@@ -1,37 +1,113 @@
-# Product vision
+# ferrum2 v0 产品愿景
 
-## Problem and target users
+## 问题与目标用户
 
-TODO
+Shadowsocks 2022 的部署者需要一个高性能、可审计、可运维的 Rust
+实现：它应严格遵守 SIP022，而不是以“能够连接”代替协议正确性；它还应在资源受限、
+连接数很高和恶意输入存在时保持边界清晰、失败关闭且不会泄露秘密。
 
-## Desired outcomes and success measures
+v0 面向两类用户：
 
-- TODO
+- 通过 SOCKS5 TCP `CONNECT` 使用自托管代理的运维者；
+- 需要嵌入、互操作验证或继续扩展 Shadowsocks 2022 TCP/UDP 协议层的维护者。
 
-## Product principles
+## 期望结果与成功度量
 
-- Correctness before breadth.
-- Deterministic validation before claims of completion.
-- TODO
+v0 只有在以下结果都有直接证据时才算完成：
 
-## Scope
+1. 独立的 `ferrum2-client` 和 `ferrum2-server` 能把 SOCKS5 TCP
+   `CONNECT` 经 Shadowsocks 2022 TCP 转发到 server 的 direct outbound。
+2. TCP 和 UDP 协议层均支持且仅支持
+   `2022-blake3-aes-128-gcm`、`2022-blake3-aes-256-gcm` 和
+   `2022-blake3-chacha20-poly1305`。
+3. 三种方法、两种 transport、两个参考实现和两个通信方向组成的 24 个必需互操作项
+   全部通过；UDP 在 v0 可通过协议 API 测试，不暗示存在公开 UDP inbound。
+4. 两个二进制都能在不创建 listener 的情况下完成 typed TOML
+   配置的完整语义校验，并提供不泄密的结构化 `tracing` 日志和低基数
+   Prometheus 兼容指标。
+5. Linux x86_64 glibc、Linux x86_64 musl 和 Windows 的 locked
+   构建及约定的 artifact smoke test 均通过。
+6. 在固定、同机、可复现的配置下，loopback aggregate TCP throughput
+   至少达到可比 shadowsocks-rust 基线的 90%；10,000 个空闲 TCP
+   session 的任务数与内存不存在持续增长。
+7. 安全、重放防护、边界检查、背压、取消、半关闭和优雅关闭的负向测试通过；
+   skipped 或缺失的 required gate 不算通过。
 
-- TODO
+## 产品原则
 
-## Non-goals
+- **协议正确性先于覆盖面和性能。** SIP022 是 wire contract；认证、重放和
+  detection-prevention 行为不得为 benchmark 让步。
+- **先认证和校验，再产生副作用。** target connect、peer-controlled allocation、
+  forwarding 和 accepted-session 状态变更都发生在认证及完整语义校验之后。
+- **秘密默认不可观察。** PSK、派生 key、salt、nonce 和 secret-bearing config
+  不进入日志、错误、panic、trace 或 metric labels；destination 不成为
+  metric label。
+- **资源必须有界且生命周期可证明。** 队列、buffer、UDP session、idle lifetime
+  和任务终止路径都有明确上限或 owner。
+- **用纵向切片降低不确定性。** 每个里程碑交付可执行、可观察、可独立验收的行为，
+  并尽早使用参考实现和目标平台验证边界。
+- **声明必须可复现。** 互操作版本、fixture 来源、toolchain、target、benchmark
+  配置和验证命令均需固定并留存证据。
 
-- TODO
+## v0 范围
 
-## Compatibility or upstream relationship
+- SIP022 TCP 与 UDP framing、codec、认证、重放防护和 transport state machine；
+- 三个指定密码套件及其精确 key 长度、key derivation 和 audited AEAD boundary；
+- SOCKS5 TCP `CONNECT` client inbound；
+- 独立 client/server 二进制和 server minimal direct outbound；
+- 单 PSK，同时保留无需重写 transport state machine 的 key lookup seam；
+- Serde-backed typed TOML、listener 启动前完整校验；
+- Tokio multi-thread runtime、owned/reusable buffers、必要时使用 `socket2`；
+- structured `tracing`、Prometheus-compatible bounded-cardinality metrics；
+- sing-box 与 shadowsocks-rust 的双向 TCP/UDP 互操作；
+- Linux x86_64 glibc、Linux x86_64 musl、Windows 构建；
+- 可复现吞吐、任务数和内存基线。
 
-TODO
+## 明确非目标
 
-## Constraints
+- SOCKS5 `UDP ASSOCIATE` 或其他公开 UDP inbound；
+- SIP023 Extensible Identity Headers、多用户或多 PSK 产品行为；
+- routing rules、DNS proxy/resolver、多个 upstream、load balancing、proxy
+  chaining、hot reload 和 management API；
+- reduced-round ChaCha、custom executor 和 `io_uring`；
+- 没有独立 ADR、安全论证和 benchmark 证据的 `unsafe`；
+- v0 路线图之外的部署编排、远程控制面或发布自动化。
 
-- TODO
+## 兼容性与上游关系
 
-## Milestone map
+[SIP022](https://shadowsocks.org/doc/sip022.html) 是规范性 wire contract。
+ferrum2 独立实现协议核心，不依赖其他代理项目的 Shadowsocks protocol core。
+sing-box 和 shadowsocks-rust 仅作为兼容性研究、互操作和性能比较对象；任何参考
+代码或 fixture 都必须记录 provenance 并经过 license review。实现差异不能通过
+静默偏离 SIP022 来解决，必须进入显式 ADR/spec 决策。
 
-| Milestone | Objective | Status |
+## 约束
+
+- 使用 stable Rust Cargo workspace；MSRV 和依赖版本在 authoritative
+  manifests 中固定，应用仓库提交 `Cargo.lock`。
+- workspace 级 `unsafe_code = "forbid"`；例外只能位于隔离的性能 crate，
+  并经过既定 ADR 和 focused review。
+- planned dependency direction 是 binaries/runtime 指向 protocol/core；
+  `ferrum2-core` 不依赖 concrete protocol、cipher、config format 或 async
+  runtime implementation。
+- crypto crate 不拥有 socket 或 policy；protocol crate 不拥有 routing policy、
+  process-global runtime state 或 CLI concerns。
+- host-local quick/full 命令以 `workflow.toml` 为准；外部互操作、target matrix、
+  security 和 performance gates 是其补充而不是替代。
+- 许可证为 `GPL-3.0-only`；examples、tests 和 fixtures 只能使用明确的 synthetic
+  secrets。
+- 当前仓库基线 `master@b41c6127b1834ebd97246451fd92bafea50cb205`
+  只有工作流控制面，没有 Cargo workspace 或产品实现。
+
+## 里程碑地图
+
+| 里程碑 | 可独立验收的结果 | 状态 |
 |---|---|---|
-| M0 | Establish the first measurable vertical slice | proposed |
+| M0 | AES-128-GCM TCP 安全纵切：离线配置、SOCKS5、独立两端、direct outbound、最小观测、互操作与平台冒烟 | planned |
+| M1 | 三种方法的完整 TCP 行为和完整 TCP 互操作矩阵 | proposed |
+| M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | proposed |
+| M3 | 稳定运维契约、生命周期证明和三目标平台资格 | proposed |
+| M4 | 可复现性能/资源门与 v0 integrated qualification | proposed |
+
+这些状态是证据状态，不代表已经实现。M0 的批准合同与 tickets 已就绪，下一入口是
+从 M0-T01 开始的 `execute`。
