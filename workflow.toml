@@ -33,9 +33,18 @@ test_plan_dir = "docs/test-plans"
 ticket_dir = "docs/tickets"
 handoff_dir = "docs/handoffs"
 
-# Fill these with deterministic commands for your repository.
-# The workflow refuses to claim a validation gate passed when the corresponding
-# command list is empty.
+# Keep these host-local and deterministic. Target-matrix builds, interoperability
+# tests, security tests, and performance regression checks supplement these Cargo
+# gates when their harnesses are added.
 [validation]
-quick = []
-full = []
+quick = [
+  "cargo fmt --all -- --check",
+  "cargo check --workspace --all-targets --locked",
+  "cargo test --workspace --locked",
+]
+full = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+  "cargo test --workspace --all-features --locked",
+  "cargo doc --workspace --all-features --no-deps --locked",
+]
