@@ -18,7 +18,7 @@ pub use metrics::{
 };
 pub use owner::{OwnerRegistry, OwnerSnapshot};
 pub use relay::{
-    RELAY_BUFFER_BYTES, RelayRunError, RelayStats, relay_bidirectional,
+    RELAY_BUFFER_BYTES, RelayFailure, RelayRunError, RelayStats, relay_bidirectional,
     relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout, relay_lifecycle,
 };
 pub use supervisor::{

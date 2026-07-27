@@ -14,7 +14,7 @@ use crate::OwnerRegistry;
 /// Fixed application buffer capacity for each relay direction.
 pub const RELAY_BUFFER_BYTES: usize = 16_384;
 
-/// Successfully forwarded byte totals from a completed relay.
+/// Successfully forwarded byte totals retained by a relay outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RelayStats {
     /// Bytes forwarded from the inbound stream to the outbound stream.
@@ -58,6 +58,7 @@ where
 }
 
 /// Closed failure categories for a bounded idle relay.
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum RelayRunError {
     /// A relay I/O operation failed.
     Io,
@@ -85,9 +86,37 @@ impl fmt::Display for RelayRunError {
 
 impl std::error::Error for RelayRunError {}
 
+/// A closed relay failure with direction-separated completed-write totals.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct RelayFailure {
+    /// Terminal failure category.
+    pub kind: RelayRunError,
+    /// Successfully forwarded bytes observed before the terminal failure.
+    pub stats: RelayStats,
+}
+
+impl fmt::Debug for RelayFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayFailure")
+            .field("kind", &self.kind)
+            .field("stats", &self.stats)
+            .finish()
+    }
+}
+
+impl fmt::Display for RelayFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.kind, formatter)
+    }
+}
+
+impl std::error::Error for RelayFailure {}
+
 struct ActivityIo<'a, T> {
     inner: &'a mut T,
     activity: Arc<Notify>,
+    bytes_written: u64,
 }
 
 impl<T> AsyncRead for ActivityIo<'_, T>
@@ -113,10 +142,15 @@ where
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut *self.inner).poll_write(context, buffer);
-        if matches!(&result, Poll::Ready(Ok(written)) if *written > 0) {
-            self.activity.notify_one();
+        if let Poll::Ready(Ok(written)) = result {
+            if written > 0 {
+                self.bytes_written += written as u64;
+                self.activity.notify_one();
+            }
+            Poll::Ready(Ok(written))
+        } else {
+            result
         }
-        result
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -133,7 +167,7 @@ pub async fn relay_bidirectional_with_idle_timeout<A, B>(
     inbound: &mut A,
     outbound: &mut B,
     idle_timeout: Duration,
-) -> Result<RelayStats, RelayRunError>
+) -> Result<RelayStats, RelayFailure>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
@@ -152,7 +186,7 @@ pub async fn relay_lifecycle<A, B, C>(
     idle_timeout: Duration,
     registry: &OwnerRegistry,
     cancellation: C,
-) -> Result<RelayStats, RelayRunError>
+) -> Result<RelayStats, RelayFailure>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
@@ -168,7 +202,7 @@ async fn relay_with_controls<A, B, C>(
     outbound: &mut B,
     idle_timeout: Duration,
     cancellation: C,
-) -> Result<RelayStats, RelayRunError>
+) -> Result<RelayStats, RelayFailure>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
@@ -178,12 +212,13 @@ where
     let mut inbound = ActivityIo {
         inner: inbound,
         activity: Arc::clone(&activity),
+        bytes_written: 0,
     };
     let mut outbound = ActivityIo {
         inner: outbound,
         activity: Arc::clone(&activity),
+        bytes_written: 0,
     };
-    let relay = relay_bidirectional(&mut inbound, &mut outbound);
     let idle = async move {
         loop {
             if tokio::time::timeout(idle_timeout, activity.notified())
@@ -194,13 +229,23 @@ where
             }
         }
     };
-    tokio::pin!(relay);
-    tokio::pin!(idle);
-    tokio::pin!(cancellation);
-    tokio::select! {
-        biased;
-        () = &mut cancellation => Err(RelayRunError::Cancelled),
-        result = &mut relay => result.map_err(|_| RelayRunError::Io),
-        () = &mut idle => Err(RelayRunError::IdleTimeout),
-    }
+    let outcome = {
+        let relay = relay_bidirectional(&mut inbound, &mut outbound);
+        tokio::pin!(relay);
+        tokio::pin!(idle);
+        tokio::pin!(cancellation);
+        tokio::select! {
+            biased;
+            () = &mut cancellation => Err(RelayRunError::Cancelled),
+            result = &mut relay => result.map(|_| ()).map_err(|_| RelayRunError::Io),
+            () = &mut idle => Err(RelayRunError::IdleTimeout),
+        }
+    };
+    let stats = RelayStats {
+        inbound_to_outbound: outbound.bytes_written,
+        outbound_to_inbound: inbound.bytes_written,
+    };
+    outcome
+        .map(|()| stats)
+        .map_err(|kind| RelayFailure { kind, stats })
 }
