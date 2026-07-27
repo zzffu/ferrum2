@@ -37,12 +37,13 @@
   SOCKS5/runtime 36，合计 70 tests PASS；lock identities 110→110、0 differences
 - **Current frontier:** M0-T03 candidate
   `05605d328cc35952676cadc8ce30e6c4b91fbf7a` **REVIEW**，Engineer package
-  27/27 与全部 focused/Clippy/fmt gates PASS；M0-T04 candidate
-  `e9c6b01e0947483dac25012f9d02f99823970827` **REPAIR 1/2 IN_PROGRESS**，Engineer
-  config 7/7、observability 5/5、tracing 2/2、metrics 3/3 与 strict
-  Clippy/fmt PASS，但 Architect/QA 均确认 exact-target tracing spoof 泄露
-  secret/destination/free-form fields，且缺 server unknown-field table case；
-  preserved worktree 正在修复。M0-T07/T08 继续等待既定 blockers
+  27/27 与全部 focused/Clippy/fmt gates PASS；M0-T04 initial candidate
+  `e9c6b01e0947483dac25012f9d02f99823970827` Architect/QA 均 BLOCK；
+  repair 1/2 candidate `8d18d174566b68e5d72c6077c74a2c096c34a313`
+  已补 exact-target hostile/approved-looking injection 与 server unknown-field
+  table evidence，Engineer config 7/7、observability 5/5、tracing 2/2、
+  metrics 3/3、strict Clippy/fmt 及独立 adversarial probe PASS，现为
+  **REVIEW**。M0-T07/T08 继续等待既定 blockers
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,

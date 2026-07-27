@@ -76,8 +76,10 @@ non-overlapping ownership。
     `f9e218e` Architect/QA 与 70 tests PASS，done；
   - M0-T03：SIP022 TCP security state/replay/binding；candidate `05605d3`
     in review；
-  - M0-T04：typed config/observability；candidate `e9c6b01` Architect/QA BLOCK，
-    exact-target tracing spoof 与 server unknown-field evidence 正在 repair 1/2；
+  - M0-T04：typed config/observability；initial candidate `e9c6b01`
+    Architect/QA BLOCK；repair 1/2 candidate `8d18d17` 已关闭 exact-target
+    tracing spoof 与 server unknown-field evidence，Engineer gates PASS，正在
+    Architect/QA re-review；
   - M0-T05：SOCKS5 CONNECT inbound；done；
   - M0-T06：runtime/direct/relay/lifecycle；done；
   - M0-T07：binary composition/local E2E；blocked by T03/T04/T05/T06；

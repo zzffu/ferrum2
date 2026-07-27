@@ -2,7 +2,7 @@
 id = "M0-T04"
 title = "Implement typed configuration and bounded observability"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P1"
 blocked_by = ["M0-T02"]
 owns = [
