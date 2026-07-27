@@ -1,0 +1,31 @@
+{
+  "classification": "unofficial repository-owned SIP022 composite fixture; not an official SIP022 KAT",
+  "method": "2022-blake3-aes-128-gcm",
+  "psk": "000102030405060708090a0b0c0d0e0f",
+  "request_salt": "101112131415161718191a1b1c1d1e1f",
+  "response_salt": "202122232425262728292a2b2c2d2e2f",
+  "timestamp": 1700000000,
+  "target_ipv4": "127.0.0.1",
+  "target_port": 8080,
+  "request_subkey": "bc32fb8d5205f7b84f9691dfb9f04ff3",
+  "response_subkey": "8180421f8f56092ca7544a64ff852536",
+  "request_a": {
+    "padding": "a1b2c3",
+    "initial_payload": "",
+    "fixed_ciphertext_and_tag": "f62b42ac395d4aead07a7f64c48c7b98a41338d6410d161f179f3f",
+    "variable_ciphertext_and_tag": "e3ea6945a057d11954ab585c50bccaee2a18ab304ef1aff04fede60f",
+    "first_write": "101112131415161718191a1b1c1d1e1ff62b42ac395d4aead07a7f64c48c7b98a41338d6410d161f179f3fe3ea6945a057d11954ab585c50bccaee2a18ab304ef1aff04fede60f"
+  },
+  "request_b": {
+    "padding": "",
+    "initial_payload": "70696e67",
+    "fixed_ciphertext_and_tag": "f62b42ac395d4aead07a7e685f201963120569a03c80ca53500bd3",
+    "variable_ciphertext_and_tag": "e3ea6945a057d119577a83f145555f9326d907fdd6a33c0139c2a6a691",
+    "first_write": "101112131415161718191a1b1c1d1e1ff62b42ac395d4aead07a7e685f201963120569a03c80ca53500bd3e3ea6945a057d119577a83f145555f9326d907fdd6a33c0139c2a6a691"
+  },
+  "response": {
+    "first_payload": "706f6e67",
+    "fixed_ciphertext_and_tag": "cfd439ccd5cb580032874d1521cc11d623310888444d4ba6dd1abf2ef5ae6f08bf66ba818335482113f40e",
+    "first_write": "202122232425262728292a2b2c2d2e2fcfd439ccd5cb580032874d1521cc11d623310888444d4ba6dd1abf2ef5ae6f08bf66ba818335482113f40e6eb2fc8f29f2bea5eb6a2bb7a53980d2d949672c"
+  }
+}
