@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "review"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -180,6 +180,13 @@ cargo test --workspace --locked
   lifecycle为exact 100 cycles，native detection为exact 47 connections，
   workspace policy 16/16，client phase deadline 5/5，server lifecycle/prefix
   6/6；Accepted base与resume checkpoint均为ancestor，worktree clean
-- Current gate: **REVIEW**；等待candidate Architect与QA ticket gates
+- Candidate review: QA PASS，24/24 ticket与4/4 full commands均exit 0；
+  Architect BLOCK，唯一REQUIRED是cooperative-cancellation cycle只依赖raw
+  connect/drop、10ms sleep与最终process kill，未deadline-bounded证明server已
+  accept并完成该flow
+- Current gate: **IN_PROGRESS — repair 1/2**；只允许以valid
+  client→server→recording-target flow、bounded EOF/reset或既有exact metrics
+  transition补齐cooperative termination同步证据；保持5×20 matrix，禁止public
+  test hook及production/manifest/lock变化
 - Integrated commit: none
 - Publication: none
