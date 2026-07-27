@@ -284,6 +284,7 @@ dependencies = [
  "serde",
  "thiserror",
  "toml",
+ "zeroize",
 ]
 
 [[package]]

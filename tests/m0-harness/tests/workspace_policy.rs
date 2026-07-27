@@ -189,6 +189,27 @@ fn every_project_package_inherits_repository_policy() {
 }
 
 #[test]
+fn config_predeclares_zeroizing_storage_dependency() {
+    let metadata = metadata();
+    let config = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "ferrum2-config")
+        .expect("config package");
+    let zeroize = config["dependencies"]
+        .as_array()
+        .expect("config dependencies")
+        .iter()
+        .find(|dependency| dependency["name"] == "zeroize")
+        .expect("config must predeclare zeroize for raw config and PSK strings");
+
+    assert_eq!(zeroize["req"], "=1.9.0");
+    assert_eq!(zeroize["uses_default_features"], false);
+    assert_eq!(zeroize["features"], serde_json::json!(["alloc", "derive"]));
+}
+
+#[test]
 fn lockfile_and_gplv3_license_are_committed_policy_inputs() {
     let root = workspace_root();
     let lock = root.join("Cargo.lock");
