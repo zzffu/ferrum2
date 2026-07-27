@@ -2,7 +2,7 @@
 id = "M0-T01"
 title = "Establish the locked workspace and core contracts"
 milestone = "M0"
-status = "review"
+status = "in_progress"
 priority = "P0"
 blocked_by = []
 owns = [
