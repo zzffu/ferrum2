@@ -1,0 +1,10 @@
+schema_version = 1
+unexpected = true
+
+[client]
+listen = "127.0.0.1:1080"
+server = "127.0.0.1:8388"
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
