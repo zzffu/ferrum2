@@ -74,8 +74,8 @@ non-overlapping ownership。
   - M0-T02：secret/KDF/AEAD/key-clock-entropy；ADR-0008 与 provenance/nonce
     repair 已 PASS；ADR-0009/T01 blocker 已关闭，combined integration
     `f9e218e` Architect/QA 与 70 tests PASS，done；
-  - M0-T03：SIP022 TCP security state/replay/binding；blocked by T02；
-  - M0-T04：typed config/observability；blocked by T02；
+  - M0-T03：SIP022 TCP security state/replay/binding；in progress；
+  - M0-T04：typed config/observability；in progress；
   - M0-T05：SOCKS5 CONNECT inbound；done；
   - M0-T06：runtime/direct/relay/lifecycle；done；
   - M0-T07：binary composition/local E2E；blocked by T03/T04/T05/T06；
@@ -94,7 +94,8 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** 当前 validated checkpoint
-  `999d4f95a2d597fb283689b9306d2a6773af707d`，包含 M0-T01、M0-T05、M0-T06。
+  `f9e218eca241f3002500b932fdcb4db93c52313b`，包含
+  M0-T01、M0-T02、M0-T05、M0-T06。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
@@ -105,7 +106,9 @@ non-overlapping ownership。
   `aes-gcm/zeroize` 没有启用 `aes/zeroize`/`ghash/zeroize`。用户已授权 ADR-0009
   与一次独占 T01 manifest repair，只允许 fixed `aes 0.9.1`/`ghash 0.6.0`
   zeroize feature anchors、lock 与 policy evidence，不改变版本、wire/API 或产品
-  范围。T03/T04 因 T02 等待，T07/T08 继续只等待既定 dependencies。
+  范围。T01/T02 combined integration `f9e218e` 已通过 Architect/QA 与
+  70 tests，T03/T04 现作为 ownership-disjoint frontier 并行执行；T07/T08
+  继续只等待既定 dependencies。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。
