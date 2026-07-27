@@ -1,155 +1,148 @@
 # Integration and recovery
 
-## Why integration uses a separate worktree
+## Isolation and provenance
 
-Parallel ticket branches are never merged directly into the base one by one. The
-Team Lead creates a milestone integration branch/worktree, combines passing branches
-there, and runs deterministic validation. Only a proven integration commit may
-fast-forward the base branch.
+Engineers work in isolated ticket worktrees. The Team Lead alone integrates candidate
+commits in the milestone integration worktree. Preserve:
 
-This gives four useful properties:
+- ticket branch, worktree, fork SHA, and candidate SHA
+- exact changed paths against `owns`
+- required reviewer role/profile and verdict
+- commands, exit codes, and evidence scope
 
-1. A failing cross-ticket interaction does not leave the base branch broken.
-2. The base worktree remains available and clean.
-3. Integration conflicts are isolated and inspectable.
-4. A context reset can recover from Git state and documents.
+Do not add a merge or status commit solely to express a transient workflow phase.
+Candidate provenance must remain traceable, but integration history need not contain
+one coordination commit per transition.
 
-## Multi-wave drain sequence
+## Pipelined drain
 
-`execute` defaults to draining all available dependency waves in one primary-thread
-invocation:
+`drain` resumes active work and starts every independent implementation-ready ticket:
 
 ```text
-base B0
-  |\
-  | ticket/A -- Engineer commit
-  | ticket/B -- Engineer commit
-  |
-  +-- integration/M1
-        merge A --no-ff
-        quick validation
-        merge B --no-ff
-        quick validation
-        full validation
-        Architect + QA final gates
+active T07 implementation/repair -----------------------+
+                                                        +--> integration gate
+independent T08 implementation -> ticket review --------+
 
-base --ff-only--> integration/M1
-base: mark A/B done and checkpoint docs
-
-scheduler recomputes frontier
-  |
-  +-- dependent ticket/C now becomes ready
-  +-- independent ticket/D may also become ready
-
-integration/M1 --ff-only--> latest base coordination commit
-  |\
-  | ticket/C -- Engineer commit
-  | ticket/D -- Engineer commit
-  |
-  +-- merge C/D, validate, gate, base ff-only
-
-repeat until ready_to_close or blocked
+other disjoint work may start as soon as capacity is available
 ```
 
-The primary thread, not the user, performs the transition from one wave to the next.
-`strategy = "wave"` is an explicit debugging/manual-control option.
+Each candidate enters review when it finishes; it does not wait for the rest of a
+wave. Compatible passing candidates are assembled into an integration batch. Run
+affected quick validation while assembling, then one configured full gate and
+required exact-SHA integration reviews.
 
-## Synchronizing a reused integration branch
+Create at most one consolidated Git evidence/status checkpoint per accepted
+integration batch. Contract changes remain separate material commits.
 
-A previous wave can leave the base ahead of the integration branch because ticket
-status and roadmap evidence are committed after the code fast-forward. Before merging
-a new wave:
+## Four dependency checks
 
-1. require both base and integration worktrees to be clean
-2. verify no unexpected commits exist on the integration branch
-3. fast-forward the integration branch to the current base coordination commit
-4. only then merge the new ticket branches
+- Engineer startup checks `implementation_blocked_by`.
+- Ticket review checks cumulative implementation + review dependencies.
+- Integration/done checks cumulative implementation + review + integration
+  dependencies.
+- Closeout checks all four phases, including release dependencies.
 
-Never reset the integration branch to achieve synchronization.
+An integration or release dependency does not prevent disjoint implementation.
 
-## Verification before integrating a ticket branch
+## Review and repair
 
-- branch/worktree matches the assigned ticket
-- branch fork point is the expected coordination commit
-- no unexpected merge/rebase occurred
-- worktree is clean
-- commit(s) exist and mention the ticket
-- diff paths conform to `owns`
-- no secret, build artifact, debug output, or unrelated cleanup is included
-- Architect and QA ticket verdicts are PASS
+Bind every gate to an exact candidate SHA and configured role profile. If launch
+metadata is not observable, record it as unverified.
 
-## Review repair loop
+When a required finding appears:
 
-When Architect or QA returns required findings:
+1. record one canonical root blocker and link derivative failures
+2. check exact authorization scope independently from repair budget
+3. classify the repair as `mechanical`, `evidence`, or `substantive`
+4. send only the root finding to the assigned Engineer
+5. rerun affected tests and invalidated reviewer gates
 
-1. send the concrete findings back to an Engineer assigned to the same worktree
-2. require a new explicit repair commit
-3. rerun ticket tests and quick validation
-4. rerun Architect and QA gates
-5. stop after `execution.max_repair_attempts_per_ticket`
+Mechanical line-ending, formatting, test-filter spelling, and equivalent
+representation repairs do not consume substantive budget. Environment retries and
+derived failures are evidence, not product repair attempts. Security/protocol/public
+API/concurrency/root architecture repairs consume the risk-aware budget.
 
-A repair must not silently modify the approved contract or expand ownership. A
-contract defect returns to planning and blocks the ticket.
+Repair budgets are per canonical root cause. When a root is exhausted, first consume
+one exact `repair_budget_override` authorization with `--root-blocker`; that creates
+one persisted allowance. It cannot unblock another root on the same ticket.
 
-## Conflict policy
+An unintegrated local candidate may be amended when the prior SHA and finding remain
+recorded. Never rewrite pushed/published history.
 
-Resolve conflicts by tracing intent to, in order:
+## Runtime ledger
 
-1. user request and milestone exit criteria
-2. accepted ADR
-3. approved spec
-4. approved test plan and ticket acceptance criteria
-5. existing public behavior and tests
-6. current implementation details
+The helper stores recoverable state below `git rev-parse --git-common-dir`, shared by
+all worktrees but outside product history. It contains:
 
-A conflict that reveals contradictory contracts is a planning failure. Stop and revise
-the contract explicitly rather than choosing the easiest code shape.
+- revision-protected scheduler checkpoint and no-progress fingerprint
+- structured root blockers and derivative evidence
+- risk-aware repair events
+- explicit authorization scopes
 
-## Fast-forward policy
+Ledger writes use a persistent lock file with a process-owned OS lock. Process exit,
+kill, or host interruption releases the lock automatically; stale owner metadata is
+not itself a lock. Revision checks and atomic replace prevent concurrent writers from
+silently overwriting each other.
 
-After full validation, update the base only with a fast-forward when the integration
-branch still descends from the current base. If the base moved:
+Useful commands:
 
-1. keep the validated integration branch
-2. identify intervening commits
-3. rebuild or merge them into the integration branch
-4. rerun affected ticket reviews and full validation
-5. then fast-forward
+```bash
+python .agents/skills/milestone-workflow/scripts/workflow.py state --milestone M0
+python .agents/skills/milestone-workflow/scripts/workflow.py next \
+  --milestone M0 --json
+python .agents/skills/milestone-workflow/scripts/workflow.py set-phase \
+  M0-T07 implementation --branch <branch> --worktree <absolute-path>
+python .agents/skills/milestone-workflow/scripts/workflow.py checkpoint \
+  --milestone M0 --progress material
+```
 
-Never force-update the base.
+Only record authorization after explicit user language. Store a concise evidence
+summary, never credentials or full secret-bearing messages. A local authorization
+must specify actions, tickets, blocker classes, maximum risk, and
+`remote_effects=false`. Remote authorization must be independently explicit and
+bind its exact remote ref, full commit SHA, and use count. Atomically run
+`consume-authorization` immediately before the authorized remote mutation.
 
-## Recovery checklist
+## Interruption recovery
 
 After interruption:
 
-```bash
-python3 .agents/skills/milestone-workflow/scripts/workflow.py status
-python3 .agents/skills/milestone-workflow/scripts/workflow.py worktree-list
-python3 .agents/skills/milestone-workflow/scripts/workflow.py next \
-  --milestone <ID> --json
-git status --short --branch
-git branch --list 'codex/*'
-git worktree list --porcelain
-```
+1. run `doctor`, `validate`, `status`, `worktree-list`, `state`, and `next`
+2. compare ledger revision with tickets, branches, worktrees, candidate SHAs, and the
+   integration branch
+3. identify write-active ownership leases
+4. adopt the exact existing ticket/repair worktree, branch, and HEAD into the runtime
+   phase; do not call default `worktree-create` when a non-default repair worktree
+   already carries the ticket
+5. resume active work and independent frontier together
+6. preserve ambiguous or dirty worktrees; never recreate or reset them
 
-Then inspect:
+Durable ticket status replacement preserves existing line endings and uses an atomic
+same-directory replace. If interruption occurs after the ticket changes but before
+the ledger phase is cleared, rerun the same `set-status`; the idempotent retry clears
+the stale phase.
 
-- tickets in `in_progress`, `review`, or `failed`
-- dirty worktrees
-- branch HEAD commits
-- integration branch merge state
-- most recent handoff
-- roadmap/CI status commit references
+A context reset does not invalidate a precise authorization that the new user prompt
+explicitly re-grants or instructs the agent to recover from the ledger. Never infer
+remote/destructive authority from a local repair record.
 
-Resume the earliest incomplete gate and, when strategy is `drain`, continue subsequent
-waves automatically. Do not remove or recreate a worktree until its changes and
-branch are understood.
+## Base movement and conflicts
 
-## Cleanup policy
+Resolve conflicts from, in order:
 
-Removing a clean worktree is not the same as deleting its branch. Default behavior:
+1. current user request and milestone outcome
+2. accepted ADR
+3. approved spec
+4. test plan and ticket acceptance
+5. existing public behavior
 
-- keep failed/blocked worktrees
-- optionally remove clean, integrated ticket worktrees after closeout
-- keep branches until the user explicitly requests branch cleanup
-- never use `git worktree remove --force` unless the user explicitly authorizes loss
+If the base moves, retain the validated integration commit, inspect intervening
+changes, rebuild only affected candidate/integration evidence, and still run the
+required final exact-SHA release gate. Never force-update the base.
+
+## Cleanup
+
+- keep failed/blocked/dirty worktrees
+- optionally remove clean integrated worktrees after closeout
+- preserve branches unless deletion is explicitly authorized
+- never use forced worktree removal to hide partial work

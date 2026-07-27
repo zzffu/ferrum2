@@ -8,6 +8,9 @@ integration_branch_prefix = "codex/integration"
 max_parallel_engineers = 8
 require_clean_base = true
 auto_remove_worktrees = false
+# Transient implementation/review state lives in the local runtime ledger. Commit
+# coordination documents only for an accepted contract change or integrated batch.
+checkpoint_policy = "integration"
 
 [execution]
 # drain: one execute invocation keeps scheduling dependency-ready waves until the
@@ -17,10 +20,44 @@ strategy = "drain"
 
 # 0 means no artificial wave cap. The no-progress guard still prevents loops.
 max_waves_per_run = 0
+# Legacy fallback for tickets without an explicit risk classification.
 max_repair_attempts_per_ticket = 2
+# Mechanical repairs (line endings, formatting, filter spelling) do not consume the
+# substantive repair budget.
+repair_budget = { low = 4, medium = 3, high = 2, critical = 1 }
+non_counting_repair_classes = ["mechanical"]
 continue_after_independent_failure = true
 auto_close = false
 no_progress_limit = 2
+
+[state]
+# Relative to `git rev-parse --git-common-dir`, so every worktree and a resumed
+# Codex context sees the same local state without polluting product history.
+path = "codex/milestone-workflow-state.json"
+
+[agents.product_manager]
+config = ".codex/agents/product-manager.toml"
+name = "product_manager"
+model = "gpt-5.6-sol"
+reasoning_effort = "max"
+
+[agents.architect]
+config = ".codex/agents/architect.toml"
+name = "architect"
+model = "gpt-5.6-sol"
+reasoning_effort = "max"
+
+[agents.engineer]
+config = ".codex/agents/engineer.toml"
+name = "engineer"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[agents.qa]
+config = ".codex/agents/qa.toml"
+name = "qa"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
 
 [documents]
 vision = "docs/vision.md"
@@ -37,6 +74,9 @@ handoff_dir = "docs/handoffs"
 # tests, security tests, and performance regression checks supplement these Cargo
 # gates when their harnesses are added.
 [validation]
+workflow = [
+  "python -m unittest discover -s .agents/skills/milestone-workflow/tests -p test_*.py",
+]
 quick = [
   "cargo fmt --all -- --check",
   "cargo check --workspace --all-targets --locked",

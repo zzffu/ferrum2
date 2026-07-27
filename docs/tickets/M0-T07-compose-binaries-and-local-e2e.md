@@ -2,8 +2,9 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "in_progress"
+status = "ready"
 priority = "P0"
+risk = "high"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
   "bins/ferrum2-client/src/cli.rs",

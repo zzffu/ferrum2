@@ -42,7 +42,7 @@ For each milestone record:
 - in-scope ticket IDs
 - explicit deferred/out-of-scope work
 - integrated commit when available
-- open blockers and risks
+- canonical root blockers and risks in separate sections
 
 Roadmap status must be evidence-based, not aspirational.
 
@@ -63,7 +63,9 @@ Required sections:
 
 Use an ADR for cross-module, public API, persistence, protocol, security, concurrency,
 platform abstraction, or hard-to-reverse choices. Do not use ADRs for routine local
-implementation details.
+implementation details. CRLF normalization, formatting, exact test-filter spelling,
+CI probe portability, and evidence-only repairs do not require an ADR unless they
+actually change an approved architecture or public contract.
 
 ## Spec: `docs/specs/SPEC-NNNN-slug.md`
 
@@ -117,7 +119,12 @@ title = "Add protocol handshake validation"
 milestone = "M1"
 status = "draft"
 priority = "P1"
-blocked_by = []
+risk = "medium"
+implementation_blocked_by = []
+review_blocked_by = []
+integration_blocked_by = []
+release_blocked_by = []
+required_reviews = ["architect", "qa"]
 owns = ["src/protocol/**", "tests/protocol/**"]
 spec = "docs/specs/SPEC-0001-protocol.md"
 test_plan = "docs/test-plans/TEST-0001-protocol.md"
@@ -127,6 +134,32 @@ acceptance = [
 ]
 +++
 ```
+
+Legacy `blocked_by` remains accepted as `implementation_blocked_by`. New tickets use
+the four explicit fields. Dependencies are cumulative through their named gate, so an
+integration-only dependency does not serialize implementation. Cycle validation uses
+the cumulative graph through integration; release-only edges are closeout checks and
+do not falsely block implementation.
+
+Tracked ticket status is durable and uses only `draft`, `ready`, `blocked`, `done`,
+or `deferred`. Implementation, review, repair, integration, and release are runtime
+ledger phases. Legacy tracked `in_progress`, `review`, and `failed` values are
+accepted only for migration.
+
+Risk and required-review policy:
+
+- `low`: mechanical or evidence-only; rerun affected gates
+- `medium`: localized behavior; QA is normally required
+- `high`/`critical`: security, protocol, concurrency, public API, cross-module, or
+  hard-to-reverse; Architect and QA are required
+
+Blocked tickets include a structured `blocker` table or a runtime-ledger record using
+`references/blocker-taxonomy.md`.
+
+The checked-in `*-0000-template.md` files must match their corresponding
+`assets/templates/` sources. `workflow.py validate` reports drift, and
+`workflow.py new-ticket` must emit the same dependency, risk, blocker, reviewer
+profile, and exact-candidate-SHA contract.
 
 Required body sections:
 
@@ -147,13 +180,13 @@ changed, declare it explicitly or execute sequentially.
 
 Record:
 
-- branch/commit tested
+- exact candidate SHA and evidence validity (`current`, `superseded`, or `historical`)
 - environment/toolchain/platform
 - exact commands
 - exit status
 - date
-- known flakes or skipped jobs
-- unresolved failures
+- canonical root blocker ID and any `derived_from` relationship
+- known flakes, setup attempts, skipped jobs, and unresolved failures
 
 Do not replace evidence with a generic “CI green”.
 
@@ -166,6 +199,12 @@ Required sections:
 - Decisions and contract references
 - Validation evidence
 - Existing branches/worktrees
+- Active transient phases and ownership leases
+- Canonical blockers and derivative failures
+- Active authorization scopes, exact remote ref/SHA/use limits, and remote-effects
+  boundary
+- Root-bound repair override allowances
+- Requested and observable agent role/reasoning provenance
 - Known risks and debt
 - Deferred work
 - Recovery instructions

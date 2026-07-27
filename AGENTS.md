@@ -161,6 +161,10 @@ Document any additional package/module-specific validation rules here.
   status, recovery, and closeout.
 - Delegate product planning to `product_manager`, system design/review to
   `architect`, implementation to `engineer`, and test gates to `qa`.
+- Spawn those exact named roles, never a generic/default agent. The configured
+  reasoning contract is Product Manager/Architect `max` and Engineer/QA `high`;
+  verify the role profile before work when launch metadata is observable, otherwise
+  report it as unverified.
 - Subagents return evidence to the Team Lead. They do not schedule other agents,
   merge, or publish work.
 - In `execute` mode, the default `drain` strategy keeps recomputing frontiers and
@@ -182,10 +186,10 @@ Approved ADRs and specs are contracts. Do not silently rewrite them to justify a
 implementation. When implementation evidence invalidates a decision, stop the gate
 and propose an explicit ADR/spec revision.
 
-### Required gates
+### Risk-calibrated gates
 
 For cross-module, protocol, persistence, public API, security, concurrency, or
-hard-to-reverse changes:
+hard-to-reverse changes, use the strict path:
 
 1. Product scope and measurable exit criteria.
 2. Architecture decision where required.
@@ -200,24 +204,56 @@ hard-to-reverse changes:
 Small local fixes may use a reduced path, but still require a precise acceptance
 criterion, focused tests, and repository validation.
 
+Mechanical and evidence-only repairs such as CRLF normalization, formatting, exact
+test-filter spelling, or CI probe portability do not require a new ADR or full
+Product/Architect/QA cycle unless they change an approved contract. Rerun only
+invalidated intermediate gates; the final release candidate still requires its
+configured exact-SHA full/platform evidence.
+
 ### Parallel work and Git rules
 
 - Parallelize read-heavy investigation freely when the questions are independent.
 - Never run two write-heavy agents in the same worktree.
 - Every Engineer receives one ticket, one branch, one worktree, and explicit
   ownership paths.
-- Parallel Engineer tickets must have all blockers complete and disjoint ownership
-  paths. Unknown or overlapping ownership means sequential execution.
+- Tickets distinguish `implementation_blocked_by`, `review_blocked_by`,
+  `integration_blocked_by`, and `release_blocked_by`; legacy `blocked_by` means the
+  implementation field. Only implementation dependencies block Engineer startup.
+- Active work and an independent, ownership-disjoint frontier may run concurrently.
+  Unknown or overlapping ownership still means sequential execution.
 - Engineers may commit only their assigned branch. They may not merge, rebase,
   push, force-push, delete branches, or modify the base worktree.
 - The Team Lead integrates into a milestone integration branch/worktree first.
-- After each validated wave, the Team Lead checkpoints state and immediately schedules
-  the next ready wave when execution strategy is `drain`.
+- Persist transient execution phases, repair usage, canonical blockers, and exact
+  authorization scopes in the Git-common-dir runtime ledger. Do not create commits
+  solely for implementation/review phases or repair counters. Tracked ticket status
+  remains one of `draft`, `ready`, `blocked`, `done`, or `deferred`; legacy
+  `in_progress`, `review`, and `failed` are migration inputs only.
+- After each accepted integration batch, the Team Lead creates at most one
+  consolidated evidence checkpoint and immediately schedules the next independent
+  work when strategy is `drain`.
 - Do not use `git add .`. Stage files intentionally.
 - Never discard an uncommitted change, abort another agent's operation, or run a
   destructive Git command without explicit user authorization.
 - Never push, open/merge a PR, publish a release, or mutate remote issue state unless
   the user explicitly requests that separate action.
+- A matching recorded local authorization may be reused after resume for the exact
+  actions/tickets/classes/risk granted. It never implies remote effects, destructive
+  actions, ownership expansion, contract expansion, push, PR, tag, or release.
+- A blocker's authorization label is not proof of authority. Authorization-requiring
+  repairs must match the exact ledger scope; bounded local scopes consume a use with
+  the repair and keep repair/override scope IDs distinct.
+- Authorization ticket/class lists are non-empty and never mean wildcard. Remote
+  kind must match `remote_effects = true`; repair-budget override is a separate,
+  explicit action. Scope IDs are immutable; revoke and grant a new ID rather than
+  overwriting usage history.
+- Remote authorization binds an exact remote ref, full commit SHA, and use count.
+  Atomically consume a use immediately before the remote mutation.
+- Repair budgets are per canonical root. A consumed, root-bound
+  `repair_budget_override` creates exactly one persisted additional attempt.
+- Open canonical roots fail their named and later gates. Resolving a root (including
+  via a derivative ID) resolves its direct derivatives atomically; no ticket becomes
+  done and no milestone closes while an applicable root remains open.
 
 ### Implementation and validation
 
@@ -225,6 +261,10 @@ criterion, focused tests, and repository validation.
 - Use red-green-refactor at agreed test seams.
 - Treat configured validation commands as deterministic gates; record commands and
   exit statuses.
+- Record one canonical root blocker and link derivative failures. Setup failures,
+  poisoned follow-on tests, and skipped downstream commands do not consume separate
+  repair attempts.
+- Mechanical repairs do not consume the substantive risk-aware repair budget.
 - A missing or skipped required command is not a pass.
 - Keep unrelated cleanup outside the ticket unless separately approved.
 - Do not place credentials, private endpoints, production data, or secrets in code,

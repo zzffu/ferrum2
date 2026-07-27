@@ -9,6 +9,12 @@
 
 TODO
 
+## Why this requires an ADR
+
+Explain the cross-module, public API, persistence, protocol, security, concurrency,
+platform-abstraction, or hard-to-reverse decision. Routine line-ending, formatting,
+test-filter, CI-probe, or evidence-only repair does not require an ADR.
+
 ## Decision drivers and invariants
 
 - TODO

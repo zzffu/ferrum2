@@ -27,6 +27,25 @@ TODO
 
 - TODO
 
+## Active execution phases and ownership
+
+- TODO
+
+## Canonical blockers and derivatives
+
+- TODO
+
+## Active authorization scopes
+
+- Actions/tickets/classes/max risk: TODO
+- Kind/remote effects: local / false
+- Exact remote ref/commit/max uses/uses (remote only): TODO
+- Root-bound repair override allowances: TODO
+
+## Agent and gate provenance
+
+- Requested role/model/reasoning, observable actual profile, candidate SHA: TODO
+
 ## Known risks and debt
 
 - TODO
@@ -38,8 +57,11 @@ TODO
 ## Recovery instructions
 
 ```bash
-python3 .agents/skills/milestone-workflow/scripts/workflow.py status
-python3 .agents/skills/milestone-workflow/scripts/workflow.py worktree-list
+python .agents/skills/milestone-workflow/scripts/workflow.py status
+python .agents/skills/milestone-workflow/scripts/workflow.py worktree-list
+python .agents/skills/milestone-workflow/scripts/workflow.py state --milestone M0
+python .agents/skills/milestone-workflow/scripts/workflow.py next \
+  --milestone M0 --json
 ```
 
 ## Next recommended action

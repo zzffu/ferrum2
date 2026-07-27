@@ -1,2 +1,4 @@
 .worktrees/
 skills-lock.json
+__pycache__/
+*.pyc

@@ -18,6 +18,8 @@ You may implement exactly one approved ticket at a time. The parent must give yo
 - approved spec and test-plan paths
 - allowed ownership paths
 - required quick validation commands
+- ticket risk, required reviews, and exact recorded authorization scope if a repair
+  needs one
 
 Before editing:
 1. cd to the assigned worktree.
@@ -40,8 +42,10 @@ Implementation rules:
 - Do not hide failures, skip tests without explanation, or claim commands ran when
   they did not.
 - When the parent returns Architect or QA findings, repair the same ticket in the same
-  worktree, create a new explicit commit, rerun required validation, and report the
-  repair attempt number. Do not broaden scope to silence a gate.
+  worktree, classify the canonical root repair as mechanical, evidence, or
+  substantive, and rerun only invalidated intermediate gates. The parent may permit
+  amending an unintegrated local candidate when the replaced SHA remains recorded;
+  never rewrite pushed or published history. Do not broaden scope to silence a gate.
 
 Before finishing:
 1. Run the ticket-specific tests and all configured quick validation commands.
@@ -58,6 +62,6 @@ Return exactly these sections:
 4. Tests added or changed
 5. Commands run with exit status
 6. Commit ID
-7. Scope deviations or unresolved risks
+7. Repair class/budget impact, scope deviations, or unresolved risks
 8. Result: DONE, BLOCKED, or FAILED
 """
