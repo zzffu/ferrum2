@@ -4,18 +4,95 @@ mod local_support;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
 use local_support::{
-    ChildGuard, active_child_count, unused_loopback, wait_for_bound, write_client_config,
+    ChildExit, ChildGuard, LoopbackReservation, active_child_count, reserve_loopback,
+    reserve_unused_loopback, wait_for_bound, wait_for_metrics_ready, write_client_config,
     write_server_config,
 };
 
 const CYCLES_PER_CATEGORY: usize = 20;
 const CHILD_DEADLINE: Duration = Duration::from_secs(5);
-type Cycle = (&'static str, fn(usize));
+const MAX_SETUP_ATTEMPTS: usize = 3;
+static LIFECYCLE_TEST_LOCK: Mutex<()> = Mutex::new(());
+type Cycle = (&'static str, fn(usize, &str) -> Result<(), SetupCollision>);
+
+#[derive(Debug)]
+struct SetupCollision {
+    exit: ChildExit,
+    foreign_listener_count: usize,
+}
+
+fn address_is_occupied(address: SocketAddrV4) -> bool {
+    match TcpListener::bind(address) {
+        Ok(listener) => {
+            drop(listener);
+            false
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => true,
+        Err(error) => panic!("setup collision bind probe failed: {error}"),
+    }
+}
+
+fn spawn_reserved_child(
+    binary: &str,
+    config: &Path,
+    context: String,
+    reservations: [LoopbackReservation; 2],
+    metrics: SocketAddrV4,
+) -> Result<ChildGuard, SetupCollision> {
+    let addresses = reservations.each_ref().map(LoopbackReservation::address);
+    let _released = reservations.map(LoopbackReservation::release);
+    let mut child = ChildGuard::spawn_with_context(binary, config, context);
+    match wait_for_metrics_ready(&mut child, metrics) {
+        Ok(()) => Ok(child),
+        Err(exit) => {
+            let foreign_listener_count = addresses
+                .into_iter()
+                .filter(|address| address_is_occupied(*address))
+                .count();
+            if foreign_listener_count == 0 {
+                panic!("{exit}");
+            }
+            Err(SetupCollision {
+                exit,
+                foreign_listener_count,
+            })
+        }
+    }
+}
+
+fn run_cycle_with_retries(
+    category: &str,
+    iteration: usize,
+    baseline_children: usize,
+    cycle: fn(usize, &str) -> Result<(), SetupCollision>,
+) {
+    for attempt in 1..=MAX_SETUP_ATTEMPTS {
+        let context = format!("category={category},iteration={iteration},attempt={attempt}");
+        match cycle(baseline_children, &context) {
+            Ok(()) => return,
+            Err(collision) => {
+                assert_eq!(
+                    active_child_count(),
+                    baseline_children,
+                    "{context} collision leaked a child"
+                );
+                if attempt == MAX_SETUP_ATTEMPTS {
+                    panic!(
+                        "{context} exhausted setup retries: foreign_listener_count={} {}",
+                        collision.foreign_listener_count, collision.exit
+                    );
+                }
+            }
+        }
+    }
+    unreachable!("bounded setup attempts always return or panic");
+}
 
 fn assert_exact_rebind(addresses: &[SocketAddrV4]) {
     for address in addresses {
@@ -149,28 +226,40 @@ fn finish_cycle(
     );
 }
 
-fn success_cycle(baseline_children: usize) {
+fn success_cycle(baseline_children: usize, context: &str) -> Result<(), SetupCollision> {
     let directory = tempfile::tempdir().expect("success tempdir");
-    let server = unused_loopback();
-    let server_metrics = unused_loopback();
-    let client = unused_loopback();
-    let client_metrics = unused_loopback();
+    let server_reservation = reserve_unused_loopback();
+    let server = server_reservation.address();
+    let server_metrics_reservation = reserve_unused_loopback();
+    let server_metrics = server_metrics_reservation.address();
+    let client_reservation = reserve_unused_loopback();
+    let client = client_reservation.address();
+    let client_metrics_reservation = reserve_unused_loopback();
+    let client_metrics = client_metrics_reservation.address();
     let target_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("echo target");
     let target = match target_listener.local_addr().expect("target address") {
         std::net::SocketAddr::V4(address) => address,
         std::net::SocketAddr::V6(_) => unreachable!("IPv4 target"),
     };
-    let echo = start_echo(target_listener);
     let server_config =
         write_server_config(directory.path(), server, Some(server_metrics)).expect("server config");
     let client_config = write_client_config(directory.path(), client, server, Some(client_metrics))
         .expect("client config");
-    let mut server_child = ChildGuard::spawn("ferrum2-server", &server_config);
-    wait_for_bound(&mut server_child, server);
-    wait_for_bound(&mut server_child, server_metrics);
-    let mut client_child = ChildGuard::spawn("ferrum2-client", &client_config);
-    wait_for_bound(&mut client_child, client);
-    wait_for_bound(&mut client_child, client_metrics);
+    let server_child = spawn_reserved_child(
+        "ferrum2-server",
+        &server_config,
+        format!("{context},child=server"),
+        [server_reservation, server_metrics_reservation],
+        server_metrics,
+    )?;
+    let client_child = spawn_reserved_child(
+        "ferrum2-client",
+        &client_config,
+        format!("{context},child=client"),
+        [client_reservation, client_metrics_reservation],
+        client_metrics,
+    )?;
+    let echo = start_echo(target_listener);
 
     let (mut socks, reply) = socks_request(client, target);
     assert_eq!(&reply[..4], &[5, 0, 0, 1]);
@@ -187,21 +276,31 @@ fn success_cycle(baseline_children: usize) {
         &[client, client_metrics, server, server_metrics, target],
         baseline_children,
     );
+    Ok(())
 }
 
-fn authentication_reject_cycle(baseline_children: usize) {
+fn authentication_reject_cycle(
+    baseline_children: usize,
+    context: &str,
+) -> Result<(), SetupCollision> {
     let directory = tempfile::tempdir().expect("auth tempdir");
-    let proxy = unused_loopback();
-    let metrics = unused_loopback();
+    let proxy_reservation = reserve_unused_loopback();
+    let proxy = proxy_reservation.address();
+    let metrics_reservation = reserve_unused_loopback();
+    let metrics = metrics_reservation.address();
     let (target_listener, target) = recording_target();
     target_listener
         .set_nonblocking(true)
         .expect("nonblocking recording target");
     let config =
         write_server_config(directory.path(), proxy, Some(metrics)).expect("server config");
-    let mut child = ChildGuard::spawn("ferrum2-server", &config);
-    wait_for_bound(&mut child, proxy);
-    wait_for_bound(&mut child, metrics);
+    let child = spawn_reserved_child(
+        "ferrum2-server",
+        &config,
+        format!("{context},child=server"),
+        [proxy_reservation, metrics_reservation],
+        metrics,
+    )?;
     let mut stream = TcpStream::connect(proxy).expect("auth reject connect");
     stream
         .set_read_timeout(Some(CHILD_DEADLINE))
@@ -229,19 +328,28 @@ fn authentication_reject_cycle(baseline_children: usize) {
         &[proxy, metrics, target],
         baseline_children,
     );
+    Ok(())
 }
 
-fn connect_failure_cycle(baseline_children: usize) {
+fn connect_failure_cycle(baseline_children: usize, context: &str) -> Result<(), SetupCollision> {
     let directory = tempfile::tempdir().expect("connect failure tempdir");
-    let proxy = unused_loopback();
-    let metrics = unused_loopback();
-    let unavailable_server = unused_loopback();
+    let proxy_reservation = reserve_unused_loopback();
+    let proxy = proxy_reservation.address();
+    let metrics_reservation = reserve_unused_loopback();
+    let metrics = metrics_reservation.address();
+    let unavailable_server_reservation = reserve_unused_loopback();
+    let unavailable_server = unavailable_server_reservation.address();
     let (target_listener, target) = recording_target();
     let config = write_client_config(directory.path(), proxy, unavailable_server, Some(metrics))
         .expect("client config");
-    let mut child = ChildGuard::spawn("ferrum2-client", &config);
-    wait_for_bound(&mut child, proxy);
-    wait_for_bound(&mut child, metrics);
+    let _unavailable_server = unavailable_server_reservation.release();
+    let child = spawn_reserved_child(
+        "ferrum2-client",
+        &config,
+        format!("{context},child=client"),
+        [proxy_reservation, metrics_reservation],
+        metrics,
+    )?;
     let (_stream, reply) = socks_request(proxy, target);
     assert_eq!(reply, [5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
     drop(target_listener);
@@ -251,26 +359,42 @@ fn connect_failure_cycle(baseline_children: usize) {
         &[proxy, metrics, unavailable_server, target],
         baseline_children,
     );
+    Ok(())
 }
 
-fn cooperative_cancellation_cycle(baseline_children: usize) {
+fn cooperative_cancellation_cycle(
+    baseline_children: usize,
+    context: &str,
+) -> Result<(), SetupCollision> {
     let directory = tempfile::tempdir().expect("cooperative cancel tempdir");
-    let server = unused_loopback();
-    let server_metrics = unused_loopback();
-    let client = unused_loopback();
-    let client_metrics = unused_loopback();
+    let server_reservation = reserve_unused_loopback();
+    let server = server_reservation.address();
+    let server_metrics_reservation = reserve_unused_loopback();
+    let server_metrics = server_metrics_reservation.address();
+    let client_reservation = reserve_unused_loopback();
+    let client = client_reservation.address();
+    let client_metrics_reservation = reserve_unused_loopback();
+    let client_metrics = client_metrics_reservation.address();
     let (target_listener, target) = recording_target();
-    let target_observer = observe_target_flow(target_listener);
     let server_config =
         write_server_config(directory.path(), server, Some(server_metrics)).expect("server config");
     let client_config = write_client_config(directory.path(), client, server, Some(client_metrics))
         .expect("client config");
-    let mut server_child = ChildGuard::spawn("ferrum2-server", &server_config);
-    wait_for_bound(&mut server_child, server);
-    wait_for_bound(&mut server_child, server_metrics);
-    let mut client_child = ChildGuard::spawn("ferrum2-client", &client_config);
-    wait_for_bound(&mut client_child, client);
-    wait_for_bound(&mut client_child, client_metrics);
+    let mut server_child = spawn_reserved_child(
+        "ferrum2-server",
+        &server_config,
+        format!("{context},child=server"),
+        [server_reservation, server_metrics_reservation],
+        server_metrics,
+    )?;
+    let mut client_child = spawn_reserved_child(
+        "ferrum2-client",
+        &client_config,
+        format!("{context},child=client"),
+        [client_reservation, client_metrics_reservation],
+        client_metrics,
+    )?;
+    let target_observer = observe_target_flow(target_listener);
 
     let (socks, reply) = socks_request(client, target);
     assert_eq!(&reply[..4], &[5, 0, 0, 1]);
@@ -291,18 +415,25 @@ fn cooperative_cancellation_cycle(baseline_children: usize) {
         &[client, client_metrics, server, server_metrics, target],
         baseline_children,
     );
+    Ok(())
 }
 
-fn forced_termination_cycle(baseline_children: usize) {
+fn forced_termination_cycle(baseline_children: usize, context: &str) -> Result<(), SetupCollision> {
     let directory = tempfile::tempdir().expect("forced termination tempdir");
-    let proxy = unused_loopback();
-    let metrics = unused_loopback();
+    let proxy_reservation = reserve_unused_loopback();
+    let proxy = proxy_reservation.address();
+    let metrics_reservation = reserve_unused_loopback();
+    let metrics = metrics_reservation.address();
     let (target_listener, target) = recording_target();
     let config =
         write_server_config(directory.path(), proxy, Some(metrics)).expect("server config");
-    let mut child = ChildGuard::spawn("ferrum2-server", &config);
-    wait_for_bound(&mut child, proxy);
-    wait_for_bound(&mut child, metrics);
+    let mut child = spawn_reserved_child(
+        "ferrum2-server",
+        &config,
+        format!("{context},child=server"),
+        [proxy_reservation, metrics_reservation],
+        metrics,
+    )?;
     let _held_flow = TcpStream::connect(proxy).expect("held forced flow");
     child.assert_running();
     drop(target_listener);
@@ -312,10 +443,12 @@ fn forced_termination_cycle(baseline_children: usize) {
         &[proxy, metrics, target],
         baseline_children,
     );
+    Ok(())
 }
 
 #[test]
 fn exactly_100_mixed_real_process_cycles_cleanup_every_owned_boundary() {
+    let _test_guard = LIFECYCLE_TEST_LOCK.lock().expect("lifecycle test lock");
     let baseline_children = active_child_count();
     let categories: [Cycle; 5] = [
         ("success", success_cycle),
@@ -327,7 +460,7 @@ fn exactly_100_mixed_real_process_cycles_cleanup_every_owned_boundary() {
     let mut executed = 0_usize;
     for (category, cycle) in categories {
         for iteration in 0..CYCLES_PER_CATEGORY {
-            cycle(baseline_children);
+            run_cycle_with_retries(category, iteration, baseline_children, cycle);
             executed += 1;
             assert_eq!(
                 active_child_count(),
@@ -343,4 +476,43 @@ fn exactly_100_mixed_real_process_cycles_cleanup_every_owned_boundary() {
 fn lifecycle_fixture_uses_exact_five_by_twenty_matrix() {
     assert_eq!(CYCLES_PER_CATEGORY * 5, 100);
     assert!(Path::new(env!("CARGO_MANIFEST_DIR")).is_dir());
+}
+
+#[test]
+fn foreign_listener_is_not_accepted_as_child_readiness() {
+    let _test_guard = LIFECYCLE_TEST_LOCK.lock().expect("lifecycle test lock");
+    let baseline_children = active_child_count();
+    let directory = tempfile::tempdir().expect("foreign listener tempdir");
+    let path = directory.path().to_path_buf();
+    let (foreign_listener, address) = reserve_loopback();
+    let config =
+        write_server_config(directory.path(), address, None).expect("foreign listener config");
+    let diagnostic_context = "category=foreign-port-regression,iteration=0,attempt=1,child=server";
+    let mut child = ChildGuard::spawn_with_context("ferrum2-server", &config, diagnostic_context);
+
+    let readiness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bound(&mut child, address);
+    }));
+    let panic = readiness.expect_err("foreign listener was accepted as child readiness");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("readiness panic message");
+    assert!(message.contains("binary=ferrum2-server"));
+    assert!(message.contains(diagnostic_context));
+    assert!(message.contains("status="));
+    assert!(message.contains("stdout_len="));
+    assert!(message.contains("stdout_hash="));
+    assert!(message.contains("stderr_len="));
+    assert!(message.contains("stderr_hash="));
+    assert!(!message.contains(local_support::SYNTHETIC_PSK));
+    assert!(!message.contains(&path.display().to_string()));
+
+    drop(child);
+    assert_eq!(active_child_count(), baseline_children);
+    drop(foreign_listener);
+    assert_exact_rebind(&[address]);
+    drop(directory);
+    assert!(!path.exists(), "foreign listener temp path survived");
 }
