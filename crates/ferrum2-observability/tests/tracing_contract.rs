@@ -51,15 +51,34 @@ fn newline_json_uses_only_closed_fields_and_redacts_sentinels() {
     const NONCE: &str = "M0_NONCE_SENTINEL";
     const RAW_CONFIG: &str = "M0_RAW_CONFIG_SENTINEL";
     const DESTINATION: &str = "192.0.2.231:65000";
+    const FREE_MESSAGE: &str = "M0_FREE_MESSAGE_SENTINEL";
+    const FREE_ERROR: &str = "M0_FREE_ERROR_SENTINEL";
+    const ARBITRARY_FIELD: &str = "M0_ARBITRARY_FIELD_SENTINEL";
 
     let capture = Captured::default();
     let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
     let dispatch = Dispatch::new(subscriber);
     tracing::dispatcher::with_default(&dispatch, || {
-        tracing::warn!(
+        tracing::event!(
+            target: "ferrum2_observability::closed",
+            tracing::Level::WARN,
+            event = RAW_PSK,
+            role = DESTINATION,
+            transport = "tcp",
+            stage = FREE_ERROR,
+            outcome = ARBITRARY_FIELD,
+            session_id = 1_u64,
+            duration_ms = 2_u64,
+            bytes = 3_u64,
+        );
+        tracing::event!(
+            target: "ferrum2_observability::closed",
+            tracing::Level::WARN,
             destination = DESTINATION,
             secret = RAW_PSK,
-            "free-form event must be filtered"
+            error = FREE_ERROR,
+            arbitrary = ARBITRARY_FIELD,
+            FREE_MESSAGE,
         );
         ferrum2_observability::emit(
             TraceRecord::new(
@@ -87,6 +106,9 @@ fn newline_json_uses_only_closed_fields_and_redacts_sentinels() {
         NONCE,
         RAW_CONFIG,
         DESTINATION,
+        FREE_MESSAGE,
+        FREE_ERROR,
+        ARBITRARY_FIELD,
     ] {
         assert!(!text.contains(sentinel), "leaked sentinel {sentinel}");
     }

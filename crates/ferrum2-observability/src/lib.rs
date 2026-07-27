@@ -9,9 +9,35 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
-use tracing::Level;
-use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing::{Level, Metadata};
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::SubscriberExt as _;
+
+const CLOSED_TRACE_TARGET: &str = "ferrum2_observability::closed";
+const CLOSED_TRACE_MODULE: &str = module_path!();
+const TRACE_FIELDS: &[&str] = &[
+    "event",
+    "role",
+    "transport",
+    "stage",
+    "outcome",
+    "session_id",
+    "duration_ms",
+    "bytes",
+];
+const TRACE_FIELDS_WITH_REASON: &[&str] = &[
+    "event",
+    "role",
+    "transport",
+    "stage",
+    "outcome",
+    "reason",
+    "session_id",
+    "duration_ms",
+    "bytes",
+];
 
 /// Closed severity levels accepted by the tracing boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,13 +50,18 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    const fn as_filter_str(self) -> &'static str {
+    fn enables(self, level: &Level) -> bool {
         match self {
-            Self::Error => "error",
-            Self::Warn => "warn",
-            Self::Info => "info",
-            Self::Debug => "debug",
-            Self::Trace => "trace",
+            Self::Error => *level == Level::ERROR,
+            Self::Warn => matches!(*level, Level::ERROR | Level::WARN),
+            Self::Info => matches!(*level, Level::ERROR | Level::WARN | Level::INFO),
+            Self::Debug => {
+                matches!(
+                    *level,
+                    Level::ERROR | Level::WARN | Level::INFO | Level::DEBUG
+                )
+            }
+            Self::Trace => true,
         }
     }
 }
@@ -289,15 +320,8 @@ pub fn json_subscriber<W>(writer: W, max_level: LogLevel) -> impl tracing::Subsc
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
-    let directive = format!(
-        "ferrum2_observability::closed={}",
-        max_level.as_filter_str()
-    );
-    let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::OFF.into())
-        .parse_lossy(directive);
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let filter = filter_fn(move |metadata| approved_trace_metadata(metadata, max_level));
+    let format = tracing_subscriber::fmt::layer()
         .json()
         .with_writer(writer)
         .with_ansi(false)
@@ -309,14 +333,29 @@ where
         .flatten_event(true)
         .with_current_span(false)
         .with_span_list(false)
-        .finish()
+        .with_filter(filter);
+    tracing_subscriber::registry().with(format)
+}
+
+fn approved_trace_metadata(metadata: &Metadata<'_>, max_level: LogLevel) -> bool {
+    metadata.is_event()
+        && metadata.target() == CLOSED_TRACE_TARGET
+        && metadata.module_path() == Some(CLOSED_TRACE_MODULE)
+        && max_level.enables(metadata.level())
+        && (has_exact_fields(metadata, TRACE_FIELDS)
+            || has_exact_fields(metadata, TRACE_FIELDS_WITH_REASON))
+}
+
+fn has_exact_fields(metadata: &Metadata<'_>, expected: &[&str]) -> bool {
+    let fields = metadata.fields();
+    fields.len() == expected.len() && expected.iter().all(|name| fields.field(name).is_some())
 }
 
 macro_rules! emit_at {
     ($level:expr, $record:ident) => {
         if let Some(reason) = $record.reason {
             tracing::event!(
-                target: "ferrum2_observability::closed",
+                target: CLOSED_TRACE_TARGET,
                 $level,
                 event = %$record.event,
                 role = %$record.role,
@@ -330,7 +369,7 @@ macro_rules! emit_at {
             );
         } else {
             tracing::event!(
-                target: "ferrum2_observability::closed",
+                target: CLOSED_TRACE_TARGET,
                 $level,
                 event = %$record.event,
                 role = %$record.role,

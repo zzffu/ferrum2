@@ -237,6 +237,14 @@ fn missing_unknown_and_wrong_role_fields_are_rejected() {
             SERVER_BASE.replacen("listen = \"127.0.0.1:8388\"\n", "", 1),
         ),
         (
+            "unknown server",
+            SERVER_BASE.replacen(
+                "listen = \"127.0.0.1:8388\"\n",
+                "listen = \"127.0.0.1:8388\"\nunexpected = 1\n",
+                1,
+            ),
+        ),
+        (
             "client role in server",
             format!(
                 "{SERVER_BASE}\n[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n"
