@@ -2,7 +2,7 @@
 id = "M0-T06"
 title = "Implement bounded runtime, direct outbound, and lifecycle ownership"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P0"
 blocked_by = ["M0-T01"]
 owns = [
@@ -86,10 +86,12 @@ cargo fmt -p ferrum2-runtime -- --check
 
 ## Completion evidence
 
-To be filled by the Team Lead after integration:
-
-- Branch:
-- Commit(s):
-- Architect verdict:
-- QA verdict:
-- Integrated commit:
+- Branch: `codex/ticket/m0-t06`
+- Commit(s): `50f547f380d6c58d5538b6540fdc43cb29b5c89c`,
+  repair 1/2 `721ed023703601d67dc2cfaad36d31502418373a`
+- Architect verdict: initial **BLOCK**; repair re-review and assembled integration
+  **PASS**
+- QA verdict: initial **FAIL**; repair re-review and assembled integration
+  **PASS**
+- Integrated commit: `999d4f95a2d597fb283689b9306d2a6773af707d`
+- Publication: none

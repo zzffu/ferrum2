@@ -2,10 +2,23 @@
 
 ## 当前 M0 执行状态
 
-- **Branch/commit:** `master@d9a641fecb2088fc1813ef4ebc58df392be48d64`
+- **Branch/commit:** `master@999d4f95a2d597fb283689b9306d2a6773af707d`
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
 - **M0-T01:** integrated；Architect **PASS**；QA **PASS**
+- **M0-T05:** `d03e0065efd13ff215cc55be6257c305e8e69175`；
+  ticket Architect/QA **PASS**；integrated
+- **M0-T06:** `50f547f380d6c58d5538b6540fdc43cb29b5c89c` +
+  repair 1/2 `721ed023703601d67dc2cfaad36d31502418373a`；initial
+  Architect **BLOCK** / QA **FAIL**，repair re-review 与 final integration
+  Architect/QA 均 **PASS**
+- **Wave-2 integration:** `999d4f95a2d597fb283689b9306d2a6773af707d`；
+  17 个新增路径均属于 T05/T06，final Architect/QA **PASS**
+- **M0-T02:** **BLOCKED**；ADR-0004 固定的
+  `gcmtestvectors.zip@f9fc479e...a023` 不含批准的 numeric cases。实际来源为
+  McGrew/Viega GCM proposal TV archive
+  `511e4741cee299ad0d1eb72ae2738911758248e2aba9d3db33a1dbcbb62e07f0`
+  的 `vec-01.txt`/`vec-02.txt`；需显式批准 ADR-0008 窄勘误后继续
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -20,6 +33,11 @@
 - **Evidence:** core 4/4、architecture 6/6、workspace policy 7/7；integration
   worktree 最终 clean，无 committed generated artifact、external binary、secret
   或 production endpoint
+- **Wave-2 commands, all exit 0:** T05 全部 5 个 ticket commands；T06 全部
+  9 个 ticket commands；`cargo test -p ferrum2-socks5 -p ferrum2-runtime
+  --locked`（36 passed）；组合 Clippy、fmt、metadata、package trees 和 fixed-base
+  `git diff --check`。T06 shutdown regression 在修复后 10,240 次 ready-race
+  观察为 0 post-shutdown accepts
 - **Approved deferrals:** workspace-wide quick/full 等下游 target source 在 T07
   汇合后执行；MSRV、platform、interop 与 GitHub Actions evidence 属于 T08，
   此处不计 PASS

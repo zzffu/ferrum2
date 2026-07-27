@@ -65,12 +65,13 @@ non-overlapping ownership。
      另行授权 push 后，GitHub Actions 一个 run ID/attempt 的 11 个固定 job 在
      exact integration `GITHUB_SHA` 全部 success。
 - **In-scope tickets:**
-  - M0-T01：locked workspace、toolchain、license 与 core contracts；无 blocker；
-  - M0-T02：secret/KDF/AEAD/key-clock-entropy；blocked by T01；
+  - M0-T01：locked workspace、toolchain、license 与 core contracts；done；
+  - M0-T02：secret/KDF/AEAD/key-clock-entropy；blocked on approved-contract
+    provenance correction；
   - M0-T03：SIP022 TCP security state/replay/binding；blocked by T02；
   - M0-T04：typed config/observability；blocked by T02；
-  - M0-T05：SOCKS5 CONNECT inbound；blocked by T01；
-  - M0-T06：runtime/direct/relay/lifecycle；blocked by T01；
+  - M0-T05：SOCKS5 CONNECT inbound；done；
+  - M0-T06：runtime/direct/relay/lifecycle；done；
   - M0-T07：binary composition/local E2E；blocked by T03/T04/T05/T06；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
     独占 `.github/workflows/m0.yml`，blocked by T07。
@@ -86,12 +87,15 @@ non-overlapping ownership。
   ```
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
-- **Integrated commit:** not yet
-- **Open blockers and risks:** M0-T01 已在
-  `d9a641fecb2088fc1813ef4ebc58df392be48d64` 完成 integration；一次用户授权的
-  额外窄修复关闭了 `workspace_policy.rs` 的 CRLF portability blocker。当前
-  ready frontier 为 M0-T02、M0-T05、M0-T06；T03/T04/T07/T08 仍只等待既定
-  ticket dependencies。
+- **Integrated commit:** 当前 validated checkpoint
+  `999d4f95a2d597fb283689b9306d2a6773af707d`，包含 M0-T01、M0-T05、M0-T06。
+- **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
+  Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
+  shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
+  CAVP ZIP 不含批准的两组 numeric cases；worktree 保持未提交，ticket 为
+  `blocked`。解锁需要显式批准 ADR-0008，仅把 provenance 更正为
+  McGrew/Viega GCM proposal `vec-01`/`vec-02`，不得改变向量或协议行为。
+  T03/T04 因 T02 等待，T07/T08 继续只等待既定 dependencies。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。

@@ -2,7 +2,7 @@
 id = "M0-T05"
 title = "Implement the SOCKS5 no-auth IPv4 CONNECT inbound"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P1"
 blocked_by = ["M0-T01"]
 owns = [
@@ -77,10 +77,11 @@ cargo fmt -p ferrum2-socks5 -- --check
 
 ## Completion evidence
 
-To be filled by the Team Lead after integration:
-
-- Branch:
-- Commit(s):
-- Architect verdict:
-- QA verdict:
-- Integrated commit:
+- Branch: `codex/ticket/m0-t05`
+- Commit(s): `d03e0065efd13ff215cc55be6257c305e8e69175`
+- Architect verdict: **PASS** on the ticket and assembled integration
+- QA verdict: **PASS** on the ticket and assembled integration
+- Integrated commit: ticket merge
+  `908b4470fc68204e3e24a13dbb226d9b123c9ae7`; validated base checkpoint
+  `999d4f95a2d597fb283689b9306d2a6773af707d`
+- Publication: none
