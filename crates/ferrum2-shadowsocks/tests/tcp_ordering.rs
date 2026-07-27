@@ -1,15 +1,155 @@
 mod common;
 
-use ferrum2_core::{ConnectErrorKind, LocalEndpoint, Session};
+use std::future::{Future, poll_fn};
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+
+use ferrum2_core::{
+    AbortiveClose, ConnectError, ConnectErrorKind, Connector, LocalEndpoint, Session, TargetAddr,
+};
 use ferrum2_shadowsocks::{
     ClientTcpOutbound, DetectionReason, REQUEST_FIRST_READ_LEN, ShadowsocksError,
-    ShadowsocksTcpInbound, TcpReplayStore,
+    ShadowsocksTcpInbound, TcpReplayStore, TransportIo,
 };
 
 use common::{
-    FakeClock, NOW, RecordingConnector, RecordingIo, ScriptedRandom, client_random_bytes,
-    custom_request_wire, provider, salt_with_last, server_target, target, valid_request_wire,
+    FakeClock, NOW, RecordingConnector, RecordingIo, ScriptedRandom, SourceSentinel,
+    client_random_bytes, custom_request_wire, provider, salt_with_last, server_target, target,
+    valid_request_wire,
 };
+
+#[derive(Default)]
+struct ClientOpenControl {
+    connect_ready: AtomicBool,
+    write_ready: AtomicBool,
+    write_polls: AtomicUsize,
+    completed_writes: AtomicUsize,
+    abortive_calls: AtomicUsize,
+    dropped_streams: AtomicUsize,
+    targets: Mutex<Vec<TargetAddr>>,
+    writes: Mutex<Vec<Vec<u8>>>,
+}
+
+struct ControlledClientIo {
+    control: Arc<ClientOpenControl>,
+    fail_write: bool,
+}
+
+impl Drop for ControlledClientIo {
+    fn drop(&mut self) {
+        self.control.dropped_streams.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl AbortiveClose for ControlledClientIo {
+    type Error = ();
+
+    fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+        self.control.abortive_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl LocalEndpoint for ControlledClientIo {
+    fn local_endpoint(&self) -> SocketAddrV4 {
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49152)
+    }
+}
+
+impl TransportIo for ControlledClientIo {
+    type IoError = SourceSentinel;
+
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Poll::Ready(Ok(0))
+    }
+
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        self.control.write_polls.fetch_add(1, Ordering::SeqCst);
+        if !self.control.write_ready.load(Ordering::SeqCst) {
+            return Poll::Pending;
+        }
+        self.control.completed_writes.fetch_add(1, Ordering::SeqCst);
+        self.control
+            .writes
+            .lock()
+            .expect("writes")
+            .push(source.to_vec());
+        if self.fail_write {
+            Poll::Ready(Err(SourceSentinel))
+        } else {
+            Poll::Ready(Ok(source.len()))
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::IoError>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct ControlledClientConnector {
+    control: Arc<ClientOpenControl>,
+    stream: Mutex<Option<ControlledClientIo>>,
+}
+
+impl ControlledClientConnector {
+    fn new(control: Arc<ClientOpenControl>, fail_write: bool) -> Self {
+        Self {
+            stream: Mutex::new(Some(ControlledClientIo {
+                control: Arc::clone(&control),
+                fail_write,
+            })),
+            control,
+        }
+    }
+}
+
+impl Connector for ControlledClientConnector {
+    type Stream = ControlledClientIo;
+
+    fn connect(
+        &self,
+        target: &TargetAddr,
+    ) -> impl Future<Output = Result<Self::Stream, ConnectError>> + Send {
+        self.control
+            .targets
+            .lock()
+            .expect("targets")
+            .push(target.clone());
+        poll_fn(move |_cx| {
+            if !self.control.connect_ready.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(self
+                .stream
+                .lock()
+                .expect("stream")
+                .take()
+                .expect("connector called once")))
+        })
+    }
+}
+
+fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+    future.poll(&mut Context::from_waker(Waker::noop()))
+}
 
 #[derive(Default)]
 struct DownstreamEffects {
@@ -226,6 +366,144 @@ async fn connector_target_and_request_target() {
         .await
         .expect("authenticated request");
     assert_eq!(session.target, target());
+}
+
+#[test]
+fn client_open_phase_contract() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let application_target = target();
+
+    let control = Arc::new(ClientOpenControl::default());
+    let connector = ControlledClientConnector::new(Arc::clone(&control), false);
+    let request_salt = salt_with_last(30);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+
+    let mut connect = Box::pin(outbound.connect_server());
+    assert!(poll_once(connect.as_mut()).is_pending());
+    assert_eq!(
+        control.targets.lock().expect("targets").as_slice(),
+        &[server_target()]
+    );
+    assert_eq!(control.write_polls.load(Ordering::SeqCst), 0);
+    assert_eq!(control.completed_writes.load(Ordering::SeqCst), 0);
+
+    control.connect_ready.store(true, Ordering::SeqCst);
+    let phase = match poll_once(connect.as_mut()) {
+        Poll::Ready(Ok(phase)) => phase,
+        Poll::Ready(Err(error)) => panic!("connect failed: {error}"),
+        Poll::Pending => panic!("connect did not complete"),
+    };
+    drop(connect);
+    assert_eq!(control.write_polls.load(Ordering::SeqCst), 0);
+
+    let mut request = Box::pin(phase.write_request(&application_target));
+    assert!(poll_once(request.as_mut()).is_pending());
+    assert_eq!(control.write_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(control.completed_writes.load(Ordering::SeqCst), 0);
+
+    control.write_ready.store(true, Ordering::SeqCst);
+    let flow = match poll_once(request.as_mut()) {
+        Poll::Ready(Ok(flow)) => flow,
+        Poll::Ready(Err(error)) => panic!("request first-write failed: {error}"),
+        Poll::Pending => panic!("request first-write did not complete"),
+    };
+    drop(request);
+    assert_eq!(control.completed_writes.load(Ordering::SeqCst), 1);
+    let wire = control.writes.lock().expect("writes")[0].clone();
+    let (server_io, _) = RecordingIo::request(&wire);
+    let server_random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("approved capacity");
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &server_random, &replay);
+    let mut accept = Box::pin(inbound.accept_stream(server_io));
+    let session = match poll_once(accept.as_mut()) {
+        Poll::Ready(Ok(session)) => session,
+        Poll::Ready(Err(error)) => panic!("request decode failed: {error}"),
+        Poll::Pending => panic!("request decode did not complete"),
+    };
+    assert_eq!(session.target, application_target);
+    drop(flow);
+    assert_eq!(control.dropped_streams.load(Ordering::SeqCst), 1);
+
+    let cancelled_control = Arc::new(ClientOpenControl::default());
+    cancelled_control
+        .connect_ready
+        .store(true, Ordering::SeqCst);
+    let cancelled_connector = ControlledClientConnector::new(Arc::clone(&cancelled_control), false);
+    let cancelled_random = ScriptedRandom::new(client_random_bytes(&salt_with_last(31)));
+    let cancelled_outbound = ClientTcpOutbound::new(
+        server_target(),
+        &keys,
+        &cancelled_connector,
+        &clock,
+        &cancelled_random,
+    );
+    let mut cancelled_connect = Box::pin(cancelled_outbound.connect_server());
+    let cancelled_phase = match poll_once(cancelled_connect.as_mut()) {
+        Poll::Ready(Ok(phase)) => phase,
+        Poll::Ready(Err(error)) => panic!("connect failed: {error}"),
+        Poll::Pending => panic!("connect did not complete"),
+    };
+    drop(cancelled_connect);
+    let mut cancelled_request = Box::pin(cancelled_phase.write_request(&application_target));
+    assert!(poll_once(cancelled_request.as_mut()).is_pending());
+    drop(cancelled_request);
+    assert_eq!(cancelled_control.dropped_streams.load(Ordering::SeqCst), 1);
+    cancelled_control.write_ready.store(true, Ordering::SeqCst);
+    assert_eq!(cancelled_control.completed_writes.load(Ordering::SeqCst), 0);
+
+    let failure_control = Arc::new(ClientOpenControl::default());
+    failure_control.connect_ready.store(true, Ordering::SeqCst);
+    failure_control.write_ready.store(true, Ordering::SeqCst);
+    let failure_connector = ControlledClientConnector::new(Arc::clone(&failure_control), true);
+    let failure_random = ScriptedRandom::new(client_random_bytes(&salt_with_last(32)));
+    let failure_outbound = ClientTcpOutbound::new(
+        server_target(),
+        &keys,
+        &failure_connector,
+        &clock,
+        &failure_random,
+    );
+    let mut failure_connect = Box::pin(failure_outbound.connect_server());
+    let failure_phase = match poll_once(failure_connect.as_mut()) {
+        Poll::Ready(Ok(phase)) => phase,
+        Poll::Ready(Err(error)) => panic!("connect failed: {error}"),
+        Poll::Pending => panic!("connect did not complete"),
+    };
+    drop(failure_connect);
+    let mut failed_request = Box::pin(failure_phase.write_request(&application_target));
+    let error = match poll_once(failed_request.as_mut()) {
+        Poll::Ready(Err(error)) => error,
+        Poll::Ready(Ok(_)) => panic!("write failure returned a flow"),
+        Poll::Pending => panic!("write failure did not complete"),
+    };
+    assert_eq!(
+        error,
+        ShadowsocksError::Detection(DetectionReason::WriteFailed)
+    );
+    assert_eq!(failure_control.abortive_calls.load(Ordering::SeqCst), 1);
+
+    let fused_control = Arc::new(ClientOpenControl::default());
+    fused_control.connect_ready.store(true, Ordering::SeqCst);
+    fused_control.write_ready.store(true, Ordering::SeqCst);
+    let fused_connector = ControlledClientConnector::new(Arc::clone(&fused_control), false);
+    let fused_random = ScriptedRandom::new(client_random_bytes(&salt_with_last(33)));
+    let fused_outbound = ClientTcpOutbound::new(
+        server_target(),
+        &keys,
+        &fused_connector,
+        &clock,
+        &fused_random,
+    );
+    let mut fused = Box::pin(fused_outbound.open_stream(&application_target));
+    let fused_flow = match poll_once(fused.as_mut()) {
+        Poll::Ready(Ok(flow)) => flow,
+        Poll::Ready(Err(error)) => panic!("fused open failed: {error}"),
+        Poll::Pending => panic!("fused open did not complete"),
+    };
+    assert_eq!(fused_control.completed_writes.load(Ordering::SeqCst), 1);
+    drop(fused_flow);
 }
 
 #[tokio::test]
