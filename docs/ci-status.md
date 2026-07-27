@@ -72,9 +72,11 @@
   let-chain不兼容；窄repair `50bf0b7`与integration `123618f`通过Rust 1.85、
   focused、quick/full及final Architect/QA，T07 done。T08 checkpoint `14343d2`
   因sing-box evidence边界与静态Architect findings未集成；ADR-0014已在
-  `96d6262`接受。repair 1/2 `5accd02`关闭已知静态finding并通过Engineer
-  quick/full、MSRV、四项exact interop、same-SHA local E2E/half-close、
-  scope/workflow policy与本机Windows evidence，现进入`review`。
+  `96d6262`接受。repair 1/2 `5accd02`通过Engineer及QA的绝大部分本地执行，
+  但final Architect/QA均**BLOCK**：external EOF/shutdown缺少跨线程顺序与
+  production-bound mutations、partial I/O可越过absolute deadline、workflow
+  policy非closed subset、platform helper存在false-pass/overclaim。repair 2/2
+  现于`codex/repair/m0-t08-final-closure`集中关闭。
 - **Contract final verdicts:** 初始review要求exact 47-case matrix、
   `AddressBounds`、harness exact two-edge lock hunk、configured而非hardcoded
   durations、T03/T07 time-evidence ownership和完整ADR模板。全部修正后
@@ -208,14 +210,14 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | REVIEW | Accepted ADR-0001～0014、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T07均done，T08 candidate `5accd02`进入Architect/QA review | M0-T08 |
-| GitHub Actions workflow contract | LOCAL STATIC PASS / NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；repair `5accd02`的YAML parse、strict structural/mutation policy和scope audit本机PASS，exact pushed-SHA run尚未发生 | M0-T08 |
+| M0 execution contracts | IN_PROGRESS / REVIEW BLOCK | Accepted ADR-0001～0014、Approved SPEC/TEST amendments且T01～T07 done；T08 repair 1/2 `5accd02`被final Architect/QA BLOCK，repair 2/2执行中 | M0-T08 |
+| GitHub Actions workflow contract | STATIC BLOCK / NOT_RUN | `5accd02`虽通过现有YAML parse/scope tests，但Architect证明quoted/unsupported keys、额外job/nameless step/任意shell可绕过；repair 2/2必须形成closed lexical/command subset；exact pushed-SHA run尚未发生 | M0-T08 |
 | Host quick Cargo gate | PASS | `123618f`先build真实binaries，再由Team Lead与QA独立运行fmt/check/workspace test 3/3；MSRV recovery后的workspace test为194/194 | 当前 |
 | Host full Cargo gate | PASS | `123618f`上Team Lead与QA独立运行fmt、strict Clippy、all-features workspace tests 194/194、docs 4/4 | 当前 |
 | Security/KAT/negative | LOCAL PASS / CI PENDING | T02/T03历史evidence保持PASS；`91516720`的primitive-only native probe为2/2、exact 47且target zero；Linux GNU与第二native provider结果等待T08 | M0-T08 |
-| Lifecycle/backpressure | PASS | T06 10,240次shutdown race及partial stats保持PASS；`91516720`的binary-private registry与5×20=100 real-process cycles通过，cooperative category具bounded accept/EOF-reset ack | 当前 |
-| External interop | LOCAL PASS / CI PENDING | `5accd02`上四项exact pinned cases各1/1 PASS；distinct pre-FIN 16386-byte双向相等、ordered clean-EOF convergence及同SHA ferrum-owned post-FIN gates均通过，runner evidence待remote | M0 subset，M1/M2 full |
-| Linux glibc/musl + Windows | WINDOWS LOCAL PARTIAL PASS / CI PENDING | Windows release build、valid/invalid exits `0,2,0,2`、native detection 2/2与side-effect helper mutation self-test PASS；既有系统会话sing-box占用固定1080，故exact helper 4/4与Linux GNU/musl provider-native/static-linkage evidence留给clean hosted runners | M0 smoke，M3 qualification |
+| Lifecycle/backpressure | HISTORICAL PASS / FLAKE DIAGNOSIS | T06/T07既有race、partial stats、100-cycle gates保持；`5accd02` QA首次MSRV workspace run的100-cycle suite出现一次`child exited before readiness`，focused 2/2与exact full 204/204 rerunPASS，现独立诊断且不把重跑当确定性证明 | M0-T08 |
+| External interop | LOCAL EXECUTION PASS / CONTRACT BLOCK | `5accd02`上四项exact pinned cases各1/1机械执行PASS，distinct pre-FIN 16386-byte相等及同SHA ferrum-owned post-FIN gates通过；但target EOF/shutdown与client EOF无跨线程barrier且partial progress可越过case deadline，故ordered convergence证据待repair 2/2 | M0 subset，M1/M2 full |
+| Linux glibc/musl + Windows | WINDOWS BUILD/RUN PASS / HELPER BLOCK | Windows release build、valid/invalid exits `0,2,0,2`、native detection 2/2 PASS；helper的“zero socket side effects”存在failed-bind/exit2 false-pass，须收窄为observable no-listener claim并补same-SHA entrypoint evidence；固定1080及Linux GNU/musl仍留给clean hosted runners | M0 smoke，M3 qualification |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
 
 ## 已冻结但尚未实现的 M0 CI
