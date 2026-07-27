@@ -3,6 +3,7 @@
 - **Status:** Draft
 - **Milestone:** M0
 - **Spec:** `docs/specs/SPEC-0000-template.md`
+- **Gate profile:** reduced / standard / strict
 
 ## Scope and test seams
 
@@ -38,6 +39,9 @@ TODO
 
 - TODO
 
+State which platform evidence must exist before ticket review and which may wait for
+the final exact-SHA release gate.
+
 ## Performance and resource tests
 
 - TODO or explicitly not applicable
@@ -48,4 +52,5 @@ TODO
 
 ## Exit conditions and known gaps
 
-- TODO
+- Identify which changes invalidate only affected evidence and which require a full
+  exact-SHA rerun. The final release gate is never assembled from different SHAs.

@@ -15,10 +15,13 @@
 - **In-scope tickets:** none yet
 - **Deferred/out of scope:** TODO
 - **Integrated commit:** not yet
-- **Blockers and risks:** TODO
+- **Canonical root blockers:** TODO
+- **Risks:** TODO
 
 ## Decision and scope change log
 
 | Date | Milestone | Change | Reason | Evidence |
 |---|---|---|---|---|
-| YYYY-MM-DD | M0 | Initial proposal | TODO | TODO |
+| YYYY-MM-DD | M0 | Initial material proposal | TODO | TODO |
+
+Do not log transient status, review, repair-count, or derived-failure churn here.

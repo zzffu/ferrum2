@@ -22,7 +22,9 @@
   **Approved**；final Product、Architect与两个独立QA document gates均**PASS**。
   T07 owns Unix-only listener/rebind plus the exact `socket2` dev edge；T08 owns
   only the two diagnosed full-name `--exact` filters, GNU/musl linker resolution,
-  Windows exit/banner evidence and `scope_audit`.
+  Windows exit/banner evidence and `scope_audit`. The repaired scheduler now reports
+  `resume_and_execute_frontier`: T07 remains active while disjoint T08 implementation
+  is ready; T08 still has an integration dependency on completed T07.
 - **Independent hosted-like RED:** Arch WSL current build exit 0；lifecycle
   full-file and full-name exact rerun each exit 101 at the first client-proxy
   exact rebind (`EADDRINUSE`), with no remaining listener and the address in
@@ -258,7 +260,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
-| Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
+| Workflow doctor/validate | PASS | 分阶段依赖、角色reasoning配置、risk-aware repair与Git-common-dir state均有效；M0 next=`resume_and_execute_frontier`，无warning | 当前 |
 | M0 execution contracts | HOSTED REPAIR IN PROGRESS | T07 `6139544`与T08 `49c63082`已在exact `51fb7327`组合并通过local/Architect/QA；hosted run `30301746374`为2/11 success、9/11 failure，ADR-0015/T07/T08已窄reopen | M0-T07/T08 |
 | GitHub Actions workflow contract | ATTEMPT 1 FAIL / REPAIR IN PROGRESS | `51fb7327`的唯一authorized run完整实例化11 jobs；两处broad filter和三套linker probes fail closed于错误假设。Job/runner/security矩阵不变，T08只修证据脚本与closed scope policy | M0-T08 |
 | Host quick Cargo gate | LOCAL PASS / HOSTED LIFECYCLE FAIL | `51fb7327`上Team Lead与QA独立完成authoritative quick；hosted quick随后只在共同M0-LIFE-005 rebind首因失败 | 当前repair SHA重跑 |

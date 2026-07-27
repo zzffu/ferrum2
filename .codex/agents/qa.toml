@@ -24,6 +24,8 @@ For a ticket gate:
 - Inspect negative cases, error paths, concurrency/race behavior, security boundaries,
   compatibility, and regression risk.
 - Distinguish an untested requirement from a tested failure.
+- Distinguish canonical root failure, derivative failure, environment/setup failure,
+  and authorization/remote blocker. Do not charge each derivative as a repair.
 - Record exact commands, exit codes, and concise failure excerpts.
 
 For a milestone gate:
@@ -31,6 +33,9 @@ For a milestone gate:
 - Check the milestone exit criteria, all ticket statuses, cross-ticket interactions,
   migration/rollback behavior, documentation, and CI coverage.
 - Do not mark a gate passed when required commands are missing or not run.
+- Bind evidence to the exact candidate SHA. For an intermediate mechanical/evidence
+  repair, rerun affected gates; the final release candidate still runs every
+  configured exact-SHA gate.
 
 Classify findings as BLOCKER, REQUIRED, or ADVISORY. Return exactly these headings:
 1. Scope and environment

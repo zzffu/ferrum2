@@ -1,188 +1,178 @@
 # Workflow state machine
 
-## Control-plane states
+## Durable and transient state
+
+Product history stores only durable outcomes:
 
 ```text
-UNINITIALIZED
-    |
-    v
-BOOTSTRAPPED  -- vision, gap analysis, roadmap, CI baseline exist
-    |
-    v
-PLANNED       -- ADR/spec/test plan/tickets are approved and validated
-    |
-    v
-EXECUTING     -- scheduler drains one or more dependency waves
-    |               |
-    |               +-- Engineer worktrees in parallel within a wave
-    |               +-- Architect/QA gates
-    |               +-- integration checkpoint
-    |               +-- recompute next wave without a new user invocation
-    v
-READY_TO_CLOSE -- all in-scope tickets are done/deferred and final validation passed
-    |
-    v
-CLOSED        -- exit criteria proved, documents updated, handoff committed
+DRAFT <-> BLOCKED
+  |
+  +----> READY ----> DONE
+           |
+           +-------> DEFERRED
 ```
 
-A repository can have more than one milestone, but only one integration branch may
-actively target a given base branch unless the user explicitly coordinates multiple
-release trains.
+`implementation`, `review`, `repair`, `integration`, and `release` are transient
+execution phases stored in the Git-common-dir runtime ledger. Do not create a product
+commit merely to enter or leave a transient phase.
 
-## Execute scheduler actions
-
-`workflow.py next --milestone <ID> --json` reports one of these actions:
-
-| Action | Meaning | Primary-thread behavior |
-|---|---|---|
-| `execute_frontier` | Dependency-ready tickets are available | Spawn one Engineer per selected, disjoint ticket and run the wave |
-| `resume_active` | A ticket is `in_progress`, `review`, or `failed` | Recover the earliest incomplete implementation/review/repair gate before selecting new work |
-| `ready_to_close` | Every in-scope ticket is `done` or `deferred` | Run final full validation, then return ready-to-close or enter closeout |
-| `blocked` | Work remains but no ticket can progress | Stop with exact contract, dependency, failure, or decision blockers |
-| `no_tickets` | The milestone has no tickets | Return to planning or correct the milestone ID |
-
-With `execution.strategy = "drain"`, the primary thread loops over these actions until
-`ready_to_close` or a material stop condition. With `strategy = "wave"`, it returns
-after one durable frontier checkpoint.
-
-## Ticket states
-
-| State | Meaning | Allowed next states |
-|---|---|---|
-| `draft` | Contract incomplete or not approved | `blocked`, `ready`, `deferred` |
-| `blocked` | A named dependency, decision, or external condition prevents work | `draft`, `ready`, `deferred` |
-| `ready` | Spec/test plan approved, blockers done, ownership declared | `in_progress` |
-| `in_progress` | Assigned Engineer/worktree exists or repair is underway | `review`, `blocked`, `failed` |
-| `review` | Commit exists and Architect/QA gates are running | `in_progress`, `blocked`, `done`, `failed` |
-| `failed` | Execution failed and needs explicit recovery | `in_progress`, `blocked`, `deferred` |
-| `done` | Integrated into the base branch and validated | terminal unless reopened explicitly |
-| `deferred` | Removed from current milestone with rationale | `draft` in a later milestone |
+`in_progress`, `review`, and `failed` tracked statuses are read-only compatibility
+adapters for existing tickets. New transitions use `set-phase`/`clear-phase`; the
+helper migrates a legacy active status back to durable `ready`.
 
 `done` means integrated and validated, not merely committed on a ticket branch.
 
-## Wave lifecycle
+## Four dependency gates
+
+Dependencies are cumulative through their named gate:
+
+| Field | First gate enforced | Effect |
+|---|---|---|
+| `implementation_blocked_by` | Engineer startup | Prevents implementation |
+| `review_blocked_by` | Candidate review | Implementation may proceed |
+| `integration_blocked_by` | Integration/done | Implementation and review may proceed |
+| `release_blocked_by` | Milestone close | Integration may proceed |
+
+Legacy `blocked_by` is an alias for `implementation_blocked_by`. A dependency must be
+`done` when its gate is evaluated. All dependency IDs must exist and must not
+self-block. The cumulative implementation/review/integration completion graph must
+be acyclic. Release-only edges are checked at closeout but do not create a false
+implementation cycle.
+
+## Scheduler actions
+
+`workflow.py next --milestone <ID> --json` reports:
+
+| Action | Meaning | Primary-thread behavior |
+|---|---|---|
+| `execute_frontier` | Independent implementation-ready tickets exist | Start them up to capacity |
+| `resume_active` | Only active implementation/review/repair work can progress | Resume it |
+| `resume_and_execute_frontier` | Active work and a disjoint frontier both exist | Run both; active work is not a global barrier |
+| `ready_to_close` | Durable tickets and release dependencies are complete | Run exact-SHA final validation/closeout |
+| `blocked` | No active or independent work can progress | Report canonical root blockers |
+| `run_limit_reached` | Wave or no-progress limit stopped this invocation | Persist state and return the exact resume command |
+| `no_tickets` | Milestone has no tickets | Return to planning |
+
+With `strategy = "drain"`, the primary thread repeatedly consumes these actions
+without another user invocation. `next` is a deterministic decision helper, not an
+agent spawner. `checkpoint` persists the loop fingerprint, no-progress count,
+authorizations, blockers, and repair usage across worktrees and contexts.
+
+## Pipelined execution
 
 ```text
-READY FRONTIER
+IMPLEMENTATION-READY FRONTIER
     |
-    v
-COORDINATION COMMIT       tickets -> in_progress
-    |
-    v
-ENGINEER FAN-OUT          one ticket / branch / worktree per Engineer
-    |
-    v
-WAIT + VERIFY             commits exist, scope is clean, worktrees are clean
-    |
-    v
-ARCHITECT + QA GATES      parallel read/test review
-    |          |
-    |          +-- required findings -> bounded Engineer repair -> rerun gates
-    v
-INTEGRATION WORKTREE      sequential --no-ff merges
-    |
-    v
-QUICK PER MERGE + FULL PER WAVE
-    |
-    v
-FINAL ARCHITECT + QA GATE
-    |
-    v
-BASE FF-ONLY + DONE CHECKPOINT
-    |
-    v
-RECOMPUTE NEXT ACTION     drain continues automatically
+    +-- Engineer A -> verify SHA -> required ticket reviews --+
+    |                                                        |
+    +-- Engineer B still working                             +--> integration batch
+    |                                                        |      |
+    +-- active repair C -> affected review only -------------+      v
+                                                               affected quick gates
+                                                                    |
+                                                               one full exact-SHA gate
+                                                                    |
+                                                               required integration reviews
+                                                                    |
+                                                               one material checkpoint
+                                                                    |
+                                                               recompute immediately
 ```
 
-The user is not the scheduler between waves. The primary Codex thread waits for
-subagents, consumes their summaries, closes completed threads, and starts the next
-eligible wave.
+There is no wait-for-all barrier and no mandatory coordination commit for an
+implementation or review phase. File ownership and worktree isolation remain
+mandatory.
 
 ## Gate invariants
 
-### Planning gate
+### Planning
 
-A ticket may become `ready` only when:
+A ticket may become ready only when:
 
-- its milestone and product outcome are documented
-- its spec and test plan exist
-- every acceptance criterion is measurable
-- blockers are valid ticket IDs and form no dependency cycle
+- product outcome, scope, non-goals, risk, and measurable acceptance are documented
+- spec and test plan exist
+- four dependency lists are valid
 - ownership paths are explicit
-- cross-module or irreversible decisions have approved ADRs
-- the ticket is small enough for one focused Engineer context
+- `required_reviews` matches risk and change surface
+- architectural decisions have an ADR; routine CRLF/format/filter/evidence repairs do
+  not
 
-### Execution gate
+### Implementation
 
-A ticket may become `in_progress` only when:
+An Engineer may start only when:
 
-- all blockers are `done`
-- it belongs to the requested milestone
-- its ownership does not overlap another selected ticket
-- the base tree is clean
-- its branch and worktree are created from the expected coordination commit
+- implementation dependencies are done
+- ownership does not overlap another write-active ticket
+- the assigned branch/worktree and base SHA are exact
+- configured `agent_type`, model, and reasoning effort were verified when observable
 
-### Review gate
+### Review and repair
 
-A ticket may pass review only when:
+A candidate may pass only when:
 
-- the assigned branch has a real commit
-- the worktree is clean
-- changed tracked files stay within declared scope or an approved scope expansion
-- Architect verdict is PASS
-- QA verdict is PASS
-- ticket tests and quick validation pass
-- required review findings have been repaired and rechecked within the configured
-  repair budget
+- its exact SHA and scoped diff are known
+- all required reviewer roles ran with the configured profile
+- required tests passed
+- review dependencies are done
+- canonical root findings are resolved
 
-### Integration gate
+Open roots are gate-aware: a review root does not prevent implementation, but it
+blocks review and every later gate. Integration roots prevent `done`; any open
+canonical root prevents `ready_to_close`.
 
-A wave may enter the base branch only when:
+Risk-aware repair rules:
 
-- all passing ticket branches are merged into the integration branch
-- merge conflicts were resolved from contract evidence
-- quick validation passed after each merge
-- full validation passed for the assembled wave
-- final Architect verdict is PASS
-- final QA verdict is PASS
-- the base branch has not moved since the integration branch was synchronized
+- security/protocol/concurrency/public API/hard-to-reverse changes require Architect
+  and QA
+- mechanical repairs do not consume substantive repair budget
+- derived failures do not create repair attempts
+- only invalidated gates rerun
+- a local unintegrated candidate may be amended with explicit provenance
 
-A failed ticket does not automatically invalidate independent passing tickets. It may
-be excluded from the wave when configuration allows continuation and no dependency,
-ownership, or contract relationship connects it to the passing work.
+### Integration
 
-### Drain-loop gate
+A ticket may become done only when:
 
-The scheduler may begin another wave only when:
+- integration dependencies are done
+- passing candidate commits are present with traceable provenance
+- affected quick gates and the assembled full gate passed
+- required cross-ticket/integration reviews passed on the exact SHA
+- the base branch did not move unexpectedly
 
-- the previous wave has a durable Git/document checkpoint
-- the base worktree is clean
-- completed subagent results were collected
-- selected worktree states are known
-- `workflow.py next` reports `execute_frontier`
-- the no-progress and wave limits have not been reached
-
-### Close gate
+### Release
 
 A milestone may close only when:
 
-- exit criteria have direct evidence
 - all in-scope tickets are done or explicitly deferred
-- final full validation passed on the milestone head
-- roadmap and CI status identify the integrated commit
-- open risks and debt are documented
-- a handoff exists
+- release dependencies are done
+- required platform and hosted evidence is from the exact candidate SHA
+- roadmap, CI status, risks, and handoff are current
+- no canonical root blocker remains open
 
-## Stop and failure behavior
+Intermediate evidence may be impact-scoped; the final release gate is never weakened.
 
-- **Dirty base tree:** stop; name the dirty paths. Do not stash or reset.
-- **Missing contract:** move ticket to draft/blocked; do not improvise a hidden design.
-- **Engineer failure:** preserve worktree and branch; retry only within the repair
-  budget, otherwise mark failed or blocked.
-- **Review blocker:** do not integrate; return ticket to in-progress/blocked.
-- **Merge conflict:** preserve conflict state when intent is unclear.
-- **Validation failure:** keep integration branch; do not fast-forward base.
-- **Base moved:** stop and rebuild/review integration against the new base.
-- **No progress:** stop when the same scheduler state repeats up to the configured
-  limit; report the exact loop state.
-- **Interrupted session:** use `resume`; never recreate state blindly.
+## Progress and stop behavior
+
+Material progress is one of:
+
+- product or test behavior changed
+- a canonical root blocker was resolved
+- new evidence was produced for a new candidate SHA
+- an integration or release result completed
+
+Status edits, coordination commits, repeated derived failures, and unchanged reruns
+are not progress. `workflow.py checkpoint --progress none` always increments the
+no-progress count; a changed scheduler fingerprint is diagnostic and cannot reset
+the guard. Only `--progress material` resets it.
+
+Before stopping:
+
+1. continue all independent work
+2. check the exact authorization ledger
+3. classify the root blocker
+4. retain dirty/failed worktrees
+5. report blocker ID, class, gate, root cause, derived failures, owner, evidence, and
+   unblock condition
+
+Local repair authorization never implies push, publish, force, deletion, remote
+mutation, contract expansion, or ownership expansion.

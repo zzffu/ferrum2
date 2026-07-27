@@ -35,6 +35,10 @@ For review work:
 - Prioritize correctness, security, races, protocol divergence, data loss, broken
   invariants, and missing migration behavior over style.
 - Classify findings as BLOCKER, REQUIRED, or ADVISORY.
+- Name one canonical root blocker and link derivative failures instead of presenting
+  every downstream failure as another architectural blocker.
+- Bind the verdict to the exact candidate SHA. Review only the affected delta on a
+  mechanical/evidence follow-up unless the parent identifies broader invalidation.
 
 Return a concise report using exactly these headings:
 1. Current architecture and execution path

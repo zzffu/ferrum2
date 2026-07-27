@@ -22,6 +22,8 @@ For planning work:
 - Define measurable milestone exit criteria.
 - Break work into independently verifiable vertical slices.
 - Make dependencies and blockers explicit.
+- Separate implementation, review, integration, and release dependencies so a final
+  gate does not unnecessarily serialize disjoint coding work.
 - Reject tickets that are too broad, have vague acceptance criteria, or cannot be
   completed and reviewed in one focused agent context.
 - Preserve previously approved ADR and spec decisions unless the parent explicitly

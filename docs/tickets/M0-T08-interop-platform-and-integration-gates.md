@@ -2,9 +2,13 @@
 id = "M0-T08"
 title = "Qualify pinned interoperability, MSRV, and three target artifacts"
 milestone = "M0"
-status = "blocked"
+status = "ready"
 priority = "P0"
-blocked_by = ["M0-T07"]
+risk = "high"
+implementation_blocked_by = []
+review_blocked_by = []
+integration_blocked_by = ["M0-T07"]
+release_blocked_by = []
 owns = [
   "tests/m0-harness/src/external_support/**",
   "tests/m0-harness/tests/external_interop.rs",
@@ -264,7 +268,9 @@ exit推断。
   filters, fail-closed GNU/musl linker resolution, fail-closed Windows
   exit/banner validation, and synchronized closed-workflow policy. Job/runner/
   trigger/permission/action/toolchain/product contracts remain unchanged.
-- Current gate remains **BLOCKED** until T07 and T08 repair candidates are
+- T08's disjoint workflow/evidence-script implementation is **READY** and may run
+  while T07 remains active. Its integration/release gate remains **BLOCKED** until
+  T07 and T08 repair candidates are
   integrated, all local gates plus Architect/QA pass on the new exact SHA, and
   one new separately authorized run/attempt is 11/11 success. No second push, rerun, PR,
   master push, tag, release, or other remote mutation has occurred.

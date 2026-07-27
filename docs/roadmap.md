@@ -133,7 +133,9 @@ non-overlapping ownership。
     PASS_WITH_ACTIONS；已与T07集成为`51fb7327`并通过same-SHA本地最终门禁。
     首个GitHub run `30301746374`为2/11 success、9/11 failure：两个interop
     success不可拼接，其余除T07 rebind外均为exact-filter、GNU/musl bare linker
-    或Windows link-help evidence-script缺陷；T08按ADR-0015再次窄reopen。
+    或Windows link-help evidence-script缺陷；T08按ADR-0015再次窄reopen。调度依赖已
+    分为implementation与integration gate：T08的disjoint证据脚本修复可与active
+    T07并行，但在T07 done前不得集成或进入release gate。
 
   Dependency graph：
 
@@ -141,8 +143,11 @@ non-overlapping ownership。
   M0-T01
    ├─ M0-T02 ─┬─ M0-T03 ─┐
    │           └─ M0-T04 ─┤
-   ├─ M0-T05 ─────────────┼─ M0-T07 ─ M0-T08
+   ├─ M0-T05 ─────────────┼─ M0-T07
    └─ M0-T06 ─────────────┘
+
+  M0-T08 implementation: independent on the current repair frontier
+  M0-T08 integration: blocked by M0-T07
   ```
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
@@ -201,7 +206,8 @@ non-overlapping ownership。
   QA PASS_WITH_ACTIONS。两者随后已集成于`51fb7327`并通过local same-SHA
   Team Lead/Architect/QA gates；首次hosted run的失败现由ADR-0015/T07/T08
   窄reopen处理。
-  全局repair budget不变。
+  repair budget现按canonical root ID及该根因risk计数；mechanical修复与派生失败不消耗substantive
+  budget，最终exact-SHA release gate不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   exact `51fb7327`已按授权push并产生run `30301746374`；该run失败并永久保留。
   ADR-0015/T07/T08窄修复、同一新SHA本地/Architect/QA再资格和新的11/11

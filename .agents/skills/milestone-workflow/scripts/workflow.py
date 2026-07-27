@@ -9,12 +9,14 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import tomllib
 from dataclasses import dataclass
@@ -32,16 +34,57 @@ TICKET_STATUSES = {
     "done",
     "deferred",
 }
+DURABLE_TICKET_STATUSES = {"draft", "blocked", "ready", "done", "deferred"}
+LEGACY_TRANSIENT_STATUSES = {"in_progress", "review", "failed"}
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
-ALLOWED_TRANSITIONS = {
+DEPENDENCY_FIELDS = {
+    "implementation": "implementation_blocked_by",
+    "review": "review_blocked_by",
+    "integration": "integration_blocked_by",
+    "release": "release_blocked_by",
+}
+RISK_LEVELS = {"low", "medium", "high", "critical"}
+RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+BLOCKER_CLASSES = {
+    "authorization",
+    "code",
+    "contract",
+    "decision",
+    "dependency",
+    "environment",
+    "mechanical",
+    "none",
+    "remote",
+    "repository_state",
+    "security",
+    "test_evidence",
+}
+AUTHORIZATION_STATES = {"not_required", "required", "granted", "exhausted"}
+REPAIR_CLASSES = {"mechanical", "evidence", "substantive"}
+TRANSIENT_PHASES = {"implementation", "review", "repair", "integration", "release"}
+ACTIVE_WRITER_PHASES = {"implementation", "repair"}
+PHASE_DEPENDENCY_GATE = {
+    "implementation": "implementation",
+    "review": "review",
+    "repair": "review",
+    "integration": "integration",
+    "release": "release",
+}
+DEPENDENCY_PHASE_ORDER = {
+    phase: index for index, phase in enumerate(DEPENDENCY_FIELDS)
+}
+LEGACY_STATUS_PHASES = {
+    "in_progress": "implementation",
+    "review": "review",
+    "failed": "repair",
+}
+RUNTIME_STATE_VERSION = 1
+ALLOWED_DURABLE_TRANSITIONS = {
     "draft": {"blocked", "ready", "deferred"},
     "blocked": {"draft", "ready", "deferred"},
-    "ready": {"in_progress", "blocked", "deferred"},
-    "in_progress": {"review", "blocked", "failed"},
-    "review": {"in_progress", "blocked", "done", "failed"},
-    "failed": {"in_progress", "blocked", "deferred"},
+    "ready": {"blocked", "done", "deferred"},
     "done": set(),
-    "deferred": {"draft"},
+    "deferred": {"draft", "ready"},
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -54,14 +97,44 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_parallel_engineers": 3,
         "require_clean_base": True,
         "auto_remove_worktrees": False,
+        "checkpoint_policy": "integration",
     },
     "execution": {
         "strategy": "drain",
         "max_waves_per_run": 0,
         "max_repair_attempts_per_ticket": 2,
+        "repair_budget": {"low": 4, "medium": 3, "high": 2, "critical": 1},
+        "non_counting_repair_classes": ["mechanical"],
         "continue_after_independent_failure": True,
         "auto_close": False,
         "no_progress_limit": 2,
+    },
+    "state": {"path": "codex/milestone-workflow-state.json"},
+    "agents": {
+        "product_manager": {
+            "config": ".codex/agents/product-manager.toml",
+            "name": "product_manager",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "max",
+        },
+        "architect": {
+            "config": ".codex/agents/architect.toml",
+            "name": "architect",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "max",
+        },
+        "engineer": {
+            "config": ".codex/agents/engineer.toml",
+            "name": "engineer",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "high",
+        },
+        "qa": {
+            "config": ".codex/agents/qa.toml",
+            "name": "qa",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "high",
+        },
     },
     "documents": {
         "vision": "docs/vision.md",
@@ -74,7 +147,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "ticket_dir": "docs/tickets",
         "handoff_dir": "docs/handoffs",
     },
-    "validation": {"quick": [], "full": []},
+    "validation": {"workflow": [], "quick": [], "full": []},
 }
 
 
@@ -106,7 +179,71 @@ class Ticket:
 
     @property
     def blockers(self) -> list[str]:
-        return [str(item) for item in self.metadata.get("blocked_by", [])]
+        """Legacy alias for implementation dependencies."""
+        return self.implementation_blockers
+
+    def dependencies(self, phase: str) -> list[str]:
+        field = DEPENDENCY_FIELDS[phase]
+        if phase == "implementation" and field not in self.metadata:
+            raw = self.metadata.get("blocked_by", [])
+        else:
+            raw = self.metadata.get(field, [])
+        return [str(item) for item in raw] if isinstance(raw, list) else []
+
+    def dependencies_through(self, phase: str) -> list[str]:
+        result: list[str] = []
+        for current in DEPENDENCY_FIELDS:
+            for dependency in self.dependencies(current):
+                if dependency not in result:
+                    result.append(dependency)
+            if current == phase:
+                break
+        return result
+
+    @property
+    def implementation_blockers(self) -> list[str]:
+        return self.dependencies("implementation")
+
+    @property
+    def review_blockers(self) -> list[str]:
+        return self.dependencies("review")
+
+    @property
+    def integration_blockers(self) -> list[str]:
+        return self.dependencies("integration")
+
+    @property
+    def release_blockers(self) -> list[str]:
+        return self.dependencies("release")
+
+    @property
+    def all_blockers(self) -> list[str]:
+        result: list[str] = []
+        for phase in DEPENDENCY_FIELDS:
+            for blocker in self.dependencies(phase):
+                if blocker not in result:
+                    result.append(blocker)
+        return result
+
+    @property
+    def risk(self) -> str:
+        return str(self.metadata.get("risk", "high")).lower()
+
+    @property
+    def required_reviews(self) -> list[str]:
+        raw = self.metadata.get("required_reviews")
+        if isinstance(raw, list):
+            return [str(item) for item in raw]
+        if self.risk in {"high", "critical"}:
+            return ["architect", "qa"]
+        if self.risk == "medium":
+            return ["qa"]
+        return []
+
+    @property
+    def blocker_record(self) -> dict[str, Any]:
+        raw = self.metadata.get("blocker", {})
+        return dict(raw) if isinstance(raw, dict) else {}
 
     @property
     def owns(self) -> list[str]:
@@ -183,6 +320,756 @@ def load_config(root: Path) -> dict[str, Any]:
     if cfg.get("version") != 1:
         raise WorkflowError(f"Unsupported workflow.toml version: {cfg.get('version')!r}")
     return cfg
+
+
+def git_common_dir(root: Path) -> Path:
+    proc = run(["git", "rev-parse", "--git-common-dir"], cwd=root)
+    configured = Path(proc.stdout.strip())
+    return (configured if configured.is_absolute() else root / configured).resolve()
+
+
+def runtime_state_path(root: Path, cfg: dict[str, Any]) -> Path:
+    raw = str(cfg.get("state", {}).get("path", "")).strip()
+    if not raw:
+        raise WorkflowError("state.path must not be empty")
+    configured = Path(raw)
+    common = git_common_dir(root)
+    path = configured if configured.is_absolute() else common / configured
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(common)
+    except ValueError as exc:
+        raise WorkflowError(f"state.path must stay inside the Git common dir: {path}") from exc
+    return resolved
+
+
+def empty_runtime_state() -> dict[str, Any]:
+    return {"version": RUNTIME_STATE_VERSION, "revision": 0, "milestones": {}}
+
+
+def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    milestones = payload.get("milestones", {})
+    if not isinstance(milestones, dict):
+        return ["milestones must be an object"]
+    for milestone, runtime in milestones.items():
+        if not isinstance(runtime, dict):
+            errors.append(f"{milestone} must be an object")
+            continue
+        authorizations = runtime.get("authorizations", {})
+        if not isinstance(authorizations, dict):
+            errors.append(f"{milestone}.authorizations must be an object")
+        else:
+            for scope, record in authorizations.items():
+                if not isinstance(record, dict):
+                    errors.append(f"{milestone}.authorizations.{scope} must be an object")
+                    continue
+                if record.get("status") not in {"granted", "revoked"}:
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.status must be granted or revoked"
+                    )
+                kind = record.get("kind")
+                if kind not in {"local", "remote"}:
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.kind must be local or remote"
+                    )
+                if not isinstance(record.get("actions"), list) or not record.get("actions"):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.actions must be non-empty"
+                    )
+                if not isinstance(record.get("tickets"), list) or not record.get("tickets"):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.tickets must be non-empty"
+                    )
+                classes = record.get("blocker_classes")
+                if not isinstance(classes, list) or not classes or any(
+                    item not in BLOCKER_CLASSES - {"none"} for item in classes
+                ):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.blocker_classes must be "
+                        "non-empty and valid"
+                    )
+                if record.get("max_risk") not in RISK_LEVELS:
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.max_risk is invalid"
+                    )
+                if not isinstance(record.get("remote_effects"), bool):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.remote_effects must be boolean"
+                    )
+                elif (kind == "remote") != bool(record.get("remote_effects")):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.kind and remote_effects "
+                        "must agree"
+                    )
+                uses = record.get("uses", 0)
+                max_uses = record.get("max_uses")
+                if isinstance(uses, bool) or not isinstance(uses, int) or uses < 0:
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.uses must be a "
+                        "non-negative integer"
+                    )
+                if max_uses is not None and (
+                    isinstance(max_uses, bool)
+                    or not isinstance(max_uses, int)
+                    or max_uses < 1
+                ):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.max_uses must be "
+                        "an integer >= 1 when present"
+                    )
+                elif (
+                    isinstance(uses, int)
+                    and isinstance(max_uses, int)
+                    and uses > max_uses
+                ):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.uses exceeds max_uses"
+                    )
+                if kind == "remote":
+                    if not str(record.get("remote_ref", "")).strip():
+                        errors.append(
+                            f"{milestone}.authorizations.{scope}.remote_ref is "
+                            "required for remote authorization"
+                        )
+                    commit_sha = record.get("commit_sha")
+                    if not (
+                        isinstance(commit_sha, str)
+                        and re.fullmatch(
+                            r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+                            commit_sha,
+                        )
+                    ):
+                        errors.append(
+                            f"{milestone}.authorizations.{scope}.commit_sha must be "
+                            "an exact commit ID for remote authorization"
+                        )
+                    if max_uses is None:
+                        errors.append(
+                            f"{milestone}.authorizations.{scope}.max_uses must be "
+                            "an integer >= 1 for remote authorization"
+                        )
+                elif str(record.get("remote_ref", "")).strip() or str(
+                    record.get("commit_sha", "")
+                ).strip():
+                    errors.append(
+                        f"{milestone}.authorizations.{scope} local scope must not "
+                        "contain remote_ref or commit_sha"
+                    )
+
+        blockers = runtime.get("blockers", {})
+        if not isinstance(blockers, dict):
+            errors.append(f"{milestone}.blockers must be an object")
+            blockers = {}
+        for blocker_id, record in blockers.items():
+            if not isinstance(record, dict):
+                errors.append(f"{milestone}.blockers.{blocker_id} must be an object")
+                continue
+            if record.get("id") != blocker_id:
+                errors.append(f"{milestone}.blockers.{blocker_id}.id must match its key")
+            if record.get("class") not in BLOCKER_CLASSES - {"none"}:
+                errors.append(f"{milestone}.blockers.{blocker_id}.class is invalid")
+            if record.get("phase") not in DEPENDENCY_FIELDS:
+                errors.append(f"{milestone}.blockers.{blocker_id}.phase is invalid")
+            if record.get("risk") not in RISK_LEVELS:
+                errors.append(f"{milestone}.blockers.{blocker_id}.risk is invalid")
+            if record.get("authorization", "not_required") not in AUTHORIZATION_STATES:
+                errors.append(
+                    f"{milestone}.blockers.{blocker_id}.authorization is invalid"
+                )
+            if record.get("status", "open") not in {
+                "open",
+                "resolved",
+                "superseded",
+            }:
+                errors.append(f"{milestone}.blockers.{blocker_id}.status is invalid")
+            if not str(record.get("ticket_id", "")).strip():
+                errors.append(f"{milestone}.blockers.{blocker_id}.ticket_id is required")
+            if not str(record.get("root_cause", "")).strip():
+                errors.append(f"{milestone}.blockers.{blocker_id}.root_cause is required")
+            derived_from = record.get("derived_from")
+            root_cause_id = record.get("root_cause_id")
+            if derived_from:
+                root = blockers.get(derived_from)
+                if not isinstance(root, dict) or root.get("derived_from"):
+                    errors.append(
+                        f"{milestone}.blockers.{blocker_id}.derived_from must name a root"
+                    )
+                if root_cause_id != derived_from:
+                    errors.append(
+                        f"{milestone}.blockers.{blocker_id}.root_cause_id must equal "
+                        "derived_from"
+                    )
+            elif root_cause_id != blocker_id:
+                errors.append(
+                    f"{milestone}.blockers.{blocker_id}.root_cause_id must equal its id"
+                )
+
+        repairs = runtime.get("repairs", {})
+        if not isinstance(repairs, dict):
+            errors.append(f"{milestone}.repairs must be an object")
+        else:
+            for ticket_id, entries in repairs.items():
+                if not isinstance(entries, list):
+                    errors.append(f"{milestone}.repairs.{ticket_id} must be an array")
+                    continue
+                for index, entry in enumerate(entries):
+                    if not isinstance(entry, dict) or entry.get("class") not in REPAIR_CLASSES:
+                        errors.append(
+                            f"{milestone}.repairs.{ticket_id}[{index}] is invalid"
+                        )
+                        continue
+                    if "consumes_budget" in entry and not isinstance(
+                        entry.get("consumes_budget"),
+                        bool,
+                    ):
+                        errors.append(
+                            f"{milestone}.repairs.{ticket_id}[{index}]."
+                            "consumes_budget must be boolean"
+                        )
+                    root_cause_id = entry.get("root_cause_id")
+                    root = blockers.get(root_cause_id)
+                    if (
+                        not isinstance(root_cause_id, str)
+                        or not isinstance(root, dict)
+                        or root.get("derived_from")
+                    ):
+                        errors.append(
+                            f"{milestone}.repairs.{ticket_id}[{index}].root_cause_id "
+                            "must name a canonical root blocker"
+                        )
+                        continue
+                    if str(root.get("ticket_id", "")).upper() != str(ticket_id).upper():
+                        errors.append(
+                            f"{milestone}.repairs.{ticket_id}[{index}] must reference "
+                            "a root owned by the same ticket"
+                        )
+                    for field, action in (
+                        ("repair_authorization_scope", "local_repair"),
+                        (
+                            "budget_override_authorization_scope",
+                            "repair_budget_override",
+                        ),
+                    ):
+                        scope = str(entry.get(field, "")).strip()
+                        if not scope:
+                            continue
+                        authorization = (
+                            authorizations.get(scope)
+                            if isinstance(authorizations, dict)
+                            else None
+                        )
+                        if not isinstance(
+                            authorization,
+                            dict,
+                        ) or not authorization_record_covers(
+                            authorization,
+                            action=action,
+                            ticket_id=str(root.get("ticket_id", "")),
+                            blocker_class=str(root.get("class", "")),
+                            risk=str(root.get("risk", "")),
+                            remote_effects=False,
+                            require_available=False,
+                        ):
+                            errors.append(
+                                f"{milestone}.repairs.{ticket_id}[{index}].{field} "
+                                f"does not cover canonical root {root_cause_id}"
+                            )
+        repair_overrides = runtime.get("repair_overrides", {})
+        if not isinstance(repair_overrides, dict):
+            errors.append(f"{milestone}.repair_overrides must be an object")
+        else:
+            override_scope_counts: collections.Counter[str] = collections.Counter()
+            for root_cause_id, entries in repair_overrides.items():
+                root = blockers.get(root_cause_id)
+                if not isinstance(root, dict) or root.get("derived_from"):
+                    errors.append(
+                        f"{milestone}.repair_overrides.{root_cause_id} must name "
+                        "a canonical root blocker"
+                    )
+                if not isinstance(entries, list):
+                    errors.append(
+                        f"{milestone}.repair_overrides.{root_cause_id} must be an array"
+                    )
+                    continue
+                for index, entry in enumerate(entries):
+                    if (
+                        not isinstance(entry, dict)
+                        or not str(entry.get("authorization_scope", "")).strip()
+                    ):
+                        errors.append(
+                            f"{milestone}.repair_overrides.{root_cause_id}[{index}] "
+                            "must name an authorization scope"
+                        )
+                        continue
+                    scope = str(entry["authorization_scope"])
+                    override_scope_counts[scope] += 1
+                    authorization = (
+                        authorizations.get(scope)
+                        if isinstance(authorizations, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(authorization, dict)
+                        or authorization.get("kind") != "local"
+                        or "repair_budget_override"
+                        not in authorization.get("actions", [])
+                    ):
+                        errors.append(
+                            f"{milestone}.repair_overrides.{root_cause_id}[{index}] "
+                            "must reference a local repair_budget_override scope"
+                        )
+                    elif isinstance(root, dict) and not authorization_record_covers(
+                        authorization,
+                        action="repair_budget_override",
+                        ticket_id=str(root.get("ticket_id", "")),
+                        blocker_class=str(root.get("class", "")),
+                        risk=str(root.get("risk", "")),
+                        remote_effects=False,
+                        require_available=False,
+                    ):
+                        errors.append(
+                            f"{milestone}.repair_overrides.{root_cause_id}[{index}] "
+                            f"authorization {scope} does not cover that root"
+                        )
+            for scope, count in override_scope_counts.items():
+                authorization = (
+                    authorizations.get(scope)
+                    if isinstance(authorizations, dict)
+                    else None
+                )
+                uses = (
+                    authorization.get("uses", 0)
+                    if isinstance(authorization, dict)
+                    else 0
+                )
+                if not isinstance(uses, int) or uses < count:
+                    errors.append(
+                        f"{milestone}.repair_overrides references {scope} {count} "
+                        f"times but authorization uses is {uses!r}"
+                    )
+        phases = runtime.get("phases", {})
+        if not isinstance(phases, dict):
+            errors.append(f"{milestone}.phases must be an object")
+        else:
+            for ticket_id, record in phases.items():
+                if not isinstance(record, dict):
+                    errors.append(f"{milestone}.phases.{ticket_id} must be an object")
+                    continue
+                if record.get("phase") not in TRANSIENT_PHASES:
+                    errors.append(f"{milestone}.phases.{ticket_id}.phase is invalid")
+                if record.get("ticket_id") != ticket_id:
+                    errors.append(
+                        f"{milestone}.phases.{ticket_id}.ticket_id must match its key"
+                    )
+                phase = record.get("phase")
+                candidate_sha = record.get("candidate_sha", "")
+                if phase in {"review", "integration", "release"} and not (
+                    isinstance(candidate_sha, str)
+                    and re.fullmatch(
+                        r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+                        candidate_sha,
+                    )
+                ):
+                    errors.append(
+                        f"{milestone}.phases.{ticket_id}.candidate_sha must be an "
+                        "exact commit ID for review/integration/release"
+                    )
+                if record.get("phase") == "repair":
+                    root_cause_id = record.get("root_cause_id")
+                    root = blockers.get(root_cause_id)
+                    if (
+                        not isinstance(root_cause_id, str)
+                        or not isinstance(root, dict)
+                        or root.get("derived_from")
+                    ):
+                        errors.append(
+                            f"{milestone}.phases.{ticket_id}.root_cause_id must name "
+                            "a canonical root blocker during repair"
+                        )
+    return errors
+
+
+def load_runtime_state(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+    path = runtime_state_path(root, cfg)
+    if not path.exists():
+        return empty_runtime_state()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkflowError(f"Cannot parse runtime state {path}: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("version") != RUNTIME_STATE_VERSION:
+        raise WorkflowError(
+            f"Unsupported runtime state version in {path}: "
+            f"{payload.get('version') if isinstance(payload, dict) else None!r}"
+        )
+    if not isinstance(payload.get("milestones"), dict):
+        raise WorkflowError(f"Runtime state {path} must contain a milestones object")
+    if (
+        isinstance(payload.get("revision"), bool)
+        or not isinstance(payload.get("revision"), int)
+        or payload["revision"] < 0
+    ):
+        raise WorkflowError(f"Runtime state {path} must contain a non-negative revision")
+    errors = runtime_state_errors(payload)
+    if errors:
+        raise WorkflowError(
+            f"Invalid runtime state {path}: " + "; ".join(errors)
+        )
+    return payload
+
+
+def acquire_runtime_state_lock(lock_path: Path) -> Any:
+    """Acquire a process-owned, crash-released lock on a persistent lock file."""
+
+    handle = lock_path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        raise WorkflowError(
+            f"Runtime state is locked by another writer: {lock_path}"
+        ) from exc
+
+    try:
+        metadata = (
+            json.dumps(
+                {"pid": os.getpid(), "acquired_at": utc_now()},
+                ensure_ascii=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        handle.seek(0)
+        handle.write(metadata)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.seek(0)
+    except Exception:
+        release_runtime_state_lock(handle)
+        raise
+    return handle
+
+
+def release_runtime_state_lock(handle: Any) -> None:
+    """Release a lock acquired by acquire_runtime_state_lock."""
+
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def save_runtime_state(root: Path, cfg: dict[str, Any], state: dict[str, Any]) -> Path:
+    path = runtime_state_path(root, cfg)
+    errors = runtime_state_errors(state)
+    if errors:
+        raise WorkflowError("Refusing invalid runtime state: " + "; ".join(errors))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    expected_revision = int(state.get("revision", 0))
+    lock_path = path.with_name(path.name + ".lock")
+    lock_handle: Any | None = None
+    temporary: Path | None = None
+    try:
+        lock_handle = acquire_runtime_state_lock(lock_path)
+
+        if path.exists():
+            try:
+                current = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise WorkflowError(f"Cannot parse runtime state {path}: {exc}") from exc
+            actual_revision = current.get("revision")
+            if actual_revision != expected_revision:
+                raise WorkflowError(
+                    f"Runtime state revision changed concurrently: expected "
+                    f"{expected_revision}, found {actual_revision}"
+                )
+        elif expected_revision != 0:
+            raise WorkflowError(
+                f"Runtime state disappeared concurrently at revision "
+                f"{expected_revision}"
+            )
+
+        next_revision = expected_revision + 1
+        serialized = dict(state)
+        serialized["revision"] = next_revision
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=path.name + ".",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(serialized, indent=2, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        state["revision"] = next_revision
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as exc:
+                eprint(f"warning: could not remove runtime-state temporary: {exc}")
+        if lock_handle is not None:
+            try:
+                release_runtime_state_lock(lock_handle)
+            except OSError as exc:
+                eprint(f"warning: could not release runtime-state lock {lock_path}: {exc}")
+    return path
+
+
+def milestone_runtime_state(state: dict[str, Any], milestone: str) -> dict[str, Any]:
+    milestones = state.setdefault("milestones", {})
+    normalized = milestone.strip().upper()
+    current = milestones.setdefault(
+        normalized,
+        {
+            "authorizations": {},
+            "blockers": {},
+            "repairs": {},
+            "repair_overrides": {},
+            "phases": {},
+            "last_checkpoint": {},
+        },
+    )
+    for key in (
+        "authorizations",
+        "blockers",
+        "repairs",
+        "repair_overrides",
+        "phases",
+        "last_checkpoint",
+    ):
+        if key not in current:
+            current[key] = {}
+        elif not isinstance(current.get(key), dict):
+            raise WorkflowError(f"Runtime state {normalized}.{key} must be an object")
+    return current
+
+
+def runtime_blocker_for_ticket(
+    runtime: dict[str, Any], ticket_id: str
+) -> dict[str, Any]:
+    records = runtime.get("blockers", {})
+    if not isinstance(records, dict):
+        return {}
+    matching = [
+        record
+        for record in records.values()
+        if isinstance(record, dict)
+        and str(record.get("ticket_id", "")).upper() == ticket_id.upper()
+        and record.get("status", "open") == "open"
+        and isinstance(
+            records.get(str(record.get("derived_from") or record.get("id"))),
+            dict,
+        )
+        and records[
+            str(record.get("derived_from") or record.get("id"))
+        ].get("status", "open")
+        == "open"
+    ]
+    roots = [record for record in matching if not record.get("derived_from")]
+    return dict((roots or matching)[0]) if (roots or matching) else {}
+
+
+def open_root_blocker_ids_for_ticket(
+    runtime: dict[str, Any],
+    ticket_id: str,
+    through_phase: str | None = None,
+) -> list[str]:
+    """Return effective open canonical roots relevant to one ticket and gate."""
+
+    records = runtime.get("blockers", {})
+    if not isinstance(records, dict):
+        return []
+    maximum = (
+        DEPENDENCY_PHASE_ORDER[through_phase]
+        if through_phase is not None
+        else max(DEPENDENCY_PHASE_ORDER.values())
+    )
+    roots: list[str] = []
+    for record in records.values():
+        if (
+            not isinstance(record, dict)
+            or str(record.get("ticket_id", "")).upper() != ticket_id.upper()
+            or record.get("status", "open") != "open"
+        ):
+            continue
+        phase = str(record.get("phase", ""))
+        if phase not in DEPENDENCY_PHASE_ORDER:
+            continue
+        if DEPENDENCY_PHASE_ORDER[phase] > maximum:
+            continue
+        root_id = str(record.get("derived_from") or record.get("id", ""))
+        root = records.get(root_id)
+        if (
+            not root_id
+            or not isinstance(root, dict)
+            or root.get("derived_from")
+            or root.get("status", "open") != "open"
+        ):
+            continue
+        if root_id not in roots:
+            roots.append(root_id)
+    return roots
+
+
+def open_canonical_root_blocker_ids(runtime: dict[str, Any]) -> list[str]:
+    records = runtime.get("blockers", {})
+    if not isinstance(records, dict):
+        return []
+    return sorted(
+        blocker_id
+        for blocker_id, record in records.items()
+        if isinstance(record, dict)
+        and not record.get("derived_from")
+        and record.get("status", "open") == "open"
+    )
+
+
+def ticket_phase(
+    ticket: Ticket, runtime: dict[str, Any] | None
+) -> tuple[str, str, dict[str, Any]] | None:
+    phases = runtime.get("phases", {}) if isinstance(runtime, dict) else {}
+    record = phases.get(ticket.id) if isinstance(phases, dict) else None
+    if isinstance(record, dict) and record.get("phase") in TRANSIENT_PHASES:
+        return str(record["phase"]), "runtime", dict(record)
+    legacy = LEGACY_STATUS_PHASES.get(ticket.status)
+    if legacy:
+        return legacy, "legacy_ticket_status", {}
+    return None
+
+
+def active_ticket_phases(
+    tickets: Sequence[Ticket],
+    runtime: dict[str, Any] | None,
+    milestone: str | None = None,
+) -> list[tuple[Ticket, str, str, dict[str, Any]]]:
+    active: list[tuple[Ticket, str, str, dict[str, Any]]] = []
+    for ticket in tickets:
+        if milestone and ticket.milestone.upper() != milestone.upper():
+            continue
+        phase = ticket_phase(ticket, runtime)
+        if phase:
+            active.append((ticket, *phase))
+    return active
+
+
+def authorization_record_covers(
+    record: dict[str, Any],
+    *,
+    action: str,
+    ticket_id: str,
+    blocker_class: str,
+    risk: str,
+    remote_effects: bool,
+    remote_ref: str = "",
+    commit_sha: str = "",
+    require_available: bool = True,
+) -> bool:
+    if require_available and record.get("status") != "granted":
+        return False
+    expected_kind = "remote" if remote_effects else "local"
+    actions = record.get("actions", [])
+    tickets = [str(item).upper() for item in record.get("tickets", [])]
+    classes = record.get("blocker_classes", [])
+    maximum = str(record.get("max_risk", "low"))
+    if record.get("kind") != expected_kind:
+        return False
+    if not isinstance(actions, list) or action not in actions:
+        return False
+    if not tickets or ticket_id.upper() not in tickets:
+        return False
+    if not isinstance(classes, list) or blocker_class not in classes:
+        return False
+    if RISK_ORDER.get(risk, 99) > RISK_ORDER.get(maximum, -1):
+        return False
+    if bool(record.get("remote_effects", False)) != remote_effects:
+        return False
+    uses = record.get("uses", 0)
+    max_uses = record.get("max_uses")
+    if require_available and isinstance(max_uses, int) and (
+        isinstance(uses, bool)
+        or not isinstance(uses, int)
+        or uses >= max_uses
+    ):
+        return False
+    if remote_effects:
+        if (
+            not remote_ref
+            or not commit_sha
+            or record.get("remote_ref") != remote_ref
+            or str(record.get("commit_sha", "")).lower() != commit_sha.lower()
+        ):
+            return False
+        if require_available and (
+            isinstance(uses, bool)
+            or not isinstance(uses, int)
+            or isinstance(max_uses, bool)
+            or not isinstance(max_uses, int)
+            or uses >= max_uses
+        ):
+            return False
+    return True
+
+
+def matching_authorization(
+    runtime: dict[str, Any],
+    *,
+    action: str,
+    ticket_id: str,
+    blocker_class: str,
+    risk: str,
+    remote_effects: bool,
+    remote_ref: str = "",
+    commit_sha: str = "",
+) -> tuple[str, dict[str, Any]] | None:
+    authorizations = runtime.get("authorizations", {})
+    if not isinstance(authorizations, dict):
+        return None
+    for scope, record in authorizations.items():
+        if isinstance(record, dict) and authorization_record_covers(
+            record,
+            action=action,
+            ticket_id=ticket_id,
+            blocker_class=blocker_class,
+            risk=risk,
+            remote_effects=remote_effects,
+            remote_ref=remote_ref,
+            commit_sha=commit_sha,
+        ):
+            return str(scope), dict(record)
+    return None
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 def relative(root: Path, path: Path) -> str:
@@ -276,8 +1163,16 @@ def ownership_overlaps(a: Sequence[str], b: Sequence[str]) -> bool:
     return False
 
 
-def detect_cycles(tickets: Sequence[Ticket]) -> list[list[str]]:
-    graph = {ticket.id: ticket.blockers for ticket in tickets}
+def detect_cycles(
+    tickets: Sequence[Ticket],
+    through_phase: str = "integration",
+) -> list[list[str]]:
+    if through_phase not in DEPENDENCY_FIELDS:
+        raise WorkflowError(f"Unknown dependency phase: {through_phase}")
+    graph = {
+        ticket.id: ticket.dependencies_through(through_phase)
+        for ticket in tickets
+    }
     state: dict[str, int] = {}
     stack: list[str] = []
     cycles: list[list[str]] = []
@@ -322,7 +1217,6 @@ def validate_tickets(root: Path, cfg: dict[str, Any]) -> tuple[list[str], list[s
         "milestone",
         "status",
         "priority",
-        "blocked_by",
         "owns",
         "spec",
         "test_plan",
@@ -346,10 +1240,45 @@ def validate_tickets(root: Path, cfg: dict[str, Any]) -> tuple[list[str], list[s
             errors.append(f"{ticket.id}: ID contains unsupported characters")
         if ticket.status not in TICKET_STATUSES:
             errors.append(f"{ticket.id}: invalid status {ticket.status!r}")
+        elif ticket.status in LEGACY_TRANSIENT_STATUSES:
+            warnings.append(
+                f"{ticket.id}: legacy transient status {ticket.status!r}; migrate the "
+                "ticket to ready and record its phase in the runtime ledger"
+            )
         if ticket.priority not in PRIORITY_ORDER:
             warnings.append(f"{ticket.id}: unusual priority {ticket.priority!r}; expected P0-P3")
-        if not isinstance(ticket.metadata.get("blocked_by"), list):
+        if ticket.risk not in RISK_LEVELS:
+            errors.append(
+                f"{ticket.id}: risk must be one of {', '.join(sorted(RISK_LEVELS))}"
+            )
+        raw_reviews = ticket.metadata.get("required_reviews")
+        if raw_reviews is not None and (
+            not isinstance(raw_reviews, list)
+            or any(item not in {"architect", "qa"} for item in raw_reviews)
+        ):
+            errors.append(
+                f"{ticket.id}: required_reviews must contain only architect and qa"
+            )
+        if ticket.risk in {"high", "critical"} and not {
+            "architect",
+            "qa",
+        }.issubset(ticket.required_reviews):
+            errors.append(
+                f"{ticket.id}: {ticket.risk}-risk tickets require architect and qa"
+            )
+        legacy = ticket.metadata.get("blocked_by")
+        implementation = ticket.metadata.get("implementation_blocked_by")
+        if legacy is not None and not isinstance(legacy, list):
             errors.append(f"{ticket.id}: blocked_by must be an array")
+        for phase, field in DEPENDENCY_FIELDS.items():
+            value = ticket.metadata.get(field)
+            if value is not None and not isinstance(value, list):
+                errors.append(f"{ticket.id}: {field} must be an array")
+        if legacy is not None and implementation is not None and legacy != implementation:
+            errors.append(
+                f"{ticket.id}: blocked_by and implementation_blocked_by disagree; "
+                "remove the legacy field or make them identical"
+            )
         if not ticket.owns:
             errors.append(f"{ticket.id}: owns must contain at least one explicit path")
         if any(not path.strip() for path in ticket.owns):
@@ -364,16 +1293,50 @@ def validate_tickets(root: Path, cfg: dict[str, Any]) -> tuple[list[str], list[s
                 errors.append(f"{ticket.id}: {label} path is empty")
             elif not (root / document).exists():
                 errors.append(f"{ticket.id}: {label} does not exist: {document}")
+        blocker = ticket.blocker_record
+        if blocker:
+            blocker_class = str(blocker.get("class", "none"))
+            authorization = str(blocker.get("authorization", "not_required"))
+            derivatives = blocker.get("derivatives", [])
+            if blocker_class not in BLOCKER_CLASSES:
+                errors.append(
+                    f"{ticket.id}: blocker.class must be one of "
+                    f"{', '.join(sorted(BLOCKER_CLASSES))}"
+                )
+            if authorization not in AUTHORIZATION_STATES:
+                errors.append(
+                    f"{ticket.id}: blocker.authorization must be one of "
+                    f"{', '.join(sorted(AUTHORIZATION_STATES))}"
+                )
+            if not isinstance(derivatives, list):
+                errors.append(f"{ticket.id}: blocker.derivatives must be an array")
+            if blocker_class != "none" and not str(blocker.get("root_cause", "")).strip():
+                errors.append(
+                    f"{ticket.id}: blocker.root_cause is required when blocker.class is not none"
+                )
+        elif ticket.status in {"blocked", "failed"}:
+            warnings.append(
+                f"{ticket.id}: {ticket.status} ticket has no structured blocker record"
+            )
 
     for ticket in tickets:
-        for blocker in ticket.blockers:
+        for blocker in ticket.all_blockers:
             if blocker == ticket.id:
                 errors.append(f"{ticket.id}: cannot block itself")
             elif blocker not in by_id:
                 errors.append(f"{ticket.id}: unknown blocker {blocker}")
 
-    for cycle in detect_cycles(tickets):
-        errors.append("Ticket dependency cycle: " + " -> ".join(cycle))
+    reported_cycles: set[frozenset[str]] = set()
+    for phase in ("implementation", "review", "integration"):
+        for cycle in detect_cycles(tickets, phase):
+            key = frozenset(cycle[:-1])
+            if key in reported_cycles:
+                continue
+            reported_cycles.add(key)
+            errors.append(
+                f"Ticket dependency cycle first visible at {phase}: "
+                + " -> ".join(cycle)
+            )
 
     active = [t for t in tickets if t.status in {"ready", "in_progress", "review"}]
     for index, left in enumerate(active):
@@ -387,6 +1350,18 @@ def validate_tickets(root: Path, cfg: dict[str, Any]) -> tuple[list[str], list[s
     return errors, warnings, tickets
 
 
+def unmet_dependencies(
+    ticket: Ticket,
+    phase: str,
+    by_id: dict[str, Ticket],
+) -> list[str]:
+    return [
+        dependency
+        for dependency in ticket.dependencies_through(phase)
+        if dependency not in by_id or by_id[dependency].status != "done"
+    ]
+
+
 def eligible_tickets(tickets: Sequence[Ticket], milestone: str | None = None) -> list[Ticket]:
     by_id = {ticket.id: ticket for ticket in tickets}
     eligible: list[Ticket] = []
@@ -395,7 +1370,7 @@ def eligible_tickets(tickets: Sequence[Ticket], milestone: str | None = None) ->
             continue
         if milestone and ticket.milestone.upper() != milestone.upper():
             continue
-        if all(by_id.get(dep) and by_id[dep].status == "done" for dep in ticket.blockers):
+        if not unmet_dependencies(ticket, "implementation", by_id):
             eligible.append(ticket)
     return sorted(
         eligible,
@@ -404,11 +1379,40 @@ def eligible_tickets(tickets: Sequence[Ticket], milestone: str | None = None) ->
 
 
 def select_frontier(
-    tickets: Sequence[Ticket], milestone: str | None, limit: int
+    tickets: Sequence[Ticket],
+    milestone: str | None,
+    limit: int,
+    reserved: Sequence[Ticket] = (),
+    runtimes: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[Ticket], list[tuple[Ticket, str]]]:
     selected: list[Ticket] = []
     skipped: list[tuple[Ticket, str]] = []
+    reserved_ids = {ticket.id for ticket in reserved}
     for ticket in eligible_tickets(tickets, milestone):
+        runtime = (runtimes or {}).get(ticket.milestone.upper(), {})
+        open_roots = open_root_blocker_ids_for_ticket(
+            runtime,
+            ticket.id,
+            "implementation",
+        )
+        if open_roots:
+            skipped.append(
+                (
+                    ticket,
+                    "open implementation blockers: " + ", ".join(open_roots),
+                )
+            )
+            continue
+        if ticket.id in reserved_ids:
+            skipped.append((ticket, "ticket already has an active runtime phase"))
+            continue
+        reserved_conflict = next(
+            (other for other in reserved if ownership_overlaps(ticket.owns, other.owns)),
+            None,
+        )
+        if reserved_conflict:
+            skipped.append((ticket, f"ownership overlaps active {reserved_conflict.id}"))
+            continue
         if len(selected) >= limit:
             skipped.append((ticket, "parallel limit reached"))
             continue
@@ -424,7 +1428,12 @@ def select_frontier(
 
 
 def milestone_scheduler_state(
-    tickets: Sequence[Ticket], milestone: str, limit: int
+    tickets: Sequence[Ticket],
+    milestone: str,
+    limit: int,
+    runtime: dict[str, Any] | None = None,
+    continue_after_independent_failure: bool = True,
+    cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the next deterministic orchestration action for one milestone.
 
@@ -435,40 +1444,217 @@ def milestone_scheduler_state(
     normalized = milestone.strip().upper()
     scoped = [ticket for ticket in tickets if ticket.milestone.upper() == normalized]
     counts = collections.Counter(ticket.status for ticket in scoped)
-    selected, skipped = select_frontier(tickets, normalized, limit)
-    active = [
-        ticket
-        for ticket in scoped
-        if ticket.status in {"in_progress", "review", "failed"}
-    ]
+    runtime = runtime or {}
+    active_entries = active_ticket_phases(scoped, runtime, normalized)
+    active = [ticket for ticket, _, _, _ in active_entries]
+    failed_active = any(phase == "repair" for _, phase, _, _ in active_entries)
     terminal = {"done", "deferred"}
 
     blocked: list[dict[str, Any]] = []
     by_id = {ticket.id: ticket for ticket in tickets}
+    active_details: list[dict[str, Any]] = []
+    resumable: list[Ticket] = []
+    active_ids = {ticket.id for ticket in active}
+    for ticket, phase, source, phase_record in active_entries:
+        gate = PHASE_DEPENDENCY_GATE[phase]
+        root_blocker: dict[str, Any] = {}
+        root_cause_id = (
+            str(phase_record.get("root_cause_id", ""))
+            if phase == "repair"
+            else ""
+        )
+        if root_cause_id:
+            root_blocker = runtime.get("blockers", {}).get(root_cause_id, {})
+            if (
+                isinstance(root_blocker, dict)
+                and root_blocker.get("phase") in DEPENDENCY_FIELDS
+            ):
+                gate = str(root_blocker["phase"])
+        unmet = unmet_dependencies(ticket, gate, by_id)
+        open_roots = (
+            []
+            if phase == "repair"
+            else open_root_blocker_ids_for_ticket(runtime, ticket.id, gate)
+        )
+        detail = {
+            "id": ticket.id,
+            "status": ticket.status,
+            "phase": phase,
+            "phase_source": source,
+            "phase_record": phase_record,
+            "dependency_gate": gate,
+            "unmet_dependencies": unmet,
+            "open_root_blockers": open_roots,
+        }
+        repair = None
+        repair_root_open = True
+        repair_authorized = True
+        if phase == "repair":
+            repair = repair_summary(
+                ticket,
+                cfg or deep_merge(DEFAULT_CONFIG, {}),
+                runtime,
+                root_cause_id or None,
+            )
+            detail["repair_budget"] = repair
+            repair_root_open = bool(
+                root_cause_id
+                and isinstance(root_blocker, dict)
+                and root_blocker.get("status", "open") == "open"
+            )
+            authorization_required = (
+                isinstance(root_blocker, dict)
+                and root_blocker.get("authorization", "not_required")
+                != "not_required"
+            )
+            authorization_match = None
+            if authorization_required and repair_root_open:
+                authorization_match = matching_authorization(
+                    runtime,
+                    action="local_repair",
+                    ticket_id=ticket.id,
+                    blocker_class=str(root_blocker.get("class", "code")),
+                    risk=str(root_blocker.get("risk", ticket.risk)),
+                    remote_effects=False,
+                )
+                repair_authorized = authorization_match is not None
+            detail["repair_root_open"] = repair_root_open
+            detail["repair_authorization_required"] = authorization_required
+            detail["repair_authorization_scope"] = (
+                authorization_match[0] if authorization_match else None
+            )
+        active_details.append(detail)
+        if (
+            not unmet
+            and not open_roots
+            and repair_root_open
+            and repair_authorized
+            and not (repair and repair["exhausted"])
+        ):
+            resumable.append(ticket)
+        else:
+            if unmet:
+                blocker_class = "dependency"
+                reason = "unmet " + gate + " dependencies: " + ", ".join(unmet)
+            elif open_roots:
+                blocker_class = "code"
+                reason = "open canonical root blockers: " + ", ".join(open_roots)
+            elif repair and not repair_root_open:
+                blocker_class = "repository_state"
+                reason = (
+                    f"repair phase references resolved or missing root "
+                    f"{root_cause_id}; clear or advance the phase"
+                )
+            elif repair and repair["exhausted"]:
+                blocker_class = "authorization"
+                reason = (
+                    "repair budget exhausted "
+                    f"({repair['consumed']}/{repair['budget']})"
+                )
+            else:
+                blocker_class = "authorization"
+                reason = (
+                    f"no exact local_repair authorization matches root "
+                    f"{root_cause_id}"
+                )
+            blocked.append(
+                {
+                    "id": ticket.id,
+                    "status": ticket.status,
+                    "class": blocker_class,
+                    "phase": phase,
+                    "reason": reason,
+                }
+            )
+
+    resumable_ids = {ticket.id for ticket in resumable}
+    active_writer_count = sum(
+        phase in ACTIVE_WRITER_PHASES and ticket.id in resumable_ids
+        for ticket, phase, _, _ in active_entries
+    )
+    available = max(0, limit - active_writer_count)
+    if failed_active and not continue_after_independent_failure:
+        available = 0
+    selected, skipped = select_frontier(
+        tickets,
+        normalized,
+        available,
+        reserved=active,
+        runtimes={normalized: runtime},
+    )
+
     for ticket in scoped:
+        if ticket.id in active_ids:
+            continue
         reason = ""
+        blocker_class = ""
         if ticket.status == "draft":
             reason = "contract is still draft"
+            blocker_class = "contract"
         elif ticket.status == "blocked":
             reason = "ticket is explicitly blocked"
+            blocker_class = "dependency"
         elif ticket.status == "ready":
-            unmet = [
-                f"{dep}={by_id[dep].status if dep in by_id else 'missing'}"
-                for dep in ticket.blockers
-                if dep not in by_id or by_id[dep].status != "done"
-            ]
+            unmet = unmet_dependencies(ticket, "implementation", by_id)
             if unmet:
-                reason = "unmet blockers: " + ", ".join(unmet)
+                reason = "unmet implementation dependencies: " + ", ".join(
+                    f"{dep}={by_id[dep].status if dep in by_id else 'missing'}"
+                    for dep in unmet
+                )
+                blocker_class = "dependency"
+            else:
+                open_roots = open_root_blocker_ids_for_ticket(
+                    runtime,
+                    ticket.id,
+                    "implementation",
+                )
+                if open_roots:
+                    reason = "open implementation blockers: " + ", ".join(
+                        open_roots
+                    )
+                    blocker_class = "code"
         if reason:
-            blocked.append({"id": ticket.id, "status": ticket.status, "reason": reason})
+            runtime_record = runtime_blocker_for_ticket(runtime or {}, ticket.id)
+            static_record = ticket.blocker_record
+            record = runtime_record or static_record
+            blocked.append(
+                {
+                    "id": ticket.id,
+                    "status": ticket.status,
+                    "class": str(record.get("class", blocker_class or "none")),
+                    "root_cause": str(record.get("root_cause", "")),
+                    "derivatives": list(record.get("derivatives", []))
+                    if isinstance(record.get("derivatives", []), list)
+                    else [],
+                    "authorization": str(
+                        record.get("authorization", "not_required")
+                    ),
+                    "reason": reason,
+                }
+            )
+
+    release_blocked: list[dict[str, Any]] = []
+    for ticket in scoped:
+        if ticket.status not in terminal:
+            continue
+        unmet = unmet_dependencies(ticket, "release", by_id)
+        if unmet:
+            release_blocked.append({"id": ticket.id, "dependencies": unmet})
+    open_release_roots = open_canonical_root_blocker_ids(runtime)
 
     if not scoped:
         action = "no_tickets"
-    elif active:
+    elif resumable and selected:
+        action = "resume_and_execute_frontier"
+    elif resumable:
         action = "resume_active"
     elif selected:
         action = "execute_frontier"
-    elif all(ticket.status in terminal for ticket in scoped):
+    elif (
+        all(ticket.status in terminal for ticket in scoped)
+        and not release_blocked
+        and not open_release_roots
+    ):
         action = "ready_to_close"
     else:
         action = "blocked"
@@ -478,11 +1664,59 @@ def milestone_scheduler_state(
         "action": action,
         "counts": dict(sorted(counts.items())),
         "selected": [ticket.id for ticket in selected],
+        "available_engineer_slots": available,
         "active": [ticket.id for ticket in active],
+        "active_details": active_details,
         "blocked": blocked,
+        "release_blocked": release_blocked,
+        "open_root_blockers": open_release_roots,
         "skipped": [{"id": ticket.id, "reason": reason} for ticket, reason in skipped],
         "all_terminal": bool(scoped) and all(ticket.status in terminal for ticket in scoped),
     }
+
+
+def apply_run_limits(
+    payload: dict[str, Any],
+    cfg: dict[str, Any],
+    runtime: dict[str, Any],
+) -> dict[str, Any]:
+    """Turn persisted wave/no-progress limits into a scheduler stop decision."""
+
+    checkpoint = runtime.get("last_checkpoint", {})
+    if not isinstance(checkpoint, dict):
+        checkpoint = {}
+    strategy = str(cfg["execution"]["strategy"])
+    configured_wave_limit = int(cfg["execution"]["max_waves_per_run"])
+    effective_wave_limit = 1 if strategy == "wave" else configured_wave_limit
+    wave = int(checkpoint.get("wave", 0))
+    no_progress = int(checkpoint.get("no_progress_count", 0))
+    no_progress_limit = int(cfg["execution"]["no_progress_limit"])
+    wave_limit_reached = bool(
+        effective_wave_limit and wave >= effective_wave_limit
+    )
+    no_progress_exhausted = no_progress >= no_progress_limit
+    payload["wave"] = wave
+    payload["no_progress_count"] = no_progress
+    payload["effective_wave_limit"] = effective_wave_limit
+    payload["wave_limit_reached"] = wave_limit_reached
+    payload["no_progress_exhausted"] = no_progress_exhausted
+    if (
+        payload.get("action")
+        not in {"no_tickets", "ready_to_close", "blocked"}
+        and (wave_limit_reached or no_progress_exhausted)
+    ):
+        prior_action = str(payload["action"])
+        prior_selected = list(payload.get("selected", []))
+        payload["action_before_run_limit"] = prior_action
+        payload["selected_before_run_limit"] = prior_selected
+        payload["selected"] = []
+        payload["action"] = "run_limit_reached"
+        payload["stop_reason"] = (
+            f"no-progress limit reached ({no_progress}/{no_progress_limit})"
+            if no_progress_exhausted
+            else f"wave limit reached ({wave}/{effective_wave_limit})"
+        )
+    return payload
 
 
 def current_branch(root: Path) -> str:
@@ -531,6 +1765,17 @@ def asset_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "assets" / "templates"
 
 
+def document_template_mapping(cfg: dict[str, Any]) -> dict[str, str]:
+    docs = cfg["documents"]
+    return {
+        str(Path(docs["adr_dir"]) / "ADR-0000-template.md"): "adr.md",
+        str(Path(docs["spec_dir"]) / "SPEC-0000-template.md"): "spec.md",
+        str(Path(docs["test_plan_dir"]) / "TEST-0000-template.md"): "test-plan.md",
+        str(Path(docs["ticket_dir"]) / "TICKET-0000-template.md"): "ticket.md",
+        str(Path(docs["handoff_dir"]) / "HANDOFF-0000-template.md"): "handoff.md",
+    }
+
+
 def write_if_missing(destination: Path, source: Path) -> bool:
     if destination.exists():
         return False
@@ -556,21 +1801,13 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         "gap_analysis": (str(docs["gap_analysis"]), "gap-analysis.md"),
         "roadmap": (str(docs["roadmap"]), "roadmap.md"),
         "ci_status": (str(docs["ci_status"]), "ci-status.md"),
-        "adr": (str(Path(docs["adr_dir"]) / "ADR-0000-template.md"), "adr.md"),
-        "spec": (str(Path(docs["spec_dir"]) / "SPEC-0000-template.md"), "spec.md"),
-        "test": (
-            str(Path(docs["test_plan_dir"]) / "TEST-0000-template.md"),
-            "test-plan.md",
-        ),
-        "ticket": (
-            str(Path(docs["ticket_dir"]) / "TICKET-0000-template.md"),
-            "ticket.md",
-        ),
-        "handoff": (
-            str(Path(docs["handoff_dir"]) / "HANDOFF-0000-template.md"),
-            "handoff.md",
-        ),
     }
+    mapping.update(
+        {
+            f"template:{destination}": (destination, source)
+            for destination, source in document_template_mapping(cfg).items()
+        }
+    )
     for destination, source_name in mapping.values():
         source = assets / source_name
         if source.exists() and write_if_missing(root / destination, source):
@@ -603,19 +1840,35 @@ def cmd_validate(args: argparse.Namespace) -> int:
         path = root / str(cfg["documents"][key])
         if not path.is_dir():
             errors.append(f"Missing document directory: {relative(root, path)}")
+    for destination, source_name in document_template_mapping(cfg).items():
+        destination_path = root / destination
+        source_path = asset_dir() / source_name
+        if not destination_path.exists() or not source_path.exists():
+            continue
+        if destination_path.read_text(encoding="utf-8") != source_path.read_text(
+            encoding="utf-8"
+        ):
+            errors.append(
+                f"Document template drift: {destination} must match "
+                f"assets/templates/{source_name}"
+            )
 
     ticket_errors, ticket_warnings, _ = validate_tickets(root, cfg)
     errors.extend(ticket_errors)
     warnings.extend(ticket_warnings)
 
-    for scope in ("quick", "full"):
-        commands = cfg.get("validation", {}).get(scope, [])
+    validation = cfg.get("validation", {})
+    if not isinstance(validation, dict):
+        errors.append("validation must be a table")
+        validation = {}
+    for scope, commands in validation.items():
         if not isinstance(commands, list):
             errors.append(f"validation.{scope} must be an array of command strings")
-        elif not commands:
-            warnings.append(f"validation.{scope} is empty; that gate cannot pass")
         elif any(not isinstance(command, str) or not command.strip() for command in commands):
             errors.append(f"validation.{scope} contains an invalid command")
+    for scope in ("quick", "full"):
+        if not validation.get(scope):
+            warnings.append(f"validation.{scope} is empty; that gate cannot pass")
 
     execution = cfg.get("execution", {})
     strategy = execution.get("strategy")
@@ -632,6 +1885,48 @@ def cmd_validate(args: argparse.Namespace) -> int:
     for key in ("continue_after_independent_failure", "auto_close"):
         if not isinstance(execution.get(key), bool):
             errors.append(f"execution.{key} must be true or false")
+    repair_budget = execution.get("repair_budget")
+    if not isinstance(repair_budget, dict):
+        errors.append("execution.repair_budget must be a table")
+    else:
+        for risk in sorted(RISK_LEVELS):
+            value = repair_budget.get(risk)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                errors.append(
+                    f"execution.repair_budget.{risk} must be an integer >= 0"
+                )
+    non_counting = execution.get("non_counting_repair_classes")
+    if not isinstance(non_counting, list) or any(
+        item not in REPAIR_CLASSES for item in non_counting
+    ):
+        errors.append(
+            "execution.non_counting_repair_classes must contain only "
+            + ", ".join(sorted(REPAIR_CLASSES))
+        )
+
+    checkpoint_policy = cfg.get("workflow", {}).get("checkpoint_policy")
+    if checkpoint_policy not in {"transition", "wave", "integration"}:
+        errors.append(
+            "workflow.checkpoint_policy must be transition, wave, or integration"
+        )
+    try:
+        runtime_state_path(root, cfg)
+        load_runtime_state(root, cfg)
+    except WorkflowError as exc:
+        errors.append(str(exc))
+
+    agents = cfg.get("agents")
+    if not isinstance(agents, dict):
+        errors.append("agents must be a table")
+    else:
+        for role in ("product_manager", "architect", "engineer", "qa"):
+            profile = agents.get(role)
+            if not isinstance(profile, dict):
+                errors.append(f"agents.{role} must be a table")
+                continue
+            for field in ("config", "name", "model", "reasoning_effort"):
+                if not str(profile.get(field, "")).strip():
+                    errors.append(f"agents.{role}.{field} must not be empty")
 
     if warnings:
         print("Warnings:")
@@ -691,6 +1986,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         max_waves = int(cfg['execution']['max_waves_per_run'])
         print(f"Max waves per execute run: {max_waves or 'unlimited'}")
         print(f"Auto close: {cfg['execution']['auto_close']}")
+        print(f"Checkpoint policy: {cfg['workflow']['checkpoint_policy']}")
+        print(f"Runtime state: {runtime_state_path(root, cfg)}")
     except WorkflowError as exc:
         failures.append(str(exc))
         cfg = deep_merge(DEFAULT_CONFIG, {})
@@ -701,14 +1998,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         root / ".codex" / "config.toml",
         root / ".agents" / "skills" / "milestone-workflow" / "SKILL.md",
     ]
-    role_files = {
-        "product-manager.toml": "product_manager",
-        "architect.toml": "architect",
-        "engineer.toml": "engineer",
-        "qa.toml": "qa",
-    }
-    for filename in role_files:
-        required_files.append(root / ".codex" / "agents" / filename)
+    profiles = cfg.get("agents", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+    for profile in profiles.values():
+        if isinstance(profile, dict) and str(profile.get("config", "")).strip():
+            required_files.append(root / str(profile["config"]))
     for path in required_files:
         if not path.exists():
             failures.append(f"Missing workflow file: {relative(root, path)}")
@@ -728,8 +2023,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         except (OSError, tomllib.TOMLDecodeError) as exc:
             failures.append(f"Cannot parse .codex/config.toml: {exc}")
 
-    for filename, expected_name in role_files.items():
-        role_path = root / ".codex" / "agents" / filename
+    for role, profile in profiles.items():
+        if not isinstance(profile, dict):
+            failures.append(f"agents.{role} must be a table")
+            continue
+        role_path = root / str(profile.get("config", ""))
         if not role_path.exists():
             continue
         try:
@@ -741,11 +2039,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         for field in ("name", "description", "developer_instructions"):
             if not str(role_cfg.get(field, "")).strip():
                 failures.append(f"{relative(root, role_path)} missing required field {field}")
-        if role_cfg.get("name") != expected_name:
-            failures.append(
-                f"{relative(root, role_path)} defines name={role_cfg.get('name')!r}; "
-                f"expected {expected_name!r}"
-            )
+        expected_fields = {
+            "name": profile.get("name"),
+            "model": profile.get("model"),
+            "model_reasoning_effort": profile.get("reasoning_effort"),
+        }
+        for field, expected in expected_fields.items():
+            if role_cfg.get(field) != expected:
+                failures.append(
+                    f"{relative(root, role_path)} defines {field}="
+                    f"{role_cfg.get(field)!r}; expected {expected!r}"
+                )
+        print(
+            f"Agent profile {role}: {role_cfg.get('model')} / "
+            f"{role_cfg.get('model_reasoning_effort')}"
+        )
 
     if root.joinpath(".gitignore").exists():
         ignored = {line.strip() for line in root.joinpath(".gitignore").read_text(encoding="utf-8").splitlines()}
@@ -808,7 +2116,14 @@ def ticket_to_dict(root: Path, ticket: Ticket) -> dict[str, Any]:
         "milestone": ticket.milestone,
         "status": ticket.status,
         "priority": ticket.priority,
+        "risk": ticket.risk,
+        "required_reviews": ticket.required_reviews,
         "blocked_by": ticket.blockers,
+        "implementation_blocked_by": ticket.implementation_blockers,
+        "review_blocked_by": ticket.review_blockers,
+        "integration_blocked_by": ticket.integration_blockers,
+        "release_blocked_by": ticket.release_blockers,
+        "blocker": ticket.blocker_record,
         "owns": ticket.owns,
         "spec": ticket.spec,
         "test_plan": ticket.test_plan,
@@ -824,10 +2139,63 @@ def cmd_frontier(args: argparse.Namespace) -> int:
         raise WorkflowError("Ticket validation failed; run workflow.py validate")
     limit = args.limit or int(cfg["workflow"]["max_parallel_engineers"])
     limit = min(limit, int(cfg["workflow"]["max_parallel_engineers"]))
-    selected, skipped = select_frontier(tickets, args.milestone, limit)
+    state = load_runtime_state(root, cfg)
+    if args.milestone:
+        runtime = milestone_runtime_state(state, args.milestone)
+        active_entries = active_ticket_phases(tickets, runtime, args.milestone)
+    else:
+        active_entries = []
+        for milestone, runtime in state["milestones"].items():
+            active_entries.extend(active_ticket_phases(tickets, runtime, milestone))
+        recorded = {ticket.id for ticket, _, _, _ in active_entries}
+        active_entries.extend(
+            entry
+            for entry in active_ticket_phases(tickets, None)
+            if entry[0].id not in recorded
+        )
+    active = [ticket for ticket, _, _, _ in active_entries]
+    if args.milestone:
+        decision = milestone_scheduler_state(
+            tickets,
+            args.milestone,
+            limit,
+            milestone_runtime_state(state, args.milestone),
+            bool(cfg["execution"]["continue_after_independent_failure"]),
+            cfg,
+        )
+        by_id = {ticket.id: ticket for ticket in tickets}
+        selected = [by_id[ticket_id] for ticket_id in decision["selected"]]
+        skipped = [
+            (by_id[item["id"]], item["reason"])
+            for item in decision["skipped"]
+            if item["id"] in by_id
+        ]
+        available = int(decision["available_engineer_slots"])
+    else:
+        available = max(
+            0,
+            limit
+            - sum(phase in ACTIVE_WRITER_PHASES for _, phase, _, _ in active_entries),
+        )
+        if any(phase == "repair" for _, phase, _, _ in active_entries) and not bool(
+            cfg["execution"]["continue_after_independent_failure"]
+        ):
+            available = 0
+        selected, skipped = select_frontier(
+            tickets,
+            args.milestone,
+            available,
+            reserved=active,
+            runtimes={
+                str(milestone).upper(): runtime
+                for milestone, runtime in state["milestones"].items()
+                if isinstance(runtime, dict)
+            },
+        )
     payload = {
         "milestone": args.milestone,
         "limit": limit,
+        "available_engineer_slots": available,
         "selected": [ticket_to_dict(root, ticket) for ticket in selected],
         "skipped": [
             {"ticket": ticket_to_dict(root, ticket), "reason": reason}
@@ -861,10 +2229,24 @@ def cmd_next(args: argparse.Namespace) -> int:
     limit = min(limit, int(cfg["workflow"]["max_parallel_engineers"]))
     if limit < 1:
         raise WorkflowError("Frontier limit must be at least 1")
-    payload = milestone_scheduler_state(tickets, args.milestone, limit)
+    runtime_state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(runtime_state, args.milestone)
+    payload = milestone_scheduler_state(
+        tickets,
+        args.milestone,
+        limit,
+        runtime,
+        bool(cfg["execution"]["continue_after_independent_failure"]),
+        cfg,
+    )
     payload["strategy"] = str(cfg["execution"]["strategy"])
     payload["max_waves_per_run"] = int(cfg["execution"]["max_waves_per_run"])
     payload["auto_close"] = bool(cfg["execution"]["auto_close"])
+    payload["checkpoint_policy"] = str(cfg["workflow"]["checkpoint_policy"])
+    payload["runtime_state_path"] = relative(root, runtime_state_path(root, cfg))
+    payload["authorizations"] = runtime["authorizations"]
+    payload["repairs"] = runtime["repairs"]
+    apply_run_limits(payload, cfg, runtime)
     payload["warnings"] = warnings
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -876,6 +2258,12 @@ def cmd_next(args: argparse.Namespace) -> int:
             print("Selected frontier: " + ", ".join(payload["selected"]))
         if payload["active"]:
             print("Active recovery: " + ", ".join(payload["active"]))
+        if payload["release_blocked"]:
+            for item in payload["release_blocked"]:
+                print(
+                    f"Release blocked: {item['id']} — "
+                    + ", ".join(item["dependencies"])
+                )
         for item in payload["blocked"]:
             print(f"Blocked: {item['id']} — {item['reason']}")
     return 0
@@ -1006,17 +2394,295 @@ def cmd_worktree_remove(args: argparse.Namespace) -> int:
     return 0
 
 
+def replace_bytes_atomic(path: Path, content: bytes) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=path.name + ".",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, path.stat().st_mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def replace_status(path: Path, new_status: str) -> tuple[str, str]:
     metadata, _ = parse_frontmatter(path)
     old = str(metadata.get("status", ""))
-    text = path.read_text(encoding="utf-8")
-    pattern = re.compile(r'(?m)^status\s*=\s*"[^"]*"\s*$')
-    replacement = f'status = "{new_status}"'
-    updated, count = pattern.subn(replacement, text, count=1)
+    original = path.read_bytes()
+    text = original.decode("utf-8")
+    pattern = re.compile(
+        r'(?m)^(status[ \t]*=[ \t]*")[^"\r\n]*("[ \t]*)(?=\r?$)'
+    )
+    updated, count = pattern.subn(
+        rf'\g<1>{new_status}\g<2>',
+        text,
+        count=1,
+    )
     if count != 1:
         raise WorkflowError(f"Could not replace status in {path}")
-    path.write_text(updated, encoding="utf-8")
+    replace_bytes_atomic(path, updated.encode("utf-8"))
     return old, new_status
+
+
+def canonical_root_blocker(
+    runtime: dict[str, Any],
+    blocker_id: str,
+    *,
+    require_open: bool = True,
+) -> tuple[str, dict[str, Any]]:
+    blockers = runtime.get("blockers", {})
+    record = blockers.get(blocker_id) if isinstance(blockers, dict) else None
+    if not isinstance(record, dict):
+        raise WorkflowError(f"Unknown blocker: {blocker_id}")
+    root_id = str(record.get("derived_from") or blocker_id)
+    root = blockers.get(root_id)
+    if not isinstance(root, dict) or root.get("derived_from"):
+        raise WorkflowError(f"{blocker_id} does not resolve to a canonical root blocker")
+    if require_open and root.get("status", "open") != "open":
+        raise WorkflowError(f"Canonical root blocker {root_id} is not open")
+    return root_id, root
+
+
+def resolve_blocker_family(
+    runtime: dict[str, Any],
+    blocker_id: str,
+    resolution: str,
+    *,
+    resolved_at: str | None = None,
+) -> tuple[str, list[str], list[str]]:
+    """Resolve a canonical root, all direct derivatives, and its repair phases."""
+
+    root_id, _ = canonical_root_blocker(
+        runtime,
+        blocker_id,
+        require_open=False,
+    )
+    timestamp = resolved_at or utc_now()
+    resolved: list[str] = []
+    for current_id, record in runtime["blockers"].items():
+        if (
+            not isinstance(record, dict)
+            or str(record.get("root_cause_id", "")) != root_id
+        ):
+            continue
+        record["status"] = "resolved"
+        record["resolution"] = resolution
+        record["resolved_at"] = timestamp
+        resolved.append(current_id)
+
+    cleared_phases: list[str] = []
+    for ticket_id, record in list(runtime.get("phases", {}).items()):
+        if (
+            isinstance(record, dict)
+            and record.get("phase") == "repair"
+            and record.get("root_cause_id") == root_id
+        ):
+            del runtime["phases"][ticket_id]
+            cleared_phases.append(ticket_id)
+    return root_id, sorted(resolved), sorted(cleared_phases)
+
+
+def phase_record_for(
+    ticket: Ticket,
+    phase: str,
+    *,
+    branch: str = "",
+    worktree: str = "",
+    candidate_sha: str = "",
+    root_cause_id: str = "",
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "ticket_id": ticket.id,
+        "phase": phase,
+        "recorded_at": utc_now(),
+    }
+    for key, value in (
+        ("branch", branch),
+        ("worktree", worktree),
+        ("candidate_sha", candidate_sha),
+        ("root_cause_id", root_cause_id),
+    ):
+        if value:
+            record[key] = value
+    return record
+
+
+def validate_phase_entry(
+    ticket: Ticket,
+    phase: str,
+    tickets: Sequence[Ticket],
+    runtime: dict[str, Any],
+    *,
+    root_blocker: str = "",
+) -> str:
+    durable_status = (
+        "ready" if ticket.status in LEGACY_TRANSIENT_STATUSES else ticket.status
+    )
+    allowed_statuses = {"done", "deferred"} if phase == "release" else {"ready"}
+    if durable_status not in allowed_statuses:
+        raise WorkflowError(
+            f"{ticket.id} cannot enter transient phase {phase} from durable status "
+            f"{durable_status}"
+        )
+    root_id = ""
+    if phase == "repair":
+        if not root_blocker:
+            raise WorkflowError("repair phase requires --root-blocker")
+        root_id, root = canonical_root_blocker(runtime, root_blocker)
+        if str(root.get("ticket_id", "")).upper() != ticket.id.upper():
+            raise WorkflowError(
+                f"Root blocker {root_id} belongs to "
+                f"{root.get('ticket_id')}, not {ticket.id}"
+            )
+        gate = str(root.get("phase", "review"))
+        if gate not in DEPENDENCY_FIELDS:
+            raise WorkflowError(
+                f"Root blocker {root_id} has invalid dependency gate {gate}"
+            )
+    else:
+        if root_blocker:
+            raise WorkflowError("--root-blocker is valid only for the repair phase")
+        gate = PHASE_DEPENDENCY_GATE[phase]
+        open_roots = open_root_blocker_ids_for_ticket(runtime, ticket.id, gate)
+        if open_roots:
+            raise WorkflowError(
+                f"{ticket.id} cannot enter {phase}; open canonical root blockers "
+                "through this gate: "
+                + ", ".join(open_roots)
+            )
+    by_id = {item.id: item for item in tickets}
+    unmet = unmet_dependencies(ticket, gate, by_id)
+    if unmet:
+        raise WorkflowError(
+            f"{ticket.id} cannot enter {phase}; unmet {gate} dependencies: "
+            + ", ".join(unmet)
+        )
+    if phase != "repair":
+        return ""
+    return root_id
+
+
+def validate_candidate_commit(root: Path, phase: str, candidate_sha: str) -> str:
+    if phase in {"review", "integration", "release"} and not candidate_sha:
+        raise WorkflowError(f"{phase} phase requires --candidate-sha")
+    if not candidate_sha:
+        return ""
+    if not re.fullmatch(
+        r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+        candidate_sha,
+    ):
+        raise WorkflowError(
+            "--candidate-sha must be a full 40- or 64-digit hexadecimal commit ID"
+        )
+    normalized = candidate_sha.lower()
+    probe = run(
+        ["git", "cat-file", "-e", f"{normalized}^{{commit}}"],
+        cwd=root,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise WorkflowError(
+            f"--candidate-sha is not a commit in this repository: {candidate_sha}"
+        )
+    return normalized
+
+
+def validate_writer_location(phase: str, branch: str, worktree: str) -> None:
+    if phase not in ACTIVE_WRITER_PHASES:
+        return
+    if not branch.strip() or not worktree.strip():
+        raise WorkflowError(
+            f"{phase} phase requires exact --branch and --worktree"
+        )
+    if not Path(worktree).is_absolute():
+        raise WorkflowError(f"{phase} --worktree must be an absolute path")
+
+
+def cmd_set_phase(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    tickets = load_tickets(root, cfg)
+    ticket = find_ticket(tickets, args.ticket_id)
+    candidate_sha = validate_candidate_commit(
+        root, args.phase, args.candidate_sha
+    )
+    validate_writer_location(args.phase, args.branch, args.worktree)
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, ticket.milestone)
+    root_cause_id = validate_phase_entry(
+        ticket,
+        args.phase,
+        tickets,
+        runtime,
+        root_blocker=args.root_blocker,
+    )
+    runtime["phases"][ticket.id] = phase_record_for(
+        ticket,
+        args.phase,
+        branch=args.branch,
+        worktree=args.worktree,
+        candidate_sha=candidate_sha,
+        root_cause_id=root_cause_id,
+    )
+    path = save_runtime_state(root, cfg, state)
+    migrated = ""
+    if ticket.status in LEGACY_TRANSIENT_STATUSES:
+        old, new = replace_status(ticket.path, "ready")
+        migrated = f"; migrated tracked status {old} -> {new}"
+    print(
+        f"{ticket.id}: phase={args.phase} recorded in {relative(root, path)}"
+        + migrated
+    )
+    return 0
+
+
+def cmd_clear_phase(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    ticket = find_ticket(load_tickets(root, cfg), args.ticket_id)
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, ticket.milestone)
+    record = runtime["phases"].get(ticket.id)
+    if not isinstance(record, dict):
+        if ticket.status in LEGACY_TRANSIENT_STATUSES:
+            old, new = replace_status(ticket.path, "ready")
+            print(
+                f"{ticket.id}: cleared legacy phase by migrating tracked status "
+                f"{old} -> {new}"
+            )
+        else:
+            print(f"{ticket.id}: no runtime phase recorded")
+        return 0
+    if args.expect and record.get("phase") != args.expect:
+        raise WorkflowError(
+            f"{ticket.id} has phase {record.get('phase')}, expected {args.expect}"
+        )
+    migrated = ""
+    original_bytes = b""
+    if ticket.status in LEGACY_TRANSIENT_STATUSES:
+        original_bytes = ticket.path.read_bytes()
+        old, new = replace_status(ticket.path, "ready")
+        migrated = f"; migrated tracked status {old} -> {new}"
+    del runtime["phases"][ticket.id]
+    try:
+        path = save_runtime_state(root, cfg, state)
+    except Exception:
+        if original_bytes:
+            replace_bytes_atomic(ticket.path, original_bytes)
+        raise
+    print(f"{ticket.id}: phase cleared in {relative(root, path)}" + migrated)
+    return 0
 
 
 def cmd_set_status(args: argparse.Namespace) -> int:
@@ -1024,18 +2690,165 @@ def cmd_set_status(args: argparse.Namespace) -> int:
         raise WorkflowError(f"Invalid ticket status: {args.status}")
     root = git_root()
     cfg = load_config(root)
-    ticket = find_ticket(load_tickets(root, cfg), args.ticket_id)
-    if ticket.status == args.status:
-        print(f"{ticket.id} already has status {args.status}")
-        return 0
-    if not args.force and args.status not in ALLOWED_TRANSITIONS.get(ticket.status, set()):
-        raise WorkflowError(
-            f"Transition {ticket.status} -> {args.status} is not allowed; use --force only "
-            "after reconciling repository evidence"
+    tickets = load_tickets(root, cfg)
+    ticket = find_ticket(tickets, args.ticket_id)
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, ticket.milestone)
+
+    if args.status in LEGACY_STATUS_PHASES:
+        phase = LEGACY_STATUS_PHASES[args.status]
+        candidate_sha = validate_candidate_commit(
+            root, phase, args.candidate_sha
         )
-    old, new = replace_status(ticket.path, args.status)
-    print(f"{ticket.id}: {old} -> {new}")
+        validate_writer_location(phase, args.branch, args.worktree)
+        open_roots = [
+            record
+            for record in runtime["blockers"].values()
+            if isinstance(record, dict)
+            and not record.get("derived_from")
+            and record.get("status", "open") == "open"
+            and str(record.get("ticket_id", "")).upper() == ticket.id.upper()
+        ]
+        root_blocker = args.root_blocker
+        if phase == "repair" and not root_blocker:
+            if len(open_roots) > 1:
+                raise WorkflowError(
+                    f"{ticket.id} has multiple open canonical roots; "
+                    "legacy failed status requires --root-blocker"
+                )
+            if open_roots:
+                root_blocker = str(open_roots[0]["id"])
+        root_cause_id = validate_phase_entry(
+            ticket,
+            phase,
+            tickets,
+            runtime,
+            root_blocker=root_blocker,
+        )
+        runtime["phases"][ticket.id] = phase_record_for(
+            ticket,
+            phase,
+            branch=args.branch,
+            worktree=args.worktree,
+            candidate_sha=candidate_sha,
+            root_cause_id=root_cause_id,
+        )
+        path = save_runtime_state(root, cfg, state)
+        migrated = ""
+        if ticket.status in LEGACY_TRANSIENT_STATUSES:
+            old, new = replace_status(ticket.path, "ready")
+            migrated = f"; migrated tracked status {old} -> {new}"
+        print(
+            f"{ticket.id}: legacy status {args.status} mapped to runtime phase {phase} "
+            f"in {relative(root, path)}{migrated}"
+        )
+        return 0
+
+    if args.candidate_sha or args.branch or args.worktree or args.root_blocker:
+        raise WorkflowError(
+            "--candidate-sha/--branch/--worktree/--root-blocker apply only when "
+            "mapping a legacy transient status; use set-phase for new work"
+        )
+    current = "ready" if ticket.status in LEGACY_TRANSIENT_STATUSES else ticket.status
+    phase_record = runtime["phases"].get(ticket.id)
+    if (
+        current == args.status
+        and ticket.status == args.status
+        and not isinstance(phase_record, dict)
+    ):
+        print(f"{ticket.id} already has durable status {args.status}")
+        return 0
+    if (
+        current != args.status
+        and not args.force
+        and args.status not in ALLOWED_DURABLE_TRANSITIONS.get(current, set())
+    ):
+        if not (ticket.status in LEGACY_TRANSIENT_STATUSES and args.status == "ready"):
+            raise WorkflowError(
+                f"Durable transition {current} -> {args.status} is not allowed; use "
+                "--force only after reconciling repository evidence"
+            )
+    if args.status == "done":
+        by_id = {item.id: item for item in tickets}
+        unmet = unmet_dependencies(ticket, "integration", by_id)
+        if unmet:
+            raise WorkflowError(
+                f"{ticket.id} cannot become done; unmet integration dependencies: "
+                + ", ".join(unmet)
+            )
+        open_roots = open_root_blocker_ids_for_ticket(
+            runtime,
+            ticket.id,
+            "integration",
+        )
+        if open_roots:
+            raise WorkflowError(
+                f"{ticket.id} cannot become done; open canonical root blockers "
+                "through integration: "
+                + ", ".join(open_roots)
+            )
+        if not args.force and (
+            not isinstance(phase_record, dict)
+            or phase_record.get("phase") != "integration"
+            or not phase_record.get("candidate_sha")
+        ):
+            raise WorkflowError(
+                f"{ticket.id} can become done only from an integration phase bound "
+                "to an exact candidate SHA; use --force only for evidence-backed "
+                "legacy reconciliation"
+            )
+    original_bytes = ticket.path.read_bytes()
+    if current == args.status and ticket.status == args.status:
+        old = new = args.status
+    else:
+        old, new = replace_status(ticket.path, args.status)
+    phase_cleared = runtime["phases"].pop(ticket.id, None) is not None
+    if phase_cleared:
+        try:
+            save_runtime_state(root, cfg, state)
+        except Exception:
+            replace_bytes_atomic(ticket.path, original_bytes)
+            raise
+    suffix = "; cleared runtime phase" if phase_cleared else ""
+    print(f"{ticket.id}: durable status {old} -> {new}{suffix}")
     return 0
+
+
+def cmd_gate_check(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    tickets = load_tickets(root, cfg)
+    ticket = find_ticket(tickets, args.ticket_id)
+    by_id = {item.id: item for item in tickets}
+    unmet = unmet_dependencies(ticket, args.phase, by_id)
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, ticket.milestone)
+    open_roots = open_root_blocker_ids_for_ticket(
+        runtime,
+        ticket.id,
+        args.phase,
+    )
+    payload = {
+        "ticket": ticket.id,
+        "phase": args.phase,
+        "dependencies": ticket.dependencies(args.phase),
+        "dependencies_through_gate": ticket.dependencies_through(args.phase),
+        "unmet": unmet,
+        "open_root_blockers": open_roots,
+        "clear": not unmet and not open_roots,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    elif unmet or open_roots:
+        reasons = []
+        if unmet:
+            reasons.append("dependencies=" + ", ".join(unmet))
+        if open_roots:
+            reasons.append("root blockers=" + ", ".join(open_roots))
+        print(f"{ticket.id} {args.phase} gate blocked: " + "; ".join(reasons))
+    else:
+        print(f"{ticket.id} {args.phase} gate clear")
+    return 0 if not unmet and not open_roots else 1
 
 
 def toml_string(value: str) -> str:
@@ -1055,16 +2868,39 @@ def cmd_new_ticket(args: argparse.Namespace) -> int:
     path = directory / f"{ticket_id}-{slug}.md"
     if path.exists():
         raise WorkflowError(f"Ticket file already exists: {path}")
-    blocked = ", ".join(toml_string(item.upper()) for item in args.blocked_by)
+    implementation_blocked = [
+        item.upper()
+        for item in (args.implementation_blocked_by + args.blocked_by)
+    ]
+    dependency_values = {
+        "implementation_blocked_by": implementation_blocked,
+        "review_blocked_by": [item.upper() for item in args.review_blocked_by],
+        "integration_blocked_by": [item.upper() for item in args.integration_blocked_by],
+        "release_blocked_by": [item.upper() for item in args.release_blocked_by],
+    }
+    rendered_dependencies = "\n".join(
+        f"{field} = ["
+        + ", ".join(toml_string(item) for item in values)
+        + "]"
+        for field, values in dependency_values.items()
+    )
     owns = ", ".join(toml_string(item) for item in args.owns)
     acceptance = ",\n  ".join(toml_string(item) for item in args.acceptance)
+    reviews = args.required_review or (
+        ["architect", "qa"]
+        if args.risk in {"high", "critical"}
+        else (["qa"] if args.risk == "medium" else [])
+    )
+    rendered_reviews = ", ".join(toml_string(item) for item in reviews)
     content = f'''+++
 id = {toml_string(ticket_id)}
 title = {toml_string(args.title)}
 milestone = {toml_string(args.milestone.upper())}
 status = "draft"
 priority = {toml_string(args.priority.upper())}
-blocked_by = [{blocked}]
+risk = {toml_string(args.risk.lower())}
+{rendered_dependencies}
+required_reviews = [{rendered_reviews}]
 owns = [{owns}]
 spec = {toml_string(args.spec)}
 test_plan = {toml_string(args.test_plan)}
@@ -1105,17 +2941,616 @@ TODO
 
 - TODO
 
+## Blocker record
+
+Use the Git-common-dir runtime ledger for transient blockers. If a durable contract
+blocker must be documented here, include ID, class, gate, root cause, derivatives,
+owner, evidence, authorization state, and unblock condition.
+
+Tracked status is durable: use only `draft`, `ready`, `blocked`, `done`, or
+`deferred`. Record implementation/review/repair/integration/release with
+`workflow.py set-phase`, not by editing this frontmatter.
+
 ## Completion evidence
+
+To be filled by the Team Lead after integration:
 
 - Branch:
 - Commit(s):
-- Architect verdict:
-- QA verdict:
+- Required reviewer role/profile and verdict:
+- Exact candidate SHA:
 - Integrated commit:
 '''
     path.write_text(content, encoding="utf-8")
     print(relative(root, path))
     return 0
+
+
+def repair_budget_for(
+    ticket: Ticket,
+    cfg: dict[str, Any],
+    risk: str | None = None,
+) -> int:
+    configured = cfg.get("execution", {}).get("repair_budget", {})
+    if isinstance(configured, dict):
+        value = configured.get(risk or ticket.risk)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return int(cfg["execution"]["max_repair_attempts_per_ticket"])
+
+
+def repair_summary(
+    ticket: Ticket,
+    cfg: dict[str, Any],
+    runtime: dict[str, Any],
+    root_cause_id: str | None = None,
+) -> dict[str, Any]:
+    all_entries = runtime.get("repairs", {}).get(ticket.id, [])
+    if not isinstance(all_entries, list):
+        raise WorkflowError(f"Runtime repairs for {ticket.id} must be an array")
+    entries = [
+        entry
+        for entry in all_entries
+        if not root_cause_id
+        or (
+            isinstance(entry, dict)
+            and entry.get("root_cause_id") == root_cause_id
+        )
+    ]
+    non_counting = set(cfg["execution"].get("non_counting_repair_classes", []))
+    consumed = sum(
+        1
+        for entry in entries
+        if isinstance(entry, dict)
+        and (
+            entry["consumes_budget"]
+            if isinstance(entry.get("consumes_budget"), bool)
+            else str(entry.get("class")) not in non_counting
+        )
+    )
+    root = runtime.get("blockers", {}).get(root_cause_id, {})
+    risk = (
+        str(root.get("risk"))
+        if root_cause_id and isinstance(root, dict) and root.get("risk") in RISK_LEVELS
+        else ticket.risk
+    )
+    base_budget = repair_budget_for(ticket, cfg, risk)
+    overrides = runtime.get("repair_overrides", {}).get(root_cause_id, [])
+    override_count = len(overrides) if root_cause_id and isinstance(overrides, list) else 0
+    budget = base_budget + override_count
+    return {
+        "root_cause_id": root_cause_id,
+        "risk": risk,
+        "base_budget": base_budget,
+        "override_count": override_count,
+        "budget": budget,
+        "consumed": consumed,
+        "remaining": max(0, budget - consumed),
+        "exhausted": consumed >= budget,
+        "entries": entries,
+    }
+
+
+def cmd_state(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    state = load_runtime_state(root, cfg)
+    payload: dict[str, Any] = {
+        "path": relative(root, runtime_state_path(root, cfg)),
+        "version": state["version"],
+    }
+    if args.milestone:
+        runtime = milestone_runtime_state(state, args.milestone)
+        tickets = [
+            ticket
+            for ticket in load_tickets(root, cfg)
+            if ticket.milestone.upper() == args.milestone.upper()
+        ]
+        payload["milestone"] = args.milestone.upper()
+        payload["runtime"] = runtime
+        payload["repair_budgets"] = {
+            ticket.id: repair_summary(ticket, cfg, runtime) for ticket in tickets
+        }
+        payload["repair_budgets_by_root"] = {
+            root_id: repair_summary(
+                find_ticket(tickets, str(record["ticket_id"])),
+                cfg,
+                runtime,
+                root_id,
+            )
+            for root_id, record in runtime["blockers"].items()
+            if isinstance(record, dict)
+            and not record.get("derived_from")
+            and any(
+                ticket.id.upper() == str(record.get("ticket_id", "")).upper()
+                for ticket in tickets
+            )
+        }
+    else:
+        payload["milestones"] = state["milestones"]
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_grant_authorization(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, args.milestone)
+    if args.scope in runtime["authorizations"]:
+        raise WorkflowError(
+            f"Authorization scope {args.scope} already exists and is immutable; "
+            "revoke it if needed and grant a new scope ID"
+        )
+    if (args.kind == "remote") != bool(args.remote_effects):
+        raise WorkflowError(
+            "--kind remote requires --remote-effects, and local authorization must "
+            "not use --remote-effects"
+        )
+    if args.kind == "remote":
+        if not args.remote_ref or not args.commit_sha:
+            raise WorkflowError(
+                "remote authorization requires --remote-ref and --commit-sha"
+            )
+        if not re.fullmatch(
+            r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+            args.commit_sha,
+        ):
+            raise WorkflowError("--commit-sha must be a full exact commit ID")
+        probe = run(
+            ["git", "cat-file", "-e", f"{args.commit_sha}^{{commit}}"],
+            cwd=root,
+            check=False,
+        )
+        if probe.returncode != 0:
+            raise WorkflowError(
+                f"--commit-sha is not a commit in this repository: {args.commit_sha}"
+            )
+        max_uses = args.max_uses if args.max_uses is not None else 1
+        if max_uses < 1:
+            raise WorkflowError("--max-uses must be at least 1")
+    else:
+        if args.remote_ref or args.commit_sha:
+            raise WorkflowError(
+                "local authorization must not set --remote-ref or --commit-sha"
+            )
+        max_uses = args.max_uses
+        if max_uses is not None and max_uses < 1:
+            raise WorkflowError("--max-uses must be at least 1")
+    record = {
+        "kind": args.kind,
+        "status": "granted",
+        "actions": list(args.action),
+        "tickets": [ticket.upper() for ticket in args.ticket],
+        "blocker_classes": list(args.blocker_class),
+        "max_risk": args.max_risk,
+        "remote_effects": bool(args.remote_effects),
+        "evidence": args.evidence,
+        "uses": 0,
+        "recorded_at": utc_now(),
+    }
+    if max_uses is not None:
+        record["max_uses"] = max_uses
+    if args.kind == "remote":
+        record.update(
+            {
+                "remote_ref": args.remote_ref,
+                "commit_sha": args.commit_sha.lower(),
+            }
+        )
+    runtime["authorizations"][args.scope] = record
+    path = save_runtime_state(root, cfg, state)
+    print(f"Recorded explicit {args.kind} authorization in {relative(root, path)}")
+    return 0
+
+
+def cmd_revoke_authorization(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, args.milestone)
+    record = runtime["authorizations"].get(args.scope)
+    if not isinstance(record, dict):
+        raise WorkflowError(f"Unknown authorization scope: {args.scope}")
+    if record.get("status") == "revoked":
+        print(f"Authorization scope {args.scope} is already revoked")
+        return 0
+    record["status"] = "revoked"
+    record["revoked_at"] = utc_now()
+    record["revocation_reason"] = args.reason
+    path = save_runtime_state(root, cfg, state)
+    print(f"Revoked authorization {args.scope} in {relative(root, path)}")
+    return 0
+
+
+def cmd_authorization_check(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    if args.remote_effects:
+        if not args.remote_ref or not re.fullmatch(
+            r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+            args.commit_sha,
+        ):
+            raise WorkflowError(
+                "remote authorization check requires exact --remote-ref and "
+                "--commit-sha"
+            )
+    elif args.remote_ref or args.commit_sha:
+        raise WorkflowError(
+            "local authorization check must not include remote ref or commit"
+        )
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, args.milestone)
+    match = matching_authorization(
+        runtime,
+        action=args.action,
+        ticket_id=args.ticket,
+        blocker_class=args.blocker_class,
+        risk=args.risk,
+        remote_effects=args.remote_effects,
+        remote_ref=args.remote_ref,
+        commit_sha=args.commit_sha,
+    )
+    payload = {
+        "authorized": match is not None,
+        "scope": match[0] if match else None,
+        "record": match[1] if match else None,
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if match else 1
+
+
+def consume_authorization_record(record: dict[str, Any]) -> None:
+    record["uses"] = int(record.get("uses", 0)) + 1
+    record["last_used_at"] = utc_now()
+    if isinstance(record.get("max_uses"), int) and record["uses"] >= record["max_uses"]:
+        record["status"] = "revoked"
+        record["revoked_at"] = utc_now()
+        record["revocation_reason"] = "usage limit exhausted"
+
+
+def cmd_consume_authorization(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    if args.remote_effects:
+        if not args.remote_ref or not re.fullmatch(
+            r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+            args.commit_sha,
+        ):
+            raise WorkflowError(
+                "remote authorization consumption requires exact --remote-ref and "
+                "--commit-sha"
+            )
+    elif args.remote_ref or args.commit_sha:
+        raise WorkflowError(
+            "local authorization consumption must not include remote ref or commit"
+        )
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, args.milestone)
+    match = matching_authorization(
+        runtime,
+        action=args.action,
+        ticket_id=args.ticket,
+        blocker_class=args.blocker_class,
+        risk=args.risk,
+        remote_effects=args.remote_effects,
+        remote_ref=args.remote_ref,
+        commit_sha=args.commit_sha,
+    )
+    if not match:
+        raise WorkflowError("No unused authorization matches the exact requested scope")
+    scope, _ = match
+    record = runtime["authorizations"][scope]
+    root_cause_id = ""
+    if args.action == "repair_budget_override":
+        if args.remote_effects:
+            raise WorkflowError("repair budget override must be a local authorization")
+        if not args.root_blocker:
+            raise WorkflowError(
+                "repair_budget_override consumption requires --root-blocker"
+            )
+        root_cause_id, root_blocker = canonical_root_blocker(
+            runtime, args.root_blocker
+        )
+        if str(root_blocker.get("ticket_id", "")).upper() != args.ticket.upper():
+            raise WorkflowError(
+                f"Root blocker {root_cause_id} belongs to "
+                f"{root_blocker.get('ticket_id')}, not {args.ticket}"
+            )
+        actual_class = str(root_blocker.get("class", ""))
+        actual_risk = str(root_blocker.get("risk", ""))
+        if args.blocker_class != actual_class or args.risk != actual_risk:
+            raise WorkflowError(
+                f"Requested class/risk {args.blocker_class}/{args.risk} does not "
+                f"match root blocker {root_cause_id} "
+                f"{actual_class}/{actual_risk}"
+            )
+        runtime["repair_overrides"].setdefault(root_cause_id, []).append(
+            {
+                "authorization_scope": scope,
+                "recorded_at": utc_now(),
+            }
+        )
+    elif args.root_blocker:
+        raise WorkflowError(
+            "--root-blocker is valid only for repair_budget_override consumption"
+        )
+    consume_authorization_record(record)
+    path = save_runtime_state(root, cfg, state)
+    print(
+        json.dumps(
+            {
+                "consumed": True,
+                "scope": scope,
+                "uses": record["uses"],
+                "max_uses": record.get("max_uses"),
+                "status": record["status"],
+                "root_cause_id": root_cause_id or None,
+                "path": relative(root, path),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def cmd_record_blocker(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    ticket = find_ticket(load_tickets(root, cfg), args.ticket_id)
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, ticket.milestone)
+    blocker_id = args.blocker_id or (
+        f"{ticket.id}-B{len(runtime['blockers']) + 1:03d}"
+    )
+    if blocker_id in runtime["blockers"]:
+        raise WorkflowError(f"Blocker ID already exists: {blocker_id}")
+    derived_from = ""
+    if args.derived_from:
+        derived_from, _ = canonical_root_blocker(runtime, args.derived_from)
+    runtime["blockers"][blocker_id] = {
+        "id": blocker_id,
+        "ticket_id": ticket.id,
+        "class": args.blocker_class,
+        "phase": args.phase,
+        "risk": args.risk or ticket.risk,
+        "root_cause": args.root_cause,
+        "root_cause_id": derived_from or blocker_id,
+        "derived_from": derived_from or None,
+        "derivatives": list(args.derivative),
+        "owner": args.owner or ticket.id,
+        "authorization": args.authorization,
+        "evidence": list(args.evidence),
+        "unblock_condition": args.unblock_condition,
+        "status": "open",
+        "recorded_at": utc_now(),
+    }
+    path = save_runtime_state(root, cfg, state)
+    print(f"Recorded blocker {blocker_id} for {ticket.id} in {relative(root, path)}")
+    return 0
+
+
+def cmd_resolve_blocker(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    state = load_runtime_state(root, cfg)
+    found: tuple[str, dict[str, Any]] | None = None
+    for milestone, runtime in state["milestones"].items():
+        record = runtime.get("blockers", {}).get(args.blocker_id)
+        if isinstance(record, dict):
+            found = (milestone, record)
+            break
+    if found is None:
+        raise WorkflowError(f"No runtime blocker recorded with ID {args.blocker_id}")
+    milestone, record = found
+    runtime = milestone_runtime_state(state, milestone)
+    if not isinstance(record, dict):
+        raise WorkflowError(f"Invalid runtime blocker {args.blocker_id}")
+    root_id, resolved, cleared_phases = resolve_blocker_family(
+        runtime,
+        args.blocker_id,
+        args.resolution,
+    )
+    path = save_runtime_state(root, cfg, state)
+    print(
+        f"Resolved canonical root {root_id} and {len(resolved) - 1} "
+        f"derivative(s) in {relative(root, path)}"
+    )
+    if cleared_phases:
+        print("Cleared repair phases: " + ", ".join(cleared_phases))
+    return 0
+
+
+def cmd_record_repair(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    ticket = find_ticket(load_tickets(root, cfg), args.ticket_id)
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, ticket.milestone)
+    root_cause_id, root_blocker = canonical_root_blocker(
+        runtime, args.root_blocker
+    )
+    if str(root_blocker.get("ticket_id", "")).upper() != ticket.id.upper():
+        raise WorkflowError(
+            f"Root blocker {root_cause_id} belongs to "
+            f"{root_blocker.get('ticket_id')}, not {ticket.id}"
+        )
+    phase_record = runtime["phases"].get(ticket.id)
+    if (
+        not isinstance(phase_record, dict)
+        or phase_record.get("phase") != "repair"
+        or phase_record.get("root_cause_id") != root_cause_id
+    ):
+        raise WorkflowError(
+            f"{ticket.id} repair record must match its active repair phase and "
+            f"canonical root {root_cause_id}"
+        )
+    entries = runtime["repairs"].setdefault(ticket.id, [])
+    if not isinstance(entries, list):
+        raise WorkflowError(f"Runtime repairs for {ticket.id} must be an array")
+    before = repair_summary(ticket, cfg, runtime, root_cause_id)
+    non_counting = set(cfg["execution"].get("non_counting_repair_classes", []))
+    consumes_budget = args.repair_class not in non_counting
+    authorization_scope = ""
+    blocker_class = str(root_blocker.get("class", "code"))
+    risk = str(root_blocker.get("risk", ticket.risk))
+    if root_blocker.get("authorization", "not_required") != "not_required":
+        match = matching_authorization(
+            runtime,
+            action="local_repair",
+            ticket_id=ticket.id,
+            blocker_class=blocker_class,
+            risk=risk,
+            remote_effects=False,
+        )
+        if not match:
+            raise WorkflowError(
+                f"{ticket.id} repair requires an exact local_repair authorization "
+                f"for blocker class {blocker_class} at risk {risk}"
+            )
+        authorization_scope = match[0]
+        consume_authorization_record(runtime["authorizations"][authorization_scope])
+    if args.force and (not consumes_budget or not before["exhausted"]):
+        raise WorkflowError(
+            "--force is valid only for a budget-consuming repair whose root budget "
+            "is exhausted"
+        )
+    if consumes_budget and before["exhausted"] and not args.force:
+        raise WorkflowError(
+            f"{ticket.id}/{root_cause_id} repair budget is exhausted "
+            f"({before['consumed']}/{before['budget']}); consume an exact "
+            "repair_budget_override authorization before another repair"
+        )
+    if args.force:
+        override = matching_authorization(
+            runtime,
+            action="repair_budget_override",
+            ticket_id=ticket.id,
+            blocker_class=blocker_class,
+            risk=risk,
+            remote_effects=False,
+        )
+        if not override:
+            raise WorkflowError(
+                f"--force requires an exact repair_budget_override authorization for "
+                f"{ticket.id}, blocker class {blocker_class}, risk {risk}"
+            )
+        override_scope = override[0]
+        override_record = runtime["authorizations"][override_scope]
+        consume_authorization_record(override_record)
+        runtime["repair_overrides"].setdefault(root_cause_id, []).append(
+            {
+                "authorization_scope": override_scope,
+                "recorded_at": utc_now(),
+            }
+        )
+        before = repair_summary(ticket, cfg, runtime, root_cause_id)
+    entries.append(
+        {
+            "class": args.repair_class,
+            "root_cause_id": root_cause_id,
+            "note": args.note,
+            "commit": args.commit,
+            "consumes_budget": consumes_budget,
+            "repair_authorization_scope": authorization_scope,
+            "budget_override_authorization_scope": (
+                override_scope if args.force else ""
+            ),
+            "recorded_at": utc_now(),
+        }
+    )
+    path = save_runtime_state(root, cfg, state)
+    after = repair_summary(ticket, cfg, runtime, root_cause_id)
+    print(
+        f"Recorded {args.repair_class} repair for {ticket.id}/{root_cause_id}; "
+        f"budget {after['consumed']}/{after['budget']} in {relative(root, path)}"
+    )
+    return 0
+
+
+def scheduler_fingerprint(payload: dict[str, Any]) -> str:
+    stable = {
+        "action": payload.get("action"),
+        "selected": payload.get("selected", []),
+        "active_details": payload.get("active_details", []),
+        "blocked": payload.get("blocked", []),
+        "release_blocked": payload.get("release_blocked", []),
+        "open_root_blockers": payload.get("open_root_blockers", []),
+    }
+    encoded = json.dumps(
+        stable,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def next_no_progress_count(current: int, progress: str) -> int:
+    if progress == "material":
+        return 0
+    if progress == "none":
+        return current + 1
+    raise WorkflowError(f"Unknown progress classification: {progress}")
+
+
+def cmd_checkpoint(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    errors, _, tickets = validate_tickets(root, cfg)
+    if errors:
+        raise WorkflowError("Ticket validation failed; run workflow.py validate")
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, args.milestone)
+    limit = args.limit or int(cfg["workflow"]["max_parallel_engineers"])
+    payload = milestone_scheduler_state(
+        tickets,
+        args.milestone,
+        limit,
+        runtime,
+        bool(cfg["execution"]["continue_after_independent_failure"]),
+        cfg,
+    )
+    fingerprint = scheduler_fingerprint(payload)
+    run_state = runtime["last_checkpoint"]
+    if args.new_run:
+        run_state.clear()
+    previous = str(run_state.get("fingerprint", ""))
+    no_progress = next_no_progress_count(
+        int(run_state.get("no_progress_count", 0)),
+        args.progress,
+    )
+    wave = int(run_state.get("wave", 0)) + (1 if args.wave_complete else 0)
+    run_state.update(
+        {
+            "strategy": str(cfg["execution"]["strategy"]),
+            "wave": wave,
+            "fingerprint": fingerprint,
+            "fingerprint_changed": bool(previous and previous != fingerprint),
+            "no_progress_count": no_progress,
+            "action": payload["action"],
+            "active": payload["active"],
+            "selected": payload["selected"],
+            "updated_at": utc_now(),
+        }
+    )
+    path = save_runtime_state(root, cfg, state)
+    limit_value = int(cfg["execution"]["no_progress_limit"])
+    result = {
+        "path": str(path),
+        "milestone": args.milestone.upper(),
+        "checkpoint": run_state,
+        "no_progress_limit": limit_value,
+        "no_progress_exhausted": no_progress >= limit_value,
+        "max_waves_per_run": int(cfg["execution"]["max_waves_per_run"]),
+    }
+    result["wave_limit_reached"] = bool(
+        result["max_waves_per_run"]
+        and wave >= result["max_waves_per_run"]
+    )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 1 if result["no_progress_exhausted"] else 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1127,7 +3562,63 @@ def cmd_status(args: argparse.Namespace) -> int:
         counts[ticket.milestone][ticket.status] += 1
     clean, dirty = is_clean(root)
     max_parallel = int(cfg["workflow"]["max_parallel_engineers"])
-    selected, skipped = select_frontier(tickets, args.milestone, max_parallel)
+    state = load_runtime_state(root, cfg)
+    if args.milestone:
+        selected_runtime = milestone_runtime_state(state, args.milestone)
+        active_entries = active_ticket_phases(
+            tickets, selected_runtime, args.milestone
+        )
+    else:
+        active_entries = []
+        for milestone, selected_runtime in state["milestones"].items():
+            active_entries.extend(
+                active_ticket_phases(tickets, selected_runtime, milestone)
+            )
+        recorded = {ticket.id for ticket, _, _, _ in active_entries}
+        active_entries.extend(
+            entry
+            for entry in active_ticket_phases(tickets, None)
+            if entry[0].id not in recorded
+        )
+    active = [ticket for ticket, _, _, _ in active_entries]
+    if args.milestone:
+        decision = milestone_scheduler_state(
+            tickets,
+            args.milestone,
+            max_parallel,
+            milestone_runtime_state(state, args.milestone),
+            bool(cfg["execution"]["continue_after_independent_failure"]),
+            cfg,
+        )
+        by_id = {ticket.id: ticket for ticket in tickets}
+        selected = [by_id[ticket_id] for ticket_id in decision["selected"]]
+        skipped = [
+            (by_id[item["id"]], item["reason"])
+            for item in decision["skipped"]
+            if item["id"] in by_id
+        ]
+        available = int(decision["available_engineer_slots"])
+    else:
+        available = max(
+            0,
+            max_parallel
+            - sum(phase in ACTIVE_WRITER_PHASES for _, phase, _, _ in active_entries),
+        )
+        if any(phase == "repair" for _, phase, _, _ in active_entries) and not bool(
+            cfg["execution"]["continue_after_independent_failure"]
+        ):
+            available = 0
+        selected, skipped = select_frontier(
+            tickets,
+            args.milestone,
+            available,
+            reserved=active,
+            runtimes={
+                str(milestone).upper(): runtime
+                for milestone, runtime in state["milestones"].items()
+                if isinstance(runtime, dict)
+            },
+        )
     payload = {
         "repository": str(root),
         "current_branch": current_branch(root),
@@ -1136,9 +3627,25 @@ def cmd_status(args: argparse.Namespace) -> int:
         "base_worktree_dirty": dirty,
         "milestones": {milestone: dict(counter) for milestone, counter in sorted(counts.items())},
         "frontier": [ticket_to_dict(root, ticket) for ticket in selected],
+        "available_engineer_slots": available,
+        "active_phases": [
+            {
+                "id": ticket.id,
+                "phase": phase,
+                "source": source,
+                "record": record,
+            }
+            for ticket, phase, source, record in active_entries
+        ],
         "frontier_skipped": [
             {"id": ticket.id, "reason": reason} for ticket, reason in skipped
         ],
+        "runtime_state_path": str(runtime_state_path(root, cfg)),
+        "runtime": (
+            milestone_runtime_state(state, args.milestone)
+            if args.milestone
+            else state["milestones"]
+        ),
         "errors": errors,
         "warnings": warnings,
     }
@@ -1255,9 +3762,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title", required=True)
     p.add_argument("--milestone", required=True)
     p.add_argument("--priority", default="P1")
+    p.add_argument("--risk", choices=sorted(RISK_LEVELS), default="medium")
+    p.add_argument(
+        "--required-review",
+        action="append",
+        choices=("architect", "qa"),
+        default=[],
+    )
     p.add_argument("--spec", required=True)
     p.add_argument("--test-plan", required=True)
-    p.add_argument("--blocked-by", action="append", default=[])
+    p.add_argument(
+        "--blocked-by",
+        action="append",
+        default=[],
+        help="Legacy alias for --implementation-blocked-by",
+    )
+    p.add_argument("--implementation-blocked-by", action="append", default=[])
+    p.add_argument("--review-blocked-by", action="append", default=[])
+    p.add_argument("--integration-blocked-by", action="append", default=[])
+    p.add_argument("--release-blocked-by", action="append", default=[])
     p.add_argument("--owns", action="append", required=True)
     p.add_argument("--acceptance", action="append", required=True)
     p.set_defaults(func=cmd_new_ticket)
@@ -1266,7 +3789,37 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("ticket_id")
     p.add_argument("status", choices=sorted(TICKET_STATUSES))
     p.add_argument("--force", action="store_true")
+    p.add_argument("--branch", default="")
+    p.add_argument("--worktree", default="")
+    p.add_argument("--candidate-sha", default="")
+    p.add_argument("--root-blocker", default="")
     p.set_defaults(func=cmd_set_status)
+
+    p = sub.add_parser(
+        "set-phase",
+        help="Record a transient execution phase outside product Git history",
+    )
+    p.add_argument("ticket_id")
+    p.add_argument("phase", choices=sorted(TRANSIENT_PHASES))
+    p.add_argument("--branch", default="")
+    p.add_argument("--worktree", default="")
+    p.add_argument("--candidate-sha", default="")
+    p.add_argument("--root-blocker", default="")
+    p.set_defaults(func=cmd_set_phase)
+
+    p = sub.add_parser(
+        "clear-phase",
+        help="Clear a ticket's transient execution phase",
+    )
+    p.add_argument("ticket_id")
+    p.add_argument("--expect", choices=sorted(TRANSIENT_PHASES))
+    p.set_defaults(func=cmd_clear_phase)
+
+    p = sub.add_parser("gate-check", help="Check one ticket dependency gate")
+    p.add_argument("ticket_id")
+    p.add_argument("phase", choices=tuple(DEPENDENCY_FIELDS))
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_gate_check)
 
     p = sub.add_parser("worktree-create", help="Create or reuse a ticket worktree")
     p.add_argument("ticket_id")
@@ -1285,8 +3838,134 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--integration", action="store_true")
     p.set_defaults(func=cmd_worktree_remove)
 
-    p = sub.add_parser("run-validation", help="Run configured quick or full command list")
-    p.add_argument("scope", choices=("quick", "full"))
+    p = sub.add_parser("state", help="Show local recoverable workflow state")
+    p.add_argument("--milestone")
+    p.set_defaults(func=cmd_state)
+
+    p = sub.add_parser(
+        "grant-authorization",
+        help="Record an authorization that the user explicitly granted",
+    )
+    p.add_argument("milestone")
+    p.add_argument("--scope", required=True)
+    p.add_argument("--kind", choices=("local", "remote"), default="local")
+    p.add_argument("--action", action="append", required=True)
+    p.add_argument("--ticket", action="append", required=True)
+    p.add_argument(
+        "--blocker-class",
+        action="append",
+        choices=sorted(BLOCKER_CLASSES - {"none"}),
+        required=True,
+    )
+    p.add_argument("--max-risk", choices=sorted(RISK_LEVELS), default="low")
+    p.add_argument("--remote-effects", action="store_true")
+    p.add_argument("--remote-ref", default="")
+    p.add_argument("--commit-sha", default="")
+    p.add_argument("--max-uses", type=int)
+    p.add_argument("--evidence", required=True)
+    p.set_defaults(func=cmd_grant_authorization)
+
+    p = sub.add_parser(
+        "revoke-authorization",
+        help="Atomically revoke an existing immutable authorization scope",
+    )
+    p.add_argument("milestone")
+    p.add_argument("--scope", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(func=cmd_revoke_authorization)
+
+    p = sub.add_parser(
+        "authorization-check",
+        help="Check an action against exact recorded authorization scope",
+    )
+    p.add_argument("milestone")
+    p.add_argument("--action", required=True)
+    p.add_argument("--ticket", required=True)
+    p.add_argument(
+        "--blocker-class",
+        choices=sorted(BLOCKER_CLASSES - {"none"}),
+        required=True,
+    )
+    p.add_argument("--risk", choices=sorted(RISK_LEVELS), required=True)
+    p.add_argument("--remote-effects", action="store_true")
+    p.add_argument("--remote-ref", default="")
+    p.add_argument("--commit-sha", default="")
+    p.set_defaults(func=cmd_authorization_check)
+
+    p = sub.add_parser(
+        "consume-authorization",
+        help="Atomically consume one exact authorization use before an action",
+    )
+    p.add_argument("milestone")
+    p.add_argument("--action", required=True)
+    p.add_argument("--ticket", required=True)
+    p.add_argument(
+        "--blocker-class",
+        choices=sorted(BLOCKER_CLASSES - {"none"}),
+        required=True,
+    )
+    p.add_argument("--risk", choices=sorted(RISK_LEVELS), required=True)
+    p.add_argument("--remote-effects", action="store_true")
+    p.add_argument("--remote-ref", default="")
+    p.add_argument("--commit-sha", default="")
+    p.add_argument("--root-blocker", default="")
+    p.set_defaults(func=cmd_consume_authorization)
+
+    p = sub.add_parser("record-blocker", help="Record one canonical root blocker")
+    p.add_argument("ticket_id")
+    p.add_argument("--id", dest="blocker_id")
+    p.add_argument(
+        "--class",
+        dest="blocker_class",
+        choices=sorted(BLOCKER_CLASSES - {"none"}),
+        required=True,
+    )
+    p.add_argument(
+        "--phase",
+        choices=("implementation", "review", "integration", "release"),
+        required=True,
+    )
+    p.add_argument("--risk", choices=sorted(RISK_LEVELS))
+    p.add_argument("--root-cause", required=True)
+    p.add_argument("--derived-from")
+    p.add_argument("--derivative", action="append", default=[])
+    p.add_argument("--owner")
+    p.add_argument(
+        "--authorization",
+        choices=sorted(AUTHORIZATION_STATES),
+        default="not_required",
+    )
+    p.add_argument("--evidence", action="append", default=[])
+    p.add_argument("--unblock-condition", required=True)
+    p.set_defaults(func=cmd_record_blocker)
+
+    p = sub.add_parser("resolve-blocker", help="Resolve a recorded root blocker")
+    p.add_argument("blocker_id")
+    p.add_argument("--resolution", required=True)
+    p.set_defaults(func=cmd_resolve_blocker)
+
+    p = sub.add_parser("record-repair", help="Record a risk-aware repair attempt")
+    p.add_argument("ticket_id")
+    p.add_argument("--root-blocker", required=True)
+    p.add_argument("--class", dest="repair_class", choices=sorted(REPAIR_CLASSES), required=True)
+    p.add_argument("--note", required=True)
+    p.add_argument("--commit", default="")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_record_repair)
+
+    p = sub.add_parser(
+        "checkpoint",
+        help="Persist a drain/resume scheduler checkpoint outside product history",
+    )
+    p.add_argument("--milestone", required=True)
+    p.add_argument("--limit", type=int)
+    p.add_argument("--progress", choices=("material", "none"), required=True)
+    p.add_argument("--wave-complete", action="store_true")
+    p.add_argument("--new-run", action="store_true")
+    p.set_defaults(func=cmd_checkpoint)
+
+    p = sub.add_parser("run-validation", help="Run a configured validation command list")
+    p.add_argument("scope")
     p.add_argument("--cwd")
     p.set_defaults(func=cmd_run_validation)
 
