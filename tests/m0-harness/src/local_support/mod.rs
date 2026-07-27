@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 pub const SYNTHETIC_PSK: &str = "AAECAwQFBgcICQoLDA0ODw==";
 const CHILD_OUTPUT_CAP: usize = 256 * 1024;
 const METRICS_HEADER_CAP: usize = 4 * 1024;
+const METRICS_RESPONSE_CAP: usize = 256 * 1024;
+const READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+const READINESS_IO_CAP: Duration = Duration::from_millis(200);
 const READINESS_POLL: Duration = Duration::from_millis(20);
 const READINESS_CONFIRMATIONS: usize = 3;
 static ACTIVE_CHILDREN: AtomicUsize = AtomicUsize::new(0);
@@ -49,6 +52,8 @@ pub struct ChildGuard {
     context: String,
     stdout: Option<thread::JoinHandle<OutputSummary>>,
     stderr: Option<thread::JoinHandle<OutputSummary>>,
+    pending_status: Option<ExitStatus>,
+    deferred_exit_checks: usize,
     reaped: bool,
 }
 
@@ -74,8 +79,14 @@ impl ChildGuard {
             context: context.into(),
             stdout: Some(capture_output(stdout)),
             stderr: Some(capture_output(stderr)),
+            pending_status: None,
+            deferred_exit_checks: 0,
             reaped: false,
         }
+    }
+
+    pub fn defer_exit_observation_for_checks(&mut self, checks: usize) {
+        self.deferred_exit_checks = checks;
     }
 
     pub fn assert_running(&mut self) {
@@ -85,9 +96,21 @@ impl ChildGuard {
     }
 
     pub fn check_running(&mut self) -> Result<(), ChildExit> {
-        match self.child.try_wait().expect("child status") {
+        let status = match self.pending_status {
+            Some(status) => Some(status),
+            None => self.child.try_wait().expect("child status"),
+        };
+        match status {
             None => Ok(()),
-            Some(status) => Err(self.finish_reap(status)),
+            Some(status) if self.deferred_exit_checks > 0 => {
+                self.pending_status = Some(status);
+                self.deferred_exit_checks -= 1;
+                Ok(())
+            }
+            Some(status) => {
+                self.pending_status = None;
+                Err(self.finish_reap(status))
+            }
         }
     }
 
@@ -95,21 +118,36 @@ impl ChildGuard {
         if self.reaped {
             return;
         }
+        let _ = self.terminate_and_reap_with_exit(timeout);
+    }
+
+    pub fn terminate_and_reap_with_exit(&mut self, timeout: Duration) -> ChildExit {
+        assert!(!self.reaped, "child already reaped");
+        if let Some(status) = self.pending_status.take() {
+            return self.finish_reap(status);
+        }
         if self.child.try_wait().expect("child status").is_none() {
             self.child.kill().expect("terminate child");
         }
-        self.wait_and_reap(timeout);
+        self.wait_for_exit(timeout)
     }
 
     pub fn wait_and_reap(&mut self, timeout: Duration) {
         if self.reaped {
             return;
         }
+        if let Some(status) = self.pending_status.take() {
+            let _ = self.finish_reap(status);
+            return;
+        }
+        let _ = self.wait_for_exit(timeout);
+    }
+
+    fn wait_for_exit(&mut self, timeout: Duration) -> ChildExit {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.child.try_wait().expect("child status") {
-                let _ = self.finish_reap(status);
-                return;
+                return self.finish_reap(status);
             }
             assert!(Instant::now() < deadline, "child reap timed out");
             thread::sleep(Duration::from_millis(10));
@@ -178,6 +216,12 @@ pub struct ChildExit {
     status: ExitStatus,
     stdout: OutputSummary,
     stderr: OutputSummary,
+}
+
+#[derive(Debug)]
+pub enum MetricsReadinessFailure {
+    ChildExited(ChildExit),
+    Deadline,
 }
 
 impl fmt::Display for ChildExit {
@@ -278,54 +322,213 @@ pub fn wait_for_bound(child: &mut ChildGuard, address: SocketAddrV4) {
 
 pub fn wait_for_metrics_ready(
     child: &mut ChildGuard,
-    address: SocketAddrV4,
-) -> Result<(), ChildExit> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    proxy: SocketAddrV4,
+    metrics: SocketAddrV4,
+) -> Result<(), MetricsReadinessFailure> {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    let identity = match child.binary.as_str() {
+        "ferrum2-client" => ReadinessIdentity::Client,
+        "ferrum2-server" => ReadinessIdentity::Server,
+        binary => panic!("unsupported readiness binary: {binary}"),
+    };
+    let initial = loop {
+        child
+            .check_running()
+            .map_err(MetricsReadinessFailure::ChildExited)?;
+        if let Some(body) = fetch_ferrum_metrics(metrics, deadline) {
+            break metric_value(&body, identity.failure_metric()).unwrap_or(0);
+        }
+        let Some(sleep) = remaining_capped(deadline, READINESS_POLL) else {
+            return Err(MetricsReadinessFailure::Deadline);
+        };
+        thread::sleep(sleep);
+    };
+    if initial != 0 || !send_identity_probe(proxy, identity, deadline) {
+        return Err(MetricsReadinessFailure::Deadline);
+    }
+
     loop {
-        child.check_running()?;
-        if let Ok(mut stream) = TcpStream::connect(address) {
-            stream
-                .set_read_timeout(Some(Duration::from_millis(200)))
-                .expect("metrics readiness read timeout");
-            stream
-                .set_write_timeout(Some(Duration::from_millis(200)))
-                .expect("metrics readiness write timeout");
-            if stream
-                .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .is_ok()
-            {
-                let mut response = Vec::with_capacity(512);
-                let mut chunk = [0_u8; 512];
-                while response.len() < METRICS_HEADER_CAP
-                    && !response.windows(4).any(|window| window == b"\r\n\r\n")
-                {
-                    match stream.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => response.extend_from_slice(&chunk[..read]),
-                    }
-                }
-                if response.windows(4).any(|window| window == b"\r\n\r\n")
-                    && response.starts_with(
-                        b"HTTP/1.1 200 OK\r\n\
-                          Content-Type: text/plain; version=0.0.4\r\n\
-                          Content-Length: ",
-                    )
-                    && response
-                        .windows(b"\r\nConnection: close\r\n\r\n".len())
-                        .any(|window| window == b"\r\nConnection: close\r\n\r\n")
-                {
-                    child.check_running()?;
-                    return Ok(());
-                }
+        child
+            .check_running()
+            .map_err(MetricsReadinessFailure::ChildExited)?;
+        if fetch_ferrum_metrics(metrics, deadline)
+            .and_then(|body| metric_value(&body, identity.failure_metric()))
+            == Some(1)
+        {
+            child
+                .check_running()
+                .map_err(MetricsReadinessFailure::ChildExited)?;
+            return Ok(());
+        }
+        child
+            .check_running()
+            .map_err(MetricsReadinessFailure::ChildExited)?;
+        let Some(sleep) = remaining_capped(deadline, READINESS_POLL) else {
+            return Err(MetricsReadinessFailure::Deadline);
+        };
+        thread::sleep(sleep);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReadinessIdentity {
+    Client,
+    Server,
+}
+
+impl ReadinessIdentity {
+    fn probe(self) -> &'static [u8] {
+        match self {
+            Self::Client => &[4, 1, 0],
+            Self::Server => &[0xa5; 43],
+        }
+    }
+
+    fn failure_metric(self) -> &'static str {
+        match self {
+            Self::Client => {
+                "ferrum2_tcp_failures_total{role=\"client\",stage=\"socks5\",reason=\"socks_protocol\"}"
+            }
+            Self::Server => {
+                "ferrum2_tcp_failures_total{role=\"server\",stage=\"shadowsocks\",reason=\"authentication\"}"
             }
         }
-        child.check_running()?;
-        assert!(
-            Instant::now() < deadline,
-            "metrics identity readiness timed out"
-        );
-        thread::sleep(READINESS_POLL);
     }
+}
+
+fn send_identity_probe(
+    proxy: SocketAddrV4,
+    identity: ReadinessIdentity,
+    deadline: Instant,
+) -> bool {
+    let Some(connect_timeout) = remaining_capped(deadline, READINESS_IO_CAP) else {
+        return false;
+    };
+    let Ok(mut stream) =
+        TcpStream::connect_timeout(&std::net::SocketAddr::V4(proxy), connect_timeout)
+    else {
+        return false;
+    };
+    write_before_deadline(&mut stream, identity.probe(), deadline).is_ok()
+        && stream.shutdown(std::net::Shutdown::Write).is_ok()
+}
+
+fn remaining_capped(deadline: Instant, cap: Duration) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .map(|remaining| remaining.min(cap))
+}
+
+fn fetch_ferrum_metrics(address: SocketAddrV4, deadline: Instant) -> Option<Vec<u8>> {
+    let connect_timeout = remaining_capped(deadline, READINESS_IO_CAP)?;
+    let mut stream =
+        TcpStream::connect_timeout(&std::net::SocketAddr::V4(address), connect_timeout).ok()?;
+    if write_before_deadline(
+        &mut stream,
+        b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        deadline,
+    )
+    .is_err()
+    {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 1024];
+    let header_end = loop {
+        if let Some(position) = response.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+        if response.len() >= METRICS_HEADER_CAP {
+            return None;
+        }
+        let timeout = remaining_capped(deadline, READINESS_IO_CAP)?;
+        if stream.set_read_timeout(Some(timeout)).is_err() {
+            return None;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => response.extend_from_slice(&chunk[..read]),
+        }
+    };
+
+    let content_length = metrics_content_length(&response[..header_end])?;
+    let response_length = header_end.checked_add(content_length)?;
+    if response_length > METRICS_RESPONSE_CAP {
+        return None;
+    }
+    while response.len() < response_length {
+        let timeout = remaining_capped(deadline, READINESS_IO_CAP)?;
+        if stream.set_read_timeout(Some(timeout)).is_err() {
+            return None;
+        }
+        let remaining = response_length - response.len();
+        let read_length = remaining.min(chunk.len());
+        match stream.read(&mut chunk[..read_length]) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => response.extend_from_slice(&chunk[..read]),
+        }
+    }
+
+    let body = &response[header_end..response_length];
+    (contains_bytes(body, b"# HELP ferrum2_tcp_replay_entries ")
+        && contains_bytes(body, b"# TYPE ferrum2_tcp_replay_entries gauge"))
+    .then(|| body.to_vec())
+}
+
+fn write_before_deadline(
+    stream: &mut TcpStream,
+    mut bytes: &[u8],
+    deadline: Instant,
+) -> io::Result<()> {
+    while !bytes.is_empty() {
+        let timeout = remaining_capped(deadline, READINESS_IO_CAP)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "readiness deadline"))?;
+        stream.set_write_timeout(Some(timeout))?;
+        match stream.write(bytes)? {
+            0 => return Err(io::Error::new(io::ErrorKind::WriteZero, "metrics request")),
+            written => bytes = &bytes[written..],
+        }
+    }
+    Ok(())
+}
+
+fn metrics_content_length(header: &[u8]) -> Option<usize> {
+    let header = std::str::from_utf8(header).ok()?;
+    let mut lines = header.split("\r\n");
+    if lines.next()? != "HTTP/1.1 200 OK" {
+        return None;
+    }
+    let mut content_type = false;
+    let mut connection_close = false;
+    let mut content_length = None;
+    for line in lines {
+        if line == "Content-Type: text/plain; version=0.0.4" {
+            content_type = true;
+        } else if line == "Connection: close" {
+            connection_close = true;
+        } else if let Some(value) = line.strip_prefix("Content-Length: ") {
+            content_length = value.parse().ok();
+        }
+    }
+    (content_type && connection_close)
+        .then_some(content_length)
+        .flatten()
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn metric_value(body: &[u8], metric: &str) -> Option<u64> {
+    let body = std::str::from_utf8(body).ok()?;
+    body.lines().find_map(|line| {
+        let (name, value) = line.rsplit_once(' ')?;
+        (name == metric).then(|| value.parse().ok()).flatten()
+    })
 }
 
 pub fn active_child_count() -> usize {
