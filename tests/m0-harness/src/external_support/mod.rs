@@ -7,7 +7,8 @@ use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -53,8 +54,12 @@ struct CaseDeadline {
 
 impl CaseDeadline {
     fn start() -> Self {
+        Self::after(CASE_TIMEOUT)
+    }
+
+    fn after(duration: Duration) -> Self {
         Self {
-            end: Instant::now() + CASE_TIMEOUT,
+            end: Instant::now() + duration,
         }
     }
 
@@ -72,6 +77,191 @@ impl CaseDeadline {
     fn check(self, label: &str) {
         let _ = self.remaining(label);
     }
+
+    fn io_timeout(self, requested: Duration, label: &str) -> io::Result<Duration> {
+        self.end
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .map(|remaining| requested.min(remaining))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{label}: absolute 60-second case deadline exceeded"),
+                )
+            })
+    }
+
+    fn check_io(self, label: &str) -> io::Result<()> {
+        self.io_timeout(Duration::MAX, label).map(|_| ())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OperationDeadline {
+    end: Instant,
+    case_end: Instant,
+}
+
+impl OperationDeadline {
+    fn start(
+        case_deadline: CaseDeadline,
+        operation_timeout: Duration,
+        label: &str,
+    ) -> io::Result<Self> {
+        let now = Instant::now();
+        let _ = case_deadline.io_timeout(Duration::MAX, label)?;
+        let operation_end = now
+            .checked_add(operation_timeout)
+            .unwrap_or(case_deadline.end);
+        Ok(Self {
+            end: operation_end.min(case_deadline.end),
+            case_end: case_deadline.end,
+        })
+    }
+
+    fn remaining(self, label: &str) -> io::Result<Duration> {
+        self.end
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                let deadline_kind = if self.end == self.case_end {
+                    "case"
+                } else {
+                    "operation"
+                };
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{label}: fixed {deadline_kind} deadline exceeded"),
+                )
+            })
+    }
+}
+
+trait DeadlineIo: Read + Write {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn shutdown_write(&self) -> io::Result<()>;
+}
+
+impl DeadlineIo for TcpStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_write_timeout(self, timeout)
+    }
+
+    fn shutdown_write(&self) -> io::Result<()> {
+        self.shutdown(Shutdown::Write)
+    }
+}
+
+fn read_exact_deadline<S: DeadlineIo + ?Sized>(
+    stream: &mut S,
+    buffer: &mut [u8],
+    deadline: CaseDeadline,
+    operation_timeout: Duration,
+    label: &str,
+) -> io::Result<()> {
+    let operation_deadline = OperationDeadline::start(deadline, operation_timeout, label)?;
+    let mut offset = 0;
+    while offset < buffer.len() {
+        stream.set_read_timeout(Some(operation_deadline.remaining(label)?))?;
+        match stream.read(&mut buffer[offset..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("{label}: premature EOF"),
+                ));
+            }
+            Ok(read) => {
+                offset += read;
+                let _ = operation_deadline.remaining(label)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                let _ = operation_deadline.remaining(label)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn write_all_deadline<S: DeadlineIo + ?Sized>(
+    stream: &mut S,
+    buffer: &[u8],
+    deadline: CaseDeadline,
+    operation_timeout: Duration,
+    label: &str,
+) -> io::Result<()> {
+    let operation_deadline = OperationDeadline::start(deadline, operation_timeout, label)?;
+    let mut offset = 0;
+    while offset < buffer.len() {
+        stream.set_write_timeout(Some(operation_deadline.remaining(label)?))?;
+        match stream.write(&buffer[offset..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    format!("{label}: write returned zero"),
+                ));
+            }
+            Ok(written) => {
+                offset += written;
+                let _ = operation_deadline.remaining(label)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                let _ = operation_deadline.remaining(label)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn flush_deadline<S: DeadlineIo + ?Sized>(
+    stream: &mut S,
+    deadline: CaseDeadline,
+    operation_timeout: Duration,
+    label: &str,
+) -> io::Result<()> {
+    let operation_deadline = OperationDeadline::start(deadline, operation_timeout, label)?;
+    stream.set_write_timeout(Some(operation_deadline.remaining(label)?))?;
+    stream.flush()?;
+    operation_deadline.remaining(label).map(|_| ())
+}
+
+fn read_once_deadline<S: DeadlineIo + ?Sized>(
+    stream: &mut S,
+    buffer: &mut [u8],
+    deadline: CaseDeadline,
+    operation_timeout: Duration,
+    label: &str,
+) -> io::Result<usize> {
+    let operation_deadline = OperationDeadline::start(deadline, operation_timeout, label)?;
+    loop {
+        stream.set_read_timeout(Some(operation_deadline.remaining(label)?))?;
+        match stream.read(buffer) {
+            Ok(read) => {
+                let _ = operation_deadline.remaining(label)?;
+                return Ok(read);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                let _ = operation_deadline.remaining(label)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn shutdown_write_deadline<S: DeadlineIo + ?Sized>(
+    stream: &S,
+    deadline: CaseDeadline,
+    label: &str,
+) -> io::Result<()> {
+    deadline.check_io(label)?;
+    stream.shutdown_write()?;
+    deadline.check_io(label)
 }
 
 struct CaptureReader {
@@ -285,7 +475,8 @@ pub fn run_case(reference: Reference, direction: Direction) {
     let target = ports.target_address();
     let proxy = ports.proxy_address();
     let shadowsocks = ports.shadowsocks_address();
-    let target_process = TargetProcess::start(ports.take_target(), deadline);
+    let trace = Arc::new(ExchangeTrace::default());
+    let target_process = TargetProcess::start(ports.take_target(), deadline, Arc::clone(&trace));
 
     let context = CaseContext {
         directory: directory.path(),
@@ -294,6 +485,9 @@ pub fn run_case(reference: Reference, direction: Direction) {
         proxy,
         target,
         deadline,
+        target_shutdown: &target_process.shutdown_gate,
+        application_ack: &target_process.application_ack,
+        trace: Arc::clone(&trace),
     };
     let (config_checksum, process_evidence) = match direction {
         Direction::FerrumClient => run_ferrum_client_case(reference, &reference_binary, context),
@@ -303,6 +497,7 @@ pub fn run_case(reference: Reference, direction: Direction) {
     };
 
     let target_evidence = target_process.finish(deadline);
+    trace.assert_complete();
     drop(ports);
     assert_rebind_all([target, proxy, shadowsocks]);
     directory
@@ -333,6 +528,9 @@ struct CaseContext<'a> {
     proxy: SocketAddrV4,
     target: SocketAddrV4,
     deadline: CaseDeadline,
+    target_shutdown: &'a Receiver<Result<(), String>>,
+    application_ack: &'a Sender<Result<(), String>>,
+    trace: Arc<ExchangeTrace>,
 }
 
 fn run_ferrum_client_case(
@@ -347,6 +545,9 @@ fn run_ferrum_client_case(
         proxy,
         target,
         deadline,
+        target_shutdown,
+        application_ack,
+        trace,
     } = context;
     let reference_config = reference_server_config(reference, shadowsocks);
     let reference_config_path = write_config(directory, "reference-server.json", &reference_config);
@@ -383,7 +584,14 @@ fn run_ferrum_client_case(
 
     reference_process.assert_running(deadline, "pre-traffic reference check");
     ferrum_process.assert_running(deadline, "pre-traffic ferrum check");
-    exercise_socks(proxy, target, deadline);
+    exercise_socks(
+        proxy,
+        target,
+        deadline,
+        target_shutdown,
+        application_ack,
+        &trace,
+    );
     reference_process.assert_running(deadline, "post-traffic reference check");
     ferrum_process.assert_running(deadline, "post-traffic ferrum check");
     let ferrum_evidence = ferrum_process.terminate(deadline);
@@ -406,6 +614,9 @@ fn run_reference_client_case(
         proxy,
         target,
         deadline,
+        target_shutdown,
+        application_ack,
+        trace,
     } = context;
     let ferrum_config = format!(
         "schema_version = 1\n\n[server]\nlisten = \"{shadowsocks}\"\n\n\
@@ -439,7 +650,14 @@ fn run_reference_client_case(
 
     reference_process.assert_running(deadline, "pre-traffic reference check");
     ferrum_process.assert_running(deadline, "pre-traffic ferrum check");
-    exercise_socks(proxy, target, deadline);
+    exercise_socks(
+        proxy,
+        target,
+        deadline,
+        target_shutdown,
+        application_ack,
+        &trace,
+    );
     reference_process.assert_running(deadline, "post-traffic reference check");
     ferrum_process.assert_running(deadline, "post-traffic ferrum check");
     let reference_evidence = reference_process.terminate(deadline);
@@ -450,48 +668,122 @@ fn run_reference_client_case(
     )
 }
 
-fn exercise_socks(proxy: SocketAddrV4, target: SocketAddrV4, deadline: CaseDeadline) {
+fn exercise_socks(
+    proxy: SocketAddrV4,
+    target: SocketAddrV4,
+    deadline: CaseDeadline,
+    target_shutdown: &Receiver<Result<(), String>>,
+    application_ack: &Sender<Result<(), String>>,
+    trace: &ExchangeTrace,
+) {
     let mut stream =
         TcpStream::connect_timeout(&proxy.into(), deadline.bounded(IO_TIMEOUT, "connect SOCKS"))
             .expect("connect SOCKS");
-    set_stream_deadlines(&stream, deadline, "SOCKS");
-    stream.write_all(&[5, 1, 0]).expect("SOCKS greeting");
+    write_all_deadline(
+        &mut stream,
+        &[5, 1, 0],
+        deadline,
+        IO_TIMEOUT,
+        "SOCKS greeting",
+    )
+    .expect("SOCKS greeting");
     let mut method = [0_u8; 2];
-    stream.read_exact(&mut method).expect("SOCKS method");
+    read_exact_deadline(
+        &mut stream,
+        &mut method,
+        deadline,
+        IO_TIMEOUT,
+        "SOCKS method",
+    )
+    .expect("SOCKS method");
     assert_eq!(method, [5, 0], "SOCKS no-auth selected");
 
     let mut request = vec![5, 1, 0, 1];
     request.extend_from_slice(&target.ip().octets());
     request.extend_from_slice(&target.port().to_be_bytes());
-    stream.write_all(&request).expect("SOCKS connect request");
+    write_all_deadline(
+        &mut stream,
+        &request,
+        deadline,
+        IO_TIMEOUT,
+        "SOCKS connect request",
+    )
+    .expect("SOCKS connect request");
     let mut reply = [0_u8; 10];
-    stream.read_exact(&mut reply).expect("SOCKS connect reply");
+    read_exact_deadline(
+        &mut stream,
+        &mut reply,
+        deadline,
+        IO_TIMEOUT,
+        "SOCKS connect reply",
+    )
+    .expect("SOCKS connect reply");
     assert_eq!(&reply[..4], &[5, 0, 0, 1], "SOCKS connect succeeded");
 
-    let mut state = ExchangeState::default();
+    run_application_exchange(
+        &mut stream,
+        deadline,
+        target_shutdown,
+        application_ack,
+        trace,
+    )
+    .unwrap_or_else(|error| panic!("application exchange failed: {error}"));
+}
+
+fn run_application_exchange<S: DeadlineIo + ?Sized>(
+    stream: &mut S,
+    deadline: CaseDeadline,
+    target_shutdown: &Receiver<Result<(), String>>,
+    application_ack: &Sender<Result<(), String>>,
+    trace: &ExchangeTrace,
+) -> Result<(), String> {
+    let mut eof_acknowledgement = ApplicationEofAck::new(application_ack);
     let forward = forward_payload();
-    stream.write_all(&forward[..1]).expect("first forward byte");
-    stream
-        .write_all(&forward[1..])
-        .expect("remaining forward bytes");
-    state.forward_matches().expect("forward payload submitted");
+    write_all_deadline(
+        stream,
+        &forward[..1],
+        deadline,
+        IO_TIMEOUT,
+        "first forward byte",
+    )
+    .map_err(|error| format!("first forward byte: {error}"))?;
+    write_all_deadline(
+        stream,
+        &forward[1..],
+        deadline,
+        IO_TIMEOUT,
+        "remaining forward bytes",
+    )
+    .map_err(|error| format!("remaining forward bytes: {error}"))?;
 
     let reverse = reverse_payload();
     let mut received = vec![0_u8; reverse.len()];
-    stream
-        .read_exact(&mut received)
-        .expect("complete reverse payload before application FIN");
-    assert_eq!(received, reverse, "reverse payload byte mismatch");
-    state.reverse_matches().expect("reverse equality");
-    stream
-        .shutdown(Shutdown::Write)
-        .expect("client write half-close");
-    state
-        .application_shutdown()
-        .expect("application FIN ordering");
-    expect_clean_eof(&mut stream, "application client").expect("application clean EOF");
-    state.client_clean_eof().expect("ordered client EOF");
-    deadline.check("completed ordered clean-EOF exchange");
+    read_exact_deadline(
+        stream,
+        &mut received,
+        deadline,
+        IO_TIMEOUT,
+        "complete reverse payload before application FIN",
+    )
+    .map_err(|error| format!("reverse premature EOF/error: {error}"))?;
+    if received != reverse {
+        return Err("reverse payload byte mismatch".into());
+    }
+    trace.record(ExchangeEvent::ReverseMatched)?;
+    trace
+        .record_after_io(ExchangeEvent::ApplicationShutdown, || {
+            shutdown_write_deadline(stream, deadline, "client write half-close")
+        })
+        .map_err(|error| format!("client write half-close: {error}"))?;
+    match target_shutdown.recv_timeout(deadline.remaining("target shutdown synchronization")) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(format!("target exchange failed before client EOF: {error}")),
+        Err(error) => return Err(format!("target shutdown synchronization failed: {error}")),
+    }
+    eof_acknowledgement.observe(stream, deadline, trace)?;
+    deadline
+        .check_io("completed ordered clean-EOF exchange")
+        .map_err(|error| error.to_string())
 }
 
 fn forward_payload() -> Vec<u8> {
@@ -507,75 +799,156 @@ fn reverse_payload() -> Vec<u8> {
     payload
 }
 
-#[derive(Default)]
-struct ExchangeState {
-    stage: u8,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExchangeEvent {
+    ForwardMatched,
+    ReverseMatched,
+    ApplicationShutdown,
+    TargetCleanEof,
+    TargetShutdown,
+    ClientCleanEof,
 }
 
-impl ExchangeState {
-    fn forward_matches(&mut self) -> Result<(), &'static str> {
-        if self.stage != 0 {
-            return Err("forward equality out of order");
-        }
-        self.stage = 1;
+const ORDERED_EXCHANGE: [ExchangeEvent; 6] = [
+    ExchangeEvent::ForwardMatched,
+    ExchangeEvent::ReverseMatched,
+    ExchangeEvent::ApplicationShutdown,
+    ExchangeEvent::TargetCleanEof,
+    ExchangeEvent::TargetShutdown,
+    ExchangeEvent::ClientCleanEof,
+];
+
+#[derive(Default)]
+struct ExchangeTrace {
+    events: Mutex<Vec<ExchangeEvent>>,
+}
+
+impl ExchangeTrace {
+    fn record(&self, event: ExchangeEvent) -> Result<(), String> {
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| "exchange trace lock poisoned".to_owned())?;
+        Self::require_next(&events, event)?;
+        events.push(event);
         Ok(())
     }
 
-    fn reverse_matches(&mut self) -> Result<(), &'static str> {
-        if self.stage != 1 {
-            return Err("reverse equality requires forward equality");
-        }
-        self.stage = 2;
+    fn record_after_io(
+        &self,
+        event: ExchangeEvent,
+        operation: impl FnOnce() -> io::Result<()>,
+    ) -> Result<(), String> {
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| "exchange trace lock poisoned".to_owned())?;
+        Self::require_next(&events, event)?;
+        operation().map_err(|error| error.to_string())?;
+        events.push(event);
         Ok(())
     }
 
-    fn application_shutdown(&mut self) -> Result<(), &'static str> {
-        if self.stage != 2 {
-            return Err("application shutdown requires both payload equalities");
+    fn require_next(events: &[ExchangeEvent], event: ExchangeEvent) -> Result<(), String> {
+        let expected = ORDERED_EXCHANGE
+            .get(events.len())
+            .ok_or_else(|| format!("unexpected extra exchange event: {event:?}"))?;
+        if *expected != event {
+            return Err(format!(
+                "exchange event out of order: actual={event:?}, expected={expected:?}"
+            ));
         }
-        self.stage = 3;
         Ok(())
     }
 
-    fn target_clean_eof(&mut self) -> Result<(), &'static str> {
-        if self.stage != 3 {
-            return Err("target EOF requires application shutdown");
-        }
-        self.stage = 4;
-        Ok(())
+    fn snapshot(&self) -> Vec<ExchangeEvent> {
+        self.events.lock().expect("exchange trace").clone()
     }
 
-    fn target_shutdown(&mut self) -> Result<(), &'static str> {
-        if self.stage != 4 {
-            return Err("target shutdown requires target clean EOF");
+    fn assert_complete(&self) {
+        assert_eq!(
+            self.snapshot(),
+            ORDERED_EXCHANGE,
+            "live external I/O sequence is incomplete or reordered"
+        );
+    }
+}
+
+struct ApplicationEofAck<'a> {
+    sender: &'a Sender<Result<(), String>>,
+    sent: bool,
+}
+
+impl<'a> ApplicationEofAck<'a> {
+    fn new(sender: &'a Sender<Result<(), String>>) -> Self {
+        Self {
+            sender,
+            sent: false,
         }
-        self.stage = 5;
-        Ok(())
     }
 
-    fn client_clean_eof(&mut self) -> Result<(), &'static str> {
-        if self.stage != 3 && self.stage != 5 {
-            return Err("client EOF requires application shutdown");
+    fn observe<S: DeadlineIo + ?Sized>(
+        &mut self,
+        stream: &mut S,
+        deadline: CaseDeadline,
+        trace: &ExchangeTrace,
+    ) -> Result<(), String> {
+        let observation = observe_clean_eof_event(
+            stream,
+            deadline,
+            "application client",
+            trace,
+            ExchangeEvent::ClientCleanEof,
+        );
+        let acknowledgement = observation
+            .as_ref()
+            .map(|_| ())
+            .map_err(std::clone::Clone::clone);
+        self.sent = true;
+        self.sender
+            .send(acknowledgement)
+            .map_err(|error| format!("send application EOF acknowledgement: {error}"))?;
+        observation
+    }
+}
+
+impl Drop for ApplicationEofAck<'_> {
+    fn drop(&mut self) {
+        if !self.sent {
+            let _ = self.sender.send(Err(
+                "application clean EOF observation was omitted".to_owned()
+            ));
+            self.sent = true;
         }
-        self.stage = 6;
-        Ok(())
     }
 }
 
 struct TargetProcess {
     result: Receiver<Result<String, String>>,
+    shutdown_gate: Receiver<Result<(), String>>,
+    application_ack: Sender<Result<(), String>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl TargetProcess {
-    fn start(listener: TcpListener, deadline: CaseDeadline) -> Self {
+    fn start(listener: TcpListener, deadline: CaseDeadline, trace: Arc<ExchangeTrace>) -> Self {
         let (sender, result) = mpsc::channel();
+        let (shutdown_sender, shutdown_gate) = mpsc::channel();
+        let (application_ack, acknowledgement_receiver) = mpsc::channel();
         let thread = thread::spawn(move || {
-            let outcome = run_target(listener, deadline);
+            let outcome = run_target(
+                listener,
+                deadline,
+                &trace,
+                &shutdown_sender,
+                &acknowledgement_receiver,
+            );
             let _ = sender.send(outcome);
         });
         Self {
             result,
+            shutdown_gate,
+            application_ack,
             thread: Some(thread),
         }
     }
@@ -594,7 +967,33 @@ impl TargetProcess {
     }
 }
 
-fn run_target(listener: TcpListener, deadline: CaseDeadline) -> Result<String, String> {
+fn run_target(
+    listener: TcpListener,
+    deadline: CaseDeadline,
+    trace: &ExchangeTrace,
+    shutdown_sender: &Sender<Result<(), String>>,
+    acknowledgement_receiver: &Receiver<Result<(), String>>,
+) -> Result<String, String> {
+    let prepared = prepare_target(listener, deadline, trace);
+    let (stream, evidence) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = shutdown_sender.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+    shutdown_sender
+        .send(Ok(()))
+        .map_err(|error| format!("send target shutdown gate: {error}"))?;
+    await_application_ack_while_holding(&stream, acknowledgement_receiver, deadline)?;
+    Ok(evidence)
+}
+
+fn prepare_target(
+    listener: TcpListener,
+    deadline: CaseDeadline,
+    trace: &ExchangeTrace,
+) -> Result<(TcpStream, String), String> {
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("target nonblocking listener: {error}"))?;
@@ -603,10 +1002,11 @@ fn run_target(listener: TcpListener, deadline: CaseDeadline) -> Result<String, S
         match listener.accept() {
             Ok(accepted) => break accepted,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                deadline.check("target accept");
                 if Instant::now() >= readiness_end {
                     return Err("target accept readiness deadline".into());
                 }
-                thread::sleep(POLL_INTERVAL);
+                thread::sleep(POLL_INTERVAL.min(deadline.remaining("target accept")));
             }
             Err(error) => return Err(format!("target accept: {error}")),
         }
@@ -614,33 +1014,47 @@ fn run_target(listener: TcpListener, deadline: CaseDeadline) -> Result<String, S
     stream
         .set_nonblocking(false)
         .map_err(|error| format!("target blocking stream: {error}"))?;
-    set_stream_deadlines(&stream, deadline, "target");
+    let evidence = run_target_exchange(&mut stream, deadline, trace)?;
+    Ok((stream, evidence))
+}
+
+fn run_target_exchange<S: DeadlineIo + ?Sized>(
+    stream: &mut S,
+    deadline: CaseDeadline,
+    trace: &ExchangeTrace,
+) -> Result<String, String> {
     let expected = forward_payload();
     let mut received = vec![0_u8; expected.len()];
-    stream
-        .read_exact(&mut received)
-        .map_err(|error| format!("forward premature EOF/error: {error}"))?;
+    read_exact_deadline(
+        stream,
+        &mut received,
+        deadline,
+        IO_TIMEOUT,
+        "complete forward payload",
+    )
+    .map_err(|error| format!("forward premature EOF/error: {error}"))?;
     if received != expected {
         return Err("forward payload byte mismatch".into());
     }
-    let mut state = ExchangeState::default();
-    state.forward_matches().map_err(str::to_owned)?;
+    trace.record(ExchangeEvent::ForwardMatched)?;
 
     let reverse = reverse_payload();
-    stream
-        .write_all(&reverse)
+    write_all_deadline(stream, &reverse, deadline, IO_TIMEOUT, "reverse payload")
         .map_err(|error| format!("reverse write: {error}"))?;
-    stream
-        .flush()
+    flush_deadline(stream, deadline, IO_TIMEOUT, "reverse flush")
         .map_err(|error| format!("reverse flush: {error}"))?;
-    state.reverse_matches().map_err(str::to_owned)?;
-    expect_clean_eof(&mut stream, "target")?;
-    state.application_shutdown().map_err(str::to_owned)?;
-    state.target_clean_eof().map_err(str::to_owned)?;
-    stream
-        .shutdown(Shutdown::Write)
+    observe_clean_eof_event(
+        stream,
+        deadline,
+        "target",
+        trace,
+        ExchangeEvent::TargetCleanEof,
+    )?;
+    trace
+        .record_after_io(ExchangeEvent::TargetShutdown, || {
+            shutdown_write_deadline(stream, deadline, "target write shutdown")
+        })
         .map_err(|error| format!("target write shutdown failed: {error}"))?;
-    state.target_shutdown().map_err(str::to_owned)?;
     Ok(format!(
         "forward_bytes={}, reverse_bytes={}, target_clean_eof=true, target_shutdown=true",
         expected.len(),
@@ -648,10 +1062,30 @@ fn run_target(listener: TcpListener, deadline: CaseDeadline) -> Result<String, S
     ))
 }
 
-fn expect_clean_eof(stream: &mut TcpStream, label: &str) -> Result<(), String> {
+fn await_application_ack_while_holding<S: ?Sized>(
+    _stream: &S,
+    acknowledgement_receiver: &Receiver<Result<(), String>>,
+    deadline: CaseDeadline,
+) -> Result<(), String> {
+    match acknowledgement_receiver
+        .recv_timeout(deadline.remaining("application EOF acknowledgement"))
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("application EOF acknowledgement failed: {error}")),
+        Err(error) => Err(format!("application EOF acknowledgement failed: {error}")),
+    }
+}
+
+fn observe_clean_eof_event<S: DeadlineIo + ?Sized>(
+    stream: &mut S,
+    deadline: CaseDeadline,
+    label: &str,
+    trace: &ExchangeTrace,
+    event: ExchangeEvent,
+) -> Result<(), String> {
     let mut extra = [0_u8; 1];
-    match stream.read(&mut extra) {
-        Ok(0) => Ok(()),
+    match read_once_deadline(stream, &mut extra, deadline, IO_TIMEOUT, label) {
+        Ok(0) => trace.record(event),
         Ok(_) => Err(format!(
             "{label} received an extra byte after expected payload"
         )),
@@ -661,14 +1095,21 @@ fn expect_clean_eof(stream: &mut TcpStream, label: &str) -> Result<(), String> {
     }
 }
 
-fn set_stream_deadlines(stream: &TcpStream, deadline: CaseDeadline, label: &str) {
-    let timeout = deadline.bounded(IO_TIMEOUT, label);
-    stream
-        .set_read_timeout(Some(timeout))
-        .unwrap_or_else(|error| panic!("{label} read deadline: {error}"));
-    stream
-        .set_write_timeout(Some(timeout))
-        .unwrap_or_else(|error| panic!("{label} write deadline: {error}"));
+fn expect_clean_eof<S: DeadlineIo + ?Sized>(
+    stream: &mut S,
+    deadline: CaseDeadline,
+    label: &str,
+) -> Result<(), String> {
+    let mut extra = [0_u8; 1];
+    match read_once_deadline(stream, &mut extra, deadline, IO_TIMEOUT, label) {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(format!(
+            "{label} received an extra byte after expected payload"
+        )),
+        Err(error) => Err(format!(
+            "{label} expected clean EOF, received error: {error}"
+        )),
+    }
 }
 
 fn wait_for_tcp_listener(
@@ -681,14 +1122,19 @@ fn wait_for_tcp_listener(
         Instant::now() + case_deadline.bounded(READINESS_TIMEOUT, "listener readiness");
     loop {
         child.assert_running(case_deadline, "listener readiness");
-        if TcpStream::connect_timeout(&address.into(), Duration::from_millis(200)).is_ok() {
+        if TcpStream::connect_timeout(
+            &address.into(),
+            case_deadline.bounded(Duration::from_millis(200), "listener readiness connect"),
+        )
+        .is_ok()
+        {
             return;
         }
         assert!(
             Instant::now() < readiness_end,
             "{label} readiness timed out"
         );
-        thread::sleep(POLL_INTERVAL);
+        thread::sleep(POLL_INTERVAL.min(case_deadline.remaining("listener readiness")));
     }
 }
 
@@ -702,14 +1148,30 @@ fn wait_for_socks_listener(
         Instant::now() + case_deadline.bounded(READINESS_TIMEOUT, "SOCKS readiness");
     loop {
         child.assert_running(case_deadline, "SOCKS readiness");
-        if let Ok(mut stream) =
-            TcpStream::connect_timeout(&address.into(), Duration::from_millis(200))
-        {
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-            if stream.write_all(&[5, 1, 0]).is_ok() {
+        if let Ok(mut stream) = TcpStream::connect_timeout(
+            &address.into(),
+            case_deadline.bounded(Duration::from_millis(200), "SOCKS readiness connect"),
+        ) {
+            if write_all_deadline(
+                &mut stream,
+                &[5, 1, 0],
+                case_deadline,
+                Duration::from_millis(500),
+                "SOCKS readiness greeting",
+            )
+            .is_ok()
+            {
                 let mut response = [0_u8; 2];
-                if stream.read_exact(&mut response).is_ok() && response == [5, 0] {
+                if read_exact_deadline(
+                    &mut stream,
+                    &mut response,
+                    case_deadline,
+                    Duration::from_millis(500),
+                    "SOCKS readiness response",
+                )
+                .is_ok()
+                    && response == [5, 0]
+                {
                     return;
                 }
             }
@@ -718,7 +1180,7 @@ fn wait_for_socks_listener(
             Instant::now() < readiness_end,
             "{label} readiness timed out"
         );
-        thread::sleep(POLL_INTERVAL);
+        thread::sleep(POLL_INTERVAL.min(case_deadline.remaining("SOCKS readiness")));
     }
 }
 
@@ -1218,14 +1680,17 @@ impl Sha256 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_CHILDREN, CaseDeadline, ExchangeState, ProcessGuard, expect_clean_eof,
-        forward_payload, reverse_payload, sha256_bytes, sha256_file,
+        ACTIVE_CHILDREN, ApplicationEofAck, CaseDeadline, DeadlineIo, ExchangeEvent, ExchangeTrace,
+        IO_TIMEOUT, ProcessGuard, await_application_ack_while_holding, expect_clean_eof,
+        forward_payload, observe_clean_eof_event, read_exact_deadline, reverse_payload,
+        run_application_exchange, run_target_exchange, sha256_bytes, sha256_file,
     };
     use std::fs;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
     use std::process::Command;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -1242,29 +1707,284 @@ mod tests {
     }
 
     #[test]
-    fn ordered_exchange_rejects_fin_before_both_payloads_match() {
-        let mut state = ExchangeState::default();
-        assert!(state.application_shutdown().is_err());
-        state.forward_matches().expect("forward equality");
-        assert!(state.application_shutdown().is_err());
-        state.reverse_matches().expect("reverse equality");
-        state
-            .application_shutdown()
-            .expect("shutdown only after both equalities");
+    fn live_exchange_records_ordered_eof_and_shutdown_operations() {
+        let (mut target, mut application) = connected_pair();
+        let trace = Arc::new(ExchangeTrace::default());
+        let target_trace = Arc::clone(&trace);
+        let (shutdown_sender, shutdown_receiver) = mpsc::channel();
+        let (ack_sender, ack_receiver) = mpsc::channel();
+        let deadline = CaseDeadline::after(Duration::from_secs(5));
+        let target_thread = thread::spawn(move || {
+            let result = run_target_exchange(&mut target, deadline, &target_trace);
+            match result {
+                Ok(evidence) => {
+                    shutdown_sender.send(Ok(())).expect("target shutdown gate");
+                    await_application_ack_while_holding(&target, &ack_receiver, deadline)
+                        .map(|_| evidence)
+                }
+                Err(error) => {
+                    shutdown_sender
+                        .send(Err(error.clone()))
+                        .expect("target failure gate");
+                    Err(error)
+                }
+            }
+        });
+        run_application_exchange(
+            &mut application,
+            deadline,
+            &shutdown_receiver,
+            &ack_sender,
+            &trace,
+        )
+        .expect("live application exchange");
+        target_thread
+            .join()
+            .expect("target thread")
+            .expect("live target exchange");
+        trace.assert_complete();
     }
 
     #[test]
-    fn ordered_exchange_rejects_clean_eof_and_target_shutdown_reordering() {
-        let mut state = ExchangeState::default();
-        assert!(state.target_clean_eof().is_err());
-        assert!(state.target_shutdown().is_err());
-        state.forward_matches().expect("forward");
-        state.reverse_matches().expect("reverse");
-        state.application_shutdown().expect("application shutdown");
-        assert!(state.target_shutdown().is_err());
-        state.target_clean_eof().expect("target EOF");
-        state.target_shutdown().expect("target shutdown");
-        state.client_clean_eof().expect("client EOF");
+    fn live_target_shutdown_failure_is_not_masked_by_stream_drop() {
+        let (target, application) = connected_pair();
+        let mut target = ShutdownFailureStream { inner: target };
+        let trace = Arc::new(ExchangeTrace::default());
+        let application_trace = Arc::clone(&trace);
+        let (shutdown_sender, shutdown_receiver) = mpsc::channel();
+        let (ack_sender, ack_receiver) = mpsc::channel();
+        let deadline = CaseDeadline::after(Duration::from_secs(5));
+        let application_thread = thread::spawn(move || {
+            let mut application = application;
+            let result = run_application_exchange(
+                &mut application,
+                deadline,
+                &shutdown_receiver,
+                &ack_sender,
+                &application_trace,
+            );
+            (result, application)
+        });
+
+        let target_error = run_target_exchange(&mut target, deadline, &trace)
+            .expect_err("injected target write shutdown failure");
+        assert!(target_error.contains("target write shutdown failed"));
+        shutdown_sender
+            .send(Err(target_error))
+            .expect("target failure gate");
+        let (application_result, mut application) =
+            application_thread.join().expect("application thread");
+        assert!(
+            application_result
+                .expect_err("target failure must block client EOF observation")
+                .contains("target exchange failed before client EOF")
+        );
+        assert!(
+            ack_receiver
+                .recv_timeout(Duration::from_millis(100))
+                .expect("application failure acknowledgement")
+                .is_err(),
+            "target failure must not produce a successful application acknowledgement"
+        );
+        assert_eq!(
+            trace.snapshot(),
+            [
+                ExchangeEvent::ForwardMatched,
+                ExchangeEvent::ReverseMatched,
+                ExchangeEvent::ApplicationShutdown,
+                ExchangeEvent::TargetCleanEof,
+            ],
+            "failed shutdown must not record target shutdown or client EOF"
+        );
+        assert!(
+            target.inner.peer_addr().is_ok(),
+            "target stream must remain alive during the failure assertion"
+        );
+        application
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("client read timeout");
+        let mut byte = [0_u8; 1];
+        let error = application
+            .read(&mut byte)
+            .expect_err("live target stream must not masquerade as client EOF");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+    }
+
+    #[test]
+    fn omitted_application_eof_observation_sends_failure_acknowledgement() {
+        let (sender, receiver) = mpsc::channel();
+        {
+            let _acknowledgement = ApplicationEofAck::new(&sender);
+        }
+        let error = receiver
+            .recv_timeout(Duration::from_millis(100))
+            .expect("omission acknowledgement")
+            .expect_err("omitted EOF observation must fail");
+        assert!(error.contains("omitted"));
+    }
+
+    #[test]
+    fn client_extra_byte_prevents_eof_event_and_success_acknowledgement() {
+        let trace = ExchangeTrace::default();
+        record_trace_prefix(
+            &trace,
+            &[
+                ExchangeEvent::ForwardMatched,
+                ExchangeEvent::ReverseMatched,
+                ExchangeEvent::ApplicationShutdown,
+                ExchangeEvent::TargetCleanEof,
+                ExchangeEvent::TargetShutdown,
+            ],
+        );
+        let (mut client, mut peer) = connected_pair();
+        peer.write_all(&[0xa5]).expect("extra byte");
+        peer.shutdown(Shutdown::Write).expect("peer shutdown");
+        let (sender, receiver) = mpsc::channel();
+        let mut acknowledgement = ApplicationEofAck::new(&sender);
+        let error = acknowledgement
+            .observe(
+                &mut client,
+                CaseDeadline::after(Duration::from_secs(1)),
+                &trace,
+            )
+            .expect_err("extra byte must reject client EOF");
+        assert!(error.contains("extra byte"));
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_millis(100))
+                .expect("failure acknowledgement")
+                .is_err(),
+            "client EOF failure must not send a successful acknowledgement"
+        );
+        assert_eq!(trace.snapshot().len(), 5);
+    }
+
+    #[test]
+    fn client_read_error_prevents_eof_event_and_success_acknowledgement() {
+        let trace = ExchangeTrace::default();
+        record_trace_prefix(
+            &trace,
+            &[
+                ExchangeEvent::ForwardMatched,
+                ExchangeEvent::ReverseMatched,
+                ExchangeEvent::ApplicationShutdown,
+                ExchangeEvent::TargetCleanEof,
+                ExchangeEvent::TargetShutdown,
+            ],
+        );
+        let mut failing = ReadFailureStream;
+        let (sender, receiver) = mpsc::channel();
+        let mut acknowledgement = ApplicationEofAck::new(&sender);
+        let error = acknowledgement
+            .observe(
+                &mut failing,
+                CaseDeadline::after(Duration::from_secs(1)),
+                &trace,
+            )
+            .expect_err("reset must reject client EOF");
+        assert!(error.contains("injected reset"));
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_millis(100))
+                .expect("failure acknowledgement")
+                .is_err(),
+            "client read error must not send a successful acknowledgement"
+        );
+        assert_eq!(trace.snapshot().len(), 5);
+    }
+
+    #[test]
+    fn target_extra_byte_and_read_error_prevent_clean_eof_event() {
+        let trace = ExchangeTrace::default();
+        record_trace_prefix(
+            &trace,
+            &[
+                ExchangeEvent::ForwardMatched,
+                ExchangeEvent::ReverseMatched,
+                ExchangeEvent::ApplicationShutdown,
+            ],
+        );
+        let (mut target, mut peer) = connected_pair();
+        peer.write_all(&[0x3c]).expect("extra byte");
+        peer.shutdown(Shutdown::Write).expect("peer shutdown");
+        assert!(
+            observe_clean_eof_event(
+                &mut target,
+                CaseDeadline::after(Duration::from_secs(1)),
+                "target mutation",
+                &trace,
+                ExchangeEvent::TargetCleanEof,
+            )
+            .is_err()
+        );
+        assert_eq!(trace.snapshot().len(), 3);
+
+        let mut failing = ReadFailureStream;
+        assert!(
+            observe_clean_eof_event(
+                &mut failing,
+                CaseDeadline::after(Duration::from_secs(1)),
+                "target reset mutation",
+                &trace,
+                ExchangeEvent::TargetCleanEof,
+            )
+            .is_err()
+        );
+        assert_eq!(trace.snapshot().len(), 3);
+    }
+
+    #[test]
+    fn target_stream_is_held_until_application_acknowledgement() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let probe = DropProbe(Arc::clone(&dropped));
+        let (ack_sender, ack_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let deadline = CaseDeadline::after(Duration::from_secs(1));
+        let waiter = thread::spawn(move || {
+            let result = await_application_ack_while_holding(&probe, &ack_receiver, deadline);
+            result_sender.send(result).expect("wait result");
+        });
+
+        assert!(
+            result_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "target wait must remain blocked before application acknowledgement"
+        );
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "target stream owner dropped before application acknowledgement"
+        );
+        ack_sender
+            .send(Ok(()))
+            .expect("application acknowledgement");
+        result_receiver
+            .recv_timeout(Duration::from_millis(100))
+            .expect("bounded acknowledgement result")
+            .expect("successful acknowledgement");
+        waiter.join().expect("acknowledgement waiter");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "target stream owner did not drop after acknowledgement"
+        );
+    }
+
+    #[test]
+    fn missing_application_acknowledgement_times_out_under_case_deadline() {
+        let probe = DropProbe(Arc::new(AtomicBool::new(false)));
+        let (_sender, receiver) = mpsc::channel::<Result<(), String>>();
+        let start = Instant::now();
+        let error = await_application_ack_while_holding(
+            &probe,
+            &receiver,
+            CaseDeadline::after(Duration::from_millis(80)),
+        )
+        .expect_err("missing acknowledgement must time out");
+        assert!(error.contains("acknowledgement"));
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
@@ -1281,13 +2001,25 @@ mod tests {
         let (mut reader, mut writer) = connected_pair();
         writer.write_all(&[0xa5]).expect("extra byte");
         writer.shutdown(Shutdown::Write).expect("writer shutdown");
-        assert!(expect_clean_eof(&mut reader, "mutation").is_err());
+        assert!(
+            expect_clean_eof(
+                &mut reader,
+                CaseDeadline::after(Duration::from_secs(1)),
+                "mutation",
+            )
+            .is_err()
+        );
 
         let (mut reader, writer) = connected_pair();
         writer
             .shutdown(Shutdown::Write)
             .expect("clean writer shutdown");
-        expect_clean_eof(&mut reader, "clean").expect("clean zero-length read");
+        expect_clean_eof(
+            &mut reader,
+            CaseDeadline::after(Duration::from_secs(1)),
+            "clean",
+        )
+        .expect("clean zero-length read");
     }
 
     #[test]
@@ -1306,12 +2038,208 @@ mod tests {
         assert_eq!(ACTIVE_CHILDREN.load(Ordering::SeqCst), baseline);
     }
 
+    #[test]
+    fn absolute_deadline_rejects_drip_progress() {
+        let (mut reader, mut writer) = connected_pair();
+        let drip = thread::spawn(move || {
+            for byte in 0_u8..8 {
+                thread::sleep(Duration::from_millis(30));
+                if writer.write_all(&[byte]).is_err() {
+                    break;
+                }
+            }
+        });
+        let deadline = CaseDeadline::after(Duration::from_millis(120));
+        let mut received = [0_u8; 8];
+        let error = read_exact_deadline(
+            &mut reader,
+            &mut received,
+            deadline,
+            IO_TIMEOUT,
+            "drip mutation",
+        )
+        .expect_err("drip progress must not extend the absolute case deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        drip.join().expect("drip writer");
+    }
+
+    #[test]
+    fn fixed_operation_deadline_rejects_drip_before_longer_case_deadline() {
+        let (mut reader, mut writer) = connected_pair();
+        let drip = thread::spawn(move || {
+            for byte in 0_u8..4 {
+                thread::sleep(Duration::from_millis(35));
+                if writer.write_all(&[byte]).is_err() {
+                    break;
+                }
+            }
+        });
+        let case_deadline = CaseDeadline::after(Duration::from_secs(2));
+        let started = Instant::now();
+        let mut received = [0_u8; 4];
+        let error = read_exact_deadline(
+            &mut reader,
+            &mut received,
+            case_deadline,
+            Duration::from_millis(90),
+            "fixed operation mutation",
+        )
+        .expect_err("partial reads must not re-arm the operation deadline");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(
+            case_deadline.end > Instant::now(),
+            "operation cap must fire before the longer case deadline"
+        );
+        drip.join().expect("drip writer");
+    }
+
+    #[test]
+    fn fixed_write_deadline_rejects_partial_progress_before_case_deadline() {
+        let mut writer = DripWriteStream;
+        let case_deadline = CaseDeadline::after(Duration::from_secs(2));
+        let started = Instant::now();
+        let error = super::write_all_deadline(
+            &mut writer,
+            &[1, 2, 3, 4],
+            case_deadline,
+            Duration::from_millis(90),
+            "fixed write operation mutation",
+        )
+        .expect_err("partial writes must not re-arm the operation deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(
+            case_deadline.end > Instant::now(),
+            "write operation cap must fire before the longer case deadline"
+        );
+    }
+
     fn connected_pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("pair listener");
         let address = listener.local_addr().expect("pair address");
         let connector = thread::spawn(move || TcpStream::connect(address).expect("pair connect"));
         let (accepted, _) = listener.accept().expect("pair accept");
         (accepted, connector.join().expect("pair connector"))
+    }
+
+    struct ShutdownFailureStream {
+        inner: TcpStream,
+    }
+
+    struct ReadFailureStream;
+
+    struct DripWriteStream;
+
+    impl Read for DripWriteStream {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            unreachable!("write-only mutation stream")
+        }
+    }
+
+    impl Write for DripWriteStream {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            thread::sleep(Duration::from_millis(35));
+            Ok(1)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl DeadlineIo for DripWriteStream {
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn shutdown_write(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for ReadFailureStream {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "injected reset",
+            ))
+        }
+    }
+
+    impl Write for ReadFailureStream {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            unreachable!("read-only mutation stream")
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            unreachable!("read-only mutation stream")
+        }
+    }
+
+    impl DeadlineIo for ReadFailureStream {
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn shutdown_write(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl Read for ShutdownFailureStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buffer)
+        }
+    }
+
+    impl Write for ShutdownFailureStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(buffer)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl DeadlineIo for ShutdownFailureStream {
+        fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+            self.inner.set_read_timeout(timeout)
+        }
+
+        fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+            self.inner.set_write_timeout(timeout)
+        }
+
+        fn shutdown_write(&self) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected target shutdown failure"))
+        }
+    }
+
+    fn record_trace_prefix(trace: &ExchangeTrace, events: &[ExchangeEvent]) {
+        for event in events {
+            trace.record(*event).expect("trace prefix");
+        }
     }
 
     fn failing_command() -> Command {

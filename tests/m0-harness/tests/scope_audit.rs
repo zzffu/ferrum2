@@ -84,17 +84,61 @@ fn platform_config_fixture_policy() {
     for required in [
         "--self-test",
         "forbidden connector side effect",
+        "--mutation-listen-exit2",
         "TcpListener::bind",
         "try_wait()",
+        "configuration valid\\n",
+        "error[config.semantic] shadowsocks.psk: configuration value is invalid\\n",
         "expected_exit: 0",
         "expected_exit: 2",
-        "4/4 exact exits and zero socket side effects",
+        "4/4 exact outputs/exits and no listener was created",
     ] {
         assert!(
             helper.contains(required),
             "platform helper omits {required}"
         );
     }
+    assert!(
+        !helper.contains("zero socket side effects"),
+        "platform helper must not overclaim that no bind was attempted"
+    );
+    assert_offline_entrypoint(&root.join("bins/ferrum2-client/src/main.rs"), "load_client");
+    assert_offline_entrypoint(&root.join("bins/ferrum2-server/src/main.rs"), "load_server");
+}
+
+fn assert_offline_entrypoint(path: &Path, loader: &str) {
+    let source = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        .replace("\r\n", "\n");
+    assert_eq!(
+        source.matches(&format!("{loader}(&cli.config)")).count(),
+        1,
+        "{} must call the pure config loader exactly once",
+        path.display()
+    );
+    assert_eq!(
+        source.matches("run::run(").count(),
+        1,
+        "{} must have exactly one runtime entrypoint",
+        path.display()
+    );
+    let load = source
+        .find(&format!("{loader}(&cli.config)"))
+        .expect("loader");
+    let check = source[load..]
+        .find("if cli.check_config {")
+        .map(|offset| load + offset)
+        .expect("offline check branch");
+    let success = source[check..]
+        .find("return ExitCode::SUCCESS;")
+        .map(|offset| check + offset)
+        .expect("offline success return");
+    let runtime = source.find("run::run(config)").expect("runtime entrypoint");
+    assert!(
+        load < check && check < success && success < runtime,
+        "{} must load config, return from --check-config, then and only then enter runtime",
+        path.display()
+    );
 }
 
 #[test]
@@ -120,6 +164,80 @@ fn workflow_policy() {
             workflow.replacen(
                 "  workflow_dispatch:",
                 "  schedule:\n  workflow_dispatch:",
+                1,
+            ),
+        ),
+        (
+            "double-quoted unknown trigger",
+            workflow.replacen(
+                "  workflow_dispatch:",
+                "  \"schedule\":\n  workflow_dispatch:",
+                1,
+            ),
+        ),
+        (
+            "single-quoted job permission elevation",
+            workflow.replacen(
+                "    timeout-minutes: 60",
+                "    'permissions': write\n    timeout-minutes: 60",
+                1,
+            ),
+        ),
+        (
+            "double-quoted job permission elevation",
+            workflow.replacen(
+                "    timeout-minutes: 60",
+                "    \"permissions\": write\n    timeout-minutes: 60",
+                1,
+            ),
+        ),
+        (
+            "mapping anchor and merge alias",
+            workflow
+                .replacen("permissions:\n", "permissions: &elevated\n", 1)
+                .replacen(
+                    "    timeout-minutes: 60",
+                    "    <<: *elevated\n    timeout-minutes: 60",
+                    1,
+                ),
+        ),
+        (
+            "unsupported alias value",
+            workflow.replacen(
+                "  workflow_dispatch:",
+                "  workflow_dispatch: *dispatch",
+                1,
+            ),
+        ),
+        (
+            "underscore job ID",
+            workflow.replacen(
+                "  m0-host-quick:",
+                "  evil_job:\n    name: evil_job\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps: []\n  m0-host-quick:",
+                1,
+            ),
+        ),
+        (
+            "uppercase job ID",
+            workflow.replacen(
+                "  m0-host-quick:",
+                "  EVIL-JOB:\n    name: EVIL-JOB\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n    steps: []\n  m0-host-quick:",
+                1,
+            ),
+        ),
+        (
+            "nameless run step",
+            workflow.replacen(
+                "      - name: Verify clean current SHA",
+                "      - run: echo bypass\n      - name: Verify clean current SHA",
+                1,
+            ),
+        ),
+        (
+            "arbitrary extra shell",
+            workflow.replacen(
+                "          set -euo pipefail",
+                "          set -euo pipefail\n          echo unallowlisted-command",
                 1,
             ),
         ),
@@ -250,6 +368,14 @@ fn fixed_baseline_scope_and_provenance_audit() {
 }
 
 fn validate_workflow(workflow: &str) -> Result<(), String> {
+    if workflow.contains('\r') {
+        let normalized = workflow.replace("\r\n", "\n");
+        if normalized.contains('\r') {
+            return Err("bare carriage return is unsupported".into());
+        }
+        return validate_workflow(&normalized);
+    }
+    validate_yaml_lexical_subset(workflow)?;
     assert_exact_keys(workflow, 0, &["name", "on", "permissions", "jobs"])?;
     let header = workflow
         .split_once("jobs:\n")
@@ -335,6 +461,147 @@ fn validate_workflow(workflow: &str) -> Result<(), String> {
         }
     }
     validate_command_allocation(&jobs)?;
+    validate_closed_workflow_snapshot(workflow)?;
+    Ok(())
+}
+
+fn validate_yaml_lexical_subset(workflow: &str) -> Result<(), String> {
+    let mut scalar_indent = None;
+    for (index, line) in workflow.lines().enumerate() {
+        if line.contains('\t') {
+            return Err(format!(
+                "line {} contains unsupported tab indentation",
+                index + 1
+            ));
+        }
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim();
+        if let Some(owner_indent) = scalar_indent {
+            if trimmed.is_empty() || indent > owner_indent {
+                continue;
+            }
+            scalar_indent = None;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == "---"
+            || trimmed == "..."
+            || trimmed.starts_with("%YAML")
+            || trimmed.starts_with("? ")
+        {
+            return Err(format!(
+                "line {} uses unsupported YAML document/key syntax",
+                index + 1
+            ));
+        }
+        let candidate = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        if quoted_mapping_key(candidate) {
+            return Err(format!(
+                "line {} uses an unsupported quoted mapping key",
+                index + 1
+            ));
+        }
+        if candidate.starts_with("<<:") {
+            return Err(format!(
+                "line {} uses an unsupported YAML merge key",
+                index + 1
+            ));
+        }
+        if contains_unquoted_yaml_control(candidate) {
+            return Err(format!(
+                "line {} uses unsupported YAML anchor, alias, or tag syntax",
+                index + 1
+            ));
+        }
+        if let Some((_, value)) = candidate.split_once(':') {
+            let value = value.trim_start();
+            if value.starts_with('|') || value.starts_with('>') {
+                scalar_indent = Some(indent);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn quoted_mapping_key(text: &str) -> bool {
+    let Some(quote) = text.as_bytes().first().copied() else {
+        return false;
+    };
+    if quote != b'\'' && quote != b'"' {
+        return false;
+    }
+    let mut escaped = false;
+    for (index, byte) in text.bytes().enumerate().skip(1) {
+        if quote == b'"' && byte == b'\\' && !escaped {
+            escaped = true;
+            continue;
+        }
+        if byte == quote && !escaped {
+            return text[index + 1..].trim_start().starts_with(':');
+        }
+        escaped = false;
+    }
+    false
+}
+
+fn contains_unquoted_yaml_control(text: &str) -> bool {
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if double && byte == b'\\' && !escaped {
+            escaped = true;
+            continue;
+        }
+        if byte == b'\'' && !double {
+            single = !single;
+        } else if byte == b'"' && !single && !escaped {
+            double = !double;
+        } else if !single
+            && !double
+            && matches!(byte, b'&' | b'*' | b'!')
+            && (index == 0
+                || bytes[index - 1].is_ascii_whitespace()
+                || matches!(bytes[index - 1], b':' | b'[' | b'{' | b','))
+        {
+            return true;
+        }
+        escaped = false;
+    }
+    single || double
+}
+
+fn validate_closed_workflow_snapshot(workflow: &str) -> Result<(), String> {
+    const EXPECTED_BLOB_ID: &str = "4fed74274af633884c9ffb486e936283558d6558";
+    let mut child = Command::new("git")
+        .args(["hash-object", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn workflow snapshot hash: {error}"))?;
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "workflow snapshot stdin unavailable".to_owned())?
+        .write_all(workflow.as_bytes())
+        .map_err(|error| format!("write workflow snapshot: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("wait workflow snapshot hash: {error}"))?;
+    if !output.status.success() {
+        return Err("workflow snapshot hash command failed".into());
+    }
+    let actual = String::from_utf8(output.stdout)
+        .map_err(|error| format!("workflow snapshot hash is not UTF-8: {error}"))?;
+    if actual.trim() != EXPECTED_BLOB_ID {
+        return Err(format!(
+            "workflow contains an unallowlisted structural or command line: {}",
+            actual.trim()
+        ));
+    }
     Ok(())
 }
 
@@ -360,17 +627,21 @@ fn assert_exact_keys(text: &str, indent: usize, expected: &[&str]) -> Result<(),
             continue;
         }
         let Some((key, _)) = line.trim().split_once(':') else {
-            continue;
+            return Err(format!(
+                "unsupported mapping syntax at indent {indent}: {}",
+                line.trim()
+            ));
         };
-        if key
+        if !key
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         {
-            if keys.contains(&key) {
-                return Err(format!("duplicate mapping key at indent {indent}: {key}"));
-            }
-            keys.push(key);
+            return Err(format!("unsupported mapping key at indent {indent}: {key}"));
         }
+        if keys.contains(&key) {
+            return Err(format!("duplicate mapping key at indent {indent}: {key}"));
+        }
+        keys.push(key);
     }
     if keys != expected {
         return Err(format!(
@@ -388,14 +659,17 @@ fn job_blocks(workflow: &str) -> Result<std::collections::BTreeMap<String, Strin
     let mut blocks = std::collections::BTreeMap::new();
     let mut current: Option<String> = None;
     for line in jobs.lines() {
-        let candidate = line.trim().trim_end_matches(':');
-        if line.starts_with("  ")
-            && !line.starts_with("    ")
-            && line.ends_with(':')
-            && candidate
+        if line.starts_with("  ") && !line.starts_with("    ") && !line.trim().is_empty() {
+            let candidate = line
+                .trim()
+                .strip_suffix(':')
+                .ok_or_else(|| format!("unsupported job mapping line: {}", line.trim()))?;
+            if !candidate
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        {
+            {
+                return Err(format!("unsupported job ID: {candidate}"));
+            }
             current = Some(candidate.to_owned());
             if blocks
                 .insert(current.clone().expect("job"), String::new())
@@ -417,7 +691,10 @@ fn validate_steps(job: &str, block: &str) -> Result<(), String> {
     let mut steps = Vec::<(String, String)>::new();
     let mut current: Option<usize> = None;
     for line in block.lines() {
-        if let Some(name) = line.strip_prefix("      - name: ") {
+        if line.starts_with("      ") && !line.starts_with("        ") {
+            let name = line
+                .strip_prefix("      - name: ")
+                .ok_or_else(|| format!("{job} contains an unsupported or nameless step"))?;
             steps.push((name.to_owned(), format!("{line}\n")));
             current = Some(steps.len() - 1);
         } else if let Some(index) = current {
