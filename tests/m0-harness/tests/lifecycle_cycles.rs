@@ -4,6 +4,7 @@ mod local_support;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
@@ -65,6 +66,66 @@ fn recording_target() -> (TcpListener, SocketAddrV4) {
         std::net::SocketAddr::V6(_) => unreachable!("IPv4 target"),
     };
     (listener, address)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TargetTerminal {
+    Eof,
+    Reset,
+}
+
+struct TargetFlowObserver {
+    accepted: Receiver<()>,
+    terminated: Receiver<TargetTerminal>,
+    task: thread::JoinHandle<()>,
+}
+
+impl TargetFlowObserver {
+    fn wait_for_accept(&self) {
+        self.accepted
+            .recv_timeout(CHILD_DEADLINE)
+            .expect("target accept acknowledgement timed out");
+    }
+
+    fn wait_for_terminal(self) -> TargetTerminal {
+        let terminal = self
+            .terminated
+            .recv_timeout(CHILD_DEADLINE)
+            .expect("target terminal acknowledgement timed out");
+        self.task.join().expect("target observer thread");
+        terminal
+    }
+}
+
+fn observe_target_flow(listener: TcpListener) -> TargetFlowObserver {
+    let (accepted_sender, accepted) = mpsc::sync_channel(1);
+    let (terminated_sender, terminated) = mpsc::sync_channel(1);
+    let task = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("cooperative target accept");
+        stream
+            .set_read_timeout(Some(CHILD_DEADLINE))
+            .expect("cooperative target timeout");
+        accepted_sender
+            .send(())
+            .expect("report cooperative target accept");
+        let mut byte = [0_u8; 1];
+        let terminal = match stream.read(&mut byte) {
+            Ok(0) => TargetTerminal::Eof,
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                TargetTerminal::Reset
+            }
+            Ok(read) => panic!("cooperative target received {read} unexpected application bytes"),
+            Err(error) => panic!("cooperative target did not receive EOF/reset: {error}"),
+        };
+        terminated_sender
+            .send(terminal)
+            .expect("report cooperative target terminal");
+    });
+    TargetFlowObserver {
+        accepted,
+        terminated,
+        task,
+    }
 }
 
 fn finish_cycle(
@@ -194,23 +255,40 @@ fn connect_failure_cycle(baseline_children: usize) {
 
 fn cooperative_cancellation_cycle(baseline_children: usize) {
     let directory = tempfile::tempdir().expect("cooperative cancel tempdir");
-    let proxy = unused_loopback();
-    let metrics = unused_loopback();
+    let server = unused_loopback();
+    let server_metrics = unused_loopback();
+    let client = unused_loopback();
+    let client_metrics = unused_loopback();
     let (target_listener, target) = recording_target();
-    let config =
-        write_server_config(directory.path(), proxy, Some(metrics)).expect("server config");
-    let mut child = ChildGuard::spawn("ferrum2-server", &config);
-    wait_for_bound(&mut child, proxy);
-    wait_for_bound(&mut child, metrics);
-    let stream = TcpStream::connect(proxy).expect("cooperative flow");
-    drop(stream);
-    thread::sleep(Duration::from_millis(10));
-    child.assert_running();
-    drop(target_listener);
+    let target_observer = observe_target_flow(target_listener);
+    let server_config =
+        write_server_config(directory.path(), server, Some(server_metrics)).expect("server config");
+    let client_config = write_client_config(directory.path(), client, server, Some(client_metrics))
+        .expect("client config");
+    let mut server_child = ChildGuard::spawn("ferrum2-server", &server_config);
+    wait_for_bound(&mut server_child, server);
+    wait_for_bound(&mut server_child, server_metrics);
+    let mut client_child = ChildGuard::spawn("ferrum2-client", &client_config);
+    wait_for_bound(&mut client_child, client);
+    wait_for_bound(&mut client_child, client_metrics);
+
+    let (socks, reply) = socks_request(client, target);
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    target_observer.wait_for_accept();
+    socks
+        .shutdown(Shutdown::Both)
+        .expect("cooperative client termination");
+    drop(socks);
+    assert!(matches!(
+        target_observer.wait_for_terminal(),
+        TargetTerminal::Eof | TargetTerminal::Reset
+    ));
+    client_child.assert_running();
+    server_child.assert_running();
     finish_cycle(
         directory,
-        vec![child],
-        &[proxy, metrics, target],
+        vec![client_child, server_child],
+        &[client, client_metrics, server, server_metrics, target],
         baseline_children,
     );
 }
