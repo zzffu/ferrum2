@@ -2,7 +2,7 @@
 id = "M0-T01"
 title = "Establish the locked workspace and core contracts"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P0"
 blocked_by = []
 owns = [
@@ -140,4 +140,7 @@ git diff --check
   workspace-policy evidence. It is a distinct one-off authorization, does not
   reset or obscure the exhausted configured 2/2 repair accounting, and does not
   change versions, cipher/protocol behavior, API, or product scope. ADR-0009
-  document gates passed; this ticket is the sole active frontier.
+  document gates passed.
+- ADR-0009 repair candidate:
+  `edaee3d73c5b5e2d7db7bf86a4165565336d8a0a`; Team Lead lineage/ownership/
+  clean-worktree checks PASS，Architect/QA ticket gates pending。
