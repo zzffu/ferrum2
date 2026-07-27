@@ -27,6 +27,10 @@ fn metadata() -> Value {
     serde_json::from_slice(&output.stdout).expect("cargo metadata JSON")
 }
 
+fn contains_manifest_policy(manifest: &str, policy: &str) -> bool {
+    manifest.replace("\r\n", "\n").contains(policy)
+}
+
 #[test]
 fn toolchain_and_msrv_are_pinned() {
     let root = workspace_root();
@@ -175,7 +179,7 @@ fn every_project_package_inherits_repository_policy() {
             PathBuf::from(package["manifest_path"].as_str().expect("manifest path"));
         let manifest = fs::read_to_string(&manifest_path).expect("member manifest");
         assert!(
-            manifest.contains("[lints]\nworkspace = true"),
+            contains_manifest_policy(&manifest, "[lints]\nworkspace = true"),
             "{} must inherit workspace lints",
             manifest_path
                 .strip_prefix(&root)
@@ -185,7 +189,25 @@ fn every_project_package_inherits_repository_policy() {
     }
 
     let root_manifest = fs::read_to_string(root.join("Cargo.toml")).expect("root manifest");
-    assert!(root_manifest.contains("[workspace.lints.rust]\nunsafe_code = \"forbid\""));
+    assert!(contains_manifest_policy(
+        &root_manifest,
+        "[workspace.lints.rust]\nunsafe_code = \"forbid\""
+    ));
+}
+
+#[test]
+fn lint_policy_matching_accepts_crlf() {
+    let member_manifest = "[lints]\r\nworkspace = true\r\n";
+    let root_manifest = "[workspace.lints.rust]\r\nunsafe_code = \"forbid\"\r\n";
+
+    assert!(contains_manifest_policy(
+        member_manifest,
+        "[lints]\nworkspace = true"
+    ));
+    assert!(contains_manifest_policy(
+        root_manifest,
+        "[workspace.lints.rust]\nunsafe_code = \"forbid\""
+    ));
 }
 
 #[test]
