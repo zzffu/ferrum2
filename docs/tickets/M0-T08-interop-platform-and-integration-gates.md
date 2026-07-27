@@ -209,12 +209,25 @@ To be filled by the Team Lead after integration:
   target stream still dropped before an application EOF acknowledgment and the
   10-second per-operation timeout still slid after partial progress. Workflow
   closed-subset and narrowed platform evidence findings are closed.
-- Authorized post-review closure is active in the same branch：retain target
-  stream through same-deadline app ack、couple real EOF observation to trace,
-  and freeze each operation deadline. Follow-up candidate pending.
+- Authorized post-review closure:
+  `49c63082b95e57fc68de20c21ba5bdd621a4ac39`, exact child of `3d5b1a2`;
+  retains the target stream through same-deadline application acknowledgment,
+  couples trace events to real clean EOF observations, freezes every operation
+  deadline, and adds omission/read-error/extra-byte/reset/shutdown/ack/lifetime/
+  drip mutations in the same T08-owned harness file.
+- Follow-up Engineer evidence: focused contract 15/15、scope 4/4、external
+  default 15 passed/4 intentional ignores、four exact pinned interop cases 1/1
+  each、same-SHA local E2E/half-close、Rust 1.85、quick 3/3 and full 4/4 PASS.
+- Follow-up review: Architect **PASS** with no BLOCKER/REQUIRED/advisory.
+  Independent QA **PASS_WITH_ACTIONS** after the same local gates, exact four
+  interop executions, Windows builds/config/detection and hygiene all passed.
+  The unrelated Session 0 `sing-box` listener still prevents the fixed-port
+  helper locally; isolated Windows、GNU/musl and one exact eleven-job run remain
+  required remote evidence.
 - Upstream readiness blocker: T07 harness diagnosis proved that ownership-blind
   `AddrInUse` readiness can false-pass a foreign port and then report
-  `child exited before readiness`; narrow repair branch
-  `codex/repair/m0-t07-readiness-ownership` is active.
-- Current gate: **BLOCKED** on the T07 readiness repair；T08 repair 2/2 continues
-  on disjoint owned paths and both repairs must pass review before integration.
+  `child exited before readiness`; narrow repair candidate `6139544` now has
+  Architect **PASS** and QA **PASS_WITH_ACTIONS**.
+- Current gate: **BLOCKED** only until reviewed T07 `6139544` and T08
+  `49c63082` are combined and pass same-SHA Team Lead、Architect and QA gates；
+  no candidate has been integrated, pushed or published yet.

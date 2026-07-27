@@ -4,9 +4,9 @@
 
 - **Current validated local product integration implementation checkpoint:**
   `123618f747771d6b0473c099f4c741ee4046fd9f`
-- **Current local coordination checkpoint:**
-  `96d62628107a373a076266d8564d81309c915be1` on local `master` and
-  `codex/integration/m0`
+- **Review-input local coordination checkpoint:**
+  `44e46737077d29cb3e378d8dc78ef5d7258c5b4b` on local `master` and
+  `codex/integration/m0`; the reviewed T07/T08 candidates remain unintegrated
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
 - **M0-T01:** original integration Architect/QA **PASS**；现依用户授权为
@@ -79,10 +79,12 @@
   现于`codex/repair/m0-t08-final-closure`集中关闭。QA首轮MSRV workspace的
   lifecycle flake经独立诊断确定为T07 harness端口ownership TOCTOU：
   `AddrInUse`可由foreign listener造成却被误认child ready；deterministic probe
-  1/1复现。T07 narrow candidate `1974935`完成两路径修复并通过focused/MSRV
-  lifecycle；T08 first final candidate `3d5b1a2`关闭workflow/platform findings，
-  但Architect因缺app EOF ack持有与sliding 10s operation deadline继续BLOCK，
-  follow-up active。
+  1/1复现。T07 first candidate `1974935`经Architect BLOCK后，follow-up
+  `6139544`以causal metrics transition、absolute readiness deadline和显式
+  failed-child/sibling cleanup关闭全部finding；Architect PASS、QA
+  PASS_WITH_ACTIONS。T08 first final candidate `3d5b1a2`关闭workflow/platform
+  findings后，follow-up `49c63082`补齐app EOF ack stream hold与fixed operation
+  deadline；Architect PASS、QA PASS_WITH_ACTIONS。两者均只待组合same-SHA gates。
 - **Contract final verdicts:** 初始review要求exact 47-case matrix、
   `AddressBounds`、harness exact two-edge lock hunk、configured而非hardcoded
   durations、T03/T07 time-evidence ownership和完整ADR模板。全部修正后
@@ -216,14 +218,14 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | BLOCKED / REPAIRS ACTIVE | T07 readiness candidate `1974935`等待review；T08 `3d5b1a2`的workflow/platform groups关闭，但app-ack stream hold与fixed 10s operation deadline仍被Architect BLOCK，follow-up active | M0-T07/T08 |
-| GitHub Actions workflow contract | STATIC BLOCK / NOT_RUN | `5accd02`虽通过现有YAML parse/scope tests，但Architect证明quoted/unsupported keys、额外job/nameless step/任意shell可绕过；repair 2/2必须形成closed lexical/command subset；exact pushed-SHA run尚未发生 | M0-T08 |
+| M0 execution contracts | CANDIDATES REVIEWED / INTEGRATION PENDING | T07 `6139544`与T08 `49c63082`的Architect均PASS、QA均PASS_WITH_ACTIONS；唯一候选级action是组合后重跑same-SHA quick/full与最终integration review | M0-T07/T08 |
+| GitHub Actions workflow contract | STATIC PASS / NOT_RUN | T08 `3d5b1a2`已关闭closed lexical/command subset finding，`49c63082`保持其workflow blob；候选Architect/QA通过，exact pushed-SHA run尚未发生 | M0-T08 |
 | Host quick Cargo gate | PASS | `123618f`先build真实binaries，再由Team Lead与QA独立运行fmt/check/workspace test 3/3；MSRV recovery后的workspace test为194/194 | 当前 |
 | Host full Cargo gate | PASS | `123618f`上Team Lead与QA独立运行fmt、strict Clippy、all-features workspace tests 194/194、docs 4/4 | 当前 |
 | Security/KAT/negative | LOCAL PASS / CI PENDING | T02/T03历史evidence保持PASS；`91516720`的primitive-only native probe为2/2、exact 47且target zero；Linux GNU与第二native provider结果等待T08 | M0-T08 |
-| Lifecycle/backpressure | CANDIDATE / REVIEW PENDING | T06/product lifecycle evidence保持；T07 candidate `1974935`以retained reservation、metrics identity、bounded confirmed-foreign retry和hashed diagnostics关闭TOCTOU；current/MSRV lifecycle与deterministic mutation PASS，组合workspace待T08修复汇合 | M0-T07 |
-| External interop | LOCAL EXECUTION PASS / CONTRACT BLOCK | `5accd02`上四项exact pinned cases各1/1机械执行PASS，distinct pre-FIN 16386-byte相等及同SHA ferrum-owned post-FIN gates通过；但target EOF/shutdown与client EOF无跨线程barrier且partial progress可越过case deadline，故ordered convergence证据待repair 2/2 | M0 subset，M1/M2 full |
-| Linux glibc/musl + Windows | WINDOWS BUILD/RUN PASS / HELPER BLOCK | Windows release build、valid/invalid exits `0,2,0,2`、native detection 2/2 PASS；helper的“zero socket side effects”存在failed-bind/exit2 false-pass，须收窄为observable no-listener claim并补same-SHA entrypoint evidence；固定1080及Linux GNU/musl仍留给clean hosted runners | M0 smoke，M3 qualification |
+| Lifecycle/backpressure | CANDIDATE REVIEW PASS / INTEGRATION PENDING | T06/product lifecycle evidence保持；T07 `6139544`用causal role-specific metric transition、absolute 5s deadline、bounded collision retry与显式reap关闭TOCTOU；current/MSRV lifecycle各4/4且exact 100-cycle PASS | M0-T07 |
+| External interop | LOCAL CANDIDATE PASS / REMOTE PENDING | T08 `49c63082`四项exact pinned cases各1/1，distinct pre-FIN 16386-byte双向相等、ordered clean-EOF/app-ack、fixed operation deadline与同SHA ferrum-owned post-FIN gates均通过Architect/QA；最终须在组合pushed SHA重跑 | M0 subset，M1/M2 full |
+| Linux glibc/musl + Windows | WINDOWS DIRECT PASS / HOSTED EVIDENCE PENDING | `49c63082`的Windows release build、valid/invalid exits `0,2,0,2`、native detection 2/2与helper self-test PASS；无副作用claim已收窄。外部Session 0 listener阻止本机fixed-port helper，隔离Windows及Linux GNU/musl留给exact GitHub run | M0 smoke，M3 qualification |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
 
 ## 已冻结但尚未实现的 M0 CI

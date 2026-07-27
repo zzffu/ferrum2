@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -244,6 +244,30 @@ cargo test --workspace --locked
   PASS. Pre-integration MSRV workspace test reaches the repaired lifecycle 3/3
   then fails only on the separate T08 CRLF workflow parser fixed on its repair
   branch.
-- Current readiness recovery gate: **IN_PROGRESS**；T08 remains blocked until
-  candidate `1974935` passes Architect, QA and combined integration gates.
+- First readiness review: Architect **BLOCK** with three REQUIRED groups:
+  the foreign-port regression bypassed the real spawn/readiness/retry path；
+  metrics readiness used a blocking connect and generic Prometheus identity；
+  second-child collision left its running sibling to unbounded `Drop` cleanup.
+- Readiness follow-up candidate:
+  `6139544465d5a5d0e88b02aeed3e0268da208def`, exact child of `1974935`;
+  only the same two authorized harness files changed. It adds a bounded complete
+  Ferrum metrics response, role-specific negative proxy probe and exact fresh
+  failure-counter `0→1` causal identity under one absolute five-second deadline.
+  The deterministic after-release mutation now traverses the real
+  spawn/readiness/retry path, rejects Ferrum-looking and drip responders, reaps
+  the failed child plus any started sibling, and verifies registry baseline,
+  nonforeign exact rebind and temp-path removal before the successful retry.
+  Exactly 20 successful cycles in each of five categories remain required.
+- Follow-up Engineer/QA evidence: intentional marker-only mutation RED, then
+  current and Rust 1.85 lifecycle 4/4 GREEN including the exact 100-cycle row；
+  detection 2/2、local E2E 4/4、current/MSRV checks、fmt、strict Clippy and docs
+  PASS. Independent QA **PASS_WITH_ACTIONS**: standalone quick/full fail only
+  the separately owned pre-final-T08 CRLF workflow parser; combined integration
+  must include T08 `49c63082` and rerun both gates.
+- Follow-up Architect gate: **PASS** with no BLOCKER/REQUIRED; legacy
+  `detection_probe` ownership-blind `wait_for_bound` remains advisory and outside
+  this lifecycle repair.
+- Current readiness recovery gate: **REVIEW**；candidate `6139544` is approved
+  for integration and still requires combined same-SHA local, Architect and QA
+  gates before T07 can return to done.
 - Readiness recovery publication: none
