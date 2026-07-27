@@ -29,24 +29,49 @@ protocol fake adapters与production adapters必须走同一泛型path；runtime 
 timer与production使用相同Tokio timeout code。mock只能观测capability，不得绕过
 production validation/state transition。
 
-Provider-neutral required job names：
+### GitHub Actions required workflow contract
 
-```text
-m0-host-quick
-m0-security
-m0-lifecycle
-m0-local-e2e
-m0-integration-full
-m0-msrv
-m0-windows-msvc
-m0-linux-gnu
-m0-linux-musl
-m0-interop-sing-box
-m0-interop-shadowsocks-rust
-```
+M0 required CI 固定为 `.github/workflows/m0.yml`。允许且仅允许
+`pull_request`、push 到 `master`/`codex/integration/**` 和
+`workflow_dispatch`；禁止 `pull_request_target` 及其他 trigger。
 
-所有 test commands 从 repository root 执行。测试 harness package 名固定为
-`ferrum2-m0-harness`。
+checkout 固定为
+`actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd`
+（v6.0.2），使用 `ref: ${{ github.sha }}`、`fetch-depth: 0`、
+`clean: true`、`persist-credentials: false`。所有 `uses:` 引用必须是 reviewed
+完整 40-hex commit SHA。顶层 permissions 只有 `contents: read`，未列权限为
+`none`，job 不得提升。required job 不 cache、不依赖 cache hit、不
+`continue-on-error`、不读取 `secrets.*`。
+
+job ID 和 displayed name 必须精确相同，不能用 matrix suffix 改名：
+
+| Required job | Runner | Timeout | Test IDs / exact command source |
+|---|---|---:|---|
+| `m0-host-quick` | `ubuntu-24.04` | 60 | M0-GATE-001；`workflow.toml` `[validation].quick` 三条命令 |
+| `m0-security` | `ubuntu-24.04` | 60 | M0-WS-001/002、M0-CFG-003、M0-CRYPTO-001～004、M0-PROTO-001～006、M0-REPLAY-001～004、M0-DETECT-001、M0-BIND-001、M0-OBS-001/002；下方 evidence matrix 的每条命令和 `cargo tree --workspace --locked` |
+| `m0-lifecycle` | `ubuntu-24.04` | 60 | M0-DETECT-003、M0-LIFE-001～005、M0-OBS-003；下方每条命令 |
+| `m0-local-e2e` | `ubuntu-24.04` | 60 | M0-CFG-001/002、M0-CLI-001、M0-SOCKS-001/002、M0-ENDPOINT-001、M0-E2E-001/002；下方每条命令 |
+| `m0-integration-full` | `ubuntu-24.04` | 60 | M0-GATE-002、M0-SCOPE-001、M0-CI-001～006；`workflow.toml` `[validation].full` 与下方每条命令 |
+| `m0-msrv` | `ubuntu-24.04` | 60 | M0-MSRV-001 两条 Rust 1.85.0 命令 |
+| `m0-windows-msvc` | `windows-2022` | 60 | M0-PLAT-001、M0-DETECT-002；Compatibility matrix 全部命令 |
+| `m0-linux-gnu` | `ubuntu-24.04` | 60 | M0-PLAT-002、M0-DETECT-002；Compatibility matrix 全部命令 |
+| `m0-linux-musl` | `ubuntu-24.04` | 60 | M0-PLAT-003；Compatibility matrix 全部命令与 static assertions |
+| `m0-interop-sing-box` | `ubuntu-24.04` | 60 | clean build、M0-INT-001/003 |
+| `m0-interop-shadowsocks-rust` | `ubuntu-24.04` | 60 | clean build、M0-INT-002/004 |
+
+`ubuntu-latest`、`windows-latest` 和所有 `*-latest` 禁止。所有 test commands
+从 repository root 执行；harness package 名固定为 `ferrum2-m0-harness`。
+
+每个 job 在生成文件前断言 checkout worktree clean 且
+`git rev-parse HEAD == GITHUB_SHA`。platform/interop job 使用各自 GitHub-hosted
+fresh VM，自行构建当前 commit binaries，不接收其他 job/run 的 ferrum2
+artifact。每个 job 记录 run ID/attempt/job/SHA、`RUNNER_OS`/`RUNNER_ARCH`、
+`ImageOS`、`ImageVersion`、OS/kernel、rustc/cargo/linker；CI status 必须链接
+`Set up job` 的 exact `Included Software` URL。
+
+M0 close evidence 只接受另行授权 push 后同一 run ID/attempt 的 11 个 job 对
+exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 result
+若 SHA 不同只能诊断，不能替代。
 
 ## Acceptance-criteria evidence matrix
 
@@ -54,7 +79,7 @@ m0-interop-shadowsocks-rust
 |---|---|---|---|---|
 | M0-WS-001 | AC-01 | workspace members、crate DAG、core purity、`LocalEndpoint`/consuming reply ownership | contract/static | `cargo test -p ferrum2-m0-harness --test architecture --locked` |
 | M0-WS-002 | AC-01/12 | exact direct versions、lock、GPL metadata、publish false、unsafe forbid、license provenance | static/build | `cargo test -p ferrum2-m0-harness --test workspace_policy --locked`；`cargo tree --workspace --locked` |
-| M0-MSRV-001 | AC-01/11 | Rust 1.85.0 resolved graph | build/test | `cargo +1.85.0 check --workspace --all-targets --locked`；`cargo +1.85.0 test --workspace --locked` |
+| M0-MSRV-001 | AC-01/11 | Rust 1.85.0 resolved graph | build/test | `m0-msrv`：`cargo +1.85.0 check --workspace --all-targets --locked`；`cargo +1.85.0 test --workspace --locked` |
 | M0-CFG-001 | AC-02 | 两 binary valid offline config | process integration | `cargo test -p ferrum2-m0-harness --test config_cli --locked valid` |
 | M0-CFG-002 | AC-02 | offline path 零 listener/connector/task 副作用 | process integration | `cargo test -p ferrum2-m0-harness --test config_cli --locked no_side_effects` |
 | M0-CFG-003 | AC-02/12 | config negative matrix与 secret redaction | parameterized integration | `cargo test -p ferrum2-m0-harness --test config_cli --locked invalid_matrix` |
@@ -90,16 +115,22 @@ m0-interop-shadowsocks-rust
 | M0-OBS-001 | AC-09 | JSON schema + sentinel secret/destination scan | integration/snapshot | `cargo test -p ferrum2-observability --test tracing_contract --locked` |
 | M0-OBS-002 | AC-09 | exposition names/types/labels/cardinality | integration/snapshot | `cargo test -p ferrum2-observability --test metrics_contract --locked` |
 | M0-OBS-003 | AC-09 | runtime-owned `/metrics` permits/timeout/header/method bounds | runtime integration | `cargo test -p ferrum2-runtime --test metrics_endpoint --locked` |
-| M0-INT-001 | AC-10/12 | ferrum client→sing-box server | required external E2E | `cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact client_sing_box` |
-| M0-INT-002 | AC-10/12 | ferrum client→shadowsocks-rust server | required external E2E | `cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact client_shadowsocks_rust` |
-| M0-INT-003 | AC-10/12 | sing-box SOCKS client→ferrum server | required external E2E | `cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact sing_box_client` |
-| M0-INT-004 | AC-10/12 | shadowsocks-rust client→ferrum server | required external E2E | `cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact shadowsocks_rust_client` |
+| M0-INT-001 | AC-10/12 | ferrum client→sing-box server | required external E2E | `m0-interop-sing-box`：`cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact client_sing_box` |
+| M0-INT-002 | AC-10/12 | ferrum client→shadowsocks-rust server | required external E2E | `m0-interop-shadowsocks-rust`：`cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact client_shadowsocks_rust` |
+| M0-INT-003 | AC-10/12 | sing-box SOCKS client→ferrum server | required external E2E | `m0-interop-sing-box`：`cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact sing_box_client` |
+| M0-INT-004 | AC-10/12 | shadowsocks-rust client→ferrum server | required external E2E | `m0-interop-shadowsocks-rust`：`cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact shadowsocks_rust_client` |
 | M0-PLAT-001 | AC-11 | Windows MSVC release build + artifact config run | native build/run | `m0-windows-msvc` commands in Compatibility matrix |
 | M0-PLAT-002 | AC-11 | Linux GNU release build + artifact config run | native build/run | `m0-linux-gnu` commands in Compatibility matrix |
 | M0-PLAT-003 | AC-11 | Linux musl release build + artifact config run/link evidence | build/run | `m0-linux-musl` commands in Compatibility matrix |
-| M0-GATE-001 | AC-11 | authoritative quick gate | repository gate | `workflow.toml` `[validation].quick`，每项 exit 0 |
-| M0-GATE-002 | AC-11 | authoritative full gate | integration gate | `workflow.toml` `[validation].full`，每项 exit 0 |
-| M0-SCOPE-001 | AC-12 | fixed-baseline diff/provenance/non-goal audit | automated + Architect/QA review | `git merge-base --is-ancestor b41c6127b1834ebd97246451fd92bafea50cb205 HEAD`；`git diff --check b41c6127b1834ebd97246451fd92bafea50cb205...HEAD`；`cargo test -p ferrum2-m0-harness --test scope_audit --locked`；`cargo tree --workspace --locked` |
+| M0-GATE-001 | AC-11 | authoritative quick gate | repository gate | `m0-host-quick`：`workflow.toml` `[validation].quick` 每项 exit 0 |
+| M0-GATE-002 | AC-11 | authoritative full gate | integration gate | `m0-integration-full`：`workflow.toml` `[validation].full` 每项 exit 0 |
+| M0-CI-001 | AC-11 | 唯一 workflow path、exact trigger allowlist、拒绝 `pull_request_target` | static workflow policy | `m0-integration-full`：`cargo test -p ferrum2-m0-harness --test scope_audit --locked workflow_policy` |
+| M0-CI-002 | AC-11 | 11 个 exact job ID/display name、runner mapping、每 job timeout 60 | static workflow policy | same `workflow_policy` command |
+| M0-CI-003 | AC-11 | permissions、checkout full SHA/options、所有 `uses:` full SHA | static workflow policy | same `workflow_policy` command |
+| M0-CI-004 | AC-11 | exact command allocation、current-SHA clean builds、no-cache dependency、无 cross-job ferrum artifact | static workflow policy | same `workflow_policy` command |
+| M0-CI-005 | AC-10/11 | musl/GNU/native evidence、reference verification-before-execution、provider evidence、synthetic-no-secrets | static policy + job evidence | same `workflow_policy` command；对应 platform/interop job logs |
+| M0-CI-006 | AC-11 | 一个 pushed exact integration SHA、单一 run ID/attempt 的 11-job close evidence | Team Lead/QA evidence review | `m0-integration-full` static policy；GitHub run/job URLs 与 exact SHA review |
+| M0-SCOPE-001 | AC-12 | fixed-baseline diff/provenance/non-goal audit，唯一 CI allowlist path 为 `.github/workflows/m0.yml` | automated + Architect/QA review | `m0-integration-full`：`git merge-base --is-ancestor b41c6127b1834ebd97246451fd92bafea50cb205 HEAD`；`git diff --check b41c6127b1834ebd97246451fd92bafea50cb205...HEAD`；`cargo test -p ferrum2-m0-harness --test scope_audit --locked`；`cargo tree --workspace --locked` |
 
 ## Unit tests
 
@@ -147,6 +178,26 @@ m0-interop-shadowsocks-rust
 - capacity装满 live entries后新 salt返回 `ReplayCapacity`，原 entries仍可检测。
 - `RecordingConnector`/metrics/forward recorder断言完整 semantic success之前全零。
 
+### Workflow policy
+
+M0-CI-001～006 复用 M0-T08 已有 ownership
+`tests/m0-harness/tests/scope_audit.rs`，不得为 YAML parsing 新增 Cargo
+dependency。`workflow_policy` 对唯一 workflow 做静态 contract audit：
+
+- exact path、trigger allowlist 与 `pull_request_target`/其他 trigger 拒绝；
+- exact job ID/display name、runner、字面量数值 timeout、无
+  `continue-on-error`；
+- top-level permissions、无 job elevation、checkout full SHA/options、所有
+  `uses:` full SHA；
+- job-to-command mapping、无 cache、platform/interop current-SHA self-build、
+  无 cross-job ferrum artifact；
+- musl version/static checks、GNU native smoke/detection、provider evidence、
+  reference verify-before-run 和无 `secrets.*`；
+- close evidence 必须关联 one pushed exact integration SHA、one run ID/attempt。
+
+static test 不能伪造远程 run；M0-CI-006 还需要 Team Lead/QA 对 GitHub run/job URL、
+run ID/attempt 和 `GITHUB_SHA` 做 evidence review。
+
 ## Integration and interoperability tests
 
 ### Local product path
@@ -167,7 +218,7 @@ failure cases分开断言：
 - protocol first-write/read/auth failure：统一 close且没有 target accept。
 - server target refusal：SOCKS success 已发，随后 EOF/RST；不期待第二个 SOCKS reply。
 
-`ferrum2-m0-harness`不链接任何concrete ferrum2 crate。required job先运行
+`ferrum2-m0-harness`不链接任何concrete ferrum2 crate。`m0-local-e2e`先运行
 `cargo build --workspace --bins --locked`，harness从metadata target directory定位
 当前platform binaries；artifact缺失即失败。
 
@@ -179,6 +230,14 @@ jobs必须用 `--ignored --exact` 显式执行。test读取 `tests/interop/versi
 缺 env/path、下载失败、checksum/version mismatch、readiness timeout、child crash
 或 case timeout直接失败；不得 `return Ok(())`、fallback latest 或把 ignored 状态
 报告为 pass。
+
+`m0-interop-sing-box` 与 `m0-interop-shadowsocks-rust` 分别在自己的 fresh
+`ubuntu-24.04` VM 断言 current `GITHUB_SHA`，运行
+`cargo build --workspace --bins --locked`，不得使用 T07、另一 job 或先前 run 的
+artifact。reference archive 下载到 runner temp，必须先核实 ADR-0006 固定的
+size/SHA-256/license record，再 safe extract，并在任何 interop case 前核实固定
+version output；unexpected archive entry同样失败。配置只使用
+`AAECAwQFBgcICQoLDA0ODw==` synthetic PSK，不读取 repository secrets。
 
 每个 case验证 TCP-only AES-128、双向 payload、half-close、reference进程清理。
 case timeout 60 秒，readiness 10 秒，stdout/stderr各 cap 256 KiB；超限截断并标记，
@@ -236,27 +295,93 @@ asset names/checksums/license policy见 ADR-0006；四行缺一即 M0 BLOCKED。
 
 ### Platform commands
 
-三个 matching runners均使用：
+四个 platform config fixtures 固定为：
 
 ```text
-cargo +1.97.1 build --workspace --bins --release --locked --target <triple>
-<client> --config <client-valid.toml> --check-config
-<client> --config <client-invalid-key-length.toml> --check-config
-<server> --config <server-valid.toml> --check-config
-<server> --config <server-invalid-key-length.toml> --check-config
+tests/platform/config/client-valid.toml
+tests/platform/config/client-invalid-key-length.toml
+tests/platform/config/server-valid.toml
+tests/platform/config/server-invalid-key-length.toml
 ```
+
+valid command必须 exit 0，invalid-key-length command必须 exit 2；四次都证明未创建
+listener。所有 config 只含 synthetic PSK。
+
+`m0-windows-msvc` 在 `windows-2022`：
+
+```text
+rustup toolchain install 1.97.1 --profile minimal
+rustup target add --toolchain 1.97.1 x86_64-pc-windows-msvc
+cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-pc-windows-msvc
+target\x86_64-pc-windows-msvc\release\ferrum2-client.exe --config tests\platform\config\client-valid.toml --check-config
+target\x86_64-pc-windows-msvc\release\ferrum2-client.exe --config tests\platform\config\client-invalid-key-length.toml --check-config
+target\x86_64-pc-windows-msvc\release\ferrum2-server.exe --config tests\platform\config\server-valid.toml --check-config
+target\x86_64-pc-windows-msvc\release\ferrum2-server.exe --config tests\platform\config\server-invalid-key-length.toml --check-config
+cargo test -p ferrum2-m0-harness --test detection_probe --locked
+```
+
+`m0-linux-gnu` 在 `ubuntu-24.04`：
+
+```text
+rustup toolchain install 1.97.1 --profile minimal
+rustup target add --toolchain 1.97.1 x86_64-unknown-linux-gnu
+cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-unknown-linux-gnu
+target/x86_64-unknown-linux-gnu/release/ferrum2-client --config tests/platform/config/client-valid.toml --check-config
+target/x86_64-unknown-linux-gnu/release/ferrum2-client --config tests/platform/config/client-invalid-key-length.toml --check-config
+target/x86_64-unknown-linux-gnu/release/ferrum2-server --config tests/platform/config/server-valid.toml --check-config
+target/x86_64-unknown-linux-gnu/release/ferrum2-server --config tests/platform/config/server-invalid-key-length.toml --check-config
+cargo test -p ferrum2-m0-harness --test detection_probe --locked
+```
+
+两个 GNU artifacts 必须在该 VM 原生实际运行；另以 `file`、`readelf` 记录 ELF
+interpreter、`DT_NEEDED` 和 required `GLIBC_*` symbols。
+
+`m0-linux-musl` 在 `ubuntu-24.04`：
+
+```text
+sudo apt-get update
+sudo apt-get install --yes --no-install-recommends musl=1.2.4-2 musl-dev=1.2.4-2 musl-tools=1.2.4-2
+dpkg-query -W musl musl-dev musl-tools
+rustup toolchain install 1.97.1 --profile minimal
+rustup target add --toolchain 1.97.1 x86_64-unknown-linux-musl
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-unknown-linux-musl
+target/x86_64-unknown-linux-musl/release/ferrum2-client --config tests/platform/config/client-valid.toml --check-config
+target/x86_64-unknown-linux-musl/release/ferrum2-client --config tests/platform/config/client-invalid-key-length.toml --check-config
+target/x86_64-unknown-linux-musl/release/ferrum2-server --config tests/platform/config/server-valid.toml --check-config
+target/x86_64-unknown-linux-musl/release/ferrum2-server --config tests/platform/config/server-invalid-key-length.toml --check-config
+file target/x86_64-unknown-linux-musl/release/ferrum2-client target/x86_64-unknown-linux-musl/release/ferrum2-server
+readelf -hW target/x86_64-unknown-linux-musl/release/ferrum2-client
+readelf -lW target/x86_64-unknown-linux-musl/release/ferrum2-client
+readelf -dW target/x86_64-unknown-linux-musl/release/ferrum2-client
+readelf -hW target/x86_64-unknown-linux-musl/release/ferrum2-server
+readelf -lW target/x86_64-unknown-linux-musl/release/ferrum2-server
+readelf -dW target/x86_64-unknown-linux-musl/release/ferrum2-server
+```
+
+Ubuntu package index update不得改变上述 exact package version；version 不可用
+即 FAIL。两个 artifacts 都必须被 `file` 识别为
+static/static-pie，且 `readelf -lW/-dW` 不得出现 `PT_INTERP` 或
+`DT_NEEDED`。只打印工具输出而不做 assertion、只 build 不原生运行均失败。
 
 | Test | Triple / runner | Extra evidence |
 |---|---|---|
-| M0-PLAT-001 | `x86_64-pc-windows-msvc` / native Windows x86_64 + VS 2022 | PE artifact SHA-256、rustc/cargo/linker、valid 0/invalid 2、无 listener；M0-DETECT-002 PASS |
-| M0-PLAT-002 | `x86_64-unknown-linux-gnu` / fixed x86_64 glibc Linux | image digest、required GLIBC symbols、artifact SHA-256、valid/invalid run；M0-DETECT-002 PASS |
-| M0-PLAT-003 | `x86_64-unknown-linux-musl` / Linux + musl toolchain | `file`/`readelf` static-link evidence、artifact SHA-256、valid/invalid run |
+| M0-PLAT-001 | `x86_64-pc-windows-msvc` / `windows-2022` | Windows kernel/build、PE artifact SHA-256、rustc/cargo/VS 2022 `cl`/`link`、valid 0/invalid 2、无 listener；M0-DETECT-002 PASS |
+| M0-PLAT-002 | `x86_64-unknown-linux-gnu` / `ubuntu-24.04` | `uname`/kernel、glibc/`cc`/`ld`、ELF interpreter/`DT_NEEDED`/required `GLIBC_*` symbols、artifact SHA-256、四次 native run；M0-DETECT-002 PASS |
+| M0-PLAT-003 | `x86_64-unknown-linux-musl` / `ubuntu-24.04` + exact `musl-tools=1.2.4-2` | package/linker versions、`file`/`readelf` no-`PT_INTERP`/no-`DT_NEEDED` assertions、artifact SHA-256、四次 native run |
 
 每个 artifact对两个 binaries各运行 valid/invalid，共四次。只 `cargo check`、只构建
 library、只看 artifact文件存在均失败。
 
-MSRV在能够安装 1.85.0 的 host runner执行 M0-MSRV-001；1.97.1 current build不能
-替代。BLAKE3 build backend/C compiler在三个 target evidence中记录。
+每个 platform job 记录 `ImageOS`、`ImageVersion`，并在 CI status 链接该 job
+`Set up job` 的 exact `Included Software` URL；另记录 OS/kernel、
+`rustc -Vv`、Cargo、实际 compiler/linker、BLAKE3 backend 和 artifact SHA-256。
+GitHub-hosted VM 不提供本项目可固定的 OCI image digest；这些 provider-native
+字段只批准为 M0 smoke evidence，不是 M3 完整平台 qualification。
+
+MSRV 在 `ubuntu-24.04` 先执行
+`rustup toolchain install 1.85.0 --profile minimal`，再执行 M0-MSRV-001；
+1.97.1 current build不能替代。BLAKE3 build backend/C compiler在三个 target
+evidence中记录。
 
 ## Performance and resource tests
 
@@ -295,8 +420,10 @@ branch name、人工挑选 path 或缩小 diff。
 `scope_audit` 必须自动拒绝：不在 M0 tickets/control-doc allowlist 的路径、
 `target/`/coverage/profile/pcap/log/result、可执行或压缩的 external artifact、
 缺 `PROVENANCE.toml`/source/license/SHA-256/expected interpretation 的 fixture，
-以及 production tree 中 fixture-only key/scripted RNG/bypass。随后 Architect 与
-QA 对 `git diff --name-status --find-renames
+以及 production tree 中 fixture-only key/scripted RNG/bypass。唯一批准的
+`.github` 路径是 M0-T08 ownership 下的 `.github/workflows/m0.yml`；其他
+workflow/action/config 一律拒绝。随后 Architect 与 QA 对
+`git diff --name-status --find-renames
 b41c6127b1834ebd97246451fd92bafea50cb205...HEAD` 和
 `cargo tree --workspace --locked` 明确签署以下 checklist：
 
@@ -310,11 +437,15 @@ b41c6127b1834ebd97246451fd92bafea50cb205...HEAD` 和
 
 M0 test gate通过需要：
 
-1. 表中 M0-WS～M0-SCOPE 每个 required ID有同一 integrated commit 的 PASS evidence。
+1. 表中 M0-WS～M0-CI～M0-SCOPE 每个 required ID有同一 integrated commit 的
+   PASS evidence。
 2. `workflow.toml` quick/full所有命令实际运行且 exit 0。
 3. 四项 interop与三项 platform smoke无 skip/缺失。
-4. Architect与QA复核 spec符合性、security ordering、ownership和 evidence。
-5. 未发现 committed external/generated artifact、real secret或M0 non-goal。
+4. 另行授权 push 后，同一 GitHub Actions run ID/attempt 的 11 个固定 job 对
+   exact integration `GITHUB_SHA` 全部 success；provider-native runner evidence
+   与 Included Software links 完整。
+5. Architect与QA复核 spec符合性、security ordering、ownership和 evidence。
+6. 未发现 committed external/generated artifact、real secret或M0 non-goal。
 
 已知但明确延期：
 
@@ -324,4 +455,6 @@ M0 test gate通过需要：
 - throughput、10,000 idle与长期资源阈值：M4。
 
 当前没有产品实现，所以上述测试均是 required future evidence，不是本次 plan 已通过
-的测试。runner/provider缺失会使对应 gate BLOCKED，不会转换为 waiver。
+的测试。required job 启动后 setup/network/package/reference/command/timeout/
+evidence 失败是 FAIL；workflow、未授权 push、provider 或 job 未产生结果是
+BLOCKED。missing/skipped/cancelled/neutral 都不会转换为 waiver 或 PASS。

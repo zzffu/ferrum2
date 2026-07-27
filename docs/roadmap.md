@@ -8,8 +8,9 @@
 Bootstrap 基线是
 `master@b41c6127b1834ebd97246451fd92bafea50cb205`。当前仍没有产品代码、工程分支
 或 integration branch，但 M0 已有 Accepted ADR、Approved spec/test plan 和八个
-ready tickets，因此 M0 为 `planned`；M1-M4 仍为 `proposed`。文档/workflow
-validation 只证明 implementation control plane ready，不证明任何产品行为已实现。
+ready tickets；ADR-0007 已把 required CI provider 收窄为 GitHub Actions。因此
+M0 仍为 `planned`，M1-M4 仍为 `proposed`。文档/workflow validation 只证明
+implementation control plane ready，不证明任何产品行为或远程 CI 已实现。
 
 ## 依赖顺序
 
@@ -34,7 +35,7 @@ non-overlapping ownership。
 - **Entry conditions:**
   - bootstrap 的 vision、gap analysis、roadmap、CI baseline 已更新并通过
     workflow validation；
-  - `ADR-0001`～`ADR-0006` 已 Accepted，关闭 DEC-001～DEC-007；
+  - `ADR-0001`～`ADR-0007` 已 Accepted，关闭 DEC-001～DEC-007 与 DEC-011；
   - `SPEC-0001` 与 `TEST-0001` 已 Approved；
   - M0-T01～M0-T08 的 blockers、non-overlapping ownership 和量化 acceptance
     已通过 workflow validation。
@@ -60,7 +61,10 @@ non-overlapping ownership。
      双向互操作，共 4 个 required cases。
   8. `workflow.toml` quick/full gates 通过；`x86_64-pc-windows-msvc`、
      `x86_64-unknown-linux-gnu`、`x86_64-unknown-linux-musl` 对两个 release
-     binaries 完成 locked build 与 matching-runner offline config smoke。
+     binaries 完成 locked build 与 matching-runner offline config smoke；
+     GNU/Windows M0-DETECT-002、musl `file`/`readelf` static evidence 完整。
+     另行授权 push 后，GitHub Actions 一个 run ID/attempt 的 11 个固定 job 在
+     exact integration `GITHUB_SHA` 全部 success。
 - **In-scope tickets:**
   - M0-T01：locked workspace、toolchain、license 与 core contracts；无 blocker；
   - M0-T02：secret/KDF/AEAD/key-clock-entropy；blocked by T01；
@@ -69,7 +73,8 @@ non-overlapping ownership。
   - M0-T05：SOCKS5 CONNECT inbound；blocked by T01；
   - M0-T06：runtime/direct/relay/lifecycle；blocked by T01；
   - M0-T07：binary composition/local E2E；blocked by T03/T04/T05/T06；
-  - M0-T08：interop/MSRV/platform/integration gates；blocked by T07。
+  - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
+    独占 `.github/workflows/m0.yml`，blocked by T07。
 
   Dependency graph：
 
@@ -83,9 +88,11 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** not yet
-- **Open blockers and risks:** 当前仍无 Cargo workspace、产品代码、CI provider、
-  fixture 或 runner evidence；唯一 ready frontier 是 M0-T01。matching Linux
-  runners/reference downloads 不可用会在 T08 成为 hard blocker，不能 skip。
+- **Open blockers and risks:** 当前仍无 Cargo workspace、产品代码、workflow、
+  fixture 或 runner evidence；唯一 ready frontier 是 M0-T01。GitHub Actions
+  provider 已由 ADR-0007 固定，但 remote capability/push/workflow execution 未经
+  单独授权且未验证。matching hosted runner/reference download 不可用会在 T08
+  成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。
   AEAD nonce reuse、secret leakage、认证前副作用和 task leak 仍是 P0 实现风险，
   其控制合同见 ADR-0002/0004/0005 与 TEST-0001。
 
@@ -206,6 +213,7 @@ non-overlapping ownership。
 | DEC-008 | open；M2 plan | UDP protocol API、window/session/buffer/idle limits 与 eviction | M0 明确不实现 UDP |
 | DEC-009 | partially bounded；M3 plan | M0 已固定 triples/build/config smoke；full native lifecycle/packaging qualification 留 M3 | `ADR-0006` |
 | DEC-010 | open；M4 plan | benchmark hardware/config/statistics 与 10k-idle stability threshold | M0 不设性能声明 |
+| DEC-011 | resolved in M0 CI amendment | GitHub Actions required provider；`.github/workflows/m0.yml`；fixed hosted runners/jobs/security/evidence；本机 WSL2仅作诊断 | `ADR-0007`、`SPEC-0001`、`TEST-0001`、M0-T08 |
 
 ## 风险登记
 
@@ -217,6 +225,7 @@ non-overlapping ownership。
 | task/session leak、unbounded queue 或错误 half-close | P0 | M0 | owner/termination contract、bounded tests、soak |
 | 外部实现/fixture/version/license 漂移 | P1 | M0 | pin/checksum/provenance 和 required-job policy |
 | musl/Windows 差异发现过晚 | P1 | M0 | early build smoke，M3 full qualification |
+| GitHub-hosted image weekly drift 或 provider outage | P1 | M0 | fixed OS labels、ImageOS/ImageVersion/Included Software evidence、unavailable=FAIL/BLOCK；不宣称M3资格 |
 | benchmark 不等价或噪声驱动错误优化 | P1 | M4 | frozen comparable config 和重复统计 |
 | 当前零代码使工期/接口估计不可靠 | P1 | M0 plan | 小型纵切、窄 tickets、每波 review/validation |
 
@@ -227,3 +236,4 @@ non-overlapping ownership。
 | 2026-07-27 | Bootstrap | 采用 M0→M4 的纵向路线，不扩大 v0 范围 | 尽早验证最高安全、互操作、平台和性能风险，同时保持每阶段可独立验收 | `AGENTS.md`、`workflow.toml`、仓库清点、Product/Architect/QA bootstrap reports |
 | 2026-07-27 | M0 | 首个 plan 目标确定为 AES-128-GCM TCP 安全纵切 | 比纯 workspace scaffolding 更早产生可观察用户路径并验证 module seams | Product PASS_WITH_ACTIONS；Architect/QA 要求安全、生命周期、互操作和平台门前移 |
 | 2026-07-27 | M0 plan | M0 改为 `planned`，接受 ADR-0001～0006、SPEC/TEST-0001 与 T01～T08 DAG | DEC-001～007 已有可实现、可测试、ownership-disjoint contract；唯一 initial frontier 为 T01 | Product/Architect/QA plan reports；upstream baseline；workflow validate/frontier/next |
+| 2026-07-27 | M0 CI amendment | 以 GitHub Actions/GitHub-hosted runners 取代本机 WSL2 作为 M0 required CI；新增 ADR-0007 和 T08 的唯一 workflow ownership | 绑定 pushed exact integration commit，固定 native runners、11 job、安全与 provider-native evidence，同时不扩大产品/协议范围 | Product/Architect/QA amendment reports；GitHub official runner/security docs；workflow validate/frontier/next |

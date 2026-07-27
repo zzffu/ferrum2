@@ -2,7 +2,7 @@
 
 - **Status:** Approved
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
 - **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
 
@@ -127,7 +127,8 @@ server TcpListener
 
 Dependency DAG、toolchain、exact dependency versions 与 manifest ownership 由
 `ADR-0001` 冻结。M0-T01 独占所有 manifests/lock/toolchain/license；后续 ticket
-不能修改它们。
+不能修改它们。M0-T08 独占 CI 路径 `.github/workflows/m0.yml`；本次 plan
+不创建该文件，T08 execute 才能按 ADR-0007 实现。
 
 ## Configuration and validation
 
@@ -316,12 +317,75 @@ JoinSet empty 和固定 buffer/permit counters；RSS 等间接指标不能替代
 ## Compatibility and upstream divergence
 
 - 固定 reference pins、四项 matrix、artifact checksums 和 required-job policy 见
-  `ADR-0006`。
+  `ADR-0006`；GitHub Actions provider、hosted runner 和 evidence 表达见
+  `ADR-0007`。
 - M0 只声明 AES-128 TCP/IPv4 covered path，不声明完整 SIP022/v0 compatibility。
 - reference 的 replay ordering、logging、unsafe 或 binding 偏差不进入 ferrum2。
   若互操作揭示规范 ambiguity，停止 gate并先修订 ADR/spec。
 - M1 对 method/地址支持只能 additive；不得复制 transport state machine或改变已
   固定 AES-128 wire。
+
+## M0 CI provider contract
+
+M0 required CI 固定为公开 repository `zzffu/ferrum2` 的 GitHub Actions，
+workflow path 为 `.github/workflows/m0.yml`。workflow 只允许
+`pull_request`、push 到 `master`/`codex/integration/**` 和
+`workflow_dispatch`；禁止 `pull_request_target` 及其他 triggers。
+
+workflow 使用
+`actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd`
+（v6.0.2），设置 `ref: ${{ github.sha }}`、`fetch-depth: 0`、
+`clean: true`、`persist-credentials: false`。所有 `uses:` 必须固定完整
+40-hex commit SHA。顶层权限只有 `contents: read`，其余为 `none`，job 不得
+提升权限。required jobs 不使用 cache，不依赖 cache hit，不使用
+`continue-on-error`，不读取 `secrets.*`。
+
+required job ID 和 displayed name、runner、timeout 精确为：
+
+| Required job | Runner | Timeout (minutes) |
+|---|---|---:|
+| `m0-host-quick` | `ubuntu-24.04` | 60 |
+| `m0-security` | `ubuntu-24.04` | 60 |
+| `m0-lifecycle` | `ubuntu-24.04` | 60 |
+| `m0-local-e2e` | `ubuntu-24.04` | 60 |
+| `m0-integration-full` | `ubuntu-24.04` | 60 |
+| `m0-msrv` | `ubuntu-24.04` | 60 |
+| `m0-windows-msvc` | `windows-2022` | 60 |
+| `m0-linux-gnu` | `ubuntu-24.04` | 60 |
+| `m0-linux-musl` | `ubuntu-24.04` | 60 |
+| `m0-interop-sing-box` | `ubuntu-24.04` | 60 |
+| `m0-interop-shadowsocks-rust` | `ubuntu-24.04` | 60 |
+
+`ubuntu-latest`、`windows-latest` 与任何 `*-latest` 禁止。每个 job checkout 后
+断言 clean worktree 和 `git rev-parse HEAD == GITHUB_SHA`。platform/interop
+job 在自己的 fresh VM 内构建当前 commit binaries，不消费其他 job/run 的
+ferrum2 artifact。
+
+`m0-linux-musl` 固定安装 `musl`/`musl-dev`/`musl-tools=1.2.4-2`，用
+`musl-gcc` 为 linker 构建两个 `x86_64-unknown-linux-musl` release binaries，
+原生运行各自 valid/invalid `--check-config`，并以 `file` 与
+`readelf -hW/-lW/-dW` 证明两个 artifact 均无 `PT_INTERP`/`DT_NEEDED`。
+`m0-linux-gnu` 构建并原生运行两个 `x86_64-unknown-linux-gnu` release
+artifacts 的 valid/invalid config matrix，同时阻塞运行 M0-DETECT-002。
+Windows 2022 job 同样运行两个 MSVC artifacts 的 config matrix 和
+M0-DETECT-002。精确 command/test allocation 见 TEST-0001。
+
+interop job 执行 reference binary 前必须核实 ADR-0006 既有固定
+SHA-256、size/version 和 license record；只使用 ADR-0006 的 synthetic PSK，
+不读取 repository secrets。每个 required job 记录 run ID/attempt、job、
+`GITHUB_SHA`、`RUNNER_OS`/`RUNNER_ARCH`、`ImageOS`、`ImageVersion`、
+OS/kernel、rustc/cargo/linker；CI status 链接 `Set up job` 中 exact
+`Included Software` URL。platform job 另记录 artifact SHA-256 和 linkage。
+
+GitHub-hosted VM 没有本项目可固定的 OCI image digest；上述 provider-native
+runner evidence 被批准用于 M0 smoke，但不是 M3 完整平台资格。job 启动后的
+setup/network/package/reference/command/timeout/evidence 错误是 FAIL；workflow、
+push、provider 或 required job 不可用导致没有结果是 BLOCKED；missing、
+skipped、cancelled 或 neutral 均不是 PASS。
+
+M0 close evidence 只能来自另行授权 push 后的一次完整 GitHub Actions run：
+同一 run ID/attempt 的 11 jobs 全部 success，且 `GITHUB_SHA` 精确等于批准的
+integration commit。不同 SHA 的 PR/manual run 和本机/WSL2 结果不能替代。
 
 ## Observability
 
@@ -340,7 +404,9 @@ JoinSet empty 和固定 buffer/permit counters；RSS 等间接指标不能替代
 M0 是首次 schema/wire/runtime，无数据迁移。所有 replay/metric state in-memory。
 rollback 为通过 supervisor shutdown 后回退 integrated commit。更改 wire、
 dependency/module direction、config schema、secret seam、task topology、metrics
-schema 或 reference pins 必须用新的 ADR/spec revision，不得静默编辑实现理由。
+schema、reference pins 或 ADR-0007 的 provider/workflow/job/runner/security/
+evidence contract 必须用新的 ADR/spec revision，不得静默编辑实现理由。远程
+revert、branch mutation 或 workflow rerun 仍需用户单独授权。
 
 ## Acceptance criteria
 
@@ -371,14 +437,18 @@ schema 或 reference pins 必须用新的 ADR/spec revision，不得静默编辑
    supervisor-owned metrics endpoint limits。
 10. **AC-10 Interoperability:** M0-INT-001～004 全部 required PASS；pin、asset
     checksum/version、双向 bytes/half-close、sanitized diagnostics齐全，缺环境不
-    得 skip-pass。
-11. **AC-11 Platform/repository gates:** M0-PLAT-001～003、M0-GATE-001～002
-    通过；三 target release binaries 在 matching runner 完成 valid/invalid config
-    smoke，quick/full 在同一 integrated commit exit 0。
+    得 skip-pass；两个 interop job 分别在自己的 `ubuntu-24.04` clean VM 从
+    `GITHUB_SHA` 构建 ferrum2，并在执行 reference 前验证既有 pin/hash/version。
+11. **AC-11 Platform/repository/CI gates:** M0-PLAT-001～003、
+    M0-GATE-001～002、M0-CI-001～006 通过；三个 target release binaries 在
+    固定 hosted runner 完成 valid/invalid config smoke，GNU/Windows
+    M0-DETECT-002 和 musl static proof 完整；同一 pushed exact integration
+    commit 的一个 run/attempt 中 11 个固定 job 全部 success。
 12. **AC-12 Scope/provenance:** M0-SCOPE-001 通过；固定从
     `b41c6127b1834ebd97246451fd92bafea50cb205` 到 integrated `HEAD` 的完整 diff
     不含 M0 non-goals、external binaries、generated results 或真实 secrets；所有
-    fixture/reference/locked dependencies有来源和license review记录。
+    fixture/reference/locked dependencies有来源和license review记录；唯一批准的
+    `.github` path是M0-T08拥有的`.github/workflows/m0.yml`。
 
 M0 只有在 AC-01～AC-12 同一 integrated commit 证据齐全时才能进入 close。
 
@@ -389,8 +459,10 @@ M0 只有在 AC-01～AC-12 同一 integrated commit 证据齐全时才能进入 
 
 - T08 首次下载时补录 reference asset byte size 与精确 `--version` 输出；checksum/
   version 不匹配即阻塞，不自行换版本。
-- 仓库尚无 CI provider；required job contract 是 provider-neutral。matching runner
-  不可用会阻塞 M0 close，而非允许 skip。
+- GitHub Actions provider 与 required workflow contract 已由 ADR-0007 固定；
+  workflow 尚未实现且 exact integration commit 尚未获授权 push，因此远程 evidence
+  仍为 BLOCKED。remote 初始化/URL 修正（若需要）、CI branch push 与 workflow
+  execution 都是 execute 前需用户单独明确授权的外部动作。
 - zero-linger native probe若在 Windows/Linux 无法得到一致批准的 close class，
   必须停止并提议 ADR-0004 revision。
 - DEC-008（UDP）、DEC-009（M3 完整平台 qualification）、DEC-010（M4 performance/

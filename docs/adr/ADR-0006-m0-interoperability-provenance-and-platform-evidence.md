@@ -168,6 +168,7 @@ reference interop 是独立 evidence，不得把 reference output改名为“官
 
 ## References
 
+- `docs/adr/ADR-0007-m0-github-actions-ci-provider.md`（补充 M0 required CI provider、hosted runner 与 provider-native evidence 合同）
 - `docs/research/M0-upstream-baseline.md`
 - [sing-box v1.13.14](https://github.com/SagerNet/sing-box/releases/tag/v1.13.14)
 - [shadowsocks-rust v1.24.0](https://github.com/shadowsocks/shadowsocks-rust/releases/tag/v1.24.0)

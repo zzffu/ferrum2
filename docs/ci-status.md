@@ -2,7 +2,8 @@
 
 ## 当前基线
 
-- **Branch/commit:** `master@b41c6127b1834ebd97246451fd92bafea50cb205`
+- **Branch/commit:** pre-amendment baseline
+  `master@5402860136c3233ff1890080099dcddc7d321fee`
 - **Date:** 2026-07-27（Asia/Shanghai）
 - **Environment:** Microsoft Windows 11 专业版 64-bit，build `10.0.26200`；
   PowerShell `7.6.4`
@@ -15,18 +16,25 @@
 - **Repository state before bootstrap edits:** clean `master`
 - **Result:** 工作流控制面结构有效，但产品验证基线为 **BLOCKED**；没有 Cargo
   workspace、产品测试或 CI，不能描述为 CI green
-- **M0 planning state:** ADR-0001～0006 Accepted，SPEC/TEST-0001 Approved，
-  M0-T01～T08 ready；这只使 implementation frontier 可执行，不改变产品 gate 的
-  blocked 状态
+- **M0 planning state:** ADR-0001～0007 Accepted，SPEC/TEST-0001 Approved，
+  M0-T01～T08 ready；ADR-0007 已选择 GitHub Actions/GitHub-hosted runners，
+  但 workflow 尚未创建、integration commit 尚未推送，产品与远程 CI gate 仍为
+  BLOCKED/NOT_RUN
+- **Remote observation:** 本地已有 `origin=https://github.com/zzffu/ferrum2.git`；
+  本轮未修改 remote、未验证 push/Actions capability，也未推送。remote
+  初始化/URL修正（若需要）与CI branch push仍需用户单独授权
 
 ## 仓库与自动化清点
 
 - 无 `Cargo.toml`、`Cargo.lock`、Rust 产品源码、benchmark 或产品 test files；
-- 无 `.github` CI workflow 或其他 CI definition；
-- bootstrap 时无 non-template contract/ticket；M0 plan 当前已新增六份 ADR、一份
-  spec、一份 test plan、八份 ticket和一份upstream evidence note；
-- Git history 只有 `88f29f2`（control-plane 初始化）和 `b41c612`
-  （产品约束/validation commands）；
+- 无 `.github` CI workflow 或其他 CI definition；固定路径
+  `.github/workflows/m0.yml` 只存在于 ADR/spec/test/ticket 合同；
+- bootstrap 时无 non-template contract/ticket；M0 plan与本次amendment现有七份
+  Accepted ADR、一份Approved spec、一份Approved test plan、八份ready ticket和
+  一份upstream evidence note；
+- pre-amendment Git history 为 `88f29f2`（control-plane 初始化）、`b41c612`
+  （产品约束/validation commands）、`3024789`（M0 plan）和`5402860`
+  （QA agent配置）；
 - `workflow.toml` 是 host-local quick/full command 的 authoritative source；
   target matrix、interop、security 和 performance jobs 尚未实现。
 
@@ -57,6 +65,16 @@
 | 2026-07-27 | same, final M0 plan | `python .agents/skills/milestone-workflow/scripts/workflow.py frontier --milestone M0 --json` | 0 | 唯一 selected frontier=`M0-T01`；`skipped=[]`、`warnings=[]` |
 | 2026-07-27 | same, final M0 plan | `python .agents/skills/milestone-workflow/scripts/workflow.py next --milestone M0 --json` | 0 | `action=execute_frontier`、8 ready；T02～T08 的等待原因与 ticket blockers 精确一致 |
 | 2026-07-27 | same, final M0 plan | `git diff --check` | 0 | 无 whitespace error；Architect 与 QA 最终只读复核均为 PASS、无 BLOCKER/REQUIRED |
+| 2026-07-27 | `master@5402860`，amendment preflight | `python .agents/skills/milestone-workflow/scripts/workflow.py doctor` | 0 | Doctor checks passed；base=`master`、strategy=`drain`、unlimited waves、auto-close false |
+| 2026-07-27 | `master@5402860`，amendment preflight | `python .agents/skills/milestone-workflow/scripts/workflow.py validate` | 0 | Existing M0 plan workflow validation passed |
+| 2026-07-27 | `master@5402860` + M0 CI amendment docs | `git ls-remote https://github.com/actions/checkout.git refs/tags/v6.0.2` | 0 | upstream tag精确解析为`de0fac2e4500dabe0009e67214ff5f5447ce83dd`；只读查询，不访问或修改项目remote |
+| 2026-07-27 | same, M0 CI amendment | `python .agents/skills/milestone-workflow/scripts/workflow.py doctor` | 0 | Doctor checks passed；base=`master`、strategy=`drain`、unlimited waves、auto-close false |
+| 2026-07-27 | same, M0 CI amendment | `python .agents/skills/milestone-workflow/scripts/workflow.py validate` | 0 | ADR-0007、SPEC/TEST、8 tickets、DAG与ownership有效，无warning |
+| 2026-07-27 | same, M0 CI amendment | `python .agents/skills/milestone-workflow/scripts/workflow.py frontier --milestone M0` | 0 | 唯一selected frontier=`M0-T01` |
+| 2026-07-27 | same, M0 CI amendment | `python .agents/skills/milestone-workflow/scripts/workflow.py next --milestone M0 --json` | 0 | `action=execute_frontier`、8 ready；T02～T08只等待原有ticket blockers；`warnings=[]` |
+| 2026-07-27 | same, M0 CI amendment | `git diff --check` | 0 | 无whitespace error；仅有既有Windows LF→CRLF checkout warning |
+| 2026-07-27 | same, final M0 CI amendment | Architect final read-only gate | PASS | ADR-0007/0006补充关系、provider/security/evidence、M3边界、ownership与remote授权边界一致；无BLOCKER/REQUIRED/advisory |
+| 2026-07-27 | same, final M0 CI amendment | QA final read-only gate | PASS | AC→test→job→runner→timeout→command→evidence与FAIL/BLOCK一致；无BLOCKER/REQUIRED，仅记录既有LF→CRLF warning |
 
 三条 Cargo 失败是当前基线的预期、已记录 blocker，不是测试失败被豁免。full
 commands 未运行，因为与 quick commands 具有同一个缺失 workspace 前置条件；
@@ -67,33 +85,48 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 pre-implementation plan | PASS | Accepted ADR-0001～0006、Approved SPEC/TEST-0001、ready T01～T08；Architect=PASS、QA=PASS；frontier=T01 | 当前 |
+| M0 pre-implementation plan | PASS | Accepted ADR-0001～0007、Approved SPEC/TEST-0001、ready T01～T08；CI amendment Architect=PASS、QA=PASS；frontier=T01 | 当前 |
+| GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | BLOCKED | 无 root manifest/workspace | M0 |
 | Host full Cargo gate | NOT_RUN/BLOCKED | quick prerequisite 不成立 | M0 |
 | Security/KAT/negative | PLANNED/NOT_RUN | TEST-0001 已映射 required tests；无实现、fixture 或执行证据 | M0 |
 | Lifecycle/backpressure | PLANNED/NOT_RUN | TEST-0001 已冻结 deterministic seams；无 runtime 或执行证据 | M0 |
-| External interop | PLANNED/NOT_RUN | reference pins/checksums与四项 M0 matrix 已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
-| Linux glibc/musl + Windows | PLANNED/NOT_RUN | 三个 exact targets与 matching-runner smoke已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |
+| External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
+| Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
 
-## 必需但尚未建立的 CI 层级
+## 已冻结但尚未实现的 M0 CI
 
-后续 test plans 必须为每项 acceptance criterion 指定 test ID、命令、预期结果、
-CI job 和 fixture 来源。拟议层级为：
+唯一 workflow 将是 `.github/workflows/m0.yml`；本次 plan 不创建。trigger 只允许
+`pull_request`、push 到 `master`/`codex/integration/**` 和
+`workflow_dispatch`，禁止 `pull_request_target`。checkout 固定
+`actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd`、full history；
+permissions 只有 `contents: read`，所有 `uses:` 为 full SHA。required jobs
+不使用 cache、secrets、cross-job ferrum artifacts或 `continue-on-error`。
 
-- 每次变更：`workflow.toml` quick gate，并在 integration 运行 full gate；
-- security negative jobs：KAT、tamper/truncation、illegal length/address、
-  timestamp/replay、request/response binding 和 secret redaction；
-- deterministic lifecycle jobs：bounded queue/buffer、backpressure、
-  timeout/cancellation、half-close、listener failure 和 graceful shutdown；
-- Windows、Linux x86_64 glibc、Linux x86_64 musl target matrix；精确
-  triples 和 native/cross 策略由对应 plan 决定；
-- 固定 sing-box/shadowsocks-rust version/checksum 的 required interop jobs；
-- scheduled soak/repetition jobs；M4 使用固定 runner 执行 performance gate。
+| Required job | Runner | Timeout | Evidence group |
+|---|---|---:|---|
+| `m0-host-quick` | `ubuntu-24.04` | 60 | `workflow.toml` quick |
+| `m0-security` | `ubuntu-24.04` | 60 | workspace/security/KAT/replay/binding/redaction |
+| `m0-lifecycle` | `ubuntu-24.04` | 60 | abortive-close/lifecycle/backpressure/metrics endpoint |
+| `m0-local-e2e` | `ubuntu-24.04` | 60 | config/CLI/SOCKS/endpoint/local process E2E |
+| `m0-integration-full` | `ubuntu-24.04` | 60 | full/scope/M0-CI-001～006 |
+| `m0-msrv` | `ubuntu-24.04` | 60 | Rust 1.85.0 check/test |
+| `m0-windows-msvc` | `windows-2022` | 60 | MSVC artifacts/config + M0-DETECT-002 |
+| `m0-linux-gnu` | `ubuntu-24.04` | 60 | GNU artifacts/native config + M0-DETECT-002 |
+| `m0-linux-musl` | `ubuntu-24.04` | 60 | musl-tools 1.2.4-2 artifacts/config/static proof |
+| `m0-interop-sing-box` | `ubuntu-24.04` | 60 | M0-INT-001/003 |
+| `m0-interop-shadowsocks-rust` | `ubuntu-24.04` | 60 | M0-INT-002/004 |
 
-required job 缺失或 skipped 不得算通过。诊断 artifact 必须脱敏；packet capture、
-benchmark output、coverage/profiling output 和 rendered docs 属于 generated
-artifacts，不提交仓库。
+每个 job 必须从 clean VM/current `GITHUB_SHA` 构建并记录 ImageOS、ImageVersion、
+Included Software URL、OS/kernel、rustc/cargo/linker；platform jobs另记录artifact
+hash/linkage。GitHub-hosted VM没有OCI image digest，provider-native evidence只用于
+M0 smoke，不是M3 qualification。required job启动后失败为FAIL；workflow、
+provider、未授权push或job未产生结果为BLOCKED；missing/skipped均非PASS。
+
+M0 close只接受另行授权push后的一个exact integration SHA、一个run ID/attempt中
+11 job全部success。诊断artifact必须脱敏；packet capture、benchmark output、
+coverage/profiling output 和 rendered docs 属于 generated artifacts，不提交仓库。
 
 ## 已知缺口、flakes 与 skipped coverage
 
@@ -102,14 +135,14 @@ artifacts，不提交仓库。
 - Windows 上技能文档给出的 `python3` 命令不可用；当前可复现入口是 `python`。
   是否修改 workflow helper 的跨平台调用说明留待单独控制面决策，不阻塞本次文档。
 - M0 已固定 build compiler 1.97.1、MSRV 1.85.0、三个 target triples、reference
-  versions/checksums、fixture provenance与 unavailable=FAIL/BLOCK contract；这些
-  仍缺实际 workspace、runner 和执行证据。
-- 最终门禁期间出现非本次 scope 的 `.codex/agents/qa.toml` working-tree 修改
-  （`model_reasoning_effort = "medium"` → `"high"`）。M0 文档提交不得包含或丢弃
-  该并发改动；`workflow.require_clean_base=true` 意味着其所有者确认处理前，
-  execute preflight 会停止。
+  versions/checksums、fixture provenance、GitHub job/runner/timeout/security和
+  unavailable=FAIL/BLOCK contract；这些仍缺实际 workspace、workflow、runner
+  run 和 artifact evidence。
+- 本地 `origin` 已存在，但 remote capability、repository Actions settings 和
+  push权限未验证；本次未修改remote。execute前必须由用户单独授权remote
+  初始化/URL修正（若需要）、`codex/integration/m0` push和CI execution。
 - 尚未定义 resource stability threshold、soak duration、benchmark hardware
   或 comparison statistics；这是 M4 DEC-010，不阻塞 M0 implementation。
-- bootstrap 文档与 M0 plan 最终写入后，workflow doctor/validate、
+- M0 CI amendment 最终写入后，workflow doctor/validate、
   `frontier --milestone M0 --json`、`next --milestone M0 --json` 和
   `git diff --check` 均须重新通过；最终结果记录在上方验证表。
