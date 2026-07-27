@@ -4,7 +4,7 @@
 - **ADR-0010 amendment:** Approved
 - **ADR-0011/0012 amendments:** Approved
 - **ADR-0013 amendment:** Approved
-- **ADR-0014 amendment:** Proposed
+- **ADR-0014 amendment:** Approved
 - **Milestone:** M0
 - **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`、`ADR-0014`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`

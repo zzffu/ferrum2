@@ -1,6 +1,6 @@
 # ADR-0014: M0 external half-close evidence boundary
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Product / Architect / Team Lead
 - **Related milestone/spec/tickets:** M0；`ADR-0005`、`ADR-0006`、`ADR-0007`；

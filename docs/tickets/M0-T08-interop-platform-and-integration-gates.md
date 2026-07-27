@@ -2,7 +2,7 @@
 id = "M0-T08"
 title = "Qualify pinned interoperability, MSRV, and three target artifacts"
 milestone = "M0"
-status = "blocked"
+status = "ready"
 priority = "P0"
 blocked_by = ["M0-T07"]
 owns = [
@@ -166,4 +166,6 @@ To be filled by the Team Lead after integration:
   sing-box 1.13.14 diagnosis found a third-party post-FIN reverse-delivery
   limitation requiring an explicit evidence-contract amendment, while static
   Architect review of checkpoint `14343d2` found required workflow/harness repairs.
-  The checkpoint remains unintegrated until both blockers are explicitly closed.
+  ADR-0014 and synchronized SPEC/TEST amendments are now accepted after final
+  Product/Architect/QA PASS. The checkpoint remains unintegrated and T08 is ready
+  for one batched repair that must close all static findings.
