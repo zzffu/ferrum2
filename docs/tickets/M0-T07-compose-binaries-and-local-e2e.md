@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -184,9 +184,12 @@ cargo test --workspace --locked
   Architect BLOCK，唯一REQUIRED是cooperative-cancellation cycle只依赖raw
   connect/drop、10ms sleep与最终process kill，未deadline-bounded证明server已
   accept并完成该flow
-- Current gate: **IN_PROGRESS — repair 1/2**；只允许以valid
-  client→server→recording-target flow、bounded EOF/reset或既有exact metrics
-  transition补齐cooperative termination同步证据；保持5×20 matrix，禁止public
-  test hook及production/manifest/lock变化
+- Repair 1/2 commit:
+  `a9b0a56f8131f1db61701c5f50f7818a5664933a`
+- Repair evidence: 只修改`lifecycle_cycles.rs`；旧row target-accept assertion
+  两次RED为`WouldBlock`，修复后valid client→server→target flow在bounded
+  target-accept ack后执行client `Shutdown::Both`/drop，并在cleanup前要求target
+  EOF/reset；exact 5×20、local E2E、workspace quick/full均PASS
+- Current gate: **REVIEW — repair 1/2**；等待Architect与QA复核
 - Integrated commit: none
 - Publication: none
