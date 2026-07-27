@@ -1,0 +1,661 @@
+name: m0
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - "codex/integration/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  m0-host-quick:
+    name: m0-host-quick
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider and toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          rustc -Vv
+          cargo -V
+          cc --version
+          ld --version
+      - name: Run authoritative quick gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check --workspace --all-targets --locked
+          cargo test --workspace --locked
+
+  m0-security:
+    name: m0-security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider and toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          rustc -Vv
+          cargo -V
+          cc --version
+          ld --version
+      - name: Run security and static evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1
+          cargo test -p ferrum2-m0-harness --test architecture --locked
+          cargo test -p ferrum2-m0-harness --test workspace_policy --locked
+          cargo tree --workspace --locked
+          cargo tree -p ferrum2-client --locked -e normal,build
+          cargo tree -p ferrum2-client --locked -e all
+          cargo tree -p ferrum2-server --locked -e normal,build
+          cargo tree -p ferrum2-server --locked -e all
+          cargo tree -p ferrum2-crypto --locked -e features -i aes
+          cargo tree -p ferrum2-crypto --locked -e features -i ghash
+          cargo tree -p ferrum2-crypto --locked -e features -i polyval
+          cargo tree -p ferrum2-crypto --locked -e features -i zeroize
+          cargo test -p ferrum2-m0-harness --test config_cli --locked invalid_matrix
+          cargo test -p ferrum2-crypto --test primitive_vectors --locked blake3
+          cargo test -p ferrum2-crypto --test primitive_vectors --locked aes128_gcm
+          cargo test -p ferrum2-crypto --test sip022_vectors --locked
+          cargo test -p ferrum2-crypto --test secret_entropy --locked
+          cargo test -p ferrum2-crypto --lib --locked tcp_owner_nonce_exhaustion
+          cargo test -p ferrum2-shadowsocks --test tcp_negative --locked bounds
+          cargo test -p ferrum2-shadowsocks --test tcp_negative --locked auth
+          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked timestamp
+          cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked
+          cargo test -p ferrum2-shadowsocks --test tcp_allocation_bounds --locked
+          cargo test -p ferrum2-shadowsocks --lib --locked flow_internal_contract
+          cargo test -p ferrum2-shadowsocks --test tcp_vectors --locked
+          cargo test -p ferrum2-shadowsocks --test tcp_duplex --locked
+          cargo test -p ferrum2-shadowsocks --test tcp_fragmentation --locked
+          cargo test -p ferrum2-shadowsocks --test tcp_flow_contract --locked
+          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact
+          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked concurrent
+          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked retention
+          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked capacity
+          cargo test -p ferrum2-shadowsocks --test detection_prevention --locked
+          cargo test -p ferrum2-shadowsocks --test response_binding --locked
+          cargo test -p ferrum2-observability --test tracing_contract --locked
+          cargo test -p ferrum2-observability --test metrics_contract --locked
+
+  m0-lifecycle:
+    name: m0-lifecycle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider and toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          rustc -Vv
+          cargo -V
+          cc --version
+          ld --version
+      - name: Run lifecycle evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ferrum2-runtime --test abortive_close --locked
+          cargo test -p ferrum2-runtime --test backpressure --locked
+          cargo test -p ferrum2-runtime --test lifecycle --locked
+          cargo test -p ferrum2-runtime --test half_close --locked
+          cargo test -p ferrum2-runtime --test shutdown --locked
+          cargo test -p ferrum2-runtime --test metrics_endpoint --locked
+          cargo test -p ferrum2-client --locked phase_deadline_contract
+          cargo test -p ferrum2-client --locked lifecycle_composition_contract
+          cargo test -p ferrum2-server --locked lifecycle_composition_contract
+          cargo test -p ferrum2-m0-harness --test lifecycle_cycles --locked
+
+  m0-local-e2e:
+    name: m0-local-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider and toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          rustc -Vv
+          cargo -V
+          cc --version
+          ld --version
+      - name: Build current binaries and run local product evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --workspace --bins --locked
+          cargo test -p ferrum2-m0-harness --test config_cli --locked valid
+          cargo test -p ferrum2-m0-harness --test config_cli --locked no_side_effects
+          cargo test -p ferrum2-m0-harness --test cli_contract --locked
+          cargo test -p ferrum2-socks5 --locked
+          cargo test -p ferrum2-socks5 --test negative --locked
+          cargo test -p ferrum2-runtime --test local_endpoint --locked
+          cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_target_and_request_target
+          cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_error_before_write
+          cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked client_open_phase_contract
+          cargo test -p ferrum2-socks5 --test negative --locked general_failure
+          cargo test -p ferrum2-client --locked local_endpoint_failure
+          cargo test -p ferrum2-client --locked adapter_contract
+          cargo test -p ferrum2-client --locked phase_deadline_contract
+          cargo test -p ferrum2-server --locked adapter_contract
+          cargo test -p ferrum2-server --locked lifecycle_composition_contract
+          cargo test -p ferrum2-m0-harness --test local_e2e --locked success
+          cargo test -p ferrum2-m0-harness --test local_e2e --locked failures
+
+  m0-integration-full:
+    name: m0-integration-full
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider and toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          rustc -Vv
+          cargo -V
+          cc --version
+          ld --version
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            echo "close-evidence-candidate run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT sha=$GITHUB_SHA"
+          fi
+      - name: Run authoritative full and repository gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+          cargo doc --workspace --all-features --no-deps --locked
+          git merge-base --is-ancestor b41c6127b1834ebd97246451fd92bafea50cb205 HEAD
+          git diff --check b41c6127b1834ebd97246451fd92bafea50cb205...HEAD
+          git diff --name-status --find-renames b41c6127b1834ebd97246451fd92bafea50cb205...HEAD
+          cargo test -p ferrum2-m0-harness --test scope_audit --locked
+          cargo test -p ferrum2-m0-harness --test scope_audit --locked workflow_policy
+          cargo tree --workspace --locked
+
+  m0-msrv:
+    name: m0-msrv
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          cc --version
+          ld --version
+      - name: Install and prove MSRV
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.85.0 --profile minimal
+          rustc +1.85.0 -Vv
+          cargo +1.85.0 -V
+          cargo +1.85.0 check --workspace --all-targets --locked
+          cargo +1.85.0 test --workspace --locked
+
+  m0-windows-msvc:
+    name: m0-windows-msvc
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: pwsh
+        run: |
+          if (git status --porcelain) { throw "checkout is not clean" }
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw "HEAD is not GITHUB_SHA" }
+      - name: Record provider and native toolchain evidence
+        shell: pwsh
+        run: |
+          Write-Output "run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT job=$env:GITHUB_JOB sha=$env:GITHUB_SHA"
+          Write-Output "runner_os=$env:RUNNER_OS runner_arch=$env:RUNNER_ARCH image_os=$env:ImageOS image_version=$env:ImageVersion"
+          Write-Output "included_software=https://github.com/actions/runner-images/blob/win22/$env:ImageVersion/images/windows/Windows2022-Readme.md"
+          Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber
+          rustc -Vv
+          cargo -V
+          cmd /c "cl 2>&1"
+          cmd /c "link 2>&1"
+      - name: Build and run native MSVC artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 x86_64-pc-windows-msvc
+          cargo clean
+          cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-pc-windows-msvc
+          rustc +1.97.1 -Vv
+          cargo +1.97.1 -V
+          Write-Output "BLAKE3 backend evidence: MSVC target features and compiler"
+          rustc +1.97.1 --print target-features --target x86_64-pc-windows-msvc
+          function Assert-PortFree([int]$Port) {
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+            $listener.Start()
+            $listener.Stop()
+          }
+          & target\x86_64-pc-windows-msvc\release\ferrum2-client.exe --config tests\platform\config\client-valid.toml --check-config
+          if ($LASTEXITCODE -ne 0) { throw "client valid exit mismatch" }
+          Assert-PortFree 1080
+          & target\x86_64-pc-windows-msvc\release\ferrum2-client.exe --config tests\platform\config\client-invalid-key-length.toml --check-config
+          if ($LASTEXITCODE -ne 2) { throw "client invalid exit mismatch" }
+          Assert-PortFree 1080
+          & target\x86_64-pc-windows-msvc\release\ferrum2-server.exe --config tests\platform\config\server-valid.toml --check-config
+          if ($LASTEXITCODE -ne 0) { throw "server valid exit mismatch" }
+          Assert-PortFree 8388
+          & target\x86_64-pc-windows-msvc\release\ferrum2-server.exe --config tests\platform\config\server-invalid-key-length.toml --check-config
+          if ($LASTEXITCODE -ne 2) { throw "server invalid exit mismatch" }
+          Assert-PortFree 8388
+          Get-FileHash -Algorithm SHA256 target\x86_64-pc-windows-msvc\release\ferrum2-client.exe
+          Get-FileHash -Algorithm SHA256 target\x86_64-pc-windows-msvc\release\ferrum2-server.exe
+          cargo test -p ferrum2-m0-harness --test detection_probe --locked
+
+  m0-linux-gnu:
+    name: m0-linux-gnu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider and native toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          ldd --version
+          cc --version
+          ld --version
+      - name: Build and run native GNU artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 x86_64-unknown-linux-gnu
+          cargo clean
+          cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-unknown-linux-gnu
+          rustc +1.97.1 -Vv
+          cargo +1.97.1 -V
+          echo "BLAKE3 backend evidence: GNU target features and compiler"
+          rustc +1.97.1 --print target-features --target x86_64-unknown-linux-gnu
+          run_invalid() {
+            set +e
+            "$@"
+            code=$?
+            set -e
+            test "$code" -eq 2
+          }
+          assert_port_free() {
+            python3 - "$1" <<'PY'
+          import socket, sys
+          with socket.socket() as listener:
+              listener.bind(("127.0.0.1", int(sys.argv[1])))
+          PY
+          }
+          target/x86_64-unknown-linux-gnu/release/ferrum2-client --config tests/platform/config/client-valid.toml --check-config
+          assert_port_free 1080
+          run_invalid target/x86_64-unknown-linux-gnu/release/ferrum2-client --config tests/platform/config/client-invalid-key-length.toml --check-config
+          assert_port_free 1080
+          target/x86_64-unknown-linux-gnu/release/ferrum2-server --config tests/platform/config/server-valid.toml --check-config
+          assert_port_free 8388
+          run_invalid target/x86_64-unknown-linux-gnu/release/ferrum2-server --config tests/platform/config/server-invalid-key-length.toml --check-config
+          assert_port_free 8388
+          file target/x86_64-unknown-linux-gnu/release/ferrum2-client target/x86_64-unknown-linux-gnu/release/ferrum2-server
+          readelf -lW target/x86_64-unknown-linux-gnu/release/ferrum2-client
+          readelf -dW target/x86_64-unknown-linux-gnu/release/ferrum2-client
+          readelf -lW target/x86_64-unknown-linux-gnu/release/ferrum2-server
+          readelf -dW target/x86_64-unknown-linux-gnu/release/ferrum2-server
+          objdump -T target/x86_64-unknown-linux-gnu/release/ferrum2-client | grep 'GLIBC_' | sort -u
+          objdump -T target/x86_64-unknown-linux-gnu/release/ferrum2-server | grep 'GLIBC_' | sort -u
+          sha256sum target/x86_64-unknown-linux-gnu/release/ferrum2-client target/x86_64-unknown-linux-gnu/release/ferrum2-server
+          cargo test -p ferrum2-m0-harness --test detection_probe --locked
+
+  m0-linux-musl:
+    name: m0-linux-musl
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider and native toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          cc --version
+          ld --version
+      - name: Install exact musl packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl=1.2.4-2 musl-dev=1.2.4-2 musl-tools=1.2.4-2
+          dpkg-query -W musl musl-dev musl-tools
+          test "$(dpkg-query -W -f='${Version}' musl)" = "1.2.4-2"
+          test "$(dpkg-query -W -f='${Version}' musl-dev)" = "1.2.4-2"
+          test "$(dpkg-query -W -f='${Version}' musl-tools)" = "1.2.4-2"
+          musl-gcc --version
+      - name: Build run and assert static musl artifacts
+        shell: bash
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 x86_64-unknown-linux-musl
+          cargo clean
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-unknown-linux-musl
+          rustc +1.97.1 -Vv
+          cargo +1.97.1 -V
+          echo "BLAKE3 backend evidence: musl target features and musl-gcc"
+          rustc +1.97.1 --print target-features --target x86_64-unknown-linux-musl
+          run_invalid() {
+            set +e
+            "$@"
+            code=$?
+            set -e
+            test "$code" -eq 2
+          }
+          assert_port_free() {
+            python3 - "$1" <<'PY'
+          import socket, sys
+          with socket.socket() as listener:
+              listener.bind(("127.0.0.1", int(sys.argv[1])))
+          PY
+          }
+          client=target/x86_64-unknown-linux-musl/release/ferrum2-client
+          server=target/x86_64-unknown-linux-musl/release/ferrum2-server
+          "$client" --config tests/platform/config/client-valid.toml --check-config
+          assert_port_free 1080
+          run_invalid "$client" --config tests/platform/config/client-invalid-key-length.toml --check-config
+          assert_port_free 1080
+          "$server" --config tests/platform/config/server-valid.toml --check-config
+          assert_port_free 8388
+          run_invalid "$server" --config tests/platform/config/server-invalid-key-length.toml --check-config
+          assert_port_free 8388
+          for binary in "$client" "$server"; do
+            file_output="$(file "$binary")"
+            echo "$file_output"
+            echo "$file_output" | grep -Eq 'statically linked|static-pie linked'
+            readelf -hW "$binary"
+            readelf -lW "$binary"
+            readelf -dW "$binary"
+            if readelf -lW "$binary" | grep -q 'INTERP'; then
+              echo "PT_INTERP is forbidden" >&2
+              exit 1
+            fi
+            if readelf -dW "$binary" | grep -q 'NEEDED'; then
+              echo "DT_NEEDED is forbidden" >&2
+              exit 1
+            fi
+          done
+          sha256sum "$client" "$server"
+
+  m0-interop-sing-box:
+    name: m0-interop-sing-box
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider and toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          rustc -Vv
+          cargo -V
+          cc --version
+          ld --version
+      - name: Build current ferrum binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clean
+          cargo build --workspace --bins --locked
+      - name: Download verify and safely extract pinned sing-box
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/sing-box-1.13.14-linux-amd64-glibc.tar.gz"
+          directory="$RUNNER_TEMP/sing-box-1.13.14"
+          curl --fail --location --retry 3 --output "$archive" \
+            https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-1.13.14-linux-amd64-glibc.tar.gz
+          test "$(stat --format='%s' "$archive")" = "24614103"
+          echo "aae9172317c61760aae3dafcde889b2e51b7ea590c40d2b3c7ccdeae14b361b6  $archive" | sha256sum -c -
+          diff -u <(printf '%s\n' \
+            'sing-box-1.13.14-linux-amd64-glibc/' \
+            'sing-box-1.13.14-linux-amd64-glibc/LICENSE' \
+            'sing-box-1.13.14-linux-amd64-glibc/sing-box') <(tar -tzf "$archive")
+          mkdir "$directory"
+          tar -xzf "$archive" -C "$directory"
+          binary="$directory/sing-box-1.13.14-linux-amd64-glibc/sing-box"
+          test -x "$binary"
+          "$binary" version | grep -F 'sing-box version 1.13.14'
+          "$binary" version | grep -F 'Revision: 25a600db24f7680ad9806ce5427bd0ab8afe1114'
+          printf 'M0_SING_BOX_ARCHIVE=%s\nM0_SING_BOX_BIN=%s\n' "$archive" "$binary" >> "$GITHUB_ENV"
+      - name: Run both required sing-box directions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact client_sing_box
+          cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact sing_box_client
+
+  m0-interop-shadowsocks-rust:
+    name: m0-interop-shadowsocks-rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Record provider and toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
+          echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
+          uname -a
+          rustc -Vv
+          cargo -V
+          cc --version
+          ld --version
+      - name: Build current ferrum binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clean
+          cargo build --workspace --bins --locked
+      - name: Download verify and safely extract pinned shadowsocks-rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz"
+          directory="$RUNNER_TEMP/shadowsocks-rust-1.24.0"
+          curl --fail --location --retry 3 --output "$archive" \
+            https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.24.0/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz
+          test "$(stat --format='%s' "$archive")" = "11635096"
+          echo "5f528efb4e51e732352f5c69538dcc76e8cf8f6d1a240dfb5b748a67f0b05f65  $archive" | sha256sum -c -
+          diff -u <(printf '%s\n' sslocal ssserver ssurl ssmanager ssservice) <(tar -tJf "$archive")
+          mkdir "$directory"
+          tar -xJf "$archive" -C "$directory"
+          test -x "$directory/sslocal"
+          test -x "$directory/ssserver"
+          "$directory/sslocal" --version | grep -Fx 'shadowsocks 1.24.0'
+          "$directory/ssserver" --version | grep -Fx 'shadowsocks 1.24.0'
+          printf 'M0_SHADOWSOCKS_RUST_ARCHIVE=%s\nM0_SSLOCAL_BIN=%s\nM0_SSSERVER_BIN=%s\n' \
+            "$archive" "$directory/sslocal" "$directory/ssserver" >> "$GITHUB_ENV"
+      - name: Run both required shadowsocks-rust directions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact client_shadowsocks_rust
+          cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact shadowsocks_rust_client

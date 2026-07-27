@@ -1,0 +1,29 @@
+schema_version = 1
+
+[sing_box]
+version = "1.13.14"
+source_commit = "25a600db24f7680ad9806ce5427bd0ab8afe1114"
+expected_version = "sing-box version 1.13.14"
+license_review = "GPL-3.0-or-later with additional name terms; GitHub SPDX NOASSERTION; execute only as an independent test process; do not redistribute"
+linux_asset = "sing-box-1.13.14-linux-amd64-glibc.tar.gz"
+linux_url = "https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-1.13.14-linux-amd64-glibc.tar.gz"
+linux_size = 24614103
+linux_sha256 = "aae9172317c61760aae3dafcde889b2e51b7ea590c40d2b3c7ccdeae14b361b6"
+windows_asset = "sing-box-1.13.14-windows-amd64.zip"
+windows_url = "https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-1.13.14-windows-amd64.zip"
+windows_size = 20961591
+windows_sha256 = "f580782c6dd10f7691c66cea1d7c421813c5fbf7e305d1ee7ce0c3a40d196341"
+
+[shadowsocks_rust]
+version = "1.24.0"
+source_commit = "7ee1aa9223ed8f4d34734aac919036c8ad4502c2"
+expected_version = "shadowsocks 1.24.0"
+license_review = "MIT; execute only as an independent test process; do not redistribute"
+linux_asset = "shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz"
+linux_url = "https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.24.0/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz"
+linux_size = 11635096
+linux_sha256 = "5f528efb4e51e732352f5c69538dcc76e8cf8f6d1a240dfb5b748a67f0b05f65"
+windows_asset = "shadowsocks-v1.24.0.x86_64-pc-windows-msvc.zip"
+windows_url = "https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.24.0/shadowsocks-v1.24.0.x86_64-pc-windows-msvc.zip"
+windows_size = 20864814
+windows_sha256 = "8f4bdd02cf3b42976f6b48e01239bc0ae61f9da7a3c260505a7880de615291d0"
