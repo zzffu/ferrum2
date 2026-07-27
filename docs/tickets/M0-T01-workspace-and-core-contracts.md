@@ -2,7 +2,7 @@
 id = "M0-T01"
 title = "Establish the locked workspace and core contracts"
 milestone = "M0"
-status = "review"
+status = "blocked"
 priority = "P0"
 blocked_by = []
 owns = [
@@ -102,10 +102,20 @@ git diff --check
 
 ## Completion evidence
 
-To be filled by the Team Lead after integration:
-
-- Branch:
-- Commit(s):
-- Architect verdict:
-- QA verdict:
-- Integrated commit:
+- Branch: `codex/ticket/m0-t01`
+- Commit(s): `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
+  `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
+  `cd51226cd1875f80115ac657526e3f9dfb267c14`
+- Architect verdict: **BLOCK** after repair attempt 2/2; the CRLF repair covers
+  `architecture.rs`, but two LF-only multiline assertions in
+  `workspace_policy.rs` remain checkout-line-ending dependent.
+- QA verdict: **PASS** at `cd51226cd1875f80115ac657526e3f9dfb267c14`;
+  all seven ticket commands and the focused CRLF regression exited 0.
+- Integrated commit: none. Preserved integration candidate
+  `codex/integration/m0@0d98d81d0a4545996fda536a646594d9fe072b98`
+  failed its first post-merge architecture gate and was not fast-forwarded to
+  `master`.
+- Blocker: `execution.max_repair_attempts_per_ticket = 2` is exhausted. Resume
+  requires explicit authorization for another bounded repair or a workflow-policy
+  change; the remaining code fix is confined to
+  `tests/m0-harness/tests/workspace_policy.rs`.
