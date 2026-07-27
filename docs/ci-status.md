@@ -54,7 +54,8 @@
   ticket commands与package 33；两者scope/lineage/cleanliness检查PASS。T03
   Architect PASS、QA PASS_WITH_ACTIONS（唯一动作是T07后重跑quick）；T06 Architect
   PASS，但QA refined mutation证明read-ahead test在t=0无法排除read activity reset，
-  因此T06回到`in_progress`执行一次test-only窄repair。T07 blocked
+  test-only窄repair `0ef7969`以4s delayed read + final 1s original deadline杀死
+  mutation，全部T06 ticket/package/Clippy/fmt gates PASS并回到`review`。T07 blocked
   且保留`52dcdb0`，T08等待T07。
 - **Contract final verdicts:** 初始review要求exact 47-case matrix、
   `AddressBounds`、harness exact two-edge lock hunk、configured而非hardcoded
@@ -184,7 +185,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0012、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01/T02/T04/T05 done，T03 `8f0d1e0` review passed with downstream quick action；T06 `756a379` test repair in_progress；T07 partial `52dcdb0` blocked，T08等待T07 | M0-T06 repair/review |
+| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0012、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01/T02/T04/T05 done，T03 `8f0d1e0` review passed with downstream quick action；T06 `756a379`+`0ef7969` in review；T07 partial `52dcdb0` blocked，T08等待T07 | M0-T06 re-review |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | T07 partial branch quick-equivalent fmt/check/workspace test已PASS但未integrate；exact integration quick仍在T03/T06 repairs与T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
