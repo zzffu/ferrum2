@@ -108,8 +108,8 @@ non-overlapping ownership。
     `2ce7708`组合integration gate通过并done；
   - M0-T07：binary composition/local E2E；partial clean checkpoint `52dcdb0`
     已完成两个binary、CLI/adapters/local E2E且未触及manifest/lock。ADR-0011/0012
-    合同与T03/T06 upstream repairs现已完成；保留checkpoint等待resume transition，
-    之后补lifecycle/native evidence；
+    合同与T03/T06 upstream repairs现已完成；保留checkpoint并恢复`in_progress`，
+    继续补lifecycle/native evidence；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
     独占 `.github/workflows/m0.yml`，blocked by T07。
 
@@ -163,7 +163,7 @@ non-overlapping ownership。
   production获Architect PASS，repair `0ef7969`关闭QA mutation gap并获最终
   Architect/QA PASS。T03/T06通过`951806d`/`2ce7708`集成，组合Architect/QA
   PASS且normal/all-features各97 tests通过，均done。
-  T07等待resume transition，
+  T07已恢复`in_progress`，
   T08等待T07。全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download

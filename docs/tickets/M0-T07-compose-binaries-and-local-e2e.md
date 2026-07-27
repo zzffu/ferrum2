@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "blocked"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -151,7 +151,9 @@ cargo test --workspace --locked
 - Partial gates: binary build、config CLI 3、CLI contract 3、local E2E 4、
   client endpoint 1、client adapter 5、server adapter 6、workspace fmt/check/test与
   strict Clippy均exit 0；worktree clean
-- Current gate: **BLOCKED** pending ADR-0012 T03/T06 upstream repairs and
-  ADR-0011 lifecycle/native evidence
+- Current gate: **IN_PROGRESS**；ADR-0012 T03/T06 upstream repairs已在
+  `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a`通过组合Architect/QA gates；
+  续作需把该checkpoint合入保留分支并完成ADR-0011 lifecycle/native evidence、
+  configured phase deadlines、server prefix accounting和workspace quick/full
 - Integrated commit: none
 - Publication: none
