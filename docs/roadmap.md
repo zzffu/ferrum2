@@ -126,10 +126,11 @@ non-overlapping ownership。
   ```
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
-- **Integrated commit:** 当前local base/integration contract checkpoint
-  `c2ea5c2b48adf986e17a11639e24184c65131d3b`；其中product code checkpoint
-  `4bf758ae76421856bb527db3afe165d47e6fd4aa`包含原M0-T01～T06。T07 partial
-  `52dcdb0`未integrate；workspace quick/full仍等待上游repairs与T07/T08。
+- **Integrated commit:** 当前local base/integration coordination checkpoint
+  `979592eb71506548f0a517713ca3af2e19655d89`；其中product repair checkpoint
+  `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a`包含M0-T01～T06及T03/T06
+  ADR-0012 repairs。T07 partial `52dcdb0`尚未integrate；workspace quick/full
+  等待T07/T08。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的

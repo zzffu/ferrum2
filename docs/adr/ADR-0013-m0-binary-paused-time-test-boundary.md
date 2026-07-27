@@ -33,8 +33,9 @@ dependency 会不必要地扩大 production feature graph。
   sleep、借用 runtime package dev graph，或降低 default/non-default assertions。
 - production Tokio version、source、checksum、root features、两个 binary normal
   declarations 与 release graph必须不变。
-- T03 继续不依赖 Tokio；T06 source、manifest、relay topology 与 production
-  feature graph不变。
+- T03 production code/dependency继续executor-neutral且不依赖Tokio time；
+  既有T03 test-only Tokio edge不变且不得增加`test-util`。T06 source、manifest、
+  relay topology 与 production feature graph不变。
 - 不新增 package identity、dependency version、lock hunk、wire/config/API/metric/
   operator behavior或产品范围。
 - 只允许一个 T07 manifest writer，且只能修改两个明确列出的 binary manifests。
@@ -174,7 +175,7 @@ Review还必须以 ADR-0013 Accepted commit 为固定base确认：
   tuples不变；
 - `workspace_policy` 对两个 manifests 的 LF/CRLF positive fixtures给出相同PASS，
   并对缺失任一edge、extra/missing feature、normal/root移动、`full`、version/
-  default/source/path/rename/optional/target/duplicate-table mutation给出相同FAIL。
+  default/source/path/git/rename/optional/target/duplicate-table mutation给出相同FAIL。
 
 ## References
 

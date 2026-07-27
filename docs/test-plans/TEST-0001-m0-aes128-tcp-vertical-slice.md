@@ -196,7 +196,7 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
   production trees不得出现`tokio feature "test-util"`，包含dev edges的两个test
   trees必须各出现一次。manifest LF/CRLF positive fixtures verdict相同，并拒绝
   missing-one-side、extra/missing feature、normal/root移动、`full`、version/default/
-  source/path/rename/optional/target/duplicate-table mutations。
+  source/path/git/rename/optional/target/duplicate-table mutations。
 - `workspace_policy` 内嵌 integration checkpoint `999d4f9`、
   lock blob `ab04f6d` 的完整 110 个 `(name,version,source,checksum)` identity
   tuples；candidate lock parser 的 sorted result 必须 exact 相等。lock diff只准
@@ -623,9 +623,11 @@ M0 test gate通过需要：
 - 全平台长期 lifecycle和最终 operator stability：M3。
 - throughput、10,000 idle与长期资源阈值：M4。
 
-当前T01～T06已有ticket/focused integration evidence；T07 partial checkpoint尚未
-integrate，且ADR-0011/0012要求的T03/T06窄repair、lifecycle composition/native
-probe仍未完成。上述完整acceptance matrix尚未在同一最终integration commit通过。
+当前T01～T06已有ticket/focused integration evidence，ADR-0012要求的T03/T06
+窄repairs已在`2ce7708`完成ticket及组合integration gates；T07 partial checkpoint
+仍未integrate。T07 lifecycle composition/native probe、paused-time phase/prefix
+evidence与ADR-0013 exact manifest boundary，以及最终integration gates尚未在同一
+commit完成。上述完整acceptance matrix尚未在同一最终integration commit通过。
 未执行或尚未实现的项目仍是
 required future evidence，不因已有局部 PASS 被豁免。required job 启动后
 setup/network/package/reference/command/timeout/evidence 失败是 FAIL；workflow、
