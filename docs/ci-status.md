@@ -2,8 +2,9 @@
 
 ## 当前 M0 执行状态
 
-- **Validated product integration checkpoint:**
-  `999d4f95a2d597fb283689b9306d2a6773af707d` on local `master`
+- **Current validated local integration checkpoint:**
+  `4f3f0ac098fb8f4df054bb52b8ba9f2f93f3cd63` on
+  `codex/integration/m0`
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
 - **M0-T01:** original integration Architect/QA **PASS**；现依用户授权为
@@ -12,7 +13,8 @@
   repair candidate `edaee3d73c5b5e2d7db7bf86a4165565336d8a0a` 已完成
   4-path implementation；Architect/QA ticket gates **PASS**，core 4/4、
   architecture 6/6、workspace-policy 13/13 与全部 ticket commands exit 0；
-  lock identities 110→110、0 differences；当前等待 integration gate
+  lock identities 110→110、0 differences；integration
+  `4f3f0ac098fb8f4df054bb52b8ba9f2f93f3cd63` 同组 gates **PASS**，done
 - **M0-T05:** `d03e0065efd13ff215cc55be6257c305e8e69175`；
   ticket Architect/QA **PASS**；integrated
 - **M0-T06:** `50f547f380d6c58d5538b6540fdc43cb29b5c89c` +
@@ -21,16 +23,16 @@
   Architect/QA 均 **PASS**
 - **Wave-2 integration:** `999d4f95a2d597fb283689b9306d2a6773af707d`；
   17 个新增路径均属于 T05/T06，final Architect/QA **PASS**
-- **M0-T02:** **BLOCKED**；ADR-0004 固定的
+- **M0-T02:** **REVIEW**；ADR-0004 固定的
   `gcmtestvectors.zip@f9fc479e...a023` 不含批准的 numeric cases。实际来源为
   McGrew/Viega GCM proposal TV archive
   `511e4741cee299ad0d1eb72ae2738911758248e2aba9d3db33a1dbcbb62e07f0`
   的 `vec-01.txt`/`vec-02.txt`；ADR-0008 窄勘误已获显式授权，数值向量与
   密码/协议行为不变；contract Architect **PASS**、QA **PASS**。实现
   `45c0e2f` + repair 1/2 `df22d7e` 的 provenance/nonce repair 已 PASS；
-  overall gate 只因 resolved graph 未启用 `aes/zeroize`/`ghash/zeroize` 而
-  BLOCK。ADR-0009 与一次独占 T01 manifest repair 已获用户授权，ADR-0009 已
-  Accepted；T02 继续等待 T01 repair gate
+  prior overall gate 只因 resolved graph 未启用 `aes/zeroize`/`ghash/zeroize`
+  而 BLOCK。ADR-0009/T01 blocker 已由 `edaee3d`/`4f3f0ac` 关闭；T02 现恢复
+  combined integration review
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -150,7 +152,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | workspace已存在；workspace-wide gate按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
-| Security/KAT/negative | BLOCKED | T02 primitive/KDF/secret与provenance/nonce repair commands均通过；overall gate只等待 ADR-0009 的 `aes`/`ghash`/`polyval` resolved zeroize feature evidence | M0-T01/T02/T03 |
+| Security/KAT/negative | IN_PROGRESS/REVIEW | T02 primitive/KDF/secret与provenance/nonce repair commands均通过；ADR-0009 resolved zeroize feature evidence 已在 T01 integration PASS，等待 combined T02 integration gate | M0-T02/T03 |
 | Lifecycle/backpressure | IN_PROGRESS | T06 focused lifecycle/backpressure commands 与 10,240 次 shutdown ready-race regression 已 PASS；完整 runtime/composition 与同一最终 integration commit evidence 尚未完成 | M0 |
 | External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |

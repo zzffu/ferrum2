@@ -2,7 +2,7 @@
 id = "M0-T01"
 title = "Establish the locked workspace and core contracts"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P0"
 blocked_by = []
 owns = [
@@ -149,4 +149,5 @@ git diff --check
   commands exit 0。独立 lock identity audit 为 110→110、0 differences，
   canonical tuple SHA-256 前后均为
   `8ad74ec21676d9dcf3c88ee2e7513c5e837895a87e7a16691fffaaee5b99b5e1`。
-  Integration commit/gate: pending。
+  Integration commit `4f3f0ac098fb8f4df054bb52b8ba9f2f93f3cd63`；同一组
+  integration-side commands 全部 exit 0，generated `target/` 已清理。

@@ -2,7 +2,7 @@
 id = "M0-T02"
 title = "Implement secret ownership, AES-128 primitives, and deterministic capabilities"
 milestone = "M0"
-status = "blocked"
+status = "review"
 priority = "P0"
 blocked_by = ["M0-T01"]
 owns = [
@@ -80,7 +80,7 @@ cargo fmt -p ferrum2-crypto -- --check
   integration assertion all exit 0；provenance 与 `NonceCounter` repair
   Architect/QA PASS。
 - Overall Architect/QA verdict: **BLOCK** only because the T01-owned resolved graph
-  lacked `aes/zeroize` and `ghash/zeroize`. ADR-0009 and its exclusive T01 repair
-  are now authorized; this ticket remains blocked until that repair passes and is
-  integrated.
+  lacked `aes/zeroize` and `ghash/zeroize`. ADR-0009/T01 candidate `edaee3d` and
+  integration `4f3f0ac` now pass Architect/QA plus ticket/integration gates；this
+  ticket is restored to review for the combined T02 integration gate.
 - Integrated commit: not yet
