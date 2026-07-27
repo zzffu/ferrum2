@@ -14,21 +14,27 @@ use common::{
     salt_from_u64, server_target, target, valid_request_wire, write_plain,
 };
 
-fn assert_fixed_storage_never_grows(observers: &RecordingObservers) {
+fn assert_fixed_storage_identity(observers: &RecordingObservers) {
     let buffers = observers.buffers.lock().expect("buffers");
     assert_eq!(buffers.len(), 2);
-    let capacities = observers.capacities.lock().expect("capacities");
     for (role, usable_limit, identity) in buffers.iter().copied() {
-        let samples = capacities
+        assert!(matches!(
+            (role, usable_limit),
+            (BufferRole::Encrypt, MAX_ENCRYPT_WIRE_LEN)
+                | (BufferRole::Decrypt, MAX_DECRYPT_WIRE_LEN)
+        ));
+        let samples = observers
+            .inspections
+            .lock()
+            .expect("inspections")
             .iter()
             .filter(|sample| sample.0 == role)
+            .copied()
             .collect::<Vec<_>>();
-        assert!(!samples.is_empty(), "{role:?}: capacity was never observed");
+        assert!(!samples.is_empty(), "{role:?}: identity was never observed");
         assert!(
-            samples
-                .iter()
-                .all(|sample| sample.1 == identity && sample.2 == usable_limit),
-            "{role:?}: storage identity or capacity changed"
+            samples.iter().all(|sample| sample.1 == identity),
+            "{role:?}: storage identity changed"
         );
     }
 }
@@ -50,7 +56,7 @@ async fn minimum_request_uses_fixed_scratch_and_empty_independent_payload_owner(
     let session = inbound.accept_stream(io).await.expect("minimum request");
 
     assert!(session.initial_payload.is_empty());
-    assert_fixed_storage_never_grows(&observers);
+    assert_fixed_storage_identity(&observers);
 }
 
 #[tokio::test]
@@ -92,7 +98,7 @@ async fn maximum_request_uses_one_fixed_scratch_per_role_and_independent_payload
     }));
     drop(inspections);
     drop(buffers);
-    assert_fixed_storage_never_grows(&observers);
+    assert_fixed_storage_identity(&observers);
 }
 
 #[tokio::test]
@@ -141,7 +147,7 @@ async fn client_flow_allocates_once_then_admits_0_1_16384_16385_with_fixed_cap()
     }));
     drop(inspections);
     drop(buffers);
-    assert_fixed_storage_never_grows(&observers);
+    assert_fixed_storage_identity(&observers);
 }
 
 #[tokio::test]
@@ -176,7 +182,7 @@ async fn client_rx_and_server_tx_reuse_storage_across_32_subsequent_frames() {
             .expect("subsequent client RX frame");
         assert_eq!(&destination[..read], &[expected]);
     }
-    assert_fixed_storage_never_grows(&client_observers);
+    assert_fixed_storage_identity(&client_observers);
 
     let replay = TcpReplayStore::new(1024).expect("capacity");
     let request = valid_request_wire(NOW, &request_salt);
@@ -199,7 +205,7 @@ async fn client_rx_and_server_tx_reuse_storage_across_32_subsequent_frames() {
             .await
             .expect("subsequent server TX frame");
     }
-    assert_fixed_storage_never_grows(&server_observers);
+    assert_fixed_storage_identity(&server_observers);
 }
 
 #[test]

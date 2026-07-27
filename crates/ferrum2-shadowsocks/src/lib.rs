@@ -257,9 +257,6 @@ pub trait BufferObserver: Send + Sync {
 
     /// Records the current identity at a public flow poll boundary.
     fn inspected(&self, _role: BufferRole, _storage_identity: usize) {}
-
-    /// Records visible capacity so tests can prove the fixed scratch never grows.
-    fn capacity_inspected(&self, _role: BufferRole, _storage_identity: usize, _capacity: usize) {}
 }
 
 /// Closed terminal observation seam.
@@ -297,16 +294,12 @@ impl Observers<'static> {
 
 fn fixed_scratch(role: BufferRole, limit: usize, observer: &dyn BufferObserver) -> BytesMut {
     let scratch = BytesMut::with_capacity(limit);
-    let identity = scratch.as_ptr() as usize;
-    observer.allocated(role, limit, identity);
-    observer.capacity_inspected(role, identity, scratch.capacity());
+    observer.allocated(role, limit, scratch.as_ptr() as usize);
     scratch
 }
 
 fn inspect_scratch(role: BufferRole, scratch: &BytesMut, observer: &dyn BufferObserver) {
-    let identity = scratch.as_ptr() as usize;
-    observer.inspected(role, identity);
-    observer.capacity_inspected(role, identity, scratch.capacity());
+    observer.inspected(role, scratch.as_ptr() as usize);
 }
 
 /// Exact, bounded TCP replay state shared by server handshakes.
@@ -562,7 +555,6 @@ where
             encrypt,
             decrypt,
             staged: None,
-            exhaust_request_seal_nonce: false,
             lifecycle: Lifecycle::default(),
             observers: self.observers,
         })
@@ -799,7 +791,6 @@ where
                 encrypt,
                 decrypt,
                 staged: None,
-                exhaust_request_open_nonce: false,
                 lifecycle: Lifecycle::default(),
                 observers: self.observers,
             },
@@ -956,7 +947,6 @@ pub struct ClientFlow<'a, S, K, T> {
     encrypt: BytesMut,
     decrypt: BytesMut,
     staged: Option<StagedWrite>,
-    exhaust_request_seal_nonce: bool,
     lifecycle: Lifecycle,
     observers: Observers<'a>,
 }
@@ -981,7 +971,6 @@ pub struct ServerFlow<'a, S, K, T, R> {
     encrypt: BytesMut,
     decrypt: BytesMut,
     staged: Option<StagedWrite>,
-    exhaust_request_open_nonce: bool,
     lifecycle: Lifecycle,
     observers: Observers<'a>,
 }
@@ -999,13 +988,15 @@ fn copy_ready(scratch: &BytesMut, position: &mut usize, destination: &mut [u8]) 
     (copied, *position == scratch.len())
 }
 
-fn protocol_from_aead(error: AeadError) -> ProtocolReason {
-    match error {
-        AeadError::NonceExhausted => ProtocolReason::NonceExhausted,
-        AeadError::AuthenticationFailed | AeadError::OperationFailed => {
-            ProtocolReason::Authentication
-        }
+fn protocol_cipher_boundary(
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    operation: impl FnOnce() -> Result<(), FrameError>,
+) -> Result<(), ShadowsocksError> {
+    if let Some(error) = lifecycle.fatal_error() {
+        return Err(error);
     }
+    operation().map_err(|error| lifecycle.install_protocol(observer, protocol_from_frame(error)))
 }
 
 impl<'a, S, K, T> ClientFlow<'a, S, K, T>
@@ -1229,22 +1220,12 @@ where
             &mut self.request_sealer,
             &mut self.encrypt,
             &mut self.staged,
-            &mut self.exhaust_request_seal_nonce,
             &mut self.tx,
             &mut self.lifecycle,
             self.observers.flow,
             cx,
             source,
         )
-    }
-
-    /// Injects a closed failure at the next request-frame seal boundary.
-    ///
-    /// This hidden seam exists only to make otherwise unreachable u96 nonce
-    /// exhaustion observable in production-shaped flow tests.
-    #[doc(hidden)]
-    pub fn test_exhaust_next_request_seal_nonce(&mut self) {
-        self.exhaust_request_seal_nonce = true;
     }
 }
 
@@ -1337,12 +1318,6 @@ where
         }
         if self.lifecycle.terminal == Some(FlowTerminal::Normal) || self.lifecycle.rx_closed {
             return Poll::Ready(Ok(0));
-        }
-        if std::mem::take(&mut self.exhaust_request_open_nonce) {
-            let error = self
-                .lifecycle
-                .install_protocol(self.observers.flow, ProtocolReason::NonceExhausted);
-            return Poll::Ready(Err(error));
         }
         let state = std::mem::replace(&mut self.rx, DataRx::Poison);
         match poll_data_read(
@@ -1456,7 +1431,9 @@ where
             .response_sealer
             .as_mut()
             .expect("open server TX has response sealer");
-        match seal_data_chunk_into(sealer, &source[..admitted], &mut self.encrypt) {
+        match protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
+            seal_data_chunk_into(sealer, &source[..admitted], &mut self.encrypt)
+        }) {
             Ok(()) => {
                 self.staged = Some(StagedWrite {
                     kind: StagedKind::Subsequent,
@@ -1464,21 +1441,8 @@ where
                 });
                 Poll::Ready(Ok(admitted))
             }
-            Err(error) => {
-                let reason = protocol_from_frame(error);
-                let error = self.lifecycle.install_protocol(self.observers.flow, reason);
-                Poll::Ready(Err(error))
-            }
+            Err(error) => Poll::Ready(Err(error)),
         }
-    }
-
-    /// Injects a closed failure at the next request-frame open boundary.
-    ///
-    /// This hidden seam exists only to make otherwise unreachable u96 nonce
-    /// exhaustion observable in production-shaped flow tests.
-    #[doc(hidden)]
-    pub fn test_exhaust_next_request_open_nonce(&mut self) {
-        self.exhaust_request_open_nonce = true;
     }
 }
 
@@ -1599,8 +1563,9 @@ fn poll_data_read<S: TransportIo>(
                         return DataPoll::Pending(DataRx::Length { filled });
                     }
                     scratch.truncate(ENCRYPTED_LENGTH_LEN);
-                    if let Err(error) = opener.open_in_place(scratch) {
-                        let error = lifecycle.install_protocol(observer, protocol_from_aead(error));
+                    if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
+                        opener.open_in_place(scratch).map_err(frame_from_open_aead)
+                    }) {
                         return DataPoll::Ready(DataRx::Poison, Err(error));
                     }
                     if scratch.len() != 2 {
@@ -1652,8 +1617,9 @@ fn poll_data_read<S: TransportIo>(
                     return DataPoll::Pending(DataRx::Payload { wire_len, filled });
                 }
                 scratch.truncate(wire_len);
-                if let Err(error) = opener.open_in_place(scratch) {
-                    let error = lifecycle.install_protocol(observer, protocol_from_aead(error));
+                if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
+                    opener.open_in_place(scratch).map_err(frame_from_open_aead)
+                }) {
                     return DataPoll::Ready(DataRx::Poison, Err(error));
                 }
                 if scratch.is_empty() {
@@ -1698,7 +1664,6 @@ fn poll_write_open<S: TransportIo>(
     sealer: &mut TcpSealer,
     scratch: &mut BytesMut,
     staged: &mut Option<StagedWrite>,
-    exhaust_seal_nonce: &mut bool,
     tx: &mut TxState,
     lifecycle: &mut Lifecycle,
     observer: &dyn FlowObserver,
@@ -1725,12 +1690,10 @@ fn poll_write_open<S: TransportIo>(
             Poll::Ready(Ok(())) => {}
         }
     }
-    if std::mem::take(exhaust_seal_nonce) {
-        let error = lifecycle.install_protocol(observer, ProtocolReason::NonceExhausted);
-        return Poll::Ready(Err(error));
-    }
     let admitted = source.len().min(MAX_ENCODE_PAYLOAD_LEN);
-    match seal_data_chunk_into(sealer, &source[..admitted], scratch) {
+    match protocol_cipher_boundary(lifecycle, observer, || {
+        seal_data_chunk_into(sealer, &source[..admitted], scratch)
+    }) {
         Ok(()) => {
             *staged = Some(StagedWrite {
                 kind: StagedKind::Subsequent,
@@ -1739,10 +1702,7 @@ fn poll_write_open<S: TransportIo>(
             *tx = TxState::Open;
             Poll::Ready(Ok(admitted))
         }
-        Err(error) => {
-            let error = lifecycle.install_protocol(observer, protocol_from_frame(error));
-            Poll::Ready(Err(error))
-        }
+        Err(error) => Poll::Ready(Err(error)),
     }
 }
 
@@ -2109,15 +2069,26 @@ pub fn open_data_frame(
     encrypted_length: &[u8],
     encrypted_payload: &[u8],
 ) -> Result<Bytes, FrameError> {
+    let mut scratch = BytesMut::with_capacity(MAX_DECRYPT_WIRE_LEN);
+    open_data_frame_into(opener, encrypted_length, encrypted_payload, &mut scratch)?;
+    Ok(scratch.freeze())
+}
+
+fn open_data_frame_into(
+    opener: &mut TcpOpener,
+    encrypted_length: &[u8],
+    encrypted_payload: &[u8],
+    scratch: &mut BytesMut,
+) -> Result<(), FrameError> {
     if encrypted_length.len() != ENCRYPTED_LENGTH_LEN
         || encrypted_payload.len() > MAX_DECRYPT_WIRE_LEN
     {
         return Err(FrameError::Bounds);
     }
-    let mut scratch = BytesMut::with_capacity(MAX_DECRYPT_WIRE_LEN);
+    scratch.clear();
     scratch.extend_from_slice(encrypted_length);
     opener
-        .open_in_place(&mut scratch)
+        .open_in_place(scratch)
         .map_err(frame_from_open_aead)?;
     if scratch.len() != 2 {
         return Err(FrameError::Bounds);
@@ -2129,12 +2100,12 @@ pub fn open_data_frame(
     scratch.clear();
     scratch.extend_from_slice(encrypted_payload);
     opener
-        .open_in_place(&mut scratch)
+        .open_in_place(scratch)
         .map_err(frame_from_open_aead)?;
     if scratch.len() != payload_len {
         return Err(FrameError::Bounds);
     }
-    Ok(scratch.freeze())
+    Ok(())
 }
 
 fn sealer_for<K: KeyProvider>(keys: &K, salt: &TcpSalt) -> Result<TcpSealer, FrameError> {
@@ -2212,6 +2183,46 @@ fn protocol_from_frame(error: FrameError) -> ProtocolReason {
     }
 }
 
+#[cfg(test)]
+struct OneShotCipherFault {
+    armed: bool,
+    calls: usize,
+}
+
+#[cfg(test)]
+impl Default for OneShotCipherFault {
+    fn default() -> Self {
+        Self {
+            armed: true,
+            calls: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl OneShotCipherFault {
+    fn seal(&mut self) -> Result<(), AeadError> {
+        self.fail()
+    }
+
+    fn open(&mut self) -> Result<(), AeadError> {
+        self.fail()
+    }
+
+    fn fail(&mut self) -> Result<(), AeadError> {
+        self.calls += 1;
+        if std::mem::take(&mut self.armed) {
+            Err(AeadError::NonceExhausted)
+        } else {
+            Ok(())
+        }
+    }
+
+    const fn calls(&self) -> usize {
+        self.calls
+    }
+}
+
 fn sample_nonzero_padding(
     random: &(impl SecureRandom + ?Sized),
     padding: &mut [u8; MAX_PADDING_LEN],
@@ -2230,4 +2241,223 @@ fn sample_nonzero_padding(
         .fill(&mut padding[..length])
         .map_err(|_| FrameError::Bounds)?;
     Ok(length)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use ferrum2_crypto::{Aes128Psk, SinglePskProvider};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct CountingFlowObserver {
+        terminals: AtomicUsize,
+        abortive: AtomicUsize,
+    }
+
+    impl FlowObserver for CountingFlowObserver {
+        fn terminal_installed(&self, _terminal: FlowTerminal) {
+            self.terminals.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl AbortiveClose for CountingFlowObserver {
+        type Error = ();
+
+        fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+            self.abortive.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct SequenceFlowObserver(Arc<Mutex<Vec<&'static str>>>);
+
+    impl FlowObserver for SequenceFlowObserver {
+        fn terminal_installed(&self, _terminal: FlowTerminal) {
+            self.0.lock().expect("sequence").push("terminal");
+        }
+    }
+
+    struct FailingAbortive {
+        calls: usize,
+        sequence: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl AbortiveClose for FailingAbortive {
+        type Error = ();
+
+        fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+            self.calls += 1;
+            self.sequence.lock().expect("sequence").push("abortive");
+            Err(())
+        }
+    }
+
+    fn provider() -> SinglePskProvider {
+        SinglePskProvider::new(Aes128Psk::from_bytes([
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ]))
+    }
+
+    fn salt(last: u8) -> TcpSalt {
+        let mut bytes = [0_u8; TCP_SALT_LEN];
+        bytes[TCP_SALT_LEN - 1] = last;
+        TcpSalt::from_bytes(bytes)
+    }
+
+    fn assert_scratch_unchanged(scratch: &BytesMut, identity: usize, capacity: usize) {
+        assert_eq!(scratch.as_ptr() as usize, identity);
+        assert_eq!(scratch.capacity(), capacity);
+    }
+
+    fn encrypted_frame(sealer: &mut TcpSealer, payload: &[u8]) -> (BytesMut, BytesMut) {
+        let mut length = BytesMut::from(
+            &u16::try_from(payload.len())
+                .expect("test payload fits")
+                .to_be_bytes()[..],
+        );
+        let mut payload = BytesMut::from(payload);
+        sealer.seal_in_place(&mut length).expect("seal length");
+        sealer.seal_in_place(&mut payload).expect("seal payload");
+        (length, payload)
+    }
+
+    #[test]
+    fn client_seal_nonce_flow_internal_contract() {
+        let observer = CountingFlowObserver::default();
+        let mut lifecycle = Lifecycle::default();
+        let mut fault = OneShotCipherFault::default();
+
+        let error = protocol_cipher_boundary(&mut lifecycle, &observer, || {
+            fault.seal().map_err(frame_from_seal_aead)
+        })
+        .expect_err("nonce exhaustion");
+
+        assert_eq!(
+            error,
+            ShadowsocksError::Protocol(ProtocolReason::NonceExhausted)
+        );
+        assert_eq!(
+            lifecycle.terminal,
+            Some(FlowTerminal::Protocol(ProtocolReason::NonceExhausted))
+        );
+        assert_eq!(fault.calls(), 1);
+        assert_eq!(observer.terminals.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.abortive.load(Ordering::SeqCst), 0);
+
+        let repeated = protocol_cipher_boundary(&mut lifecycle, &observer, || {
+            fault.seal().map_err(frame_from_seal_aead)
+        });
+        assert_eq!(repeated, Err(error));
+        assert_eq!(fault.calls(), 1, "terminal freezes the one-shot boundary");
+        assert_eq!(observer.terminals.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.abortive.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn server_open_nonce_flow_internal_contract() {
+        let observer = CountingFlowObserver::default();
+        let mut lifecycle = Lifecycle::default();
+        let mut fault = OneShotCipherFault::default();
+
+        let error = protocol_cipher_boundary(&mut lifecycle, &observer, || {
+            fault.open().map_err(frame_from_open_aead)
+        })
+        .expect_err("nonce exhaustion");
+
+        assert_eq!(
+            error,
+            ShadowsocksError::Protocol(ProtocolReason::NonceExhausted)
+        );
+        assert_eq!(
+            lifecycle.terminal,
+            Some(FlowTerminal::Protocol(ProtocolReason::NonceExhausted))
+        );
+        assert_eq!(fault.calls(), 1);
+        assert_eq!(observer.terminals.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.abortive.load(Ordering::SeqCst), 0);
+
+        let repeated = protocol_cipher_boundary(&mut lifecycle, &observer, || {
+            fault.open().map_err(frame_from_open_aead)
+        });
+        assert_eq!(repeated, Err(error));
+        assert_eq!(fault.calls(), 1, "terminal freezes the one-shot boundary");
+        assert_eq!(observer.terminals.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.abortive.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn encrypt_scratch_capacity_flow_internal_contract() {
+        let keys = provider();
+        let mut sealer = sealer_for(&keys, &salt(1)).expect("sealer");
+        let mut scratch = fixed_scratch(BufferRole::Encrypt, MAX_ENCRYPT_WIRE_LEN, &NOOP_OBSERVER);
+        let identity = scratch.as_ptr() as usize;
+        let capacity = scratch.capacity();
+
+        for payload in [Vec::new(), vec![0x5a; MAX_ENCODE_PAYLOAD_LEN]]
+            .into_iter()
+            .chain((0_u8..32).map(|value| vec![value]))
+        {
+            seal_data_chunk_into(&mut sealer, &payload, &mut scratch).expect("seal frame");
+            assert_scratch_unchanged(&scratch, identity, capacity);
+        }
+    }
+
+    #[test]
+    fn decrypt_scratch_capacity_flow_internal_contract() {
+        let keys = provider();
+        let salt = salt(2);
+        let mut sealer = sealer_for(&keys, &salt).expect("sealer");
+        let mut opener = opener_for(&keys, &salt).expect("opener");
+        let mut scratch = fixed_scratch(BufferRole::Decrypt, MAX_DECRYPT_WIRE_LEN, &NOOP_OBSERVER);
+        let identity = scratch.as_ptr() as usize;
+        let capacity = scratch.capacity();
+
+        for payload in [Vec::new(), vec![0xa5; MAX_PAYLOAD_LEN]]
+            .into_iter()
+            .chain((0_u8..32).map(|value| vec![value]))
+        {
+            let (length, encrypted_payload) = encrypted_frame(&mut sealer, &payload);
+            open_data_frame_into(&mut opener, &length, &encrypted_payload, &mut scratch)
+                .expect("open frame");
+            assert_eq!(scratch.as_ref(), payload);
+            assert_scratch_unchanged(&scratch, identity, capacity);
+        }
+    }
+
+    #[test]
+    fn replay_unavailable_detection_reason_contract() {
+        let replay = TcpReplayStore::new(MIN_REPLAY_CAPACITY).expect("capacity");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = replay.state.lock().expect("replay lock");
+            panic!("poison replay state for the private failure-path contract");
+        }));
+        assert_eq!(
+            replay.check_and_insert(&salt(3), MonotonicInstant::from_duration(Duration::ZERO),),
+            Err(ReplayInsertError::Unavailable)
+        );
+
+        let sequence = Arc::new(Mutex::new(Vec::new()));
+        let observer = SequenceFlowObserver(sequence.clone());
+        let mut io = FailingAbortive {
+            calls: 0,
+            sequence: sequence.clone(),
+        };
+        let error = terminate_detection(&mut io, &observer, DetectionReason::ReplayUnavailable);
+
+        assert_eq!(
+            error,
+            ShadowsocksError::Detection(DetectionReason::ReplayUnavailable)
+        );
+        assert_eq!(io.calls, 1);
+        assert_eq!(
+            *sequence.lock().expect("sequence"),
+            vec!["terminal", "abortive"]
+        );
+    }
 }

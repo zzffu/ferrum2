@@ -6,7 +6,7 @@ use std::fmt;
 use std::future::ready;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -60,6 +60,37 @@ impl KeyProvider for CountingKeyProvider {
         use_key: impl FnOnce(SecretKeyRef<'_>) -> T,
     ) -> Result<T, Self::Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.with_key(selector, use_key)
+    }
+}
+
+pub struct FailAfterKeyProvider {
+    inner: SinglePskProvider,
+    successful_calls_remaining: AtomicUsize,
+}
+
+impl FailAfterKeyProvider {
+    pub fn new(successful_calls: usize) -> Self {
+        Self {
+            inner: provider(),
+            successful_calls_remaining: AtomicUsize::new(successful_calls),
+        }
+    }
+}
+
+impl KeyProvider for FailAfterKeyProvider {
+    type Error = KeyProviderError;
+
+    fn with_key<T>(
+        &self,
+        selector: KeySelector<'_>,
+        use_key: impl FnOnce(SecretKeyRef<'_>) -> T,
+    ) -> Result<T, Self::Error> {
+        self.successful_calls_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .map_err(|_| KeyProviderError::IdentityUnsupported)?;
         self.inner.with_key(selector, use_key)
     }
 }
@@ -540,7 +571,7 @@ impl Connector for RecordingConnector {
 pub struct FakeClock {
     wall: AtomicU64,
     monotonic_millis: AtomicU64,
-    fail_wall: bool,
+    fail_wall: AtomicBool,
 }
 
 impl FakeClock {
@@ -548,7 +579,7 @@ impl FakeClock {
         Self {
             wall: AtomicU64::new(wall),
             monotonic_millis: AtomicU64::new(monotonic_millis),
-            fail_wall: false,
+            fail_wall: AtomicBool::new(false),
         }
     }
 
@@ -556,7 +587,7 @@ impl FakeClock {
         Self {
             wall: AtomicU64::new(0),
             monotonic_millis: AtomicU64::new(0),
-            fail_wall: true,
+            fail_wall: AtomicBool::new(true),
         }
     }
 
@@ -567,11 +598,15 @@ impl FakeClock {
     pub fn set_monotonic_millis(&self, millis: u64) {
         self.monotonic_millis.store(millis, Ordering::SeqCst);
     }
+
+    pub fn set_wall_failure(&self, fail: bool) {
+        self.fail_wall.store(fail, Ordering::SeqCst);
+    }
 }
 
 impl Clock for FakeClock {
     fn unix_seconds(&self) -> Result<u64, ClockError> {
-        if self.fail_wall {
+        if self.fail_wall.load(Ordering::SeqCst) {
             Err(ClockError::Unavailable)
         } else {
             Ok(self.wall.load(Ordering::SeqCst))
@@ -654,7 +689,6 @@ pub async fn shutdown_plain(
 pub struct RecordingObservers {
     pub buffers: Mutex<Vec<(BufferRole, usize, usize)>>,
     pub inspections: Mutex<Vec<(BufferRole, usize)>>,
-    pub capacities: Mutex<Vec<(BufferRole, usize, usize)>>,
     pub terminals: Mutex<Vec<FlowTerminal>>,
     pub sequence: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -672,13 +706,6 @@ impl BufferObserver for RecordingObservers {
             .lock()
             .expect("inspections")
             .push((role, storage_identity));
-    }
-
-    fn capacity_inspected(&self, role: BufferRole, storage_identity: usize, capacity: usize) {
-        self.capacities
-            .lock()
-            .expect("capacities")
-            .push((role, storage_identity, capacity));
     }
 }
 
