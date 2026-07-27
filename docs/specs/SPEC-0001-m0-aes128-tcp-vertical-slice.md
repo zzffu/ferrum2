@@ -2,8 +2,9 @@
 
 - **Status:** Approved
 - **ADR-0010 amendment:** Approved
+- **ADR-0011/0012 amendments:** Approved
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
 - **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
 
@@ -93,8 +94,9 @@ M0 完成后的 client path：
 client TcpListener
  → Socks5Inbound::accept
  → Session<SocksStream, SocksReplyPending>
- → ShadowsocksTcpOutbound::open
- → request salt/header single-write
+ → ShadowsocksTcpOutbound::connect_server [configured connect timeout; default 10s]
+ → ConnectedClientOpen::write_request(application_target)
+     [fresh configured handshake timeout; default 5s]
  → SocksReplyPending::succeeded(outbound.local_endpoint())
  → owned bidirectional relay
 ```
@@ -126,13 +128,16 @@ server TcpListener
 | `ferrum2-config` | TOML read/parse/semantic validation、validated role configs、redacted config errors | listeners、runtime creation |
 | `ferrum2-observability` | JSON tracing initialization、typed metrics registry与text encoding | Tokio、socket/listener、protocol/session policy、destination labels |
 | binaries | parse CLI、load validated config、construct adapters/supervisor | protocol implementation |
-| `tests/m0-harness` | metadata/filesystem policy、黑盒process E2E、external interop/platform drivers | concrete ferrum2 Cargo dependency、production behavior |
+| `tests/m0-harness` | metadata/filesystem policy、黑盒process E2E、external interop/platform drivers、primitive-only independent native request generator | concrete ferrum2 Cargo dependency、production behavior |
 
 Dependency DAG、toolchain、exact dependency versions 与 manifest ownership 由
 `ADR-0001` 冻结，并由 `ADR-0009` 仅对 `aes 0.9.1`/`ghash 0.6.0`
-no-default `zeroize` feature anchors 作部分取代。M0-T01 独占所有
-manifests/lock/toolchain/license；后续 ticket 不能修改它们。M0-T08 独占 CI 路径
-`.github/workflows/m0.yml`；本次 plan 不创建该文件，T08 execute 才能按
+no-default `zeroize` feature anchors、由 `ADR-0011` 仅对 T07 harness 的
+`aes-gcm`/`blake3` test-only direct edges作部分取代。除
+`tests/m0-harness/Cargo.toml`、`Cargo.lock`中
+`ferrum2-m0-harness`的精确两条edge和对应`workspace_policy`证据外，M0-T01继续
+独占所有 manifests/lock/toolchain/license。M0-T08 独占 CI 路径
+`.github/workflows/m0.yml`；本次 amendment 不创建该文件，T08 execute 才能按
 ADR-0007 实现。
 
 ## Configuration and validation
@@ -181,18 +186,24 @@ C0 AcceptedSocks
   → C1 Greeting
   → C2 ConnectRequestValidated(IPv4 target)
   → C3 ServerConnecting
-  → C4 RequestHeaderSingleWrite
-  → C5 SocksSuccessSent
-  → C6 Relaying(RequestOpen, ResponseAwaiting|ResponseOpen)
-  → C7 Closing
+  → C4 ConnectedClientOpen
+  → C5 RequestHeaderSingleWrite
+  → C6 SocksSuccessSent
+  → C7 Relaying(RequestOpen, ResponseAwaiting|ResponseOpen)
+  → C8 Closing
 ```
 
 - C0～C2 受 handshake timeout。
 - C3 受 connect timeout。
-- C4 生成 16-byte salt、type 0、wall timestamp、target、`1..=900` padding；
+- C4 是不暴露transport/cipher/nonce/scratch的single-use opaque capability；
+  connect成功即停止configured connect budget，随后开始新的configured handshake
+  budget；默认值分别为10秒/5秒，但实现不得硬编码默认值。
+- C5 生成 16-byte salt、type 0、wall timestamp、target、`1..=900` padding；
   M0 ferrum2 client initial payload 为空。
-- C4 成功定义为一次底层 write 返回整个 contiguous header 长度；short write 失败。
-- C5 后 client→server data frames可发送；server→client bytes 必须等 response header/
+- C5 成功定义为一次底层 write 返回整个 contiguous header 长度；short write失败，
+  timeout是binary-owned `Reason::HandshakeTimeout`且normal drop/abortive 0，不扩展
+  `ShadowsocksError`。
+- C6 后 client→server data frames可发送；server→client bytes 必须等 response header/
   first payload认证及 request-salt binding 后才可见。
 
 ### Server states and side-effect order
@@ -255,8 +266,11 @@ scratch与单一lifecycle/fatal latch，并通过`PlainDuplex`只暴露plaintext
 read/write/flush/shutdown及只读`terminal()`：
 
 - `ClientTcpOutbound`构造时持有validated configured Shadowsocks server endpoint；
-  `open(application_target)`连接该stored server endpoint，并只把application target
-  编码进SIP022 request。两者不得混用。
+  `connect_server()`连接该stored server endpoint并返回opaque
+  `ConnectedClientOpen`；后者被`write_request(application_target)`消费，且只把
+  application target编码进SIP022 request。两者不得混用。fused core convenience
+  `open`可以内部委托，但T07必须用分相interface分别应用validated config中的
+  connect/handshake durations（默认10秒/5秒）。
 - client flow在request first-write后立即允许TX；RX可同时等待并认证response。
 - `ShadowsocksTcpInbound::accept`返回既有
   `Session<ServerFlow, NoReply>`；validated target和authenticated initial payload
@@ -278,14 +292,17 @@ read/write/flush/shutdown及只读`terminal()`：
   `TokioTransport`/`TokioFramed`只做connector/trait delegation与closed error
   mapping；server accepted socket先用现有`RuntimeTcpStream::from_connected`
   取得stored endpoint/abortive capability。不含任何protocol transition；
-  core/runtime/manifest/dependency不变。
+  core/runtime production dependency不变；唯一manifest/lock exception由
+  ADR-0011限定在harness test dependencies。
 
 ### Relay data flow
 
 direct connect 成功后：
 
-1. server connection owner先把非空`Session.initial_payload`完整、恰好一次写入
-   target；connect或prefix write失败不进入普通relay。`ServerFlow`不重复该payload。
+1. server connection owner先用binary-private bounded loop把非空
+   `Session.initial_payload`完整、恰好一次写入target；每次successful nonzero
+   write重置idle deadline。cancel、idle、write-zero或write failure返回精确partial
+   prefix count且不进入普通relay；`ServerFlow`不重复该payload。
 2. client request-write可与response-pending read并发；server request-read可与
    response-pending write并发。
 3. 两方向 local futures 使用runtime-owned 16 KiB application buffers；SS flow
@@ -299,6 +316,10 @@ direct connect 成功后：
 7. detection/protocol/transport fatal或cancellation终止本flow两方向并回收；
    只有initial Detection调用abortive。正常单向EOF/shutdown只关闭该方向，反方向
    继续。
+8. `relay_lifecycle`无论success、I/O failure、idle timeout或cancellation都保留
+   terminal前每方向successful nonzero application writes的`RelayStats`；binary只
+   把server prefix count恰好一次加到对应方向，不统计read-ahead、ciphertext或
+   protocol overhead。
 
 ## Errors and failure semantics
 
@@ -349,6 +370,14 @@ ConnectionRefused, RelayIo, IdleTimeout, Cancelled, Shutdown, ListenerFailure
   fail closed，不降级、不 retry 弱策略。
 - target connect 只在 S4 后发生。client 侧 pre-success connect error 可发一次 SOCKS
   failure；server target failure发生在 success 后，只关闭 stream。
+- client configured-server connect deadline精确映射
+  `ConnectErrorKind::Timeout`/`ConnectTimeout`；connect完成后fresh configured
+  handshake duration覆盖request first-write并映射binary
+  `Reason::HandshakeTimeout`。两者使用validated config values（默认10秒/5秒），
+  不得复用budget、硬编码默认值、扩展protocol error taxonomy或把timeout伪装成
+  Detection。
+- relay/prefix failure保留失败前每方向已成功写出的application byte totals；error
+  reason与partial stats必须同时可用，normal与failure都不得double count。
 - 没有 error path 可 panic、按 peer 值无界 allocate 或 forward unauthenticated bytes。
 
 ## Security and privacy
@@ -396,8 +425,12 @@ ConnectionRefused, RelayIo, IdleTimeout, Cancelled, Shutdown, ListenerFailure
 
 一个 supervisor 拥有 listeners/JoinSet；每 flow 一个 owner task且不再 spawn relay
 directions。shutdown、listener failure、timeout、half-close 与 cleanup 采用
-`ADR-0005`。required lifecycle evidence 是 owner registry 回零、socket 可重绑、
-JoinSet empty 和固定 buffer/permit counters；RSS 等间接指标不能替代。
+`ADR-0005`，partial relay outcome采用`ADR-0012`。required lifecycle evidence按
+`ADR-0011`组合：恰好100个real-process mixed cycles证明child/port/temp cleanup；
+T06 direct tests证明真实runtime counters/JoinSet；两个binary的production-used
+private `run_with_registry` tests证明composition连接了同一个registry，先观察live
+non-baseline再回baseline。`forced_shutdowns`只断言精确累计增量。RSS、process exit
+或port rebind不能单独替代内部counter证据。
 
 ## Compatibility and upstream divergence
 
@@ -513,19 +546,24 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
 5. **AC-05 Replay/time:** M0-REPLAY-001～004 通过；invalid 不 poison、64-way duplicate
    恰好一个成功、±30/±31、59.999/60 秒、wall rollback 与 capacity fail-closed。
 6. **AC-06 Detection/binding:** M0-DETECT-001～003、M0-BIND-001 通过；single
-   underlying I/O、typed abortive-close capability、批准的统一native close class和
-   full request-salt binding均有直接证据。
+   underlying I/O、typed abortive-close capability、full request-salt binding，
+   以及ADR-0011 primitive-only generator构造的43个short prefixes加
+   auth/type/time/length共47个native connections均有直接证据；全部是批准的
+   reset class、非EOF，且每案target accepts为0。authenticated zero variable length
+   的typed reason精确为`AddressBounds`。
 7. **AC-07 SOCKS/local product path:** M0-SOCKS-001～002、M0-ENDPOINT-001、
    M0-ADAPT-001～002、M0-E2E-001～002 通过；两个真实 binaries 完成 IPv4
    echo/half-close；production adapters、client configured-server
-   dial/application-target wire separation及server
+   dial/application-target wire separation、configured connect与fresh configured
+   request first-write phase deadlines（默认10秒/5秒）及server
    connect-before-initial-payload-forward有focused证据，全部typed terminal/Connect
    及Normal的role/call-site observability映射穷尽；
    `local_addr` error/non-IPv4 保持零 first-write并发精确general failure，同时冻结
    target/protocol failure行为。
 8. **AC-08 Lifecycle/backpressure:** M0-LIFE-001～005 通过；stalled writer传播
-   backpressure，timeout/cancel/listener/half-close/shutdown 与至少 100 mixed cycles
-   后 owner registry/buffer/socket 回基线。
+   backpressure；timeout/cancel/listener/half-close/shutdown保留failure前partial
+   direction stats；恰好100个五类均分black-box cycles与T06/binary-private直接证据
+   共同证明owner task/buffer/permit/listener/child/port/temp cleanup。
 9. **AC-09 Observability:** M0-OBS-001～003 通过；JSON/metric snapshot与 sentinel
    scan证明fixed fields/labels、无secret/destination、bounded cardinality和
    supervisor-owned metrics endpoint limits。
@@ -542,14 +580,16 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
     `b41c6127b1834ebd97246451fd92bafea50cb205` 到 integrated `HEAD` 的完整 diff
     不含 M0 non-goals、external binaries、generated results 或真实 secrets；所有
     fixture/reference/locked dependencies有来源和license review记录；dependency
-    surface 精确等于 ADR-0001 经 ADR-0009 部分取代后的集合；唯一批准的
+    production dependency surface 精确等于 ADR-0001 经 ADR-0009 部分取代后的
+    集合；harness direct dev dependencies与lock hunk精确等于ADR-0011 allowlist，
+    package identities/resolved crypto features不变；唯一批准的
     `.github` path是M0-T08拥有的`.github/workflows/m0.yml`。
 
 M0 只有在 AC-01～AC-12 同一 integrated commit 证据齐全时才能进入 close。
 
 ## Open questions
 
-ADR-0010批准后，没有留给 Engineer 自行决定的 M0 contract 问题。以下是执行期验证 contingency，不
+ADR-0010～0012批准后，没有留给 Engineer 自行决定的 M0 contract 问题。以下是执行期验证 contingency，不
 扩大实现权限：
 
 - T08 首次下载时补录 reference asset byte size 与精确 `--version` 输出；checksum/

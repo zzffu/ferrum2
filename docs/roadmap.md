@@ -34,10 +34,10 @@ non-overlapping ownership。
 - **Entry conditions:**
   - bootstrap 的 vision、gap analysis、roadmap、CI baseline 已更新并通过
     workflow validation；
-  - `ADR-0001`～`ADR-0010` 已 Accepted，关闭 DEC-001～DEC-007、
-    DEC-011～DEC-013；ADR-0009 仅修正 AEAD state zeroize feature
-    unification，ADR-0010冻结opaque duplex contract；
-  - `SPEC-0001` 与 `TEST-0001` 已 Approved；
+  - `ADR-0001`～`ADR-0012` 已 Accepted；ADR-0011/0012窄修订覆盖evidence
+    boundary、independent native probes、configured client phase deadlines与
+    partial relay accounting，DEC-014/015已关闭；
+  - `SPEC-0001` 与 `TEST-0001` 及ADR-0011/0012 amendments已 Approved；
   - M0-T01～M0-T08 的 blockers、non-overlapping ownership 和量化 acceptance
     已通过 workflow validation。
 - **Exit criteria:**
@@ -90,14 +90,22 @@ non-overlapping ownership。
     checkout缺陷，隔离修复`1f76597`仅规范化文本哈希语义。最终checkpoint
     `4bf758a`上15项ticket commands、T02 exact 2/2、T03 exact 4/4、
     release/Clippy/fmt及组合Architect/QA gates全部通过，done；本地授权不改变
-    原T08 conditional exact-SHA push边界；
+    原T08 conditional exact-SHA push边界。T07 preflight随后发现fused client open
+    无法分别应用configured connect/fresh first-write deadlines（默认10秒/5秒）；
+    现依ADR-0012窄幅reopen
+    为ready，历史completion evidence保留；
   - M0-T04：typed config/observability；initial candidate `e9c6b01`
     Architect/QA BLOCK；repair 1/2 candidate `8d18d17` 已关闭 exact-target
     tracing spoof 与 server unknown-field evidence，ticket与integration
     Architect/QA全部PASS，integrated `5e3ddf9`，done；
   - M0-T05：SOCKS5 CONNECT inbound；done；
-  - M0-T06：runtime/direct/relay/lifecycle；done；
-  - M0-T07：binary composition/local E2E；全部依赖已完成，ready；
+  - M0-T06：runtime/direct/relay/lifecycle；历史ticket/integration done；T07
+    preflight发现failure outcome丢失partial forwarded stats，现依ADR-0012窄幅reopen
+    为ready，只修复relay outcome与direct tests；
+  - M0-T07：binary composition/local E2E；partial clean checkpoint `52dcdb0`
+    已完成两个binary、CLI/adapters/local E2E且未触及manifest/lock。当前blocked，
+    等待ADR-0011/0012合同及T03/T06 upstream repairs；之后补lifecycle/native
+    evidence并恢复；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
     独占 `.github/workflows/m0.yml`，blocked by T07。
 
@@ -112,10 +120,10 @@ non-overlapping ownership。
   ```
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
-- **Integrated commit:** 当前 validated checkpoint
-  `4bf758ae76421856bb527db3afe165d47e6fd4aa`，包含
-  M0-T01～M0-T06；T03票据级门禁与组合证据已通过，workspace quick/full仍等待
-  T07/T08完成缺失的binary/harness入口。
+- **Integrated commit:** 当前local base/integration coordination checkpoint
+  `ad9e499c0ba01f43a3877d6000e3192237575735`；其中product code checkpoint
+  `4bf758ae76421856bb527db3afe165d47e6fd4aa`包含原M0-T01～T06。T07 partial
+  `52dcdb0`未integrate；workspace quick/full仍等待上游repairs与T07/T08。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
@@ -139,7 +147,15 @@ non-overlapping ownership。
   移除所有public/release test seam并增加4个private mapping/capacity unit，
   同时补齐Detection/admission evidence。Windows CRLF provenance blocker由
   `1f76597`窄修复；最终integration `4bf758a`的T02 2/2、T03 4/4与全部T03 gates
-  经Architect/QA通过，T03已done。全局repair budget不变；T07现ready，T08等待T07。
+  经Architect/QA通过，T03历史checkpoint已done。T07 preflight又暴露两个跨module
+  contract blocker：黑盒harness不能直接证明进程内owner counters且stale fixture
+  不能认证type/time/length native branches；fused client open/relay error-only
+  outcome分别阻止独立deadline和partial byte accounting。用户的后续本地窄blocker
+  授权已覆盖该修订；ADR-0011/0012草案不改变wire/product/API/remote范围。
+  Product对两项范围均PASS，Architect接受evidence设计并要求独立ADR-0012，QA要求
+  exact two-edge lock delta与`AddressBounds` row；修订吸收全部findings后最终
+  Product/Architect/QA document gates均PASS。T03/T06因此ready，T07 blocked，
+  T08等待T07。全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。
@@ -266,6 +282,8 @@ non-overlapping ownership。
 | DEC-011 | resolved in M0 CI amendment | GitHub Actions required provider；`.github/workflows/m0.yml`；fixed hosted runners/jobs/security/evidence；本机 WSL2仅作诊断 | `ADR-0007`、`SPEC-0001`、`TEST-0001`、M0-T08 |
 | DEC-012 | resolved in M0 narrow amendment | fixed `aes 0.9.1`/`ghash 0.6.0` no-default `zeroize` direct feature anchors，使 `aes`/`ghash`/`polyval` keyed state drop-zeroize；exact resolved feature/package-ID 与 110-tuple lock identity evidence；无版本/wire/API/scope变化 | `ADR-0009`、`ADR-0002`、M0-T01/M0-T02 |
 | DEC-013 | resolved in M0 narrow amendment | opaque unsplit SIP022 flow、configured-server/application-target separation、core `Session.initial_payload` ownership、executor-neutral polling、direction-local normal close、single fatal arbitration与binary-local Tokio adapters；无wire/product/core/runtime/manifest变化 | `ADR-0010`、`SPEC-0001`、`TEST-0001`、M0-T03/M0-T07 |
+| DEC-014 | resolved in M0 narrow amendment | lifecycle采用black-box child/port/temp + T06 direct counters + production-used binary-private registry composition三段证据；native detection由harness primitive-only current-time generator精确构造47案，只允许两个test dev edges与唯一lock hunk | `ADR-0011`、`SPEC-0001`、`TEST-0001`、M0-T07 |
+| DEC-015 | resolved in M0 narrow amendment | opaque configured-server connect capability分离validated configured connect与fresh request-first-write deadlines（默认10秒/5秒，禁止hardcode）；runtime relay failure保留direction-separated partial stats，server prefix loop在binary-private composition内保持progress/cancel/accounting | `ADR-0012`、`SPEC-0001`、`TEST-0001`、M0-T03/M0-T06/M0-T07 |
 
 ## 风险登记
 
@@ -291,3 +309,4 @@ non-overlapping ownership。
 | 2026-07-27 | M0 plan | M0 改为 `planned`，接受 ADR-0001～0006、SPEC/TEST-0001 与 T01～T08 DAG | DEC-001～007 已有可实现、可测试、ownership-disjoint contract；唯一 initial frontier 为 T01 | Product/Architect/QA plan reports；upstream baseline；workflow validate/frontier/next |
 | 2026-07-27 | M0 CI amendment | 以 GitHub Actions/GitHub-hosted runners 取代本机 WSL2 作为 M0 required CI；新增 ADR-0007 和 T08 的唯一 workflow ownership | 绑定 pushed exact integration commit，固定 native runners、11 job、安全与 provider-native evidence，同时不扩大产品/协议范围 | Product/Architect/QA amendment reports；GitHub official runner/security docs；workflow validate/frontier/next |
 | 2026-07-27 | M0 duplex contract amendment | 接受opaque unsplit SIP022 flow取代T03 caller-managed transitions，同时分离configured SS server/application target、保留core Session initial-payload ownership与未修改runtime lifecycle | initial candidate无法并发duplex、丢失cipher/payload、拒绝合法fragmentation且无法证明scratch/fatal ownership；用户已授权本地窄blocker修复 | ADR-0010 Accepted；Product/Architect/QA PASS；workflow validate/diff-check |
+| 2026-07-27 | M0 evidence/phase contract amendment | 接受组合式lifecycle evidence、primitive-only 47-case native probes、opaque configured connect/first-write phases与failure-preserving relay stats；T03/T06窄reopen，T07保留partial checkpoint并blocked | T07真实composition证明原黑盒/fixture/fused-open/error-only seams无法满足已批准AC；修订不扩大wire/product/operator API/remote范围 | ADR-0011/0012 Accepted；SPEC/TEST amendments Approved；Product/Architect/QA final PASS；workflow validate/diff-check |

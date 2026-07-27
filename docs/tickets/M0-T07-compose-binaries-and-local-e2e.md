@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "in_progress"
+status = "blocked"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -18,6 +18,9 @@ owns = [
   "tests/m0-harness/tests/local_e2e.rs",
   "tests/m0-harness/tests/lifecycle_cycles.rs",
   "tests/m0-harness/tests/detection_probe.rs",
+  "tests/m0-harness/tests/workspace_policy.rs",
+  "tests/m0-harness/Cargo.toml",
+  "Cargo.lock",
 ]
 spec = "docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md"
 test_plan = "docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md"
@@ -27,11 +30,14 @@ acceptance = [
   "Composition passes the opened Shadowsocks stream stored LocalEndpoint into the consuming SOCKS success reply; it does not substitute the SOCKS listener or remote endpoint",
   "M0-ENDPOINT-001 client composition maps a LocalEndpoint or connect general error to one exact 05 01 00 01 00000000 0000 reply and performs no protocol first-write",
   "M0-E2E-002 fixes pre-success protocol failure versus post-success target-refusal EOF or reset semantics and proves target accept count remains zero on unauthenticated requests",
-  "M0-LIFE-005 completes at least 100 mixed lifecycle cycles with owner, buffer, permit, listener, and child-process counts at baseline",
-  "M0-DETECT-002 passes on the host native socket probe or the ticket is blocked pending an ADR-0004 revision",
-  "M0-DETECT-002 proves the approved wire-triggerable short/auth/type/time/length native close class; exhaustive key, clock, random, replay, read, and write Detection paths remain M0-DETECT-001 scripted evidence",
+  "M0-LIFE-005 combines exactly 100 black-box cycles split 20 each across success/auth reject/connect failure/cooperative cancel/forced termination with T06 direct counters and binary-private production-used registry composition evidence",
+  "Every black-box cycle timed-waits its child, rebinds the exact proxy/metrics/target addresses, removes its temp path, and returns the harness child registry to baseline; private composition tests first witness live nonzero runtime counters and then baseline, with forced_shutdowns exactly +1",
+  "M0-DETECT-002 runs exactly 47 native connections on each required native platform: 43 valid fixed-region prefixes plus independently authenticated auth/type/time/length rows; every row resets rather than EOF and leaves target accepts at zero",
+  "The independent detection generator uses only workspace-inherited aes-gcm/blake3 test primitives, never a ferrum2 package; the authenticated zero-length row maps to AddressBounds",
   "M0-ADAPT-001 and M0-ADAPT-002 prove the client TokioConnector and both binaries' TokioTransport/TokioFramed mechanical delegation, initialized ReadBuf handling, fixed error mapping/source redaction, role/call-site typed observability mapping including Normal, configured-server versus application-target separation, and direct-connect-before-initial-payload-forward ordering",
   "The server connection owner writes Session.initial_payload completely and exactly once after target connect and before ordinary relay; connect or prefix-write failure never starts relay, and ServerFlow never repeats the payload",
+  "Client composition applies independent configured-server connect and fresh request-first-write deadlines from validated config, proves the 10-second/5-second defaults plus non-default values through ADR-0012's opaque phase capability, and sends SOCKS success only after first-write completion",
+  "Prefix and ordinary relay accounting includes only successful nonzero application writes, retains direction-separated partial counts on error/idle/cancel, and never double-counts prefix bytes",
 ]
 +++
 
@@ -59,12 +65,15 @@ repeated cleanup。
   `Session.initial_payload`完整一次性forward。
 - process harness local support、ephemeral echo/recording target和child cleanup。
 - real-binary config CLI、local E2E、failure、lifecycle cycles与native detection probe。
+- ADR-0011限定的harness `aes-gcm`/`blake3` dev-dependencies、精确两条harness
+  lock edges和CRLF-safe workspace-policy evidence。
 
 ## Out of scope
 
 - external reference download/interop、target platform matrix（T08）。
 - method/transport/address范围扩展。
-- manifest/lock或shared module修改。
+- root/其他member manifest、除`ferrum2-m0-harness`精确两条edge之外的lock hunk，
+  或任何production dependency/shared module修改。
 - push/publish/release。
 
 ## Implementation notes and constraints
@@ -75,9 +84,21 @@ repeated cleanup。
 - client composition把validated `client.server`交给`ClientTcpOutbound`作为固定
   upstream endpoint；`TokioConnector`只机械委托，不得用SOCKS application target
   替换该endpoint。
+- binary在opaque `connect_server` future外应用validated configured
+  `connect_timeout`，并只在成功后为consuming request-first-write future启动fresh
+  validated `handshake_timeout`。默认值为10秒/5秒，但测试必须用non-default values
+  杀死hardcoding。connect timeout是pre-success `ConnectTimeout`；handshake
+  timeout是binary `Reason::HandshakeTimeout`、normal drop、abortive 0；
+  first-write真实错误保持Detection。不得用Notify/heuristic/raw transport shim。
 - server connector Pending/failure时不得poll或forward `Session.initial_payload`；
   success后用bounded writes保持原byte sequence完整一次，prefix write失败停止flow。
 - listener/supervisor拥有所有child；harness必须kill-on-drop并避免固定ports。
+- `run`必须调用同一个private `run_with_registry` production path；composition tests
+  必须观察registry live witness后回baseline，不能以process exit/rebind声称看到了
+  进程内counter。
+- server prefix loop只有successful nonzero write重置idle；timeout/cancel/write-zero/
+  error保留partial count且不进入relay。runtime relay failure stats与prefix count只在
+  binary instrumentation boundary合并一次。
 - instrumentation只调用typedobservability API，不加入free-formtarget/error labels。
 - 每个`DetectionReason`、`ProtocolReason`、`TransportPhase`、
   `ConnectErrorKind`及`Normal`只按ADR-0010 exact table映射
@@ -94,6 +115,9 @@ repeated cleanup。
 
 ```bash
 cargo build --workspace --bins --locked
+cargo metadata --locked --format-version 1
+cargo test -p ferrum2-m0-harness --test architecture --locked
+cargo test -p ferrum2-m0-harness --test workspace_policy --locked
 cargo test -p ferrum2-m0-harness --test config_cli --locked
 cargo test -p ferrum2-m0-harness --test cli_contract --locked
 cargo test -p ferrum2-m0-harness --test local_e2e --locked
@@ -101,7 +125,10 @@ cargo test -p ferrum2-m0-harness --test lifecycle_cycles --locked
 cargo test -p ferrum2-m0-harness --test detection_probe --locked
 cargo test -p ferrum2-client --locked local_endpoint_failure
 cargo test -p ferrum2-client --locked adapter_contract
+cargo test -p ferrum2-client --locked phase_deadline_contract
+cargo test -p ferrum2-client --locked lifecycle_composition_contract
 cargo test -p ferrum2-server --locked adapter_contract
+cargo test -p ferrum2-server --locked lifecycle_composition_contract
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo test --workspace --locked
@@ -115,10 +142,16 @@ cargo test --workspace --locked
 
 ## Completion evidence
 
-To be filled by the Team Lead after integration:
-
-- Branch:
-- Commit(s):
-- Architect verdict:
-- QA verdict:
-- Integrated commit:
+- Preserved branch: `codex/ticket/m0-t07`
+- Partial checkpoint:
+  `52dcdb00a82ed0ab07601f86a985de853c1df00f`
+- Partial scope: both binary `src/{cli,main,run}.rs`、harness local support、
+  `config_cli`、`cli_contract`、`local_e2e`; no manifest/lock、lifecycle/native probe
+  或control-doc changes
+- Partial gates: binary build、config CLI 3、CLI contract 3、local E2E 4、
+  client endpoint 1、client adapter 5、server adapter 6、workspace fmt/check/test与
+  strict Clippy均exit 0；worktree clean
+- Current gate: **BLOCKED** pending ADR-0012 T03/T06 upstream repairs and
+  ADR-0011 lifecycle/native evidence
+- Integrated commit: none
+- Publication: none
