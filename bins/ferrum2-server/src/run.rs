@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 
 use ferrum2_config::{LoggingLevel, RuntimeConfig, ValidatedServerConfig};
 use ferrum2_core::{
-    AbortiveClose, ConnectErrorKind, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr,
+    AbortiveClose, ConnectErrorKind, Inbound as _, LocalEndpoint, Outbound as _, SessionReply as _,
 };
 use ferrum2_crypto::{SinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
@@ -14,8 +14,8 @@ use ferrum2_observability::{
     json_subscriber,
 };
 use ferrum2_runtime::{
-    BoundedSupervisor, CancellationToken, DirectOutbound, OwnerRegistry, RelayRunError,
-    RuntimeTcpStream, TcpConnector, relay_lifecycle,
+    BoundedSupervisor, CancellationToken, DirectOutbound, OwnerRegistry, RelayFailure,
+    RelayRunError, RuntimeTcpStream, TcpConnector, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
     DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason, ShadowsocksError,
@@ -44,11 +44,21 @@ pub(crate) fn run(config: ValidatedServerConfig) -> Result<(), RunError> {
 }
 
 async fn run_async(config: ValidatedServerConfig) -> Result<(), RunError> {
+    run_with_registry(config, OwnerRegistry::new(), shutdown_signal()).await
+}
+
+async fn run_with_registry<S>(
+    config: ValidatedServerConfig,
+    registry: OwnerRegistry,
+    shutdown: S,
+) -> Result<(), RunError>
+where
+    S: std::future::Future<Output = ()> + Send,
+{
     let listener = bind_listener(
         config.listen,
         u32::from(config.runtime.listen_backlog.get()),
     )?;
-    let registry = OwnerRegistry::new();
     let metrics = Arc::new(Metrics::new());
     let replay = TcpReplayStore::new(config.replay.capacity).map_err(|_| RunError::Replay)?;
     let context = Arc::new(ServerContext {
@@ -89,8 +99,9 @@ async fn run_async(config: ValidatedServerConfig) -> Result<(), RunError> {
         let metrics_server = endpoint.run_until(wait_for_shutdown(metrics_shutdown));
         tokio::pin!(proxy);
         tokio::pin!(metrics_server);
+        tokio::pin!(shutdown);
         tokio::select! {
-            _ = shutdown_signal() => {
+            _ = &mut shutdown => {
                 shutdown_sender.send_replace(true);
                 let (proxy_result, metrics_result) = tokio::join!(proxy, metrics_server);
                 proxy_result.map_err(|_| RunError::Supervisor)?;
@@ -111,7 +122,7 @@ async fn run_async(config: ValidatedServerConfig) -> Result<(), RunError> {
         }
     } else {
         supervisor
-            .run_until(handler, shutdown_signal())
+            .run_until(handler, shutdown)
             .await
             .map_err(|_| RunError::Supervisor)?;
     }
@@ -220,14 +231,12 @@ async fn server_connection(
             context.metrics.active_connections_dec(Role::Server, Inbound::Shadowsocks);
             return;
         }
-        result = open_and_forward(&context.direct, &target, &initial_payload) => result,
+        result = context.direct.open(&target) => result,
     };
-    let OpenedTarget {
-        stream: mut target_stream,
-        initial_payload_bytes,
-    } = match opened {
-        Ok(opened) => opened,
-        Err(ServerOpenError::Connect(kind)) => {
+    let mut target_stream = match opened {
+        Ok(stream) => stream,
+        Err(error) => {
+            let kind = error.kind();
             let (stage, outcome, reason) = observation_for_direct_connect(kind);
             record_failure(&context, stage, reason, outcome);
             let _ = reply.failed(kind).await;
@@ -236,19 +245,32 @@ async fn server_connection(
                 .active_connections_dec(Role::Server, Inbound::Shadowsocks);
             return;
         }
-        Err(ServerOpenError::InitialPayload) => {
-            record_failure(&context, Stage::Direct, Reason::RelayIo, Outcome::Failed);
+    };
+    let initial_payload_bytes = match forward_initial_payload(
+        &mut target_stream,
+        &initial_payload,
+        context.runtime.idle_timeout,
+        cancellation.cancelled(),
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(failure) => {
+            context
+                .metrics
+                .add_bytes(Role::Server, Direction::InboundToOutbound, failure.bytes);
+            let (reason, outcome) = match failure.kind {
+                RelayRunError::Io => (Reason::RelayIo, Outcome::Failed),
+                RelayRunError::IdleTimeout => (Reason::IdleTimeout, Outcome::Timeout),
+                RelayRunError::Cancelled => (Reason::Cancelled, Outcome::Cancelled),
+            };
+            record_failure(&context, Stage::Direct, reason, outcome);
             context
                 .metrics
                 .active_connections_dec(Role::Server, Inbound::Shadowsocks);
             return;
         }
     };
-    context.metrics.add_bytes(
-        Role::Server,
-        Direction::InboundToOutbound,
-        initial_payload_bytes,
-    );
     let _ = reply.succeeded(target_stream.local_endpoint()).await;
     let mut framed = TokioFramed::new(stream);
     let relay = relay_lifecycle(
@@ -262,43 +284,65 @@ async fn server_connection(
     context
         .metrics
         .active_connections_dec(Role::Server, Inbound::Shadowsocks);
-    finish_relay(&context, &framed, relay);
+    finish_relay(&context, &framed, initial_payload_bytes, relay);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ServerOpenError {
-    Connect(ConnectErrorKind),
-    InitialPayload,
+struct PrefixFailure {
+    kind: RelayRunError,
+    bytes: u64,
 }
 
-struct OpenedTarget<S> {
-    stream: S,
-    initial_payload_bytes: u64,
-}
-
-async fn open_and_forward<O>(
-    outbound: &O,
-    target: &TargetAddr,
+async fn forward_initial_payload<W, C>(
+    stream: &mut W,
     initial_payload: &[u8],
-) -> Result<OpenedTarget<O::Stream>, ServerOpenError>
+    idle_timeout: std::time::Duration,
+    cancellation: C,
+) -> Result<u64, PrefixFailure>
 where
-    O: ferrum2_core::Outbound<Error = ferrum2_core::ConnectError>,
-    O::Stream: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
+    C: std::future::Future<Output = ()>,
 {
-    let mut stream = outbound
-        .open(target)
-        .await
-        .map_err(|error| ServerOpenError::Connect(error.kind()))?;
-    if !initial_payload.is_empty() {
-        stream
-            .write_all(initial_payload)
-            .await
-            .map_err(|_| ServerOpenError::InitialPayload)?;
+    let mut written = 0_usize;
+    let mut deadline = tokio::time::Instant::now() + idle_timeout;
+    tokio::pin!(cancellation);
+    while written < initial_payload.len() {
+        let result = tokio::select! {
+            biased;
+            _ = &mut cancellation => {
+                return Err(PrefixFailure {
+                    kind: RelayRunError::Cancelled,
+                    bytes: written as u64,
+                });
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(PrefixFailure {
+                    kind: RelayRunError::IdleTimeout,
+                    bytes: written as u64,
+                });
+            }
+            result = stream.write(&initial_payload[written..]) => result,
+        };
+        match result {
+            Ok(0) => {
+                return Err(PrefixFailure {
+                    kind: RelayRunError::Io,
+                    bytes: written as u64,
+                });
+            }
+            Ok(count) => {
+                written += count;
+                deadline = tokio::time::Instant::now() + idle_timeout;
+            }
+            Err(_) => {
+                return Err(PrefixFailure {
+                    kind: RelayRunError::Io,
+                    bytes: written as u64,
+                });
+            }
+        }
     }
-    Ok(OpenedTarget {
-        stream,
-        initial_payload_bytes: u64::try_from(initial_payload.len()).unwrap_or(u64::MAX),
-    })
+    Ok(written as u64)
 }
 
 fn update_replay_metric(context: &ServerContext) {
@@ -312,20 +356,25 @@ fn update_replay_metric(context: &ServerContext) {
 fn finish_relay(
     context: &ServerContext,
     framed: &TokioFramed<impl PlainDuplex>,
-    result: Result<ferrum2_runtime::RelayStats, RelayRunError>,
+    initial_payload_bytes: u64,
+    result: Result<ferrum2_runtime::RelayStats, RelayFailure>,
 ) {
+    let stats = match result {
+        Ok(stats) => stats,
+        Err(failure) => failure.stats,
+    };
+    context.metrics.add_bytes(
+        Role::Server,
+        Direction::InboundToOutbound,
+        initial_payload_bytes + stats.inbound_to_outbound,
+    );
+    context.metrics.add_bytes(
+        Role::Server,
+        Direction::OutboundToInbound,
+        stats.outbound_to_inbound,
+    );
     match result {
-        Ok(stats) => {
-            context.metrics.add_bytes(
-                Role::Server,
-                Direction::InboundToOutbound,
-                stats.inbound_to_outbound,
-            );
-            context.metrics.add_bytes(
-                Role::Server,
-                Direction::OutboundToInbound,
-                stats.outbound_to_inbound,
-            );
+        Ok(_) => {
             context
                 .metrics
                 .connection(Role::Server, Inbound::Shadowsocks, Outcome::Completed);
@@ -335,13 +384,22 @@ fn finish_relay(
                 .unwrap_or((Stage::Relay, Outcome::Completed, None));
             emit_observation(Role::Server, stage, outcome, reason);
         }
-        Err(RelayRunError::Cancelled) => {
+        Err(RelayFailure {
+            kind: RelayRunError::Cancelled,
+            ..
+        }) => {
             record_failure(context, Stage::Relay, Reason::Cancelled, Outcome::Cancelled);
         }
-        Err(RelayRunError::IdleTimeout) => {
+        Err(RelayFailure {
+            kind: RelayRunError::IdleTimeout,
+            ..
+        }) => {
             record_failure(context, Stage::Relay, Reason::IdleTimeout, Outcome::Timeout);
         }
-        Err(RelayRunError::Io) => {
+        Err(RelayFailure {
+            kind: RelayRunError::Io,
+            ..
+        }) => {
             if let Some(terminal) = framed.terminal() {
                 let (stage, outcome, reason) = observation_for_terminal(terminal);
                 emit_observation(Role::Server, stage, outcome, reason);
@@ -471,6 +529,15 @@ pub(crate) struct TokioTransport<T> {
 impl<T> TokioTransport<T> {
     pub(crate) const fn new(inner: T) -> Self {
         Self { inner }
+    }
+}
+
+impl<T> LocalEndpoint for TokioTransport<T>
+where
+    T: LocalEndpoint,
+{
+    fn local_endpoint(&self) -> std::net::SocketAddrV4 {
+        self.inner.local_endpoint()
     }
 }
 
@@ -619,15 +686,25 @@ fn framed_error(error: ShadowsocksError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::path::PathBuf;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::Waker;
+    use std::time::Duration;
 
-    use ferrum2_core::{ConnectError, LocalEndpoint, Outbound};
+    use ferrum2_core::{ConnectError, Connector, LocalEndpoint, Outbound, TargetAddr};
+    use ferrum2_crypto::Aes128Psk;
+    use ferrum2_shadowsocks::ClientTcpOutbound;
     use ferrum2_shadowsocks::TransportPhase;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::Notify;
 
     use super::*;
+
+    const PSK_BYTES: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
 
     struct EndpointIo {
         inner: tokio::io::DuplexStream,
@@ -1045,7 +1122,16 @@ mod tests {
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
         let task_outbound = Arc::clone(&outbound);
         let task = tokio::spawn(async move {
-            open_and_forward(task_outbound.as_ref(), &target, b"initial").await
+            let mut stream = task_outbound.open(&target).await?;
+            let bytes = forward_initial_payload(
+                &mut stream,
+                b"initial",
+                std::time::Duration::from_secs(5),
+                std::future::pending(),
+            )
+            .await
+            .expect("prefix");
+            Ok::<_, ConnectError>((stream, bytes))
         });
 
         tokio::task::yield_now().await;
@@ -1054,7 +1140,7 @@ mod tests {
         assert_eq!(write_calls.load(Ordering::SeqCst), 0);
 
         gate.notify_one();
-        let opened = task
+        let (opened, initial_payload_bytes) = task
             .await
             .expect("open task")
             .expect("connect and initial payload");
@@ -1063,9 +1149,9 @@ mod tests {
             b"initial"
         );
         assert!(write_calls.load(Ordering::SeqCst) > 1);
-        assert_eq!(opened.initial_payload_bytes, 7);
+        assert_eq!(initial_payload_bytes, 7);
         assert_eq!(
-            opened.stream.local_endpoint(),
+            opened.local_endpoint(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_003)
         );
     }
@@ -1077,30 +1163,304 @@ mod tests {
             controlled_outbound(2, None, Some(ConnectErrorKind::ConnectionRefused));
         let task_outbound = Arc::clone(&outbound);
         let task_target = target.clone();
-        let task = tokio::spawn(async move {
-            open_and_forward(task_outbound.as_ref(), &task_target, b"initial").await
-        });
+        let task = tokio::spawn(async move { task_outbound.open(&task_target).await });
         tokio::task::yield_now().await;
         assert!(bytes.lock().expect("recording bytes").is_empty());
         gate.notify_one();
         assert!(matches!(
             task.await.expect("connect task"),
-            Err(ServerOpenError::Connect(
-                ConnectErrorKind::ConnectionRefused
-            ))
+            Err(error) if error.kind() == ConnectErrorKind::ConnectionRefused
         ));
         assert_eq!(write_calls.load(Ordering::SeqCst), 0);
 
         let (outbound, gate, bytes, _write_calls) = controlled_outbound(2, Some(1), None);
-        let task =
-            tokio::spawn(
-                async move { open_and_forward(outbound.as_ref(), &target, b"initial").await },
-            );
+        let task = tokio::spawn(async move {
+            let mut stream = outbound.open(&target).await.expect("connected");
+            forward_initial_payload(
+                &mut stream,
+                b"initial",
+                std::time::Duration::from_secs(5),
+                std::future::pending(),
+            )
+            .await
+        });
         gate.notify_one();
         assert!(matches!(
             task.await.expect("prefix task"),
-            Err(ServerOpenError::InitialPayload)
+            Err(PrefixFailure {
+                kind: RelayRunError::Io,
+                bytes: 2,
+            })
         ));
         assert_eq!(bytes.lock().expect("recording bytes").as_slice(), b"in");
+    }
+
+    struct GatedPrefixWriter {
+        ready: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+        waker: Arc<Mutex<Option<Waker>>>,
+        max_write: usize,
+        fail_after: Option<usize>,
+        zero_after: Option<usize>,
+    }
+
+    impl AsyncWrite for GatedPrefixWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            source: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_after == Some(call) {
+                return Poll::Ready(Err(io::Error::other("prefix sentinel")));
+            }
+            if self.zero_after == Some(call) {
+                return Poll::Ready(Ok(0));
+            }
+            if !self.ready.swap(false, Ordering::SeqCst) {
+                *self.waker.lock().expect("prefix waker") = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(source.len().min(self.max_write)))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_composition_contract_prefix_cancel_retains_partial_count() {
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let ready = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let waker = Arc::new(Mutex::new(None));
+        let mut writer = GatedPrefixWriter {
+            ready,
+            calls,
+            waker,
+            max_write: 2,
+            fail_after: None,
+            zero_after: None,
+        };
+        let mut prefix = Box::pin(forward_initial_payload(
+            &mut writer,
+            b"four",
+            std::time::Duration::from_secs(5),
+            async {
+                let _ = cancelled.await;
+            },
+        ));
+        tokio::select! {
+            biased;
+            result = &mut prefix => panic!("prefix ended before cancellation: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        cancel.send(()).expect("cancel prefix");
+        assert_eq!(
+            prefix.await,
+            Err(PrefixFailure {
+                kind: RelayRunError::Cancelled,
+                bytes: 2,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_composition_contract_prefix_write_zero_and_error_retain_counts() {
+        for (fail_after, zero_after) in [(Some(1), None), (None, Some(1))] {
+            let mut writer = GatedPrefixWriter {
+                ready: Arc::new(AtomicBool::new(true)),
+                calls: Arc::new(AtomicUsize::new(0)),
+                waker: Arc::new(Mutex::new(None)),
+                max_write: 2,
+                fail_after,
+                zero_after,
+            };
+            let result = forward_initial_payload(
+                &mut writer,
+                b"four",
+                std::time::Duration::from_secs(5),
+                std::future::pending(),
+            )
+            .await;
+            assert_eq!(
+                result,
+                Err(PrefixFailure {
+                    kind: RelayRunError::Io,
+                    bytes: 2,
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_composition_contract_empty_prefix_performs_no_write() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut writer = GatedPrefixWriter {
+            ready: Arc::new(AtomicBool::new(false)),
+            calls: Arc::clone(&calls),
+            waker: Arc::new(Mutex::new(None)),
+            max_write: 1,
+            fail_after: None,
+            zero_after: None,
+        };
+        assert_eq!(
+            forward_initial_payload(
+                &mut writer,
+                b"",
+                std::time::Duration::from_secs(5),
+                std::future::pending(),
+            )
+            .await,
+            Ok(0)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    fn reserve_address() -> SocketAddrV4 {
+        let listener =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve address");
+        let address = match listener.local_addr().expect("reserved address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 reservation"),
+        };
+        drop(listener);
+        address
+    }
+
+    fn server_test_config(listen: SocketAddrV4) -> (PathBuf, ValidatedServerConfig) {
+        static CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ferrum2-server-composition-{}-{}.toml",
+            std::process::id(),
+            CONFIG_ID.fetch_add(1, Ordering::SeqCst)
+        ));
+        let source = format!(
+            "schema_version = 1\n\
+             [server]\n\
+             listen = \"{listen}\"\n\
+             [shadowsocks]\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+             [runtime]\n\
+             shutdown_grace_ms = 0\n"
+        );
+        std::fs::write(&path, source).expect("server test config");
+        let config = ferrum2_config::load_server(&path).expect("validated server test config");
+        (path, config)
+    }
+
+    async fn wait_until_bound(address: SocketAddrV4) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::net::TcpListener::bind(address) {
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => return,
+                Ok(listener) => drop(listener),
+                Err(error) => panic!("bind readiness failed: {error}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "listener readiness timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    struct ProtocolClientConnector {
+        inner: TcpConnector,
+    }
+
+    impl Connector for ProtocolClientConnector {
+        type Stream = TokioTransport<RuntimeTcpStream>;
+
+        async fn connect(&self, target: &TargetAddr) -> Result<Self::Stream, ConnectError> {
+            self.inner.connect(target).await.map(TokioTransport::new)
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_composition_contract_production_registry_witnesses_live_then_baseline() {
+        let listen = reserve_address();
+        let target_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("target listener");
+        let target_address = match target_listener.local_addr().expect("target address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 target"),
+        };
+        let (config_path, config) = server_test_config(listen);
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
+        let task_registry = registry.clone();
+        let run_task = tokio::spawn(async move {
+            run_with_registry(config, task_registry, async {
+                let _ = shutdown_receiver.await;
+            })
+            .await
+        });
+        wait_until_bound(listen).await;
+
+        let target_accept =
+            tokio::spawn(async move { target_listener.accept().await.expect("target accept").0 });
+        let keys = SinglePskProvider::new(Aes128Psk::from_bytes(PSK_BYTES));
+        let connector = ProtocolClientConnector {
+            inner: TcpConnector::new(Duration::from_secs(5)),
+        };
+        let server_target = TargetAddr::ipv4(listen).expect("server target");
+        let application_target = TargetAddr::ipv4(target_address).expect("application target");
+        let clock = SystemClock::new();
+        let random = SystemRandom;
+        let outbound = ClientTcpOutbound::new(server_target, &keys, &connector, &clock, &random);
+        let flow = outbound
+            .connect_server()
+            .await
+            .expect("connect server")
+            .write_request(&application_target)
+            .await
+            .expect("write request");
+        let target_stream = target_accept.await.expect("target accept task");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let live = registry.snapshot();
+            if live.active_supervisor_children == 1
+                && live.connection_tasks == 1
+                && live.owned_buffers == 2
+                && live.owned_permits >= 1
+                && live.listeners == 1
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "registry never exposed the live production path: {live:?}"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        shutdown_sender.send(()).expect("request shutdown");
+        assert_eq!(run_task.await.expect("run task"), Ok(()));
+        drop(flow);
+        drop(target_stream);
+        let final_snapshot = registry.snapshot();
+        assert_eq!(
+            final_snapshot.active_supervisor_children,
+            baseline.active_supervisor_children
+        );
+        assert_eq!(final_snapshot.connection_tasks, baseline.connection_tasks);
+        assert_eq!(final_snapshot.owned_buffers, baseline.owned_buffers);
+        assert_eq!(final_snapshot.owned_permits, baseline.owned_permits);
+        assert_eq!(final_snapshot.listeners, baseline.listeners);
+        assert_eq!(
+            final_snapshot.forced_shutdowns,
+            baseline.forced_shutdowns + 1
+        );
+        std::fs::remove_file(config_path).expect("remove server test config");
     }
 }

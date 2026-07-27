@@ -7,19 +7,21 @@ use std::task::{Context, Poll};
 use ferrum2_config::{LoggingLevel, RuntimeConfig, ValidatedClientConfig};
 use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, Inbound as _, LocalEndpoint,
-    Outbound as _, SessionReply as _, TargetAddr,
+    SessionReply as _, TargetAddr,
 };
-use ferrum2_crypto::{SinglePskProvider, SystemClock, SystemRandom};
+use ferrum2_crypto::{
+    Clock, KeyProvider, SecureRandom, SinglePskProvider, SystemClock, SystemRandom,
+};
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
     json_subscriber,
 };
 use ferrum2_runtime::{
-    BoundedSupervisor, CancellationToken, OwnerRegistry, RelayRunError, TcpConnector,
+    BoundedSupervisor, CancellationToken, OwnerRegistry, RelayFailure, RelayRunError, TcpConnector,
     relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason,
+    ClientFlow, ClientTcpOutbound, DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason,
     ShadowsocksError, TransportIo,
 };
 use ferrum2_socks5::Socks5Inbound;
@@ -45,11 +47,21 @@ pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
 }
 
 async fn run_async(config: ValidatedClientConfig) -> Result<(), RunError> {
+    run_with_registry(config, OwnerRegistry::new(), shutdown_signal()).await
+}
+
+async fn run_with_registry<S>(
+    config: ValidatedClientConfig,
+    registry: OwnerRegistry,
+    shutdown: S,
+) -> Result<(), RunError>
+where
+    S: std::future::Future<Output = ()> + Send,
+{
     let listener = bind_listener(
         config.listen,
         u32::from(config.runtime.listen_backlog.get()),
     )?;
-    let registry = OwnerRegistry::new();
     let metrics = Arc::new(Metrics::new());
     let server = TargetAddr::ipv4(config.server).map_err(|_| RunError::Listener)?;
     let context = Arc::new(ClientContext {
@@ -91,8 +103,9 @@ async fn run_async(config: ValidatedClientConfig) -> Result<(), RunError> {
         let metrics_server = endpoint.run_until(wait_for_shutdown(metrics_shutdown));
         tokio::pin!(proxy);
         tokio::pin!(metrics_server);
+        tokio::pin!(shutdown);
         tokio::select! {
-            _ = shutdown_signal() => {
+            _ = &mut shutdown => {
                 shutdown_sender.send_replace(true);
                 let (proxy_result, metrics_result) = tokio::join!(proxy, metrics_server);
                 proxy_result.map_err(|_| RunError::Supervisor)?;
@@ -113,7 +126,7 @@ async fn run_async(config: ValidatedClientConfig) -> Result<(), RunError> {
         }
     } else {
         supervisor
-            .run_until(handler, shutdown_signal())
+            .run_until(handler, shutdown)
             .await
             .map_err(|_| RunError::Supervisor)?;
     }
@@ -202,11 +215,16 @@ async fn client_connection(
     );
     let opened = tokio::select! {
         _ = cancellation.cancelled() => return,
-        result = outbound.open(&target) => result,
+        result = open_with_deadlines(
+            &outbound,
+            &target,
+            context.runtime.connect_timeout,
+            context.runtime.handshake_timeout,
+        ) => result,
     };
     let flow = match opened {
         Ok(flow) => flow,
-        Err(error) => {
+        Err(ClientOpenFailure::Protocol(error)) => {
             let (stage, outcome, reason) = observation_for_error(error);
             record_failure(&context, stage, reason, outcome);
             let kind = match error {
@@ -216,6 +234,16 @@ async fn client_connection(
                 | ShadowsocksError::Transport(_) => ConnectErrorKind::Other,
             };
             let _ = reply.failed(kind).await;
+            return;
+        }
+        Err(ClientOpenFailure::HandshakeTimeout) => {
+            record_failure(
+                &context,
+                Stage::Shadowsocks,
+                Reason::HandshakeTimeout,
+                Outcome::Timeout,
+            );
+            let _ = reply.failed(ConnectErrorKind::Other).await;
             return;
         }
     };
@@ -256,20 +284,24 @@ async fn client_connection(
 fn finish_relay(
     context: &ClientContext,
     framed: &TokioFramed<impl PlainDuplex>,
-    result: Result<ferrum2_runtime::RelayStats, RelayRunError>,
+    result: Result<ferrum2_runtime::RelayStats, RelayFailure>,
 ) {
+    let stats = match result {
+        Ok(stats) => stats,
+        Err(failure) => failure.stats,
+    };
+    context.metrics.add_bytes(
+        Role::Client,
+        Direction::InboundToOutbound,
+        stats.inbound_to_outbound,
+    );
+    context.metrics.add_bytes(
+        Role::Client,
+        Direction::OutboundToInbound,
+        stats.outbound_to_inbound,
+    );
     match result {
-        Ok(stats) => {
-            context.metrics.add_bytes(
-                Role::Client,
-                Direction::InboundToOutbound,
-                stats.inbound_to_outbound,
-            );
-            context.metrics.add_bytes(
-                Role::Client,
-                Direction::OutboundToInbound,
-                stats.outbound_to_inbound,
-            );
+        Ok(_) => {
             context
                 .metrics
                 .connection(Role::Client, Inbound::Socks5, Outcome::Completed);
@@ -279,13 +311,22 @@ fn finish_relay(
                 .unwrap_or((Stage::Relay, Outcome::Completed, None));
             emit_observation(Role::Client, stage, outcome, reason);
         }
-        Err(RelayRunError::Cancelled) => {
+        Err(RelayFailure {
+            kind: RelayRunError::Cancelled,
+            ..
+        }) => {
             record_failure(context, Stage::Relay, Reason::Cancelled, Outcome::Cancelled);
         }
-        Err(RelayRunError::IdleTimeout) => {
+        Err(RelayFailure {
+            kind: RelayRunError::IdleTimeout,
+            ..
+        }) => {
             record_failure(context, Stage::Relay, Reason::IdleTimeout, Outcome::Timeout);
         }
-        Err(RelayRunError::Io) => {
+        Err(RelayFailure {
+            kind: RelayRunError::Io,
+            ..
+        }) => {
             if let Some(terminal) = framed.terminal() {
                 let (stage, outcome, reason) = observation_for_terminal(terminal);
                 emit_observation(Role::Client, stage, outcome, reason);
@@ -297,6 +338,40 @@ fn finish_relay(
             }
         }
     }
+}
+
+#[derive(Debug)]
+enum ClientOpenFailure {
+    Protocol(ShadowsocksError),
+    HandshakeTimeout,
+}
+
+async fn open_with_deadlines<'a, K, C, T, R>(
+    outbound: &ClientTcpOutbound<'a, K, C, T, R>,
+    application_target: &TargetAddr,
+    connect_timeout: std::time::Duration,
+    handshake_timeout: std::time::Duration,
+) -> Result<ClientFlow<'a, C::Stream, K, T>, ClientOpenFailure>
+where
+    K: KeyProvider + Sync,
+    C: Connector,
+    C::Stream: TransportIo + LocalEndpoint,
+    T: Clock + Sync,
+    R: SecureRandom,
+{
+    let connected = tokio::time::timeout(connect_timeout, outbound.connect_server())
+        .await
+        .map_err(|_| {
+            ClientOpenFailure::Protocol(ShadowsocksError::Connect(ConnectErrorKind::Timeout))
+        })?
+        .map_err(ClientOpenFailure::Protocol)?;
+    tokio::time::timeout(
+        handshake_timeout,
+        connected.write_request(application_target),
+    )
+    .await
+    .map_err(|_| ClientOpenFailure::HandshakeTimeout)?
+    .map_err(ClientOpenFailure::Protocol)
 }
 
 fn record_failure(context: &ClientContext, stage: Stage, reason: Reason, outcome: Outcome) {
@@ -587,8 +662,10 @@ fn framed_error(error: ShadowsocksError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use ferrum2_core::{ConnectError, Connector};
     use ferrum2_shadowsocks::TransportPhase;
@@ -1006,5 +1083,146 @@ mod tests {
             peer_task.await.expect("peer task"),
             [5, 1, 0, 1, 0, 0, 0, 0, 0, 0]
         );
+    }
+
+    fn reserve_address() -> SocketAddrV4 {
+        let listener =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve address");
+        let address = match listener.local_addr().expect("reserved address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 reservation"),
+        };
+        drop(listener);
+        address
+    }
+
+    fn client_test_config(
+        listen: SocketAddrV4,
+        server: SocketAddrV4,
+    ) -> (PathBuf, ValidatedClientConfig) {
+        static CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ferrum2-client-composition-{}-{}.toml",
+            std::process::id(),
+            CONFIG_ID.fetch_add(1, Ordering::SeqCst)
+        ));
+        let source = format!(
+            "schema_version = 1\n\
+             [client]\n\
+             listen = \"{listen}\"\n\
+             server = \"{server}\"\n\
+             [shadowsocks]\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+             [runtime]\n\
+             shutdown_grace_ms = 0\n"
+        );
+        std::fs::write(&path, source).expect("client test config");
+        let config = ferrum2_config::load_client(&path).expect("validated client test config");
+        (path, config)
+    }
+
+    async fn wait_until_bound(address: SocketAddrV4) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::net::TcpListener::bind(address) {
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => return,
+                Ok(listener) => drop(listener),
+                Err(error) => panic!("bind readiness failed: {error}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "listener readiness timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_composition_contract_production_registry_witnesses_live_then_baseline() {
+        let shadowsocks_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("fake Shadowsocks listener");
+        let server = match shadowsocks_listener.local_addr().expect("server address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 server"),
+        };
+        let listen = reserve_address();
+        let (config_path, config) = client_test_config(listen, server);
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
+        let task_registry = registry.clone();
+        let run_task = tokio::spawn(async move {
+            run_with_registry(config, task_registry, async {
+                let _ = shutdown_receiver.await;
+            })
+            .await
+        });
+        wait_until_bound(listen).await;
+
+        let accept_task = tokio::spawn(async move {
+            shadowsocks_listener
+                .accept()
+                .await
+                .expect("fake Shadowsocks accept")
+                .0
+        });
+        let mut socks = tokio::net::TcpStream::connect(listen)
+            .await
+            .expect("SOCKS client connect");
+        socks.write_all(&[5, 1, 0]).await.expect("SOCKS greeting");
+        let mut method = [0_u8; 2];
+        socks.read_exact(&mut method).await.expect("SOCKS method");
+        assert_eq!(method, [5, 0]);
+        socks
+            .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 0, 80])
+            .await
+            .expect("SOCKS request");
+        let mut reply = [0_u8; 10];
+        socks.read_exact(&mut reply).await.expect("SOCKS success");
+        assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+        let shadowsocks_stream = accept_task.await.expect("fake Shadowsocks task");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let live = registry.snapshot();
+            if live.active_supervisor_children == 1
+                && live.connection_tasks == 1
+                && live.owned_buffers == 2
+                && live.owned_permits >= 1
+                && live.listeners == 1
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "registry never exposed the live production path: {live:?}"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        shutdown_sender.send(()).expect("request shutdown");
+        assert_eq!(
+            run_task.await.expect("run task"),
+            Ok(()),
+            "production run_with_registry path"
+        );
+        drop(socks);
+        drop(shadowsocks_stream);
+        let final_snapshot = registry.snapshot();
+        assert_eq!(
+            final_snapshot.active_supervisor_children,
+            baseline.active_supervisor_children
+        );
+        assert_eq!(final_snapshot.connection_tasks, baseline.connection_tasks);
+        assert_eq!(final_snapshot.owned_buffers, baseline.owned_buffers);
+        assert_eq!(final_snapshot.owned_permits, baseline.owned_permits);
+        assert_eq!(final_snapshot.listeners, baseline.listeners);
+        assert_eq!(
+            final_snapshot.forced_shutdowns,
+            baseline.forced_shutdowns + 1
+        );
+        std::fs::remove_file(config_path).expect("remove client test config");
     }
 }

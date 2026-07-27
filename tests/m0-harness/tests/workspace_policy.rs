@@ -124,11 +124,19 @@ struct LockIdentity {
     checksum: Option<String>,
 }
 
+fn normalize_line_endings(source: &str) -> Result<String, String> {
+    let normalized = source.replace("\r\n", "\n");
+    if normalized.contains('\r') {
+        return Err("bare carriage return is forbidden".to_owned());
+    }
+    Ok(normalized)
+}
+
 fn dependency_table(
     manifest: &str,
     table_header: &str,
 ) -> Result<BTreeMap<String, String>, String> {
-    let normalized = manifest.replace("\r\n", "\n");
+    let normalized = normalize_line_endings(manifest)?;
     let mut in_table = false;
     let mut declarations = BTreeMap::new();
 
@@ -187,7 +195,7 @@ fn quoted_lock_field(block: &str, field: &str) -> Result<Option<String>, String>
 }
 
 fn lock_identities(lock: &str) -> Result<Vec<LockIdentity>, String> {
-    let normalized = lock.replace("\r\n", "\n");
+    let normalized = normalize_line_endings(lock)?;
     let mut identities = Vec::new();
 
     for block in normalized.split("[[package]]").skip(1) {
@@ -203,6 +211,46 @@ fn lock_identities(lock: &str) -> Result<Vec<LockIdentity>, String> {
 
     identities.sort();
     Ok(identities)
+}
+
+fn lock_package_dependencies(lock: &str, package_name: &str) -> Result<BTreeSet<String>, String> {
+    let normalized = normalize_line_endings(lock)?;
+    let mut matches = normalized.split("[[package]]").skip(1).filter(|block| {
+        quoted_lock_field(block, "name").is_ok_and(|name| name.as_deref() == Some(package_name))
+    });
+    let block = matches
+        .next()
+        .ok_or_else(|| format!("lock package not found: {package_name}"))?;
+    if matches.next().is_some() {
+        return Err(format!("duplicate lock package: {package_name}"));
+    }
+    let mut in_dependencies = false;
+    let mut dependencies = BTreeSet::new();
+    for line in block.lines() {
+        let line = line.trim();
+        if line == "dependencies = [" {
+            if in_dependencies {
+                return Err("duplicate dependencies array".to_owned());
+            }
+            in_dependencies = true;
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        if line == "]" {
+            return Ok(dependencies);
+        }
+        let dependency = line
+            .strip_suffix(',')
+            .and_then(|line| line.strip_prefix('"'))
+            .and_then(|line| line.strip_suffix('"'))
+            .ok_or_else(|| format!("invalid lock dependency entry: {line}"))?;
+        if !dependencies.insert(dependency.to_owned()) {
+            return Err(format!("duplicate lock dependency: {dependency}"));
+        }
+    }
+    Err(format!("missing lock dependencies array: {package_name}"))
 }
 
 fn pre_repair_lock_identities() -> Vec<LockIdentity> {
@@ -297,7 +345,7 @@ fn resolve_node<'a>(metadata: &'a Value, package_id: &str) -> &'a Value {
 }
 
 fn contains_manifest_policy(manifest: &str, policy: &str) -> bool {
-    manifest.replace("\r\n", "\n").contains(policy)
+    normalize_line_endings(manifest).is_ok_and(|manifest| manifest.contains(policy))
 }
 
 #[test]
@@ -525,6 +573,147 @@ fn manifest_dependency_helpers_accept_line_endings_and_reject_mutations() {
     }
 
     assert!(dependency_table("[dependencies]\naes.workspace=true\n", "[dependencies]").is_err());
+    assert!(
+        dependency_table("[dependencies]\raes.workspace = true\r", "[dependencies]").is_err(),
+        "bare carriage returns must not bypass dependency policy"
+    );
+}
+
+#[test]
+fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
+    let root = workspace_root();
+    let manifest =
+        fs::read_to_string(root.join("tests/m0-harness/Cargo.toml")).expect("harness manifest");
+    let manifest_lf = normalize_line_endings(&manifest).expect("harness line endings");
+    let expected = BTreeMap::from([
+        ("aes-gcm.workspace".to_owned(), "true".to_owned()),
+        ("blake3.workspace".to_owned(), "true".to_owned()),
+        ("hex.workspace".to_owned(), "true".to_owned()),
+        ("serde_json.workspace".to_owned(), "true".to_owned()),
+        ("tempfile.workspace".to_owned(), "true".to_owned()),
+    ]);
+    assert_eq!(
+        dependency_table(&manifest, "[dev-dependencies]").expect("harness dev dependencies"),
+        expected
+    );
+
+    for fixture in [manifest_lf.clone(), manifest_lf.replace('\n', "\r\n")] {
+        assert_eq!(
+            dependency_table(&fixture, "[dev-dependencies]").expect("line-ending fixture"),
+            expected
+        );
+    }
+    for mutation in [
+        manifest_lf.replace("aes-gcm.workspace = true\n", ""),
+        manifest_lf.replace("aes-gcm.workspace = true", "aes-gcm = { workspace = true }"),
+        manifest_lf.replace(
+            "blake3.workspace = true",
+            "blake3 = { workspace = true, features = [\"rayon\"] }",
+        ),
+        manifest_lf.replace(
+            "tempfile.workspace = true",
+            "tempfile.workspace = true\nferrum2-core.workspace = true",
+        ),
+        manifest_lf.replace("[dev-dependencies]", "[dependencies]"),
+    ] {
+        assert_ne!(
+            dependency_table(&mutation, "[dev-dependencies]").ok(),
+            Some(expected.clone()),
+            "manifest mutation must not preserve the approved dependency contract"
+        );
+    }
+    assert!(
+        dependency_table(&manifest_lf.replace('\n', "\r"), "[dev-dependencies]").is_err(),
+        "bare carriage returns must be rejected"
+    );
+
+    let metadata = metadata();
+    let harness = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "ferrum2-m0-harness")
+        .expect("harness package");
+    let actual_metadata: BTreeSet<_> = harness["dependencies"]
+        .as_array()
+        .expect("harness dependencies")
+        .iter()
+        .map(|dependency| {
+            assert_eq!(
+                dependency["kind"], "dev",
+                "every harness direct edge must be test-only"
+            );
+            let name = dependency["name"].as_str().expect("dependency name");
+            match name {
+                "aes-gcm" => {
+                    assert_eq!(dependency["uses_default_features"], false);
+                    assert_eq!(
+                        dependency["features"],
+                        serde_json::json!(["aes", "bytes", "zeroize"])
+                    );
+                }
+                "blake3" => {
+                    assert_eq!(dependency["uses_default_features"], false);
+                    assert_eq!(
+                        dependency["features"],
+                        serde_json::json!(["std", "zeroize"])
+                    );
+                }
+                "hex" | "serde_json" | "tempfile" => {
+                    assert_eq!(dependency["uses_default_features"], true);
+                    assert_eq!(dependency["features"], serde_json::json!([]));
+                }
+                other => panic!("unexpected harness dependency: {other}"),
+            }
+            name.to_owned()
+        })
+        .collect();
+    assert_eq!(
+        actual_metadata,
+        BTreeSet::from([
+            "aes-gcm".to_owned(),
+            "blake3".to_owned(),
+            "hex".to_owned(),
+            "serde_json".to_owned(),
+            "tempfile".to_owned(),
+        ])
+    );
+    assert!(
+        actual_metadata
+            .iter()
+            .all(|dependency| !dependency.starts_with("ferrum2-"))
+    );
+
+    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock");
+    let lock_lf = normalize_line_endings(&lock).expect("Cargo.lock line endings");
+    let expected_lock = BTreeSet::from([
+        "aes-gcm".to_owned(),
+        "blake3".to_owned(),
+        "hex".to_owned(),
+        "serde_json".to_owned(),
+        "tempfile".to_owned(),
+    ]);
+    assert_eq!(
+        lock_package_dependencies(&lock, "ferrum2-m0-harness").expect("harness lock dependencies"),
+        expected_lock
+    );
+    assert_eq!(
+        lock_package_dependencies(&lock_lf.replace('\n', "\r\n"), "ferrum2-m0-harness")
+            .expect("CRLF harness lock dependencies"),
+        expected_lock
+    );
+    for mutation in [
+        lock_lf.replace(" \"aes-gcm\",\n", ""),
+        lock_lf.replace(" \"blake3\",\n", ""),
+        lock_lf.replace(" \"tempfile\",\n", " \"ferrum2-core\",\n \"tempfile\",\n"),
+    ] {
+        assert_ne!(
+            lock_package_dependencies(&mutation, "ferrum2-m0-harness").ok(),
+            Some(expected_lock.clone()),
+            "lock edge mutation must not preserve the approved contract"
+        );
+    }
+    assert!(lock_package_dependencies(&lock_lf.replace('\n', "\r"), "ferrum2-m0-harness").is_err());
 }
 
 #[test]
