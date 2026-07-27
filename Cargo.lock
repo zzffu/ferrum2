@@ -315,6 +315,8 @@ dependencies = [
 name = "ferrum2-m0-harness"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "blake3",
  "hex",
  "serde_json",
  "tempfile",

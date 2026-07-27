@@ -124,11 +124,19 @@ struct LockIdentity {
     checksum: Option<String>,
 }
 
+fn normalize_line_endings(source: &str) -> Result<String, String> {
+    let normalized = source.replace("\r\n", "\n");
+    if normalized.contains('\r') {
+        return Err("bare carriage return is forbidden".to_owned());
+    }
+    Ok(normalized)
+}
+
 fn dependency_table(
     manifest: &str,
     table_header: &str,
 ) -> Result<BTreeMap<String, String>, String> {
-    let normalized = manifest.replace("\r\n", "\n");
+    let normalized = normalize_line_endings(manifest)?;
     let mut in_table = false;
     let mut declarations = BTreeMap::new();
 
@@ -187,7 +195,7 @@ fn quoted_lock_field(block: &str, field: &str) -> Result<Option<String>, String>
 }
 
 fn lock_identities(lock: &str) -> Result<Vec<LockIdentity>, String> {
-    let normalized = lock.replace("\r\n", "\n");
+    let normalized = normalize_line_endings(lock)?;
     let mut identities = Vec::new();
 
     for block in normalized.split("[[package]]").skip(1) {
@@ -203,6 +211,46 @@ fn lock_identities(lock: &str) -> Result<Vec<LockIdentity>, String> {
 
     identities.sort();
     Ok(identities)
+}
+
+fn lock_package_dependencies(lock: &str, package_name: &str) -> Result<BTreeSet<String>, String> {
+    let normalized = normalize_line_endings(lock)?;
+    let mut matches = normalized.split("[[package]]").skip(1).filter(|block| {
+        quoted_lock_field(block, "name").is_ok_and(|name| name.as_deref() == Some(package_name))
+    });
+    let block = matches
+        .next()
+        .ok_or_else(|| format!("lock package not found: {package_name}"))?;
+    if matches.next().is_some() {
+        return Err(format!("duplicate lock package: {package_name}"));
+    }
+    let mut in_dependencies = false;
+    let mut dependencies = BTreeSet::new();
+    for line in block.lines() {
+        let line = line.trim();
+        if line == "dependencies = [" {
+            if in_dependencies {
+                return Err("duplicate dependencies array".to_owned());
+            }
+            in_dependencies = true;
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        if line == "]" {
+            return Ok(dependencies);
+        }
+        let dependency = line
+            .strip_suffix(',')
+            .and_then(|line| line.strip_prefix('"'))
+            .and_then(|line| line.strip_suffix('"'))
+            .ok_or_else(|| format!("invalid lock dependency entry: {line}"))?;
+        if !dependencies.insert(dependency.to_owned()) {
+            return Err(format!("duplicate lock dependency: {dependency}"));
+        }
+    }
+    Err(format!("missing lock dependencies array: {package_name}"))
 }
 
 fn pre_repair_lock_identities() -> Vec<LockIdentity> {
@@ -297,7 +345,104 @@ fn resolve_node<'a>(metadata: &'a Value, package_id: &str) -> &'a Value {
 }
 
 fn contains_manifest_policy(manifest: &str, policy: &str) -> bool {
-    manifest.replace("\r\n", "\n").contains(policy)
+    normalize_line_endings(manifest).is_ok_and(|manifest| manifest.contains(policy))
+}
+
+const ROOT_TOKIO_DECLARATION: &str = "tokio = { version = \"=1.53.1\", default-features = false, features = [\"rt-multi-thread\", \"macros\", \"net\", \"io-util\", \"sync\", \"time\", \"signal\"] }";
+const BINARY_TOKIO_NORMAL_DECLARATION: &str = "tokio.workspace = true";
+const BINARY_TOKIO_DEV_DECLARATION: &str =
+    "tokio = { workspace = true, features = [\"test-util\"] }";
+
+fn exact_binary_tokio_boundary(
+    root_manifest: &str,
+    client_manifest: &str,
+    server_manifest: &str,
+) -> Result<(), String> {
+    let root = normalize_line_endings(root_manifest)?;
+    if root
+        .lines()
+        .filter(|line| line.trim() == "[workspace.dependencies]")
+        .count()
+        != 1
+    {
+        return Err("workspace dependency table must be unique".to_owned());
+    }
+    let root_dependencies = dependency_table(&root, "[workspace.dependencies]")?;
+    if root_dependencies.get("tokio").map(String::as_str)
+        != ROOT_TOKIO_DECLARATION.strip_prefix("tokio = ")
+    {
+        return Err("root Tokio declaration changed".to_owned());
+    }
+    let root_tokio_lines: Vec<_> = root
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("tokio"))
+        .collect();
+    if root_tokio_lines != [ROOT_TOKIO_DECLARATION] {
+        return Err("root contains an extra or moved Tokio declaration".to_owned());
+    }
+
+    for (role, manifest) in [("client", client_manifest), ("server", server_manifest)] {
+        let manifest = normalize_line_endings(manifest)?;
+        for header in ["[dependencies]", "[dev-dependencies]"] {
+            if manifest
+                .lines()
+                .filter(|line| line.trim() == header)
+                .count()
+                != 1
+            {
+                return Err(format!("{role} {header} must be unique"));
+            }
+        }
+        let normal = dependency_table(&manifest, "[dependencies]")?;
+        if normal.get("tokio.workspace").map(String::as_str) != Some("true")
+            || normal.contains_key("tokio")
+        {
+            return Err(format!("{role} normal Tokio declaration changed"));
+        }
+        let dev = dependency_table(&manifest, "[dev-dependencies]")?;
+        if dev
+            != BTreeMap::from([(
+                "tokio".to_owned(),
+                BINARY_TOKIO_DEV_DECLARATION
+                    .strip_prefix("tokio = ")
+                    .expect("dev declaration prefix")
+                    .to_owned(),
+            )])
+        {
+            return Err(format!("{role} dev dependencies changed"));
+        }
+        let tokio_lines: Vec<_> = manifest
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("tokio"))
+            .collect();
+        if tokio_lines
+            != [
+                BINARY_TOKIO_NORMAL_DECLARATION,
+                BINARY_TOKIO_DEV_DECLARATION,
+            ]
+        {
+            return Err(format!("{role} contains an extra or moved Tokio edge"));
+        }
+    }
+    Ok(())
+}
+
+fn cargo_tree_for_tokio(package: &str, edges: &str) -> String {
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "tree", "-p", package, "--locked", "-e", edges, "-i", "tokio",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("cargo tree must start");
+    assert!(
+        output.status.success(),
+        "cargo tree failed for {package} {edges}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("cargo tree output must be UTF-8")
 }
 
 #[test]
@@ -525,6 +670,406 @@ fn manifest_dependency_helpers_accept_line_endings_and_reject_mutations() {
     }
 
     assert!(dependency_table("[dependencies]\naes.workspace=true\n", "[dependencies]").is_err());
+    assert!(
+        dependency_table("[dependencies]\raes.workspace = true\r", "[dependencies]").is_err(),
+        "bare carriage returns must not bypass dependency policy"
+    );
+}
+
+#[test]
+fn binary_tokio_manifests_match_the_exact_test_only_boundary_and_reject_mutations() {
+    let root = workspace_root();
+    let root_manifest = fs::read_to_string(root.join("Cargo.toml")).expect("root manifest");
+    let client_manifest =
+        fs::read_to_string(root.join("bins/ferrum2-client/Cargo.toml")).expect("client manifest");
+    let server_manifest =
+        fs::read_to_string(root.join("bins/ferrum2-server/Cargo.toml")).expect("server manifest");
+    let root_lf = normalize_line_endings(&root_manifest).expect("root line endings");
+    let client_lf = normalize_line_endings(&client_manifest).expect("client line endings");
+    let server_lf = normalize_line_endings(&server_manifest).expect("server line endings");
+
+    for crlf in [false, true] {
+        let convert = |source: &str| {
+            if crlf {
+                source.replace('\n', "\r\n")
+            } else {
+                source.to_owned()
+            }
+        };
+        exact_binary_tokio_boundary(
+            &convert(&root_lf),
+            &convert(&client_lf),
+            &convert(&server_lf),
+        )
+        .expect("approved LF/CRLF Tokio boundary");
+    }
+
+    let mut mutations = Vec::new();
+    mutations.push((
+        root_lf.clone(),
+        client_lf.replace(&format!("{BINARY_TOKIO_DEV_DECLARATION}\n"), ""),
+        server_lf.clone(),
+    ));
+    mutations.push((
+        root_lf.clone(),
+        client_lf.clone(),
+        server_lf.replace(&format!("{BINARY_TOKIO_DEV_DECLARATION}\n"), ""),
+    ));
+    mutations.push((
+        root_lf.clone(),
+        client_lf.replace("[\"test-util\"]", "[\"test-util\", \"rt\"]"),
+        server_lf.clone(),
+    ));
+    mutations.push((
+        root_lf.clone(),
+        client_lf.replace("features = [\"test-util\"]", "features = []"),
+        server_lf.clone(),
+    ));
+    mutations.push((
+        root_lf.clone(),
+        client_lf.replace(&format!("{BINARY_TOKIO_NORMAL_DECLARATION}\n"), ""),
+        server_lf.clone(),
+    ));
+    mutations.push((
+        root_lf.replace(
+            "features = [\"rt-multi-thread\", \"macros\", \"net\", \"io-util\", \"sync\", \"time\", \"signal\"]",
+            "features = [\"rt-multi-thread\", \"macros\", \"net\", \"io-util\", \"sync\", \"time\", \"signal\", \"test-util\"]",
+        ),
+        client_lf.replace(&format!("{BINARY_TOKIO_DEV_DECLARATION}\n"), ""),
+        server_lf.replace(&format!("{BINARY_TOKIO_DEV_DECLARATION}\n"), ""),
+    ));
+    for replacement in [
+        "tokio = { workspace = true, features = [\"full\"] }",
+        "tokio = { version = \"=1.53.1\", features = [\"test-util\"] }",
+        "tokio = { workspace = true, default-features = true, features = [\"test-util\"] }",
+        "tokio = { workspace = true, source = \"registry\", features = [\"test-util\"] }",
+        "tokio = { workspace = true, path = \"../../tokio\", features = [\"test-util\"] }",
+        "tokio = { workspace = true, git = \"https://example.invalid/tokio\", features = [\"test-util\"] }",
+        "runtime = { workspace = true, package = \"tokio\", features = [\"test-util\"] }",
+        "tokio = { workspace = true, optional = true, features = [\"test-util\"] }",
+    ] {
+        mutations.push((
+            root_lf.clone(),
+            client_lf.replace(BINARY_TOKIO_DEV_DECLARATION, replacement),
+            server_lf.clone(),
+        ));
+    }
+    mutations.push((
+        root_lf.clone(),
+        client_lf.replace(
+            "[dev-dependencies]",
+            "[target.'cfg(windows)'.dev-dependencies]",
+        ),
+        server_lf.clone(),
+    ));
+    mutations.push((
+        root_lf.clone(),
+        format!("{client_lf}\n[dev-dependencies]\n{BINARY_TOKIO_DEV_DECLARATION}\n"),
+        server_lf.clone(),
+    ));
+    mutations.push((
+        root_lf.clone(),
+        client_lf.replace(
+            BINARY_TOKIO_DEV_DECLARATION,
+            &format!("{BINARY_TOKIO_DEV_DECLARATION}\n{BINARY_TOKIO_DEV_DECLARATION}"),
+        ),
+        server_lf.clone(),
+    ));
+
+    for (root_mutation, client_mutation, server_mutation) in mutations {
+        for crlf in [false, true] {
+            let convert = |source: &str| {
+                if crlf {
+                    source.replace('\n', "\r\n")
+                } else {
+                    source.to_owned()
+                }
+            };
+            assert!(
+                exact_binary_tokio_boundary(
+                    &convert(&root_mutation),
+                    &convert(&client_mutation),
+                    &convert(&server_mutation),
+                )
+                .is_err(),
+                "Tokio boundary mutation must fail for LF and CRLF"
+            );
+        }
+    }
+    assert!(
+        exact_binary_tokio_boundary(&root_lf, &client_lf.replace('\n', "\r"), &server_lf).is_err(),
+        "bare carriage returns must be rejected"
+    );
+}
+
+#[test]
+fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
+    let metadata = metadata();
+    let tokio_id = unique_registry_package_id(&metadata, "tokio", "1.53.1");
+    let normal_features = serde_json::json!([
+        "rt-multi-thread",
+        "macros",
+        "net",
+        "io-util",
+        "sync",
+        "time",
+        "signal"
+    ]);
+    let dev_features = serde_json::json!([
+        "rt-multi-thread",
+        "macros",
+        "net",
+        "io-util",
+        "sync",
+        "time",
+        "signal",
+        "test-util"
+    ]);
+    let lock = fs::read_to_string(workspace_root().join("Cargo.lock")).expect("Cargo.lock");
+
+    for (package_name, expected_lock_dependencies) in [
+        (
+            "ferrum2-client",
+            BTreeSet::from([
+                "clap".to_owned(),
+                "ferrum2-config".to_owned(),
+                "ferrum2-core".to_owned(),
+                "ferrum2-crypto".to_owned(),
+                "ferrum2-observability".to_owned(),
+                "ferrum2-runtime".to_owned(),
+                "ferrum2-shadowsocks".to_owned(),
+                "ferrum2-socks5".to_owned(),
+                "tokio".to_owned(),
+                "tracing".to_owned(),
+            ]),
+        ),
+        (
+            "ferrum2-server",
+            BTreeSet::from([
+                "clap".to_owned(),
+                "ferrum2-config".to_owned(),
+                "ferrum2-core".to_owned(),
+                "ferrum2-crypto".to_owned(),
+                "ferrum2-observability".to_owned(),
+                "ferrum2-runtime".to_owned(),
+                "ferrum2-shadowsocks".to_owned(),
+                "tokio".to_owned(),
+                "tracing".to_owned(),
+            ]),
+        ),
+    ] {
+        let package = metadata["packages"]
+            .as_array()
+            .expect("packages")
+            .iter()
+            .find(|package| package["name"] == package_name)
+            .expect("binary package");
+        let tokio_dependencies: Vec<_> = package["dependencies"]
+            .as_array()
+            .expect("binary dependencies")
+            .iter()
+            .filter(|dependency| dependency["name"] == "tokio")
+            .collect();
+        assert_eq!(
+            tokio_dependencies.len(),
+            2,
+            "{package_name} must have one normal and one dev Tokio edge"
+        );
+        for (dependency, kind, features) in [
+            (tokio_dependencies[0], Value::Null, &normal_features),
+            (
+                tokio_dependencies[1],
+                Value::String("dev".to_owned()),
+                &dev_features,
+            ),
+        ] {
+            assert_eq!(
+                dependency["source"],
+                "registry+https://github.com/rust-lang/crates.io-index"
+            );
+            assert_eq!(dependency["req"], "=1.53.1");
+            assert_eq!(dependency["kind"], kind);
+            assert!(dependency["rename"].is_null());
+            assert_eq!(dependency["optional"], false);
+            assert_eq!(dependency["uses_default_features"], false);
+            assert_eq!(&dependency["features"], features);
+            assert!(dependency["target"].is_null());
+        }
+
+        let node = resolve_node(
+            &metadata,
+            package["id"].as_str().expect("binary package ID"),
+        );
+        let resolved_tokio: Vec<_> = node["deps"]
+            .as_array()
+            .expect("resolved binary dependencies")
+            .iter()
+            .filter(|dependency| dependency["name"] == "tokio")
+            .collect();
+        assert_eq!(resolved_tokio.len(), 1);
+        assert_eq!(resolved_tokio[0]["pkg"], tokio_id);
+        assert_eq!(
+            resolved_tokio[0]["dep_kinds"],
+            serde_json::json!([
+                {"kind": null, "target": null},
+                {"kind": "dev", "target": null}
+            ])
+        );
+
+        let production_tree = cargo_tree_for_tokio(package_name, "normal,build,features");
+        assert!(
+            !production_tree.contains("tokio feature \"test-util\""),
+            "{package_name} production tree must exclude test-util"
+        );
+        let test_tree = cargo_tree_for_tokio(package_name, "all,features");
+        assert!(
+            test_tree.contains("tokio feature \"test-util\"")
+                && test_tree.contains("[dev-dependencies]"),
+            "{package_name} test tree must include the binary-local test-util edge"
+        );
+        assert_eq!(
+            lock_package_dependencies(&lock, package_name).expect("binary lock dependencies"),
+            expected_lock_dependencies,
+            "dev feature unification must not add a binary lock dependency"
+        );
+    }
+}
+
+#[test]
+fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
+    let root = workspace_root();
+    let manifest =
+        fs::read_to_string(root.join("tests/m0-harness/Cargo.toml")).expect("harness manifest");
+    let manifest_lf = normalize_line_endings(&manifest).expect("harness line endings");
+    let expected = BTreeMap::from([
+        ("aes-gcm.workspace".to_owned(), "true".to_owned()),
+        ("blake3.workspace".to_owned(), "true".to_owned()),
+        ("hex.workspace".to_owned(), "true".to_owned()),
+        ("serde_json.workspace".to_owned(), "true".to_owned()),
+        ("tempfile.workspace".to_owned(), "true".to_owned()),
+    ]);
+    assert_eq!(
+        dependency_table(&manifest, "[dev-dependencies]").expect("harness dev dependencies"),
+        expected
+    );
+
+    for fixture in [manifest_lf.clone(), manifest_lf.replace('\n', "\r\n")] {
+        assert_eq!(
+            dependency_table(&fixture, "[dev-dependencies]").expect("line-ending fixture"),
+            expected
+        );
+    }
+    for mutation in [
+        manifest_lf.replace("aes-gcm.workspace = true\n", ""),
+        manifest_lf.replace("aes-gcm.workspace = true", "aes-gcm = { workspace = true }"),
+        manifest_lf.replace(
+            "blake3.workspace = true",
+            "blake3 = { workspace = true, features = [\"rayon\"] }",
+        ),
+        manifest_lf.replace(
+            "tempfile.workspace = true",
+            "tempfile.workspace = true\nferrum2-core.workspace = true",
+        ),
+        manifest_lf.replace("[dev-dependencies]", "[dependencies]"),
+    ] {
+        assert_ne!(
+            dependency_table(&mutation, "[dev-dependencies]").ok(),
+            Some(expected.clone()),
+            "manifest mutation must not preserve the approved dependency contract"
+        );
+    }
+    assert!(
+        dependency_table(&manifest_lf.replace('\n', "\r"), "[dev-dependencies]").is_err(),
+        "bare carriage returns must be rejected"
+    );
+
+    let metadata = metadata();
+    let harness = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "ferrum2-m0-harness")
+        .expect("harness package");
+    let actual_metadata: BTreeSet<_> = harness["dependencies"]
+        .as_array()
+        .expect("harness dependencies")
+        .iter()
+        .map(|dependency| {
+            assert_eq!(
+                dependency["kind"], "dev",
+                "every harness direct edge must be test-only"
+            );
+            let name = dependency["name"].as_str().expect("dependency name");
+            match name {
+                "aes-gcm" => {
+                    assert_eq!(dependency["uses_default_features"], false);
+                    assert_eq!(
+                        dependency["features"],
+                        serde_json::json!(["aes", "bytes", "zeroize"])
+                    );
+                }
+                "blake3" => {
+                    assert_eq!(dependency["uses_default_features"], false);
+                    assert_eq!(
+                        dependency["features"],
+                        serde_json::json!(["std", "zeroize"])
+                    );
+                }
+                "hex" | "serde_json" | "tempfile" => {
+                    assert_eq!(dependency["uses_default_features"], true);
+                    assert_eq!(dependency["features"], serde_json::json!([]));
+                }
+                other => panic!("unexpected harness dependency: {other}"),
+            }
+            name.to_owned()
+        })
+        .collect();
+    assert_eq!(
+        actual_metadata,
+        BTreeSet::from([
+            "aes-gcm".to_owned(),
+            "blake3".to_owned(),
+            "hex".to_owned(),
+            "serde_json".to_owned(),
+            "tempfile".to_owned(),
+        ])
+    );
+    assert!(
+        actual_metadata
+            .iter()
+            .all(|dependency| !dependency.starts_with("ferrum2-"))
+    );
+
+    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock");
+    let lock_lf = normalize_line_endings(&lock).expect("Cargo.lock line endings");
+    let expected_lock = BTreeSet::from([
+        "aes-gcm".to_owned(),
+        "blake3".to_owned(),
+        "hex".to_owned(),
+        "serde_json".to_owned(),
+        "tempfile".to_owned(),
+    ]);
+    assert_eq!(
+        lock_package_dependencies(&lock, "ferrum2-m0-harness").expect("harness lock dependencies"),
+        expected_lock
+    );
+    assert_eq!(
+        lock_package_dependencies(&lock_lf.replace('\n', "\r\n"), "ferrum2-m0-harness")
+            .expect("CRLF harness lock dependencies"),
+        expected_lock
+    );
+    for mutation in [
+        lock_lf.replace(" \"aes-gcm\",\n", ""),
+        lock_lf.replace(" \"blake3\",\n", ""),
+        lock_lf.replace(" \"tempfile\",\n", " \"ferrum2-core\",\n \"tempfile\",\n"),
+    ] {
+        assert_ne!(
+            lock_package_dependencies(&mutation, "ferrum2-m0-harness").ok(),
+            Some(expected_lock.clone()),
+            "lock edge mutation must not preserve the approved contract"
+        );
+    }
+    assert!(lock_package_dependencies(&lock_lf.replace('\n', "\r"), "ferrum2-m0-harness").is_err());
 }
 
 #[test]
