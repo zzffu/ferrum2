@@ -2,7 +2,7 @@
 
 - **Status:** Approved
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
 - **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
 
@@ -82,7 +82,9 @@ SOCKS5 no-auth IPv4 CONNECT
 
 ## Current execution path
 
-当前仓库无 Cargo workspace 或产品 execution path；这不是部分实现。
+当前仓库已有 locked Cargo workspace、core contracts 以及已集成的 T05/T06
+SOCKS5/runtime slices，但 crypto、SIP022、config/observability 与 binary composition
+尚未汇合；因此还没有完整 M0 end-to-end product execution path。
 
 M0 完成后的 client path：
 
@@ -126,9 +128,11 @@ server TcpListener
 | `tests/m0-harness` | metadata/filesystem policy、黑盒process E2E、external interop/platform drivers | concrete ferrum2 Cargo dependency、production behavior |
 
 Dependency DAG、toolchain、exact dependency versions 与 manifest ownership 由
-`ADR-0001` 冻结。M0-T01 独占所有 manifests/lock/toolchain/license；后续 ticket
-不能修改它们。M0-T08 独占 CI 路径 `.github/workflows/m0.yml`；本次 plan
-不创建该文件，T08 execute 才能按 ADR-0007 实现。
+`ADR-0001` 冻结，并由 `ADR-0009` 仅对 `aes 0.9.1`/`ghash 0.6.0`
+no-default `zeroize` feature anchors 作部分取代。M0-T01 独占所有
+manifests/lock/toolchain/license；后续 ticket 不能修改它们。M0-T08 独占 CI 路径
+`.github/workflows/m0.yml`；本次 plan 不创建该文件，T08 execute 才能按
+ADR-0007 实现。
 
 ## Configuration and validation
 
@@ -280,6 +284,12 @@ ConnectionRefused, RelayIo, IdleTimeout, Cancelled, Shutdown, ListenerFailure
 - fixed SIP022 revision、primitive/protocol fixture provenance、exact replay 和
   detection strategy 由 ADR-0004/0006/0008 定义；ADR-0008 仅纠正两个
   AES-GCM primitive cases 的来源归属，不改变 numeric values 或密码/协议行为。
+- AEAD owner 的 dependency-review evidence 由 ADR-0002/0009 联合定义：
+  `aes-gcm/zeroize`、`aes/zeroize`、`ghash/zeroize` 与
+  `polyval/zeroize` 必须在同一 exact registry package instances 上启用；
+  metadata feature sets、`zeroize/aarch64` induced feature 与 pre-repair 110-tuple
+  lock identity baseline 必须 exact；这不改变 AES API、wire 或 physical-memory
+  guarantee 边界。
 - PSK、derived material、salt、nonce、raw config、raw frames 绝不进入 log/error/
   panic/trace/metric；destination 不进入 tracing 或 metric labels。
 - config/secret/KDF buffers 使用 fixed secret newtypes 与 explicit zeroize；任何
@@ -412,8 +422,9 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
 ## Acceptance criteria
 
 1. **AC-01 Workspace/toolchain:** M0-WS-001、M0-WS-002、M0-MSRV-001 通过；
-   workspace members/DAG、exact direct versions、lock、license、unsafe forbid、
-   Rust 1.85.0 locked graph 均有证据。
+   workspace members/DAG、ADR-0001/0009 exact direct versions/features、lock、
+   package version/source/checksum identity、license、unsafe forbid、Rust 1.85.0
+   locked graph 均有证据。
 2. **AC-02 Offline config/CLI:** M0-CFG-001～003、M0-CLI-001 通过；两个 binaries
    的 valid/invalid matrix 与零 listener/connector/task 副作用直接可见。
 3. **AC-03 Crypto correctness/secrets:** M0-CRYPTO-001～004 通过；primitive vectors、
@@ -448,7 +459,8 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
 12. **AC-12 Scope/provenance:** M0-SCOPE-001 通过；固定从
     `b41c6127b1834ebd97246451fd92bafea50cb205` 到 integrated `HEAD` 的完整 diff
     不含 M0 non-goals、external binaries、generated results 或真实 secrets；所有
-    fixture/reference/locked dependencies有来源和license review记录；唯一批准的
+    fixture/reference/locked dependencies有来源和license review记录；dependency
+    surface 精确等于 ADR-0001 经 ADR-0009 部分取代后的集合；唯一批准的
     `.github` path是M0-T08拥有的`.github/workflows/m0.yml`。
 
 M0 只有在 AC-01～AC-12 同一 integrated commit 证据齐全时才能进入 close。

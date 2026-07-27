@@ -48,7 +48,7 @@ job ID 和 displayed name 必须精确相同，不能用 matrix suffix 改名：
 | Required job | Runner | Timeout | Test IDs / exact command source |
 |---|---|---:|---|
 | `m0-host-quick` | `ubuntu-24.04` | 60 | M0-GATE-001；`workflow.toml` `[validation].quick` 三条命令 |
-| `m0-security` | `ubuntu-24.04` | 60 | M0-WS-001/002、M0-CFG-003、M0-CRYPTO-001～004、M0-PROTO-001～006、M0-REPLAY-001～004、M0-DETECT-001、M0-BIND-001、M0-OBS-001/002；下方 evidence matrix 的每条命令和 `cargo tree --workspace --locked` |
+| `m0-security` | `ubuntu-24.04` | 60 | M0-WS-001/002、M0-CFG-003、M0-CRYPTO-001～004、M0-PROTO-001～006、M0-REPLAY-001～004、M0-DETECT-001、M0-BIND-001、M0-OBS-001/002；下方 evidence matrix 的每条命令、`cargo tree --workspace --locked`，以及 `cargo tree -p ferrum2-crypto --locked -e features -i aes`、`-i ghash`、`-i polyval`、`-i zeroize` 四条 focused commands |
 | `m0-lifecycle` | `ubuntu-24.04` | 60 | M0-DETECT-003、M0-LIFE-001～005、M0-OBS-003；下方每条命令 |
 | `m0-local-e2e` | `ubuntu-24.04` | 60 | M0-CFG-001/002、M0-CLI-001、M0-SOCKS-001/002、M0-ENDPOINT-001、M0-E2E-001/002；下方每条命令 |
 | `m0-integration-full` | `ubuntu-24.04` | 60 | M0-GATE-002、M0-SCOPE-001、M0-CI-001～006；`workflow.toml` `[validation].full` 与下方每条命令 |
@@ -78,7 +78,7 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
 | Test ID | Spec criterion | Evidence/test | Level | Required job/command |
 |---|---|---|---|---|
 | M0-WS-001 | AC-01 | workspace members、crate DAG、core purity、`LocalEndpoint`/consuming reply ownership | contract/static | `cargo test -p ferrum2-m0-harness --test architecture --locked` |
-| M0-WS-002 | AC-01/12 | exact direct versions、lock、GPL metadata、publish false、unsafe forbid、license provenance | static/build | `cargo test -p ferrum2-m0-harness --test workspace_policy --locked`；`cargo tree --workspace --locked` |
+| M0-WS-002 | AC-01/12 | ADR-0001/0009 exact direct versions/features、AES/GHASH/POLYVAL drop-zeroize resolved graph、110-tuple lock identity baseline、GPL metadata、publish false、unsafe forbid、license provenance | static/build | `cargo test -p ferrum2-m0-harness --test workspace_policy --locked`；`cargo tree --workspace --locked`；`cargo tree -p ferrum2-crypto --locked -e features -i aes`、`-i ghash`、`-i polyval`、`-i zeroize` |
 | M0-MSRV-001 | AC-01/11 | Rust 1.85.0 resolved graph | build/test | `m0-msrv`：`cargo +1.85.0 check --workspace --all-targets --locked`；`cargo +1.85.0 test --workspace --locked` |
 | M0-CFG-001 | AC-02 | 两 binary valid offline config | process integration | `cargo test -p ferrum2-m0-harness --test config_cli --locked valid` |
 | M0-CFG-002 | AC-02 | offline path 零 listener/connector/task 副作用 | process integration | `cargo test -p ferrum2-m0-harness --test config_cli --locked no_side_effects` |
@@ -138,9 +138,27 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
 
 - `architecture` 读取 `cargo metadata`，断言十个 members 精确、DAG 不含反向边；
   `core` 不含 Tokio/TOML/concrete package。
-- `workspace_policy` 断言 direct versions/features与 ADR-0001 exact 相等、所有 project
-  package继承 license/publish/lints、`Cargo.lock` tracked。完整 `cargo tree` 做人工
-  provenance/license sign-off，不以“能编译”代替。
+- `workspace_policy` 断言 direct versions/features 与 ADR-0001 经 ADR-0009
+  部分取代后的 baseline exact 相等、所有 project package 继承
+  license/publish/lints、`Cargo.lock` tracked。它还从 locked Cargo metadata
+  断言 `ferrum2-crypto` 的 exact/no-default/normal/unrenamed/unconditional
+  `aes`/`ghash` anchors 与 `aes-gcm` transitive edges 解析到相同且唯一的 exact
+  registry package IDs，并断言 resolved-node exact feature sets：
+  `aes-gcm={aes,bytes,zeroize}`、`aes={zeroize}`、
+  `ghash={zeroize}`、`polyval={hazmat,zeroize}`、
+  `zeroize={aarch64,alloc,derive,zeroize_derive}`。这会拒绝
+  `aes-gcm/hazmat`/`aes/hazmat`，同时保留 required `polyval/hazmat`。
+  `cargo tree` 中由 upstream edges 显示的空 `aes/default`/`polyval/default`
+  不被误报为额外 node feature；四条 focused trees 必须同时显示这两个空
+  default edges、`polyval/hazmat` 与 induced `zeroize/aarch64`，作为
+  metadata node sets 之外的 exact edge evidence。
+- `workspace_policy` 内嵌 integration checkpoint `999d4f9`、
+  lock blob `ab04f6d` 的完整 110 个 `(name,version,source,checksum)` identity
+  tuples；candidate lock parser 的 sorted result 必须 exact 相等。root/member
+  manifest helpers 与 lock parser 对同一 LF/CRLF positive fixtures 以及
+  addition/removal/version/source/checksum/feature mutation negative fixtures
+  产生相同 verdict。完整 `cargo tree` 做人工 provenance/license sign-off，
+  不以“能编译”代替。
 - config table覆盖每个 missing/unknown field、上下界/界外值、port 0、non-loopback
   metrics、internal endpoint equality、method/base64/key/file-size/UTF-8。
 
@@ -433,7 +451,9 @@ b41c6127b1834ebd97246451fd92bafea50cb205...HEAD` 和
 - 所有变更落在批准的 M0 product/control ownership，未实现 AES-256、ChaCha、UDP、
   public UDP inbound、domain/DNS、multi-user/EIH、routing/management 或性能范围；
 - 无 real secret、production endpoint、外部 binary、generated result或未审 fixture；
-- dependency/member/method surface与 ADR-0001 相等，新增依赖均有license/provenance；
+- dependency/member/method surface与 ADR-0001 经 ADR-0009 部分取代后的 baseline
+  相等；`aes 0.9.1`/`ghash 0.6.0` 仅为已锁定 permissive feature anchors，
+  version/source/checksum 不变，新增 direct surface 有license/provenance；
 - T02/T03 fixtures与两个 reference pins的来源、hash、license-or-rights review和
   非分发策略完整。
 
@@ -458,7 +478,9 @@ M0 test gate通过需要：
 - 全平台长期 lifecycle和最终 operator stability：M3。
 - throughput、10,000 idle与长期资源阈值：M4。
 
-当前没有产品实现，所以上述测试均是 required future evidence，不是本次 plan 已通过
-的测试。required job 启动后 setup/network/package/reference/command/timeout/
-evidence 失败是 FAIL；workflow、未授权 push、provider 或 job 未产生结果是
-BLOCKED。missing/skipped/cancelled/neutral 都不会转换为 waiver 或 PASS。
+当前只有 T01、T05、T06 的 ticket/focused integration evidence；上述完整 acceptance
+matrix 尚未在同一最终 integration commit 通过。未执行或尚未实现的项目仍是
+required future evidence，不因已有局部 PASS 被豁免。required job 启动后
+setup/network/package/reference/command/timeout/evidence 失败是 FAIL；workflow、
+未授权 push、provider 或 job 未产生结果是 BLOCKED。missing/skipped/cancelled/
+neutral 都不会转换为 waiver 或 PASS。

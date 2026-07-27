@@ -34,8 +34,9 @@ non-overlapping ownership。
 - **Entry conditions:**
   - bootstrap 的 vision、gap analysis、roadmap、CI baseline 已更新并通过
     workflow validation；
-  - `ADR-0001`～`ADR-0008` 已 Accepted；ADR-0008 仅纠正 M0 AES-GCM primitive
-    KAT 的来源归属，关闭 DEC-001～DEC-007 与 DEC-011；
+  - `ADR-0001`～`ADR-0009` 已 Accepted，关闭 DEC-001～DEC-007、
+    DEC-011 与 DEC-012；ADR-0009 仅修正 AEAD state zeroize feature
+    unification；
   - `SPEC-0001` 与 `TEST-0001` 已 Approved；
   - M0-T01～M0-T08 的 blockers、non-overlapping ownership 和量化 acceptance
     已通过 workflow validation。
@@ -66,9 +67,11 @@ non-overlapping ownership。
      另行授权 push 后，GitHub Actions 一个 run ID/attempt 的 11 个固定 job 在
      exact integration `GITHUB_SHA` 全部 success。
 - **In-scope tickets:**
-  - M0-T01：locked workspace、toolchain、license 与 core contracts；done；
-  - M0-T02：secret/KDF/AEAD/key-clock-entropy；ADR-0008 窄勘误及双评审已
-    PASS，preserved worktree 正在恢复执行；
+  - M0-T01：locked workspace、toolchain、license 与 core contracts；原 integration
+    已 done，现依用户授权为 ADR-0009 的一次独占 manifest repair reopen，且为
+    sole ready frontier；
+  - M0-T02：secret/KDF/AEAD/key-clock-entropy；ADR-0008 与 provenance/nonce
+    repair 已 PASS，整体只等待 ADR-0009/T01 feature-unification blocker；
   - M0-T03：SIP022 TCP security state/replay/binding；blocked by T02；
   - M0-T04：typed config/observability；blocked by T02；
   - M0-T05：SOCKS5 CONNECT inbound；done；
@@ -95,8 +98,12 @@ non-overlapping ownership。
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
   CAVP ZIP 不含批准的两组 numeric cases；ADR-0008 窄勘误已经显式授权并把
   provenance 更正为 McGrew/Viega GCM proposal `vec-01`/`vec-02`。向量与协议
-  行为不变，contract Architect/QA 均已 PASS，保留的 T02 worktree 已恢复执行。
-  T03/T04 因 T02 等待，T07/T08 继续只等待既定 dependencies。
+  行为不变，contract Architect/QA 均已 PASS。T02 commit `df22d7e` 已关闭
+  provenance 与 `NonceCounter` findings；后续 dependency review 又确认
+  `aes-gcm/zeroize` 没有启用 `aes/zeroize`/`ghash/zeroize`。用户已授权 ADR-0009
+  与一次独占 T01 manifest repair，只允许 fixed `aes 0.9.1`/`ghash 0.6.0`
+  zeroize feature anchors、lock 与 policy evidence，不改变版本、wire/API 或产品
+  范围。T03/T04 因 T02 等待，T07/T08 继续只等待既定 dependencies。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。
@@ -221,12 +228,14 @@ non-overlapping ownership。
 | DEC-009 | partially bounded；M3 plan | M0 已固定 triples/build/config smoke；full native lifecycle/packaging qualification 留 M3 | `ADR-0006` |
 | DEC-010 | open；M4 plan | benchmark hardware/config/statistics 与 10k-idle stability threshold | M0 不设性能声明 |
 | DEC-011 | resolved in M0 CI amendment | GitHub Actions required provider；`.github/workflows/m0.yml`；fixed hosted runners/jobs/security/evidence；本机 WSL2仅作诊断 | `ADR-0007`、`SPEC-0001`、`TEST-0001`、M0-T08 |
+| DEC-012 | resolved in M0 narrow amendment | fixed `aes 0.9.1`/`ghash 0.6.0` no-default `zeroize` direct feature anchors，使 `aes`/`ghash`/`polyval` keyed state drop-zeroize；exact resolved feature/package-ID 与 110-tuple lock identity evidence；无版本/wire/API/scope变化 | `ADR-0009`、`ADR-0002`、M0-T01/M0-T02 |
 
 ## 风险登记
 
 | 风险 | 等级 | 最早控制点 | 控制方式 |
 |---|---|---|---|
 | SIP022/AEAD/nonce/replay 实现错误 | P0 | M0 | approved ADR/spec、KAT、负向测试、双向互操作 |
+| AEAD expanded key/GHASH state 未启用上游 drop-zeroize | P0 | M0 | ADR-0009 exact feature anchors、metadata/package-ID/lock-identity policy、Cargo tree、T01/T02与integration双 gate |
 | 认证前 connect/allocate/mutate | P0 | M0 | explicit connector/allocation/state test seams |
 | secret 泄漏、destination 成为 metric label 或 cardinality 爆炸 | P0 | M0 | secret types、redaction tests、fixed labels |
 | task/session leak、unbounded queue 或错误 half-close | P0 | M0 | owner/termination contract、bounded tests、soak |

@@ -6,7 +6,10 @@
   `999d4f95a2d597fb283689b9306d2a6773af707d` on local `master`
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
-- **M0-T01:** integrated；Architect **PASS**；QA **PASS**
+- **M0-T01:** original integration Architect/QA **PASS**；现依用户授权为
+  ADR-0009 的一次独占 manifest repair reopen；document Product/Architect
+  **PASS_WITH_ACTIONS** 的 required corrections 已完成，QA final **PASS**；
+  当前为 sole ready frontier，尚未修改 manifest
 - **M0-T05:** `d03e0065efd13ff215cc55be6257c305e8e69175`；
   ticket Architect/QA **PASS**；integrated
 - **M0-T06:** `50f547f380d6c58d5538b6540fdc43cb29b5c89c` +
@@ -15,13 +18,16 @@
   Architect/QA 均 **PASS**
 - **Wave-2 integration:** `999d4f95a2d597fb283689b9306d2a6773af707d`；
   17 个新增路径均属于 T05/T06，final Architect/QA **PASS**
-- **M0-T02:** **IN_PROGRESS**；ADR-0004 固定的
+- **M0-T02:** **BLOCKED**；ADR-0004 固定的
   `gcmtestvectors.zip@f9fc479e...a023` 不含批准的 numeric cases。实际来源为
   McGrew/Viega GCM proposal TV archive
   `511e4741cee299ad0d1eb72ae2738911758248e2aba9d3db33a1dbcbb62e07f0`
   的 `vec-01.txt`/`vec-02.txt`；ADR-0008 窄勘误已获显式授权，数值向量与
-  密码/协议行为不变；contract Architect **PASS**、QA **PASS**，preserved
-  worktree 已恢复
+  密码/协议行为不变；contract Architect **PASS**、QA **PASS**。实现
+  `45c0e2f` + repair 1/2 `df22d7e` 的 provenance/nonce repair 已 PASS；
+  overall gate 只因 resolved graph 未启用 `aes/zeroize`/`ghash/zeroize` 而
+  BLOCK。ADR-0009 与一次独占 T01 manifest repair 已获用户授权，ADR-0009 已
+  Accepted；T02 继续等待 T01 repair gate
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -137,12 +143,12 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | PASS | Accepted ADR-0001～0008、Approved SPEC/TEST-0001；T01/T05/T06 done，ADR-0008 contract Architect/QA PASS，frontier=T02 | 当前 |
+| M0 execution contracts | PASS | Accepted ADR-0001～0009、Approved SPEC/TEST-0001；ADR-0009 Product/Architect required actions 已关闭且 QA final PASS；T01 sole frontier，T05/T06 done，T02 preserved | 当前 |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | workspace已存在；workspace-wide gate按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
-| Security/KAT/negative | IN_PROGRESS/NOT_RUN | TEST-0001与ADR-0008已映射required tests；T02 preserved worktree尚无commit或corrected-contract执行证据 | M0-T02/T03 |
-| Lifecycle/backpressure | PLANNED/NOT_RUN | TEST-0001 已冻结 deterministic seams；无 runtime 或执行证据 | M0 |
+| Security/KAT/negative | BLOCKED | T02 primitive/KDF/secret与provenance/nonce repair commands均通过；overall gate只等待 ADR-0009 的 `aes`/`ghash`/`polyval` resolved zeroize feature evidence | M0-T01/T02/T03 |
+| Lifecycle/backpressure | IN_PROGRESS | T06 focused lifecycle/backpressure commands 与 10,240 次 shutdown ready-race regression 已 PASS；完整 runtime/composition 与同一最终 integration commit evidence 尚未完成 | M0 |
 | External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
@@ -182,17 +188,19 @@ coverage/profiling output 和 rendered docs 属于 generated artifacts，不提�
 
 ## 已知缺口、flakes 与 skipped coverage
 
-- 当前没有 CI，因此也没有可声称的 flakes；所有产品 coverage 都是
-  **not present**，不是 skipped-pass。
+- 当前没有 remote CI，因此也没有可声称的 remote flakes；T01/T05/T06 与 preserved
+  T02 有 local ticket evidence，但完整产品/平台/interop coverage 尚未在最终
+  integration commit 产生，不是 skipped-pass。
 - Windows 上技能文档给出的 `python3` 命令不可用；当前可复现入口是 `python`。
   是否修改 workflow helper 的跨平台调用说明留待单独控制面决策，不阻塞本次文档。
 - M0 已固定 build compiler 1.97.1、MSRV 1.85.0、三个 target triples、reference
   versions/checksums、fixture provenance、GitHub job/runner/timeout/security和
-  unavailable=FAIL/BLOCK contract；这些仍缺实际 workspace、workflow、runner
-  run 和 artifact evidence。
-- 本地 `origin` 已存在，但 remote capability、repository Actions settings 和
-  push权限未验证；本次未修改remote。execute前必须由用户单独授权remote
-  初始化/URL修正（若需要）、`codex/integration/m0` push和CI execution。
+  unavailable=FAIL/BLOCK contract；workspace/T01/T05/T06 已存在，这些仍缺其余
+  product slices、workflow、runner run 和 artifact evidence。
+- 本地 `origin` URL 与只读访问已验证，push capability 与 repository Actions
+  settings 尚未验证；当前未修改 remote。用户已条件授权仅在 T08 local
+  integration、Architect 与 QA 均 PASS 后 push exact
+  `codex/integration/m0` commit 并等待 Actions；其他 remote mutation 仍未授权。
 - 尚未定义 resource stability threshold、soak duration、benchmark hardware
   或 comparison statistics；这是 M4 DEC-010，不阻塞 M0 implementation。
 - M0 CI amendment 最终写入后，workflow doctor/validate、

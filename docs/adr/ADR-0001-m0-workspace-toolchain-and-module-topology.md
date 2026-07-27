@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Architect / Team Lead
-- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T01～M0-T08；关闭 DEC-001、DEC-002
+- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T01～M0-T08；关闭 DEC-001、DEC-002；direct dependency baseline 与一次性 manifest repair 条款被 ADR-0009 部分取代
 
 ## Context and problem
 
@@ -65,7 +65,11 @@ workspace，并使 AES-128-GCM TCP 纵切可以按非重叠 ownership 并行实�
   committed `Cargo.lock` 固定。禁止 `full` feature、OpenSSL/native TLS、
   `async-trait`、`io_uring` 和未使用 optional dependency。
 
-M0 已批准的 direct dependency baseline 如下；member 只声明实际使用的条目：
+M0 原始批准的 direct dependency baseline 如下；member 只声明实际使用的条目。
+ADR-0009 部分取代本段：在不改变既有版本/feature 的前提下，额外增加 exact
+`aes 0.9.1` 与 `ghash 0.6.0` no-default `zeroize` direct feature anchors，并只对
+这两个不直接导入 Rust symbols 的安全 anchors 建立窄例外。当前规范性 dependency
+surface 必须联合读取本表与 ADR-0009：
 
 | Crate | Exact version | Feature contract |
 |---|---:|---|
@@ -213,7 +217,9 @@ Cargo metadata与lock resolution不要求explicit target path已经存在，因�
 
 后续并行 ticket 不得修改T01拥有的manifest/lock路径。若实现发现遗漏dependency或
 target，当前wave必须停止，由Team Lead先修订contract并安排一个独占manifest变更；
-不得由多个Engineer竞争`Cargo.lock`。
+不得由多个Engineer竞争`Cargo.lock`。ADR-0009 是该流程的首次窄执行：仅授权一个
+T01 writer 增加两个 fixed-version zeroize feature anchors、更新 lock representation
+与 workspace-policy evidence。
 
 ## Consequences and tradeoffs
 

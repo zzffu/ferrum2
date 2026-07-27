@@ -16,7 +16,7 @@ acceptance = [
   "M0-CRYPTO-001 and M0-CRYPTO-002 pass exactly the ADR-0004 BLAKE3 input-length 0, 1, and 1024 rows plus the ADR-0008 McGrew/Viega GCM proposal test cases 1 and 2 and the unchanged corrupted-tag reject, with pinned hashes and truthful submitter-source provenance",
   "M0-CRYPTO-003 passes for the exact SIP022 context, 32-to-16-byte subkey selection, empty AAD, zero u96le nonce, carry, and checked increment",
   "M0-CRYPTO-004 proves redacted Debug, explicit-clear and ZeroizeOnDrop seams, production entropy failure, response-salt collision handling, and nonce overflow fail closed",
-  "The KeyProvider, Clock, and SecureRandom interfaces match ADR-0002 and expose neither raw PSK bytes nor a production deterministic fallback",
+  "The KeyProvider, Clock, and SecureRandom interfaces match ADR-0002 and expose neither raw PSK bytes nor a production deterministic fallback; the integrated dependency graph satisfies ADR-0009 exact package-ID, feature-set, and lock-identity evidence",
 ]
 +++
 
@@ -73,10 +73,14 @@ cargo fmt -p ferrum2-crypto -- --check
 
 ## Completion evidence
 
-To be filled by the Team Lead after integration:
-
-- Branch:
-- Commit(s):
-- Architect verdict:
-- QA verdict:
-- Integrated commit:
+- Branch: `codex/ticket/m0-t02`
+- Commit(s): `45c0e2fcf8630a128f9ee422854ea0a089be75c8`,
+  repair 1/2 `df22d7efe287043d90b5823d0f69c69913eda56b`
+- Repair evidence: primitive/KDF/secret tests, strict Clippy, fmt and provenance
+  integration assertion all exit 0；provenance 与 `NonceCounter` repair
+  Architect/QA PASS。
+- Overall Architect/QA verdict: **BLOCK** only because the T01-owned resolved graph
+  lacked `aes/zeroize` and `ghash/zeroize`. ADR-0009 and its exclusive T01 repair
+  are now authorized; this ticket remains blocked until that repair passes and is
+  integrated.
+- Integrated commit: not yet
