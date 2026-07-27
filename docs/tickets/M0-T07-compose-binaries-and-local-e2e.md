@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "done"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -218,3 +218,23 @@ cargo test --workspace --locked
   clean且`target/`已清理。
 - Final recovery gate: **DONE**
 - Recovery publication: none
+- Readiness recovery reopen (2026-07-27): independent T08 QA's first
+  `cargo +1.85.0 test --workspace --locked` failed in the exact 100-cycle
+  lifecycle suite with `child exited before readiness`; focused 2/2 and the
+  exact workspace rerun 204/204 passed, so the first failure was retained for
+  diagnosis rather than waived.
+- Readiness diagnosis branch: `codex/diagnose/m0-t08-lifecycle-flake`;
+  3/3 MSRV、3/3 current serial and 4/4 parallel focused invocations passed
+  (`0/1000` spontaneous cycle failures), while a deterministic foreign-port
+  probe reproduced the failure path 1/1. Root cause is test-harness TOCTOU:
+  `unused_loopback` releases the reservation and ownership-blind
+  `wait_for_bound` treats any `AddrInUse` as child readiness before the real
+  child exits on bind collision. No product lifecycle defect or process/temp
+  leak was found.
+- Readiness repair branch: `codex/repair/m0-t07-readiness-ownership`;
+  restricted to `tests/m0-harness/src/local_support/**` and
+  `tests/m0-harness/tests/lifecycle_cycles.rs`; candidate pending.
+- Current readiness recovery gate: **IN_PROGRESS**；T08 remains blocked until
+  the narrow harness repair passes Engineer, Architect, QA and integration
+  gates.
+- Readiness recovery publication: none

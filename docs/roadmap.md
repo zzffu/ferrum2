@@ -113,12 +113,14 @@ non-overlapping ownership。
     假阳性。ticket及integration Architect/QA、24条ticket commands、quick/full
     均PASS，integrated `91516720`。T08随后暴露Rust 1.85 let-chain不兼容；窄修复
     `50bf0b7`及integration `123618f`通过MSRV、focused、quick/full与最终
-    Architect/QA gates，done；
+    Architect/QA gates；T08 QA后续发现100-cycle readiness flake，独立诊断以
+    foreign-port probe确定为harness `AddrInUse` ownership TOCTOU，现只窄reopen
+    local_support/lifecycle_cycles evidence；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
     独占 `.github/workflows/m0.yml`；ADR-0014 external evidence边界已接受；
     repair 1/2 `5accd02`通过大部分本地执行，但final Architect/QA因EOF顺序/
     deadline、workflow closed-subset及platform helper evidence缺口而BLOCK；
-    final repair 2/2执行中。
+    final repair 2/2执行中，并blocked于disjoint T07 readiness repair。
 
   Dependency graph：
 
@@ -174,10 +176,11 @@ non-overlapping ownership。
   并被接受；T07 candidate `5ac8f1b`与lifecycle evidence repair 1/2 `a9b0a56`
   已通过ticket/final Architect与QA gates并集成于`91516720`。后续MSRV repair
   `50bf0b7`与integration `123618f`同样通过Team Lead/final Architect/QA gates，
-  T07现done。ADR-0014已在`96d6262`接受；T08 repair 1/2 `5accd02`通过大部分
-  本地执行，但final Architect/QA均BLOCK。final repair 2/2现集中关闭真实
+  T07的product/MSRV修复保持PASS，但readiness harness因deterministic
+  foreign-port TOCTOU窄reopen。ADR-0014已在`96d6262`接受；T08 repair 1/2
+  `5accd02`通过大部分本地执行，但final Architect/QA均BLOCK。final repair 2/2现集中关闭真实
   target→application EOF/shutdown顺序、absolute I/O deadline、closed workflow
-  policy与observable platform evidence，尚未集成。
+  policy与observable platform evidence；T07/T08两个disjoint repairs均尚未集成。
   全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download

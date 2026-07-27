@@ -2,7 +2,7 @@
 id = "M0-T08"
 title = "Qualify pinned interoperability, MSRV, and three target artifacts"
 milestone = "M0"
-status = "in_progress"
+status = "blocked"
 priority = "P0"
 blocked_by = ["M0-T07"]
 owns = [
@@ -202,5 +202,9 @@ To be filled by the Team Lead after integration:
   full reruns passed；the flake is under separate diagnosis and is not silently
   counted as deterministic evidence.
 - Repair 2/2 branch: `codex/repair/m0-t08-final-closure`; pending candidate SHA.
-- Current gate: **IN_PROGRESS**；repair 2/2 must close all review findings before
-  another Architect/QA review.
+- Upstream readiness blocker: T07 harness diagnosis proved that ownership-blind
+  `AddrInUse` readiness can false-pass a foreign port and then report
+  `child exited before readiness`; narrow repair branch
+  `codex/repair/m0-t07-readiness-ownership` is active.
+- Current gate: **BLOCKED** on the T07 readiness repair；T08 repair 2/2 continues
+  on disjoint owned paths and both repairs must pass review before integration.
