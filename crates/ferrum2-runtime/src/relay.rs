@@ -62,7 +62,7 @@ where
 pub enum RelayRunError {
     /// A relay I/O operation failed.
     Io,
-    /// No bytes were forwarded before the idle deadline.
+    /// No byte progress occurred during the idle interval.
     IdleTimeout,
     /// The flow owner requested cooperative cancellation.
     Cancelled,

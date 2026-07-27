@@ -193,14 +193,19 @@ struct CountingBytesReader {
     bytes: &'static [u8],
     offset: usize,
     observed: Arc<AtomicUsize>,
+    gate: Arc<WriteGate>,
 }
 
 impl AsyncRead for CountingBytesReader {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        _context: &mut Context<'_>,
+        context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if !self.gate.open.load(Ordering::SeqCst) {
+            *self.gate.waker.lock().expect("waker lock") = Some(context.waker().clone());
+            return Poll::Pending;
+        }
         let count = buffer
             .remaining()
             .min(self.bytes.len().saturating_sub(self.offset));
@@ -526,12 +531,15 @@ async fn idle_timeout_after_progress_retains_completed_stats() {
 async fn read_ahead_into_a_pending_writer_counts_zero_and_does_not_reset_idle() {
     let observed = Arc::new(AtomicUsize::new(0));
     let observed_by_reader = Arc::clone(&observed);
+    let read_gate = Arc::new(WriteGate::new());
+    let read_gate_for_relay = Arc::clone(&read_gate);
     let relay = tokio::spawn(async move {
         let mut inbound = Endpoint {
             reader: CountingBytesReader {
                 bytes: b"read-but-not-written",
                 offset: 0,
                 observed: observed_by_reader,
+                gate: read_gate_for_relay,
             },
             writer: SinkWriter,
         };
@@ -543,6 +551,12 @@ async fn read_ahead_into_a_pending_writer_counts_zero_and_does_not_reset_idle() 
             .await
     });
 
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert_eq!(observed.load(Ordering::SeqCst), 0);
+    assert!(!relay.is_finished(), "idle interval has one second left");
+
+    read_gate.open();
     for _ in 0..100 {
         if observed.load(Ordering::SeqCst) > 0 {
             break;
@@ -550,7 +564,12 @@ async fn read_ahead_into_a_pending_writer_counts_zero_and_does_not_reset_idle() 
         tokio::task::yield_now().await;
     }
     assert_eq!(observed.load(Ordering::SeqCst), 20);
-    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        relay.is_finished(),
+        "successful reads must not reset the armed idle deadline"
+    );
 
     assert_eq!(
         relay.await.expect("relay task"),
