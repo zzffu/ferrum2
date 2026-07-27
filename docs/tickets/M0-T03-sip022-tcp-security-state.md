@@ -2,7 +2,7 @@
 id = "M0-T03"
 title = "Implement the SIP022 AES-128 TCP security state machine"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P0"
 blocked_by = ["M0-T02"]
 owns = [
@@ -86,10 +86,13 @@ cargo fmt -p ferrum2-shadowsocks -- --check
 
 ## Completion evidence
 
-To be filled by the Team Lead after integration:
-
-- Branch:
-- Commit(s):
-- Architect verdict:
-- QA verdict:
-- Integrated commit:
+- Branch: `codex/ticket/m0-t03`
+- Candidate: `05605d328cc35952676cadc8ce30e6c4b91fbf7a`
+- Team Lead lineage/ownership/clean-worktree checks: PASS；12 additions，全部属于
+  T03 ownership；无 manifest/lock change
+- Engineer gates: package 27/27、ordering 4/4、focused connector 1/1、
+  allocation 3/3、vectors 2/2、replay 5/5、detection 7/7、binding 3/3、
+  strict Clippy/fmt/diff PASS；Architect/QA review pending
+- Fixture generator/output SHA-256:
+  `ca8d181b…faa39` / `c7f210d6…11f0`
+- Integrated commit: pending
