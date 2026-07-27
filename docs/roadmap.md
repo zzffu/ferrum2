@@ -69,10 +69,11 @@ non-overlapping ownership。
 - **In-scope tickets:**
   - M0-T01：locked workspace、toolchain、license 与 core contracts；原 integration
     已 done，现依用户授权为 ADR-0009 的一次独占 manifest repair reopen，且为
-    sole review frontier；candidate `edaee3d` Architect/QA ticket gates PASS，
-    integration pending；
+    candidate `edaee3d` Architect/QA ticket gates PASS，integration `4f3f0ac`
+    gates PASS，done；
   - M0-T02：secret/KDF/AEAD/key-clock-entropy；ADR-0008 与 provenance/nonce
-    repair 已 PASS，整体只等待 ADR-0009/T01 feature-unification blocker；
+    repair 已 PASS；ADR-0009/T01 blocker 已关闭，当前恢复 combined integration
+    review；
   - M0-T03：SIP022 TCP security state/replay/binding；blocked by T02；
   - M0-T04：typed config/observability；blocked by T02；
   - M0-T05：SOCKS5 CONNECT inbound；done；
