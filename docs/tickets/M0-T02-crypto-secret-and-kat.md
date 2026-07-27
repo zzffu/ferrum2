@@ -2,7 +2,7 @@
 id = "M0-T02"
 title = "Implement secret ownership, AES-128 primitives, and deterministic capabilities"
 milestone = "M0"
-status = "in_progress"
+status = "blocked"
 priority = "P0"
 blocked_by = ["M0-T01"]
 owns = [
