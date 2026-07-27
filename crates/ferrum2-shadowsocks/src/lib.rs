@@ -464,59 +464,76 @@ impl<'a, K, C, T, R> ClientTcpOutbound<'a, K, C, T, R> {
     }
 }
 
+/// Opaque single-use capability for a connected client transport.
+///
+/// Consuming [`Self::write_request`] completes the SIP022 request first-write
+/// and returns the only flow that can use the connected transport.
+pub struct ConnectedClientOpen<'a, S, K, T, R> {
+    io: S,
+    keys: &'a K,
+    clock: &'a T,
+    random: &'a R,
+    observers: Observers<'a>,
+}
+
 impl<'a, K, C, T, R> ClientTcpOutbound<'a, K, C, T, R>
 where
-    K: KeyProvider + Sync,
     C: Connector,
-    C::Stream: TransportIo + LocalEndpoint,
-    T: Clock + Sync,
-    R: SecureRandom,
 {
-    /// Dials the stored server and completes one contiguous request write.
-    pub async fn open_stream(
+    /// Dials only the stored configured Shadowsocks server.
+    pub async fn connect_server(
         &self,
-        application_target: &TargetAddr,
-    ) -> Result<ClientFlow<'a, C::Stream, K, T>, ShadowsocksError> {
-        let mut io = self
+    ) -> Result<ConnectedClientOpen<'a, C::Stream, K, T, R>, ShadowsocksError> {
+        let io = self
             .connector
             .connect(&self.server)
             .await
             .map_err(|error| ShadowsocksError::Connect(error.kind()))?;
-        let mut encrypt = fixed_scratch(
-            BufferRole::Encrypt,
-            MAX_ENCRYPT_WIRE_LEN,
-            self.observers.buffer,
-        );
-        let decrypt = fixed_scratch(
-            BufferRole::Decrypt,
-            MAX_DECRYPT_WIRE_LEN,
-            self.observers.buffer,
-        );
+        Ok(ConnectedClientOpen {
+            io,
+            keys: self.keys,
+            clock: self.clock,
+            random: self.random,
+            observers: self.observers,
+        })
+    }
+}
 
-        let salt = generate_request_salt(self.random).map_err(|_| {
-            terminate_detection(
-                &mut io,
-                self.observers.flow,
-                DetectionReason::RandomUnavailable,
-            )
+impl<'a, S, K, T, R> ConnectedClientOpen<'a, S, K, T, R>
+where
+    S: TransportIo + LocalEndpoint,
+    K: KeyProvider + Sync,
+    T: Clock + Sync,
+    R: SecureRandom,
+{
+    /// Consumes the connected capability and completes one contiguous request write.
+    pub async fn write_request(
+        self,
+        application_target: &TargetAddr,
+    ) -> Result<ClientFlow<'a, S, K, T>, ShadowsocksError> {
+        let Self {
+            mut io,
+            keys,
+            clock,
+            random,
+            observers,
+        } = self;
+        let mut encrypt =
+            fixed_scratch(BufferRole::Encrypt, MAX_ENCRYPT_WIRE_LEN, observers.buffer);
+        let decrypt = fixed_scratch(BufferRole::Decrypt, MAX_DECRYPT_WIRE_LEN, observers.buffer);
+
+        let salt = generate_request_salt(random).map_err(|_| {
+            terminate_detection(&mut io, observers.flow, DetectionReason::RandomUnavailable)
         })?;
-        let timestamp = self.clock.unix_seconds().map_err(|_| {
-            terminate_detection(
-                &mut io,
-                self.observers.flow,
-                DetectionReason::ClockUnavailable,
-            )
+        let timestamp = clock.unix_seconds().map_err(|_| {
+            terminate_detection(&mut io, observers.flow, DetectionReason::ClockUnavailable)
         })?;
         let mut padding = [0_u8; MAX_PADDING_LEN];
-        let padding_len = sample_nonzero_padding(self.random, &mut padding).map_err(|_| {
-            terminate_detection(
-                &mut io,
-                self.observers.flow,
-                DetectionReason::RandomUnavailable,
-            )
+        let padding_len = sample_nonzero_padding(random, &mut padding).map_err(|_| {
+            terminate_detection(&mut io, observers.flow, DetectionReason::RandomUnavailable)
         })?;
         let request_sealer = encode_request_state_into(
-            self.keys,
+            keys,
             &salt,
             timestamp,
             application_target,
@@ -525,28 +542,28 @@ where
             &mut encrypt,
         )
         .map_err(|error| {
-            terminate_detection(&mut io, self.observers.flow, detection_from_frame(error))
+            terminate_detection(&mut io, observers.flow, detection_from_frame(error))
         })?;
         let expected = encrypt.len();
         let write = poll_fn(|cx| Pin::new(&mut io).poll_write(cx, &encrypt)).await;
         let written = write.map_err(|_| {
-            terminate_detection(&mut io, self.observers.flow, DetectionReason::WriteFailed)
+            terminate_detection(&mut io, observers.flow, DetectionReason::WriteFailed)
         })?;
         if written != expected {
             return Err(terminate_detection(
                 &mut io,
-                self.observers.flow,
+                observers.flow,
                 DetectionReason::ShortWrite,
             ));
         }
         encrypt.clear();
-        inspect_scratch(BufferRole::Encrypt, &encrypt, self.observers.buffer);
-        inspect_scratch(BufferRole::Decrypt, &decrypt, self.observers.buffer);
+        inspect_scratch(BufferRole::Encrypt, &encrypt, observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &decrypt, observers.buffer);
 
         Ok(ClientFlow {
             io,
-            keys: self.keys,
-            clock: self.clock,
+            keys,
+            clock,
             request_salt: salt,
             request_sealer,
             response_opener: None,
@@ -556,8 +573,28 @@ where
             decrypt,
             staged: None,
             lifecycle: Lifecycle::default(),
-            observers: self.observers,
+            observers,
         })
+    }
+}
+
+impl<'a, K, C, T, R> ClientTcpOutbound<'a, K, C, T, R>
+where
+    K: KeyProvider + Sync,
+    C: Connector,
+    C::Stream: TransportIo + LocalEndpoint,
+    T: Clock + Sync,
+    R: SecureRandom,
+{
+    /// Fused compatibility helper that connects, then writes the request.
+    pub async fn open_stream(
+        &self,
+        application_target: &TargetAddr,
+    ) -> Result<ClientFlow<'a, C::Stream, K, T>, ShadowsocksError> {
+        self.connect_server()
+            .await?
+            .write_request(application_target)
+            .await
     }
 }
 
