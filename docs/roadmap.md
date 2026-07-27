@@ -94,8 +94,9 @@ non-overlapping ownership。
   LF-only multiline assertion 在 CRLF checkout 模拟下失败。失败的 integration
   candidate 保留为
   `codex/integration/m0@0d98d81d0a4545996fda536a646594d9fe072b98`，
-  未 fast-forward 到 `master`；T02～T08 尚未调度。恢复需要明确授权增加一次
-  bounded repair，或显式修改 workflow repair policy。
+  未 fast-forward 到 `master`；T02～T08 尚未调度。用户已于 2026-07-27
+  授权一次额外且仅限 `workspace_policy.rs` CRLF 匹配的 bounded repair；
+  该恢复 gate 正在执行。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。

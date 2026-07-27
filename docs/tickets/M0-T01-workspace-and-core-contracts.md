@@ -2,7 +2,7 @@
 id = "M0-T01"
 title = "Establish the locked workspace and core contracts"
 milestone = "M0"
-status = "blocked"
+status = "ready"
 priority = "P0"
 blocked_by = []
 owns = [
@@ -115,7 +115,7 @@ git diff --check
   `codex/integration/m0@0d98d81d0a4545996fda536a646594d9fe072b98`
   failed its first post-merge architecture gate and was not fast-forwarded to
   `master`.
-- Blocker: `execution.max_repair_attempts_per_ticket = 2` is exhausted. Resume
-  requires explicit authorization for another bounded repair or a workflow-policy
-  change; the remaining code fix is confined to
-  `tests/m0-harness/tests/workspace_policy.rs`.
+- Resume authorization: on 2026-07-27 the user authorized exactly one additional
+  bounded repair beyond the configured 2/2 limit, confined to CRLF-independent
+  matching in `tests/m0-harness/tests/workspace_policy.rs`. No other code,
+  manifest, contract, or workflow-policy change is authorized by this exception.
