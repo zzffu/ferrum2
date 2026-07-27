@@ -2,7 +2,7 @@
 id = "M0-T03"
 title = "Implement the SIP022 AES-128 TCP security state machine"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P0"
 blocked_by = ["M0-T02"]
 owns = [
@@ -202,4 +202,15 @@ cargo fmt -p ferrum2-shadowsocks -- --check
 - Fixture generator/output SHA-256:
   `ca8d181b…faa39` / `c7f210d6…11f0`
 - Integrated commit: `4bf758ae76421856bb527db3afe165d47e6fd4aa`
+- ADR-0012 phased-open repair candidate:
+  `8f0d1e0dc3a385cdefa5d491b642143ee0fe9400` on
+  `codex/repair/m0-t03-client-open-phase`; ticket Architect **PASS**、QA
+  **PASS_WITH_ACTIONS**，唯一downstream action是在T07汇合binary entrypoints后重跑
+  workspace quick。
+- Repair integration merge `951806d4b4bdf7c7b8682058582945a3caf3ad3d`；
+  combined T03/T06 checkpoint
+  `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a`上T03 package 64、
+  ordering 6、全部focused/security/flow commands、联合normal/all-features
+  97/97、strict Clippy/fmt/locked metadata/scope/lineage/cleanliness均PASS。
+  Combined Architect/QA均**PASS**，无T03 corrective action。
 - Remote state: nothing pushed or published

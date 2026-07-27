@@ -2,7 +2,7 @@
 id = "M0-T06"
 title = "Implement bounded runtime, direct outbound, and lifecycle ownership"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P0"
 blocked_by = ["M0-T01"]
 owns = [
@@ -109,4 +109,14 @@ cargo fmt -p ferrum2-runtime -- --check
 - QA verdict: initial **FAIL**; repair re-review and assembled integration
   **PASS**
 - Integrated commit: `999d4f95a2d597fb283689b9306d2a6773af707d`
+- ADR-0012 outcome repair:
+  `756a379dc42919fb4fed9c476ec2bd3926201852` plus narrow test/rustdoc repair
+  `0ef796907ef9699ba46a9c8fbdfeffdd5230b58f` on
+  `codex/repair/m0-t06-relay-outcome`。Delayed-read mutation proof、全部9项ticket
+  commands、package/all-features 33/33、strict Clippy/fmt与scope/lineage均PASS；
+  final Architect/QA均**PASS**，先前coverage gap与rustdoc advisory均关闭。
+- Repair integration merge/checkpoint:
+  `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a`；组合Architect/QA均
+  **PASS**，T03+T06 normal/all-features各97 tests通过。剩余workspace quick、
+  binary-private registry和100-process evidence归T07，不是T06缺陷。
 - Publication: none

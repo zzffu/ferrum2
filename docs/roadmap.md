@@ -92,8 +92,8 @@ non-overlapping ownership。
     release/Clippy/fmt及组合Architect/QA gates全部通过，done；本地授权不改变
     原T08 conditional exact-SHA push边界。T07 preflight随后发现fused client open
     无法分别应用configured connect/fresh first-write deadlines（默认10秒/5秒）；
-    现依ADR-0012窄幅reopen；candidate `8f0d1e0`已通过15项ticket commands并进入
-    `review`，历史completion evidence保留；
+    现依ADR-0012窄幅reopen；candidate `8f0d1e0`已通过全部ticket commands，
+    Architect/QA ticket gates及`2ce7708`组合integration gates均PASS，done；
   - M0-T04：typed config/observability；initial candidate `e9c6b01`
     Architect/QA BLOCK；repair 1/2 candidate `8d18d17` 已关闭 exact-target
     tracing spoof 与 server unknown-field evidence，ticket与integration
@@ -104,11 +104,12 @@ non-overlapping ownership。
     只修复relay outcome与direct tests；candidate `756a379`已通过全部ticket commands
     与33个package tests，Architect PASS；QA mutation review发现read-ahead test在
     t=0不能杀死read误重置idle的突变；窄repair `0ef7969`用4s延迟read+最后1s
-    deadline杀死该突变，全部ticket/package gates PASS并回到`review`；
+    deadline杀死该突变，全部ticket/package gates及Architect/QA复核PASS；
+    `2ce7708`组合integration gate通过并done；
   - M0-T07：binary composition/local E2E；partial clean checkpoint `52dcdb0`
-    已完成两个binary、CLI/adapters/local E2E且未触及manifest/lock。当前blocked，
-    等待ADR-0011/0012合同及T03/T06 upstream repairs；之后补lifecycle/native
-    evidence并恢复；
+    已完成两个binary、CLI/adapters/local E2E且未触及manifest/lock。ADR-0011/0012
+    合同与T03/T06 upstream repairs现已完成；保留checkpoint等待resume transition，
+    之后补lifecycle/native evidence；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
     独占 `.github/workflows/m0.yml`，blocked by T07。
 
@@ -159,9 +160,10 @@ non-overlapping ownership。
   exact two-edge lock delta与`AddressBounds` row；修订吸收全部findings后最终
   Product/Architect/QA document gates均PASS。T03 candidate `8f0d1e0`获Architect
   PASS、QA PASS_WITH_ACTIONS（仅T07后workspace quick）；T06 candidate `756a379`
-  production获Architect PASS但QA因mutation coverage gap BLOCK；repair `0ef7969`
-  已完成并等待Architect/QA复核。
-  T07 blocked，
+  production获Architect PASS，repair `0ef7969`关闭QA mutation gap并获最终
+  Architect/QA PASS。T03/T06通过`951806d`/`2ce7708`集成，组合Architect/QA
+  PASS且normal/all-features各97 tests通过，均done。
+  T07等待resume transition，
   T08等待T07。全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download

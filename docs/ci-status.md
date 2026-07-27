@@ -2,8 +2,8 @@
 
 ## 当前 M0 执行状态
 
-- **Current validated local integration checkpoint:**
-  `c2ea5c2b48adf986e17a11639e24184c65131d3b` on local `master` and
+- **Current validated local integration implementation checkpoint:**
+  `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a` on local `master` and
   `codex/integration/m0`
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
@@ -55,8 +55,11 @@
   Architect PASS、QA PASS_WITH_ACTIONS（唯一动作是T07后重跑quick）；T06 Architect
   PASS，但QA refined mutation证明read-ahead test在t=0无法排除read activity reset，
   test-only窄repair `0ef7969`以4s delayed read + final 1s original deadline杀死
-  mutation，全部T06 ticket/package/Clippy/fmt gates PASS并回到`review`。T07 blocked
-  且保留`52dcdb0`，T08等待T07。
+  mutation。T03/T06分别经`951806d`/`2ce7708`合入local integration；组合
+  Architect/QA均PASS，T03 64、T06 33、联合normal/all-features各97 tests及strict
+  Clippy/fmt/locked metadata/scope/lineage/cleanliness均PASS，现均done。权威quick
+  诊断仅因T07-owned两个`src/main.rs`缺失而未通过，不计PASS。T07保留`52dcdb0`
+  并等待resume transition，T08等待T07。
 - **Contract final verdicts:** 初始review要求exact 47-case matrix、
   `AddressBounds`、harness exact two-edge lock hunk、configured而非hardcoded
   durations、T03/T07 time-evidence ownership和完整ADR模板。全部修正后
@@ -175,6 +178,8 @@
 | 2026-07-27 | `master@ad9e499` + final ADR-0011/0012 contract | `python .agents/skills/milestone-workflow/scripts/workflow.py doctor`；`validate`；`status`；`frontier --milestone M0 --json`；`next --milestone M0 --json` | 0 | 12 Accepted ADR、Approved SPEC/TEST amendments；T03/T06 selected、T07 blocked、无warning |
 | 2026-07-27 | same, final ADR-0011/0012 contract | `cargo metadata --locked --format-version 1`；`git diff --check`；ADR required-section/whitespace/bare-CR audit | 0 | 当前baseline 110 packages；两份ADR模板完整；无whitespace/bare-CR finding，只有既有autocrlf warning |
 | 2026-07-27 | same, final ADR-0011/0012 contract | Product / Architect / QA final read-only gates | PASS | configured default/non-default deadlines、evidence ownership、47-case native、exact lock exception、partial accounting与scope一致；无BLOCKER/REQUIRED/advisory |
+| 2026-07-27 | `codex/integration/m0@2ce7708` | T03全部16项、T06全部9项、联合normal/all-features package tests、strict Clippy/fmt、locked metadata、scope/lineage/cleanliness | 0 | T03 64、T06 33、联合97/97；Architect/QA组合gate均PASS，无BLOCKER/REQUIRED/advisory |
+| 2026-07-27 | same, pre-T07 diagnostic | configured quick：fmt/check/test | 1/101/101 | 仅缺T07-owned client/server `src/main.rs`；不计quick PASS，须T07汇合后重跑 |
 
 三条 Cargo 失败是当前基线的预期、已记录 blocker，不是测试失败被豁免。full
 commands 未运行，因为与 quick commands 具有同一个缺失 workspace 前置条件；
@@ -185,12 +190,12 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0012、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01/T02/T04/T05 done，T03 `8f0d1e0` review passed with downstream quick action；T06 `756a379`+`0ef7969` in review；T07 partial `52dcdb0` blocked，T08等待T07 | M0-T06 re-review |
+| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0012、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T06均done，T03/T06 repair integration `2ce7708`双gate PASS；T07 partial `52dcdb0`等待resume transition，T08等待T07 | M0-T07 |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | T07 partial branch quick-equivalent fmt/check/workspace test已PASS但未integrate；exact integration quick仍在T03/T06 repairs与T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
 | Security/KAT/negative | T02/T03 historical PASS；native probe PENDING | T02真实AEAD owner 2/2、T03 private 4/4和全部T03 gates已在`4bf758a`PASS；ADR-0011 primitive-only 47-case native probe与policy delta尚未实现 | M0-T07 |
-| Lifecycle/backpressure | IN_PROGRESS | T06历史focused gates与10,240次shutdown race PASS；ADR-0012 partial-failure stats repair及ADR-0011 T06/binary-private/100-process compositional evidence尚未完成 | M0-T06/T07 |
+| Lifecycle/backpressure | IN_PROGRESS | T06历史focused gates与10,240次shutdown race PASS；ADR-0012 partial-failure stats及其read-activity mutation evidence已在`2ce7708`通过；ADR-0011 binary-private/100-process compositional evidence尚待T07 | M0-T07 |
 | External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
