@@ -158,4 +158,3 @@ cargo test -p ferrum2-runtime --test half_close --locked
 - `ADR-0007`：GitHub Actions provider与exact-SHA close contract。
 - `SPEC-0001` AC-07/08/10。
 - `TEST-0001` M0-E2E-001、M0-LIFE-003、M0-INT-001～004。
-
