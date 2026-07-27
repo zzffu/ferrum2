@@ -2,7 +2,7 @@
 id = "M0-T03"
 title = "Implement the SIP022 AES-128 TCP security state machine"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P0"
 blocked_by = ["M0-T02"]
 owns = [
