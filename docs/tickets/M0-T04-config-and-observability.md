@@ -2,7 +2,7 @@
 id = "M0-T04"
 title = "Implement typed configuration and bounded observability"
 milestone = "M0"
-status = "blocked"
+status = "in_progress"
 priority = "P1"
 blocked_by = ["M0-T02"]
 owns = [
@@ -86,5 +86,6 @@ cargo fmt -p ferrum2-config -p ferrum2-observability -- --check
 - Initial review: Architect **BLOCK**、QA **BLOCK**。Target-only filtering permits
   an external exact-target callsite to emit secret/destination/free-form fields
   through the closed NDJSON channel；`[server]` unknown-field table evidence is
-  also missing。Candidate is not integrated；repair 1/2 pending。
+  also missing。Candidate is not integrated；repair 1/2 active on the preserved
+  worktree and may change only T04-owned source/tests。
 - Integrated commit: pending

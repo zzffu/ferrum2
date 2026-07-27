@@ -38,11 +38,11 @@
 - **Current frontier:** M0-T03 candidate
   `05605d328cc35952676cadc8ce30e6c4b91fbf7a` **REVIEW**，Engineer package
   27/27 与全部 focused/Clippy/fmt gates PASS；M0-T04 candidate
-  `e9c6b01e0947483dac25012f9d02f99823970827` **BLOCKED**，Engineer
+  `e9c6b01e0947483dac25012f9d02f99823970827` **REPAIR 1/2 IN_PROGRESS**，Engineer
   config 7/7、observability 5/5、tracing 2/2、metrics 3/3 与 strict
   Clippy/fmt PASS，但 Architect/QA 均确认 exact-target tracing spoof 泄露
   secret/destination/free-form fields，且缺 server unknown-field table case；
-  repair 1/2 pending。M0-T07/T08 继续等待既定 blockers
+  preserved worktree 正在修复。M0-T07/T08 继续等待既定 blockers
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -158,7 +158,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | PASS | Accepted ADR-0001～0009、Approved SPEC/TEST-0001；T01/T02/T05/T06 done，T03 review、T04 blocked pending repair 1/2，T07/T08 只等待既定 blockers | 当前 |
+| M0 execution contracts | PASS | Accepted ADR-0001～0009、Approved SPEC/TEST-0001；T01/T02/T05/T06 done，T03 review、T04 repair 1/2 active，T07/T08 只等待既定 blockers | 当前 |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | workspace已存在；workspace-wide gate按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
