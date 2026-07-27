@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "review"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -33,14 +33,14 @@ acceptance = [
   "M0-ENDPOINT-001 client composition maps a LocalEndpoint or connect general error to one exact 05 01 00 01 00000000 0000 reply and performs no protocol first-write",
   "M0-E2E-002 fixes pre-success protocol failure versus post-success target-refusal EOF or reset semantics and proves target accept count remains zero on unauthenticated requests",
   "M0-LIFE-005 combines exactly 100 black-box cycles split 20 each across success/auth reject/connect failure/cooperative cancel/forced termination with T06 direct counters and binary-private production-used registry composition evidence",
-  "Every black-box cycle timed-waits its child, rebinds the exact proxy/metrics/target addresses, removes its temp path, and returns the harness child registry to baseline; private composition tests first witness live nonzero runtime counters and then baseline, with forced_shutdowns exactly +1",
+  "Every black-box cycle timed-waits its child, immediately bind-listens the exact proxy/metrics/target addresses under ADR-0015's Unix-reuse/default-Windows policy, removes its temp path, and returns the harness child registry to baseline; a live same-policy owner still excludes a contender; private composition tests first witness live nonzero runtime counters and then baseline, with forced_shutdowns exactly +1",
   "M0-DETECT-002 runs exactly 47 native connections on each required native platform: 43 valid fixed-region prefixes plus independently authenticated auth/type/time/length rows; every row resets rather than EOF and leaves target accepts at zero",
-  "The independent detection generator uses only workspace-inherited aes-gcm/blake3 test primitives, never a ferrum2 package; the authenticated zero-length row maps to AddressBounds",
+  "The independent detection generator uses only workspace-inherited aes-gcm/blake3 test primitives, while socket2 is the sole additional ADR-0015 rebind-evidence edge; the harness never depends on a ferrum2 package and the authenticated zero-length row maps to AddressBounds",
   "M0-ADAPT-001 and M0-ADAPT-002 prove the client TokioConnector and both binaries' TokioTransport/TokioFramed mechanical delegation, initialized ReadBuf handling, fixed error mapping/source redaction, role/call-site typed observability mapping including Normal, configured-server versus application-target separation, and direct-connect-before-initial-payload-forward ordering",
   "The server connection owner writes Session.initial_payload completely and exactly once after target connect and before ordinary relay; connect or prefix-write failure never starts relay, and ServerFlow never repeats the payload",
   "Client composition applies independent configured-server connect and fresh request-first-write deadlines from validated config, proves the 10-second/5-second defaults plus non-default values through ADR-0012's opaque phase capability, and sends SOCKS success only after first-write completion",
   "Prefix and ordinary relay accounting includes only successful nonzero application writes, retains direction-separated partial counts on error/idle/cancel, and never double-counts prefix bytes",
-  "ADR-0013 adds exactly one workspace-inherited Tokio test-util dev edge to each binary, leaves both normal declarations and the production feature graph unchanged, and produces no Cargo.lock hunk beyond ADR-0011's harness edges",
+  "ADR-0013 adds exactly one workspace-inherited Tokio test-util dev edge to each binary, leaves both normal declarations and the production feature graph unchanged, and produces no Cargo.lock hunk beyond ADR-0011 as partially superseded by ADR-0015's exact harness edges",
 ]
 +++
 
@@ -68,8 +68,9 @@ repeated cleanup。
   `Session.initial_payload`完整一次性forward。
 - process harness local support、ephemeral echo/recording target和child cleanup。
 - real-binary config CLI、local E2E、failure、lifecycle cycles与native detection probe。
-- ADR-0011限定的harness `aes-gcm`/`blake3` dev-dependencies、精确两条harness
-  lock edges和CRLF-safe workspace-policy evidence。
+- ADR-0011经ADR-0015部分取代后的harness `aes-gcm`/`blake3`/`socket2`
+  dev-dependencies、精确三条harness lock edges和CRLF-safe workspace-policy
+  evidence。
 - ADR-0013限定的两个binary `Cargo.toml` exact Tokio `test-util` dev declarations、
   production/test feature-tree boundary与zero-additional-lock-delta evidence。
 
@@ -78,7 +79,7 @@ repeated cleanup。
 - external reference download/interop、target platform matrix（T08）。
 - method/transport/address范围扩展。
 - root/其他member manifest（ADR-0013两个binary manifests的exact dev declarations
-  除外）、除`ferrum2-m0-harness`精确两条edge之外的lock hunk，或任何production
+  除外）、除`ferrum2-m0-harness`精确三条edge之外的lock hunk，或任何production
   dependency/shared module修改。
 - push/publish/release。
 
@@ -104,6 +105,11 @@ repeated cleanup。
 - server connector Pending/failure时不得poll或forward `Session.initial_payload`；
   success后用bounded writes保持原byte sequence完整一次，prefix write失败停止flow。
 - listener/supervisor拥有所有child；harness必须kill-on-drop并避免固定ports。
+- Client/server各自的binary-private listener constructor只在Unix bind前调用
+  `set_reuseaddr(true)`；Windows保持default，任何平台不得启用`SO_REUSEPORT`。
+  Proxy使用validated configured backlog，metrics保持16。Harness target/foreign/
+  cleanup listeners从首次bind起镜像同一平台策略并完成bind+listen；live
+  same-policy incumbent必须让contender失败。
 - `run`必须调用同一个private `run_with_registry` production path；composition tests
   必须观察registry live witness后回baseline，不能以process exit/rebind声称看到了
   进程内counter。
@@ -192,7 +198,7 @@ cargo test --workspace --locked
   EOF/reset；exact 5×20、local E2E、workspace quick/full均PASS
 - Repair review: Architect与QA均PASS，无剩余BLOCKER/REQUIRED；
   repair-affected、quick与full commands全部重跑通过
-- Current gate: **DONE**
+- Historical `91516720` gate: **DONE**
 - Integrated commit:
   `91516720e9acdc60597dd3596d6cbd33319d5a39`
 - Integration evidence: exact two-parent merge；Team Lead与独立QA均按ticket顺序先
@@ -267,7 +273,36 @@ cargo test --workspace --locked
 - Follow-up Architect gate: **PASS** with no BLOCKER/REQUIRED; legacy
   `detection_probe` ownership-blind `wait_for_bound` remains advisory and outside
   this lifecycle repair.
-- Current readiness recovery gate: **REVIEW**；candidate `6139544` is approved
-  for integration and still requires combined same-SHA local, Architect and QA
-  gates before T07 can return to done.
-- Readiness recovery publication: none
+- Pre-hosted readiness recovery gate (subsequently closed by `51fb7327`):
+  **REVIEW**；candidate `6139544` was approved for integration and still
+  required combined same-SHA local, Architect and QA gates.
+- Readiness recovery publication at that checkpoint: none
+- Hosted-rebind reopen (2026-07-28): T07 `6139544` and T08 `49c63082` were
+  integrated into exact `51fb7327af966cfc3f4a49058ea6bf2284009dcf`; local
+  Team Lead, final Architect and independent QA gates passed, and that exact SHA
+  was pushed only to `origin/codex/integration/m0`. GitHub Actions run
+  `30301746374` attempt 1 failed four jobs at the same first Linux
+  M0-LIFE-005 exact-rebind assertion (`EADDRINUSE`); later poisoned-lock rows
+  were derivative. No task/child leak or protocol failure is waived.
+- Hosted-rebind diagnosis: both binary-local `TcpSocket` listener constructors
+  lacked Unix reuse-address, while the harness used a plain bind probe after
+  real traffic. Product scope **PASS_WITH_ACTIONS** and Architect diagnosis
+  **BLOCK** pending repair; ADR-0015 now defines Unix-only listener reuse,
+  default Windows behavior, same-policy bind+listen evidence, live-owner
+  exclusion and the exact `socket2` dev edge.
+- Independent QA Linux reproduction: an offline Arch WSL current-toolchain
+  build exited 0. The full lifecycle test and a second full-name `--exact`
+  execution each exited 101 at the first `exactly_100...` cycle, failing client
+  proxy rebind on `127.0.0.1:44221` and `127.0.0.1:45809` with
+  `EADDRINUSE`; later rows only observed the poisoned test lock. No ferrum
+  listener remained, while the failed port was in `TIME_WAIT`. An independent
+  socket probe exited 0 and observed: default rebind in `TIME_WAIT` =
+  `EADDRINUSE`；old/new Unix reuse-address = success；live same-policy contender
+  = `EADDRINUSE`. WSL setup-only failures were retained separately: combined
+  toolchain/temp target exit 101 `ENOSPC`, and a drvfs install timeout exit 124.
+  All dedicated temp paths and owned processes were cleaned; integration
+  worktree remained clean with `target/` absent.
+- Current hosted-rebind gate: **IN_PROGRESS**. The repair is limited to the two
+  binary `run.rs` listener constructors, harness local/lifecycle seams,
+  `tests/m0-harness/Cargo.toml`, `Cargo.lock`, and `workspace_policy.rs`.
+  No second push or other remote mutation has occurred.

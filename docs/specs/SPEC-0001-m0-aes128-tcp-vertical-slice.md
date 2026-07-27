@@ -5,8 +5,9 @@
 - **ADR-0011/0012 amendments:** Approved
 - **ADR-0013 amendment:** Approved
 - **ADR-0014 amendment:** Approved
+- **ADR-0015 amendment:** Approved
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`、`ADR-0014`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`、`ADR-0014`、`ADR-0015`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
 - **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
 
@@ -86,9 +87,11 @@ SOCKS5 no-auth IPv4 CONNECT
 
 ## Current execution path
 
-当前仓库已有 locked Cargo workspace、core contracts 以及已集成的 T05/T06
-SOCKS5/runtime slices，但 crypto、SIP022、config/observability 与 binary composition
-尚未汇合；因此还没有完整 M0 end-to-end product execution path。
+当前仓库的exact integration `51fb7327af966cfc3f4a49058ea6bf2284009dcf`
+已经汇合T01～T08并通过local Team Lead、Architect与QA gates，包含完整M0
+end-to-end product path。该SHA的首次hosted run `30301746374`为2/11 success、
+9/11 failure；ADR-0015/T07/T08正在修复Linux listener restart与evidence-script
+portability，因此该SHA不是M0 close commit。
 
 M0 完成后的 client path：
 
@@ -135,15 +138,17 @@ server TcpListener
 Dependency DAG、toolchain、exact dependency versions 与 manifest ownership 由
 `ADR-0001` 冻结，并由 `ADR-0009` 仅对 `aes 0.9.1`/`ghash 0.6.0`
 no-default `zeroize` feature anchors、由 `ADR-0011` 仅对 T07 harness 的
-`aes-gcm`/`blake3` test-only direct edges、由`ADR-0013`仅对两个T07 binary
+`aes-gcm`/`blake3` test-only direct edges、由 `ADR-0015` 再仅对同一 harness
+增加 `socket2` test-only direct edge、由`ADR-0013`仅对两个T07 binary
 的Tokio `test-util` dev-kind edges作部分取代。除
 `tests/m0-harness/Cargo.toml`、`Cargo.lock`中
-`ferrum2-m0-harness`的精确两条edge、对应`workspace_policy`证据以及
+`ferrum2-m0-harness`的精确三条edge、对应`workspace_policy`证据以及
 `bins/ferrum2-client/Cargo.toml`/`bins/ferrum2-server/Cargo.toml`各一个exact
 dev declaration外，M0-T01继续独占所有 manifests/lock/toolchain/license。
 ADR-0013不允许新增lock hunk或改变production graph。M0-T08 独占 CI 路径
-`.github/workflows/m0.yml`；本次 amendment 不创建该文件，T08 execute 才能按
-ADR-0007 实现。
+`.github/workflows/m0.yml`；该workflow已在`51fb7327`实现并执行过首次hosted
+run。本次ADR-0015 amendment只允许T08修复两处exact selection与三套linker
+evidence probes，不创建第二个workflow或改变ADR-0007 job/security matrix。
 
 ## Configuration and validation
 
@@ -436,7 +441,12 @@ directions。shutdown、listener failure、timeout、half-close 与 cleanup 采�
 T06 direct tests证明真实runtime counters/JoinSet；两个binary的production-used
 private `run_with_registry` tests证明composition连接了同一个registry，先观察live
 non-baseline再回baseline。`forced_shutdowns`只断言精确累计增量。RSS、process exit
-或port rebind不能单独替代内部counter证据。
+或port rebind不能单独替代内部counter证据。ADR-0015部分取代 exact-rebind seam：
+client/server各自的binary-private listener constructor只在Unix bind前启用
+`SO_REUSEADDR`，Windows保持默认且所有平台禁止`SO_REUSEPORT`；harness-owned
+target/foreign listeners与cleanup probe从首次bind起使用相同平台策略并完成
+bind+listen。完全终止后的exact proxy/metrics/target地址必须立即可重绑，而一个
+仍存活的同策略listener必须继续阻止第二个listener。
 
 ## Compatibility and upstream divergence
 
@@ -571,7 +581,9 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
 8. **AC-08 Lifecycle/backpressure:** M0-LIFE-001～005 通过；stalled writer传播
    backpressure；timeout/cancel/listener/half-close/shutdown保留failure前partial
    direction stats；恰好100个五类均分black-box cycles与T06/binary-private直接证据
-   共同证明owner task/buffer/permit/listener/child/port/temp cleanup。
+   共同证明owner task/buffer/permit/listener/child/port/temp cleanup；Unix真实连接
+   后完全终止的proxy/metrics/target exact地址可立即bind+listen，Windows保持默认
+   exclusive语义，且任一平台的live same-policy listener都阻止第二个listener。
 9. **AC-09 Observability:** M0-OBS-001～003 通过；JSON/metric snapshot与 sentinel
    scan证明fixed fields/labels、无secret/destination、bounded cardinality和
    supervisor-owned metrics endpoint limits。
@@ -597,7 +609,9 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
     不含 M0 non-goals、external binaries、generated results 或真实 secrets；所有
     fixture/reference/locked dependencies有来源和license review记录；dependency
     production dependency surface 精确等于 ADR-0001 经 ADR-0009 部分取代后的
-    集合；harness direct dev dependencies与lock hunk精确等于ADR-0011 allowlist，
+    集合；harness direct dev dependencies与lock hunk精确等于ADR-0011经
+    ADR-0015部分取代后的allowlist（两个primitive edges加一个rebind-evidence
+    `socket2` edge），
     两个binary dev-kind Tokio declarations精确等于ADR-0013 allowlist且production
     trees不含`test-util`、lock无新增hunk，package identities/resolved crypto
     features不变；唯一批准的
@@ -607,17 +621,18 @@ M0 只有在 AC-01～AC-12 同一 integrated commit 证据齐全时才能进入 
 
 ## Open questions
 
-ADR-0010～0013批准后，没有留给 Engineer 自行决定的 M0 contract 问题。以下是执行期验证 contingency，不
-扩大实现权限：
+ADR-0010～0015已批准，不留给 Engineer 自行决定的 M0 contract 问题。以下是
+执行期验证 contingency，不扩大实现权限：
 
-- T08 首次下载时补录 reference asset byte size 与精确 `--version` 输出；checksum/
-  version 不匹配即阻塞，不自行换版本。
+- T08已固定并验证reference asset byte size、checksum与精确`--version`输出；
+  后续run任一不匹配仍阻塞，不自行换版本。
 - GitHub Actions provider 与 required workflow contract 已由 ADR-0007 固定；
-  workflow 尚未实现，因此远程 evidence仍为BLOCKED。用户已授权验证并仅在缺失/
-  错误时把origin修正为固定URL（当前已验证正确）；只有T08 local integration gates、
-  Architect与QA均PASS后，才可push exact `codex/integration/m0` commit到同名
-  remote branch并等待该SHA的Actions run。master、PR、branch protection、
-  tag/release、rerun及其他remote mutation均未授权。
+  workflow已实现，exact `51fb7327`已按一次授权push并产生失败run
+  `30301746374`。Origin固定URL已验证正确；修复后的新exact
+  `codex/integration/m0`必须先通过T08 local integration、Architect与QA gates，
+  并获得separately authorized push，才可非force更新同名remote branch并等待新
+  Actions run。master、PR、branch protection、tag/release、rerun及其他remote
+  mutation均未授权。
 - zero-linger native probe若在 Windows/Linux 无法得到一致批准的 close class，
   必须停止并提议 ADR-0004 revision。
 - DEC-008（UDP）、DEC-009（M3 完整平台 qualification）、DEC-010（M4 performance/
