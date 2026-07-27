@@ -1,0 +1,53 @@
+[workspace]
+members = [
+    "bins/ferrum2-client",
+    "bins/ferrum2-server",
+    "crates/ferrum2-core",
+    "crates/ferrum2-crypto",
+    "crates/ferrum2-shadowsocks",
+    "crates/ferrum2-socks5",
+    "crates/ferrum2-runtime",
+    "crates/ferrum2-config",
+    "crates/ferrum2-observability",
+    "tests/m0-harness",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+license = "GPL-3.0-only"
+publish = false
+
+[workspace.dependencies]
+ferrum2-core = { path = "crates/ferrum2-core", version = "=0.1.0" }
+ferrum2-crypto = { path = "crates/ferrum2-crypto", version = "=0.1.0" }
+ferrum2-shadowsocks = { path = "crates/ferrum2-shadowsocks", version = "=0.1.0" }
+ferrum2-socks5 = { path = "crates/ferrum2-socks5", version = "=0.1.0" }
+ferrum2-runtime = { path = "crates/ferrum2-runtime", version = "=0.1.0" }
+ferrum2-config = { path = "crates/ferrum2-config", version = "=0.1.0" }
+ferrum2-observability = { path = "crates/ferrum2-observability", version = "=0.1.0" }
+
+tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+bytes = "=1.12.1"
+socket2 = "=0.6.5"
+serde = { version = "=1.0.229", default-features = false, features = ["std", "derive"] }
+toml = { version = "=1.1.3", default-features = false, features = ["std", "serde", "parse"] }
+tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json", "env-filter"] }
+prometheus-client = { version = "=0.25.0", default-features = false }
+aes-gcm = { version = "=0.11.0", default-features = false, features = ["aes", "bytes", "zeroize"] }
+blake3 = { version = "=1.8.5", default-features = false, features = ["std", "zeroize"] }
+base64 = { version = "=0.23.0", default-features = false, features = ["std"] }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc", "derive"] }
+getrandom = { version = "=0.4.3", default-features = false, features = ["std"] }
+clap = { version = "=4.6.4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+thiserror = "=2.0.19"
+
+hex = "=0.4.3"
+serde_json = "=1.0.151"
+tempfile = "=3.27.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

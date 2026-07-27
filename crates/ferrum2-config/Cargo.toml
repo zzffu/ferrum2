@@ -1,0 +1,22 @@
+[package]
+name = "ferrum2-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ferrum2-core.workspace = true
+ferrum2-crypto.workspace = true
+base64.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true
