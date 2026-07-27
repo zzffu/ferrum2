@@ -1,8 +1,9 @@
 # SPEC-0001: M0 AES-128-GCM TCP 安全纵切
 
 - **Status:** Approved
+- **ADR-0010 amendment:** Approved
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
 - **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
 
@@ -228,28 +229,76 @@ replay mutation 均为 0。唯一例外是 S4 自身的成功 replay insertion�
 ### Wire and allocation
 
 wire constants、KDF、nonce、request/response header 与 replay algorithm 完全采用
-`ADR-0004`。额外实现约束：
+`ADR-0004`；duplex ownership与executor-neutral interface采用`ADR-0010`。额外实现
+约束：
 
 - initial fixed read/write 使用记录底层 operation 的 abstraction；不得以
   `read_exact`/`write_all` 多次触底。
-- decrypt direction持有一个最大 `65551` bytes 的 fixed-capacity reusable scratch；
-  不按 authenticated length 调用 input-sized reserve。所有 slice/length arithmetic
-  用 checked operations。
+- 每个receive direction以一次固定`65551` usable-limit request创建reusable decrypt
+  scratch；每flow以一次固定`16459` usable-limit request创建reusable encrypt
+  scratch。两者storage identity保持不变且不reserve/grow；所有slice/length
+  arithmetic用checked operations。
 - request variable header完整消费；IPv4 address 7 bytes、padding length 2 bytes、
-  padding `0..=900`，其余是 initial payload。padding 与 payload 不得同时为空。
+  padding `0..=900`，其余是 initial payload。padding 与 payload 不得同时为空；
+  完整auth/semantics后才可为core `Session.initial_payload`创建一个最大`65526`
+  bytes的bounded `Bytes` owner。
 - encoder 将 application bytes 切成 `<=16384` chunks；decoder 接受最大 65535。
 - response 必须绑定本连接完整 16-byte request salt，且 first response header 与
   nonempty first payload 一次 write。
+
+### Opaque duplex interface
+
+`ferrum2-shadowsocks`提供executor-neutral `TransportIo` seam与opaque
+`ClientFlow`/`ServerFlow`。flow持有未拆分transport、logical RX/TX states、当前已
+实例化cipher owner、pending response direction的一次性derivation capability、
+scratch与单一lifecycle/fatal latch，并通过`PlainDuplex`只暴露plaintext poll
+read/write/flush/shutdown及只读`terminal()`：
+
+- `ClientTcpOutbound`构造时持有validated configured Shadowsocks server endpoint；
+  `open(application_target)`连接该stored server endpoint，并只把application target
+  编码进SIP022 request。两者不得混用。
+- client flow在request first-write后立即允许TX；RX可同时等待并认证response。
+- `ShadowsocksTcpInbound::accept`返回既有
+  `Session<ServerFlow, NoReply>`；validated target和authenticated initial payload
+  分别位于`Session.target`/`Session.initial_payload`。server flow RX只从
+  subsequent request frame开始，不重复payload。
+- server first nonempty plaintext write生成并single-write response first header；
+  response pending不阻塞request RX。
+- fixed 43/59-byte reads及request/response first-writes维持single completed
+  operation；所有post-fixed region使用checked bounded-fill/write-drain。
+- 合法zero-length subsequent payload frame必须完成认证与nonce推进；面对非空
+  destination不得返回伪EOF，必须self-wake/Pending并在下一次outer poll继续下一
+  frame。
+- `TransportIo: AbortiveClose + Send + Unpin`与
+  `PlainDuplex: Send + Unpin`不全局要求`LocalEndpoint`；只有`ClientFlow`按core
+  `Outbound::Stream`要求委托stored endpoint。capabilities采用borrowed
+  process-owner lifetime，`Clock`额外要求`Sync`，production-shaped flow必须
+  compile-time证明`Send + Unpin`。
+- T07的client `TokioConnector`及两个composition root内
+  `TokioTransport`/`TokioFramed`只做connector/trait delegation与closed error
+  mapping；server accepted socket先用现有`RuntimeTcpStream::from_connected`
+  取得stored endpoint/abortive capability。不含任何protocol transition；
+  core/runtime/manifest/dependency不变。
 
 ### Relay data flow
 
 direct connect 成功后：
 
-1. server 先写 authenticated initial payload（若有）。
-2. 两方向 local futures 使用 owned 16 KiB application buffers。
-3. writer stalled 时对应 reader停止；无 data queue。
-4. EOF 只 shutdown 对侧 writer，反方向继续。
-5. fatal error/cancellation 终止本 flow 两方向并回收。
+1. server connection owner先把非空`Session.initial_payload`完整、恰好一次写入
+   target；connect或prefix write失败不进入普通relay。`ServerFlow`不重复该payload。
+2. client request-write可与response-pending read并发；server request-read可与
+   response-pending write并发。
+3. 两方向 local futures 使用runtime-owned 16 KiB application buffers；SS flow
+   内另持有固定reusable wire scratch。
+4. `poll_write_plain`可在plaintext完整进入唯一encrypt scratch后报告consumption；
+   scratch未drain时不接受下一段plaintext，因此writer stalled最多保留一个bounded
+   frame并让对应reader停止；无data queue。
+5. 每个outer protocol poll最多触发一个underlying transport operation；
+   always-ready one-byte fragmentation不得饿死反方向。
+6. complete subsequent frame之间的EOF只shutdown对侧writer，反方向继续。
+7. detection/protocol/transport fatal或cancellation终止本flow两方向并回收；
+   只有initial Detection调用abortive。正常单向EOF/shutdown只关闭该方向，反方向
+   继续。
 
 ## Errors and failure semantics
 
@@ -266,10 +315,33 @@ ConnectionRefused, RelayIo, IdleTimeout, Cancelled, Shutdown, ListenerFailure
 ```
 
 - 对外 config/CLI 输出使用 `ADR-0003` stable codes，不包含 source `Display`。
-- protocol initial failure返回closed `ShadowsocksError::Detection(reason)`，并在
-  返回前恰好一次调用core `AbortiveClose::mark_abortive`；调用后typed state
-  terminal且owner立即drop transport。runtime只实现protocol-neutral capability，
-  不反向依赖protocol，也不使用string-based判断。
+- protocol公开error精确为`Connect(ConnectErrorKind)`、
+  `Detection(DetectionReason)`、`Protocol(ProtocolReason)`与
+  `Transport(TransportPhase)`；`ProtocolReason`只有`Authentication`、
+  `FrameBounds`、`NonceExhausted`，`TransportPhase`只有`Read`、`Write`、
+  `WriteZero`、`Flush`、`Shutdown`。`FlowTerminal`只有`Normal`及上述三个
+  flow-fatal类别；`ResponseUnavailable`删除。
+- 只有参与request/response first-envelope的fixed/variable/first-payload read、
+  contiguous first-write、auth或semantics failure才是Detection。terminal先安装，
+  再恰好一次调用`AbortiveClose::mark_abortive`；mark失败不恢复。另一方向的
+  subsequent operation不因response pending而改类。first-envelope完成后的
+  tag/bounds/mid-frame EOF/nonce failure为Protocol，underlying I/O为Transport；
+  两者均终止两方向但不abortive。server response-pending empty flush零I/O；
+  shutdown不发header且failure为`Transport(Shutdown)`。
+- RX frame-boundary EOF与TX shutdown为direction-local normal close；只有两方向
+  都关闭才是`Normal` terminal。仅在RX仍open时，TX shutdown后的nonempty write
+  安装`Transport(Write)`；`Normal`安装后不可替换，read/write返回`Ok(0)`、
+  flush/shutdown成功且全部零I/O。fatal后所有poll返回相同typed error且不再触底。
+- T07按ADR-0010穷尽映射既有observability `Reason`，不得字符串判断。
+  client configured-SS-server `ShadowsocksError::Connect`固定为
+  `stage=shadowsocks,outcome=failed`；server direct-target core
+  `ConnectErrorKind`固定为`stage=direct,outcome=failed`；Detection/Protocol固定为
+  `stage=shadowsocks,outcome=rejected`；Transport固定为
+  `stage=relay,outcome=failed`；Normal固定为
+  `stage=relay,outcome=completed`且无reason。
+  `TokioFramed`对Detection/Protocol使用
+  `io::Error::from(ErrorKind::InvalidData)`，对Transport使用
+  `io::Error::from(ErrorKind::Other)`；不保留underlying source。
 - 普通 EOF、target refusal、idle/operator shutdown 不伪装成 authentication
   failure，也不得调用`mark_abortive`。
 - authentication/semantic failure只关闭当前 flow；listener failure 是 process fatal。
@@ -282,7 +354,8 @@ ConnectionRefused, RelayIo, IdleTimeout, Cancelled, Shutdown, ListenerFailure
 ## Security and privacy
 
 - fixed SIP022 revision、primitive/protocol fixture provenance、exact replay 和
-  detection strategy 由 ADR-0004/0006/0008 定义；ADR-0008 仅纠正两个
+  detection strategy 由 ADR-0004/0006/0008 定义；duplex/fatal ownership由
+  ADR-0010定义。ADR-0008仅纠正两个
   AES-GCM primitive cases 的来源归属，不改变 numeric values 或密码/协议行为。
 - AEAD owner 的 dependency-review evidence 由 ADR-0002/0009 联合定义：
   `aes-gcm/zeroize`、`aes/zeroize`、`ghash/zeroize` 与
@@ -309,8 +382,9 @@ ConnectionRefused, RelayIo, IdleTimeout, Cancelled, Shutdown, ListenerFailure
 | active proxy connections | semaphore default 4096，validated `1..=65535` |
 | listen backlog | default 1024，validated `1..=65535` |
 | application relay buffer | 每方向 16384 bytes |
-| encrypt wire scratch | 每 active flow一个 reusable buffer，最多16459 bytes（覆盖first response） |
-| decrypt wire scratch | 每 active decrypt direction最多 65551 bytes，一个 reusable buffer |
+| encrypt wire scratch | 每 active flow一次固定16459 usable-limit allocation request；storage identity不变、不增长 |
+| decrypt wire scratch | 每 active receive direction一次固定65551 usable-limit allocation request；storage identity不变、不增长 |
+| authenticated initial payload | core `Session`中一个bounded `Bytes` owner，完整auth/semantics后创建，最大65526 bytes，forward或drop后释放 |
 | data-plane queues | none |
 | replay entries | default 65536，validated `1024..=1048576`，TTL 60s |
 | handshake timeout | 5s default |
@@ -429,16 +503,24 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
    的 valid/invalid matrix 与零 listener/connector/task 副作用直接可见。
 3. **AC-03 Crypto correctness/secrets:** M0-CRYPTO-001～004 通过；primitive vectors、
    KDF/nonce fixture、redaction/clear seam、entropy failure和nonce overflow均精确。
-4. **AC-04 SIP022 fail-closed ordering:** M0-PROTO-001～006 通过；有provenance的
-   非官方composite wire KAT通过，且所有auth、bounds、semantic和allocation
-   negative case在connector/forward/accepted/replay mutation前失败。
+4. **AC-04 SIP022 fail-closed ordering:** M0-PROTO-001～009 通过；有provenance的
+    非官方composite wire KAT通过，且所有auth、bounds、semantic和allocation
+    negative case在connector/forward/accepted/replay mutation前失败；opaque flow
+    在response pending时保持duplex/fair progress；对向subsequent failure不被
+    pending first-envelope重分类且abortive为0；post-fixed fragmentation（含
+    zero-length subsequent frame不伪装EOF）、
+    scratch reuse、poll/admission边界与exact terminal matrix有直接证据。
 5. **AC-05 Replay/time:** M0-REPLAY-001～004 通过；invalid 不 poison、64-way duplicate
    恰好一个成功、±30/±31、59.999/60 秒、wall rollback 与 capacity fail-closed。
 6. **AC-06 Detection/binding:** M0-DETECT-001～003、M0-BIND-001 通过；single
    underlying I/O、typed abortive-close capability、批准的统一native close class和
    full request-salt binding均有直接证据。
 7. **AC-07 SOCKS/local product path:** M0-SOCKS-001～002、M0-ENDPOINT-001、
-   M0-E2E-001～002 通过；两个真实 binaries 完成 IPv4 echo/half-close；
+   M0-ADAPT-001～002、M0-E2E-001～002 通过；两个真实 binaries 完成 IPv4
+   echo/half-close；production adapters、client configured-server
+   dial/application-target wire separation及server
+   connect-before-initial-payload-forward有focused证据，全部typed terminal/Connect
+   及Normal的role/call-site observability映射穷尽；
    `local_addr` error/non-IPv4 保持零 first-write并发精确general failure，同时冻结
    target/protocol failure行为。
 8. **AC-08 Lifecycle/backpressure:** M0-LIFE-001～005 通过；stalled writer传播
@@ -467,15 +549,17 @@ M0 只有在 AC-01～AC-12 同一 integrated commit 证据齐全时才能进入 
 
 ## Open questions
 
-没有留给 Engineer 自行决定的 M0 contract 问题。以下是执行期验证 contingency，不
+ADR-0010批准后，没有留给 Engineer 自行决定的 M0 contract 问题。以下是执行期验证 contingency，不
 扩大实现权限：
 
 - T08 首次下载时补录 reference asset byte size 与精确 `--version` 输出；checksum/
   version 不匹配即阻塞，不自行换版本。
 - GitHub Actions provider 与 required workflow contract 已由 ADR-0007 固定；
-  workflow 尚未实现且 exact integration commit 尚未获授权 push，因此远程 evidence
-  仍为 BLOCKED。remote 初始化/URL 修正（若需要）、CI branch push 与 workflow
-  execution 都是 execute 前需用户单独明确授权的外部动作。
+  workflow 尚未实现，因此远程 evidence仍为BLOCKED。用户已授权验证并仅在缺失/
+  错误时把origin修正为固定URL（当前已验证正确）；只有T08 local integration gates、
+  Architect与QA均PASS后，才可push exact `codex/integration/m0` commit到同名
+  remote branch并等待该SHA的Actions run。master、PR、branch protection、
+  tag/release、rerun及其他remote mutation均未授权。
 - zero-linger native probe若在 Windows/Linux 无法得到一致批准的 close class，
   必须停止并提议 ADR-0004 revision。
 - DEC-008（UDP）、DEC-009（M3 完整平台 qualification）、DEC-010（M4 performance/

@@ -43,9 +43,13 @@
   Architect/QA均 **BLOCK**：fixed/reusable scratch与negative/order evidence
   不完整，typed transition还无法组成concurrent duplex relay、丢失authenticated
   initial payload并拒绝合法post-fixed fragmentation。修复前需显式冻结
-  split/fatal-error concurrency interface；Product scope triage确认这不扩大M0
-  产品/wire范围，但当前未授权code-only repair，candidate未integrate；
-  M0-T07/T08继续等待既定blockers
+  duplex/fatal-error concurrency interface；Product scope triage确认这不扩大M0
+  产品/wire范围，用户已授权后续全部M0内本地窄blocker。ADR-0010选择opaque
+  unsplit duplex flow、保留core `Session.initial_payload`并冻结exact
+  terminal/poll/adapter evidence及configured-server/application-target separation；
+  首轮findings全部闭合，最终Product/Architect/QA均PASS；candidate未integrate，
+  下一步为T03 repair；
+  本地授权不改变原T08 conditional exact-SHA push边界，M0-T07/T08继续等待
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -151,6 +155,9 @@
 | 2026-07-27 | same, ADR-0008 docs | `git diff --check` | 0 | 无whitespace error；仅有既有Windows LF→CRLF checkout warning |
 | 2026-07-27 | same, final ADR-0008 contract | Architect final read-only gate | PASS | partial supersession、source classification/hashes/rights、no-binary与no-behavior/scope-change完整；无BLOCKER/REQUIRED/advisory |
 | 2026-07-27 | same, final ADR-0008 contract | QA final read-only gate | PASS | M0-CRYPTO-002/T02映射、numeric invariants、frontier与未执行gate状态一致；无BLOCKER/REQUIRED/advisory |
+| 2026-07-27 | `master@5a3a89e` + final ADR-0010 contract | `python .agents/skills/milestone-workflow/scripts/workflow.py validate` | 0 | ADR/SPEC/TEST/T03/T07同步修订、DAG与ownership有效 |
+| 2026-07-27 | same, final ADR-0010 contract | `git diff --check` | 0 | 无whitespace error；仅有Windows LF→CRLF checkout warning |
+| 2026-07-27 | same, final ADR-0010 contract | Product / Architect / QA final gates | PASS | 无剩余BLOCKER/REQUIRED/advisory；wire/product/core/runtime/manifest范围不变 |
 
 三条 Cargo 失败是当前基线的预期、已记录 blocker，不是测试失败被豁免。full
 commands 未运行，因为与 quick commands 具有同一个缺失 workspace 前置条件；
@@ -161,11 +168,11 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | BLOCKED | Accepted ADR-0001～0009、Approved SPEC/TEST-0001；T01/T02/T04/T05/T06 done；T03 review揭示split/fatal-error concurrency interface需显式合同决定，T07/T08等待T03 | M0-T03 contract gate |
+| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0010、Approved SPEC/TEST-0001；T01/T02/T04/T05/T06 done；ADR-0010及SPEC/TEST/T03/T07 mappings已获Product/Architect/QA PASS；T03 repair ready，T07/T08等待T03 | M0-T03 repair |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | workspace已存在；workspace-wide gate按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
-| Security/KAT/negative | T02 PASS / T03 BLOCKED | T02 primitive/KDF/secret、provenance/nonce、ADR-0009 resolved zeroize feature 与 combined integration gates 全部 PASS；T03 replay/binding已有部分PASS，但scratch、完整negative/order与composable duplex contract未过gate | M0-T03 contract decision |
+| Security/KAT/negative | T02 PASS / T03 IN_PROGRESS | T02 primitive/KDF/secret、provenance/nonce、ADR-0009 resolved zeroize feature 与 combined integration gates 全部 PASS；T03 contract gate PASS，repair与新增scratch/negative/order/duplex evidence尚待执行 | M0-T03 repair |
 | Lifecycle/backpressure | IN_PROGRESS | T06 focused lifecycle/backpressure commands 与 10,240 次 shutdown ready-race regression 已 PASS；完整 runtime/composition 与同一最终 integration commit evidence 尚未完成 | M0 |
 | External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |

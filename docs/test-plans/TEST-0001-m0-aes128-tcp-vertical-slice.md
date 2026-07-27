@@ -1,6 +1,7 @@
 # TEST-0001: M0 AES-128-GCM TCP 安全纵切
 
 - **Status:** Approved
+- **ADR-0010 amendment:** Approved
 - **Milestone:** M0
 - **Spec:** `docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`
 
@@ -16,9 +17,19 @@ M0 建立以下 production-shaped test seams：
 - `ScriptedRandom`：固定 salt/padding、重复值、失败和 nonce边界。
 - `RecordingConnector`：调用次数、顺序、target category、forwarded bytes。
 - `RecordingReplayStore`/store snapshot：check/insert/purge 的线性化与 entry count。
-- `RecordingHeaderIo`：每次底层 read/write 的 call count、requested/returned length。
-- `FrameBufferFactory`/`BufferObserver`：只记录安全 buffer capacity 请求；不用自定义
-  global allocator，也不引入 `unsafe`。
+- `RecordingTransportIo`：跨与production相同的`TransportIo` seam记录每次completed
+  read/write、requested/returned length、fragment script、flush/shutdown与abortive
+  count；`Pending` poll不伪计completed operation。
+- `FrameBufferFactory`/`BufferObserver`：只记录安全的fixed usable-limit request、
+  role与opaque storage identity；不用自定义global allocator，也不引入`unsafe`；
+  同一flow多帧断言allocation count、identity稳定且无reserve/growth。
+- `FlowObserver`：production为no-op；recording版本与
+  `RecordingTransportIo`共享sequence recorder，只记录closed terminal event，
+  直接证明terminal installation早于abortive call。
+- T03 scripted adapter：通过与production相同的`TransportIo`/`PlainDuplex` seam
+  观察bytes、fairness、backpressure、half-close与typed terminal；T07 binary unit
+  tests另外覆盖client `TokioConnector`及两个composition root中的production
+  `TokioTransport`/`TokioFramed` delegation与source redaction。
 - test-only `OwnerRegistry`：supervisor child、connection task、buffer、permit、
   listener 和 forced-shutdown counters。
 - process harness：ephemeral ports、temporary config、readiness deadline、bounded
@@ -48,9 +59,9 @@ job ID 和 displayed name 必须精确相同，不能用 matrix suffix 改名：
 | Required job | Runner | Timeout | Test IDs / exact command source |
 |---|---|---:|---|
 | `m0-host-quick` | `ubuntu-24.04` | 60 | M0-GATE-001；`workflow.toml` `[validation].quick` 三条命令 |
-| `m0-security` | `ubuntu-24.04` | 60 | M0-WS-001/002、M0-CFG-003、M0-CRYPTO-001～004、M0-PROTO-001～006、M0-REPLAY-001～004、M0-DETECT-001、M0-BIND-001、M0-OBS-001/002；下方 evidence matrix 的每条命令、`cargo tree --workspace --locked`，以及 `cargo tree -p ferrum2-crypto --locked -e features -i aes`、`-i ghash`、`-i polyval`、`-i zeroize` 四条 focused commands |
+| `m0-security` | `ubuntu-24.04` | 60 | M0-WS-001/002、M0-CFG-003、M0-CRYPTO-001～004、M0-PROTO-001～009、M0-REPLAY-001～004、M0-DETECT-001、M0-BIND-001、M0-OBS-001/002；下方 evidence matrix 的每条命令、`cargo tree --workspace --locked`，以及 `cargo tree -p ferrum2-crypto --locked -e features -i aes`、`-i ghash`、`-i polyval`、`-i zeroize` 四条 focused commands |
 | `m0-lifecycle` | `ubuntu-24.04` | 60 | M0-DETECT-003、M0-LIFE-001～005、M0-OBS-003；下方每条命令 |
-| `m0-local-e2e` | `ubuntu-24.04` | 60 | M0-CFG-001/002、M0-CLI-001、M0-SOCKS-001/002、M0-ENDPOINT-001、M0-E2E-001/002；下方每条命令 |
+| `m0-local-e2e` | `ubuntu-24.04` | 60 | M0-CFG-001/002、M0-CLI-001、M0-SOCKS-001/002、M0-ENDPOINT-001、M0-ADAPT-001/002、M0-E2E-001/002；下方每条命令 |
 | `m0-integration-full` | `ubuntu-24.04` | 60 | M0-GATE-002、M0-SCOPE-001、M0-CI-001～006；`workflow.toml` `[validation].full` 与下方每条命令 |
 | `m0-msrv` | `ubuntu-24.04` | 60 | M0-MSRV-001 两条 Rust 1.85.0 命令 |
 | `m0-windows-msvc` | `windows-2022` | 60 | M0-PLAT-001、M0-DETECT-002；Compatibility matrix 全部命令 |
@@ -92,19 +103,24 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
 | M0-PROTO-002 | AC-04 | 每个 authenticated chunk bit flip与 truncation | unit/negative | `cargo test -p ferrum2-shadowsocks --test tcp_negative --locked auth` |
 | M0-PROTO-003 | AC-04/05 | timestamp `±30`/`±31` | fake-clock unit | `cargo test -p ferrum2-shadowsocks --test tcp_replay --locked timestamp` |
 | M0-PROTO-004 | AC-04 | S0-S3 reject 前 connector/forward/accepted/replay mutation 全零 | instrumented integration | `cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked` |
-| M0-PROTO-005 | AC-04 | fixed buffer cap；无 peer-sized reserve | safe buffer-observer unit | `cargo test -p ferrum2-shadowsocks --test tcp_allocation_bounds --locked` |
+| M0-PROTO-005 | AC-04 | one encrypt/one per-RX decrypt reusable scratch；fixed usable-limit request、stable identity、无reserve/per-frame growth；独立bounded Session payload owner | safe buffer-observer unit | `cargo test -p ferrum2-shadowsocks --test tcp_allocation_bounds --locked` |
 | M0-PROTO-006 | AC-04/12 | 有独立provenance的非官方request/response composite wire fixture | protocol KAT | `cargo test -p ferrum2-shadowsocks --test tcp_vectors --locked` |
+| M0-PROTO-007 | AC-04/07 | response pending时client upload与server request RX公平推进；server Session target/payload精确且flow不重复payload；current/pending cipher ownership与Send+Unpin闭合 | opaque-flow integration | `cargo test -p ferrum2-shadowsocks --test tcp_duplex --locked` |
+| M0-PROTO-008 | AC-04/06 | fixed 43/59 single completed operation不变；全部post-fixed region支持one-byte/mixed fragmentation，mid-region EOF按closed table终止；zero-length subsequent frame不产生伪EOF | scripted transport integration | `cargo test -p ferrum2-shadowsocks --test tcp_fragmentation --locked` |
+| M0-PROTO-009 | AC-04/06/08 | 0/1/16384/16385 write admission、single-scratch backpressure、normal repeat polls、response-pending时对向subsequent failure仍为Protocol/Transport且零abortive、exact terminal matrix、source redaction | poll-state table integration | `cargo test -p ferrum2-shadowsocks --test tcp_flow_contract --locked` |
 | M0-REPLAY-001 | AC-05 | invalid 不 poison；valid same salt first accept/second reject | fake-state unit | `cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact` |
 | M0-REPLAY-002 | AC-05 | 64-way duplicate 原子性 | concurrency | `cargo test -p ferrum2-shadowsocks --test tcp_replay --locked concurrent` |
 | M0-REPLAY-003 | AC-05 | 59.999/60s retention与 wall rollback | fake-clock/state | `cargo test -p ferrum2-shadowsocks --test tcp_replay --locked retention` |
 | M0-REPLAY-004 | AC-05 | capacity full fail closed，无 live eviction | state unit | `cargo test -p ferrum2-shadowsocks --test tcp_replay --locked capacity` |
-| M0-DETECT-001 | AC-06 | single underlying I/O + detection时恰好一次`mark_abortive`并terminal | instrumented transport | `cargo test -p ferrum2-shadowsocks --test detection_prevention --locked` |
+| M0-DETECT-001 | AC-06 | every scripted Detection；single completed initial I/O；terminal-installed event早于恰好一次`mark_abortive`，mark失败不恢复 | instrumented transport/observer | `cargo test -p ferrum2-shadowsocks --test detection_prevention --locked` |
 | M0-DETECT-002 | AC-06/11 | short byte/bad auth/type/time/length 相同 native close class | native process/socket | `m0-windows-msvc` 与 `m0-linux-gnu` 各运行 `cargo test -p ferrum2-m0-harness --test detection_probe --locked` |
 | M0-DETECT-003 | AC-06 | runtime `AbortiveClose`只在mark时设置zero linger；normal paths不设置 | runtime socket integration | `cargo test -p ferrum2-runtime --test abortive_close --locked` |
 | M0-BIND-001 | AC-06 | response full request-salt equality，bad binding不 forward | protocol integration | `cargo test -p ferrum2-shadowsocks --test response_binding --locked` |
 | M0-SOCKS-001 | AC-07 | connector在first-write前存local endpoint；success bytes为`05 00 00 01`+该IPv4/port；双向 bytes | unit/integration | `cargo test -p ferrum2-socks5 --locked`；`cargo test -p ferrum2-m0-harness --test local_e2e --locked success` |
 | M0-SOCKS-002 | AC-07 | auth/cmd/domain/IPv6/malformed negative；每个 request-stage failure为`05 REP 00 01 00000000 0000` | unit/negative | `cargo test -p ferrum2-socks5 --test negative --locked` |
-| M0-ENDPOINT-001 | AC-07 | `local_addr`恰好查询一次；error/non-IPv4时零 SIP022 first-write，composition发精确general failure | cross-crate ordering | `cargo test -p ferrum2-runtime --test local_endpoint --locked`；`cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_error_before_write`；`cargo test -p ferrum2-socks5 --test negative --locked general_failure`；`cargo test -p ferrum2-client --locked local_endpoint_failure` |
+| M0-ENDPOINT-001 | AC-07 | client connector只收到configured SS server endpoint、request只编码application target；`local_addr`恰好查询一次；error/non-IPv4时零 SIP022 first-write，composition发精确general failure | cross-crate ordering | `cargo test -p ferrum2-runtime --test local_endpoint --locked`；`cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_target_and_request_target`；`cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_error_before_write`；`cargo test -p ferrum2-socks5 --test negative --locked general_failure`；`cargo test -p ferrum2-client --locked local_endpoint_failure` |
+| M0-ADAPT-001 | AC-06/07/08/09 | client TokioConnector/Transport/Framed机械delegation、initialized ReadBuf、Pending/call count、stored endpoint、fixed io::Error/source redaction；configured-SS Connect=`shadowsocks/failed`及全部terminal→Reason/stage/outcome mappings | binary unit integration | `cargo test -p ferrum2-client --locked adapter_contract` |
+| M0-ADAPT-002 | AC-06/07/08/09 | server TokioTransport/Framed delegation；direct connect Pending/failure时零payload poll/forward，成功后Session.initial_payload恰好一次且先于ordinary relay；direct Connect=`direct/failed`及全部terminal含Normal的observability mapping | binary unit integration | `cargo test -p ferrum2-server --locked adapter_contract` |
 | M0-E2E-001 | AC-07 | 两真实 binary local echo + half-close + cleanup | process E2E | `cargo test -p ferrum2-m0-harness --test local_e2e --locked success` |
 | M0-E2E-002 | AC-07 | pre-success protocol failure与 post-success target refusal | process E2E | `cargo test -p ferrum2-m0-harness --test local_e2e --locked failures` |
 | M0-LIFE-001 | AC-08 | stalled writer停止 upstream read；buffer/permit cap | deterministic I/O | `cargo test -p ferrum2-runtime --test backpressure --locked` |
@@ -179,12 +195,54 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
   重复 nonce。
 - `local_endpoint`用可脚本化socket inspector覆盖成功、lookup error与IPv6结果：
   每案恰好一次查询；后两案不返回stream。`connector_error_before_write`断言这些
-  connect errors使`HeaderIo` write count保持0；SOCKS与client composition tests
+  connect errors使`TransportIo` completed write count保持0；SOCKS与client composition tests
   再断言最终reply恰好为`05 01 00 01 00000000 0000`且只发送一次。
+- `connector_target_and_request_target`使用互不相同的configured SS server与
+  application target，断言recording connector只收到前者，而authenticated request
+  解码只得到后者；不得通过Tokio adapter改写二者。
 - protocol negative table至少包括：每个 chunk tag bit flip、0..完整长度的关键
   truncation points、type 0/1反转、ATYP、port 0、padding 901、padding overrun、
   empty padding+payload、length arithmetic、trailing/under-consumed header、
   response binding mismatch。
+- `tcp_duplex`在response fixed-read保持`Pending`时推进至少两个client request
+  frames；server侧在first response保持`Pending`时消费至少一个subsequent request
+  frame。always-ready one-byte transport下，每个outer poll最多一次underlying
+  operation，另一logical direction在固定poll bound内进展。server accept断言
+  `Session.target`/`initial_payload`精确、flow首个plaintext read不重复payload。
+  test-only compile assertions证明production-shaped client/server flows为
+  `Send + Unpin`，并证明pending response capability只创建一次cipher owner。
+- `tcp_fragmentation`保持43/59-byte fixed region一个completed read；request
+  variable、response first payload、subsequent length/payload分别用one-byte与mixed
+  fragments成功。initial/mid-frame EOF、bit flip、type/time/length/binding分别映射
+  Detection或Protocol table，且terminal后read/write count不再增加。
+- allocation observer在handshake、minimum、maximum及至少32个subsequent frames后
+  断言每flow一个encrypt、每receive direction一个decrypt fixed request，storage
+  identity不变且无reserve/growth；不得用requested read length代替allocation
+  evidence。initial payload另为auth/semantics后创建的一个`Session` Bytes，
+  `0..=65526`边界与drop/forward ownership单独断言。
+- `tcp_flow_contract`表驱动断言：empty source为`Ok(0)`且零I/O/nonce/response；
+  1与16384完整admit；16385只admit/return 16384；scratch未drain时第二个source
+  `Pending`且不被复制，drain后才admit当前source，不依赖重交旧buffer。zero-length
+  read零I/O；RX EOF后重复read仍EOF；TX shutdown幂等、之后flush/shutdown成功且
+  零I/O；RX仍open时nonempty write-after-shutdown固定为`Transport(Write)`；
+  双向已关闭的`Normal`则read/write=`Ok(0)`、flush/shutdown成功、terminal不变且
+  零I/O。server
+  response-pending empty flush零I/O，shutdown零header且error精确映射
+  `Transport(Shutdown)`，不得伪装为Detection。
+- 同一`tcp_flow_contract`穷尽`ProtocolReason`、`TransportPhase`与`FlowTerminal`
+  table，逐项证明abortive=0、fatal后所有方向返回同一error且counts冻结；transport
+  source sentinel不出现在Debug/Display/source。状态组合必须显式覆盖client response
+  first-envelope仍pending时subsequent request-TX的bounds/nonce/I/O failure，以及server
+  response first-envelope仍pending时subsequent request-RX的auth/bounds/nonce/I/O
+  failure；每项仍为对应Protocol/Transport、abortive=0，不得改类为Detection。
+- `tcp_fragmentation`在非空destination下认证一个zero-length subsequent payload，
+  断言nonce/state推进、outer poll self-wake/Pending且不返回`Ok(0)`；后续合法非空
+  frame仍被交付，只有真正frame-boundary transport EOF才产生read EOF。
+- detection test分别从client response initial-read与server response first-write
+  注入failure；pre-flow request initial read/write覆盖同一matrix。
+  `FlowObserver`与transport recorder断言terminal-installed sequence严格早于
+  `mark_abortive`，合计恰好一次且mark failure不恢复。post-first-envelope
+  protocol/transport fatal、clean EOF、half-close与cancel均为0次abortive。
 
 ### Replay and ordering
 
@@ -220,6 +278,22 @@ run ID/attempt 和 `GITHUB_SHA` 做 evidence review。
 ## Integration and interoperability tests
 
 ### Local product path
+
+`adapter_contract` unit integrations直接实例化binary-local production adapters：
+
+- client记录connector/transport/framed每次poll、Pending、read/write/flush/shutdown、
+  endpoint与abortive delegation；`ReadBuf`只推进initialized bytes。
+- server recording direct connector在Pending/failure时断言
+  `Session.initial_payload`零poll/forward；成功后即使target partial writes也按原
+  byte sequence完整恰好一次写完，再开始ordinary relay，`ServerFlow`不重复。
+- 两边对每个typed terminal断言ADR-0010 fixed `io::ErrorKind`、`get_ref()=None`、
+  standard message与source sentinel零匹配。表驱动穷尽每个`DetectionReason`、
+  `ProtocolReason`、`TransportPhase`、`ConnectErrorKind`与`Normal`到exact
+  `Reason`/stage/outcome的映射；client configured-SS Connect必须是
+  `shadowsocks/failed`，server direct-target Connect必须是`direct/failed`，
+  Normal必须是`relay/completed/no reason`。
+  源码/Architect review再确认adapter没有frame/cipher/replay/binding/allocation/
+  terminal policy。
 
 `local_e2e` 每个 case用 temporary directory、ephemeral loopback listeners 和
 synthetic config启动真实 `ferrum2-server`/`ferrum2-client`：

@@ -29,7 +29,9 @@ acceptance = [
   "M0-E2E-002 fixes pre-success protocol failure versus post-success target-refusal EOF or reset semantics and proves target accept count remains zero on unauthenticated requests",
   "M0-LIFE-005 completes at least 100 mixed lifecycle cycles with owner, buffer, permit, listener, and child-process counts at baseline",
   "M0-DETECT-002 passes on the host native socket probe or the ticket is blocked pending an ADR-0004 revision",
-  "Real-binary probes prove each ShadowsocksError::Detection path invokes the runtime AbortiveClose capability while every ordinary EOF, target failure, and shutdown path remains a normal close",
+  "M0-DETECT-002 proves the approved wire-triggerable short/auth/type/time/length native close class; exhaustive key, clock, random, replay, read, and write Detection paths remain M0-DETECT-001 scripted evidence",
+  "M0-ADAPT-001 and M0-ADAPT-002 prove the client TokioConnector and both binaries' TokioTransport/TokioFramed mechanical delegation, initialized ReadBuf handling, fixed error mapping/source redaction, role/call-site typed observability mapping including Normal, configured-server versus application-target separation, and direct-connect-before-initial-payload-forward ordering",
+  "The server connection owner writes Session.initial_payload completely and exactly once after target connect and before ordinary relay; connect or prefix-write failure never starts relay, and ServerFlow never repeats the payload",
 ]
 +++
 
@@ -50,6 +52,11 @@ repeated cleanup。
 
 - 两binary `main`/run composition、Tokio multi-thread runtime和signal wiring。
 - validated config到providers/listeners/metrics/supervisor的construction order。
+- client binary-local `TokioConnector`及两个composition root内的
+  `TokioTransport`/`TokioFramed` newtype adapters，将已审核的opaque SS flow接入
+  未修改的runtime `relay_lifecycle`。
+- server direct connect后、ordinary relay前的bounded
+  `Session.initial_payload`完整一次性forward。
 - process harness local support、ephemeral echo/recording target和child cleanup。
 - real-binary config CLI、local E2E、failure、lifecycle cycles与native detection probe。
 
@@ -65,9 +72,23 @@ repeated cleanup。
 - `--check-config`必须在任何subscriber/runtime/listener/provider side effect前return。
 - client SOCKS success时机与SPEC-0001一致，并传入opened SS stream存储的
   `LocalEndpoint`；server target failure不产生第二reply。
+- client composition把validated `client.server`交给`ClientTcpOutbound`作为固定
+  upstream endpoint；`TokioConnector`只机械委托，不得用SOCKS application target
+  替换该endpoint。
+- server connector Pending/failure时不得poll或forward `Session.initial_payload`；
+  success后用bounded writes保持原byte sequence完整一次，prefix write失败停止flow。
 - listener/supervisor拥有所有child；harness必须kill-on-drop并避免固定ports。
 - instrumentation只调用typedobservability API，不加入free-formtarget/error labels。
+- 每个`DetectionReason`、`ProtocolReason`、`TransportPhase`、
+  `ConnectErrorKind`及`Normal`只按ADR-0010 exact table映射
+  `Reason`/stage/outcome；client configured-SS Connect为`shadowsocks/failed`，
+  server direct-target Connect为`direct/failed`，Normal为
+  `relay/completed/no reason`。
 - native detection probe失败是contract evidence blocker，不能标记flaky/skip。
+- adapters只委托connector/poll、stored endpoint、abortive与ADR-0010 exact closed
+  error/observability mapping；不得用string或自定义heuristic重新分类，不得
+  physical split/reunite transport，不得引入per-flow mutex、channel或direction
+  task，不得复制frame/cipher/replay/binding/allocation/protocol state。
 
 ## Validation commands
 
@@ -79,6 +100,8 @@ cargo test -p ferrum2-m0-harness --test local_e2e --locked
 cargo test -p ferrum2-m0-harness --test lifecycle_cycles --locked
 cargo test -p ferrum2-m0-harness --test detection_probe --locked
 cargo test -p ferrum2-client --locked local_endpoint_failure
+cargo test -p ferrum2-client --locked adapter_contract
+cargo test -p ferrum2-server --locked adapter_contract
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo test --workspace --locked

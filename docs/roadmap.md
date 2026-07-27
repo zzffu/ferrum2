@@ -36,7 +36,8 @@ non-overlapping ownership。
     workflow validation；
   - `ADR-0001`～`ADR-0009` 已 Accepted，关闭 DEC-001～DEC-007、
     DEC-011 与 DEC-012；ADR-0009 仅修正 AEAD state zeroize feature
-    unification；
+    unification；ADR-0010/DEC-013 opaque duplex contract为Proposed，批准后才
+    启动T03 repair；
   - `SPEC-0001` 与 `TEST-0001` 已 Approved；
   - M0-T01～M0-T08 的 blockers、non-overlapping ownership 和量化 acceptance
     已通过 workflow validation。
@@ -78,8 +79,11 @@ non-overlapping ownership。
     Architect/QA BLOCK；fixed/reusable scratch与negative/order evidence不完整，
     且typed transition无法组成concurrent duplex relay、丢失authenticated initial
     payload并拒绝合法post-fixed fragmentation。修复前需要显式冻结split/fatal-error
-    concurrency interface；Product scope triage确认不扩大M0产品/wire范围，但
-    code-only repair仍未获授权，当前为contract blocked，未integrate；
+    concurrency interface；Product scope triage确认不扩大M0产品/wire范围，用户
+    已授权后续全部M0内本地窄blocker。ADR-0010保留core
+    `Session.initial_payload`、选择opaque unsplit duplex flow并冻结exact terminal/
+    adapter evidence，正在第二轮Product/Architect/QA contract gate，批准前仍
+    blocked且未integrate；本地授权不改变原T08 conditional exact-SHA push边界；
   - M0-T04：typed config/observability；initial candidate `e9c6b01`
     Architect/QA BLOCK；repair 1/2 candidate `8d18d17` 已关闭 exact-target
     tracing spoof 与 server unknown-field evidence，ticket与integration
@@ -117,9 +121,9 @@ non-overlapping ownership。
   范围。T01/T02 combined integration `f9e218e` 已通过 Architect/QA 与
   70 tests。T04 repair 1/2 与 integration `5e3ddf9` 已通过全部ticket、
   regression、Architect与QA gates。T03 initial candidate虽通过现有命令，
-  Architect/QA均BLOCK：除scratch/coverage缺口外，现有transition API无法支持
-  已批准的concurrent relay。需显式合同修订后才可开始repair；T07/T08继续等待
-  T03及既定dependencies。
+  Architect/QA曾BLOCK：除scratch/coverage缺口外，现有transition API无法支持
+  已批准的concurrent relay。ADR-0010及同步SPEC/TEST/T03/T07窄修订现已获
+  Product/Architect/QA PASS，T03进入repair；T07/T08继续等待T03及既定dependencies。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。
@@ -245,6 +249,7 @@ non-overlapping ownership。
 | DEC-010 | open；M4 plan | benchmark hardware/config/statistics 与 10k-idle stability threshold | M0 不设性能声明 |
 | DEC-011 | resolved in M0 CI amendment | GitHub Actions required provider；`.github/workflows/m0.yml`；fixed hosted runners/jobs/security/evidence；本机 WSL2仅作诊断 | `ADR-0007`、`SPEC-0001`、`TEST-0001`、M0-T08 |
 | DEC-012 | resolved in M0 narrow amendment | fixed `aes 0.9.1`/`ghash 0.6.0` no-default `zeroize` direct feature anchors，使 `aes`/`ghash`/`polyval` keyed state drop-zeroize；exact resolved feature/package-ID 与 110-tuple lock identity evidence；无版本/wire/API/scope变化 | `ADR-0009`、`ADR-0002`、M0-T01/M0-T02 |
+| DEC-013 | resolved in M0 narrow amendment | opaque unsplit SIP022 flow、configured-server/application-target separation、core `Session.initial_payload` ownership、executor-neutral polling、direction-local normal close、single fatal arbitration与binary-local Tokio adapters；无wire/product/core/runtime/manifest变化 | `ADR-0010`、`SPEC-0001`、`TEST-0001`、M0-T03/M0-T07 |
 
 ## 风险登记
 
@@ -269,3 +274,4 @@ non-overlapping ownership。
 | 2026-07-27 | M0 | 首个 plan 目标确定为 AES-128-GCM TCP 安全纵切 | 比纯 workspace scaffolding 更早产生可观察用户路径并验证 module seams | Product PASS_WITH_ACTIONS；Architect/QA 要求安全、生命周期、互操作和平台门前移 |
 | 2026-07-27 | M0 plan | M0 改为 `planned`，接受 ADR-0001～0006、SPEC/TEST-0001 与 T01～T08 DAG | DEC-001～007 已有可实现、可测试、ownership-disjoint contract；唯一 initial frontier 为 T01 | Product/Architect/QA plan reports；upstream baseline；workflow validate/frontier/next |
 | 2026-07-27 | M0 CI amendment | 以 GitHub Actions/GitHub-hosted runners 取代本机 WSL2 作为 M0 required CI；新增 ADR-0007 和 T08 的唯一 workflow ownership | 绑定 pushed exact integration commit，固定 native runners、11 job、安全与 provider-native evidence，同时不扩大产品/协议范围 | Product/Architect/QA amendment reports；GitHub official runner/security docs；workflow validate/frontier/next |
+| 2026-07-27 | M0 duplex contract amendment | 接受opaque unsplit SIP022 flow取代T03 caller-managed transitions，同时分离configured SS server/application target、保留core Session initial-payload ownership与未修改runtime lifecycle | initial candidate无法并发duplex、丢失cipher/payload、拒绝合法fragmentation且无法证明scratch/fatal ownership；用户已授权本地窄blocker修复 | ADR-0010 Accepted；Product/Architect/QA PASS；workflow validate/diff-check |
