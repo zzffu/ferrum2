@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -206,3 +206,5 @@ cargo test --workspace --locked
   restricted to an equivalent nested `if let`; behavior, APIs, manifests, lockfile,
   product scope, and wire contract remain unchanged. T08 stays blocked until this
   repair passes Engineer, Architect, QA, and integration gates.
+- MSRV repair candidate:
+  `50bf0b7b632333758fbaecde05dbe92b39171db3`
