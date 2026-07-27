@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
@@ -167,6 +169,7 @@ where
             }
 
             let permit = tokio::select! {
+                biased;
                 _ = &mut shutdown => break 'accepting Stop::Operator,
                 result = children.join_next(), if !children.is_empty() => {
                     if result.is_some_and(|result| result.is_err()) {
@@ -182,9 +185,13 @@ where
                 }
             };
             let permit_guard = registry.track_permit();
+            if future_is_ready(shutdown.as_mut()).await {
+                break Stop::Operator;
+            }
 
             let accepted = loop {
                 tokio::select! {
+                    biased;
                     _ = &mut shutdown => break 'accepting Stop::Operator,
                     result = children.join_next(), if !children.is_empty() => {
                         if result.is_some_and(|result| result.is_err()) {
@@ -194,9 +201,18 @@ where
                     result = listener.accept() => break result,
                 }
             };
+            if future_is_ready(shutdown.as_mut()).await {
+                break Stop::Operator;
+            }
 
             let stream = match accepted {
                 Ok(stream) => stream,
+                Err(error) if is_transient_accept_error(&error) => {
+                    drop(permit_guard);
+                    drop(permit);
+                    tokio::task::yield_now().await;
+                    continue;
+                }
                 Err(_) => break Stop::Fatal(SupervisorError::ListenerFailure),
             };
             let child_guard = registry.track_supervisor_child();
@@ -302,4 +318,21 @@ async fn drain_for_shutdown(
 
 async fn reap_children(children: &mut JoinSet<()>) {
     while children.join_next().await.is_some() {}
+}
+
+async fn future_is_ready<F>(mut future: Pin<&mut F>) -> bool
+where
+    F: Future + ?Sized,
+{
+    std::future::poll_fn(|context| Poll::Ready(future.as_mut().poll(context).is_ready())).await
+}
+
+fn is_transient_accept_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    )
 }

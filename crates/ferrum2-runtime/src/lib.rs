@@ -8,7 +8,8 @@ mod relay;
 mod supervisor;
 
 pub use connector::{
-    DirectOutbound, RuntimeTcpStream, SocketInspector, SystemSocketInspector, TcpConnector,
+    DirectOutbound, RuntimeTcpStream, SocketInspector, SystemSocketInspector, SystemTcpDialer,
+    TcpConnector, TcpDialer,
 };
 pub use deadline::{DeadlineError, with_deadline};
 pub use metrics::{
@@ -18,7 +19,7 @@ pub use metrics::{
 pub use owner::{OwnerRegistry, OwnerSnapshot};
 pub use relay::{
     RELAY_BUFFER_BYTES, RelayRunError, RelayStats, relay_bidirectional,
-    relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout,
+    relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout, relay_lifecycle,
 };
 pub use supervisor::{
     AcceptListener, BoundedSupervisor, CancellationToken, SupervisorConfigError, SupervisorError,

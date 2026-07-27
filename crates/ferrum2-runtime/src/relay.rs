@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::{Future, pending};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -62,6 +63,8 @@ pub enum RelayRunError {
     Io,
     /// No bytes were forwarded before the idle deadline.
     IdleTimeout,
+    /// The flow owner requested cooperative cancellation.
+    Cancelled,
 }
 
 impl fmt::Debug for RelayRunError {
@@ -75,6 +78,7 @@ impl fmt::Display for RelayRunError {
         match self {
             Self::Io => formatter.write_str("relay I/O failed"),
             Self::IdleTimeout => formatter.write_str("relay idle timeout"),
+            Self::Cancelled => formatter.write_str("relay cancelled"),
         }
     }
 }
@@ -134,6 +138,42 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
+    relay_with_controls(inbound, outbound, idle_timeout, pending()).await
+}
+
+/// Runs the complete T07 relay lifecycle in the caller's connection-owner task.
+///
+/// The seam owns exactly two fixed 16 KiB buffers, accounts for them in the
+/// supplied registry, preserves half-close and backpressure, resets the idle
+/// deadline only after forwarded bytes, and observes cooperative cancellation.
+pub async fn relay_lifecycle<A, B, C>(
+    inbound: &mut A,
+    outbound: &mut B,
+    idle_timeout: Duration,
+    registry: &OwnerRegistry,
+    cancellation: C,
+) -> Result<RelayStats, RelayRunError>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+    C: Future<Output = ()>,
+{
+    let _inbound_buffer = registry.track_buffer();
+    let _outbound_buffer = registry.track_buffer();
+    relay_with_controls(inbound, outbound, idle_timeout, cancellation).await
+}
+
+async fn relay_with_controls<A, B, C>(
+    inbound: &mut A,
+    outbound: &mut B,
+    idle_timeout: Duration,
+    cancellation: C,
+) -> Result<RelayStats, RelayRunError>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+    C: Future<Output = ()>,
+{
     let activity = Arc::new(Notify::new());
     let mut inbound = ActivityIo {
         inner: inbound,
@@ -156,7 +196,10 @@ where
     };
     tokio::pin!(relay);
     tokio::pin!(idle);
+    tokio::pin!(cancellation);
     tokio::select! {
+        biased;
+        () = &mut cancellation => Err(RelayRunError::Cancelled),
         result = &mut relay => result.map_err(|_| RelayRunError::Io),
         () = &mut idle => Err(RelayRunError::IdleTimeout),
     }

@@ -26,6 +26,25 @@ impl SocketInspector for SystemSocketInspector {
     }
 }
 
+/// Establishes the raw IPv4 TCP socket used by the runtime connector.
+pub trait TcpDialer: Send + Sync {
+    /// Starts one IPv4 TCP connection attempt.
+    fn connect(
+        &self,
+        address: SocketAddrV4,
+    ) -> impl std::future::Future<Output = io::Result<TcpStream>> + Send;
+}
+
+/// Production Tokio TCP dialer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemTcpDialer;
+
+impl TcpDialer for SystemTcpDialer {
+    async fn connect(&self, address: SocketAddrV4) -> io::Result<TcpStream> {
+        TcpStream::connect(SocketAddr::V4(address)).await
+    }
+}
+
 /// An owned Tokio TCP stream with a validated, stored IPv4 local endpoint.
 pub struct RuntimeTcpStream {
     stream: TcpStream,
@@ -120,34 +139,49 @@ impl AsyncWrite for RuntimeTcpStream {
 
 /// Direct IPv4 TCP connector with a bounded connect deadline.
 #[derive(Debug)]
-pub struct TcpConnector<I = SystemSocketInspector> {
+pub struct TcpConnector<I = SystemSocketInspector, D = SystemTcpDialer> {
     inspector: I,
+    dialer: D,
     connect_timeout: std::time::Duration,
 }
 
-impl TcpConnector<SystemSocketInspector> {
+impl TcpConnector<SystemSocketInspector, SystemTcpDialer> {
     /// Creates a production connector.
     pub fn new(connect_timeout: std::time::Duration) -> Self {
         Self {
             inspector: SystemSocketInspector,
+            dialer: SystemTcpDialer,
             connect_timeout,
         }
     }
 }
 
-impl<I> TcpConnector<I> {
+impl<I> TcpConnector<I, SystemTcpDialer> {
     /// Creates a connector with an injected post-connect socket inspector.
     pub fn with_inspector(inspector: I, connect_timeout: std::time::Duration) -> Self {
         Self {
             inspector,
+            dialer: SystemTcpDialer,
             connect_timeout,
         }
     }
 }
 
-impl<I> Connector for TcpConnector<I>
+impl<I, D> TcpConnector<I, D> {
+    /// Creates a connector with injected dial and endpoint-inspection adapters.
+    pub fn with_adapters(inspector: I, dialer: D, connect_timeout: std::time::Duration) -> Self {
+        Self {
+            inspector,
+            dialer,
+            connect_timeout,
+        }
+    }
+}
+
+impl<I, D> Connector for TcpConnector<I, D>
 where
     I: SocketInspector,
+    D: TcpDialer,
 {
     type Stream = RuntimeTcpStream;
 
@@ -162,7 +196,7 @@ where
             };
             let stream = match tokio::time::timeout(
                 self.connect_timeout,
-                TcpStream::connect(SocketAddr::V4(address)),
+                self.dialer.connect(address),
             )
             .await
             {

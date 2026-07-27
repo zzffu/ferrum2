@@ -1,10 +1,14 @@
+use std::future::pending;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
-use ferrum2_runtime::{OwnerRegistry, RELAY_BUFFER_BYTES, relay_bidirectional_tracked};
+use ferrum2_runtime::{OwnerRegistry, RELAY_BUFFER_BYTES, relay_lifecycle};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 struct Endpoint<R, W> {
@@ -40,52 +44,92 @@ impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for Endpoint<R, W> {
     }
 }
 
-struct CountingSource(Arc<AtomicUsize>);
+struct CountingSource {
+    payload: Vec<u8>,
+    offset: usize,
+    observed: Arc<AtomicUsize>,
+}
 
 impl AsyncRead for CountingSource {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         _context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let count = buffer.remaining();
-        buffer.initialize_unfilled()[..count].fill(0x5a);
-        buffer.advance(count);
-        self.0.fetch_add(count, Ordering::SeqCst);
+        let count = buffer
+            .remaining()
+            .min(self.payload.len().saturating_sub(self.offset));
+        if count == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let end = self.offset + count;
+        buffer.put_slice(&self.payload[self.offset..end]);
+        self.offset = end;
+        self.observed.fetch_add(count, Ordering::SeqCst);
         Poll::Ready(Ok(()))
     }
 }
 
-struct PendingReader;
+struct EofReader;
 
-impl AsyncRead for PendingReader {
+impl AsyncRead for EofReader {
     fn poll_read(
         self: Pin<&mut Self>,
         _context: &mut Context<'_>,
         _buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Poll::Pending
+        Poll::Ready(Ok(()))
     }
 }
 
-struct StalledWriter(Arc<AtomicUsize>);
+struct WriterState {
+    open: AtomicBool,
+    attempts: AtomicUsize,
+    wake: Mutex<Option<std::task::Waker>>,
+    bytes: Mutex<Vec<u8>>,
+}
+
+impl WriterState {
+    fn resume(&self) {
+        self.open.store(true, Ordering::SeqCst);
+        if let Some(waker) = self.wake.lock().expect("wake lock").take() {
+            waker.wake();
+        }
+    }
+}
+
+struct StalledWriter(Arc<WriterState>);
 
 impl AsyncWrite for StalledWriter {
     fn poll_write(
         self: Pin<&mut Self>,
-        _context: &mut Context<'_>,
-        _buffer: &[u8],
+        context: &mut Context<'_>,
+        buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Poll::Pending
+        self.0.attempts.fetch_add(1, Ordering::SeqCst);
+        if !self.0.open.load(Ordering::SeqCst) {
+            *self.0.wake.lock().expect("wake lock") = Some(context.waker().clone());
+            return Poll::Pending;
+        }
+        self.0
+            .bytes
+            .lock()
+            .expect("bytes lock")
+            .extend_from_slice(buffer);
+        Poll::Ready(Ok(buffer.len()))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Pending
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.0.open.load(Ordering::SeqCst) {
+            Poll::Ready(Ok(()))
+        } else {
+            *self.0.wake.lock().expect("wake lock") = Some(context.waker().clone());
+            Poll::Pending
+        }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Pending
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(context)
     }
 }
 
@@ -111,25 +155,44 @@ impl AsyncWrite for Sink {
 
 #[tokio::test]
 async fn stalled_writer_stops_upstream_at_one_fixed_buffer() {
+    let payload: Vec<u8> = (0..RELAY_BUFFER_BYTES * 2 + 37)
+        .map(|index| (index % 251) as u8)
+        .collect();
     let bytes_read = Arc::new(AtomicUsize::new(0));
-    let write_attempts = Arc::new(AtomicUsize::new(0));
+    let writer = Arc::new(WriterState {
+        open: AtomicBool::new(false),
+        attempts: AtomicUsize::new(0),
+        wake: Mutex::new(None),
+        bytes: Mutex::new(Vec::new()),
+    });
     let registry = OwnerRegistry::new();
     let registry_for_owner = registry.clone();
     let mut inbound = Endpoint {
-        reader: CountingSource(Arc::clone(&bytes_read)),
+        reader: CountingSource {
+            payload: payload.clone(),
+            offset: 0,
+            observed: Arc::clone(&bytes_read),
+        },
         writer: Sink,
     };
     let mut outbound = Endpoint {
-        reader: PendingReader,
-        writer: StalledWriter(Arc::clone(&write_attempts)),
+        reader: EofReader,
+        writer: StalledWriter(Arc::clone(&writer)),
     };
 
     let owner = tokio::spawn(async move {
-        relay_bidirectional_tracked(&mut inbound, &mut outbound, &registry_for_owner).await
+        relay_lifecycle(
+            &mut inbound,
+            &mut outbound,
+            Duration::from_secs(60),
+            &registry_for_owner,
+            pending(),
+        )
+        .await
     });
 
     for _ in 0..100 {
-        if write_attempts.load(Ordering::SeqCst) > 0 {
+        if writer.attempts.load(Ordering::SeqCst) > 0 {
             break;
         }
         tokio::task::yield_now().await;
@@ -139,7 +202,9 @@ async fn stalled_writer_stops_upstream_at_one_fixed_buffer() {
     assert_eq!(bytes_read.load(Ordering::SeqCst), RELAY_BUFFER_BYTES);
     assert_eq!(registry.snapshot().owned_buffers, 2);
 
-    owner.abort();
-    assert!(owner.await.expect_err("owner is cancelled").is_cancelled());
+    writer.resume();
+    let stats = owner.await.expect("owner task").expect("relay completes");
+    assert_eq!(stats.inbound_to_outbound, payload.len() as u64);
+    assert_eq!(*writer.bytes.lock().expect("bytes lock"), payload);
     assert_eq!(registry.snapshot().owned_buffers, 0);
 }
