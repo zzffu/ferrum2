@@ -23,6 +23,8 @@ acceptance = [
   "ShadowsocksTcpInbound returns Session<ServerFlow, NoReply> with exact target and one bounded authenticated initial_payload owner; ServerFlow begins at the subsequent request-frame state and never repeats that payload",
   "M0-ENDPOINT-001 connector_error_before_write proves every connector error leaves TransportIo completed first-write count at zero",
   "The reviewed unofficial composite SIP022 fixture uses every exact ADR-0004 input, a generator that imports no ferrum2 production module, and PROVENANCE.toml source/output hashes before exact request/response wire tests pass",
+  "ADR-0012 phased client open returns one opaque ConnectedClientOpen after dialing only the configured server and consumes it once to first-write only the application target; it exposes no raw transport or protocol state",
+  "M0-ENDPOINT-001 client_open_phase_contract proves connector completion and request first-write are independently controllable, actual first-write failures keep ADR-0010 Detection mapping, and cancellation drops the sole transport owner without detached tasks",
 ]
 +++
 
@@ -44,6 +46,8 @@ recording adapters直接证明。
 - request/response fixed/variable/data chunk codecs与typed state transitions。
 - ADR-0010 opaque `ClientFlow`/`ServerFlow`、executor-neutral `TransportIo`/
   `PlainDuplex` seam、single fatal arbitration与direction-local normal close。
+- ADR-0012 opaque `ConnectedClientOpen` seam，分离configured-server connect完成与
+  consuming application-target request first-write；不在protocol crate引入Tokio。
 - single-completed-operation `TransportIo` fixed-region contract和contiguous
   first-write buffers。
 - fixed-capacity frame scratch、checked length/address/padding parse。
@@ -52,6 +56,18 @@ recording adapters直接证明。
 - exact replay store、atomic check/insert、monotonic TTL/capacity behavior。
 - closed detection failure classification、response request-salt binding。
 - positive/composite fixture、tamper/truncation/order/replay/concurrency tests。
+
+### Reopened narrow ADR-0012 repair
+
+历史T03 completion evidence保持有效。本次只允许修改
+`crates/ferrum2-shadowsocks/src/**`与对应tests，以把现有fused client open拆成
+opaque connected capability和consuming request-first-write phase。不得改变wire、
+KDF、nonce、replay、binding、Detection/Protocol/Transport taxonomy、public raw
+state、manifest/dependency、server flow或产品范围。T07继续拥有Tokio configured
+deadlines（默认10秒/5秒）及其paused-time数值证据；T03只提供executor-neutral
+phase boundary和controlled-future证据。
+该repair由用户“后续授权所有堵塞点”的明确授权单独覆盖；它不重置或放宽其他票的
+全局repair budget，也不产生任何remote授权。
 
 ## Out of scope
 
@@ -102,6 +118,7 @@ cargo test -p ferrum2-shadowsocks --locked
 cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked
 cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_target_and_request_target
 cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_error_before_write
+cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked client_open_phase_contract
 cargo test -p ferrum2-shadowsocks --test tcp_allocation_bounds --locked
 cargo test -p ferrum2-shadowsocks --test tcp_vectors --locked
 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked
@@ -185,4 +202,15 @@ cargo fmt -p ferrum2-shadowsocks -- --check
 - Fixture generator/output SHA-256:
   `ca8d181b…faa39` / `c7f210d6…11f0`
 - Integrated commit: `4bf758ae76421856bb527db3afe165d47e6fd4aa`
+- ADR-0012 phased-open repair candidate:
+  `8f0d1e0dc3a385cdefa5d491b642143ee0fe9400` on
+  `codex/repair/m0-t03-client-open-phase`; ticket Architect **PASS**、QA
+  **PASS_WITH_ACTIONS**，唯一downstream action是在T07汇合binary entrypoints后重跑
+  workspace quick。
+- Repair integration merge `951806d4b4bdf7c7b8682058582945a3caf3ad3d`；
+  combined T03/T06 checkpoint
+  `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a`上T03 package 64、
+  ordering 6、全部focused/security/flow commands、联合normal/all-features
+  97/97、strict Clippy/fmt/locked metadata/scope/lineage/cleanliness均PASS。
+  Combined Architect/QA均**PASS**，无T03 corrective action。
 - Remote state: nothing pushed or published
