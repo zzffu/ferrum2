@@ -89,11 +89,17 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** not yet
-- **Open blockers and risks:** 当前仍无 Cargo workspace、产品代码、workflow、
-  fixture 或 runner evidence；唯一 ready frontier 是 M0-T01。GitHub Actions
-  provider 已由 ADR-0007 固定，但 remote capability/push/workflow execution 未经
-  单独授权且未验证。matching hosted runner/reference download 不可用会在 T08
-  成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。
+- **Open blockers and risks:** M0-T01 已产生三个 ticket commits，但在
+  repair attempt 2/2 后仍被 Architect 阻塞：`workspace_policy.rs` 的两处
+  LF-only multiline assertion 在 CRLF checkout 模拟下失败。失败的 integration
+  candidate 保留为
+  `codex/integration/m0@0d98d81d0a4545996fda536a646594d9fe072b98`，
+  未 fast-forward 到 `master`；T02～T08 尚未调度。用户已于 2026-07-27
+  授权一次额外且仅限 `workspace_policy.rs` CRLF 匹配的 bounded repair；
+  该恢复 gate 正在执行。
+  GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
+  但 push/workflow execution 尚未发生。matching hosted runner/reference download
+  不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。
   AEAD nonce reuse、secret leakage、认证前副作用和 task leak 仍是 P0 实现风险，
   其控制合同见 ADR-0002/0004/0005 与 TEST-0001。
 
