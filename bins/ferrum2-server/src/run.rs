@@ -1233,6 +1233,127 @@ mod tests {
         }
     }
 
+    fn server_deadline_test_config(
+        idle_timeout_ms: Option<u64>,
+    ) -> (PathBuf, ValidatedServerConfig) {
+        static CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ferrum2-server-deadline-{}-{}.toml",
+            std::process::id(),
+            CONFIG_ID.fetch_add(1, Ordering::SeqCst)
+        ));
+        let mut runtime = String::from("[runtime]\n");
+        if let Some(value) = idle_timeout_ms {
+            runtime.push_str(&format!("idle_timeout_ms = {value}\n"));
+        }
+        let source = format!(
+            "schema_version = 1\n\
+             [server]\n\
+             listen = \"127.0.0.1:42001\"\n\
+             [shadowsocks]\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+             {runtime}"
+        );
+        std::fs::write(&path, source).expect("server deadline config");
+        let config = ferrum2_config::load_server(&path).expect("validated server deadline config");
+        (path, config)
+    }
+
+    async fn assert_prefix_pending<F>(future: &mut Pin<Box<F>>)
+    where
+        F: std::future::Future,
+    {
+        tokio::select! {
+            biased;
+            _ = future.as_mut() => panic!("prefix completed before its controlled deadline"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+
+    fn release_prefix_writer(ready: &AtomicBool, waker: &Mutex<Option<Waker>>) {
+        ready.store(true, Ordering::SeqCst);
+        if let Some(waker) = waker.lock().expect("prefix waker").take() {
+            waker.wake();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_composition_contract_default_prefix_idle_timeout_is_exact() {
+        let (path, config) = server_deadline_test_config(None);
+        assert_eq!(config.runtime.idle_timeout, Duration::from_secs(300));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut writer = GatedPrefixWriter {
+            ready: Arc::new(AtomicBool::new(false)),
+            calls: Arc::clone(&calls),
+            waker: Arc::new(Mutex::new(None)),
+            max_write: 2,
+            fail_after: None,
+            zero_after: None,
+        };
+        let mut prefix = Box::pin(forward_initial_payload(
+            &mut writer,
+            b"four",
+            config.runtime.idle_timeout,
+            std::future::pending(),
+        ));
+
+        assert_prefix_pending(&mut prefix).await;
+        tokio::time::advance(Duration::from_millis(299_999)).await;
+        assert_prefix_pending(&mut prefix).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            prefix.await,
+            Err(PrefixFailure {
+                kind: RelayRunError::IdleTimeout,
+                bytes: 0,
+            })
+        );
+        assert!(calls.load(Ordering::SeqCst) >= 1);
+        std::fs::remove_file(path).expect("remove server deadline config");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_composition_contract_non_default_prefix_progress_resets_fresh_deadline() {
+        let (path, config) = server_deadline_test_config(Some(3_700));
+        assert_eq!(config.runtime.idle_timeout, Duration::from_millis(3_700));
+        let ready = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let waker = Arc::new(Mutex::new(None));
+        let mut writer = GatedPrefixWriter {
+            ready: Arc::clone(&ready),
+            calls: Arc::clone(&calls),
+            waker: Arc::clone(&waker),
+            max_write: 2,
+            fail_after: None,
+            zero_after: None,
+        };
+        let mut prefix = Box::pin(forward_initial_payload(
+            &mut writer,
+            b"four",
+            config.runtime.idle_timeout,
+            std::future::pending(),
+        ));
+
+        assert_prefix_pending(&mut prefix).await;
+        tokio::time::advance(Duration::from_millis(2_300)).await;
+        assert_prefix_pending(&mut prefix).await;
+        release_prefix_writer(&ready, &waker);
+        assert_prefix_pending(&mut prefix).await;
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+        tokio::time::advance(Duration::from_millis(3_699)).await;
+        assert_prefix_pending(&mut prefix).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            prefix.await,
+            Err(PrefixFailure {
+                kind: RelayRunError::IdleTimeout,
+                bytes: 2,
+            })
+        );
+        std::fs::remove_file(path).expect("remove server deadline config");
+    }
+
     #[tokio::test]
     async fn lifecycle_composition_contract_prefix_cancel_retains_partial_count() {
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();

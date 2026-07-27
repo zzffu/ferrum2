@@ -665,9 +665,11 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Waker;
     use std::time::Duration;
 
     use ferrum2_core::{ConnectError, Connector};
+    use ferrum2_crypto::{Aes128Psk, RandomError};
     use ferrum2_shadowsocks::TransportPhase;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::Notify;
@@ -839,6 +841,396 @@ mod tests {
                 .take()
                 .expect("one connect"))
         }
+    }
+
+    #[derive(Default)]
+    struct PhaseDeadlineControl {
+        connect_ready: std::sync::atomic::AtomicBool,
+        write_ready: std::sync::atomic::AtomicBool,
+        connect_waker: Mutex<Option<Waker>>,
+        write_waker: Mutex<Option<Waker>>,
+        write_polls: AtomicUsize,
+        completed_writes: AtomicUsize,
+        abortive_calls: AtomicUsize,
+        dropped_streams: AtomicUsize,
+        targets: Mutex<Vec<TargetAddr>>,
+    }
+
+    impl PhaseDeadlineControl {
+        fn release_connect(&self) {
+            self.connect_ready.store(true, Ordering::SeqCst);
+            if let Some(waker) = self.connect_waker.lock().expect("connect waker").take() {
+                waker.wake();
+            }
+        }
+
+        fn release_write(&self) {
+            self.write_ready.store(true, Ordering::SeqCst);
+            if let Some(waker) = self.write_waker.lock().expect("write waker").take() {
+                waker.wake();
+            }
+        }
+    }
+
+    struct PhaseDeadlineTransport {
+        control: Arc<PhaseDeadlineControl>,
+    }
+
+    impl Drop for PhaseDeadlineTransport {
+        fn drop(&mut self) {
+            self.control.dropped_streams.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl LocalEndpoint for PhaseDeadlineTransport {
+        fn local_endpoint(&self) -> SocketAddrV4 {
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152)
+        }
+    }
+
+    impl AbortiveClose for PhaseDeadlineTransport {
+        type Error = io::Error;
+
+        fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+            self.control.abortive_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl TransportIo for PhaseDeadlineTransport {
+        type IoError = io::Error;
+
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _destination: &mut [u8],
+        ) -> Poll<Result<usize, Self::IoError>> {
+            Poll::Pending
+        }
+
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            source: &[u8],
+        ) -> Poll<Result<usize, Self::IoError>> {
+            self.control.write_polls.fetch_add(1, Ordering::SeqCst);
+            if !self.control.write_ready.load(Ordering::SeqCst) {
+                *self.control.write_waker.lock().expect("write waker") = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+            self.control.completed_writes.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Ok(source.len()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::IoError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::IoError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct PhaseDeadlineConnector {
+        control: Arc<PhaseDeadlineControl>,
+        stream: Mutex<Option<PhaseDeadlineTransport>>,
+    }
+
+    impl PhaseDeadlineConnector {
+        fn new(control: Arc<PhaseDeadlineControl>) -> Self {
+            Self {
+                stream: Mutex::new(Some(PhaseDeadlineTransport {
+                    control: Arc::clone(&control),
+                })),
+                control,
+            }
+        }
+    }
+
+    impl Connector for PhaseDeadlineConnector {
+        type Stream = PhaseDeadlineTransport;
+
+        async fn connect(&self, target: &TargetAddr) -> Result<Self::Stream, ConnectError> {
+            self.control
+                .targets
+                .lock()
+                .expect("phase targets")
+                .push(target.clone());
+            let stream = self
+                .stream
+                .lock()
+                .expect("phase stream")
+                .take()
+                .expect("one phase connect");
+            std::future::poll_fn(|cx| {
+                if self.control.connect_ready.load(Ordering::SeqCst) {
+                    Poll::Ready(())
+                } else {
+                    *self.control.connect_waker.lock().expect("connect waker") =
+                        Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            })
+            .await;
+            Ok(stream)
+        }
+    }
+
+    struct FixedRandom;
+
+    impl SecureRandom for FixedRandom {
+        fn fill(&self, destination: &mut [u8]) -> Result<(), RandomError> {
+            destination.fill(0x42);
+            Ok(())
+        }
+    }
+
+    fn client_deadline_test_config(
+        connect_timeout_ms: Option<u64>,
+        handshake_timeout_ms: Option<u64>,
+    ) -> (PathBuf, ValidatedClientConfig) {
+        static CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ferrum2-client-deadline-{}-{}.toml",
+            std::process::id(),
+            CONFIG_ID.fetch_add(1, Ordering::SeqCst)
+        ));
+        let mut runtime = String::from("[runtime]\n");
+        if let Some(value) = connect_timeout_ms {
+            runtime.push_str(&format!("connect_timeout_ms = {value}\n"));
+        }
+        if let Some(value) = handshake_timeout_ms {
+            runtime.push_str(&format!("handshake_timeout_ms = {value}\n"));
+        }
+        let source = format!(
+            "schema_version = 1\n\
+             [client]\n\
+             listen = \"127.0.0.1:41001\"\n\
+             server = \"127.0.0.1:41002\"\n\
+             [shadowsocks]\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+             {runtime}"
+        );
+        std::fs::write(&path, source).expect("client deadline config");
+        let config = ferrum2_config::load_client(&path).expect("validated deadline config");
+        (path, config)
+    }
+
+    async fn assert_open_pending<F>(future: &mut Pin<Box<F>>)
+    where
+        F: std::future::Future,
+    {
+        tokio::select! {
+            biased;
+            _ = future.as_mut() => panic!("open completed before its controlled phase"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+
+    fn phase_outbound<'a>(
+        server: SocketAddrV4,
+        keys: &'a SinglePskProvider,
+        connector: &'a PhaseDeadlineConnector,
+        clock: &'a SystemClock,
+        random: &'a FixedRandom,
+    ) -> ClientTcpOutbound<'a, SinglePskProvider, PhaseDeadlineConnector, SystemClock, FixedRandom>
+    {
+        ClientTcpOutbound::new(
+            TargetAddr::ipv4(server).expect("configured server"),
+            keys,
+            connector,
+            clock,
+            random,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phase_deadline_contract_default_connect_timeout_is_exact() {
+        let (path, config) = client_deadline_test_config(None, None);
+        assert_eq!(config.runtime.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.runtime.handshake_timeout, Duration::from_secs(5));
+        let control = Arc::new(PhaseDeadlineControl::default());
+        let connector = PhaseDeadlineConnector::new(Arc::clone(&control));
+        let keys = SinglePskProvider::new(Aes128Psk::from_bytes([0x11; 16]));
+        let clock = SystemClock::new();
+        let random = FixedRandom;
+        let outbound = phase_outbound(config.server, &keys, &connector, &clock, &random);
+        let application_target =
+            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
+        let mut opened = Box::pin(open_with_deadlines(
+            &outbound,
+            &application_target,
+            config.runtime.connect_timeout,
+            config.runtime.handshake_timeout,
+        ));
+
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_millis(9_999)).await;
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            opened.await,
+            Err(ClientOpenFailure::Protocol(ShadowsocksError::Connect(
+                ConnectErrorKind::Timeout
+            )))
+        ));
+        assert_eq!(control.write_polls.load(Ordering::SeqCst), 0);
+        assert_eq!(control.dropped_streams.load(Ordering::SeqCst), 1);
+        assert_eq!(control.abortive_calls.load(Ordering::SeqCst), 0);
+        control.release_connect();
+        tokio::task::yield_now().await;
+        assert_eq!(control.completed_writes.load(Ordering::SeqCst), 0);
+        std::fs::remove_file(path).expect("remove deadline config");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phase_deadline_contract_default_handshake_budget_is_fresh_after_slow_connect() {
+        let (path, config) = client_deadline_test_config(None, None);
+        let control = Arc::new(PhaseDeadlineControl::default());
+        let connector = PhaseDeadlineConnector::new(Arc::clone(&control));
+        let keys = SinglePskProvider::new(Aes128Psk::from_bytes([0x12; 16]));
+        let clock = SystemClock::new();
+        let random = FixedRandom;
+        let outbound = phase_outbound(config.server, &keys, &connector, &clock, &random);
+        let application_target =
+            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
+        let mut opened = Box::pin(open_with_deadlines(
+            &outbound,
+            &application_target,
+            config.runtime.connect_timeout,
+            config.runtime.handshake_timeout,
+        ));
+
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert_open_pending(&mut opened).await;
+        control.release_connect();
+        assert_open_pending(&mut opened).await;
+        assert!(control.write_polls.load(Ordering::SeqCst) >= 1);
+        tokio::time::advance(Duration::from_millis(4_999)).await;
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            opened.await,
+            Err(ClientOpenFailure::HandshakeTimeout)
+        ));
+        assert_eq!(control.completed_writes.load(Ordering::SeqCst), 0);
+        assert_eq!(control.dropped_streams.load(Ordering::SeqCst), 1);
+        assert_eq!(control.abortive_calls.load(Ordering::SeqCst), 0);
+        control.release_write();
+        tokio::task::yield_now().await;
+        assert_eq!(control.completed_writes.load(Ordering::SeqCst), 0);
+        std::fs::remove_file(path).expect("remove deadline config");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phase_deadline_contract_non_default_connect_value_is_not_hardcoded() {
+        let (path, config) = client_deadline_test_config(Some(2_300), Some(3_700));
+        let control = Arc::new(PhaseDeadlineControl::default());
+        let connector = PhaseDeadlineConnector::new(Arc::clone(&control));
+        let keys = SinglePskProvider::new(Aes128Psk::from_bytes([0x13; 16]));
+        let clock = SystemClock::new();
+        let random = FixedRandom;
+        let outbound = phase_outbound(config.server, &keys, &connector, &clock, &random);
+        let application_target =
+            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
+        let mut opened = Box::pin(open_with_deadlines(
+            &outbound,
+            &application_target,
+            config.runtime.connect_timeout,
+            config.runtime.handshake_timeout,
+        ));
+
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_millis(2_299)).await;
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            opened.await,
+            Err(ClientOpenFailure::Protocol(ShadowsocksError::Connect(
+                ConnectErrorKind::Timeout
+            )))
+        ));
+        assert_eq!(control.dropped_streams.load(Ordering::SeqCst), 1);
+        assert_eq!(control.abortive_calls.load(Ordering::SeqCst), 0);
+        std::fs::remove_file(path).expect("remove deadline config");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phase_deadline_contract_non_default_handshake_value_is_not_hardcoded() {
+        let (path, config) = client_deadline_test_config(Some(2_300), Some(3_700));
+        let control = Arc::new(PhaseDeadlineControl::default());
+        let connector = PhaseDeadlineConnector::new(Arc::clone(&control));
+        let keys = SinglePskProvider::new(Aes128Psk::from_bytes([0x14; 16]));
+        let clock = SystemClock::new();
+        let random = FixedRandom;
+        let outbound = phase_outbound(config.server, &keys, &connector, &clock, &random);
+        let application_target =
+            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
+        let mut opened = Box::pin(open_with_deadlines(
+            &outbound,
+            &application_target,
+            config.runtime.connect_timeout,
+            config.runtime.handshake_timeout,
+        ));
+
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        control.release_connect();
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_millis(3_699)).await;
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            opened.await,
+            Err(ClientOpenFailure::HandshakeTimeout)
+        ));
+        assert_eq!(control.completed_writes.load(Ordering::SeqCst), 0);
+        assert_eq!(control.dropped_streams.load(Ordering::SeqCst), 1);
+        assert_eq!(control.abortive_calls.load(Ordering::SeqCst), 0);
+        std::fs::remove_file(path).expect("remove deadline config");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phase_deadline_contract_open_completes_only_after_request_first_write() {
+        let (path, config) = client_deadline_test_config(Some(2_300), Some(3_700));
+        let control = Arc::new(PhaseDeadlineControl::default());
+        control.release_connect();
+        let connector = PhaseDeadlineConnector::new(Arc::clone(&control));
+        let keys = SinglePskProvider::new(Aes128Psk::from_bytes([0x15; 16]));
+        let clock = SystemClock::new();
+        let random = FixedRandom;
+        let outbound = phase_outbound(config.server, &keys, &connector, &clock, &random);
+        let application_target =
+            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
+        let mut opened = Box::pin(open_with_deadlines(
+            &outbound,
+            &application_target,
+            config.runtime.connect_timeout,
+            config.runtime.handshake_timeout,
+        ));
+
+        assert_open_pending(&mut opened).await;
+        assert!(control.write_polls.load(Ordering::SeqCst) >= 1);
+        assert_eq!(control.completed_writes.load(Ordering::SeqCst), 0);
+        control.release_write();
+        let flow = opened.await.expect("first-write completion opens flow");
+        assert_eq!(control.completed_writes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            flow.local_endpoint(),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152)
+        );
+        drop(flow);
+        assert_eq!(control.dropped_streams.load(Ordering::SeqCst), 1);
+        assert_eq!(control.abortive_calls.load(Ordering::SeqCst), 0);
+        std::fs::remove_file(path).expect("remove deadline config");
     }
 
     #[tokio::test]
