@@ -72,7 +72,9 @@
   let-chain不兼容；窄repair `50bf0b7`与integration `123618f`通过Rust 1.85、
   focused、quick/full及final Architect/QA，T07 done。T08 checkpoint `14343d2`
   因sing-box evidence边界与静态Architect findings未集成；ADR-0014已在
-  `96d6262`接受，T08现以repair 1/2 `in_progress`。
+  `96d6262`接受。repair 1/2 `5accd02`关闭已知静态finding并通过Engineer
+  quick/full、MSRV、四项exact interop、same-SHA local E2E/half-close、
+  scope/workflow policy与本机Windows evidence，现进入`review`。
 - **Contract final verdicts:** 初始review要求exact 47-case matrix、
   `AddressBounds`、harness exact two-edge lock hunk、configured而非hardcoded
   durations、T03/T07 time-evidence ownership和完整ADR模板。全部修正后
@@ -206,14 +208,14 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0014、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T07均done，T08 `in_progress` | M0-T08 |
-| GitHub Actions workflow contract | IN_PROGRESS/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；checkpoint `14343d2`存在于未集成T08 branch并被Architect BLOCK，repair 1/2进行中 | M0-T08 |
+| M0 execution contracts | REVIEW | Accepted ADR-0001～0014、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T07均done，T08 candidate `5accd02`进入Architect/QA review | M0-T08 |
+| GitHub Actions workflow contract | LOCAL STATIC PASS / NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；repair `5accd02`的YAML parse、strict structural/mutation policy和scope audit本机PASS，exact pushed-SHA run尚未发生 | M0-T08 |
 | Host quick Cargo gate | PASS | `123618f`先build真实binaries，再由Team Lead与QA独立运行fmt/check/workspace test 3/3；MSRV recovery后的workspace test为194/194 | 当前 |
 | Host full Cargo gate | PASS | `123618f`上Team Lead与QA独立运行fmt、strict Clippy、all-features workspace tests 194/194、docs 4/4 | 当前 |
 | Security/KAT/negative | LOCAL PASS / CI PENDING | T02/T03历史evidence保持PASS；`91516720`的primitive-only native probe为2/2、exact 47且target zero；Linux GNU与第二native provider结果等待T08 | M0-T08 |
 | Lifecycle/backpressure | PASS | T06 10,240次shutdown race及partial stats保持PASS；`91516720`的binary-private registry与5×20=100 real-process cycles通过，cooperative category具bounded accept/EOF-reset ack | 当前 |
-| External interop | LOCAL DIAGNOSIS / CI PENDING | checkpoint `14343d2`的shadowsocks-rust双向PASS；sing-box原post-FIN sequence双向RED并被诊断为1.13.14 lifecycle限制。ADR-0014保留四案并要求pre-FIN双向16386-byte equality与ordered clean-EOF convergence；新序列及runner evidence尚未PASS | M0 subset，M1/M2 full |
-| Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |
+| External interop | LOCAL PASS / CI PENDING | `5accd02`上四项exact pinned cases各1/1 PASS；distinct pre-FIN 16386-byte双向相等、ordered clean-EOF convergence及同SHA ferrum-owned post-FIN gates均通过，runner evidence待remote | M0 subset，M1/M2 full |
+| Linux glibc/musl + Windows | WINDOWS LOCAL PARTIAL PASS / CI PENDING | Windows release build、valid/invalid exits `0,2,0,2`、native detection 2/2与side-effect helper mutation self-test PASS；既有系统会话sing-box占用固定1080，故exact helper 4/4与Linux GNU/musl provider-native/static-linkage evidence留给clean hosted runners | M0 smoke，M3 qualification |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
 
 ## 已冻结但尚未实现的 M0 CI

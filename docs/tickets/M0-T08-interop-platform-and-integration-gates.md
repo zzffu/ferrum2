@@ -2,7 +2,7 @@
 id = "M0-T08"
 title = "Qualify pinned interoperability, MSRV, and three target artifacts"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P0"
 blocked_by = ["M0-T07"]
 owns = [
@@ -151,7 +151,8 @@ exit推断。
 To be filled by the Team Lead after integration:
 
 - Branch: `codex/ticket/m0-t08`
-- Commit(s):
+- Commit(s): initial `14343d222b5caa1dfdc2ebfc931c52d427a106de`;
+  repair 1/2 `5accd02d290ba0cedc60f394adbc3f3d71332ad9`
 - Architect verdict: pending
 - QA verdict: pending
 - Integrated commit: pending
@@ -159,16 +160,20 @@ To be filled by the Team Lead after integration:
 - Pushed `GITHUB_SHA`:
 - Eleven required job results:
 - Runner ImageOS/ImageVersion/Included Software links:
-- Platform artifact/linkage evidence:
+- Platform artifact/linkage evidence: local Windows release build and exact
+  valid/invalid exits `0,2,0,2` PASS；native detection 2/2 and side-effect helper
+  mutation self-test PASS。The exact four-case helper is reserved for a clean
+  runner because an unrelated pre-existing system-session `sing-box.exe` owns
+  `127.0.0.1:1080`; Linux GNU/musl provider evidence remains pending.
 - Recovery state (2026-07-27): upstream T07 Rust 1.85.0 syntax incompatibility is
   closed by candidate `50bf0b7` and reviewed integration `123618f`; Team Lead,
-  Architect and QA gates all PASS. T08 remains blocked independently: exact
+  Architect and QA gates all PASS. T08 was then blocked independently: exact
   sing-box 1.13.14 diagnosis found a third-party post-FIN reverse-delivery
   limitation requiring an explicit evidence-contract amendment, while static
   Architect review of checkpoint `14343d2` found required workflow/harness repairs.
   ADR-0014 and synchronized SPEC/TEST amendments are now accepted after final
-  Product/Architect/QA PASS. The checkpoint remains unintegrated and T08 is released
-  into one batched repair that must close all static findings.
+  Product/Architect/QA PASS. The initial checkpoint remains unintegrated; repair
+  1/2 closes the known static findings and is now under independent review.
 - Initial checkpoint: `14343d222b5caa1dfdc2ebfc931c52d427a106de`;
   clean, nine T08-owned files, unintegrated.
 - Initial Architect gate: **BLOCK**. Repair 1/2 must close all findings in one
@@ -179,4 +184,10 @@ To be filled by the Team Lead after integration:
   no-side-effect/compiler-linker/BLAKE3-backend evidence.
 - ADR-0014 acceptance: `96d62628107a373a076266d8564d81309c915be1`;
   final Product/Architect/QA document gates PASS.
-- Current gate: **IN_PROGRESS**；checkpoint refresh and repair 1/2 pending.
+- Repair candidate: `5accd02d290ba0cedc60f394adbc3f3d71332ad9`;
+  clean, eight T08-owned files. Engineer evidence: quick 3/3、full 4/4、scope
+  audit 4/4、workflow policy 1/1、external default 6 passed/4 ignored、four
+  exact pinned interop cases 1/1 each、same-SHA local E2E success 3/3、
+  runtime half-close 1/1、Rust 1.85 build/check/test and local Windows
+  build/config/detection gates all PASS.
+- Current gate: **REVIEW**；final candidate Architect and QA verdicts pending.
