@@ -2,7 +2,7 @@
 id = "M0-T04"
 title = "Implement typed configuration and bounded observability"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P1"
 blocked_by = ["M0-T02"]
 owns = [
@@ -78,7 +78,8 @@ cargo fmt -p ferrum2-config -p ferrum2-observability -- --check
 ## Completion evidence
 
 - Branch: `codex/ticket/m0-t04`
-- Candidate: `e9c6b01e0947483dac25012f9d02f99823970827`
+- Initial candidate: `e9c6b01e0947483dac25012f9d02f99823970827`
+- Repair 1/2 candidate: `8d18d174566b68e5d72c6077c74a2c096c34a313`
 - Team Lead lineage/ownership/clean-worktree checks: PASS；10 additions，全部属于
   T04 ownership；无 manifest/lock/doc change
 - Engineer gates: config 7/7、observability 5/5、focused tracing 2/2、focused
@@ -86,6 +87,11 @@ cargo fmt -p ferrum2-config -p ferrum2-observability -- --check
 - Initial review: Architect **BLOCK**、QA **BLOCK**。Target-only filtering permits
   an external exact-target callsite to emit secret/destination/free-form fields
   through the closed NDJSON channel；`[server]` unknown-field table evidence is
-  also missing。Candidate is not integrated；repair 1/2 active on the preserved
-  worktree and may change only T04-owned source/tests。
-- Integrated commit: pending
+  also missing。
+- Repair 1/2 re-review: Architect **PASS**、QA **PASS**；exact-target adversarial
+  probe `typed_lines=2, spoofed_lines=0`，六条ticket commands全部exit 0。
+- Integrated commit: `5e3ddf9b1591f56b5f57983c121980af9b3aeb09`
+- Integration gates: Team Lead与final Architect/QA全部 **PASS**；config 7/7、
+  observability 5/5、tracing 2/2、metrics 3/3、existing package regressions
+  63/63、architecture 6/6、workspace-policy 13/13；workspace quick/full按批准
+  合同继续到T07执行，当前为DEFERRED/NOT_RUN。

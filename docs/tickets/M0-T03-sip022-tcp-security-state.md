@@ -2,7 +2,7 @@
 id = "M0-T03"
 title = "Implement the SIP022 AES-128 TCP security state machine"
 milestone = "M0"
-status = "review"
+status = "blocked"
 priority = "P0"
 blocked_by = ["M0-T02"]
 owns = [
@@ -92,7 +92,17 @@ cargo fmt -p ferrum2-shadowsocks -- --check
   T03 ownership；无 manifest/lock change
 - Engineer gates: package 27/27、ordering 4/4、focused connector 1/1、
   allocation 3/3、vectors 2/2、replay 5/5、detection 7/7、binding 3/3、
-  strict Clippy/fmt/diff PASS；Architect/QA review pending
+  strict Clippy/fmt/diff PASS
+- Initial review: Architect **BLOCK**、QA **BLOCK**。QA确认fixed scratch并非
+  single/reusable，且allocation observer、response/data-frame negative matrix与
+  forward/accepted ordering evidence不完整。Architect另确认现有typed transition
+  在等待response header时串行独占transport，随后丢失一侧cipher owner，无法组成
+  concurrent relay；server transition还丢弃authenticated initial payload，并把
+  post-fixed合法TCP fragmentation误判为detection failure。
+- Contract blocker: repair前必须显式冻结transport split ownership、pending-response
+  duplex、scratch ownership、subsequent bounded-fill与split后fatal-error ownership，
+  并映射到SPEC-0001/TEST-0001。当前授权只允许执行已批准合同，故未擅自修订合同、
+  未开始repair 1/2，candidate未integrate；branch/worktree保留。
 - Fixture generator/output SHA-256:
   `ca8d181b…faa39` / `c7f210d6…11f0`
 - Integrated commit: pending

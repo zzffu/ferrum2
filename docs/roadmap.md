@@ -75,11 +75,14 @@ non-overlapping ownership。
     repair 已 PASS；ADR-0009/T01 blocker 已关闭，combined integration
     `f9e218e` Architect/QA 与 70 tests PASS，done；
   - M0-T03：SIP022 TCP security state/replay/binding；candidate `05605d3`
-    in review；
+    Architect/QA BLOCK；fixed/reusable scratch与negative/order evidence不完整，
+    且typed transition无法组成concurrent duplex relay、丢失authenticated initial
+    payload并拒绝合法post-fixed fragmentation。修复前需要显式冻结split/fatal-error
+    concurrency interface，当前为contract blocked，未integrate；
   - M0-T04：typed config/observability；initial candidate `e9c6b01`
     Architect/QA BLOCK；repair 1/2 candidate `8d18d17` 已关闭 exact-target
-    tracing spoof 与 server unknown-field evidence，Engineer gates PASS，正在
-    Architect/QA re-review；
+    tracing spoof 与 server unknown-field evidence，ticket与integration
+    Architect/QA全部PASS，integrated `5e3ddf9`，done；
   - M0-T05：SOCKS5 CONNECT inbound；done；
   - M0-T06：runtime/direct/relay/lifecycle；done；
   - M0-T07：binary composition/local E2E；blocked by T03/T04/T05/T06；
@@ -98,8 +101,8 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** 当前 validated checkpoint
-  `f9e218eca241f3002500b932fdcb4db93c52313b`，包含
-  M0-T01、M0-T02、M0-T05、M0-T06。
+  `5e3ddf9b1591f56b5f57983c121980af9b3aeb09`，包含
+  M0-T01、M0-T02、M0-T04、M0-T05、M0-T06。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
@@ -111,8 +114,11 @@ non-overlapping ownership。
   与一次独占 T01 manifest repair，只允许 fixed `aes 0.9.1`/`ghash 0.6.0`
   zeroize feature anchors、lock 与 policy evidence，不改变版本、wire/API 或产品
   范围。T01/T02 combined integration `f9e218e` 已通过 Architect/QA 与
-  70 tests，T03/T04 现作为 ownership-disjoint frontier 并行执行；T07/T08
-  继续只等待既定 dependencies。
+  70 tests。T04 repair 1/2 与 integration `5e3ddf9` 已通过全部ticket、
+  regression、Architect与QA gates。T03 initial candidate虽通过现有命令，
+  Architect/QA均BLOCK：除scratch/coverage缺口外，现有transition API无法支持
+  已批准的concurrent relay。需显式合同修订后才可开始repair；T07/T08继续等待
+  T03及既定dependencies。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。

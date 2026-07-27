@@ -3,7 +3,7 @@
 ## 当前 M0 执行状态
 
 - **Current validated local integration checkpoint:**
-  `f9e218eca241f3002500b932fdcb4db93c52313b` on local `master` and
+  `5e3ddf9b1591f56b5f57983c121980af9b3aeb09` on local `master` and
   `codex/integration/m0`
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
@@ -35,15 +35,16 @@
   integration `f9e218eca241f3002500b932fdcb4db93c52313b` Architect/QA
   **PASS**，T02 3+2+6、policy 13、architecture 6、core 4 与
   SOCKS5/runtime 36，合计 70 tests PASS；lock identities 110→110、0 differences
-- **Current frontier:** M0-T03 candidate
-  `05605d328cc35952676cadc8ce30e6c4b91fbf7a` **REVIEW**，Engineer package
-  27/27 与全部 focused/Clippy/fmt gates PASS；M0-T04 initial candidate
-  `e9c6b01e0947483dac25012f9d02f99823970827` Architect/QA 均 BLOCK；
-  repair 1/2 candidate `8d18d174566b68e5d72c6077c74a2c096c34a313`
-  已补 exact-target hostile/approved-looking injection 与 server unknown-field
-  table evidence，Engineer config 7/7、observability 5/5、tracing 2/2、
-  metrics 3/3、strict Clippy/fmt 及独立 adversarial probe PASS，现为
-  **REVIEW**。M0-T07/T08 继续等待既定 blockers
+- **Current frontier:** M0-T04 repair 1/2
+  `8d18d174566b68e5d72c6077c74a2c096c34a313` ticket Architect/QA **PASS**；
+  integration `5e3ddf9b1591f56b5f57983c121980af9b3aeb09` Team Lead、final
+  Architect/QA gates **PASS**，done。M0-T03 candidate
+  `05605d328cc35952676cadc8ce30e6c4b91fbf7a` Engineer commands PASS但
+  Architect/QA均 **BLOCK**：fixed/reusable scratch与negative/order evidence
+  不完整，typed transition还无法组成concurrent duplex relay、丢失authenticated
+  initial payload并拒绝合法post-fixed fragmentation。修复前需显式冻结
+  split/fatal-error concurrency interface，当前contract blocked且未integrate；
+  M0-T07/T08继续等待既定blockers
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -159,11 +160,11 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | PASS | Accepted ADR-0001～0009、Approved SPEC/TEST-0001；T01/T02/T05/T06 done，T03 review、T04 repair 1/2 active，T07/T08 只等待既定 blockers | 当前 |
+| M0 execution contracts | BLOCKED | Accepted ADR-0001～0009、Approved SPEC/TEST-0001；T01/T02/T04/T05/T06 done；T03 review揭示split/fatal-error concurrency interface需显式合同决定，T07/T08等待T03 | M0-T03 contract gate |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | workspace已存在；workspace-wide gate按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
-| Security/KAT/negative | T02 PASS / T03 PENDING | T02 primitive/KDF/secret、provenance/nonce、ADR-0009 resolved zeroize feature 与 combined integration gates 全部 PASS；T03 protocol security negative coverage 尚待实现 | M0-T03 |
+| Security/KAT/negative | T02 PASS / T03 BLOCKED | T02 primitive/KDF/secret、provenance/nonce、ADR-0009 resolved zeroize feature 与 combined integration gates 全部 PASS；T03 replay/binding已有部分PASS，但scratch、完整negative/order与composable duplex contract未过gate | M0-T03 contract decision |
 | Lifecycle/backpressure | IN_PROGRESS | T06 focused lifecycle/backpressure commands 与 10,240 次 shutdown ready-race regression 已 PASS；完整 runtime/composition 与同一最终 integration commit evidence 尚未完成 | M0 |
 | External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |
