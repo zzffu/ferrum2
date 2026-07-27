@@ -10,8 +10,48 @@ use ferrum2_shadowsocks::{
 
 use common::{
     FakeClock, NOW, RecordingConnector, RecordingIo, RecordingObservers, ScriptedRandom,
-    client_random_bytes, provider, salt_from_u64, server_target, target, write_plain,
+    client_random_bytes, flush_plain, provider, read_plain, response_wire_and_frames,
+    salt_from_u64, server_target, target, valid_request_wire, write_plain,
 };
+
+fn assert_fixed_storage_never_grows(observers: &RecordingObservers) {
+    let buffers = observers.buffers.lock().expect("buffers");
+    assert_eq!(buffers.len(), 2);
+    let capacities = observers.capacities.lock().expect("capacities");
+    for (role, usable_limit, identity) in buffers.iter().copied() {
+        let samples = capacities
+            .iter()
+            .filter(|sample| sample.0 == role)
+            .collect::<Vec<_>>();
+        assert!(!samples.is_empty(), "{role:?}: capacity was never observed");
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.1 == identity && sample.2 == usable_limit),
+            "{role:?}: storage identity or capacity changed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn minimum_request_uses_fixed_scratch_and_empty_independent_payload_owner() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("approved capacity");
+    let salt = salt_from_u64(299);
+    let wire =
+        encode_request_first_write(&keys, &salt, NOW, &target(), &[0xa1], &[]).expect("minimum");
+    let (io, _) = RecordingIo::request(&wire);
+    let observers = RecordingObservers::default();
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay)
+        .with_observers(&observers, &observers);
+
+    let session = inbound.accept_stream(io).await.expect("minimum request");
+
+    assert!(session.initial_payload.is_empty());
+    assert_fixed_storage_never_grows(&observers);
+}
 
 #[tokio::test]
 async fn maximum_request_uses_one_fixed_scratch_per_role_and_independent_payload_owner() {
@@ -50,6 +90,9 @@ async fn maximum_request_uses_one_fixed_scratch_per_role_and_independent_payload
             .expect("role allocated");
         *identity == allocated.2
     }));
+    drop(inspections);
+    drop(buffers);
+    assert_fixed_storage_never_grows(&observers);
 }
 
 #[tokio::test]
@@ -96,6 +139,67 @@ async fn client_flow_allocates_once_then_admits_0_1_16384_16385_with_fixed_cap()
             .expect("role allocated");
         *identity == allocated.2
     }));
+    drop(inspections);
+    drop(buffers);
+    assert_fixed_storage_never_grows(&observers);
+}
+
+#[tokio::test]
+async fn client_rx_and_server_tx_reuse_storage_across_32_subsequent_frames() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(303);
+    let response_salt = salt_from_u64(304);
+    let payloads = (0_u8..32).map(|value| vec![value]).collect::<Vec<_>>();
+    let payload_refs = payloads.iter().map(Vec::as_slice).collect::<Vec<&[u8]>>();
+    let (response, frames) =
+        response_wire_and_frames(&request_salt, &response_salt, b"first", &payload_refs);
+    let mut reads = vec![response[..59].to_vec(), response[59..].to_vec()];
+    reads.extend(frames);
+    let (client_io, _) = RecordingIo::new(reads);
+    let connector = RecordingConnector::succeeds(client_io);
+    let client_random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let client_observers = RecordingObservers::default();
+    let outbound =
+        ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &client_random)
+            .with_observers(&client_observers, &client_observers);
+    let mut client = outbound.open_stream(&target()).await.expect("client");
+    let mut destination = [0_u8; 16];
+
+    let first = read_plain(&mut client, &mut destination)
+        .await
+        .expect("first payload");
+    assert_eq!(&destination[..first], b"first");
+    for expected in 0_u8..32 {
+        let read = read_plain(&mut client, &mut destination)
+            .await
+            .expect("subsequent client RX frame");
+        assert_eq!(&destination[..read], &[expected]);
+    }
+    assert_fixed_storage_never_grows(&client_observers);
+
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let request = valid_request_wire(NOW, &request_salt);
+    let (server_io, _) = RecordingIo::request(&request);
+    let server_random = ScriptedRandom::new(response_salt.as_bytes().iter().copied());
+    let server_observers = RecordingObservers::default();
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &server_random, &replay)
+        .with_observers(&server_observers, &server_observers);
+    let mut server = inbound
+        .accept_stream(server_io)
+        .await
+        .expect("server")
+        .stream;
+
+    assert_eq!(write_plain(&mut server, b"first").await, Ok(5));
+    flush_plain(&mut server).await.expect("first response");
+    for value in 0_u8..32 {
+        assert_eq!(write_plain(&mut server, &[value]).await, Ok(1));
+        flush_plain(&mut server)
+            .await
+            .expect("subsequent server TX frame");
+    }
+    assert_fixed_storage_never_grows(&server_observers);
 }
 
 #[test]

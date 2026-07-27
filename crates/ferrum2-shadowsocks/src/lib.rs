@@ -257,6 +257,9 @@ pub trait BufferObserver: Send + Sync {
 
     /// Records the current identity at a public flow poll boundary.
     fn inspected(&self, _role: BufferRole, _storage_identity: usize) {}
+
+    /// Records visible capacity so tests can prove the fixed scratch never grows.
+    fn capacity_inspected(&self, _role: BufferRole, _storage_identity: usize, _capacity: usize) {}
 }
 
 /// Closed terminal observation seam.
@@ -294,12 +297,16 @@ impl Observers<'static> {
 
 fn fixed_scratch(role: BufferRole, limit: usize, observer: &dyn BufferObserver) -> BytesMut {
     let scratch = BytesMut::with_capacity(limit);
-    observer.allocated(role, limit, scratch.as_ptr() as usize);
+    let identity = scratch.as_ptr() as usize;
+    observer.allocated(role, limit, identity);
+    observer.capacity_inspected(role, identity, scratch.capacity());
     scratch
 }
 
 fn inspect_scratch(role: BufferRole, scratch: &BytesMut, observer: &dyn BufferObserver) {
-    observer.inspected(role, scratch.as_ptr() as usize);
+    let identity = scratch.as_ptr() as usize;
+    observer.inspected(role, identity);
+    observer.capacity_inspected(role, identity, scratch.capacity());
 }
 
 /// Exact, bounded TCP replay state shared by server handshakes.
@@ -555,6 +562,7 @@ where
             encrypt,
             decrypt,
             staged: None,
+            exhaust_request_seal_nonce: false,
             lifecycle: Lifecycle::default(),
             observers: self.observers,
         })
@@ -791,6 +799,7 @@ where
                 encrypt,
                 decrypt,
                 staged: None,
+                exhaust_request_open_nonce: false,
                 lifecycle: Lifecycle::default(),
                 observers: self.observers,
             },
@@ -947,6 +956,7 @@ pub struct ClientFlow<'a, S, K, T> {
     encrypt: BytesMut,
     decrypt: BytesMut,
     staged: Option<StagedWrite>,
+    exhaust_request_seal_nonce: bool,
     lifecycle: Lifecycle,
     observers: Observers<'a>,
 }
@@ -971,6 +981,7 @@ pub struct ServerFlow<'a, S, K, T, R> {
     encrypt: BytesMut,
     decrypt: BytesMut,
     staged: Option<StagedWrite>,
+    exhaust_request_open_nonce: bool,
     lifecycle: Lifecycle,
     observers: Observers<'a>,
 }
@@ -1218,12 +1229,22 @@ where
             &mut self.request_sealer,
             &mut self.encrypt,
             &mut self.staged,
+            &mut self.exhaust_request_seal_nonce,
             &mut self.tx,
             &mut self.lifecycle,
             self.observers.flow,
             cx,
             source,
         )
+    }
+
+    /// Injects a closed failure at the next request-frame seal boundary.
+    ///
+    /// This hidden seam exists only to make otherwise unreachable u96 nonce
+    /// exhaustion observable in production-shaped flow tests.
+    #[doc(hidden)]
+    pub fn test_exhaust_next_request_seal_nonce(&mut self) {
+        self.exhaust_request_seal_nonce = true;
     }
 }
 
@@ -1316,6 +1337,12 @@ where
         }
         if self.lifecycle.terminal == Some(FlowTerminal::Normal) || self.lifecycle.rx_closed {
             return Poll::Ready(Ok(0));
+        }
+        if std::mem::take(&mut self.exhaust_request_open_nonce) {
+            let error = self
+                .lifecycle
+                .install_protocol(self.observers.flow, ProtocolReason::NonceExhausted);
+            return Poll::Ready(Err(error));
         }
         let state = std::mem::replace(&mut self.rx, DataRx::Poison);
         match poll_data_read(
@@ -1443,6 +1470,15 @@ where
                 Poll::Ready(Err(error))
             }
         }
+    }
+
+    /// Injects a closed failure at the next request-frame open boundary.
+    ///
+    /// This hidden seam exists only to make otherwise unreachable u96 nonce
+    /// exhaustion observable in production-shaped flow tests.
+    #[doc(hidden)]
+    pub fn test_exhaust_next_request_open_nonce(&mut self) {
+        self.exhaust_request_open_nonce = true;
     }
 }
 
@@ -1662,6 +1698,7 @@ fn poll_write_open<S: TransportIo>(
     sealer: &mut TcpSealer,
     scratch: &mut BytesMut,
     staged: &mut Option<StagedWrite>,
+    exhaust_seal_nonce: &mut bool,
     tx: &mut TxState,
     lifecycle: &mut Lifecycle,
     observer: &dyn FlowObserver,
@@ -1687,6 +1724,10 @@ fn poll_write_open<S: TransportIo>(
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
         }
+    }
+    if std::mem::take(exhaust_seal_nonce) {
+        let error = lifecycle.install_protocol(observer, ProtocolReason::NonceExhausted);
+        return Poll::Ready(Err(error));
     }
     let admitted = source.len().min(MAX_ENCODE_PAYLOAD_LEN);
     match seal_data_chunk_into(sealer, &source[..admitted], scratch) {

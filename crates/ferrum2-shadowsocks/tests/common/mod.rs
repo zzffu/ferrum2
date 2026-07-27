@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
+use std::error::Error;
+use std::fmt;
 use std::future::ready;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
@@ -14,8 +16,8 @@ use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, LocalEndpoint, TargetAddr,
 };
 use ferrum2_crypto::{
-    Aes128Psk, Clock, ClockError, KeyProvider, KeySelector, MonotonicInstant, RandomError,
-    SecureRandom, SinglePskProvider, TcpMethod, TcpSalt, TcpSealer,
+    Aes128Psk, Clock, ClockError, KeyProvider, KeyProviderError, KeySelector, MonotonicInstant,
+    RandomError, SecretKeyRef, SecureRandom, SinglePskProvider, TcpMethod, TcpSalt, TcpSealer,
 };
 use ferrum2_shadowsocks::{
     BufferObserver, BufferRole, FlowObserver, FlowTerminal, PlainDuplex, REQUEST_FIRST_READ_LEN,
@@ -29,6 +31,37 @@ pub fn provider() -> SinglePskProvider {
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
         0x0f,
     ]))
+}
+
+pub struct CountingKeyProvider {
+    inner: SinglePskProvider,
+    calls: AtomicUsize,
+}
+
+impl CountingKeyProvider {
+    pub fn new() -> Self {
+        Self {
+            inner: provider(),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl KeyProvider for CountingKeyProvider {
+    type Error = KeyProviderError;
+
+    fn with_key<T>(
+        &self,
+        selector: KeySelector<'_>,
+        use_key: impl FnOnce(SecretKeyRef<'_>) -> T,
+    ) -> Result<T, Self::Error> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.with_key(selector, use_key)
+    }
 }
 
 pub fn target() -> TargetAddr {
@@ -156,6 +189,36 @@ pub fn response_wire_and_frames(
     (wire, frames)
 }
 
+pub fn custom_response_wire(
+    response_salt: &TcpSalt,
+    message_type: u8,
+    timestamp: u64,
+    bound_request_salt: &TcpSalt,
+    first_payload: &[u8],
+) -> Vec<u8> {
+    let mut fixed = BytesMut::new();
+    fixed.extend_from_slice(&[message_type]);
+    fixed.extend_from_slice(&timestamp.to_be_bytes());
+    fixed.extend_from_slice(bound_request_salt.as_bytes());
+    fixed.extend_from_slice(&(first_payload.len() as u16).to_be_bytes());
+    let mut payload = BytesMut::from(first_payload);
+    provider()
+        .with_key(KeySelector::Default, |key| {
+            let mut sealer = TcpSealer::new(
+                key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, response_salt),
+            );
+            sealer.seal_in_place(&mut fixed).expect("response fixed");
+            sealer
+                .seal_in_place(&mut payload)
+                .expect("response payload");
+        })
+        .expect("default key");
+    let mut wire = response_salt.as_bytes().to_vec();
+    wire.extend_from_slice(&fixed);
+    wire.extend_from_slice(&payload);
+    wire
+}
+
 #[derive(Default)]
 pub struct IoObservation {
     pub read_calls: usize,
@@ -168,6 +231,23 @@ pub struct IoObservation {
     pub endpoint_calls: usize,
     pub writes: Vec<Vec<u8>>,
 }
+
+#[derive(Clone, Copy)]
+pub struct SourceSentinel;
+
+impl fmt::Debug for SourceSentinel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("sentinel-source-debug")
+    }
+}
+
+impl fmt::Display for SourceSentinel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("sentinel-source-display")
+    }
+}
+
+impl Error for SourceSentinel {}
 
 pub struct RecordingIo {
     reads: VecDeque<Vec<u8>>,
@@ -281,7 +361,7 @@ impl RecordingIo {
 }
 
 impl TransportIo for RecordingIo {
-    type IoError = ();
+    type IoError = SourceSentinel;
 
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -301,7 +381,7 @@ impl TransportIo for RecordingIo {
                 .fail_read_after
                 .is_some_and(|successful| observation.read_calls > successful)
         {
-            return Poll::Ready(Err(()));
+            return Poll::Ready(Err(SourceSentinel));
         }
         drop(observation);
         let source = self.reads.pop_front().unwrap_or_default();
@@ -332,7 +412,7 @@ impl TransportIo for RecordingIo {
                 .fail_write_after
                 .is_some_and(|successful| observation.write_calls > successful)
         {
-            return Poll::Ready(Err(()));
+            return Poll::Ready(Err(SourceSentinel));
         }
         let limit = self
             .write_limit_after
@@ -346,7 +426,7 @@ impl TransportIo for RecordingIo {
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::IoError>> {
         self.observation.lock().expect("observation").flush_calls += 1;
         if self.fail_flush {
-            Poll::Ready(Err(()))
+            Poll::Ready(Err(SourceSentinel))
         } else {
             Poll::Ready(Ok(()))
         }
@@ -358,7 +438,7 @@ impl TransportIo for RecordingIo {
     ) -> Poll<Result<(), Self::IoError>> {
         self.observation.lock().expect("observation").shutdown_calls += 1;
         if self.fail_shutdown {
-            Poll::Ready(Err(()))
+            Poll::Ready(Err(SourceSentinel))
         } else {
             Poll::Ready(Ok(()))
         }
@@ -574,6 +654,7 @@ pub async fn shutdown_plain(
 pub struct RecordingObservers {
     pub buffers: Mutex<Vec<(BufferRole, usize, usize)>>,
     pub inspections: Mutex<Vec<(BufferRole, usize)>>,
+    pub capacities: Mutex<Vec<(BufferRole, usize, usize)>>,
     pub terminals: Mutex<Vec<FlowTerminal>>,
     pub sequence: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -591,6 +672,13 @@ impl BufferObserver for RecordingObservers {
             .lock()
             .expect("inspections")
             .push((role, storage_identity));
+    }
+
+    fn capacity_inspected(&self, role: BufferRole, storage_identity: usize, capacity: usize) {
+        self.capacities
+            .lock()
+            .expect("capacities")
+            .push((role, storage_identity, capacity));
     }
 }
 

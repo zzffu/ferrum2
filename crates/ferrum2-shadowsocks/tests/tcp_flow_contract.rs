@@ -1,5 +1,6 @@
 mod common;
 
+use std::error::Error;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
@@ -27,6 +28,8 @@ fn closed_contract_is_exact_copyable_and_source_free() {
     assert_eq!(format!("{protocol}"), "SIP022 protocol failure");
     assert_eq!(format!("{transport}"), "SIP022 transport failure");
     assert!(!format!("{protocol:?}{transport:?}").contains("sentinel-source"));
+    assert!(protocol.source().is_none());
+    assert!(transport.source().is_none());
 }
 
 #[tokio::test]
@@ -94,6 +97,32 @@ async fn response_pending_opposite_direction_failures_keep_protocol_or_transport
         0
     );
 
+    let request_salt = salt_from_u64(1011);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(io);
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    flow.test_exhaust_next_request_seal_nonce();
+    let before = {
+        let observed = observation.lock().expect("observation");
+        (observed.read_calls, observed.write_calls)
+    };
+
+    assert_eq!(
+        write_plain(&mut flow, b"upload").await,
+        Err(ShadowsocksError::Protocol(ProtocolReason::NonceExhausted))
+    );
+    assert_eq!(
+        flow.terminal(),
+        Some(FlowTerminal::Protocol(ProtocolReason::NonceExhausted))
+    );
+    {
+        let observed = observation.lock().expect("observation");
+        assert_eq!((observed.read_calls, observed.write_calls), before);
+        assert_eq!(observed.abortive_calls, 0);
+    }
+
     let replay = TcpReplayStore::new(1024).expect("capacity");
     let server_salt = salt_from_u64(1002);
     let request = valid_request_wire(NOW, &server_salt);
@@ -151,6 +180,58 @@ async fn response_pending_opposite_direction_failures_keep_protocol_or_transport
             .abortive_calls,
         0
     );
+
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let bounds_salt = salt_from_u64(1004);
+    let request = valid_request_wire(NOW, &bounds_salt);
+    let frames = request_data_frames(&bounds_salt, &[b"bounds"]);
+    let (bounds_io, bounds_observation) = RecordingIo::new([
+        request[..43].to_vec(),
+        request[43..].to_vec(),
+        frames[0][..3].to_vec(),
+    ]);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &server_random, &replay);
+    let mut server = inbound
+        .accept_stream(bounds_io)
+        .await
+        .expect("server")
+        .stream;
+    assert_eq!(
+        read_plain(&mut server, &mut destination).await,
+        Err(ShadowsocksError::Protocol(ProtocolReason::FrameBounds))
+    );
+    assert_eq!(
+        server.terminal(),
+        Some(FlowTerminal::Protocol(ProtocolReason::FrameBounds))
+    );
+    {
+        let observed = bounds_observation.lock().expect("observation");
+        assert_eq!(observed.write_calls, 0, "response remains pending");
+        assert_eq!(observed.abortive_calls, 0);
+    }
+
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let nonce_salt = salt_from_u64(1005);
+    let request = valid_request_wire(NOW, &nonce_salt);
+    let (nonce_io, nonce_observation) = RecordingIo::request(&request);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &server_random, &replay);
+    let mut server = inbound
+        .accept_stream(nonce_io)
+        .await
+        .expect("server")
+        .stream;
+    server.test_exhaust_next_request_open_nonce();
+    assert_eq!(
+        read_plain(&mut server, &mut destination).await,
+        Err(ShadowsocksError::Protocol(ProtocolReason::NonceExhausted))
+    );
+    assert_eq!(
+        server.terminal(),
+        Some(FlowTerminal::Protocol(ProtocolReason::NonceExhausted))
+    );
+    let observed = nonce_observation.lock().expect("observation");
+    assert_eq!(observed.write_calls, 0, "response remains pending");
+    assert_eq!(observed.abortive_calls, 0);
 }
 
 #[tokio::test]
@@ -212,6 +293,32 @@ async fn transport_phase_table_is_exact_and_fatal_freezes_all_counts() {
         ),
         frozen
     );
+}
+
+#[tokio::test]
+async fn real_transport_source_sentinel_is_erased_from_debug_display_and_source_chain() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(1150);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(io.with_write_failure_after(1));
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    assert_eq!(write_plain(&mut flow, b"data").await, Ok(4));
+
+    let error = flush_plain(&mut flow)
+        .await
+        .expect_err("scripted source sentinel");
+
+    assert_eq!(error, ShadowsocksError::Transport(TransportPhase::Write));
+    let diagnostics = format!("{error:?} {error}");
+    assert!(!diagnostics.contains("sentinel-source-debug"));
+    assert!(!diagnostics.contains("sentinel-source-display"));
+    assert!(error.source().is_none());
+    let observed = observation.lock().expect("observation");
+    assert_eq!(observed.abortive_calls, 0);
+    assert_eq!(observed.read_calls, 0, "response remains pending");
 }
 
 #[tokio::test]
@@ -310,4 +417,75 @@ async fn nonempty_write_after_shutdown_while_rx_live_installs_transport_write() 
         Some(FlowTerminal::Transport(TransportPhase::Write))
     );
     assert_eq!(observation.lock().expect("observation").abortive_calls, 0);
+}
+
+#[tokio::test]
+async fn nonce_exhaustion_test_seam_installs_protocol_terminal_without_io_or_abortive() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+
+    let client_salt = salt_from_u64(1500);
+    let client_random = ScriptedRandom::new(client_random_bytes(&client_salt));
+    let (client_io, client_observation) = RecordingIo::new([]);
+    let client_connector = RecordingConnector::succeeds(client_io);
+    let client_outbound = ClientTcpOutbound::new(
+        server_target(),
+        &keys,
+        &client_connector,
+        &clock,
+        &client_random,
+    );
+    let mut client = client_outbound
+        .open_stream(&target())
+        .await
+        .expect("client");
+    client.test_exhaust_next_request_seal_nonce();
+    let client_counts = {
+        let observed = client_observation.lock().expect("observation");
+        (observed.read_calls, observed.write_calls)
+    };
+
+    assert_eq!(
+        write_plain(&mut client, b"upload").await,
+        Err(ShadowsocksError::Protocol(ProtocolReason::NonceExhausted))
+    );
+    assert_eq!(
+        client.terminal(),
+        Some(FlowTerminal::Protocol(ProtocolReason::NonceExhausted))
+    );
+    {
+        let observed = client_observation.lock().expect("observation");
+        assert_eq!((observed.read_calls, observed.write_calls), client_counts);
+        assert_eq!(observed.abortive_calls, 0);
+    }
+
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let server_salt = salt_from_u64(1501);
+    let request = valid_request_wire(NOW, &server_salt);
+    let (server_io, server_observation) = RecordingIo::request(&request);
+    let server_random = ScriptedRandom::new([]);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &server_random, &replay);
+    let mut server = inbound
+        .accept_stream(server_io)
+        .await
+        .expect("server")
+        .stream;
+    server.test_exhaust_next_request_open_nonce();
+    let server_counts = {
+        let observed = server_observation.lock().expect("observation");
+        (observed.read_calls, observed.write_calls)
+    };
+    let mut destination = [0_u8; 8];
+
+    assert_eq!(
+        read_plain(&mut server, &mut destination).await,
+        Err(ShadowsocksError::Protocol(ProtocolReason::NonceExhausted))
+    );
+    assert_eq!(
+        server.terminal(),
+        Some(FlowTerminal::Protocol(ProtocolReason::NonceExhausted))
+    );
+    let observed = server_observation.lock().expect("observation");
+    assert_eq!((observed.read_calls, observed.write_calls), server_counts);
+    assert_eq!(observed.abortive_calls, 0);
 }
