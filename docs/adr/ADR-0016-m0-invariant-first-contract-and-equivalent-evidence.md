@@ -1,6 +1,6 @@
 # ADR-0016: M0 invariant-first contract and equivalent evidence substitution
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-28
 - **Owners:** Product / Architect / Team Lead
 - **Related milestone/spec/tickets:** M0；`SPEC-0001`；`TEST-0001`；
@@ -258,6 +258,11 @@ runtime ledger。回滚只需移除本 ADR 及同步 mapping；已通过 ADR-000
 - `git diff --check`与bare-CR检查通过。
 - Product确认scope/exit criteria不变；Architect确认security/protocol/dependency
   fail-closed边界；QA确认没有required result被删除且当前open blockers未被改写。
+
+提案提交`a389aa9861806a5d7d0d4fa8f8379f6ecef925d2`（tree
+`c2a2bb2bada9c88f912b917da6941370c335c9ce`）已取得Product、Architect与QA
+exact-SHA document gate PASS；接受提交只同步decision status与审查记录，不改变
+该提案的protected/profile matrix。
 
 ## References
 

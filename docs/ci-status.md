@@ -4,11 +4,10 @@
 
 - **Current validated local product integration implementation checkpoint:**
   `51fb7327af966cfc3f4a49058ea6bf2284009dcf`
-- **Accepted local coordination contract:** current `master` contains ADR-0015
-  and synchronized SPEC/TEST/T07/T08/roadmap status. ADR-0016 plus
-  SPEC/TEST/T01/T02/T03/T06/T07/T08 mappings are a local proposal pending final
-  document gates. The accepted coordination commit ID is recorded in Team Lead
-  integration evidence rather than self-embedded in the commit.
+- **Accepted local coordination contract:** current `master` contains ADR-0016
+  plus synchronized SPEC/TEST/T01/T02/T03/T06/T07/T08/roadmap status. The
+  accepted coordination commit ID is recorded in Team Lead integration evidence
+  rather than self-embedded in the commit.
 - **Date/environment:** 2026-07-28（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
 - **First authorized hosted run:** exact `51fb7327` was pushed only to
@@ -26,12 +25,13 @@
   Windows exit/banner evidence and `scope_audit`. The repaired scheduler now reports
   `resume_and_execute_frontier`: T07 remains active while disjoint T08 implementation
   is ready; T08 still has an integration dependency on completed T07.
-- **ADR-0016 contract-relaxation proposal:** normative
+- **ADR-0016 contract-relaxation decision:** normative
   product/security/platform/release
   outcomes remain unchanged；current exact profiles stay selected. Equivalent
   evidence requires pre-execution mapping、single-writer ownership、new exact-SHA
-  execution and Architect/QA review. It does not close T07/T08, waive run
-  `30301746374`, or grant another push/run.
+  execution and Architect/QA review. Proposal `a389aa9` received Product、
+  Architect与QA exact-SHA document PASS. The decision does not close T07/T08、
+  waive run `30301746374`、or grant another push/run.
 - **Independent hosted-like RED:** Arch WSL current build exit 0；lifecycle
   full-file and full-name exact rerun each exit 101 at the first client-proxy
   exact rebind (`EADDRINUSE`), with no remaining listener and the address in
@@ -268,7 +268,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | 分阶段依赖、角色reasoning配置、risk-aware repair与Git-common-dir state均有效；M0 next=`resume_and_execute_frontier`，无warning | 当前 |
-| M0 execution contracts | HOSTED REPAIR IN PROGRESS / ADR-0016 PROPOSED | ADR-0016 proposal只放宽证据机制治理且不改gate；T07 `6139544`与T08 `49c63082`已在exact `51fb7327`组合并通过local/Architect/QA，hosted run `30301746374`仍为2/11 success、9/11 failure，ADR-0015/T07/T08保持窄reopen | M0-T07/T08 |
+| M0 execution contracts | HOSTED REPAIR IN PROGRESS / ADR-0016 ACCEPTED | ADR-0016只放宽证据机制治理且不改gate；proposal `a389aa9`的Product/Architect/QA document gates均PASS；T07 `6139544`与T08 `49c63082`已在exact `51fb7327`组合并通过local/Architect/QA，hosted run `30301746374`仍为2/11 success、9/11 failure，ADR-0015/T07/T08保持窄reopen | M0-T07/T08 |
 | GitHub Actions workflow contract | ATTEMPT 1 FAIL / REPAIR IN PROGRESS | `51fb7327`的唯一authorized run完整实例化11 jobs；两处broad filter和三套linker probes fail closed于错误假设。Job/runner/security矩阵不变，T08只修证据脚本与closed scope policy | M0-T08 |
 | Host quick Cargo gate | LOCAL PASS / HOSTED LIFECYCLE FAIL | `51fb7327`上Team Lead与QA独立完成authoritative quick；hosted quick随后只在共同M0-LIFE-005 rebind首因失败 | 当前repair SHA重跑 |
 | Host full Cargo gate | LOCAL PASS / HOSTED LIFECYCLE FAIL | `51fb7327`上Team Lead与QA独立完成authoritative full；hosted full随后只在共同M0-LIFE-005 rebind首因失败 | 当前repair SHA重跑 |

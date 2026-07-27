@@ -6,7 +6,7 @@
 - **ADR-0013 amendment:** Approved
 - **ADR-0014 amendment:** Approved
 - **ADR-0015 amendment:** Approved
-- **ADR-0016 amendment:** Proposed
+- **ADR-0016 amendment:** Approved
 - **Milestone:** M0
 - **Spec:** `docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`
 
