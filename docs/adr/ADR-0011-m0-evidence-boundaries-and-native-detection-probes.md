@@ -6,7 +6,9 @@
 - **Related milestone/spec/tickets:** M0；`SPEC-0001`；M0-T01、M0-T03、
   M0-T06、M0-T07；部分取代 ADR-0001 的 harness dependency/manifest ownership、
   ADR-0004 的 native probe construction，以及 ADR-0005 的 lifecycle evidence
-  allocation；ADR-0010 的 production protocol interface 不变
+  allocation；ADR-0010 的 production protocol interface 不变；本ADR关于
+  root/其他member manifests不变的审查边界被ADR-0013的exact binary dev edges
+  部分取代
 
 ## Context and problem
 
@@ -138,9 +140,9 @@ dependency addition/removal、显式 version、feature override、normal depende
 ## Compatibility and upstream divergence
 
 本决策只重分配 evidence ownership，并增加两个已锁定 primitive 的 test-only
-direct edges。production member、production dependency、wire bytes、key/nonce
-semantics、error taxonomy、API、config、task topology、metric schema、reference pin
-和 target matrix均不变。
+direct edges。除ADR-0013随后批准的两个binary-local Tokio dev edges外，
+production member/graph、wire bytes、key/nonce semantics、error taxonomy、API、
+config、task topology、metric schema、reference pin和 target matrix均不变。
 
 ADR-0001 的“后续票不得修改 manifest/lock”仅被本 ADR 对 M0-T07 上述三个精确路径/
 hunk 取代。ADR-0004 的 detection classification 与 ADR-0005 的 runtime lifecycle
@@ -172,9 +174,9 @@ cargo check --workspace --all-targets --locked
 cargo test --workspace --locked
 ```
 
-Review还必须确认 root/其他 member manifests 不变、lock diff 只有两个 harness
-edges、110 identity tuples/crypto features不变、matched tests 非零且符合
-TEST-0001 的 exact matrix。
+Review还必须确认 root/其他 member manifests除ADR-0013两个exact binary dev
+declarations外不变、lock diff 只有两个 harness edges、110 identity tuples/crypto
+features不变、matched tests 非零且符合 TEST-0001 的 exact matrix。
 
 ## References
 

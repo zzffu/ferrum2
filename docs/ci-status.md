@@ -59,14 +59,19 @@
   Architect/QA均PASS，T03 64、T06 33、联合normal/all-features各97 tests及strict
   Clippy/fmt/locked metadata/scope/lineage/cleanliness均PASS，现均done。权威quick
   诊断仅因T07-owned两个`src/main.rs`缺失而未通过，不计PASS。T07保留`52dcdb0`
-  并已恢复为`in_progress`，T08等待T07。
+  并已恢复为`in_progress`。续作发现ADR-0012 required binary paused-time tests因
+  两个binary manifests没有Tokio `test-util`且T07不拥有这些路径而无法编译；
+  Product/Architect/QA triage均PASS exact two-dev-edge、zero-lock-delta方案；
+  勘误base `24ddecf`的三方final document gates均PASS，ADR-0013现为Accepted。
+  T08等待T07。
 - **Contract final verdicts:** 初始review要求exact 47-case matrix、
   `AddressBounds`、harness exact two-edge lock hunk、configured而非hardcoded
   durations、T03/T07 time-evidence ownership和完整ADR模板。全部修正后
   Product/Architect/QA最终均**PASS**，无BLOCKER/REQUIRED/advisory；
   `workflow.py doctor/validate/status/frontier/next`、locked metadata与
-  `git diff --check`均exit 0。implementation、quick/full、native和remote evidence
-  尚未运行且不计PASS。
+  `git diff --check`均exit 0。ADR-0013勘误base `24ddecf`的Product/Architect/QA
+  final document gates均PASS；其implementation与T07/T08的quick/full/remote
+  evidence均不提前计PASS。
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -190,7 +195,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0012、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T06均done，T03/T06 repair integration `2ce7708`双gate PASS；T07 partial `52dcdb0`已恢复`in_progress`，T08等待T07 | M0-T07 |
+| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0013、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T06均done，T07 `in_progress`，T08等待T07 | M0-T07 |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | T07 partial branch quick-equivalent fmt/check/workspace test已PASS但未integrate；exact integration quick仍在T03/T06 repairs与T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |

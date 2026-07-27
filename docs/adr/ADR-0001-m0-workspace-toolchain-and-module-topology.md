@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Architect / Team Lead
-- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T01～M0-T08；关闭 DEC-001、DEC-002；direct dependency baseline 与一次性 manifest repair 条款被 ADR-0009 部分取代
+- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T01～M0-T08；关闭 DEC-001、DEC-002；direct dependency baseline 与 manifest ownership 条款被 ADR-0009、ADR-0011、ADR-0013 部分取代
 
 ## Context and problem
 
@@ -73,7 +73,7 @@ surface 必须联合读取本表与 ADR-0009：
 
 | Crate | Exact version | Feature contract |
 |---|---:|---|
-| `tokio` | `1.53.1` | production no-default；`rt-multi-thread,macros,net,io-util,sync,time,signal`；`ferrum2-runtime` dev-dependency额外启用`test-util` |
+| `tokio` | `1.53.1` | production no-default；`rt-multi-thread,macros,net,io-util,sync,time,signal`；`ferrum2-runtime`及ADR-0013限定的两个T07 binary dev-dependency可额外启用`test-util` |
 | `bytes` | `1.12.1` | default `std` |
 | `socket2` | `0.6.5` | default；不启用 `all` |
 | `serde` | `1.0.229` | no-default；`std,derive` |
@@ -219,7 +219,9 @@ Cargo metadata与lock resolution不要求explicit target path已经存在，因�
 target，当前wave必须停止，由Team Lead先修订contract并安排一个独占manifest变更；
 不得由多个Engineer竞争`Cargo.lock`。ADR-0009 是该流程的首次窄执行：仅授权一个
 T01 writer 增加两个 fixed-version zeroize feature anchors、更新 lock representation
-与 workspace-policy evidence。
+与 workspace-policy evidence。ADR-0011 随后只把harness manifest、对应policy与
+唯一two-edge lock hunk转交T07；ADR-0013再只把两个binary manifests的exact
+Tokio `test-util` dev edges转交同一个T07 writer，且不允许新增lock hunk。
 
 ## Consequences and tradeoffs
 
