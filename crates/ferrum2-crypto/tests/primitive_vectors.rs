@@ -2,6 +2,7 @@ use blake3::Hasher;
 use bytes::BytesMut;
 use ferrum2_crypto::{TcpOpener, TcpSealer, TcpSubkey};
 use serde_json::Value;
+use std::path::Path;
 
 const BLAKE3_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/blake3-derive-v1.json");
 const AES128_GCM_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/aes128-gcm-v1.json");
@@ -152,6 +153,103 @@ fn fixture_hashes_and_source_provenance_are_pinned() {
     ] {
         assert!(PROVENANCE.contains(required), "missing provenance field");
     }
+
+    let sip022 = provenance_section("tests/fixtures/crypto/sip022-kdf-v1.json");
+    let source_path = quoted_provenance_value(sip022, "source_path");
+    assert_eq!(
+        source_path,
+        "docs/adr/ADR-0004-m0-sip022-tcp-security-state.md"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "historical_contract_revision"),
+        "c658e5dd285923ccf16d4102034c47e9700461a3"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "historical_contract_blob"),
+        "77136841f2122809a39cc6fa36c0354c5bf8c3c4"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "historical_contract_lf_sha256"),
+        "ac6365de83c3f3548171caba74781b523a7aebba2f79aa5853352481557cc614"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "historical_contract_section"),
+        "Decision / Cryptographic wire constants / subkey"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "current_contract_revision"),
+        "8f6b1ca7a14a6a05867c5fe74bd95d954a0eff13"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "current_contract_blob"),
+        "06459a889a4cc8d96ac45355871753ffa8c10431"
+    );
+    let current_contract_hash = quoted_provenance_value(sip022, "current_contract_lf_sha256");
+    assert_eq!(
+        current_contract_hash,
+        "66525bb033975cf75b9840361ce0db6d1a7a86a794d30a28996b104540a6cf4e"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "current_contract_section"),
+        "Decision / Cryptographic wire constants / subkey"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "upstream_sip022_revision"),
+        "34598d65054dad975d330ff9d7317b0d41cf1efd"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "upstream_sip022_path"),
+        "docs/doc/sip022.md"
+    );
+    assert_eq!(
+        quoted_provenance_value(sip022, "adr0008_kdf_effect"),
+        "ADR-0008 changes AES-GCM KAT provenance only; SIP022 KDF constants are unchanged."
+    );
+
+    let checked_out_source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(source_path),
+    )
+    .expect("source_path resolves from the repository root");
+    let normalized_source = checked_out_source.replace("\r\n", "\n").replace('\r', "\n");
+    let checked_out_hash = hex::encode(sha256(normalized_source.as_bytes()));
+    assert!(
+        [
+            quoted_provenance_value(sip022, "historical_contract_lf_sha256"),
+            current_contract_hash,
+        ]
+        .contains(&checked_out_hash.as_str()),
+        "checked-out source must be an explicitly pinned historical or current contract"
+    );
+    assert!(
+        normalized_source
+            .contains("BLAKE3-DERIVE(\"shadowsocks 2022 session subkey\", PSK || salt)[0..16]")
+    );
+}
+
+fn provenance_section(path: &str) -> &str {
+    let path_field = format!("path = \"{path}\"");
+    let path_offset = PROVENANCE
+        .find(&path_field)
+        .unwrap_or_else(|| panic!("missing provenance section for {path}"));
+    let start = PROVENANCE[..path_offset]
+        .rfind("[[fixtures]]")
+        .expect("fixture path follows a section header");
+    let section = &PROVENANCE[start..];
+    let after_header = "[[fixtures]]".len();
+    let end = section[after_header..]
+        .find("[[fixtures]]")
+        .map_or(section.len(), |offset| after_header + offset);
+    &section[..end]
+}
+
+fn quoted_provenance_value<'a>(section: &'a str, key: &str) -> &'a str {
+    let prefix = format!("{key} = \"");
+    section
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix)?.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("missing quoted provenance field {key}"))
 }
 
 fn sha256(input: &[u8]) -> [u8; 32] {

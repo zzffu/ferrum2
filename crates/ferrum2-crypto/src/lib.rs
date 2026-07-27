@@ -240,6 +240,20 @@ impl fmt::Debug for NonceCounter {
     }
 }
 
+impl Zeroize for NonceCounter {
+    fn zeroize(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+impl Drop for NonceCounter {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for NonceCounter {}
+
 impl NonceCounter {
     /// Reserves the current nonce and advances atomically.
     ///

@@ -9,7 +9,7 @@ use ferrum2_crypto::{
     SystemClock, SystemRandom, TcpMethod, TcpSalt, TcpSealer, generate_request_salt,
     generate_response_salt,
 };
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
 
@@ -112,6 +112,15 @@ fn nonce_overflow_returns_no_nonce_and_preserves_state() {
     let mut counter = NonceCounter::from_le_bytes([0xff; 12]);
     assert_eq!(counter.checked_take(), Err(AeadError::NonceExhausted));
     assert_eq!(counter.current_bytes(), [0xff; 12]);
+}
+
+#[test]
+fn nonce_counter_has_explicit_clear_and_drop_zeroizing_contract() {
+    assert_zeroize_on_drop::<NonceCounter>();
+
+    let mut counter = NonceCounter::from_le_bytes([0x5a; 12]);
+    counter.zeroize();
+    assert_eq!(counter.current_bytes(), [0; 12]);
 }
 
 struct ScriptedClock {
