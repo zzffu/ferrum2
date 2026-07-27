@@ -3,6 +3,7 @@
 - **Status:** Approved
 - **ADR-0010 amendment:** Approved
 - **ADR-0011/0012 amendments:** Approved
+- **ADR-0013 amendment:** Proposed
 - **Milestone:** M0
 - **Spec:** `docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`
 
@@ -18,8 +19,9 @@ mapping与encrypt/decrypt scratch capacity）。
 
 M0 建立以下 production-shaped test seams：
 
-- protocol `ScriptedClock`：wall 与 replay monotonic 时间独立推进；runtime timeout
-  tests使用Tokio `test-util` paused time，不导入crypto Clock。
+- protocol `ScriptedClock`：wall 与 replay monotonic 时间独立推进；runtime与
+  binary composition timeout tests使用Tokio `test-util` paused time，不导入
+  crypto Clock。binary capability只能来自ADR-0013 exact dev-kind edges。
 - `ScriptedRandom`：固定 salt/padding、重复值、失败和 nonce边界。
 - `RecordingConnector`：调用次数、顺序、target category、forwarded bytes。
 - `RecordingReplayStore`/store snapshot：check/insert/purge 的线性化与 entry count。
@@ -105,7 +107,7 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
 | Test ID | Spec criterion | Evidence/test | Level | Required job/command |
 |---|---|---|---|---|
 | M0-WS-001 | AC-01 | workspace members、crate DAG、core purity、`LocalEndpoint`/consuming reply ownership | contract/static | `cargo test -p ferrum2-m0-harness --test architecture --locked` |
-| M0-WS-002 | AC-01/12 | ADR-0001/0009 production exact versions/features、ADR-0011 exact harness-only dev-dependency/lock edges、AES/GHASH/POLYVAL drop-zeroize resolved graph、110-tuple lock identity baseline、GPL metadata、publish false、unsafe forbid、license provenance | static/build | `cargo metadata --locked --format-version 1`；`cargo test -p ferrum2-m0-harness --test workspace_policy --locked`；`cargo tree --workspace --locked`；`cargo tree -p ferrum2-crypto --locked -e features -i aes`、`-i ghash`、`-i polyval`、`-i zeroize` |
+| M0-WS-002 | AC-01/12 | ADR-0001/0009 production exact versions/features、ADR-0011 exact harness-only dev-dependency/lock edges、ADR-0013两个binary exact Tokio dev-kind edges与production/test feature boundary、AES/GHASH/POLYVAL drop-zeroize resolved graph、110-tuple lock identity baseline、GPL metadata、publish false、unsafe forbid、license provenance | static/build | `cargo metadata --locked --format-version 1`；`cargo test -p ferrum2-m0-harness --test workspace_policy --locked`；`cargo tree --workspace --locked`；两个binary各自的Tokio normal/build与all feature trees；`cargo tree -p ferrum2-crypto --locked -e features -i aes`、`-i ghash`、`-i polyval`、`-i zeroize` |
 | M0-MSRV-001 | AC-01/11 | Rust 1.85.0 resolved graph | build/test | `m0-msrv`：`cargo +1.85.0 check --workspace --all-targets --locked`；`cargo +1.85.0 test --workspace --locked` |
 | M0-CFG-001 | AC-02 | 两 binary valid offline config | process integration | `cargo test -p ferrum2-m0-harness --test config_cli --locked valid` |
 | M0-CFG-002 | AC-02 | offline path 零 listener/connector/task 副作用 | process integration | `cargo test -p ferrum2-m0-harness --test config_cli --locked no_side_effects` |
@@ -135,8 +137,8 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
 | M0-SOCKS-001 | AC-07 | connector在first-write前存local endpoint；success bytes为`05 00 00 01`+该IPv4/port；双向 bytes | unit/integration | `cargo test -p ferrum2-socks5 --locked`；`cargo test -p ferrum2-m0-harness --test local_e2e --locked success` |
 | M0-SOCKS-002 | AC-07 | auth/cmd/domain/IPv6/malformed negative；每个 request-stage failure为`05 REP 00 01 00000000 0000` | unit/negative | `cargo test -p ferrum2-socks5 --test negative --locked` |
 | M0-ENDPOINT-001 | AC-07 | client connector只收到configured SS server endpoint、request只编码application target；opaque connect-complete capability被一次消费；`local_addr`恰好查询一次；error/non-IPv4时零 SIP022 first-write，composition发精确general failure | cross-crate ordering | `cargo test -p ferrum2-runtime --test local_endpoint --locked`；`cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_target_and_request_target`；`cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_error_before_write`；`cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked client_open_phase_contract`；`cargo test -p ferrum2-socks5 --test negative --locked general_failure`；`cargo test -p ferrum2-client --locked local_endpoint_failure` |
-| M0-ADAPT-001 | AC-06/07/08/09 | client TokioConnector/Transport/Framed机械delegation、initialized ReadBuf、Pending/call count、stored endpoint、fixed io::Error/source redaction；paused time以non-default durations和defaults证明configured connect与fresh configured request-first-write budgets、SOCKS success timing及timeout sole-owner drop；configured-SS Connect=`shadowsocks/failed`及全部terminal→Reason/stage/outcome mappings | binary unit integration | `cargo test -p ferrum2-client --locked adapter_contract`；`cargo test -p ferrum2-client --locked phase_deadline_contract` |
-| M0-ADAPT-002 | AC-06/07/08/09 | server TokioTransport/Framed delegation；direct connect Pending/failure时零payload poll/forward；prefix partial writes只在nonzero progress重置idle，cancel/timeout/write-zero/error均保留精确count且不启动relay；成功后Session.initial_payload恰好一次；direct Connect=`direct/failed`及全部terminal含Normal的observability mapping | binary unit integration | `cargo test -p ferrum2-server --locked adapter_contract`；`cargo test -p ferrum2-server --locked lifecycle_composition_contract` |
+| M0-ADAPT-001 | AC-06/07/08/09 | client TokioConnector/Transport/Framed机械delegation、initialized ReadBuf、Pending/call count、stored endpoint、fixed io::Error/source redaction；paused time以non-default durations和defaults证明configured connect与fresh configured request-first-write budgets、SOCKS success timing及timeout sole-owner drop；`test-util`只由ADR-0013 client dev edge启用；configured-SS Connect=`shadowsocks/failed`及全部terminal→Reason/stage/outcome mappings | binary unit integration | `cargo test -p ferrum2-client --locked adapter_contract`；`cargo test -p ferrum2-client --locked phase_deadline_contract` |
+| M0-ADAPT-002 | AC-06/07/08/09 | server TokioTransport/Framed delegation；direct connect Pending/failure时零payload poll/forward；prefix partial writes只在nonzero progress重置idle，cancel/timeout/write-zero/error均保留精确count且不启动relay；paused-time capability只由ADR-0013 server dev edge启用；成功后Session.initial_payload恰好一次；direct Connect=`direct/failed`及全部terminal含Normal的observability mapping | binary unit integration | `cargo test -p ferrum2-server --locked adapter_contract`；`cargo test -p ferrum2-server --locked lifecycle_composition_contract` |
 | M0-E2E-001 | AC-07 | 两真实 binary local echo + half-close + cleanup | process E2E | `cargo test -p ferrum2-m0-harness --test local_e2e --locked success` |
 | M0-E2E-002 | AC-07 | pre-success protocol failure与 post-success target refusal | process E2E | `cargo test -p ferrum2-m0-harness --test local_e2e --locked failures` |
 | M0-LIFE-001 | AC-08 | stalled writer停止 upstream read；buffer/permit cap | deterministic I/O | `cargo test -p ferrum2-runtime --test backpressure --locked` |
@@ -187,6 +189,14 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
   不被误报为额外 node feature；四条 focused trees 必须同时显示这两个空
   default edges、`polyval/hazmat` 与 induced `zeroize/aarch64`，作为
   metadata node sets 之外的 exact edge evidence。
+- ADR-0013 exception 后，两个binary manifests都必须保留exact normal
+  `tokio.workspace = true`并各自只新增一个dev-kind workspace-inherited
+  `test-util` declaration；root/normal declarations不得出现`test-util`。locked
+  metadata必须分别显示normal/dev kinds与同一Tokio identity；排除dev edges的两个
+  production trees不得出现`tokio feature "test-util"`，包含dev edges的两个test
+  trees必须各出现一次。manifest LF/CRLF positive fixtures verdict相同，并拒绝
+  missing-one-side、extra/missing feature、normal/root移动、`full`、version/default/
+  source/path/rename/optional/target/duplicate-table mutations。
 - `workspace_policy` 内嵌 integration checkpoint `999d4f9`、
   lock blob `ab04f6d` 的完整 110 个 `(name,version,source,checksum)` identity
   tuples；candidate lock parser 的 sorted result 必须 exact 相等。lock diff只准
@@ -584,7 +594,9 @@ b41c6127b1834ebd97246451fd92bafea50cb205...HEAD` 和
 - 无 real secret、production endpoint、外部 binary、generated result或未审 fixture；
 - production dependency/member/method surface与 ADR-0001 经 ADR-0009 部分取代后
   的 baseline相等；ADR-0011只允许harness两个test-only primitive edges及唯一lock
-  hunk，110 package identities/resolved crypto feature sets不变；`aes 0.9.1`/
+  hunk；ADR-0013只允许两个binary dev-only Tokio `test-util` declarations且不
+  产生lock hunk，production trees不含该feature；110 package identities/resolved
+  crypto feature sets不变；`aes 0.9.1`/
   `ghash 0.6.0`仅为已锁定 permissive feature anchors，
   version/source/checksum 不变，新增 direct surface 有license/provenance；
 - T02/T03 fixtures与两个 reference pins的来源、hash、license-or-rights review和

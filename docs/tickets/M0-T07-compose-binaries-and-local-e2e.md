@@ -9,9 +9,11 @@ owns = [
   "bins/ferrum2-client/src/cli.rs",
   "bins/ferrum2-client/src/main.rs",
   "bins/ferrum2-client/src/run.rs",
+  "bins/ferrum2-client/Cargo.toml",
   "bins/ferrum2-server/src/cli.rs",
   "bins/ferrum2-server/src/main.rs",
   "bins/ferrum2-server/src/run.rs",
+  "bins/ferrum2-server/Cargo.toml",
   "tests/m0-harness/src/local_support/**",
   "tests/m0-harness/tests/config_cli.rs",
   "tests/m0-harness/tests/cli_contract.rs",
@@ -38,6 +40,7 @@ acceptance = [
   "The server connection owner writes Session.initial_payload completely and exactly once after target connect and before ordinary relay; connect or prefix-write failure never starts relay, and ServerFlow never repeats the payload",
   "Client composition applies independent configured-server connect and fresh request-first-write deadlines from validated config, proves the 10-second/5-second defaults plus non-default values through ADR-0012's opaque phase capability, and sends SOCKS success only after first-write completion",
   "Prefix and ordinary relay accounting includes only successful nonzero application writes, retains direction-separated partial counts on error/idle/cancel, and never double-counts prefix bytes",
+  "ADR-0013 adds exactly one workspace-inherited Tokio test-util dev edge to each binary, leaves both normal declarations and the production feature graph unchanged, and produces no Cargo.lock hunk beyond ADR-0011's harness edges",
 ]
 +++
 
@@ -67,13 +70,16 @@ repeated cleanup。
 - real-binary config CLI、local E2E、failure、lifecycle cycles与native detection probe。
 - ADR-0011限定的harness `aes-gcm`/`blake3` dev-dependencies、精确两条harness
   lock edges和CRLF-safe workspace-policy evidence。
+- ADR-0013限定的两个binary `Cargo.toml` exact Tokio `test-util` dev declarations、
+  production/test feature-tree boundary与zero-additional-lock-delta evidence。
 
 ## Out of scope
 
 - external reference download/interop、target platform matrix（T08）。
 - method/transport/address范围扩展。
-- root/其他member manifest、除`ferrum2-m0-harness`精确两条edge之外的lock hunk，
-  或任何production dependency/shared module修改。
+- root/其他member manifest（ADR-0013两个binary manifests的exact dev declarations
+  除外）、除`ferrum2-m0-harness`精确两条edge之外的lock hunk，或任何production
+  dependency/shared module修改。
 - push/publish/release。
 
 ## Implementation notes and constraints
@@ -90,6 +96,11 @@ repeated cleanup。
   杀死hardcoding。connect timeout是pre-success `ConnectTimeout`；handshake
   timeout是binary `Reason::HandshakeTimeout`、normal drop、abortive 0；
   first-write真实错误保持Detection。不得用Notify/heuristic/raw transport shim。
+- 两个binary保留normal `tokio.workspace = true`，且各自在
+  `[dev-dependencies]`只新增
+  `tokio = { workspace = true, features = ["test-util"] }`。不得修改root Tokio
+  features、normal edge、version/default/source/path或`Cargo.lock`；paused-time
+  tests不得依赖其他package的dev edge。
 - server connector Pending/failure时不得poll或forward `Session.initial_payload`；
   success后用bounded writes保持原byte sequence完整一次，prefix write失败停止flow。
 - listener/supervisor拥有所有child；harness必须kill-on-drop并避免固定ports。
@@ -116,6 +127,12 @@ repeated cleanup。
 ```bash
 cargo build --workspace --bins --locked
 cargo metadata --locked --format-version 1
+cargo tree -p ferrum2-client --locked -e normal,build,features -i tokio
+cargo tree -p ferrum2-server --locked -e normal,build,features -i tokio
+cargo tree -p ferrum2-client --locked -e all,features -i tokio
+cargo tree -p ferrum2-server --locked -e all,features -i tokio
+cargo build -p ferrum2-client --bin ferrum2-client --release --locked
+cargo build -p ferrum2-server --bin ferrum2-server --release --locked
 cargo test -p ferrum2-m0-harness --test architecture --locked
 cargo test -p ferrum2-m0-harness --test workspace_policy --locked
 cargo test -p ferrum2-m0-harness --test config_cli --locked
@@ -153,7 +170,8 @@ cargo test --workspace --locked
   strict Clippy均exit 0；worktree clean
 - Current gate: **IN_PROGRESS**；ADR-0012 T03/T06 upstream repairs已在
   `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a`通过组合Architect/QA gates；
-  续作需把该checkpoint合入保留分支并完成ADR-0011 lifecycle/native evidence、
-  configured phase deadlines、server prefix accounting和workspace quick/full
+  续作已把该checkpoint合入保留分支；ADR-0013需先批准两个binary dev-only
+  `test-util` edges，随后完成configured paused-time phase/prefix evidence和
+  workspace quick/full
 - Integrated commit: none
 - Publication: none

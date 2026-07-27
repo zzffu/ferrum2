@@ -28,11 +28,11 @@ spec = "docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md"
 test_plan = "docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md"
 acceptance = [
   "M0-WS-001 passes: cargo metadata reports exactly the ten approved members and the tested dependency DAG has no reverse edge into ferrum2-core",
-  "M0-WS-002 passes: exact production direct versions and features, Cargo.lock, GPL-3.0-only metadata, publish=false, and workspace unsafe_code=forbid match ADR-0001 as partially superseded by ADR-0009 and ADR-0011's exact harness-only test dependency exception",
+  "M0-WS-002 passes: exact production direct versions and features, Cargo.lock, GPL-3.0-only metadata, publish=false, and workspace unsafe_code=forbid match ADR-0001 as partially superseded by ADR-0009, ADR-0011's exact harness-only test dependency exception, and ADR-0013's exact two-binary dev-only Tokio test-util exception",
   "The ADR-0009 repair adds only exact aes 0.9.1 and ghash 0.6.0 no-default zeroize feature anchors, proves the exact ADR-0009 resolved feature sets and unique package IDs, and exactly preserves the 110-tuple locked package name/version/source/checksum baseline",
   "Rust 1.97.1 can build and test ferrum2-core plus the architecture and workspace-policy tests with --locked",
   "Core LocalEndpoint requires an infallible stored SocketAddrV4 on Connector and Outbound streams, and consuming SessionReply::succeeded requires that endpoint",
-  "All later production member target paths are predeclared; only ADR-0011 may transfer tests/m0-harness/Cargo.toml, workspace_policy.rs, and the exact two-edge harness lock hunk to M0-T07",
+  "All later production member target paths are predeclared; ADR-0011 transfers tests/m0-harness/Cargo.toml, workspace_policy.rs, and the exact two-edge harness lock hunk to M0-T07, while ADR-0013 additionally transfers only both binary Cargo.toml files for one exact dev-only Tokio test-util declaration each with no lock delta",
   "ferrum2-m0-harness has no Cargo dependency on a concrete ferrum2 crate, so both T01 static tests compile while future target sources are absent",
 ]
 +++

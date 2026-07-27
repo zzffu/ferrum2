@@ -3,8 +3,9 @@
 - **Status:** Approved
 - **ADR-0010 amendment:** Approved
 - **ADR-0011/0012 amendments:** Approved
+- **ADR-0013 amendment:** Proposed
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
 - **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
 
@@ -133,10 +134,13 @@ server TcpListener
 Dependency DAG、toolchain、exact dependency versions 与 manifest ownership 由
 `ADR-0001` 冻结，并由 `ADR-0009` 仅对 `aes 0.9.1`/`ghash 0.6.0`
 no-default `zeroize` feature anchors、由 `ADR-0011` 仅对 T07 harness 的
-`aes-gcm`/`blake3` test-only direct edges作部分取代。除
+`aes-gcm`/`blake3` test-only direct edges、由`ADR-0013`仅对两个T07 binary
+的Tokio `test-util` dev-kind edges作部分取代。除
 `tests/m0-harness/Cargo.toml`、`Cargo.lock`中
-`ferrum2-m0-harness`的精确两条edge和对应`workspace_policy`证据外，M0-T01继续
-独占所有 manifests/lock/toolchain/license。M0-T08 独占 CI 路径
+`ferrum2-m0-harness`的精确两条edge、对应`workspace_policy`证据以及
+`bins/ferrum2-client/Cargo.toml`/`bins/ferrum2-server/Cargo.toml`各一个exact
+dev declaration外，M0-T01继续独占所有 manifests/lock/toolchain/license。
+ADR-0013不允许新增lock hunk或改变production graph。M0-T08 独占 CI 路径
 `.github/workflows/m0.yml`；本次 amendment 不创建该文件，T08 execute 才能按
 ADR-0007 实现。
 
@@ -292,8 +296,9 @@ read/write/flush/shutdown及只读`terminal()`：
   `TokioTransport`/`TokioFramed`只做connector/trait delegation与closed error
   mapping；server accepted socket先用现有`RuntimeTcpStream::from_connected`
   取得stored endpoint/abortive capability。不含任何protocol transition；
-  core/runtime production dependency不变；唯一manifest/lock exception由
-  ADR-0011限定在harness test dependencies。
+  core/runtime production dependency不变；manifest exceptions由ADR-0011限定在
+  harness test dependencies/唯一lock hunk，并由ADR-0013限定在两个binary
+  dev-only Tokio `test-util` declarations且无lock delta。
 
 ### Relay data flow
 
@@ -557,7 +562,9 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
    dial/application-target wire separation、configured connect与fresh configured
    request first-write phase deadlines（默认10秒/5秒）及server
    connect-before-initial-payload-forward有focused证据，全部typed terminal/Connect
-   及Normal的role/call-site observability映射穷尽；
+   及Normal的role/call-site observability映射穷尽；paused-time capability只由
+   ADR-0013两个binary dev edges提供，排除dev edges的production feature tree
+   不含`test-util`；
    `local_addr` error/non-IPv4 保持零 first-write并发精确general failure，同时冻结
    target/protocol failure行为。
 8. **AC-08 Lifecycle/backpressure:** M0-LIFE-001～005 通过；stalled writer传播
@@ -582,14 +589,16 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
     fixture/reference/locked dependencies有来源和license review记录；dependency
     production dependency surface 精确等于 ADR-0001 经 ADR-0009 部分取代后的
     集合；harness direct dev dependencies与lock hunk精确等于ADR-0011 allowlist，
-    package identities/resolved crypto features不变；唯一批准的
+    两个binary dev-kind Tokio declarations精确等于ADR-0013 allowlist且production
+    trees不含`test-util`、lock无新增hunk，package identities/resolved crypto
+    features不变；唯一批准的
     `.github` path是M0-T08拥有的`.github/workflows/m0.yml`。
 
 M0 只有在 AC-01～AC-12 同一 integrated commit 证据齐全时才能进入 close。
 
 ## Open questions
 
-ADR-0010～0012批准后，没有留给 Engineer 自行决定的 M0 contract 问题。以下是执行期验证 contingency，不
+ADR-0010～0013批准后，没有留给 Engineer 自行决定的 M0 contract 问题。以下是执行期验证 contingency，不
 扩大实现权限：
 
 - T08 首次下载时补录 reference asset byte size 与精确 `--version` 输出；checksum/

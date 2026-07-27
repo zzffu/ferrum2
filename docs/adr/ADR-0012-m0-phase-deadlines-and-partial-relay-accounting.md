@@ -5,7 +5,8 @@
 - **Owners:** Product / Architect / Team Lead
 - **Related milestone/spec/tickets:** M0；`SPEC-0001`；M0-T03、M0-T06、M0-T07；
   部分取代 ADR-0010 的 fused client open 与“prefix 后使用 unchanged relay result”
-  假设，以及 ADR-0005 的 relay failure accounting contract
+  假设，以及 ADR-0005 的 relay failure accounting contract；本ADR的manifest/
+  dependency non-goal被ADR-0013两个test-only binary dev edges部分取代
 
 ## Context and problem
 
@@ -142,7 +143,8 @@ application 已消费。metric names、labels、cardinality、stage/outcome voca
 
 - 不改变 SIP022 bytes、crypto、replay、detection、binding、target、method 或
   protocol error taxonomy。
-- 不修改 `ferrum2-core` traits/`Session`、config field/default/range 或 manifest/
+- 不修改 `ferrum2-core` traits/`Session`、config field/default/range；除
+  ADR-0013精确批准的两个binary Tokio `test-util` dev edges外，不修改manifest/
   `Cargo.lock`/dependency。
 - 不在 `ferrum2-shadowsocks` 引入 Tokio，不新增 public observer/callback/test hook、
   management API、metric 或 raw protocol state。
@@ -191,6 +193,8 @@ worktrees并行；两者都通过 ticket/integration Architect 与 QA gate 后 T
   独立、慢connect不消耗后者、SOCKS reply timing、timeout/cancel sole-owner drop与
   零detached task；同时覆盖prefix partial progress、progress-reset idle、
   cancel/error/empty prefix、no-relay ordering和最终direction-separated metrics。
+- ADR-0013 policy与feature-tree evidence必须证明`test-util`只由两个binary
+  dev-kind edges启用，排除dev edges的production graph不含该feature且lock无新增hunk。
 - T03/T06 原 ticket commands、workspace quick/full、strict Clippy、formatting 与
   fixed-baseline diff仍须全部通过。
 
