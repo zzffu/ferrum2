@@ -2,7 +2,7 @@
 id = "M0-T08"
 title = "Qualify pinned interoperability, MSRV, and three target artifacts"
 milestone = "M0"
-status = "ready"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T07"]
 owns = [
@@ -143,11 +143,11 @@ exit推断。
 
 To be filled by the Team Lead after integration:
 
-- Branch:
+- Branch: `codex/ticket/m0-t08`
 - Commit(s):
-- Architect verdict:
-- QA verdict:
-- Integrated commit:
+- Architect verdict: pending
+- QA verdict: pending
+- Integrated commit: pending
 - GitHub run URL / run ID / attempt:
 - Pushed `GITHUB_SHA`:
 - Eleven required job results:

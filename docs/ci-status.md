@@ -198,7 +198,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0013、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T07均done，T08 `ready` | M0-T08 |
+| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0013、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T07均done，T08 `in_progress` | M0-T08 |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | PASS | `91516720`先按ticket前置build真实binaries，再由Team Lead与QA独立运行fmt/check/workspace test 3/3；首次省略build的diagnostic exit 1已如实记录，不计PASS | 当前 |
 | Host full Cargo gate | PASS | `91516720`上Team Lead与QA独立运行fmt、strict Clippy、all-features workspace tests、docs 4/4 | 当前 |

@@ -113,7 +113,7 @@ non-overlapping ownership。
     假阳性。ticket及integration Architect/QA、24条ticket commands、quick/full
     均PASS，integrated `91516720`，done；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
-    独占 `.github/workflows/m0.yml`，ready。
+    独占 `.github/workflows/m0.yml`，in_progress。
 
   Dependency graph：
 
@@ -166,7 +166,8 @@ non-overlapping ownership。
   PASS且normal/all-features各97 tests通过，均done。
   ADR-0013勘误base `24ddecf`已通过Product/Architect/QA final document gates
   并被接受；T07 candidate `5ac8f1b`与lifecycle evidence repair 1/2 `a9b0a56`
-  已通过ticket/final Architect与QA gates并集成于`91516720`，现done。T08已ready。
+  已通过ticket/final Architect与QA gates并集成于`91516720`，现done。T08已
+  `in_progress`。
   全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
