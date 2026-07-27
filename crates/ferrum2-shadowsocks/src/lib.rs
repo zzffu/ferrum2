@@ -1,20 +1,24 @@
 #![forbid(unsafe_code)]
 
-//! SIP022 TCP framing and security state for the AES-128 M0 vertical slice.
+//! SIP022 TCP framing and opaque duplex flows for the AES-128 M0 slice.
 
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
+use std::convert::Infallible;
+use std::future::{Future, poll_fn, ready};
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use ferrum2_core::{
-    AbortiveClose, ConnectErrorKind, Connector, LocalEndpoint, Outbound, TargetAddr,
+    AbortiveClose, ConnectErrorKind, Connector, Inbound, LocalEndpoint, Outbound, Session,
+    SessionReply, TargetAddr,
 };
 use ferrum2_crypto::{
-    Clock, KeyProvider, KeySelector, MonotonicInstant, SecureRandom, TcpMethod, TcpOpener, TcpSalt,
-    TcpSealer, generate_request_salt, generate_response_salt,
+    AeadError, Clock, KeyProvider, KeySelector, MonotonicInstant, SecureRandom, TcpMethod,
+    TcpOpener, TcpSalt, TcpSealer, generate_request_salt, generate_response_salt,
 };
 use thiserror::Error;
 
@@ -22,16 +26,19 @@ use thiserror::Error;
 pub const TCP_SALT_LEN: usize = 16;
 /// AES-GCM tag width.
 pub const TAG_LEN: usize = 16;
-/// Request salt plus the encrypted fixed request header.
+/// Request salt plus encrypted fixed request header.
 pub const REQUEST_FIRST_READ_LEN: usize = 43;
-/// Response salt plus the encrypted fixed response header.
+/// Response salt plus encrypted fixed response header.
 pub const RESPONSE_FIRST_READ_LEN: usize = 59;
 /// Largest plaintext chunk accepted from a compatible peer.
 pub const MAX_PAYLOAD_LEN: usize = u16::MAX as usize;
-/// Largest encrypted peer chunk stored by one decrypt direction.
+/// Fixed usable limit requested for each receive-direction scratch.
 pub const MAX_DECRYPT_WIRE_LEN: usize = MAX_PAYLOAD_LEN + TAG_LEN;
 /// Largest application chunk emitted by ferrum2.
 pub const MAX_ENCODE_PAYLOAD_LEN: usize = 16_384;
+/// Fixed usable limit requested for the single per-flow encrypt scratch.
+pub const MAX_ENCRYPT_WIRE_LEN: usize =
+    TCP_SALT_LEN + RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN + MAX_ENCODE_PAYLOAD_LEN + TAG_LEN;
 /// Largest SIP022 request padding accepted by M0.
 pub const MAX_PADDING_LEN: usize = 900;
 
@@ -40,12 +47,13 @@ const RESPONSE_TYPE: u8 = 1;
 const IPV4_ATYP: u8 = 1;
 const REQUEST_FIXED_PLAINTEXT_LEN: usize = 11;
 const RESPONSE_FIXED_PLAINTEXT_LEN: usize = 27;
+const ENCRYPTED_LENGTH_LEN: usize = 2 + TAG_LEN;
 const REPLAY_RETENTION: Duration = Duration::from_secs(60);
 const DEFAULT_REPLAY_CAPACITY: usize = 65_536;
 const MIN_REPLAY_CAPACITY: usize = 1_024;
 const MAX_REPLAY_CAPACITY: usize = 1_048_576;
 
-/// A closed frame-construction failure.
+/// A closed deterministic codec failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum FrameError {
     /// The configured key could not be selected.
@@ -54,6 +62,9 @@ pub enum FrameError {
     /// The cryptographic operation failed without exposing its source.
     #[error("cipher operation failed")]
     Cipher,
+    /// The nonce owner has no unused nonce.
+    #[error("nonce exhausted")]
+    NonceExhausted,
     /// A length cannot be represented by the SIP022 frame.
     #[error("frame bounds invalid")]
     Bounds,
@@ -74,18 +85,18 @@ pub enum FrameError {
     ResponseSaltReuse,
 }
 
-/// The closed reason for an approved SIP022 detection-prevention failure.
+/// Closed reason for an initial-envelope detection failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DetectionReason {
-    /// An initial header read returned fewer bytes than requested.
+    /// An initial fixed read completed short.
     ShortRead,
-    /// An initial header write returned fewer bytes than supplied.
+    /// An initial contiguous write completed short.
     ShortWrite,
     /// An authenticated chunk failed verification.
     Authentication,
-    /// The authenticated message type was not valid for this direction.
+    /// The authenticated message type was invalid for this direction.
     InvalidType,
-    /// The authenticated wall timestamp exceeded the inclusive 30-second window.
+    /// The authenticated timestamp exceeded the inclusive 30-second window.
     TimestampSkew,
     /// Authenticated frame lengths were invalid.
     FrameBounds,
@@ -115,36 +126,180 @@ pub enum DetectionReason {
     WriteFailed,
 }
 
-/// Closed SIP022 transport failures.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum ShadowsocksError {
-    /// A detection-prevention failure terminated the transport.
-    #[error("SIP022 detection failure")]
-    Detection(DetectionReason),
-    /// A protocol-neutral connector failed before an initial protocol write.
-    #[error("connection failed")]
-    Connect(ConnectErrorKind),
-    /// The target closed before producing a first nonempty response payload.
-    #[error("response payload unavailable")]
-    ResponseUnavailable,
+/// Closed reason for a post-first-envelope protocol failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtocolReason {
+    /// A subsequent authenticated chunk failed verification.
+    Authentication,
+    /// A subsequent frame was truncated or outside its bounds.
+    FrameBounds,
+    /// A cipher owner had no unused nonce.
+    NonceExhausted,
 }
 
-/// The single-operation transport seam for SIP022 initial headers and chunks.
-pub trait HeaderIo: Send {
-    /// Closed transport error type. It is never retained or displayed.
-    type Error;
+/// Closed phase for a post-first-envelope transport failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransportPhase {
+    /// A read operation failed.
+    Read,
+    /// A write operation failed.
+    Write,
+    /// A nonempty pending write completed with zero bytes.
+    WriteZero,
+    /// A flush operation failed.
+    Flush,
+    /// A shutdown operation failed.
+    Shutdown,
+}
 
-    /// Performs exactly one underlying read into `destination`.
-    fn read_header<'a>(
-        &'a mut self,
-        destination: &'a mut [u8],
-    ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+/// Immutable terminal state for an opaque duplex flow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FlowTerminal {
+    /// Both logical directions closed normally.
+    Normal,
+    /// An initial-envelope failure installed an abortive terminal.
+    Detection(DetectionReason),
+    /// A subsequent wire failure terminated both directions.
+    Protocol(ProtocolReason),
+    /// A subsequent transport failure terminated both directions.
+    Transport(TransportPhase),
+}
 
-    /// Performs exactly one underlying write from `source`.
-    fn write_header<'a>(
-        &'a mut self,
-        source: &'a [u8],
-    ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+/// Closed public error surface. No variant retains an underlying source.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum ShadowsocksError {
+    /// A configured-server connector failed before any protocol write.
+    #[error("connection failed")]
+    Connect(ConnectErrorKind),
+    /// An initial envelope failed closed.
+    #[error("SIP022 detection failure")]
+    Detection(DetectionReason),
+    /// A subsequent protocol operation failed closed.
+    #[error("SIP022 protocol failure")]
+    Protocol(ProtocolReason),
+    /// A subsequent transport operation failed closed.
+    #[error("SIP022 transport failure")]
+    Transport(TransportPhase),
+}
+
+/// Executor-neutral transport capability owned by one opaque flow.
+pub trait TransportIo: AbortiveClose + Send + Unpin {
+    /// Underlying error type. It is immediately erased into a closed phase.
+    type IoError;
+
+    /// Polls one transport read operation.
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>>;
+
+    /// Polls one transport write operation.
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, Self::IoError>>;
+
+    /// Polls one transport flush operation.
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::IoError>>;
+
+    /// Polls one transport write-half shutdown operation.
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>)
+    -> Poll<Result<(), Self::IoError>>;
+}
+
+/// Plaintext duplex interface exposed by the deep protocol module.
+pub trait PlainDuplex: Send + Unpin {
+    /// Polls authenticated plaintext from the peer.
+    fn poll_read_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, ShadowsocksError>>;
+
+    /// Polls admission of plaintext for encryption.
+    fn poll_write_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, ShadowsocksError>>;
+
+    /// Polls pending ciphertext drain followed by transport flush.
+    fn poll_flush_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>>;
+
+    /// Polls pending ciphertext drain followed by write-half shutdown.
+    fn poll_shutdown_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>>;
+
+    /// Returns the flow's sole immutable terminal latch.
+    fn terminal(&self) -> Option<FlowTerminal>;
+}
+
+/// Fixed scratch allocation roles observable without exposing bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BufferRole {
+    /// The one per-flow encrypt scratch.
+    Encrypt,
+    /// The one receive-direction decrypt scratch.
+    Decrypt,
+}
+
+/// Safe fixed-buffer observation seam.
+pub trait BufferObserver: Send + Sync {
+    /// Records one fixed usable-limit request and opaque storage identity.
+    fn allocated(&self, role: BufferRole, usable_limit: usize, storage_identity: usize);
+
+    /// Records the current identity at a public flow poll boundary.
+    fn inspected(&self, _role: BufferRole, _storage_identity: usize) {}
+}
+
+/// Closed terminal observation seam.
+pub trait FlowObserver: Send + Sync {
+    /// Records installation of the sole terminal latch.
+    fn terminal_installed(&self, terminal: FlowTerminal);
+}
+
+struct NoopObserver;
+
+impl BufferObserver for NoopObserver {
+    fn allocated(&self, _role: BufferRole, _usable_limit: usize, _storage_identity: usize) {}
+}
+
+impl FlowObserver for NoopObserver {
+    fn terminal_installed(&self, _terminal: FlowTerminal) {}
+}
+
+static NOOP_OBSERVER: NoopObserver = NoopObserver;
+
+#[derive(Clone, Copy)]
+struct Observers<'a> {
+    buffer: &'a dyn BufferObserver,
+    flow: &'a dyn FlowObserver,
+}
+
+impl Observers<'static> {
+    const fn noop() -> Self {
+        Self {
+            buffer: &NOOP_OBSERVER,
+            flow: &NOOP_OBSERVER,
+        }
+    }
+}
+
+fn fixed_scratch(role: BufferRole, limit: usize, observer: &dyn BufferObserver) -> BytesMut {
+    let scratch = BytesMut::with_capacity(limit);
+    observer.allocated(role, limit, scratch.as_ptr() as usize);
+    scratch
+}
+
+fn inspect_scratch(role: BufferRole, scratch: &BytesMut, observer: &dyn BufferObserver) {
+    observer.inspected(role, scratch.as_ptr() as usize);
 }
 
 /// Exact, bounded TCP replay state shared by server handshakes.
@@ -232,101 +387,189 @@ fn purge_expired(state: &mut ReplayState, now: MonotonicInstant) {
             state.insertion_order.pop_front();
             continue;
         };
-        let expired = now
+        if !now
             .duration_since(inserted)
-            .is_some_and(|elapsed| elapsed >= REPLAY_RETENTION);
-        if !expired {
+            .is_some_and(|elapsed| elapsed >= REPLAY_RETENTION)
+        {
             break;
         }
-        let expired_salt = state
+        let salt = state
             .insertion_order
             .pop_front()
             .expect("front was observed");
-        state.entries.remove(&expired_salt);
+        state.entries.remove(&salt);
     }
 }
 
-/// A client-side SIP022 outbound whose dependencies are explicit capabilities.
+/// A no-op server reply capability.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoReply;
+
+impl SessionReply for NoReply {
+    type Error = Infallible;
+
+    fn succeeded(
+        self,
+        _bound: SocketAddrV4,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        ready(Ok(()))
+    }
+
+    fn failed(
+        self,
+        _kind: ConnectErrorKind,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        ready(Ok(()))
+    }
+}
+
+/// Client outbound that stores the configured Shadowsocks server independently
+/// from each application target passed to [`Outbound::open`].
 pub struct ClientTcpOutbound<'a, K, C, T, R> {
+    server: TargetAddr,
     keys: &'a K,
     connector: &'a C,
     clock: &'a T,
     random: &'a R,
+    observers: Observers<'a>,
 }
 
 impl<'a, K, C, T, R> ClientTcpOutbound<'a, K, C, T, R> {
-    /// Creates a client-side outbound.
-    pub const fn new(keys: &'a K, connector: &'a C, clock: &'a T, random: &'a R) -> Self {
+    /// Creates an outbound for one validated configured Shadowsocks server.
+    pub fn new(
+        server: TargetAddr,
+        keys: &'a K,
+        connector: &'a C,
+        clock: &'a T,
+        random: &'a R,
+    ) -> Self {
         Self {
+            server,
             keys,
             connector,
             clock,
             random,
+            observers: Observers::noop(),
         }
+    }
+
+    /// Installs safe recording observers for focused tests.
+    pub fn with_observers(
+        mut self,
+        buffer: &'a dyn BufferObserver,
+        flow: &'a dyn FlowObserver,
+    ) -> Self {
+        self.observers = Observers { buffer, flow };
+        self
     }
 }
 
-impl<K, C, T, R> ClientTcpOutbound<'_, K, C, T, R>
+impl<'a, K, C, T, R> ClientTcpOutbound<'a, K, C, T, R>
 where
-    K: KeyProvider,
+    K: KeyProvider + Sync,
     C: Connector,
-    C::Stream: AbortiveClose + HeaderIo,
-    T: Clock,
+    C::Stream: TransportIo + LocalEndpoint,
+    T: Clock + Sync,
     R: SecureRandom,
 {
-    /// Connects first, then produces one contiguous request first-write.
+    /// Dials the stored server and completes one contiguous request write.
     pub async fn open_stream(
         &self,
-        target: &TargetAddr,
-    ) -> Result<OpenedClientStream<C::Stream>, ShadowsocksError> {
+        application_target: &TargetAddr,
+    ) -> Result<ClientFlow<'a, C::Stream, K, T>, ShadowsocksError> {
         let mut io = self
             .connector
-            .connect(target)
+            .connect(&self.server)
             .await
             .map_err(|error| ShadowsocksError::Connect(error.kind()))?;
+        let mut encrypt = fixed_scratch(
+            BufferRole::Encrypt,
+            MAX_ENCRYPT_WIRE_LEN,
+            self.observers.buffer,
+        );
+        let decrypt = fixed_scratch(
+            BufferRole::Decrypt,
+            MAX_DECRYPT_WIRE_LEN,
+            self.observers.buffer,
+        );
 
-        let salt = match generate_request_salt(self.random) {
-            Ok(salt) => salt,
-            Err(_) => return Err(terminate_detection(io, DetectionReason::RandomUnavailable)),
-        };
-        let timestamp = match self.clock.unix_seconds() {
-            Ok(timestamp) => timestamp,
-            Err(_) => return Err(terminate_detection(io, DetectionReason::ClockUnavailable)),
-        };
-        let padding = match sample_nonzero_padding(self.random) {
-            Ok(padding) => padding,
-            Err(_) => return Err(terminate_detection(io, DetectionReason::RandomUnavailable)),
-        };
-        let (wire, request_sealer) =
-            match encode_request_state(self.keys, &salt, timestamp, target, &padding, &[]) {
-                Ok(state) => state,
-                Err(error) => return Err(terminate_detection(io, detection_from_frame(error))),
-            };
-
-        let written = match io.write_header(&wire).await {
-            Ok(written) => written,
-            Err(_) => return Err(terminate_detection(io, DetectionReason::WriteFailed)),
-        };
-        if written != wire.len() {
-            return Err(terminate_detection(io, DetectionReason::ShortWrite));
+        let salt = generate_request_salt(self.random).map_err(|_| {
+            terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::RandomUnavailable,
+            )
+        })?;
+        let timestamp = self.clock.unix_seconds().map_err(|_| {
+            terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::ClockUnavailable,
+            )
+        })?;
+        let mut padding = [0_u8; MAX_PADDING_LEN];
+        let padding_len = sample_nonzero_padding(self.random, &mut padding).map_err(|_| {
+            terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::RandomUnavailable,
+            )
+        })?;
+        let request_sealer = encode_request_state_into(
+            self.keys,
+            &salt,
+            timestamp,
+            application_target,
+            &padding[..padding_len],
+            &[],
+            &mut encrypt,
+        )
+        .map_err(|error| {
+            terminate_detection(&mut io, self.observers.flow, detection_from_frame(error))
+        })?;
+        let expected = encrypt.len();
+        let write = poll_fn(|cx| Pin::new(&mut io).poll_write(cx, &encrypt)).await;
+        let written = write.map_err(|_| {
+            terminate_detection(&mut io, self.observers.flow, DetectionReason::WriteFailed)
+        })?;
+        if written != expected {
+            return Err(terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::ShortWrite,
+            ));
         }
-        Ok(OpenedClientStream {
+        encrypt.clear();
+        inspect_scratch(BufferRole::Encrypt, &encrypt, self.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &decrypt, self.observers.buffer);
+
+        Ok(ClientFlow {
             io,
+            keys: self.keys,
+            clock: self.clock,
             request_salt: salt,
             request_sealer,
+            response_opener: None,
+            rx: ClientRx::ResponseFixed,
+            tx: TxState::Open,
+            encrypt,
+            decrypt,
+            staged: None,
+            lifecycle: Lifecycle::default(),
+            observers: self.observers,
         })
     }
 }
 
-impl<K, C, T, R> Outbound for ClientTcpOutbound<'_, K, C, T, R>
+impl<'a, K, C, T, R> Outbound for ClientTcpOutbound<'a, K, C, T, R>
 where
-    K: KeyProvider,
+    K: KeyProvider + Sync,
     C: Connector,
-    C::Stream: AbortiveClose + HeaderIo + Send,
+    C::Stream: TransportIo + LocalEndpoint,
     T: Clock + Sync,
     R: SecureRandom,
 {
-    type Stream = OpenedClientStream<C::Stream>;
+    type Stream = ClientFlow<'a, C::Stream, K, T>;
     type Error = ShadowsocksError;
 
     async fn open(&self, target: &TargetAddr) -> Result<Self::Stream, Self::Error> {
@@ -334,297 +577,1260 @@ where
     }
 }
 
-/// A client stream after its request first-write succeeded.
-pub struct OpenedClientStream<S> {
-    io: S,
-    request_salt: TcpSalt,
-    request_sealer: TcpSealer,
+/// Server inbound that authenticates into a core session and opaque flow.
+pub struct ShadowsocksTcpInbound<'a, K, T, R> {
+    keys: &'a K,
+    clock: &'a T,
+    random: &'a R,
+    replay: &'a TcpReplayStore,
+    observers: Observers<'a>,
 }
 
-impl<S: LocalEndpoint> LocalEndpoint for OpenedClientStream<S> {
+impl<'a, K, T, R> ShadowsocksTcpInbound<'a, K, T, R> {
+    /// Creates a server-side inbound.
+    pub const fn new(keys: &'a K, clock: &'a T, random: &'a R, replay: &'a TcpReplayStore) -> Self {
+        Self {
+            keys,
+            clock,
+            random,
+            replay,
+            observers: Observers::noop(),
+        }
+    }
+
+    /// Installs safe recording observers for focused tests.
+    pub fn with_observers(
+        mut self,
+        buffer: &'a dyn BufferObserver,
+        flow: &'a dyn FlowObserver,
+    ) -> Self {
+        self.observers = Observers { buffer, flow };
+        self
+    }
+}
+
+impl<'a, K, T, R> ShadowsocksTcpInbound<'a, K, T, R>
+where
+    K: KeyProvider + Sync,
+    T: Clock + Sync,
+    R: SecureRandom,
+{
+    /// Authenticates one request and returns exact target/payload ownership.
+    pub async fn accept_stream<S>(
+        &self,
+        mut io: S,
+    ) -> Result<Session<ServerFlow<'a, S, K, T, R>, NoReply>, ShadowsocksError>
+    where
+        S: TransportIo,
+    {
+        let mut decrypt = fixed_scratch(
+            BufferRole::Decrypt,
+            MAX_DECRYPT_WIRE_LEN,
+            self.observers.buffer,
+        );
+        let encrypt = fixed_scratch(
+            BufferRole::Encrypt,
+            MAX_ENCRYPT_WIRE_LEN,
+            self.observers.buffer,
+        );
+        reset_decrypt(&mut decrypt);
+
+        let first_read =
+            poll_fn(|cx| Pin::new(&mut io).poll_read(cx, &mut decrypt[..REQUEST_FIRST_READ_LEN]))
+                .await
+                .map_err(|_| {
+                    terminate_detection(&mut io, self.observers.flow, DetectionReason::ReadFailed)
+                })?;
+        if first_read != REQUEST_FIRST_READ_LEN {
+            return Err(terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::ShortRead,
+            ));
+        }
+
+        let request_salt = TcpSalt::from_bytes(
+            decrypt[..TCP_SALT_LEN]
+                .try_into()
+                .expect("fixed salt region"),
+        );
+        let mut opener = opener_for(self.keys, &request_salt)
+            .map_err(|reason| terminate_detection(&mut io, self.observers.flow, reason))?;
+        let fixed_wire: [u8; REQUEST_FIXED_PLAINTEXT_LEN + TAG_LEN] = decrypt
+            [TCP_SALT_LEN..REQUEST_FIRST_READ_LEN]
+            .try_into()
+            .expect("fixed encrypted request width");
+        decrypt.clear();
+        decrypt.extend_from_slice(&fixed_wire);
+        opener.open_in_place(&mut decrypt).map_err(|error| {
+            terminate_detection(&mut io, self.observers.flow, detection_from_aead(error))
+        })?;
+        if decrypt.len() != REQUEST_FIXED_PLAINTEXT_LEN {
+            return Err(terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::FrameBounds,
+            ));
+        }
+        if decrypt[0] != REQUEST_TYPE {
+            return Err(terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::InvalidType,
+            ));
+        }
+        let timestamp = u64::from_be_bytes(decrypt[1..9].try_into().expect("timestamp"));
+        let now = self.clock.unix_seconds().map_err(|_| {
+            terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::ClockUnavailable,
+            )
+        })?;
+        if now.abs_diff(timestamp) > 30 {
+            return Err(terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::TimestampSkew,
+            ));
+        }
+        let variable_len = usize::from(u16::from_be_bytes(
+            decrypt[9..11].try_into().expect("length"),
+        ));
+        let wire_len = variable_len
+            .checked_add(TAG_LEN)
+            .filter(|length| *length <= MAX_DECRYPT_WIRE_LEN)
+            .ok_or_else(|| {
+                terminate_detection(&mut io, self.observers.flow, DetectionReason::FrameBounds)
+            })?;
+
+        reset_decrypt(&mut decrypt);
+        let mut filled = 0;
+        while filled < wire_len {
+            let read =
+                poll_fn(|cx| Pin::new(&mut io).poll_read(cx, &mut decrypt[filled..wire_len]))
+                    .await
+                    .map_err(|_| {
+                        terminate_detection(
+                            &mut io,
+                            self.observers.flow,
+                            DetectionReason::ReadFailed,
+                        )
+                    })?;
+            if read == 0 {
+                return Err(terminate_detection(
+                    &mut io,
+                    self.observers.flow,
+                    DetectionReason::ShortRead,
+                ));
+            }
+            filled = filled
+                .checked_add(read)
+                .filter(|n| *n <= wire_len)
+                .ok_or_else(|| {
+                    terminate_detection(&mut io, self.observers.flow, DetectionReason::FrameBounds)
+                })?;
+        }
+        decrypt.truncate(wire_len);
+        opener.open_in_place(&mut decrypt).map_err(|error| {
+            terminate_detection(&mut io, self.observers.flow, detection_from_aead(error))
+        })?;
+        if decrypt.len() != variable_len {
+            return Err(terminate_detection(
+                &mut io,
+                self.observers.flow,
+                DetectionReason::FrameBounds,
+            ));
+        }
+        let parsed = parse_request_variable(&decrypt)
+            .map_err(|reason| terminate_detection(&mut io, self.observers.flow, reason))?;
+        match self
+            .replay
+            .check_and_insert(&request_salt, self.clock.monotonic_now())
+        {
+            Ok(()) => {}
+            Err(ReplayInsertError::Duplicate) => {
+                return Err(terminate_detection(
+                    &mut io,
+                    self.observers.flow,
+                    DetectionReason::Replay,
+                ));
+            }
+            Err(ReplayInsertError::Capacity) => {
+                return Err(terminate_detection(
+                    &mut io,
+                    self.observers.flow,
+                    DetectionReason::ReplayCapacity,
+                ));
+            }
+            Err(ReplayInsertError::Unavailable) => {
+                return Err(terminate_detection(
+                    &mut io,
+                    self.observers.flow,
+                    DetectionReason::ReplayUnavailable,
+                ));
+            }
+        }
+
+        let initial_payload = parsed.initial_payload;
+        reset_decrypt(&mut decrypt);
+        inspect_scratch(BufferRole::Encrypt, &encrypt, self.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &decrypt, self.observers.buffer);
+        Ok(Session {
+            target: parsed.target,
+            stream: ServerFlow {
+                io,
+                keys: self.keys,
+                clock: self.clock,
+                random: self.random,
+                request_salt,
+                request_opener: opener,
+                response_sealer: None,
+                rx: DataRx::Length { filled: 0 },
+                tx: TxState::ResponsePending,
+                encrypt,
+                decrypt,
+                staged: None,
+                lifecycle: Lifecycle::default(),
+                observers: self.observers,
+            },
+            initial_payload,
+            reply: NoReply,
+        })
+    }
+}
+
+impl<'a, K, T, R, S> Inbound<S> for ShadowsocksTcpInbound<'a, K, T, R>
+where
+    K: KeyProvider + Sync,
+    T: Clock + Sync,
+    R: SecureRandom,
+    S: TransportIo,
+{
+    type Stream = ServerFlow<'a, S, K, T, R>;
+    type Reply = NoReply;
+    type Error = ShadowsocksError;
+
+    async fn accept(&self, io: S) -> Result<Session<Self::Stream, Self::Reply>, Self::Error> {
+        self.accept_stream(io).await
+    }
+}
+
+#[derive(Default)]
+struct Lifecycle {
+    terminal: Option<FlowTerminal>,
+    rx_closed: bool,
+    tx_closed: bool,
+}
+
+impl Lifecycle {
+    fn fatal_error(&self) -> Option<ShadowsocksError> {
+        match self.terminal {
+            Some(FlowTerminal::Detection(reason)) => Some(ShadowsocksError::Detection(reason)),
+            Some(FlowTerminal::Protocol(reason)) => Some(ShadowsocksError::Protocol(reason)),
+            Some(FlowTerminal::Transport(phase)) => Some(ShadowsocksError::Transport(phase)),
+            Some(FlowTerminal::Normal) | None => None,
+        }
+    }
+
+    fn close_rx(&mut self, observer: &dyn FlowObserver) {
+        if self.terminal.is_some() {
+            return;
+        }
+        self.rx_closed = true;
+        self.maybe_normal(observer);
+    }
+
+    fn close_tx(&mut self, observer: &dyn FlowObserver) {
+        if self.terminal.is_some() {
+            return;
+        }
+        self.tx_closed = true;
+        self.maybe_normal(observer);
+    }
+
+    fn maybe_normal(&mut self, observer: &dyn FlowObserver) {
+        if self.rx_closed && self.tx_closed && self.terminal.is_none() {
+            self.terminal = Some(FlowTerminal::Normal);
+            observer.terminal_installed(FlowTerminal::Normal);
+        }
+    }
+
+    fn install_protocol(
+        &mut self,
+        observer: &dyn FlowObserver,
+        reason: ProtocolReason,
+    ) -> ShadowsocksError {
+        if self.terminal.is_none() {
+            let terminal = FlowTerminal::Protocol(reason);
+            self.terminal = Some(terminal);
+            observer.terminal_installed(terminal);
+        }
+        self.fatal_error()
+            .expect("protocol installation creates fatal terminal")
+    }
+
+    fn install_transport(
+        &mut self,
+        observer: &dyn FlowObserver,
+        phase: TransportPhase,
+    ) -> ShadowsocksError {
+        if self.terminal.is_none() {
+            let terminal = FlowTerminal::Transport(phase);
+            self.terminal = Some(terminal);
+            observer.terminal_installed(terminal);
+        }
+        self.fatal_error()
+            .expect("transport installation creates fatal terminal")
+    }
+
+    fn install_detection<S: AbortiveClose>(
+        &mut self,
+        io: &mut S,
+        observer: &dyn FlowObserver,
+        reason: DetectionReason,
+    ) -> ShadowsocksError {
+        if self.terminal.is_none() {
+            let terminal = FlowTerminal::Detection(reason);
+            self.terminal = Some(terminal);
+            observer.terminal_installed(terminal);
+            let _ = io.mark_abortive();
+        }
+        self.fatal_error()
+            .expect("detection installation creates fatal terminal")
+    }
+}
+
+enum ClientRx {
+    ResponseFixed,
+    ResponsePayload { wire_len: usize, filled: usize },
+    Data(DataRx),
+    Poison,
+}
+
+enum DataRx {
+    Length { filled: usize },
+    Payload { wire_len: usize, filled: usize },
+    Ready { position: usize },
+    Closed,
+    Poison,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TxState {
+    ResponsePending,
+    Open,
+    Closed,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StagedKind {
+    First,
+    Subsequent,
+}
+
+struct StagedWrite {
+    kind: StagedKind,
+    position: usize,
+}
+
+/// Opaque client flow retaining unsplit transport and both cipher directions.
+pub struct ClientFlow<'a, S, K, T> {
+    io: S,
+    keys: &'a K,
+    clock: &'a T,
+    request_salt: TcpSalt,
+    request_sealer: TcpSealer,
+    response_opener: Option<TcpOpener>,
+    rx: ClientRx,
+    tx: TxState,
+    encrypt: BytesMut,
+    decrypt: BytesMut,
+    staged: Option<StagedWrite>,
+    lifecycle: Lifecycle,
+    observers: Observers<'a>,
+}
+
+impl<S: LocalEndpoint, K, T> LocalEndpoint for ClientFlow<'_, S, K, T> {
     fn local_endpoint(&self) -> SocketAddrV4 {
         self.io.local_endpoint()
     }
 }
 
-impl<S> OpenedClientStream<S> {
-    /// Returns the redacted typed request salt used for response binding.
-    pub const fn request_salt(&self) -> &TcpSalt {
-        &self.request_salt
-    }
-
-    /// Encodes one client-to-server data frame after the initial request.
-    pub fn seal_request_chunk(&mut self, payload: &[u8]) -> Result<Bytes, FrameError> {
-        seal_data_chunk(&mut self.request_sealer, payload)
-    }
-
-    /// Returns the underlying connector-owned transport.
-    pub fn into_inner(self) -> S {
-        self.io
-    }
-}
-
-/// A fully authenticated server-side request.
-pub struct AcceptedServerStream<S> {
+/// Opaque server flow retaining unsplit transport and both cipher directions.
+pub struct ServerFlow<'a, S, K, T, R> {
     io: S,
-    target: TargetAddr,
-    initial_payload: Bytes,
+    keys: &'a K,
+    clock: &'a T,
+    random: &'a R,
     request_salt: TcpSalt,
     request_opener: TcpOpener,
+    response_sealer: Option<TcpSealer>,
+    rx: DataRx,
+    tx: TxState,
+    encrypt: BytesMut,
+    decrypt: BytesMut,
+    staged: Option<StagedWrite>,
+    lifecycle: Lifecycle,
+    observers: Observers<'a>,
 }
 
-impl<S> AcceptedServerStream<S> {
-    /// Returns the authenticated target.
-    pub const fn target(&self) -> &TargetAddr {
-        &self.target
-    }
+fn reset_decrypt(scratch: &mut BytesMut) {
+    scratch.clear();
+    scratch.resize(MAX_DECRYPT_WIRE_LEN, 0);
+}
 
-    /// Returns authenticated initial payload bytes.
-    pub const fn initial_payload(&self) -> &Bytes {
-        &self.initial_payload
-    }
+fn copy_ready(scratch: &BytesMut, position: &mut usize, destination: &mut [u8]) -> (usize, bool) {
+    let remaining = scratch.len().saturating_sub(*position);
+    let copied = remaining.min(destination.len());
+    destination[..copied].copy_from_slice(&scratch[*position..*position + copied]);
+    *position += copied;
+    (copied, *position == scratch.len())
+}
 
-    /// Returns the typed request salt used for response binding.
-    pub const fn request_salt(&self) -> &TcpSalt {
-        &self.request_salt
-    }
-
-    /// Connects only after authentication, semantics, and replay insertion.
-    pub async fn connect_target<C: Connector>(
-        self,
-        connector: &C,
-    ) -> Result<ConnectedServerStream<S, C::Stream>, ShadowsocksError> {
-        let target_stream = connector
-            .connect(&self.target)
-            .await
-            .map_err(|error| ShadowsocksError::Connect(error.kind()))?;
-        Ok(ConnectedServerStream {
-            io: self.io,
-            target_stream,
-            request_salt: self.request_salt,
-            request_opener: self.request_opener,
-        })
+fn protocol_from_aead(error: AeadError) -> ProtocolReason {
+    match error {
+        AeadError::NonceExhausted => ProtocolReason::NonceExhausted,
+        AeadError::AuthenticationFailed | AeadError::OperationFailed => {
+            ProtocolReason::Authentication
+        }
     }
 }
 
-/// Server-side request state after the target connector succeeded.
-pub struct ConnectedServerStream<S, D> {
-    io: S,
-    target_stream: D,
-    request_salt: TcpSalt,
-    request_opener: TcpOpener,
-}
-
-impl<S, D> ConnectedServerStream<S, D> {
-    /// Borrows the connector-owned target stream.
-    pub const fn target_stream(&self) -> &D {
-        &self.target_stream
-    }
-
-    /// Mutably borrows the connector-owned target stream.
-    pub fn target_stream_mut(&mut self) -> &mut D {
-        &mut self.target_stream
-    }
-
-    /// Authenticates one client-to-server data frame.
-    pub fn open_request_chunk(
+impl<'a, S, K, T> ClientFlow<'a, S, K, T>
+where
+    S: TransportIo,
+    K: KeyProvider + Sync,
+    T: Clock + Sync,
+{
+    fn poll_read(
         &mut self,
-        encrypted_length: &[u8],
-        encrypted_payload: &[u8],
-    ) -> Result<Bytes, FrameError> {
-        open_data_frame(
-            &mut self.request_opener,
-            encrypted_length,
-            encrypted_payload,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        if let Some(error) = self.lifecycle.fatal_error() {
+            return Poll::Ready(Err(error));
+        }
+        if destination.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if self.lifecycle.terminal == Some(FlowTerminal::Normal) || self.lifecycle.rx_closed {
+            return Poll::Ready(Ok(0));
+        }
+
+        let state = std::mem::replace(&mut self.rx, ClientRx::Poison);
+        match state {
+            ClientRx::ResponseFixed => {
+                reset_decrypt(&mut self.decrypt);
+                match Pin::new(&mut self.io)
+                    .poll_read(cx, &mut self.decrypt[..RESPONSE_FIRST_READ_LEN])
+                {
+                    Poll::Pending => {
+                        self.rx = ClientRx::ResponseFixed;
+                        Poll::Pending
+                    }
+                    Poll::Ready(Err(_)) => {
+                        let error = self.lifecycle.install_detection(
+                            &mut self.io,
+                            self.observers.flow,
+                            DetectionReason::ReadFailed,
+                        );
+                        Poll::Ready(Err(error))
+                    }
+                    Poll::Ready(Ok(read)) if read != RESPONSE_FIRST_READ_LEN => {
+                        let error = self.lifecycle.install_detection(
+                            &mut self.io,
+                            self.observers.flow,
+                            DetectionReason::ShortRead,
+                        );
+                        Poll::Ready(Err(error))
+                    }
+                    Poll::Ready(Ok(_)) => {
+                        let result = self.open_response_fixed();
+                        match result {
+                            Ok(wire_len) => {
+                                reset_decrypt(&mut self.decrypt);
+                                self.rx = ClientRx::ResponsePayload {
+                                    wire_len,
+                                    filled: 0,
+                                };
+                                cx.waker().wake_by_ref();
+                                Poll::Pending
+                            }
+                            Err(reason) => {
+                                let error = self.lifecycle.install_detection(
+                                    &mut self.io,
+                                    self.observers.flow,
+                                    reason,
+                                );
+                                Poll::Ready(Err(error))
+                            }
+                        }
+                    }
+                }
+            }
+            ClientRx::ResponsePayload {
+                wire_len,
+                mut filled,
+            } => match Pin::new(&mut self.io).poll_read(cx, &mut self.decrypt[filled..wire_len]) {
+                Poll::Pending => {
+                    self.rx = ClientRx::ResponsePayload { wire_len, filled };
+                    Poll::Pending
+                }
+                Poll::Ready(Err(_)) => {
+                    let error = self.lifecycle.install_detection(
+                        &mut self.io,
+                        self.observers.flow,
+                        DetectionReason::ReadFailed,
+                    );
+                    Poll::Ready(Err(error))
+                }
+                Poll::Ready(Ok(0)) => {
+                    let error = self.lifecycle.install_detection(
+                        &mut self.io,
+                        self.observers.flow,
+                        DetectionReason::ShortRead,
+                    );
+                    Poll::Ready(Err(error))
+                }
+                Poll::Ready(Ok(read)) => {
+                    filled += read;
+                    if filled > wire_len {
+                        let error = self.lifecycle.install_detection(
+                            &mut self.io,
+                            self.observers.flow,
+                            DetectionReason::FrameBounds,
+                        );
+                        return Poll::Ready(Err(error));
+                    }
+                    if filled < wire_len {
+                        self.rx = ClientRx::ResponsePayload { wire_len, filled };
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    self.decrypt.truncate(wire_len);
+                    let opened = self
+                        .response_opener
+                        .as_mut()
+                        .expect("fixed response installed opener")
+                        .open_in_place(&mut self.decrypt);
+                    if let Err(error) = opened {
+                        let error = self.lifecycle.install_detection(
+                            &mut self.io,
+                            self.observers.flow,
+                            detection_from_aead(error),
+                        );
+                        return Poll::Ready(Err(error));
+                    }
+                    let mut position = 0;
+                    let (copied, complete) = copy_ready(&self.decrypt, &mut position, destination);
+                    self.rx = if complete {
+                        reset_decrypt(&mut self.decrypt);
+                        ClientRx::Data(DataRx::Length { filled: 0 })
+                    } else {
+                        ClientRx::Data(DataRx::Ready { position })
+                    };
+                    Poll::Ready(Ok(copied))
+                }
+            },
+            ClientRx::Data(state) => {
+                let result = poll_data_read(
+                    &mut self.io,
+                    self.response_opener
+                        .as_mut()
+                        .expect("response opener exists in data state"),
+                    &mut self.decrypt,
+                    state,
+                    &mut self.lifecycle,
+                    self.observers.flow,
+                    cx,
+                    destination,
+                );
+                match result {
+                    DataPoll::Pending(state) => {
+                        self.rx = ClientRx::Data(state);
+                        Poll::Pending
+                    }
+                    DataPoll::Ready(state, result) => {
+                        self.rx = ClientRx::Data(state);
+                        Poll::Ready(result)
+                    }
+                }
+            }
+            ClientRx::Poison => unreachable!("client RX state is restored before returning"),
+        }
+    }
+
+    fn open_response_fixed(&mut self) -> Result<usize, DetectionReason> {
+        let response_salt =
+            TcpSalt::from_bytes(self.decrypt[..TCP_SALT_LEN].try_into().expect("fixed salt"));
+        if response_salt == self.request_salt {
+            return Err(DetectionReason::ResponseBinding);
+        }
+        let mut opener = opener_for(self.keys, &response_salt)?;
+        let fixed_wire: [u8; RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN] = self.decrypt
+            [TCP_SALT_LEN..RESPONSE_FIRST_READ_LEN]
+            .try_into()
+            .expect("fixed encrypted response width");
+        self.decrypt.clear();
+        self.decrypt.extend_from_slice(&fixed_wire);
+        opener
+            .open_in_place(&mut self.decrypt)
+            .map_err(detection_from_aead)?;
+        if self.decrypt.len() != RESPONSE_FIXED_PLAINTEXT_LEN {
+            return Err(DetectionReason::FrameBounds);
+        }
+        if self.decrypt[0] != RESPONSE_TYPE {
+            return Err(DetectionReason::InvalidType);
+        }
+        let timestamp = u64::from_be_bytes(self.decrypt[1..9].try_into().expect("timestamp"));
+        let now = self
+            .clock
+            .unix_seconds()
+            .map_err(|_| DetectionReason::ClockUnavailable)?;
+        if now.abs_diff(timestamp) > 30 {
+            return Err(DetectionReason::TimestampSkew);
+        }
+        if self.decrypt[9..25] != *self.request_salt.as_bytes() {
+            return Err(DetectionReason::ResponseBinding);
+        }
+        let payload_len = usize::from(u16::from_be_bytes(
+            self.decrypt[25..27].try_into().expect("length"),
+        ));
+        if payload_len == 0 {
+            return Err(DetectionReason::FrameBounds);
+        }
+        let wire_len = payload_len
+            .checked_add(TAG_LEN)
+            .filter(|length| *length <= MAX_DECRYPT_WIRE_LEN)
+            .ok_or(DetectionReason::FrameBounds)?;
+        self.response_opener = Some(opener);
+        Ok(wire_len)
+    }
+
+    fn poll_write(
+        &mut self,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        poll_write_open(
+            &mut self.io,
+            &mut self.request_sealer,
+            &mut self.encrypt,
+            &mut self.staged,
+            &mut self.tx,
+            &mut self.lifecycle,
+            self.observers.flow,
+            cx,
+            source,
         )
     }
 }
 
-impl<S, D> ConnectedServerStream<S, D>
+impl<S, K, T> PlainDuplex for ClientFlow<'_, S, K, T>
 where
-    S: AbortiveClose + HeaderIo,
+    S: TransportIo,
+    K: KeyProvider + Sync,
+    T: Clock + Sync,
 {
-    /// Writes the first nonempty server response in one underlying operation.
-    pub async fn write_first_response<K, T, R>(
-        self,
-        keys: &K,
-        clock: &T,
-        random: &R,
-        first_payload: &[u8],
-    ) -> Result<ServerDataStream<S, D>, ShadowsocksError>
-    where
-        K: KeyProvider,
-        T: Clock,
-        R: SecureRandom + ?Sized,
-    {
-        let Self {
-            mut io,
-            target_stream,
-            request_salt,
-            request_opener,
-        } = self;
-        if first_payload.is_empty() {
-            return Err(ShadowsocksError::ResponseUnavailable);
+    fn poll_read_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        this.poll_read(cx, destination)
+    }
+
+    fn poll_write_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        this.poll_write(cx, source)
+    }
+
+    fn poll_flush_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        poll_flush(
+            &mut this.io,
+            &mut this.encrypt,
+            &mut this.staged,
+            this.tx,
+            &mut this.lifecycle,
+            this.observers.flow,
+            cx,
+        )
+    }
+
+    fn poll_shutdown_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        poll_shutdown(
+            &mut this.io,
+            &mut this.encrypt,
+            &mut this.staged,
+            &mut this.tx,
+            &mut this.lifecycle,
+            this.observers.flow,
+            cx,
+        )
+    }
+
+    fn terminal(&self) -> Option<FlowTerminal> {
+        self.lifecycle.terminal
+    }
+}
+
+impl<'a, S, K, T, R> ServerFlow<'a, S, K, T, R>
+where
+    S: TransportIo,
+    K: KeyProvider + Sync,
+    T: Clock + Sync,
+    R: SecureRandom,
+{
+    fn poll_read(
+        &mut self,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        if let Some(error) = self.lifecycle.fatal_error() {
+            return Poll::Ready(Err(error));
         }
-        let response_salt = match generate_response_salt(random, &request_salt) {
-            Ok(salt) => salt,
-            Err(_) => return Err(terminate_detection(io, DetectionReason::RandomUnavailable)),
-        };
-        let timestamp = match clock.unix_seconds() {
-            Ok(timestamp) => timestamp,
-            Err(_) => return Err(terminate_detection(io, DetectionReason::ClockUnavailable)),
-        };
-        let (wire, response_sealer) = match encode_response_state(
-            keys,
-            &response_salt,
-            timestamp,
-            &request_salt,
-            first_payload,
+        if destination.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if self.lifecycle.terminal == Some(FlowTerminal::Normal) || self.lifecycle.rx_closed {
+            return Poll::Ready(Ok(0));
+        }
+        let state = std::mem::replace(&mut self.rx, DataRx::Poison);
+        match poll_data_read(
+            &mut self.io,
+            &mut self.request_opener,
+            &mut self.decrypt,
+            state,
+            &mut self.lifecycle,
+            self.observers.flow,
+            cx,
+            destination,
         ) {
-            Ok(state) => state,
-            Err(error) => return Err(terminate_detection(io, detection_from_frame(error))),
-        };
-        let written = match io.write_header(&wire).await {
-            Ok(written) => written,
-            Err(_) => return Err(terminate_detection(io, DetectionReason::WriteFailed)),
-        };
-        if written != wire.len() {
-            return Err(terminate_detection(io, DetectionReason::ShortWrite));
+            DataPoll::Pending(state) => {
+                self.rx = state;
+                Poll::Pending
+            }
+            DataPoll::Ready(state, result) => {
+                self.rx = state;
+                Poll::Ready(result)
+            }
         }
-        Ok(ServerDataStream {
-            io,
-            target_stream,
-            request_opener,
-            response_sealer,
-        })
+    }
+
+    fn poll_write(
+        &mut self,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        if let Some(error) = self.lifecycle.fatal_error() {
+            return Poll::Ready(Err(error));
+        }
+        if source.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if self.lifecycle.terminal == Some(FlowTerminal::Normal) {
+            return Poll::Ready(Ok(0));
+        }
+        if self.lifecycle.tx_closed {
+            let error = self
+                .lifecycle
+                .install_transport(self.observers.flow, TransportPhase::Write);
+            return Poll::Ready(Err(error));
+        }
+
+        if self.staged.is_some() {
+            match drain_staged(
+                &mut self.io,
+                &mut self.encrypt,
+                &mut self.staged,
+                &mut self.lifecycle,
+                self.observers.flow,
+                cx,
+            ) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+
+        let admitted = source.len().min(MAX_ENCODE_PAYLOAD_LEN);
+        if self.tx == TxState::ResponsePending {
+            let response_salt = match generate_response_salt(self.random, &self.request_salt) {
+                Ok(salt) => salt,
+                Err(_) => {
+                    let error = self.lifecycle.install_detection(
+                        &mut self.io,
+                        self.observers.flow,
+                        DetectionReason::RandomUnavailable,
+                    );
+                    return Poll::Ready(Err(error));
+                }
+            };
+            let timestamp = match self.clock.unix_seconds() {
+                Ok(timestamp) => timestamp,
+                Err(_) => {
+                    let error = self.lifecycle.install_detection(
+                        &mut self.io,
+                        self.observers.flow,
+                        DetectionReason::ClockUnavailable,
+                    );
+                    return Poll::Ready(Err(error));
+                }
+            };
+            match encode_response_state_into(
+                self.keys,
+                &response_salt,
+                timestamp,
+                &self.request_salt,
+                &source[..admitted],
+                &mut self.encrypt,
+            ) {
+                Ok(sealer) => self.response_sealer = Some(sealer),
+                Err(error) => {
+                    let error = self.lifecycle.install_detection(
+                        &mut self.io,
+                        self.observers.flow,
+                        detection_from_frame(error),
+                    );
+                    return Poll::Ready(Err(error));
+                }
+            }
+            self.staged = Some(StagedWrite {
+                kind: StagedKind::First,
+                position: 0,
+            });
+            self.tx = TxState::Open;
+            return Poll::Ready(Ok(admitted));
+        }
+
+        let sealer = self
+            .response_sealer
+            .as_mut()
+            .expect("open server TX has response sealer");
+        match seal_data_chunk_into(sealer, &source[..admitted], &mut self.encrypt) {
+            Ok(()) => {
+                self.staged = Some(StagedWrite {
+                    kind: StagedKind::Subsequent,
+                    position: 0,
+                });
+                Poll::Ready(Ok(admitted))
+            }
+            Err(error) => {
+                let reason = protocol_from_frame(error);
+                let error = self.lifecycle.install_protocol(self.observers.flow, reason);
+                Poll::Ready(Err(error))
+            }
+        }
     }
 }
 
-/// Server-side framed stream after its response first-write.
-pub struct ServerDataStream<S, D> {
-    io: S,
-    target_stream: D,
-    request_opener: TcpOpener,
-    response_sealer: TcpSealer,
-}
-
-impl<S: LocalEndpoint, D> LocalEndpoint for ServerDataStream<S, D> {
-    fn local_endpoint(&self) -> SocketAddrV4 {
-        self.io.local_endpoint()
-    }
-}
-
-impl<S, D> ServerDataStream<S, D> {
-    /// Encodes one server-to-client data frame.
-    pub fn seal_response_chunk(&mut self, payload: &[u8]) -> Result<Bytes, FrameError> {
-        seal_data_chunk(&mut self.response_sealer, payload)
-    }
-
-    /// Returns the underlying streams and authenticated request opener.
-    pub fn into_parts(self) -> (S, D, TcpOpener) {
-        (self.io, self.target_stream, self.request_opener)
-    }
-}
-
-/// Authenticates a server request, validates all semantics, and only then
-/// mutates exact replay state.
-pub async fn accept_server_request<S, K, T>(
-    mut io: S,
-    keys: &K,
-    clock: &T,
-    replay: &TcpReplayStore,
-) -> Result<AcceptedServerStream<S>, ShadowsocksError>
+impl<S, K, T, R> PlainDuplex for ServerFlow<'_, S, K, T, R>
 where
-    S: AbortiveClose + HeaderIo,
-    K: KeyProvider,
-    T: Clock,
+    S: TransportIo,
+    K: KeyProvider + Sync,
+    T: Clock + Sync,
+    R: SecureRandom,
 {
-    let mut first_read = [0_u8; REQUEST_FIRST_READ_LEN];
-    let read = match io.read_header(&mut first_read).await {
-        Ok(read) => read,
-        Err(_) => return Err(terminate_detection(io, DetectionReason::ReadFailed)),
-    };
-    if read != REQUEST_FIRST_READ_LEN {
-        return Err(terminate_detection(io, DetectionReason::ShortRead));
+    fn poll_read_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        this.poll_read(cx, destination)
     }
 
-    let salt_bytes: [u8; TCP_SALT_LEN] = first_read[..TCP_SALT_LEN]
-        .try_into()
-        .expect("fixed salt region");
-    let request_salt = TcpSalt::from_bytes(salt_bytes);
-    let mut opener = match opener_for(keys, &request_salt) {
-        Ok(opener) => opener,
-        Err(reason) => return Err(terminate_detection(io, reason)),
-    };
-    let mut fixed = BytesMut::with_capacity(REQUEST_FIXED_PLAINTEXT_LEN + TAG_LEN);
-    fixed.extend_from_slice(&first_read[TCP_SALT_LEN..]);
-    if opener.open_in_place(&mut fixed).is_err() {
-        return Err(terminate_detection(io, DetectionReason::Authentication));
+    fn poll_write_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        this.poll_write(cx, source)
     }
-    if fixed.len() != REQUEST_FIXED_PLAINTEXT_LEN {
-        return Err(terminate_detection(io, DetectionReason::FrameBounds));
-    }
-    if fixed[0] != REQUEST_TYPE {
-        return Err(terminate_detection(io, DetectionReason::InvalidType));
-    }
-    let timestamp = u64::from_be_bytes(fixed[1..9].try_into().expect("fixed timestamp"));
-    let now_wall = match clock.unix_seconds() {
-        Ok(now) => now,
-        Err(_) => return Err(terminate_detection(io, DetectionReason::ClockUnavailable)),
-    };
-    if now_wall.abs_diff(timestamp) > 30 {
-        return Err(terminate_detection(io, DetectionReason::TimestampSkew));
-    }
-    let variable_len = usize::from(u16::from_be_bytes(
-        fixed[9..11].try_into().expect("fixed variable length"),
-    ));
-    let wire_len = match variable_len.checked_add(TAG_LEN) {
-        Some(length) if length <= MAX_DECRYPT_WIRE_LEN => length,
-        _ => return Err(terminate_detection(io, DetectionReason::FrameBounds)),
-    };
 
-    // Allocation size is the fixed protocol maximum, never the peer value.
-    let mut read_scratch = vec![0_u8; MAX_DECRYPT_WIRE_LEN];
-    let read = match io.read_header(&mut read_scratch[..wire_len]).await {
-        Ok(read) => read,
-        Err(_) => return Err(terminate_detection(io, DetectionReason::ReadFailed)),
-    };
-    if read != wire_len {
-        return Err(terminate_detection(io, DetectionReason::ShortRead));
+    fn poll_flush_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        poll_flush(
+            &mut this.io,
+            &mut this.encrypt,
+            &mut this.staged,
+            this.tx,
+            &mut this.lifecycle,
+            this.observers.flow,
+            cx,
+        )
     }
-    let mut variable = BytesMut::with_capacity(MAX_DECRYPT_WIRE_LEN);
-    variable.extend_from_slice(&read_scratch[..wire_len]);
-    if opener.open_in_place(&mut variable).is_err() {
-        return Err(terminate_detection(io, DetectionReason::Authentication));
-    }
-    if variable.len() != variable_len {
-        return Err(terminate_detection(io, DetectionReason::FrameBounds));
-    }
-    let parsed = match parse_request_variable(&variable) {
-        Ok(parsed) => parsed,
-        Err(reason) => return Err(terminate_detection(io, reason)),
-    };
 
-    match replay.check_and_insert(&request_salt, clock.monotonic_now()) {
-        Ok(()) => {}
-        Err(ReplayInsertError::Duplicate) => {
-            return Err(terminate_detection(io, DetectionReason::Replay));
+    fn poll_shutdown_plain(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        poll_shutdown(
+            &mut this.io,
+            &mut this.encrypt,
+            &mut this.staged,
+            &mut this.tx,
+            &mut this.lifecycle,
+            this.observers.flow,
+            cx,
+        )
+    }
+
+    fn terminal(&self) -> Option<FlowTerminal> {
+        self.lifecycle.terminal
+    }
+}
+
+enum DataPoll {
+    Pending(DataRx),
+    Ready(DataRx, Result<usize, ShadowsocksError>),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_data_read<S: TransportIo>(
+    io: &mut S,
+    opener: &mut TcpOpener,
+    scratch: &mut BytesMut,
+    state: DataRx,
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    cx: &mut Context<'_>,
+    destination: &mut [u8],
+) -> DataPoll {
+    match state {
+        DataRx::Length { mut filled } => {
+            if filled == 0 {
+                reset_decrypt(scratch);
+            }
+            match Pin::new(io).poll_read(cx, &mut scratch[filled..ENCRYPTED_LENGTH_LEN]) {
+                Poll::Pending => DataPoll::Pending(DataRx::Length { filled }),
+                Poll::Ready(Err(_)) => {
+                    let error = lifecycle.install_transport(observer, TransportPhase::Read);
+                    DataPoll::Ready(DataRx::Poison, Err(error))
+                }
+                Poll::Ready(Ok(0)) if filled == 0 => {
+                    lifecycle.close_rx(observer);
+                    DataPoll::Ready(DataRx::Closed, Ok(0))
+                }
+                Poll::Ready(Ok(0)) => {
+                    let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                    DataPoll::Ready(DataRx::Poison, Err(error))
+                }
+                Poll::Ready(Ok(read)) => {
+                    filled += read;
+                    if filled > ENCRYPTED_LENGTH_LEN {
+                        let error =
+                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    }
+                    if filled < ENCRYPTED_LENGTH_LEN {
+                        cx.waker().wake_by_ref();
+                        return DataPoll::Pending(DataRx::Length { filled });
+                    }
+                    scratch.truncate(ENCRYPTED_LENGTH_LEN);
+                    if let Err(error) = opener.open_in_place(scratch) {
+                        let error = lifecycle.install_protocol(observer, protocol_from_aead(error));
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    }
+                    if scratch.len() != 2 {
+                        let error =
+                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    }
+                    let payload_len = usize::from(u16::from_be_bytes([scratch[0], scratch[1]]));
+                    let Some(wire_len) = payload_len.checked_add(TAG_LEN) else {
+                        let error =
+                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    };
+                    if wire_len > MAX_DECRYPT_WIRE_LEN {
+                        let error =
+                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    }
+                    reset_decrypt(scratch);
+                    cx.waker().wake_by_ref();
+                    DataPoll::Pending(DataRx::Payload {
+                        wire_len,
+                        filled: 0,
+                    })
+                }
+            }
         }
-        Err(ReplayInsertError::Capacity) => {
-            return Err(terminate_detection(io, DetectionReason::ReplayCapacity));
+        DataRx::Payload {
+            wire_len,
+            mut filled,
+        } => match Pin::new(io).poll_read(cx, &mut scratch[filled..wire_len]) {
+            Poll::Pending => DataPoll::Pending(DataRx::Payload { wire_len, filled }),
+            Poll::Ready(Err(_)) => {
+                let error = lifecycle.install_transport(observer, TransportPhase::Read);
+                DataPoll::Ready(DataRx::Poison, Err(error))
+            }
+            Poll::Ready(Ok(0)) => {
+                let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                DataPoll::Ready(DataRx::Poison, Err(error))
+            }
+            Poll::Ready(Ok(read)) => {
+                filled += read;
+                if filled > wire_len {
+                    let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                    return DataPoll::Ready(DataRx::Poison, Err(error));
+                }
+                if filled < wire_len {
+                    cx.waker().wake_by_ref();
+                    return DataPoll::Pending(DataRx::Payload { wire_len, filled });
+                }
+                scratch.truncate(wire_len);
+                if let Err(error) = opener.open_in_place(scratch) {
+                    let error = lifecycle.install_protocol(observer, protocol_from_aead(error));
+                    return DataPoll::Ready(DataRx::Poison, Err(error));
+                }
+                if scratch.is_empty() {
+                    reset_decrypt(scratch);
+                    cx.waker().wake_by_ref();
+                    return DataPoll::Pending(DataRx::Length { filled: 0 });
+                }
+                let mut position = 0;
+                let (copied, complete) = copy_ready(scratch, &mut position, destination);
+                let next = if complete {
+                    reset_decrypt(scratch);
+                    DataRx::Length { filled: 0 }
+                } else {
+                    DataRx::Ready { position }
+                };
+                DataPoll::Ready(next, Ok(copied))
+            }
+        },
+        DataRx::Ready { mut position } => {
+            let (copied, complete) = copy_ready(scratch, &mut position, destination);
+            let next = if complete {
+                reset_decrypt(scratch);
+                DataRx::Length { filled: 0 }
+            } else {
+                DataRx::Ready { position }
+            };
+            DataPoll::Ready(next, Ok(copied))
         }
-        Err(ReplayInsertError::Unavailable) => {
-            return Err(terminate_detection(io, DetectionReason::ReplayUnavailable));
+        DataRx::Closed => DataPoll::Ready(DataRx::Closed, Ok(0)),
+        DataRx::Poison => {
+            let error = lifecycle
+                .fatal_error()
+                .expect("poison state only exists after fatal installation");
+            DataPoll::Ready(DataRx::Poison, Err(error))
         }
     }
+}
 
-    Ok(AcceptedServerStream {
-        io,
-        target: parsed.target,
-        initial_payload: parsed.initial_payload,
-        request_salt,
-        request_opener: opener,
-    })
+#[allow(clippy::too_many_arguments)]
+fn poll_write_open<S: TransportIo>(
+    io: &mut S,
+    sealer: &mut TcpSealer,
+    scratch: &mut BytesMut,
+    staged: &mut Option<StagedWrite>,
+    tx: &mut TxState,
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    cx: &mut Context<'_>,
+    source: &[u8],
+) -> Poll<Result<usize, ShadowsocksError>> {
+    if let Some(error) = lifecycle.fatal_error() {
+        return Poll::Ready(Err(error));
+    }
+    if source.is_empty() {
+        return Poll::Ready(Ok(0));
+    }
+    if lifecycle.terminal == Some(FlowTerminal::Normal) {
+        return Poll::Ready(Ok(0));
+    }
+    if lifecycle.tx_closed {
+        let error = lifecycle.install_transport(observer, TransportPhase::Write);
+        return Poll::Ready(Err(error));
+    }
+    if staged.is_some() {
+        match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
+    }
+    let admitted = source.len().min(MAX_ENCODE_PAYLOAD_LEN);
+    match seal_data_chunk_into(sealer, &source[..admitted], scratch) {
+        Ok(()) => {
+            *staged = Some(StagedWrite {
+                kind: StagedKind::Subsequent,
+                position: 0,
+            });
+            *tx = TxState::Open;
+            Poll::Ready(Ok(admitted))
+        }
+        Err(error) => {
+            let error = lifecycle.install_protocol(observer, protocol_from_frame(error));
+            Poll::Ready(Err(error))
+        }
+    }
+}
+
+fn drain_staged<S: TransportIo>(
+    io: &mut S,
+    scratch: &mut BytesMut,
+    staged: &mut Option<StagedWrite>,
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    cx: &mut Context<'_>,
+) -> Poll<Result<(), ShadowsocksError>> {
+    let current = staged.as_mut().expect("caller checked staged wire");
+    let source = &scratch[current.position..];
+    match Pin::new(&mut *io).poll_write(cx, source) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Err(_)) if current.kind == StagedKind::First => {
+            let error = lifecycle.install_detection(io, observer, DetectionReason::WriteFailed);
+            Poll::Ready(Err(error))
+        }
+        Poll::Ready(Err(_)) => {
+            let error = lifecycle.install_transport(observer, TransportPhase::Write);
+            Poll::Ready(Err(error))
+        }
+        Poll::Ready(Ok(written)) if current.kind == StagedKind::First => {
+            if written != source.len() {
+                let error = lifecycle.install_detection(io, observer, DetectionReason::ShortWrite);
+                return Poll::Ready(Err(error));
+            }
+            scratch.clear();
+            *staged = None;
+            Poll::Ready(Ok(()))
+        }
+        Poll::Ready(Ok(0)) => {
+            let error = lifecycle.install_transport(observer, TransportPhase::WriteZero);
+            Poll::Ready(Err(error))
+        }
+        Poll::Ready(Ok(written)) => {
+            current.position += written;
+            if current.position > scratch.len() {
+                let error = lifecycle.install_transport(observer, TransportPhase::Write);
+                return Poll::Ready(Err(error));
+            }
+            if current.position == scratch.len() {
+                scratch.clear();
+                *staged = None;
+                Poll::Ready(Ok(()))
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_flush<S: TransportIo>(
+    io: &mut S,
+    scratch: &mut BytesMut,
+    staged: &mut Option<StagedWrite>,
+    tx: TxState,
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    cx: &mut Context<'_>,
+) -> Poll<Result<(), ShadowsocksError>> {
+    if let Some(error) = lifecycle.fatal_error() {
+        return Poll::Ready(Err(error));
+    }
+    if lifecycle.terminal == Some(FlowTerminal::Normal) || lifecycle.tx_closed {
+        return Poll::Ready(Ok(()));
+    }
+    if staged.is_some() {
+        return match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
+            Poll::Ready(Ok(())) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            other => other,
+        };
+    }
+    if tx == TxState::ResponsePending {
+        return Poll::Ready(Ok(()));
+    }
+    match Pin::new(io).poll_flush(cx) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+        Poll::Ready(Err(_)) => {
+            let error = lifecycle.install_transport(observer, TransportPhase::Flush);
+            Poll::Ready(Err(error))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_shutdown<S: TransportIo>(
+    io: &mut S,
+    scratch: &mut BytesMut,
+    staged: &mut Option<StagedWrite>,
+    tx: &mut TxState,
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    cx: &mut Context<'_>,
+) -> Poll<Result<(), ShadowsocksError>> {
+    if let Some(error) = lifecycle.fatal_error() {
+        return Poll::Ready(Err(error));
+    }
+    if lifecycle.terminal == Some(FlowTerminal::Normal) || lifecycle.tx_closed {
+        return Poll::Ready(Ok(()));
+    }
+    if staged.is_some() {
+        return match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
+            Poll::Ready(Ok(())) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            other => other,
+        };
+    }
+    match Pin::new(io).poll_shutdown(cx) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Ok(())) => {
+            *tx = TxState::Closed;
+            lifecycle.close_tx(observer);
+            Poll::Ready(Ok(()))
+        }
+        Poll::Ready(Err(_)) => {
+            let error = lifecycle.install_transport(observer, TransportPhase::Shutdown);
+            Poll::Ready(Err(error))
+        }
+    }
 }
 
 struct ParsedRequest {
@@ -634,10 +1840,7 @@ struct ParsedRequest {
 
 fn parse_request_variable(variable: &[u8]) -> Result<ParsedRequest, DetectionReason> {
     const ADDRESS_AND_PADDING_LEN: usize = 9;
-    if variable.len() < ADDRESS_AND_PADDING_LEN {
-        return Err(DetectionReason::AddressBounds);
-    }
-    if variable[0] != IPV4_ATYP {
+    if variable.len() < ADDRESS_AND_PADDING_LEN || variable[0] != IPV4_ATYP {
         return Err(DetectionReason::AddressBounds);
     }
     let address = Ipv4Addr::new(variable[1], variable[2], variable[3], variable[4]);
@@ -664,152 +1867,7 @@ fn parse_request_variable(variable: &[u8]) -> Result<ParsedRequest, DetectionRea
     })
 }
 
-/// Authenticates the response first-read, checks full request-salt binding,
-/// authenticates the first payload, and only then returns application bytes.
-pub async fn accept_client_response<S, K, T>(
-    stream: OpenedClientStream<S>,
-    keys: &K,
-    clock: &T,
-) -> Result<OpenedClientResponse<S>, ShadowsocksError>
-where
-    S: AbortiveClose + HeaderIo,
-    K: KeyProvider,
-    T: Clock,
-{
-    let OpenedClientStream {
-        mut io,
-        request_salt,
-        request_sealer,
-    } = stream;
-    let mut first_read = [0_u8; RESPONSE_FIRST_READ_LEN];
-    let read = match io.read_header(&mut first_read).await {
-        Ok(read) => read,
-        Err(_) => return Err(terminate_detection(io, DetectionReason::ReadFailed)),
-    };
-    if read != RESPONSE_FIRST_READ_LEN {
-        return Err(terminate_detection(io, DetectionReason::ShortRead));
-    }
-    let response_salt = TcpSalt::from_bytes(
-        first_read[..TCP_SALT_LEN]
-            .try_into()
-            .expect("fixed salt region"),
-    );
-    if response_salt == request_salt {
-        return Err(terminate_detection(io, DetectionReason::ResponseBinding));
-    }
-    let mut opener = match opener_for(keys, &response_salt) {
-        Ok(opener) => opener,
-        Err(reason) => return Err(terminate_detection(io, reason)),
-    };
-    let mut fixed = BytesMut::with_capacity(RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN);
-    fixed.extend_from_slice(&first_read[TCP_SALT_LEN..]);
-    if opener.open_in_place(&mut fixed).is_err() {
-        return Err(terminate_detection(io, DetectionReason::Authentication));
-    }
-    if fixed.len() != RESPONSE_FIXED_PLAINTEXT_LEN {
-        return Err(terminate_detection(io, DetectionReason::FrameBounds));
-    }
-    if fixed[0] != RESPONSE_TYPE {
-        return Err(terminate_detection(io, DetectionReason::InvalidType));
-    }
-    let timestamp = u64::from_be_bytes(fixed[1..9].try_into().expect("fixed timestamp"));
-    let now_wall = match clock.unix_seconds() {
-        Ok(now) => now,
-        Err(_) => return Err(terminate_detection(io, DetectionReason::ClockUnavailable)),
-    };
-    if now_wall.abs_diff(timestamp) > 30 {
-        return Err(terminate_detection(io, DetectionReason::TimestampSkew));
-    }
-    if fixed[9..25] != *request_salt.as_bytes() {
-        return Err(terminate_detection(io, DetectionReason::ResponseBinding));
-    }
-    let payload_len = usize::from(u16::from_be_bytes(
-        fixed[25..27].try_into().expect("fixed payload length"),
-    ));
-    if payload_len == 0 {
-        return Err(terminate_detection(io, DetectionReason::FrameBounds));
-    }
-    let wire_len = match payload_len
-        .checked_add(TAG_LEN)
-        .filter(|length| *length <= MAX_DECRYPT_WIRE_LEN)
-    {
-        Some(length) => length,
-        None => return Err(terminate_detection(io, DetectionReason::FrameBounds)),
-    };
-    let mut scratch = vec![0_u8; MAX_DECRYPT_WIRE_LEN];
-    let read = match io.read_header(&mut scratch[..wire_len]).await {
-        Ok(read) => read,
-        Err(_) => return Err(terminate_detection(io, DetectionReason::ReadFailed)),
-    };
-    if read != wire_len {
-        return Err(terminate_detection(io, DetectionReason::ShortRead));
-    }
-    let mut payload = BytesMut::with_capacity(MAX_DECRYPT_WIRE_LEN);
-    payload.extend_from_slice(&scratch[..wire_len]);
-    if opener.open_in_place(&mut payload).is_err() {
-        return Err(terminate_detection(io, DetectionReason::Authentication));
-    }
-    if payload.len() != payload_len {
-        return Err(terminate_detection(io, DetectionReason::FrameBounds));
-    }
-    Ok(OpenedClientResponse {
-        io,
-        first_payload: payload.freeze(),
-        request_sealer,
-        response_opener: opener,
-    })
-}
-
-/// Client-side state after response authentication and request-salt binding.
-pub struct OpenedClientResponse<S> {
-    io: S,
-    first_payload: Bytes,
-    request_sealer: TcpSealer,
-    response_opener: TcpOpener,
-}
-
-impl<S: LocalEndpoint> LocalEndpoint for OpenedClientResponse<S> {
-    fn local_endpoint(&self) -> SocketAddrV4 {
-        self.io.local_endpoint()
-    }
-}
-
-impl<S> OpenedClientResponse<S> {
-    /// Returns the authenticated first server payload.
-    pub const fn first_payload(&self) -> &Bytes {
-        &self.first_payload
-    }
-
-    /// Encodes one subsequent request data frame.
-    pub fn seal_request_chunk(&mut self, payload: &[u8]) -> Result<Bytes, FrameError> {
-        seal_data_chunk(&mut self.request_sealer, payload)
-    }
-
-    /// Authenticates one subsequent server-to-client data frame.
-    pub fn open_response_chunk(
-        &mut self,
-        encrypted_length: &[u8],
-        encrypted_payload: &[u8],
-    ) -> Result<Bytes, FrameError> {
-        open_data_frame(
-            &mut self.response_opener,
-            encrypted_length,
-            encrypted_payload,
-        )
-    }
-
-    /// Returns the transport and response opener for runtime-owned relay.
-    pub fn into_parts(self) -> (S, TcpOpener) {
-        (self.io, self.response_opener)
-    }
-}
-
-/// Builds the contiguous SIP022 request first-write from already selected,
-/// validated inputs.
-///
-/// Production callers obtain the salt, timestamp, and padding through their
-/// injected capabilities. Exposing the deterministic codec also lets reviewed
-/// wire fixtures exercise the same state transition.
+/// Builds a deterministic contiguous request first-write for reviewed fixtures.
 pub fn encode_request_first_write<K: KeyProvider>(
     keys: &K,
     salt: &TcpSalt,
@@ -818,86 +1876,87 @@ pub fn encode_request_first_write<K: KeyProvider>(
     padding: &[u8],
     initial_payload: &[u8],
 ) -> Result<Bytes, FrameError> {
-    encode_request_state(keys, salt, timestamp, target, padding, initial_payload)
-        .map(|(wire, _sealer)| wire)
+    let mut scratch = BytesMut::with_capacity(REQUEST_FIRST_READ_LEN + MAX_DECRYPT_WIRE_LEN);
+    let _ = encode_request_state_into(
+        keys,
+        salt,
+        timestamp,
+        target,
+        padding,
+        initial_payload,
+        &mut scratch,
+    )?;
+    Ok(scratch.freeze())
 }
 
-fn encode_request_state<K: KeyProvider>(
+fn encode_request_state_into<K: KeyProvider>(
     keys: &K,
     salt: &TcpSalt,
     timestamp: u64,
     target: &TargetAddr,
     padding: &[u8],
     initial_payload: &[u8],
-) -> Result<(Bytes, TcpSealer), FrameError> {
+    scratch: &mut BytesMut,
+) -> Result<TcpSealer, FrameError> {
     if padding.len() > MAX_PADDING_LEN {
         return Err(FrameError::PaddingBounds);
     }
     if padding.is_empty() && initial_payload.is_empty() {
         return Err(FrameError::EmptyRequest);
     }
-
     let socket = target
         .as_socket_addr()
         .ok_or(FrameError::AddressUnsupported)?;
     let IpAddr::V4(address) = socket.ip() else {
         return Err(FrameError::AddressUnsupported);
     };
-
-    let variable_len = 1_usize
-        .checked_add(4)
-        .and_then(|length| length.checked_add(2))
-        .and_then(|length| length.checked_add(2))
-        .and_then(|length| length.checked_add(padding.len()))
+    let variable_len = 9_usize
+        .checked_add(padding.len())
         .and_then(|length| length.checked_add(initial_payload.len()))
         .ok_or(FrameError::Bounds)?;
-    let variable_len_u16 = u16::try_from(variable_len).map_err(|_| FrameError::Bounds)?;
+    let variable_u16 = u16::try_from(variable_len).map_err(|_| FrameError::Bounds)?;
 
-    let mut variable = BytesMut::with_capacity(variable_len);
-    variable.extend_from_slice(&[IPV4_ATYP]);
-    variable.extend_from_slice(&address.octets());
-    variable.extend_from_slice(&target.port().get().to_be_bytes());
-    variable.extend_from_slice(
+    scratch.clear();
+    scratch.extend_from_slice(&[REQUEST_TYPE]);
+    scratch.extend_from_slice(&timestamp.to_be_bytes());
+    scratch.extend_from_slice(&variable_u16.to_be_bytes());
+    let mut sealer = sealer_for(keys, salt)?;
+    sealer
+        .seal_in_place(scratch)
+        .map_err(frame_from_seal_aead)?;
+    let fixed: [u8; REQUEST_FIXED_PLAINTEXT_LEN + TAG_LEN] = scratch[..]
+        .try_into()
+        .expect("fixed encrypted request width");
+
+    scratch.clear();
+    scratch.extend_from_slice(&[IPV4_ATYP]);
+    scratch.extend_from_slice(&address.octets());
+    scratch.extend_from_slice(&target.port().get().to_be_bytes());
+    scratch.extend_from_slice(
         &u16::try_from(padding.len())
             .map_err(|_| FrameError::PaddingBounds)?
             .to_be_bytes(),
     );
-    variable.extend_from_slice(padding);
-    variable.extend_from_slice(initial_payload);
-
-    let mut fixed = BytesMut::with_capacity(11);
-    fixed.extend_from_slice(&[REQUEST_TYPE]);
-    fixed.extend_from_slice(&timestamp.to_be_bytes());
-    fixed.extend_from_slice(&variable_len_u16.to_be_bytes());
-
-    let sealer = keys
-        .with_key(KeySelector::Default, |key| {
-            let subkey = key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, salt);
-            let mut sealer = TcpSealer::new(subkey);
-            sealer
-                .seal_in_place(&mut fixed)
-                .map_err(|_| FrameError::Cipher)?;
-            sealer
-                .seal_in_place(&mut variable)
-                .map_err(|_| FrameError::Cipher)?;
-            Ok::<_, FrameError>(sealer)
-        })
-        .map_err(|_| FrameError::KeyUnavailable)?;
-    let sealer = sealer?;
-
-    let capacity = TCP_SALT_LEN
-        .checked_add(fixed.len())
-        .and_then(|length| length.checked_add(variable.len()))
+    scratch.extend_from_slice(padding);
+    scratch.extend_from_slice(initial_payload);
+    sealer
+        .seal_in_place(scratch)
+        .map_err(frame_from_seal_aead)?;
+    let variable_wire_len = scratch.len();
+    let total = REQUEST_FIRST_READ_LEN
+        .checked_add(variable_wire_len)
         .ok_or(FrameError::Bounds)?;
-    let mut wire = BytesMut::with_capacity(capacity);
-    wire.extend_from_slice(salt.as_bytes());
-    wire.extend_from_slice(&fixed);
-    wire.extend_from_slice(&variable);
-    Ok((wire.freeze(), sealer))
+    if total > scratch.capacity() {
+        return Err(FrameError::Bounds);
+    }
+    scratch.resize(total, 0);
+    scratch.copy_within(0..variable_wire_len, REQUEST_FIRST_READ_LEN);
+    scratch[..TCP_SALT_LEN].copy_from_slice(salt.as_bytes());
+    scratch[TCP_SALT_LEN..REQUEST_FIRST_READ_LEN].copy_from_slice(&fixed);
+    Ok(sealer)
 }
 
-/// Builds the contiguous SIP022 response first-write and binds it to the full
-/// request salt.
+/// Builds a deterministic contiguous response first-write for reviewed fixtures.
 pub fn encode_response_first_write<K: KeyProvider>(
     keys: &K,
     response_salt: &TcpSalt,
@@ -905,17 +1964,26 @@ pub fn encode_response_first_write<K: KeyProvider>(
     request_salt: &TcpSalt,
     first_payload: &[u8],
 ) -> Result<Bytes, FrameError> {
-    encode_response_state(keys, response_salt, timestamp, request_salt, first_payload)
-        .map(|(wire, _sealer)| wire)
+    let mut scratch = BytesMut::with_capacity(MAX_ENCRYPT_WIRE_LEN);
+    let _ = encode_response_state_into(
+        keys,
+        response_salt,
+        timestamp,
+        request_salt,
+        first_payload,
+        &mut scratch,
+    )?;
+    Ok(scratch.freeze())
 }
 
-fn encode_response_state<K: KeyProvider>(
+fn encode_response_state_into<K: KeyProvider>(
     keys: &K,
     response_salt: &TcpSalt,
     timestamp: u64,
     request_salt: &TcpSalt,
     first_payload: &[u8],
-) -> Result<(Bytes, TcpSealer), FrameError> {
+    scratch: &mut BytesMut,
+) -> Result<TcpSealer, FrameError> {
     if first_payload.is_empty() {
         return Err(FrameError::EmptyResponse);
     }
@@ -927,116 +1995,161 @@ fn encode_response_state<K: KeyProvider>(
     }
     let payload_len = u16::try_from(first_payload.len()).map_err(|_| FrameError::Bounds)?;
 
-    let mut fixed = BytesMut::with_capacity(27);
-    fixed.extend_from_slice(&[RESPONSE_TYPE]);
-    fixed.extend_from_slice(&timestamp.to_be_bytes());
-    fixed.extend_from_slice(request_salt.as_bytes());
-    fixed.extend_from_slice(&payload_len.to_be_bytes());
-    let mut payload = BytesMut::with_capacity(first_payload.len());
-    payload.extend_from_slice(first_payload);
+    scratch.clear();
+    scratch.extend_from_slice(&[RESPONSE_TYPE]);
+    scratch.extend_from_slice(&timestamp.to_be_bytes());
+    scratch.extend_from_slice(request_salt.as_bytes());
+    scratch.extend_from_slice(&payload_len.to_be_bytes());
+    let mut sealer = sealer_for(keys, response_salt)?;
+    sealer
+        .seal_in_place(scratch)
+        .map_err(frame_from_seal_aead)?;
+    let fixed: [u8; RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN] = scratch[..]
+        .try_into()
+        .expect("fixed encrypted response width");
 
-    let sealer = keys
-        .with_key(KeySelector::Default, |key| {
-            let subkey = key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, response_salt);
-            let mut sealer = TcpSealer::new(subkey);
-            sealer
-                .seal_in_place(&mut fixed)
-                .map_err(|_| FrameError::Cipher)?;
-            sealer
-                .seal_in_place(&mut payload)
-                .map_err(|_| FrameError::Cipher)?;
-            Ok::<_, FrameError>(sealer)
-        })
-        .map_err(|_| FrameError::KeyUnavailable)?;
-    let sealer = sealer?;
-
-    let capacity = TCP_SALT_LEN
-        .checked_add(fixed.len())
-        .and_then(|length| length.checked_add(payload.len()))
+    scratch.clear();
+    scratch.extend_from_slice(first_payload);
+    sealer
+        .seal_in_place(scratch)
+        .map_err(frame_from_seal_aead)?;
+    let payload_wire_len = scratch.len();
+    let total = RESPONSE_FIRST_READ_LEN
+        .checked_add(payload_wire_len)
         .ok_or(FrameError::Bounds)?;
-    let mut wire = BytesMut::with_capacity(capacity);
-    wire.extend_from_slice(response_salt.as_bytes());
-    wire.extend_from_slice(&fixed);
-    wire.extend_from_slice(&payload);
-    Ok((wire.freeze(), sealer))
+    if total > MAX_ENCRYPT_WIRE_LEN {
+        return Err(FrameError::Bounds);
+    }
+    scratch.resize(total, 0);
+    scratch.copy_within(0..payload_wire_len, RESPONSE_FIRST_READ_LEN);
+    scratch[..TCP_SALT_LEN].copy_from_slice(response_salt.as_bytes());
+    scratch[TCP_SALT_LEN..RESPONSE_FIRST_READ_LEN].copy_from_slice(&fixed);
+    Ok(sealer)
 }
 
-fn seal_data_chunk(sealer: &mut TcpSealer, payload: &[u8]) -> Result<Bytes, FrameError> {
+fn seal_data_chunk_into(
+    sealer: &mut TcpSealer,
+    payload: &[u8],
+    scratch: &mut BytesMut,
+) -> Result<(), FrameError> {
     if payload.len() > MAX_ENCODE_PAYLOAD_LEN {
         return Err(FrameError::Bounds);
     }
     let payload_len = u16::try_from(payload.len()).map_err(|_| FrameError::Bounds)?;
-    let mut length = BytesMut::with_capacity(2);
-    length.extend_from_slice(&payload_len.to_be_bytes());
-    let mut encrypted_payload = BytesMut::with_capacity(payload.len());
-    encrypted_payload.extend_from_slice(payload);
+    scratch.clear();
+    scratch.extend_from_slice(&payload_len.to_be_bytes());
     sealer
-        .seal_in_place(&mut length)
-        .map_err(|_| FrameError::Cipher)?;
+        .seal_in_place(scratch)
+        .map_err(frame_from_seal_aead)?;
+    let length: [u8; ENCRYPTED_LENGTH_LEN] =
+        scratch[..].try_into().expect("encrypted length width");
+
+    scratch.clear();
+    scratch.extend_from_slice(payload);
     sealer
-        .seal_in_place(&mut encrypted_payload)
-        .map_err(|_| FrameError::Cipher)?;
-    let mut wire = BytesMut::with_capacity(length.len() + encrypted_payload.len());
-    wire.extend_from_slice(&length);
-    wire.extend_from_slice(&encrypted_payload);
-    Ok(wire.freeze())
+        .seal_in_place(scratch)
+        .map_err(frame_from_seal_aead)?;
+    let payload_wire_len = scratch.len();
+    let total = ENCRYPTED_LENGTH_LEN
+        .checked_add(payload_wire_len)
+        .ok_or(FrameError::Bounds)?;
+    if total > MAX_ENCRYPT_WIRE_LEN {
+        return Err(FrameError::Bounds);
+    }
+    scratch.resize(total, 0);
+    scratch.copy_within(0..payload_wire_len, ENCRYPTED_LENGTH_LEN);
+    scratch[..ENCRYPTED_LENGTH_LEN].copy_from_slice(&length);
+    Ok(())
 }
 
-/// Authenticates and decodes one complete SIP022 data frame.
-///
-/// `encrypted_length` is exactly the encrypted two-byte length chunk and
-/// `encrypted_payload` is the corresponding encrypted payload chunk. The
-/// decoder accepts the full peer range `0..=65535`.
+/// Authenticates one complete subsequent frame for deterministic codec tests.
 pub fn open_data_frame(
     opener: &mut TcpOpener,
     encrypted_length: &[u8],
     encrypted_payload: &[u8],
 ) -> Result<Bytes, FrameError> {
-    if encrypted_length.len() != 2 + TAG_LEN || encrypted_payload.len() > MAX_DECRYPT_WIRE_LEN {
+    if encrypted_length.len() != ENCRYPTED_LENGTH_LEN
+        || encrypted_payload.len() > MAX_DECRYPT_WIRE_LEN
+    {
         return Err(FrameError::Bounds);
     }
-    let mut length = BytesMut::with_capacity(2 + TAG_LEN);
-    length.extend_from_slice(encrypted_length);
+    let mut scratch = BytesMut::with_capacity(MAX_DECRYPT_WIRE_LEN);
+    scratch.extend_from_slice(encrypted_length);
     opener
-        .open_in_place(&mut length)
-        .map_err(|_| FrameError::Cipher)?;
-    if length.len() != 2 {
+        .open_in_place(&mut scratch)
+        .map_err(frame_from_open_aead)?;
+    if scratch.len() != 2 {
         return Err(FrameError::Bounds);
     }
-    let payload_len = usize::from(u16::from_be_bytes([length[0], length[1]]));
-    let expected_wire_len = payload_len.checked_add(TAG_LEN).ok_or(FrameError::Bounds)?;
-    if encrypted_payload.len() != expected_wire_len {
+    let payload_len = usize::from(u16::from_be_bytes([scratch[0], scratch[1]]));
+    if encrypted_payload.len() != payload_len.checked_add(TAG_LEN).ok_or(FrameError::Bounds)? {
         return Err(FrameError::Bounds);
     }
-    let mut payload = BytesMut::with_capacity(MAX_DECRYPT_WIRE_LEN);
-    payload.extend_from_slice(encrypted_payload);
+    scratch.clear();
+    scratch.extend_from_slice(encrypted_payload);
     opener
-        .open_in_place(&mut payload)
-        .map_err(|_| FrameError::Cipher)?;
-    if payload.len() != payload_len {
+        .open_in_place(&mut scratch)
+        .map_err(frame_from_open_aead)?;
+    if scratch.len() != payload_len {
         return Err(FrameError::Bounds);
     }
-    Ok(payload.freeze())
+    Ok(scratch.freeze())
+}
+
+fn sealer_for<K: KeyProvider>(keys: &K, salt: &TcpSalt) -> Result<TcpSealer, FrameError> {
+    keys.with_key(KeySelector::Default, |key| {
+        TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, salt))
+    })
+    .map_err(|_| FrameError::KeyUnavailable)
 }
 
 fn opener_for<K: KeyProvider>(keys: &K, salt: &TcpSalt) -> Result<TcpOpener, DetectionReason> {
     keys.with_key(KeySelector::Default, |key| {
-        let subkey = key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, salt);
-        TcpOpener::new(subkey)
+        TcpOpener::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, salt))
     })
     .map_err(|_| DetectionReason::KeyUnavailable)
 }
 
-fn terminate_detection<S: AbortiveClose>(mut io: S, reason: DetectionReason) -> ShadowsocksError {
+fn terminate_detection<S: AbortiveClose>(
+    io: &mut S,
+    observer: &dyn FlowObserver,
+    reason: DetectionReason,
+) -> ShadowsocksError {
+    observer.terminal_installed(FlowTerminal::Detection(reason));
     let _ = io.mark_abortive();
     ShadowsocksError::Detection(reason)
+}
+
+fn detection_from_aead(error: AeadError) -> DetectionReason {
+    match error {
+        AeadError::NonceExhausted => DetectionReason::FrameBounds,
+        AeadError::AuthenticationFailed | AeadError::OperationFailed => {
+            DetectionReason::Authentication
+        }
+    }
+}
+
+fn frame_from_seal_aead(error: AeadError) -> FrameError {
+    match error {
+        AeadError::NonceExhausted => FrameError::NonceExhausted,
+        AeadError::AuthenticationFailed | AeadError::OperationFailed => FrameError::Cipher,
+    }
+}
+
+fn frame_from_open_aead(error: AeadError) -> FrameError {
+    match error {
+        AeadError::NonceExhausted => FrameError::NonceExhausted,
+        AeadError::AuthenticationFailed | AeadError::OperationFailed => FrameError::Cipher,
+    }
 }
 
 fn detection_from_frame(error: FrameError) -> DetectionReason {
     match error {
         FrameError::KeyUnavailable => DetectionReason::KeyUnavailable,
         FrameError::Cipher => DetectionReason::Authentication,
-        FrameError::Bounds | FrameError::EmptyResponse => DetectionReason::FrameBounds,
+        FrameError::NonceExhausted | FrameError::Bounds | FrameError::EmptyResponse => {
+            DetectionReason::FrameBounds
+        }
         FrameError::AddressUnsupported => DetectionReason::AddressBounds,
         FrameError::PaddingBounds => DetectionReason::PaddingBounds,
         FrameError::EmptyRequest => DetectionReason::EmptyRequest,
@@ -1044,7 +2157,24 @@ fn detection_from_frame(error: FrameError) -> DetectionReason {
     }
 }
 
-fn sample_nonzero_padding(random: &(impl SecureRandom + ?Sized)) -> Result<Vec<u8>, FrameError> {
+fn protocol_from_frame(error: FrameError) -> ProtocolReason {
+    match error {
+        FrameError::NonceExhausted => ProtocolReason::NonceExhausted,
+        FrameError::Cipher => ProtocolReason::Authentication,
+        FrameError::KeyUnavailable
+        | FrameError::Bounds
+        | FrameError::AddressUnsupported
+        | FrameError::PaddingBounds
+        | FrameError::EmptyRequest
+        | FrameError::EmptyResponse
+        | FrameError::ResponseSaltReuse => ProtocolReason::FrameBounds,
+    }
+}
+
+fn sample_nonzero_padding(
+    random: &(impl SecureRandom + ?Sized),
+    padding: &mut [u8; MAX_PADDING_LEN],
+) -> Result<usize, FrameError> {
     const SAMPLE_RANGE: u32 = (u16::MAX as u32) + 1;
     const ACCEPTED_RANGE: u32 = (SAMPLE_RANGE / MAX_PADDING_LEN as u32) * MAX_PADDING_LEN as u32;
     let mut sample = [0_u8; 2];
@@ -1055,7 +2185,8 @@ fn sample_nonzero_padding(random: &(impl SecureRandom + ?Sized)) -> Result<Vec<u
             break (value % MAX_PADDING_LEN as u32) as usize + 1;
         }
     };
-    let mut padding = vec![0_u8; length];
-    random.fill(&mut padding).map_err(|_| FrameError::Bounds)?;
-    Ok(padding)
+    random
+        .fill(&mut padding[..length])
+        .map_err(|_| FrameError::Bounds)?;
+    Ok(length)
 }

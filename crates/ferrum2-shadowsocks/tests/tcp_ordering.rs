@@ -2,27 +2,28 @@ mod common;
 
 use ferrum2_core::{ConnectErrorKind, LocalEndpoint};
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, ShadowsocksError, TcpReplayStore, accept_server_request,
+    ClientTcpOutbound, DetectionReason, ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore,
 };
 
 use common::{
     FakeClock, NOW, RecordingConnector, RecordingIo, ScriptedRandom, client_random_bytes, provider,
-    salt_with_last, target, valid_request_wire,
+    salt_with_last, server_target, target, valid_request_wire,
 };
 
 #[tokio::test]
-async fn authenticated_semantics_precede_replay_and_connector_side_effects() {
+async fn authenticated_semantics_precede_replay_and_accepted_session() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
     let replay = TcpReplayStore::new(1024).expect("approved capacity");
     let salt = salt_with_last(1);
     let mut wire = valid_request_wire(NOW, &salt);
     wire[20] ^= 1;
     let (io, observation) = RecordingIo::request(&wire);
-    let (unused_target, _) = RecordingIo::new([]);
-    let connector = RecordingConnector::succeeds(unused_target);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
 
-    let error = accept_server_request(io, &keys, &clock, &replay)
+    let error = inbound
+        .accept_stream(io)
         .await
         .err()
         .expect("tamper rejected");
@@ -32,34 +33,27 @@ async fn authenticated_semantics_precede_replay_and_connector_side_effects() {
         ShadowsocksError::Detection(DetectionReason::Authentication)
     );
     assert_eq!(replay.entry_count().expect("replay snapshot"), 0);
-    assert_eq!(connector.call_count(), 0);
     assert_eq!(observation.lock().expect("observation").abortive_calls, 1);
 }
 
 #[tokio::test]
-async fn valid_request_is_reserved_before_target_connector_failure() {
+async fn valid_request_is_reserved_before_session_is_returned() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
     let replay = TcpReplayStore::new(1024).expect("approved capacity");
     let salt = salt_with_last(2);
     let wire = valid_request_wire(NOW, &salt);
     let (io, observation) = RecordingIo::request(&wire);
-    let connector = RecordingConnector::fails(ConnectErrorKind::ConnectionRefused);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
 
-    let accepted = accept_server_request(io, &keys, &clock, &replay)
+    let session = inbound
+        .accept_stream(io)
         .await
         .expect("authenticated request");
-    let error = accepted
-        .connect_target(&connector)
-        .await
-        .err()
-        .expect("target refusal");
 
-    assert_eq!(
-        error,
-        ShadowsocksError::Connect(ConnectErrorKind::ConnectionRefused)
-    );
-    assert_eq!(connector.call_count(), 1);
+    assert_eq!(session.target, target());
+    assert!(session.initial_payload.is_empty());
     assert_eq!(replay.entry_count().expect("replay snapshot"), 1);
     assert_eq!(observation.lock().expect("observation").abortive_calls, 0);
 }
@@ -74,7 +68,7 @@ async fn connector_error_before_write() {
         ConnectErrorKind::NetworkUnreachable,
         unreturned_io,
     );
-    let outbound = ClientTcpOutbound::new(&keys, &connector, &clock, &random);
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
 
     let error = outbound
         .open_stream(&target())
@@ -87,19 +81,48 @@ async fn connector_error_before_write() {
         ShadowsocksError::Connect(ConnectErrorKind::NetworkUnreachable)
     );
     assert_eq!(connector.call_count(), 1);
+    assert_eq!(connector.targets(), vec![server_target()]);
     assert_eq!(observation.lock().expect("observation").write_calls, 0);
     assert_eq!(observation.lock().expect("observation").abortive_calls, 0);
+}
+
+#[tokio::test]
+async fn connector_target_and_request_target() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_with_last(3);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(io);
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+
+    let _flow = outbound
+        .open_stream(&target())
+        .await
+        .expect("request first-write");
+
+    assert_eq!(connector.targets(), vec![server_target()]);
+    let wire = observation.lock().expect("observation").writes[0].clone();
+    let (server_io, _) = RecordingIo::request(&wire);
+    let server_random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("approved capacity");
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &server_random, &replay);
+    let session = inbound
+        .accept_stream(server_io)
+        .await
+        .expect("authenticated request");
+    assert_eq!(session.target, target());
 }
 
 #[tokio::test]
 async fn opened_stream_delegates_stored_local_endpoint_without_open_time_query() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
-    let salt = salt_with_last(3);
+    let salt = salt_with_last(4);
     let random = ScriptedRandom::new(client_random_bytes(&salt));
     let (io, observation) = RecordingIo::new([]);
     let connector = RecordingConnector::succeeds(io);
-    let outbound = ClientTcpOutbound::new(&keys, &connector, &clock, &random);
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
 
     let opened = outbound
         .open_stream(&target())

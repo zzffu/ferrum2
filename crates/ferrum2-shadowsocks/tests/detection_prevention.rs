@@ -1,20 +1,21 @@
 mod common;
 
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, REQUEST_FIRST_READ_LEN, ShadowsocksError, TcpReplayStore,
-    accept_server_request,
+    ClientTcpOutbound, DetectionReason, FlowTerminal, PlainDuplex, REQUEST_FIRST_READ_LEN,
+    ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore,
 };
 
 use common::{
-    FakeClock, NOW, RecordingConnector, RecordingIo, ScriptedRandom, client_random_bytes,
-    custom_request_wire, provider, salt_with_last, target, valid_request_wire,
+    FakeClock, NOW, RecordingConnector, RecordingIo, RecordingObservers, ScriptedRandom,
+    client_random_bytes, custom_request_wire, flush_plain, provider, salt_with_last, server_target,
+    shutdown_plain, target, valid_request_wire, write_plain,
 };
 
 #[tokio::test]
-async fn each_initial_request_failure_uses_one_fixed_read_and_one_abortive_mark() {
+async fn each_initial_request_failure_uses_one_fixed_read_and_terminal_before_abortive() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
-
+    let random = ScriptedRandom::new([]);
     let salt = salt_with_last(10);
     let valid = valid_request_wire(NOW, &salt);
     let mut bad_tag = valid.clone();
@@ -61,8 +62,13 @@ async fn each_initial_request_failure_uses_one_fixed_read_and_one_abortive_mark(
 
     for (reads, expected) in cases {
         let replay = TcpReplayStore::new(1024).expect("approved capacity");
+        let observers = RecordingObservers::default();
         let (io, observation) = RecordingIo::new(reads);
-        let error = accept_server_request(io, &keys, &clock, &replay)
+        let io = io.with_sequence(observers.sequence.clone());
+        let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay)
+            .with_observers(&observers, &observers);
+        let error = inbound
+            .accept_stream(io)
             .await
             .err()
             .expect("case rejected");
@@ -71,49 +77,42 @@ async fn each_initial_request_failure_uses_one_fixed_read_and_one_abortive_mark(
         assert_eq!(observed.read_lengths[0], REQUEST_FIRST_READ_LEN);
         assert_eq!(observed.abortive_calls, 1);
         assert_eq!(observed.write_calls, 0);
+        assert_eq!(
+            *observers.sequence.lock().expect("sequence"),
+            vec!["terminal", "abortive"]
+        );
+        assert_eq!(
+            *observers.terminals.lock().expect("terminals"),
+            vec![FlowTerminal::Detection(expected)]
+        );
     }
 }
 
 #[tokio::test]
-async fn initial_read_error_is_terminal_and_marked_once() {
+async fn abortive_mark_failure_does_not_restore_the_flow() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
     let replay = TcpReplayStore::new(1024).expect("approved capacity");
-    let (io, observation) = RecordingIo::new([]);
-    let io = io.with_read_failure();
-
-    let error = accept_server_request(io, &keys, &clock, &replay)
-        .await
-        .err()
-        .expect("read error");
-
-    assert_eq!(
-        error,
-        ShadowsocksError::Detection(DetectionReason::ReadFailed)
-    );
-    let observed = observation.lock().expect("observation");
-    assert_eq!(observed.read_calls, 1);
-    assert_eq!(observed.abortive_calls, 1);
-}
-
-#[tokio::test]
-async fn abortive_mark_failure_still_returns_closed_terminal_detection() {
-    let keys = provider();
-    let clock = FakeClock::new(NOW, 0);
-    let replay = TcpReplayStore::new(1024).expect("approved capacity");
+    let observers = RecordingObservers::default();
     let (io, observation) = RecordingIo::new([vec![0_u8; 1]]);
-    let io = io.with_abortive_failure();
+    let io = io
+        .with_abortive_failure()
+        .with_sequence(observers.sequence.clone());
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay)
+        .with_observers(&observers, &observers);
 
-    let error = accept_server_request(io, &keys, &clock, &replay)
-        .await
-        .err()
-        .expect("short read");
+    let error = inbound.accept_stream(io).await.err().expect("short read");
 
     assert_eq!(
         error,
         ShadowsocksError::Detection(DetectionReason::ShortRead)
     );
     assert_eq!(observation.lock().expect("observation").abortive_calls, 1);
+    assert_eq!(
+        *observers.sequence.lock().expect("sequence"),
+        vec!["terminal", "abortive"]
+    );
 }
 
 #[tokio::test]
@@ -123,7 +122,8 @@ async fn client_entropy_and_clock_failures_mark_once_before_any_write() {
     let random = ScriptedRandom::failing();
     let (entropy_io, entropy_observation) = RecordingIo::new([]);
     let entropy_connector = RecordingConnector::succeeds(entropy_io);
-    let outbound = ClientTcpOutbound::new(&keys, &entropy_connector, &clock, &random);
+    let outbound =
+        ClientTcpOutbound::new(server_target(), &keys, &entropy_connector, &clock, &random);
     assert_eq!(
         outbound.open_stream(&target()).await.err(),
         Some(ShadowsocksError::Detection(
@@ -141,7 +141,13 @@ async fn client_entropy_and_clock_failures_mark_once_before_any_write() {
     let random = ScriptedRandom::new(request_salt.as_bytes().iter().copied());
     let (clock_io, clock_observation) = RecordingIo::new([]);
     let clock_connector = RecordingConnector::succeeds(clock_io);
-    let outbound = ClientTcpOutbound::new(&keys, &clock_connector, &failing_clock, &random);
+    let outbound = ClientTcpOutbound::new(
+        server_target(),
+        &keys,
+        &clock_connector,
+        &failing_clock,
+        &random,
+    );
     assert_eq!(
         outbound.open_stream(&target()).await.err(),
         Some(ShadowsocksError::Detection(
@@ -161,7 +167,7 @@ async fn request_first_write_is_one_operation_and_short_write_is_terminal() {
     let random = ScriptedRandom::new(client_random_bytes(&salt));
     let (io, observation) = RecordingIo::new([]);
     let connector = RecordingConnector::succeeds(io.with_write_limit(1));
-    let outbound = ClientTcpOutbound::new(&keys, &connector, &clock, &random);
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
 
     let error = outbound
         .open_stream(&target())
@@ -188,27 +194,27 @@ async fn response_first_write_is_one_operation_and_short_write_is_terminal() {
     let request = valid_request_wire(NOW, &request_salt);
     let (io, observation) = RecordingIo::request(&request);
     let io = io.with_write_limit(1);
-    let accepted = accept_server_request(io, &keys, &clock, &replay)
-        .await
-        .expect("authenticated request");
-    let (target_io, _) = RecordingIo::new([]);
-    let target_connector = RecordingConnector::succeeds(target_io);
-    let connected = accepted
-        .connect_target(&target_connector)
-        .await
-        .expect("target connection");
     let response_salt = salt_with_last(22);
     let random = ScriptedRandom::new(response_salt.as_bytes().iter().copied());
-
-    let error = connected
-        .write_first_response(&keys, &clock, &random, b"pong")
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io)
         .await
-        .err()
-        .expect("short response write");
+        .expect("authenticated request")
+        .stream;
+
+    assert_eq!(write_plain(&mut flow, b"pong").await, Ok(4));
+    let error = flush_plain(&mut flow)
+        .await
+        .expect_err("short response write");
 
     assert_eq!(
         error,
         ShadowsocksError::Detection(DetectionReason::ShortWrite)
+    );
+    assert_eq!(
+        flow.terminal(),
+        Some(FlowTerminal::Detection(DetectionReason::ShortWrite))
     );
     let observed = observation.lock().expect("observation");
     assert_eq!(observed.write_calls, 1);
@@ -216,32 +222,25 @@ async fn response_first_write_is_one_operation_and_short_write_is_terminal() {
 }
 
 #[tokio::test]
-async fn target_eof_before_first_payload_sends_no_header_and_is_not_detection() {
+async fn target_eof_before_first_payload_shuts_down_without_header_or_detection() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let replay = TcpReplayStore::new(1024).expect("approved capacity");
     let request_salt = salt_with_last(23);
     let request = valid_request_wire(NOW, &request_salt);
     let (io, observation) = RecordingIo::request(&request);
-    let accepted = accept_server_request(io, &keys, &clock, &replay)
-        .await
-        .expect("authenticated request");
-    let (target_io, _) = RecordingIo::new([]);
-    let target_connector = RecordingConnector::succeeds(target_io);
-    let connected = accepted
-        .connect_target(&target_connector)
-        .await
-        .expect("target connection");
     let random = ScriptedRandom::failing();
-
-    let error = connected
-        .write_first_response(&keys, &clock, &random, b"")
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io)
         .await
-        .err()
-        .expect("target EOF");
+        .expect("authenticated request")
+        .stream;
 
-    assert_eq!(error, ShadowsocksError::ResponseUnavailable);
+    assert_eq!(shutdown_plain(&mut flow).await, Ok(()));
+    assert_eq!(flow.terminal(), None);
     let observed = observation.lock().expect("observation");
     assert_eq!(observed.write_calls, 0);
+    assert_eq!(observed.shutdown_calls, 1);
     assert_eq!(observed.abortive_calls, 0);
 }

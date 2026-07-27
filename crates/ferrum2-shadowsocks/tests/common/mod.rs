@@ -3,8 +3,10 @@
 use std::collections::VecDeque;
 use std::future::ready;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -15,7 +17,10 @@ use ferrum2_crypto::{
     Aes128Psk, Clock, ClockError, KeyProvider, KeySelector, MonotonicInstant, RandomError,
     SecureRandom, SinglePskProvider, TcpMethod, TcpSalt, TcpSealer,
 };
-use ferrum2_shadowsocks::{HeaderIo, REQUEST_FIRST_READ_LEN, encode_request_first_write};
+use ferrum2_shadowsocks::{
+    BufferObserver, BufferRole, FlowObserver, FlowTerminal, PlainDuplex, REQUEST_FIRST_READ_LEN,
+    ShadowsocksError, TransportIo, encode_request_first_write,
+};
 
 pub const NOW: u64 = 1_700_000_000;
 
@@ -28,6 +33,10 @@ pub fn provider() -> SinglePskProvider {
 
 pub fn target() -> TargetAddr {
     TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)).expect("valid target")
+}
+
+pub fn server_target() -> TargetAddr {
+    TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8388)).expect("valid server")
 }
 
 pub fn salt_with_last(last: u8) -> TcpSalt {
@@ -78,12 +87,83 @@ pub fn custom_request_wire(
     wire
 }
 
+pub fn seal_data_frame(sealer: &mut TcpSealer, payload: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut length = BytesMut::from(&(payload.len() as u16).to_be_bytes()[..]);
+    let mut payload = BytesMut::from(payload);
+    sealer.seal_in_place(&mut length).expect("seal length");
+    sealer.seal_in_place(&mut payload).expect("seal payload");
+    (length.to_vec(), payload.to_vec())
+}
+
+pub fn request_data_frames(salt: &TcpSalt, payloads: &[&[u8]]) -> Vec<Vec<u8>> {
+    let variable = [1, 127, 0, 0, 1, 0x1f, 0x90, 0, 1, 0xa1];
+    let mut fixed = BytesMut::new();
+    fixed.extend_from_slice(&[0]);
+    fixed.extend_from_slice(&NOW.to_be_bytes());
+    fixed.extend_from_slice(&(variable.len() as u16).to_be_bytes());
+    let mut variable = BytesMut::from(&variable[..]);
+    let mut sealer = provider()
+        .with_key(KeySelector::Default, |key| {
+            TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, salt))
+        })
+        .expect("default key");
+    sealer.seal_in_place(&mut fixed).expect("fixed");
+    sealer.seal_in_place(&mut variable).expect("variable");
+    payloads
+        .iter()
+        .flat_map(|payload| {
+            let (length, payload) = seal_data_frame(&mut sealer, payload);
+            [length, payload]
+        })
+        .collect()
+}
+
+pub fn response_wire_and_frames(
+    request_salt: &TcpSalt,
+    response_salt: &TcpSalt,
+    first_payload: &[u8],
+    subsequent: &[&[u8]],
+) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let wire = ferrum2_shadowsocks::encode_response_first_write(
+        &provider(),
+        response_salt,
+        NOW,
+        request_salt,
+        first_payload,
+    )
+    .expect("response wire")
+    .to_vec();
+    let mut fixed = BytesMut::new();
+    fixed.extend_from_slice(&[1]);
+    fixed.extend_from_slice(&NOW.to_be_bytes());
+    fixed.extend_from_slice(request_salt.as_bytes());
+    fixed.extend_from_slice(&(first_payload.len() as u16).to_be_bytes());
+    let mut first = BytesMut::from(first_payload);
+    let mut sealer = provider()
+        .with_key(KeySelector::Default, |key| {
+            TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, response_salt))
+        })
+        .expect("default key");
+    sealer.seal_in_place(&mut fixed).expect("fixed");
+    sealer.seal_in_place(&mut first).expect("first");
+    let frames = subsequent
+        .iter()
+        .flat_map(|payload| {
+            let (length, payload) = seal_data_frame(&mut sealer, payload);
+            [length, payload]
+        })
+        .collect();
+    (wire, frames)
+}
+
 #[derive(Default)]
 pub struct IoObservation {
     pub read_calls: usize,
     pub read_lengths: Vec<usize>,
     pub write_calls: usize,
     pub write_lengths: Vec<usize>,
+    pub flush_calls: usize,
+    pub shutdown_calls: usize,
     pub abortive_calls: usize,
     pub endpoint_calls: usize,
     pub writes: Vec<Vec<u8>>,
@@ -93,10 +173,18 @@ pub struct RecordingIo {
     reads: VecDeque<Vec<u8>>,
     observation: Arc<Mutex<IoObservation>>,
     write_limit: Option<usize>,
+    write_limit_after: Option<(usize, usize)>,
+    pending_reads: usize,
+    pending_writes: usize,
     fail_read: bool,
+    fail_read_after: Option<usize>,
     fail_write: bool,
+    fail_write_after: Option<usize>,
+    fail_flush: bool,
+    fail_shutdown: bool,
     fail_abortive: bool,
     endpoint: SocketAddrV4,
+    sequence: Option<Arc<Mutex<Vec<&'static str>>>>,
 }
 
 impl RecordingIo {
@@ -107,10 +195,18 @@ impl RecordingIo {
                 reads: reads.into_iter().collect(),
                 observation: Arc::clone(&observation),
                 write_limit: None,
+                write_limit_after: None,
+                pending_reads: 0,
+                pending_writes: 0,
                 fail_read: false,
+                fail_read_after: None,
                 fail_write: false,
+                fail_write_after: None,
+                fail_flush: false,
+                fail_shutdown: false,
                 fail_abortive: false,
                 endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49152),
+                sequence: None,
             },
             observation,
         )
@@ -128,8 +224,28 @@ impl RecordingIo {
         self
     }
 
+    pub fn with_write_limit_after(mut self, successful_writes: usize, limit: usize) -> Self {
+        self.write_limit_after = Some((successful_writes, limit));
+        self
+    }
+
     pub fn with_read_failure(mut self) -> Self {
         self.fail_read = true;
+        self
+    }
+
+    pub fn with_read_failure_after(mut self, successful_reads: usize) -> Self {
+        self.fail_read_after = Some(successful_reads);
+        self
+    }
+
+    pub fn with_pending_reads(mut self, polls: usize) -> Self {
+        self.pending_reads = polls;
+        self
+    }
+
+    pub fn with_pending_writes(mut self, polls: usize) -> Self {
+        self.pending_writes = polls;
         self
     }
 
@@ -138,46 +254,114 @@ impl RecordingIo {
         self
     }
 
+    pub fn with_write_failure_after(mut self, successful_writes: usize) -> Self {
+        self.fail_write_after = Some(successful_writes);
+        self
+    }
+
+    pub fn with_flush_failure(mut self) -> Self {
+        self.fail_flush = true;
+        self
+    }
+
+    pub fn with_shutdown_failure(mut self) -> Self {
+        self.fail_shutdown = true;
+        self
+    }
+
     pub fn with_abortive_failure(mut self) -> Self {
         self.fail_abortive = true;
         self
     }
+
+    pub fn with_sequence(mut self, sequence: Arc<Mutex<Vec<&'static str>>>) -> Self {
+        self.sequence = Some(sequence);
+        self
+    }
 }
 
-impl HeaderIo for RecordingIo {
-    type Error = ();
+impl TransportIo for RecordingIo {
+    type IoError = ();
 
-    fn read_header<'a>(
-        &'a mut self,
-        destination: &'a mut [u8],
-    ) -> impl Future<Output = Result<usize, Self::Error>> + Send {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        if self.pending_reads > 0 {
+            self.pending_reads -= 1;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
         let mut observation = self.observation.lock().expect("observation lock");
         observation.read_calls += 1;
         observation.read_lengths.push(destination.len());
-        if self.fail_read {
-            return ready(Err(()));
+        if self.fail_read
+            || self
+                .fail_read_after
+                .is_some_and(|successful| observation.read_calls > successful)
+        {
+            return Poll::Ready(Err(()));
         }
+        drop(observation);
         let source = self.reads.pop_front().unwrap_or_default();
         let copied = source.len().min(destination.len());
         destination[..copied].copy_from_slice(&source[..copied]);
-        ready(Ok(copied))
+        if copied < source.len() {
+            self.reads.push_front(source[copied..].to_vec());
+        }
+        Poll::Ready(Ok(copied))
     }
 
-    fn write_header<'a>(
-        &'a mut self,
-        source: &'a [u8],
-    ) -> impl Future<Output = Result<usize, Self::Error>> + Send {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        if self.pending_writes > 0 {
+            self.pending_writes -= 1;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
         let mut observation = self.observation.lock().expect("observation lock");
         observation.write_calls += 1;
         observation.write_lengths.push(source.len());
         observation.writes.push(source.to_vec());
-        if self.fail_write {
-            return ready(Err(()));
+        if self.fail_write
+            || self
+                .fail_write_after
+                .is_some_and(|successful| observation.write_calls > successful)
+        {
+            return Poll::Ready(Err(()));
         }
-        ready(Ok(self
-            .write_limit
-            .unwrap_or(source.len())
-            .min(source.len())))
+        let limit = self
+            .write_limit_after
+            .filter(|(successful, _)| observation.write_calls > *successful)
+            .map(|(_, limit)| limit)
+            .or(self.write_limit)
+            .unwrap_or(source.len());
+        Poll::Ready(Ok(limit.min(source.len())))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::IoError>> {
+        self.observation.lock().expect("observation").flush_calls += 1;
+        if self.fail_flush {
+            Poll::Ready(Err(()))
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        self.observation.lock().expect("observation").shutdown_calls += 1;
+        if self.fail_shutdown {
+            Poll::Ready(Err(()))
+        } else {
+            Poll::Ready(Ok(()))
+        }
     }
 }
 
@@ -185,6 +369,9 @@ impl AbortiveClose for RecordingIo {
     type Error = ();
 
     fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+        if let Some(sequence) = &self.sequence {
+            sequence.lock().expect("sequence").push("abortive");
+        }
         self.observation
             .lock()
             .expect("observation lock")
@@ -207,6 +394,7 @@ pub struct RecordingConnector {
     stream: Mutex<Option<RecordingIo>>,
     failure: Option<ConnectErrorKind>,
     calls: AtomicUsize,
+    targets: Mutex<Vec<TargetAddr>>,
 }
 
 impl RecordingConnector {
@@ -215,6 +403,7 @@ impl RecordingConnector {
             stream: Mutex::new(Some(stream)),
             failure: None,
             calls: AtomicUsize::new(0),
+            targets: Mutex::new(Vec::new()),
         }
     }
 
@@ -223,6 +412,7 @@ impl RecordingConnector {
             stream: Mutex::new(None),
             failure: Some(kind),
             calls: AtomicUsize::new(0),
+            targets: Mutex::new(Vec::new()),
         }
     }
 
@@ -231,11 +421,16 @@ impl RecordingConnector {
             stream: Mutex::new(Some(stream)),
             failure: Some(kind),
             calls: AtomicUsize::new(0),
+            targets: Mutex::new(Vec::new()),
         }
     }
 
     pub fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    pub fn targets(&self) -> Vec<TargetAddr> {
+        self.targets.lock().expect("targets").clone()
     }
 }
 
@@ -244,9 +439,10 @@ impl Connector for RecordingConnector {
 
     fn connect(
         &self,
-        _target: &TargetAddr,
+        target: &TargetAddr,
     ) -> impl Future<Output = Result<Self::Stream, ConnectError>> + Send {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.targets.lock().expect("targets").push(target.clone());
         let result = if let Some(kind) = self.failure {
             Err(ConnectError::new(kind))
         } else {
@@ -348,4 +544,59 @@ pub fn client_random_bytes(request_salt: &TcpSalt) -> Vec<u8> {
     bytes.extend_from_slice(&[0, 0]);
     bytes.push(0xa1);
     bytes
+}
+
+pub async fn read_plain(
+    flow: &mut (impl PlainDuplex + ?Sized),
+    destination: &mut [u8],
+) -> Result<usize, ShadowsocksError> {
+    std::future::poll_fn(|cx| Pin::new(&mut *flow).poll_read_plain(cx, destination)).await
+}
+
+pub async fn write_plain(
+    flow: &mut (impl PlainDuplex + ?Sized),
+    source: &[u8],
+) -> Result<usize, ShadowsocksError> {
+    std::future::poll_fn(|cx| Pin::new(&mut *flow).poll_write_plain(cx, source)).await
+}
+
+pub async fn flush_plain(flow: &mut (impl PlainDuplex + ?Sized)) -> Result<(), ShadowsocksError> {
+    std::future::poll_fn(|cx| Pin::new(&mut *flow).poll_flush_plain(cx)).await
+}
+
+pub async fn shutdown_plain(
+    flow: &mut (impl PlainDuplex + ?Sized),
+) -> Result<(), ShadowsocksError> {
+    std::future::poll_fn(|cx| Pin::new(&mut *flow).poll_shutdown_plain(cx)).await
+}
+
+#[derive(Default)]
+pub struct RecordingObservers {
+    pub buffers: Mutex<Vec<(BufferRole, usize, usize)>>,
+    pub inspections: Mutex<Vec<(BufferRole, usize)>>,
+    pub terminals: Mutex<Vec<FlowTerminal>>,
+    pub sequence: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl BufferObserver for RecordingObservers {
+    fn allocated(&self, role: BufferRole, usable_limit: usize, storage_identity: usize) {
+        self.buffers
+            .lock()
+            .expect("buffers")
+            .push((role, usable_limit, storage_identity));
+    }
+
+    fn inspected(&self, role: BufferRole, storage_identity: usize) {
+        self.inspections
+            .lock()
+            .expect("inspections")
+            .push((role, storage_identity));
+    }
+}
+
+impl FlowObserver for RecordingObservers {
+    fn terminal_installed(&self, terminal: FlowTerminal) {
+        self.terminals.lock().expect("terminals").push(terminal);
+        self.sequence.lock().expect("sequence").push("terminal");
+    }
 }

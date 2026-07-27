@@ -2,12 +2,12 @@ mod common;
 
 use ferrum2_shadowsocks::{
     ClientTcpOutbound, DetectionReason, RESPONSE_FIRST_READ_LEN, ShadowsocksError,
-    accept_client_response, encode_response_first_write,
+    encode_response_first_write,
 };
 
 use common::{
     FakeClock, NOW, RecordingConnector, RecordingIo, ScriptedRandom, client_random_bytes, provider,
-    salt_with_last, target,
+    read_plain, salt_with_last, server_target, target,
 };
 
 #[tokio::test]
@@ -31,16 +31,16 @@ async fn full_request_salt_binding_precedes_first_payload_forwarding() {
     ]);
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
-    let outbound = ClientTcpOutbound::new(&keys, &connector, &clock, &random);
-    let opened = outbound
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
         .open_stream(&target())
         .await
         .expect("request first-write");
+    let mut destination = [0_u8; 64];
 
-    let error = accept_client_response(opened, &keys, &clock)
+    let error = read_plain(&mut flow, &mut destination)
         .await
-        .err()
-        .expect("binding mismatch");
+        .expect_err("binding mismatch");
 
     assert_eq!(
         error,
@@ -49,6 +49,7 @@ async fn full_request_salt_binding_precedes_first_payload_forwarding() {
     let observed = observation.lock().expect("observation");
     assert_eq!(observed.read_calls, 1);
     assert_eq!(observed.abortive_calls, 1);
+    assert!(destination.iter().all(|byte| *byte == 0));
 }
 
 #[tokio::test]
@@ -65,17 +66,18 @@ async fn authenticated_bound_response_releases_exact_first_payload() {
     ]);
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
-    let outbound = ClientTcpOutbound::new(&keys, &connector, &clock, &random);
-    let opened = outbound
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
         .open_stream(&target())
         .await
         .expect("request first-write");
+    let mut destination = [0_u8; 16];
 
-    let response = accept_client_response(opened, &keys, &clock)
+    let read = read_plain(&mut flow, &mut destination)
         .await
         .expect("response authentication");
 
-    assert_eq!(response.first_payload().as_ref(), b"pong");
+    assert_eq!(&destination[..read], b"pong");
     let observed = observation.lock().expect("observation");
     assert_eq!(observed.read_calls, 2);
     assert_eq!(observed.read_lengths[0], RESPONSE_FIRST_READ_LEN);
@@ -99,20 +101,21 @@ async fn tampered_first_payload_is_never_released() {
     ]);
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
-    let outbound = ClientTcpOutbound::new(&keys, &connector, &clock, &random);
-    let opened = outbound
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
         .open_stream(&target())
         .await
         .expect("request first-write");
+    let mut destination = [0_u8; 16];
 
-    let error = accept_client_response(opened, &keys, &clock)
+    let error = read_plain(&mut flow, &mut destination)
         .await
-        .err()
-        .expect("payload authentication");
+        .expect_err("payload authentication");
 
     assert_eq!(
         error,
         ShadowsocksError::Detection(DetectionReason::Authentication)
     );
     assert_eq!(observation.lock().expect("observation").abortive_calls, 1);
+    assert!(destination.iter().all(|byte| *byte == 0));
 }
