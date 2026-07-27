@@ -1,6 +1,31 @@
 # CI 与验证状态
 
-## 当前基线
+## 当前 M0 执行状态
+
+- **Branch/commit:** `master@d9a641fecb2088fc1813ef4ebc58df392be48d64`
+- **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
+  Rust/Cargo 1.97.1
+- **M0-T01:** integrated；Architect **PASS**；QA **PASS**
+- **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
+  `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
+  `cd51226cd1875f80115ac657526e3f9dfb267c14`,
+  `4948185c0db282261e045ad1276f5e286f6d7d1d`
+- **Commands, all exit 0:** `cargo +1.97.1 metadata --locked --format-version 1`;
+  `cargo +1.97.1 test -p ferrum2-core --locked`;
+  `cargo +1.97.1 test -p ferrum2-m0-harness --test architecture --locked`;
+  `cargo +1.97.1 test -p ferrum2-m0-harness --test workspace_policy --locked`;
+  `cargo +1.97.1 tree --workspace --locked`;
+  `cargo fmt -p ferrum2-core -- --check`; `git diff --check`;
+  focused architecture/workspace-policy CRLF regressions
+- **Evidence:** core 4/4、architecture 6/6、workspace policy 7/7；integration
+  worktree 最终 clean，无 committed generated artifact、external binary、secret
+  或 production endpoint
+- **Approved deferrals:** workspace-wide quick/full 等下游 target source 在 T07
+  汇合后执行；MSRV、platform、interop 与 GitHub Actions evidence 属于 T08，
+  此处不计 PASS
+- **Remote:** origin URL 与只读访问已验证；未 push、未触发 Actions、未发布
+
+## 规划前基线
 
 - **Branch/commit:** pre-amendment baseline
   `master@5402860136c3233ff1890080099dcddc7d321fee`

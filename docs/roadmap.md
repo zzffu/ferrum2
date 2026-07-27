@@ -6,12 +6,10 @@
 状态必须由 contract、ticket、commit 和验证证据支持。
 
 Bootstrap 基线是
-`master@b41c6127b1834ebd97246451fd92bafea50cb205`。当前仍没有产品代码、工程分支
-或 integration branch，但 M0 已有 Accepted ADR、Approved spec/test plan 和八个
-ready tickets；ADR-0007 已把 required CI provider 收窄为 GitHub Actions。因此
-M0 已进入 `executing`，M1-M4 仍为 `proposed`。文档/workflow validation 只证明
-implementation control plane ready；M0-T01 已进入实现阶段，但尚不证明任何产品
-行为或远程 CI 已实现。
+`master@b41c6127b1834ebd97246451fd92bafea50cb205`。M0 已进入 `executing`，
+M1-M4 仍为 `proposed`。M0-T01 的 locked workspace、core contracts 与静态
+policy tests 已在 `master@d9a641fecb2088fc1813ef4ebc58df392be48d64`
+完成 integration；这只证明 AC-01 的当前切片，不证明后续产品行为或远程 CI。
 
 ## 依赖顺序
 
@@ -89,14 +87,11 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** not yet
-- **Open blockers and risks:** M0-T01 已产生三个 ticket commits，但在
-  repair attempt 2/2 后仍被 Architect 阻塞：`workspace_policy.rs` 的两处
-  LF-only multiline assertion 在 CRLF checkout 模拟下失败。失败的 integration
-  candidate 保留为
-  `codex/integration/m0@0d98d81d0a4545996fda536a646594d9fe072b98`，
-  未 fast-forward 到 `master`；T02～T08 尚未调度。用户已于 2026-07-27
-  授权一次额外且仅限 `workspace_policy.rs` CRLF 匹配的 bounded repair；
-  该恢复 gate 正在执行。
+- **Open blockers and risks:** M0-T01 已在
+  `d9a641fecb2088fc1813ef4ebc58df392be48d64` 完成 integration；一次用户授权的
+  额外窄修复关闭了 `workspace_policy.rs` 的 CRLF portability blocker。当前
+  ready frontier 为 M0-T02、M0-T05、M0-T06；T03/T04/T07/T08 仍只等待既定
+  ticket dependencies。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。

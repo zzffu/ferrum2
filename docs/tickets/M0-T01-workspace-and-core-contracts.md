@@ -2,7 +2,7 @@
 id = "M0-T01"
 title = "Establish the locked workspace and core contracts"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P0"
 blocked_by = []
 owns = [
@@ -105,16 +105,14 @@ git diff --check
 - Branch: `codex/ticket/m0-t01`
 - Commit(s): `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
-  `cd51226cd1875f80115ac657526e3f9dfb267c14`
-- Architect verdict: **BLOCK** after repair attempt 2/2; the CRLF repair covers
-  `architecture.rs`, but two LF-only multiline assertions in
-  `workspace_policy.rs` remain checkout-line-ending dependent.
-- QA verdict: **PASS** at `cd51226cd1875f80115ac657526e3f9dfb267c14`;
-  all seven ticket commands and the focused CRLF regression exited 0.
-- Integrated commit: none. Preserved integration candidate
-  `codex/integration/m0@0d98d81d0a4545996fda536a646594d9fe072b98`
-  failed its first post-merge architecture gate and was not fast-forwarded to
-  `master`.
+  `cd51226cd1875f80115ac657526e3f9dfb267c14`,
+  `4948185c0db282261e045ad1276f5e286f6d7d1d`
+- Architect verdict: **PASS** for ticket HEAD and integration
+  `d9a641fecb2088fc1813ef4ebc58df392be48d64`.
+- QA verdict: **PASS**; all seven ticket commands and both focused CRLF
+  regressions exited 0 in the integration worktree.
+- Integrated commit:
+  `d9a641fecb2088fc1813ef4ebc58df392be48d64`
 - Resume authorization: on 2026-07-27 the user authorized exactly one additional
   bounded repair beyond the configured 2/2 limit, confined to CRLF-independent
   matching in `tests/m0-harness/tests/workspace_policy.rs`. No other code,
