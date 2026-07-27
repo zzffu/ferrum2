@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -174,11 +174,12 @@ cargo test --workspace --locked
   lock policy、native 47-case detection probe、exact 100-process lifecycle cycles、
   binary-private registry与T06 failure-stats consumer migration；两个binary
   manifests仍未修改，worktree clean
-- Current gate: **IN_PROGRESS**；ADR-0012 T03/T06 upstream repairs已在
-  `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a`通过组合Architect/QA gates；
-  续作已把该checkpoint合入保留分支；ADR-0013已批准两个binary dev-only
-  `test-util` edges。Team Lead须先把Accepted base合入保留分支，再完成exact
-  manifest declarations、configured paused-time phase/prefix evidence和workspace
-  quick/full
+- Candidate commit:
+  `5ac8f1b7894256caf1e0200befbcc32af9469342`
+- Candidate gates: 全部ticket commands及workflow quick/full均exit 0；
+  lifecycle为exact 100 cycles，native detection为exact 47 connections，
+  workspace policy 16/16，client phase deadline 5/5，server lifecycle/prefix
+  6/6；Accepted base与resume checkpoint均为ancestor，worktree clean
+- Current gate: **REVIEW**；等待candidate Architect与QA ticket gates
 - Integrated commit: none
 - Publication: none
