@@ -9,7 +9,7 @@
 - **M0-T01:** original integration Architect/QA **PASS**；现依用户授权为
   ADR-0009 的一次独占 manifest repair reopen；document Product/Architect
   **PASS_WITH_ACTIONS** 的 required corrections 已完成，QA final **PASS**；
-  当前为 sole ready frontier，尚未修改 manifest
+  当前为 sole active frontier，尚未修改 manifest
 - **M0-T05:** `d03e0065efd13ff215cc55be6257c305e8e69175`；
   ticket Architect/QA **PASS**；integrated
 - **M0-T06:** `50f547f380d6c58d5538b6540fdc43cb29b5c89c` +
@@ -143,7 +143,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | PASS | Accepted ADR-0001～0009、Approved SPEC/TEST-0001；ADR-0009 Product/Architect required actions 已关闭且 QA final PASS；T01 sole frontier，T05/T06 done，T02 preserved | 当前 |
+| M0 execution contracts | PASS | Accepted ADR-0001～0009、Approved SPEC/TEST-0001；ADR-0009 Product/Architect required actions 已关闭且 QA final PASS；T01 sole active frontier，T05/T06 done，T02 preserved | 当前 |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | workspace已存在；workspace-wide gate按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
