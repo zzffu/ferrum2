@@ -2,7 +2,7 @@
 id = "M0-T05"
 title = "Implement the SOCKS5 no-auth IPv4 CONNECT inbound"
 milestone = "M0"
-status = "in_progress"
+status = "review"
 priority = "P1"
 blocked_by = ["M0-T01"]
 owns = [
