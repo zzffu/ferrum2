@@ -18,7 +18,7 @@ test_plan = "docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md"
 acceptance = [
   "M0-CI-001 through M0-CI-006 pass for the sole workflow .github/workflows/m0.yml: exact trigger allowlist, full-SHA actions, read-only permissions, exact eleven job names, fixed runners, numeric timeouts, no cache dependency, clean current-SHA builds, provider evidence, and one pushed-SHA run/attempt close contract",
   "A clean-worktree cargo build --workspace --bins --locked succeeds immediately before M0-INT-001 through M0-INT-004; the harness never relies on T07 or another worktree's untracked artifacts",
-  "M0-INT-001 through M0-INT-004 all pass with exact sing-box 1.13.14 and shadowsocks-rust 1.24.0 asset checksums, independent process directions, bidirectional bytes, half-close, and sanitized diagnostics",
+  "M0-INT-001 through M0-INT-004 all pass with exact sing-box 1.13.14 and shadowsocks-rust 1.24.0 asset checksums; each independent case byte-compares distinct fixed 16386-byte payloads in both directions before application Shutdown::Write, then deadline-observes target clean EOF, successful target write shutdown, and client clean EOF with no extra byte or reset/error without claiming target-FIN causality, while same-SHA M0-E2E-001/M0-LIFE-003 independently retain post-FIN reverse-drain evidence",
   "M0-MSRV-001 passes on Rust 1.85.0 without --ignore-rust-version",
   "M0-PLAT-001 through M0-PLAT-003 build both release binaries with Rust 1.97.1 and run valid and invalid offline config smoke on windows-2022 or ubuntu-24.04 as specified; musl-tools is exactly 1.2.4-2 and both musl binaries prove no PT_INTERP or DT_NEEDED with file/readelf",
   "M0-DETECT-002 passes separately on the native Windows MSVC and Linux GNU runners; one host result cannot substitute for the other",
@@ -80,7 +80,14 @@ remote、push、创建PR或触发workflow；这些外部动作需要用户单独
 - interop required job从clean worktree显式运行current-toolchain binary build；不得复用
   T07 worktree、另一个job或先前run留下的untracked artifact。
 - external tests虽标`#[ignore]`，required jobs必须`--ignored --exact`逐项运行。
+- 每个filtered required command必须先证明exact match/run count；zero-test success
+  是FAIL，不能只依赖libtest exit status。
 - 每case独立temp/ports，TCP-only且关闭multiplex/UDP/EIH/plugins。
+- 每case先完整比较distinct fixed 16386-byte双向payload，再依次观察application
+  write-half close后的target clean EOF、target成功write-half close后的application
+  clean EOF；任何early FIN、reset/error、truncation、extra byte、mismatch或
+  timeout失败。该顺序不声明target FIN导致client EOF。M0-E2E-001/M0-LIFE-003
+  继续在同一SHA证明peer FIN后新reverse bytes的ferrum2行为。
 - 三目标必须运行两个artifact的valid/invalid config；`cargo check`不可替代。
 - GNU job实际运行两个GNU artifacts并执行M0-DETECT-002。musl job固定
   `musl`/`musl-dev`/`musl-tools=1.2.4-2`，实际运行两个musl artifacts，并对两者
@@ -153,3 +160,23 @@ To be filled by the Team Lead after integration:
 - Eleven required job results:
 - Runner ImageOS/ImageVersion/Included Software links:
 - Platform artifact/linkage evidence:
+- Recovery state (2026-07-27): upstream T07 Rust 1.85.0 syntax incompatibility is
+  closed by candidate `50bf0b7` and reviewed integration `123618f`; Team Lead,
+  Architect and QA gates all PASS. T08 remains blocked independently: exact
+  sing-box 1.13.14 diagnosis found a third-party post-FIN reverse-delivery
+  limitation requiring an explicit evidence-contract amendment, while static
+  Architect review of checkpoint `14343d2` found required workflow/harness repairs.
+  ADR-0014 and synchronized SPEC/TEST amendments are now accepted after final
+  Product/Architect/QA PASS. The checkpoint remains unintegrated and T08 is released
+  into one batched repair that must close all static findings.
+- Initial checkpoint: `14343d222b5caa1dfdc2ebfc931c52d427a106de`;
+  clean, nine T08-owned files, unintegrated.
+- Initial Architect gate: **BLOCK**. Repair 1/2 must close all findings in one
+  batch: clean-job binary prerequisites；absolute child/version/I/O/reap deadlines
+  with checked statuses and bounded sanitized evidence；reserved unique ports plus
+  child-specific readiness and cleanup/rebind proof；structural per-job workflow
+  policy and immutable scope allowlist；nonzero exact filtered-test counts；native
+  no-side-effect/compiler-linker/BLAKE3-backend evidence.
+- ADR-0014 acceptance: `96d62628107a373a076266d8564d81309c915be1`;
+  final Product/Architect/QA document gates PASS.
+- Current gate: **IN_PROGRESS**；checkpoint refresh and repair 1/2 pending.

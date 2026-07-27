@@ -111,9 +111,13 @@ non-overlapping ownership。
     lifecycle。Architect发现cooperative row未同步证明target flow；repair 1/2
     `a9b0a56`以valid client→server→target、bounded accept与EOF/reset ack关闭
     假阳性。ticket及integration Architect/QA、24条ticket commands、quick/full
-    均PASS，integrated `91516720`，done；
+    均PASS，integrated `91516720`。T08随后暴露Rust 1.85 let-chain不兼容；窄修复
+    `50bf0b7`及integration `123618f`通过MSRV、focused、quick/full与最终
+    Architect/QA gates，done；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
-    独占 `.github/workflows/m0.yml`，in_progress。
+    独占 `.github/workflows/m0.yml`；checkpoint `14343d2`未集成；ADR-0014
+    external evidence边界已接受，当前in_progress执行静态Architect required
+    repairs。
 
   Dependency graph：
 
@@ -127,8 +131,9 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** 当前local product integration
-  `91516720e9acdc60597dd3596d6cbd33319d5a39`包含M0-T01～T07；其24条T07
-  ticket commands、quick/full及final Architect/QA gates均PASS。T08尚未integrate。
+  `123618f747771d6b0473c099f4c741ee4046fd9f`包含M0-T01～T07及T07 MSRV
+  recovery；Rust 1.85 build/check/test、quick/full及final Architect/QA gates均
+  PASS。T08尚未integrate。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
@@ -166,8 +171,10 @@ non-overlapping ownership。
   PASS且normal/all-features各97 tests通过，均done。
   ADR-0013勘误base `24ddecf`已通过Product/Architect/QA final document gates
   并被接受；T07 candidate `5ac8f1b`与lifecycle evidence repair 1/2 `a9b0a56`
-  已通过ticket/final Architect与QA gates并集成于`91516720`，现done。T08已
-  `in_progress`。
+  已通过ticket/final Architect与QA gates并集成于`91516720`。后续MSRV repair
+  `50bf0b7`与integration `123618f`同样通过Team Lead/final Architect/QA gates，
+  T07现done。ADR-0014已在`96d6262`接受；T08 checkpoint `14343d2`仍未集成，
+  现以repair 1/2处理全部静态Architect findings。
   全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
@@ -298,6 +305,7 @@ non-overlapping ownership。
 | DEC-014 | resolved in M0 narrow amendment | lifecycle采用black-box child/port/temp + T06 direct counters + production-used binary-private registry composition三段证据；native detection由harness primitive-only current-time generator精确构造47案，只允许两个test dev edges与唯一lock hunk | `ADR-0011`、`SPEC-0001`、`TEST-0001`、M0-T07 |
 | DEC-015 | resolved in M0 narrow amendment | opaque configured-server connect capability分离validated configured connect与fresh request-first-write deadlines（默认10秒/5秒，禁止hardcode）；runtime relay failure保留direction-separated partial stats，server prefix loop在binary-private composition内保持progress/cancel/accounting | `ADR-0012`、`SPEC-0001`、`TEST-0001`、M0-T03/M0-T06/M0-T07 |
 | DEC-016 | resolved in M0 narrow amendment | 两个binary各增加一个workspace-inherited、dev-only Tokio `test-util` edge以运行paused-time composition tests；root/normal/production graph、version与lock不变 | `ADR-0013`、`SPEC-0001`、`TEST-0001`、M0-T01/M0-T07 |
+| DEC-017 | resolved in M0 narrow amendment | external四案先比较pre-FIN双向各16386-byte distinct payload，再观察ordered clean-EOF convergence且不声明target-FIN causality；peer FIN后新reverse drain继续由同一SHA的M0-E2E-001/M0-LIFE-003独立blocking；pin/wire/product不变 | `ADR-0014`、`SPEC-0001`、`TEST-0001`、M0-T08 |
 
 ## 风险登记
 
@@ -324,4 +332,5 @@ non-overlapping ownership。
 | 2026-07-27 | M0 CI amendment | 以 GitHub Actions/GitHub-hosted runners 取代本机 WSL2 作为 M0 required CI；新增 ADR-0007 和 T08 的唯一 workflow ownership | 绑定 pushed exact integration commit，固定 native runners、11 job、安全与 provider-native evidence，同时不扩大产品/协议范围 | Product/Architect/QA amendment reports；GitHub official runner/security docs；workflow validate/frontier/next |
 | 2026-07-27 | M0 duplex contract amendment | 接受opaque unsplit SIP022 flow取代T03 caller-managed transitions，同时分离configured SS server/application target、保留core Session initial-payload ownership与未修改runtime lifecycle | initial candidate无法并发duplex、丢失cipher/payload、拒绝合法fragmentation且无法证明scratch/fatal ownership；用户已授权本地窄blocker修复 | ADR-0010 Accepted；Product/Architect/QA PASS；workflow validate/diff-check |
 | 2026-07-27 | M0 evidence/phase contract amendment | 接受组合式lifecycle evidence、primitive-only 47-case native probes、opaque configured connect/first-write phases与failure-preserving relay stats；T03/T06窄reopen，T07保留partial checkpoint并blocked | T07真实composition证明原黑盒/fixture/fused-open/error-only seams无法满足已批准AC；修订不扩大wire/product/operator API/remote范围 | ADR-0011/0012 Accepted；SPEC/TEST amendments Approved；Product/Architect/QA final PASS；workflow validate/diff-check |
+| 2026-07-27 | M0 external half-close evidence amendment | 接受：保留sing-box 1.13.14 pin与四项hard gate，把external evidence细化为pre-FIN双向完整bytes及ordered clean-EOF convergence，不声称target-FIN causality；ferrum FIN后reverse drain仍由local/runtime同SHA硬门证明 | exact diagnosis隔离出sing-box 1.13.14在peer FIN后关闭leg的第三方限制；不改变wire/product/API/pin/remote范围 | ADR-0014 Accepted；SPEC/TEST Approved；`f757b58` final Product/Architect/QA PASS |
 | 2026-07-27 | M0 binary paused-time contract amendment | 接受两个binary-local exact Tokio `test-util` dev edges与zero-additional-lock-delta policy；不改root/normal/production graph | ADR-0012要求targeted binary paused-time tests，但现有manifest ownership使其无法编译；root/normal/injection/real-time替代均更广或更弱 | ADR-0013 Accepted；勘误base `24ddecf`的Product/Architect/QA final gates均PASS |

@@ -200,3 +200,21 @@ cargo test --workspace --locked
   integration PASS，17个ticket paths与candidate blobs exact相同，base以
   fast-forward更新
 - Publication: none
+- Recovery reopen (2026-07-27): T08's required Rust 1.85.0 gate exposed
+  `E0658` in `bins/ferrum2-server/src/run.rs` because the accepted T07
+  composition used let-chain syntax unavailable on the pinned MSRV. The repair is
+  restricted to an equivalent nested `if let`; behavior, APIs, manifests, lockfile,
+  product scope, and wire contract remain unchanged. T08 stays blocked until this
+  repair passes Engineer, Architect, QA, and integration gates.
+- MSRV repair candidate:
+  `50bf0b7b632333758fbaecde05dbe92b39171db3`
+- MSRV repair integration:
+  `123618f747771d6b0473c099f4c741ee4046fd9f`
+- MSRV repair gates: exact two-parent merge；relative to coordination parent只修改
+  `bins/ferrum2-server/src/run.rs`的等价nested `if let`（4+/4-），candidate与
+  integration blob一致；Rust 1.85 build/check/workspace test（194/194）、
+  focused server adapter/lifecycle、quick 3/3、full 4/4均exit 0。Team Lead、
+  final Architect与independent QA均PASS；base以fast-forward更新，worktrees
+  clean且`target/`已清理。
+- Final recovery gate: **DONE**
+- Recovery publication: none
