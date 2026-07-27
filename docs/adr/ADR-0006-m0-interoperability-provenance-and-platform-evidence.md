@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Architect / Team Lead
-- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T08；关闭 DEC-007
+- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T08；关闭 DEC-007；external half-close sequence 由 proposed `ADR-0014` 显式细化
 
 ## Context and problem
 
@@ -70,9 +70,13 @@ multi-user/EIH 和额外 routing；synthetic PSK 固定为
 4. shadowsocks-rust `sslocal` → `ferrum2-server` → local IPv4 echo。
 
 每项独立进程/临时目录/ephemeral ports，验证 client→target 和 target→client bytes、
-TCP half-close、process cleanup。T08 记录 reference `--version`、asset checksum、
-sanitized config checksum、command category、exit status 和 sanitized logs；不记录
-PSK、salt/nonce 或 raw config。
+TCP half-close、process cleanup。proposed ADR-0014把external case的顺序细化为：
+先完整逐byte比较双向各16386-byte distinct payload，再由application client
+write-half close、target deadline-observe EOF后write-half close、application client
+deadline-observe EOF。peer FIN后新产生reverse bytes的ferrum2要求仍由同一SHA的
+M0-E2E-001/M0-LIFE-003独立阻塞，external PASS不得替代。T08 记录 reference
+`--version`、asset checksum、sanitized config checksum、command category、exit
+status 和 sanitized logs；不记录 PSK、salt/nonce 或 raw config。
 
 外部 binaries 下载到 `target/interop-tools/` 或 runner temp，属于 generated
 artifacts。harness 对每个 child 使用 readiness deadline、case timeout、bounded

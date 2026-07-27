@@ -4,8 +4,9 @@
 - **ADR-0010 amendment:** Approved
 - **ADR-0011/0012 amendments:** Approved
 - **ADR-0013 amendment:** Approved
+- **ADR-0014 amendment:** Proposed
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`、`ADR-0014`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
 - **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
 
@@ -578,6 +579,11 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
     checksum/version、双向 bytes/half-close、sanitized diagnostics齐全，缺环境不
     得 skip-pass；两个 interop job 分别在自己的 `ubuntu-24.04` clean VM 从
     `GITHUB_SHA` 构建 ferrum2，并在执行 reference 前验证既有 pin/hash/version。
+    每案先完整逐byte比较双向各16386-byte distinct payload，再依次证明application
+    client write-half close、target EOF/write-half close、application client EOF；
+    byte equality前不得发送FIN。external evidence不声明peer FIN后新产生的reverse
+    bytes能穿过sing-box 1.13.14；该ferrum2行为仍由同一SHA上未修改的
+    M0-E2E-001/M0-LIFE-003独立blocking。
 11. **AC-11 Platform/repository/CI gates:** M0-PLAT-001～003、
     M0-GATE-001～002、M0-CI-001～006 通过；三个 target release binaries 在
     固定 hosted runner 完成 valid/invalid config smoke，GNU/Windows

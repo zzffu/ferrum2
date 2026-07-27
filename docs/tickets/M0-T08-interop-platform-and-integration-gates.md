@@ -18,7 +18,7 @@ test_plan = "docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md"
 acceptance = [
   "M0-CI-001 through M0-CI-006 pass for the sole workflow .github/workflows/m0.yml: exact trigger allowlist, full-SHA actions, read-only permissions, exact eleven job names, fixed runners, numeric timeouts, no cache dependency, clean current-SHA builds, provider evidence, and one pushed-SHA run/attempt close contract",
   "A clean-worktree cargo build --workspace --bins --locked succeeds immediately before M0-INT-001 through M0-INT-004; the harness never relies on T07 or another worktree's untracked artifacts",
-  "M0-INT-001 through M0-INT-004 all pass with exact sing-box 1.13.14 and shadowsocks-rust 1.24.0 asset checksums, independent process directions, bidirectional bytes, half-close, and sanitized diagnostics",
+  "M0-INT-001 through M0-INT-004 all pass with exact sing-box 1.13.14 and shadowsocks-rust 1.24.0 asset checksums; each independent case byte-compares distinct fixed 16386-byte payloads in both directions before application Shutdown::Write, then deadline-proves target EOF/write shutdown and client EOF with no extra byte, while same-SHA M0-E2E-001/M0-LIFE-003 independently retain post-FIN reverse-drain evidence",
   "M0-MSRV-001 passes on Rust 1.85.0 without --ignore-rust-version",
   "M0-PLAT-001 through M0-PLAT-003 build both release binaries with Rust 1.97.1 and run valid and invalid offline config smoke on windows-2022 or ubuntu-24.04 as specified; musl-tools is exactly 1.2.4-2 and both musl binaries prove no PT_INTERP or DT_NEEDED with file/readelf",
   "M0-DETECT-002 passes separately on the native Windows MSVC and Linux GNU runners; one host result cannot substitute for the other",
@@ -80,7 +80,13 @@ remote、push、创建PR或触发workflow；这些外部动作需要用户单独
 - interop required job从clean worktree显式运行current-toolchain binary build；不得复用
   T07 worktree、另一个job或先前run留下的untracked artifact。
 - external tests虽标`#[ignore]`，required jobs必须`--ignored --exact`逐项运行。
+- 每个filtered required command必须先证明exact match/run count；zero-test success
+  是FAIL，不能只依赖libtest exit status。
 - 每case独立temp/ports，TCP-only且关闭multiplex/UDP/EIH/plugins。
+- 每case先完整比较distinct fixed 16386-byte双向payload，再执行application
+  write-half close→target EOF/write-half close→application EOF；任何early FIN、
+  truncation、extra byte、mismatch或timeout失败。M0-E2E-001/M0-LIFE-003继续在
+  同一SHA证明peer FIN后新reverse bytes的ferrum2行为。
 - 三目标必须运行两个artifact的valid/invalid config；`cargo check`不可替代。
 - GNU job实际运行两个GNU artifacts并执行M0-DETECT-002。musl job固定
   `musl`/`musl-dev`/`musl-tools=1.2.4-2`，实际运行两个musl artifacts，并对两者
