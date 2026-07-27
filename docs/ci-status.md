@@ -10,8 +10,9 @@
   ADR-0009 的一次独占 manifest repair reopen；document Product/Architect
   **PASS_WITH_ACTIONS** 的 required corrections 已完成，QA final **PASS**；
   repair candidate `edaee3d73c5b5e2d7db7bf86a4165565336d8a0a` 已完成
-  4-path implementation 与 ticket commands，当前为 sole review frontier；
-  Architect/QA ticket gates pending
+  4-path implementation；Architect/QA ticket gates **PASS**，core 4/4、
+  architecture 6/6、workspace-policy 13/13 与全部 ticket commands exit 0；
+  lock identities 110→110、0 differences；当前等待 integration gate
 - **M0-T05:** `d03e0065efd13ff215cc55be6257c305e8e69175`；
   ticket Architect/QA **PASS**；integrated
 - **M0-T06:** `50f547f380d6c58d5538b6540fdc43cb29b5c89c` +

@@ -143,4 +143,10 @@ git diff --check
   document gates passed.
 - ADR-0009 repair candidate:
   `edaee3d73c5b5e2d7db7bf86a4165565336d8a0a`; Team Lead lineage/ownership/
-  clean-worktree checks PASS，Architect/QA ticket gates pending。
+  clean-worktree checks PASS。
+- ADR-0009 repair gates: Architect **PASS**、QA **PASS**；core 4/4、
+  architecture 6/6、workspace-policy 13/13 与全部 metadata/tree/fmt/diff
+  commands exit 0。独立 lock identity audit 为 110→110、0 differences，
+  canonical tuple SHA-256 前后均为
+  `8ad74ec21676d9dcf3c88ee2e7513c5e837895a87e7a16691fffaaee5b99b5e1`。
+  Integration commit/gate: pending。
