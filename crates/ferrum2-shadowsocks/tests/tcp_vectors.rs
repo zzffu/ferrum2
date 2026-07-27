@@ -116,12 +116,18 @@ fn unofficial_composite_request_and_response_match_exact_reviewed_wire() {
 
 #[test]
 fn fixture_and_primitive_only_generator_match_reviewed_provenance_hashes() {
-    let fixture = include_bytes!("../../../tests/fixtures/sip022/aes128-tcp-v1.json");
-    let generator = include_bytes!("../../../tests/fixtures/sip022/generator.rs");
+    let fixture = canonical_lf_utf8(
+        include_bytes!("../../../tests/fixtures/sip022/aes128-tcp-v1.json"),
+        "fixture",
+    );
+    let generator = canonical_lf_utf8(
+        include_bytes!("../../../tests/fixtures/sip022/generator.rs"),
+        "generator",
+    );
     let provenance = include_str!("../../../tests/fixtures/sip022/PROVENANCE.toml");
 
-    let fixture_hash = sha256_hex(fixture);
-    let generator_hash = sha256_hex(generator);
+    let fixture_hash = sha256_hex(&fixture);
+    let generator_hash = sha256_hex(&generator);
     assert_eq!(
         fixture_hash,
         "c7f210d612fd101a05e052dadabd29be12c0f9a82d75c8b394caae3653e611f0"
@@ -135,6 +141,29 @@ fn fixture_and_primitive_only_generator_match_reviewed_provenance_hashes() {
     assert!(provenance.contains("Unofficial repository-owned SIP022 composite fixture"));
     assert!(provenance.contains("expected_interpretation"));
     assert!(!include_str!("../../../tests/fixtures/sip022/generator.rs").contains("ferrum2_"));
+}
+
+fn canonical_lf_utf8(input: &[u8], label: &str) -> Vec<u8> {
+    let text = std::str::from_utf8(input)
+        .unwrap_or_else(|_| panic!("{label} must contain valid UTF-8 text"));
+    let bytes = text.as_bytes();
+    let mut canonical = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' {
+            assert_eq!(
+                bytes.get(index + 1),
+                Some(&b'\n'),
+                "{label} contains an unexpected bare carriage return"
+            );
+            canonical.push(b'\n');
+            index += 2;
+        } else {
+            canonical.push(bytes[index]);
+            index += 1;
+        }
+    }
+    canonical
 }
 
 fn sha256_hex(input: &[u8]) -> String {
