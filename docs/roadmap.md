@@ -72,8 +72,8 @@ non-overlapping ownership。
     candidate `edaee3d` Architect/QA ticket gates PASS，integration `4f3f0ac`
     gates PASS，done；
   - M0-T02：secret/KDF/AEAD/key-clock-entropy；ADR-0008 与 provenance/nonce
-    repair 已 PASS；ADR-0009/T01 blocker 已关闭，当前恢复 combined integration
-    review；
+    repair 已 PASS；ADR-0009/T01 blocker 已关闭，combined integration
+    `f9e218e` Architect/QA 与 70 tests PASS，done；
   - M0-T03：SIP022 TCP security state/replay/binding；blocked by T02；
   - M0-T04：typed config/observability；blocked by T02；
   - M0-T05：SOCKS5 CONNECT inbound；done；

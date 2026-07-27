@@ -2,7 +2,7 @@
 id = "M0-T02"
 title = "Implement secret ownership, AES-128 primitives, and deterministic capabilities"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P0"
 blocked_by = ["M0-T01"]
 owns = [
@@ -79,8 +79,12 @@ cargo fmt -p ferrum2-crypto -- --check
 - Repair evidence: primitive/KDF/secret tests, strict Clippy, fmt and provenance
   integration assertion all exit 0；provenance 与 `NonceCounter` repair
   Architect/QA PASS。
-- Overall Architect/QA verdict: **BLOCK** only because the T01-owned resolved graph
-  lacked `aes/zeroize` and `ghash/zeroize`. ADR-0009/T01 candidate `edaee3d` and
-  integration `4f3f0ac` now pass Architect/QA plus ticket/integration gates；this
-  ticket is restored to review for the combined T02 integration gate.
-- Integrated commit: not yet
+- Prior overall Architect/QA verdict was **BLOCK** only because the T01-owned
+  resolved graph lacked `aes/zeroize` and `ghash/zeroize`. ADR-0009/T01 candidate
+  `edaee3d` and integration `4f3f0ac` closed that blocker.
+- Final combined integration `f9e218eca241f3002500b932fdcb4db93c52313b`:
+  Architect **PASS**、QA **PASS**；T02 tests 3/3 + 2/2 + 6/6、strict Clippy/fmt、
+  T01 policy 13/13、architecture 6/6、core 4/4、SOCKS5/runtime 36/36，合计
+  70 tests PASS。Lock identities 110→110、0 differences；generated `target/`
+  已清理。
+- Integrated commit: `f9e218eca241f3002500b932fdcb4db93c52313b`

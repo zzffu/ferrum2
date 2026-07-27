@@ -3,7 +3,7 @@
 ## 当前 M0 执行状态
 
 - **Current validated local integration checkpoint:**
-  `4f3f0ac098fb8f4df054bb52b8ba9f2f93f3cd63` on
+  `f9e218eca241f3002500b932fdcb4db93c52313b` on local `master` and
   `codex/integration/m0`
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
@@ -23,7 +23,7 @@
   Architect/QA 均 **PASS**
 - **Wave-2 integration:** `999d4f95a2d597fb283689b9306d2a6773af707d`；
   17 个新增路径均属于 T05/T06，final Architect/QA **PASS**
-- **M0-T02:** **REVIEW**；ADR-0004 固定的
+- **M0-T02:** **DONE**；ADR-0004 固定的
   `gcmtestvectors.zip@f9fc479e...a023` 不含批准的 numeric cases。实际来源为
   McGrew/Viega GCM proposal TV archive
   `511e4741cee299ad0d1eb72ae2738911758248e2aba9d3db33a1dbcbb62e07f0`
@@ -31,8 +31,10 @@
   密码/协议行为不变；contract Architect **PASS**、QA **PASS**。实现
   `45c0e2f` + repair 1/2 `df22d7e` 的 provenance/nonce repair 已 PASS；
   prior overall gate 只因 resolved graph 未启用 `aes/zeroize`/`ghash/zeroize`
-  而 BLOCK。ADR-0009/T01 blocker 已由 `edaee3d`/`4f3f0ac` 关闭；T02 现恢复
-  combined integration review
+  而 BLOCK。ADR-0009/T01 blocker 已由 `edaee3d`/`4f3f0ac` 关闭；combined
+  integration `f9e218eca241f3002500b932fdcb4db93c52313b` Architect/QA
+  **PASS**，T02 3+2+6、policy 13、architecture 6、core 4 与
+  SOCKS5/runtime 36，合计 70 tests PASS；lock identities 110→110、0 differences
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -152,7 +154,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | workspace已存在；workspace-wide gate按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
-| Security/KAT/negative | IN_PROGRESS/REVIEW | T02 primitive/KDF/secret与provenance/nonce repair commands均通过；ADR-0009 resolved zeroize feature evidence 已在 T01 integration PASS，等待 combined T02 integration gate | M0-T02/T03 |
+| Security/KAT/negative | T02 PASS / T03 PENDING | T02 primitive/KDF/secret、provenance/nonce、ADR-0009 resolved zeroize feature 与 combined integration gates 全部 PASS；T03 protocol security negative coverage 尚待实现 | M0-T03 |
 | Lifecycle/backpressure | IN_PROGRESS | T06 focused lifecycle/backpressure commands 与 10,240 次 shutdown ready-race regression 已 PASS；完整 runtime/composition 与同一最终 integration commit evidence 尚未完成 | M0 |
 | External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |
