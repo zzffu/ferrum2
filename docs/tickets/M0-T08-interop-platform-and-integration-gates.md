@@ -2,7 +2,7 @@
 id = "M0-T08"
 title = "Qualify pinned interoperability, MSRV, and three target artifacts"
 milestone = "M0"
-status = "ready"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T07"]
 owns = [
@@ -167,5 +167,16 @@ To be filled by the Team Lead after integration:
   limitation requiring an explicit evidence-contract amendment, while static
   Architect review of checkpoint `14343d2` found required workflow/harness repairs.
   ADR-0014 and synchronized SPEC/TEST amendments are now accepted after final
-  Product/Architect/QA PASS. The checkpoint remains unintegrated and T08 is ready
-  for one batched repair that must close all static findings.
+  Product/Architect/QA PASS. The checkpoint remains unintegrated and T08 is released
+  into one batched repair that must close all static findings.
+- Initial checkpoint: `14343d222b5caa1dfdc2ebfc931c52d427a106de`;
+  clean, nine T08-owned files, unintegrated.
+- Initial Architect gate: **BLOCK**. Repair 1/2 must close all findings in one
+  batch: clean-job binary prerequisites；absolute child/version/I/O/reap deadlines
+  with checked statuses and bounded sanitized evidence；reserved unique ports plus
+  child-specific readiness and cleanup/rebind proof；structural per-job workflow
+  policy and immutable scope allowlist；nonzero exact filtered-test counts；native
+  no-side-effect/compiler-linker/BLAKE3-backend evidence.
+- ADR-0014 acceptance: `96d62628107a373a076266d8564d81309c915be1`;
+  final Product/Architect/QA document gates PASS.
+- Current gate: **IN_PROGRESS**；checkpoint refresh and repair 1/2 pending.

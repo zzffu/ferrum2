@@ -116,7 +116,8 @@ non-overlapping ownership。
     Architect/QA gates，done；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
     独占 `.github/workflows/m0.yml`；checkpoint `14343d2`未集成；ADR-0014
-    external evidence边界已接受，当前ready执行静态Architect required repairs。
+    external evidence边界已接受，当前in_progress执行静态Architect required
+    repairs。
 
   Dependency graph：
 
@@ -172,7 +173,8 @@ non-overlapping ownership。
   并被接受；T07 candidate `5ac8f1b`与lifecycle evidence repair 1/2 `a9b0a56`
   已通过ticket/final Architect与QA gates并集成于`91516720`。后续MSRV repair
   `50bf0b7`与integration `123618f`同样通过Team Lead/final Architect/QA gates，
-  T07现done。T08 checkpoint `14343d2`仍未集成并处于blocked。
+  T07现done。ADR-0014已在`96d6262`接受；T08 checkpoint `14343d2`仍未集成，
+  现以repair 1/2处理全部静态Architect findings。
   全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
