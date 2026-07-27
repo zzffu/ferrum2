@@ -5,7 +5,9 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,9 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 const CASE_TIMEOUT: Duration = Duration::from_secs(60);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const CHILD_OUTPUT_CAP: usize = 256 * 1024;
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+static ACTIVE_CHILDREN: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug)]
 pub enum Reference {
@@ -41,16 +46,50 @@ struct Capture {
     truncated: bool,
 }
 
+#[derive(Clone, Copy)]
+struct CaseDeadline {
+    end: Instant,
+}
+
+impl CaseDeadline {
+    fn start() -> Self {
+        Self {
+            end: Instant::now() + CASE_TIMEOUT,
+        }
+    }
+
+    fn remaining(self, label: &str) -> Duration {
+        self.end
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .unwrap_or_else(|| panic!("{label}: absolute 60-second case deadline exceeded"))
+    }
+
+    fn bounded(self, requested: Duration, label: &str) -> Duration {
+        requested.min(self.remaining(label))
+    }
+
+    fn check(self, label: &str) {
+        let _ = self.remaining(label);
+    }
+}
+
+struct CaptureReader {
+    receiver: Receiver<Capture>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
 struct ProcessGuard {
     label: &'static str,
     child: Child,
-    stdout: Option<thread::JoinHandle<Capture>>,
-    stderr: Option<thread::JoinHandle<Capture>>,
+    stdout: Option<CaptureReader>,
+    stderr: Option<CaptureReader>,
     reaped: bool,
 }
 
 impl ProcessGuard {
-    fn spawn(label: &'static str, command: &mut Command) -> Self {
+    fn spawn(label: &'static str, command: &mut Command, deadline: CaseDeadline) -> Self {
+        deadline.check("before child spawn");
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -58,57 +97,94 @@ impl ProcessGuard {
         let mut child = command
             .spawn()
             .unwrap_or_else(|error| panic!("spawn {label}: {error}"));
+        ACTIVE_CHILDREN.fetch_add(1, Ordering::SeqCst);
         let stdout = child.stdout.take().expect("captured stdout");
         let stderr = child.stderr.take().expect("captured stderr");
-        Self {
+        let process = Self {
             label,
             child,
             stdout: Some(capture_output(stdout)),
             stderr: Some(capture_output(stderr)),
             reaped: false,
-        }
+        };
+        deadline.check("after child spawn");
+        process
     }
 
-    fn assert_running(&mut self) {
+    fn assert_running(&mut self, deadline: CaseDeadline, phase: &str) {
+        deadline.check(phase);
         if let Some(status) = self.child.try_wait().expect("child status") {
-            let diagnostics = self.finish_capture();
+            let diagnostics = self.finish_capture(deadline);
             self.reaped = true;
+            ACTIVE_CHILDREN.fetch_sub(1, Ordering::SeqCst);
             panic!(
-                "{} exited before readiness with {status}: {diagnostics}",
-                self.label
+                "{} exited unexpectedly during {phase} with {status}: {diagnostics}",
+                self.label,
             );
         }
     }
 
-    fn terminate(&mut self) {
-        if self.reaped {
-            return;
+    fn wait_for_exit(&mut self, deadline: CaseDeadline, phase: &str) -> ExitStatus {
+        loop {
+            deadline.check(phase);
+            if let Some(status) = self.child.try_wait().expect("child status") {
+                self.reaped = true;
+                ACTIVE_CHILDREN.fetch_sub(1, Ordering::SeqCst);
+                return status;
+            }
+            thread::sleep(POLL_INTERVAL.min(deadline.remaining(phase)));
         }
-        if self.child.try_wait().expect("child status").is_none() {
-            self.child.kill().expect("kill child");
-        }
-        self.child.wait().expect("reap child");
-        self.finish_capture();
-        self.reaped = true;
     }
 
-    fn finish_capture(&mut self) -> String {
-        let stdout = self
-            .stdout
-            .take()
-            .map(|handle| handle.join().expect("stdout capture"))
-            .unwrap_or_else(|| Capture {
-                bytes: Vec::new(),
-                truncated: false,
-            });
-        let stderr = self
-            .stderr
-            .take()
-            .map(|handle| handle.join().expect("stderr capture"))
-            .unwrap_or_else(|| Capture {
-                bytes: Vec::new(),
-                truncated: false,
-            });
+    fn finish_natural(&mut self, deadline: CaseDeadline, phase: &str) -> (ExitStatus, String) {
+        let status = self.wait_for_exit(deadline, phase);
+        let diagnostics = self.finish_capture(deadline);
+        (status, diagnostics)
+    }
+
+    fn terminate(&mut self, deadline: CaseDeadline) -> String {
+        if self.reaped {
+            panic!(
+                "{} was already reaped before intentional termination",
+                self.label
+            );
+        }
+        self.assert_running(deadline, "post-traffic child status check");
+        self.child
+            .kill()
+            .unwrap_or_else(|error| panic!("kill {}: {error}", self.label));
+        let status = self.wait_for_exit(deadline, "intentional child termination/reap");
+        assert!(
+            !status.success(),
+            "{} reported success after intentional termination",
+            self.label
+        );
+        let diagnostics = self.finish_capture(deadline);
+        format!("intentional_status={status}, {diagnostics}")
+    }
+
+    fn finish_capture(&mut self, deadline: CaseDeadline) -> String {
+        fn receive(reader: Option<CaptureReader>, deadline: CaseDeadline, label: &str) -> Capture {
+            let Some(mut reader) = reader else {
+                return Capture {
+                    bytes: Vec::new(),
+                    truncated: false,
+                };
+            };
+            let capture = reader
+                .receiver
+                .recv_timeout(deadline.remaining(label))
+                .unwrap_or_else(|error| panic!("{label}: bounded capture failed: {error}"));
+            reader
+                .thread
+                .take()
+                .expect("capture thread")
+                .join()
+                .expect("capture thread completed before channel delivery");
+            capture
+        }
+        let stdout = receive(self.stdout.take(), deadline, "stdout capture");
+        let stderr = receive(self.stderr.take(), deadline, "stderr capture");
         format!(
             "stdout={}, stderr={}",
             sanitize_capture(stdout),
@@ -122,26 +198,42 @@ impl Drop for ProcessGuard {
         if self.reaped {
             return;
         }
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
         }
-        let _ = self.child.wait();
-        let diagnostics = self.finish_capture();
-        if thread::panicking() {
-            eprintln!("sanitized {} diagnostics: {diagnostics}", self.label);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => {
+                    ACTIVE_CHILDREN.fetch_sub(1, Ordering::SeqCst);
+                    self.reaped = true;
+                    break;
+                }
+                Ok(None) if Instant::now() < cleanup_deadline => thread::sleep(POLL_INTERVAL),
+                _ => break,
+            }
         }
-        self.reaped = true;
+        if thread::panicking() {
+            eprintln!(
+                "sanitized {} diagnostics unavailable during drop",
+                self.label
+            );
+        }
     }
 }
 
-fn capture_output(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<Capture> {
-    thread::spawn(move || {
+fn capture_output(mut stream: impl Read + Send + 'static) -> CaptureReader {
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
         let mut bytes = Vec::new();
         let mut truncated = false;
         let mut chunk = [0_u8; 8192];
         loop {
             match stream.read(&mut chunk) {
-                Ok(0) | Err(_) => return Capture { bytes, truncated },
+                Ok(0) | Err(_) => {
+                    let _ = sender.send(Capture { bytes, truncated });
+                    return;
+                }
                 Ok(read) => {
                     let remaining = CHILD_OUTPUT_CAP.saturating_sub(bytes.len());
                     bytes.extend_from_slice(&chunk[..read.min(remaining)]);
@@ -149,7 +241,11 @@ fn capture_output(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<
                 }
             }
         }
-    })
+    });
+    CaptureReader {
+        receiver,
+        thread: Some(thread),
+    }
 }
 
 fn sanitize_capture(capture: Capture) -> String {
@@ -165,80 +261,107 @@ fn sanitize_capture(capture: Capture) -> String {
 }
 
 pub fn run_case(reference: Reference, direction: Direction) {
-    let started = Instant::now();
+    let deadline = CaseDeadline::start();
+    let child_baseline = ACTIVE_CHILDREN.load(Ordering::SeqCst);
     let pin = load_pin(reference);
     let archive = required_env(reference_archive_env(reference));
-    verify_archive(&archive, &pin);
+    verify_archive(&archive, &pin, deadline);
 
     let reference_binary = match (reference, direction) {
         (Reference::SingBox, _) => required_env("M0_SING_BOX_BIN"),
         (Reference::ShadowsocksRust, Direction::FerrumClient) => required_env("M0_SSSERVER_BIN"),
         (Reference::ShadowsocksRust, Direction::ReferenceClient) => required_env("M0_SSLOCAL_BIN"),
     };
-    verify_version(reference, &reference_binary, &pin.expected_version);
+    verify_version(
+        reference,
+        &reference_binary,
+        &pin.expected_version,
+        deadline,
+    );
 
     let directory = tempfile::tempdir().expect("isolated interop directory");
-    let (target, echo) = start_echo();
-    let proxy = unused_loopback();
-    let shadowsocks = unused_loopback();
+    let directory_path = directory.path().to_path_buf();
+    let mut ports = ReservedPorts::new();
+    let target = ports.target_address();
+    let proxy = ports.proxy_address();
+    let shadowsocks = ports.shadowsocks_address();
+    let target_process = TargetProcess::start(ports.take_target(), deadline);
 
-    let config_checksum = match direction {
-        Direction::FerrumClient => run_ferrum_client_case(
-            reference,
-            &reference_binary,
-            directory.path(),
-            shadowsocks,
-            proxy,
-            target,
-            started,
-        ),
-        Direction::ReferenceClient => run_reference_client_case(
-            reference,
-            &reference_binary,
-            directory.path(),
-            shadowsocks,
-            proxy,
-            target,
-            started,
-        ),
+    let context = CaseContext {
+        directory: directory.path(),
+        ports: &mut ports,
+        shadowsocks,
+        proxy,
+        target,
+        deadline,
+    };
+    let (config_checksum, process_evidence) = match direction {
+        Direction::FerrumClient => run_ferrum_client_case(reference, &reference_binary, context),
+        Direction::ReferenceClient => {
+            run_reference_client_case(reference, &reference_binary, context)
+        }
     };
 
-    let received = echo.join().expect("echo thread");
-    let expected = expected_payload();
+    let target_evidence = target_process.finish(deadline);
+    drop(ports);
+    assert_rebind_all([target, proxy, shadowsocks]);
+    directory
+        .close()
+        .unwrap_or_else(|error| panic!("explicit temporary directory close: {error}"));
     assert!(
-        received == expected,
-        "target bytes mismatch: received={}, expected={}",
-        received.len(),
-        expected.len()
+        !directory_path.exists(),
+        "temporary interop directory remains after explicit close"
     );
-    assert!(started.elapsed() < CASE_TIMEOUT, "interop case timed out");
+    assert_eq!(
+        ACTIVE_CHILDREN.load(Ordering::SeqCst),
+        child_baseline,
+        "external child registry did not return to baseline"
+    );
+    deadline.check("final interop evidence");
     eprintln!(
         "M0 interop evidence: reference={reference:?}, direction={direction:?}, \
          asset_sha256={}, config_sha256={config_checksum}, command_category=black-box-process, \
-         result=success",
+         process={process_evidence}, target={target_evidence}, result=success",
         pin.sha256
     );
+}
+
+struct CaseContext<'a> {
+    directory: &'a Path,
+    ports: &'a mut ReservedPorts,
+    shadowsocks: SocketAddrV4,
+    proxy: SocketAddrV4,
+    target: SocketAddrV4,
+    deadline: CaseDeadline,
 }
 
 fn run_ferrum_client_case(
     reference: Reference,
     reference_binary: &Path,
-    directory: &Path,
-    shadowsocks: SocketAddrV4,
-    proxy: SocketAddrV4,
-    target: SocketAddrV4,
-    started: Instant,
-) -> String {
+    context: CaseContext<'_>,
+) -> (String, String) {
+    let CaseContext {
+        directory,
+        ports,
+        shadowsocks,
+        proxy,
+        target,
+        deadline,
+    } = context;
     let reference_config = reference_server_config(reference, shadowsocks);
     let reference_config_path = write_config(directory, "reference-server.json", &reference_config);
+    ports.release_shadowsocks();
     let mut reference_command =
         reference_command(reference, reference_binary, &reference_config_path);
-    let mut reference_process =
-        ProcessGuard::spawn("reference Shadowsocks server", &mut reference_command);
-    wait_for_bound(
+    let mut reference_process = ProcessGuard::spawn(
+        "reference Shadowsocks server",
+        &mut reference_command,
+        deadline,
+    );
+    wait_for_tcp_listener(
         &mut reference_process,
         shadowsocks,
-        started,
+        deadline,
         "reference Shadowsocks server",
     );
 
@@ -247,69 +370,91 @@ fn run_ferrum_client_case(
          [shadowsocks]\nmethod = \"{METHOD}\"\npsk = \"{SYNTHETIC_PSK}\"\n"
     );
     let ferrum_config_path = write_config(directory, "ferrum-client.toml", &ferrum_config);
+    ports.release_proxy();
     let mut ferrum_command = Command::new(ferrum_binary("ferrum2-client"));
     ferrum_command.args(["--config", path_text(&ferrum_config_path)]);
-    let mut ferrum_process = ProcessGuard::spawn("ferrum client", &mut ferrum_command);
-    wait_for_bound(&mut ferrum_process, proxy, started, "ferrum SOCKS listener");
+    let mut ferrum_process = ProcessGuard::spawn("ferrum client", &mut ferrum_command, deadline);
+    wait_for_socks_listener(
+        &mut ferrum_process,
+        proxy,
+        deadline,
+        "ferrum SOCKS listener",
+    );
 
-    exercise_socks(proxy, target, started);
-    ferrum_process.terminate();
-    reference_process.terminate();
-    sha256_bytes(reference_config.as_bytes())
+    reference_process.assert_running(deadline, "pre-traffic reference check");
+    ferrum_process.assert_running(deadline, "pre-traffic ferrum check");
+    exercise_socks(proxy, target, deadline);
+    reference_process.assert_running(deadline, "post-traffic reference check");
+    ferrum_process.assert_running(deadline, "post-traffic ferrum check");
+    let ferrum_evidence = ferrum_process.terminate(deadline);
+    let reference_evidence = reference_process.terminate(deadline);
+    (
+        sha256_bytes(reference_config.as_bytes()),
+        format!("ferrum=[{ferrum_evidence}], reference=[{reference_evidence}]"),
+    )
 }
 
 fn run_reference_client_case(
     reference: Reference,
     reference_binary: &Path,
-    directory: &Path,
-    shadowsocks: SocketAddrV4,
-    proxy: SocketAddrV4,
-    target: SocketAddrV4,
-    started: Instant,
-) -> String {
+    context: CaseContext<'_>,
+) -> (String, String) {
+    let CaseContext {
+        directory,
+        ports,
+        shadowsocks,
+        proxy,
+        target,
+        deadline,
+    } = context;
     let ferrum_config = format!(
         "schema_version = 1\n\n[server]\nlisten = \"{shadowsocks}\"\n\n\
          [shadowsocks]\nmethod = \"{METHOD}\"\npsk = \"{SYNTHETIC_PSK}\"\n"
     );
     let ferrum_config_path = write_config(directory, "ferrum-server.toml", &ferrum_config);
+    ports.release_shadowsocks();
     let mut ferrum_command = Command::new(ferrum_binary("ferrum2-server"));
     ferrum_command.args(["--config", path_text(&ferrum_config_path)]);
-    let mut ferrum_process = ProcessGuard::spawn("ferrum server", &mut ferrum_command);
-    wait_for_bound(
+    let mut ferrum_process = ProcessGuard::spawn("ferrum server", &mut ferrum_command, deadline);
+    wait_for_tcp_listener(
         &mut ferrum_process,
         shadowsocks,
-        started,
+        deadline,
         "ferrum Shadowsocks listener",
     );
 
     let reference_config = reference_client_config(reference, shadowsocks, proxy);
     let reference_config_path = write_config(directory, "reference-client.json", &reference_config);
+    ports.release_proxy();
     let mut reference_command =
         reference_command(reference, reference_binary, &reference_config_path);
     let mut reference_process =
-        ProcessGuard::spawn("reference SOCKS client", &mut reference_command);
-    wait_for_bound(
+        ProcessGuard::spawn("reference SOCKS client", &mut reference_command, deadline);
+    wait_for_socks_listener(
         &mut reference_process,
         proxy,
-        started,
+        deadline,
         "reference SOCKS listener",
     );
 
-    exercise_socks(proxy, target, started);
-    reference_process.terminate();
-    ferrum_process.terminate();
-    sha256_bytes(reference_config.as_bytes())
+    reference_process.assert_running(deadline, "pre-traffic reference check");
+    ferrum_process.assert_running(deadline, "pre-traffic ferrum check");
+    exercise_socks(proxy, target, deadline);
+    reference_process.assert_running(deadline, "post-traffic reference check");
+    ferrum_process.assert_running(deadline, "post-traffic ferrum check");
+    let reference_evidence = reference_process.terminate(deadline);
+    let ferrum_evidence = ferrum_process.terminate(deadline);
+    (
+        sha256_bytes(reference_config.as_bytes()),
+        format!("reference=[{reference_evidence}], ferrum=[{ferrum_evidence}]"),
+    )
 }
 
-fn exercise_socks(proxy: SocketAddrV4, target: SocketAddrV4, started: Instant) {
-    assert!(started.elapsed() < CASE_TIMEOUT, "interop case timed out");
-    let mut stream = TcpStream::connect_timeout(&proxy.into(), IO_TIMEOUT).expect("connect SOCKS");
-    stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .expect("SOCKS read deadline");
-    stream
-        .set_write_timeout(Some(IO_TIMEOUT))
-        .expect("SOCKS write deadline");
+fn exercise_socks(proxy: SocketAddrV4, target: SocketAddrV4, deadline: CaseDeadline) {
+    let mut stream =
+        TcpStream::connect_timeout(&proxy.into(), deadline.bounded(IO_TIMEOUT, "connect SOCKS"))
+            .expect("connect SOCKS");
+    set_stream_deadlines(&stream, deadline, "SOCKS");
     stream.write_all(&[5, 1, 0]).expect("SOCKS greeting");
     let mut method = [0_u8; 2];
     stream.read_exact(&mut method).expect("SOCKS method");
@@ -323,110 +468,331 @@ fn exercise_socks(proxy: SocketAddrV4, target: SocketAddrV4, started: Instant) {
     stream.read_exact(&mut reply).expect("SOCKS connect reply");
     assert_eq!(&reply[..4], &[5, 0, 0, 1], "SOCKS connect succeeded");
 
-    let payload = expected_payload();
-    stream.write_all(&payload[..1]).expect("first payload");
-    stream.write_all(&payload[1..]).expect("second payload");
+    let mut state = ExchangeState::default();
+    let forward = forward_payload();
+    stream.write_all(&forward[..1]).expect("first forward byte");
+    stream
+        .write_all(&forward[1..])
+        .expect("remaining forward bytes");
+    state.forward_matches().expect("forward payload submitted");
+
+    let reverse = reverse_payload();
+    let mut received = vec![0_u8; reverse.len()];
+    stream
+        .read_exact(&mut received)
+        .expect("complete reverse payload before application FIN");
+    assert_eq!(received, reverse, "reverse payload byte mismatch");
+    state.reverse_matches().expect("reverse equality");
     stream
         .shutdown(Shutdown::Write)
         .expect("client write half-close");
-    let mut echoed = Vec::new();
-    stream
-        .read_to_end(&mut echoed)
-        .expect("reverse half-close drain");
-    assert!(
-        echoed == payload,
-        "reverse bytes mismatch: received={}, expected={}",
-        echoed.len(),
-        payload.len()
-    );
-    assert!(started.elapsed() < CASE_TIMEOUT, "interop case timed out");
+    state
+        .application_shutdown()
+        .expect("application FIN ordering");
+    expect_clean_eof(&mut stream, "application client").expect("application clean EOF");
+    state.client_clean_eof().expect("ordered client EOF");
+    deadline.check("completed ordered clean-EOF exchange");
 }
 
-fn expected_payload() -> Vec<u8> {
+fn forward_payload() -> Vec<u8> {
     let mut payload = vec![0x49];
     payload.extend(std::iter::repeat_n(0x5a, 16_385));
     payload
 }
 
-fn start_echo() -> (SocketAddrV4, thread::JoinHandle<Vec<u8>>) {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("echo listener");
-    let address = ipv4_address(&listener);
-    listener
-        .set_nonblocking(true)
-        .expect("nonblocking echo listener");
-    let handle = thread::spawn(move || {
-        let deadline = Instant::now() + READINESS_TIMEOUT;
-        let (mut stream, _) = loop {
-            match listener.accept() {
-                Ok(accepted) => break accepted,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "echo accept timed out");
-                    thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => panic!("echo accept: {error}"),
-            }
-        };
-        stream.set_nonblocking(false).expect("blocking echo stream");
-        stream
-            .set_read_timeout(Some(IO_TIMEOUT))
-            .expect("echo read deadline");
-        stream
-            .set_write_timeout(Some(IO_TIMEOUT))
-            .expect("echo write deadline");
-        let mut received = Vec::new();
-        stream.read_to_end(&mut received).expect("echo read");
-        stream.write_all(&received).expect("echo reverse write");
-        stream.shutdown(Shutdown::Write).expect("echo half-close");
-        received
-    });
-    (address, handle)
+fn reverse_payload() -> Vec<u8> {
+    let mut payload = vec![0xa6];
+    payload.extend((0..16_385).map(|index| (index % 251) as u8));
+    assert_ne!(payload, forward_payload(), "payloads must remain distinct");
+    payload
 }
 
-fn wait_for_listener(
+#[derive(Default)]
+struct ExchangeState {
+    stage: u8,
+}
+
+impl ExchangeState {
+    fn forward_matches(&mut self) -> Result<(), &'static str> {
+        if self.stage != 0 {
+            return Err("forward equality out of order");
+        }
+        self.stage = 1;
+        Ok(())
+    }
+
+    fn reverse_matches(&mut self) -> Result<(), &'static str> {
+        if self.stage != 1 {
+            return Err("reverse equality requires forward equality");
+        }
+        self.stage = 2;
+        Ok(())
+    }
+
+    fn application_shutdown(&mut self) -> Result<(), &'static str> {
+        if self.stage != 2 {
+            return Err("application shutdown requires both payload equalities");
+        }
+        self.stage = 3;
+        Ok(())
+    }
+
+    fn target_clean_eof(&mut self) -> Result<(), &'static str> {
+        if self.stage != 3 {
+            return Err("target EOF requires application shutdown");
+        }
+        self.stage = 4;
+        Ok(())
+    }
+
+    fn target_shutdown(&mut self) -> Result<(), &'static str> {
+        if self.stage != 4 {
+            return Err("target shutdown requires target clean EOF");
+        }
+        self.stage = 5;
+        Ok(())
+    }
+
+    fn client_clean_eof(&mut self) -> Result<(), &'static str> {
+        if self.stage != 3 && self.stage != 5 {
+            return Err("client EOF requires application shutdown");
+        }
+        self.stage = 6;
+        Ok(())
+    }
+}
+
+struct TargetProcess {
+    result: Receiver<Result<String, String>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl TargetProcess {
+    fn start(listener: TcpListener, deadline: CaseDeadline) -> Self {
+        let (sender, result) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            let outcome = run_target(listener, deadline);
+            let _ = sender.send(outcome);
+        });
+        Self {
+            result,
+            thread: Some(thread),
+        }
+    }
+
+    fn finish(mut self, deadline: CaseDeadline) -> String {
+        let result = self
+            .result
+            .recv_timeout(deadline.remaining("target completion"))
+            .unwrap_or_else(|error| panic!("target completion deadline: {error}"));
+        self.thread
+            .take()
+            .expect("target thread")
+            .join()
+            .expect("target thread completed before channel delivery");
+        result.unwrap_or_else(|error| panic!("target contract failed: {error}"))
+    }
+}
+
+fn run_target(listener: TcpListener, deadline: CaseDeadline) -> Result<String, String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("target nonblocking listener: {error}"))?;
+    let readiness_end = Instant::now() + deadline.bounded(READINESS_TIMEOUT, "target accept");
+    let (mut stream, _) = loop {
+        match listener.accept() {
+            Ok(accepted) => break accepted,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if Instant::now() >= readiness_end {
+                    return Err("target accept readiness deadline".into());
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(error) => return Err(format!("target accept: {error}")),
+        }
+    };
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| format!("target blocking stream: {error}"))?;
+    set_stream_deadlines(&stream, deadline, "target");
+    let expected = forward_payload();
+    let mut received = vec![0_u8; expected.len()];
+    stream
+        .read_exact(&mut received)
+        .map_err(|error| format!("forward premature EOF/error: {error}"))?;
+    if received != expected {
+        return Err("forward payload byte mismatch".into());
+    }
+    let mut state = ExchangeState::default();
+    state.forward_matches().map_err(str::to_owned)?;
+
+    let reverse = reverse_payload();
+    stream
+        .write_all(&reverse)
+        .map_err(|error| format!("reverse write: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("reverse flush: {error}"))?;
+    state.reverse_matches().map_err(str::to_owned)?;
+    expect_clean_eof(&mut stream, "target")?;
+    state.application_shutdown().map_err(str::to_owned)?;
+    state.target_clean_eof().map_err(str::to_owned)?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|error| format!("target write shutdown failed: {error}"))?;
+    state.target_shutdown().map_err(str::to_owned)?;
+    Ok(format!(
+        "forward_bytes={}, reverse_bytes={}, target_clean_eof=true, target_shutdown=true",
+        expected.len(),
+        reverse.len()
+    ))
+}
+
+fn expect_clean_eof(stream: &mut TcpStream, label: &str) -> Result<(), String> {
+    let mut extra = [0_u8; 1];
+    match stream.read(&mut extra) {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(format!(
+            "{label} received an extra byte after expected payload"
+        )),
+        Err(error) => Err(format!(
+            "{label} expected clean EOF, received error: {error}"
+        )),
+    }
+}
+
+fn set_stream_deadlines(stream: &TcpStream, deadline: CaseDeadline, label: &str) {
+    let timeout = deadline.bounded(IO_TIMEOUT, label);
+    stream
+        .set_read_timeout(Some(timeout))
+        .unwrap_or_else(|error| panic!("{label} read deadline: {error}"));
+    stream
+        .set_write_timeout(Some(timeout))
+        .unwrap_or_else(|error| panic!("{label} write deadline: {error}"));
+}
+
+fn wait_for_tcp_listener(
     child: &mut ProcessGuard,
     address: SocketAddrV4,
-    case_started: Instant,
+    case_deadline: CaseDeadline,
     label: &str,
 ) {
-    let deadline = Instant::now() + READINESS_TIMEOUT;
+    let readiness_end =
+        Instant::now() + case_deadline.bounded(READINESS_TIMEOUT, "listener readiness");
     loop {
-        child.assert_running();
+        child.assert_running(case_deadline, "listener readiness");
         if TcpStream::connect_timeout(&address.into(), Duration::from_millis(200)).is_ok() {
             return;
         }
         assert!(
-            Instant::now() < deadline && case_started.elapsed() < CASE_TIMEOUT,
+            Instant::now() < readiness_end,
             "{label} readiness timed out"
         );
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(POLL_INTERVAL);
     }
 }
 
-fn wait_for_bound(
+fn wait_for_socks_listener(
     child: &mut ProcessGuard,
     address: SocketAddrV4,
-    case_started: Instant,
+    case_deadline: CaseDeadline,
     label: &str,
 ) {
-    let deadline = Instant::now() + READINESS_TIMEOUT;
+    let readiness_end =
+        Instant::now() + case_deadline.bounded(READINESS_TIMEOUT, "SOCKS readiness");
     loop {
-        child.assert_running();
-        match TcpListener::bind(address) {
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => return,
-            Ok(listener) => drop(listener),
-            Err(error) => panic!("{label} readiness bind probe failed: {error}"),
+        child.assert_running(case_deadline, "SOCKS readiness");
+        if let Ok(mut stream) =
+            TcpStream::connect_timeout(&address.into(), Duration::from_millis(200))
+        {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+            if stream.write_all(&[5, 1, 0]).is_ok() {
+                let mut response = [0_u8; 2];
+                if stream.read_exact(&mut response).is_ok() && response == [5, 0] {
+                    return;
+                }
+            }
         }
         assert!(
-            Instant::now() < deadline && case_started.elapsed() < CASE_TIMEOUT,
+            Instant::now() < readiness_end,
             "{label} readiness timed out"
         );
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(POLL_INTERVAL);
     }
 }
 
-fn unused_loopback() -> SocketAddrV4 {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve loopback");
-    ipv4_address(&listener)
+struct ReservedPorts {
+    target: Option<TcpListener>,
+    proxy: Option<TcpListener>,
+    shadowsocks: Option<TcpListener>,
+}
+
+impl ReservedPorts {
+    fn new() -> Self {
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve target");
+        let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve proxy");
+        let shadowsocks = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve Shadowsocks");
+        let addresses = [
+            ipv4_address(&target),
+            ipv4_address(&proxy),
+            ipv4_address(&shadowsocks),
+        ];
+        assert!(
+            addresses[0] != addresses[1]
+                && addresses[0] != addresses[2]
+                && addresses[1] != addresses[2],
+            "reserved port pool must be distinct"
+        );
+        Self {
+            target: Some(target),
+            proxy: Some(proxy),
+            shadowsocks: Some(shadowsocks),
+        }
+    }
+
+    fn target_address(&self) -> SocketAddrV4 {
+        ipv4_address(self.target.as_ref().expect("target reservation"))
+    }
+
+    fn proxy_address(&self) -> SocketAddrV4 {
+        ipv4_address(self.proxy.as_ref().expect("proxy reservation"))
+    }
+
+    fn shadowsocks_address(&self) -> SocketAddrV4 {
+        ipv4_address(self.shadowsocks.as_ref().expect("Shadowsocks reservation"))
+    }
+
+    fn take_target(&mut self) -> TcpListener {
+        self.target.take().expect("release target only to target")
+    }
+
+    fn release_proxy(&mut self) {
+        drop(
+            self.proxy
+                .take()
+                .expect("release proxy only to proxy child"),
+        );
+    }
+
+    fn release_shadowsocks(&mut self) {
+        drop(
+            self.shadowsocks
+                .take()
+                .expect("release Shadowsocks only to server child"),
+        );
+    }
+}
+
+fn assert_rebind_all(addresses: [SocketAddrV4; 3]) {
+    let rebound = addresses
+        .into_iter()
+        .map(|address| {
+            TcpListener::bind(address)
+                .unwrap_or_else(|error| panic!("exact address did not rebind {address}: {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rebound.len(), 3);
 }
 
 fn ipv4_address(listener: &TcpListener) -> SocketAddrV4 {
@@ -590,7 +956,8 @@ fn value<'a>(values: &'a HashMap<String, String>, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("required pin field missing: {key}"))
 }
 
-fn verify_archive(path: &Path, pin: &Pin) {
+fn verify_archive(path: &Path, pin: &Pin, deadline: CaseDeadline) {
+    deadline.check("reference archive verification");
     assert_eq!(
         path.file_name().and_then(|name| name.to_str()),
         Some(pin.asset.as_str()),
@@ -598,7 +965,7 @@ fn verify_archive(path: &Path, pin: &Pin) {
     );
     let metadata = fs::metadata(path).expect("reference archive metadata");
     assert_eq!(metadata.len(), pin.size, "reference archive size mismatch");
-    let actual = sha256_file(path);
+    let actual = sha256_file_with_deadline(path, Some(deadline));
     assert_eq!(actual, pin.sha256, "reference archive SHA-256 mismatch");
     assert!(
         !pin.license_review.trim().is_empty()
@@ -607,16 +974,22 @@ fn verify_archive(path: &Path, pin: &Pin) {
     );
 }
 
-fn verify_version(reference: Reference, binary: &Path, expected: &str) {
-    let output = match reference {
-        Reference::SingBox => Command::new(binary).arg("version").output(),
-        Reference::ShadowsocksRust => Command::new(binary).arg("--version").output(),
+fn verify_version(reference: Reference, binary: &Path, expected: &str, deadline: CaseDeadline) {
+    let mut command = Command::new(binary);
+    match reference {
+        Reference::SingBox => {
+            command.arg("version");
+        }
+        Reference::ShadowsocksRust => {
+            command.arg("--version");
+        }
     }
-    .expect("execute pinned reference version probe");
-    assert!(output.status.success(), "reference version probe failed");
-    let mut combined = output.stdout;
-    combined.extend_from_slice(&output.stderr);
-    let rendered = String::from_utf8_lossy(&combined);
+    let mut process = ProcessGuard::spawn("reference version probe", &mut command, deadline);
+    let (status, rendered) = process.finish_natural(deadline, "bounded reference version probe");
+    assert!(
+        status.success(),
+        "reference version probe failed: {rendered}"
+    );
     assert!(
         rendered.contains(expected),
         "reference version mismatch: expected reviewed output"
@@ -624,10 +997,17 @@ fn verify_version(reference: Reference, binary: &Path, expected: &str) {
 }
 
 fn sha256_file(path: &Path) -> String {
+    sha256_file_with_deadline(path, None)
+}
+
+fn sha256_file_with_deadline(path: &Path, deadline: Option<CaseDeadline>) -> String {
     let mut file = File::open(path).expect("open SHA-256 input");
     let mut state = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
+        if let Some(deadline) = deadline {
+            deadline.check("reference archive SHA-256");
+        }
         let read = file.read(&mut buffer).expect("read SHA-256 input");
         if read == 0 {
             return hex_digest(state.finish());
@@ -837,8 +1217,17 @@ impl Sha256 {
 
 #[cfg(test)]
 mod tests {
-    use super::{sha256_bytes, sha256_file};
+    use super::{
+        ACTIVE_CHILDREN, CaseDeadline, ExchangeState, ProcessGuard, expect_clean_eof,
+        forward_payload, reverse_payload, sha256_bytes, sha256_file,
+    };
     use std::fs;
+    use std::io::Write;
+    use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+    use std::process::Command;
+    use std::sync::atomic::Ordering;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn sha256_matches_reviewed_known_answer() {
@@ -850,5 +1239,93 @@ mod tests {
         let path = directory.path().join("abc");
         fs::write(&path, b"abc").expect("write fixture");
         assert_eq!(sha256_file(&path), sha256_bytes(b"abc"));
+    }
+
+    #[test]
+    fn ordered_exchange_rejects_fin_before_both_payloads_match() {
+        let mut state = ExchangeState::default();
+        assert!(state.application_shutdown().is_err());
+        state.forward_matches().expect("forward equality");
+        assert!(state.application_shutdown().is_err());
+        state.reverse_matches().expect("reverse equality");
+        state
+            .application_shutdown()
+            .expect("shutdown only after both equalities");
+    }
+
+    #[test]
+    fn ordered_exchange_rejects_clean_eof_and_target_shutdown_reordering() {
+        let mut state = ExchangeState::default();
+        assert!(state.target_clean_eof().is_err());
+        assert!(state.target_shutdown().is_err());
+        state.forward_matches().expect("forward");
+        state.reverse_matches().expect("reverse");
+        state.application_shutdown().expect("application shutdown");
+        assert!(state.target_shutdown().is_err());
+        state.target_clean_eof().expect("target EOF");
+        state.target_shutdown().expect("target shutdown");
+        state.client_clean_eof().expect("client EOF");
+    }
+
+    #[test]
+    fn payload_contract_is_fixed_complete_and_distinct() {
+        let forward = forward_payload();
+        let reverse = reverse_payload();
+        assert_eq!(forward.len(), 16_386);
+        assert_eq!(reverse.len(), 16_386);
+        assert_ne!(forward, reverse);
+    }
+
+    #[test]
+    fn clean_eof_rejects_extra_byte_and_accepts_only_zero() {
+        let (mut reader, mut writer) = connected_pair();
+        writer.write_all(&[0xa5]).expect("extra byte");
+        writer.shutdown(Shutdown::Write).expect("writer shutdown");
+        assert!(expect_clean_eof(&mut reader, "mutation").is_err());
+
+        let (mut reader, writer) = connected_pair();
+        writer
+            .shutdown(Shutdown::Write)
+            .expect("clean writer shutdown");
+        expect_clean_eof(&mut reader, "clean").expect("clean zero-length read");
+    }
+
+    #[test]
+    fn absolute_deadline_and_nonzero_child_status_are_enforced() {
+        let expired = CaseDeadline {
+            end: Instant::now() - Duration::from_millis(1),
+        };
+        assert!(std::panic::catch_unwind(|| expired.check("mutation")).is_err());
+
+        let deadline = CaseDeadline::start();
+        let baseline = ACTIVE_CHILDREN.load(Ordering::SeqCst);
+        let mut command = failing_command();
+        let mut child = ProcessGuard::spawn("nonzero status mutation", &mut command, deadline);
+        let (status, _) = child.finish_natural(deadline, "nonzero child");
+        assert!(!status.success());
+        assert_eq!(ACTIVE_CHILDREN.load(Ordering::SeqCst), baseline);
+    }
+
+    fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("pair listener");
+        let address = listener.local_addr().expect("pair address");
+        let connector = thread::spawn(move || TcpStream::connect(address).expect("pair connect"));
+        let (accepted, _) = listener.accept().expect("pair accept");
+        (accepted, connector.join().expect("pair connector"))
+    }
+
+    fn failing_command() -> Command {
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("cmd");
+            command.args(["/c", "exit", "7"]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 7"]);
+            command
+        }
     }
 }

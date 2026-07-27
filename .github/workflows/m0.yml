@@ -46,6 +46,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo build --workspace --bins --locked
           cargo fmt --all -- --check
           cargo check --workspace --all-targets --locked
           cargo test --workspace --locked
@@ -84,6 +85,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          run_filtered() {
+            expected="$1"
+            shift
+            count="$("$@" -- --list | grep -c ': test$')"
+            test "$count" -eq "$expected"
+            "$@"
+          }
+          cargo build --workspace --bins --locked
           cargo metadata --locked --format-version 1
           cargo test -p ferrum2-m0-harness --test architecture --locked
           cargo test -p ferrum2-m0-harness --test workspace_policy --locked
@@ -96,26 +105,26 @@ jobs:
           cargo tree -p ferrum2-crypto --locked -e features -i ghash
           cargo tree -p ferrum2-crypto --locked -e features -i polyval
           cargo tree -p ferrum2-crypto --locked -e features -i zeroize
-          cargo test -p ferrum2-m0-harness --test config_cli --locked invalid_matrix
-          cargo test -p ferrum2-crypto --test primitive_vectors --locked blake3
-          cargo test -p ferrum2-crypto --test primitive_vectors --locked aes128_gcm
+          run_filtered 1 cargo test -p ferrum2-m0-harness --test config_cli --locked invalid_matrix
+          run_filtered 1 cargo test -p ferrum2-crypto --test primitive_vectors --locked blake3
+          run_filtered 1 cargo test -p ferrum2-crypto --test primitive_vectors --locked aes128_gcm
           cargo test -p ferrum2-crypto --test sip022_vectors --locked
           cargo test -p ferrum2-crypto --test secret_entropy --locked
-          cargo test -p ferrum2-crypto --lib --locked tcp_owner_nonce_exhaustion
-          cargo test -p ferrum2-shadowsocks --test tcp_negative --locked bounds
-          cargo test -p ferrum2-shadowsocks --test tcp_negative --locked auth
-          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked timestamp
+          run_filtered 2 cargo test -p ferrum2-crypto --lib --locked tcp_owner_nonce_exhaustion
+          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_negative --locked bounds
+          run_filtered 2 cargo test -p ferrum2-shadowsocks --test tcp_negative --locked auth
+          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked timestamp
           cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked
           cargo test -p ferrum2-shadowsocks --test tcp_allocation_bounds --locked
-          cargo test -p ferrum2-shadowsocks --lib --locked flow_internal_contract
+          run_filtered 4 cargo test -p ferrum2-shadowsocks --lib --locked flow_internal_contract
           cargo test -p ferrum2-shadowsocks --test tcp_vectors --locked
           cargo test -p ferrum2-shadowsocks --test tcp_duplex --locked
           cargo test -p ferrum2-shadowsocks --test tcp_fragmentation --locked
           cargo test -p ferrum2-shadowsocks --test tcp_flow_contract --locked
-          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact
-          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked concurrent
-          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked retention
-          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked capacity
+          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact
+          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked concurrent
+          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked retention
+          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked capacity
           cargo test -p ferrum2-shadowsocks --test detection_prevention --locked
           cargo test -p ferrum2-shadowsocks --test response_binding --locked
           cargo test -p ferrum2-observability --test tracing_contract --locked
@@ -155,15 +164,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          run_filtered() {
+            expected="$1"
+            shift
+            count="$("$@" -- --list | grep -c ': test$')"
+            test "$count" -eq "$expected"
+            "$@"
+          }
+          cargo build --workspace --bins --locked
           cargo test -p ferrum2-runtime --test abortive_close --locked
           cargo test -p ferrum2-runtime --test backpressure --locked
           cargo test -p ferrum2-runtime --test lifecycle --locked
           cargo test -p ferrum2-runtime --test half_close --locked
           cargo test -p ferrum2-runtime --test shutdown --locked
           cargo test -p ferrum2-runtime --test metrics_endpoint --locked
-          cargo test -p ferrum2-client --locked phase_deadline_contract
-          cargo test -p ferrum2-client --locked lifecycle_composition_contract
-          cargo test -p ferrum2-server --locked lifecycle_composition_contract
+          run_filtered 5 cargo test -p ferrum2-client --locked phase_deadline_contract
+          run_filtered 1 cargo test -p ferrum2-client --locked lifecycle_composition_contract
+          run_filtered 6 cargo test -p ferrum2-server --locked lifecycle_composition_contract
           cargo test -p ferrum2-m0-harness --test lifecycle_cycles --locked
 
   m0-local-e2e:
@@ -200,24 +217,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          run_filtered() {
+            expected="$1"
+            shift
+            count="$("$@" -- --list | grep -c ': test$')"
+            test "$count" -eq "$expected"
+            "$@"
+          }
           cargo build --workspace --bins --locked
-          cargo test -p ferrum2-m0-harness --test config_cli --locked valid
-          cargo test -p ferrum2-m0-harness --test config_cli --locked no_side_effects
+          run_filtered 1 cargo test -p ferrum2-m0-harness --test config_cli --locked valid
+          run_filtered 1 cargo test -p ferrum2-m0-harness --test config_cli --locked no_side_effects
           cargo test -p ferrum2-m0-harness --test cli_contract --locked
           cargo test -p ferrum2-socks5 --locked
           cargo test -p ferrum2-socks5 --test negative --locked
           cargo test -p ferrum2-runtime --test local_endpoint --locked
-          cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_target_and_request_target
-          cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_error_before_write
-          cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked client_open_phase_contract
-          cargo test -p ferrum2-socks5 --test negative --locked general_failure
-          cargo test -p ferrum2-client --locked local_endpoint_failure
-          cargo test -p ferrum2-client --locked adapter_contract
-          cargo test -p ferrum2-client --locked phase_deadline_contract
-          cargo test -p ferrum2-server --locked adapter_contract
-          cargo test -p ferrum2-server --locked lifecycle_composition_contract
-          cargo test -p ferrum2-m0-harness --test local_e2e --locked success
-          cargo test -p ferrum2-m0-harness --test local_e2e --locked failures
+          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_target_and_request_target
+          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked connector_error_before_write
+          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked client_open_phase_contract
+          run_filtered 1 cargo test -p ferrum2-socks5 --test negative --locked general_failure
+          run_filtered 1 cargo test -p ferrum2-client --locked local_endpoint_failure
+          run_filtered 5 cargo test -p ferrum2-client --locked adapter_contract
+          run_filtered 5 cargo test -p ferrum2-client --locked phase_deadline_contract
+          run_filtered 6 cargo test -p ferrum2-server --locked adapter_contract
+          run_filtered 6 cargo test -p ferrum2-server --locked lifecycle_composition_contract
+          run_filtered 3 cargo test -p ferrum2-m0-harness --test local_e2e --locked success
+          run_filtered 2 cargo test -p ferrum2-m0-harness --test local_e2e --locked failures
 
   m0-integration-full:
     name: m0-integration-full
@@ -256,6 +280,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          run_filtered() {
+            expected="$1"
+            shift
+            count="$("$@" -- --list | grep -c ': test$')"
+            test "$count" -eq "$expected"
+            "$@"
+          }
+          run_all() {
+            expected="$1"
+            shift
+            count="$("$@" -- --list | grep -c ': test$')"
+            test "$count" -eq "$expected"
+            "$@"
+          }
+          cargo build --workspace --bins --locked
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
@@ -263,8 +302,8 @@ jobs:
           git merge-base --is-ancestor b41c6127b1834ebd97246451fd92bafea50cb205 HEAD
           git diff --check b41c6127b1834ebd97246451fd92bafea50cb205...HEAD
           git diff --name-status --find-renames b41c6127b1834ebd97246451fd92bafea50cb205...HEAD
-          cargo test -p ferrum2-m0-harness --test scope_audit --locked
-          cargo test -p ferrum2-m0-harness --test scope_audit --locked workflow_policy
+          run_all 4 cargo test -p ferrum2-m0-harness --test scope_audit --locked
+          run_filtered 1 cargo test -p ferrum2-m0-harness --test scope_audit --locked workflow_policy
           cargo tree --workspace --locked
 
   m0-msrv:
@@ -302,6 +341,7 @@ jobs:
           rustup toolchain install 1.85.0 --profile minimal
           rustc +1.85.0 -Vv
           cargo +1.85.0 -V
+          cargo +1.85.0 build --workspace --bins --locked
           cargo +1.85.0 check --workspace --all-targets --locked
           cargo +1.85.0 test --workspace --locked
 
@@ -331,39 +371,54 @@ jobs:
           Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber
           rustc -Vv
           cargo -V
-          cmd /c "cl 2>&1"
-          cmd /c "link 2>&1"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere is missing" }
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw "VS 2022 C++ tools not found" }
+          $tools = Get-ChildItem "$installation\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $cl = Join-Path $tools.FullName "bin\Hostx64\x64\cl.exe"
+          $link = Join-Path $tools.FullName "bin\Hostx64\x64\link.exe"
+          if (-not (Test-Path $cl) -or -not (Test-Path $link)) { throw "resolved MSVC tools are missing" }
+          Write-Output "compiler_path=$cl linker_path=$link"
+          & $cl /? 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "cl version probe failed" }
+          & $link /? 2>&1
+          if ($LASTEXITCODE -ne 1100) { throw "link version probe exit mismatch" }
       - name: Build and run native MSVC artifacts
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw "VS 2022 C++ tools not found" }
+          $tools = Get-ChildItem "$installation\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $env:CC_x86_64_pc_windows_msvc = Join-Path $tools.FullName "bin\Hostx64\x64\cl.exe"
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = Join-Path $tools.FullName "bin\Hostx64\x64\link.exe"
+          Write-Output "configured_compiler=$env:CC_x86_64_pc_windows_msvc configured_linker=$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 x86_64-pc-windows-msvc
           cargo clean
-          cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-pc-windows-msvc
+          $messages = cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-pc-windows-msvc --message-format=json
+          if ($LASTEXITCODE -ne 0) { throw "MSVC release build failed" }
+          $buildScripts = $messages | ForEach-Object { $_ | ConvertFrom-Json } |
+            Where-Object { $_.reason -eq "build-script-executed" -and $_.package_id -match "#blake3@1\.8\.5$" }
+          if (@($buildScripts).Count -ne 1) { throw "exact BLAKE3 build-script evidence missing" }
+          $backend = @($buildScripts[0].cfgs | Where-Object { $_ -match "^blake3_" })
+          if ($backend.Count -eq 0) { throw "actual BLAKE3 backend cfg missing" }
+          Write-Output "BLAKE3 build-script cfg=$($backend -join ',')"
           rustc +1.97.1 -Vv
           cargo +1.97.1 -V
-          Write-Output "BLAKE3 backend evidence: MSVC target features and compiler"
-          rustc +1.97.1 --print target-features --target x86_64-pc-windows-msvc
-          function Assert-PortFree([int]$Port) {
-            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
-            $listener.Start()
-            $listener.Stop()
-          }
-          & target\x86_64-pc-windows-msvc\release\ferrum2-client.exe --config tests\platform\config\client-valid.toml --check-config
-          if ($LASTEXITCODE -ne 0) { throw "client valid exit mismatch" }
-          Assert-PortFree 1080
-          & target\x86_64-pc-windows-msvc\release\ferrum2-client.exe --config tests\platform\config\client-invalid-key-length.toml --check-config
-          if ($LASTEXITCODE -ne 2) { throw "client invalid exit mismatch" }
-          Assert-PortFree 1080
-          & target\x86_64-pc-windows-msvc\release\ferrum2-server.exe --config tests\platform\config\server-valid.toml --check-config
-          if ($LASTEXITCODE -ne 0) { throw "server valid exit mismatch" }
-          Assert-PortFree 8388
-          & target\x86_64-pc-windows-msvc\release\ferrum2-server.exe --config tests\platform\config\server-invalid-key-length.toml --check-config
-          if ($LASTEXITCODE -ne 2) { throw "server invalid exit mismatch" }
-          Assert-PortFree 8388
+          rustc +1.97.1 --edition 2024 tests\platform\check_config_no_side_effects.rs -o target\platform-no-side-effect.exe
+          & target\platform-no-side-effect.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "platform helper mutation test failed" }
+          & target\platform-no-side-effect.exe target\x86_64-pc-windows-msvc\release\ferrum2-client.exe target\x86_64-pc-windows-msvc\release\ferrum2-server.exe
+          if ($LASTEXITCODE -ne 0) { throw "MSVC 4/4 offline evidence failed" }
           Get-FileHash -Algorithm SHA256 target\x86_64-pc-windows-msvc\release\ferrum2-client.exe
           Get-FileHash -Algorithm SHA256 target\x86_64-pc-windows-msvc\release\ferrum2-server.exe
+          cargo +1.97.1 build --workspace --bins --locked
+          $detectionList = cargo test -p ferrum2-m0-harness --test detection_probe --locked -- --list
+          $detectionCount = @($detectionList | Where-Object { $_ -match ": test$" }).Count
+          if ($detectionCount -ne 2) { throw "detection_probe must list exactly 2 tests, got $detectionCount" }
           cargo test -p ferrum2-m0-harness --test detection_probe --locked
 
   m0-linux-gnu:
@@ -393,42 +448,37 @@ jobs:
           echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
           uname -a
           ldd --version
-          cc --version
-          ld --version
+          compiler="$(readlink -f "$(command -v gcc)")"
+          linker="$(readlink -f "$(command -v gcc)")"
+          underlying_linker="$(readlink -f "$("$compiler" -print-prog-name=ld)")"
+          echo "compiler_path=$compiler linker_driver_path=$linker underlying_linker_path=$underlying_linker"
+          "$compiler" --version
+          "$underlying_linker" --version
       - name: Build and run native GNU artifacts
         shell: bash
+        env:
+          CC_x86_64_unknown_linux_gnu: /usr/bin/gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: /usr/bin/gcc
         run: |
           set -euo pipefail
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 x86_64-unknown-linux-gnu
           cargo clean
-          cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-unknown-linux-gnu
+          cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-unknown-linux-gnu --message-format=json > "$RUNNER_TEMP/gnu-build.json"
+          python3 - <<'PY'
+          import json
+          rows = [json.loads(line) for line in open(__import__("os").environ["RUNNER_TEMP"] + "/gnu-build.json", encoding="utf-8")]
+          rows = [row for row in rows if row.get("reason") == "build-script-executed" and row.get("package_id", "").endswith("#blake3@1.8.5")]
+          assert len(rows) == 1, f"expected one BLAKE3 build-script row, got {len(rows)}"
+          backend = [cfg for cfg in rows[0]["cfgs"] if cfg.startswith("blake3_")]
+          assert backend, "actual BLAKE3 backend cfg missing"
+          print("BLAKE3 build-script cfg=" + ",".join(backend))
+          PY
           rustc +1.97.1 -Vv
           cargo +1.97.1 -V
-          echo "BLAKE3 backend evidence: GNU target features and compiler"
-          rustc +1.97.1 --print target-features --target x86_64-unknown-linux-gnu
-          run_invalid() {
-            set +e
-            "$@"
-            code=$?
-            set -e
-            test "$code" -eq 2
-          }
-          assert_port_free() {
-            python3 - "$1" <<'PY'
-          import socket, sys
-          with socket.socket() as listener:
-              listener.bind(("127.0.0.1", int(sys.argv[1])))
-          PY
-          }
-          target/x86_64-unknown-linux-gnu/release/ferrum2-client --config tests/platform/config/client-valid.toml --check-config
-          assert_port_free 1080
-          run_invalid target/x86_64-unknown-linux-gnu/release/ferrum2-client --config tests/platform/config/client-invalid-key-length.toml --check-config
-          assert_port_free 1080
-          target/x86_64-unknown-linux-gnu/release/ferrum2-server --config tests/platform/config/server-valid.toml --check-config
-          assert_port_free 8388
-          run_invalid target/x86_64-unknown-linux-gnu/release/ferrum2-server --config tests/platform/config/server-invalid-key-length.toml --check-config
-          assert_port_free 8388
+          rustc +1.97.1 --edition 2024 tests/platform/check_config_no_side_effects.rs -o target/platform-no-side-effect
+          target/platform-no-side-effect --self-test
+          target/platform-no-side-effect target/x86_64-unknown-linux-gnu/release/ferrum2-client target/x86_64-unknown-linux-gnu/release/ferrum2-server
           file target/x86_64-unknown-linux-gnu/release/ferrum2-client target/x86_64-unknown-linux-gnu/release/ferrum2-server
           readelf -lW target/x86_64-unknown-linux-gnu/release/ferrum2-client
           readelf -dW target/x86_64-unknown-linux-gnu/release/ferrum2-client
@@ -437,6 +487,8 @@ jobs:
           objdump -T target/x86_64-unknown-linux-gnu/release/ferrum2-client | grep 'GLIBC_' | sort -u
           objdump -T target/x86_64-unknown-linux-gnu/release/ferrum2-server | grep 'GLIBC_' | sort -u
           sha256sum target/x86_64-unknown-linux-gnu/release/ferrum2-client target/x86_64-unknown-linux-gnu/release/ferrum2-server
+          cargo +1.97.1 build --workspace --bins --locked
+          test "$(cargo test -p ferrum2-m0-harness --test detection_probe --locked -- --list | grep -c ': test$')" -eq 2
           cargo test -p ferrum2-m0-harness --test detection_probe --locked
 
   m0-linux-musl:
@@ -477,45 +529,38 @@ jobs:
           test "$(dpkg-query -W -f='${Version}' musl)" = "1.2.4-2"
           test "$(dpkg-query -W -f='${Version}' musl-dev)" = "1.2.4-2"
           test "$(dpkg-query -W -f='${Version}' musl-tools)" = "1.2.4-2"
-          musl-gcc --version
+          musl_compiler="$(readlink -f "$(command -v musl-gcc)")"
+          musl_ld="$(readlink -f "$("$musl_compiler" -print-prog-name=ld)")"
+          echo "musl_compiler_path=$musl_compiler musl_linker_driver_path=$musl_compiler underlying_linker_path=$musl_ld"
+          "$musl_compiler" --version
+          "$musl_ld" --version
       - name: Build run and assert static musl artifacts
         shell: bash
         env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_x86_64_unknown_linux_musl: /usr/bin/musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: /usr/bin/musl-gcc
         run: |
           set -euo pipefail
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 x86_64-unknown-linux-musl
           cargo clean
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-unknown-linux-musl
+          cargo +1.97.1 build --workspace --bins --release --locked --target x86_64-unknown-linux-musl --message-format=json > "$RUNNER_TEMP/musl-build.json"
+          python3 - <<'PY'
+          import json
+          rows = [json.loads(line) for line in open(__import__("os").environ["RUNNER_TEMP"] + "/musl-build.json", encoding="utf-8")]
+          rows = [row for row in rows if row.get("reason") == "build-script-executed" and row.get("package_id", "").endswith("#blake3@1.8.5")]
+          assert len(rows) == 1, f"expected one BLAKE3 build-script row, got {len(rows)}"
+          backend = [cfg for cfg in rows[0]["cfgs"] if cfg.startswith("blake3_")]
+          assert backend, "actual BLAKE3 backend cfg missing"
+          print("BLAKE3 build-script cfg=" + ",".join(backend))
+          PY
           rustc +1.97.1 -Vv
           cargo +1.97.1 -V
-          echo "BLAKE3 backend evidence: musl target features and musl-gcc"
-          rustc +1.97.1 --print target-features --target x86_64-unknown-linux-musl
-          run_invalid() {
-            set +e
-            "$@"
-            code=$?
-            set -e
-            test "$code" -eq 2
-          }
-          assert_port_free() {
-            python3 - "$1" <<'PY'
-          import socket, sys
-          with socket.socket() as listener:
-              listener.bind(("127.0.0.1", int(sys.argv[1])))
-          PY
-          }
           client=target/x86_64-unknown-linux-musl/release/ferrum2-client
           server=target/x86_64-unknown-linux-musl/release/ferrum2-server
-          "$client" --config tests/platform/config/client-valid.toml --check-config
-          assert_port_free 1080
-          run_invalid "$client" --config tests/platform/config/client-invalid-key-length.toml --check-config
-          assert_port_free 1080
-          "$server" --config tests/platform/config/server-valid.toml --check-config
-          assert_port_free 8388
-          run_invalid "$server" --config tests/platform/config/server-invalid-key-length.toml --check-config
-          assert_port_free 8388
+          rustc +1.97.1 --edition 2024 tests/platform/check_config_no_side_effects.rs -o target/platform-no-side-effect
+          target/platform-no-side-effect --self-test
+          target/platform-no-side-effect "$client" "$server"
           for binary in "$client" "$server"; do
             file_output="$(file "$binary")"
             echo "$file_output"
@@ -595,8 +640,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact client_sing_box
-          cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact sing_box_client
+          run_ignored_exact() {
+            name="$1"
+            count="$(cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact "$name" --list | grep -c ': test$')"
+            test "$count" -eq 1
+            cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact "$name"
+          }
+          run_ignored_exact client_sing_box
+          run_ignored_exact sing_box_client
 
   m0-interop-shadowsocks-rust:
     name: m0-interop-shadowsocks-rust
@@ -657,5 +708,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact client_shadowsocks_rust
-          cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact shadowsocks_rust_client
+          run_ignored_exact() {
+            name="$1"
+            count="$(cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact "$name" --list | grep -c ': test$')"
+            test "$count" -eq 1
+            cargo test -p ferrum2-m0-harness --test external_interop --locked -- --ignored --exact "$name"
+          }
+          run_ignored_exact client_shadowsocks_rust
+          run_ignored_exact shadowsocks_rust_client
