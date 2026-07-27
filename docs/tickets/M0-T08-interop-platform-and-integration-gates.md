@@ -201,7 +201,17 @@ To be filled by the Team Lead after integration:
   one `child exited before readiness` lifecycle failure, while focused and exact
   full reruns passed；the flake is under separate diagnosis and is not silently
   counted as deterministic evidence.
-- Repair 2/2 branch: `codex/repair/m0-t08-final-closure`; pending candidate SHA.
+- Repair 2/2 branch: `codex/repair/m0-t08-final-closure`; first candidate
+  `3d5b1a2f5db716f55b4a3aa25f394e0fa0ac7f51`.
+- Repair 2/2 first-candidate evidence: quick 3/3、full 4/4、MSRV workspace、
+  scope 4/4、four exact pinned interop cases、same-SHA E2E/half-close and helper
+  mutations PASS；clean three-file owned commit. Architect re-review **BLOCK**:
+  target stream still dropped before an application EOF acknowledgment and the
+  10-second per-operation timeout still slid after partial progress. Workflow
+  closed-subset and narrowed platform evidence findings are closed.
+- Authorized post-review closure is active in the same branch：retain target
+  stream through same-deadline app ack、couple real EOF observation to trace,
+  and freeze each operation deadline. Follow-up candidate pending.
 - Upstream readiness blocker: T07 harness diagnosis proved that ownership-blind
   `AddrInUse` readiness can false-pass a foreign port and then report
   `child exited before readiness`; narrow repair branch

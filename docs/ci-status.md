@@ -79,7 +79,10 @@
   现于`codex/repair/m0-t08-final-closure`集中关闭。QA首轮MSRV workspace的
   lifecycle flake经独立诊断确定为T07 harness端口ownership TOCTOU：
   `AddrInUse`可由foreign listener造成却被误认child ready；deterministic probe
-  1/1复现，T07 narrow repair active，T08当前blocked。
+  1/1复现。T07 narrow candidate `1974935`完成两路径修复并通过focused/MSRV
+  lifecycle；T08 first final candidate `3d5b1a2`关闭workflow/platform findings，
+  但Architect因缺app EOF ack持有与sliding 10s operation deadline继续BLOCK，
+  follow-up active。
 - **Contract final verdicts:** 初始review要求exact 47-case matrix、
   `AddressBounds`、harness exact two-edge lock hunk、configured而非hardcoded
   durations、T03/T07 time-evidence ownership和完整ADR模板。全部修正后
@@ -213,12 +216,12 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | BLOCKED / REPAIRS ACTIVE | Accepted ADR-0001～0014与Approved SPEC/TEST保持；T07 readiness evidence因foreign-port TOCTOU窄reopen，T08 repair 1/2 `5accd02`被final Architect/QA BLOCK；两个disjoint repairs执行中 | M0-T07/T08 |
+| M0 execution contracts | BLOCKED / REPAIRS ACTIVE | T07 readiness candidate `1974935`等待review；T08 `3d5b1a2`的workflow/platform groups关闭，但app-ack stream hold与fixed 10s operation deadline仍被Architect BLOCK，follow-up active | M0-T07/T08 |
 | GitHub Actions workflow contract | STATIC BLOCK / NOT_RUN | `5accd02`虽通过现有YAML parse/scope tests，但Architect证明quoted/unsupported keys、额外job/nameless step/任意shell可绕过；repair 2/2必须形成closed lexical/command subset；exact pushed-SHA run尚未发生 | M0-T08 |
 | Host quick Cargo gate | PASS | `123618f`先build真实binaries，再由Team Lead与QA独立运行fmt/check/workspace test 3/3；MSRV recovery后的workspace test为194/194 | 当前 |
 | Host full Cargo gate | PASS | `123618f`上Team Lead与QA独立运行fmt、strict Clippy、all-features workspace tests 194/194、docs 4/4 | 当前 |
 | Security/KAT/negative | LOCAL PASS / CI PENDING | T02/T03历史evidence保持PASS；`91516720`的primitive-only native probe为2/2、exact 47且target zero；Linux GNU与第二native provider结果等待T08 | M0-T08 |
-| Lifecycle/backpressure | HARNESS REPAIR ACTIVE | T06/product lifecycle evidence保持；`5accd02` QA首次MSRV workspace的100-cycle suite出现`child exited before readiness`。0/1000 spontaneous rerun后，foreign-port deterministic probe 1/1证明`unused_loopback`释放+ownership-blind `AddrInUse` readiness TOCTOU；仅T07 local_support/lifecycle_cycles窄修复 | M0-T07 |
+| Lifecycle/backpressure | CANDIDATE / REVIEW PENDING | T06/product lifecycle evidence保持；T07 candidate `1974935`以retained reservation、metrics identity、bounded confirmed-foreign retry和hashed diagnostics关闭TOCTOU；current/MSRV lifecycle与deterministic mutation PASS，组合workspace待T08修复汇合 | M0-T07 |
 | External interop | LOCAL EXECUTION PASS / CONTRACT BLOCK | `5accd02`上四项exact pinned cases各1/1机械执行PASS，distinct pre-FIN 16386-byte相等及同SHA ferrum-owned post-FIN gates通过；但target EOF/shutdown与client EOF无跨线程barrier且partial progress可越过case deadline，故ordered convergence证据待repair 2/2 | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | WINDOWS BUILD/RUN PASS / HELPER BLOCK | Windows release build、valid/invalid exits `0,2,0,2`、native detection 2/2 PASS；helper的“zero socket side effects”存在failed-bind/exit2 false-pass，须收窄为observable no-listener claim并补same-SHA entrypoint evidence；固定1080及Linux GNU/musl仍留给clean hosted runners | M0 smoke，M3 qualification |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |

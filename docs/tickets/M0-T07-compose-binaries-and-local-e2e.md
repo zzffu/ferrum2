@@ -233,8 +233,17 @@ cargo test --workspace --locked
   leak was found.
 - Readiness repair branch: `codex/repair/m0-t07-readiness-ownership`;
   restricted to `tests/m0-harness/src/local_support/**` and
-  `tests/m0-harness/tests/lifecycle_cycles.rs`; candidate pending.
+  `tests/m0-harness/tests/lifecycle_cycles.rs`.
+- Readiness repair candidate:
+  `1974935e3a6d86588a156be43f5ad45ca623330c`; retained reservations reach
+  immediately before spawn、metrics identity readiness、max-three retry only
+  after reaped child plus demonstrable foreign ownership、bounded hashed child
+  diagnostics and exact five-by-twenty successful cycles. Intentional old-helper
+  mutation RED；current lifecycle 3×3/3、MSRV lifecycle 3/3、focused regression、
+  detection 2/2、local E2E 4/4、current/MSRV checks、strict Clippy、fmt and docs
+  PASS. Pre-integration MSRV workspace test reaches the repaired lifecycle 3/3
+  then fails only on the separate T08 CRLF workflow parser fixed on its repair
+  branch.
 - Current readiness recovery gate: **IN_PROGRESS**；T08 remains blocked until
-  the narrow harness repair passes Engineer, Architect, QA and integration
-  gates.
+  candidate `1974935` passes Architect, QA and combined integration gates.
 - Readiness recovery publication: none

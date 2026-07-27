@@ -115,12 +115,14 @@ non-overlapping ownership。
     `50bf0b7`及integration `123618f`通过MSRV、focused、quick/full与最终
     Architect/QA gates；T08 QA后续发现100-cycle readiness flake，独立诊断以
     foreign-port probe确定为harness `AddrInUse` ownership TOCTOU，现只窄reopen
-    local_support/lifecycle_cycles evidence；
+    local_support/lifecycle_cycles evidence；candidate `1974935`完成并等待review；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
     独占 `.github/workflows/m0.yml`；ADR-0014 external evidence边界已接受；
     repair 1/2 `5accd02`通过大部分本地执行，但final Architect/QA因EOF顺序/
     deadline、workflow closed-subset及platform helper evidence缺口而BLOCK；
-    final repair 2/2执行中，并blocked于disjoint T07 readiness repair。
+    final repair first candidate `3d5b1a2`关闭workflow/platform groups，但
+    Architect要求补app EOF ack stream-hold与fixed operation deadline；
+    follow-up执行中，并blocked于disjoint T07 readiness review。
 
   Dependency graph：
 
@@ -180,7 +182,8 @@ non-overlapping ownership。
   foreign-port TOCTOU窄reopen。ADR-0014已在`96d6262`接受；T08 repair 1/2
   `5accd02`通过大部分本地执行，但final Architect/QA均BLOCK。final repair 2/2现集中关闭真实
   target→application EOF/shutdown顺序、absolute I/O deadline、closed workflow
-  policy与observable platform evidence；T07/T08两个disjoint repairs均尚未集成。
+  policy与observable platform evidence。T07 candidate `1974935`待review；
+  T08 `3d5b1a2`后续仍补app-ack与fixed operation deadline；均尚未集成。
   全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
