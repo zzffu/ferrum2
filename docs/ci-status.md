@@ -2,7 +2,8 @@
 
 ## 当前 M0 执行状态
 
-- **Branch/commit:** `master@999d4f95a2d597fb283689b9306d2a6773af707d`
+- **Validated product integration checkpoint:**
+  `999d4f95a2d597fb283689b9306d2a6773af707d` on local `master`
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
 - **M0-T01:** integrated；Architect **PASS**；QA **PASS**
@@ -14,11 +15,13 @@
   Architect/QA 均 **PASS**
 - **Wave-2 integration:** `999d4f95a2d597fb283689b9306d2a6773af707d`；
   17 个新增路径均属于 T05/T06，final Architect/QA **PASS**
-- **M0-T02:** **BLOCKED**；ADR-0004 固定的
+- **M0-T02:** **READY TO RESUME**；ADR-0004 固定的
   `gcmtestvectors.zip@f9fc479e...a023` 不含批准的 numeric cases。实际来源为
   McGrew/Viega GCM proposal TV archive
   `511e4741cee299ad0d1eb72ae2738911758248e2aba9d3db33a1dbcbb62e07f0`
-  的 `vec-01.txt`/`vec-02.txt`；需显式批准 ADR-0008 窄勘误后继续
+  的 `vec-01.txt`/`vec-02.txt`；ADR-0008 窄勘误已获显式授权，数值向量与
+  密码/协议行为不变；contract Architect **PASS**、QA **PASS**，可恢复
+  preserved worktree
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -118,6 +121,12 @@
 | 2026-07-27 | same, M0 CI amendment | `git diff --check` | 0 | 无whitespace error；仅有既有Windows LF→CRLF checkout warning |
 | 2026-07-27 | same, final M0 CI amendment | Architect final read-only gate | PASS | ADR-0007/0006补充关系、provider/security/evidence、M3边界、ownership与remote授权边界一致；无BLOCKER/REQUIRED/advisory |
 | 2026-07-27 | same, final M0 CI amendment | QA final read-only gate | PASS | AC→test→job→runner→timeout→command→evidence与FAIL/BLOCK一致；无BLOCKER/REQUIRED，仅记录既有LF→CRLF warning |
+| 2026-07-27 | `master@b1c4e10` + ADR-0008 docs | `python .agents/skills/milestone-workflow/scripts/workflow.py validate` | 0 | 8 Accepted ADR、Approved SPEC/TEST、8 tickets、DAG与ownership有效，无warning |
+| 2026-07-27 | same, ADR-0008 docs | `python .agents/skills/milestone-workflow/scripts/workflow.py status`；`next --milestone M0 --json` | 0 | `done=3, ready=5`；唯一selected frontier=`M0-T02`；`warnings=[]` |
+| 2026-07-27 | same, ADR-0008 docs | archive/entry/spec/IPR SHA-256与numeric-case comparison | 0 | `511e…e07f0`、`4fff…137f1`、`6ceb…436a`、`327e…b6c37`、`0170…813d`精确；旧/新/upstream values一致 |
+| 2026-07-27 | same, ADR-0008 docs | `git diff --check` | 0 | 无whitespace error；仅有既有Windows LF→CRLF checkout warning |
+| 2026-07-27 | same, final ADR-0008 contract | Architect final read-only gate | PASS | partial supersession、source classification/hashes/rights、no-binary与no-behavior/scope-change完整；无BLOCKER/REQUIRED/advisory |
+| 2026-07-27 | same, final ADR-0008 contract | QA final read-only gate | PASS | M0-CRYPTO-002/T02映射、numeric invariants、frontier与未执行gate状态一致；无BLOCKER/REQUIRED/advisory |
 
 三条 Cargo 失败是当前基线的预期、已记录 blocker，不是测试失败被豁免。full
 commands 未运行，因为与 quick commands 具有同一个缺失 workspace 前置条件；
@@ -128,11 +137,11 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 pre-implementation plan | PASS | Accepted ADR-0001～0007、Approved SPEC/TEST-0001、ready T01～T08；CI amendment Architect=PASS、QA=PASS；frontier=T01 | 当前 |
+| M0 execution contracts | PASS | Accepted ADR-0001～0008、Approved SPEC/TEST-0001；T01/T05/T06 done，ADR-0008 contract Architect/QA PASS，frontier=T02 | 当前 |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
-| Host quick Cargo gate | BLOCKED | 无 root manifest/workspace | M0 |
-| Host full Cargo gate | NOT_RUN/BLOCKED | quick prerequisite 不成立 | M0 |
-| Security/KAT/negative | PLANNED/NOT_RUN | TEST-0001 已映射 required tests；无实现、fixture 或执行证据 | M0 |
+| Host quick Cargo gate | DEFERRED/NOT_RUN | workspace已存在；workspace-wide gate按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
+| Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
+| Security/KAT/negative | IN_PROGRESS/NOT_RUN | TEST-0001与ADR-0008已映射required tests；T02 preserved worktree尚无commit或corrected-contract执行证据 | M0-T02/T03 |
 | Lifecycle/backpressure | PLANNED/NOT_RUN | TEST-0001 已冻结 deterministic seams；无 runtime 或执行证据 | M0 |
 | External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |

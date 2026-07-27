@@ -4,6 +4,9 @@
 - **Date:** 2026-07-27
 - **Owners:** Architect / Team Lead
 - **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T02、M0-T03、M0-T07；关闭 DEC-005
+- **Partial supersession:** ADR-0008 仅取代下文 AES-GCM primitive KAT 的
+  CAVP/NIST-authored 来源与 rights 归属；numeric cases、corrupted-tag reject 及
+  本 ADR 其他决定保持有效
 
 ## Context and problem
 
@@ -150,6 +153,11 @@ M0 gate 阻塞并修订 ADR，不能静默退化。
   M0选择`input_len = 0, 1, 1024`的derive-key rows。artifact继承该仓库
   `CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception`，provenance必须随
   fixture提交。
+> **ADR-0008 partial supersession:** 下项保留为历史记录；其中
+> “NIST CAVP source”“NIST-authored/official validation vector”和 NIST public
+> information rights 归属已被 ADR-0008 取代。两个 numeric cases 与 case 2
+> corrupted-tag reject 不变，并由 ADR-0008 继续规范。
+>
 - AES-GCM primitive source固定为NIST CAVP `gcmtestvectors.zip`，SHA-256
   `f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023`。M0只提交并
   标注来源的两个AES-128/96-bit-IV/empty-AAD numeric cases：
@@ -220,8 +228,9 @@ M0 没有旧 wire state。回滚是关闭 listener 并回退 integrated commit�
 
 - `AGENTS.md`
 - `docs/research/M0-upstream-baseline.md`
+- `docs/adr/ADR-0008-m0-aes-gcm-kat-provenance-correction.md`
 - [固定 SIP022 文件](https://github.com/shadowsocks/shadowsocks-org/blob/34598d65054dad975d330ff9d7317b0d41cf1efd/docs/doc/sip022.md)
 - [SIP022 live page](https://shadowsocks.org/doc/sip022.html)
 - [BLAKE3 1.8.5 vectors](https://github.com/BLAKE3-team/BLAKE3/blob/1.8.5/test_vectors/test_vectors.json)
-- [NIST GCM test vectors](https://csrc.nist.gov/Projects/Cryptographic-Algorithm-Validation-Program/CAVP-TESTING-BLOCK-CIPHER-MODES)
-- [NIST copyright and distribution notice](https://www.nist.gov/copyrights-disclaimers)
+- [Historical CAVP artifact whose mismatch is corrected by ADR-0008](https://csrc.nist.gov/Projects/Cryptographic-Algorithm-Validation-Program/CAVP-TESTING-BLOCK-CIPHER-MODES)
+- [Historical NIST notice superseded as rights attribution by ADR-0008](https://www.nist.gov/copyrights-disclaimers)

@@ -85,7 +85,7 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
 | M0-CFG-003 | AC-02/12 | config negative matrix与 secret redaction | parameterized integration | `cargo test -p ferrum2-m0-harness --test config_cli --locked invalid_matrix` |
 | M0-CLI-001 | AC-02 | help/version、stdout/stderr、exit taxonomy | process integration | `cargo test -p ferrum2-m0-harness --test cli_contract --locked` |
 | M0-CRYPTO-001 | AC-03 | BLAKE3 official derive-mode vectors | unit/KAT | `cargo test -p ferrum2-crypto --test primitive_vectors --locked blake3` |
-| M0-CRYPTO-002 | AC-03 | 两个固定NIST AES-128-GCM cases + corrupted-tag reject | unit/KAT | `cargo test -p ferrum2-crypto --test primitive_vectors --locked aes128_gcm` |
+| M0-CRYPTO-002 | AC-03 | 两个固定McGrew/Viega GCM proposal cases 1/2 + corrupted-tag reject；submitter-supplied、historically hosted by NIST，非CAVP/NIST-authored validation vectors | unit/KAT | `cargo test -p ferrum2-crypto --test primitive_vectors --locked aes128_gcm` |
 | M0-CRYPTO-003 | AC-03/12 | SIP022 KDF output、key truncation与nonce-counter fixture | unit/KAT | `cargo test -p ferrum2-crypto --test sip022_vectors --locked` |
 | M0-CRYPTO-004 | AC-03 | redacted secret、explicit-clear seam、entropy failure、salt collision、nonce overflow | unit/negative | `cargo test -p ferrum2-crypto --test secret_entropy --locked` |
 | M0-PROTO-001 | AC-04 | type/frame/address/padding/initial-payload bounds table | unit/negative | `cargo test -p ferrum2-shadowsocks --test tcp_negative --locked bounds` |
@@ -152,8 +152,9 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
 - protocol composite fixture由`ferrum2-shadowsocks`测试逐字段断言每个nonce、
   plaintext/ciphertext/tag与完整request/response first-write wire bytes；该fixture
   明确不是官方SIP022 KAT。
-- primitive input选择固定为ADR-0004的BLAKE3 `input_len=0,1,1024` rows和两个
-  明列NIST numeric cases；不得由Engineer替换为“任意几个能过的vector”。
+- primitive input选择固定为ADR-0004的BLAKE3 `input_len=0,1,1024` rows和
+  ADR-0008的McGrew/Viega GCM proposal test cases 1/2；不得由Engineer替换为
+  “任意几个能过的vector”。两个AES numeric cases与corrupted-tag reject不变。
 - composite input、generator path和provenance fields完全固定为ADR-0004；test
   runtime只读取并断言committed bytes，不更新fixture。
 - nonce测试从 zero开始、跨 byte carry、最终 overflow；overflow前后不输出/接受
@@ -397,10 +398,11 @@ M0 不设 throughput、10,000 idle、RSS/CPU或正式性能门；这些是 M4。
 - 所有 repository fixtures使用 synthetic key/loopback endpoint，绝不使用 real PSK
   或 production data。
 - primitive/protocol fixtures放在 `tests/fixtures/crypto/**` 与
-  `tests/fixtures/sip022/**`。BLAKE3 commit/file hash/cases、NIST archive hash/
-  numeric cases/public-information attribution，以及composite exact inputs/
-  generator path均由ADR-0004固定；每组provenance metadata记录source、license、
-  SHA-256和expected interpretation。
+  `tests/fixtures/sip022/**`。BLAKE3 commit/file hash/cases与composite exact
+  inputs/generator path由ADR-0004固定；McGrew/Viega proposal archive/entry/spec/
+  IPR hashes、test cases 1/2、submitter-source classification、`NOASSERTION`及rights
+  evidence由ADR-0008固定。每组provenance metadata记录source、license-or-rights
+  review、SHA-256和expected interpretation。
 - composite SIP022 fixture明确写“unofficial”；expected bytes不由被测 production
   path运行时生成。
 - config fixtures放 `tests/fixtures/config/**`；invalid fixture的 secret sentinel
@@ -419,7 +421,8 @@ branch name、人工挑选 path 或缩小 diff。
 
 `scope_audit` 必须自动拒绝：不在 M0 tickets/control-doc allowlist 的路径、
 `target/`/coverage/profile/pcap/log/result、可执行或压缩的 external artifact、
-缺 `PROVENANCE.toml`/source/license/SHA-256/expected interpretation 的 fixture，
+缺 `PROVENANCE.toml`/source/license-or-rights review/SHA-256/expected
+interpretation 的 fixture，
 以及 production tree 中 fixture-only key/scripted RNG/bypass。唯一批准的
 `.github` 路径是 M0-T08 ownership 下的 `.github/workflows/m0.yml`；其他
 workflow/action/config 一律拒绝。随后 Architect 与 QA 对
@@ -431,7 +434,8 @@ b41c6127b1834ebd97246451fd92bafea50cb205...HEAD` 和
   public UDP inbound、domain/DNS、multi-user/EIH、routing/management 或性能范围；
 - 无 real secret、production endpoint、外部 binary、generated result或未审 fixture；
 - dependency/member/method surface与 ADR-0001 相等，新增依赖均有license/provenance；
-- T02/T03 fixtures与两个 reference pins的来源、hash、license和非分发策略完整。
+- T02/T03 fixtures与两个 reference pins的来源、hash、license-or-rights review和
+  非分发策略完整。
 
 ## Exit conditions and known gaps
 

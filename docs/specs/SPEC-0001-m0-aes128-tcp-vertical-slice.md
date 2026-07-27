@@ -2,7 +2,7 @@
 
 - **Status:** Approved
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
 - **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
 
@@ -278,7 +278,8 @@ ConnectionRefused, RelayIo, IdleTimeout, Cancelled, Shutdown, ListenerFailure
 ## Security and privacy
 
 - fixed SIP022 revision、primitive/protocol fixture provenance、exact replay 和
-  detection strategy 由 ADR-0004/0006 定义。
+  detection strategy 由 ADR-0004/0006/0008 定义；ADR-0008 仅纠正两个
+  AES-GCM primitive cases 的来源归属，不改变 numeric values 或密码/协议行为。
 - PSK、derived material、salt、nonce、raw config、raw frames 绝不进入 log/error/
   panic/trace/metric；destination 不进入 tracing 或 metric labels。
 - config/secret/KDF buffers 使用 fixed secret newtypes 与 explicit zeroize；任何

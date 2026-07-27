@@ -34,7 +34,8 @@ non-overlapping ownership。
 - **Entry conditions:**
   - bootstrap 的 vision、gap analysis、roadmap、CI baseline 已更新并通过
     workflow validation；
-  - `ADR-0001`～`ADR-0007` 已 Accepted，关闭 DEC-001～DEC-007 与 DEC-011；
+  - `ADR-0001`～`ADR-0008` 已 Accepted；ADR-0008 仅纠正 M0 AES-GCM primitive
+    KAT 的来源归属，关闭 DEC-001～DEC-007 与 DEC-011；
   - `SPEC-0001` 与 `TEST-0001` 已 Approved；
   - M0-T01～M0-T08 的 blockers、non-overlapping ownership 和量化 acceptance
     已通过 workflow validation。
@@ -66,8 +67,8 @@ non-overlapping ownership。
      exact integration `GITHUB_SHA` 全部 success。
 - **In-scope tickets:**
   - M0-T01：locked workspace、toolchain、license 与 core contracts；done；
-  - M0-T02：secret/KDF/AEAD/key-clock-entropy；blocked on approved-contract
-    provenance correction；
+  - M0-T02：secret/KDF/AEAD/key-clock-entropy；ADR-0008 窄勘误已获授权，
+    ready to resume；
   - M0-T03：SIP022 TCP security state/replay/binding；blocked by T02；
   - M0-T04：typed config/observability；blocked by T02；
   - M0-T05：SOCKS5 CONNECT inbound；done；
@@ -92,9 +93,9 @@ non-overlapping ownership。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
-  CAVP ZIP 不含批准的两组 numeric cases；worktree 保持未提交，ticket 为
-  `blocked`。解锁需要显式批准 ADR-0008，仅把 provenance 更正为
-  McGrew/Viega GCM proposal `vec-01`/`vec-02`，不得改变向量或协议行为。
+  CAVP ZIP 不含批准的两组 numeric cases；ADR-0008 窄勘误已经显式授权并把
+  provenance 更正为 McGrew/Viega GCM proposal `vec-01`/`vec-02`。向量与协议
+  行为不变，contract Architect/QA 均已 PASS，保留的 T02 worktree 可以恢复。
   T03/T04 因 T02 等待，T07/T08 继续只等待既定 dependencies。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download

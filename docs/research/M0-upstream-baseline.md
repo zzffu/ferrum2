@@ -113,12 +113,21 @@
   [AES-128-GCM tests](https://docs.rs/crate/aes-gcm/0.11.0/source/tests/aes128gcm.rs)
   标明使用 NIST CAVS vectors，并另有 Wycheproof pass/fail tests；这些验证 primitive，
   不验证 SIP022 framing/KDF/counter/binding。
+- M0最终选中的两个all-zero numeric cases不在固定NIST CAVP
+  `gcmtestvectors.zip`
+  (`f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023`)
+  中。它们来自McGrew/Viega GCM proposal
+  [test-vector bundle](https://web.archive.org/web/20170830120738id_/http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/gcm/gcm-test-vectors.tar.gz)
+  的test cases 1/2；archive SHA-256为
+  `511e4741cee299ad0d1eb72ae2738911758248e2aba9d3db33a1dbcbb62e07f0`。
+  该artifact由submitter提供并曾由NIST托管，不是CAVP或NIST-authored
+  validation vectors；规范性更正见ADR-0008。
 
 **建议：**
 
 1. 分开维护两层 KAT：
-   - primitive gate：固定 BLAKE3 derive-mode 官方 vector 与 NIST AES-128-GCM
-     vector；
+   - primitive gate：固定 BLAKE3 derive-mode 官方 vector 与ADR-0008固定的
+     McGrew/Viega GCM proposal test cases 1/2；
    - protocol gate：仓库自有、明确标注“非官方 SIP022 KAT”的 synthetic fixture。
 2. protocol fixture 至少固定 PSK、request/response salt、timestamp、SOCKS5 target、
    padding、initial payload 和每个 nonce，记录：

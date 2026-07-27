@@ -2,7 +2,7 @@
 id = "M0-T02"
 title = "Implement secret ownership, AES-128 primitives, and deterministic capabilities"
 milestone = "M0"
-status = "blocked"
+status = "ready"
 priority = "P0"
 blocked_by = ["M0-T01"]
 owns = [
@@ -13,7 +13,7 @@ owns = [
 spec = "docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md"
 test_plan = "docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md"
 acceptance = [
-  "M0-CRYPTO-001 and M0-CRYPTO-002 pass exactly the ADR-0004 BLAKE3 input-length 0, 1, and 1024 rows plus both listed NIST AES-128-GCM numeric cases and the corrupted-tag reject, with pinned hashes and provenance",
+  "M0-CRYPTO-001 and M0-CRYPTO-002 pass exactly the ADR-0004 BLAKE3 input-length 0, 1, and 1024 rows plus the ADR-0008 McGrew/Viega GCM proposal test cases 1 and 2 and the unchanged corrupted-tag reject, with pinned hashes and truthful submitter-source provenance",
   "M0-CRYPTO-003 passes for the exact SIP022 context, 32-to-16-byte subkey selection, empty AAD, zero u96le nonce, carry, and checked increment",
   "M0-CRYPTO-004 proves redacted Debug, explicit-clear and ZeroizeOnDrop seams, production entropy failure, response-salt collision handling, and nonce overflow fail closed",
   "The KeyProvider, Clock, and SecureRandom interfaces match ADR-0002 and expose neither raw PSK bytes nor a production deterministic fallback",
