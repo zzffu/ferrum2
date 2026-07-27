@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "source_vector_ids": [
+    "input_len=0",
+    "input_len=1",
+    "input_len=1024"
+  ],
+  "context_string": "BLAKE3 2019-12-27 16:29:52 test vectors context",
+  "input_pattern": "byte at index i is i modulo 251",
+  "cases": [
+    {
+      "input_len": 0,
+      "derive_key": "2cc39783c223154fea8dfb7c1b1660f2ac2dcbd1c1de8277b0b0dd39b7e50d7d905630c8be290dfcf3e6842f13bddd573c098c3f17361f1f206b8cad9d088aa4a3f746752c6b0ce6a83b0da81d59649257cdf8eb3e9f7d4998e41021fac119deefb896224ac99f860011f73609e6e0e4540f93b273e56547dfd3aa1a035ba6689d89a0"
+    },
+    {
+      "input_len": 1,
+      "derive_key": "b3e2e340a117a499c6cf2398a19ee0d29cca2bb7404c73063382693bf66cb06c5827b91bf889b6b97c5477f535361caefca0b5d8c4746441c57617111933158950670f9aa8a05d791daae10ac683cbef8faf897c84e6114a59d2173c3f417023a35d6983f2c7dfa57e7fc559ad751dbfb9ffab39c2ef8c4aafebc9ae973a64f0c76551"
+    },
+    {
+      "input_len": 1024,
+      "derive_key": "7356cd7720d5b66b6d0697eb3177d9f8d73a4a5c5e968896eb6a6896843027066c23b601d3ddfb391e90d5c8eccdef4ae2a264bce9e612ba15e2bc9d654af1481b2e75dbabe615974f1070bba84d56853265a34330b4766f8e75edd1f4a1650476c10802f22b64bd3919d246ba20a17558bc51c199efdec67e80a227251808d8ce5bad"
+    }
+  ]
+}
