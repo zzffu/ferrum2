@@ -34,7 +34,8 @@ version/hash/provenance/license与双方向实测，当前没有该证据。
 - 四个reference/direction结果仍是独立required gates，缺一即M0 BLOCKED。
 - exact versions、source commits、asset names/sizes/SHA-256、version output与
   license boundary保持不变。
-- external interop必须证明双向wire/data compatibility以及有序FIN/EOF；不得
+- external interop必须证明pre-FIN双向wire/data compatibility以及ordered
+  clean-EOF convergence；不得
   skip、xfail、缩短payload、放宽deadline、复用case或隐藏child failure。
 - ferrum2在peer FIN后继续drain新reverse application bytes的产品要求不得削弱；
   它继续由同一最终SHA上的M0-E2E-001和M0-LIFE-003独立阻塞。
@@ -45,7 +46,8 @@ version/hash/provenance/license与双方向实测，当前没有该证据。
 
 ### Option A: split external compatibility and ferrum-owned drain evidence
 
-external cases先完整比较双向payload，再验证application FIN传播与两端EOF；
+external cases先完整比较双向payload，再依次观察application write shutdown后的
+target clean EOF与target write shutdown后的application clean EOF；
 ferrum-owned local/runtime tests继续验证FIN后产生的reverse bytes仍被drain。
 
 ### Option B: replace the sing-box pin
@@ -69,9 +71,10 @@ ports，并按以下顺序执行：
    读取exact length并逐byte比较。
 3. 只有两次byte equality都成功后，application client才调用
    `Shutdown::Write`。
-4. target必须在I/O deadline内观察EOF，然后调用`Shutdown::Write`。
-5. application client必须在I/O deadline内观察EOF；expected reverse payload后
-   若出现任何额外byte也失败。
+4. target必须在I/O deadline内观察clean `Ok(0)`，然后成功调用
+   `Shutdown::Write`。
+5. application client必须在I/O deadline内观察clean `Ok(0)`；expected reverse
+   payload后若出现任何额外byte，或以reset/error代替clean EOF，也失败。
 
 任何truncation、extra byte、premature EOF、mismatch、timeout、child early exit、
 unchecked exit status或cleanup失败均使case失败。readiness 10秒、I/O 10秒、
@@ -80,9 +83,13 @@ pin/version/archive checks与clean current-SHA binary build保持blocking。
 
 external interop据此只声明：
 
-- pinned reference与ferrum2之间的双向SIP022 data compatibility；
-- application write-half close向target EOF的传播；
-- target write-half close向application client EOF的传播。
+- pinned reference与ferrum2之间的pre-FIN双向SIP022 data compatibility；
+- application write shutdown后观察到target clean EOF；
+- target write shutdown后观察到application client clean EOF，形成ordered
+  clean-EOF convergence。
+
+该black-box顺序不证明reference在第一次FIN后仍保持reverse leg，也不证明target
+FIN导致client EOF；client EOF可能已由reference的更早full-close挂起。
 
 它不声明sing-box 1.13.14能够在peer FIN后交付新产生的reverse application bytes。
 ferrum2自身的该项要求继续由未修改的：
@@ -100,7 +107,8 @@ ferrum2自身的该项要求继续由未修改的：
 
 - compatibility claim与实际pinned reference能力精确一致，不把第三方close policy
   误判为ferrum2 wire defect。
-- 双向16386-byte equality、FIN传播、EOF与cleanup仍为四个hard gates。
+- 双向16386-byte equality、ordered clean-EOF convergence与cleanup仍为四个
+  hard gates。
 - 产品最强half-close行为由ferrum-owned real-process和runtime seams双重保留。
 - 无pin、wire、production code、API或产品范围变化。
 
@@ -134,8 +142,8 @@ external half-close解释并使sing-box两项重新BLOCKED；不得只回滚test
   - forward exact 16386/16386；
   - reverse exact 16386/16386且payload distinct；
   - byte equality完成前调用`Shutdown::Write`的mutation失败；
-  - target未见EOF、未调用write shutdown、client未见EOF、extra byte、
-    premature EOF与timeout mutations分别失败；
+  - target未见clean `Ok(0)`、target write shutdown失败、client未见clean
+    `Ok(0)`、reset/error、extra byte、premature EOF与timeout mutations分别失败；
   - child status、deadline、bounded sanitized capture、port/temp cleanup/rebind
     全部有结构化evidence。
 - 同一最终SHA上重跑且通过：

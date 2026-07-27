@@ -576,13 +576,16 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
    scan证明fixed fields/labels、无secret/destination、bounded cardinality和
    supervisor-owned metrics endpoint limits。
 10. **AC-10 Interoperability:** M0-INT-001～004 全部 required PASS；pin、asset
-    checksum/version、双向 bytes/half-close、sanitized diagnostics齐全，缺环境不
-    得 skip-pass；两个 interop job 分别在自己的 `ubuntu-24.04` clean VM 从
+    checksum/version、pre-FIN双向bytes、ordered clean-EOF convergence与
+    sanitized diagnostics齐全，缺环境不得 skip-pass；两个 interop job 分别在
+    自己的 `ubuntu-24.04` clean VM 从
     `GITHUB_SHA` 构建 ferrum2，并在执行 reference 前验证既有 pin/hash/version。
-    每案先完整逐byte比较双向各16386-byte distinct payload，再依次证明application
-    client write-half close、target EOF/write-half close、application client EOF；
+    每案先完整逐byte比较双向各16386-byte distinct payload，再依次观察application
+    client write-half close后的target clean `Ok(0)`、target成功write-half close后
+    的application client clean `Ok(0)`；
     byte equality前不得发送FIN。external evidence不声明peer FIN后新产生的reverse
-    bytes能穿过sing-box 1.13.14；该ferrum2行为仍由同一SHA上未修改的
+    bytes能穿过sing-box 1.13.14，也不声明target FIN导致client EOF；该ferrum2
+    行为仍由同一SHA上未修改的
     M0-E2E-001/M0-LIFE-003独立blocking。
 11. **AC-11 Platform/repository/CI gates:** M0-PLAT-001～003、
     M0-GATE-001～002、M0-CI-001～006 通过；三个 target release binaries 在

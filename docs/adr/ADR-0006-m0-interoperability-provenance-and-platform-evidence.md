@@ -69,11 +69,13 @@ multi-user/EIH 和额外 routing；synthetic PSK 固定为
 3. sing-box SOCKS client path → `ferrum2-server` → local IPv4 echo。
 4. shadowsocks-rust `sslocal` → `ferrum2-server` → local IPv4 echo。
 
-每项独立进程/临时目录/ephemeral ports，验证 client→target 和 target→client bytes、
-TCP half-close、process cleanup。proposed ADR-0014把external case的顺序细化为：
+每项独立进程/临时目录/ephemeral ports，验证 client→target 和 target→client
+pre-FIN bytes、ordered clean-EOF convergence、process cleanup。proposed
+ADR-0014把external case的顺序细化为：
 先完整逐byte比较双向各16386-byte distinct payload，再由application client
-write-half close、target deadline-observe EOF后write-half close、application client
-deadline-observe EOF。peer FIN后新产生reverse bytes的ferrum2要求仍由同一SHA的
+write-half close、target deadline-observe clean `Ok(0)`后成功write-half close、
+application client deadline-observe clean `Ok(0)`；该顺序不声明target FIN导致
+client EOF。peer FIN后新产生reverse bytes的ferrum2要求仍由同一SHA的
 M0-E2E-001/M0-LIFE-003独立阻塞，external PASS不得替代。T08 记录 reference
 `--version`、asset checksum、sanitized config checksum、command category、exit
 status 和 sanitized logs；不记录 PSK、salt/nonce 或 raw config。

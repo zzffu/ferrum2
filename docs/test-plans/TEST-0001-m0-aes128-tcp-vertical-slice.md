@@ -388,20 +388,25 @@ size/SHA-256/license record，再 safe extract，并在任何 interop case 前�
 version output；unexpected archive entry同样失败。配置只使用
 `AAECAwQFBgcICQoLDA0ODw==` synthetic PSK，不读取 repository secrets。
 
-每个 case验证 TCP-only AES-128、双向 payload、half-close、reference进程清理：
+每个 case验证 TCP-only AES-128、pre-FIN双向payload、ordered clean-EOF
+convergence、reference进程清理：
 
 1. application client写固定16386-byte forward payload；target不等待EOF，读取
    exact length并逐byte比较。
 2. target写入distinct fixed 16386-byte reverse payload；application client读取
    exact length并逐byte比较。
 3. 仅在两次equality均成功后application client `Shutdown::Write`；target在I/O
-   deadline内观察EOF后`Shutdown::Write`；application client随后在deadline内
-   观察EOF。
+   deadline内观察clean `Ok(0)`后成功`Shutdown::Write`；application client随后
+   在deadline内观察clean `Ok(0)`。
 
-truncation、extra byte、premature EOF、mismatch或timeout任一失败。mutation
-evidence必须杀死equality前FIN、target未见EOF、target未write-shutdown、client
-未见EOF与expected reverse后extra byte。该external sequence只证明双向
-wire/data与ordered FIN/EOF；peer FIN后新产生reverse bytes继续由同一最终SHA的
+truncation、extra byte、premature EOF、reset/error、mismatch或timeout任一失败。
+mutation
+evidence必须杀死equality前FIN、target未见clean `Ok(0)`、target write shutdown
+失败、client未见clean `Ok(0)`与expected reverse后extra byte。该external
+sequence只证明双向
+wire/data与ordered clean-EOF convergence；它不证明reference在第一次FIN后仍保持
+reverse leg，也不证明target FIN导致client EOF。peer FIN后新产生reverse bytes
+继续由同一最终SHA的
 M0-E2E-001和M0-LIFE-003独立blocking，四项external PASS不得替代。
 
 case timeout 60 秒，readiness 10 秒，I/O 10秒，stdout/stderr各 cap 256 KiB；
