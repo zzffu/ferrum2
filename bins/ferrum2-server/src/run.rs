@@ -346,10 +346,10 @@ where
 }
 
 fn update_replay_metric(context: &ServerContext) {
-    if let Ok(entries) = context.replay.entry_count()
-        && let Ok(entries) = u32::try_from(entries)
-    {
-        context.metrics.set_replay_entries(entries);
+    if let Ok(entries) = context.replay.entry_count() {
+        if let Ok(entries) = u32::try_from(entries) {
+            context.metrics.set_replay_entries(entries);
+        }
     }
 }
 
