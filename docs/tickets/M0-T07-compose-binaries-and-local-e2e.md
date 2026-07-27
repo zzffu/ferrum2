@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -208,3 +208,13 @@ cargo test --workspace --locked
   repair passes Engineer, Architect, QA, and integration gates.
 - MSRV repair candidate:
   `50bf0b7b632333758fbaecde05dbe92b39171db3`
+- MSRV repair integration:
+  `123618f747771d6b0473c099f4c741ee4046fd9f`
+- MSRV repair gates: exact two-parent merge；relative to coordination parent只修改
+  `bins/ferrum2-server/src/run.rs`的等价nested `if let`（4+/4-），candidate与
+  integration blob一致；Rust 1.85 build/check/workspace test（194/194）、
+  focused server adapter/lifecycle、quick 3/3、full 4/4均exit 0。Team Lead、
+  final Architect与independent QA均PASS；base以fast-forward更新，worktrees
+  clean且`target/`已清理。
+- Final recovery gate: **DONE**
+- Recovery publication: none

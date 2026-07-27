@@ -153,8 +153,10 @@ To be filled by the Team Lead after integration:
 - Eleven required job results:
 - Runner ImageOS/ImageVersion/Included Software links:
 - Platform artifact/linkage evidence:
-- Recovery blocker (2026-07-27): local evidence found an upstream T07 Rust 1.85.0
-  syntax incompatibility and a separate sing-box 1.13.14 bidirectional
-  interoperability failure under diagnosis. T08-owned implementation may be
-  preserved as a clean checkpoint, but review and integration remain blocked until
-  the upstream repairs pass their own gates and are merged into the T08 base.
+- Recovery state (2026-07-27): upstream T07 Rust 1.85.0 syntax incompatibility is
+  closed by candidate `50bf0b7` and reviewed integration `123618f`; Team Lead,
+  Architect and QA gates all PASS. T08 remains blocked independently: exact
+  sing-box 1.13.14 diagnosis found a third-party post-FIN reverse-delivery
+  limitation requiring an explicit evidence-contract amendment, while static
+  Architect review of checkpoint `14343d2` found required workflow/harness repairs.
+  The checkpoint remains unintegrated until both blockers are explicitly closed.

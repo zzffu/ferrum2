@@ -111,9 +111,12 @@ non-overlapping ownership。
     lifecycle。Architect发现cooperative row未同步证明target flow；repair 1/2
     `a9b0a56`以valid client→server→target、bounded accept与EOF/reset ack关闭
     假阳性。ticket及integration Architect/QA、24条ticket commands、quick/full
-    均PASS，integrated `91516720`，done；
+    均PASS，integrated `91516720`。T08随后暴露Rust 1.85 let-chain不兼容；窄修复
+    `50bf0b7`及integration `123618f`通过MSRV、focused、quick/full与最终
+    Architect/QA gates，done；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
-    独占 `.github/workflows/m0.yml`，in_progress。
+    独占 `.github/workflows/m0.yml`；checkpoint `14343d2`未集成，当前blocked于
+    sing-box half-close证据合同与静态Architect required repairs。
 
   Dependency graph：
 
@@ -127,8 +130,9 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** 当前local product integration
-  `91516720e9acdc60597dd3596d6cbd33319d5a39`包含M0-T01～T07；其24条T07
-  ticket commands、quick/full及final Architect/QA gates均PASS。T08尚未integrate。
+  `123618f747771d6b0473c099f4c741ee4046fd9f`包含M0-T01～T07及T07 MSRV
+  recovery；Rust 1.85 build/check/test、quick/full及final Architect/QA gates均
+  PASS。T08尚未integrate。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
@@ -166,8 +170,9 @@ non-overlapping ownership。
   PASS且normal/all-features各97 tests通过，均done。
   ADR-0013勘误base `24ddecf`已通过Product/Architect/QA final document gates
   并被接受；T07 candidate `5ac8f1b`与lifecycle evidence repair 1/2 `a9b0a56`
-  已通过ticket/final Architect与QA gates并集成于`91516720`，现done。T08已
-  `in_progress`。
+  已通过ticket/final Architect与QA gates并集成于`91516720`。后续MSRV repair
+  `50bf0b7`与integration `123618f`同样通过Team Lead/final Architect/QA gates，
+  T07现done。T08 checkpoint `14343d2`仍未集成并处于blocked。
   全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
