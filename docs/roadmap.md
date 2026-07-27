@@ -78,7 +78,8 @@ non-overlapping ownership。
     Architect/QA BLOCK；fixed/reusable scratch与negative/order evidence不完整，
     且typed transition无法组成concurrent duplex relay、丢失authenticated initial
     payload并拒绝合法post-fixed fragmentation。修复前需要显式冻结split/fatal-error
-    concurrency interface，当前为contract blocked，未integrate；
+    concurrency interface；Product scope triage确认不扩大M0产品/wire范围，但
+    code-only repair仍未获授权，当前为contract blocked，未integrate；
   - M0-T04：typed config/observability；initial candidate `e9c6b01`
     Architect/QA BLOCK；repair 1/2 candidate `8d18d17` 已关闭 exact-target
     tracing spoof 与 server unknown-field evidence，ticket与integration

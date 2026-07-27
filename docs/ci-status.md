@@ -43,7 +43,8 @@
   Architect/QA均 **BLOCK**：fixed/reusable scratch与negative/order evidence
   不完整，typed transition还无法组成concurrent duplex relay、丢失authenticated
   initial payload并拒绝合法post-fixed fragmentation。修复前需显式冻结
-  split/fatal-error concurrency interface，当前contract blocked且未integrate；
+  split/fatal-error concurrency interface；Product scope triage确认这不扩大M0
+  产品/wire范围，但当前未授权code-only repair，candidate未integrate；
   M0-T07/T08继续等待既定blockers
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,

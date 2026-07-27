@@ -103,6 +103,9 @@ cargo fmt -p ferrum2-shadowsocks -- --check
   duplex、scratch ownership、subsequent bounded-fill与split后fatal-error ownership，
   并映射到SPEC-0001/TEST-0001。当前授权只允许执行已批准合同，故未擅自修订合同、
   未开始repair 1/2，candidate未integrate；branch/worktree保留。
+- Product scope triage: **BLOCK code-only repair**；所需修正保持现有M0产品与wire
+  行为不变，但属于未冻结的cross-module public concurrency contract，必须先获得
+  窄合同修订授权与Product/Architect/QA批准。
 - Fixture generator/output SHA-256:
   `ca8d181b…faa39` / `c7f210d6…11f0`
 - Integrated commit: pending
