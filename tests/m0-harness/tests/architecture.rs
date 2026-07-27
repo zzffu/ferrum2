@@ -54,6 +54,10 @@ fn package_names_by_id(metadata: &Value) -> BTreeMap<String, String> {
         .collect()
 }
 
+fn contains_explicit_target_declaration(manifest: &str, declaration: &str) -> bool {
+    manifest.replace("\r\n", "\n").contains(declaration)
+}
+
 #[test]
 fn workspace_has_exactly_the_approved_members() {
     let metadata = metadata();
@@ -240,8 +244,16 @@ fn all_future_product_targets_are_declared_explicitly() {
     ] {
         let contents = fs::read_to_string(root.join(manifest)).expect("member manifest");
         assert!(
-            contents.contains(declaration),
+            contains_explicit_target_declaration(&contents, declaration),
             "{manifest} must explicitly declare `{declaration}`"
         );
     }
+}
+
+#[test]
+fn explicit_target_declaration_matching_accepts_crlf() {
+    let manifest = "[[bin]]\r\nname = \"ferrum2-client\"\r\npath = \"src/main.rs\"\r\n";
+    let declaration = "[[bin]]\nname = \"ferrum2-client\"\npath = \"src/main.rs\"";
+
+    assert!(contains_explicit_target_declaration(manifest, declaration));
 }
