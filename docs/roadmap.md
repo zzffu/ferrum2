@@ -67,8 +67,8 @@ non-overlapping ownership。
      exact integration `GITHUB_SHA` 全部 success。
 - **In-scope tickets:**
   - M0-T01：locked workspace、toolchain、license 与 core contracts；done；
-  - M0-T02：secret/KDF/AEAD/key-clock-entropy；ADR-0008 窄勘误已获授权，
-    ready to resume；
+  - M0-T02：secret/KDF/AEAD/key-clock-entropy；ADR-0008 窄勘误及双评审已
+    PASS，preserved worktree 正在恢复执行；
   - M0-T03：SIP022 TCP security state/replay/binding；blocked by T02；
   - M0-T04：typed config/observability；blocked by T02；
   - M0-T05：SOCKS5 CONNECT inbound；done；
@@ -95,7 +95,7 @@ non-overlapping ownership。
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
   CAVP ZIP 不含批准的两组 numeric cases；ADR-0008 窄勘误已经显式授权并把
   provenance 更正为 McGrew/Viega GCM proposal `vec-01`/`vec-02`。向量与协议
-  行为不变，contract Architect/QA 均已 PASS，保留的 T02 worktree 可以恢复。
+  行为不变，contract Architect/QA 均已 PASS，保留的 T02 worktree 已恢复执行。
   T03/T04 因 T02 等待，T07/T08 继续只等待既定 dependencies。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
