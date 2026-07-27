@@ -527,3 +527,54 @@ impl fmt::Display for AeadError {
 }
 
 impl Error for AeadError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXHAUSTED_NONCE: [u8; AEAD_NONCE_BYTES] = [u8::MAX; AEAD_NONCE_BYTES];
+
+    #[test]
+    fn tcp_owner_nonce_exhaustion_sealer_fails_closed() {
+        let mut sealer = TcpSealer::new(TcpSubkey::from_bytes([0x11; AES_128_KEY_BYTES]));
+        sealer.nonce = NonceCounter::from_le_bytes(EXHAUSTED_NONCE);
+        let mut plaintext = BytesMut::from(&b"plaintext remains unchanged"[..]);
+        let original_plaintext = plaintext.clone();
+
+        assert_eq!(
+            sealer.seal_in_place(&mut plaintext),
+            Err(AeadError::NonceExhausted)
+        );
+        assert_eq!(plaintext, original_plaintext);
+        assert_eq!(sealer.nonce.current_bytes(), EXHAUSTED_NONCE);
+
+        assert_eq!(
+            sealer.seal_in_place(&mut plaintext),
+            Err(AeadError::NonceExhausted)
+        );
+        assert_eq!(plaintext, original_plaintext);
+        assert_eq!(sealer.nonce.current_bytes(), EXHAUSTED_NONCE);
+    }
+
+    #[test]
+    fn tcp_owner_nonce_exhaustion_opener_fails_closed() {
+        let mut opener = TcpOpener::new(TcpSubkey::from_bytes([0x22; AES_128_KEY_BYTES]));
+        opener.nonce = NonceCounter::from_le_bytes(EXHAUSTED_NONCE);
+        let mut ciphertext = BytesMut::from(&b"ciphertext and tag remain unchanged"[..]);
+        let original_ciphertext = ciphertext.clone();
+
+        assert_eq!(
+            opener.open_in_place(&mut ciphertext),
+            Err(AeadError::NonceExhausted)
+        );
+        assert_eq!(ciphertext, original_ciphertext);
+        assert_eq!(opener.nonce.current_bytes(), EXHAUSTED_NONCE);
+
+        assert_eq!(
+            opener.open_in_place(&mut ciphertext),
+            Err(AeadError::NonceExhausted)
+        );
+        assert_eq!(ciphertext, original_ciphertext);
+        assert_eq!(opener.nonce.current_bytes(), EXHAUSTED_NONCE);
+    }
+}
