@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "done"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -200,3 +200,9 @@ cargo test --workspace --locked
   integration PASS，17个ticket paths与candidate blobs exact相同，base以
   fast-forward更新
 - Publication: none
+- Recovery reopen (2026-07-27): T08's required Rust 1.85.0 gate exposed
+  `E0658` in `bins/ferrum2-server/src/run.rs` because the accepted T07
+  composition used let-chain syntax unavailable on the pinned MSRV. The repair is
+  restricted to an equivalent nested `if let`; behavior, APIs, manifests, lockfile,
+  product scope, and wire contract remain unchanged. T08 stays blocked until this
+  repair passes Engineer, Architect, QA, and integration gates.

@@ -2,7 +2,7 @@
 id = "M0-T08"
 title = "Qualify pinned interoperability, MSRV, and three target artifacts"
 milestone = "M0"
-status = "in_progress"
+status = "blocked"
 priority = "P0"
 blocked_by = ["M0-T07"]
 owns = [
@@ -153,3 +153,8 @@ To be filled by the Team Lead after integration:
 - Eleven required job results:
 - Runner ImageOS/ImageVersion/Included Software links:
 - Platform artifact/linkage evidence:
+- Recovery blocker (2026-07-27): local evidence found an upstream T07 Rust 1.85.0
+  syntax incompatibility and a separate sing-box 1.13.14 bidirectional
+  interoperability failure under diagnosis. T08-owned implementation may be
+  preserved as a clean checkpoint, but review and integration remain blocked until
+  the upstream repairs pass their own gates and are merged into the T08 base.
