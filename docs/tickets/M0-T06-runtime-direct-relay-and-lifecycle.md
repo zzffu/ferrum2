@@ -2,7 +2,7 @@
 id = "M0-T06"
 title = "Implement bounded runtime, direct outbound, and lifecycle ownership"
 milestone = "M0"
-status = "ready"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T01"]
 owns = [

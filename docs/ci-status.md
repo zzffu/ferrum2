@@ -3,7 +3,7 @@
 ## 当前 M0 执行状态
 
 - **Current validated local integration checkpoint:**
-  `ad9e499c0ba01f43a3877d6000e3192237575735` on local `master` and
+  `c2ea5c2b48adf986e17a11639e24184c65131d3b` on local `master` and
   `codex/integration/m0`
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
@@ -49,7 +49,8 @@
   lifecycle/native-probe/control-doc change，也未integrate。composition preflight
   发现四个合同证据缺口：黑盒counter visibility、stale fixture native branch、
   fused client connect/first-write、relay error丢partial stats。ADR-0011/0012已
-  Accepted，SPEC/TEST amendments已Approved；T03/T06已reopen为ready，T07 blocked
+  Accepted，SPEC/TEST amendments已Approved；T03/T06已reopen并进入`in_progress`，
+  T07 blocked
   且保留`52dcdb0`，T08等待T07。
 - **Contract final verdicts:** 初始review要求exact 47-case matrix、
   `AddressBounds`、harness exact two-edge lock hunk、configured而非hardcoded
@@ -179,7 +180,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0012、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01/T02/T04/T05 done，T03/T06 narrow repairs ready，T07 partial `52dcdb0` blocked，T08等待T07 | M0-T03/T06 repairs |
+| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0012、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01/T02/T04/T05 done，T03/T06 narrow repairs in_progress，T07 partial `52dcdb0` blocked，T08等待T07 | M0-T03/T06 repairs |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
 | Host quick Cargo gate | DEFERRED/NOT_RUN | T07 partial branch quick-equivalent fmt/check/workspace test已PASS但未integrate；exact integration quick仍在T03/T06 repairs与T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |

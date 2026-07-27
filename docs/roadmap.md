@@ -92,8 +92,7 @@ non-overlapping ownership。
     release/Clippy/fmt及组合Architect/QA gates全部通过，done；本地授权不改变
     原T08 conditional exact-SHA push边界。T07 preflight随后发现fused client open
     无法分别应用configured connect/fresh first-write deadlines（默认10秒/5秒）；
-    现依ADR-0012窄幅reopen
-    为ready，历史completion evidence保留；
+    现依ADR-0012窄幅reopen并进入`in_progress`，历史completion evidence保留；
   - M0-T04：typed config/observability；initial candidate `e9c6b01`
     Architect/QA BLOCK；repair 1/2 candidate `8d18d17` 已关闭 exact-target
     tracing spoof 与 server unknown-field evidence，ticket与integration
@@ -101,7 +100,7 @@ non-overlapping ownership。
   - M0-T05：SOCKS5 CONNECT inbound；done；
   - M0-T06：runtime/direct/relay/lifecycle；历史ticket/integration done；T07
     preflight发现failure outcome丢失partial forwarded stats，现依ADR-0012窄幅reopen
-    为ready，只修复relay outcome与direct tests；
+    并进入`in_progress`，只修复relay outcome与direct tests；
   - M0-T07：binary composition/local E2E；partial clean checkpoint `52dcdb0`
     已完成两个binary、CLI/adapters/local E2E且未触及manifest/lock。当前blocked，
     等待ADR-0011/0012合同及T03/T06 upstream repairs；之后补lifecycle/native
@@ -120,8 +119,8 @@ non-overlapping ownership。
   ```
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
-- **Integrated commit:** 当前local base/integration coordination checkpoint
-  `ad9e499c0ba01f43a3877d6000e3192237575735`；其中product code checkpoint
+- **Integrated commit:** 当前local base/integration contract checkpoint
+  `c2ea5c2b48adf986e17a11639e24184c65131d3b`；其中product code checkpoint
   `4bf758ae76421856bb527db3afe165d47e6fd4aa`包含原M0-T01～T06。T07 partial
   `52dcdb0`未integrate；workspace quick/full仍等待上游repairs与T07/T08。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
@@ -154,7 +153,8 @@ non-overlapping ownership。
   授权已覆盖该修订；ADR-0011/0012草案不改变wire/product/API/remote范围。
   Product对两项范围均PASS，Architect接受evidence设计并要求独立ADR-0012，QA要求
   exact two-edge lock delta与`AddressBounds` row；修订吸收全部findings后最终
-  Product/Architect/QA document gates均PASS。T03/T06因此ready，T07 blocked，
+  Product/Architect/QA document gates均PASS。T03/T06因此进入`in_progress`，
+  T07 blocked，
   T08等待T07。全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
