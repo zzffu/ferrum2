@@ -69,6 +69,10 @@ backpressure、half-close、timeout值、connector、metrics schema、manifest/d
 
 ## Implementation notes and constraints
 
+- ADR-0016只允许替换private registry/counter helper、test file或result-carrier
+  spelling；one-owner-task/two-buffer/no-channel topology、partial stats、
+  backpressure、half-close、timeout与shutdown语义保持本票规范。替代evidence仍须
+  覆盖全部terminal/mutation并经Architect/QA执行前映射。
 - 每flow一个spawnedowner task；relay directions不可另spawn。
 - data plane无mpsc/channel/prefetch queue。
 - permit在accept前取得并随socket/task生命周期释放。

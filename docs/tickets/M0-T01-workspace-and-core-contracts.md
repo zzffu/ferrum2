@@ -28,11 +28,11 @@ spec = "docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md"
 test_plan = "docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md"
 acceptance = [
   "M0-WS-001 passes: cargo metadata reports exactly the ten approved members and the tested dependency DAG has no reverse edge into ferrum2-core",
-  "M0-WS-002 passes: exact production direct versions and features, Cargo.lock, GPL-3.0-only metadata, publish=false, and workspace unsafe_code=forbid match ADR-0001 as partially superseded by ADR-0009, ADR-0011's exact harness-only test dependency exception, and ADR-0013's exact two-binary dev-only Tokio test-util exception",
+  "M0-WS-002 passes: exact production direct versions and features, Cargo.lock, GPL-3.0-only metadata, publish=false, and workspace unsafe_code=forbid match ADR-0001 as partially superseded by ADR-0009, ADR-0011/0013/0015's current selected test-only profiles, and ADR-0016's single-writer equivalent-substitution policy",
   "The ADR-0009 repair adds only exact aes 0.9.1 and ghash 0.6.0 no-default zeroize feature anchors, proves the exact ADR-0009 resolved feature sets and unique package IDs, and exactly preserves the 110-tuple locked package name/version/source/checksum baseline",
   "Rust 1.97.1 can build and test ferrum2-core plus the architecture and workspace-policy tests with --locked",
   "Core LocalEndpoint requires an infallible stored SocketAddrV4 on Connector and Outbound streams, and consuming SessionReply::succeeded requires that endpoint",
-  "All later production member target paths are predeclared; ADR-0011 transfers tests/m0-harness/Cargo.toml, workspace_policy.rs, and the exact two-edge harness lock hunk to M0-T07, while ADR-0013 additionally transfers only both binary Cargo.toml files for one exact dev-only Tokio test-util declaration each with no lock delta",
+  "All later production member target paths are predeclared; current M0 uses the exact ADR-0011/0013/0015 manifest and lock profile, while ADR-0016 permits only a pre-mapped, single-writer, fully audited equivalent test-only substitution or declaration spelling change that preserves approved production package identities and resolved features",
   "ferrum2-m0-harness has no Cargo dependency on a concrete ferrum2 crate, so both T01 static tests compile while future target sources are absent",
 ]
 +++
@@ -53,6 +53,11 @@ Engineer独占，否则后续 T02/T04/T05/T06 会竞争 shared files。模块、
 
 ADR-0011后来只对T07 independent native-probe evidence建立精确test-only exception；
 它不追溯改变本票历史implementation或production dependency baseline。
+
+ADR-0016进一步把T01 ownership定义为默认协调策略而非永久写禁令。当前
+ADR-0009/0011/0013/0015 exact declarations仍是M0 selected profile；任何替代都
+必须在执行前由对应ticket取得精确single-writer lease并证明production/release
+graph、版本、source、license、MSRV和安全feature不弱于该baseline。
 
 ## In scope
 
@@ -84,7 +89,10 @@ ADR-0011后来只对T07 independent native-probe evidence建立精确test-only e
 - traits使用 RPITIT/static dispatch，不引入 `async-trait`。
 - `TargetAddr` 不实现泄露原值的 `Display`；domain storage有 255-byte bound。
 - 若 exact dependency 无法形成 locked graph，停止并请求 ADR/spec revision；不得
-  自行换版本。
+  自行换版本。仅证据所需的test-only edge，或保持既有production package
+  identities与resolved feature outcome的declaration/anchor spelling，可按ADR-0016
+  ticket amendment处理；新增package/feature及version/source/API/wire/unsafe/
+  license/behavior变化仍须ADR/spec revision。
 - 本次 reopen 只有一个 manifest writer；只可修改 root/crypto manifests、
   `Cargo.lock` 与 `workspace_policy.rs`。不得修改 product source、依赖版本、
   AES/SIP022 behavior 或其他 member manifest。
@@ -115,8 +123,8 @@ git diff --check
 
 - 某个 pinned transitive dependency可能无法在 MSRV 1.85.0解析；最终 blocking MSRV
   gate仍由 T08执行，但本票应尽早验证 metadata。
-- predeclared target漏项会迫使后续修改 manifest；这是 blocker，不允许 ownership
-  例外。
+- predeclared target漏项会迫使后续修改 manifest；它必须先形成ADR-0016
+  single-writer lease和完整影响映射，不能由并行Engineer临场修改。
 - license review遗漏会阻塞 M0，而不是通过编译自动豁免。
 
 ## Completion evidence

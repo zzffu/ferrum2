@@ -78,6 +78,10 @@ phase boundary和controlled-future证据。
 
 ## Implementation notes and constraints
 
+- ADR-0016只允许替换private test helper、recording adapter或result-carrier spelling；
+  `TransportIo`、`PlainDuplex`、`ConnectedClientOpen`及opaque ownership/phase/error/
+  caller-capability语义保持本票规范。替代evidence必须覆盖相同ordering、terminal、
+  fragmentation、allocation和mutation，并经Architect/QA执行前映射。
 - 严格采用ADR-0004的先完整authentication/semantics、后replay mutation、再connector
   顺序。
 - 不能用`read_exact`/`write_all`替代first-header底层调用证明。

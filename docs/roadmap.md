@@ -34,10 +34,11 @@ non-overlapping ownership。
 - **Entry conditions:**
   - bootstrap 的 vision、gap analysis、roadmap、CI baseline 已更新并通过
     workflow validation；
-  - `ADR-0001`～`ADR-0012` 已 Accepted；ADR-0011/0012窄修订覆盖evidence
-    boundary、independent native probes、configured client phase deadlines与
-    partial relay accounting，DEC-014/015已关闭；
-  - `SPEC-0001` 与 `TEST-0001` 及ADR-0011/0012 amendments已 Approved；
+  - `ADR-0001`～`ADR-0015` 已 Accepted；ADR-0016 proposal区分normative invariant、
+    selected conformance profile与mechanical realization，既有安全/协议/release
+    结果不变，DEC-014～018已关闭、DEC-019正在document gate；
+  - `SPEC-0001` 与 `TEST-0001` 及ADR-0010～0015 amendments已 Approved；
+    ADR-0016 amendments为Proposed；
   - M0-T01～M0-T08 的 blockers、non-overlapping ownership 和量化 acceptance
     已通过 workflow validation。
 - **Exit criteria:**
@@ -341,6 +342,7 @@ non-overlapping ownership。
 | DEC-016 | resolved in M0 narrow amendment | 两个binary各增加一个workspace-inherited、dev-only Tokio `test-util` edge以运行paused-time composition tests；root/normal/production graph、version与lock不变 | `ADR-0013`、`SPEC-0001`、`TEST-0001`、M0-T01/M0-T07 |
 | DEC-017 | resolved in M0 narrow amendment | external四案先比较pre-FIN双向各16386-byte distinct payload，再观察ordered clean-EOF convergence且不声明target-FIN causality；peer FIN后新reverse drain继续由同一SHA的M0-E2E-001/M0-LIFE-003独立blocking；pin/wire/product不变 | `ADR-0014`、`SPEC-0001`、`TEST-0001`、M0-T08 |
 | DEC-018 | resolved in M0 hosted-rebind amendment | client/server listener仅在Unix bind前启用reuse-address，Windows保持default且禁止reuse-port；harness首次listener与exact probe镜像同策略bind+listen并保留live-owner collision；新增唯一既有pin的`socket2` dev edge；四类hosted evidence-script portability缺陷fail closed修复 | `ADR-0015`、`SPEC-0001`、`TEST-0001`、M0-T07/M0-T08 |
+| DEC-019 | proposed in M0 invariant/evidence amendment | 产品/安全/release outcome为normative invariant；具体fixture/probe/test-only edge为selected conformance profile，可在执行前以等强、可审计、single-writer方式替换；机械修复不再自动要求新产品ADR | `ADR-0016` proposal、`SPEC-0001`/`TEST-0001` amendments、M0-T01/T02/T03/T06/T07/T08 |
 
 ## 风险登记
 
@@ -355,6 +357,7 @@ non-overlapping ownership。
 | musl/Windows 差异发现过晚 | P1 | M0 | early build smoke，M3 full qualification |
 | GitHub-hosted image weekly drift 或 provider outage | P1 | M0 | fixed OS labels、ImageOS/ImageVersion/Included Software evidence、unavailable=FAIL/BLOCK；不宣称M3资格 |
 | Linux真实流量后listener exact地址无法立即restart，或reuse策略意外允许live-owner共享 | P0 | M0 | ADR-0015 Unix-only reuse/default Windows、禁止SO_REUSEPORT、same-policy bind+listen与live-owner negative、100-cycle gate |
+| “等价证据”被事后用作waiver或缩减coverage | P0 | M0 | ADR-0016要求执行前mapping、old/new claim、独立性/failure modes、exact candidate SHA与Architect/QA gate；旧失败不可追认 |
 | benchmark 不等价或噪声驱动错误优化 | P1 | M4 | frozen comparable config 和重复统计 |
 | 当前零代码使工期/接口估计不可靠 | P1 | M0 plan | 小型纵切、窄 tickets、每波 review/validation |
 
@@ -371,3 +374,4 @@ non-overlapping ownership。
 | 2026-07-27 | M0 external half-close evidence amendment | 接受：保留sing-box 1.13.14 pin与四项hard gate，把external evidence细化为pre-FIN双向完整bytes及ordered clean-EOF convergence，不声称target-FIN causality；ferrum FIN后reverse drain仍由local/runtime同SHA硬门证明 | exact diagnosis隔离出sing-box 1.13.14在peer FIN后关闭leg的第三方限制；不改变wire/product/API/pin/remote范围 | ADR-0014 Accepted；SPEC/TEST Approved；`f757b58` final Product/Architect/QA PASS |
 | 2026-07-27 | M0 binary paused-time contract amendment | 接受两个binary-local exact Tokio `test-util` dev edges与zero-additional-lock-delta policy；不改root/normal/production graph | ADR-0012要求targeted binary paused-time tests，但现有manifest ownership使其无法编译；root/normal/injection/real-time替代均更广或更弱 | ADR-0013 Accepted；勘误base `24ddecf`的Product/Architect/QA final gates均PASS |
 | 2026-07-28 | M0 hosted-rebind/evidence portability amendment | 接受Unix-only listener reuse、default Windows、same-policy exact bind+listen及唯一`socket2` harness edge；T08只修正两处full-name exact filters与三个platform linker probes | exact `51fb7327`的run `30301746374`及独立WSL复现把9个failed jobs归约为Linux rebind及四类CI evidence defects；不改变wire/product/API/config/job matrix/remote授权 | ADR-0015 Accepted；SPEC/TEST amendments Approved；Product/Architect/two QA document gates PASS；workflow validate/diff-check |
+| 2026-07-28 | M0 invariant/evidence contract amendment proposal | 提议三层合同与执行前equivalent substitution；T01 ownership改为single-writer默认协调，事实性provenance勘误与机械evidence修复不再自动需要产品ADR | 历史ADR-0008/0011/0013/0014/0015证明写死的来源、probe、test edge或第三方时序会形成非产品blocker；不改变任何wire/security/product/platform/job/exact-SHA gate | ADR-0016 Proposed；SPEC/TEST/T01/T02/T03/T06/T07/T08同步；等待final Architect/QA document gates |
