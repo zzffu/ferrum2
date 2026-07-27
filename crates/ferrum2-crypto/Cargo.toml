@@ -10,10 +10,12 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+aes.workspace = true
 aes-gcm.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 getrandom.workspace = true
+ghash.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 

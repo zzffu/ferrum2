@@ -1,9 +1,244 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
+
+const PRE_REPAIR_LOCK_IDENTITIES: &str = r#"aead|0.6.1|registry+https://github.com/rust-lang/crates.io-index|1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99
+aes|0.9.1|registry+https://github.com/rust-lang/crates.io-index|f1fc76eaeac4c9164506c466d4ffdd8ec9d0c5bf57ee97177c4d8eceb3a0e138
+aes-gcm|0.11.0|registry+https://github.com/rust-lang/crates.io-index|fdf011db2e21ce0d575593d749db5554b47fed37aff429e4dc50bc91ac93a028
+aho-corasick|1.1.4|registry+https://github.com/rust-lang/crates.io-index|ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301
+anstyle|1.0.14|registry+https://github.com/rust-lang/crates.io-index|940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000
+arrayref|0.3.9|registry+https://github.com/rust-lang/crates.io-index|76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb
+arrayvec|0.7.8|registry+https://github.com/rust-lang/crates.io-index|d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56
+base64|0.23.0|registry+https://github.com/rust-lang/crates.io-index|b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9
+bitflags|2.13.1|registry+https://github.com/rust-lang/crates.io-index|b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da
+blake3|1.8.5|registry+https://github.com/rust-lang/crates.io-index|0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce
+block-buffer|0.12.1|registry+https://github.com/rust-lang/crates.io-index|d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa
+bytes|1.12.1|registry+https://github.com/rust-lang/crates.io-index|fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04
+cc|1.4.0|registry+https://github.com/rust-lang/crates.io-index|5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9
+cfg-if|1.0.4|registry+https://github.com/rust-lang/crates.io-index|9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801
+cipher|0.5.2|registry+https://github.com/rust-lang/crates.io-index|e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c
+clap|4.6.4|registry+https://github.com/rust-lang/crates.io-index|d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7
+clap_builder|4.6.2|registry+https://github.com/rust-lang/crates.io-index|f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b
+clap_derive|4.6.4|registry+https://github.com/rust-lang/crates.io-index|d012d2b9d65aca7f18f4d9878a045bc17899bba951561ba5ec3c2ba1eed9a061
+clap_lex|1.1.0|registry+https://github.com/rust-lang/crates.io-index|c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9
+cmov|0.5.4|registry+https://github.com/rust-lang/crates.io-index|0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a
+constant_time_eq|0.4.2|registry+https://github.com/rust-lang/crates.io-index|3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b
+cpubits|0.1.1|registry+https://github.com/rust-lang/crates.io-index|15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae
+cpufeatures|0.3.0|registry+https://github.com/rust-lang/crates.io-index|8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201
+crypto-common|0.2.2|registry+https://github.com/rust-lang/crates.io-index|ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453
+ctr|0.10.1|registry+https://github.com/rust-lang/crates.io-index|baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21
+ctutils|0.4.2|registry+https://github.com/rust-lang/crates.io-index|7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e
+dtoa|1.0.11|registry+https://github.com/rust-lang/crates.io-index|4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590
+equivalent|1.0.2|registry+https://github.com/rust-lang/crates.io-index|877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f
+errno|0.3.14|registry+https://github.com/rust-lang/crates.io-index|39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb
+fastrand|2.5.0|registry+https://github.com/rust-lang/crates.io-index|da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223
+ferrum2-client|0.1.0||
+ferrum2-config|0.1.0||
+ferrum2-core|0.1.0||
+ferrum2-crypto|0.1.0||
+ferrum2-m0-harness|0.1.0||
+ferrum2-observability|0.1.0||
+ferrum2-runtime|0.1.0||
+ferrum2-server|0.1.0||
+ferrum2-shadowsocks|0.1.0||
+ferrum2-socks5|0.1.0||
+find-msvc-tools|0.1.9|registry+https://github.com/rust-lang/crates.io-index|5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582
+getrandom|0.4.3|registry+https://github.com/rust-lang/crates.io-index|300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099
+ghash|0.6.0|registry+https://github.com/rust-lang/crates.io-index|2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5
+hashbrown|0.17.1|registry+https://github.com/rust-lang/crates.io-index|ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a
+heck|0.5.0|registry+https://github.com/rust-lang/crates.io-index|2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea
+hex|0.4.3|registry+https://github.com/rust-lang/crates.io-index|7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70
+hybrid-array|0.4.13|registry+https://github.com/rust-lang/crates.io-index|818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c
+indexmap|2.14.0|registry+https://github.com/rust-lang/crates.io-index|d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9
+inout|0.2.2|registry+https://github.com/rust-lang/crates.io-index|4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7
+itoa|1.0.18|registry+https://github.com/rust-lang/crates.io-index|8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682
+lazy_static|1.5.0|registry+https://github.com/rust-lang/crates.io-index|bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe
+libc|0.2.189|registry+https://github.com/rust-lang/crates.io-index|3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2
+linux-raw-sys|0.12.1|registry+https://github.com/rust-lang/crates.io-index|32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53
+lock_api|0.4.14|registry+https://github.com/rust-lang/crates.io-index|224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965
+matchers|0.2.0|registry+https://github.com/rust-lang/crates.io-index|d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9
+memchr|2.8.3|registry+https://github.com/rust-lang/crates.io-index|cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98
+mio|1.2.2|registry+https://github.com/rust-lang/crates.io-index|30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427
+once_cell|1.21.4|registry+https://github.com/rust-lang/crates.io-index|9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50
+parking_lot|0.12.5|registry+https://github.com/rust-lang/crates.io-index|93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a
+parking_lot_core|0.9.12|registry+https://github.com/rust-lang/crates.io-index|2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1
+pin-project-lite|0.2.17|registry+https://github.com/rust-lang/crates.io-index|a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd
+polyval|0.7.3|registry+https://github.com/rust-lang/crates.io-index|f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd
+proc-macro2|1.0.107|registry+https://github.com/rust-lang/crates.io-index|985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9
+prometheus-client|0.25.0|registry+https://github.com/rust-lang/crates.io-index|ba70bf887030e45213b4a95c9b08d5a450b157f87c1d63661ed0847a12fa2aad
+prometheus-client-derive-encode|0.5.0|registry+https://github.com/rust-lang/crates.io-index|9adf1691c04c0a5ff46ff8f262b58beb07b0dbb61f96f9f54f6cbd82106ed87f
+quote|1.0.47|registry+https://github.com/rust-lang/crates.io-index|1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001
+r-efi|6.0.0|registry+https://github.com/rust-lang/crates.io-index|f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf
+redox_syscall|0.5.18|registry+https://github.com/rust-lang/crates.io-index|ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d
+regex-automata|0.4.16|registry+https://github.com/rust-lang/crates.io-index|8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad
+regex-syntax|0.8.11|registry+https://github.com/rust-lang/crates.io-index|d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4
+rustix|1.1.4|registry+https://github.com/rust-lang/crates.io-index|b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190
+scopeguard|1.2.0|registry+https://github.com/rust-lang/crates.io-index|94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49
+serde|1.0.229|registry+https://github.com/rust-lang/crates.io-index|4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba
+serde_core|1.0.229|registry+https://github.com/rust-lang/crates.io-index|67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48
+serde_derive|1.0.229|registry+https://github.com/rust-lang/crates.io-index|e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348
+serde_json|1.0.151|registry+https://github.com/rust-lang/crates.io-index|c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14
+serde_spanned|1.1.1|registry+https://github.com/rust-lang/crates.io-index|6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26
+sharded-slab|0.1.7|registry+https://github.com/rust-lang/crates.io-index|f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6
+shlex|2.0.1|registry+https://github.com/rust-lang/crates.io-index|f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba
+signal-hook-registry|1.4.8|registry+https://github.com/rust-lang/crates.io-index|c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b
+smallvec|1.15.2|registry+https://github.com/rust-lang/crates.io-index|8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90
+socket2|0.6.5|registry+https://github.com/rust-lang/crates.io-index|c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4
+subtle|2.6.1|registry+https://github.com/rust-lang/crates.io-index|13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292
+syn|2.0.119|registry+https://github.com/rust-lang/crates.io-index|872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297
+syn|3.0.3|registry+https://github.com/rust-lang/crates.io-index|53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3
+tempfile|3.27.0|registry+https://github.com/rust-lang/crates.io-index|32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd
+thiserror|2.0.19|registry+https://github.com/rust-lang/crates.io-index|09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9
+thiserror-impl|2.0.19|registry+https://github.com/rust-lang/crates.io-index|43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd
+thread_local|1.1.10|registry+https://github.com/rust-lang/crates.io-index|1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070
+tokio|1.53.1|registry+https://github.com/rust-lang/crates.io-index|202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed
+tokio-macros|2.7.1|registry+https://github.com/rust-lang/crates.io-index|6328af13490e73a9b4694030fafd93f8c8c6a9dede33e821c3fc63eddf8042ba
+toml|1.1.3+spec-1.1.0|registry+https://github.com/rust-lang/crates.io-index|53c96ecdfa941c8fc4fcaed14f99ada8ebed502eef533015095a07e3301d4c3c
+toml_datetime|1.1.1+spec-1.1.0|registry+https://github.com/rust-lang/crates.io-index|3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7
+toml_parser|1.1.2+spec-1.1.0|registry+https://github.com/rust-lang/crates.io-index|a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526
+toml_writer|1.1.2+spec-1.1.0|registry+https://github.com/rust-lang/crates.io-index|7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2
+tracing|0.1.44|registry+https://github.com/rust-lang/crates.io-index|63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100
+tracing-core|0.1.36|registry+https://github.com/rust-lang/crates.io-index|db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a
+tracing-serde|0.2.0|registry+https://github.com/rust-lang/crates.io-index|704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1
+tracing-subscriber|0.3.23|registry+https://github.com/rust-lang/crates.io-index|cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319
+typenum|1.20.1|registry+https://github.com/rust-lang/crates.io-index|b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20
+unicode-ident|1.0.24|registry+https://github.com/rust-lang/crates.io-index|e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75
+universal-hash|0.6.1|registry+https://github.com/rust-lang/crates.io-index|f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96
+valuable|0.1.1|registry+https://github.com/rust-lang/crates.io-index|ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65
+wasi|0.11.1+wasi-snapshot-preview1|registry+https://github.com/rust-lang/crates.io-index|ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b
+windows-link|0.2.1|registry+https://github.com/rust-lang/crates.io-index|f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5
+windows-sys|0.61.2|registry+https://github.com/rust-lang/crates.io-index|ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc
+winnow|1.0.4|registry+https://github.com/rust-lang/crates.io-index|23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81
+zeroize|1.9.0|registry+https://github.com/rust-lang/crates.io-index|e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e
+zeroize_derive|1.5.0|registry+https://github.com/rust-lang/crates.io-index|3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328
+zmij|1.0.23|registry+https://github.com/rust-lang/crates.io-index|29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"#;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct LockIdentity {
+    name: String,
+    version: String,
+    source: Option<String>,
+    checksum: Option<String>,
+}
+
+fn dependency_table(
+    manifest: &str,
+    table_header: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let normalized = manifest.replace("\r\n", "\n");
+    let mut in_table = false;
+    let mut declarations = BTreeMap::new();
+
+    for line in normalized.lines() {
+        let line = line.trim();
+        if line == table_header {
+            in_table = true;
+            continue;
+        }
+        if in_table && line.starts_with('[') {
+            break;
+        }
+        if !in_table || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let (name, value) = line
+            .split_once(" = ")
+            .ok_or_else(|| format!("invalid dependency declaration: {line}"))?;
+        if name.is_empty() || value.is_empty() {
+            return Err(format!("invalid dependency declaration: {line}"));
+        }
+        if declarations
+            .insert(name.to_owned(), value.to_owned())
+            .is_some()
+        {
+            return Err(format!("duplicate dependency declaration: {name}"));
+        }
+    }
+
+    if !in_table {
+        return Err(format!("missing dependency table: {table_header}"));
+    }
+    Ok(declarations)
+}
+
+fn quoted_lock_field(block: &str, field: &str) -> Result<Option<String>, String> {
+    let prefix = format!("{field} = ");
+    let mut values = block.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix(&prefix)
+            .map(str::trim)
+            .map(str::to_owned)
+    });
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(format!("duplicate lock field: {field}"));
+    }
+    let value = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(|| format!("lock field is not a quoted string: {field}"))?;
+    Ok(Some(value.to_owned()))
+}
+
+fn lock_identities(lock: &str) -> Result<Vec<LockIdentity>, String> {
+    let normalized = lock.replace("\r\n", "\n");
+    let mut identities = Vec::new();
+
+    for block in normalized.split("[[package]]").skip(1) {
+        identities.push(LockIdentity {
+            name: quoted_lock_field(block, "name")?
+                .ok_or_else(|| "lock package missing name".to_owned())?,
+            version: quoted_lock_field(block, "version")?
+                .ok_or_else(|| "lock package missing version".to_owned())?,
+            source: quoted_lock_field(block, "source")?,
+            checksum: quoted_lock_field(block, "checksum")?,
+        });
+    }
+
+    identities.sort();
+    Ok(identities)
+}
+
+fn pre_repair_lock_identities() -> Vec<LockIdentity> {
+    let identities: Vec<_> = PRE_REPAIR_LOCK_IDENTITIES
+        .lines()
+        .map(|line| {
+            let fields: Vec<_> = line.split('|').collect();
+            assert_eq!(fields.len(), 4, "invalid embedded lock identity: {line}");
+            LockIdentity {
+                name: fields[0].to_owned(),
+                version: fields[1].to_owned(),
+                source: (!fields[2].is_empty()).then(|| fields[2].to_owned()),
+                checksum: (!fields[3].is_empty()).then(|| fields[3].to_owned()),
+            }
+        })
+        .collect();
+    assert_eq!(
+        identities.len(),
+        110,
+        "the ADR-0009 pre-repair baseline must contain 110 identities"
+    );
+    let mut sorted = identities.clone();
+    sorted.sort();
+    if identities != sorted {
+        let index = identities
+            .iter()
+            .zip(&sorted)
+            .position(|(embedded, sorted)| embedded != sorted)
+            .expect("different vectors must have a mismatched entry");
+        panic!(
+            "the embedded lock identity baseline must be sorted at index {index}: embedded={:?}, sorted={:?}",
+            identities[index], sorted[index]
+        );
+    }
+    identities
+}
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -25,6 +260,40 @@ fn metadata() -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("cargo metadata JSON")
+}
+
+fn unique_registry_package_id(metadata: &Value, name: &str, version: &str) -> String {
+    let packages: Vec<_> = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .filter(|package| {
+            package["name"] == name
+                && package["version"] == version
+                && package["source"] == "registry+https://github.com/rust-lang/crates.io-index"
+        })
+        .collect();
+    assert_eq!(
+        packages.len(),
+        1,
+        "{name} {version} must have exactly one registry package instance"
+    );
+    packages[0]["id"].as_str().expect("package ID").to_owned()
+}
+
+fn resolve_node<'a>(metadata: &'a Value, package_id: &str) -> &'a Value {
+    let nodes: Vec<_> = metadata["resolve"]["nodes"]
+        .as_array()
+        .expect("resolve nodes")
+        .iter()
+        .filter(|node| node["id"] == package_id)
+        .collect();
+    assert_eq!(
+        nodes.len(),
+        1,
+        "{package_id} must have exactly one resolve node"
+    );
+    nodes[0]
 }
 
 fn contains_manifest_policy(manifest: &str, policy: &str) -> bool {
@@ -63,6 +332,7 @@ fn toolchain_and_msrv_are_pinned() {
 fn direct_dependency_versions_and_features_match_the_approved_baseline() {
     let manifest = fs::read_to_string(workspace_root().join("Cargo.toml")).expect("root manifest");
     let required = [
+        "aes = { version = \"=0.9.1\", default-features = false, features = [\"zeroize\"] }",
         "tokio = { version = \"=1.53.1\", default-features = false, features = [\"rt-multi-thread\", \"macros\", \"net\", \"io-util\", \"sync\", \"time\", \"signal\"] }",
         "bytes = \"=1.12.1\"",
         "socket2 = \"=0.6.5\"",
@@ -72,6 +342,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "tracing-subscriber = { version = \"=0.3.23\", default-features = false, features = [\"fmt\", \"json\", \"env-filter\"] }",
         "prometheus-client = { version = \"=0.25.0\", default-features = false }",
         "aes-gcm = { version = \"=0.11.0\", default-features = false, features = [\"aes\", \"bytes\", \"zeroize\"] }",
+        "ghash = { version = \"=0.6.0\", default-features = false, features = [\"zeroize\"] }",
         "blake3 = { version = \"=1.8.5\", default-features = false, features = [\"std\", \"zeroize\"] }",
         "base64 = { version = \"=0.23.0\", default-features = false, features = [\"std\"] }",
         "zeroize = { version = \"=1.9.0\", default-features = false, features = [\"alloc\", \"derive\"] }",
@@ -90,19 +361,19 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         );
     }
 
-    let dependency_table = manifest
-        .split("[workspace.dependencies]")
-        .nth(1)
-        .expect("workspace dependencies")
-        .split("[workspace.lints.rust]")
-        .next()
-        .expect("workspace dependency table end");
-    let actual_names: BTreeSet<_> = dependency_table
-        .lines()
-        .filter_map(|line| line.split_once('=').map(|(name, _)| name.trim()))
-        .filter(|name| !name.is_empty())
-        .collect();
+    let dependency_table =
+        dependency_table(&manifest, "[workspace.dependencies]").expect("workspace dependencies");
+    assert_eq!(
+        dependency_table.get("aes").map(String::as_str),
+        Some(r#"{ version = "=0.9.1", default-features = false, features = ["zeroize"] }"#)
+    );
+    assert_eq!(
+        dependency_table.get("ghash").map(String::as_str),
+        Some(r#"{ version = "=0.6.0", default-features = false, features = ["zeroize"] }"#)
+    );
+    let actual_names: BTreeSet<_> = dependency_table.keys().map(String::as_str).collect();
     let expected_names = BTreeSet::from([
+        "aes",
         "aes-gcm",
         "base64",
         "blake3",
@@ -116,6 +387,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "ferrum2-shadowsocks",
         "ferrum2-socks5",
         "getrandom",
+        "ghash",
         "hex",
         "prometheus-client",
         "serde",
@@ -148,6 +420,278 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
             "forbidden dependency or feature: {forbidden}"
         );
     }
+}
+
+#[test]
+fn crypto_manifest_declares_exact_zeroize_feature_anchors() {
+    let manifest = fs::read_to_string(
+        workspace_root()
+            .join("crates")
+            .join("ferrum2-crypto")
+            .join("Cargo.toml"),
+    )
+    .expect("crypto manifest");
+    let dependencies = dependency_table(&manifest, "[dependencies]").expect("crypto dependencies");
+
+    assert_eq!(
+        dependencies.get("aes.workspace").map(String::as_str),
+        Some("true"),
+        "aes must be inherited from the workspace without member overrides"
+    );
+    assert_eq!(
+        dependencies.get("ghash.workspace").map(String::as_str),
+        Some("true"),
+        "ghash must be inherited from the workspace without member overrides"
+    );
+    assert!(
+        !dependencies.contains_key("aes"),
+        "aes must use the exact dotted workspace declaration"
+    );
+    assert!(
+        !dependencies.contains_key("ghash"),
+        "ghash must use the exact dotted workspace declaration"
+    );
+}
+
+#[test]
+fn manifest_dependency_helpers_accept_line_endings_and_reject_mutations() {
+    let root_lf = "[workspace.dependencies]\naes = { version = \"=0.9.1\", default-features = false, features = [\"zeroize\"] }\nghash = { version = \"=0.6.0\", default-features = false, features = [\"zeroize\"] }\n\n[workspace.lints.rust]\nunsafe_code = \"forbid\"\n";
+    let member_lf =
+        "[dependencies]\naes.workspace = true\nghash.workspace = true\n\n[dev-dependencies]\n";
+
+    for root in [root_lf.to_owned(), root_lf.replace('\n', "\r\n")] {
+        let dependencies =
+            dependency_table(&root, "[workspace.dependencies]").expect("root fixture");
+        assert_eq!(
+            dependencies,
+            BTreeMap::from([
+                (
+                    "aes".to_owned(),
+                    r#"{ version = "=0.9.1", default-features = false, features = ["zeroize"] }"#
+                        .to_owned()
+                ),
+                (
+                    "ghash".to_owned(),
+                    r#"{ version = "=0.6.0", default-features = false, features = ["zeroize"] }"#
+                        .to_owned()
+                ),
+            ])
+        );
+    }
+
+    for member in [member_lf.to_owned(), member_lf.replace('\n', "\r\n")] {
+        assert_eq!(
+            dependency_table(&member, "[dependencies]").expect("member fixture"),
+            BTreeMap::from([
+                ("aes.workspace".to_owned(), "true".to_owned()),
+                ("ghash.workspace".to_owned(), "true".to_owned()),
+            ])
+        );
+    }
+
+    for mutation in [
+        root_lf.replace("=0.9.1", "=0.9.2"),
+        root_lf.replace("default-features = false", "default-features = true"),
+        root_lf.replace("[\"zeroize\"]", "[\"hazmat\", \"zeroize\"]"),
+        root_lf.replace("ghash = ", "renamed-ghash = "),
+        format!(
+            "{}extra = \"=1.0.0\"\n",
+            root_lf.replace("\n\n[workspace.lints.rust]", "\n")
+        ),
+    ] {
+        for fixture in [mutation.clone(), mutation.replace('\n', "\r\n")] {
+            let dependencies =
+                dependency_table(&fixture, "[workspace.dependencies]").expect("root mutation");
+            assert_ne!(
+                dependencies,
+                dependency_table(root_lf, "[workspace.dependencies]").expect("root baseline"),
+                "a dependency policy mutation must change the parsed contract"
+            );
+        }
+    }
+
+    for mutation in [
+        member_lf.replace("aes.workspace = true\n", ""),
+        member_lf.replace("ghash.workspace = true", "ghash.workspace = false"),
+        member_lf.replace("aes.workspace = true", "aes = { workspace = true }"),
+    ] {
+        for fixture in [mutation.clone(), mutation.replace('\n', "\r\n")] {
+            assert_ne!(
+                dependency_table(&fixture, "[dependencies]").expect("member mutation"),
+                dependency_table(member_lf, "[dependencies]").expect("member baseline"),
+                "a member anchor mutation must change the parsed contract"
+            );
+        }
+    }
+
+    assert!(dependency_table("[dependencies]\naes.workspace=true\n", "[dependencies]").is_err());
+}
+
+#[test]
+fn metadata_proves_exact_zeroize_feature_anchor_edges() {
+    let metadata = metadata();
+    let packages = metadata["packages"].as_array().expect("packages");
+    let crypto = packages
+        .iter()
+        .find(|package| package["name"] == "ferrum2-crypto")
+        .expect("crypto package");
+    let crypto_dependencies = crypto["dependencies"]
+        .as_array()
+        .expect("crypto dependencies");
+
+    for (name, version) in [("aes", "0.9.1"), ("ghash", "0.6.0")] {
+        let dependencies: Vec<_> = crypto_dependencies
+            .iter()
+            .filter(|dependency| dependency["name"] == name)
+            .collect();
+        assert_eq!(
+            dependencies.len(),
+            1,
+            "crypto must have one direct {name} feature anchor"
+        );
+        let dependency = dependencies[0];
+        assert_eq!(
+            dependency["source"],
+            "registry+https://github.com/rust-lang/crates.io-index"
+        );
+        assert_eq!(dependency["req"], format!("={version}"));
+        assert!(dependency["kind"].is_null(), "{name} must be normal");
+        assert!(dependency["rename"].is_null(), "{name} must be unrenamed");
+        assert_eq!(dependency["optional"], false);
+        assert_eq!(dependency["uses_default_features"], false);
+        assert_eq!(dependency["features"], serde_json::json!(["zeroize"]));
+        assert!(
+            dependency["target"].is_null(),
+            "{name} must be unconditional"
+        );
+    }
+
+    let crypto_node = resolve_node(&metadata, crypto["id"].as_str().expect("crypto package ID"));
+    let aes_gcm_id = unique_registry_package_id(&metadata, "aes-gcm", "0.11.0");
+    let aes_gcm_node = resolve_node(&metadata, &aes_gcm_id);
+
+    for (name, version) in [("aes", "0.9.1"), ("ghash", "0.6.0")] {
+        let package_id = unique_registry_package_id(&metadata, name, version);
+        let direct_edge = crypto_node["deps"]
+            .as_array()
+            .expect("crypto resolve dependencies")
+            .iter()
+            .find(|dependency| dependency["name"] == name)
+            .expect("direct feature anchor edge");
+        let transitive_edge = aes_gcm_node["deps"]
+            .as_array()
+            .expect("aes-gcm resolve dependencies")
+            .iter()
+            .find(|dependency| dependency["name"] == name)
+            .expect("aes-gcm transitive edge");
+
+        assert_eq!(direct_edge["pkg"], package_id);
+        assert_eq!(transitive_edge["pkg"], package_id);
+        assert_eq!(
+            direct_edge["dep_kinds"],
+            serde_json::json!([{"kind": null, "target": null}]),
+            "{name} direct resolve edge must be normal and unconditional"
+        );
+    }
+}
+
+#[test]
+fn resolved_crypto_feature_sets_are_exact() {
+    let metadata = metadata();
+    for (name, version, expected_features) in [
+        ("aes-gcm", "0.11.0", &["aes", "bytes", "zeroize"][..]),
+        ("aes", "0.9.1", &["zeroize"][..]),
+        ("ghash", "0.6.0", &["zeroize"][..]),
+        ("polyval", "0.7.3", &["hazmat", "zeroize"][..]),
+        (
+            "zeroize",
+            "1.9.0",
+            &["aarch64", "alloc", "derive", "zeroize_derive"][..],
+        ),
+    ] {
+        let package_id = unique_registry_package_id(&metadata, name, version);
+        let node = resolve_node(&metadata, &package_id);
+        let actual: BTreeSet<_> = node["features"]
+            .as_array()
+            .expect("resolved features")
+            .iter()
+            .map(|feature| feature.as_str().expect("feature string"))
+            .collect();
+        let expected: BTreeSet<_> = expected_features.iter().copied().collect();
+        assert_eq!(
+            actual, expected,
+            "{name} {version} resolved features must exactly match ADR-0009"
+        );
+    }
+}
+
+#[test]
+fn lock_package_identities_exactly_match_the_pre_repair_baseline() {
+    let lock = fs::read_to_string(workspace_root().join("Cargo.lock")).expect("Cargo.lock");
+    let actual = lock_identities(&lock).expect("candidate lock identities");
+    let expected = pre_repair_lock_identities();
+
+    assert_eq!(
+        actual.len(),
+        110,
+        "candidate lock must contain 110 packages"
+    );
+    assert_eq!(
+        actual, expected,
+        "package name/version/source/checksum identities must not change"
+    );
+}
+
+#[test]
+fn lock_identity_helper_accepts_line_endings_and_rejects_mutations() {
+    let fixture_lf = "# generated\nversion = 4\n\n[[package]]\nname = \"demo\"\nversion = \"1.2.3\"\nsource = \"registry+https://example.invalid/index\"\nchecksum = \"abc123\"\n\n[[package]]\nname = \"workspace-member\"\nversion = \"0.1.0\"\n";
+    let expected = vec![
+        LockIdentity {
+            name: "demo".to_owned(),
+            version: "1.2.3".to_owned(),
+            source: Some("registry+https://example.invalid/index".to_owned()),
+            checksum: Some("abc123".to_owned()),
+        },
+        LockIdentity {
+            name: "workspace-member".to_owned(),
+            version: "0.1.0".to_owned(),
+            source: None,
+            checksum: None,
+        },
+    ];
+
+    assert_eq!(
+        lock_identities(fixture_lf).expect("LF lock fixture"),
+        expected
+    );
+    assert_eq!(
+        lock_identities(&fixture_lf.replace('\n', "\r\n")).expect("CRLF lock fixture"),
+        expected
+    );
+
+    for mutation in [
+        fixture_lf.replace("1.2.3", "1.2.4"),
+        fixture_lf.replace(
+            "registry+https://example.invalid/index",
+            "git+https://example.invalid",
+        ),
+        fixture_lf.replace("abc123", "def456"),
+        fixture_lf.replace(
+            "\n[[package]]\nname = \"workspace-member\"\nversion = \"0.1.0\"\n",
+            "",
+        ),
+        format!("{fixture_lf}\n[[package]]\nname = \"added\"\nversion = \"9.9.9\"\n"),
+    ] {
+        for fixture in [mutation.clone(), mutation.replace('\n', "\r\n")] {
+            assert_ne!(
+                lock_identities(&fixture).expect("lock mutation"),
+                expected,
+                "a lock identity mutation must change the parsed contract"
+            );
+        }
+    }
+
+    assert!(lock_identities("[[package]]\nname = \"missing-version\"\n").is_err());
 }
 
 #[test]
