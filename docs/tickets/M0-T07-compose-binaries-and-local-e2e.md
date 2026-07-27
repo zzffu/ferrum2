@@ -168,10 +168,17 @@ cargo test --workspace --locked
 - Partial gates: binary build、config CLI 3、CLI contract 3、local E2E 4、
   client endpoint 1、client adapter 5、server adapter 6、workspace fmt/check/test与
   strict Clippy均exit 0；worktree clean
+- Resume checkpoint:
+  `78876c6fc8616e6b5f2d5bf3b82150779fff9943`
+- Resume scope/evidence: 保留上述partial并增加ADR-0011 exact harness dependency/
+  lock policy、native 47-case detection probe、exact 100-process lifecycle cycles、
+  binary-private registry与T06 failure-stats consumer migration；两个binary
+  manifests仍未修改，worktree clean
 - Current gate: **IN_PROGRESS**；ADR-0012 T03/T06 upstream repairs已在
   `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a`通过组合Architect/QA gates；
-  续作已把该checkpoint合入保留分支；ADR-0013需先批准两个binary dev-only
-  `test-util` edges，随后完成configured paused-time phase/prefix evidence和
-  workspace quick/full
+  续作已把该checkpoint合入保留分支；ADR-0013已批准两个binary dev-only
+  `test-util` edges。Team Lead须先把Accepted base合入保留分支，再完成exact
+  manifest declarations、configured paused-time phase/prefix evidence和workspace
+  quick/full
 - Integrated commit: none
 - Publication: none

@@ -1,6 +1,6 @@
 # ADR-0013: M0 binary paused-time test boundary
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Product / Architect / Team Lead
 - **Related milestone/spec/tickets:** M0；`SPEC-0001`；M0-T01、M0-T07；
