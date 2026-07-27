@@ -85,17 +85,19 @@ non-overlapping ownership。
     `Session.initial_payload`、选择opaque unsplit duplex flow并冻结exact terminal/
     adapter evidence；repair 1/2关闭production缺陷，repair 2/2补强多数证据但最终
     Architect/QA拒绝public hidden nonce hooks、release flags与扩大的observer
-    callback，并要求补齐Detection/client admission。T02真实private owner证据已
-    在`bb5c47ec`通过，现按用户授权执行一次额外T03窄修复，
-    以T02真实private owner test + T03 private cipher-boundary unit组合取代公共hook；
-    candidate仍未integrate；本地授权不改变原T08 conditional exact-SHA push边界；
+    callback，并要求补齐Detection/client admission。用户授权的额外窄修复
+    `3a9114d`关闭全部finding；integration首轮发现Windows CRLF provenance
+    checkout缺陷，隔离修复`1f76597`仅规范化文本哈希语义。最终checkpoint
+    `4bf758a`上15项ticket commands、T02 exact 2/2、T03 exact 4/4、
+    release/Clippy/fmt及组合Architect/QA gates全部通过，done；本地授权不改变
+    原T08 conditional exact-SHA push边界；
   - M0-T04：typed config/observability；initial candidate `e9c6b01`
     Architect/QA BLOCK；repair 1/2 candidate `8d18d17` 已关闭 exact-target
     tracing spoof 与 server unknown-field evidence，ticket与integration
     Architect/QA全部PASS，integrated `5e3ddf9`，done；
   - M0-T05：SOCKS5 CONNECT inbound；done；
   - M0-T06：runtime/direct/relay/lifecycle；done；
-  - M0-T07：binary composition/local E2E；blocked by T03/T04/T05/T06；
+  - M0-T07：binary composition/local E2E；全部依赖已完成，ready；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
     独占 `.github/workflows/m0.yml`，blocked by T07。
 
@@ -111,8 +113,9 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** 当前 validated checkpoint
-  `bb5c47ec7e36120d8a024dce34b7ec348621505f`，包含
-  M0-T01、M0-T02、M0-T04、M0-T05、M0-T06。
+  `4bf758ae76421856bb527db3afe165d47e6fd4aa`，包含
+  M0-T01～M0-T06；T03票据级门禁与组合证据已通过，workspace quick/full仍等待
+  T07/T08完成缺失的binary/harness入口。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
@@ -132,9 +135,11 @@ non-overlapping ownership。
   `BufferObserver` callback，并要求补齐client pending admission/Detection rows。
   T02的2个crate-private真实AEAD owner tests已在candidate `6a058035`和
   integration `bb5c47ec`通过全部Team Lead/Architect/QA gates并恢复done。
-  T03现从保留的`2ce254f`恢复，使用用户明确授权的一次额外窄修复，移除所有
-  public/release test seam并增加4个private mapping/capacity unit，同时补齐
-  Detection/admission evidence。全局repair budget不变；T07/T08继续等待T03。
+  T03从保留的`2ce254f`恢复后，使用用户明确授权的一次额外窄修复`3a9114d`，
+  移除所有public/release test seam并增加4个private mapping/capacity unit，
+  同时补齐Detection/admission evidence。Windows CRLF provenance blocker由
+  `1f76597`窄修复；最终integration `4bf758a`的T02 2/2、T03 4/4与全部T03 gates
+  经Architect/QA通过，T03已done。全局repair budget不变；T07现ready，T08等待T07。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。

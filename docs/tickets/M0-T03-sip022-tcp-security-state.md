@@ -2,7 +2,7 @@
 id = "M0-T03"
 title = "Implement the SIP022 AES-128 TCP security state machine"
 milestone = "M0"
-status = "in_progress"
+status = "done"
 priority = "P0"
 blocked_by = ["M0-T02"]
 owns = [
@@ -155,19 +155,34 @@ cargo fmt -p ferrum2-shadowsocks -- --check
   ordering/allocation/fairness/fragmentation/terminal evidence and all 14 then-current
   ticket commands passed, but final Architect/QA **BLOCK** rejected its public hidden
   nonce hooks, release flags and expanded `BufferObserver` callback; remaining
-  Detection/client-bounds rows were incomplete. Under the user's blanket local
-  blocker authorization, one extra narrow repair must remove those public/release
-  seams and use only the approved private unit evidence above. No code from this
-  branch is integrated yet.
-- Scheduler state: preserved at `codex/ticket/m0-t03@2ce254f8`; blocked solely
-  by the reopened M0-T02 private-owner evidence. M0-T03 must not resume until
-  M0-T02 is reviewed, integrated and returned to `done`. The subsequent extra
-  narrow T03 repair is an explicit one-time user-authorized exception to
-  `max_repair_attempts_per_ticket = 2`, not a global budget change.
-- Dependency resumed: M0-T02 owner evidence candidate `6a058035` and integration
-  `bb5c47ec` passed Team Lead/Architect/QA gates and M0-T02 returned to `done`.
-  The preserved T03 worktree may now execute that one extra narrow repair; no
-  prior T03 code is yet integrated.
+  Detection/client-bounds rows were incomplete.
+- User-authorized extra narrow repair
+  `3a9114dd9456c1b8d680889dba03d41b885b7aca` removed every rejected
+  public/release test seam, restored the frozen observer interface, and added only
+  crate-private nonce-mapping/capacity evidence plus the missing Detection/client
+  admission rows. All 15 ticket commands passed: package 63, ordering 5 plus two
+  focused 1/1 cases, allocation 5, vectors 2, replay 5, Detection 11, binding 3,
+  duplex 6, fragmentation 10, flow 8, internal filter exact 4, strict Clippy and
+  formatting. Architect **PASS**; branch QA found no repair-specific defect and
+  required the approved same-SHA T02/T03 integration evidence.
+- Local integration merge `22d6cccd7650f2936041aa553ba9cf0a967f68f4`
+  combined T02 and T03. Its first package run exposed a Windows checkout-only
+  provenance failure: `core.autocrlf=true` changed reviewed LF text to CRLF before
+  the test hashed working-tree bytes. Isolated repair
+  `1f76597dc74dff90a9592302ec0cf28f77594b16` canonicalizes only valid UTF-8
+  CRLF/LF text for provenance hashing, rejects bare CR, documents that contract,
+  and leaves fixture/generator blobs, expected hashes, production code and wire
+  behavior unchanged. Repair Architect/QA both **PASS**.
+- Final T03 checkpoint
+  `4bf758ae76421856bb527db3afe165d47e6fd4aa` passed the original provenance
+  repro, all 15 ticket commands, release check, T02 owner filter exact 2/2 and T03
+  private filter exact 4/4 on the same SHA. Combined integration Architect
+  **PASS_WITH_ACTIONS** and QA **PASS**; the only action was this control-document
+  closeout. Workspace quick/full remain T07/T08 gates because their binary/harness
+  entrypoints are not yet integrated.
+- The extra T03 repair remains an explicit user-authorized exception to
+  `max_repair_attempts_per_ticket = 2`; the global budget is unchanged.
 - Fixture generator/output SHA-256:
   `ca8d181b…faa39` / `c7f210d6…11f0`
-- Integrated commit: pending
+- Integrated commit: `4bf758ae76421856bb527db3afe165d47e6fd4aa`
+- Remote state: nothing pushed or published
