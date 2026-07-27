@@ -106,14 +106,14 @@ non-overlapping ownership。
     t=0不能杀死read误重置idle的突变；窄repair `0ef7969`用4s延迟read+最后1s
     deadline杀死该突变，全部ticket/package gates及Architect/QA复核PASS；
     `2ce7708`组合integration gate通过并done；
-  - M0-T07：binary composition/local E2E；partial clean checkpoint `52dcdb0`
-    已完成两个binary、CLI/adapters/local E2E且未触及manifest/lock。ADR-0011/0012
-    合同与T03/T06 upstream repairs现已完成；保留checkpoint并恢复`in_progress`，
-    继续补lifecycle/native evidence。paused-time preflight发现两个binary package
-    缺少Tokio `test-util` dev edge且现有ownership禁止修改其manifests；ADR-0013
-    已Accepted，以exact two-dev-edge、zero-lock-delta边界修正该合同矛盾；
+  - M0-T07：binary composition/local E2E；candidate `5ac8f1b`完成两个binary、
+    CLI/adapters、configured paused-time phases、native 47-case probe与5×20
+    lifecycle。Architect发现cooperative row未同步证明target flow；repair 1/2
+    `a9b0a56`以valid client→server→target、bounded accept与EOF/reset ack关闭
+    假阳性。ticket及integration Architect/QA、24条ticket commands、quick/full
+    均PASS，integrated `91516720`，done；
   - M0-T08：GitHub Actions workflow、interop/MSRV/platform/integration gates；
-    独占 `.github/workflows/m0.yml`，blocked by T07。
+    独占 `.github/workflows/m0.yml`，ready。
 
   Dependency graph：
 
@@ -126,11 +126,9 @@ non-overlapping ownership。
   ```
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
-- **Integrated commit:** 当前local base/integration coordination checkpoint
-  `979592eb71506548f0a517713ca3af2e19655d89`；其中product repair checkpoint
-  `2ce77082ed65bfe1a8707f8923f27dc75c2f5c6a`包含M0-T01～T06及T03/T06
-  ADR-0012 repairs。T07 partial `52dcdb0`尚未integrate；workspace quick/full
-  等待T07/T08。
+- **Integrated commit:** 当前local product integration
+  `91516720e9acdc60597dd3596d6cbd33319d5a39`包含M0-T01～T07；其24条T07
+  ticket commands、quick/full及final Architect/QA gates均PASS。T08尚未integrate。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
@@ -166,10 +164,10 @@ non-overlapping ownership。
   production获Architect PASS，repair `0ef7969`关闭QA mutation gap并获最终
   Architect/QA PASS。T03/T06通过`951806d`/`2ce7708`集成，组合Architect/QA
   PASS且normal/all-features各97 tests通过，均done。
-  T07已恢复`in_progress`；其paused-time测试曾被binary-local `test-util` manifest
-  ownership矛盾阻塞。ADR-0013勘误base `24ddecf`已通过Product/Architect/QA
-  final document gates并被接受；T07仍须在Accepted base上完成实现与gates，
-  T08等待T07。全局repair budget不变。
+  ADR-0013勘误base `24ddecf`已通过Product/Architect/QA final document gates
+  并被接受；T07 candidate `5ac8f1b`与lifecycle evidence repair 1/2 `a9b0a56`
+  已通过ticket/final Architect与QA gates并集成于`91516720`，现done。T08已ready。
+  全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。

@@ -2,7 +2,7 @@
 id = "M0-T07"
 title = "Compose the client and server binaries and prove the local vertical slice"
 milestone = "M0"
-status = "review"
+status = "done"
 priority = "P0"
 blocked_by = ["M0-T03", "M0-T04", "M0-T05", "M0-T06"]
 owns = [
@@ -190,6 +190,13 @@ cargo test --workspace --locked
   两次RED为`WouldBlock`，修复后valid client→server→target flow在bounded
   target-accept ack后执行client `Shutdown::Both`/drop，并在cleanup前要求target
   EOF/reset；exact 5×20、local E2E、workspace quick/full均PASS
-- Current gate: **REVIEW — repair 1/2**；等待Architect与QA复核
-- Integrated commit: none
+- Repair review: Architect与QA均PASS，无剩余BLOCKER/REQUIRED；
+  repair-affected、quick与full commands全部重跑通过
+- Current gate: **DONE**
+- Integrated commit:
+  `91516720e9acdc60597dd3596d6cbd33319d5a39`
+- Integration evidence: exact two-parent merge；Team Lead与独立QA均按ticket顺序先
+  build真实binaries，再完成quick 3/3、ticket 24/24与full 4/4；Architect final
+  integration PASS，17个ticket paths与candidate blobs exact相同，base以
+  fast-forward更新
 - Publication: none

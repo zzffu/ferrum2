@@ -63,15 +63,18 @@
   两个binary manifests没有Tokio `test-util`且T07不拥有这些路径而无法编译；
   Product/Architect/QA triage均PASS exact two-dev-edge、zero-lock-delta方案；
   勘误base `24ddecf`的三方final document gates均PASS，ADR-0013现为Accepted。
-  T08等待T07。
+  T07 candidate `5ac8f1b`完成exact dev edges、paused-time/native/lifecycle
+  evidence；Architect发现cooperative row假阳性后，repair 1/2 `a9b0a56`用
+  bounded target accept与EOF/reset ack关闭。ticket与integration
+  Architect/QA均PASS，integrated `91516720`，T07 done；T08 ready。
 - **Contract final verdicts:** 初始review要求exact 47-case matrix、
   `AddressBounds`、harness exact two-edge lock hunk、configured而非hardcoded
   durations、T03/T07 time-evidence ownership和完整ADR模板。全部修正后
   Product/Architect/QA最终均**PASS**，无BLOCKER/REQUIRED/advisory；
   `workflow.py doctor/validate/status/frontier/next`、locked metadata与
   `git diff --check`均exit 0。ADR-0013勘误base `24ddecf`的Product/Architect/QA
-  final document gates均PASS；其implementation与T07/T08的quick/full/remote
-  evidence均不提前计PASS。
+  final document gates均PASS；ADR-0013 implementation及T07 quick/full已在
+  `91516720`通过，T08 remote evidence仍不提前计PASS。
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
   `cd51226cd1875f80115ac657526e3f9dfb267c14`,
@@ -195,12 +198,12 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0013、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T06均done，T07 `in_progress`，T08等待T07 | M0-T07 |
+| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0013、Approved SPEC/TEST amendments且final Product/Architect/QA PASS；T01～T07均done，T08 `ready` | M0-T08 |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
-| Host quick Cargo gate | DEFERRED/NOT_RUN | T07 partial branch quick-equivalent fmt/check/workspace test已PASS但未integrate；exact integration quick仍在T03/T06 repairs与T07汇合后执行，当前不计PASS | M0-T07 |
-| Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
-| Security/KAT/negative | T02/T03 historical PASS；native probe PENDING | T02真实AEAD owner 2/2、T03 private 4/4和全部T03 gates已在`4bf758a`PASS；ADR-0011 primitive-only 47-case native probe与policy delta尚未实现 | M0-T07 |
-| Lifecycle/backpressure | IN_PROGRESS | T06历史focused gates与10,240次shutdown race PASS；ADR-0012 partial-failure stats及其read-activity mutation evidence已在`2ce7708`通过；ADR-0011 binary-private/100-process compositional evidence尚待T07 | M0-T07 |
+| Host quick Cargo gate | PASS | `91516720`先按ticket前置build真实binaries，再由Team Lead与QA独立运行fmt/check/workspace test 3/3；首次省略build的diagnostic exit 1已如实记录，不计PASS | 当前 |
+| Host full Cargo gate | PASS | `91516720`上Team Lead与QA独立运行fmt、strict Clippy、all-features workspace tests、docs 4/4 | 当前 |
+| Security/KAT/negative | LOCAL PASS / CI PENDING | T02/T03历史evidence保持PASS；`91516720`的primitive-only native probe为2/2、exact 47且target zero；Linux GNU与第二native provider结果等待T08 | M0-T08 |
+| Lifecycle/backpressure | PASS | T06 10,240次shutdown race及partial stats保持PASS；`91516720`的binary-private registry与5×20=100 real-process cycles通过，cooperative category具bounded accept/EOF-reset ack | 当前 |
 | External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
