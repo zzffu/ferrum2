@@ -10,6 +10,11 @@
 本计划证明 SPEC-0001 AC-01～AC-12；required command 缺失、未运行、ignored 未显式
 执行、环境不可用或 evidence 不完整都不是 pass。
 
+带name filter的required Cargo command必须同时核对非零且精确的matched test
+count；仅exit 0但运行0 tests仍为FAIL。新增crypto owner filter必须运行2 tests
+（sealer/opener），T03 internal-flow filter必须运行4 tests（client/server nonce
+mapping与encrypt/decrypt scratch capacity）。
+
 M0 建立以下 production-shaped test seams：
 
 - protocol `ScriptedClock`：wall 与 replay monotonic 时间独立推进；runtime timeout
@@ -30,6 +35,12 @@ M0 建立以下 production-shaped test seams：
   观察bytes、fairness、backpressure、half-close与typed terminal；T07 binary unit
   tests另外覆盖client `TokioConnector`及两个composition root中的production
   `TokioTransport`/`TokioFramed` delegation与source redaction。
+- nonce exhaustion采用两段可组合证据，不增加release API或状态：T02 crate-private
+  `cfg(test)` unit直接把`TcpSealer`/`TcpOpener`的真实private counter置为
+  `ff..ff`并调用实际AEAD owner；T03 crate-private `cfg(test)` one-shot
+  cipher-boundary fault返回真实`AeadError::NonceExhausted`，随后必须经过production
+  `FrameError`/`protocol_from_*`/lifecycle路径。不得公开test hook、增加release flag
+  或直接安装预期terminal。
 - test-only `OwnerRegistry`：supervisor child、connection task、buffer、permit、
   listener 和 forced-shutdown counters。
 - process harness：ephemeral ports、temporary config、readiness deadline、bounded
@@ -98,16 +109,16 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
 | M0-CRYPTO-001 | AC-03 | BLAKE3 official derive-mode vectors | unit/KAT | `cargo test -p ferrum2-crypto --test primitive_vectors --locked blake3` |
 | M0-CRYPTO-002 | AC-03 | 两个固定McGrew/Viega GCM proposal cases 1/2 + corrupted-tag reject；submitter-supplied、historically hosted by NIST，非CAVP/NIST-authored validation vectors | unit/KAT | `cargo test -p ferrum2-crypto --test primitive_vectors --locked aes128_gcm` |
 | M0-CRYPTO-003 | AC-03/12 | SIP022 KDF output、key truncation与nonce-counter fixture | unit/KAT | `cargo test -p ferrum2-crypto --test sip022_vectors --locked` |
-| M0-CRYPTO-004 | AC-03 | redacted secret、explicit-clear seam、entropy failure、salt collision、nonce overflow | unit/negative | `cargo test -p ferrum2-crypto --test secret_entropy --locked` |
+| M0-CRYPTO-004 | AC-03 | redacted secret、explicit-clear seam、entropy failure、salt collision、standalone counter与真实TCP AEAD owner nonce overflow | unit/negative | `cargo test -p ferrum2-crypto --test secret_entropy --locked`；`cargo test -p ferrum2-crypto --lib --locked tcp_owner_nonce_exhaustion` |
 | M0-PROTO-001 | AC-04 | type/frame/address/padding/initial-payload bounds table | unit/negative | `cargo test -p ferrum2-shadowsocks --test tcp_negative --locked bounds` |
 | M0-PROTO-002 | AC-04 | 每个 authenticated chunk bit flip与 truncation | unit/negative | `cargo test -p ferrum2-shadowsocks --test tcp_negative --locked auth` |
 | M0-PROTO-003 | AC-04/05 | timestamp `±30`/`±31` | fake-clock unit | `cargo test -p ferrum2-shadowsocks --test tcp_replay --locked timestamp` |
 | M0-PROTO-004 | AC-04 | S0-S3 reject 前 connector/forward/accepted/replay mutation 全零 | instrumented integration | `cargo test -p ferrum2-shadowsocks --test tcp_ordering --locked` |
-| M0-PROTO-005 | AC-04 | one encrypt/one per-RX decrypt reusable scratch；fixed usable-limit request、stable identity、无reserve/per-frame growth；独立bounded Session payload owner | safe buffer-observer unit | `cargo test -p ferrum2-shadowsocks --test tcp_allocation_bounds --locked` |
+| M0-PROTO-005 | AC-04 | one encrypt/one per-RX decrypt reusable scratch；fixed usable-limit request、stable identity、无reserve/per-frame growth；独立bounded Session payload owner | safe buffer-observer + private unit | `cargo test -p ferrum2-shadowsocks --test tcp_allocation_bounds --locked`；`cargo test -p ferrum2-shadowsocks --lib --locked flow_internal_contract` |
 | M0-PROTO-006 | AC-04/12 | 有独立provenance的非官方request/response composite wire fixture | protocol KAT | `cargo test -p ferrum2-shadowsocks --test tcp_vectors --locked` |
 | M0-PROTO-007 | AC-04/07 | response pending时client upload与server request RX公平推进；server Session target/payload精确且flow不重复payload；current/pending cipher ownership与Send+Unpin闭合 | opaque-flow integration | `cargo test -p ferrum2-shadowsocks --test tcp_duplex --locked` |
 | M0-PROTO-008 | AC-04/06 | fixed 43/59 single completed operation不变；全部post-fixed region支持one-byte/mixed fragmentation，mid-region EOF按closed table终止；zero-length subsequent frame不产生伪EOF | scripted transport integration | `cargo test -p ferrum2-shadowsocks --test tcp_fragmentation --locked` |
-| M0-PROTO-009 | AC-04/06/08 | 0/1/16384/16385 write admission、single-scratch backpressure、normal repeat polls、response-pending时对向subsequent failure仍为Protocol/Transport且零abortive、exact terminal matrix、source redaction | poll-state table integration | `cargo test -p ferrum2-shadowsocks --test tcp_flow_contract --locked` |
+| M0-PROTO-009 | AC-04/06/08 | 0/1/16384/16385 write admission、single-scratch backpressure、normal repeat polls、client response-pending时16385结构性边界仍非fatal且nonce/I/O failure精确、server response-pending时auth/bounds/nonce/I/O failure精确、零abortive、exact terminal matrix、source redaction | poll-state integration + private cipher-boundary unit | `cargo test -p ferrum2-shadowsocks --test tcp_flow_contract --locked`；`cargo test -p ferrum2-shadowsocks --lib --locked flow_internal_contract` |
 | M0-REPLAY-001 | AC-05 | invalid 不 poison；valid same salt first accept/second reject | fake-state unit | `cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact` |
 | M0-REPLAY-002 | AC-05 | 64-way duplicate 原子性 | concurrency | `cargo test -p ferrum2-shadowsocks --test tcp_replay --locked concurrent` |
 | M0-REPLAY-003 | AC-05 | 59.999/60s retention与 wall rollback | fake-clock/state | `cargo test -p ferrum2-shadowsocks --test tcp_replay --locked retention` |
@@ -219,7 +230,9 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
   断言每flow一个encrypt、每receive direction一个decrypt fixed request，storage
   identity不变且无reserve/growth；不得用requested read length代替allocation
   evidence。initial payload另为auth/semantics后创建的一个`Session` Bytes，
-  `0..=65526`边界与drop/forward ownership单独断言。
+  `0..=65526`边界与drop/forward ownership单独断言。公开`BufferObserver`只保留
+  role、requested usable limit和opaque identity；capacity由crate-private unit
+  直接观察，不增加hot-path callback。
 - `tcp_flow_contract`表驱动断言：empty source为`Ok(0)`且零I/O/nonce/response；
   1与16384完整admit；16385只admit/return 16384；scratch未drain时第二个source
   `Pending`且不被复制，drain后才admit当前source，不依赖重交旧buffer。zero-length
@@ -232,9 +245,19 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
 - 同一`tcp_flow_contract`穷尽`ProtocolReason`、`TransportPhase`与`FlowTerminal`
   table，逐项证明abortive=0、fatal后所有方向返回同一error且counts冻结；transport
   source sentinel不出现在Debug/Display/source。状态组合必须显式覆盖client response
-  first-envelope仍pending时subsequent request-TX的bounds/nonce/I/O failure，以及server
-  response first-envelope仍pending时subsequent request-RX的auth/bounds/nonce/I/O
-  failure；每项仍为对应Protocol/Transport、abortive=0，不得改类为Detection。
+  first-envelope仍pending时subsequent request-TX的`16385 -> admit 16384`
+  非fatal结构性边界及nonce/I/O failure；ADR-0010的admission cap使client TX
+  `FrameBounds`不可达，不得为测试注入该terminal。server response first-envelope仍
+  pending时subsequent request-RX继续覆盖auth/bounds/nonce/I/O failure；fatal项仍为
+  对应Protocol/Transport、abortive=0，不得改类为Detection。
+- `flow_internal_contract`只在crate `cfg(test)` build存在：client/server flow的
+  private one-shot cipher-boundary fault必须返回`AeadError::NonceExhausted`并经过
+  现有frame/protocol/lifecycle映射；不得直接调用terminal安装函数。它还直接读取
+  private scratch capacity，证明minimum/maximum与32帧后没有growth。release build
+  的public methods、fields、trait callbacks与布局不得因此增加。
+- T02的2-test owner evidence与T03的4-test mapping/capacity evidence必须合入同一
+  final integration SHA并由Architect/QA组合复核；任一分支单独通过都不构成完整
+  nonce-exhaustion证据。
 - `tcp_fragmentation`在非空destination下认证一个zero-length subsequent payload，
   断言nonce/state推进、outer poll self-wake/Pending且不返回`Ok(0)`；后续合法非空
   frame仍被交付，只有真正frame-boundary transport EOF才产生read EOF。

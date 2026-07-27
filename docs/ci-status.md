@@ -3,7 +3,7 @@
 ## 当前 M0 执行状态
 
 - **Current validated local integration checkpoint:**
-  `5e3ddf9b1591f56b5f57983c121980af9b3aeb09` on local `master` and
+  `d0e7e38fd4b61b95ca30c7c57de12624a50989a5` on local `master` and
   `codex/integration/m0`
 - **Date/environment:** 2026-07-27（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
@@ -23,7 +23,7 @@
   Architect/QA 均 **PASS**
 - **Wave-2 integration:** `999d4f95a2d597fb283689b9306d2a6773af707d`；
   17 个新增路径均属于 T05/T06，final Architect/QA **PASS**
-- **M0-T02:** **DONE**；ADR-0004 固定的
+- **M0-T02:** **IN_PROGRESS（narrow reopen）**；ADR-0004 固定的
   `gcmtestvectors.zip@f9fc479e...a023` 不含批准的 numeric cases。实际来源为
   McGrew/Viega GCM proposal TV archive
   `511e4741cee299ad0d1eb72ae2738911758248e2aba9d3db33a1dbcbb62e07f0`
@@ -34,21 +34,22 @@
   而 BLOCK。ADR-0009/T01 blocker 已由 `edaee3d`/`4f3f0ac` 关闭；combined
   integration `f9e218eca241f3002500b932fdcb4db93c52313b` Architect/QA
   **PASS**，T02 3+2+6、policy 13、architecture 6、core 4 与
-  SOCKS5/runtime 36，合计 70 tests PASS；lock identities 110→110、0 differences
-- **Current frontier:** M0-T04 repair 1/2
-  `8d18d174566b68e5d72c6077c74a2c096c34a313` ticket Architect/QA **PASS**；
-  integration `5e3ddf9b1591f56b5f57983c121980af9b3aeb09` Team Lead、final
-  Architect/QA gates **PASS**，done。M0-T03 candidate
-  `05605d328cc35952676cadc8ce30e6c4b91fbf7a` Engineer commands PASS但
-  Architect/QA均 **BLOCK**：fixed/reusable scratch与negative/order evidence
-  不完整，typed transition还无法组成concurrent duplex relay、丢失authenticated
-  initial payload并拒绝合法post-fixed fragmentation。修复前需显式冻结
-  duplex/fatal-error concurrency interface；Product scope triage确认这不扩大M0
-  产品/wire范围，用户已授权后续全部M0内本地窄blocker。ADR-0010选择opaque
-  unsplit duplex flow、保留core `Session.initial_payload`并冻结exact
-  terminal/poll/adapter evidence及configured-server/application-target separation；
-  首轮findings全部闭合，最终Product/Architect/QA均PASS；candidate未integrate，
-  下一步为T03 repair；
+  SOCKS5/runtime 36，合计 70 tests PASS；lock identities 110→110、0 differences。
+  该历史checkpoint仍有效，但不足以证明真实`TcpSealer`/`TcpOpener` private
+  nonce owner exhaustion；新增2-test crate-private filter为REQUIRED/NOT_RUN，
+  通过并重新集成前T02不再标记done
+- **Current frontier:** ADR-0010 contract已在`d0e7e38`获
+  Product/Architect/QA **PASS**。M0-T03 repair 1/2 `8d772f4`关闭opaque
+  duplex/state缺陷；repair 2/2 `2ce254f`的55 tests及全部14条ticket命令由Engineer、
+  Team Lead、QA复跑均PASS，但final Architect/QA **BLOCK**：public hidden nonce
+  hooks/release flags绕过真实cipher mapping，`BufferObserver` callback越界，且
+  client pending admission/Detection矩阵不完整。用户已授权全部后续M0本地窄blocker；
+  当前先窄幅reopen T02，以crate-private 2-test unit直接证明真实
+  `TcpSealer`/`TcpOpener` owner exhaustion；T03保留
+  `codex/ticket/m0-t03@2ce254f`且状态为blocked。T02 review/integration/done后才
+  执行用户授权的一次额外T03 public-free `cfg(test)` repair。两者均不得改变
+  release API/layout、wire、manifest或依赖；两个新增filtered commands分别必须
+  显示2和4个matched tests，且最终只在同一integration SHA上组合判定。candidate未integrate，
   本地授权不改变原T08 conditional exact-SHA push边界，M0-T07/T08继续等待
 - **Ticket commits:** `ed2fc9243ceed8e2822319b22182f47936f4c22f`,
   `a13949998535a591f0f0a28542ac2b9bf5a25d15`,
@@ -168,11 +169,11 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
 | Workflow doctor/validate | PASS | M0 contracts/tickets/DAG/ownership 结构有效，无 workflow warning | 当前 |
-| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0010、Approved SPEC/TEST-0001；T01/T02/T04/T05/T06 done；ADR-0010及SPEC/TEST/T03/T07 mappings已获Product/Architect/QA PASS；T03 repair ready，T07/T08等待T03 | M0-T03 repair |
+| M0 execution contracts | IN_PROGRESS | Accepted ADR-0001～0010、Approved SPEC/TEST-0001；T01/T04/T05/T06 done，T02 narrow reopen active；ADR-0010 mappings已获PASS；T03保留branch并等待T02 done，T07/T08等待T03 | M0-T02/T03 repair |
 | GitHub Actions workflow contract | PLANNED/NOT_RUN | ADR-0007 固定 `.github/workflows/m0.yml`、11 jobs、runner/timeout、triggers、permissions、full-SHA actions、no-cache 与 exact-pushed-SHA evidence；YAML 尚未创建 | M0-T08 |
-| Host quick Cargo gate | DEFERRED/NOT_RUN | workspace已存在；workspace-wide gate按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
+| Host quick Cargo gate | DEFERRED/NOT_RUN | control-plane pre-implementation diagnostic因尚未合入T03/T07入口而FAIL；exact integration gate仍按ADR-0001在T07汇合后执行，当前不计PASS | M0-T07 |
 | Host full Cargo gate | DEFERRED/NOT_RUN | quick与完整downstream targets先在T07汇合；当前不计PASS | M0-T07/T08 |
-| Security/KAT/negative | T02 PASS / T03 IN_PROGRESS | T02 primitive/KDF/secret、provenance/nonce、ADR-0009 resolved zeroize feature 与 combined integration gates 全部 PASS；T03 contract gate PASS，repair与新增scratch/negative/order/duplex evidence尚待执行 | M0-T03 repair |
+| Security/KAT/negative | T02 IN_PROGRESS / T03 BLOCKED | T02历史primitive/KDF/secret与combined gates PASS，但真实AEAD owner 2-test filter REQUIRED/NOT_RUN；T03 repair 2/2多数证据PASS但final gate BLOCK，等待T02后执行public-free 4-test internal mapping/capacity与剩余Detection/admission repair | M0-T02/T03 repair |
 | Lifecycle/backpressure | IN_PROGRESS | T06 focused lifecycle/backpressure commands 与 10,240 次 shutdown ready-race regression 已 PASS；完整 runtime/composition 与同一最终 integration commit evidence 尚未完成 | M0 |
 | External interop | PLANNED/NOT_RUN | reference pins/checksums、四项 M0 matrix与两个`ubuntu-24.04` clean-VM jobs已冻结；无 harness/runner evidence | M0 subset，M1/M2 full |
 | Linux glibc/musl + Windows | PLANNED/NOT_RUN | `windows-2022`/`ubuntu-24.04`、GNU native probe、musl 1.2.4-2/static assertions与provider-native evidence已冻结；尚无 artifact evidence | M0 smoke，M3 qualification |

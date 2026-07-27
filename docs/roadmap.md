@@ -34,10 +34,9 @@ non-overlapping ownership。
 - **Entry conditions:**
   - bootstrap 的 vision、gap analysis、roadmap、CI baseline 已更新并通过
     workflow validation；
-  - `ADR-0001`～`ADR-0009` 已 Accepted，关闭 DEC-001～DEC-007、
-    DEC-011 与 DEC-012；ADR-0009 仅修正 AEAD state zeroize feature
-    unification；ADR-0010/DEC-013 opaque duplex contract为Proposed，批准后才
-    启动T03 repair；
+  - `ADR-0001`～`ADR-0010` 已 Accepted，关闭 DEC-001～DEC-007、
+    DEC-011～DEC-013；ADR-0009 仅修正 AEAD state zeroize feature
+    unification，ADR-0010冻结opaque duplex contract；
   - `SPEC-0001` 与 `TEST-0001` 已 Approved；
   - M0-T01～M0-T08 的 blockers、non-overlapping ownership 和量化 acceptance
     已通过 workflow validation。
@@ -72,9 +71,10 @@ non-overlapping ownership。
     已 done，现依用户授权为 ADR-0009 的一次独占 manifest repair reopen，且为
     candidate `edaee3d` Architect/QA ticket gates PASS，integration `4f3f0ac`
     gates PASS，done；
-  - M0-T02：secret/KDF/AEAD/key-clock-entropy；ADR-0008 与 provenance/nonce
-    repair 已 PASS；ADR-0009/T01 blocker 已关闭，combined integration
-    `f9e218e` Architect/QA 与 70 tests PASS，done；
+  - M0-T02：secret/KDF/AEAD/key-clock-entropy；原 combined integration
+    `f9e218e` Architect/QA 与 70 tests PASS；现因T03 nonce-exhaustion evidence
+    blocker窄幅reopen，只增加crate-private `cfg(test)`真实
+    `TcpSealer`/`TcpOpener` owner exhaustion，不增加public setter/API或release状态；
   - M0-T03：SIP022 TCP security state/replay/binding；candidate `05605d3`
     Architect/QA BLOCK；fixed/reusable scratch与negative/order evidence不完整，
     且typed transition无法组成concurrent duplex relay、丢失authenticated initial
@@ -82,8 +82,11 @@ non-overlapping ownership。
     concurrency interface；Product scope triage确认不扩大M0产品/wire范围，用户
     已授权后续全部M0内本地窄blocker。ADR-0010保留core
     `Session.initial_payload`、选择opaque unsplit duplex flow并冻结exact terminal/
-    adapter evidence，正在第二轮Product/Architect/QA contract gate，批准前仍
-    blocked且未integrate；本地授权不改变原T08 conditional exact-SHA push边界；
+    adapter evidence；repair 1/2关闭production缺陷，repair 2/2补强多数证据但最终
+    Architect/QA拒绝public hidden nonce hooks、release flags与扩大的observer
+    callback，并要求补齐Detection/client-bounds。现按用户授权执行一次额外窄修复，
+    以T02真实private owner test + T03 private cipher-boundary unit组合取代公共hook；
+    candidate仍未integrate；本地授权不改变原T08 conditional exact-SHA push边界；
   - M0-T04：typed config/observability；initial candidate `e9c6b01`
     Architect/QA BLOCK；repair 1/2 candidate `8d18d17` 已关闭 exact-target
     tracing spoof 与 server unknown-field evidence，ticket与integration
@@ -106,7 +109,7 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** 当前 validated checkpoint
-  `5e3ddf9b1591f56b5f57983c121980af9b3aeb09`，包含
+  `d0e7e38fd4b61b95ca30c7c57de12624a50989a5`，包含
   M0-T01、M0-T02、M0-T04、M0-T05、M0-T06。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
@@ -120,10 +123,15 @@ non-overlapping ownership。
   zeroize feature anchors、lock 与 policy evidence，不改变版本、wire/API 或产品
   范围。T01/T02 combined integration `f9e218e` 已通过 Architect/QA 与
   70 tests。T04 repair 1/2 与 integration `5e3ddf9` 已通过全部ticket、
-  regression、Architect与QA gates。T03 initial candidate虽通过现有命令，
-  Architect/QA曾BLOCK：除scratch/coverage缺口外，现有transition API无法支持
-  已批准的concurrent relay。ADR-0010及同步SPEC/TEST/T03/T07窄修订现已获
-  Product/Architect/QA PASS，T03进入repair；T07/T08继续等待T03及既定dependencies。
+  regression、Architect与QA gates。ADR-0010及同步SPEC/TEST/T03/T07窄修订已获
+  Product/Architect/QA PASS并在`d0e7e38`接受。T03 repair 1/2 `8d772f4`
+  关闭opaque duplex/state缺陷；repair 2/2 `2ce254f`补强多数direct evidence，
+  但final Architect/QA拒绝public hidden nonce hooks、release flags与扩大的
+  `BufferObserver` callback，并要求补齐client pending admission/Detection rows。
+  当前先窄幅reopen T02，只增加2个crate-private真实AEAD owner exhaustion unit；
+  T03保留在`2ce254f`并标记blocked。T02 review/integration/done后，才使用用户明确
+  授权的一次额外T03窄修复，移除所有public/release test seam并增加4个private
+  mapping/capacity unit。全局repair budget不变；T07/T08继续等待T03。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。

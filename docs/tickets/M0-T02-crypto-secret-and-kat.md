@@ -2,7 +2,7 @@
 id = "M0-T02"
 title = "Implement secret ownership, AES-128 primitives, and deterministic capabilities"
 milestone = "M0"
-status = "done"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T01"]
 owns = [
@@ -15,7 +15,7 @@ test_plan = "docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md"
 acceptance = [
   "M0-CRYPTO-001 and M0-CRYPTO-002 pass exactly the ADR-0004 BLAKE3 input-length 0, 1, and 1024 rows plus the ADR-0008 McGrew/Viega GCM proposal test cases 1 and 2 and the unchanged corrupted-tag reject, with pinned hashes and truthful submitter-source provenance",
   "M0-CRYPTO-003 passes for the exact SIP022 context, 32-to-16-byte subkey selection, empty AAD, zero u96le nonce, carry, and checked increment",
-  "M0-CRYPTO-004 proves redacted Debug, explicit-clear and ZeroizeOnDrop seams, production entropy failure, response-salt collision handling, and nonce overflow fail closed",
+  "M0-CRYPTO-004 proves redacted Debug, explicit-clear and ZeroizeOnDrop seams, production entropy failure, response-salt collision handling, standalone-counter overflow, and actual TcpSealer/TcpOpener private nonce-owner overflow fail closed without a public setter",
   "The KeyProvider, Clock, and SecureRandom interfaces match ADR-0002 and expose neither raw PSK bytes nor a production deterministic fallback; the integrated dependency graph satisfies ADR-0009 exact package-ID, feature-set, and lock-identity evidence",
 ]
 +++
@@ -61,6 +61,7 @@ capability，不实现 TCP framing/replay。
 cargo test -p ferrum2-crypto --test primitive_vectors --locked
 cargo test -p ferrum2-crypto --test sip022_vectors --locked
 cargo test -p ferrum2-crypto --test secret_entropy --locked
+cargo test -p ferrum2-crypto --lib --locked tcp_owner_nonce_exhaustion
 cargo clippy -p ferrum2-crypto --all-targets --all-features --locked -- -D warnings
 cargo fmt -p ferrum2-crypto -- --check
 ```
@@ -88,3 +89,10 @@ cargo fmt -p ferrum2-crypto -- --check
   70 tests PASS。Lock identities 110→110、0 differences；generated `target/`
   已清理。
 - Integrated commit: `f9e218eca241f3002500b932fdcb4db93c52313b`
+- Reopened narrow evidence repair: T03 final review showed that standalone
+  `NonceCounter` overflow does not directly prove the private counter used by
+  `TcpSealer`/`TcpOpener`. The user-authorized blocker exception permits one
+  crate-private `cfg(test)` module with exactly two owner cases (sealer/opener);
+  public constructors/setters, release
+  fields, wire behavior, manifests, dependencies, fixtures and versions remain
+  unchanged. Candidate and re-integration evidence: pending.

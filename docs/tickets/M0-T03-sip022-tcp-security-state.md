@@ -2,7 +2,7 @@
 id = "M0-T03"
 title = "Implement the SIP022 AES-128 TCP security state machine"
 milestone = "M0"
-status = "ready"
+status = "blocked"
 priority = "P0"
 blocked_by = ["M0-T02"]
 owns = [
@@ -81,9 +81,11 @@ recording adapters直接证明。
 - initial Detection、post-first-envelope Protocol与Transport failure按ADR-0010
   exact enums/table分离；只有Detection abortive，且terminal-installed observer
   event必须先于mark，所有类别不得保留source error文本。
-- client response仍pending时的subsequent request-TX failure与server response仍
-  pending时的subsequent request-RX failure不得改类为Detection；focused table必须
-  证明对应Protocol/Transport与零abortive。
+- client response仍pending时必须保持`16385 -> admit 16384`非fatal边界，并证明
+  subsequent request-TX nonce/I/O failure不改类为Detection；server response仍
+  pending时的subsequent request-RX auth/bounds/nonce/I/O failure同样不得改类；
+  focused table必须证明对应Protocol/Transport与零abortive。不得为client TX注入
+  被ADR-0010 admission cap排除的`FrameBounds` terminal。
 - write-after-shutdown只在RX仍open的Live state安装`Transport(Write)`；Normal安装
   后不可替换，重复read/write/flush/shutdown遵循ADR-0010 closed success语义。
 - encrypted stream必须委托underlying `LocalEndpoint`的已存endpoint；不得依赖
@@ -108,6 +110,7 @@ cargo test -p ferrum2-shadowsocks --test response_binding --locked
 cargo test -p ferrum2-shadowsocks --test tcp_duplex --locked
 cargo test -p ferrum2-shadowsocks --test tcp_fragmentation --locked
 cargo test -p ferrum2-shadowsocks --test tcp_flow_contract --locked
+cargo test -p ferrum2-shadowsocks --lib --locked flow_internal_contract
 cargo clippy -p ferrum2-shadowsocks --all-targets --all-features --locked -- -D warnings
 cargo fmt -p ferrum2-shadowsocks -- --check
 ```
@@ -146,6 +149,21 @@ cargo fmt -p ferrum2-shadowsocks -- --check
   该授权不改变原T08 conditional exact-SHA push边界，也不授权其他remote mutation。
 - ADR-0010 contract gate: Product **PASS**、Architect **PASS**、QA **PASS**；
   `workflow.py validate`与`git diff --check`均exit 0，无BLOCKER/REQUIRED/advisory。
+- Repair 1/2 `8d772f4758f3f497ce8afe973354fed744c51e33` closed the
+  production duplex/state defects. Repair 2/2
+  `2ce254f8fac5d11f9e1d3637901b207a7697b328` added substantial direct
+  ordering/allocation/fairness/fragmentation/terminal evidence and all 14 then-current
+  ticket commands passed, but final Architect/QA **BLOCK** rejected its public hidden
+  nonce hooks, release flags and expanded `BufferObserver` callback; remaining
+  Detection/client-bounds rows were incomplete. Under the user's blanket local
+  blocker authorization, one extra narrow repair must remove those public/release
+  seams and use only the approved private unit evidence above. No code from this
+  branch is integrated yet.
+- Scheduler state: preserved at `codex/ticket/m0-t03@2ce254f8`; blocked solely
+  by the reopened M0-T02 private-owner evidence. M0-T03 must not resume until
+  M0-T02 is reviewed, integrated and returned to `done`. The subsequent extra
+  narrow T03 repair is an explicit one-time user-authorized exception to
+  `max_repair_attempts_per_ticket = 2`, not a global budget change.
 - Fixture generator/output SHA-256:
   `ca8d181b…faa39` / `c7f210d6…11f0`
 - Integrated commit: pending
