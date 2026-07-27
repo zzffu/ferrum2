@@ -102,7 +102,8 @@ non-overlapping ownership。
   - M0-T06：runtime/direct/relay/lifecycle；历史ticket/integration done；T07
     preflight发现failure outcome丢失partial forwarded stats，现依ADR-0012窄幅reopen
     只修复relay outcome与direct tests；candidate `756a379`已通过全部ticket commands
-    与33个package tests并进入`review`；
+    与33个package tests，Architect PASS；QA mutation review发现read-ahead test在
+    t=0不能杀死read误重置idle的突变，执行一次窄test repair并回到`in_progress`；
   - M0-T07：binary composition/local E2E；partial clean checkpoint `52dcdb0`
     已完成两个binary、CLI/adapters/local E2E且未触及manifest/lock。当前blocked，
     等待ADR-0011/0012合同及T03/T06 upstream repairs；之后补lifecycle/native
@@ -155,8 +156,9 @@ non-overlapping ownership。
   授权已覆盖该修订；ADR-0011/0012草案不改变wire/product/API/remote范围。
   Product对两项范围均PASS，Architect接受evidence设计并要求独立ADR-0012，QA要求
   exact two-edge lock delta与`AddressBounds` row；修订吸收全部findings后最终
-  Product/Architect/QA document gates均PASS。T03/T06 candidates分别为
-  `8f0d1e0`/`756a379`并进入`review`，
+  Product/Architect/QA document gates均PASS。T03 candidate `8f0d1e0`获Architect
+  PASS、QA PASS_WITH_ACTIONS（仅T07后workspace quick）；T06 candidate `756a379`
+  production获Architect PASS但QA因mutation coverage gap BLOCK，现执行窄test repair。
   T07 blocked，
   T08等待T07。全局repair budget不变。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
