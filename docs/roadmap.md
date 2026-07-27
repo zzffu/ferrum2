@@ -9,8 +9,9 @@ Bootstrap 基线是
 `master@b41c6127b1834ebd97246451fd92bafea50cb205`。当前仍没有产品代码、工程分支
 或 integration branch，但 M0 已有 Accepted ADR、Approved spec/test plan 和八个
 ready tickets；ADR-0007 已把 required CI provider 收窄为 GitHub Actions。因此
-M0 仍为 `planned`，M1-M4 仍为 `proposed`。文档/workflow validation 只证明
-implementation control plane ready，不证明任何产品行为或远程 CI 已实现。
+M0 已进入 `executing`，M1-M4 仍为 `proposed`。文档/workflow validation 只证明
+implementation control plane ready；M0-T01 已进入实现阶段，但尚不证明任何产品
+行为或远程 CI 已实现。
 
 ## 依赖顺序
 
@@ -28,7 +29,7 @@ non-overlapping ownership。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** 建立第一个真实、可观察的产品路径：两个独立二进制在离线验证
   typed TOML 后，通过 SOCKS5 TCP `CONNECT`、SIP022
   `2022-blake3-aes-128-gcm` 和 server direct outbound 完成 local TCP echo。
