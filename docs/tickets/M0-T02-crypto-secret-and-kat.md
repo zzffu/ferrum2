@@ -2,7 +2,7 @@
 id = "M0-T02"
 title = "Implement secret ownership, AES-128 primitives, and deterministic capabilities"
 milestone = "M0"
-status = "in_progress"
+status = "done"
 priority = "P0"
 blocked_by = ["M0-T01"]
 owns = [
@@ -95,4 +95,13 @@ cargo fmt -p ferrum2-crypto -- --check
   crate-private `cfg(test)` module with exactly two owner cases (sealer/opener);
   public constructors/setters, release
   fields, wire behavior, manifests, dependencies, fixtures and versions remain
-  unchanged. Candidate and re-integration evidence: pending.
+  unchanged.
+- Narrow owner-evidence candidate:
+  `6a0580351bf2728aa26ecf6901428648bf1950da`; exact filter 2/2,
+  primitive 3/3, SIP022 2/2, secret/entropy 6/6, strict Clippy, fmt and
+  `git diff --check` all exit 0. Ticket Architect **PASS**、QA **PASS**。
+- Re-integration: `bb5c47ec7e36120d8a024dce34b7ec348621505f`
+  (parents `01ca57d` + `6a058035`)；same command matrix exit 0，
+  integration Architect **PASS**、QA **PASS**，worktree clean。This proves only
+  the T02 real-owner half; T03 mapping/capacity evidence remains required on a
+  later common integration SHA.

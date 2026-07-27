@@ -2,7 +2,7 @@
 id = "M0-T03"
 title = "Implement the SIP022 AES-128 TCP security state machine"
 milestone = "M0"
-status = "blocked"
+status = "in_progress"
 priority = "P0"
 blocked_by = ["M0-T02"]
 owns = [
@@ -164,6 +164,10 @@ cargo fmt -p ferrum2-shadowsocks -- --check
   M0-T02 is reviewed, integrated and returned to `done`. The subsequent extra
   narrow T03 repair is an explicit one-time user-authorized exception to
   `max_repair_attempts_per_ticket = 2`, not a global budget change.
+- Dependency resumed: M0-T02 owner evidence candidate `6a058035` and integration
+  `bb5c47ec` passed Team Lead/Architect/QA gates and M0-T02 returned to `done`.
+  The preserved T03 worktree may now execute that one extra narrow repair; no
+  prior T03 code is yet integrated.
 - Fixture generator/output SHA-256:
   `ca8d181b…faa39` / `c7f210d6…11f0`
 - Integrated commit: pending

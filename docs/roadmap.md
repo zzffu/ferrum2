@@ -72,9 +72,10 @@ non-overlapping ownership。
     candidate `edaee3d` Architect/QA ticket gates PASS，integration `4f3f0ac`
     gates PASS，done；
   - M0-T02：secret/KDF/AEAD/key-clock-entropy；原 combined integration
-    `f9e218e` Architect/QA 与 70 tests PASS；现因T03 nonce-exhaustion evidence
-    blocker窄幅reopen，只增加crate-private `cfg(test)`真实
-    `TcpSealer`/`TcpOpener` owner exhaustion，不增加public setter/API或release状态；
+    `f9e218e` Architect/QA 与 70 tests PASS；T03 nonce-exhaustion blocker引发的
+    窄幅reopen已由candidate `6a058035`和integration `bb5c47ec`关闭，只增加
+    crate-private `cfg(test)`真实`TcpSealer`/`TcpOpener` owner exhaustion；
+    exact 2/2及全部T02 commands、ticket/integration Architect/QA PASS，done；
   - M0-T03：SIP022 TCP security state/replay/binding；candidate `05605d3`
     Architect/QA BLOCK；fixed/reusable scratch与negative/order evidence不完整，
     且typed transition无法组成concurrent duplex relay、丢失authenticated initial
@@ -84,7 +85,8 @@ non-overlapping ownership。
     `Session.initial_payload`、选择opaque unsplit duplex flow并冻结exact terminal/
     adapter evidence；repair 1/2关闭production缺陷，repair 2/2补强多数证据但最终
     Architect/QA拒绝public hidden nonce hooks、release flags与扩大的observer
-    callback，并要求补齐Detection/client-bounds。现按用户授权执行一次额外窄修复，
+    callback，并要求补齐Detection/client admission。T02真实private owner证据已
+    在`bb5c47ec`通过，现按用户授权执行一次额外T03窄修复，
     以T02真实private owner test + T03 private cipher-boundary unit组合取代公共hook；
     candidate仍未integrate；本地授权不改变原T08 conditional exact-SHA push边界；
   - M0-T04：typed config/observability；initial candidate `e9c6b01`
@@ -109,7 +111,7 @@ non-overlapping ownership。
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** 当前 validated checkpoint
-  `d0e7e38fd4b61b95ca30c7c57de12624a50989a5`，包含
+  `bb5c47ec7e36120d8a024dce34b7ec348621505f`，包含
   M0-T01、M0-T02、M0-T04、M0-T05、M0-T06。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
@@ -128,10 +130,11 @@ non-overlapping ownership。
   关闭opaque duplex/state缺陷；repair 2/2 `2ce254f`补强多数direct evidence，
   但final Architect/QA拒绝public hidden nonce hooks、release flags与扩大的
   `BufferObserver` callback，并要求补齐client pending admission/Detection rows。
-  当前先窄幅reopen T02，只增加2个crate-private真实AEAD owner exhaustion unit；
-  T03保留在`2ce254f`并标记blocked。T02 review/integration/done后，才使用用户明确
-  授权的一次额外T03窄修复，移除所有public/release test seam并增加4个private
-  mapping/capacity unit。全局repair budget不变；T07/T08继续等待T03。
+  T02的2个crate-private真实AEAD owner tests已在candidate `6a058035`和
+  integration `bb5c47ec`通过全部Team Lead/Architect/QA gates并恢复done。
+  T03现从保留的`2ce254f`恢复，使用用户明确授权的一次额外窄修复，移除所有
+  public/release test seam并增加4个private mapping/capacity unit，同时补齐
+  Detection/admission evidence。全局repair budget不变；T07/T08继续等待T03。
   GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
   但 push/workflow execution 尚未发生。matching hosted runner/reference download
   不可用会在 T08 成为 hard blocker，不能 skip，也不能用本机 WSL2 代替。
