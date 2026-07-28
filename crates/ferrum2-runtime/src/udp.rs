@@ -12,7 +12,7 @@ use bytes::BytesMut;
 use ferrum2_core::Datagram;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -615,7 +615,6 @@ impl UdpSessionManager {
         handle: UdpSessionHandle,
         direction: UdpDirection,
         datagram: AccountedDatagram,
-        now: Instant,
     ) -> Result<(), UdpRuntimeError> {
         let notify = {
             let mut state = self
@@ -631,7 +630,6 @@ impl UdpSessionManager {
             if entry.pending[index] + entry.queues[index].len() >= UDP_SESSION_QUEUE_DEPTH {
                 return Err(UdpRuntimeError::QueueFull);
             }
-            entry.last_activity = now;
             entry.queues[index].push_back(QueuedDatagram {
                 datagram,
                 _guard: self.inner.registry.track_udp_queue_entry(),
@@ -639,6 +637,27 @@ impl UdpSessionManager {
             Arc::clone(&entry.notify)
         };
         notify.notify_one();
+        Ok(())
+    }
+
+    fn commit_activity(
+        &self,
+        handle: UdpSessionHandle,
+        now: Instant,
+    ) -> Result<(), UdpRuntimeError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("UDP session state lock poisoned");
+        if state.shutting_down {
+            return Err(UdpRuntimeError::Cancelled);
+        }
+        let entry = matching_entry_mut(&mut state, handle)?;
+        if !entry.committed {
+            return Err(UdpRuntimeError::Cancelled);
+        }
+        entry.last_activity = now;
         Ok(())
     }
 
@@ -807,11 +826,26 @@ pub struct DirectUdpSessionAdmission<S> {
     first_datagram: PendingUdpDatagram,
     socket: S,
     socket_guard: OwnerGuard,
+    owner_slot: OwnedSemaphorePermit,
 }
 
 impl<S> fmt::Debug for DirectUdpSessionAdmission<S> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DirectUdpSessionAdmission([redacted])")
+    }
+}
+
+struct DirectOwnerLifetime {
+    task_guard: Option<OwnerGuard>,
+    socket_guard: Option<OwnerGuard>,
+    owner_slot: Option<OwnedSemaphorePermit>,
+}
+
+impl Drop for DirectOwnerLifetime {
+    fn drop(&mut self) {
+        drop(self.socket_guard.take());
+        drop(self.task_guard.take());
+        drop(self.owner_slot.take());
     }
 }
 
@@ -829,6 +863,7 @@ where
     connect_timeout: Duration,
     registry: OwnerRegistry,
     tasks: JoinSet<()>,
+    owner_slots: Arc<Semaphore>,
 }
 
 impl<H> DirectUdpRuntime<SystemUdpResolver, SystemDirectUdpSocketFactory, H>
@@ -877,6 +912,7 @@ where
             connect_timeout,
             registry,
             tasks: JoinSet::new(),
+            owner_slots: Arc::new(Semaphore::new(limits.max_sessions())),
         }
     }
 
@@ -893,6 +929,9 @@ where
     ) -> Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError> {
         while self.tasks.try_join_next().is_some() {}
         let session = self.manager.reserve_session(now)?;
+        let owner_slot = Arc::clone(&self.owner_slots)
+            .try_acquire_owned()
+            .map_err(|_| UdpRuntimeError::SessionLimit)?;
         let first_datagram =
             session.reserve_datagram(UdpDirection::ToTarget, first_allocated_capacity)?;
         let socket = self
@@ -906,6 +945,7 @@ where
             first_datagram,
             socket,
             socket_guard,
+            owner_slot,
         })
     }
 
@@ -939,6 +979,7 @@ where
             first_datagram,
             socket,
             socket_guard,
+            owner_slot,
         } = admission;
         let handle = session.commit_with(first_datagram, datagram, now, protocol_commit)?;
         let manager = self.manager.clone();
@@ -947,9 +988,13 @@ where
         let connect_timeout = self.connect_timeout;
         let registry = self.registry.clone();
         let task_guard = self.registry.track_udp_task();
+        let owner_lifetime = DirectOwnerLifetime {
+            task_guard: Some(task_guard),
+            socket_guard: Some(socket_guard),
+            owner_slot: Some(owner_slot),
+        };
         self.tasks.spawn(async move {
-            let _task_guard = task_guard;
-            let _socket_guard = socket_guard;
+            let _owner_lifetime = owner_lifetime;
             let _ = run_direct_session(
                 manager.clone(),
                 resolver,
@@ -1056,7 +1101,6 @@ where
                     handle,
                     UdpDirection::ToClient,
                     response,
-                    Instant::now(),
                 )?;
                 let response = manager
                     .pop(handle, UdpDirection::ToClient)?
@@ -1065,6 +1109,7 @@ where
                     .handle_target_response(handle, response)
                     .await
                     .map_err(|_| UdpRuntimeError::Receive)?;
+                manager.commit_activity(handle, Instant::now())?;
             }
         }
     }

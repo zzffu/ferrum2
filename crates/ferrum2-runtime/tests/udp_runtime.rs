@@ -383,11 +383,31 @@ impl DirectUdpPacketHandler for RecordingHandler {
             .lock()
             .expect("handler lock")
             .push(response.datagram().payload().to_vec());
-        self.entered.notify_waiters();
+        self.entered.notify_one();
         if self.block {
             pending::<()>().await;
         }
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct FailingGateHandler {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl DirectUdpPacketHandler for FailingGateHandler {
+    type Error = ();
+
+    async fn handle_target_response(
+        &self,
+        _session: UdpSessionHandle,
+        _response: AccountedDatagram,
+    ) -> Result<(), Self::Error> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Err(())
     }
 }
 
@@ -573,6 +593,137 @@ async fn direct_session_idle_expiry_reaps_socket_task_queue_scratch_and_bytes() 
     tokio::time::advance(MIN_UDP_IDLE_TIMEOUT).await;
     wait_for_zero_udp_owners(&registry).await;
     runtime.shutdown(Duration::ZERO).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_replacement_churn_never_exceeds_the_direct_owner_limit() {
+    let registry = OwnerRegistry::new();
+    let (socket, _) = socket_fixture(Duration::ZERO, []);
+    let factory = ScriptedFactory {
+        socket,
+        opens: Arc::new(AtomicUsize::new(0)),
+    };
+    let resolver = ScriptedResolver {
+        delay: Duration::ZERO,
+        candidates: Vec::new(),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let handler = RecordingHandler {
+        responses: Arc::new(Mutex::new(Vec::new())),
+        entered: Arc::new(Notify::new()),
+        block: false,
+    };
+    let mut runtime = DirectUdpRuntime::with_adapters(
+        limits(1),
+        Duration::from_secs(10),
+        resolver,
+        factory,
+        handler,
+        registry.clone(),
+    );
+    let mut activity = Instant::now();
+    let initial = runtime
+        .reserve_session(activity, 7)
+        .await
+        .expect("initial direct owner");
+    runtime
+        .commit_session(initial, ip_datagram(b"request"), activity)
+        .expect("commit initial owner");
+    tokio::task::yield_now().await;
+
+    for _ in 0..32 {
+        activity += MIN_UDP_IDLE_TIMEOUT;
+        assert_eq!(
+            runtime.reserve_session(activity, 7).await.unwrap_err(),
+            UdpRuntimeError::SessionLimit
+        );
+        let retiring = registry.snapshot();
+        assert!(retiring.udp_sockets <= 1);
+        assert!(retiring.udp_tasks <= 1);
+        wait_for_zero_udp_owners(&registry).await;
+
+        let replacement = runtime
+            .reserve_session(activity, 7)
+            .await
+            .expect("retired owner releases fixed slot");
+        runtime
+            .commit_session(replacement, ip_datagram(b"request"), activity)
+            .expect("commit bounded replacement");
+        tokio::task::yield_now().await;
+        let active = registry.snapshot();
+        assert_eq!(active.udp_sockets, 1);
+        assert_eq!(active.udp_tasks, 1);
+    }
+
+    runtime.shutdown(Duration::from_secs(1)).await;
+    wait_for_zero_udp_owners(&registry).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn handler_failure_does_not_refresh_activity_before_final_generation_recheck() {
+    let registry = OwnerRegistry::new();
+    let (socket, _) = socket_fixture(Duration::ZERO, []);
+    let responses = Arc::clone(&socket.responses);
+    let response_ready = Arc::clone(&socket.response_ready);
+    let factory = ScriptedFactory {
+        socket,
+        opens: Arc::new(AtomicUsize::new(0)),
+    };
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let handler = FailingGateHandler {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    };
+    let resolver = ScriptedResolver {
+        delay: Duration::ZERO,
+        candidates: Vec::new(),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut runtime = DirectUdpRuntime::with_adapters(
+        limits(1),
+        Duration::from_secs(10),
+        resolver,
+        factory,
+        handler,
+        registry.clone(),
+    );
+    let started = Instant::now();
+    let admission = runtime
+        .reserve_session(started, 7)
+        .await
+        .expect("reserve direct session");
+    runtime
+        .commit_session(admission, ip_datagram(b"request"), started)
+        .expect("commit session");
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    responses
+        .lock()
+        .expect("response lock")
+        .push_back((b"reply".to_vec(), SocketAddr::from(([127, 0, 0, 1], 9000))));
+    response_ready.notify_one();
+    entered.notified().await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let replacement = runtime
+        .sessions()
+        .reserve_session(Instant::now())
+        .expect("uncommitted handler response must not refresh activity");
+    release.notify_one();
+    for _ in 0..200 {
+        let snapshot = registry.snapshot();
+        if snapshot.udp_sockets == 0 && snapshot.udp_tasks == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(registry.snapshot().udp_sockets, 0);
+    assert_eq!(registry.snapshot().udp_tasks, 0);
+    drop(replacement);
+    runtime.shutdown(Duration::ZERO).await;
+    wait_for_zero_udp_owners(&registry).await;
 }
 
 #[tokio::test(start_paused = true)]
