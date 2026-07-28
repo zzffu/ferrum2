@@ -336,6 +336,31 @@ fn workflow_policy() {
 #[test]
 fn fixed_baseline_scope_and_provenance_audit() {
     const BASELINE: &str = "b41c6127b1834ebd97246451fd92bafea50cb205";
+    const REQUIRED_CONTROL_DOCUMENTS: &[&str] = &[
+        "CONTEXT.md",
+        "docs/adr/ADR-0015-m0-unix-listener-restart-and-rebind-evidence.md",
+        "docs/adr/ADR-0016-m0-invariant-first-contract-and-equivalent-evidence.md",
+        "docs/adr/README.md",
+    ];
+    for exact in REQUIRED_CONTROL_DOCUMENTS {
+        assert!(
+            is_control_document(exact),
+            "required exact control document is omitted: {exact}"
+        );
+        for near_miss in [
+            format!("renamed/{exact}"),
+            format!("{exact}/child"),
+            exact
+                .strip_suffix(".md")
+                .map(|stem| format!("{stem}.markdown"))
+                .expect("required control document uses .md"),
+        ] {
+            assert!(
+                !is_control_document(&near_miss),
+                "renamed or near-miss control document must fail closed: {near_miss}"
+            );
+        }
+    }
     let root = repository_root();
     let ancestor = Command::new("git")
         .args(["merge-base", "--is-ancestor", BASELINE, "HEAD"])
@@ -1308,6 +1333,7 @@ fn is_immutable_owned(path: &str) -> bool {
 fn is_control_document(path: &str) -> bool {
     const CONTROL_DOCUMENTS: &[&str] = &[
         ".codex/agents/qa.toml",
+        "CONTEXT.md",
         "docs/ci-status.md",
         "docs/gap-analysis.md",
         "docs/roadmap.md",
@@ -1337,6 +1363,9 @@ fn is_control_document(path: &str) -> bool {
         "docs/adr/ADR-0012-m0-phase-deadlines-and-partial-relay-accounting.md",
         "docs/adr/ADR-0013-m0-binary-paused-time-test-boundary.md",
         "docs/adr/ADR-0014-m0-external-half-close-evidence-boundary.md",
+        "docs/adr/ADR-0015-m0-unix-listener-restart-and-rebind-evidence.md",
+        "docs/adr/ADR-0016-m0-invariant-first-contract-and-equivalent-evidence.md",
+        "docs/adr/README.md",
     ];
     CONTROL_DOCUMENTS.contains(&path)
 }
