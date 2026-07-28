@@ -26,3 +26,5 @@ problem or the user explicitly reopens the contract.
 - `M1-T03` `qa` `4c9ad421e0ef`: QA-M1-T03-001: Record real-process IPv6 as NOT EXECUTED on Windows WSAEACCES and require exact-SHA IPv6-capable release/platform evidence; fallback is not IPv6 PASS.
 <!-- review-debt:706cf6f25501 -->
 - `M1-T03` `qa` `4c9ad421e0ef`: QA-M1-T03-002: Local platform smoke artifact run was setup-blocked by occupied fixed port 1080; run the frozen same-SHA three-platform jobs during release qualification.
+<!-- review-debt:02701aae13c2 -->
+- `M2-T02` `qa` `0d88666d2f46`: QA-M2-T02-N01: T04 must invoke public UdpServer::commit_request only inside T03 reserved commit_*_with closure; verify exact call placement during T04 integration review.
