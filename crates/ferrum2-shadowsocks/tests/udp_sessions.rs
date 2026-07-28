@@ -89,6 +89,85 @@ fn response_wire(
     wire
 }
 
+fn accept_response(
+    client: &UdpClientSession,
+    clock: &FakeClock,
+    wire: &[u8],
+    scratch: &mut UdpPacketScratch,
+    now_millis: u64,
+) -> Result<Datagram, UdpPacketError> {
+    let pending = client.prepare_response(clock, wire, scratch)?;
+    let (datagram, commit) = pending.into_parts();
+    client.commit_response(commit, instant(now_millis))?;
+    Ok(datagram)
+}
+
+#[test]
+fn dropped_client_reservations_leave_response_admissible_and_concurrent_commit_rechecks() {
+    let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let client_random = FillRandom::new(0x10);
+    let server_random = FillRandom::new(0x80);
+    let mut client =
+        UdpClientSession::new(&keys, &client_random, |_| false).expect("client session");
+    let server = UdpServer::new(&keys).expect("server");
+    let request = request_wire(&mut client, &clock, &client_random, b"request");
+    let capability = accept(
+        &server,
+        &clock,
+        &server_random,
+        &request,
+        "127.0.0.1:49152".parse().expect("peer"),
+        0,
+    );
+    let response = response_wire(&server, capability, &clock, &server_random, b"response");
+    let empty = client.association_snapshot().expect("empty snapshot");
+
+    for _simulated_failure in ["buffer", "queue", "cancelled", "generation"] {
+        let mut scratch = UdpPacketScratch::new();
+        let pending = client
+            .prepare_response(&clock, &response, &mut scratch)
+            .expect("authentication remains admissible");
+        drop(pending);
+        assert_eq!(client.association_snapshot().expect("unchanged"), empty);
+    }
+
+    let mut first_scratch = UdpPacketScratch::new();
+    let mut second_scratch = UdpPacketScratch::new();
+    let (_, first_commit) = client
+        .prepare_response(&clock, &response, &mut first_scratch)
+        .expect("first pending")
+        .into_parts();
+    let (_, second_commit) = client
+        .prepare_response(&clock, &response, &mut second_scratch)
+        .expect("stale pending")
+        .into_parts();
+    let results = std::thread::scope(|scope| {
+        let client_ref = &client;
+        let first = scope.spawn(move || client_ref.commit_response(first_commit, instant(1)));
+        let second = scope.spawn(move || client_ref.commit_response(second_commit, instant(1)));
+        [
+            first.join().expect("first worker"),
+            second.join().expect("second worker"),
+        ]
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(UdpPacketError::Duplicate)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        client
+            .association_snapshot()
+            .expect("accepted snapshot")
+            .association_count(),
+        1
+    );
+}
+
 #[test]
 fn client_retains_current_and_old_and_rotates_at_exactly_sixty_seconds() {
     let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
@@ -161,20 +240,16 @@ fn client_retains_current_and_old_and_rotates_at_exactly_sixty_seconds() {
         b"early",
     );
     let mut scratch = UdpPacketScratch::new();
-    client
-        .decode_response(&clock, &first, &mut scratch)
-        .expect("first association");
+    accept_response(&client, &clock, &first, &mut scratch, 0).expect("first association");
     clock.set_monotonic_millis(1);
-    client
-        .decode_response(&clock, &second, &mut scratch)
-        .expect("second association");
+    accept_response(&client, &clock, &second, &mut scratch, 1).expect("second association");
     let before = client.association_snapshot().expect("snapshot");
     assert_eq!(before.association_count(), 2);
     assert_eq!(before.old_last_valid(), Some(instant(0)));
 
     clock.set_monotonic_millis(59_999);
     assert!(matches!(
-        client.decode_response(&clock, &third_early, &mut scratch),
+        accept_response(&client, &clock, &third_early, &mut scratch, 59_999),
         Err(UdpPacketError::AssociationLimit)
     ));
     assert_eq!(
@@ -192,7 +267,7 @@ fn client_retains_current_and_old_and_rotates_at_exactly_sixty_seconds() {
     );
     *tampered_old.last_mut().expect("tag byte") ^= 1;
     assert!(matches!(
-        client.decode_response(&clock, &tampered_old, &mut scratch),
+        accept_response(&client, &clock, &tampered_old, &mut scratch, 59_999),
         Err(UdpPacketError::Authentication)
     ));
     assert_eq!(client.association_snapshot().expect("unchanged"), before);
@@ -205,8 +280,7 @@ fn client_retains_current_and_old_and_rotates_at_exactly_sixty_seconds() {
         b"boundary",
     );
     clock.set_monotonic_millis(60_000);
-    client
-        .decode_response(&clock, &third_at_boundary, &mut scratch)
+    accept_response(&client, &clock, &third_at_boundary, &mut scratch, 60_000)
         .expect("old association rotates at exactly sixty seconds");
     let after = client.association_snapshot().expect("rotated");
     assert_eq!(after.association_count(), 2);

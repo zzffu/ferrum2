@@ -316,14 +316,14 @@ impl UdpClientSession {
         )
     }
 
-    /// Authenticates, semantically validates, reserves owned payload, and
-    /// atomically commits one response association/replay transition.
-    pub fn decode_response(
+    /// Authenticates, semantically validates, and reserves an owned response
+    /// payload without changing association, replay, or activity state.
+    pub fn prepare_response(
         &self,
         clock: &(impl Clock + ?Sized),
         wire: &[u8],
         scratch: &mut UdpPacketScratch,
-    ) -> Result<Datagram, UdpPacketError> {
+    ) -> Result<PendingUdpResponse, UdpPacketError> {
         let opened = open_packet(
             &self.crypto,
             clock,
@@ -332,13 +332,27 @@ impl UdpClientSession {
             RESPONSE_TYPE,
             Some(self.outbound.session_id()),
         )?;
-        let now = clock.monotonic_now();
+        Ok(PendingUdpResponse {
+            session_id: opened.session_id,
+            packet_id: opened.packet_id,
+            datagram: opened.datagram,
+        })
+    }
+
+    /// Atomically rechecks and commits a reserved response transition.
+    ///
+    /// T04 must call this only from the T03 byte/queue/session/generation
+    /// reservation commit closure (`QA-M2-T02-N01`).
+    pub fn commit_response(
+        &self,
+        commit: UdpResponseCommit,
+        now: MonotonicInstant,
+    ) -> Result<(), UdpPacketError> {
         let mut associations = self
             .associations
             .lock()
             .map_err(|_| UdpPacketError::StateUnavailable)?;
-        commit_client_association(&mut associations, opened.session_id, opened.packet_id, now)?;
-        Ok(opened.datagram)
+        commit_client_association(&mut associations, commit.session_id, commit.packet_id, now)
     }
 
     /// Returns a redacted snapshot of current+old association state.
@@ -428,6 +442,52 @@ struct OpenedPacket {
     session_id: UdpSessionId,
     packet_id: u64,
     datagram: Datagram,
+}
+
+/// Fully authenticated and semantically validated response awaiting reservation.
+pub struct PendingUdpResponse {
+    session_id: UdpSessionId,
+    packet_id: u64,
+    datagram: Datagram,
+}
+
+impl PendingUdpResponse {
+    /// Borrows the validated datagram for bounded capacity planning only.
+    pub const fn datagram(&self) -> &Datagram {
+        &self.datagram
+    }
+
+    /// Separates reserved ownership from the opaque serialized commit token.
+    pub fn into_parts(self) -> (Datagram, UdpResponseCommit) {
+        (
+            self.datagram,
+            UdpResponseCommit {
+                session_id: self.session_id,
+                packet_id: self.packet_id,
+            },
+        )
+    }
+}
+
+impl fmt::Debug for PendingUdpResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PendingUdpResponse")
+            .field("datagram", &self.datagram)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Move-only authenticated response identity committed after reservation.
+pub struct UdpResponseCommit {
+    session_id: UdpSessionId,
+    packet_id: u64,
+}
+
+impl fmt::Debug for UdpResponseCommit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("UdpResponseCommit([redacted])")
+    }
 }
 
 /// Fully authenticated and semantically validated request awaiting reservation.

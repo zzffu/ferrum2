@@ -62,6 +62,18 @@ fn fixture_target(kind: &str) -> TargetAddr {
     }
 }
 
+fn accept_response(
+    client: &UdpClientSession,
+    clock: &FakeClock,
+    wire: &[u8],
+    scratch: &mut UdpPacketScratch,
+) -> Result<Datagram, UdpPacketError> {
+    let pending = client.prepare_response(clock, wire, scratch)?;
+    let (datagram, commit) = pending.into_parts();
+    client.commit_response(commit, MonotonicInstant::ZERO)?;
+    Ok(datagram)
+}
+
 #[test]
 fn three_method_request_response_table_round_trips_every_address_kind() {
     let cases = [
@@ -146,13 +158,13 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
             )
             .expect("response encodes");
         assert_eq!(encoded.peer(), peer);
-        let opened_response = client
-            .decode_response(
-                &clock,
-                &response_wire[..encoded.wire_len()],
-                &mut response_scratch,
-            )
-            .expect("response authenticates, binds, and commits");
+        let opened_response = accept_response(
+            &client,
+            &clock,
+            &response_wire[..encoded.wire_len()],
+            &mut response_scratch,
+        )
+        .expect("response authenticates, binds, and commits");
         assert_eq!(opened_response.target(), &target);
         assert_eq!(opened_response.payload(), b"response payload");
     }
@@ -340,7 +352,7 @@ fn authenticated_response_with_wrong_client_binding_is_rejected_without_associat
     let clock = FakeClock::new(NOW, 0);
     let mut scratch = UdpPacketScratch::new();
     assert!(matches!(
-        client.decode_response(&clock, &wire, &mut scratch),
+        client.prepare_response(&clock, &wire, &mut scratch),
         Err(UdpPacketError::Binding)
     ));
     assert_eq!(
@@ -487,9 +499,13 @@ fn independent_three_method_composite_fixture_matches_exact_request_and_response
             "{} response",
             profile.canonical_name()
         );
-        let opened = client
-            .decode_response(&clock, &output[..response.wire_len()], &mut scratch)
-            .expect("fixture response opens");
+        let opened = accept_response(
+            &client,
+            &clock,
+            &output[..response.wire_len()],
+            &mut scratch,
+        )
+        .expect("fixture response opens");
         assert_eq!(opened.target(), &target);
         assert_eq!(opened.payload(), response_payload);
     }
