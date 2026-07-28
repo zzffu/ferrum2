@@ -1,6 +1,15 @@
 #![forbid(unsafe_code)]
 
-//! SIP022 TCP framing and one opaque duplex flow shared by all supported methods.
+//! SIP022 TCP flow plus socket-free bounded UDP packet and security state.
+
+mod udp;
+
+pub use udp::{
+    AcceptedUdpRequest, ClientAssociationSnapshot, EncodedUdpResponse, MAX_UDP_WIRE_LEN,
+    PendingUdpRequest, ServerResponseCapability, ServerSessionSnapshot, UDP_ASSOCIATION_RETENTION,
+    UDP_REPLAY_LAG, UdpClientSession, UdpPacketError, UdpPacketScratch, UdpReplayWindow,
+    UdpRequestCommit, UdpServer, max_udp_payload_len,
+};
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -17,9 +26,9 @@ use ferrum2_core::{
     SessionReply, TargetAddr,
 };
 use ferrum2_crypto::{
-    AeadError, Clock, KeyProvider, KeySelector, MethodKeyProvider, MethodTcpSalt, MonotonicInstant,
-    SecureRandom, TcpMethod, TcpMethodProfile, TcpOpener, TcpSalt, TcpSealer,
-    generate_method_request_salt, generate_method_response_salt,
+    AeadError, Clock, KeyProvider, KeySelector, MethodKeyProvider, MethodSecretKeyRef,
+    MethodTcpSalt, MonotonicInstant, SecureRandom, TcpMethod, TcpMethodProfile, TcpOpener, TcpSalt,
+    TcpSealer, generate_method_request_salt, generate_method_response_salt,
 };
 use thiserror::Error;
 
@@ -135,6 +144,22 @@ impl<K: MethodKeyProvider> TcpKeyProvider for MethodKeyAdapter<K> {
             })
             .map_err(|_| TcpKeyError)?
             .map_err(|_| TcpKeyError)
+    }
+}
+
+impl<K: MethodKeyProvider> MethodKeyProvider for MethodKeyAdapter<K> {
+    type Error = K::Error;
+
+    fn profile(&self) -> TcpMethodProfile {
+        self.0.profile()
+    }
+
+    fn with_method_key<T>(
+        &self,
+        selector: KeySelector<'_>,
+        use_key: impl FnOnce(MethodSecretKeyRef<'_>) -> T,
+    ) -> Result<T, Self::Error> {
+        self.0.with_method_key(selector, use_key)
     }
 }
 

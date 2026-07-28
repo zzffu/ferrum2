@@ -1,0 +1,58 @@
+{
+  "classification": "unofficial repository-owned SIP022 UDP composite fixture; not an official SIP022 KAT",
+  "cases": [
+    {
+      "method": "2022-blake3-aes-128-gcm",
+      "psk": "000102030405060708090a0b0c0d0e0f",
+      "client_session_id": "6061626364656667",
+      "server_session_id": "68696a6b6c6d6e6f",
+      "packet_id": 0,
+      "timestamp": 1700000000,
+      "target_kind": "ipv4",
+      "target": "01c00002010035",
+      "padding": "a1b2",
+      "request_payload": "6d322d6165733132382d726571",
+      "response_payload": "6d322d6165733132382d727370",
+      "request_body": "00000000006553f1000002a1b201c000020100356d322d6165733132382d726571",
+      "response_body": "01000000006553f10060616263646566670002a1b201c000020100356d322d6165733132382d727370",
+      "request_wire": "4a10db8b245f479ecd484d6b34d89b5686eac1aaa5db4c3d829ebb62013c9f07d00998b38ccfd4755b58c1e44bbdc68174fac301e2227e40cd1c434d7daa25c03f",
+      "response_wire": "e82b1cb741dfe72c2b256ae50c114219a95c851b7d9742cc58481a578c316cf314d27b8a0aa8cc8b3cbf1206f9e458521aa87215b3b7dc42021958ae2d5d6906a31b8c7ebdac856722"
+    },
+    {
+      "method": "2022-blake3-aes-256-gcm",
+      "psk": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "client_session_id": "7071727374757677",
+      "server_session_id": "78797a7b7c7d7e7f",
+      "packet_id": 1,
+      "timestamp": 1700000000,
+      "target_kind": "ipv6",
+      "target": "0420010db800000000000000000000000114e9",
+      "padding": "b1b2b3",
+      "request_payload": "6d322d6165733235362d726571",
+      "response_payload": "6d322d6165733235362d727370",
+      "request_body": "00000000006553f1000003b1b2b30420010db800000000000000000000000114e96d322d6165733235362d726571",
+      "response_body": "01000000006553f10070717273747576770003b1b2b30420010db800000000000000000000000114e96d322d6165733235362d727370",
+      "request_wire": "d2b54d8ab449cd9cbdbf4f6acc0964be4543e25d48b989586d5dad89520ea9a7796e57cb284847eb45126307c8fed0ef5959f1c9999c25f9b685e4e92bcedf290fd6448e448f529e994b327a5bcf",
+      "response_wire": "7d77969989e3dcb7731b8046503032a789906409f7e61ad4096127863a3ae4cb2e7868c7d622a7748abfa5eda66a0645db37abab86e9a4db527e65d80fc3adacc7e178c67cd1588bf2c96738a773eaa0de2dbc698d5b"
+    },
+    {
+      "method": "2022-blake3-chacha20-poly1305",
+      "psk": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "client_session_id": "8081828384858687",
+      "server_session_id": "88898a8b8c8d8e8f",
+      "packet_id": 2,
+      "request_nonce": "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7",
+      "response_nonce": "a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "timestamp": 1700000000,
+      "target_kind": "domain",
+      "target": "030c6578616d706c652e7465737420fb",
+      "padding": "c1",
+      "request_payload": "6d322d6368616368612d726571",
+      "response_payload": "6d322d6368616368612d727370",
+      "request_body": "00000000006553f1000001c1030c6578616d706c652e7465737420fb6d322d6368616368612d726571",
+      "response_body": "01000000006553f10080818283848586870001c1030c6578616d706c652e7465737420fb6d322d6368616368612d727370",
+      "request_wire": "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a71c59e3e0e890c0582b2f2ea8f33cfdc2726e094f87b3b50717fef8109d57e8c4bce679453e2fcfe5473ca2b8347ae5db8ca14be71c35e57dba63d6e1974ff61ec654a23af833448227",
+      "response_wire": "a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf11e55196ea01fee4aeade6f2f0eff15c38401fbdf632d99a169e279f3eeae80c5c11e7c0ceaeb2359e24546d2752d1514edf21cb3292f447e32f918e4d88309557fdae18acb5145573d83bd4ed54301ecc"
+    }
+  ]
+}

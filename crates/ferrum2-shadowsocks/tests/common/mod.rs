@@ -42,6 +42,34 @@ pub fn method_provider(profile: TcpMethodProfile) -> MethodKeyAdapter<MethodSing
     ))
 }
 
+pub fn udp_provider(profile: TcpMethodProfile) -> MethodSinglePskProvider {
+    let key = vec![profile as u8 + 1; profile.key_bytes()];
+    MethodSinglePskProvider::new(
+        MethodPsk::try_from_slice(profile, &key).expect("method-matched UDP test key"),
+    )
+}
+
+pub struct FillRandom {
+    next: Mutex<u8>,
+}
+
+impl FillRandom {
+    pub fn new(first: u8) -> Self {
+        Self {
+            next: Mutex::new(first),
+        }
+    }
+}
+
+impl SecureRandom for FillRandom {
+    fn fill(&self, destination: &mut [u8]) -> Result<(), RandomError> {
+        let mut next = self.next.lock().expect("random lock");
+        destination.fill(*next);
+        *next = next.wrapping_add(1);
+        Ok(())
+    }
+}
+
 pub struct CountingKeyProvider {
     inner: SinglePskProvider,
     calls: AtomicUsize,
