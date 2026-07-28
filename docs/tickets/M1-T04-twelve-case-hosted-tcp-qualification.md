@@ -2,7 +2,7 @@
 id = "M1-T04"
 title = "Expand hosted TCP qualification to twelve fail-closed cases"
 milestone = "M1"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M1-T01"]
@@ -106,12 +106,22 @@ git diff --check
 
 ## Completion evidence
 
-Filled by the Team Lead after integration/release qualification:
-
-- Branch/worktree/candidate and integrated commit:
-- Full/targeted Architect and QA reviews; stable finding IDs:
-- Exact local validation exits:
-- Hosted run ID/attempt/SHA and 12 case results:
-- Test-budget counts/baseline:
-- Accepted review debt:
-- Push/publish state:
+- Branch/worktree/candidate: `codex/ticket/m1-t04`,
+  `C:\project\ferrum2\.worktrees\m1-t04`,
+  `b7a69899e4053e78fe8824e2cd9215b9d232e106`; product integration commit
+  `fba23ca0b628bd6935d0977e3d9df7836b957e78`.
+- Reviews: Architect and QA full reviews on the exact candidate both `PASS`;
+  no stable finding, targeted review, or repair round.
+- Local candidate validation: qualification binary build, pure
+  `qualification_contract` 10/10, locked metadata, fmt, ticket budget, and
+  `git diff --check` all exited 0. The non-test qualification entry was not
+  executed.
+- Integration validation on `fba23ca`: binary build; authoritative quick
+  fmt/check/tests; authoritative full fmt/Clippy/all-feature tests/docs;
+  workflow validation and `git diff --check` all exited 0.
+- Hosted run ID/attempt/SHA and 12 case results: **not produced**. No external
+  reference was downloaded, started, or contacted. Same-run/attempt exact-SHA
+  12/12 evidence remains a separately authorized release qualification gate.
+- Test budget: ticket gate `PASS`, code `7386`, tests `15216`, ratio `2.060`;
+  baseline `7031/14707/2.092`; delta `+0/+120`, allowance `120`.
+- Accepted review debt: none for T04. Push/publish: none.
