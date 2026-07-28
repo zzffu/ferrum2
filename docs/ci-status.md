@@ -2,6 +2,21 @@
 
 ## 当前 M2 execute 状态
 
+- **Wave-2 product integration:** exact
+  `6e54cce52e5e29135acd91f6337a4516a094852e`; contains initial M2-T02
+  candidate `0d88666d2f46ef85b376c12c55ffb34a784a8451`, repaired candidate
+  `4d1c65b4d9af03f008b51cae3b5f058ca1edea64`, and coordination-only
+  review-note commit `d268f46435830bdf4f392618071b90ce4b7cee1f`.
+- **Wave-2 reviews:** QA full `PASS_WITH_NOTES`; Architect full `BLOCK` on
+  `ARCH-M2-T02-001`, followed by the one substantive repair and targeted
+  `PASS`. Exact-SHA Architect/QA integration gates both `PASS_WITH_NOTES`.
+  The root is resolved; accepted debt `QA-M2-T02-N01` requires T04 to place
+  request and response protocol commits inside T03 reserved closures.
+- **Wave-2 local gates:** workspace binary build, authoritative quick 3/3,
+  authoritative full 4/4, workflow validation/review-state/integration-gate
+  checks, and `git diff --check` all exit 0. Ticket budget `PASS`: code
+  `10628`, tests `17947`, ratio `1.689`, baseline `2.041`; delta
+  `918/1010`, allowance `1038`.
 - **Wave-1 product integration:** exact
   `0dff5c104149e7042f5e62dc10831f208a0e16ad` on
   `codex/integration/m2`; contains repaired M2-T01 candidate
@@ -23,7 +38,8 @@
   ratio `1.744`, baseline `2.041`; delta `1990/1178`, allowance `2110`.
 - **Remote/release:** nothing pushed or published. M2-T05 hosted UDP
   qualification and exact-SHA remote evidence have not run and are not
-  credited. The next local dependency-ready ticket is M2-T02.
+  credited. The next local dependency-ready frontier is M2-T04 + M2-T05;
+  T05 integration/release still waits for T04.
 
 ## 当前 M1 closeout 状态
 

@@ -336,8 +336,9 @@ dependency-ready 和 non-overlapping ownership。
   7. `M2-UDP-INT-001..012` 在同一authorized exact SHA/run/attempt取得
      12/12+cleanup，缺失/unavailable不得waive。
   8. M0/M1回归、test-budget ratchet、MSRV/三平台和`workflow.toml` full通过。
-- **In-scope tickets:** M2-T01、M2-T03 已 `done`；M2-T02～M2-T05 仍按
-  dependency gates 等待执行。Initial implementation frontier 为
+- **In-scope tickets:** M2-T01、M2-T02、M2-T03 已 `done`；M2-T04 与 M2-T05
+  进入下一 implementation frontier，T05 integration/release 仍等待 T04。
+  Initial implementation frontier 为
   M2-T01 + M2-T03：
 
   ```text
@@ -354,10 +355,19 @@ dependency-ready 和 non-overlapping ownership。
   Architect/QA integration gates；三个 review root findings 均由一次各票
   bounded repair 关闭，无 accepted debt，未 push/publish。
 
+  Wave 2 exact product integration
+  `6e54cce52e5e29135acd91f6337a4516a094852e` 通过 authoritative quick
+  3/3、full 4/4、ticket-budget、workflow validation 和 exact-SHA
+  Architect/QA integration gates。`ARCH-M2-T02-001` 由一次 bounded repair
+  关闭；`QA-M2-T02-N01` 作为 nonblocking debt 要求 T04 证明 request/response
+  protocol commit 均位于 T03 reserved closure 内。未 push/publish。
+
 - **Deferred/out of scope:** public client UDP inbound、SOCKS5 UDP ASSOCIATE、
   SIP023/multi-user、routing/DNS proxy/custom resolver、M3 platform/lifecycle
   qualification和M4 performance。
-- **Integrated commit:** not yet
+- **Integrated commit:** current execute checkpoint
+  `6e54cce52e5e29135acd91f6337a4516a094852e`; final milestone integration
+  not yet.
 - **Open blockers and risks:** planning blocker为零。Execute风险是AES/ChaCha
   envelope分歧、post-validation mutation ordering、capacity/replay race、
   roaming/generation ABA、allocated-capacity accounting和same-port dual bind。

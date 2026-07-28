@@ -2,7 +2,7 @@
 id = "M2-T02"
 title = "Implement the bounded SIP022 UDP packet, association, and replay state"
 milestone = "M2"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = ["M2-T01", "M2-T03"]
@@ -94,10 +94,24 @@ git diff --check
 
 ## Completion evidence
 
-由Team Lead integration后填写：
-
-- Branch/worktree/candidate and integrated commit:
-- Architect/QA full/targeted review and stable finding IDs:
-- Exact validation exits and test-budget counts/baseline:
-- Accepted review debt:
-- Push/publish state:
+- Branch/worktree/candidates: `codex/ticket/m2-t02`,
+  `C:\project\ferrum2\.worktrees\m2-t02`; initial
+  `0d88666d2f46ef85b376c12c55ffb34a784a8451`, repaired
+  `4d1c65b4d9af03f008b51cae3b5f058ca1edea64`. Product integration is
+  `6e54cce52e5e29135acd91f6337a4516a094852e`.
+- Reviews: QA full `PASS_WITH_NOTES`; Architect full `BLOCK` on
+  `ARCH-M2-T02-001` (`major`). The one substantive repair added the client
+  response pending/commit seam; Architect targeted re-review `PASS` resolved
+  the finding. Exact-SHA Wave-2 Architect and QA integration gates both
+  `PASS_WITH_NOTES`, with no blocker or major finding.
+- Validation: all Shadowsocks TCP/UDP tests, architecture/workspace-policy,
+  strict Clippy, fmt, docs, fixture reproduction, binary build,
+  authoritative quick 3/3, authoritative full 4/4, workflow validation,
+  review-state/integration-gate checks, and `git diff --check` exited 0.
+- Ticket test budget `PASS`: code `10628`, tests `17947`, ratio `1.689`,
+  baseline `2.041`; delta `918/1010`, allowance `1038`. Repair-only delta
+  was code `45`, tests `85`, allowance `165`.
+- Accepted review debt: `QA-M2-T02-N01`; T04 must place both protocol commit
+  calls inside T03 reserved `commit_*_with` closures and prove the exact call
+  placement. No repair override or authorization was used.
+- Push/publish state: nothing pushed or published.
