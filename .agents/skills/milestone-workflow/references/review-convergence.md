@@ -61,8 +61,10 @@ third automatic cycle.
 
 A targeted `ESCALATE` remains the normal terminal result. Exceptionally, the user may
 authorize one later budget-consuming repair and one local superseding verification
-for the same canonical root. Record it as a separate `superseding` round bound to the
-active repaired SHA and an unused `review_round_override` authorization scope.
+for the same canonical root. The repair must name its consumed
+`repair_budget_override`. Record the verification as a separate `superseding` round
+bound to the active repaired SHA and an unused single-use `review_round_override`
+authorization scope.
 
 The superseding round:
 

@@ -95,10 +95,11 @@ These rules override any looser third-party TDD or code-review guidance:
 7. **Convergent verdicts.** `PASS` and `PASS_WITH_NOTES` integrate. `BLOCK` allows one
    substantive repair. A remaining blocker after targeted re-review is `ESCALATE`; do
    not launch another automatic repair loop. After a separately user-authorized
-   budget-consuming repair, one explicit `review_round_override` scope may authorize
-   a local superseding verification of that same escalated root and original finding
-   IDs. This preserves the full and targeted records, is never automatic, and grants
-   no authority for another repair.
+   budget-consuming repair recorded with its consumed `repair_budget_override`,
+   one explicit single-use `review_round_override` scope may authorize a local
+   superseding verification of that same escalated root and original finding IDs.
+   This preserves the full and targeted records, is never automatic, and grants no
+   authority for another repair.
 8. **Test budget.** Run the configured test-budget report during planning/bootstrap,
    the ticket gate before integration, and the milestone gate at close. Existing
    high-ratio repositories use a recorded ratchet baseline rather than an immediate

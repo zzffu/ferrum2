@@ -1843,6 +1843,7 @@ class ReviewConvergenceTests(unittest.TestCase):
                 "class": "substantive",
                 "root_cause_id": "B1",
                 "consumes_budget": True,
+                "budget_override_authorization_scope": "repair-override",
                 "recorded_at": "2026-07-28T00:03:00+00:00",
             }
         )
@@ -1874,6 +1875,20 @@ class ReviewConvergenceTests(unittest.TestCase):
             "uses": 0,
             "max_uses": 1,
         }
+        runtime["authorizations"]["repair-override"] = {
+            "kind": "local",
+            "status": "revoked",
+            "actions": ["repair_budget_override"],
+            "tickets": [item.id],
+            "blocker_classes": ["security"],
+            "max_risk": "critical",
+            "remote_effects": False,
+            "uses": 1,
+            "max_uses": 1,
+        }
+        runtime["repair_overrides"]["B1"] = [
+            {"authorization_scope": "repair-override"}
+        ]
         args = self.review_args(
             reviewer="architect",
             round_name="superseding",
@@ -1925,7 +1940,12 @@ class ReviewConvergenceTests(unittest.TestCase):
             ("new finding", "does not accept new findings"),
             ("non-original finding", "original full-review"),
             ("missing later repair", "later budget-consuming repair"),
+            ("repair without override", "separately authorized"),
+            ("repair with wrong override", "separately authorized"),
+            ("unbounded review scope", "single-use"),
+            ("multi-use review scope", "single-use"),
             ("target not escalated", "targeted escalation"),
+            ("escalation without blocker", "blocking finding"),
             ("second block", "verdict must be"),
             ("passing with open finding", "unresolved"),
         ]
@@ -1961,10 +1981,26 @@ class ReviewConvergenceTests(unittest.TestCase):
                     args.finding = ["ARCH-999:major:not an original finding"]
                 elif name == "missing later repair":
                     runtime["repairs"][item.id].pop()
+                elif name == "repair without override":
+                    runtime["repairs"][item.id][-1][
+                        "budget_override_authorization_scope"
+                    ] = ""
+                elif name == "repair with wrong override":
+                    runtime["repairs"][item.id][-1][
+                        "budget_override_authorization_scope"
+                    ] = "review-override"
+                elif name == "unbounded review scope":
+                    del runtime["authorizations"]["review-override"]["max_uses"]
+                elif name == "multi-use review scope":
+                    runtime["authorizations"]["review-override"]["max_uses"] = 2
                 elif name == "target not escalated":
                     runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"][
                         "verdict"
                     ] = "pass"
+                elif name == "escalation without blocker":
+                    runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"][
+                        "findings"
+                    ] = []
                 elif name == "second block":
                     args.verdict = "block"
                     args.resolved = []
@@ -1986,6 +2022,16 @@ class ReviewConvergenceTests(unittest.TestCase):
         ] = "missing"
         errors = workflow.runtime_state_errors(state)
         self.assertTrue(any("authorization scope" in error for error in errors))
+
+        for round_name in ("full", "targeted"):
+            with self.subTest(round_name=round_name):
+                state, item, _runtime, args = self.superseding_fixture()
+                args.round = round_name
+                with self.assertRaisesRegex(
+                    workflow.WorkflowError,
+                    "only valid for superseding",
+                ):
+                    self._record(state, item, args)
 
     def test_full_review_is_idempotent_but_cannot_be_reopened(self) -> None:
         item = ticket("M0-T01", "ready", owns=("a/**",), risk="high")

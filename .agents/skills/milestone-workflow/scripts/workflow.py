@@ -2668,6 +2668,25 @@ def validate_superseding_review(
         raise WorkflowError(
             f"Superseding review authorization scope {authorization_scope} is missing"
         )
+    if authorization.get("max_uses") != 1:
+        raise WorkflowError(
+            "Superseding review requires a single-use review_round_override scope"
+        )
+    uses = authorization.get("uses", 0)
+    if require_available and (isinstance(uses, bool) or uses != 0):
+        raise WorkflowError(
+            f"Superseding review requires an unused authorization scope; "
+            f"{authorization_scope} is exhausted or revoked"
+        )
+    if not require_available and (
+        isinstance(uses, bool)
+        or uses != 1
+        or authorization.get("status") != "revoked"
+    ):
+        raise WorkflowError(
+            "Superseding runtime record requires its consumed single-use "
+            "review_round_override scope"
+        )
     if not authorization_record_covers(
         authorization,
         action="review_round_override",
@@ -2688,21 +2707,51 @@ def validate_superseding_review(
         )
     targeted_at = recorded_at(targeted.get("recorded_at"))
     repairs = runtime.get("repairs", {}).get(ticket_id, [])
-    later_repair = targeted_at is not None and isinstance(repairs, list) and any(
-        isinstance(item, dict)
-        and item.get("root_cause_id") == root_cause_id
-        and bool(item.get("consumes_budget", True))
-        and (
-            recorded_at(item.get("recorded_at"))
-            or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    authorizations = runtime.get("authorizations", {})
+    root_overrides = runtime.get("repair_overrides", {}).get(root_cause_id, [])
+
+    def is_authorized_later_repair(item: object) -> bool:
+        if not isinstance(item, dict) or targeted_at is None:
+            return False
+        scope = str(item.get("budget_override_authorization_scope", "")).strip()
+        override = authorizations.get(scope) if isinstance(authorizations, dict) else None
+        override_uses = override.get("uses", 0) if isinstance(override, dict) else 0
+        return bool(
+            item.get("root_cause_id") == root_cause_id
+            and item.get("consumes_budget", True)
+            and (recorded_at(item.get("recorded_at")) or dt.datetime.min.replace(
+                tzinfo=dt.timezone.utc
+            ))
+            > targeted_at
+            and scope
+            and isinstance(root_overrides, list)
+            and any(
+                isinstance(entry, dict)
+                and entry.get("authorization_scope") == scope
+                for entry in root_overrides
+            )
+            and isinstance(override, dict)
+            and authorization_record_covers(
+                override,
+                action="repair_budget_override",
+                ticket_id=ticket_id,
+                blocker_class=blocker_class,
+                risk=risk,
+                remote_effects=False,
+                require_available=False,
+            )
+            and not isinstance(override_uses, bool)
+            and override_uses >= 1
         )
-        > targeted_at
-        for item in repairs
+
+    later_repair = isinstance(repairs, list) and any(
+        is_authorized_later_repair(item) for item in repairs
     )
     if not later_repair:
         raise WorkflowError(
-            "Superseding review requires a later budget-consuming repair "
-            f"for canonical root {root_cause_id}"
+            "Superseding review requires a later budget-consuming repair with a "
+            "separately authorized repair_budget_override scope for canonical root "
+            f"{root_cause_id}"
         )
     original = {
         str(item.get("id")): item
@@ -2714,6 +2763,10 @@ def validate_superseding_review(
         for item in targeted.get("findings", [])
         if isinstance(item, dict) and item.get("severity") in blocking_severities
     }
+    if not targeted_open:
+        raise WorkflowError(
+            "Targeted escalation must retain at least one blocking finding"
+        )
     non_original = sorted(set(targeted_open) - set(original))
     if non_original:
         raise WorkflowError(
@@ -2847,6 +2900,13 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         raise WorkflowError("--candidate-sha must be an exact 40- or 64-hex commit ID")
     if reviewer not in REVIEWERS or round_name not in REVIEW_ROUNDS:
         raise WorkflowError("Invalid review role or round")
+    if round_name != "superseding" and (
+        str(args.root_blocker).strip() or str(args.authorization_scope).strip()
+    ):
+        raise WorkflowError(
+            "--root-blocker and --authorization-scope are only valid for "
+            "superseding review"
+        )
 
     findings = [_parse_review_finding(raw, new=False) for raw in args.finding]
     new_findings = [_parse_review_finding(raw, new=True) for raw in args.new_finding]
