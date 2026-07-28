@@ -4,13 +4,15 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use socket2::{Domain, Protocol, Socket, Type};
 
 pub const SYNTHETIC_PSK: &str = "AAECAwQFBgcICQoLDA0ODw==";
 const CHILD_OUTPUT_CAP: usize = 256 * 1024;
@@ -291,13 +293,13 @@ pub fn wait_for_bound(child: &mut ChildGuard, address: SocketAddrV4) {
     let mut occupied_confirmations = 0_usize;
     loop {
         child.assert_running();
-        match TcpListener::bind(address) {
+        match bind_loopback_listener(address) {
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
                 occupied_confirmations += 1;
                 if occupied_confirmations >= READINESS_CONFIRMATIONS {
                     thread::sleep(READINESS_POLL);
                     child.assert_running();
-                    match TcpListener::bind(address) {
+                    match bind_loopback_listener(address) {
                         Err(error) if error.kind() == io::ErrorKind::AddrInUse => return,
                         Ok(listener) => {
                             drop(listener);
@@ -552,12 +554,22 @@ impl LoopbackReservation {
 }
 
 pub fn reserve_loopback() -> (TcpListener, SocketAddrV4) {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve loopback port");
+    let listener = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .expect("reserve loopback port");
     let address = match listener.local_addr().expect("reserved address") {
         std::net::SocketAddr::V4(address) => address,
         std::net::SocketAddr::V6(_) => unreachable!("IPv4 bind returned IPv6"),
     };
     (listener, address)
+}
+
+pub fn bind_loopback_listener(address: SocketAddrV4) -> io::Result<TcpListener> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    socket.bind(&SocketAddr::V4(address).into())?;
+    socket.listen(128)?;
+    Ok(socket.into())
 }
 
 pub fn reserve_unused_loopback() -> LoopbackReservation {

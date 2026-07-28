@@ -19,6 +19,7 @@ aes-gcm.workspace = true
 blake3.workspace = true
 hex.workspace = true
 serde_json.workspace = true
+socket2.workspace = true
 tempfile.workspace = true
 
 [lints]

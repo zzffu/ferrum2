@@ -2,7 +2,7 @@
 mod local_support;
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddrV4, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use local_support::{
     ChildExit, ChildGuard, LoopbackReservation, MetricsReadinessFailure, active_child_count,
-    reserve_unused_loopback, wait_for_metrics_ready, write_client_config, write_server_config,
+    bind_loopback_listener, reserve_loopback, reserve_unused_loopback, wait_for_metrics_ready,
+    write_client_config, write_server_config,
 };
 
 const CYCLES_PER_CATEGORY: usize = 20;
@@ -49,7 +50,7 @@ impl ChildSetupError {
 }
 
 fn address_is_occupied(address: SocketAddrV4) -> bool {
-    match TcpListener::bind(address) {
+    match bind_loopback_listener(address) {
         Ok(listener) => {
             drop(listener);
             false
@@ -125,8 +126,8 @@ struct ForeignSetup {
 
 impl ForeignSetup {
     fn start(addresses: [SocketAddrV4; 2], requests: Arc<AtomicUsize>, drip: bool) -> Self {
-        let proxy = TcpListener::bind(addresses[0]).expect("foreign proxy bind");
-        let metrics_listener = TcpListener::bind(addresses[1]).expect("foreign metrics bind");
+        let proxy = bind_loopback_listener(addresses[0]).expect("foreign proxy bind");
+        let metrics_listener = bind_loopback_listener(addresses[1]).expect("foreign metrics bind");
         metrics_listener
             .set_nonblocking(true)
             .expect("foreign metrics nonblocking");
@@ -224,7 +225,7 @@ fn run_cycle_with_retries<F>(
 
 fn assert_exact_rebind(addresses: &[SocketAddrV4]) {
     for address in addresses {
-        let listener = TcpListener::bind(address)
+        let listener = bind_loopback_listener(*address)
             .unwrap_or_else(|error| panic!("exact rebind failed for {address}: {error}"));
         assert_eq!(
             listener.local_addr().expect("rebound address"),
@@ -313,12 +314,7 @@ fn start_echo(listener: TcpListener) -> thread::JoinHandle<()> {
 }
 
 fn recording_target() -> (TcpListener, SocketAddrV4) {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("recording target");
-    let address = match listener.local_addr().expect("target address") {
-        std::net::SocketAddr::V4(address) => address,
-        std::net::SocketAddr::V6(_) => unreachable!("IPv4 target"),
-    };
-    (listener, address)
+    reserve_loopback()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -412,11 +408,7 @@ fn success_cycle(baseline_children: usize, context: &str) -> Result<(), Box<Setu
     let client = client_reservation.address();
     let client_metrics_reservation = reserve_unused_loopback();
     let client_metrics = client_metrics_reservation.address();
-    let target_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("echo target");
-    let target = match target_listener.local_addr().expect("target address") {
-        std::net::SocketAddr::V4(address) => address,
-        std::net::SocketAddr::V6(_) => unreachable!("IPv4 target"),
-    };
+    let (target_listener, target) = reserve_loopback();
     let server_config =
         write_server_config(directory.path(), server, Some(server_metrics)).expect("server config");
     let client_config = write_client_config(directory.path(), client, server, Some(client_metrics))
@@ -732,6 +724,16 @@ fn exactly_100_mixed_real_process_cycles_cleanup_every_owned_boundary() {
 fn lifecycle_fixture_uses_exact_five_by_twenty_matrix() {
     assert_eq!(CYCLES_PER_CATEGORY * 5, 100);
     assert!(Path::new(env!("CARGO_MANIFEST_DIR")).is_dir());
+}
+
+#[test]
+fn live_same_policy_listener_excludes_same_policy_contender() {
+    let _test_guard = LIFECYCLE_TEST_LOCK.lock().expect("lifecycle test lock");
+    let (incumbent, address) = reserve_loopback();
+    let error = bind_loopback_listener(address).expect_err("live listener admitted a contender");
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    drop(incumbent);
+    assert_exact_rebind(&[address]);
 }
 
 #[test]

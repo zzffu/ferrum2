@@ -319,6 +319,7 @@ dependencies = [
  "blake3",
  "hex",
  "serde_json",
+ "socket2",
  "tempfile",
 ]
 
