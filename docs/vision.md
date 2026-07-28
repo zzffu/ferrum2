@@ -96,18 +96,20 @@ sing-box 和 shadowsocks-rust 仅作为兼容性研究、互操作和性能比�
   security 和 performance gates 是其补充而不是替代。
 - 许可证为 `GPL-3.0-only`；examples、tests 和 fixtures 只能使用明确的 synthetic
   secrets。
-- 当前仓库基线 `master@b41c6127b1834ebd97246451fd92bafea50cb205`
-  只有工作流控制面，没有 Cargo workspace 或产品实现。
+- M0 规划前仓库基线
+  `master@b41c6127b1834ebd97246451fd92bafea50cb205` 只有工作流控制面，
+  没有 Cargo workspace 或产品实现；M0 的集成与资格证据由 roadmap、CI status
+  和 milestone handoff 记录。
 
 ## 里程碑地图
 
 | 里程碑 | 可独立验收的结果 | 状态 |
 |---|---|---|
-| M0 | AES-128-GCM TCP 安全纵切：离线配置、SOCKS5、独立两端、direct outbound、最小观测、互操作与平台冒烟 | planned |
+| M0 | AES-128-GCM TCP 安全纵切：离线配置、SOCKS5、独立两端、direct outbound、最小观测、互操作与平台冒烟 | closed |
 | M1 | 三种方法的完整 TCP 行为和完整 TCP 互操作矩阵 | proposed |
 | M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | proposed |
 | M3 | 稳定运维契约、生命周期证明和三目标平台资格 | proposed |
 | M4 | 可复现性能/资源门与 v0 integrated qualification | proposed |
 
-这些状态是证据状态，不代表已经实现。M0 的批准合同与 tickets 已就绪，下一入口是
-从 M0-T01 开始的 `execute`。
+这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
+下一入口是 M1 `plan`，用于冻结三方法 TCP 扩展与 12 项 TCP 互操作合同。

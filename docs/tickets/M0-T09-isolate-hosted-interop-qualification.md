@@ -120,8 +120,10 @@ deterministic Cargo tests证明guard、aggregation、failure continuation与summ
 
 ## Blocker record
 
-当前 canonical root 是 M0 CI evidence seam错误。旧 run
-`30322690937`保持失败；本票完成不授权或替代 hosted qualification。
+历史 canonical root 是 M0 CI evidence seam错误。旧 run
+`30322690937`保持失败；本票实现本身不授权或替代 hosted qualification。
+该root已由`cb193a1`、exact integration `8318ef1`及run
+`30331336772` attempt 1关闭。
 
 Final integration QA在exact candidate
 `e41dbd23b0f939666094ce0aa3f12c2fbbb127f4`发现

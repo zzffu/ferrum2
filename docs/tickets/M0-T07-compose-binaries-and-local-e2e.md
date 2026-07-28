@@ -310,7 +310,10 @@ cargo test --workspace --locked
   toolchain/temp target exit 101 `ENOSPC`, and a drvfs install timeout exit 124.
   All dedicated temp paths and owned processes were cleaned; integration
   worktree remained clean with `target/` absent.
-- Current hosted-rebind gate: **IN_PROGRESS**. The repair is limited to the two
-  binary `run.rs` listener constructors, harness local/lifecycle seams,
-  `tests/m0-harness/Cargo.toml`, `Cargo.lock`, and `workspace_policy.rs`.
-  No second push or other remote mutation has occurred.
+- Hosted-rebind gate resolution: **PASS**. The bounded repair changed only the
+  two binary `run.rs` listener constructors, harness local/lifecycle seams,
+  `tests/m0-harness/Cargo.toml`, `Cargo.lock`, and `workspace_policy.rs`; it was
+  integrated by `5969bfd`. Hosted lifecycle evidence passed at exact `5969bfd`
+  in run `30322690937`, and the final exact `8318ef1` run `30331336772`
+  attempt 1 also completed all six rendered results successfully. Both exact
+  remote authorizations are exhausted; close mode performed no remote mutation.

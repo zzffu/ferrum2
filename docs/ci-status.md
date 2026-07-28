@@ -1,6 +1,6 @@
 # CI 与验证状态
 
-## 当前 M0 执行状态
+## 当前 M0 closeout 状态
 
 - **Current product integration checkpoint:**
   `8318ef106d6cd4e029bd3b02aa64125fabdda462` on
@@ -13,7 +13,7 @@
   GitHub Actions run `30331336772`, attempt 1, push event，整体
   **success**。同一run/attempt的quality、MSRV、Windows MSVC、Linux GNU、
   Linux musl和interop六项required results全部success；没有跨run拼接。
-- **Current implementation frontier:** M0-T09/T10已done。Cargo-managed
+- **Current implementation frontier:** none；M0-T01～T10均已done。Cargo-managed
   qualification由本机compile/lint与pure-state tests覆盖但不执行external entry；
   hosted profile已收敛为quality、MSRV、三平台matrix及一个四案interop，共四个
   definitions/六个rendered results；11-job self-audit、filter/count、
@@ -24,6 +24,15 @@
 - **Authorization:** 一次性scope
   `m0-20260728-final-integration-push-8318ef1`已在正常push前原子消费并耗尽。
   当前没有第二次push、rerun、PR、branch-protection、tag或release授权。
+- **Closeout verification:** 2026-07-28 Team Lead在clean
+  `codex/integration/m0@8318ef106d6cd4e029bd3b02aa64125fabdda462`
+  重新执行authoritative full：`cargo fmt --all -- --check`、
+  `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`、
+  `cargo test --workspace --all-features --locked`和
+  `cargo doc --workspace --all-features --no-deps --locked`，四条均exit 0。
+  GitHub public run page与jobs API只读复核同一SHA/attempt的六项job均为
+  `completed/success`；匿名job-log不可见不改变已reviewed fail-closed workflow
+  与provider结论的边界。
 
 ## 历史修复状态（保留记录）
 
@@ -276,7 +285,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
 
-## 已接受、待实现的 M0 CI profile
+## 已实现并通过的 M0 CI profile
 
 唯一 workflow 是 `.github/workflows/m0.yml`。trigger 只允许
 `pull_request`、push 到 `master`/`codex/integration/**` 和
@@ -320,6 +329,6 @@ coverage/profiling output 和 rendered docs 属于 generated artifacts，不提�
   remote mutation仍未授权。
 - 尚未定义 resource stability threshold、soak duration、benchmark hardware
   或 comparison statistics；这是 M4 DEC-010，不阻塞 M0 implementation。
-- M0 CI amendment实现后，workflow doctor/validate、
-  `frontier --milestone M0 --json`、`next --milestone M0 --json` 和
-  `git diff --check`已重新通过；close mode仍负责最终里程碑归档。
+- M0 closeout已重新执行workflow doctor/validate、release dependency checks、
+  exact-SHA full gate和`git diff --check`；最终里程碑状态与恢复入口记录在
+  `docs/handoffs/HANDOFF-M0-2026-07-28.md`。

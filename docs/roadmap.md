@@ -6,10 +6,10 @@
 状态必须由 contract、ticket、commit 和验证证据支持。
 
 Bootstrap 基线是
-`master@b41c6127b1834ebd97246451fd92bafea50cb205`。M0 已进入 `executing`，
-M1-M4 仍为 `proposed`。M0-T01 的 locked workspace、core contracts 与静态
-policy tests 已在 `master@d9a641fecb2088fc1813ef4ebc58df392be48d64`
-完成 integration；这只证明 AC-01 的当前切片，不证明后续产品行为或远程 CI。
+`master@b41c6127b1834ebd97246451fd92bafea50cb205`。M0 已以 exact integration
+`8318ef106d6cd4e029bd3b02aa64125fabdda462`、本地 full gate 与 GitHub Actions
+run `30331336772` attempt 1 的六项成功证据关闭；M1-M4 仍为 `proposed`。
+M0 的 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md`。
 
 ## 依赖顺序
 
@@ -27,7 +27,7 @@ non-overlapping ownership。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
-- **Status:** validating
+- **Status:** closed
 - **Objective:** 建立第一个真实、可观察的产品路径：两个独立二进制在离线验证
   typed TOML 后，通过 SOCKS5 TCP `CONNECT`、SIP022
   `2022-blake3-aes-128-gcm` 和 server direct outbound 完成 local TCP echo。
@@ -170,6 +170,10 @@ non-overlapping ownership。
   implementation。GitHub Actions run `30331336772` attempt 1在该exact SHA
   整体success，quality、MSRV、Windows MSVC、Linux GNU、Linux musl与interop
   六项required results全部success；旧失败run保持历史记录。
+- **Closeout:** 2026-07-28 close gate在`master@b0717d2`启动；Product、
+  Architect与QA完成独立只读复核，Team Lead在exact integration SHA重跑
+  `workflow.toml` full 4/4并写入durable handoff。close mode没有新增product
+  repair、push、PR、tag或release。
 - **Resolved blocker history and remaining deferred risks:** M0没有open
   canonical blocker；performance/10k-idle qualification按路线图留给M4。
   M0-T05 与 M0-T06 已完成 ticket/final
@@ -224,9 +228,9 @@ non-overlapping ownership。
   budget，最终exact-SHA release gate不变。
   GitHub Actions provider由ADR-0007固定，profile由ADR-0017重新收敛；origin URL
   与只读访问已验证。exact `5969bfd` run `30322690937`为6/11整体失败并永久
-  保留。ADR-0017/T09/T10、同一新SHA local/Architect/QA再资格和新的六项
-  run/attempt仍是hard blockers，不能skip，也不能用本机WSL2或旧run局部success
-  代替。
+  保留，未被拼接或追认。ADR-0017、T09/T10、同一新SHA的local/Architect/QA
+  再资格和六项run/attempt hard gate均已在exact `8318ef1`与run
+  `30331336772` attempt 1关闭。
   AEAD nonce reuse、secret leakage、认证前副作用和 task leak 仍是 P0 实现风险，
   其控制合同见 ADR-0002/0004/0005 与 TEST-0001。
 

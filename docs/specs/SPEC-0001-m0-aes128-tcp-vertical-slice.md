@@ -89,11 +89,12 @@ SOCKS5 no-auth IPv4 CONNECT
 
 ## Current execution path
 
-当前仓库的exact integration `51fb7327af966cfc3f4a49058ea6bf2284009dcf`
-已经汇合T01～T08并通过local Team Lead、Architect与QA gates，包含完整M0
-end-to-end product path。该SHA的首次hosted run `30301746374`为2/11 success、
-9/11 failure；ADR-0015/T07/T08正在修复Linux listener restart与evidence-script
-portability，因此该SHA不是M0 close commit。
+当前仓库的exact product integration
+`8318ef106d6cd4e029bd3b02aa64125fabdda462`已汇合T01～T10并通过local
+Team Lead、Architect与QA gates，包含完整M0 end-to-end product path。该SHA的
+GitHub Actions run `30331336772` attempt 1整体success，六项rendered results
+全部success。早期`51fb7327`与`5969bfd` hosted runs保持失败历史，不与最终证据
+拼接。
 
 M0 完成后的 client path：
 
@@ -148,9 +149,10 @@ lock/metadata/tree/MSRV gate，可以采用同等或更强的窄替代；test-on
 identities与既有resolved feature outcome内调整declaration/anchor spelling。
 任何version/source/API/wire/unsafe/license/product behavior变化仍需新ADR/spec。
 
-M0-T08继续独占CI路径`.github/workflows/m0.yml`；该workflow已在`51fb7327`实现并
-执行过首次hosted run。ADR-0016不创建第二个workflow、不改变ADR-0007的
-job/security/exact-SHA matrix，也不把当前T07/T08 repair或旧run改成PASS。
+M0-T08拥有已完成、现为历史selected profile的CI路径证据；ADR-0017明确由
+M0-T09/T10取代qualification seam与job/filter/linker/scope mechanics，最终
+`.github/workflows/m0.yml`仍是唯一workflow。该替换不改变ADR-0007的
+trigger/security/exact-SHA结果合同，也不把T07/T08旧run改成PASS。
 
 ## Configuration and validation
 
@@ -662,10 +664,11 @@ ADR-0010～0017批准后，不留给 Engineer 自行决定的 M0 contract 问题
   后续run任一不匹配仍阻塞，不自行换版本。
 - GitHub Actions provider与result/security contract由ADR-0007经ADR-0017部分
   取代后固定。exact `5969bfd`的run `30322690937`是不可豁免的6/11 overall
-  failure；它只证明该SHA上的六个局部结果，不能拼接。M0-T09/T10新exact
-  integration必须先通过local、Architect与QA gates，并获得separately
-  authorized push，才可非force更新授权remote branch并等待新Actions run。
-  master、PR、branch protection、tag/release、rerun及其他remote mutation均未授权。
+  failure；它只证明该SHA上的六个局部结果，不能拼接。M0-T09/T10随后在exact
+  `8318ef1`通过local、Architect与QA gates，并以一次已耗尽的separately
+  authorized、non-force push触发run `30331336772` attempt 1；同一SHA的六项
+  rendered results与完整workflow均success。master、PR、branch protection、
+  tag/release、rerun及其他remote mutation仍未授权。
 - zero-linger native probe若在 Windows/Linux 无法得到一致批准的 close class，
   必须停止并提议 ADR-0004 revision。
 - DEC-008（UDP）、DEC-009（M3 完整平台 qualification）、DEC-010（M4 performance/

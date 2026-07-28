@@ -697,11 +697,12 @@ M0 test gate通过需要：
 - 全平台长期 lifecycle和最终 operator stability：M3。
 - throughput、10,000 idle与长期资源阈值：M4。
 
-T01～T08 reviewed implementation已汇合到exact `5969bfd`。其hosted run
-`30322690937`为6/11 success、5/11 failure，整体保持失败；成功项不能拼接或豁免
-未来evidence。当前缺口是ADR-0017及M0-T09/T10、修复后新exact SHA的全部
-local/Architect/QA再资格，以及一个separately authorized六项hosted run。
-required job启动后
-setup/network/package/reference/command/timeout/evidence 失败是 FAIL；workflow、
-未授权 push、provider 或 job 未产生结果是 BLOCKED。missing/skipped/cancelled/
-neutral 都不会转换为 waiver 或 PASS。
+T01～T08 reviewed implementation先汇合到exact `5969bfd`；其hosted run
+`30322690937`为6/11 success、5/11 failure并永久保持失败，未与后续证据拼接。
+ADR-0017及M0-T09/T10随后在exact `8318ef1`完成local、Architect与QA再资格；
+separately authorized run `30331336772` attempt 1的六项rendered results与完整
+workflow均success，因此上述M0 test gate条件现已全部满足且没有open test blocker。
+failure语义不变：required job启动后的
+setup/network/package/reference/command/timeout/evidence失败是FAIL；workflow、
+未授权push、provider或job未产生结果是BLOCKED。missing/skipped/cancelled/
+neutral不会转换为waiver或PASS。

@@ -20,16 +20,16 @@ owns = [
 spec = "docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md"
 test_plan = "docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md"
 acceptance = [
-  "M0-CI-001 through M0-CI-006 pass for the sole workflow .github/workflows/m0.yml: exact trigger allowlist, full-SHA actions, read-only permissions, exact eleven job names, fixed runners, numeric timeouts, no cache dependency, clean current-SHA builds, provider evidence, and one pushed-SHA run/attempt close contract",
-  "The two diagnosed config/replay filters are listed and executed by their full test names with libtest --exact and exact count one, so valid config cannot match invalid_matrix and replay exact_invalid cannot match exactly_one; other filtered command semantics remain unchanged",
+  "Historical selected-profile evidence for M0-CI-001 through M0-CI-006 covers the sole workflow .github/workflows/m0.yml: exact trigger allowlist, full-SHA actions, read-only permissions, fixed runners, numeric timeouts, no cache dependency, clean current-SHA builds, and provider evidence; ADR-0017 and M0-T10 supersede the exact eleven-job topology, filter/count and linker-probe mechanics, and automated scope-snapshot/self-audit while preserving those normative outcomes for final close",
+  "Historical T08 filter/count evidence used full libtest names with --exact and count one; ADR-0017 and M0-T09/T10 supersede that mechanism with a Cargo-managed non-test qualification entry and direct outcome jobs, without weakening config, replay, or four-case interoperability results",
   "A clean-worktree cargo build --workspace --bins --locked succeeds immediately before M0-INT-001 through M0-INT-004; the harness never relies on T07 or another worktree's untracked artifacts",
   "M0-INT-001 through M0-INT-004 all pass with exact sing-box 1.13.14 and shadowsocks-rust 1.24.0 asset checksums; each independent case byte-compares distinct fixed 16386-byte payloads in both directions before application Shutdown::Write, then deadline-observes target clean EOF, successful target write shutdown, and client clean EOF with no extra byte or reset/error without claiming target-FIN causality, while same-SHA M0-E2E-001/M0-LIFE-003 independently retain post-FIN reverse-drain evidence",
   "M0-MSRV-001 passes on Rust 1.85.0 without --ignore-rust-version",
-  "M0-PLAT-001 through M0-PLAT-003 build both release binaries with Rust 1.97.1 and run valid and invalid offline config smoke on windows-2022 or ubuntu-24.04 as specified; GNU/musl resolve compiler-reported absolute or bare linker names to an executable canonical path and run --version; Windows accepts link-help exit only 0 or 1 together with a Microsoft linker/version banner; musl-tools is exactly 1.2.4-2 and both musl binaries prove no PT_INTERP or DT_NEEDED with file/readelf",
+  "M0-PLAT-001 through M0-PLAT-003 build both release binaries with Rust 1.97.1 and run valid and invalid offline config smoke on windows-2022 or ubuntu-24.04 as specified; historical T08 linker-resolution/help probes are superseded by ADR-0017/M0-T10 actual build and native artifact outcomes; musl-tools remains exactly 1.2.4-2 and both musl binaries prove no PT_INTERP or DT_NEEDED with file/readelf",
   "M0-DETECT-002 passes separately on the native Windows MSVC and Linux GNU runners; one host result cannot substitute for the other",
   "M0-GATE-001 and M0-GATE-002 both pass on the same integrated commit, with every authoritative command executed and exit status recorded",
-  "One separately authorized GitHub Actions push run has all eleven required jobs successful in one run ID and attempt at the exact approved integration GITHUB_SHA; missing, skipped, unavailable, or differently attributed results remain FAIL/BLOCKED",
-  "M0-SCOPE-001 enumerates the complete b41c6127b1834ebd97246451fd92bafea50cb205...HEAD diff; only the user-authorized exact 23-path skill snapshot at d1ef4bcfb081a89c5da1185dcb7c57606f8ec77e is out-of-band from M0 content/provenance scanning after exact parent, full commit path set, ancestry, and per-path blob identity checks, while every other path is audited and no wildcard, rename, near-miss, spillover, non-goal code, real secret, external binary, generated result, or unreviewed fixture/dependency provenance is accepted",
+  "The historical eleven-job close condition remains failed evidence and is not reinterpreted; ADR-0017 and M0-T10 replace it with one separately authorized exact-SHA run whose six rendered results and complete workflow succeed in one run ID/attempt, while missing, skipped, unavailable, or differently attributed results remain FAIL/BLOCKED",
+  "Historical M0-SCOPE-001 automated snapshot evidence is retained but superseded by ADR-0017's exact-baseline Team Lead/Architect/QA diff, dependency, provenance, and generated-artifact review; the user-authorized exact d1ef4bcf skill snapshot exclusion is not broadened, and no non-goal code, real secret, external binary, generated result, or unreviewed fixture/dependency provenance is accepted",
   "Any ADR-0016 evidence substitution is mapped before execution, preserves every required platform/reference/direction/failure claim, runs on the new exact candidate SHA, and cannot retroactively qualify an old failed run",
 ]
 +++
@@ -168,11 +168,12 @@ cargo tree --workspace --locked
 `file`/`readelf` assertions按TEST-0001 platform matrix逐项执行并记录，不能从build
 exit推断。
 
-## Current risks
+## Historical risks and resolved gate
 
-- Workflow已实现且首次authorized push/run已发生；run `30301746374`失败，
-  repair/new exact SHA/重新资格与separately authorized新run当前为真实BLOCKED，
-  不得用本机/WSL2或旧run局部success替代。
+- Workflow首次authorized run `30301746374`失败并保持历史失败证据；其局部success
+  未被本机/WSL2或后续run拼接。ADR-0017与M0-T09/T10完成replacement profile后，
+  exact `8318ef1`的local/review gates及separately authorized run
+  `30331336772` attempt 1六项success已关闭该release gate。
 - GitHub-hosted image weekly drift只能靠ImageVersion/Included Software evidence
   追溯，不能提供M3完整资格。
 - upstream asset/version/license drift或download rate limit会阻塞，但不得放宽pin。
@@ -283,9 +284,12 @@ exit推断。
   filters, fail-closed GNU/musl linker resolution, fail-closed Windows
   exit/banner validation, and synchronized closed-workflow policy. Job/runner/
   trigger/permission/action/toolchain/product contracts remain unchanged.
-- T08's disjoint workflow/evidence-script implementation is **READY** and may run
-  while T07 remains active. Its integration/release gate remains **BLOCKED** until
-  T07 and T08 repair candidates are
-  integrated, all local gates plus Architect/QA pass on the new exact SHA, and
-  one new separately authorized run/attempt is 11/11 success. No second push, rerun, PR,
-  master push, tag, release, or other remote mutation has occurred.
+- Historical T08 repair scheduling state is **RESOLVED**: its disjoint
+  workflow/evidence-script candidate and T07 were integrated at `5969bfd`.
+  The immutable eleven-job runs remained failed; ADR-0017 and M0-T09/T10 then
+  superseded the job/filter/linker/scope mechanics without weakening the
+  reference, platform, security, exact-SHA, or failure invariants. Exact
+  `8318ef1` passed local and Architect/QA gates, and separately authorized run
+  `30331336772` attempt 1 completed the six replacement rendered results and
+  full workflow successfully. Both push scopes are exhausted; no rerun, PR,
+  master push, tag, release, or other remote mutation is authorized.
