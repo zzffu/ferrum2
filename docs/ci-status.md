@@ -19,13 +19,31 @@
   workflow validation/review/integration checks, and diff checks all exit
   `0`. Ticket budget `PASS`: code `11582`, tests `18721`, ratio `1.616`,
   baseline `2.041`; delta `954/774`, allowance `1074`.
-- **M2-T05 escalation:** initial `6c321ebbed07e426e66b8257792920595cfc0dd2`
-  and repaired `975276a90b6ae4b5a9bd984bcc31e3709d473ed5` were not
-  integrated. Targeted Architect/QA both `ESCALATE`: the restored TCP
-  driver violates ADR-0014 pre-FIN reverse-equality ordering, and the
-  mandatory ticket budget fails (`132/523`, allowance `252`; repair
-  `0/815`, allowance `120`). `M2-T05-REVIEW-001` remains open; no further
-  automatic repair/review is permitted.
+- **Wave-4 T05 product integration:** exact
+  `90c173f014f84761ee485ec584b7aa3fe8e7abab`; cherry-picked initial
+  `6c321ebbed07e426e66b8257792920595cfc0dd2`, first repair
+  `975276a90b6ae4b5a9bd984bcc31e3709d473ed5`, and user-authorized
+  superseding repair `bc589ee53e3fbf093bfe876e40a962e9f43444c2` as
+  `0801a39095fd1c088698c3a2bf75062fc0bc8061`,
+  `0f3c8ae8d42df9d4333ed9bc04570a5e28531a44`, and
+  `90c173f014f84761ee485ec584b7aa3fe8e7abab`.
+- **Wave-4 reviews/control:** full and targeted Architect/QA history,
+  including both targeted `ESCALATE` verdicts, remains preserved.
+  User-authorized `bc589ee` resolves the ADR-0014 ordering and mandatory
+  budget IDs; both superseding reviews returned `PASS` and
+  `M2-T05-REVIEW-001` is resolved. The narrow workflow-control amendment
+  `dff012a4a7ec88b0d5492b2efe9bea76c4510f30` passed focused `3/3`,
+  full workflow `67/67`, and exact-SHA Architect/QA control reviews.
+  Final integration Architect returned `PASS`; QA returned
+  `PASS_WITH_NOTES` with nonblocking `M2-INT-QA-001`.
+- **Wave-4 local gates:** workspace binaries, protocol example, and
+  Cargo-managed qualification entry build; pure qualification contract
+  `12/12`; authoritative quick `3/3`; full `4/4`, including strict
+  Clippy, all-features tests, fixed 100-cycle lifecycle, and docs;
+  metadata, workflow validation, review/integration gates, and diff/status
+  checks all pass. Ticket budget passes at code `11714`, tests `18971`,
+  ratio `1.620`, delta `1086/1024`, allowance `1206`; milestone budget
+  passes at `3994/3212`, allowance `4114`.
 - **Wave-2 product integration:** exact
   `6e54cce52e5e29135acd91f6337a4516a094852e`; contains initial M2-T02
   candidate `0d88666d2f46ef85b376c12c55ffb34a784a8451`, repaired candidate
@@ -60,11 +78,11 @@
   as environmental evidence, not a product waiver.
 - **Test budget:** combined ticket gate `PASS`: code `9710`, tests `16937`,
   ratio `1.744`, baseline `2.041`; delta `1990/1178`, allowance `2110`.
-- **Remote/release:** nothing pushed or published. IPv6-capable T04
-  platform evidence, M2-T05 hosted TCP+UDP qualification, and exact-SHA
-  remote evidence have not run and are not credited. T01-T04 are locally
-  integrated; T05 is blocked at bounded review convergence before
-  integration.
+- **Remote/release:** nothing pushed or published. T01-T05 are locally
+  integrated, but IPv6-capable platform evidence, exact-SHA quality/MSRV/
+  Windows/Linux GNU/Linux musl jobs, and hosted 12 TCP + 12 UDP
+  interoperability/cleanup have not run and are not credited.
+  `M2-T05-RELEASE-001` remains the separately authorized release gate.
 
 ## 当前 M1 closeout 状态
 

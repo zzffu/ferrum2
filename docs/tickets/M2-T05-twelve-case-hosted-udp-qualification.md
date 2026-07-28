@@ -2,7 +2,7 @@
 id = "M2-T05"
 title = "Add the twelve-case fail-closed hosted UDP qualification"
 milestone = "M2"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M2-T02"]
@@ -31,12 +31,6 @@ acceptance = [
   "Local quick and full only compile and lint the example and Cargo-managed qualification entry and run the pure aggregation contract; they never execute qualification, download references, open external sockets, or spawn reference processes",
   "After separate authorization, exit zero requires one clean GitHub Actions Linux checkout at exact GITHUB_SHA and an explicit twelve-line 12-of-12 plus cleanup report on one run and attempt; missing or unavailable evidence remains BLOCKED",
 ]
-
-[blocker]
-class = "code"
-authorization = "required"
-root_cause = "M2-T05-REVIEW-001: after the one substantive repair, current-candidate TCP qualification still violates ADR-0014 pre-FIN reverse-equality ordering and the mandatory ticket test-budget gate fails"
-derivatives = ["QA-M2-T05-001", "ARCH-M2-T05-001", "QA-M2-T05-002", "ARCH-M2-T05-003"]
 +++
 
 # M2-T05: Add the twelve-case fail-closed hosted UDP qualification
@@ -107,30 +101,44 @@ git diff --check
 
 - Branch/worktree/candidates: `codex/ticket/m2-t05`,
   `C:\project\ferrum2\.worktrees\m2-t05`; initial
-  `6c321ebbed07e426e66b8257792920595cfc0dd2`, repaired
-  `975276a90b6ae4b5a9bd984bcc31e3709d473ed5`. No T05 candidate was
-  integrated.
+  `6c321ebbed07e426e66b8257792920595cfc0dd2`, first repair
+  `975276a90b6ae4b5a9bd984bcc31e3709d473ed5`, and user-authorized
+  superseding repair
+  `bc589ee53e3fbf093bfe876e40a962e9f43444c2`. Cherry-picked integration
+  commits are `0801a39095fd1c088698c3a2bf75062fc0bc8061`,
+  `0f3c8ae8d42df9d4333ed9bc04570a5e28531a44`, and exact reviewed
+  assembly `90c173f014f84761ee485ec584b7aa3fe8e7abab`.
 - Reviews: QA full `BLOCK` on `QA-M2-T05-001`; Architect full `BLOCK` on
-  `ARCH-M2-T05-001` and `ARCH-M2-T05-002`. The one substantive repair
-  restored combined TCP+UDP plans and confirmed cleanup ownership.
-  Targeted QA and Architect both returned `ESCALATE`: cleanup finding
-  `ARCH-M2-T05-002` is resolved, but `QA-M2-T05-001` and
-  `ARCH-M2-T05-001` remain open because the restored TCP path performs
-  application write shutdown before reverse-payload equality, contrary to
-  ADR-0014. Repair-introduced budget findings are `QA-M2-T05-002` and
-  `ARCH-M2-T05-003`.
-- Local evidence: example/qualification builds, metadata, strict Clippy,
-  fmt, quick/full workspace gates, docs, diff checks, and the 12-row pure
-  contract exited `0`. The external qualification entry was never invoked;
-  no hosted run/attempt or reference provisioning is credited.
-- Ticket budget `FAIL`: code `10760`, tests `18470`, ratio `1.717`,
-  baseline `2.041`; delta `132/523`, allowance `252`. Repair-only delta
-  was code `0`, tests `815`, allowance `120`. The failure is mandatory
-  under TEST-0003 and was not relabeled as advisory.
-- Blocker: canonical root `M2-T05-REVIEW-001` remains open. Bounded
-  convergence permits no further automatic repair or third review. Unblock
-  requires explicit user authorization for a budget-consuming superseding
-  repair/verification limited to the open root, restoring pre-FIN reverse
-  equality and legitimately consolidating the test delta without production
-  padding.
-- Push/publish state: nothing pushed or published.
+  `ARCH-M2-T05-001` and `ARCH-M2-T05-002`. The first repair resolved
+  cleanup ownership but targeted Architect/QA both `ESCALATE` on the
+  remaining ADR-0014 ordering IDs and repair-introduced budget IDs. After
+  explicit user authorization, `bc589ee` restored forward equality then
+  reverse equality before application write shutdown and legitimately
+  consolidated the test delta. Architect and QA superseding reviews both
+  returned `PASS`; full and targeted history is preserved and canonical
+  root `M2-T05-REVIEW-001` is resolved.
+- Control amendment: user-authorized
+  `dff012a4a7ec88b0d5492b2efe9bea76c4510f30` permits an authorized
+  superseding review to resolve blocking IDs frozen in the targeted
+  escalation, including `introduced_by_repair`, without permitting new
+  findings or weakening root/SHA/repair/single-use authorization controls.
+  Its focused tests passed `3/3`, the full workflow suite passed `67/67`,
+  and exact-SHA Architect/QA control reviews both returned `PASS`.
+- Local integration evidence on `90c173f`: workspace binaries, protocol
+  example and Cargo-managed qualification entry built; the pure
+  qualification contract passed `12/12`; authoritative quick passed `3/3`
+  and full passed `4/4`, including strict Clippy, all-features tests, the
+  fixed 100-cycle lifecycle row, and docs. Metadata, workflow validation,
+  review/integration gates, and diff/status checks passed. Architect
+  integration review returned `PASS`; QA returned `PASS_WITH_NOTES` with
+  nonblocking `M2-INT-QA-001`.
+- Test budget: superseding candidate total `code=10760`,
+  `tests=18197`, ratio `1.691`; ticket delta `132/250`, allowance `252`;
+  repair delta `0/0`, allowance `120`. Exact integration ticket gate
+  passed at `code=11714`, `tests=18971`, ratio `1.620`, delta
+  `1086/1024`, allowance `1206`; milestone gate passed at
+  `3994/3212`, allowance `4114`.
+- Release evidence: the external qualification entry was never invoked
+  locally. No hosted run/attempt, reference provisioning, IPv6 platform
+  qualification, push, or publication is credited. Those remain a
+  separately authorized release gate.

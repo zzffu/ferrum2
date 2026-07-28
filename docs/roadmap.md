@@ -336,9 +336,9 @@ dependency-ready 和 non-overlapping ownership。
   7. `M2-UDP-INT-001..012` 在同一authorized exact SHA/run/attempt取得
      12/12+cleanup，缺失/unavailable不得waive。
   8. M0/M1回归、test-budget ratchet、MSRV/三平台和`workflow.toml` full通过。
-- **In-scope tickets:** M2-T01、M2-T02、M2-T03、M2-T04 已 `done`；
-  M2-T05 在一次substantive repair后的targeted Architect/QA
-  `ESCALATE`，durable status为 `blocked`，尚未integration。
+- **In-scope tickets:** M2-T01、M2-T02、M2-T03、M2-T04、M2-T05 均已
+  `done` 并完成本地integration；M2-T05 hosted/platform release
+  qualification仍未执行。
   Initial implementation frontier 为
   M2-T01 + M2-T03：
 
@@ -372,26 +372,35 @@ dependency-ready 和 non-overlapping ownership。
   TCP-only fixture isolation关闭；`QA-M2-T02-N01`已满足。IPv6仍
   **NOT EXECUTED**，未 push/publish。
 
-  M2-T05 repaired candidate
-  `975276a90b6ae4b5a9bd984bcc31e3709d473ed5` 未集成。Targeted QA与
-  Architect均`ESCALATE`：combined TCP+UDP topology及cleanup ownership
-  已修复，但TCP path在reverse equality前write-half-close，且mandatory
-  ticket budget以delta `132/523`、allowance `252`失败。Canonical root
-  `M2-T05-REVIEW-001`保持open；bounded convergence下无第二次automatic
-  repair/第三次review。
+  Wave 4 T05 exact product integration
+  `90c173f014f84761ee485ec584b7aa3fe8e7abab` 包含initial、first repair
+  和user-authorized superseding repair。`bc589ee`恢复ADR-0014规定的
+  forward equality、reverse equality、application write shutdown、
+  target EOF/shutdown、application EOF顺序，并保留同一current-SHA run的
+  12 TCP + 12 UDP fixed plans、provider continuation、transport summaries
+  和fail-closed cleanup。Architect/QA superseding reviews均`PASS`，
+  `M2-T05-REVIEW-001`已关闭；原full/targeted `ESCALATE`记录保留。
+  User-authorized workflow-control commit `dff012a`经Architect/QA
+  `PASS`，只允许处置targeted escalation中冻结的blocking IDs并继续执行
+  canonical root、active repaired SHA、separate repair override和per-reviewer
+  single-use review authorization约束。Exact integration quick 3/3、full
+  4/4、focused qualification 12/12、ticket/milestone budgets和final
+  Architect/QA integration gates均通过；QA仅记录nonblocking
+  `M2-INT-QA-001`。
 
 - **Deferred/out of scope:** public client UDP inbound、SOCKS5 UDP ASSOCIATE、
   SIP023/multi-user、routing/DNS proxy/custom resolver、M3 platform/lifecycle
   qualification和M4 performance。
-- **Integrated commit:** current execute checkpoint
-  `980540bd439c438eb196cbc3096cbea0cda3fb4d`; final milestone integration
-  not yet.
-- **Open blockers and risks:** `M2-T05-REVIEW-001` (`code`, review,
-  high) 为material stop：current TCP qualification不满足ADR-0014 pre-FIN
-  ordering，且repair-introduced test delta超过ticket allowance。Unblock需要
-  explicit user authorization限定于一次superseding repair/verification；
-  不得以production padding、旧run或different SHA规避。IPv6与hosted
-  execution仍未执行；push/publish不在隐含权限内。
+- **Integrated commit:** current reviewed local product/control checkpoint
+  `90c173f014f84761ee485ec584b7aa3fe8e7abab`; coordination closeout follows
+  on the same integration branch.
+- **Open blockers and risks:** 当前没有open implementation/review/integration
+  root。`M2-T05-RELEASE-001`将保持release blocker，直到同一最终exact SHA在
+  separately authorized hosted run/attempt完成quality、MSRV、Windows、
+  Linux GNU/musl、IPv6-capable platform evidence以及12 TCP + 12 UDP
+  interoperability与cleanup。`M2-INT-QA-001`是parallel server-test
+  port/readiness contention的nonblocking advisory；只有复现为authoritative
+  gate失败或shipped server defect时才触发跟进。当前未push/publish。
 
 ## M3 — 运维、生命周期与平台资格
 

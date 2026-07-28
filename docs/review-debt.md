@@ -32,3 +32,17 @@ problem or the user explicitly reopens the contract.
 - `M2-T04` `architect` `6896c6e02679`: ARCH-M2-T04-N01: IPv6 real-process target evidence remains NOT EXECUTED on this Windows host; require exact-SHA IPv6-capable platform evidence.
 <!-- review-debt:4276fb90dc85 -->
 - `M2-T04` `qa` `6896c6e02679`: QA-M2-T04-N01: IPv6 remains NOT EXECUTED on this Windows host and requires exact-SHA IPv6-capable platform evidence; build exact candidate binaries before process harness execution.
+
+## M2-INT-QA-001 — Parallel server-test readiness contention
+
+- **Milestone/tickets:** M2；M2-T04、M2-T05 integration
+- **Reviewer/verdict:** QA `PASS_WITH_NOTES`
+- **Reviewed candidate:** `90c173f014f84761ee485ec584b7aa3fe8e7abab`
+- **Impact:** 一次default-parallel `cargo test -p ferrum2-server --locked`
+  在三个listener readiness assertions超时；同一candidate的bounded
+  single-thread UDP rerun `3/3`、fully-qualified lifecycle witness `1/1`和
+  Team Lead authoritative full gate均通过。因此当前证据只表明local
+  test-fixture port/readiness contention风险，不表明shipped server defect。
+- **Follow-up trigger:** 仅当authoritative quick/full或hosted exact-SHA gate
+  再现同类失败，或有证据指向product listener ownership/lifecycle缺陷时，
+  才建立新的diagnosis/repair root；不得仅凭本次advisory重开T04/T05。
