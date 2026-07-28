@@ -1747,6 +1747,51 @@ class TestEconomyTests(unittest.TestCase):
             self.assertEqual(payload["delta"]["allowed_tests"], 120.0)
             self.assertTrue(any("test delta 150" in reason for reason in payload["reasons"]))
 
+    def test_milestone_delta_is_reported_without_ticket_allowance_enforcement(self) -> None:
+        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+        baseline = {
+            "schema_version": 1,
+            "tool": "builtin",
+            "counts": {"code": 1000, "tests": 2000},
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(
+                workflow, "load_test_budget_baseline", return_value=baseline
+            ),
+            mock.patch.object(workflow, "_merge_base", return_value="a" * 40),
+            mock.patch.object(
+                workflow,
+                "count_git_ref_builtin",
+                return_value=workflow.SourceCounts(1000, 2000, 2, "builtin"),
+            ),
+        ):
+            for current_tests, expected_code in ((2500, 0), (2550, 1)):
+                with self.subTest(current_tests=current_tests), mock.patch.object(
+                    workflow,
+                    "count_working_tree_builtin",
+                    return_value=workflow.SourceCounts(1300, current_tests, 2, "builtin"),
+                ):
+                    payload, code = workflow.evaluate_test_budget(
+                        Path(directory),
+                        cfg,
+                        gate="milestone",
+                        base="main",
+                        requested_tool="builtin",
+                        write_baseline=False,
+                    )
+                self.assertEqual(code, expected_code)
+                self.assertGreater(
+                    payload["delta"]["tests"], payload["delta"]["allowed_tests"]
+                )
+                self.assertFalse(
+                    any("test delta" in reason for reason in payload["reasons"])
+                )
+                self.assertEqual(
+                    any("did not reach ratchet target" in reason for reason in payload["reasons"]),
+                    expected_code == 1,
+                )
+
 
 class ReviewConvergenceTests(unittest.TestCase):
     @staticmethod

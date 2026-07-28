@@ -2450,7 +2450,7 @@ def evaluate_test_budget(
             "allowed_tests": round(allowed_delta_tests, 3),
             "ratio": None if delta_code == 0 else round(delta_tests / delta_code, 6),
         }
-        if delta_tests > allowed_delta_tests:
+        if gate == "ticket" and delta_tests > allowed_delta_tests:
             reasons.append(
                 f"test delta {delta_tests} exceeds allowance {allowed_delta_tests:.1f} "
                 f"for code delta {delta_code}"
