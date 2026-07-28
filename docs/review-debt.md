@@ -18,3 +18,5 @@ problem or the user explicitly reopens the contract.
   与 M1-T03 real-process evidence 明确使用 owner/future/socket seam 的措辞；
   若实现需要强制 OS-level cancellation，则必须先提交新的 platform/concurrency
   contract，而不能把它视为本 note 已批准。
+<!-- review-debt:8c6ba083f74e -->
+- `M1-T01` `qa` `4223051eeae3`: QA-M1-T01-001: Initial workspace-test setup failed because required process binaries were absent; the unchanged candidate passed after the normal workspace binary build. Keep clean CI/integration setup ordering explicit.

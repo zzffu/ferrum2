@@ -2,7 +2,7 @@
 id = "M1-T01"
 title = "Establish the three method-bound crypto profiles and reviewed fixtures"
 milestone = "M1"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = []
@@ -98,11 +98,23 @@ git diff --check
 
 ## Completion evidence
 
-Filled by the Team Lead after integration:
-
 - Branch/worktree/candidate and integrated commit:
+  `codex/ticket/m1-t01`；
+  `C:\project\ferrum2\.worktrees\m1-t01`；
+  candidate `4223051eeae35220b150461cad91daf09a954423`；
+  integration `0ad653fc6846b05ff83ec0cb941c396dfa0f54fe`。
 - Full/targeted Architect and QA reviews; stable finding IDs:
+  Architect full `PASS`（无 finding）；QA full `PASS_WITH_NOTES`；
+  advisory `QA-M1-T01-001`。没有 blocking ID、targeted round 或 repair。
 - Exact validation exits:
+  ticket commands、Team Lead quick 3/3 和 integration full 4/4 均 exit 0。
+  clean integration target 的首次 quick 在 process binaries 尚未 build 时于
+  `cargo test --workspace --locked` exit 101；既有 prerequisite
+  `cargo build --workspace --bins --locked` exit 0 后，同一未修改 SHA 的 quick
+  3/3 exit 0。该 setup-order derivative 不构成 product blocker。
 - Test-budget counts/baseline:
+  `code=7386`、`tests=15096`、ratio `2.044`；baseline
+  `7031/14707/2.092`；delta `+355/+389`，allowance `475`，ticket gate PASS。
 - Accepted review debt:
-- Push/publish state:
+  `QA-M1-T01-001`，要求 clean CI/integration 明确先 build process binaries。
+- Push/publish state: 未 push、未 publish、未运行 external qualification。
