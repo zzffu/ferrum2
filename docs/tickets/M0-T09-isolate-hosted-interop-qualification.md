@@ -2,7 +2,7 @@
 id = "M0-T09"
 title = "Isolate external interoperability behind one hosted qualification seam"
 milestone = "M0"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = []
@@ -127,20 +127,29 @@ Final integration QA在exact candidate
 `e41dbd23b0f939666094ce0aa3f12c2fbbb127f4`发现
 `M0-T09-PROVIDER-STATUS-AGGREGATION`：workflow已持久化provider setup
 退出状态，但qualification plan尚未消费它们，因此一次失败setup留下有效文件时
-可能错误执行对应cases并报告PASS。本票已重新打开，等待closed status state、
-pure no-I/O regression test和exact-SHA复审。
+可能错误执行对应cases并报告PASS。修复提交
+`cb193a19ec821786684f03839221a528ed1d21dc`现在只消费两个固定status变量，
+仅精确`"0"`允许对应reference进入provision/cases；其他值在pure state plan中
+fail closed，使该reference的两行共享一个`provision-<reference>` root，同时
+继续另一个reference。聚焦测试8/8及exact-SHA Architect/QA复审均PASS，该局部
+canonical root已关闭。
 
 ## Completion evidence
 
 - Branch: `codex/ticket/m0-t09`
-- Commit(s): `f6f160c5cf2204cb009b42292627544534d16917`
+- Commit(s): `f6f160c5cf2204cb009b42292627544534d16917`,
+  `cb193a19ec821786684f03839221a528ed1d21dc`
 - Required reviewer role/profile and verdict: Architect (`gpt-5.6-sol/max`)
-  PASS；QA (`gpt-5.6-sol/high`) PASS。实际 launch metadata 不可观察，
-  因此配置未作运行时声称。
-- Exact candidate SHA: `f6f160c5cf2204cb009b42292627544534d16917`
-- Integrated commit: `42f9a96dd90e1d07a89ec485c5e17422431c81b4`
-  on `codex/integration/m0`
-- Validation: qualification pure-state 6/6、workspace policy 17/17、
-  `cargo build --workspace --bins --locked`、authoritative quick 与 full
-  均 exit 0。未运行 `m0-qualification`、reference interoperability、WSL2
-  或任何 remote action。
+  PASS；QA (`gpt-5.6-sol/high`) PASS；provider-status修复的exact-SHA
+  Architect与QA复审也均PASS。实际 launch metadata 不可观察，因此配置未作
+  运行时声称，且未使用fast-mode override。
+- Exact candidate SHA: `cb193a19ec821786684f03839221a528ed1d21dc`
+- Integrated commits: `42f9a96dd90e1d07a89ec485c5e17422431c81b4`,
+  `37aba8aa0bf00968507404973ead32d7246f013e` on
+  `codex/integration/m0`
+- Validation: repair candidate的qualification pure-state 8/8、metadata、
+  workspace check、strict Clippy、fmt、tree、Rust 1.85 check、workspace
+  binaries build和safe workspace tests均exit 0；集成后的qualification
+  pure-state 8/8与workspace policy 17/17也均exit 0。未运行
+  `m0-qualification`、reference interoperability、网络、WSL2或任何remote
+  action。
