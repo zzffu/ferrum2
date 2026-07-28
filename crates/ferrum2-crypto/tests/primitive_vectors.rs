@@ -178,16 +178,16 @@ fn fixture_hashes_and_source_provenance_are_pinned() {
     );
     assert_eq!(
         quoted_provenance_value(sip022, "current_contract_revision"),
-        "8f6b1ca7a14a6a05867c5fe74bd95d954a0eff13"
+        "a389aa9861806a5d7d0d4fa8f8379f6ecef925d2"
     );
     assert_eq!(
         quoted_provenance_value(sip022, "current_contract_blob"),
-        "06459a889a4cc8d96ac45355871753ffa8c10431"
+        "4c2e401eec1d6f21aedf5b69843de17056c02d40"
     );
     let current_contract_hash = quoted_provenance_value(sip022, "current_contract_lf_sha256");
     assert_eq!(
         current_contract_hash,
-        "66525bb033975cf75b9840361ce0db6d1a7a86a794d30a28996b104540a6cf4e"
+        "a8c33a8e2ea013d3b94c9ef54a5b1795a71be77a3adfe1b1079957c72fca83a6"
     );
     assert_eq!(
         quoted_provenance_value(sip022, "current_contract_section"),
