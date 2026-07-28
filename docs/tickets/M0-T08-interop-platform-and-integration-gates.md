@@ -2,7 +2,7 @@
 id = "M0-T08"
 title = "Qualify pinned interoperability, MSRV, and three target artifacts"
 milestone = "M0"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = []
