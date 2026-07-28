@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Architect / Team Lead
-- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T01～M0-T08；关闭 DEC-001、DEC-002；direct dependency baseline 与 manifest ownership 条款被 ADR-0009、ADR-0011、ADR-0013 部分取代
+- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T01～M0-T08；关闭 DEC-001、DEC-002；direct dependency baseline 与 manifest ownership 条款被 ADR-0009、ADR-0011、ADR-0013、ADR-0016 部分取代
 
 ## Context and problem
 
@@ -222,6 +222,13 @@ T01 writer 增加两个 fixed-version zeroize feature anchors、更新 lock repr
 与 workspace-policy evidence。ADR-0011 随后只把harness manifest、对应policy与
 唯一two-edge lock hunk转交T07；ADR-0013再只把两个binary manifests的exact
 Tokio `test-util` dev edges转交同一个T07 writer，且不允许新增lock hunk。
+
+ADR-0016 部分取代上述永久写禁令：T01 ownership 继续是默认协调策略，但经明确
+ticket mapping、exact authorization、single-writer lease和完整lock/graph gate后，
+遗漏的package-local dev/test-only edge，或在已批准package identities与resolved
+feature outcome内只改变manifest declaration/anchor spelling，可由指定ticket窄修，
+不再自动要求新的产品ADR。新增production package/feature，或版本、source、API、
+wire、unsafe、license或产品行为变化，仍必须按新的架构决定处理。
 
 ## Consequences and tradeoffs
 

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Architect / Team Lead
-- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T02、M0-T08；仅取代 ADR-0004 的 AES-GCM primitive KAT 来源归属条款
+- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T02、M0-T08；仅取代 ADR-0004 的 AES-GCM primitive KAT 来源归属条款；后续bytes/result不变的事实性勘误流程由ADR-0016规范
 
 ## Context and problem
 

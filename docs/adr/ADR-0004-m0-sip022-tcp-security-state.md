@@ -6,7 +6,8 @@
 - **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T02、M0-T03、M0-T07；关闭 DEC-005
 - **Partial supersession:** ADR-0008 仅取代下文 AES-GCM primitive KAT 的
   CAVP/NIST-authored 来源与 rights 归属；numeric cases、corrupted-tag reject 及
-  本 ADR 其他决定保持有效
+  本 ADR 其他决定保持有效。ADR-0016 仅把 bytes/result不变的事实性provenance
+  勘误归为evidence amendment；不取代本ADR的wire/security/KAT数值合同
 
 ## Context and problem
 

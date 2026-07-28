@@ -36,12 +36,12 @@ acceptance = [
   "M0-LIFE-005 combines exactly 100 black-box cycles split 20 each across success/auth reject/connect failure/cooperative cancel/forced termination with T06 direct counters and binary-private production-used registry composition evidence",
   "Every black-box cycle timed-waits its child, immediately bind-listens the exact proxy/metrics/target addresses under ADR-0015's Unix-reuse/default-Windows policy, removes its temp path, and returns the harness child registry to baseline; a live same-policy owner still excludes a contender; private composition tests first witness live nonzero runtime counters and then baseline, with forced_shutdowns exactly +1",
   "M0-DETECT-002 runs exactly 47 native connections on each required native platform: 43 valid fixed-region prefixes plus independently authenticated auth/type/time/length rows; every row resets rather than EOF and leaves target accepts at zero",
-  "The independent detection generator uses only workspace-inherited aes-gcm/blake3 test primitives, while socket2 is the sole additional ADR-0015 rebind-evidence edge; the harness never depends on a ferrum2 package and the authenticated zero-length row maps to AddressBounds",
+  "The current selected profile uses workspace-inherited aes-gcm/blake3 independent primitives and the ADR-0015 socket2 rebind-evidence edge; any ADR-0016 substitution preserves all 47 native rows, production-oracle independence, target accepts zero, and the authenticated zero-length AddressBounds mapping",
   "M0-ADAPT-001 and M0-ADAPT-002 prove the client TokioConnector and both binaries' TokioTransport/TokioFramed mechanical delegation, initialized ReadBuf handling, fixed error mapping/source redaction, role/call-site typed observability mapping including Normal, configured-server versus application-target separation, and direct-connect-before-initial-payload-forward ordering",
   "The server connection owner writes Session.initial_payload completely and exactly once after target connect and before ordinary relay; connect or prefix-write failure never starts relay, and ServerFlow never repeats the payload",
   "Client composition applies independent configured-server connect and fresh request-first-write deadlines from validated config, proves the 10-second/5-second defaults plus non-default values through ADR-0012's opaque phase capability, and sends SOCKS success only after first-write completion",
   "Prefix and ordinary relay accounting includes only successful nonzero application writes, retains direction-separated partial counts on error/idle/cancel, and never double-counts prefix bytes",
-  "ADR-0013 adds exactly one workspace-inherited Tokio test-util dev edge to each binary, leaves both normal declarations and the production feature graph unchanged, and produces no Cargo.lock hunk beyond ADR-0011 as partially superseded by ADR-0015's exact harness edges",
+  "The current selected profile keeps one workspace-inherited Tokio test-util dev edge in each binary and ADR-0011/0015's exact harness edges; any ADR-0016 substitution remains package-local and dev-only, leaves the production/release graph unchanged, and receives an exact lock and workspace-policy audit",
 ]
 +++
 
@@ -74,14 +74,16 @@ repeated cleanup。
   evidence。
 - ADR-0013限定的两个binary `Cargo.toml` exact Tokio `test-util` dev declarations、
   production/test feature-tree boundary与zero-additional-lock-delta evidence。
+- ADR-0016 equivalent-evidence记录：old claim、新seam、相同failure coverage、
+  independence、platform、cleanup、exact ownership/candidate与invalidated gates。
 
 ## Out of scope
 
 - external reference download/interop、target platform matrix（T08）。
 - method/transport/address范围扩展。
-- root/其他member manifest（ADR-0013两个binary manifests的exact dev declarations
-  除外）、除`ferrum2-m0-harness`精确三条edge之外的lock hunk，或任何production
-  dependency/shared module修改。
+- root/其他member manifest、当前selected profile之外的lock hunk或任何production
+  dependency/shared module修改；只有执行前按ADR-0016映射并取得single-writer
+  lease的exact test-only替代可作为本票窄例外。
 - push/publish/release。
 
 ## Implementation notes and constraints
@@ -102,7 +104,9 @@ repeated cleanup。
   `[dev-dependencies]`只新增
   `tokio = { workspace = true, features = ["test-util"] }`。不得修改root Tokio
   features、normal edge、version/default/source/path或`Cargo.lock`；paused-time
-  tests不得依赖其他package的dev edge。
+  tests不得依赖其他package的dev edge。这是当前selected profile；替代只能在
+  ADR-0016执行前amendment后使用，并必须同样杀死default/non-default hardcoding与
+  wall-clock mutation且不污染production graph。
 - server connector Pending/failure时不得poll或forward `Session.initial_payload`；
   success后用bounded writes保持原byte sequence完整一次，prefix write失败停止flow。
 - listener/supervisor拥有所有child；harness必须kill-on-drop并避免固定ports。
@@ -124,6 +128,9 @@ repeated cleanup。
   server direct-target Connect为`direct/failed`，Normal为
   `relay/completed/no reason`。
 - native detection probe失败是contract evidence blocker，不能标记flaky/skip。
+- 100-cycle、47-row与same-policy rebind的当前helper/process布局可按ADR-0016作
+  等强重组，但五类各20次、全部47语义rows、逐案target=0、逐cycle cleanup/rebind、
+  internal-owner直接证据、immediate restart与live-owner exclusion不得减少。
 - adapters只委托connector/poll、stored endpoint、abortive与ADR-0010 exact closed
   error/observability mapping；不得用string或自定义heuristic重新分类，不得
   physical split/reunite transport，不得引入per-flow mutex、channel或direction

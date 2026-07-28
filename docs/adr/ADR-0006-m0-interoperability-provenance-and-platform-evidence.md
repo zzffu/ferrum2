@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Architect / Team Lead
-- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T08；关闭 DEC-007；external half-close sequence 由 `ADR-0014` 显式细化
+- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T08；关闭 DEC-007；external half-close sequence 由 `ADR-0014` 显式细化，evidence-mechanism替换边界由`ADR-0016`规范
 
 ## Context and problem
 

@@ -6,6 +6,7 @@
 - **ADR-0013 amendment:** Approved
 - **ADR-0014 amendment:** Approved
 - **ADR-0015 amendment:** Approved
+- **ADR-0016 amendment:** Approved
 - **Milestone:** M0
 - **Spec:** `docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`
 
@@ -13,6 +14,12 @@
 
 本计划证明 SPEC-0001 AC-01～AC-12；required command 缺失、未运行、ignored 未显式
 执行、环境不可用或 evidence 不完整都不是 pass。
+
+ADR-0016把下述具体test/probe/dependency组合定义为当前selected conformance
+profile，而非永久唯一机制。替代必须在执行前记录old claim→new seam、相同正负向
+coverage、independence、bounds、platform与cleanup，更新本计划/ticket mapping，
+并在新exact candidate SHA上执行全部受影响gate。文档修改、旧SHA、skip、zero-test
+或本机结果不能追认失败的required evidence。
 
 带name filter的required Cargo command必须同时核对非零且精确的matched test
 count；仅exit 0但运行0 tests仍为FAIL。新增crypto owner filter必须运行2 tests
@@ -23,7 +30,8 @@ M0 建立以下 production-shaped test seams：
 
 - protocol `ScriptedClock`：wall 与 replay monotonic 时间独立推进；runtime与
   binary composition timeout tests使用Tokio `test-util` paused time，不导入
-  crypto Clock。binary capability只能来自ADR-0013 exact dev-kind edges。
+  crypto Clock。当前binary capability来自ADR-0013 exact dev-kind edges；等价替代
+  仍必须package-local/dev-only且不得污染production graph。
 - `ScriptedRandom`：固定 salt/padding、重复值、失败和 nonce边界。
 - `RecordingConnector`：调用次数、顺序、target category、forwarded bytes。
 - `RecordingReplayStore`/store snapshot：check/insert/purge 的线性化与 entry count。
@@ -219,6 +227,10 @@ exact integration `GITHUB_SHA` 全部 success。PR、manual、本机或 WSL2 res
   bare CR、addition/removal/version/source/checksum/feature/dependency-edge mutation
   negative fixtures产生相同 verdict。完整 `cargo tree` 做人工 provenance/license sign-off，
   不以“能编译”代替。
+- 上述exact declarations、110 tuples与feature sets是当前profile的基线。经
+  ADR-0016执行前amendment批准替换test-only edge或policy representation时，测试
+  必须精确比较新profile，并同时证明production/release dependency tree、crypto
+  zeroize feature graph、version/source/checksum/license和有效coverage未改变。
 - config table覆盖每个 missing/unknown field、上下界/界外值、port 0、non-loopback
   metrics、internal endpoint equality、method/base64/key/file-size/UTF-8。
 
@@ -421,6 +433,10 @@ reverse leg，也不证明target FIN导致client EOF。peer FIN后新产生rever
 继续由同一最终SHA的
 M0-E2E-001和M0-LIFE-003独立blocking，四项external PASS不得替代。
 
+这是当前external selected profile。可替换payload字面值、test/helper布局或记录
+机制，但每方向payload必须distinct且不少于16386 bytes，必须在FIN前逐byte比较，
+四个reference/direction与ordered clean-EOF仍分别required。
+
 case timeout 60 秒，readiness 10 秒，I/O 10秒，stdout/stderr各 cap 256 KiB；
 超限截断并标记，kill-on-drop。只保存 sanitized diagnostics。
 
@@ -451,6 +467,9 @@ case timeout 60 秒，readiness 10 秒，I/O 10秒，stdout/stderr各 cap 256 Ki
   AddressBounds。每个47案都观察`ConnectionReset`而非EOF，并在该案后立即断言
   target accept count 0。Windows与Linux GNU为 M0 blocking；musl完整 close matrix留
   M3。
+- ADR-0016允许调整47-row probe的process/helper组织，但不得减少43个prefix及
+  auth/type/time/length rows，不得调用production encoder/parser形成circular
+  oracle，且每row仍须native、reset-not-EOF、target accepts为0。
 - fixture checksum/provenance在测试前验证；production code不能包含 fixture-only
   key、scripted RNG 或 bypass。
 
@@ -595,6 +614,10 @@ M0 不设 throughput、10,000 idle、RSS/CPU或正式性能门；这些是 M4。
   IPR hashes、test cases 1/2、submitter-source classification、`NOASSERTION`及rights
   evidence由ADR-0008固定。每组provenance metadata记录source、license-or-rights
   review、SHA-256和expected interpretation。
+- bytes、numeric result、pin与expected interpretation不变的来源/作者/URL/hash
+  转录或rights classification勘误按ADR-0016作为evidence amendment处理；必须保留
+  superseded记录、取得Architect/QA复核并重跑provenance/fixture gates。改变
+  bytes/result/pin或license/distribution conclusion仍不是勘误。
 - composite SIP022 fixture明确写“unofficial”；expected bytes不由被测 production
   path运行时生成。
 - config fixtures放 `tests/fixtures/config/**`；invalid fixture的 secret sentinel
@@ -635,6 +658,10 @@ b41c6127b1834ebd97246451fd92bafea50cb205...HEAD` 和
   version/source/checksum 不变，新增 direct surface 有license/provenance；
 - T02/T03 fixtures与两个 reference pins的来源、hash、license-or-rights review和
   非分发策略完整。
+
+以上dependency allowlist是当前selected profile。任何ADR-0016 substitution必须在
+执行前写入本节与对应ticket，并由scope audit精确验证amended profile；不存在通配
+allowlist，且不得降低production graph、zeroize、license、MSRV或platform证据。
 
 ## Exit conditions and known gaps
 

@@ -6,7 +6,9 @@
 - **Related milestone/spec/tickets:** M0；`SPEC-0001`；M0-T01、M0-T07；
   部分取代 ADR-0001 的 Tokio test/manifest baseline、ADR-0011 的
   “root/other member manifests unchanged”审查边界，以及 ADR-0012 的
-  manifest/dependency non-goal；不改变 ADR-0012 的 deadline/accounting semantics
+  manifest/dependency non-goal；ADR-0016将两个exact dev edges定义为当前selected
+  conformance profile而非永久唯一机制；不改变 ADR-0012 的 deadline/accounting
+  semantics
 
 ## Context and problem
 

@@ -6,8 +6,9 @@
 - **ADR-0013 amendment:** Approved
 - **ADR-0014 amendment:** Approved
 - **ADR-0015 amendment:** Approved
+- **ADR-0016 amendment:** Approved
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`、`ADR-0014`、`ADR-0015`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`、`ADR-0014`、`ADR-0015`、`ADR-0016`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
 - **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
 
@@ -135,20 +136,20 @@ server TcpListener
 | binaries | parse CLI、load validated config、construct adapters/supervisor | protocol implementation |
 | `tests/m0-harness` | metadata/filesystem policy、黑盒process E2E、external interop/platform drivers、primitive-only independent native request generator | concrete ferrum2 Cargo dependency、production behavior |
 
-Dependency DAG、toolchain、exact dependency versions 与 manifest ownership 由
-`ADR-0001` 冻结，并由 `ADR-0009` 仅对 `aes 0.9.1`/`ghash 0.6.0`
-no-default `zeroize` feature anchors、由 `ADR-0011` 仅对 T07 harness 的
-`aes-gcm`/`blake3` test-only direct edges、由 `ADR-0015` 再仅对同一 harness
-增加 `socket2` test-only direct edge、由`ADR-0013`仅对两个T07 binary
-的Tokio `test-util` dev-kind edges作部分取代。除
-`tests/m0-harness/Cargo.toml`、`Cargo.lock`中
-`ferrum2-m0-harness`的精确三条edge、对应`workspace_policy`证据以及
-`bins/ferrum2-client/Cargo.toml`/`bins/ferrum2-server/Cargo.toml`各一个exact
-dev declaration外，M0-T01继续独占所有 manifests/lock/toolchain/license。
-ADR-0013不允许新增lock hunk或改变production graph。M0-T08 独占 CI 路径
-`.github/workflows/m0.yml`；该workflow已在`51fb7327`实现并执行过首次hosted
-run。本次ADR-0015 amendment只允许T08修复两处exact selection与三套linker
-evidence probes，不创建第二个workflow或改变ADR-0007 job/security matrix。
+Dependency DAG、toolchain、production versions/sources、license与release graph由
+`ADR-0001`及其修订冻结。`ADR-0009`的`aes 0.9.1`/`ghash 0.6.0` no-default
+`zeroize` anchors、`ADR-0011/0015`的harness test-only edges，以及`ADR-0013`
+两个binary的Tokio `test-util` dev-kind edges组成当前M0 selected conformance
+profile。ADR-0016部分取代“永久由T01独占”和“这些edge是唯一合法机制”的表述：
+经执行前ticket/test mapping、exact authorization、single-writer lease与完整
+lock/metadata/tree/MSRV gate，可以采用同等或更强的窄替代；test-only capability
+不得进入production/release graph；production manifest只能在既有package
+identities与既有resolved feature outcome内调整declaration/anchor spelling。
+任何version/source/API/wire/unsafe/license/product behavior变化仍需新ADR/spec。
+
+M0-T08继续独占CI路径`.github/workflows/m0.yml`；该workflow已在`51fb7327`实现并
+执行过首次hosted run。ADR-0016不创建第二个workflow、不改变ADR-0007的
+job/security/exact-SHA matrix，也不把当前T07/T08 repair或旧run改成PASS。
 
 ## Configuration and validation
 
@@ -397,12 +398,16 @@ ConnectionRefused, RelayIo, IdleTimeout, Cancelled, Shutdown, ListenerFailure
   detection strategy 由 ADR-0004/0006/0008 定义；duplex/fatal ownership由
   ADR-0010定义。ADR-0008仅纠正两个
   AES-GCM primitive cases 的来源归属，不改变 numeric values 或密码/协议行为。
+  ADR-0016允许bytes/result不变的后续事实性provenance勘误作为evidence amendment，
+  但更换fixture bytes、expected result、reference pin或分发/license决定仍须
+  architecture/scope revision。
 - AEAD owner 的 dependency-review evidence 由 ADR-0002/0009 联合定义：
   `aes-gcm/zeroize`、`aes/zeroize`、`ghash/zeroize` 与
   `polyval/zeroize` 必须在同一 exact registry package instances 上启用；
   metadata feature sets、`zeroize/aarch64` induced feature 与 pre-repair 110-tuple
   lock identity baseline 必须 exact；这不改变 AES API、wire 或 physical-memory
-  guarantee 边界。
+  guarantee 边界。package identities和上述resolved feature sets是normative，
+  不能以ADR-0016 equivalent substitution改变。
 - PSK、derived material、salt、nonce、raw config、raw frames 绝不进入 log/error/
   panic/trace/metric；destination 不进入 tracing 或 metric labels。
 - config/secret/KDF buffers 使用 fixed secret newtypes 与 explicit zeroize；任何
@@ -447,6 +452,12 @@ client/server各自的binary-private listener constructor只在Unix bind前启�
 target/foreign listeners与cleanup probe从首次bind起使用相同平台策略并完成
 bind+listen。完全终止后的exact proxy/metrics/target地址必须立即可重绑，而一个
 仍存活的同策略listener必须继续阻止第二个listener。
+
+上述100-cycle、direct counter、binary-private registry与same-policy bind probe是
+当前selected conformance profile。ADR-0016允许重新组织test process、private seam
+或test-only依赖，但不得减少五类各20次、逐cycle cleanup/rebind、内部owner直接
+证据、immediate restart或live-owner exclusion，也不得让black-box外观冒充进程内
+状态。
 
 ## Compatibility and upstream divergence
 
@@ -542,6 +553,10 @@ schema、reference pins 或 ADR-0007 的 provider/workflow/job/runner/security/
 evidence contract 必须用新的 ADR/spec revision，不得静默编辑实现理由。远程
 revert、branch mutation 或 workflow rerun 仍需用户单独授权。
 
+只改变selected conformance profile或mechanical realization、且ADR-0016的全部
+equivalence条件成立时，可以使用执行前的TEST/ticket amendment而不新建产品ADR；
+它仍须在新exact candidate SHA上重跑受影响gate，且不得追认旧失败证据。
+
 ## Acceptance criteria
 
 1. **AC-01 Workspace/toolchain:** M0-WS-001、M0-WS-002、M0-MSRV-001 通过；
@@ -566,16 +581,18 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
    以及ADR-0011 primitive-only generator构造的43个short prefixes加
    auth/type/time/length共47个native connections均有直接证据；全部是批准的
    reset class、非EOF，且每案target accepts为0。authenticated zero variable length
-   的typed reason精确为`AddressBounds`。
+   的typed reason精确为`AddressBounds`。47-row覆盖与独立construction是不变量；
+   process/helper布局只是ADR-0016 selected profile。
 7. **AC-07 SOCKS/local product path:** M0-SOCKS-001～002、M0-ENDPOINT-001、
    M0-ADAPT-001～002、M0-E2E-001～002 通过；两个真实 binaries 完成 IPv4
    echo/half-close；production adapters、client configured-server
    dial/application-target wire separation、configured connect与fresh configured
    request first-write phase deadlines（默认10秒/5秒）及server
    connect-before-initial-payload-forward有focused证据，全部typed terminal/Connect
-   及Normal的role/call-site observability映射穷尽；paused-time capability只由
-   ADR-0013两个binary dev edges提供，排除dev edges的production feature tree
-   不含`test-util`；
+   及Normal的role/call-site observability映射穷尽；当前paused-time capability由
+   ADR-0013两个binary dev edges提供。ADR-0016允许同等的package-local dev-only
+   受控时间方案，但production feature tree必须不含test capability，并同时杀死
+   default/non-default hardcoding与wall-clock mutation；
    `local_addr` error/non-IPv4 保持零 first-write并发精确general failure，同时冻结
    target/protocol failure行为。
 8. **AC-08 Lifecycle/backpressure:** M0-LIFE-001～005 通过；stalled writer传播
@@ -608,13 +625,15 @@ revert、branch mutation 或 workflow rerun 仍需用户单独授权。
     `b41c6127b1834ebd97246451fd92bafea50cb205` 到 integrated `HEAD` 的完整 diff
     不含 M0 non-goals、external binaries、generated results 或真实 secrets；所有
     fixture/reference/locked dependencies有来源和license review记录；dependency
-    production dependency surface 精确等于 ADR-0001 经 ADR-0009 部分取代后的
-    集合；harness direct dev dependencies与lock hunk精确等于ADR-0011经
-    ADR-0015部分取代后的allowlist（两个primitive edges加一个rebind-evidence
-    `socket2` edge），
-    两个binary dev-kind Tokio declarations精确等于ADR-0013 allowlist且production
-    trees不含`test-util`、lock无新增hunk，package identities/resolved crypto
-    features不变；唯一批准的
+    当前selected profile中production dependency surface精确等于ADR-0001经
+    ADR-0009部分取代后的集合；harness direct dev dependencies与lock hunk精确等于
+    ADR-0011经ADR-0015部分取代后的allowlist（两个primitive edges加一个
+    rebind-evidence `socket2` edge），两个binary dev-kind Tokio declarations精确
+    等于ADR-0013 allowlist且production trees不含`test-util`、lock无新增hunk，
+    package identities/resolved crypto features不变。若执行前按ADR-0016批准
+    equivalent substitution，则审计改为精确比较该amended profile，并另外证明
+    production/release graph、安全feature、version/source/license及coverage不弱于
+    本baseline；唯一批准的
     `.github` path是M0-T08拥有的`.github/workflows/m0.yml`。
 
 M0 只有在 AC-01～AC-12 同一 integrated commit 证据齐全时才能进入 close。

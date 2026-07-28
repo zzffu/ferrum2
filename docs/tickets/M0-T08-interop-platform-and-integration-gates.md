@@ -30,6 +30,7 @@ acceptance = [
   "M0-GATE-001 and M0-GATE-002 both pass on the same integrated commit, with every authoritative command executed and exit status recorded",
   "One separately authorized GitHub Actions push run has all eleven required jobs successful in one run ID and attempt at the exact approved integration GITHUB_SHA; missing, skipped, unavailable, or differently attributed results remain FAIL/BLOCKED",
   "M0-SCOPE-001 audits the complete b41c6127b1834ebd97246451fd92bafea50cb205...HEAD diff and finds no non-goal code, real secret, external binary, generated result, or unreviewed fixture and dependency provenance",
+  "Any ADR-0016 evidence substitution is mapped before execution, preserves every required platform/reference/direction/failure claim, runs on the new exact candidate SHA, and cannot retroactively qualify an old failed run",
 ]
 +++
 
@@ -60,6 +61,8 @@ remote、push、创建PR或触发workflow；这些外部动作需要用户单独
 - Rust 1.85.0 MSRV check/test、Rust 1.97.1 target builds。
 - authoritative quick/full gates、scope/provenance audit和给Team Lead的结构化
   command/exit/artifact evidence。
+- ADR-0016 equivalent-evidence mapping仅适用于test/helper/probe realization；
+  不改变四项interop、三平台、MSRV、11 jobs、exact pushed SHA或单run/attempt门。
 
 ## Out of scope
 
@@ -109,6 +112,9 @@ remote、push、创建PR或触发workflow；这些外部动作需要用户单独
 - required job已启动后的setup/command/evidence错误为FAIL；workflow、push、
   provider或job未产生结果为BLOCKED；missing/skipped/cancelled均非PASS。
 - evidence不得保存PSK/raw config；generated assets在`target/`或runner temp。
+- 完整test name、linker discovery或evidence helper的机械修复不要求新产品ADR，
+  但必须fail-closed、在新candidate执行、重跑受影响job，并保持当前job/runner/
+  permission/timeout与scope matrix。run `30301746374`仍固定为2/11，不能追认。
 
 ## Validation commands
 

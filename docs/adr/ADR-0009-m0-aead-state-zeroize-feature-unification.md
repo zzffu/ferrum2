@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Architect / Team Lead
-- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T01、M0-T02；仅部分取代 ADR-0001 的 direct dependency baseline 与一次性 manifest ownership repair 条款
+- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T01、M0-T02；仅部分取代 ADR-0001 的 direct dependency baseline 与一次性 manifest ownership repair 条款；ADR-0016只放宽manifest/policy helper spelling与single-writer routing，package identities和resolved zeroize feature outcome继续规范
 
 ## Context and problem
 

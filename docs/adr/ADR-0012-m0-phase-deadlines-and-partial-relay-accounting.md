@@ -6,7 +6,9 @@
 - **Related milestone/spec/tickets:** M0；`SPEC-0001`；M0-T03、M0-T06、M0-T07；
   部分取代 ADR-0010 的 fused client open 与“prefix 后使用 unchanged relay result”
   假设，以及 ADR-0005 的 relay failure accounting contract；本ADR的manifest/
-  dependency non-goal被ADR-0013两个test-only binary dev edges部分取代
+  dependency non-goal被ADR-0013两个test-only binary dev edges部分取代；
+  ADR-0016只放宽private test helper/result-carrier spelling，不改变separate
+  deadline、partial accounting、payload ordering或production interface semantics
 
 ## Context and problem
 

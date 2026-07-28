@@ -8,7 +8,9 @@
 
 本 ADR 仅部分取代 ADR-0011 的 M0-LIFE-005 exact-rebind probe 与 harness
 dependency/lock allowlist；ADR-0011 的其余 evidence、ownership、native request
-generation 和 policy 决定继续规范。
+generation 和 policy 决定继续规范。ADR-0016 将具体probe实现与test-only
+dependency allowlist定义为selected conformance profile；immediate restart、
+live-owner exclusion、Unix/Windows安全边界继续是规范性不变量。
 
 ## Context and problem
 

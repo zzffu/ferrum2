@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Owners:** Architect / Team Lead
-- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T04、M0-T06、M0-T07；关闭 DEC-006
+- **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T04、M0-T06、M0-T07；关闭 DEC-006；ADR-0016仅将private registry/counter evidence realization定义为selected profile，不改变lifecycle topology、bounds、accounting、half-close或shutdown outcome
 
 ## Context and problem
 

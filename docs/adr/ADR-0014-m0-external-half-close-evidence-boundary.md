@@ -5,7 +5,9 @@
 - **Owners:** Product / Architect / Team Lead
 - **Related milestone/spec/tickets:** M0；`ADR-0005`、`ADR-0006`、`ADR-0007`；
   `SPEC-0001`；`TEST-0001`；M0-T07、M0-T08；部分取代 ADR-0006 对 external
-  interop half-close sequence 的未细化表述，不改变 ferrum2 half-close behavior
+  interop half-close sequence 的未细化表述；ADR-0016将具体external evidence
+  sequence定义为selected profile并保留同等或更强替换路径，不改变 ferrum2
+  half-close behavior
 
 ## Context and problem
 

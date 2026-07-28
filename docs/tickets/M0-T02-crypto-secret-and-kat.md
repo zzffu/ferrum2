@@ -54,6 +54,9 @@ capability，不实现 TCP framing/replay。
 - production entropy唯一入口是 `getrandom::fill`；scripted adapter只在 tests。
 - AEAD owner独占nonce；调用者不能设置counter或clone owner。
 - fixture expected bytes不由被测production code在runtime生成，并标注非官方层级。
+- bytes、numeric result、pin与expected interpretation不变的来源/作者/URL/hash
+  转录或rights勘误按ADR-0016作为evidence amendment处理；必须保留superseded
+  记录并重跑fixture/provenance gates。改变任何cryptographic byte/result不是勘误。
 
 ## Validation commands
 

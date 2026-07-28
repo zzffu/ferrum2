@@ -9,7 +9,8 @@
   allocation；ADR-0010 的 production protocol interface 不变；本ADR关于
   root/其他member manifests不变的审查边界被ADR-0013的exact binary dev edges
   部分取代；本ADR的M0-LIFE-005 exact-rebind probe与harness dependency/lock
-  allowlist被ADR-0015部分取代，其余决定继续规范
+  allowlist被ADR-0015部分取代；ADR-0016再将具体evidence mechanism和test-only
+  allowlist降为selected conformance profile，其余结果性决定继续规范
 
 ## Context and problem
 

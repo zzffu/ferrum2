@@ -5,7 +5,9 @@
 - **Owners:** Architect / Team Lead
 - **Related milestone/spec/tickets:** M0；`SPEC-0001`；M0-T03、M0-T07；
   窄幅取代 ADR-0004 的 caller-visible TCP stream transition/`HeaderIo`
-  interface；保持 ADR-0001 `Session` ownership 与 ADR-0005 owner-task lifecycle
+  interface；保持 ADR-0001 `Session` ownership 与 ADR-0005 owner-task lifecycle；
+  ADR-0016只放宽private test helper/result-carrier spelling，不放宽本ADR的opaque
+  ownership、production interface、phase、duplex、terminal或error semantics
 
 ## Context and problem
 
