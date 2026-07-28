@@ -2,8 +2,9 @@
 mod qualification;
 
 use qualification::{
-    CASES, CaseFailure, CaseSpec, Direction, HostedContext, Method, QualificationOps, Reference,
-    SetupAvailability, execute_hosted, execute_with_setup, validate_hosted,
+    CaseFailure, CaseSpec, CleanupState, Direction, HostedContext, Method, QualificationOps,
+    Reference, SetupAvailability, TCP_CASES, Transport, UDP_CASES, execute_hosted,
+    execute_with_setup, validate_hosted,
 };
 
 // This table is the explicit disposition for the 15 OS/process/socket helper tests
@@ -87,19 +88,34 @@ fn all_ready() -> SetupAvailability {
 }
 
 fn case_ids_for(reference: Reference) -> Vec<&'static str> {
-    CASES
+    TCP_CASES
         .iter()
+        .chain(UDP_CASES.iter())
         .filter(|case| case.reference == reference)
         .map(|case| case.id)
         .collect()
 }
 
-fn assert_setup_root(lines: [String; 12], failed: Reference, root: &str) {
-    for (case, line) in CASES.iter().zip(lines) {
+fn assert_setup_root(
+    cases: [CaseSpec; 12],
+    lines: [String; 12],
+    transport: Transport,
+    failed: Reference,
+    root: &str,
+) {
+    for (case, line) in cases.iter().zip(lines) {
         let expected = if case.reference == failed {
-            format!("case_id={} status=FAIL canonical_root={root}", case.id)
+            format!(
+                "transport={} case_id={} status=FAIL canonical_root={root}",
+                transport.label(),
+                case.id
+            )
         } else {
-            format!("case_id={} status=PASS", case.id)
+            format!(
+                "transport={} case_id={} status=PASS",
+                transport.label(),
+                case.id
+            )
         };
         assert_eq!(line, expected);
     }
@@ -136,13 +152,41 @@ impl QualificationOps for FakeOps {
 }
 
 #[test]
-fn case_plan_is_the_frozen_twelve_tuple_matrix() {
+fn both_active_transport_plans_are_frozen_twelve_tuple_matrices() {
     use Direction::{FerrumClient as Ferrum, ReferenceClient as Client};
     use Method::{Aes128Gcm as Aes128, Aes256Gcm as Aes256, ChaCha20Poly1305 as ChaCha};
     use Reference::{ShadowsocksRust, SingBox};
 
+    let tuple = |case: CaseSpec| (case.id, case.method, case.reference, case.direction);
+    assert!(
+        TCP_CASES
+            .iter()
+            .all(|case| case.transport == Transport::Tcp)
+    );
+    assert!(
+        UDP_CASES
+            .iter()
+            .all(|case| case.transport == Transport::Udp)
+    );
     assert_eq!(
-        CASES.map(|case| (case.id, case.method, case.reference, case.direction)),
+        TCP_CASES.map(tuple),
+        [
+            ("M1-INT-001", Aes128, SingBox, Ferrum),
+            ("M1-INT-002", Aes128, ShadowsocksRust, Ferrum),
+            ("M1-INT-003", Aes128, SingBox, Client),
+            ("M1-INT-004", Aes128, ShadowsocksRust, Client),
+            ("M1-INT-005", Aes256, SingBox, Ferrum),
+            ("M1-INT-006", Aes256, ShadowsocksRust, Ferrum),
+            ("M1-INT-007", Aes256, SingBox, Client),
+            ("M1-INT-008", Aes256, ShadowsocksRust, Client),
+            ("M1-INT-009", ChaCha, SingBox, Ferrum),
+            ("M1-INT-010", ChaCha, ShadowsocksRust, Ferrum),
+            ("M1-INT-011", ChaCha, SingBox, Client),
+            ("M1-INT-012", ChaCha, ShadowsocksRust, Client),
+        ]
+    );
+    assert_eq!(
+        UDP_CASES.map(tuple),
         [
             ("M2-UDP-INT-001", Aes128, SingBox, Ferrum),
             ("M2-UDP-INT-002", Aes128, ShadowsocksRust, Ferrum),
@@ -300,7 +344,16 @@ fn unavailable_setup_skips_that_reference_and_continues_the_ready_reference() {
     assert_eq!(ops.provisioned, [Reference::ShadowsocksRust]);
     assert_eq!(ops.attempted, case_ids_for(Reference::ShadowsocksRust));
     assert_setup_root(
-        report.summary_lines(),
+        TCP_CASES,
+        report.summary_lines(Transport::Tcp),
+        Transport::Tcp,
+        Reference::SingBox,
+        "provision-sing-box",
+    );
+    assert_setup_root(
+        UDP_CASES,
+        report.summary_lines(Transport::Udp),
+        Transport::Udp,
         Reference::SingBox,
         "provision-sing-box",
     );
@@ -322,7 +375,16 @@ fn provision_failure_marks_only_that_reference_and_does_not_mask_the_other() {
     );
     assert_eq!(ops.attempted, case_ids_for(Reference::ShadowsocksRust));
     assert_setup_root(
-        report.summary_lines(),
+        TCP_CASES,
+        report.summary_lines(Transport::Tcp),
+        Transport::Tcp,
+        Reference::SingBox,
+        "provision-sing-box",
+    );
+    assert_setup_root(
+        UDP_CASES,
+        report.summary_lines(Transport::Udp),
+        Transport::Udp,
         Reference::SingBox,
         "provision-sing-box",
     );
@@ -332,19 +394,27 @@ fn provision_failure_marks_only_that_reference_and_does_not_mask_the_other() {
 #[test]
 fn one_case_failure_does_not_prevent_later_cases() {
     let mut ops = FakeOps {
-        fail_case: Some("M2-UDP-INT-001"),
+        fail_case: Some("M1-INT-001"),
         ..FakeOps::default()
     };
 
     let report = execute_with_setup(all_ready(), &mut ops);
 
-    assert_eq!(ops.attempted, CASES.map(|case| case.id));
-    let lines = report.summary_lines();
+    assert_eq!(
+        ops.attempted,
+        TCP_CASES
+            .into_iter()
+            .chain(UDP_CASES)
+            .map(|case| case.id)
+            .collect::<Vec<_>>()
+    );
+    let lines = report.summary_lines(Transport::Tcp);
     assert_eq!(
         lines[0],
-        "case_id=M2-UDP-INT-001 status=FAIL canonical_root=case-M2-UDP-INT-001"
+        "transport=tcp case_id=M1-INT-001 status=FAIL canonical_root=case-M1-INT-001"
     );
-    assert_eq!(lines[11], "case_id=M2-UDP-INT-012 status=PASS");
+    assert_eq!(lines[11], "transport=tcp case_id=M1-INT-012 status=PASS");
+    assert!(report.transport_success(Transport::Udp));
     assert!(!report.success());
 }
 
@@ -358,25 +428,30 @@ fn case_panic_fails_that_row_and_does_not_prevent_later_cases() {
     let report = execute_with_setup(all_ready(), &mut ops);
 
     assert_eq!(
-        report.summary_lines()[5],
-        "case_id=M2-UDP-INT-006 status=FAIL canonical_root=case-M2-UDP-INT-006"
+        report.summary_lines(Transport::Udp)[5],
+        "transport=udp case_id=M2-UDP-INT-006 status=FAIL \
+         canonical_root=case-M2-UDP-INT-006"
     );
     assert_eq!(
-        report.summary_lines()[11],
-        "case_id=M2-UDP-INT-012 status=PASS"
+        report.summary_lines(Transport::Udp)[11],
+        "transport=udp case_id=M2-UDP-INT-012 status=PASS"
     );
     assert!(!report.success());
 }
 
 #[test]
-fn twelve_passes_are_required_for_success_and_summary_is_minimal() {
+fn both_twelve_row_gates_are_required_and_have_transport_specific_summaries() {
     let mut ops = FakeOps::default();
     let report = execute_with_setup(all_ready(), &mut ops);
 
     assert!(report.success());
     assert_eq!(
-        report.summary_lines(),
-        CASES.map(|case| format!("case_id={} status=PASS", case.id))
+        report.summary_lines(Transport::Tcp),
+        TCP_CASES.map(|case| format!("transport=tcp case_id={} status=PASS", case.id))
+    );
+    assert_eq!(
+        report.summary_lines(Transport::Udp),
+        UDP_CASES.map(|case| format!("transport=udp case_id={} status=PASS", case.id))
     );
     assert!(report.cleanup_success());
     assert_eq!(ops.cleanup_calls, 1);
@@ -391,8 +466,13 @@ fn twelve_passes_are_required_for_success_and_summary_is_minimal() {
         checkout_clean: true,
     };
     assert_eq!(
-        report.completion_line(&context),
-        "qualification status=PASS cases=12/12 cleanup=PASS \
+        report.completion_line(Transport::Tcp, &context),
+        "qualification transport=tcp status=PASS cases=12/12 cleanup=PASS \
+         sha=0123456789abcdef0123456789abcdef01234567 run_id=123456 run_attempt=2"
+    );
+    assert_eq!(
+        report.completion_line(Transport::Udp, &context),
+        "qualification transport=udp status=PASS cases=12/12 cleanup=PASS \
          sha=0123456789abcdef0123456789abcdef01234567 run_id=123456 run_attempt=2"
     );
 }
@@ -407,12 +487,35 @@ fn cleanup_failure_can_never_produce_success() {
     let report = execute_with_setup(all_ready(), &mut ops);
 
     assert_eq!(
-        report.summary_lines()[11],
-        "case_id=M2-UDP-INT-012 status=PASS"
+        report.summary_lines(Transport::Udp)[11],
+        "transport=udp case_id=M2-UDP-INT-012 status=PASS"
     );
     assert!(!report.cleanup_success());
     assert!(!report.success());
     assert_eq!(ops.cleanup_calls, 1);
+}
+
+#[test]
+fn never_confirmed_child_or_capture_worker_keeps_cleanup_failed() {
+    let mut child_unreaped = CleanupState::default();
+    child_unreaped.child_started();
+    child_unreaped.worker_started();
+    child_unreaped.worker_joined();
+    assert!(!child_unreaped.success());
+
+    let mut capture_unjoined = CleanupState::default();
+    capture_unjoined.child_started();
+    capture_unjoined.child_reaped();
+    capture_unjoined.worker_started();
+    assert!(!capture_unjoined.success());
+
+    let mut observed_failure = CleanupState::default();
+    observed_failure.child_started();
+    observed_failure.child_reaped();
+    observed_failure.worker_started();
+    observed_failure.worker_joined();
+    observed_failure.fail();
+    assert!(!observed_failure.success());
 }
 
 #[test]

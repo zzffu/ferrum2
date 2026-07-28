@@ -3,7 +3,7 @@ mod external_support;
 #[path = "../qualification/mod.rs"]
 mod qualification;
 
-use qualification::{HostedContext, SetupAvailability, execute_hosted};
+use qualification::{HostedContext, SetupAvailability, Transport, execute_hosted};
 use std::env;
 use std::process::{Command, ExitCode};
 
@@ -11,7 +11,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("M2 UDP qualification rejected: {error}");
+            eprintln!("M1 TCP/M2 UDP qualification rejected: {error}");
             ExitCode::FAILURE
         }
     }
@@ -44,10 +44,12 @@ fn run() -> Result<(), String> {
     );
     let mut operations = external_support::HostedOperations::new();
     let report = execute_hosted(&context, setup, &mut operations).map_err(str::to_owned)?;
-    for line in report.summary_lines() {
-        println!("{line}");
+    for transport in [Transport::Tcp, Transport::Udp] {
+        for line in report.summary_lines(transport) {
+            println!("{line}");
+        }
+        println!("{}", report.completion_line(transport, &context));
     }
-    println!("{}", report.completion_line(&context));
     if report.success() {
         Ok(())
     } else {

@@ -22,6 +22,21 @@ pub enum Direction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Transport {
+    Tcp,
+    Udp,
+}
+
+impl Transport {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Method {
     Aes128Gcm,
     Aes256Gcm,
@@ -50,6 +65,7 @@ impl Method {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaseSpec {
     pub id: &'static str,
+    pub transport: Transport,
     pub method: Method,
     pub reference: Reference,
     pub direction: Direction,
@@ -58,6 +74,18 @@ pub struct CaseSpec {
 impl CaseSpec {
     pub fn case_root(self) -> &'static str {
         match self.id {
+            "M1-INT-001" => "case-M1-INT-001",
+            "M1-INT-002" => "case-M1-INT-002",
+            "M1-INT-003" => "case-M1-INT-003",
+            "M1-INT-004" => "case-M1-INT-004",
+            "M1-INT-005" => "case-M1-INT-005",
+            "M1-INT-006" => "case-M1-INT-006",
+            "M1-INT-007" => "case-M1-INT-007",
+            "M1-INT-008" => "case-M1-INT-008",
+            "M1-INT-009" => "case-M1-INT-009",
+            "M1-INT-010" => "case-M1-INT-010",
+            "M1-INT-011" => "case-M1-INT-011",
+            "M1-INT-012" => "case-M1-INT-012",
             "M2-UDP-INT-001" => "case-M2-UDP-INT-001",
             "M2-UDP-INT-002" => "case-M2-UDP-INT-002",
             "M2-UDP-INT-003" => "case-M2-UDP-INT-003",
@@ -77,12 +105,14 @@ impl CaseSpec {
 
 const fn case(
     id: &'static str,
+    transport: Transport,
     method: Method,
     reference: Reference,
     direction: Direction,
 ) -> CaseSpec {
     CaseSpec {
         id,
+        transport,
         method,
         reference,
         direction,
@@ -92,20 +122,36 @@ const fn case(
 use Direction::{FerrumClient as Ferrum, ReferenceClient as RefClient};
 use Method::{Aes128Gcm as Aes128, Aes256Gcm as Aes256, ChaCha20Poly1305 as ChaCha};
 use Reference::{ShadowsocksRust, SingBox};
+use Transport::{Tcp, Udp};
 
-pub const CASES: [CaseSpec; 12] = [
-    case("M2-UDP-INT-001", Aes128, SingBox, Ferrum),
-    case("M2-UDP-INT-002", Aes128, ShadowsocksRust, Ferrum),
-    case("M2-UDP-INT-003", Aes128, SingBox, RefClient),
-    case("M2-UDP-INT-004", Aes128, ShadowsocksRust, RefClient),
-    case("M2-UDP-INT-005", Aes256, SingBox, Ferrum),
-    case("M2-UDP-INT-006", Aes256, ShadowsocksRust, Ferrum),
-    case("M2-UDP-INT-007", Aes256, SingBox, RefClient),
-    case("M2-UDP-INT-008", Aes256, ShadowsocksRust, RefClient),
-    case("M2-UDP-INT-009", ChaCha, SingBox, Ferrum),
-    case("M2-UDP-INT-010", ChaCha, ShadowsocksRust, Ferrum),
-    case("M2-UDP-INT-011", ChaCha, SingBox, RefClient),
-    case("M2-UDP-INT-012", ChaCha, ShadowsocksRust, RefClient),
+pub const TCP_CASES: [CaseSpec; 12] = [
+    case("M1-INT-001", Tcp, Aes128, SingBox, Ferrum),
+    case("M1-INT-002", Tcp, Aes128, ShadowsocksRust, Ferrum),
+    case("M1-INT-003", Tcp, Aes128, SingBox, RefClient),
+    case("M1-INT-004", Tcp, Aes128, ShadowsocksRust, RefClient),
+    case("M1-INT-005", Tcp, Aes256, SingBox, Ferrum),
+    case("M1-INT-006", Tcp, Aes256, ShadowsocksRust, Ferrum),
+    case("M1-INT-007", Tcp, Aes256, SingBox, RefClient),
+    case("M1-INT-008", Tcp, Aes256, ShadowsocksRust, RefClient),
+    case("M1-INT-009", Tcp, ChaCha, SingBox, Ferrum),
+    case("M1-INT-010", Tcp, ChaCha, ShadowsocksRust, Ferrum),
+    case("M1-INT-011", Tcp, ChaCha, SingBox, RefClient),
+    case("M1-INT-012", Tcp, ChaCha, ShadowsocksRust, RefClient),
+];
+
+pub const UDP_CASES: [CaseSpec; 12] = [
+    case("M2-UDP-INT-001", Udp, Aes128, SingBox, Ferrum),
+    case("M2-UDP-INT-002", Udp, Aes128, ShadowsocksRust, Ferrum),
+    case("M2-UDP-INT-003", Udp, Aes128, SingBox, RefClient),
+    case("M2-UDP-INT-004", Udp, Aes128, ShadowsocksRust, RefClient),
+    case("M2-UDP-INT-005", Udp, Aes256, SingBox, Ferrum),
+    case("M2-UDP-INT-006", Udp, Aes256, ShadowsocksRust, Ferrum),
+    case("M2-UDP-INT-007", Udp, Aes256, SingBox, RefClient),
+    case("M2-UDP-INT-008", Udp, Aes256, ShadowsocksRust, RefClient),
+    case("M2-UDP-INT-009", Udp, ChaCha, SingBox, Ferrum),
+    case("M2-UDP-INT-010", Udp, ChaCha, ShadowsocksRust, Ferrum),
+    case("M2-UDP-INT-011", Udp, ChaCha, SingBox, RefClient),
+    case("M2-UDP-INT-012", Udp, ChaCha, ShadowsocksRust, RefClient),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,6 +169,49 @@ pub trait QualificationOps {
     fn provision(&mut self, reference: Reference) -> Result<(), CaseFailure>;
     fn run_case(&mut self, case: CaseSpec) -> Result<(), CaseFailure>;
     fn finish_cleanup(&mut self) -> Result<(), CaseFailure>;
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CleanupState {
+    children_started: usize,
+    children_reaped: usize,
+    workers_started: usize,
+    workers_joined: usize,
+    failed: bool,
+}
+
+impl CleanupState {
+    pub fn child_started(&mut self) {
+        self.children_started += 1;
+    }
+
+    pub fn child_reaped(&mut self) {
+        self.children_reaped += 1;
+        if self.children_reaped > self.children_started {
+            self.failed = true;
+        }
+    }
+
+    pub fn worker_started(&mut self) {
+        self.workers_started += 1;
+    }
+
+    pub fn worker_joined(&mut self) {
+        self.workers_joined += 1;
+        if self.workers_joined > self.workers_started {
+            self.failed = true;
+        }
+    }
+
+    pub fn fail(&mut self) {
+        self.failed = true;
+    }
+
+    pub const fn success(self) -> bool {
+        !self.failed
+            && self.children_started == self.children_reaped
+            && self.workers_started == self.workers_joined
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,15 +250,15 @@ struct CaseResult {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct QualificationReport {
-    results: [CaseResult; 12],
+    tcp_results: [CaseResult; 12],
+    udp_results: [CaseResult; 12],
     cleanup: CaseStatus,
 }
 
 impl QualificationReport {
     pub fn success(&self) -> bool {
-        self.results
-            .iter()
-            .all(|result| result.status == CaseStatus::Pass)
+        self.transport_success(Transport::Tcp)
+            && self.transport_success(Transport::Udp)
             && self.cleanup == CaseStatus::Pass
     }
 
@@ -177,18 +266,30 @@ impl QualificationReport {
         matches!(self.cleanup, CaseStatus::Pass)
     }
 
-    pub fn pass_count(&self) -> usize {
-        self.results
+    pub fn transport_success(&self, transport: Transport) -> bool {
+        self.results(transport)
+            .iter()
+            .all(|result| result.status == CaseStatus::Pass)
+    }
+
+    pub fn pass_count(&self, transport: Transport) -> usize {
+        self.results(transport)
             .iter()
             .filter(|result| result.status == CaseStatus::Pass)
             .count()
     }
 
-    pub fn completion_line(&self, context: &HostedContext<'_>) -> String {
+    pub fn completion_line(&self, transport: Transport, context: &HostedContext<'_>) -> String {
         format!(
-            "qualification status={} cases={}/12 cleanup={} sha={} run_id={} run_attempt={}",
-            if self.success() { "PASS" } else { "FAIL" },
-            self.pass_count(),
+            "qualification transport={} status={} cases={}/12 cleanup={} sha={} run_id={} \
+             run_attempt={}",
+            transport.label(),
+            if self.transport_success(transport) && self.cleanup_success() {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+            self.pass_count(transport),
             if self.cleanup_success() {
                 "PASS"
             } else {
@@ -200,14 +301,26 @@ impl QualificationReport {
         )
     }
 
-    pub fn summary_lines(&self) -> [String; 12] {
-        self.results.map(|result| match result.status {
-            CaseStatus::Pass => format!("case_id={} status=PASS", result.case.id),
+    pub fn summary_lines(&self, transport: Transport) -> [String; 12] {
+        self.results(transport).map(|result| match result.status {
+            CaseStatus::Pass => format!(
+                "transport={} case_id={} status=PASS",
+                transport.label(),
+                result.case.id
+            ),
             CaseStatus::Fail(root) => format!(
-                "case_id={} status=FAIL canonical_root={root}",
+                "transport={} case_id={} status=FAIL canonical_root={root}",
+                transport.label(),
                 result.case.id
             ),
         })
+    }
+
+    fn results(&self, transport: Transport) -> [CaseResult; 12] {
+        match transport {
+            Transport::Tcp => self.tcp_results,
+            Transport::Udp => self.udp_results,
+        }
     }
 }
 
@@ -222,17 +335,21 @@ pub fn execute_with_setup(
         Reference::ShadowsocksRust => shadowsocks_rust,
     };
 
-    let results = CASES.map(|case| {
-        let status = match provision(case.reference) {
-            Err(failure) => CaseStatus::Fail(failure.canonical_root),
-            Ok(()) => match catch_unwind(AssertUnwindSafe(|| ops.run_case(case))) {
-                Ok(Ok(())) => CaseStatus::Pass,
-                Ok(Err(failure)) => CaseStatus::Fail(failure.canonical_root),
-                Err(_) => CaseStatus::Fail(case.case_root()),
-            },
-        };
-        CaseResult { case, status }
-    });
+    let mut run_plan = |cases: [CaseSpec; 12]| {
+        cases.map(|case| {
+            let status = match provision(case.reference) {
+                Err(failure) => CaseStatus::Fail(failure.canonical_root),
+                Ok(()) => match catch_unwind(AssertUnwindSafe(|| ops.run_case(case))) {
+                    Ok(Ok(())) => CaseStatus::Pass,
+                    Ok(Err(failure)) => CaseStatus::Fail(failure.canonical_root),
+                    Err(_) => CaseStatus::Fail(case.case_root()),
+                },
+            };
+            CaseResult { case, status }
+        })
+    };
+    let tcp_results = run_plan(TCP_CASES);
+    let udp_results = run_plan(UDP_CASES);
 
     let cleanup = match catch_unwind(AssertUnwindSafe(|| ops.finish_cleanup())) {
         Ok(Ok(())) => CaseStatus::Pass,
@@ -240,7 +357,11 @@ pub fn execute_with_setup(
         Err(_) => CaseStatus::Fail("cleanup"),
     };
 
-    QualificationReport { results, cleanup }
+    QualificationReport {
+        tcp_results,
+        udp_results,
+        cleanup,
+    }
 }
 
 pub fn execute_hosted(

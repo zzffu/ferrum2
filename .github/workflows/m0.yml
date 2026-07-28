@@ -395,12 +395,12 @@ jobs:
             printf 'M2_SING_BOX_SETUP_STATUS=%s\n' "$sing_box_status"
             printf 'M2_SHADOWSOCKS_RUST_SETUP_STATUS=%s\n' "$shadowsocks_rust_status"
           } >> "$GITHUB_ENV"
-      - name: Run hosted M2 UDP qualification
+      - name: Run hosted M1 TCP and M2 UDP qualification
         shell: bash
         run: |
           set -euo pipefail
           export CARGO_TARGET_DIR
-          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/m2-udp-qualification-target.XXXXXX")"
+          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/m1-tcp-m2-udp-qualification-target.XXXXXX")"
           cargo build --workspace --bins --locked
           cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
           cargo build -p ferrum2-m0-harness --bin m0-qualification --locked
