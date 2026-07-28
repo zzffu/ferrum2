@@ -11,7 +11,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("m0 qualification rejected: {error}");
+            eprintln!("M1 qualification rejected: {error}");
             ExitCode::FAILURE
         }
     }
@@ -24,8 +24,8 @@ fn run() -> Result<(), String> {
     let github_actions = env::var("GITHUB_ACTIONS").ok();
     let runner_os = env::var("RUNNER_OS").ok();
     let github_sha = env::var("GITHUB_SHA").ok();
-    let sing_box_setup_status = env::var("M0_SING_BOX_SETUP_STATUS").ok();
-    let shadowsocks_rust_setup_status = env::var("M0_SHADOWSOCKS_RUST_SETUP_STATUS").ok();
+    let sing_box_setup_status = env::var("M1_SING_BOX_SETUP_STATUS").ok();
+    let shadowsocks_rust_setup_status = env::var("M1_SHADOWSOCKS_RUST_SETUP_STATUS").ok();
     let context = HostedContext {
         argument_count,
         github_actions: github_actions.as_deref(),

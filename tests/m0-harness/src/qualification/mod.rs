@@ -22,8 +22,35 @@ pub enum Direction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Method {
+    Aes128Gcm,
+    Aes256Gcm,
+    ChaCha20Poly1305,
+}
+
+impl Method {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Aes128Gcm => "2022-blake3-aes-128-gcm",
+            Self::Aes256Gcm => "2022-blake3-aes-256-gcm",
+            Self::ChaCha20Poly1305 => "2022-blake3-chacha20-poly1305",
+        }
+    }
+
+    pub const fn synthetic_psk(self) -> &'static str {
+        match self {
+            Self::Aes128Gcm => "AAECAwQFBgcICQoLDA0ODw==",
+            Self::Aes256Gcm | Self::ChaCha20Poly1305 => {
+                "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaseSpec {
     pub id: &'static str,
+    pub method: Method,
     pub reference: Reference,
     pub direction: Direction,
 }
@@ -31,36 +58,54 @@ pub struct CaseSpec {
 impl CaseSpec {
     pub fn case_root(self) -> &'static str {
         match self.id {
-            "M0-INT-001" => "case-M0-INT-001",
-            "M0-INT-002" => "case-M0-INT-002",
-            "M0-INT-003" => "case-M0-INT-003",
-            "M0-INT-004" => "case-M0-INT-004",
+            "M1-INT-001" => "case-M1-INT-001",
+            "M1-INT-002" => "case-M1-INT-002",
+            "M1-INT-003" => "case-M1-INT-003",
+            "M1-INT-004" => "case-M1-INT-004",
+            "M1-INT-005" => "case-M1-INT-005",
+            "M1-INT-006" => "case-M1-INT-006",
+            "M1-INT-007" => "case-M1-INT-007",
+            "M1-INT-008" => "case-M1-INT-008",
+            "M1-INT-009" => "case-M1-INT-009",
+            "M1-INT-010" => "case-M1-INT-010",
+            "M1-INT-011" => "case-M1-INT-011",
+            "M1-INT-012" => "case-M1-INT-012",
             _ => "case-unknown",
         }
     }
 }
 
-pub const CASES: [CaseSpec; 4] = [
+const fn case(
+    id: &'static str,
+    method: Method,
+    reference: Reference,
+    direction: Direction,
+) -> CaseSpec {
     CaseSpec {
-        id: "M0-INT-001",
-        reference: Reference::SingBox,
-        direction: Direction::FerrumClient,
-    },
-    CaseSpec {
-        id: "M0-INT-002",
-        reference: Reference::ShadowsocksRust,
-        direction: Direction::FerrumClient,
-    },
-    CaseSpec {
-        id: "M0-INT-003",
-        reference: Reference::SingBox,
-        direction: Direction::ReferenceClient,
-    },
-    CaseSpec {
-        id: "M0-INT-004",
-        reference: Reference::ShadowsocksRust,
-        direction: Direction::ReferenceClient,
-    },
+        id,
+        method,
+        reference,
+        direction,
+    }
+}
+
+use Direction::{FerrumClient as Ferrum, ReferenceClient as RefClient};
+use Method::{Aes128Gcm as Aes128, Aes256Gcm as Aes256, ChaCha20Poly1305 as ChaCha};
+use Reference::{ShadowsocksRust, SingBox};
+
+pub const CASES: [CaseSpec; 12] = [
+    case("M1-INT-001", Aes128, SingBox, Ferrum),
+    case("M1-INT-002", Aes128, ShadowsocksRust, Ferrum),
+    case("M1-INT-003", Aes128, SingBox, RefClient),
+    case("M1-INT-004", Aes128, ShadowsocksRust, RefClient),
+    case("M1-INT-005", Aes256, SingBox, Ferrum),
+    case("M1-INT-006", Aes256, ShadowsocksRust, Ferrum),
+    case("M1-INT-007", Aes256, SingBox, RefClient),
+    case("M1-INT-008", Aes256, ShadowsocksRust, RefClient),
+    case("M1-INT-009", ChaCha, SingBox, Ferrum),
+    case("M1-INT-010", ChaCha, ShadowsocksRust, Ferrum),
+    case("M1-INT-011", ChaCha, SingBox, RefClient),
+    case("M1-INT-012", ChaCha, ShadowsocksRust, RefClient),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,7 +160,7 @@ struct CaseResult {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct QualificationReport {
-    results: [CaseResult; 4],
+    results: [CaseResult; 12],
 }
 
 impl QualificationReport {
@@ -125,7 +170,7 @@ impl QualificationReport {
             .all(|result| result.status == CaseStatus::Pass)
     }
 
-    pub fn summary_lines(&self) -> [String; 4] {
+    pub fn summary_lines(&self) -> [String; 12] {
         self.results.map(|result| match result.status {
             CaseStatus::Pass => format!("case_id={} status=PASS", result.case.id),
             CaseStatus::Fail(root) => format!(

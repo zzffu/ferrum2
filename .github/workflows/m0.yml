@@ -1,4 +1,4 @@
-name: m0
+name: m1
 
 on:
   pull_request:
@@ -385,22 +385,22 @@ jobs:
           fi
           echo "provider_setup sing_box=$sing_box_status shadowsocks_rust=$shadowsocks_rust_status"
           {
-            printf 'M0_SING_BOX_SETUP_STATUS=%s\n' "$sing_box_status"
-            printf 'M0_SHADOWSOCKS_RUST_SETUP_STATUS=%s\n' "$shadowsocks_rust_status"
+            printf 'M1_SING_BOX_SETUP_STATUS=%s\n' "$sing_box_status"
+            printf 'M1_SHADOWSOCKS_RUST_SETUP_STATUS=%s\n' "$shadowsocks_rust_status"
           } >> "$GITHUB_ENV"
-      - name: Run hosted M0 qualification
+      - name: Run hosted M1 qualification
         shell: bash
         run: |
           set -euo pipefail
           export CARGO_TARGET_DIR
-          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/m0-qualification-target.XXXXXX")"
+          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/m1-qualification-target.XXXXXX")"
           cargo build --workspace --bins --locked
           cargo build -p ferrum2-m0-harness --bin m0-qualification --locked
           qualification_status=0
           "$CARGO_TARGET_DIR/debug/m0-qualification" || qualification_status=$?
 
-          sing_box_status="${M0_SING_BOX_SETUP_STATUS:-}"
-          shadowsocks_rust_status="${M0_SHADOWSOCKS_RUST_SETUP_STATUS:-}"
+          sing_box_status="${M1_SING_BOX_SETUP_STATUS:-}"
+          shadowsocks_rust_status="${M1_SHADOWSOCKS_RUST_SETUP_STATUS:-}"
           case "$sing_box_status" in
             ''|*[!0-9]*) echo "invalid persisted sing-box setup status" >&2; exit 1 ;;
           esac

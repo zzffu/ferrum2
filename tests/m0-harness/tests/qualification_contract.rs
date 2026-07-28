@@ -2,13 +2,13 @@
 mod qualification;
 
 use qualification::{
-    CaseFailure, CaseSpec, HostedContext, QualificationOps, Reference, SetupAvailability,
-    execute_hosted, execute_with_setup, validate_hosted,
+    CASES, CaseFailure, CaseSpec, Direction, HostedContext, Method, QualificationOps, Reference,
+    SetupAvailability, execute_hosted, execute_with_setup, validate_hosted,
 };
 
 // This table is the explicit disposition for the 15 OS/process/socket helper tests
 // removed from libtest discovery. "hosted" means the claim is observed by every
-// runnable M0-INT case; "quality" means the same-SHA local lifecycle gate owns it;
+// runnable M1-INT case; "quality" means the same-SHA local lifecycle gate owns it;
 // "discarded-mechanic" means the assertion described an implementation detail
 // rather than a release outcome.
 const REMOVED_HELPER_CLAIMS: [(&str, &str); 15] = [
@@ -75,12 +75,32 @@ const REMOVED_HELPER_CLAIMS: [(&str, &str); 15] = [
 struct FakeOps {
     fail_provision: Option<Reference>,
     fail_case: Option<&'static str>,
+    panic_case: Option<&'static str>,
     provisioned: Vec<Reference>,
     attempted: Vec<&'static str>,
 }
 
 fn all_ready() -> SetupAvailability {
     SetupAvailability::from_provider_status(Some("0"), Some("0"))
+}
+
+fn case_ids_for(reference: Reference) -> Vec<&'static str> {
+    CASES
+        .iter()
+        .filter(|case| case.reference == reference)
+        .map(|case| case.id)
+        .collect()
+}
+
+fn assert_setup_root(lines: [String; 12], failed: Reference, root: &str) {
+    for (case, line) in CASES.iter().zip(lines) {
+        let expected = if case.reference == failed {
+            format!("case_id={} status=FAIL canonical_root={root}", case.id)
+        } else {
+            format!("case_id={} status=PASS", case.id)
+        };
+        assert_eq!(line, expected);
+    }
 }
 
 impl QualificationOps for FakeOps {
@@ -95,11 +115,59 @@ impl QualificationOps for FakeOps {
 
     fn run_case(&mut self, case: CaseSpec) -> Result<(), CaseFailure> {
         self.attempted.push(case.id);
+        assert_ne!(self.panic_case, Some(case.id), "injected case panic");
         if self.fail_case == Some(case.id) {
             Err(CaseFailure::new(case.case_root()))
         } else {
             Ok(())
         }
+    }
+}
+
+#[test]
+fn case_plan_is_the_frozen_twelve_tuple_matrix() {
+    use Direction::{FerrumClient as Ferrum, ReferenceClient as Client};
+    use Method::{Aes128Gcm as Aes128, Aes256Gcm as Aes256, ChaCha20Poly1305 as ChaCha};
+    use Reference::{ShadowsocksRust, SingBox};
+
+    assert_eq!(
+        CASES.map(|case| (case.id, case.method, case.reference, case.direction)),
+        [
+            ("M1-INT-001", Aes128, SingBox, Ferrum),
+            ("M1-INT-002", Aes128, ShadowsocksRust, Ferrum),
+            ("M1-INT-003", Aes128, SingBox, Client),
+            ("M1-INT-004", Aes128, ShadowsocksRust, Client),
+            ("M1-INT-005", Aes256, SingBox, Ferrum),
+            ("M1-INT-006", Aes256, ShadowsocksRust, Ferrum),
+            ("M1-INT-007", Aes256, SingBox, Client),
+            ("M1-INT-008", Aes256, ShadowsocksRust, Client),
+            ("M1-INT-009", ChaCha, SingBox, Ferrum),
+            ("M1-INT-010", ChaCha, ShadowsocksRust, Ferrum),
+            ("M1-INT-011", ChaCha, SingBox, Client),
+            ("M1-INT-012", ChaCha, ShadowsocksRust, Client),
+        ]
+    );
+    for (method, name, psk) in [
+        (
+            Aes128,
+            "2022-blake3-aes-128-gcm",
+            "AAECAwQFBgcICQoLDA0ODw==",
+        ),
+        (
+            Aes256,
+            "2022-blake3-aes-256-gcm",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        ),
+        (
+            ChaCha,
+            "2022-blake3-chacha20-poly1305",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        ),
+    ] {
+        assert_eq!(
+            (method.canonical_name(), method.synthetic_psk()),
+            (name, psk)
+        );
     }
 }
 
@@ -207,15 +275,11 @@ fn unavailable_setup_skips_that_reference_and_continues_the_ready_reference() {
     let report = execute_with_setup(availability, &mut ops);
 
     assert_eq!(ops.provisioned, [Reference::ShadowsocksRust]);
-    assert_eq!(ops.attempted, ["M0-INT-002", "M0-INT-004"]);
-    assert_eq!(
+    assert_eq!(ops.attempted, case_ids_for(Reference::ShadowsocksRust));
+    assert_setup_root(
         report.summary_lines(),
-        [
-            "case_id=M0-INT-001 status=FAIL canonical_root=provision-sing-box",
-            "case_id=M0-INT-002 status=PASS",
-            "case_id=M0-INT-003 status=FAIL canonical_root=provision-sing-box",
-            "case_id=M0-INT-004 status=PASS",
-        ]
+        Reference::SingBox,
+        "provision-sing-box",
     );
     assert!(!report.success());
 }
@@ -233,15 +297,11 @@ fn provision_failure_marks_only_that_reference_and_does_not_mask_the_other() {
         ops.provisioned,
         [Reference::SingBox, Reference::ShadowsocksRust]
     );
-    assert_eq!(ops.attempted, ["M0-INT-002", "M0-INT-004"]);
-    assert_eq!(
+    assert_eq!(ops.attempted, case_ids_for(Reference::ShadowsocksRust));
+    assert_setup_root(
         report.summary_lines(),
-        [
-            "case_id=M0-INT-001 status=FAIL canonical_root=provision-sing-box",
-            "case_id=M0-INT-002 status=PASS",
-            "case_id=M0-INT-003 status=FAIL canonical_root=provision-sing-box",
-            "case_id=M0-INT-004 status=PASS",
-        ]
+        Reference::SingBox,
+        "provision-sing-box",
     );
     assert!(!report.success());
 }
@@ -249,42 +309,48 @@ fn provision_failure_marks_only_that_reference_and_does_not_mask_the_other() {
 #[test]
 fn one_case_failure_does_not_prevent_later_cases() {
     let mut ops = FakeOps {
-        fail_case: Some("M0-INT-001"),
+        fail_case: Some("M1-INT-001"),
+        ..FakeOps::default()
+    };
+
+    let report = execute_with_setup(all_ready(), &mut ops);
+
+    assert_eq!(ops.attempted, CASES.map(|case| case.id));
+    let lines = report.summary_lines();
+    assert_eq!(
+        lines[0],
+        "case_id=M1-INT-001 status=FAIL canonical_root=case-M1-INT-001"
+    );
+    assert_eq!(lines[11], "case_id=M1-INT-012 status=PASS");
+    assert!(!report.success());
+}
+
+#[test]
+fn case_panic_fails_that_row_and_does_not_prevent_later_cases() {
+    let mut ops = FakeOps {
+        panic_case: Some("M1-INT-006"),
         ..FakeOps::default()
     };
 
     let report = execute_with_setup(all_ready(), &mut ops);
 
     assert_eq!(
-        ops.attempted,
-        ["M0-INT-001", "M0-INT-002", "M0-INT-003", "M0-INT-004"]
+        report.summary_lines()[5],
+        "case_id=M1-INT-006 status=FAIL canonical_root=case-M1-INT-006"
     );
-    assert_eq!(
-        report.summary_lines(),
-        [
-            "case_id=M0-INT-001 status=FAIL canonical_root=case-M0-INT-001",
-            "case_id=M0-INT-002 status=PASS",
-            "case_id=M0-INT-003 status=PASS",
-            "case_id=M0-INT-004 status=PASS",
-        ]
-    );
+    assert_eq!(report.summary_lines()[11], "case_id=M1-INT-012 status=PASS");
     assert!(!report.success());
 }
 
 #[test]
-fn four_passes_are_required_for_success_and_summary_is_minimal() {
+fn twelve_passes_are_required_for_success_and_summary_is_minimal() {
     let mut ops = FakeOps::default();
     let report = execute_with_setup(all_ready(), &mut ops);
 
     assert!(report.success());
     assert_eq!(
         report.summary_lines(),
-        [
-            "case_id=M0-INT-001 status=PASS",
-            "case_id=M0-INT-002 status=PASS",
-            "case_id=M0-INT-003 status=PASS",
-            "case_id=M0-INT-004 status=PASS",
-        ]
+        CASES.map(|case| format!("case_id={} status=PASS", case.id))
     );
 }
 

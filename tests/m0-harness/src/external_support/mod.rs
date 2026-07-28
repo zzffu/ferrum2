@@ -1,4 +1,4 @@
-use crate::qualification::{CaseFailure, CaseSpec, Direction, QualificationOps, Reference};
+use crate::qualification::{CaseFailure, CaseSpec, Direction, Method, QualificationOps, Reference};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -12,8 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const SYNTHETIC_PSK: &str = "AAECAwQFBgcICQoLDA0ODw==";
-const METHOD: &str = "2022-blake3-aes-128-gcm";
 const READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 const CASE_TIMEOUT: Duration = Duration::from_secs(60);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -55,7 +53,7 @@ impl QualificationOps for HostedOperations {
     }
 
     fn run_case(&mut self, case: CaseSpec) -> Result<(), CaseFailure> {
-        match catch_sanitized(|| run_case(case.reference, case.direction)) {
+        match catch_sanitized(|| run_case(case)) {
             Ok(()) => Ok(()),
             Err(payload) => {
                 eprintln!(
@@ -473,8 +471,7 @@ fn capture_output(mut stream: impl Read + Send + 'static) -> CaptureReader {
 }
 
 fn sanitize_capture(capture: Capture) -> String {
-    let text = String::from_utf8_lossy(&capture.bytes)
-        .replace(SYNTHETIC_PSK, "[redacted]")
+    let text = redact_synthetic_psks(&String::from_utf8_lossy(&capture.bytes))
         .replace('\r', "\\r")
         .replace('\n', "\\n");
     if capture.truncated {
@@ -482,6 +479,11 @@ fn sanitize_capture(capture: Capture) -> String {
     } else {
         text
     }
+}
+
+fn redact_synthetic_psks(text: &str) -> String {
+    text.replace(Method::Aes128Gcm.synthetic_psk(), "[redacted]")
+        .replace(Method::Aes256Gcm.synthetic_psk(), "[redacted]")
 }
 
 fn provision_reference(reference: Reference) {
@@ -513,7 +515,13 @@ fn provision_reference(reference: Reference) {
     deadline.check("final reference provision verification");
 }
 
-fn run_case(reference: Reference, direction: Direction) {
+fn run_case(case: CaseSpec) {
+    let CaseSpec {
+        method,
+        reference,
+        direction,
+        ..
+    } = case;
     let deadline = CaseDeadline::start();
     let child_baseline = ACTIVE_CHILDREN.load(Ordering::SeqCst);
     let pin = load_pin(reference);
@@ -547,9 +555,11 @@ fn run_case(reference: Reference, direction: Direction) {
         trace: Arc::clone(&trace),
     };
     let (config_checksum, process_evidence) = match direction {
-        Direction::FerrumClient => run_ferrum_client_case(reference, &reference_binary, context),
+        Direction::FerrumClient => {
+            run_ferrum_client_case(method, reference, &reference_binary, context)
+        }
         Direction::ReferenceClient => {
-            run_reference_client_case(reference, &reference_binary, context)
+            run_reference_client_case(method, reference, &reference_binary, context)
         }
     };
 
@@ -570,9 +580,10 @@ fn run_case(reference: Reference, direction: Direction) {
     );
     deadline.check("final interop evidence");
     eprintln!(
-        "M0 interop evidence: reference={reference:?}, direction={direction:?}, \
+        "M1 interop evidence: method={}, reference={reference:?}, direction={direction:?}, \
          asset_sha256={}, config_sha256={config_checksum}, command_category=black-box-process, \
          process={process_evidence}, target={target_evidence}, result=success",
+        method.canonical_name(),
         pin.sha256
     );
 }
@@ -590,6 +601,7 @@ struct CaseContext<'a> {
 }
 
 fn run_ferrum_client_case(
+    method: Method,
     reference: Reference,
     reference_binary: &Path,
     context: CaseContext<'_>,
@@ -605,7 +617,7 @@ fn run_ferrum_client_case(
         application_ack,
         trace,
     } = context;
-    let reference_config = reference_server_config(reference, shadowsocks);
+    let reference_config = reference_server_config(method, reference, shadowsocks);
     let reference_config_path = write_config(directory, "reference-server.json", &reference_config);
     ports.release_shadowsocks();
     let mut reference_command =
@@ -624,7 +636,9 @@ fn run_ferrum_client_case(
 
     let ferrum_config = format!(
         "schema_version = 1\n\n[client]\nlisten = \"{proxy}\"\nserver = \"{shadowsocks}\"\n\n\
-         [shadowsocks]\nmethod = \"{METHOD}\"\npsk = \"{SYNTHETIC_PSK}\"\n"
+         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
+        method.canonical_name(),
+        method.synthetic_psk()
     );
     let ferrum_config_path = write_config(directory, "ferrum-client.toml", &ferrum_config);
     ports.release_proxy();
@@ -659,6 +673,7 @@ fn run_ferrum_client_case(
 }
 
 fn run_reference_client_case(
+    method: Method,
     reference: Reference,
     reference_binary: &Path,
     context: CaseContext<'_>,
@@ -676,7 +691,9 @@ fn run_reference_client_case(
     } = context;
     let ferrum_config = format!(
         "schema_version = 1\n\n[server]\nlisten = \"{shadowsocks}\"\n\n\
-         [shadowsocks]\nmethod = \"{METHOD}\"\npsk = \"{SYNTHETIC_PSK}\"\n"
+         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
+        method.canonical_name(),
+        method.synthetic_psk()
     );
     let ferrum_config_path = write_config(directory, "ferrum-server.toml", &ferrum_config);
     ports.release_shadowsocks();
@@ -690,7 +707,7 @@ fn run_reference_client_case(
         "ferrum Shadowsocks listener",
     );
 
-    let reference_config = reference_client_config(reference, shadowsocks, proxy);
+    let reference_config = reference_client_config(method, reference, shadowsocks, proxy);
     let reference_config_path = write_config(directory, "reference-client.json", &reference_config);
     ports.release_proxy();
     let mut reference_command =
@@ -1315,20 +1332,22 @@ fn ipv4_address(listener: &TcpListener) -> SocketAddrV4 {
     }
 }
 
-fn reference_server_config(reference: Reference, address: SocketAddrV4) -> String {
+fn reference_server_config(method: Method, reference: Reference, address: SocketAddrV4) -> String {
+    let method_name = method.canonical_name();
+    let psk = method.synthetic_psk();
     match reference {
         Reference::SingBox => format!(
             "{{\"log\":{{\"level\":\"error\",\"timestamp\":false}},\
              \"inbounds\":[{{\"type\":\"shadowsocks\",\"tag\":\"ss-in\",\
              \"listen\":\"127.0.0.1\",\"listen_port\":{},\"network\":\"tcp\",\
-             \"method\":\"{METHOD}\",\"password\":\"{SYNTHETIC_PSK}\"}}],\
+             \"method\":\"{method_name}\",\"password\":\"{psk}\"}}],\
              \"outbounds\":[{{\"type\":\"direct\",\"tag\":\"direct\"}}],\
              \"route\":{{\"final\":\"direct\"}}}}",
             address.port()
         ),
         Reference::ShadowsocksRust => format!(
             "{{\"server\":\"127.0.0.1\",\"server_port\":{},\
-             \"password\":\"{SYNTHETIC_PSK}\",\"method\":\"{METHOD}\",\
+             \"password\":\"{psk}\",\"method\":\"{method_name}\",\
              \"mode\":\"tcp_only\"}}",
             address.port()
         ),
@@ -1336,18 +1355,21 @@ fn reference_server_config(reference: Reference, address: SocketAddrV4) -> Strin
 }
 
 fn reference_client_config(
+    method: Method,
     reference: Reference,
     server: SocketAddrV4,
     proxy: SocketAddrV4,
 ) -> String {
+    let method_name = method.canonical_name();
+    let psk = method.synthetic_psk();
     match reference {
         Reference::SingBox => format!(
             "{{\"log\":{{\"level\":\"error\",\"timestamp\":false}},\
              \"inbounds\":[{{\"type\":\"socks\",\"tag\":\"socks-in\",\
              \"listen\":\"127.0.0.1\",\"listen_port\":{}}}],\
              \"outbounds\":[{{\"type\":\"shadowsocks\",\"tag\":\"ss-out\",\
-             \"server\":\"127.0.0.1\",\"server_port\":{},\"method\":\"{METHOD}\",\
-             \"password\":\"{SYNTHETIC_PSK}\",\"network\":\"tcp\"}}],\
+             \"server\":\"127.0.0.1\",\"server_port\":{},\"method\":\"{method_name}\",\
+             \"password\":\"{psk}\",\"network\":\"tcp\"}}],\
              \"route\":{{\"final\":\"ss-out\"}}}}",
             proxy.port(),
             server.port()
@@ -1355,7 +1377,7 @@ fn reference_client_config(
         Reference::ShadowsocksRust => format!(
             "{{\"local_address\":\"127.0.0.1\",\"local_port\":{},\
              \"server\":\"127.0.0.1\",\"server_port\":{},\
-             \"password\":\"{SYNTHETIC_PSK}\",\"method\":\"{METHOD}\",\
+             \"password\":\"{psk}\",\"method\":\"{method_name}\",\
              \"mode\":\"tcp_only\"}}",
             proxy.port(),
             server.port()
@@ -1547,7 +1569,7 @@ fn panic_diagnostic(payload: Box<dyn std::any::Any + Send>) -> String {
     } else {
         "non-text panic".to_owned()
     };
-    text.replace(SYNTHETIC_PSK, "[redacted]")
+    redact_synthetic_psks(&text)
         .replace('\r', "\\r")
         .replace('\n', "\\n")
         .chars()
