@@ -41,6 +41,12 @@ async fn authenticated_semantic_table_all_profiles_fails_before_replay_or_owned_
             NOW,
             &[3, 2, 0xc3, 0xa9, 0, 80, 0, 1, 0],
         ),
+        (
+            DetectionReason::AddressBounds,
+            0,
+            NOW,
+            &[3, 3, b'a', b'b', b'c', 0, 0, 0, 1, 0],
+        ),
         (DetectionReason::AddressBounds, 0, NOW, &[3, 3, b'a', b'b']),
         (
             DetectionReason::AddressBounds,
@@ -63,6 +69,12 @@ async fn authenticated_semantic_table_all_profiles_fails_before_replay_or_owned_
             &[1, 127, 0, 0, 1, 0, 80, 0, 2, 0],
         ),
         (
+            DetectionReason::PaddingBounds,
+            0,
+            NOW,
+            &[3, 3, b'a', b'b', b'c', 0, 80, 3, 133, 0],
+        ),
+        (
             DetectionReason::EmptyRequest,
             0,
             NOW,
@@ -82,11 +94,10 @@ async fn authenticated_semantic_table_all_profiles_fails_before_replay_or_owned_
             let first = profile.initial_request_read_bytes();
             let (io, observation) =
                 RecordingIo::new([wire[..first].to_vec(), wire[first..].to_vec()]);
-            let error = inbound
-                .accept_stream(io)
-                .await
-                .err()
-                .expect("invalid semantic request");
+            let error = match inbound.accept_stream(io).await {
+                Ok(_) => panic!("{profile:?} case {index}: invalid request returned owned session"),
+                Err(error) => error,
+            };
             assert_eq!(error, ShadowsocksError::Detection(*reason));
             assert_eq!(replay.entry_count().expect("snapshot"), 0);
             assert_eq!(observation.lock().expect("observation").abortive_calls, 1);

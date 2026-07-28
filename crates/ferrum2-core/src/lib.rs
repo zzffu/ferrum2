@@ -93,8 +93,8 @@ impl TargetAddr {
 
     /// Constructs a bounded-domain target and rejects port zero.
     pub fn domain(host: &str, port: u16) -> Result<Self, TargetAddrError> {
-        let host = DomainName::new(host).map_err(TargetAddrError::Domain)?;
         let port = NonZeroU16::new(port).ok_or(TargetAddrError::PortZero)?;
+        let host = DomainName::new(host).map_err(TargetAddrError::Domain)?;
         Ok(Self {
             host: TargetHost::Domain(host),
             port,
@@ -336,6 +336,10 @@ mod tests {
         assert_eq!(
             DomainName::new(&"a".repeat(256)).unwrap_err(),
             DomainNameError::TooLong
+        );
+        assert_eq!(
+            TargetAddr::domain("example.test", 0).unwrap_err(),
+            TargetAddrError::PortZero
         );
     }
 
