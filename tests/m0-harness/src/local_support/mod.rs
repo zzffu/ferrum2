@@ -646,6 +646,39 @@ pub fn write_server_config_with_psk(
     metrics: Option<SocketAddrV4>,
     psk: &str,
 ) -> io::Result<PathBuf> {
+    write_server_config_variant(directory, listen, metrics, psk, "")
+}
+
+pub fn write_tcp_only_server_config(
+    directory: &Path,
+    listen: SocketAddrV4,
+    metrics: Option<SocketAddrV4>,
+) -> io::Result<PathBuf> {
+    write_tcp_only_server_config_with_psk(directory, listen, metrics, SYNTHETIC_PSK)
+}
+
+pub fn write_tcp_only_server_config_with_psk(
+    directory: &Path,
+    listen: SocketAddrV4,
+    metrics: Option<SocketAddrV4>,
+    psk: &str,
+) -> io::Result<PathBuf> {
+    write_server_config_variant(
+        directory,
+        listen,
+        metrics,
+        psk,
+        "\n[udp]\nenabled = false\n",
+    )
+}
+
+fn write_server_config_variant(
+    directory: &Path,
+    listen: SocketAddrV4,
+    metrics: Option<SocketAddrV4>,
+    psk: &str,
+    udp: &str,
+) -> io::Result<PathBuf> {
     let metrics = metrics
         .map(|address| format!("\n[metrics]\nlisten = \"{address}\"\n"))
         .unwrap_or_default();
@@ -658,6 +691,7 @@ pub fn write_server_config_with_psk(
          [shadowsocks]\n\
          method = \"2022-blake3-aes-128-gcm\"\n\
          psk = \"{psk}\"\n\
+         {udp}\
          {metrics}"
     );
     let path = directory.join("server.toml");

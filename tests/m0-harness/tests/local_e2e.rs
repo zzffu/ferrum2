@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use local_support::{
     ChildGuard, TCP_METHOD_CONFIGS, rewrite_config_method, unused_loopback, wait_for_listener,
-    write_client_config, write_client_config_with_psk, write_server_config,
-    write_server_config_with_psk,
+    write_client_config, write_client_config_with_psk, write_tcp_only_server_config,
+    write_tcp_only_server_config_with_psk,
 };
 
 fn start_echo() -> (SocketAddrV4, thread::JoinHandle<Vec<u8>>) {
@@ -173,8 +173,8 @@ fn success_bounded_method_matrix_preserves_bytes_and_half_close() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let server_address = unused_loopback();
         let client_address = unused_loopback();
-        let server_config =
-            write_server_config(directory.path(), server_address, None).expect("server config");
+        let server_config = write_tcp_only_server_config(directory.path(), server_address, None)
+            .expect("server config");
         let client_config =
             write_client_config(directory.path(), client_address, server_address, None)
                 .expect("client config");
@@ -229,8 +229,8 @@ fn success_reply_uses_exact_opened_shadowsocks_socket_local_endpoint() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let server_address = unused_loopback();
     let client_address = unused_loopback();
-    let server_config =
-        write_server_config(directory.path(), server_address, None).expect("server config");
+    let server_config = write_tcp_only_server_config(directory.path(), server_address, None)
+        .expect("server config");
     let (bridge_address, bridge_peer, bridge) = start_recording_bridge(server_address);
     let client_config = write_client_config(directory.path(), client_address, bridge_address, None)
         .expect("client config");
@@ -274,7 +274,7 @@ fn failures_unauthenticated_request_never_connects_target() {
     };
     let server_address = unused_loopback();
     let client_address = unused_loopback();
-    let server_config = write_server_config_with_psk(
+    let server_config = write_tcp_only_server_config_with_psk(
         directory.path(),
         server_address,
         None,
@@ -324,8 +324,8 @@ fn failures_pre_success_connect_and_post_success_target_refusal() {
 
     let server_address = unused_loopback();
     let client_address = unused_loopback();
-    let server_config =
-        write_server_config(directory.path(), server_address, None).expect("server config");
+    let server_config = write_tcp_only_server_config(directory.path(), server_address, None)
+        .expect("server config");
     let client_config = write_client_config(directory.path(), client_address, server_address, None)
         .expect("client config");
     let refused_target = unused_loopback();

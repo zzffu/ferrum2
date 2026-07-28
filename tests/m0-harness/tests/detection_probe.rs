@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::{AeadInOut, Aes128Gcm, KeyInit, Nonce};
 use blake3::derive_key;
-use local_support::{ChildGuard, unused_loopback, wait_for_bound, write_server_config};
+use local_support::{ChildGuard, unused_loopback, wait_for_bound, write_tcp_only_server_config};
 
 const PSK: [u8; 16] = [
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
@@ -198,8 +198,8 @@ fn exact_47_native_connections_reset_and_never_reach_target() {
         std::net::SocketAddr::V4(address) => address,
         std::net::SocketAddr::V6(_) => unreachable!("IPv4 target"),
     };
-    let config =
-        write_server_config(directory.path(), server_address, None).expect("server config");
+    let config = write_tcp_only_server_config(directory.path(), server_address, None)
+        .expect("server config");
     let mut server = ChildGuard::spawn("ferrum2-server", &config);
     wait_for_bound(&mut server, server_address);
 

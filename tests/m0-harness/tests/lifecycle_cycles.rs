@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use local_support::{
     ChildExit, ChildGuard, LoopbackReservation, MetricsReadinessFailure, TCP_METHOD_CONFIGS,
     active_child_count, bind_loopback_listener, reserve_loopback, reserve_unused_loopback,
-    rewrite_config_method, wait_for_metrics_ready, write_client_config, write_server_config,
+    rewrite_config_method, wait_for_metrics_ready, write_client_config,
+    write_tcp_only_server_config,
 };
 
 const CYCLES_PER_CATEGORY: usize = 20;
@@ -415,7 +416,8 @@ fn success_cycle(
     let client_metrics = client_metrics_reservation.address();
     let (target_listener, target) = reserve_loopback();
     let server_config =
-        write_server_config(directory.path(), server, Some(server_metrics)).expect("server config");
+        write_tcp_only_server_config(directory.path(), server, Some(server_metrics))
+            .expect("server config");
     let client_config = write_client_config(directory.path(), client, server, Some(client_metrics))
         .expect("client config");
     rewrite_config_method(&server_config, method).expect("server method");
@@ -493,8 +495,8 @@ fn authentication_reject_cycle(
     target_listener
         .set_nonblocking(true)
         .expect("nonblocking recording target");
-    let config =
-        write_server_config(directory.path(), proxy, Some(metrics)).expect("server config");
+    let config = write_tcp_only_server_config(directory.path(), proxy, Some(metrics))
+        .expect("server config");
     rewrite_config_method(&config, method).expect("server method");
     let addresses = [proxy, metrics, target];
     let child = match spawn_reserved_child(
@@ -601,7 +603,8 @@ fn cooperative_cancellation_cycle(
     let client_metrics = client_metrics_reservation.address();
     let (target_listener, target) = recording_target();
     let server_config =
-        write_server_config(directory.path(), server, Some(server_metrics)).expect("server config");
+        write_tcp_only_server_config(directory.path(), server, Some(server_metrics))
+            .expect("server config");
     let client_config = write_client_config(directory.path(), client, server, Some(client_metrics))
         .expect("client config");
     rewrite_config_method(&server_config, method).expect("server method");
@@ -680,8 +683,8 @@ fn forced_termination_cycle(
     let metrics_reservation = reserve_unused_loopback();
     let metrics = metrics_reservation.address();
     let (target_listener, target) = recording_target();
-    let config =
-        write_server_config(directory.path(), proxy, Some(metrics)).expect("server config");
+    let config = write_tcp_only_server_config(directory.path(), proxy, Some(metrics))
+        .expect("server config");
     rewrite_config_method(&config, method).expect("server method");
     let addresses = [proxy, metrics, target];
     let mut child = match spawn_reserved_child(
@@ -761,7 +764,7 @@ fn unrelated_metrics_responder_cannot_reset_fixed_readiness_deadline() {
     let proxy = proxy_reservation.address();
     let metrics_reservation = reserve_unused_loopback();
     let metrics = metrics_reservation.address();
-    let config = write_server_config(directory.path(), proxy, Some(metrics))
+    let config = write_tcp_only_server_config(directory.path(), proxy, Some(metrics))
         .expect("deadline server config");
     let mut child = spawn_reserved_child(
         "ferrum2-server",
@@ -828,8 +831,9 @@ fn foreign_listener_is_not_accepted_as_child_readiness() {
             let client = client_reservation.address();
             let client_metrics_reservation = reserve_unused_loopback();
             let client_metrics = client_metrics_reservation.address();
-            let server_config = write_server_config(directory.path(), server, Some(server_metrics))
-                .expect("foreign regression server config");
+            let server_config =
+                write_tcp_only_server_config(directory.path(), server, Some(server_metrics))
+                    .expect("foreign regression server config");
             let client_config =
                 write_client_config(directory.path(), client, server, Some(client_metrics))
                     .expect("foreign regression client config");
