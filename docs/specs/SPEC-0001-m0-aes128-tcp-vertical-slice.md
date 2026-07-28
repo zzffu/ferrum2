@@ -623,8 +623,15 @@ equivalence条件成立时，可以使用执行前的TEST/ticket amendment而不
     commit 的一个 run/attempt 中 11 个固定 job 全部 success。
 12. **AC-12 Scope/provenance:** M0-SCOPE-001 通过；固定从
     `b41c6127b1834ebd97246451fd92bafea50cb205` 到 integrated `HEAD` 的完整 diff
-    不含 M0 non-goals、external binaries、generated results 或真实 secrets；所有
-    fixture/reference/locked dependencies有来源和license review记录；dependency
+    仍被逐项枚举。仅用户明确授权的既有 skill optimization
+    `d1ef4bcfb081a89c5da1185dcb7c57606f8ec77e` 中 23 个 exact out-of-band
+    control-plane paths 不进入 M0 内容/provenance 扫描；该例外必须同时固定
+    `d1ef4bcf` 的精确 parent、完整 commit path set、逐路径 blob identity，并要求
+    `d1ef4bcf` 是 `HEAD` ancestor。任一路径、内容、rename、descendant、near-miss
+    或额外 spillover 不匹配都 fail closed；不得使用目录 glob、移动 baseline 或
+    缩小 diff。其余完整 M0 diff 不含 non-goals、external binaries、generated
+    results 或真实 secrets；所有 fixture/reference/locked dependencies有来源和
+    license review记录；dependency
     当前selected profile中production dependency surface精确等于ADR-0001经
     ADR-0009部分取代后的集合；harness direct dev dependencies与lock hunk精确等于
     ADR-0011经ADR-0015部分取代后的allowlist（两个primitive edges加一个

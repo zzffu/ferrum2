@@ -29,7 +29,7 @@ acceptance = [
   "M0-DETECT-002 passes separately on the native Windows MSVC and Linux GNU runners; one host result cannot substitute for the other",
   "M0-GATE-001 and M0-GATE-002 both pass on the same integrated commit, with every authoritative command executed and exit status recorded",
   "One separately authorized GitHub Actions push run has all eleven required jobs successful in one run ID and attempt at the exact approved integration GITHUB_SHA; missing, skipped, unavailable, or differently attributed results remain FAIL/BLOCKED",
-  "M0-SCOPE-001 audits the complete b41c6127b1834ebd97246451fd92bafea50cb205...HEAD diff and finds no non-goal code, real secret, external binary, generated result, or unreviewed fixture and dependency provenance",
+  "M0-SCOPE-001 enumerates the complete b41c6127b1834ebd97246451fd92bafea50cb205...HEAD diff; only the user-authorized exact 23-path skill snapshot at d1ef4bcfb081a89c5da1185dcb7c57606f8ec77e is out-of-band from M0 content/provenance scanning after exact parent, full commit path set, ancestry, and per-path blob identity checks, while every other path is audited and no wildcard, rename, near-miss, spillover, non-goal code, real secret, external binary, generated result, or unreviewed fixture/dependency provenance is accepted",
   "Any ADR-0016 evidence substitution is mapped before execution, preserves every required platform/reference/direction/failure claim, runs on the new exact candidate SHA, and cannot retroactively qualify an old failed run",
 ]
 +++
@@ -115,6 +115,11 @@ remote、push、创建PR或触发workflow；这些外部动作需要用户单独
 - 完整test name、linker discovery或evidence helper的机械修复不要求新产品ADR，
   但必须fail-closed、在新candidate执行、重跑受影响job，并保持当前job/runner/
   permission/timeout与scope matrix。run `30301746374`仍固定为2/11，不能追认。
+- 另一个上下文已提交的 skill optimization 只按用户明确授权作为 exact
+  `d1ef4bcfb081a89c5da1185dcb7c57606f8ec77e` snapshot out-of-band：固定精确
+  parent、完整 commit path set、23 个路径与逐项 blob identity；不扫描这些路径的
+  M0 内容，但任何 wildcard、遗漏、额外 path、rename、near-miss、blob drift 或
+  其他路径排除都 FAIL。其余 baseline diff 继续执行原 M0 scope/provenance gate。
 
 ## Validation commands
 

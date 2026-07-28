@@ -634,6 +634,16 @@ M0 的固定审计基线是 bootstrap 前的
 ancestor，再审计该 commit 到同一 integrated `HEAD` 的完整差异；不得改用移动的
 branch name、人工挑选 path 或缩小 diff。
 
+唯一 out-of-band 分类是用户明确授权的既有 skill optimization commit
+`d1ef4bcfb081a89c5da1185dcb7c57606f8ec77e` 中 23 个 exact control-plane
+paths。`scope_audit` 仍枚举完整 baseline diff，但仅在以下条件全部成立时跳过这些
+路径的 M0 内容/provenance scan：`d1ef4bcf` 的精确 parent 与完整 commit path set
+匹配；它是 `HEAD` ancestor；23 个路径逐项精确匹配且 `HEAD` blob 与
+`d1ef4bcf` blob 相同。任何 omission、extra path、rename、descendant、
+suffix/extension、same-directory sibling、wildcard/prefix 或 blob drift 都必须
+fail closed。该分类不授权修改这些文件，也不排除 `.codex/agents/qa.toml`、
+`docs/ci-status.md`、`docs/roadmap.md` 或 M0-T07/T08 ticket 的正常内容扫描。
+
 `scope_audit` 必须自动拒绝：不在 M0 tickets/control-doc allowlist 的路径、
 `target/`/coverage/profile/pcap/log/result、可执行或压缩的 external artifact、
 缺 `PROVENANCE.toml`/source/license-or-rights review/SHA-256/expected
@@ -647,6 +657,8 @@ b41c6127b1834ebd97246451fd92bafea50cb205...HEAD` 和
 
 - 所有变更落在批准的 M0 product/control ownership，未实现 AES-256、ChaCha、UDP、
   public UDP inbound、domain/DNS、multi-user/EIH、routing/management 或性能范围；
+- out-of-band skill snapshot 只包含上述 exact 23 paths，commit lineage/path set/blob
+  identity 完全匹配，且没有 wildcard、rename、额外路径或后续内容变更；
 - 无 real secret、production endpoint、外部 binary、generated result或未审 fixture；
 - production dependency/member/method surface与 ADR-0001 经 ADR-0009 部分取代后
   的 baseline相等；ADR-0011经ADR-0015部分取代后只允许harness两个test-only
