@@ -28,8 +28,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -z "$(git status --porcelain)"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if ! status_output="$(git status --porcelain)"; then
+            echo "git status failed" >&2
+            exit 1
+          fi
+          test -z "$status_output"
+          if ! head_sha="$(git rev-parse HEAD)"; then
+            echo "git rev-parse HEAD failed" >&2
+            exit 1
+          fi
+          test "$head_sha" = "$GITHUB_SHA"
       - name: Record provider and toolchain evidence
         shell: bash
         run: |
@@ -67,8 +75,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -z "$(git status --porcelain)"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if ! status_output="$(git status --porcelain)"; then
+            echo "git status failed" >&2
+            exit 1
+          fi
+          test -z "$status_output"
+          if ! head_sha="$(git rev-parse HEAD)"; then
+            echo "git rev-parse HEAD failed" >&2
+            exit 1
+          fi
+          test "$head_sha" = "$GITHUB_SHA"
       - name: Record provider evidence
         shell: bash
         run: |
@@ -117,15 +133,27 @@ jobs:
         if: matrix.profile == 'windows-msvc'
         shell: pwsh
         run: |
-          if (git status --porcelain) { throw "checkout is not clean" }
-          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw "HEAD is not GITHUB_SHA" }
+          $statusOutput = git status --porcelain
+          if ($LASTEXITCODE -ne 0) { throw "git status failed" }
+          if ($statusOutput) { throw "checkout is not clean" }
+          $headSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed" }
+          if ($headSha -ne $env:GITHUB_SHA) { throw "HEAD is not GITHUB_SHA" }
       - name: Verify clean current SHA on Linux
         if: matrix.profile != 'windows-msvc'
         shell: bash
         run: |
           set -euo pipefail
-          test -z "$(git status --porcelain)"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if ! status_output="$(git status --porcelain)"; then
+            echo "git status failed" >&2
+            exit 1
+          fi
+          test -z "$status_output"
+          if ! head_sha="$(git rev-parse HEAD)"; then
+            echo "git rev-parse HEAD failed" >&2
+            exit 1
+          fi
+          test "$head_sha" = "$GITHUB_SHA"
       - name: Record Windows provider evidence
         if: matrix.profile == 'windows-msvc'
         shell: pwsh
@@ -157,6 +185,12 @@ jobs:
           uname -a
           cc --version
           ld --version
+      - name: Record GNU host glibc identity
+        if: matrix.profile == 'linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldd --version
       - name: Build and run native Windows artifacts
         if: matrix.profile == 'windows-msvc'
         shell: pwsh
@@ -277,8 +311,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -z "$(git status --porcelain)"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if ! status_output="$(git status --porcelain)"; then
+            echo "git status failed" >&2
+            exit 1
+          fi
+          test -z "$status_output"
+          if ! head_sha="$(git rev-parse HEAD)"; then
+            echo "git rev-parse HEAD failed" >&2
+            exit 1
+          fi
+          test "$head_sha" = "$GITHUB_SHA"
       - name: Record provider and toolchain evidence
         shell: bash
         run: |
@@ -290,10 +332,61 @@ jobs:
           cargo -V
           cc --version
           ld --version
+      - name: Provision both pinned references independently
+        shell: bash
+        run: |
+          set -uo pipefail
+          sing_box_status=0
+          bash -euo pipefail <<'SING_BOX_SETUP' || sing_box_status=$?
+          archive="$RUNNER_TEMP/sing-box-1.13.14-linux-amd64-glibc.tar.gz"
+          directory="$RUNNER_TEMP/sing-box-1.13.14"
+          curl --fail --location --retry 3 --output "$archive" \
+            https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-1.13.14-linux-amd64-glibc.tar.gz
+          test "$(stat --format='%s' "$archive")" = "24614103"
+          echo "aae9172317c61760aae3dafcde889b2e51b7ea590c40d2b3c7ccdeae14b361b6  $archive" | sha256sum -c -
+          diff -u <(printf '%s\n' \
+            'sing-box-1.13.14-linux-amd64-glibc/' \
+            'sing-box-1.13.14-linux-amd64-glibc/LICENSE' \
+            'sing-box-1.13.14-linux-amd64-glibc/sing-box') <(tar -tzf "$archive")
+          mkdir "$directory"
+          tar -xzf "$archive" -C "$directory"
+          binary="$directory/sing-box-1.13.14-linux-amd64-glibc/sing-box"
+          test -x "$binary"
+          version_output="$("$binary" version)"
+          grep -F 'sing-box version 1.13.14' <<<"$version_output"
+          grep -F 'Revision: 25a600db24f7680ad9806ce5427bd0ab8afe1114' <<<"$version_output"
+          SING_BOX_SETUP
+
+          shadowsocks_rust_status=0
+          bash -euo pipefail <<'SHADOWSOCKS_RUST_SETUP' || shadowsocks_rust_status=$?
+          archive="$RUNNER_TEMP/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz"
+          directory="$RUNNER_TEMP/shadowsocks-rust-1.24.0"
+          curl --fail --location --retry 3 --output "$archive" \
+            https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.24.0/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz
+          test "$(stat --format='%s' "$archive")" = "11635096"
+          echo "5f528efb4e51e732352f5c69538dcc76e8cf8f6d1a240dfb5b748a67f0b05f65  $archive" | sha256sum -c -
+          diff -u <(printf '%s\n' sslocal ssserver ssurl ssmanager ssservice) <(tar -tJf "$archive")
+          mkdir "$directory"
+          tar -xJf "$archive" -C "$directory"
+          test -x "$directory/sslocal"
+          test -x "$directory/ssserver"
+          "$directory/sslocal" --version | grep -Fx 'shadowsocks 1.24.0'
+          "$directory/ssserver" --version | grep -Fx 'shadowsocks 1.24.0'
+          SHADOWSOCKS_RUST_SETUP
+
+          if [ "$sing_box_status" -ne 0 ]; then
+            echo "sing-box provider setup failed; qualification will report its provision root" >&2
+          fi
+          if [ "$shadowsocks_rust_status" -ne 0 ]; then
+            echo "shadowsocks-rust provider setup failed; qualification will report its provision root" >&2
+          fi
+          echo "provider_setup sing_box=$sing_box_status shadowsocks_rust=$shadowsocks_rust_status"
       - name: Run hosted M0 qualification
         shell: bash
         run: |
           set -euo pipefail
+          export CARGO_TARGET_DIR
+          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/m0-qualification-target.XXXXXX")"
           cargo build --workspace --bins --locked
           cargo build -p ferrum2-m0-harness --bin m0-qualification --locked
-          target/debug/m0-qualification
+          "$CARGO_TARGET_DIR/debug/m0-qualification"
