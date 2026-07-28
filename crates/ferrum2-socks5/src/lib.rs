@@ -137,7 +137,11 @@ where
 {
     type Error = SocksError;
 
-    async fn succeeded(self, bound: SocketAddr) -> Result<(), Self::Error> {
+    async fn succeeded(self, bound: std::net::SocketAddrV4) -> Result<(), Self::Error> {
+        self.succeeded_socket(SocketAddr::V4(bound)).await
+    }
+
+    async fn succeeded_socket(self, bound: SocketAddr) -> Result<(), Self::Error> {
         let mut reply = [0_u8; 22];
         reply[..3].copy_from_slice(&[SOCKS_VERSION, 0x00, 0x00]);
         let reply_len = match bound {

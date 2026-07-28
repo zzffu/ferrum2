@@ -45,7 +45,7 @@ async fn fragmented_ipv4_connect_yields_session_and_exact_success_reply() {
     let bound = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 7), 49_152);
     session
         .reply
-        .succeeded(SocketAddr::V4(bound))
+        .succeeded(bound)
         .await
         .expect("write success reply");
 
@@ -136,7 +136,11 @@ async fn ipv6_and_domain_targets_round_trip_and_ipv6_success_uses_actual_endpoin
             0,
             0,
         ));
-        session.reply.succeeded(bound).await.expect("success reply");
+        session
+            .reply
+            .succeeded_socket(bound)
+            .await
+            .expect("success reply");
         let mut reply = [0_u8; 22];
         client.read_exact(&mut reply).await.expect("IPv6 reply");
         assert_eq!(&reply[..4], &[0x05, 0x00, 0x00, 0x04]);

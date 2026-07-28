@@ -8,8 +8,8 @@ use ferrum2_crypto::{
     TcpMethodProfile,
 };
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore,
-    encode_request_first_write, encode_response_first_write,
+    ClientTcpOutbound, DetectionReason, MethodKeyAdapter, ShadowsocksError, ShadowsocksTcpInbound,
+    TcpReplayStore, encode_request_first_write, encode_response_first_write,
 };
 use serde_json::Value;
 
@@ -185,9 +185,9 @@ async fn one_shared_flow_round_trips_all_profiles_and_target_classes() {
 
     for (profile_index, profile) in TcpMethodProfile::ALL.into_iter().enumerate() {
         let key = vec![0x20 + profile_index as u8; profile.key_bytes()];
-        let keys = MethodSinglePskProvider::new(
+        let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
             MethodPsk::try_from_slice(profile, &key).expect("method PSK"),
-        );
+        ));
         let request_salt = MethodTcpSalt::try_from_slice(
             profile,
             &vec![0x40 + profile_index as u8; profile.salt_bytes()],
@@ -249,7 +249,7 @@ async fn one_shared_flow_round_trips_all_profiles_and_target_classes() {
 #[tokio::test]
 async fn wide_profile_replay_and_response_binding_use_all_32_salt_bytes() {
     let profile = TcpMethodProfile::Blake3Aes256Gcm2022;
-    let keys = MethodSinglePskProvider::new(MethodPsk::aes256([0x21; 32]));
+    let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(MethodPsk::aes256([0x21; 32])));
     let first_salt = MethodTcpSalt::try_from_slice(profile, &[0x31; 32]).expect("first salt");
     let mut second_bytes = [0x31; 32];
     second_bytes[31] = 0x32;

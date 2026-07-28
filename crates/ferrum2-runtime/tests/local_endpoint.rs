@@ -62,8 +62,8 @@ async fn stores_an_ipv4_endpoint_after_exactly_one_lookup() {
     let stream =
         RuntimeTcpStream::from_connected_with_inspector(stream, &inspector).expect("IPv4 endpoint");
 
-    assert_eq!(stream.local_endpoint(), SocketAddr::V4(expected));
-    assert_eq!(stream.local_endpoint(), SocketAddr::V4(expected));
+    assert_eq!(stream.local_socket_addr(), SocketAddr::V4(expected));
+    assert_eq!(stream.local_socket_addr(), SocketAddr::V4(expected));
     assert_eq!(inspector.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -87,15 +87,15 @@ async fn ipv6_lookup_is_stored_without_family_conversion() {
     let result =
         RuntimeTcpStream::from_connected_with_inspector(stream, &inspector).expect("IPv6 endpoint");
 
-    assert_eq!(result.local_endpoint(), SocketAddr::V6(ipv6));
+    assert_eq!(result.local_socket_addr(), SocketAddr::V6(ipv6));
     assert_eq!(inspector.calls.load(Ordering::SeqCst), 1);
 }
 
 #[derive(Clone, Copy)]
-struct StoredEndpoint(SocketAddr);
+struct StoredEndpoint(SocketAddrV4);
 
 impl LocalEndpoint for StoredEndpoint {
-    fn local_endpoint(&self) -> SocketAddr {
+    fn local_endpoint(&self) -> SocketAddrV4 {
         self.0
     }
 }
@@ -112,10 +112,10 @@ impl Connector for RecordingConnector {
         _target: &TargetAddr,
     ) -> impl Future<Output = Result<Self::Stream, ConnectError>> + Send {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        ready(Ok(StoredEndpoint(SocketAddr::V4(SocketAddrV4::new(
+        ready(Ok(StoredEndpoint(SocketAddrV4::new(
             Ipv4Addr::LOCALHOST,
             49152,
-        )))))
+        ))))
     }
 }
 
@@ -157,7 +157,7 @@ async fn tcp_connector_returns_the_actual_ipv4_local_endpoint() {
         SocketAddr::V6(_) => panic!("IPv4 peer returned IPv6"),
     };
 
-    assert_eq!(stream.local_endpoint(), SocketAddr::V4(peer));
+    assert_eq!(stream.local_socket_addr(), SocketAddr::V4(peer));
 }
 
 struct PendingDialer {
@@ -214,7 +214,7 @@ async fn connect_with_scripted_inspector(
     let (opened, accepted) = tokio::join!(connector.connect(&target), listener.accept());
     drop(accepted.expect("accept connection").0);
     let endpoint = opened
-        .map(|stream| stream.local_endpoint())
+        .map(|stream| stream.local_socket_addr())
         .map_err(|error| error.kind());
     (endpoint, calls.load(Ordering::SeqCst))
 }

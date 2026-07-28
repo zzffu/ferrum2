@@ -1,7 +1,7 @@
 mod common;
 
 use std::future::{Future, poll_fn};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,8 +54,8 @@ impl AbortiveClose for ControlledClientIo {
 }
 
 impl LocalEndpoint for ControlledClientIo {
-    fn local_endpoint(&self) -> SocketAddr {
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49152))
+    fn local_endpoint(&self) -> SocketAddrV4 {
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49152)
     }
 }
 

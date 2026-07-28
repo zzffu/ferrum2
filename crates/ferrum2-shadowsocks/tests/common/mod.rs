@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 use std::future::ready;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,12 +16,14 @@ use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, LocalEndpoint, TargetAddr,
 };
 use ferrum2_crypto::{
-    Aes128Psk, Clock, ClockError, MethodTcpSalt, MonotonicInstant, RandomError, SecureRandom,
-    SinglePskProvider, TcpMethodProfile, TcpOpener, TcpSealer,
+    Aes128Psk, Clock, ClockError, MethodPsk, MethodSinglePskProvider, MethodTcpSalt,
+    MonotonicInstant, RandomError, SecureRandom, SinglePskProvider, TcpMethodProfile, TcpOpener,
+    TcpSealer,
 };
 use ferrum2_shadowsocks::{
-    BufferObserver, BufferRole, FlowObserver, FlowTerminal, PlainDuplex, REQUEST_FIRST_READ_LEN,
-    ShadowsocksError, TcpKeyError, TcpKeyProvider, TransportIo, encode_request_first_write,
+    BufferObserver, BufferRole, FlowObserver, FlowTerminal, MethodKeyAdapter, PlainDuplex,
+    REQUEST_FIRST_READ_LEN, ShadowsocksError, TcpKeyError, TcpKeyProvider, TransportIo,
+    encode_request_first_write,
 };
 
 pub const NOW: u64 = 1_700_000_000;
@@ -31,6 +33,13 @@ pub fn provider() -> SinglePskProvider {
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
         0x0f,
     ]))
+}
+
+pub fn method_provider(profile: TcpMethodProfile) -> MethodKeyAdapter<MethodSinglePskProvider> {
+    let key = vec![0x42; profile.key_bytes()];
+    MethodKeyAdapter::new(MethodSinglePskProvider::new(
+        MethodPsk::try_from_slice(profile, &key).expect("method-matched test key"),
+    ))
 }
 
 pub struct CountingKeyProvider {
@@ -130,8 +139,23 @@ pub fn salt_from_u64(value: u64) -> MethodTcpSalt {
         .expect("AES-128 salt")
 }
 
+pub fn method_salt_from_u64(profile: TcpMethodProfile, value: u64) -> MethodTcpSalt {
+    let width = profile.salt_bytes();
+    let mut salt = [0x5a; 32];
+    salt[width - 8..width].copy_from_slice(&value.to_be_bytes());
+    MethodTcpSalt::try_from_slice(profile, &salt[..width]).expect("method salt")
+}
+
 pub fn valid_request_wire(timestamp: u64, salt: &MethodTcpSalt) -> Vec<u8> {
-    encode_request_first_write(&provider(), salt, timestamp, &target(), &[0xa1], &[])
+    valid_request_wire_for(&provider(), timestamp, salt)
+}
+
+pub fn valid_request_wire_for(
+    keys: &impl TcpKeyProvider,
+    timestamp: u64,
+    salt: &MethodTcpSalt,
+) -> Vec<u8> {
+    encode_request_first_write(keys, salt, timestamp, &target(), &[0xa1], &[])
         .expect("valid request")
         .to_vec()
 }
@@ -142,12 +166,22 @@ pub fn custom_request_wire(
     timestamp: u64,
     variable: &[u8],
 ) -> Vec<u8> {
+    custom_request_wire_for(&provider(), salt, message_type, timestamp, variable)
+}
+
+pub fn custom_request_wire_for(
+    keys: &impl TcpKeyProvider,
+    salt: &MethodTcpSalt,
+    message_type: u8,
+    timestamp: u64,
+    variable: &[u8],
+) -> Vec<u8> {
     let mut fixed = BytesMut::with_capacity(11);
     fixed.extend_from_slice(&[message_type]);
     fixed.extend_from_slice(&timestamp.to_be_bytes());
     fixed.extend_from_slice(&(variable.len() as u16).to_be_bytes());
     let mut variable = BytesMut::from(variable);
-    let mut sealer = provider().tcp_sealer(salt).expect("default key");
+    let mut sealer = keys.tcp_sealer(salt).expect("default key");
     sealer.seal_in_place(&mut fixed).expect("fixture fixed");
     sealer
         .seal_in_place(&mut variable)
@@ -485,12 +519,12 @@ impl AbortiveClose for RecordingIo {
 }
 
 impl LocalEndpoint for RecordingIo {
-    fn local_endpoint(&self) -> SocketAddr {
+    fn local_endpoint(&self) -> SocketAddrV4 {
         self.observation
             .lock()
             .expect("observation lock")
             .endpoint_calls += 1;
-        SocketAddr::V4(self.endpoint)
+        self.endpoint
     }
 }
 

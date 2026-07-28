@@ -17,9 +17,9 @@ use ferrum2_core::{
     SessionReply, TargetAddr,
 };
 use ferrum2_crypto::{
-    AeadError, Clock, KeyProvider, KeySelector, MethodKeyProvider, MethodSinglePskProvider,
-    MethodTcpSalt, MonotonicInstant, SecureRandom, SinglePskProvider, TcpMethod, TcpMethodProfile,
-    TcpOpener, TcpSalt, TcpSealer, generate_method_request_salt, generate_method_response_salt,
+    AeadError, Clock, KeyProvider, KeySelector, MethodKeyProvider, MethodTcpSalt, MonotonicInstant,
+    SecureRandom, TcpMethod, TcpMethodProfile, TcpOpener, TcpSalt, TcpSealer,
+    generate_method_request_salt, generate_method_response_salt,
 };
 use thiserror::Error;
 
@@ -77,7 +77,7 @@ pub trait TcpKeyProvider: Send + Sync {
 #[error("TCP key unavailable")]
 pub struct TcpKeyError;
 
-impl TcpKeyProvider for SinglePskProvider {
+impl<K: KeyProvider> TcpKeyProvider for K {
     fn tcp_profile(&self) -> TcpMethodProfile {
         TcpMethodProfile::Blake3Aes128Gcm2022
     }
@@ -99,25 +99,42 @@ impl TcpKeyProvider for SinglePskProvider {
     }
 }
 
-impl TcpKeyProvider for MethodSinglePskProvider {
+/// Owns a method-aware crypto provider behind the shared protocol capability.
+pub struct MethodKeyAdapter<K>(K);
+
+impl<K> MethodKeyAdapter<K> {
+    /// Wraps one method-aware provider without exposing raw key material.
+    pub fn new(inner: K) -> Self {
+        Self(inner)
+    }
+
+    /// Returns the wrapped provider.
+    pub fn into_inner(self) -> K {
+        self.0
+    }
+}
+
+impl<K: MethodKeyProvider> TcpKeyProvider for MethodKeyAdapter<K> {
     fn tcp_profile(&self) -> TcpMethodProfile {
-        self.profile()
+        self.0.profile()
     }
 
     fn tcp_sealer(&self, salt: &MethodTcpSalt) -> Result<TcpSealer, TcpKeyError> {
-        self.with_method_key(KeySelector::Default, |key| {
-            key.derive_tcp_subkey(salt).map(TcpSealer::new)
-        })
-        .map_err(|_| TcpKeyError)?
-        .map_err(|_| TcpKeyError)
+        self.0
+            .with_method_key(KeySelector::Default, |key| {
+                key.derive_tcp_subkey(salt).map(TcpSealer::new)
+            })
+            .map_err(|_| TcpKeyError)?
+            .map_err(|_| TcpKeyError)
     }
 
     fn tcp_opener(&self, salt: &MethodTcpSalt) -> Result<TcpOpener, TcpKeyError> {
-        self.with_method_key(KeySelector::Default, |key| {
-            key.derive_tcp_subkey(salt).map(TcpOpener::new)
-        })
-        .map_err(|_| TcpKeyError)?
-        .map_err(|_| TcpKeyError)
+        self.0
+            .with_method_key(KeySelector::Default, |key| {
+                key.derive_tcp_subkey(salt).map(TcpOpener::new)
+            })
+            .map_err(|_| TcpKeyError)?
+            .map_err(|_| TcpKeyError)
     }
 }
 
@@ -481,7 +498,10 @@ pub struct NoReply;
 impl SessionReply for NoReply {
     type Error = Infallible;
 
-    fn succeeded(self, _bound: SocketAddr) -> impl Future<Output = Result<(), Self::Error>> + Send {
+    fn succeeded(
+        self,
+        _bound: std::net::SocketAddrV4,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
         ready(Ok(()))
     }
 
@@ -1061,8 +1081,12 @@ pub struct ClientFlow<'a, S, K, T> {
 }
 
 impl<S: LocalEndpoint, K, T> LocalEndpoint for ClientFlow<'_, S, K, T> {
-    fn local_endpoint(&self) -> SocketAddr {
+    fn local_endpoint(&self) -> std::net::SocketAddrV4 {
         self.io.local_endpoint()
+    }
+
+    fn local_socket_addr(&self) -> SocketAddr {
+        self.io.local_socket_addr()
     }
 }
 
@@ -1959,7 +1983,7 @@ struct ParsedRequest {
 }
 
 fn parse_request_variable(variable: &[u8]) -> Result<ParsedRequest, DetectionReason> {
-    let (target, address_len) = parse_target(variable)?;
+    let (target, address_len) = validate_target(variable)?;
     let padding_end = address_len
         .checked_add(2)
         .ok_or(DetectionReason::FrameBounds)?;
@@ -1984,13 +2008,32 @@ fn parse_request_variable(variable: &[u8]) -> Result<ParsedRequest, DetectionRea
     if padding_len == 0 && initial_payload.is_empty() {
         return Err(DetectionReason::EmptyRequest);
     }
+    let target = target.into_owned()?;
     Ok(ParsedRequest {
         target,
         initial_payload: Bytes::copy_from_slice(initial_payload),
     })
 }
 
-fn parse_target(variable: &[u8]) -> Result<(TargetAddr, usize), DetectionReason> {
+enum ValidatedTarget<'a> {
+    Ip(SocketAddr),
+    Domain(&'a str, u16),
+}
+
+impl ValidatedTarget<'_> {
+    fn into_owned(self) -> Result<TargetAddr, DetectionReason> {
+        match self {
+            Self::Ip(address) => {
+                TargetAddr::ip(address).map_err(|_| DetectionReason::AddressBounds)
+            }
+            Self::Domain(host, port) => {
+                TargetAddr::domain(host, port).map_err(|_| DetectionReason::AddressBounds)
+            }
+        }
+    }
+}
+
+fn validate_target(variable: &[u8]) -> Result<(ValidatedTarget<'_>, usize), DetectionReason> {
     let atyp = *variable.first().ok_or(DetectionReason::AddressBounds)?;
     match atyp {
         IPV4_ATYP => {
@@ -1999,9 +2042,13 @@ fn parse_target(variable: &[u8]) -> Result<(TargetAddr, usize), DetectionReason>
             }
             let address = Ipv4Addr::new(variable[1], variable[2], variable[3], variable[4]);
             let port = u16::from_be_bytes([variable[5], variable[6]]);
-            let target = TargetAddr::ip(SocketAddr::new(address.into(), port))
-                .map_err(|_| DetectionReason::AddressBounds)?;
-            Ok((target, 7))
+            if port == 0 {
+                return Err(DetectionReason::AddressBounds);
+            }
+            Ok((
+                ValidatedTarget::Ip(SocketAddr::new(address.into(), port)),
+                7,
+            ))
         }
         IPV6_ATYP => {
             if variable.len() < 19 {
@@ -2010,9 +2057,13 @@ fn parse_target(variable: &[u8]) -> Result<(TargetAddr, usize), DetectionReason>
             let address =
                 Ipv6Addr::from(<[u8; 16]>::try_from(&variable[1..17]).expect("fixed IPv6 region"));
             let port = u16::from_be_bytes([variable[17], variable[18]]);
-            let target = TargetAddr::ip(SocketAddr::new(address.into(), port))
-                .map_err(|_| DetectionReason::AddressBounds)?;
-            Ok((target, 19))
+            if port == 0 {
+                return Err(DetectionReason::AddressBounds);
+            }
+            Ok((
+                ValidatedTarget::Ip(SocketAddr::new(address.into(), port)),
+                19,
+            ))
         }
         DOMAIN_ATYP => {
             let length = usize::from(*variable.get(1).ok_or(DetectionReason::AddressBounds)?);
@@ -2029,9 +2080,10 @@ fn parse_target(variable: &[u8]) -> Result<(TargetAddr, usize), DetectionReason>
                 .map_err(|_| DetectionReason::AddressBounds)?;
             let port =
                 u16::from_be_bytes(variable[host_end..port_end].try_into().expect("port width"));
-            let target =
-                TargetAddr::domain(host, port).map_err(|_| DetectionReason::AddressBounds)?;
-            Ok((target, port_end))
+            if host.is_empty() || !host.is_ascii() || port == 0 {
+                return Err(DetectionReason::AddressBounds);
+            }
+            Ok((ValidatedTarget::Domain(host, port), port_end))
         }
         _ => Err(DetectionReason::AddressBounds),
     }
