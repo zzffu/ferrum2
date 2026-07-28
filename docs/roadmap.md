@@ -8,9 +8,11 @@
 Bootstrap 基线是
 `master@b41c6127b1834ebd97246451fd92bafea50cb205`。M0 已以 exact integration
 `8318ef106d6cd4e029bd3b02aa64125fabdda462`、本地 full gate 与 GitHub Actions
-run `30331336772` attempt 1 的六项成功证据关闭；M1 已 `planned`，M2-M4 仍为
-`proposed`。
-M0 的 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md`。
+run `30331336772` attempt 1 的六项成功证据关闭；M1 已以 exact
+`874c83d0ee71054bd702d6ecac55e88d9e2fbcef`、本地 full gate 与 GitHub Actions
+run `30367147537` attempt 1 的六项成功证据关闭；M2-M4 仍为 `proposed`。
+durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
+`docs/handoffs/HANDOFF-M1-2026-07-28.md`。
 
 ## 依赖顺序
 
@@ -22,9 +24,9 @@ M0 的 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md`。
 | M3 | M1、M2 closed | 运维契约、生命周期和三目标平台资格 |
 | M4 | M3 closed | 性能/资源门及同一 commit 上的 v0 资格证明 |
 
-M1 与 M2 都依赖 shared crypto/wire/runtime boundary；在 M1 冻结这些 contract
-前不并行实施 M2。每个里程碑内的并行 ticket 仍须满足 dependency-ready 和
-non-overlapping ownership。
+M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 的下一动作是规划 UDP
+contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满足 dependency-ready
+和 non-overlapping ownership。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -237,8 +239,8 @@ non-overlapping ownership。
 
 ## M1 — 完整 TCP 与 TCP 互操作
 
-- **Status:** validating（M1-T01～M1-T04 done；local execute close gates 与
-  exact-SHA hosted qualification PASS；`auto_close = false`，尚未执行 close）
+- **Status:** closed（M1-T01～M1-T04 done；local close gates、三方 close review
+  与 exact-SHA hosted qualification PASS）
 - **Objective:** 在不复制 transport state machine 的前提下，将 TCP 扩展到
   三个指定方法并完成完整 reference interoperability。
 - **Entry conditions:** M0 closed；AES-128 wire/runtime/key lookup contract
@@ -270,7 +272,8 @@ non-overlapping ownership。
 
   唯一 initial frontier 是 M1-T01。T01 done 后 T02 与 T04 implementation
   ownership-disjoint；T03 等待 T02；T04 最后集成。
-- **Deferred/out of scope:** UDP、最终平台 qualification 和 performance gate。
+- **Deferred/out of scope:** UDP；M3 最终 native packaging/lifecycle
+  qualification；M4 performance/resource gate。
 - **Integrated commit:** complete local product/control checkpoint
   `874c83d0ee71054bd702d6ecac55e88d9e2fbcef`（包含 M1-T01～M1-T04
   product checkpoint `fba23ca0b628bd6935d0977e3d9df7836b957e78` 与 test-budget
@@ -291,12 +294,22 @@ non-overlapping ownership。
   错用于 milestone；control commit `81345fbb56ac4cdbf1aea3a3f020d6fd514b187f`
   仅恢复 TEST-0002 已批准语义。final exact SHA `874c83d` 上 66 项 workflow tests、
   authoritative full 与 milestone ratchet 均 PASS；ratio `2.041`，required
-  `2.042`，未改写 baseline 或授予预算豁免。
+  `2.042`，没有预算豁免。三方 close review 接受后，ratchet baseline 以
+  `master@dd17233e292262c80bfd8f0e5a0db4bc0361244e` 为来源更新为
+  code `7720`、tests `15759`、ratio `2.041321`。
   execute 风险是 method/profile 错配、partial address-family conversion、fixture
   provenance/rights、hot-path allocation/dispatch 与 hosted provider availability；
   ADR-0018/0019、TEST-0002、exact-SHA review 和 fail-closed release gate 已给出
   控制。一次性 remote qualification scope 已消费并撤销；任何 rerun、第二次
   push、remote `master`、PR、tag、release 或 publish 仍需另行授权。
+- **Closeout:** 2026-07-28 close gate 在 docs-only source
+  `master@dd17233e292262c80bfd8f0e5a0db4bc0361244e` 启动。Product Manager、
+  Architect 和 QA 均 `PASS_WITH_NOTES`，没有 blocker/major finding 或 product
+  repair。Team Lead 在 exact product/release SHA `874c83d` 重跑 binary build、
+  authoritative full 4/4、`git diff --check` 与 milestone ratchet，全部 exit 0。
+  authenticated quality raw log 中 real-process matrix test 恰出现一次，IPv6
+  conditional skip marker 为零次；Windows 本机未执行记录没有被改写成本机 PASS。
+  durable handoff 为 `docs/handoffs/HANDOFF-M1-2026-07-28.md`。
 
 ## M2 — 完整 UDP 协议纵切与 UDP 互操作
 

@@ -1,6 +1,6 @@
 # CI 与验证状态
 
-## 当前 M1 execute 状态
+## 当前 M1 closeout 状态
 
 - **Current product/control integration checkpoint:**
   `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` on
@@ -13,7 +13,9 @@
   commits `91bb86b`/`3bdde10` 支持并审计一次性 superseding review；
   `81345fbb56ac4cdbf1aea3a3f020d6fd514b187f` 恢复 ticket/milestone
   test-budget gate 的既有分层语义；`02c7bc7` 是其 integration commit，
-  `874c83d` 增加 execute close-gate evidence。
+  `874c83d` 增加 execute close-gate evidence。closeout source
+  `master@dd17233e292262c80bfd8f0e5a0db4bc0361244e` 只增加 hosted evidence
+  文档，不是新的 product/release SHA。
 - **Date/environment:** 2026-07-28（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1；Python 3.11.9。
 - **Reviews:** T01 Architect full `PASS`、QA full `PASS_WITH_NOTES`
@@ -24,7 +26,10 @@
   `M1-T02-REVIEW-001` 已关闭，历史记录未覆盖。T03 Architect/QA full 均
   `PASS_WITH_NOTES`，无 blocker/major/repair；notes 为
   `ARCH-M1-T03-001`、`QA-M1-T03-001/002`。T04 Architect/QA full 均
-  `PASS`，无 finding/repair。
+  `PASS`，无 finding/repair。M1 closeout 的 Product Manager、Architect 和 QA
+  均 `PASS_WITH_NOTES`；没有新 blocker/major finding。`QA-M1-CLOSE-A01`
+  是由本次 roadmap、CI、handoff 和 baseline commit 完成的程序性 close 动作，
+  不是 candidate defect。
 - **Ticket/quick evidence:** T01～T04 ticket commands 均 exit 0。T03 Team Lead
   admission 的 config/client/server 31 tests 与五个 harness targets 17 tests
   均 PASS；T04 qualification entry 只 build，pure contract 10/10 PASS，未执行
@@ -34,39 +39,50 @@
   尚未 build 而 exit 101；`cargo build --workspace --bins --locked` exit 0 后，
   同一未修改 SHA quick 3/3 exit 0。该 setup-order derivative 已记录为 review
   debt，不是 product blocker。
-- **Full evidence:** final exact integration `874c83d` 上 workspace binary build 与
-  authoritative full：
+- **Full evidence:** close mode 在 final exact integration `874c83d` 重跑
+  workspace binary build 与 authoritative full：
   `cargo fmt --all -- --check`、
   `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`、
   `cargo test --workspace --all-features --locked`、
   `cargo doc --workspace --all-features --no-deps --locked`，4/4 exit 0；
-  `git diff --check` exit 0。
+  `git diff --check` exit 0。首次 test wrapper 在 60 秒到达工具执行上限而 exit
+  124，没有产生 test verdict；同一未修改 SHA 的捕获式重跑在 92.6 秒 exit 0，
+  所以该项是 environment/setup derivative，不是 product failure。
 - **Test budget:** T04 ticket gate PASS：code `7386`、tests `15216`、ratio
   `2.060`；delta `+0/+120`，allowance `120`。M1 milestone gate 在
-  `874c83d` PASS：code `7720`、tests `15759`、ratio `2.041`；baseline
-  `7031/14707/2.092`；required ratchet ratio `2.042`；planning-base delta
-  `+689/+1052` 只报告、不复用 ticket allowance，baseline 未改写。
+  `874c83d` PASS：code `7720`、tests `15759`、ratio `2.041321`；pre-close
+  baseline `7031/14707/2.091737`；required ratchet ratio `2.041737`；
+  planning-base delta `+689/+1052` 只报告、不复用 ticket allowance。三方 close
+  review 接受 candidate 后，`codex/test-budget-baseline.json` 已以
+  `master@dd17233e292262c80bfd8f0e5a0db4bc0361244e` 为来源更新为
+  `7720/15759/2.041321`。
 - **Workflow control evidence:** 66 unit tests、`workflow.py validate`、
   `py_compile`、`git diff --check` 均 exit 0；两项 control hardening findings
   `CTRL-M1-T02-001/002` 在 integration 前关闭。close gate 首次真实 FAIL
   定位为 ticket allowance 被错误复用于 milestone；最小脚本修复及 focused
   pass/fail ratchet regression 已在独立 control worktree 提交并由 Team Lead
-  复核，无新授权、豁免或产品改动。
+  复核，无新授权、豁免或产品改动。closeout docs/baseline working tree 再次
+  运行同一 workflow unit suite 66/66 PASS，`workflow.py validate` 与
+  post-ratchet `test-budget --gate report` 均 exit 0。
 - **Authorization:** three exact single-use local scopes for the T02 additional
   repair, control amendment, and superseding Architect review were consumed and
   revoked。用户随后授权 exact remote qualification；scope
   `m1-20260728-remote-qualification-874c83d-a1` 在 push 前原子消费并因
   `max_uses=1` 自动撤销。没有 force-push、rerun、ref deletion、PR、tag、
   release、publish 或 remote `master` 授权。
-- **Scheduler/blockers:** M1-T01～M1-T04 done；当前无 active ticket 或 open
-  canonical root。本地 execute close gates 已 PASS；`auto_close = false`，
-  close mode 尚未执行。
+- **Scheduler/blockers:** M1-T01～M1-T04 done；当前无 active ticket、release
+  dependency 或 open canonical root。pre-close helper action 为
+  `ready_to_close`；roadmap durable status 现为 `closed`。close mode 没有
+  implementation wave、product repair 或新 authorization。
 - **Local qualification notes:** 本 Windows host `[::1]` bind 成功但 raw connect
   返回 `WSAEACCES`，所以 T03 real-process IPv6 row 是 **NOT EXECUTED**；IPv4
   fallback 只证明第三方法 echo/half-close。local platform artifact run 另因
   fixed port 1080 被占而 setup-blocked，不计本机 PASS。同一 exact-SHA hosted
   platform matrix 已补齐 Windows MSVC、Linux GNU、Linux musl success；历史
-  IPv6 review note 保留给 close review，不把本机 fallback 改写为 IPv6 PASS。
+  IPv6 review note 保留，不把本机 fallback 改写为 IPv6 PASS。close 时对
+  authenticated `quality` raw log 的 exact marker audit 证明
+  `success_bounded_method_matrix_preserves_bytes_and_half_close` 恰出现一次，
+  `SKIP real-process IPv6 row: host IPv6 loopback connect unavailable` 出现零次。
 - **Hosted qualification:** exact
   `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 已仅 push 到
   `origin/codex/integration/m1`。GitHub Actions

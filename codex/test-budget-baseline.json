@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-28T08:46:54.805442+00:00",
-  "commit": "69c9fb845c28f278b5613b52307e545bd7e3b53c",
+  "generated_at": "2026-07-28T14:49:34.330776+00:00",
+  "commit": "dd17233e292262c80bfd8f0e5a0db4bc0361244e",
   "tool": "builtin",
   "counts": {
-    "code": 7031,
-    "tests": 14707,
+    "code": 7720,
+    "tests": 15759,
     "files": 58,
     "tool": "builtin",
-    "ratio": 2.091737,
-    "ratio_display": "2.092"
+    "ratio": 2.041321,
+    "ratio_display": "2.041"
   },
   "policy": {
     "mode": "ratchet",
