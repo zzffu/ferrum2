@@ -2,7 +2,7 @@
 id = "M0-T09"
 title = "Isolate external interoperability behind one hosted qualification seam"
 milestone = "M0"
-status = "done"
+status = "ready"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = []
@@ -122,6 +122,13 @@ deterministic Cargo tests证明guard、aggregation、failure continuation与summ
 
 当前 canonical root 是 M0 CI evidence seam错误。旧 run
 `30322690937`保持失败；本票完成不授权或替代 hosted qualification。
+
+Final integration QA在exact candidate
+`e41dbd23b0f939666094ce0aa3f12c2fbbb127f4`发现
+`M0-T09-PROVIDER-STATUS-AGGREGATION`：workflow已持久化provider setup
+退出状态，但qualification plan尚未消费它们，因此一次失败setup留下有效文件时
+可能错误执行对应cases并报告PASS。本票已重新打开，等待closed status state、
+pure no-I/O regression test和exact-SHA复审。
 
 ## Completion evidence
 
