@@ -1,7 +1,9 @@
+use aes::cipher::{Array, BlockCipherDecrypt, BlockCipherEncrypt};
+use aes::{Aes128, Aes256};
 use aes_gcm::{AeadInOut, Aes128Gcm, Aes256Gcm, KeyInit, Nonce};
 use blake3::Hasher;
 use bytes::BytesMut;
-use chacha20poly1305::ChaCha20Poly1305;
+use chacha20poly1305::{ChaCha20Poly1305, XChaCha20Poly1305, XNonce};
 use serde_json::Value;
 use std::path::Path;
 
@@ -10,6 +12,10 @@ const AES128_GCM_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/ae
 const AES256_GCM_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/aes256-gcm-v1.json");
 const CHACHA20_POLY1305_FIXTURE: &str =
     include_str!("../../../tests/fixtures/crypto/chacha20-poly1305-v1.json");
+const XCHACHA20_POLY1305_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/crypto/xchacha20-poly1305-draft02-v1.json");
+const SIP022_UDP_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/crypto/sip022-udp-primitives-v1.json");
 const SIP022_KDF_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/sip022-kdf-v1.json");
 const SIP022_PROFILE_KDF_FIXTURE: &str =
     include_str!("../../../tests/fixtures/crypto/sip022-kdf-profiles-v1.json");
@@ -174,6 +180,133 @@ fn reviewed_aead_profile_rows_and_corrupted_tags_match() {
 }
 
 #[test]
+fn pinned_xchacha_draft02_row_and_corrupted_tag_match() {
+    let fixture: Value =
+        serde_json::from_str(XCHACHA20_POLY1305_FIXTURE).expect("valid XChaCha fixture");
+    let cases = fixture["cases"].as_array().expect("cases");
+    assert_eq!(cases.len(), 1);
+    let case = &cases[0];
+    let key = hex::decode(case["key"].as_str().expect("key")).expect("key");
+    let nonce = decode_array::<24>(case["nonce"].as_str().expect("nonce"));
+    let aad = hex::decode(case["aad"].as_str().expect("AAD")).expect("AAD");
+    let plaintext = hex::decode(case["plaintext"].as_str().expect("plaintext")).expect("plaintext");
+    let mut expected =
+        hex::decode(case["ciphertext"].as_str().expect("ciphertext")).expect("ciphertext");
+    expected.extend(hex::decode(case["tag"].as_str().expect("tag")).expect("tag"));
+
+    let cipher = XChaCha20Poly1305::new_from_slice(&key).expect("XChaCha key");
+    let mut encrypted = BytesMut::with_capacity(plaintext.len() + 16);
+    encrypted.extend_from_slice(&plaintext);
+    cipher
+        .encrypt_in_place(&XNonce::from(nonce), &aad, &mut encrypted)
+        .expect("draft row encrypts");
+    assert_eq!(encrypted.as_ref(), expected);
+
+    cipher
+        .decrypt_in_place(&XNonce::from(nonce), &aad, &mut encrypted)
+        .expect("draft row authenticates");
+    assert_eq!(encrypted.as_ref(), plaintext);
+
+    let mut corrupted = expected;
+    *corrupted.last_mut().expect("tag byte") ^= 1;
+    let original = corrupted.clone();
+    let mut corrupted = BytesMut::from(corrupted.as_slice());
+    assert!(
+        cipher
+            .decrypt_in_place(&XNonce::from(nonce), &aad, &mut corrupted)
+            .is_err()
+    );
+    assert_eq!(corrupted.as_ref(), original);
+}
+
+#[test]
+fn sip022_udp_aes_header_kdf_nonce_and_tag_rows_match() {
+    let fixture: Value = serde_json::from_str(SIP022_UDP_FIXTURE).expect("valid UDP fixture");
+    let context = fixture["context_string"].as_str().expect("context");
+    let plaintext = hex::decode(fixture["body_plaintext"].as_str().expect("body")).expect("body");
+    let cases = fixture["cases"].as_array().expect("cases");
+
+    for case in &cases[..2] {
+        let method = case["method"].as_str().expect("method");
+        let psk = hex::decode(case["psk"].as_str().expect("PSK")).expect("PSK");
+        let session_id =
+            hex::decode(case["session_id"].as_str().expect("session ID")).expect("session ID");
+        let plaintext_header =
+            decode_array::<16>(case["plaintext_header"].as_str().expect("plaintext header"));
+        let expected_header =
+            decode_array::<16>(case["encrypted_header"].as_str().expect("encrypted header"));
+        let expected_full =
+            decode_array::<32>(case["full_derive_output"].as_str().expect("derive output"));
+
+        let mut material = psk.clone();
+        material.extend_from_slice(&session_id);
+        assert_eq!(blake3::derive_key(context, &material), expected_full);
+        assert_eq!(
+            &expected_full[..psk.len()],
+            hex::decode(case["selected_subkey"].as_str().expect("subkey")).expect("subkey")
+        );
+        assert_eq!(
+            &plaintext_header[4..],
+            hex::decode(case["body_nonce"].as_str().expect("body nonce")).expect("body nonce")
+        );
+
+        let mut block = Array::from(plaintext_header);
+        match method {
+            "2022-blake3-aes-128-gcm" => {
+                let cipher = Aes128::new_from_slice(&psk).expect("AES-128 key");
+                cipher.encrypt_block(&mut block);
+                assert_eq!(block.as_slice(), expected_header);
+                cipher.decrypt_block(&mut block);
+            }
+            "2022-blake3-aes-256-gcm" => {
+                let cipher = Aes256::new_from_slice(&psk).expect("AES-256 key");
+                cipher.encrypt_block(&mut block);
+                assert_eq!(block.as_slice(), expected_header);
+                cipher.decrypt_block(&mut block);
+            }
+            other => panic!("unexpected AES row {other}"),
+        }
+        assert_eq!(block.as_slice(), plaintext_header);
+
+        let nonce = decode_array::<12>(case["body_nonce"].as_str().expect("body nonce"));
+        let mut encrypted = BytesMut::with_capacity(plaintext.len() + 16);
+        encrypted.extend_from_slice(&plaintext);
+        match method {
+            "2022-blake3-aes-128-gcm" => Aes128Gcm::new_from_slice(&expected_full[..16])
+                .expect("AES-128 body key")
+                .encrypt_in_place(&Nonce::from(nonce), &[], &mut encrypted)
+                .expect("AES-128 body"),
+            "2022-blake3-aes-256-gcm" => Aes256Gcm::new_from_slice(&expected_full)
+                .expect("AES-256 body key")
+                .encrypt_in_place(&Nonce::from(nonce), &[], &mut encrypted)
+                .expect("AES-256 body"),
+            _ => unreachable!("validated method"),
+        }
+        assert_eq!(
+            encrypted.as_ref(),
+            hex::decode(
+                case["body_ciphertext_and_tag"]
+                    .as_str()
+                    .expect("body output")
+            )
+            .expect("body output")
+        );
+
+        *encrypted.last_mut().expect("tag byte") ^= 1;
+        let rejected = match method {
+            "2022-blake3-aes-128-gcm" => Aes128Gcm::new_from_slice(&expected_full[..16])
+                .expect("AES-128 body key")
+                .decrypt_in_place(&Nonce::from(nonce), &[], &mut encrypted),
+            "2022-blake3-aes-256-gcm" => Aes256Gcm::new_from_slice(&expected_full)
+                .expect("AES-256 body key")
+                .decrypt_in_place(&Nonce::from(nonce), &[], &mut encrypted),
+            _ => unreachable!("validated method"),
+        };
+        assert!(rejected.is_err(), "{method} corrupted tag");
+    }
+}
+
+#[test]
 fn fixture_hashes_and_source_provenance_are_pinned() {
     for (fixture, expected) in [
         (
@@ -201,8 +334,16 @@ fn fixture_hashes_and_source_provenance_are_pinned() {
             "f6d0047ad1432707b44201da40cfb831e754cbd70008b28d4538aa160d72f428",
         ),
         (
+            XCHACHA20_POLY1305_FIXTURE,
+            "6791999d70ac966e72fdf4d55afa03f0b8096bf4d14d04b8a96d33cbc2aa77aa",
+        ),
+        (
+            SIP022_UDP_FIXTURE,
+            "3db87e963d6d1ae3b784450958021deeeaaf9f5a8b8053724613a74da0becfef",
+        ),
+        (
             PROFILE_GENERATOR,
-            "ddcbdfe3da9c02eada30f4981a1f6b1e3ac73a43cd21d64c9d61f14cf2a65060",
+            "0c57b6ae188cd2f471ce0cf5b533d503edea6fc01a381fbb13998f066b365df3",
         ),
     ] {
         let normalized = fixture.replace("\r\n", "\n");
@@ -241,6 +382,11 @@ fn fixture_hashes_and_source_provenance_are_pinned() {
         "e37a978ccf0992d9053fbc039470d6527108e393",
         "profile-fixture-generator.rs",
         "imports no ferrum2 crate or reference implementation",
+        "draft-irtf-cfrg-xchacha-02",
+        "Appendix A.1 and A.3.1",
+        "IETF Trust Legal Provisions",
+        "f6b203facf219fe47bfe2913c2e576240d2bf1f9",
+        "AES-128 PSK 00..0f/session ID 60..67/packet ID 0",
     ] {
         assert!(PROVENANCE.contains(required), "missing provenance field");
     }

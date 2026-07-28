@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "classification": "repository-owned non-official SIP022 UDP cryptographic-envelope primitive fixture",
+  "context_string": "shadowsocks 2022 session subkey",
+  "body_plaintext": "000102030405",
+  "cases": [
+    {
+      "method": "2022-blake3-aes-128-gcm",
+      "psk": "000102030405060708090a0b0c0d0e0f",
+      "session_id": "6061626364656667",
+      "packet_id": 0,
+      "plaintext_header": "60616263646566670000000000000000",
+      "encrypted_header": "4a10db8b245f479ecd484d6b34d89b56",
+      "full_derive_output": "850e9e578b6665c9c1404f4c7ac4a6fa7e93fffe2f0fd3cb82a183ff36f762cc",
+      "selected_subkey": "850e9e578b6665c9c1404f4c7ac4a6fa",
+      "body_nonce": "646566670000000000000000",
+      "body_ciphertext_and_tag": "86ebc3a9a1bbe72bfbc5f74831a17b0766b974a45922",
+      "wire": "4a10db8b245f479ecd484d6b34d89b5686ebc3a9a1bbe72bfbc5f74831a17b0766b974a45922"
+    },
+    {
+      "method": "2022-blake3-aes-256-gcm",
+      "psk": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "session_id": "7071727374757677",
+      "packet_id": 1,
+      "plaintext_header": "70717273747576770000000000000001",
+      "encrypted_header": "d2b54d8ab449cd9cbdbf4f6acc0964be",
+      "full_derive_output": "b389d3cc63520371a0a409aff53379eb7a869cce4215dda95f6af4cf25c4911f",
+      "selected_subkey": "b389d3cc63520371a0a409aff53379eb7a869cce4215dda95f6af4cf25c4911f",
+      "body_nonce": "747576770000000000000001",
+      "body_ciphertext_and_tag": "4542e05e4cd9b11f984dc96ee3e972506d8160ef2ff9",
+      "wire": "d2b54d8ab449cd9cbdbf4f6acc0964be4542e05e4cd9b11f984dc96ee3e972506d8160ef2ff9"
+    },
+    {
+      "method": "2022-blake3-chacha20-poly1305",
+      "psk": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "session_id": "8081828384858687",
+      "packet_id": 2,
+      "nonce": "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7",
+      "plaintext_identity_and_body": "80818283848586870000000000000002000102030405",
+      "ciphertext_and_tag": "1c59e3e0e890c0582b2f2ea8f33cfdc2726f0b4c83d35911ff1d408f0ac02e6e8e5de2cd1857",
+      "wire": "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a71c59e3e0e890c0582b2f2ea8f33cfdc2726f0b4c83d35911ff1d408f0ac02e6e8e5de2cd1857"
+    }
+  ]
+}

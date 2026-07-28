@@ -211,12 +211,17 @@ fn crypto_profiles_keep_cipher_dispatch_inside_one_deep_module() {
     let crypto =
         fs::read_to_string(root.join("crates/ferrum2-crypto/src/lib.rs")).expect("crypto source");
     for required in [
-        "pub enum TcpMethodProfile",
+        "pub enum MethodProfile",
+        "pub type TcpMethodProfile = MethodProfile",
         "pub struct MethodPsk",
         "pub trait MethodKeyProvider",
         "enum TcpCipher",
         "pub struct TcpSealer",
         "pub struct TcpOpener",
+        "enum UdpCryptoInner",
+        "pub struct UdpCrypto",
+        "pub struct UdpSessionId",
+        "pub struct UdpPacketCounter",
     ] {
         assert!(
             crypto.contains(required),
@@ -228,6 +233,9 @@ fn crypto_profiles_keep_cipher_dispatch_inside_one_deep_module() {
         "Aes256TcpOpener",
         "ChaChaTcpSealer",
         "ChaChaTcpOpener",
+        "Aes128UdpCrypto",
+        "Aes256UdpCrypto",
+        "ChaChaUdpCrypto",
     ] {
         assert!(
             !crypto.contains(duplicated_owner),

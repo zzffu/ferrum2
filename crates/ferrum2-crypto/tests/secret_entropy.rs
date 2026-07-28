@@ -1,19 +1,34 @@
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use bytes::BytesMut;
 use ferrum2_crypto::{
     AeadError, Aes128Psk, Clock, ClockError, KeyProvider, KeyProviderError, KeySelector,
-    MethodKeyProvider, MethodProfileMismatchError, MethodPsk, MethodPskLengthError,
+    MethodKeyProvider, MethodProfile, MethodProfileMismatchError, MethodPsk, MethodPskLengthError,
     MethodSaltLengthError, MethodSinglePskProvider, MethodTcpSalt, MonotonicInstant, NonceCounter,
     PskLengthError, RandomError, SecureRandom, SinglePskProvider, SystemClock, SystemRandom,
-    TcpMethod, TcpMethodProfile, TcpSalt, TcpSealer, generate_method_request_salt,
-    generate_method_response_salt, generate_request_salt, generate_response_salt,
+    TcpMethod, TcpMethodProfile, TcpSalt, TcpSealer, UdpSessionId,
+    generate_distinct_udp_session_id, generate_method_request_salt, generate_method_response_salt,
+    generate_request_salt, generate_response_salt, generate_udp_session_id,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+#[derive(Default)]
+struct RecordingHasher(Vec<u8>);
+
+impl Hasher for RecordingHasher {
+    fn finish(&self) -> u64 {
+        0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+}
 
 fn seal_with_provider(provider: &SinglePskProvider) -> BytesMut {
     let salt = TcpSalt::from_bytes([0x44; 16]);
@@ -133,38 +148,44 @@ fn entropy_failure_has_no_fallback_and_response_salt_retries_are_bounded() {
 fn method_profiles_bind_exact_width_secret_salt_and_key_capabilities() {
     let rows = [
         (
-            TcpMethodProfile::Blake3Aes128Gcm2022,
+            MethodProfile::Blake3Aes128Gcm2022,
             16,
             43,
             59,
+            32,
             vec![0x11; 16],
         ),
         (
-            TcpMethodProfile::Blake3Aes256Gcm2022,
+            MethodProfile::Blake3Aes256Gcm2022,
             32,
             59,
             91,
+            32,
             vec![0x22; 32],
         ),
         (
-            TcpMethodProfile::Blake3ChaCha20Poly13052022,
+            MethodProfile::Blake3ChaCha20Poly13052022,
             32,
             59,
             91,
+            56,
             vec![0x33; 32],
         ),
     ];
-    assert_eq!(TcpMethodProfile::ALL.len(), rows.len());
+    assert_eq!(MethodProfile::ALL.len(), rows.len());
     assert_zeroize_on_drop::<MethodPsk>();
     assert_zeroize_on_drop::<MethodTcpSalt>();
 
-    for (profile, width, request_read, response_read, bytes) in rows {
+    for (profile, width, request_read, response_read, udp_overhead, bytes) in rows {
+        let tcp_alias: TcpMethodProfile = profile;
+        assert_eq!(tcp_alias, profile);
         assert_eq!(profile.key_bytes(), width);
         assert_eq!(profile.salt_bytes(), width);
         assert_eq!(profile.tag_bytes(), 16);
         assert_eq!(profile.nonce_bytes(), 12);
         assert_eq!(profile.initial_request_read_bytes(), request_read);
         assert_eq!(profile.initial_response_read_bytes(), response_read);
+        assert_eq!(profile.udp_wire_overhead_bytes(), udp_overhead);
 
         let psk = MethodPsk::try_from_slice(profile, &bytes).expect("method-width PSK");
         assert_eq!(psk.profile(), profile);
@@ -249,6 +270,47 @@ fn method_profiles_bind_exact_width_secret_salt_and_key_capabilities() {
         .unwrap_err();
     assert_eq!(error, KeyProviderError::IdentityUnsupported);
     assert!(!error.to_string().contains("identity-secret"));
+}
+
+#[test]
+fn udp_session_ids_retry_live_collisions_without_exposing_partial_state() {
+    assert_zeroize_on_drop::<UdpSessionId>();
+
+    for collisions in 0..8 {
+        let random = ScriptedRandom::new((0..=collisions).map(|draw| Ok([draw as u8 + 1; 8])));
+        let mut observed = 0;
+        let id = generate_udp_session_id(&random, |_| {
+            let collides = observed < collisions;
+            observed += 1;
+            collides
+        })
+        .expect("one of the first eight draws is distinct");
+        assert_eq!(observed, collisions + 1);
+        assert_eq!(format!("{id:?}"), "UdpSessionId([REDACTED])");
+    }
+
+    let random = ScriptedRandom::new((0..8).map(|_| Ok([0x41; 8])));
+    assert_eq!(
+        generate_udp_session_id(&random, |_| true).unwrap_err(),
+        RandomError::RepeatedSessionId
+    );
+
+    let client_random = ScriptedRandom::new([Ok([0x51; 8])]);
+    let client = generate_udp_session_id(&client_random, |_| false).expect("client ID");
+    let mut hasher = RecordingHasher::default();
+    client.hash(&mut hasher);
+    assert_eq!(hasher.0.len(), 32);
+    assert!(!hasher.0.windows(8).any(|window| window == [0x51; 8]));
+    let server_random = ScriptedRandom::new([Ok([0x51; 8]), Ok([0x52; 8])]);
+    let server = generate_distinct_udp_session_id(&server_random, &client, |_| false)
+        .expect("server retries the direction collision");
+    assert_ne!(client, server);
+
+    let unavailable = ScriptedRandom::new::<8>([Err(RandomError::Unavailable)]);
+    assert_eq!(
+        generate_udp_session_id(&unavailable, |_| false).unwrap_err(),
+        RandomError::Unavailable
+    );
 }
 
 #[test]
