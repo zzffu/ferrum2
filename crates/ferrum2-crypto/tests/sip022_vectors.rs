@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use ferrum2_crypto::{
     KeySelector, MethodKeyProvider, MethodProfile, MethodPsk, MethodSinglePskProvider,
     MethodTcpSalt, NonceCounter, RandomError, SecureRandom, TcpMethodProfile, TcpOpener, TcpSealer,
-    UdpCryptoError, UdpPacketCounter, generate_udp_session_id,
+    UdpCryptoError,
 };
 use serde_json::Value;
 
@@ -165,19 +165,6 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
         let psk = hex::decode(case["psk"].as_str().expect("PSK")).expect("PSK");
         let session_bytes =
             hex::decode(case["session_id"].as_str().expect("session ID")).expect("session ID");
-        let session_random = ScriptedRandom::new([session_bytes]);
-        let session_id =
-            generate_udp_session_id(&session_random, |_| false).expect("fixture session ID");
-        let mut binding_field = [0_u8; 8];
-        session_id
-            .write_wire(&mut binding_field)
-            .expect("bounded response binding field");
-        assert_eq!(
-            binding_field.as_slice(),
-            hex::decode(case["session_id"].as_str().expect("session ID")).expect("session ID")
-        );
-        assert!(session_id.matches_wire(&binding_field));
-        assert!(!session_id.matches_wire(&binding_field[..7]));
         let provider = MethodSinglePskProvider::new(
             MethodPsk::try_from_slice(profile, &psk).expect("method-width PSK"),
         );
@@ -186,6 +173,22 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
             .expect("default key");
         assert_eq!(crypto.profile(), profile);
         assert_eq!(format!("{crypto:?}"), "UdpCrypto([REDACTED])");
+        let session_random = ScriptedRandom::new([session_bytes]);
+        let mut outbound = crypto
+            .generate_outbound_session(&session_random, |_| false)
+            .expect("fixture outbound session");
+        assert_eq!(format!("{outbound:?}"), "UdpOutboundSession([REDACTED])");
+        let mut binding_field = [0_u8; 8];
+        outbound
+            .session_id()
+            .write_wire(&mut binding_field)
+            .expect("bounded response binding field");
+        assert_eq!(
+            binding_field.as_slice(),
+            hex::decode(case["session_id"].as_str().expect("session ID")).expect("session ID")
+        );
+        assert!(outbound.session_id().matches_wire(&binding_field));
+        assert!(!outbound.session_id().matches_wire(&binding_field[..7]));
 
         let target_packet_id = case["packet_id"].as_u64().expect("packet ID");
         let nonce_draws = if profile == MethodProfile::Blake3ChaCha20Poly13052022 {
@@ -199,43 +202,24 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
             Vec::new()
         };
         let packet_random = ScriptedRandom::new(nonce_draws);
-        let mut counter = UdpPacketCounter::new();
         let mut output = vec![0xa5; plaintext.len() + profile.udp_wire_overhead_bytes()];
 
         for expected_packet_id in 0..target_packet_id {
             let sealed = crypto
-                .seal(
-                    &session_id,
-                    &mut counter,
-                    &plaintext,
-                    &mut output,
-                    &packet_random,
-                )
+                .seal(&mut outbound, &plaintext, &mut output, &packet_random)
                 .expect("preceding packet seals");
             assert_eq!(sealed.packet_id(), expected_packet_id);
         }
 
         let mut too_small = vec![0xa5; output.len() - 1];
         assert!(matches!(
-            crypto.seal(
-                &session_id,
-                &mut counter,
-                &plaintext,
-                &mut too_small,
-                &packet_random,
-            ),
+            crypto.seal(&mut outbound, &plaintext, &mut too_small, &packet_random,),
             Err(UdpCryptoError::OutputTooSmall)
         ));
         assert!(too_small.iter().all(|byte| *byte == 0xa5));
 
         let sealed = crypto
-            .seal(
-                &session_id,
-                &mut counter,
-                &plaintext,
-                &mut output,
-                &packet_random,
-            )
+            .seal(&mut outbound, &plaintext, &mut output, &packet_random)
             .expect("fixture packet seals");
         assert_eq!(sealed.packet_id(), target_packet_id);
         let expected_wire = hex::decode(case["wire"].as_str().expect("wire")).expect("wire");
@@ -245,7 +229,7 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
         let opened = crypto
             .open(&expected_wire, &mut opened_body)
             .expect("fixture packet authenticates");
-        assert_eq!(opened.session_id(), &session_id);
+        assert_eq!(opened.session_id(), outbound.session_id());
         assert_eq!(opened.packet_id(), target_packet_id);
         assert_eq!(&opened_body[..opened.plaintext_len()], plaintext);
 
@@ -265,13 +249,7 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
         if profile == MethodProfile::Blake3ChaCha20Poly13052022 {
             let prior_wire = output.clone();
             let next = crypto
-                .seal(
-                    &session_id,
-                    &mut counter,
-                    &plaintext,
-                    &mut output,
-                    &packet_random,
-                )
+                .seal(&mut outbound, &plaintext, &mut output, &packet_random)
                 .expect("next packet draws a fresh nonce");
             assert_eq!(next.packet_id(), target_packet_id + 1);
             assert_eq!(&output[..24], &[0xd4; 24]);

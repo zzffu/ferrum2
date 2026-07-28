@@ -221,11 +221,22 @@ fn crypto_profiles_keep_cipher_dispatch_inside_one_deep_module() {
         "enum UdpCryptoInner",
         "pub struct UdpCrypto",
         "pub struct UdpSessionId",
-        "pub struct UdpPacketCounter",
+        "pub struct UdpOutboundSession",
+        "outbound: &mut UdpOutboundSession",
     ] {
         assert!(
             crypto.contains(required),
             "crypto deep module must contain `{required}`"
+        );
+    }
+    for separable_udp_state in [
+        "pub struct UdpPacketCounter",
+        "pub fn generate_udp_session_id",
+        "pub fn generate_distinct_udp_session_id",
+    ] {
+        assert!(
+            !crypto.contains(separable_udp_state),
+            "outbound UDP identity and packet lineage must remain inseparable: {separable_udp_state}"
         );
     }
     for duplicated_owner in [

@@ -9,9 +9,9 @@ use ferrum2_crypto::{
     MethodKeyProvider, MethodProfile, MethodProfileMismatchError, MethodPsk, MethodPskLengthError,
     MethodSaltLengthError, MethodSinglePskProvider, MethodTcpSalt, MonotonicInstant, NonceCounter,
     PskLengthError, RandomError, SecureRandom, SinglePskProvider, SystemClock, SystemRandom,
-    TcpMethod, TcpMethodProfile, TcpSalt, TcpSealer, UdpSessionId,
-    generate_distinct_udp_session_id, generate_method_request_salt, generate_method_response_salt,
-    generate_request_salt, generate_response_salt, generate_udp_session_id,
+    TcpMethod, TcpMethodProfile, TcpSalt, TcpSealer, UdpOutboundSession, UdpSessionId,
+    generate_method_request_salt, generate_method_response_salt, generate_request_salt,
+    generate_response_salt,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -275,40 +275,57 @@ fn method_profiles_bind_exact_width_secret_salt_and_key_capabilities() {
 #[test]
 fn udp_session_ids_retry_live_collisions_without_exposing_partial_state() {
     assert_zeroize_on_drop::<UdpSessionId>();
+    assert_zeroize_on_drop::<UdpOutboundSession>();
+    let provider = MethodSinglePskProvider::new(MethodPsk::aes128([0x11; 16]));
+    let crypto = provider
+        .with_method_key(KeySelector::Default, |key| key.udp_crypto())
+        .expect("default key");
 
     for collisions in 0..8 {
         let random = ScriptedRandom::new((0..=collisions).map(|draw| Ok([draw as u8 + 1; 8])));
         let mut observed = 0;
-        let id = generate_udp_session_id(&random, |_| {
-            let collides = observed < collisions;
-            observed += 1;
-            collides
-        })
-        .expect("one of the first eight draws is distinct");
+        let outbound = crypto
+            .generate_outbound_session(&random, |_| {
+                let collides = observed < collisions;
+                observed += 1;
+                collides
+            })
+            .expect("one of the first eight draws is distinct");
         assert_eq!(observed, collisions + 1);
-        assert_eq!(format!("{id:?}"), "UdpSessionId([REDACTED])");
+        assert_eq!(format!("{outbound:?}"), "UdpOutboundSession([REDACTED])");
+        assert_eq!(
+            format!("{:?}", outbound.session_id()),
+            "UdpSessionId([REDACTED])"
+        );
     }
 
     let random = ScriptedRandom::new((0..8).map(|_| Ok([0x41; 8])));
     assert_eq!(
-        generate_udp_session_id(&random, |_| true).unwrap_err(),
+        crypto
+            .generate_outbound_session(&random, |_| true)
+            .unwrap_err(),
         RandomError::RepeatedSessionId
     );
 
     let client_random = ScriptedRandom::new([Ok([0x51; 8])]);
-    let client = generate_udp_session_id(&client_random, |_| false).expect("client ID");
+    let client = crypto
+        .generate_outbound_session(&client_random, |_| false)
+        .expect("client session");
     let mut hasher = RecordingHasher::default();
-    client.hash(&mut hasher);
+    client.session_id().hash(&mut hasher);
     assert_eq!(hasher.0.len(), 32);
     assert!(!hasher.0.windows(8).any(|window| window == [0x51; 8]));
     let server_random = ScriptedRandom::new([Ok([0x51; 8]), Ok([0x52; 8])]);
-    let server = generate_distinct_udp_session_id(&server_random, &client, |_| false)
+    let server = crypto
+        .generate_distinct_outbound_session(&server_random, client.session_id(), |_| false)
         .expect("server retries the direction collision");
-    assert_ne!(client, server);
+    assert_ne!(client.session_id(), server.session_id());
 
     let unavailable = ScriptedRandom::new::<8>([Err(RandomError::Unavailable)]);
     assert_eq!(
-        generate_udp_session_id(&unavailable, |_| false).unwrap_err(),
+        crypto
+            .generate_outbound_session(&unavailable, |_| false)
+            .unwrap_err(),
         RandomError::Unavailable
     );
 }

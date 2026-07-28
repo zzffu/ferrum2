@@ -526,12 +526,7 @@ impl Drop for UdpSessionId {
 
 impl ZeroizeOnDrop for UdpSessionId {}
 
-/// Draws a fresh UDP session ID, retrying live collisions at most eight times.
-///
-/// The collision predicate is the caller's bounded live-session lookup and
-/// can include the opposite direction's ID to keep client/server owners
-/// distinct. No candidate bytes are exposed or retained on failure.
-pub fn generate_udp_session_id(
+fn generate_udp_session_id(
     random: &(impl SecureRandom + ?Sized),
     mut is_live: impl FnMut(&UdpSessionId) -> bool,
 ) -> Result<UdpSessionId, RandomError> {
@@ -547,11 +542,7 @@ pub fn generate_udp_session_id(
     Err(RandomError::RepeatedSessionId)
 }
 
-/// Draws a fresh UDP session ID distinct from an opposite-direction owner.
-///
-/// The opposite ID is always treated as a live collision in addition to the
-/// caller's bounded live-session lookup.
-pub fn generate_distinct_udp_session_id(
+fn generate_distinct_udp_session_id(
     random: &(impl SecureRandom + ?Sized),
     opposite_direction: &UdpSessionId,
     mut is_live: impl FnMut(&UdpSessionId) -> bool,
@@ -561,23 +552,13 @@ pub fn generate_distinct_udp_session_id(
     })
 }
 
-/// A directional UDP packet-ID owner.
-///
-/// New owners start at zero. State advances only after [`UdpCrypto::seal`]
-/// has produced a complete envelope in caller-owned output.
-pub struct UdpPacketCounter {
+struct UdpPacketCounter {
     next: Option<u64>,
 }
 
 impl UdpPacketCounter {
-    /// Creates a new counter whose first packet ID is zero.
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Self { next: Some(0) }
-    }
-
-    /// Reports whether every `u64` packet ID has been consumed.
-    pub const fn is_exhausted(&self) -> bool {
-        self.next.is_none()
     }
 
     fn current(&self) -> Result<u64, UdpCryptoError> {
@@ -587,18 +568,6 @@ impl UdpPacketCounter {
     fn commit(&mut self, packet_id: u64) {
         debug_assert_eq!(self.next, Some(packet_id));
         self.next = packet_id.checked_add(1);
-    }
-}
-
-impl Default for UdpPacketCounter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Debug for UdpPacketCounter {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("UdpPacketCounter([REDACTED])")
     }
 }
 
@@ -618,6 +587,58 @@ impl Drop for UdpPacketCounter {
 }
 
 impl ZeroizeOnDrop for UdpPacketCounter {}
+
+/// A move-only, method-bound outbound UDP session owner.
+///
+/// The opaque session ID and its sole packet-ID lineage are created together.
+/// Callers can use the ID for bounded lookup and response binding, but cannot
+/// clone, reset, replace, or detach the lineage used by [`UdpCrypto::seal`].
+pub struct UdpOutboundSession {
+    profile: MethodProfile,
+    session_id: UdpSessionId,
+    counter: UdpPacketCounter,
+}
+
+impl UdpOutboundSession {
+    fn new(profile: MethodProfile, session_id: UdpSessionId) -> Self {
+        Self {
+            profile,
+            session_id,
+            counter: UdpPacketCounter::new(),
+        }
+    }
+
+    /// Returns the opaque session ID for bounded lookup and response binding.
+    pub const fn session_id(&self) -> &UdpSessionId {
+        &self.session_id
+    }
+
+    /// Reports whether every `u64` packet ID has been consumed.
+    pub const fn is_exhausted(&self) -> bool {
+        self.counter.next.is_none()
+    }
+}
+
+impl fmt::Debug for UdpOutboundSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("UdpOutboundSession([REDACTED])")
+    }
+}
+
+impl Zeroize for UdpOutboundSession {
+    fn zeroize(&mut self) {
+        self.session_id.zeroize();
+        self.counter.zeroize();
+    }
+}
+
+impl Drop for UdpOutboundSession {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for UdpOutboundSession {}
 
 // Keeping fixed-size expanded primitive state inline avoids an allocation in
 // the long-lived method capability and all per-packet operations.
@@ -697,6 +718,33 @@ impl UdpCrypto {
         }
     }
 
+    /// Creates one outbound session with a fresh ID and one private packet-ID lineage.
+    ///
+    /// The collision predicate is the caller's bounded live-session lookup.
+    /// No candidate bytes or independently resettable counter are exposed.
+    pub fn generate_outbound_session(
+        &self,
+        random: &(impl SecureRandom + ?Sized),
+        is_live: impl FnMut(&UdpSessionId) -> bool,
+    ) -> Result<UdpOutboundSession, RandomError> {
+        generate_udp_session_id(random, is_live)
+            .map(|session_id| UdpOutboundSession::new(self.profile(), session_id))
+    }
+
+    /// Creates an outbound session distinct from an opposite-direction owner.
+    ///
+    /// The opposite ID is always treated as a live collision in addition to
+    /// the caller's bounded live-session lookup.
+    pub fn generate_distinct_outbound_session(
+        &self,
+        random: &(impl SecureRandom + ?Sized),
+        opposite_direction: &UdpSessionId,
+        is_live: impl FnMut(&UdpSessionId) -> bool,
+    ) -> Result<UdpOutboundSession, RandomError> {
+        generate_distinct_udp_session_id(random, opposite_direction, is_live)
+            .map(|session_id| UdpOutboundSession::new(self.profile(), session_id))
+    }
+
     fn crypt_aes_header(&self, header: &mut [u8; UDP_IDENTITY_BYTES], encrypt: bool) {
         let mut block = Array::from(*header);
         match (&self.inner, encrypt) {
@@ -749,13 +797,15 @@ impl UdpCrypto {
     /// counter unchanged and returns no externally ownable length.
     pub fn seal(
         &self,
-        session_id: &UdpSessionId,
-        counter: &mut UdpPacketCounter,
+        outbound: &mut UdpOutboundSession,
         plaintext_body: &[u8],
         output: &mut [u8],
         random: &(impl SecureRandom + ?Sized),
     ) -> Result<UdpSealResult, UdpCryptoError> {
-        let packet_id = counter.current()?;
+        if outbound.profile != self.profile() {
+            return Err(UdpCryptoError::MethodMismatch);
+        }
+        let packet_id = outbound.counter.current()?;
         let wire_len = plaintext_body
             .len()
             .checked_add(self.profile().udp_wire_overhead_bytes())
@@ -767,7 +817,7 @@ impl UdpCrypto {
         let result = match &self.inner {
             UdpCryptoInner::Aes128 { .. } | UdpCryptoInner::Aes256 { .. } => seal_aes_udp(
                 self,
-                session_id,
+                &outbound.session_id,
                 packet_id,
                 plaintext_body,
                 &mut output[..wire_len],
@@ -775,7 +825,7 @@ impl UdpCrypto {
             UdpCryptoInner::ChaCha20Poly1305(cipher) => seal_xchacha_udp(
                 cipher,
                 random,
-                session_id,
+                &outbound.session_id,
                 packet_id,
                 plaintext_body,
                 &mut output[..wire_len],
@@ -786,7 +836,7 @@ impl UdpCrypto {
             output[..wire_len].zeroize();
             return Err(error);
         }
-        counter.commit(packet_id);
+        outbound.counter.commit(packet_id);
         Ok(UdpSealResult {
             wire_len,
             packet_id,
@@ -871,6 +921,8 @@ pub enum UdpCryptoError {
     OperationFailed,
     /// Every directional `u64` packet ID has been consumed.
     CounterExhausted,
+    /// The outbound session belongs to another cryptographic method.
+    MethodMismatch,
 }
 
 impl fmt::Display for UdpCryptoError {
@@ -882,6 +934,7 @@ impl fmt::Display for UdpCryptoError {
             Self::RandomUnavailable => "secure random unavailable",
             Self::OperationFailed => "UDP encryption failed",
             Self::CounterExhausted => "UDP packet counter exhausted",
+            Self::MethodMismatch => "UDP cryptographic method mismatch",
         };
         formatter.write_str(message)
     }
@@ -1687,56 +1740,44 @@ mod tests {
         MethodSecretKeyRef { psk: &psk }.udp_crypto()
     }
 
+    fn aes256_udp_crypto() -> UdpCrypto {
+        let psk = MethodPskBytes::Aes256(Zeroizing::new([0x33; WIDE_KEY_BYTES]));
+        MethodSecretKeyRef { psk: &psk }.udp_crypto()
+    }
+
     #[test]
-    fn udp_packet_counter_commits_zero_terminal_and_exhausted_states_only_on_success() {
+    fn udp_outbound_session_commits_zero_terminal_and_exhausted_states_only_on_success() {
         let crypto = aes128_udp_crypto();
         let session_id = UdpSessionId::from_bytes([0x22; UDP_SESSION_ID_BYTES]);
+        let mut outbound = UdpOutboundSession::new(crypto.profile(), session_id);
         let mut output = [0xa5; 64];
-        let mut counter = UdpPacketCounter::new();
-
-        assert!(matches!(
-            crypto.seal(
-                &session_id,
-                &mut counter,
-                b"body",
-                &mut output[..3],
-                &SystemRandom,
-            ),
-            Err(UdpCryptoError::OutputTooSmall)
-        ));
-        let first = crypto
-            .seal(
-                &session_id,
-                &mut counter,
-                b"body",
-                &mut output,
-                &SystemRandom,
-            )
-            .expect("first complete packet");
-        assert_eq!(first.packet_id(), 0);
-
-        counter.next = Some(u64::MAX);
-        let terminal = crypto
-            .seal(
-                &session_id,
-                &mut counter,
-                b"body",
-                &mut output,
-                &SystemRandom,
-            )
-            .expect("terminal packet ID remains usable");
-        assert_eq!(terminal.packet_id(), u64::MAX);
-        assert!(counter.is_exhausted());
 
         let original = output;
         assert!(matches!(
-            crypto.seal(
-                &session_id,
-                &mut counter,
-                b"body",
-                &mut output,
-                &SystemRandom,
-            ),
+            aes256_udp_crypto().seal(&mut outbound, b"body", &mut output, &SystemRandom),
+            Err(UdpCryptoError::MethodMismatch)
+        ));
+        assert_eq!(output, original);
+
+        assert!(matches!(
+            crypto.seal(&mut outbound, b"body", &mut output[..3], &SystemRandom,),
+            Err(UdpCryptoError::OutputTooSmall)
+        ));
+        let first = crypto
+            .seal(&mut outbound, b"body", &mut output, &SystemRandom)
+            .expect("first complete packet");
+        assert_eq!(first.packet_id(), 0);
+
+        outbound.counter.next = Some(u64::MAX);
+        let terminal = crypto
+            .seal(&mut outbound, b"body", &mut output, &SystemRandom)
+            .expect("terminal packet ID remains usable");
+        assert_eq!(terminal.packet_id(), u64::MAX);
+        assert!(outbound.is_exhausted());
+
+        let original = output;
+        assert!(matches!(
+            crypto.seal(&mut outbound, b"body", &mut output, &SystemRandom,),
             Err(UdpCryptoError::CounterExhausted)
         ));
         assert_eq!(output, original);
