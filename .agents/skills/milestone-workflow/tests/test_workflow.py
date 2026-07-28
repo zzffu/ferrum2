@@ -1760,6 +1760,8 @@ class ReviewConvergenceTests(unittest.TestCase):
         resolved: list[str] | None = None,
         note: list[str] | None = None,
         sha: str = "a" * 40,
+        root_blocker: str = "",
+        authorization_scope: str = "",
     ) -> argparse.Namespace:
         return argparse.Namespace(
             ticket_id="M0-T01",
@@ -1771,6 +1773,8 @@ class ReviewConvergenceTests(unittest.TestCase):
             new_finding=new_finding or [],
             resolved=resolved or [],
             note=note or [],
+            root_blocker=root_blocker,
+            authorization_scope=authorization_scope,
         )
 
     def _record(self, state: dict[str, object], item: workflow.Ticket, args: argparse.Namespace) -> int:
@@ -1785,6 +1789,203 @@ class ReviewConvergenceTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             return workflow.cmd_record_review(args)
+
+    def superseding_fixture(
+        self,
+    ) -> tuple[dict[str, object], workflow.Ticket, dict[str, object], argparse.Namespace]:
+        item = ticket("M0-T01", "ready", owns=("a/**",), risk="critical")
+        state = workflow.empty_runtime_state()
+        runtime = workflow.milestone_runtime_state(state, "M0")
+        runtime["blockers"]["B1"] = {
+            "id": "B1",
+            "ticket_id": item.id,
+            "class": "security",
+            "phase": "review",
+            "risk": "critical",
+            "root_cause": "security invariant",
+            "root_cause_id": "B1",
+            "derived_from": None,
+            "status": "open",
+        }
+        self._record(
+            state,
+            item,
+            self.review_args(
+                reviewer="architect",
+                round_name="full",
+                verdict="block",
+                finding=["ARCH-001:major:security invariant is violated"],
+            ),
+        )
+        runtime["repairs"][item.id] = [
+            {
+                "class": "substantive",
+                "root_cause_id": "B1",
+                "consumes_budget": True,
+                "recorded_at": "2026-07-28T00:01:00+00:00",
+            }
+        ]
+        self._record(
+            state,
+            item,
+            self.review_args(
+                reviewer="architect",
+                round_name="targeted",
+                verdict="escalate",
+                finding=["ARCH-001:major:security invariant remains violated"],
+                sha="b" * 40,
+            ),
+        )
+        targeted = runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"]
+        targeted["recorded_at"] = "2026-07-28T00:02:00+00:00"
+        runtime["repairs"][item.id].append(
+            {
+                "class": "substantive",
+                "root_cause_id": "B1",
+                "consumes_budget": True,
+                "recorded_at": "2026-07-28T00:03:00+00:00",
+            }
+        )
+        self._record(
+            state,
+            item,
+            self.review_args(
+                reviewer="qa",
+                round_name="full",
+                verdict="pass",
+            ),
+        )
+        runtime["phases"][item.id] = {
+            "ticket_id": item.id,
+            "phase": "repair",
+            "branch": "codex/ticket/m0-t01",
+            "worktree": str(Path.cwd().resolve()),
+            "candidate_sha": "c" * 40,
+            "root_cause_id": "B1",
+        }
+        runtime["authorizations"]["review-override"] = {
+            "kind": "local",
+            "status": "granted",
+            "actions": ["review_round_override"],
+            "tickets": [item.id],
+            "blocker_classes": ["security"],
+            "max_risk": "critical",
+            "remote_effects": False,
+            "uses": 0,
+            "max_uses": 1,
+        }
+        args = self.review_args(
+            reviewer="architect",
+            round_name="superseding",
+            verdict="pass",
+            resolved=["ARCH-001"],
+            sha="c" * 40,
+            root_blocker="B1",
+            authorization_scope="review-override",
+        )
+        return state, item, runtime, args
+
+    def test_superseding_review_preserves_escalation_consumes_scope_and_passes_gate(
+        self,
+    ) -> None:
+        state, item, runtime, args = self.superseding_fixture()
+        targeted = dict(runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"])
+
+        self.assertEqual(self._record(state, item, args), 0)
+
+        rounds = runtime["reviews"][item.id]["reviewers"]["architect"]
+        self.assertEqual(rounds["targeted"], targeted)
+        superseding = rounds["superseding"]
+        self.assertEqual(superseding["root_cause_id"], "B1")
+        self.assertEqual(superseding["authorization_scope"], "review-override")
+        self.assertEqual(
+            superseding["supersedes"],
+            {
+                "round": "targeted",
+                "candidate_sha": "b" * 40,
+                "verdict": "escalate",
+            },
+        )
+        self.assertEqual(runtime["authorizations"]["review-override"]["uses"], 1)
+        self.assertEqual(runtime["authorizations"]["review-override"]["status"], "revoked")
+        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+        self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
+        self.assertEqual(workflow.runtime_state_errors(state), [])
+
+    def test_superseding_review_rejects_unaudited_or_broadened_dispositions(
+        self,
+    ) -> None:
+        cases = [
+            ("missing scope", "requires --authorization-scope"),
+            ("wrong scope", "does not cover"),
+            ("exhausted scope", "unused"),
+            ("wrong candidate", "active repair SHA"),
+            ("wrong root", "active repair root"),
+            ("second record", "already used"),
+            ("new finding", "does not accept new findings"),
+            ("non-original finding", "original full-review"),
+            ("missing later repair", "later budget-consuming repair"),
+            ("target not escalated", "targeted escalation"),
+            ("second block", "verdict must be"),
+            ("passing with open finding", "unresolved"),
+        ]
+        for name, message in cases:
+            with self.subTest(name=name):
+                state, item, runtime, args = self.superseding_fixture()
+                if name == "missing scope":
+                    args.authorization_scope = ""
+                elif name == "wrong scope":
+                    runtime["authorizations"]["review-override"]["tickets"] = ["M0-T02"]
+                elif name == "exhausted scope":
+                    runtime["authorizations"]["review-override"].update(
+                        status="revoked", uses=1
+                    )
+                elif name == "wrong candidate":
+                    args.candidate_sha = "d" * 40
+                elif name == "wrong root":
+                    runtime["blockers"]["B2"] = {
+                        **runtime["blockers"]["B1"],
+                        "id": "B2",
+                        "root_cause_id": "B2",
+                    }
+                    args.root_blocker = "B2"
+                elif name == "second record":
+                    runtime["reviews"][item.id]["reviewers"]["architect"][
+                        "superseding"
+                    ] = {}
+                elif name == "new finding":
+                    args.new_finding = [
+                        "ARCH-002:major:introduced_by_repair:new security finding"
+                    ]
+                elif name == "non-original finding":
+                    args.finding = ["ARCH-999:major:not an original finding"]
+                elif name == "missing later repair":
+                    runtime["repairs"][item.id].pop()
+                elif name == "target not escalated":
+                    runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"][
+                        "verdict"
+                    ] = "pass"
+                elif name == "second block":
+                    args.verdict = "block"
+                    args.resolved = []
+                    args.finding = ["ARCH-001:major:still blocked"]
+                else:
+                    args.resolved = []
+                uses_before = runtime["authorizations"]["review-override"]["uses"]
+                with self.assertRaisesRegex(workflow.WorkflowError, message):
+                    self._record(state, item, args)
+                self.assertEqual(
+                    runtime["authorizations"]["review-override"]["uses"],
+                    uses_before,
+                )
+
+        state, item, runtime, args = self.superseding_fixture()
+        self._record(state, item, args)
+        runtime["reviews"][item.id]["reviewers"]["architect"]["superseding"][
+            "authorization_scope"
+        ] = "missing"
+        errors = workflow.runtime_state_errors(state)
+        self.assertTrue(any("authorization scope" in error for error in errors))
 
     def test_full_review_is_idempotent_but_cannot_be_reopened(self) -> None:
         item = ticket("M0-T01", "ready", owns=("a/**",), risk="high")

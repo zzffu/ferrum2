@@ -57,6 +57,22 @@ policy. Record it with:
 If any blocker remains after the targeted round, return `ESCALATE`. Do not start a
 third automatic cycle.
 
+## Explicit superseding verification
+
+A targeted `ESCALATE` remains the normal terminal result. Exceptionally, the user may
+authorize one later budget-consuming repair and one local superseding verification
+for the same canonical root. Record it as a separate `superseding` round bound to the
+active repaired SHA and an unused `review_round_override` authorization scope.
+
+The superseding round:
+
+- preserves the full and targeted records, including the escalation;
+- may address only original blocking finding IDs still open in that escalation;
+- consumes its exact authorization atomically with the new review record;
+- may conclude `PASS`, `PASS_WITH_NOTES`, or retain `ESCALATE`;
+- is never an automatic third loop and never authorizes another repair, broader
+  findings, ownership, contract, remote, destructive, push, or publish action.
+
 ## Verdicts
 
 - `pass`: integrate.

@@ -63,10 +63,11 @@ BLOCKER_CLASSES = {
 }
 AUTHORIZATION_STATES = {"not_required", "required", "granted", "exhausted"}
 REPAIR_CLASSES = {"mechanical", "evidence", "substantive"}
-REVIEW_ROUNDS = {"full", "targeted"}
+REVIEW_ROUNDS = {"full", "targeted", "superseding"}
 REVIEW_VERDICTS = {"pass", "pass_with_notes", "block", "escalate"}
 REVIEWERS = {"architect", "qa"}
 REVIEW_FINDING_SEVERITIES = {"blocker", "major", "minor", "note"}
+BLOCKING_REVIEW_SEVERITIES = {"blocker", "major"}
 NEW_REVIEW_BLOCKER_ORIGINS = {"introduced_by_repair", "previously_unobservable"}
 TEST_BUDGET_GATES = {"report", "ticket", "milestone"}
 TEST_BUDGET_MODES = {"ratchet", "strict", "off"}
@@ -704,6 +705,7 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
         if not isinstance(reviews, dict):
             errors.append(f"{milestone}.reviews must be an object")
         else:
+            superseding_scope_counts: collections.Counter[str] = collections.Counter()
             for ticket_id, ticket_reviews in reviews.items():
                 if not isinstance(ticket_reviews, dict):
                     errors.append(f"{milestone}.reviews.{ticket_id} must be an object")
@@ -774,6 +776,65 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
                             if round_name == "targeted" and finding.get("new", False):
                                 if origin not in NEW_REVIEW_BLOCKER_ORIGINS:
                                     errors.append(prefix + ".origin is invalid for a new finding")
+                    superseding = rounds.get("superseding")
+                    if not isinstance(superseding, dict):
+                        continue
+                    authorization_scope = str(
+                        superseding.get("authorization_scope", "")
+                    ).strip()
+                    findings = superseding.get("findings", [])
+                    resolved = superseding.get("resolved", [])
+                    try:
+                        expected_findings, _, _ = validate_superseding_review(
+                            runtime=runtime,
+                            ticket_id=str(ticket_id),
+                            reviewer_rounds=rounds,
+                            candidate_sha=str(
+                                superseding.get("candidate_sha", "")
+                            ).lower(),
+                            verdict=str(superseding.get("verdict", "")),
+                            findings=findings if isinstance(findings, list) else [],
+                            new_findings=[
+                                item
+                                for item in findings
+                                if isinstance(item, dict) and item.get("new", False)
+                            ] if isinstance(findings, list) else [],
+                            resolved=resolved if isinstance(resolved, list) else [],
+                            root_cause_id=str(
+                                superseding.get("root_cause_id", "")
+                            ).strip(),
+                            authorization_scope=authorization_scope,
+                            blocking_severities=BLOCKING_REVIEW_SEVERITIES,
+                            supersedes=superseding.get("supersedes"),
+                            require_available=False,
+                        )
+                        if expected_findings != findings:
+                            raise WorkflowError(
+                                "Superseding findings do not match unresolved targeted IDs"
+                            )
+                    except WorkflowError as exc:
+                        errors.append(
+                            f"{milestone}.reviews.{ticket_id}.{reviewer}."
+                            f"superseding is invalid: {exc}"
+                        )
+                    else:
+                        superseding_scope_counts[authorization_scope] += 1
+            for scope, count in superseding_scope_counts.items():
+                authorization = (
+                    authorizations.get(scope)
+                    if isinstance(authorizations, dict)
+                    else None
+                )
+                uses = (
+                    authorization.get("uses", 0)
+                    if isinstance(authorization, dict)
+                    else 0
+                )
+                if not isinstance(uses, int) or uses < count:
+                    errors.append(
+                        f"{milestone}.reviews superseding records reference {scope} "
+                        f"{count} times but authorization uses is {uses!r}"
+                    )
 
         phases = runtime.get("phases", {})
         if not isinstance(phases, dict):
@@ -1199,6 +1260,18 @@ def matching_authorization(
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def recorded_at(value: object) -> dt.datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(dt.timezone.utc)
 
 
 def relative(root: Path, path: Path) -> str:
@@ -2522,6 +2595,181 @@ def _review_passes(verdict: str, cfg: dict[str, Any]) -> bool:
     )
 
 
+def validate_superseding_review(
+    *,
+    runtime: dict[str, Any],
+    ticket_id: str,
+    reviewer_rounds: dict[str, Any],
+    candidate_sha: str,
+    verdict: str,
+    findings: Sequence[dict[str, Any]],
+    new_findings: Sequence[dict[str, Any]],
+    resolved: Sequence[str],
+    root_cause_id: str,
+    authorization_scope: str,
+    blocking_severities: set[str],
+    phase: dict[str, Any] | None = None,
+    supersedes: object = None,
+    require_available: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str]]:
+    if any(not isinstance(item, dict) for item in findings + new_findings):
+        raise WorkflowError("Superseding review findings must be objects")
+    if any(not isinstance(item, str) or not item.strip() for item in resolved):
+        raise WorkflowError("Superseding resolved IDs must be non-empty strings")
+    if verdict not in {"pass", "pass_with_notes", "escalate"}:
+        raise WorkflowError(
+            "Superseding review verdict must be pass, pass_with_notes, or escalate"
+        )
+    if new_findings:
+        raise WorkflowError("Superseding review does not accept new findings")
+    full = reviewer_rounds.get("full")
+    targeted = reviewer_rounds.get("targeted")
+    if not isinstance(full, dict) or full.get("verdict") != "block":
+        raise WorkflowError("Superseding review requires the original blocking full review")
+    if not isinstance(targeted, dict) or targeted.get("verdict") != "escalate":
+        raise WorkflowError("Superseding review requires a prior targeted escalation")
+    targeted_sha = str(targeted.get("candidate_sha", "")).lower()
+    if candidate_sha == targeted_sha:
+        raise WorkflowError(
+            "Superseding review candidate must differ from the targeted escalation SHA"
+        )
+    root = runtime.get("blockers", {}).get(root_cause_id)
+    if (
+        not root_cause_id
+        or not isinstance(root, dict)
+        or root.get("derived_from")
+        or str(root.get("root_cause_id", "")) != root_cause_id
+        or str(root.get("ticket_id", "")).upper() != ticket_id.upper()
+        or (require_available and root.get("status", "open") != "open")
+    ):
+        raise WorkflowError(
+            f"--root-blocker must name {ticket_id}'s open canonical root exactly"
+        )
+    if phase is not None and (
+        phase.get("phase") != "repair"
+        or phase.get("root_cause_id") != root_cause_id
+    ):
+        raise WorkflowError(
+            f"Superseding review root {root_cause_id} does not match the active repair root"
+        )
+    if phase is not None:
+        phase_sha = str(phase.get("candidate_sha", "")).lower()
+        if not phase_sha or phase_sha != candidate_sha:
+            raise WorkflowError(
+                f"Superseding review candidate {candidate_sha} does not match "
+                f"active repair SHA {phase_sha or 'missing'}"
+            )
+    if not authorization_scope:
+        raise WorkflowError("Superseding review requires --authorization-scope")
+    authorization = runtime.get("authorizations", {}).get(authorization_scope)
+    blocker_class = str(root.get("class", ""))
+    risk = str(root.get("risk", ""))
+    if not isinstance(authorization, dict):
+        raise WorkflowError(
+            f"Superseding review authorization scope {authorization_scope} is missing"
+        )
+    if not authorization_record_covers(
+        authorization,
+        action="review_round_override",
+        ticket_id=ticket_id,
+        blocker_class=blocker_class,
+        risk=risk,
+        remote_effects=False,
+        require_available=require_available,
+    ):
+        if require_available and authorization.get("status") != "granted":
+            raise WorkflowError(
+                f"Superseding review requires an unused authorization scope; "
+                f"{authorization_scope} is exhausted or revoked"
+            )
+        raise WorkflowError(
+            f"Superseding review authorization scope {authorization_scope} "
+            f"does not cover {ticket_id}/{blocker_class}/{risk}"
+        )
+    targeted_at = recorded_at(targeted.get("recorded_at"))
+    repairs = runtime.get("repairs", {}).get(ticket_id, [])
+    later_repair = targeted_at is not None and isinstance(repairs, list) and any(
+        isinstance(item, dict)
+        and item.get("root_cause_id") == root_cause_id
+        and bool(item.get("consumes_budget", True))
+        and (
+            recorded_at(item.get("recorded_at"))
+            or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+        )
+        > targeted_at
+        for item in repairs
+    )
+    if not later_repair:
+        raise WorkflowError(
+            "Superseding review requires a later budget-consuming repair "
+            f"for canonical root {root_cause_id}"
+        )
+    original = {
+        str(item.get("id")): item
+        for item in full.get("findings", [])
+        if isinstance(item, dict) and item.get("severity") in blocking_severities
+    }
+    targeted_open = {
+        str(item.get("id")): item
+        for item in targeted.get("findings", [])
+        if isinstance(item, dict) and item.get("severity") in blocking_severities
+    }
+    non_original = sorted(set(targeted_open) - set(original))
+    if non_original:
+        raise WorkflowError(
+            "Superseding review cannot dispose non-original targeted findings: "
+            + ", ".join(non_original)
+        )
+    resolved_ids = set(resolved)
+    if len(resolved_ids) != len(resolved) or not resolved_ids.issubset(targeted_open):
+        raise WorkflowError(
+            "--resolved must uniquely name findings in the targeted escalation"
+        )
+    remaining = {
+        finding_id: dict(item)
+        for finding_id, item in targeted_open.items()
+        if finding_id not in resolved_ids
+    }
+    for item in findings:
+        finding_id = str(item.get("id", ""))
+        if finding_id not in targeted_open or finding_id not in original:
+            raise WorkflowError(
+                "Superseding --finding must reuse an original full-review "
+                f"finding still open in the targeted escalation: {finding_id}"
+            )
+        if finding_id in resolved_ids:
+            raise WorkflowError(
+                f"Superseding finding {finding_id} cannot be both resolved and open"
+            )
+        if item.get("severity") != original[finding_id].get("severity"):
+            raise WorkflowError(
+                f"Superseding finding {finding_id} must retain its original severity"
+            )
+        remaining[finding_id] = dict(item)
+    if verdict in {"pass", "pass_with_notes"} and remaining:
+        raise WorkflowError(
+            "Superseding passing verdict leaves unresolved blocking findings: "
+            + ", ".join(sorted(remaining))
+        )
+    if verdict == "escalate" and not remaining:
+        raise WorkflowError(
+            "Superseding escalation must retain at least one blocking finding"
+        )
+    expected_supersedes = {
+        "round": "targeted",
+        "candidate_sha": targeted_sha,
+        "verdict": "escalate",
+    }
+    if (
+        (not require_available or supersedes is not None)
+        and supersedes != expected_supersedes
+    ):
+        raise WorkflowError(
+            "Superseding record must exactly preserve targeted SHA/verdict"
+        )
+    return list(remaining.values()), authorization, expected_supersedes
+
+
 def review_gate_status(
     ticket: Ticket,
     runtime: dict[str, Any],
@@ -2534,7 +2782,11 @@ def review_gate_status(
         rounds = reviewers.get(reviewer, {}) if isinstance(reviewers, dict) else {}
         record = None
         if isinstance(rounds, dict):
-            record = rounds.get("targeted") or rounds.get("full")
+            record = (
+                rounds.get("superseding")
+                or rounds.get("targeted")
+                or rounds.get("full")
+            )
         if not isinstance(record, dict):
             failures.append(f"missing {reviewer} review")
             continue
@@ -2603,9 +2855,13 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         raise WorkflowError("Review finding IDs must be unique in one record")
     blocking_severities = set(cfg.get("review", {}).get("blocking_severities", []))
     blocking = [item for item in findings + new_findings if item["severity"] in blocking_severities]
-    if verdict == "block" and not blocking:
+    if round_name != "superseding" and verdict == "block" and not blocking:
         raise WorkflowError("A block verdict requires at least one blocking finding")
-    if verdict in {"pass", "pass_with_notes"} and blocking:
+    if (
+        round_name != "superseding"
+        and verdict in {"pass", "pass_with_notes"}
+        and blocking
+    ):
         raise WorkflowError("A passing verdict cannot contain unresolved blocking findings")
     if verdict == "pass_with_notes" and not any(str(note).strip() for note in args.note):
         raise WorkflowError("pass_with_notes requires at least one --note")
@@ -2622,6 +2878,8 @@ def cmd_record_review(args: argparse.Namespace) -> int:
     review_cfg = cfg.get("review", {})
     ticket_reviews = runtime["reviews"].setdefault(ticket.id, {"reviewers": {}})
     reviewer_rounds = ticket_reviews.setdefault("reviewers", {}).setdefault(reviewer, {})
+    record_extra: dict[str, Any] = {}
+    authorization_to_consume: dict[str, Any] | None = None
 
     if round_name == "full":
         maximum = int(review_cfg.get("max_full_review_rounds", 1))
@@ -2645,7 +2903,7 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         if new_findings:
             raise WorkflowError("--new-finding is valid only for targeted re-review")
         record_findings = findings
-    else:
+    elif round_name == "targeted":
         maximum = int(review_cfg.get("max_targeted_repair_rounds", 1))
         if "targeted" in reviewer_rounds:
             raise WorkflowError(
@@ -2732,6 +2990,34 @@ def cmd_record_review(args: argparse.Namespace) -> int:
             )
         if verdict == "escalate" and not remaining_blocking:
             raise WorkflowError("Escalate verdict requires an unresolved blocking finding")
+    else:
+        if "superseding" in reviewer_rounds:
+            raise WorkflowError(
+                f"{ticket.id} {reviewer} already used its superseding review round"
+            )
+        root_cause_id = str(args.root_blocker).strip()
+        authorization_scope = str(args.authorization_scope).strip()
+        record_findings, authorization_to_consume, supersedes = (
+            validate_superseding_review(
+                runtime=runtime,
+                ticket_id=ticket.id,
+                reviewer_rounds=reviewer_rounds,
+                candidate_sha=candidate_sha,
+                verdict=verdict,
+                findings=findings,
+                new_findings=new_findings,
+                resolved=args.resolved,
+                root_cause_id=root_cause_id,
+                authorization_scope=authorization_scope,
+                blocking_severities=blocking_severities,
+                phase=phase if isinstance(phase, dict) else {},
+            )
+        )
+        record_extra = {
+            "authorization_scope": authorization_scope,
+            "root_cause_id": root_cause_id,
+            "supersedes": supersedes,
+        }
 
     record = {
         "round": round_name,
@@ -2742,7 +3028,10 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         "resolved": list(args.resolved),
         "notes": list(args.note),
         "recorded_at": utc_now(),
+        **record_extra,
     }
+    if authorization_to_consume is not None:
+        consume_authorization_record(authorization_to_consume)
     reviewer_rounds[round_name] = record
     path = save_runtime_state(root, cfg, state)
     if verdict == "pass_with_notes":
@@ -5096,7 +5385,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "record-review",
-        help="Record one bounded full review or targeted re-review",
+        help="Record one bounded full, targeted, or explicitly authorized superseding review",
     )
     p.add_argument("ticket_id")
     p.add_argument("--reviewer", choices=sorted(REVIEWERS), required=True)
@@ -5117,6 +5406,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--resolved", action="append", default=[])
     p.add_argument("--note", action="append", default=[])
+    p.add_argument("--root-blocker", default="")
+    p.add_argument("--authorization-scope", default="")
     p.set_defaults(func=cmd_record_review)
 
     p = sub.add_parser("review-state", help="Show the bounded review gate for one ticket")
