@@ -106,10 +106,11 @@ sing-box 和 shadowsocks-rust 仅作为兼容性研究、互操作和性能比�
 | 里程碑 | 可独立验收的结果 | 状态 |
 |---|---|---|
 | M0 | AES-128-GCM TCP 安全纵切：离线配置、SOCKS5、独立两端、direct outbound、最小观测、互操作与平台冒烟 | closed |
-| M1 | 三种方法的完整 TCP 行为和完整 TCP 互操作矩阵 | proposed |
+| M1 | 三种方法的完整 TCP 行为和完整 TCP 互操作矩阵 | planned |
 | M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | proposed |
 | M3 | 稳定运维契约、生命周期证明和三目标平台资格 | proposed |
 | M4 | 可复现性能/资源门与 v0 integrated qualification | proposed |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
-下一入口是 M1 `plan`，用于冻结三方法 TCP 扩展与 12 项 TCP 互操作合同。
+M1 已由 ADR-0018/0019、SPEC/TEST-0002 与 M1-T01～T04 冻结合同，下一入口是
+M1 `execute`，唯一 initial frontier 为 M1-T01。

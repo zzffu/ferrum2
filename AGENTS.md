@@ -45,10 +45,10 @@ and command definitions in their authoritative build/config files where possible
     values must not become metric labels.
 
 - Architecture entry points:
-  - This repository currently contains the workflow control plane only; no
-    Cargo workspace has been scaffolded. The planned workspace entry points
-    below must be reconciled with the root `Cargo.toml` when the first vertical
-    slice is created:
+  - M0 established the Cargo workspace and first reviewed product slice. The
+    root `Cargo.toml` and `Cargo.lock` are authoritative for the current
+    workspace; the entry points below are implemented and must remain
+    reconciled with those manifests:
     - `bins/ferrum2-client`: composition root for the SOCKS5 client.
     - `bins/ferrum2-server`: composition root for the Shadowsocks server and
       direct outbound.

@@ -8,7 +8,8 @@
 Bootstrap 基线是
 `master@b41c6127b1834ebd97246451fd92bafea50cb205`。M0 已以 exact integration
 `8318ef106d6cd4e029bd3b02aa64125fabdda462`、本地 full gate 与 GitHub Actions
-run `30331336772` attempt 1 的六项成功证据关闭；M1-M4 仍为 `proposed`。
+run `30331336772` attempt 1 的六项成功证据关闭；M1 已 `planned`，M2-M4 仍为
+`proposed`。
 M0 的 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md`。
 
 ## 依赖顺序
@@ -236,11 +237,13 @@ non-overlapping ownership。
 
 ## M1 — 完整 TCP 与 TCP 互操作
 
-- **Status:** proposed
+- **Status:** planned
 - **Objective:** 在不复制 transport state machine 的前提下，将 TCP 扩展到
   三个指定方法并完成完整 reference interoperability。
 - **Entry conditions:** M0 closed；AES-128 wire/runtime/key lookup contract
-  经实测稳定；reference versions 和 fixture provenance 已固定。
+  经实测稳定；reference versions 已固定；AES-256/ChaCha primitive source、
+  synthetic wire inputs、dependency/profile 与 fixture provenance contract
+  由 M1 research/ADR 固定。
 - **Exit criteria:**
   1. AES-128、AES-256、ChaCha20-Poly1305 分别通过 KDF/AEAD KAT、SIP022
      TCP 正负向、replay、binding 和 detection-prevention suite。
@@ -250,12 +253,29 @@ non-overlapping ownership。
      个 TCP required interop cases 全部通过；required case 不因环境缺失静默跳过。
   4. M0 security、resource、observability、platform smoke 和 host full gate
      回归通过。
-- **In-scope tickets:** none yet；由 M1 `plan` 创建。
+- **In-scope tickets:**
+  - M1-T01：三方法 crypto profile、primitive fixtures、dependency/lock policy；
+  - M1-T02：共享 SIP022 TCP flow 与 IPv4/IPv6/domain target path；
+  - M1-T03：method-aware config/binaries 与 local product/lifecycle matrix；
+  - M1-T04：12-cell hosted qualification 与 thin CI orchestration。
+
+  Dependency graph：
+
+  ```text
+  M1-T01
+  ├─ M1-T02 ── M1-T03 ──(integration blocker)── M1-T04
+  └─ M1-T04 implementation
+  ```
+
+  唯一 initial frontier 是 M1-T01。T01 done 后 T02 与 T04 implementation
+  ownership-disjoint；T03 等待 T02；T04 最后集成。
 - **Deferred/out of scope:** UDP、最终平台 qualification 和 performance gate。
 - **Integrated commit:** not yet
-- **Open blockers and risks:** reference behavior/version drift、fixture license、
-  method abstraction 对 hot path 的额外 allocation/dispatch，以及为兼容性静默
-  偏离 SIP022 的风险。
+- **Open blockers and risks:** 当前没有 pre-implementation contract blocker。
+  execute 风险是 method/profile 错配、partial address-family conversion、fixture
+  provenance/rights、hot-path allocation/dispatch 与 hosted provider availability；
+  ADR-0018/0019、TEST-0002、exact-SHA review 和 fail-closed release gate 已给出
+  控制。push/run 仍需另行授权。
 
 ## M2 — 完整 UDP 协议纵切与 UDP 互操作
 
@@ -361,6 +381,9 @@ non-overlapping ownership。
 | DEC-018 | resolved in M0 hosted-rebind amendment | client/server listener仅在Unix bind前启用reuse-address，Windows保持default且禁止reuse-port；harness首次listener与exact probe镜像同策略bind+listen并保留live-owner collision；新增唯一既有pin的`socket2` dev edge；四类hosted evidence-script portability缺陷fail closed修复 | `ADR-0015`、`SPEC-0001`、`TEST-0001`、M0-T07/M0-T08 |
 | DEC-019 | resolved in M0 invariant/evidence amendment | 产品/安全/release outcome为normative invariant；具体fixture/probe/test-only edge为selected conformance profile，可在执行前以等强、可审计、single-writer方式替换；机械修复不再自动要求新产品ADR | `ADR-0016` Accepted、`SPEC-0001`/`TEST-0001` amendments Approved、M0-T01/T02/T03/T06/T07/T08 |
 | DEC-020 | resolved in M0 CI convergence | qualification保留在Cargo compile/lint policy内但本机不执行external entry；hosted profile收敛为quality、MSRV、三平台matrix与一个四案interop，共六项result；删除11-job/self-audit/filter/link-help机械合同 | `ADR-0017` Accepted、`SPEC-0001`/`TEST-0001` amendments Approved、M0-T09/T10 done；exact `8318ef1` run `30331336772`六项success |
+| DEC-021 | resolved in M1 plan | method-bound secret/profile；AES-128 为16-byte、AES-256/ChaCha为32-byte；AEAD owner内分派且TCP state machine唯一；ChaCha 32-byte width显式标为compatibility interpretation | `ADR-0018`、M1 research、SPEC/TEST-0002 |
+| DEC-022 | resolved in M1 plan | target支持IPv4/IPv6/1～255-byte ASCII domain；system resolution最多16 candidates并与全部sequential dial共用absolute deadline；endpoint/reply端到端使用`SocketAddr` | `ADR-0019`、SPEC/TEST-0002 |
+| DEC-023 | resolved in M1 plan | 保留两个reference pins与thin hosted profile；固定M1-INT-001～012，12/12+cleanup且同一exact SHA/run/attempt才PASS | `SPEC-0002`、`TEST-0002`、M1-T04 |
 
 ## 风险登记
 
@@ -376,8 +399,10 @@ non-overlapping ownership。
 | GitHub-hosted image weekly drift 或 provider outage | P1 | M0 | fixed OS labels、ImageOS/ImageVersion与toolchain版本用于追溯、unavailable=FAIL/BLOCK；不把Included Software URL形状当控制，也不宣称M3资格 |
 | Linux真实流量后listener exact地址无法立即restart，或reuse策略意外允许live-owner共享 | P0 | M0 | ADR-0015 Unix-only reuse/default Windows、禁止SO_REUSEPORT、same-policy bind+listen与live-owner negative、100-cycle gate |
 | “等价证据”被事后用作waiver或缩减coverage | P0 | M0 | ADR-0016要求执行前mapping、old/new claim、独立性/failure modes、exact candidate SHA与Architect/QA gate；旧失败不可追认 |
+| 三方法 profile/key/salt width 错配或复制 TCP security state | P0 | M1 | ADR-0018 method-bound capability、one shared flow、profile table KAT/negative/interop |
+| IPv6/domain partial conversion、认证前 resolution/dial 或 deadline reset | P0 | M1 | ADR-0019 normalized target、zero-side-effect recording table、16-candidate/single-deadline paused-time gate |
+| 12-cell qualification 缺案、setup failure短路或不同SHA evidence拼接 | P0 | M1 | 固定case IDs、failure continuation、12/12+cleanup、同一run/attempt exact-SHA gate |
 | benchmark 不等价或噪声驱动错误优化 | P1 | M4 | frozen comparable config 和重复统计 |
-| 当前零代码使工期/接口估计不可靠 | P1 | M0 plan | 小型纵切、窄 tickets、每波 review/validation |
 
 ## 决策与范围变更日志
 
@@ -394,3 +419,4 @@ non-overlapping ownership。
 | 2026-07-28 | M0 hosted-rebind/evidence portability amendment | 接受Unix-only listener reuse、default Windows、same-policy exact bind+listen及唯一`socket2` harness edge；T08只修正两处full-name exact filters与三个platform linker probes | exact `51fb7327`的run `30301746374`及独立WSL复现把9个failed jobs归约为Linux rebind及四类CI evidence defects；不改变wire/product/API/config/job matrix/remote授权 | ADR-0015 Accepted；SPEC/TEST amendments Approved；Product/Architect/two QA document gates PASS；workflow validate/diff-check |
 | 2026-07-28 | M0 invariant/evidence contract amendment | 接受三层合同与执行前equivalent substitution；T01 ownership改为single-writer默认协调，事实性provenance勘误与机械evidence修复不再自动需要产品ADR | 历史ADR-0008/0011/0013/0014/0015证明写死的来源、probe、test edge或第三方时序会形成非产品blocker；不改变任何wire/security/product/platform/job/exact-SHA gate | ADR-0016 Accepted；SPEC/TEST amendments Approved；proposal `a389aa9`的Product/Architect/QA exact-SHA document gates均PASS |
 | 2026-07-28 | M0 CI evidence convergence | 接受Cargo-managed non-test qualification及四个job definitions/六个rendered results直接证明quality、MSRV、三平台与四案interop；本机编译/lint但不执行external entry；删除scope self-audit、filter/count、link-help及重复jobs | exact `5969bfd` run `30322690937`的6/11、5 failure再次证明mechanical realization被误当release invariant；不改变wire/security/platform/reference/exact-SHA结果 | ADR-0017 Accepted；SPEC/TEST amendments Approved；M0-T09/T10 done；exact `8318ef1`的local/review gates及run `30331336772`六项success |
+| 2026-07-28 | M1 plan | M1 改为 `planned`；接受method-bound三方法profile与完整target/resolution contract，批准SPEC/TEST-0002及四票DAG | M0已关闭；current code仍AES-128/IPv4 hard-code且qualification仅4案，需要先冻结width/address/deadline/fixture/12-cell evidence，避免Engineer临场安全决策 | Product/Architect/QA planning reports；ADR-0018/0019；M1 research；workflow validate/test-budget/frontier/next |
