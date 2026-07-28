@@ -1,5 +1,7 @@
 #[path = "../src/external_support/mod.rs"]
 mod external_support;
+#[path = "../src/local_support/mod.rs"]
+mod local_support;
 
 use external_support::{Direction, Reference, run_case};
 

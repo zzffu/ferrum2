@@ -3,6 +3,100 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SYNTHETIC_PSK: &str = "AAECAwQFBgcICQoLDA0ODw==";
+const HISTORICAL_OUT_OF_BAND_COMMIT: &str = "d1ef4bcfb081a89c5da1185dcb7c57606f8ec77e";
+const HISTORICAL_OUT_OF_BAND_PARENT: &str = "cd35dd91991425baa85b62dda5653eff13c48857";
+const HISTORICAL_ORDINARY_PATHS: &[&str] = &[
+    ".codex/agents/qa.toml",
+    "docs/ci-status.md",
+    "docs/roadmap.md",
+    "docs/tickets/M0-T07-compose-binaries-and-local-e2e.md",
+    "docs/tickets/M0-T08-interop-platform-and-integration-gates.md",
+];
+const HISTORICAL_OUT_OF_BAND_SNAPSHOT: &[(&str, &str)] = &[
+    (
+        ".agents/skills/milestone-workflow/SKILL.md",
+        "f430cfd87c6658c0d7ded77aa41b72474069cff5",
+    ),
+    (
+        ".agents/skills/milestone-workflow/assets/templates/adr.md",
+        "af8b78140d1c7a58caa4a3c3ab085a14169bdbd4",
+    ),
+    (
+        ".agents/skills/milestone-workflow/assets/templates/ci-status.md",
+        "d5ca1b798666c3df11cbe49fecf523d81a7db6dd",
+    ),
+    (
+        ".agents/skills/milestone-workflow/assets/templates/handoff.md",
+        "ccf781babd35cf3ab8fdf7f44bdf9ecb60864201",
+    ),
+    (
+        ".agents/skills/milestone-workflow/assets/templates/roadmap.md",
+        "1e31f43e48377073e65a1eed6e7ea956509532c8",
+    ),
+    (
+        ".agents/skills/milestone-workflow/assets/templates/test-plan.md",
+        "9721bb7e122a155d41cdf3ba772fae6349a48c4b",
+    ),
+    (
+        ".agents/skills/milestone-workflow/assets/templates/ticket.md",
+        "1266caf4f1e619bd8a2808fab0b7b6ce08f65cfa",
+    ),
+    (
+        ".agents/skills/milestone-workflow/references/blocker-taxonomy.md",
+        "02f3dbee39ffdbacd57b6dd159ef278ece1a4d2d",
+    ),
+    (
+        ".agents/skills/milestone-workflow/references/document-contracts.md",
+        "ccf9089a9e08449b334ec78f53d677a3ab97a7c4",
+    ),
+    (
+        ".agents/skills/milestone-workflow/references/integration-and-recovery.md",
+        "47afaa6697754de1c83f4b3c9beeb30fe1e7a510",
+    ),
+    (
+        ".agents/skills/milestone-workflow/references/state-machine.md",
+        "f7458a68a6613d23b943b4510e0c3c256f83a0a1",
+    ),
+    (
+        ".agents/skills/milestone-workflow/scripts/workflow.py",
+        "fdad74336362bf93425343361af6597d31a53cd5",
+    ),
+    (
+        ".agents/skills/milestone-workflow/tests/test_workflow.py",
+        "4f73297fcb686400761b775c49b14d3376390fd4",
+    ),
+    (
+        ".codex/agents/architect.toml",
+        "12ca50d5f123e818e2d9bec4d6b593884801ba5e",
+    ),
+    (
+        ".codex/agents/engineer.toml",
+        "7decb91ed574633acd63327033d5356fd90e7631",
+    ),
+    (
+        ".codex/agents/product-manager.toml",
+        "f830b0afeb190e0a74ac9023b66f81f61c221a97",
+    ),
+    (".gitignore", "aa4626395a669abf792af10a22a14b25e59c614a"),
+    ("AGENTS.md", "a8bc7cc3146c1833916a10a5419056bf18dcaa1f"),
+    (
+        "docs/adr/ADR-0000-template.md",
+        "af8b78140d1c7a58caa4a3c3ab085a14169bdbd4",
+    ),
+    (
+        "docs/handoffs/HANDOFF-0000-template.md",
+        "ccf781babd35cf3ab8fdf7f44bdf9ecb60864201",
+    ),
+    (
+        "docs/test-plans/TEST-0000-template.md",
+        "9721bb7e122a155d41cdf3ba772fae6349a48c4b",
+    ),
+    (
+        "docs/tickets/TICKET-0000-template.md",
+        "1266caf4f1e619bd8a2808fab0b7b6ce08f65cfa",
+    ),
+    ("workflow.toml", "a923a6248aa876a56a45a2b4a275fe5004731304"),
+];
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -266,6 +360,54 @@ fn workflow_policy() {
             ),
         ),
         (
+            "config exact full-name filter",
+            workflow.replacen(
+                "valid_client_and_server_configs_have_exact_offline_output -- --exact",
+                "valid -- --exact",
+                1,
+            ),
+        ),
+        (
+            "replay exact full-name filter",
+            workflow.replacen(
+                "exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact",
+                "exact -- --exact",
+                1,
+            ),
+        ),
+        (
+            "GNU bare linker relative to checkout",
+            workflow.replacen(
+                "resolved=\"$(command -v \"$reported\")\"",
+                "resolved=\"$reported\"",
+                1,
+            ),
+        ),
+        (
+            "GNU linker executable check omitted",
+            workflow.replacen("test -x \"$canonical\"", "test -n \"$canonical\"", 1),
+        ),
+        (
+            "Windows linker help legacy exit",
+            workflow.replacen(
+                "if ($linkExit -notin 0, 1)",
+                "if ($linkExit -ne 1100)",
+                1,
+            ),
+        ),
+        (
+            "Windows linker banner omitted",
+            workflow.replacen(
+                "if ($linkText -notmatch",
+                "if ($false -and $linkText -notmatch",
+                1,
+            ),
+        ),
+        (
+            "Windows linker success not restored",
+            workflow.replacen("$global:LASTEXITCODE = 0", "$global:LASTEXITCODE = $linkExit", 1),
+        ),
+        (
             "wrong build-script JSON field",
             workflow.replacen(".cfgs", ".cfg", 1),
         ),
@@ -288,7 +430,240 @@ fn workflow_policy() {
 #[test]
 fn fixed_baseline_scope_and_provenance_audit() {
     const BASELINE: &str = "b41c6127b1834ebd97246451fd92bafea50cb205";
+    const REQUIRED_CONTROL_DOCUMENTS: &[&str] = &[
+        "CONTEXT.md",
+        "docs/adr/ADR-0015-m0-unix-listener-restart-and-rebind-evidence.md",
+        "docs/adr/ADR-0016-m0-invariant-first-contract-and-equivalent-evidence.md",
+        "docs/adr/README.md",
+    ];
+    for exact in REQUIRED_CONTROL_DOCUMENTS {
+        assert!(
+            is_control_document(exact),
+            "required exact control document is omitted: {exact}"
+        );
+        for near_miss in [
+            format!("renamed/{exact}"),
+            format!("{exact}/child"),
+            exact
+                .strip_suffix(".md")
+                .map(|stem| format!("{stem}.markdown"))
+                .expect("required control document uses .md"),
+        ] {
+            assert!(
+                !is_control_document(&near_miss),
+                "renamed or near-miss control document must fail closed: {near_miss}"
+            );
+        }
+    }
+    let historical_diff = historical_snapshot_diff_fixture();
+    let historical_blobs = HISTORICAL_OUT_OF_BAND_SNAPSHOT.to_vec();
+    validate_historical_out_of_band_snapshot(
+        &format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+        true,
+        &historical_diff,
+        &historical_blobs,
+    )
+    .expect("exact historical out-of-band snapshot fixture");
+    for path in HISTORICAL_ORDINARY_PATHS {
+        assert!(
+            !is_historical_out_of_band_path(path),
+            "ordinary historical control path must retain normal auditing: {path}"
+        );
+        assert!(
+            is_control_document(path),
+            "ordinary historical control path must retain exact control classification: {path}"
+        );
+    }
+
+    let first_path = HISTORICAL_OUT_OF_BAND_SNAPSHOT[0].0;
+    for (label, commit_line, ancestor, diff, blobs) in [
+        (
+            "commit drift",
+            format!("{BASELINE} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.clone(),
+            historical_blobs.clone(),
+        ),
+        (
+            "parent drift",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {BASELINE}"),
+            true,
+            historical_diff.clone(),
+            historical_blobs.clone(),
+        ),
+        (
+            "missing ancestry",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            false,
+            historical_diff.clone(),
+            historical_blobs.clone(),
+        ),
+        (
+            "historical deletion",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.replacen(&format!("M\t{first_path}"), &format!("D\t{first_path}"), 1),
+            historical_blobs.clone(),
+        ),
+        (
+            "historical rename",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.replacen(
+                &format!("M\t{first_path}"),
+                &format!("R100\t{first_path}\trenamed/{first_path}"),
+                1,
+            ),
+            historical_blobs.clone(),
+        ),
+        (
+            "descendant path",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.replacen(first_path, &format!("{first_path}/child"), 1),
+            historical_blobs.clone(),
+        ),
+        (
+            "suffix extension",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.replacen(first_path, &format!("{first_path}.backup"), 1),
+            historical_blobs.clone(),
+        ),
+        (
+            "same-directory sibling",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.replacen(
+                first_path,
+                ".agents/skills/milestone-workflow/SKILL-copy.md",
+                1,
+            ),
+            historical_blobs.clone(),
+        ),
+        (
+            "extra twenty-fourth out-of-band path",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            format!("{historical_diff}M\t.agents/skills/milestone-workflow/extra.md\n"),
+            historical_blobs.clone(),
+        ),
+        (
+            "duplicate historical path",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            format!("{historical_diff}M\t{first_path}\n"),
+            historical_blobs.clone(),
+        ),
+        (
+            "wildcard historical path",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.replacen(first_path, ".agents/skills/**", 1),
+            historical_blobs.clone(),
+        ),
+        (
+            "blob drift",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.clone(),
+            {
+                let mut blobs = historical_blobs.clone();
+                blobs[0].1 = "0000000000000000000000000000000000000000";
+                blobs
+            },
+        ),
+        (
+            "missing current blob",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.clone(),
+            historical_blobs[1..].to_vec(),
+        ),
+        (
+            "historical path-set drift",
+            format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}"),
+            true,
+            historical_diff.replacen(
+                HISTORICAL_ORDINARY_PATHS[0],
+                ".codex/agents/qa-copy.toml",
+                1,
+            ),
+            historical_blobs.clone(),
+        ),
+    ] {
+        assert!(
+            validate_historical_out_of_band_snapshot(&commit_line, ancestor, &diff, &blobs)
+                .is_err(),
+            "historical snapshot mutation escaped fail-closed audit: {label}"
+        );
+    }
     let root = repository_root();
+    verify_historical_out_of_band_snapshot(&root)
+        .expect("authorized historical out-of-band snapshot must remain exact");
+    let external_entry =
+        fs::read_to_string(root.join("tests/m0-harness/tests/external_interop.rs"))
+            .expect("read external interop entry")
+            .replace("\r\n", "\n");
+    let external_support =
+        fs::read_to_string(root.join("tests/m0-harness/src/external_support/mod.rs"))
+            .expect("read external interop support")
+            .replace("\r\n", "\n");
+    let local_support = fs::read_to_string(root.join("tests/m0-harness/src/local_support/mod.rs"))
+        .expect("read shared local support")
+        .replace("\r\n", "\n");
+    validate_external_interop_same_policy(&external_entry, &external_support, &local_support)
+        .expect("external interop must use the shared same-policy bind-and-listen seam");
+
+    for (label, mutated_external, mutated_local) in [
+        (
+            "omitted Unix reuse",
+            external_support.clone(),
+            local_support.replacen("    socket.set_reuse_address(true)?;\n", "", 1),
+        ),
+        (
+            "reuse weakened to every platform",
+            external_support.clone(),
+            local_support.replacen("#[cfg(unix)]\n", "", 1),
+        ),
+        (
+            "omitted listen",
+            external_support.clone(),
+            local_support.replacen("    socket.listen(128)?;\n", "", 1),
+        ),
+        (
+            "final probe falls back to default bind",
+            external_support.replacen(
+                "bind_loopback_listener(address)",
+                "TcpListener::bind(address)",
+                1,
+            ),
+            local_support.clone(),
+        ),
+        (
+            "reuse-port weakening",
+            external_support.clone(),
+            local_support.replacen(
+                "    socket.set_reuse_address(true)?;\n",
+                "    socket.set_reuse_address(true)?;\n    socket.set_reuse_port(true)?;\n",
+                1,
+            ),
+        ),
+    ] {
+        assert!(
+            mutated_external != external_support || mutated_local != local_support,
+            "same-policy mutation fixture did not change source: {label}"
+        );
+        assert!(
+            validate_external_interop_same_policy(
+                &external_entry,
+                &mutated_external,
+                &mutated_local
+            )
+            .is_err(),
+            "same-policy mutation escaped fail-closed audit: {label}"
+        );
+    }
     let ancestor = Command::new("git")
         .args(["merge-base", "--is-ancestor", BASELINE, "HEAD"])
         .current_dir(&root)
@@ -308,12 +683,15 @@ fn fixed_baseline_scope_and_provenance_audit() {
     assert!(output.status.success(), "fixed-baseline diff failed");
     let changed = String::from_utf8(output.stdout).expect("UTF-8 changed paths");
     for path in changed_paths(&changed) {
+        let historical_out_of_band = is_historical_out_of_band_path(path);
         assert!(
-            is_immutable_owned(path) || is_control_document(path),
+            is_immutable_owned(path) || is_control_document(path) || historical_out_of_band,
             "path is outside immutable M0 ownership/control allowlist: {path}"
         );
-        assert_safe_changed_path(path);
-        scan_changed_text(&root, path);
+        if !historical_out_of_band {
+            assert_safe_changed_path(path);
+            scan_changed_text(&root, path);
+        }
     }
     let mutable_ticket = fs::read_to_string(
         root.join("docs/tickets/M0-T08-interop-platform-and-integration-gates.md"),
@@ -574,7 +952,7 @@ fn contains_unquoted_yaml_control(text: &str) -> bool {
 }
 
 fn validate_closed_workflow_snapshot(workflow: &str) -> Result<(), String> {
-    const EXPECTED_BLOB_ID: &str = "4fed74274af633884c9ffb486e936283558d6558";
+    const EXPECTED_BLOB_ID: &str = "6376d3647180ec868409d7c5bbdb3359ba4995e9";
     let mut child = Command::new("git")
         .args(["hash-object", "--stdin"])
         .stdin(std::process::Stdio::piped())
@@ -852,6 +1230,9 @@ fn validate_command_allocation(
                 "cargo build --workspace --bins --locked",
                 "run_filtered 2 cargo test -p ferrum2-crypto --lib --locked tcp_owner_nonce_exhaustion",
                 "run_filtered 4 cargo test -p ferrum2-shadowsocks --lib --locked flow_internal_contract",
+                "replay_count=\"$(cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact --list | grep -c ': test$')\"",
+                "test \"$replay_count\" -eq 1",
+                "cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact",
                 "cargo test -p ferrum2-shadowsocks --test detection_prevention --locked",
                 "cargo test -p ferrum2-shadowsocks --test response_binding --locked",
             ],
@@ -870,6 +1251,9 @@ fn validate_command_allocation(
             "m0-local-e2e",
             &[
                 "cargo build --workspace --bins --locked",
+                "config_count=\"$(cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact --list | grep -c ': test$')\"",
+                "test \"$config_count\" -eq 1",
+                "cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact",
                 "run_filtered 3 cargo test -p ferrum2-m0-harness --test local_e2e --locked success",
                 "run_filtered 2 cargo test -p ferrum2-m0-harness --test local_e2e --locked failures",
             ],
@@ -897,7 +1281,12 @@ fn validate_command_allocation(
             &[
                 "$env:CC_x86_64_pc_windows_msvc = Join-Path",
                 "$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = Join-Path",
-                "$LASTEXITCODE -ne 1100",
+                "Test-Path -LiteralPath $link -PathType Leaf",
+                "Get-Command -Name $link -CommandType Application",
+                "& $link /? 2>&1",
+                "if ($linkExit -notin 0, 1)",
+                "Microsoft \\(R\\) (?:Incremental )?Linker Version",
+                "$global:LASTEXITCODE = 0",
                 "$buildScripts[0].cfgs",
                 "tests\\platform\\check_config_no_side_effects.rs",
                 "platform-no-side-effect.exe --self-test",
@@ -911,7 +1300,13 @@ fn validate_command_allocation(
             &[
                 "CC_x86_64_unknown_linux_gnu: /usr/bin/gcc",
                 "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: /usr/bin/gcc",
+                "resolve_compiler_linker() {",
+                "/*) resolved=\"$reported\" ;;",
+                "resolved=\"$(command -v \"$reported\")\"",
+                "canonical=\"$(readlink -f \"$resolved\")\"",
+                "test -x \"$canonical\"",
                 "underlying_linker_path=",
+                "\"$underlying_linker\" --version",
                 "rows[0][\"cfgs\"]",
                 "$RUNNER_TEMP/gnu-build.json",
                 "tests/platform/check_config_no_side_effects.rs",
@@ -927,7 +1322,13 @@ fn validate_command_allocation(
                 "musl=1.2.4-2 musl-dev=1.2.4-2 musl-tools=1.2.4-2",
                 "CC_x86_64_unknown_linux_musl: /usr/bin/musl-gcc",
                 "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: /usr/bin/musl-gcc",
+                "resolve_compiler_linker() {",
+                "/*) resolved=\"$reported\" ;;",
+                "resolved=\"$(command -v \"$reported\")\"",
+                "canonical=\"$(readlink -f \"$resolved\")\"",
+                "test -x \"$canonical\"",
                 "musl_linker_driver_path=",
+                "\"$musl_ld\" --version",
                 "rows[0][\"cfgs\"]",
                 "$RUNNER_TEMP/musl-build.json",
                 "platform-no-side-effect --self-test",
@@ -1050,7 +1451,8 @@ fn validate_exact_cargo_lines(job: &str, block: &str) -> Result<(), String> {
             "cargo test -p ferrum2-shadowsocks --test tcp_duplex --locked",
             "cargo test -p ferrum2-shadowsocks --test tcp_fragmentation --locked",
             "cargo test -p ferrum2-shadowsocks --test tcp_flow_contract --locked",
-            "run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact",
+            "replay_count=\"$(cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact --list | grep -c ': test$')\"",
+            "cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact",
             "run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked concurrent",
             "run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked retention",
             "run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked capacity",
@@ -1074,7 +1476,8 @@ fn validate_exact_cargo_lines(job: &str, block: &str) -> Result<(), String> {
         ],
         "m0-local-e2e" => &[
             "cargo build --workspace --bins --locked",
-            "run_filtered 1 cargo test -p ferrum2-m0-harness --test config_cli --locked valid",
+            "config_count=\"$(cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact --list | grep -c ': test$')\"",
+            "cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact",
             "run_filtered 1 cargo test -p ferrum2-m0-harness --test config_cli --locked no_side_effects",
             "cargo test -p ferrum2-m0-harness --test cli_contract --locked",
             "cargo test -p ferrum2-socks5 --locked",
@@ -1152,6 +1555,211 @@ fn require_once_or_more(text: &str, needle: &str, context: &str) -> Result<(), S
         return Err(format!("{context}: missing `{needle}`"));
     }
     Ok(())
+}
+
+fn historical_snapshot_diff_fixture() -> String {
+    HISTORICAL_OUT_OF_BAND_SNAPSHOT
+        .iter()
+        .map(|(path, _)| *path)
+        .chain(HISTORICAL_ORDINARY_PATHS.iter().copied())
+        .map(|path| format!("M\t{path}\n"))
+        .collect()
+}
+
+fn validate_historical_out_of_band_snapshot(
+    commit_line: &str,
+    is_head_ancestor: bool,
+    historical_diff: &str,
+    head_blobs: &[(&str, &str)],
+) -> Result<(), String> {
+    let expected_commit_line =
+        format!("{HISTORICAL_OUT_OF_BAND_COMMIT} {HISTORICAL_OUT_OF_BAND_PARENT}");
+    if commit_line.trim() != expected_commit_line {
+        return Err(format!(
+            "historical commit parent mismatch: expected `{expected_commit_line}`, got `{}`",
+            commit_line.trim()
+        ));
+    }
+    if !is_head_ancestor {
+        return Err(format!(
+            "{HISTORICAL_OUT_OF_BAND_COMMIT} is not an ancestor of HEAD"
+        ));
+    }
+    if HISTORICAL_OUT_OF_BAND_SNAPSHOT.len() != 23 {
+        return Err(format!(
+            "historical out-of-band snapshot must have exactly 23 entries, got {}",
+            HISTORICAL_OUT_OF_BAND_SNAPSHOT.len()
+        ));
+    }
+    if HISTORICAL_ORDINARY_PATHS.len() != 5 {
+        return Err(format!(
+            "historical ordinary path set must have exactly five entries, got {}",
+            HISTORICAL_ORDINARY_PATHS.len()
+        ));
+    }
+
+    let mut expected_paths = std::collections::BTreeSet::new();
+    let mut expected_blobs = std::collections::BTreeMap::new();
+    for (path, oid) in HISTORICAL_OUT_OF_BAND_SNAPSHOT {
+        validate_literal_snapshot_path(path)?;
+        validate_blob_oid(oid)?;
+        if !expected_paths.insert(*path) || expected_blobs.insert(*path, *oid).is_some() {
+            return Err(format!("duplicate historical snapshot path: {path}"));
+        }
+    }
+    for path in HISTORICAL_ORDINARY_PATHS {
+        validate_literal_snapshot_path(path)?;
+        if !expected_paths.insert(*path) {
+            return Err(format!("duplicate historical ordinary path: {path}"));
+        }
+    }
+
+    let mut actual_paths = std::collections::BTreeSet::new();
+    for line in historical_diff.lines() {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 2 || !matches!(fields[0], "A" | "M") {
+            return Err(format!(
+                "historical diff permits only exact added/modified paths: {line}"
+            ));
+        }
+        validate_literal_snapshot_path(fields[1])?;
+        if !actual_paths.insert(fields[1]) {
+            return Err(format!("duplicate historical diff path: {}", fields[1]));
+        }
+    }
+    if actual_paths != expected_paths {
+        return Err(format!(
+            "historical 28-path diff mismatch:\nactual={actual_paths:#?}\nexpected={expected_paths:#?}"
+        ));
+    }
+
+    let mut actual_blobs = std::collections::BTreeMap::new();
+    for (path, oid) in head_blobs {
+        validate_literal_snapshot_path(path)?;
+        validate_blob_oid(oid)?;
+        if actual_blobs.insert(*path, *oid).is_some() {
+            return Err(format!("duplicate current snapshot blob path: {path}"));
+        }
+    }
+    if actual_blobs != expected_blobs {
+        return Err(format!(
+            "current HEAD blobs differ from the authorized d1 snapshot:\nactual={actual_blobs:#?}\nexpected={expected_blobs:#?}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_literal_snapshot_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.contains(['*', '?', '[', ']']) {
+        return Err(format!(
+            "historical snapshot path must be a non-glob literal: {path}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_blob_oid(oid: &str) -> Result<(), String> {
+    if oid.len() != 40 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("historical snapshot has invalid blob OID: {oid}"));
+    }
+    Ok(())
+}
+
+fn verify_historical_out_of_band_snapshot(root: &Path) -> Result<(), String> {
+    let commit_line = git_stdout(
+        root,
+        &[
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            HISTORICAL_OUT_OF_BAND_COMMIT,
+        ],
+        "read historical commit parent",
+    )?;
+    let ancestor = Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            HISTORICAL_OUT_OF_BAND_COMMIT,
+            "HEAD",
+        ])
+        .current_dir(root)
+        .status()
+        .map_err(|error| format!("check historical ancestry: {error}"))?
+        .success();
+    if !ancestor {
+        return Err(format!(
+            "{HISTORICAL_OUT_OF_BAND_COMMIT} is not an ancestor of HEAD"
+        ));
+    }
+    let historical_diff = git_stdout(
+        root,
+        &[
+            "diff",
+            "--name-status",
+            "--find-renames",
+            HISTORICAL_OUT_OF_BAND_PARENT,
+            HISTORICAL_OUT_OF_BAND_COMMIT,
+        ],
+        "read historical commit diff",
+    )?;
+
+    let mut head_blob_values = Vec::with_capacity(HISTORICAL_OUT_OF_BAND_SNAPSHOT.len());
+    for (path, expected_oid) in HISTORICAL_OUT_OF_BAND_SNAPSHOT {
+        let historical_spec = format!("{HISTORICAL_OUT_OF_BAND_COMMIT}:{path}");
+        let historical_oid = git_stdout(
+            root,
+            &["rev-parse", "--verify", &historical_spec],
+            "read historical snapshot blob",
+        )?;
+        if historical_oid.trim() != *expected_oid {
+            return Err(format!(
+                "hardcoded d1 blob mismatch for {path}: expected {expected_oid}, got {}",
+                historical_oid.trim()
+            ));
+        }
+
+        let head_spec = format!("HEAD:{path}");
+        let head_oid = git_stdout(
+            root,
+            &["rev-parse", "--verify", &head_spec],
+            "read current snapshot blob",
+        )?;
+        head_blob_values.push((path.to_string(), head_oid.trim().to_string()));
+    }
+    let head_blob_refs = head_blob_values
+        .iter()
+        .map(|(path, oid)| (path.as_str(), oid.as_str()))
+        .collect::<Vec<_>>();
+    validate_historical_out_of_band_snapshot(
+        &commit_line,
+        ancestor,
+        &historical_diff,
+        &head_blob_refs,
+    )
+}
+
+fn git_stdout(root: &Path, args: &[&str], context: &str) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("{context}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{context}: git exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|error| format!("{context}: {error}"))
+}
+
+fn is_historical_out_of_band_path(path: &str) -> bool {
+    HISTORICAL_OUT_OF_BAND_SNAPSHOT
+        .iter()
+        .any(|(exact, _)| path == *exact)
 }
 
 fn changed_paths(diff: &str) -> Vec<&str> {
@@ -1235,6 +1843,7 @@ fn is_immutable_owned(path: &str) -> bool {
 fn is_control_document(path: &str) -> bool {
     const CONTROL_DOCUMENTS: &[&str] = &[
         ".codex/agents/qa.toml",
+        "CONTEXT.md",
         "docs/ci-status.md",
         "docs/gap-analysis.md",
         "docs/roadmap.md",
@@ -1264,8 +1873,99 @@ fn is_control_document(path: &str) -> bool {
         "docs/adr/ADR-0012-m0-phase-deadlines-and-partial-relay-accounting.md",
         "docs/adr/ADR-0013-m0-binary-paused-time-test-boundary.md",
         "docs/adr/ADR-0014-m0-external-half-close-evidence-boundary.md",
+        "docs/adr/ADR-0015-m0-unix-listener-restart-and-rebind-evidence.md",
+        "docs/adr/ADR-0016-m0-invariant-first-contract-and-equivalent-evidence.md",
+        "docs/adr/README.md",
     ];
     CONTROL_DOCUMENTS.contains(&path)
+}
+
+fn validate_external_interop_same_policy(
+    entry: &str,
+    external_support: &str,
+    local_support: &str,
+) -> Result<(), String> {
+    let entry = entry.replace("\r\n", "\n");
+    let external_support = external_support.replace("\r\n", "\n");
+    let local_support = local_support.replace("\r\n", "\n");
+    require_once(
+        &entry,
+        "#[path = \"../src/local_support/mod.rs\"]\nmod local_support;",
+        "external interop shared helper composition",
+    )?;
+    require_once(
+        &external_support,
+        "use crate::local_support::bind_loopback_listener;",
+        "external interop shared helper import",
+    )?;
+
+    let production = external_support
+        .split_once("#[cfg(test)]")
+        .map(|(production, _)| production)
+        .unwrap_or(&external_support);
+    let reservations = source_between(production, "impl ReservedPorts {", "fn target_address")?;
+    if reservations.matches("bind_loopback_listener(").count() != 3 {
+        return Err(
+            "all three initial port reservations must use the shared listener helper".into(),
+        );
+    }
+    let final_probe = source_between(production, "fn assert_rebind_all(", "fn ipv4_address(")?;
+    require_once(
+        final_probe,
+        "bind_loopback_listener(address)",
+        "final exact bind-and-listen probe",
+    )?;
+    if production.contains("TcpListener::bind") {
+        return Err("external interop production path bypasses the shared listener helper".into());
+    }
+
+    let helper = source_between(
+        &local_support,
+        "pub fn bind_loopback_listener(",
+        "pub fn reserve_unused_loopback(",
+    )?;
+    for required in [
+        "Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?",
+        "#[cfg(unix)]\n    socket.set_reuse_address(true)?;",
+        "socket.bind(&SocketAddr::V4(address).into())?;",
+        "socket.listen(128)?;",
+        "Ok(socket.into())",
+    ] {
+        require_once(helper, required, "shared bind-and-listen helper")?;
+    }
+    let create = helper.find("Socket::new").expect("required above");
+    let reuse = helper
+        .find("socket.set_reuse_address(true)?;")
+        .expect("required above");
+    let bind = helper.find("socket.bind(").expect("required above");
+    let listen = helper.find("socket.listen(").expect("required above");
+    if !(create < reuse && reuse < bind && bind < listen) {
+        return Err("shared helper must set Unix reuse before bind and listen".into());
+    }
+    for forbidden in [
+        "set_reuse_port",
+        "SO_REUSEPORT",
+        "TcpListener::bind",
+        ".or_else",
+        "unwrap_or_else",
+    ] {
+        if helper.contains(forbidden) {
+            return Err(format!(
+                "shared helper contains forbidden fallback or weakening: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn source_between<'a>(source: &'a str, start: &str, end: &str) -> Result<&'a str, String> {
+    let tail = source
+        .split_once(start)
+        .ok_or_else(|| format!("missing source section start: {start}"))?
+        .1;
+    tail.split_once(end)
+        .map(|(section, _)| section)
+        .ok_or_else(|| format!("missing source section end: {end}"))
 }
 
 fn assert_safe_changed_path(path: &str) {

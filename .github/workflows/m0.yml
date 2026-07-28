@@ -121,7 +121,9 @@ jobs:
           cargo test -p ferrum2-shadowsocks --test tcp_duplex --locked
           cargo test -p ferrum2-shadowsocks --test tcp_fragmentation --locked
           cargo test -p ferrum2-shadowsocks --test tcp_flow_contract --locked
-          run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact
+          replay_count="$(cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact --list | grep -c ': test$')"
+          test "$replay_count" -eq 1
+          cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact
           run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked concurrent
           run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked retention
           run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked capacity
@@ -225,7 +227,9 @@ jobs:
             "$@"
           }
           cargo build --workspace --bins --locked
-          run_filtered 1 cargo test -p ferrum2-m0-harness --test config_cli --locked valid
+          config_count="$(cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact --list | grep -c ': test$')"
+          test "$config_count" -eq 1
+          cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact
           run_filtered 1 cargo test -p ferrum2-m0-harness --test config_cli --locked no_side_effects
           cargo test -p ferrum2-m0-harness --test cli_contract --locked
           cargo test -p ferrum2-socks5 --locked
@@ -378,12 +382,23 @@ jobs:
           $tools = Get-ChildItem "$installation\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
           $cl = Join-Path $tools.FullName "bin\Hostx64\x64\cl.exe"
           $link = Join-Path $tools.FullName "bin\Hostx64\x64\link.exe"
-          if (-not (Test-Path $cl) -or -not (Test-Path $link)) { throw "resolved MSVC tools are missing" }
+          if (-not (Test-Path -LiteralPath $cl -PathType Leaf) -or -not (Test-Path -LiteralPath $link -PathType Leaf)) {
+            throw "resolved MSVC tools are missing"
+          }
+          $cl = (Get-Command -Name $cl -CommandType Application -ErrorAction Stop).Source
+          $link = (Get-Command -Name $link -CommandType Application -ErrorAction Stop).Source
           Write-Output "compiler_path=$cl linker_path=$link"
           & $cl /? 2>&1
           if ($LASTEXITCODE -ne 0) { throw "cl version probe failed" }
-          & $link /? 2>&1
-          if ($LASTEXITCODE -ne 1100) { throw "link version probe exit mismatch" }
+          $linkOutput = @(& $link /? 2>&1 | ForEach-Object { $_.ToString() })
+          $linkExit = $LASTEXITCODE
+          $linkText = $linkOutput -join [Environment]::NewLine
+          Write-Output $linkText
+          if ($linkExit -notin 0, 1) { throw "link version probe exit mismatch: $linkExit" }
+          if ($linkText -notmatch '(?im)^Microsoft \(R\) (?:Incremental )?Linker Version [0-9]+\.[0-9]+') {
+            throw "link version probe banner mismatch"
+          }
+          $global:LASTEXITCODE = 0
       - name: Build and run native MSVC artifacts
         shell: pwsh
         run: |
@@ -448,9 +463,23 @@ jobs:
           echo "included_software=https://github.com/actions/runner-images/blob/ubuntu24/${ImageVersion}/images/ubuntu/Ubuntu2404-Readme.md"
           uname -a
           ldd --version
+          resolve_compiler_linker() {
+            reported="$1"
+            case "$reported" in
+              /*) resolved="$reported" ;;
+              */*) echo "relative compiler-reported linker is forbidden: $reported" >&2; return 1 ;;
+              *) resolved="$(command -v "$reported")" ;;
+            esac
+            canonical="$(readlink -f "$resolved")"
+            test -n "$canonical"
+            test -x "$canonical"
+            printf '%s\n' "$canonical"
+          }
           compiler="$(readlink -f "$(command -v gcc)")"
+          test -x "$compiler"
           linker="$(readlink -f "$(command -v gcc)")"
-          underlying_linker="$(readlink -f "$("$compiler" -print-prog-name=ld)")"
+          reported_linker="$("$compiler" -print-prog-name=ld)"
+          underlying_linker="$(resolve_compiler_linker "$reported_linker")"
           echo "compiler_path=$compiler linker_driver_path=$linker underlying_linker_path=$underlying_linker"
           "$compiler" --version
           "$underlying_linker" --version
@@ -529,8 +558,22 @@ jobs:
           test "$(dpkg-query -W -f='${Version}' musl)" = "1.2.4-2"
           test "$(dpkg-query -W -f='${Version}' musl-dev)" = "1.2.4-2"
           test "$(dpkg-query -W -f='${Version}' musl-tools)" = "1.2.4-2"
+          resolve_compiler_linker() {
+            reported="$1"
+            case "$reported" in
+              /*) resolved="$reported" ;;
+              */*) echo "relative compiler-reported linker is forbidden: $reported" >&2; return 1 ;;
+              *) resolved="$(command -v "$reported")" ;;
+            esac
+            canonical="$(readlink -f "$resolved")"
+            test -n "$canonical"
+            test -x "$canonical"
+            printf '%s\n' "$canonical"
+          }
           musl_compiler="$(readlink -f "$(command -v musl-gcc)")"
-          musl_ld="$(readlink -f "$("$musl_compiler" -print-prog-name=ld)")"
+          test -x "$musl_compiler"
+          reported_musl_ld="$("$musl_compiler" -print-prog-name=ld)"
+          musl_ld="$(resolve_compiler_linker "$reported_musl_ld")"
           echo "musl_compiler_path=$musl_compiler musl_linker_driver_path=$musl_compiler underlying_linker_path=$musl_ld"
           "$musl_compiler" --version
           "$musl_ld" --version

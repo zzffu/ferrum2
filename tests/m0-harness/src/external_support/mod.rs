@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::local_support::bind_loopback_listener;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -1192,9 +1193,12 @@ struct ReservedPorts {
 
 impl ReservedPorts {
     fn new() -> Self {
-        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve target");
-        let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve proxy");
-        let shadowsocks = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve Shadowsocks");
+        let target = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("reserve target");
+        let proxy = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("reserve proxy");
+        let shadowsocks = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("reserve Shadowsocks");
         let addresses = [
             ipv4_address(&target),
             ipv4_address(&proxy),
@@ -1250,7 +1254,7 @@ fn assert_rebind_all(addresses: [SocketAddrV4; 3]) {
     let rebound = addresses
         .into_iter()
         .map(|address| {
-            TcpListener::bind(address)
+            bind_loopback_listener(address)
                 .unwrap_or_else(|error| panic!("exact address did not rebind {address}: {error}"))
         })
         .collect::<Vec<_>>();
