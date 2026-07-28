@@ -3,74 +3,9 @@ mod qualification;
 
 use qualification::{
     CaseFailure, CaseSpec, CleanupState, Direction, HostedContext, Method, QualificationOps,
-    Reference, SetupAvailability, TCP_CASES, Transport, UDP_CASES, execute_hosted,
-    execute_with_setup, validate_hosted,
+    Reference, SetupAvailability, TCP_CASES, TCP_EXCHANGE_ORDER, TcpExchangeEvent,
+    TcpExchangeState, Transport, UDP_CASES, execute_hosted, execute_with_setup, validate_hosted,
 };
-
-// This table is the explicit disposition for the 15 OS/process/socket helper tests
-// removed from libtest discovery. "hosted" means the claim is observed by every
-// historical M1 hosted cases; "quality" means the same-SHA local lifecycle gate owns it;
-// "discarded-mechanic" means the assertion described an implementation detail
-// rather than a release outcome.
-const REMOVED_HELPER_CLAIMS: [(&str, &str); 15] = [
-    ("sha256_matches_reviewed_known_answer", "hosted:asset-pin"),
-    (
-        "live_exchange_records_ordered_eof_and_shutdown_operations",
-        "hosted:payload-eof-cleanup",
-    ),
-    (
-        "live_target_shutdown_failure_is_not_masked_by_stream_drop",
-        "hosted:eof-cleanup",
-    ),
-    (
-        "omitted_application_eof_observation_sends_failure_acknowledgement",
-        "hosted:eof-cleanup",
-    ),
-    (
-        "client_extra_byte_prevents_eof_event_and_success_acknowledgement",
-        "hosted:eof",
-    ),
-    (
-        "client_read_error_prevents_eof_event_and_success_acknowledgement",
-        "hosted:eof",
-    ),
-    (
-        "target_extra_byte_and_read_error_prevent_clean_eof_event",
-        "hosted:eof",
-    ),
-    (
-        "target_stream_is_held_until_application_acknowledgement",
-        "hosted:eof-cleanup",
-    ),
-    (
-        "missing_application_acknowledgement_times_out_under_case_deadline",
-        "hosted:absolute-deadline",
-    ),
-    (
-        "payload_contract_is_fixed_complete_and_distinct",
-        "hosted:payload",
-    ),
-    (
-        "clean_eof_rejects_extra_byte_and_accepts_only_zero",
-        "hosted:eof",
-    ),
-    (
-        "absolute_deadline_and_nonzero_child_status_are_enforced",
-        "hosted:absolute-deadline-cleanup",
-    ),
-    (
-        "absolute_deadline_rejects_drip_progress",
-        "hosted:absolute-deadline",
-    ),
-    (
-        "fixed_operation_deadline_rejects_drip_before_longer_case_deadline",
-        "hosted:absolute-deadline",
-    ),
-    (
-        "fixed_write_deadline_rejects_partial_progress_before_case_deadline",
-        "discarded-mechanic:synthetic-write-shim",
-    ),
-];
 
 #[derive(Default)]
 struct FakeOps {
@@ -87,6 +22,19 @@ fn all_ready() -> SetupAvailability {
     SetupAvailability::from_provider_status(Some("0"), Some("0"))
 }
 
+fn valid_context() -> HostedContext<'static> {
+    HostedContext {
+        argument_count: 1,
+        github_actions: Some("true"),
+        runner_os: Some("Linux"),
+        run_id: Some("123456"),
+        run_attempt: Some("1"),
+        github_sha: Some("0123456789abcdef0123456789abcdef01234567"),
+        head_sha: "0123456789abcdef0123456789abcdef01234567",
+        checkout_clean: true,
+    }
+}
+
 fn case_ids_for(reference: Reference) -> Vec<&'static str> {
     TCP_CASES
         .iter()
@@ -96,28 +44,23 @@ fn case_ids_for(reference: Reference) -> Vec<&'static str> {
         .collect()
 }
 
-fn assert_setup_root(
-    cases: [CaseSpec; 12],
-    lines: [String; 12],
-    transport: Transport,
-    failed: Reference,
-    root: &str,
-) {
-    for (case, line) in cases.iter().zip(lines) {
-        let expected = if case.reference == failed {
-            format!(
-                "transport={} case_id={} status=FAIL canonical_root={root}",
-                transport.label(),
-                case.id
-            )
-        } else {
-            format!(
-                "transport={} case_id={} status=PASS",
-                transport.label(),
-                case.id
-            )
-        };
-        assert_eq!(line, expected);
+fn assert_setup_root(report: &qualification::QualificationReport, failed: Reference, root: &str) {
+    for (transport, cases) in [(Transport::Tcp, TCP_CASES), (Transport::Udp, UDP_CASES)] {
+        for (case, line) in cases.iter().zip(report.summary_lines(transport)) {
+            let suffix = if case.reference == failed {
+                format!("FAIL canonical_root={root}")
+            } else {
+                "PASS".to_owned()
+            };
+            assert_eq!(
+                line,
+                format!(
+                    "transport={} case_id={} status={suffix}",
+                    transport.label(),
+                    case.id
+                )
+            );
+        }
     }
 }
 
@@ -156,50 +99,49 @@ fn both_active_transport_plans_are_frozen_twelve_tuple_matrices() {
     use Direction::{FerrumClient as Ferrum, ReferenceClient as Client};
     use Method::{Aes128Gcm as Aes128, Aes256Gcm as Aes256, ChaCha20Poly1305 as ChaCha};
     use Reference::{ShadowsocksRust, SingBox};
+    use Transport::{Tcp, Udp};
 
-    let tuple = |case: CaseSpec| (case.id, case.method, case.reference, case.direction);
-    assert!(
-        TCP_CASES
-            .iter()
-            .all(|case| case.transport == Transport::Tcp)
-    );
-    assert!(
-        UDP_CASES
-            .iter()
-            .all(|case| case.transport == Transport::Udp)
-    );
+    let tuple = |case: CaseSpec| {
+        (
+            case.id,
+            case.method,
+            case.reference,
+            case.direction,
+            case.transport,
+        )
+    };
     assert_eq!(
         TCP_CASES.map(tuple),
         [
-            ("M1-INT-001", Aes128, SingBox, Ferrum),
-            ("M1-INT-002", Aes128, ShadowsocksRust, Ferrum),
-            ("M1-INT-003", Aes128, SingBox, Client),
-            ("M1-INT-004", Aes128, ShadowsocksRust, Client),
-            ("M1-INT-005", Aes256, SingBox, Ferrum),
-            ("M1-INT-006", Aes256, ShadowsocksRust, Ferrum),
-            ("M1-INT-007", Aes256, SingBox, Client),
-            ("M1-INT-008", Aes256, ShadowsocksRust, Client),
-            ("M1-INT-009", ChaCha, SingBox, Ferrum),
-            ("M1-INT-010", ChaCha, ShadowsocksRust, Ferrum),
-            ("M1-INT-011", ChaCha, SingBox, Client),
-            ("M1-INT-012", ChaCha, ShadowsocksRust, Client),
+            ("M1-INT-001", Aes128, SingBox, Ferrum, Tcp),
+            ("M1-INT-002", Aes128, ShadowsocksRust, Ferrum, Tcp),
+            ("M1-INT-003", Aes128, SingBox, Client, Tcp),
+            ("M1-INT-004", Aes128, ShadowsocksRust, Client, Tcp),
+            ("M1-INT-005", Aes256, SingBox, Ferrum, Tcp),
+            ("M1-INT-006", Aes256, ShadowsocksRust, Ferrum, Tcp),
+            ("M1-INT-007", Aes256, SingBox, Client, Tcp),
+            ("M1-INT-008", Aes256, ShadowsocksRust, Client, Tcp),
+            ("M1-INT-009", ChaCha, SingBox, Ferrum, Tcp),
+            ("M1-INT-010", ChaCha, ShadowsocksRust, Ferrum, Tcp),
+            ("M1-INT-011", ChaCha, SingBox, Client, Tcp),
+            ("M1-INT-012", ChaCha, ShadowsocksRust, Client, Tcp),
         ]
     );
     assert_eq!(
         UDP_CASES.map(tuple),
         [
-            ("M2-UDP-INT-001", Aes128, SingBox, Ferrum),
-            ("M2-UDP-INT-002", Aes128, ShadowsocksRust, Ferrum),
-            ("M2-UDP-INT-003", Aes128, SingBox, Client),
-            ("M2-UDP-INT-004", Aes128, ShadowsocksRust, Client),
-            ("M2-UDP-INT-005", Aes256, SingBox, Ferrum),
-            ("M2-UDP-INT-006", Aes256, ShadowsocksRust, Ferrum),
-            ("M2-UDP-INT-007", Aes256, SingBox, Client),
-            ("M2-UDP-INT-008", Aes256, ShadowsocksRust, Client),
-            ("M2-UDP-INT-009", ChaCha, SingBox, Ferrum),
-            ("M2-UDP-INT-010", ChaCha, ShadowsocksRust, Ferrum),
-            ("M2-UDP-INT-011", ChaCha, SingBox, Client),
-            ("M2-UDP-INT-012", ChaCha, ShadowsocksRust, Client),
+            ("M2-UDP-INT-001", Aes128, SingBox, Ferrum, Udp),
+            ("M2-UDP-INT-002", Aes128, ShadowsocksRust, Ferrum, Udp),
+            ("M2-UDP-INT-003", Aes128, SingBox, Client, Udp),
+            ("M2-UDP-INT-004", Aes128, ShadowsocksRust, Client, Udp),
+            ("M2-UDP-INT-005", Aes256, SingBox, Ferrum, Udp),
+            ("M2-UDP-INT-006", Aes256, ShadowsocksRust, Ferrum, Udp),
+            ("M2-UDP-INT-007", Aes256, SingBox, Client, Udp),
+            ("M2-UDP-INT-008", Aes256, ShadowsocksRust, Client, Udp),
+            ("M2-UDP-INT-009", ChaCha, SingBox, Ferrum, Udp),
+            ("M2-UDP-INT-010", ChaCha, ShadowsocksRust, Ferrum, Udp),
+            ("M2-UDP-INT-011", ChaCha, SingBox, Client, Udp),
+            ("M2-UDP-INT-012", ChaCha, ShadowsocksRust, Client, Udp),
         ]
     );
     for (method, name, psk) in [
@@ -228,16 +170,7 @@ fn both_active_transport_plans_are_frozen_twelve_tuple_matrices() {
 
 #[test]
 fn hosted_guard_rejects_every_unqualified_context() {
-    let valid = HostedContext {
-        argument_count: 1,
-        github_actions: Some("true"),
-        runner_os: Some("Linux"),
-        run_id: Some("123456"),
-        run_attempt: Some("1"),
-        github_sha: Some("0123456789abcdef0123456789abcdef01234567"),
-        head_sha: "0123456789abcdef0123456789abcdef01234567",
-        checkout_clean: true,
-    };
+    let valid = valid_context();
     assert!(validate_hosted(&valid).is_ok());
 
     let mutations = [
@@ -287,14 +220,8 @@ fn hosted_guard_rejects_every_unqualified_context() {
 #[test]
 fn rejected_hosted_context_never_reaches_provision_or_case_operations() {
     let invalid = HostedContext {
-        argument_count: 1,
-        github_actions: Some("true"),
-        runner_os: Some("Linux"),
-        run_id: Some("123456"),
-        run_attempt: Some("1"),
-        github_sha: Some("0123456789abcdef0123456789abcdef01234567"),
         head_sha: "1123456789abcdef0123456789abcdef01234567",
-        checkout_clean: true,
+        ..valid_context()
     };
     let mut ops = FakeOps::default();
 
@@ -343,20 +270,7 @@ fn unavailable_setup_skips_that_reference_and_continues_the_ready_reference() {
 
     assert_eq!(ops.provisioned, [Reference::ShadowsocksRust]);
     assert_eq!(ops.attempted, case_ids_for(Reference::ShadowsocksRust));
-    assert_setup_root(
-        TCP_CASES,
-        report.summary_lines(Transport::Tcp),
-        Transport::Tcp,
-        Reference::SingBox,
-        "provision-sing-box",
-    );
-    assert_setup_root(
-        UDP_CASES,
-        report.summary_lines(Transport::Udp),
-        Transport::Udp,
-        Reference::SingBox,
-        "provision-sing-box",
-    );
+    assert_setup_root(&report, Reference::SingBox, "provision-sing-box");
     assert!(!report.success());
 }
 
@@ -374,20 +288,7 @@ fn provision_failure_marks_only_that_reference_and_does_not_mask_the_other() {
         [Reference::SingBox, Reference::ShadowsocksRust]
     );
     assert_eq!(ops.attempted, case_ids_for(Reference::ShadowsocksRust));
-    assert_setup_root(
-        TCP_CASES,
-        report.summary_lines(Transport::Tcp),
-        Transport::Tcp,
-        Reference::SingBox,
-        "provision-sing-box",
-    );
-    assert_setup_root(
-        UDP_CASES,
-        report.summary_lines(Transport::Udp),
-        Transport::Udp,
-        Reference::SingBox,
-        "provision-sing-box",
-    );
+    assert_setup_root(&report, Reference::SingBox, "provision-sing-box");
     assert!(!report.success());
 }
 
@@ -400,14 +301,8 @@ fn one_case_failure_does_not_prevent_later_cases() {
 
     let report = execute_with_setup(all_ready(), &mut ops);
 
-    assert_eq!(
-        ops.attempted,
-        TCP_CASES
-            .into_iter()
-            .chain(UDP_CASES)
-            .map(|case| case.id)
-            .collect::<Vec<_>>()
-    );
+    let expected = TCP_CASES.into_iter().chain(UDP_CASES).map(|case| case.id);
+    assert!(ops.attempted.iter().copied().eq(expected));
     let lines = report.summary_lines(Transport::Tcp);
     assert_eq!(
         lines[0],
@@ -456,14 +351,8 @@ fn both_twelve_row_gates_are_required_and_have_transport_specific_summaries() {
     assert!(report.cleanup_success());
     assert_eq!(ops.cleanup_calls, 1);
     let context = HostedContext {
-        argument_count: 1,
-        github_actions: Some("true"),
-        runner_os: Some("Linux"),
-        run_id: Some("123456"),
         run_attempt: Some("2"),
-        github_sha: Some("0123456789abcdef0123456789abcdef01234567"),
-        head_sha: "0123456789abcdef0123456789abcdef01234567",
-        checkout_clean: true,
+        ..valid_context()
     };
     assert_eq!(
         report.completion_line(Transport::Tcp, &context),
@@ -499,55 +388,22 @@ fn cleanup_failure_can_never_produce_success() {
 fn never_confirmed_child_or_capture_worker_keeps_cleanup_failed() {
     let mut child_unreaped = CleanupState::default();
     child_unreaped.child_started();
-    child_unreaped.worker_started();
-    child_unreaped.worker_joined();
     assert!(!child_unreaped.success());
 
     let mut capture_unjoined = CleanupState::default();
-    capture_unjoined.child_started();
-    capture_unjoined.child_reaped();
     capture_unjoined.worker_started();
     assert!(!capture_unjoined.success());
-
-    let mut observed_failure = CleanupState::default();
-    observed_failure.child_started();
-    observed_failure.child_reaped();
-    observed_failure.worker_started();
-    observed_failure.worker_joined();
-    observed_failure.fail();
-    assert!(!observed_failure.success());
 }
 
 #[test]
-fn removed_helper_claims_have_an_explicit_non_local_disposition() {
-    let names: std::collections::BTreeSet<_> = REMOVED_HELPER_CLAIMS
-        .iter()
-        .map(|(name, _)| *name)
-        .collect();
-    assert_eq!(names.len(), 15);
-    assert!(
-        REMOVED_HELPER_CLAIMS
-            .iter()
-            .any(|(_, disposition)| disposition.contains("payload"))
-    );
-    assert!(
-        REMOVED_HELPER_CLAIMS
-            .iter()
-            .any(|(_, disposition)| disposition.contains("eof"))
-    );
-    assert!(
-        REMOVED_HELPER_CLAIMS
-            .iter()
-            .any(|(_, disposition)| disposition.contains("absolute-deadline"))
-    );
-    assert!(
-        REMOVED_HELPER_CLAIMS
-            .iter()
-            .any(|(_, disposition)| disposition.contains("cleanup"))
-    );
-    assert!(REMOVED_HELPER_CLAIMS.iter().all(
-        |(_, disposition)| disposition.starts_with("hosted:")
-            || disposition.starts_with("quality:")
-            || disposition.starts_with("discarded-mechanic:")
-    ));
+fn tcp_exchange_accepts_only_the_adr_0014_observable_order() {
+    use TcpExchangeEvent as E;
+
+    let mut exchange = TcpExchangeState::default();
+    assert!(exchange.record(E::ReverseMatched).is_err());
+    for event in TCP_EXCHANGE_ORDER {
+        exchange.record(event).expect("approved event order");
+    }
+    assert!(exchange.success());
+    assert!(exchange.record(E::ApplicationShutdown).is_err());
 }

@@ -65,6 +65,7 @@ impl Method {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaseSpec {
     pub id: &'static str,
+    root: &'static str,
     pub transport: Transport,
     pub method: Method,
     pub reference: Reference,
@@ -72,51 +73,22 @@ pub struct CaseSpec {
 }
 
 impl CaseSpec {
-    pub fn case_root(self) -> &'static str {
-        match self.id {
-            "M1-INT-001" => "case-M1-INT-001",
-            "M1-INT-002" => "case-M1-INT-002",
-            "M1-INT-003" => "case-M1-INT-003",
-            "M1-INT-004" => "case-M1-INT-004",
-            "M1-INT-005" => "case-M1-INT-005",
-            "M1-INT-006" => "case-M1-INT-006",
-            "M1-INT-007" => "case-M1-INT-007",
-            "M1-INT-008" => "case-M1-INT-008",
-            "M1-INT-009" => "case-M1-INT-009",
-            "M1-INT-010" => "case-M1-INT-010",
-            "M1-INT-011" => "case-M1-INT-011",
-            "M1-INT-012" => "case-M1-INT-012",
-            "M2-UDP-INT-001" => "case-M2-UDP-INT-001",
-            "M2-UDP-INT-002" => "case-M2-UDP-INT-002",
-            "M2-UDP-INT-003" => "case-M2-UDP-INT-003",
-            "M2-UDP-INT-004" => "case-M2-UDP-INT-004",
-            "M2-UDP-INT-005" => "case-M2-UDP-INT-005",
-            "M2-UDP-INT-006" => "case-M2-UDP-INT-006",
-            "M2-UDP-INT-007" => "case-M2-UDP-INT-007",
-            "M2-UDP-INT-008" => "case-M2-UDP-INT-008",
-            "M2-UDP-INT-009" => "case-M2-UDP-INT-009",
-            "M2-UDP-INT-010" => "case-M2-UDP-INT-010",
-            "M2-UDP-INT-011" => "case-M2-UDP-INT-011",
-            "M2-UDP-INT-012" => "case-M2-UDP-INT-012",
-            _ => "case-unknown",
-        }
+    pub const fn case_root(self) -> &'static str {
+        self.root
     }
 }
 
-const fn case(
-    id: &'static str,
-    transport: Transport,
-    method: Method,
-    reference: Reference,
-    direction: Direction,
-) -> CaseSpec {
-    CaseSpec {
-        id,
-        transport,
-        method,
-        reference,
-        direction,
-    }
+macro_rules! case {
+    ($id:literal, $transport:expr, $method:expr, $reference:expr, $direction:expr) => {
+        CaseSpec {
+            id: $id,
+            root: concat!("case-", $id),
+            transport: $transport,
+            method: $method,
+            reference: $reference,
+            direction: $direction,
+        }
+    };
 }
 
 use Direction::{FerrumClient as Ferrum, ReferenceClient as RefClient};
@@ -125,33 +97,33 @@ use Reference::{ShadowsocksRust, SingBox};
 use Transport::{Tcp, Udp};
 
 pub const TCP_CASES: [CaseSpec; 12] = [
-    case("M1-INT-001", Tcp, Aes128, SingBox, Ferrum),
-    case("M1-INT-002", Tcp, Aes128, ShadowsocksRust, Ferrum),
-    case("M1-INT-003", Tcp, Aes128, SingBox, RefClient),
-    case("M1-INT-004", Tcp, Aes128, ShadowsocksRust, RefClient),
-    case("M1-INT-005", Tcp, Aes256, SingBox, Ferrum),
-    case("M1-INT-006", Tcp, Aes256, ShadowsocksRust, Ferrum),
-    case("M1-INT-007", Tcp, Aes256, SingBox, RefClient),
-    case("M1-INT-008", Tcp, Aes256, ShadowsocksRust, RefClient),
-    case("M1-INT-009", Tcp, ChaCha, SingBox, Ferrum),
-    case("M1-INT-010", Tcp, ChaCha, ShadowsocksRust, Ferrum),
-    case("M1-INT-011", Tcp, ChaCha, SingBox, RefClient),
-    case("M1-INT-012", Tcp, ChaCha, ShadowsocksRust, RefClient),
+    case!("M1-INT-001", Tcp, Aes128, SingBox, Ferrum),
+    case!("M1-INT-002", Tcp, Aes128, ShadowsocksRust, Ferrum),
+    case!("M1-INT-003", Tcp, Aes128, SingBox, RefClient),
+    case!("M1-INT-004", Tcp, Aes128, ShadowsocksRust, RefClient),
+    case!("M1-INT-005", Tcp, Aes256, SingBox, Ferrum),
+    case!("M1-INT-006", Tcp, Aes256, ShadowsocksRust, Ferrum),
+    case!("M1-INT-007", Tcp, Aes256, SingBox, RefClient),
+    case!("M1-INT-008", Tcp, Aes256, ShadowsocksRust, RefClient),
+    case!("M1-INT-009", Tcp, ChaCha, SingBox, Ferrum),
+    case!("M1-INT-010", Tcp, ChaCha, ShadowsocksRust, Ferrum),
+    case!("M1-INT-011", Tcp, ChaCha, SingBox, RefClient),
+    case!("M1-INT-012", Tcp, ChaCha, ShadowsocksRust, RefClient),
 ];
 
 pub const UDP_CASES: [CaseSpec; 12] = [
-    case("M2-UDP-INT-001", Udp, Aes128, SingBox, Ferrum),
-    case("M2-UDP-INT-002", Udp, Aes128, ShadowsocksRust, Ferrum),
-    case("M2-UDP-INT-003", Udp, Aes128, SingBox, RefClient),
-    case("M2-UDP-INT-004", Udp, Aes128, ShadowsocksRust, RefClient),
-    case("M2-UDP-INT-005", Udp, Aes256, SingBox, Ferrum),
-    case("M2-UDP-INT-006", Udp, Aes256, ShadowsocksRust, Ferrum),
-    case("M2-UDP-INT-007", Udp, Aes256, SingBox, RefClient),
-    case("M2-UDP-INT-008", Udp, Aes256, ShadowsocksRust, RefClient),
-    case("M2-UDP-INT-009", Udp, ChaCha, SingBox, Ferrum),
-    case("M2-UDP-INT-010", Udp, ChaCha, ShadowsocksRust, Ferrum),
-    case("M2-UDP-INT-011", Udp, ChaCha, SingBox, RefClient),
-    case("M2-UDP-INT-012", Udp, ChaCha, ShadowsocksRust, RefClient),
+    case!("M2-UDP-INT-001", Udp, Aes128, SingBox, Ferrum),
+    case!("M2-UDP-INT-002", Udp, Aes128, ShadowsocksRust, Ferrum),
+    case!("M2-UDP-INT-003", Udp, Aes128, SingBox, RefClient),
+    case!("M2-UDP-INT-004", Udp, Aes128, ShadowsocksRust, RefClient),
+    case!("M2-UDP-INT-005", Udp, Aes256, SingBox, Ferrum),
+    case!("M2-UDP-INT-006", Udp, Aes256, ShadowsocksRust, Ferrum),
+    case!("M2-UDP-INT-007", Udp, Aes256, SingBox, RefClient),
+    case!("M2-UDP-INT-008", Udp, Aes256, ShadowsocksRust, RefClient),
+    case!("M2-UDP-INT-009", Udp, ChaCha, SingBox, Ferrum),
+    case!("M2-UDP-INT-010", Udp, ChaCha, ShadowsocksRust, Ferrum),
+    case!("M2-UDP-INT-011", Udp, ChaCha, SingBox, RefClient),
+    case!("M2-UDP-INT-012", Udp, ChaCha, ShadowsocksRust, RefClient),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -173,34 +145,29 @@ pub trait QualificationOps {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CleanupState {
-    children_started: usize,
-    children_reaped: usize,
-    workers_started: usize,
-    workers_joined: usize,
+    children: isize,
+    workers: isize,
     failed: bool,
 }
 
+#[allow(dead_code)]
 impl CleanupState {
     pub fn child_started(&mut self) {
-        self.children_started += 1;
+        self.children += 1;
     }
 
     pub fn child_reaped(&mut self) {
-        self.children_reaped += 1;
-        if self.children_reaped > self.children_started {
-            self.failed = true;
-        }
+        self.children -= 1;
+        self.failed |= self.children < 0;
     }
 
     pub fn worker_started(&mut self) {
-        self.workers_started += 1;
+        self.workers += 1;
     }
 
     pub fn worker_joined(&mut self) {
-        self.workers_joined += 1;
-        if self.workers_joined > self.workers_started {
-            self.failed = true;
-        }
+        self.workers -= 1;
+        self.failed |= self.workers < 0;
     }
 
     pub fn fail(&mut self) {
@@ -208,9 +175,43 @@ impl CleanupState {
     }
 
     pub const fn success(self) -> bool {
-        !self.failed
-            && self.children_started == self.children_reaped
-            && self.workers_started == self.workers_joined
+        !self.failed && self.children == 0 && self.workers == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TcpExchangeEvent {
+    ForwardMatched,
+    ReverseMatched,
+    ApplicationShutdown,
+    TargetCleanEof,
+    TargetShutdown,
+    ApplicationCleanEof,
+}
+
+pub const TCP_EXCHANGE_ORDER: [TcpExchangeEvent; 6] = [
+    TcpExchangeEvent::ForwardMatched,
+    TcpExchangeEvent::ReverseMatched,
+    TcpExchangeEvent::ApplicationShutdown,
+    TcpExchangeEvent::TargetCleanEof,
+    TcpExchangeEvent::TargetShutdown,
+    TcpExchangeEvent::ApplicationCleanEof,
+];
+
+#[derive(Debug, Default)]
+pub struct TcpExchangeState(usize);
+
+impl TcpExchangeState {
+    pub fn record(&mut self, event: TcpExchangeEvent) -> Result<(), &'static str> {
+        if TCP_EXCHANGE_ORDER.get(self.0) != Some(&event) {
+            return Err("TCP exchange event is out of order");
+        }
+        self.0 += 1;
+        Ok(())
+    }
+
+    pub fn success(&self) -> bool {
+        self.0 == TCP_EXCHANGE_ORDER.len()
     }
 }
 
@@ -250,8 +251,7 @@ struct CaseResult {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct QualificationReport {
-    tcp_results: [CaseResult; 12],
-    udp_results: [CaseResult; 12],
+    results: [[CaseResult; 12]; 2],
     cleanup: CaseStatus,
 }
 
@@ -280,21 +280,14 @@ impl QualificationReport {
     }
 
     pub fn completion_line(&self, transport: Transport, context: &HostedContext<'_>) -> String {
+        let status = |passed| if passed { "PASS" } else { "FAIL" };
         format!(
             "qualification transport={} status={} cases={}/12 cleanup={} sha={} run_id={} \
              run_attempt={}",
             transport.label(),
-            if self.transport_success(transport) && self.cleanup_success() {
-                "PASS"
-            } else {
-                "FAIL"
-            },
+            status(self.transport_success(transport) && self.cleanup_success()),
             self.pass_count(transport),
-            if self.cleanup_success() {
-                "PASS"
-            } else {
-                "FAIL"
-            },
+            status(self.cleanup_success()),
             context.head_sha,
             context.run_id.unwrap_or("missing"),
             context.run_attempt.unwrap_or("missing")
@@ -302,25 +295,21 @@ impl QualificationReport {
     }
 
     pub fn summary_lines(&self, transport: Transport) -> [String; 12] {
-        self.results(transport).map(|result| match result.status {
-            CaseStatus::Pass => format!(
-                "transport={} case_id={} status=PASS",
+        self.results(transport).map(|result| {
+            let status = match result.status {
+                CaseStatus::Pass => "PASS".to_owned(),
+                CaseStatus::Fail(root) => format!("FAIL canonical_root={root}"),
+            };
+            format!(
+                "transport={} case_id={} status={status}",
                 transport.label(),
                 result.case.id
-            ),
-            CaseStatus::Fail(root) => format!(
-                "transport={} case_id={} status=FAIL canonical_root={root}",
-                transport.label(),
-                result.case.id
-            ),
+            )
         })
     }
 
     fn results(&self, transport: Transport) -> [CaseResult; 12] {
-        match transport {
-            Transport::Tcp => self.tcp_results,
-            Transport::Udp => self.udp_results,
-        }
+        self.results[usize::from(transport == Transport::Udp)]
     }
 }
 
@@ -358,8 +347,7 @@ pub fn execute_with_setup(
     };
 
     QualificationReport {
-        tcp_results,
-        udp_results,
+        results: [tcp_results, udp_results],
         cleanup,
     }
 }

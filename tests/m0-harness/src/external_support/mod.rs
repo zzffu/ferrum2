@@ -1,5 +1,6 @@
 use crate::qualification::{
-    CaseFailure, CaseSpec, CleanupState, Direction, Method, QualificationOps, Reference, Transport,
+    CaseFailure, CaseSpec, CleanupState, Direction, Method, QualificationOps, Reference,
+    TcpExchangeEvent, TcpExchangeState, Transport,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -25,8 +26,9 @@ const SESSION_DATAGRAMS: usize = 3;
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 static CLEANUP_STATE: OnceLock<Mutex<CleanupState>> = OnceLock::new();
-static PENDING_WORKERS: OnceLock<Mutex<Vec<thread::JoinHandle<()>>>> = OnceLock::new();
-static PENDING_CHILDREN: OnceLock<Mutex<Vec<Child>>> = OnceLock::new();
+
+type PendingOwners = (Vec<Child>, Vec<thread::JoinHandle<()>>);
+static PENDING: OnceLock<Mutex<PendingOwners>> = OnceLock::new();
 
 fn cleanup_state(operation: impl FnOnce(&mut CleanupState)) {
     operation(
@@ -37,48 +39,12 @@ fn cleanup_state(operation: impl FnOnce(&mut CleanupState)) {
     );
 }
 
-fn pending_workers() -> &'static Mutex<Vec<thread::JoinHandle<()>>> {
-    PENDING_WORKERS.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-fn pending_children() -> &'static Mutex<Vec<Child>> {
-    PENDING_CHILDREN.get_or_init(|| Mutex::new(Vec::new()))
+fn pending() -> &'static Mutex<PendingOwners> {
+    PENDING.get_or_init(|| Mutex::new((Vec::new(), Vec::new())))
 }
 
 fn retain_unconfirmed_worker(worker: thread::JoinHandle<()>) {
-    pending_workers()
-        .lock()
-        .expect("pending worker lock")
-        .push(worker);
-}
-
-fn finish_pending_workers() {
-    let mut retained = Vec::new();
-    let mut workers = pending_workers().lock().expect("pending worker lock");
-    for worker in workers.drain(..) {
-        if worker.is_finished() {
-            match worker.join() {
-                Ok(()) => cleanup_state(CleanupState::worker_joined),
-                Err(_) => cleanup_state(CleanupState::fail),
-            }
-        } else {
-            retained.push(worker);
-        }
-    }
-    *workers = retained;
-}
-
-fn finish_pending_children() {
-    let mut retained = Vec::new();
-    let mut children = pending_children().lock().expect("pending child lock");
-    for mut child in children.drain(..) {
-        let _ = child.kill();
-        match child.try_wait() {
-            Ok(Some(_)) => cleanup_state(CleanupState::child_reaped),
-            Ok(None) | Err(_) => retained.push(child),
-        }
-    }
-    *children = retained;
+    pending().lock().expect("pending owner lock").1.push(worker);
 }
 
 struct Pin {
@@ -95,7 +61,7 @@ struct Pin {
 pub struct HostedOperations;
 
 impl HostedOperations {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -129,21 +95,15 @@ impl QualificationOps for HostedOperations {
     }
 
     fn finish_cleanup(&mut self) -> Result<(), CaseFailure> {
-        finish_pending_children();
-        finish_pending_workers();
-        let workers_empty = pending_workers()
-            .lock()
-            .expect("pending worker lock")
-            .is_empty();
-        let children_empty = pending_children()
-            .lock()
-            .expect("pending child lock")
-            .is_empty();
+        let owners_finished = {
+            let pending = pending().lock().expect("pending owner lock");
+            pending.0.is_empty() && pending.1.is_empty()
+        };
         let state = *CLEANUP_STATE
             .get_or_init(|| Mutex::new(CleanupState::default()))
             .lock()
             .expect("cleanup state lock");
-        if children_empty && workers_empty && state.success() {
+        if owners_finished && state.success() {
             Ok(())
         } else {
             Err(CaseFailure::new("cleanup"))
@@ -249,6 +209,70 @@ impl Drop for CaptureReader {
         if let Some(worker) = self.worker.take() {
             cleanup_state(CleanupState::fail);
             retain_unconfirmed_worker(worker);
+        }
+    }
+}
+
+struct CancellableWorker<T> {
+    cancelled: Arc<AtomicBool>,
+    result: Receiver<T>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl<T: Send + 'static> CancellableWorker<T> {
+    fn spawn(operation: impl FnOnce(Arc<AtomicBool>) -> T + Send + 'static) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let (sender, result) = mpsc::sync_channel(1);
+        cleanup_state(CleanupState::worker_started);
+        let worker = thread::spawn(move || {
+            let _ = sender.send(operation(worker_cancelled));
+        });
+        Self {
+            cancelled,
+            result,
+            worker: Some(worker),
+        }
+    }
+
+    fn finish(mut self, deadline: CaseDeadline, label: &str) -> T {
+        let result = self
+            .result
+            .recv_timeout(deadline.remaining(label))
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        self.join();
+        result
+    }
+}
+
+impl<T> CancellableWorker<T> {
+    fn join(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            match worker.join() {
+                Ok(()) => cleanup_state(CleanupState::worker_joined),
+                Err(_) => {
+                    cleanup_state(CleanupState::fail);
+                    panic!("owned worker panicked");
+                }
+            }
+        }
+    }
+}
+
+impl<T> Drop for CancellableWorker<T> {
+    fn drop(&mut self) {
+        if self.worker.is_none() {
+            return;
+        }
+        cleanup_state(CleanupState::fail);
+        self.cancelled.store(true, Ordering::SeqCst);
+        match self.result.recv_timeout(Duration::from_secs(2)) {
+            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = catch_unwind(AssertUnwindSafe(|| self.join()));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                retain_unconfirmed_worker(self.worker.take().expect("pending worker owner"));
+            }
         }
     }
 }
@@ -399,9 +423,10 @@ impl Drop for ProcessGuard {
             if reaped {
                 self.mark_reaped();
             } else {
-                pending_children()
+                pending()
                     .lock()
-                    .expect("pending child lock")
+                    .expect("pending owner lock")
+                    .0
                     .push(self.child.take().expect("retain unconfirmed child"));
             }
         }
@@ -589,13 +614,6 @@ fn run_config_check(reference: Reference, binary: &Path, config: &Path, deadline
 }
 
 fn run_case(case: CaseSpec) {
-    match case.transport {
-        Transport::Tcp => run_tcp_case(case),
-        Transport::Udp => run_udp_case(case),
-    }
-}
-
-fn run_tcp_case(case: CaseSpec) {
     let deadline = CaseDeadline::start();
     let pin = load_pin(case.reference);
     let paths = reference_paths(case.reference, &pin);
@@ -603,16 +621,14 @@ fn run_tcp_case(case: CaseSpec) {
         Direction::FerrumClient => &paths.server,
         Direction::ReferenceClient => paths.client.as_ref().unwrap_or(&paths.server),
     };
-    let directory = tempfile::tempdir().expect("isolated TCP interop directory");
+    let directory = tempfile::tempdir().expect("isolated interop directory");
     let directory_path = directory.path().to_path_buf();
     let mut ports = ReservedPorts::new();
     let target = ports.target_address();
     let proxy = ports.proxy_address();
     let shadowsocks = ports.shadowsocks_address();
-    let target_process = TcpTarget::start(ports.take_target_tcp(), deadline);
-
-    let (config_checksum, process_evidence) = match case.direction {
-        Direction::FerrumClient => run_tcp_ferrum_client_case(
+    let (config_checksum, process_evidence, target_evidence) = match case.transport {
+        Transport::Tcp => run_tcp_transport(
             case,
             reference_binary,
             directory.path(),
@@ -622,7 +638,7 @@ fn run_tcp_case(case: CaseSpec) {
             target,
             deadline,
         ),
-        Direction::ReferenceClient => run_tcp_reference_client_case(
+        Transport::Udp => run_udp_transport(
             case,
             reference_binary,
             directory.path(),
@@ -633,21 +649,20 @@ fn run_tcp_case(case: CaseSpec) {
             deadline,
         ),
     };
-
-    let target_evidence = target_process.finish(deadline);
     drop(ports);
     directory
         .close()
-        .unwrap_or_else(|error| panic!("explicit TCP temporary directory close: {error}"));
+        .unwrap_or_else(|error| panic!("explicit temporary directory close: {error}"));
     assert!(
         !directory_path.exists(),
-        "temporary TCP interop directory remains after explicit close"
+        "temporary interop directory remains"
     );
-    deadline.check("final TCP interop evidence");
+    deadline.check("final interop evidence");
     eprintln!(
-        "M1 TCP interop evidence: case_id={}, method={}, reference={:?}, direction={:?}, \
+        "{} interop evidence: case_id={}, method={}, reference={:?}, direction={:?}, \
          asset_sha256={}, config_sha256={config_checksum}, command_category=black-box-process, \
          process={process_evidence}, target={target_evidence}, result=success",
+        case.transport.label(),
         case.id,
         case.method.canonical_name(),
         case.reference,
@@ -657,7 +672,7 @@ fn run_tcp_case(case: CaseSpec) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_tcp_ferrum_client_case(
+fn run_tcp_transport(
     case: CaseSpec,
     reference_binary: &Path,
     directory: &Path,
@@ -666,51 +681,31 @@ fn run_tcp_ferrum_client_case(
     proxy: SocketAddrV4,
     target: SocketAddrV4,
     deadline: CaseDeadline,
-) -> (String, String) {
-    let config = reference_server_config(case.method, case.reference, shadowsocks, Transport::Tcp);
-    assert_transport_config(&config, case.reference, Transport::Tcp);
-    let config_path = write_config(directory, "reference-tcp-server.json", &config);
-    ports.release_shadowsocks();
-    let mut reference_command = reference_command(case.reference, reference_binary, &config_path);
-    let mut reference = ProcessGuard::spawn(
-        "reference Shadowsocks TCP server",
-        &mut reference_command,
-        deadline,
-    );
-    wait_for_tcp_listener(
-        &mut reference,
+) -> (String, String, String) {
+    let trace = Arc::new(Mutex::new(TcpExchangeState::default()));
+    let target_process = TcpTarget::start(ports.take_target_tcp(), deadline, Arc::clone(&trace));
+    let (config_checksum, process_evidence) = run_tcp_processes(
+        case,
+        reference_binary,
+        directory,
+        ports,
         shadowsocks,
+        proxy,
+        target,
         deadline,
-        "reference Shadowsocks TCP server",
+        &trace,
     );
 
-    let ferrum_config = format!(
-        "schema_version = 1\n\n[client]\nlisten = \"{proxy}\"\nserver = \"{shadowsocks}\"\n\n\
-         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
-        case.method.canonical_name(),
-        case.method.synthetic_psk()
+    let target_evidence = target_process.finish(deadline);
+    assert!(
+        trace.lock().expect("TCP exchange trace lock").success(),
+        "TCP exchange order is incomplete"
     );
-    let ferrum_path = write_config(directory, "ferrum-tcp-client.toml", &ferrum_config);
-    ports.release_proxy();
-    let mut ferrum_command = Command::new(ferrum_binary("ferrum2-client"));
-    ferrum_command.args(["--config", path_text(&ferrum_path)]);
-    let mut ferrum = ProcessGuard::spawn("ferrum TCP client", &mut ferrum_command, deadline);
-    wait_for_socks_listener(&mut ferrum, proxy, deadline, "ferrum SOCKS TCP listener");
-
-    reference.assert_running(deadline, "pre-traffic reference TCP server");
-    exercise_socks_tcp(proxy, target, deadline);
-    reference.assert_running(deadline, "post-traffic reference TCP server");
-    ferrum.assert_running(deadline, "post-traffic ferrum TCP client");
-    let ferrum_evidence = ferrum.terminate(deadline);
-    let reference_evidence = reference.terminate(deadline);
-    (
-        sha256_bytes(config.as_bytes()),
-        format!("ferrum=[{ferrum_evidence}], reference=[{reference_evidence}]"),
-    )
+    (config_checksum, process_evidence, target_evidence)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_tcp_reference_client_case(
+fn run_tcp_processes(
     case: CaseSpec,
     reference_binary: &Path,
     directory: &Path,
@@ -719,52 +714,60 @@ fn run_tcp_reference_client_case(
     proxy: SocketAddrV4,
     target: SocketAddrV4,
     deadline: CaseDeadline,
+    trace: &Arc<Mutex<TcpExchangeState>>,
 ) -> (String, String) {
-    let ferrum_config = format!(
-        "schema_version = 1\n\n[server]\nlisten = \"{shadowsocks}\"\n\n\
-         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
-        case.method.canonical_name(),
-        case.method.synthetic_psk()
-    );
-    let ferrum_path = write_config(directory, "ferrum-tcp-server.toml", &ferrum_config);
+    let config = match case.direction {
+        Direction::FerrumClient => {
+            reference_server_config(case.method, case.reference, shadowsocks, Transport::Tcp)
+        }
+        Direction::ReferenceClient => reference_client_config(
+            case.method,
+            case.reference,
+            shadowsocks,
+            proxy,
+            Transport::Tcp,
+        ),
+    };
+    let config_path = write_config(directory, "reference-tcp.json", &config);
+    let ferrum_config = match case.direction {
+        Direction::FerrumClient => format!(
+            "schema_version = 1\n\n[client]\nlisten = \"{proxy}\"\nserver = \"{shadowsocks}\"\n\n\
+             [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
+            case.method.canonical_name(),
+            case.method.synthetic_psk()
+        ),
+        Direction::ReferenceClient => format!(
+            "schema_version = 1\n\n[server]\nlisten = \"{shadowsocks}\"\n\n\
+             [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
+            case.method.canonical_name(),
+            case.method.synthetic_psk()
+        ),
+    };
+    let (ferrum_name, ferrum_listen) = match case.direction {
+        Direction::FerrumClient => ("ferrum2-client", proxy),
+        Direction::ReferenceClient => ("ferrum2-server", shadowsocks),
+    };
+    let ferrum_path = write_config(directory, "ferrum-tcp.toml", &ferrum_config);
     ports.release_shadowsocks();
-    let mut ferrum_command = Command::new(ferrum_binary("ferrum2-server"));
-    ferrum_command.args(["--config", path_text(&ferrum_path)]);
-    let mut ferrum = ProcessGuard::spawn("ferrum TCP server", &mut ferrum_command, deadline);
-    wait_for_tcp_listener(
-        &mut ferrum,
-        shadowsocks,
-        deadline,
-        "ferrum Shadowsocks TCP server",
-    );
-
-    let config = reference_client_config(
-        case.method,
-        case.reference,
-        shadowsocks,
-        proxy,
-        Transport::Tcp,
-    );
-    assert_transport_config(&config, case.reference, Transport::Tcp);
-    let config_path = write_config(directory, "reference-tcp-client.json", &config);
     ports.release_proxy();
+    let mut ferrum_command = Command::new(ferrum_binary(ferrum_name));
+    ferrum_command.args(["--config", path_text(&ferrum_path)]);
+    let mut ferrum = ProcessGuard::spawn("ferrum TCP process", &mut ferrum_command, deadline);
+    wait_for_tcp_listener(&mut ferrum, ferrum_listen, deadline, "ferrum TCP listener");
     let mut reference_command = reference_command(case.reference, reference_binary, &config_path);
-    let mut reference = ProcessGuard::spawn(
-        "reference SOCKS TCP client",
-        &mut reference_command,
-        deadline,
-    );
-    wait_for_socks_listener(
+    let mut reference =
+        ProcessGuard::spawn("reference TCP process", &mut reference_command, deadline);
+    let reference_listen = match case.direction {
+        Direction::FerrumClient => shadowsocks,
+        Direction::ReferenceClient => proxy,
+    };
+    wait_for_tcp_listener(
         &mut reference,
-        proxy,
+        reference_listen,
         deadline,
-        "reference SOCKS TCP listener",
+        "reference TCP listener",
     );
-
-    ferrum.assert_running(deadline, "pre-traffic ferrum TCP server");
-    exercise_socks_tcp(proxy, target, deadline);
-    ferrum.assert_running(deadline, "post-traffic ferrum TCP server");
-    reference.assert_running(deadline, "post-traffic reference TCP client");
+    exercise_socks_tcp(proxy, target, deadline, trace);
     let reference_evidence = reference.terminate(deadline);
     let ferrum_evidence = ferrum.terminate(deadline);
     (
@@ -773,36 +776,12 @@ fn run_tcp_reference_client_case(
     )
 }
 
-fn wait_for_socks_listener(
-    child: &mut ProcessGuard,
-    address: SocketAddrV4,
+fn exercise_socks_tcp(
+    proxy: SocketAddrV4,
+    target: SocketAddrV4,
     deadline: CaseDeadline,
-    label: &str,
+    trace: &Arc<Mutex<TcpExchangeState>>,
 ) {
-    let readiness_end = Instant::now() + deadline.bounded(READINESS_TIMEOUT, label);
-    loop {
-        child.assert_running(deadline, label);
-        if let Ok(mut stream) = TcpStream::connect_timeout(
-            &address.into(),
-            deadline.bounded(Duration::from_millis(200), label),
-        ) {
-            set_stream_deadlines(&stream, deadline);
-            if stream.write_all(&[5, 1, 0]).is_ok() {
-                let mut response = [0_u8; 2];
-                if stream.read_exact(&mut response).is_ok() && response == [5, 0] {
-                    return;
-                }
-            }
-        }
-        assert!(
-            Instant::now() < readiness_end,
-            "{label}: readiness deadline exceeded"
-        );
-        thread::sleep(POLL_INTERVAL.min(deadline.remaining(label)));
-    }
-}
-
-fn exercise_socks_tcp(proxy: SocketAddrV4, target: SocketAddrV4, deadline: CaseDeadline) {
     let mut stream = TcpStream::connect_timeout(
         &proxy.into(),
         deadline.bounded(IO_TIMEOUT, "connect SOCKS TCP"),
@@ -824,13 +803,15 @@ fn exercise_socks_tcp(proxy: SocketAddrV4, target: SocketAddrV4, deadline: CaseD
 
     let forward = tcp_forward_payload();
     write_all_case(&mut stream, &forward, deadline, "TCP forward payload");
-    stream
-        .shutdown(Shutdown::Write)
-        .expect("application TCP write half-close");
     let reverse = tcp_reverse_payload();
     let mut received = vec![0_u8; reverse.len()];
     read_exact_case(&mut stream, &mut received, deadline, "TCP reverse payload");
     assert_eq!(received, reverse, "TCP reverse payload mismatch");
+    record_tcp_event(trace, TcpExchangeEvent::ReverseMatched);
+    stream
+        .shutdown(Shutdown::Write)
+        .expect("application TCP write half-close");
+    record_tcp_event(trace, TcpExchangeEvent::ApplicationShutdown);
     let mut extra = [0_u8; 1];
     assert_eq!(
         read_case(
@@ -842,6 +823,15 @@ fn exercise_socks_tcp(proxy: SocketAddrV4, target: SocketAddrV4, deadline: CaseD
         0,
         "TCP application expected clean EOF"
     );
+    record_tcp_event(trace, TcpExchangeEvent::ApplicationCleanEof);
+}
+
+fn record_tcp_event(trace: &Arc<Mutex<TcpExchangeState>>, event: TcpExchangeEvent) {
+    trace
+        .lock()
+        .expect("TCP exchange trace lock")
+        .record(event)
+        .unwrap_or_else(|error| panic!("{error}: {event:?}"));
 }
 
 fn tcp_forward_payload() -> Vec<u8> {
@@ -894,70 +884,26 @@ fn read_case(
         .unwrap_or_else(|error| panic!("{label}: {error}"))
 }
 
-struct TcpTarget {
-    cancelled: Arc<AtomicBool>,
-    result: Receiver<Result<String, String>>,
-    worker: Option<thread::JoinHandle<()>>,
-}
+struct TcpTarget(CancellableWorker<Result<String, String>>);
 
 impl TcpTarget {
-    fn start(listener: TcpListener, deadline: CaseDeadline) -> Self {
+    fn start(
+        listener: TcpListener,
+        deadline: CaseDeadline,
+        trace: Arc<Mutex<TcpExchangeState>>,
+    ) -> Self {
         listener
             .set_nonblocking(true)
             .expect("set TCP target listener nonblocking");
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        let (sender, result) = mpsc::sync_channel(1);
-        cleanup_state(CleanupState::worker_started);
-        let worker = thread::spawn(move || {
-            let outcome = run_tcp_target(listener, deadline, &worker_cancelled);
-            let _ = sender.send(outcome);
-        });
-        Self {
-            cancelled,
-            result,
-            worker: Some(worker),
-        }
+        Self(CancellableWorker::spawn(move |cancelled| {
+            run_tcp_target(listener, deadline, &cancelled, &trace)
+        }))
     }
 
-    fn finish(mut self, deadline: CaseDeadline) -> String {
-        let result = self
-            .result
-            .recv_timeout(deadline.remaining("TCP target completion"))
-            .unwrap_or_else(|error| panic!("TCP target completion failed: {error}"));
-        self.join();
-        result.unwrap_or_else(|error| panic!("TCP target failed: {error}"))
-    }
-
-    fn join(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            match worker.join() {
-                Ok(()) => cleanup_state(CleanupState::worker_joined),
-                Err(_) => {
-                    cleanup_state(CleanupState::fail);
-                    panic!("TCP target worker panicked");
-                }
-            }
-        }
-    }
-}
-
-impl Drop for TcpTarget {
-    fn drop(&mut self) {
-        if self.worker.is_some() {
-            cleanup_state(CleanupState::fail);
-            self.cancelled.store(true, Ordering::SeqCst);
-            match self.result.recv_timeout(Duration::from_secs(2)) {
-                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = catch_unwind(AssertUnwindSafe(|| self.join()));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if let Some(worker) = self.worker.take() {
-                        retain_unconfirmed_worker(worker);
-                    }
-                }
-            }
-        }
+    fn finish(self, deadline: CaseDeadline) -> String {
+        self.0
+            .finish(deadline, "TCP target completion")
+            .unwrap_or_else(|error| panic!("TCP target failed: {error}"))
     }
 }
 
@@ -965,6 +911,7 @@ fn run_tcp_target(
     listener: TcpListener,
     deadline: CaseDeadline,
     cancelled: &AtomicBool,
+    trace: &Arc<Mutex<TcpExchangeState>>,
 ) -> Result<String, String> {
     let readiness_end = Instant::now() + deadline.bounded(READINESS_TIMEOUT, "TCP target accept");
     let mut stream = loop {
@@ -994,6 +941,7 @@ fn run_tcp_target(
     if received != forward {
         return Err("TCP target forward payload mismatch".to_owned());
     }
+    record_tcp_event(trace, TcpExchangeEvent::ForwardMatched);
     let reverse = tcp_reverse_payload();
     write_all_case(
         &mut stream,
@@ -1005,9 +953,11 @@ fn run_tcp_target(
     if read_case(&mut stream, &mut extra, deadline, "TCP target clean EOF") != 0 {
         return Err("TCP target received bytes after expected payload".to_owned());
     }
+    record_tcp_event(trace, TcpExchangeEvent::TargetCleanEof);
     stream
         .shutdown(Shutdown::Write)
         .map_err(|error| format!("TCP target write shutdown failed: {error}"))?;
+    record_tcp_event(trace, TcpExchangeEvent::TargetShutdown);
     Ok(format!(
         "forward_bytes={}, reverse_bytes={}, clean_eof=true",
         forward.len(),
@@ -1015,60 +965,41 @@ fn run_tcp_target(
     ))
 }
 
-fn run_udp_case(case: CaseSpec) {
-    let deadline = CaseDeadline::start();
-    let pin = load_pin(case.reference);
-    let paths = reference_paths(case.reference, &pin);
-    let directory = tempfile::tempdir().expect("isolated interop directory");
-    let directory_path = directory.path().to_path_buf();
-    let mut ports = ReservedPorts::new();
-    let target = ports.target_address();
-    let proxy = ports.proxy_address();
-    let shadowsocks = ports.shadowsocks_address();
+#[allow(clippy::too_many_arguments)]
+fn run_udp_transport(
+    case: CaseSpec,
+    reference_binary: &Path,
+    directory: &Path,
+    ports: &mut ReservedPorts,
+    shadowsocks: SocketAddrV4,
+    proxy: SocketAddrV4,
+    target: SocketAddrV4,
+    deadline: CaseDeadline,
+) -> (String, String, String) {
     let echo = EchoTarget::start(ports.take_target_udp(), deadline);
-
     let (config_checksum, process_evidence) = match case.direction {
         Direction::FerrumClient => run_udp_ferrum_client_case(
             case,
-            &paths.server,
-            directory.path(),
-            &mut ports,
+            reference_binary,
+            directory,
+            ports,
             shadowsocks,
             target,
             deadline,
         ),
         Direction::ReferenceClient => run_udp_reference_client_case(
             case,
-            paths.client.as_ref().unwrap_or(&paths.server),
-            directory.path(),
-            &mut ports,
+            reference_binary,
+            directory,
+            ports,
             shadowsocks,
             proxy,
             target,
             deadline,
         ),
     };
-
     let target_evidence = echo.finish(deadline);
-    drop(ports);
-    directory
-        .close()
-        .unwrap_or_else(|error| panic!("explicit temporary directory close: {error}"));
-    assert!(
-        !directory_path.exists(),
-        "temporary interop directory remains after explicit close"
-    );
-    deadline.check("final UDP interop evidence");
-    eprintln!(
-        "M2 UDP interop evidence: case_id={}, method={}, reference={:?}, direction={:?}, \
-         asset_sha256={}, config_sha256={config_checksum}, command_category=black-box-process, \
-         process={process_evidence}, target={target_evidence}, result=success",
-        case.id,
-        case.method.canonical_name(),
-        case.reference,
-        case.direction,
-        pin.sha256
-    );
+    (config_checksum, process_evidence, target_evidence)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1082,7 +1013,6 @@ fn run_udp_ferrum_client_case(
     deadline: CaseDeadline,
 ) -> (String, String) {
     let config = reference_server_config(case.method, case.reference, shadowsocks, Transport::Udp);
-    assert_transport_config(&config, case.reference, Transport::Udp);
     let config_path = write_config(directory, "reference-server.json", &config);
     ports.release_shadowsocks();
     let mut command = reference_command(case.reference, reference_binary, &config_path);
@@ -1111,7 +1041,6 @@ fn run_udp_ferrum_client_case(
         sanitize_capture(stdout),
         sanitize_capture(stderr)
     );
-    reference.assert_running(deadline, "post-traffic reference check");
     let reference_evidence = reference.terminate(deadline);
     (
         sha256_bytes(config.as_bytes()),
@@ -1153,14 +1082,11 @@ fn run_udp_reference_client_case(
         proxy,
         Transport::Udp,
     );
-    assert_transport_config(&config, case.reference, Transport::Udp);
     let config_path = write_config(directory, "reference-client.json", &config);
     ports.release_proxy();
     let mut command = reference_command(case.reference, reference_binary, &config_path);
     let mut reference = ProcessGuard::spawn("reference SOCKS UDP client", &mut command, deadline);
     exercise_socks_udp(&mut reference, proxy, target, case.method, deadline);
-    reference.assert_running(deadline, "post-traffic reference client check");
-    ferrum.assert_running(deadline, "post-traffic ferrum server check");
     let reference_evidence = reference.terminate(deadline);
     let ferrum_evidence = ferrum.terminate(deadline);
     (
@@ -1366,12 +1292,7 @@ fn case_payload(method: Method, sequence: usize) -> Vec<u8> {
     .into_bytes()
 }
 
-struct EchoTarget {
-    cancelled: Arc<AtomicBool>,
-    result: Receiver<Result<Vec<Vec<u8>>, String>>,
-    worker: Option<thread::JoinHandle<()>>,
-    counted: bool,
-}
+struct EchoTarget(CancellableWorker<Result<Vec<Vec<u8>>, String>>);
 
 impl EchoTarget {
     fn start(socket: UdpSocket, deadline: CaseDeadline) -> Self {
@@ -1381,15 +1302,11 @@ impl EchoTarget {
         socket
             .set_write_timeout(Some(deadline.bounded(IO_TIMEOUT, "echo target send")))
             .expect("set echo target write timeout");
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        let (sender, result) = mpsc::sync_channel(1);
-        cleanup_state(CleanupState::worker_started);
-        let worker = thread::spawn(move || {
+        Self(CancellableWorker::spawn(move |cancelled| {
             let mut received_payloads = Vec::with_capacity(SESSION_DATAGRAMS);
             let mut buffer = [0_u8; MAX_UDP_DATAGRAM];
-            let outcome = loop {
-                if worker_cancelled.load(Ordering::SeqCst) {
+            loop {
+                if cancelled.load(Ordering::SeqCst) {
                     break Err("echo target cancelled".to_owned());
                 }
                 if received_payloads.len() == SESSION_DATAGRAMS {
@@ -1411,24 +1328,15 @@ impl EchoTarget {
                         ) => {}
                     Err(error) => break Err(format!("echo target receive failed: {error}")),
                 }
-            };
-            let _ = sender.send(outcome);
-        });
-        Self {
-            cancelled,
-            result,
-            worker: Some(worker),
-            counted: true,
-        }
+            }
+        }))
     }
 
-    fn finish(mut self, deadline: CaseDeadline) -> String {
+    fn finish(self, deadline: CaseDeadline) -> String {
         let payloads = self
-            .result
-            .recv_timeout(deadline.remaining("echo target completion"))
-            .unwrap_or_else(|error| panic!("echo target completion failed: {error}"))
+            .0
+            .finish(deadline, "echo target completion")
             .unwrap_or_else(|error| panic!("{error}"));
-        self.join();
         assert_eq!(
             payloads.len(),
             SESSION_DATAGRAMS,
@@ -1440,40 +1348,6 @@ impl EchoTarget {
             "echo target request payloads were not distinct"
         );
         "three-distinct-request-reply-datagrams".to_owned()
-    }
-
-    fn join(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            match worker.join() {
-                Ok(()) => {
-                    cleanup_state(CleanupState::worker_joined);
-                    self.counted = false;
-                }
-                Err(_) => {
-                    cleanup_state(CleanupState::fail);
-                    panic!("join echo target worker");
-                }
-            }
-        }
-    }
-}
-
-impl Drop for EchoTarget {
-    fn drop(&mut self) {
-        if self.counted {
-            cleanup_state(CleanupState::fail);
-            self.cancelled.store(true, Ordering::SeqCst);
-            match self.result.recv_timeout(Duration::from_secs(2)) {
-                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = catch_unwind(AssertUnwindSafe(|| self.join()));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if let Some(worker) = self.worker.take() {
-                        retain_unconfirmed_worker(worker);
-                    }
-                }
-            }
-        }
     }
 }
 
