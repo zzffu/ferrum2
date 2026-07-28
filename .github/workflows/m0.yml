@@ -102,6 +102,7 @@ jobs:
           rustc +1.85.0 -Vv
           cargo +1.85.0 -V
           cargo +1.85.0 check --workspace --all-targets --locked
+          cargo +1.85.0 build --workspace --bins --locked
           cargo +1.85.0 test --workspace --locked
 
   platform:
