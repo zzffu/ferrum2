@@ -16,6 +16,20 @@ pub struct OwnerSnapshot {
     pub listeners: usize,
     /// Flows terminated after a graceful deadline.
     pub forced_shutdowns: usize,
+    /// Active protocol-neutral UDP sessions.
+    pub udp_sessions: usize,
+    /// Direct UDP sockets owned by active sessions.
+    pub udp_sockets: usize,
+    /// Direct UDP session tasks owned by the runtime.
+    pub udp_tasks: usize,
+    /// Datagram entries currently held in runtime queues.
+    pub udp_queued_datagrams: usize,
+    /// Allocated-capacity bytes held by UDP runtime owners.
+    pub udp_buffered_bytes: usize,
+    /// UDP receive scratch buffers currently owned by session tasks.
+    pub udp_scratch_buffers: usize,
+    /// UDP session tasks terminated after their graceful deadline.
+    pub udp_forced_shutdowns: usize,
 }
 
 #[derive(Debug, Default)]
@@ -26,6 +40,13 @@ struct OwnerCounters {
     permits: AtomicUsize,
     listeners: AtomicUsize,
     forced_shutdowns: AtomicUsize,
+    udp_sessions: AtomicUsize,
+    udp_sockets: AtomicUsize,
+    udp_tasks: AtomicUsize,
+    udp_queued_datagrams: AtomicUsize,
+    udp_buffered_bytes: AtomicUsize,
+    udp_scratch_buffers: AtomicUsize,
+    udp_forced_shutdowns: AtomicUsize,
 }
 
 /// Cloneable owner accounting used by deterministic lifecycle tests.
@@ -49,6 +70,13 @@ impl OwnerRegistry {
             owned_permits: self.counters.permits.load(Ordering::SeqCst),
             listeners: self.counters.listeners.load(Ordering::SeqCst),
             forced_shutdowns: self.counters.forced_shutdowns.load(Ordering::SeqCst),
+            udp_sessions: self.counters.udp_sessions.load(Ordering::SeqCst),
+            udp_sockets: self.counters.udp_sockets.load(Ordering::SeqCst),
+            udp_tasks: self.counters.udp_tasks.load(Ordering::SeqCst),
+            udp_queued_datagrams: self.counters.udp_queued_datagrams.load(Ordering::SeqCst),
+            udp_buffered_bytes: self.counters.udp_buffered_bytes.load(Ordering::SeqCst),
+            udp_scratch_buffers: self.counters.udp_scratch_buffers.load(Ordering::SeqCst),
+            udp_forced_shutdowns: self.counters.udp_forced_shutdowns.load(Ordering::SeqCst),
         }
     }
 
@@ -72,6 +100,46 @@ impl OwnerRegistry {
         OwnerGuard::new(self, OwnerKind::Listener)
     }
 
+    pub(crate) fn track_udp_session(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::UdpSession)
+    }
+
+    pub(crate) fn track_udp_socket(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::UdpSocket)
+    }
+
+    pub(crate) fn track_udp_task(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::UdpTask)
+    }
+
+    pub(crate) fn track_udp_queue_entry(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::UdpQueueEntry)
+    }
+
+    pub(crate) fn track_udp_scratch(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::UdpScratch)
+    }
+
+    pub(crate) fn add_udp_buffered_bytes(&self, bytes: usize) {
+        self.counters
+            .udp_buffered_bytes
+            .fetch_add(bytes, Ordering::SeqCst);
+    }
+
+    pub(crate) fn remove_udp_buffered_bytes(&self, bytes: usize) {
+        let previous = self
+            .counters
+            .udp_buffered_bytes
+            .fetch_sub(bytes, Ordering::SeqCst);
+        debug_assert!(previous >= bytes, "UDP byte owner counter underflow");
+    }
+
+    pub(crate) fn record_udp_forced_shutdowns(&self, count: usize) {
+        self.counters
+            .udp_forced_shutdowns
+            .fetch_add(count, Ordering::SeqCst);
+    }
+
     pub(crate) fn record_forced_shutdowns(&self, count: usize) {
         self.counters
             .forced_shutdowns
@@ -86,6 +154,11 @@ enum OwnerKind {
     Buffer,
     Permit,
     Listener,
+    UdpSession,
+    UdpSocket,
+    UdpTask,
+    UdpQueueEntry,
+    UdpScratch,
 }
 
 #[derive(Debug)]
@@ -118,5 +191,10 @@ fn counter(counters: &OwnerCounters, kind: OwnerKind) -> &AtomicUsize {
         OwnerKind::Buffer => &counters.buffers,
         OwnerKind::Permit => &counters.permits,
         OwnerKind::Listener => &counters.listeners,
+        OwnerKind::UdpSession => &counters.udp_sessions,
+        OwnerKind::UdpSocket => &counters.udp_sockets,
+        OwnerKind::UdpTask => &counters.udp_tasks,
+        OwnerKind::UdpQueueEntry => &counters.udp_queued_datagrams,
+        OwnerKind::UdpScratch => &counters.udp_scratch_buffers,
     }
 }

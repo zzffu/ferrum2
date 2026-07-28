@@ -6,7 +6,7 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroU16;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 const MAX_DOMAIN_NAME_BYTES: usize = 255;
 
@@ -163,6 +163,81 @@ impl fmt::Display for TargetAddrError {
 }
 
 impl Error for TargetAddrError {}
+
+/// A runtime-neutral datagram with a validated target and owned payload.
+///
+/// Construction applies the caller's complete payload bound before the value
+/// can cross a protocol/runtime seam. Buffer-capacity accounting remains a
+/// runtime concern and is intentionally not represented here.
+pub struct Datagram {
+    target: TargetAddr,
+    payload: Bytes,
+    allocated_capacity: usize,
+}
+
+impl Datagram {
+    /// Constructs an owned datagram whose payload does not exceed `max_payload_bytes`.
+    pub fn new(
+        target: TargetAddr,
+        payload: BytesMut,
+        max_payload_bytes: usize,
+    ) -> Result<Self, DatagramError> {
+        if payload.len() > max_payload_bytes {
+            return Err(DatagramError::Bounds);
+        }
+        let allocated_capacity = payload.capacity();
+        Ok(Self {
+            target,
+            payload: payload.freeze(),
+            allocated_capacity,
+        })
+    }
+
+    /// Returns the normalized target without exposing it through formatting.
+    pub fn target(&self) -> &TargetAddr {
+        &self.target
+    }
+
+    /// Returns the owned payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Returns the owned backing capacity captured before the payload was frozen.
+    pub const fn allocated_capacity(&self) -> usize {
+        self.allocated_capacity
+    }
+
+    /// Consumes the datagram into its normalized target and owned payload.
+    pub fn into_parts(self) -> (TargetAddr, Bytes) {
+        (self.target, self.payload)
+    }
+}
+
+impl fmt::Debug for Datagram {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Datagram")
+            .field("target", &"[redacted]")
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
+}
+
+/// Failure to construct a caller-bounded datagram.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DatagramError {
+    /// The owned payload exceeds the caller's complete payload bound.
+    Bounds,
+}
+
+impl fmt::Display for DatagramError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("bounds")
+    }
+}
+
+impl Error for DatagramError {}
 
 /// A normalized accepted session passed from an inbound to an outbound.
 pub struct Session<S, R> {
@@ -351,6 +426,30 @@ mod tests {
         let rendered = format!("{target:?}");
         assert!(!rendered.contains("192.0.2.9"));
         assert!(!rendered.contains("443"));
+    }
+
+    #[test]
+    fn datagram_owns_a_caller_bounded_payload_without_disclosing_values() {
+        let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 9), 443))
+            .expect("non-zero port");
+        let datagram =
+            Datagram::new(target, BytesMut::from(&b"owned payload"[..]), 13).expect("at bound");
+
+        assert_eq!(datagram.payload(), b"owned payload");
+        assert_eq!(datagram.allocated_capacity(), 13);
+        assert_eq!(datagram.target().port().get(), 443);
+        assert_eq!(
+            Datagram::new(
+                TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9)).expect("non-zero port"),
+                BytesMut::from(&b"too large"[..]),
+                8,
+            )
+            .unwrap_err(),
+            DatagramError::Bounds
+        );
+        let rendered = format!("{datagram:?}");
+        assert!(!rendered.contains("192.0.2.9"));
+        assert!(!rendered.contains("owned payload"));
     }
 
     struct StoredEndpoint(SocketAddrV4);
