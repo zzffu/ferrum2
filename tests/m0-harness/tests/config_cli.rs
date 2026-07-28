@@ -4,7 +4,8 @@ mod local_support;
 use std::net::TcpStream;
 
 use local_support::{
-    reserve_loopback, run_binary, unused_loopback, write_client_config, write_server_config,
+    TCP_METHOD_CONFIGS, reserve_loopback, rewrite_config_method, run_binary, unused_loopback,
+    write_client_config, write_server_config,
 };
 
 const CLIENT_BASE: &str = "schema_version = 1\n\
@@ -25,23 +26,32 @@ const SERVER_BASE: &str = "schema_version = 1\n\
 #[test]
 fn valid_client_and_server_configs_have_exact_offline_output() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let client = write_client_config(directory.path(), unused_loopback(), unused_loopback(), None)
-        .expect("client config");
-    let server =
-        write_server_config(directory.path(), unused_loopback(), None).expect("server config");
+    for method in TCP_METHOD_CONFIGS {
+        let client =
+            write_client_config(directory.path(), unused_loopback(), unused_loopback(), None)
+                .expect("client config");
+        let server =
+            write_server_config(directory.path(), unused_loopback(), None).expect("server config");
+        rewrite_config_method(&client, method).expect("client method");
+        rewrite_config_method(&server, method).expect("server method");
 
-    for (binary, config) in [("ferrum2-client", client), ("ferrum2-server", server)] {
-        let output = run_binary(
-            binary,
-            &[
-                "--config",
-                config.to_str().expect("UTF-8 path"),
-                "--check-config",
-            ],
-        );
-        assert_eq!(output.status.code(), Some(0), "{binary}");
-        assert_eq!(output.stdout, b"configuration valid\n", "{binary}");
-        assert!(output.stderr.is_empty(), "{binary}");
+        for (binary, config) in [("ferrum2-client", client), ("ferrum2-server", server)] {
+            let output = run_binary(
+                binary,
+                &[
+                    "--config",
+                    config.to_str().expect("UTF-8 path"),
+                    "--check-config",
+                ],
+            );
+            assert_eq!(output.status.code(), Some(0), "{binary}: {}", method.0);
+            assert_eq!(
+                output.stdout, b"configuration valid\n",
+                "{binary}: {}",
+                method.0
+            );
+            assert!(output.stderr.is_empty(), "{binary}: {}", method.0);
+        }
     }
 }
 
@@ -128,10 +138,16 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
             "error[config.semantic] client.server: configuration value is invalid\n",
         ),
         (
-            "client-unsupported-method",
+            "client-unknown-method",
+            "ferrum2-client",
+            CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "future-method", 1),
+            "error[config.semantic] shadowsocks.method: configuration value is invalid\n",
+        ),
+        (
+            "client-aes256-short-psk",
             "ferrum2-client",
             CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", 1),
-            "error[config.semantic] shadowsocks.method: configuration value is invalid\n",
+            "error[config.semantic] shadowsocks.psk: configuration value is invalid\n",
         ),
         (
             "client-secret",

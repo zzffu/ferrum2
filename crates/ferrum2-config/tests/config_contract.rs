@@ -9,7 +9,7 @@ use std::time::Duration;
 use ferrum2_config::{
     ConfigErrorKind, ConfigField, LoggingLevel, MAX_CONFIG_BYTES, load_client, load_server,
 };
-use ferrum2_crypto::TcpMethod;
+use ferrum2_crypto::TcpMethodProfile;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -69,8 +69,8 @@ fn role_specific_valid_configs_apply_all_defaults() {
     let client = load_client(fixture("client-valid.toml")).expect("valid client fixture");
     assert_eq!(client.listen, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1080));
     assert_eq!(client.server, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8388));
-    assert_eq!(client.method, TcpMethod::Blake3Aes128Gcm2022);
-    assert_eq!(format!("{:?}", client.psk), "Aes128Psk([REDACTED])");
+    assert_eq!(client.method(), TcpMethodProfile::Blake3Aes128Gcm2022);
+    assert_eq!(format!("{:?}", client.psk), "MethodPsk([REDACTED])");
     assert_eq!(
         client.runtime.max_connections,
         NonZeroU16::new(4096).expect("non-zero")
@@ -94,10 +94,31 @@ fn role_specific_valid_configs_apply_all_defaults() {
 
     let server = load_server(fixture("server-valid.toml")).expect("valid server fixture");
     assert_eq!(server.listen, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8388));
-    assert_eq!(server.method, TcpMethod::Blake3Aes128Gcm2022);
+    assert_eq!(server.method(), TcpMethodProfile::Blake3Aes128Gcm2022);
     assert_eq!(server.replay.capacity, 65_536);
     assert_eq!(server.logging.level, LoggingLevel::Info);
     assert!(server.metrics.is_none());
+
+    for (method, psk, expected) in [
+        (
+            "2022-blake3-aes-256-gcm",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+            TcpMethodProfile::Blake3Aes256Gcm2022,
+        ),
+        (
+            "2022-blake3-chacha20-poly1305",
+            "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+            TcpMethodProfile::Blake3ChaCha20Poly13052022,
+        ),
+    ] {
+        let client = TempConfig::text(
+            &CLIENT_BASE
+                .replace("2022-blake3-aes-128-gcm", method)
+                .replace("AAECAwQFBgcICQoLDA0ODw==", psk),
+        );
+        let client = load_client(client.path()).expect(method);
+        assert_eq!(client.method(), expected, "{method}");
+    }
 }
 
 #[test]
@@ -319,8 +340,13 @@ fn endpoint_method_key_and_cross_field_rules_are_enforced() {
             ConfigField::ClientServer,
         ),
         (
-            "method",
-            CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", 1),
+            "unknown method",
+            CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "future-method", 1),
+            ConfigField::ShadowsocksMethod,
+        ),
+        (
+            "reduced-round method",
+            CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "2022-blake3-chacha8-poly1305", 1),
             ConfigField::ShadowsocksMethod,
         ),
         (
@@ -340,7 +366,11 @@ fn endpoint_method_key_and_cross_field_rules_are_enforced() {
         ),
         (
             "wrong key length",
-            CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "AAECAwQFBgcICQoLDA0O", 1),
+            CLIENT_BASE.replacen(
+                "AAECAwQFBgcICQoLDA0ODw==",
+                "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+                1,
+            ),
             ConfigField::ShadowsocksPsk,
         ),
         (

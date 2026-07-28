@@ -2,22 +2,30 @@
 mod local_support;
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use local_support::{
-    ChildGuard, unused_loopback, wait_for_listener, write_client_config,
-    write_client_config_with_psk, write_server_config, write_server_config_with_psk,
+    ChildGuard, TCP_METHOD_CONFIGS, rewrite_config_method, unused_loopback, wait_for_listener,
+    write_client_config, write_client_config_with_psk, write_server_config,
+    write_server_config_with_psk,
 };
 
 fn start_echo() -> (SocketAddrV4, thread::JoinHandle<Vec<u8>>) {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("echo listener");
-    let address = match listener.local_addr().expect("echo address") {
+    let (address, handle) =
+        start_echo_at(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)));
+    let address = match address {
         std::net::SocketAddr::V4(address) => address,
         std::net::SocketAddr::V6(_) => unreachable!("IPv4 listener"),
     };
+    (address, handle)
+}
+
+fn start_echo_at(bind: SocketAddr) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind(bind).expect("echo listener");
+    let address = listener.local_addr().expect("echo address");
     listener
         .set_nonblocking(true)
         .expect("nonblocking echo listener");
@@ -117,6 +125,26 @@ fn start_recording_bridge(
 }
 
 fn socks_connect(client: SocketAddrV4, target: SocketAddrV4) -> (TcpStream, [u8; 10]) {
+    socks_connect_wire(client, &address_wire(SocketAddr::V4(target)))
+}
+
+fn address_wire(target: SocketAddr) -> Vec<u8> {
+    let mut wire = Vec::new();
+    match target {
+        SocketAddr::V4(target) => {
+            wire.push(1);
+            wire.extend_from_slice(&target.ip().octets());
+        }
+        SocketAddr::V6(target) => {
+            wire.push(4);
+            wire.extend_from_slice(&target.ip().octets());
+        }
+    }
+    wire.extend_from_slice(&target.port().to_be_bytes());
+    wire
+}
+
+fn socks_connect_wire(client: SocketAddrV4, target: &[u8]) -> (TcpStream, [u8; 10]) {
     let mut stream = TcpStream::connect(client).expect("connect SOCKS client");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -125,9 +153,8 @@ fn socks_connect(client: SocketAddrV4, target: SocketAddrV4) -> (TcpStream, [u8;
     let mut method = [0_u8; 2];
     stream.read_exact(&mut method).expect("SOCKS method");
     assert_eq!(method, [5, 0]);
-    let mut request = vec![5, 1, 0, 1];
-    request.extend_from_slice(&target.ip().octets());
-    request.extend_from_slice(&target.port().to_be_bytes());
+    let mut request = vec![5, 1, 0];
+    request.extend_from_slice(target);
     stream.write_all(&request).expect("SOCKS request");
     let mut reply = [0_u8; 10];
     stream.read_exact(&mut reply).expect("SOCKS reply");
@@ -135,38 +162,66 @@ fn socks_connect(client: SocketAddrV4, target: SocketAddrV4) -> (TcpStream, [u8;
 }
 
 #[test]
-fn success_real_process_echo_byte_equality_and_half_close() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let server_address = unused_loopback();
-    let client_address = unused_loopback();
-    let server_config =
-        write_server_config(directory.path(), server_address, None).expect("server config");
-    let client_config = write_client_config(directory.path(), client_address, server_address, None)
-        .expect("client config");
-    let (echo_address, echo) = start_echo();
+fn success_bounded_method_matrix_preserves_bytes_and_half_close() {
+    let ipv6_loopback = TcpListener::bind("[::1]:0").is_ok_and(|listener| {
+        TcpStream::connect(listener.local_addr().expect("IPv6 probe address")).is_ok()
+    });
+    if !ipv6_loopback {
+        eprintln!("SKIP real-process IPv6 row: host IPv6 loopback connect unavailable");
+    }
+    for (address_class, method) in TCP_METHOD_CONFIGS.into_iter().enumerate() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let server_address = unused_loopback();
+        let client_address = unused_loopback();
+        let server_config =
+            write_server_config(directory.path(), server_address, None).expect("server config");
+        let client_config =
+            write_client_config(directory.path(), client_address, server_address, None)
+                .expect("client config");
+        rewrite_config_method(&server_config, method).expect("server method");
+        rewrite_config_method(&client_config, method).expect("client method");
+        let (target, echo) = match address_class {
+            0 => {
+                let (target, echo) = start_echo();
+                (address_wire(SocketAddr::V4(target)), echo)
+            }
+            1 => {
+                let (target, echo) = start_echo();
+                let mut wire = b"\x03\x09127.0.0.1".to_vec();
+                wire.extend_from_slice(&target.port().to_be_bytes());
+                (wire, echo)
+            }
+            _ if ipv6_loopback => {
+                let (target, echo) =
+                    start_echo_at("[::1]:0".parse().expect("IPv6 loopback address"));
+                (address_wire(target), echo)
+            }
+            _ => {
+                let (target, echo) = start_echo();
+                (address_wire(SocketAddr::V4(target)), echo)
+            }
+        };
 
-    let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
-    wait_for_listener(&mut server, server_address);
-    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
-    wait_for_listener(&mut client, client_address);
+        let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+        wait_for_listener(&mut server, server_address);
+        let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+        wait_for_listener(&mut client, client_address);
 
-    let (mut socks, reply) = socks_connect(client_address, echo_address);
-    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
-    assert_eq!(&reply[4..8], &Ipv4Addr::LOCALHOST.octets());
-    assert_ne!(u16::from_be_bytes([reply[8], reply[9]]), 0);
+        let (mut socks, reply) = socks_connect_wire(client_address, &target);
+        assert_eq!(&reply[..4], &[5, 0, 0, 1], "{}", method.0);
+        let first = method.0.as_bytes();
+        let second = vec![0x5a; 16_385];
+        socks.write_all(first).expect("first payload");
+        socks.write_all(&second).expect("second payload");
+        socks.shutdown(Shutdown::Write).expect("client half close");
 
-    let first = b"x";
-    let second = vec![0x5a; 16_385];
-    socks.write_all(first).expect("first payload");
-    socks.write_all(&second).expect("second payload");
-    socks.shutdown(Shutdown::Write).expect("client half close");
-
-    let mut echoed = Vec::new();
-    socks.read_to_end(&mut echoed).expect("reverse drain");
-    let mut expected = first.to_vec();
-    expected.extend_from_slice(&second);
-    assert_eq!(echoed, expected);
-    assert_eq!(echo.join().expect("echo thread"), expected);
+        let mut echoed = Vec::new();
+        socks.read_to_end(&mut echoed).expect("reverse drain");
+        let mut expected = first.to_vec();
+        expected.extend_from_slice(&second);
+        assert_eq!(echoed, expected, "{}", method.0);
+        assert_eq!(echo.join().expect("echo thread"), expected, "{}", method.0);
+    }
 }
 
 #[test]

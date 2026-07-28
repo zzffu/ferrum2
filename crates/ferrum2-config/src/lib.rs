@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ferrum2_crypto::{Aes128Psk, TcpMethod};
+use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
 use serde::Deserialize;
 use serde::de::{Deserializer, Visitor};
 use zeroize::{Zeroize, Zeroizing};
@@ -31,22 +31,34 @@ const DEFAULT_REPLAY_CAPACITY: usize = 65_536;
 pub struct ValidatedClientConfig {
     pub listen: SocketAddrV4,
     pub server: SocketAddrV4,
-    pub method: TcpMethod,
-    pub psk: Aes128Psk,
+    pub psk: MethodPsk,
     pub runtime: RuntimeConfig,
     pub logging: LoggingConfig,
     pub metrics: Option<MetricsConfig>,
 }
 
+impl ValidatedClientConfig {
+    /// Returns the immutable TCP method bound to the validated PSK.
+    pub const fn method(&self) -> TcpMethodProfile {
+        self.psk.profile()
+    }
+}
+
 /// A validated server configuration with no retained source text.
 pub struct ValidatedServerConfig {
     pub listen: SocketAddrV4,
-    pub method: TcpMethod,
-    pub psk: Aes128Psk,
+    pub psk: MethodPsk,
     pub runtime: RuntimeConfig,
     pub replay: ReplayConfig,
     pub logging: LoggingConfig,
     pub metrics: Option<MetricsConfig>,
+}
+
+impl ValidatedServerConfig {
+    /// Returns the immutable TCP method bound to the validated PSK.
+    pub const fn method(&self) -> TcpMethodProfile {
+        self.psk.profile()
+    }
 }
 
 /// Validated bounded runtime settings.
@@ -257,14 +269,13 @@ fn validate_client(raw: RawClientRoot) -> Result<ValidatedClientConfig, ConfigEr
         return Err(ConfigError::semantic(ConfigField::ClientServer));
     }
     let method = parse_method(&raw.shadowsocks.method)?;
-    let psk = parse_psk(&raw.shadowsocks.psk)?;
+    let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
     let logging = validate_logging(raw.logging)?;
     let metrics = validate_metrics(raw.metrics, listen)?;
     Ok(ValidatedClientConfig {
         listen,
         server,
-        method,
         psk,
         runtime,
         logging,
@@ -276,14 +287,13 @@ fn validate_server(raw: RawServerRoot) -> Result<ValidatedServerConfig, ConfigEr
     validate_schema(raw.schema_version)?;
     let listen = parse_endpoint(&raw.server.listen, ConfigField::ServerListen)?;
     let method = parse_method(&raw.shadowsocks.method)?;
-    let psk = parse_psk(&raw.shadowsocks.psk)?;
+    let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
     let replay = validate_replay(raw.replay)?;
     let logging = validate_logging(raw.logging)?;
     let metrics = validate_metrics(raw.metrics, listen)?;
     Ok(ValidatedServerConfig {
         listen,
-        method,
         psk,
         runtime,
         replay,
@@ -308,36 +318,40 @@ fn parse_endpoint(value: &str, field: ConfigField) -> Result<SocketAddrV4, Confi
     Ok(endpoint)
 }
 
-fn parse_method(value: &str) -> Result<TcpMethod, ConfigError> {
+fn parse_method(value: &str) -> Result<TcpMethodProfile, ConfigError> {
     match value {
-        "2022-blake3-aes-128-gcm" => Ok(TcpMethod::Blake3Aes128Gcm2022),
+        "2022-blake3-aes-128-gcm" => Ok(TcpMethodProfile::Blake3Aes128Gcm2022),
+        "2022-blake3-aes-256-gcm" => Ok(TcpMethodProfile::Blake3Aes256Gcm2022),
+        "2022-blake3-chacha20-poly1305" => Ok(TcpMethodProfile::Blake3ChaCha20Poly13052022),
         _ => Err(ConfigError::semantic(ConfigField::ShadowsocksMethod)),
     }
 }
 
-fn parse_psk(value: &SecretString) -> Result<Aes128Psk, ConfigError> {
+fn parse_psk(method: TcpMethodProfile, value: &SecretString) -> Result<MethodPsk, ConfigError> {
     let token = value.as_str();
-    if token.len() != 24 || !token.ends_with("==") {
+    let expected_bytes = method.key_bytes();
+    let expected_encoded_bytes = expected_bytes.div_ceil(3) * 4;
+    if token.len() != expected_encoded_bytes {
         return Err(ConfigError::semantic(ConfigField::ShadowsocksPsk));
     }
 
-    let mut decoded = Zeroizing::new([0_u8; 16]);
+    let mut decoded = Zeroizing::new([0_u8; 32]);
     let decoded_len = STANDARD
         .decode_slice(token.as_bytes(), decoded.as_mut())
         .map_err(|_| ConfigError::semantic(ConfigField::ShadowsocksPsk))?;
-    if decoded_len != decoded.len() {
+    if decoded_len != expected_bytes {
         return Err(ConfigError::semantic(ConfigField::ShadowsocksPsk));
     }
 
-    let mut canonical = Zeroizing::new([0_u8; 24]);
+    let mut canonical = Zeroizing::new([0_u8; 44]);
     let encoded_len = STANDARD
-        .encode_slice(decoded.as_ref(), canonical.as_mut())
+        .encode_slice(&decoded[..decoded_len], canonical.as_mut())
         .map_err(|_| ConfigError::semantic(ConfigField::ShadowsocksPsk))?;
-    if encoded_len != token.len() || canonical.as_ref() != token.as_bytes() {
+    if encoded_len != token.len() || &canonical[..encoded_len] != token.as_bytes() {
         return Err(ConfigError::semantic(ConfigField::ShadowsocksPsk));
     }
 
-    let psk = Aes128Psk::try_from(decoded.as_ref())
+    let psk = MethodPsk::try_from_slice(method, &decoded[..decoded_len])
         .map_err(|_| ConfigError::semantic(ConfigField::ShadowsocksPsk))?;
     decoded.zeroize();
     canonical.zeroize();

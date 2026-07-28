@@ -15,6 +15,12 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 
 pub const SYNTHETIC_PSK: &str = "AAECAwQFBgcICQoLDA0ODw==";
+#[rustfmt::skip]
+pub const TCP_METHOD_CONFIGS: [(&str, &str); 3] = [
+    ("2022-blake3-aes-128-gcm", SYNTHETIC_PSK),
+    ("2022-blake3-aes-256-gcm", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="),
+    ("2022-blake3-chacha20-poly1305", "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8="),
+];
 const CHILD_OUTPUT_CAP: usize = 256 * 1024;
 const METRICS_HEADER_CAP: usize = 4 * 1024;
 const METRICS_RESPONSE_CAP: usize = 256 * 1024;
@@ -657,4 +663,11 @@ pub fn write_server_config_with_psk(
     let path = directory.join("server.toml");
     fs::write(&path, config)?;
     Ok(path)
+}
+
+pub fn rewrite_config_method(path: &Path, method: (&str, &str)) -> io::Result<()> {
+    let config = fs::read_to_string(path)?
+        .replace(TCP_METHOD_CONFIGS[0].0, method.0)
+        .replace(SYNTHETIC_PSK, method.1);
+    fs::write(path, config)
 }

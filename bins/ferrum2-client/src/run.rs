@@ -9,9 +9,7 @@ use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, Inbound as _, LocalEndpoint,
     SessionReply as _, TargetAddr,
 };
-use ferrum2_crypto::{
-    Clock, KeyProvider, SecureRandom, SinglePskProvider, SystemClock, SystemRandom,
-};
+use ferrum2_crypto::{Clock, MethodSinglePskProvider, SecureRandom, SystemClock, SystemRandom};
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
     json_subscriber,
@@ -21,8 +19,8 @@ use ferrum2_runtime::{
     relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
-    ClientFlow, ClientTcpOutbound, DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason,
-    ShadowsocksError, TransportIo,
+    ClientFlow, ClientTcpOutbound, DetectionReason, FlowTerminal, MethodKeyAdapter, PlainDuplex,
+    ProtocolReason, ShadowsocksError, TcpKeyProvider, TransportIo,
 };
 use ferrum2_socks5::Socks5Inbound;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -67,7 +65,7 @@ where
     let context = Arc::new(ClientContext {
         inbound: Socks5Inbound::new(),
         outbound_connector: TokioConnector::new(TcpConnector::new(config.runtime.connect_timeout)),
-        keys: SinglePskProvider::new(config.psk),
+        keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
         clock: SystemClock::new(),
         random: SystemRandom,
         server,
@@ -160,7 +158,7 @@ async fn wait_for_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
 struct ClientContext {
     inbound: Socks5Inbound,
     outbound_connector: TokioConnector<TcpConnector>,
-    keys: SinglePskProvider,
+    keys: MethodKeyAdapter<MethodSinglePskProvider>,
     clock: SystemClock,
     random: SystemRandom,
     server: TargetAddr,
@@ -249,8 +247,8 @@ async fn client_connection(
             return;
         }
     };
-    let bound = flow.local_endpoint();
-    if reply.succeeded(bound).await.is_err() {
+    let bound = flow.local_socket_addr();
+    if reply.succeeded_socket(bound).await.is_err() {
         record_failure(&context, Stage::Socks5, Reason::RelayIo, Outcome::Failed);
         return;
     }
@@ -355,7 +353,7 @@ async fn open_with_deadlines<'a, K, C, T, R>(
     handshake_timeout: std::time::Duration,
 ) -> Result<ClientFlow<'a, C::Stream, K, T>, ClientOpenFailure>
 where
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     C: Connector,
     C::Stream: TransportIo + LocalEndpoint,
     T: Clock + Sync,
@@ -671,7 +669,7 @@ mod tests {
     use std::time::Duration;
 
     use ferrum2_core::{ConnectError, Connector};
-    use ferrum2_crypto::{Aes128Psk, RandomError};
+    use ferrum2_crypto::{Aes128Psk, RandomError, SinglePskProvider};
     use ferrum2_shadowsocks::TransportPhase;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::Notify;

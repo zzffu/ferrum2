@@ -8,7 +8,7 @@ use ferrum2_config::{LoggingLevel, RuntimeConfig, ValidatedServerConfig};
 use ferrum2_core::{
     AbortiveClose, ConnectErrorKind, Inbound as _, LocalEndpoint, Outbound as _, SessionReply as _,
 };
-use ferrum2_crypto::{SinglePskProvider, SystemClock, SystemRandom};
+use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
     json_subscriber,
@@ -18,7 +18,7 @@ use ferrum2_runtime::{
     RelayRunError, RuntimeTcpStream, TcpConnector, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
-    DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason, ShadowsocksError,
+    DetectionReason, FlowTerminal, MethodKeyAdapter, PlainDuplex, ProtocolReason, ShadowsocksError,
     ShadowsocksTcpInbound, TcpReplayStore, TransportIo,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, ReadBuf};
@@ -63,7 +63,7 @@ where
     let replay = TcpReplayStore::new(config.replay.capacity).map_err(|_| RunError::Replay)?;
     let context = Arc::new(ServerContext {
         direct: DirectOutbound::new(TcpConnector::new(config.runtime.connect_timeout)),
-        keys: SinglePskProvider::new(config.psk),
+        keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
         clock: SystemClock::new(),
         random: SystemRandom,
         replay,
@@ -155,7 +155,7 @@ async fn wait_for_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
 
 struct ServerContext {
     direct: DirectOutbound<TcpConnector>,
-    keys: SinglePskProvider,
+    keys: MethodKeyAdapter<MethodSinglePskProvider>,
     clock: SystemClock,
     random: SystemRandom,
     replay: TcpReplayStore,
@@ -273,7 +273,9 @@ async fn server_connection(
             return;
         }
     };
-    let _ = reply.succeeded(target_stream.local_endpoint()).await;
+    let _ = reply
+        .succeeded_socket(target_stream.local_socket_addr())
+        .await;
     let mut framed = TokioFramed::new(stream);
     let relay = relay_lifecycle(
         &mut framed,
@@ -695,7 +697,7 @@ mod tests {
     use std::time::Duration;
 
     use ferrum2_core::{ConnectError, Connector, LocalEndpoint, Outbound, TargetAddr};
-    use ferrum2_crypto::Aes128Psk;
+    use ferrum2_crypto::{Aes128Psk, SinglePskProvider};
     use ferrum2_shadowsocks::ClientTcpOutbound;
     use ferrum2_shadowsocks::TransportPhase;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
