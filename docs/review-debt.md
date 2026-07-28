@@ -28,3 +28,7 @@ problem or the user explicitly reopens the contract.
 - `M1-T03` `qa` `4c9ad421e0ef`: QA-M1-T03-002: Local platform smoke artifact run was setup-blocked by occupied fixed port 1080; run the frozen same-SHA three-platform jobs during release qualification.
 <!-- review-debt:02701aae13c2 -->
 - `M2-T02` `qa` `0d88666d2f46`: QA-M2-T02-N01: T04 must invoke public UdpServer::commit_request only inside T03 reserved commit_*_with closure; verify exact call placement during T04 integration review.
+<!-- review-debt:10059c5c38f4 -->
+- `M2-T04` `architect` `6896c6e02679`: ARCH-M2-T04-N01: IPv6 real-process target evidence remains NOT EXECUTED on this Windows host; require exact-SHA IPv6-capable platform evidence.
+<!-- review-debt:4276fb90dc85 -->
+- `M2-T04` `qa` `6896c6e02679`: QA-M2-T04-N01: IPv6 remains NOT EXECUTED on this Windows host and requires exact-SHA IPv6-capable platform evidence; build exact candidate binaries before process harness execution.
