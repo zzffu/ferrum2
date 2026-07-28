@@ -946,6 +946,7 @@ fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
         ("blake3.workspace".to_owned(), "true".to_owned()),
         ("hex.workspace".to_owned(), "true".to_owned()),
         ("serde_json.workspace".to_owned(), "true".to_owned()),
+        ("socket2.workspace".to_owned(), "true".to_owned()),
         ("tempfile.workspace".to_owned(), "true".to_owned()),
     ]);
     assert_eq!(
@@ -965,6 +966,11 @@ fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
         manifest_lf.replace(
             "blake3.workspace = true",
             "blake3 = { workspace = true, features = [\"rayon\"] }",
+        ),
+        manifest_lf.replace("socket2.workspace = true\n", ""),
+        manifest_lf.replace(
+            "socket2.workspace = true",
+            "socket2 = { workspace = true, features = [\"all\"] }",
         ),
         manifest_lf.replace(
             "tempfile.workspace = true",
@@ -1015,7 +1021,7 @@ fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
                         serde_json::json!(["std", "zeroize"])
                     );
                 }
-                "hex" | "serde_json" | "tempfile" => {
+                "hex" | "serde_json" | "socket2" | "tempfile" => {
                     assert_eq!(dependency["uses_default_features"], true);
                     assert_eq!(dependency["features"], serde_json::json!([]));
                 }
@@ -1031,6 +1037,7 @@ fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
             "blake3".to_owned(),
             "hex".to_owned(),
             "serde_json".to_owned(),
+            "socket2".to_owned(),
             "tempfile".to_owned(),
         ])
     );
@@ -1047,6 +1054,7 @@ fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
         "blake3".to_owned(),
         "hex".to_owned(),
         "serde_json".to_owned(),
+        "socket2".to_owned(),
         "tempfile".to_owned(),
     ]);
     assert_eq!(
@@ -1061,6 +1069,7 @@ fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
     for mutation in [
         lock_lf.replace(" \"aes-gcm\",\n", ""),
         lock_lf.replace(" \"blake3\",\n", ""),
+        lock_lf.replace(" \"socket2\",\n", ""),
         lock_lf.replace(" \"tempfile\",\n", " \"ferrum2-core\",\n \"tempfile\",\n"),
     ] {
         assert_ne!(
