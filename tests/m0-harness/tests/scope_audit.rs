@@ -266,6 +266,54 @@ fn workflow_policy() {
             ),
         ),
         (
+            "config exact full-name filter",
+            workflow.replacen(
+                "valid_client_and_server_configs_have_exact_offline_output -- --exact",
+                "valid -- --exact",
+                1,
+            ),
+        ),
+        (
+            "replay exact full-name filter",
+            workflow.replacen(
+                "exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact",
+                "exact -- --exact",
+                1,
+            ),
+        ),
+        (
+            "GNU bare linker relative to checkout",
+            workflow.replacen(
+                "resolved=\"$(command -v \"$reported\")\"",
+                "resolved=\"$reported\"",
+                1,
+            ),
+        ),
+        (
+            "GNU linker executable check omitted",
+            workflow.replacen("test -x \"$canonical\"", "test -n \"$canonical\"", 1),
+        ),
+        (
+            "Windows linker help legacy exit",
+            workflow.replacen(
+                "if ($linkExit -notin 0, 1)",
+                "if ($linkExit -ne 1100)",
+                1,
+            ),
+        ),
+        (
+            "Windows linker banner omitted",
+            workflow.replacen(
+                "if ($linkText -notmatch",
+                "if ($false -and $linkText -notmatch",
+                1,
+            ),
+        ),
+        (
+            "Windows linker success not restored",
+            workflow.replacen("$global:LASTEXITCODE = 0", "$global:LASTEXITCODE = $linkExit", 1),
+        ),
+        (
             "wrong build-script JSON field",
             workflow.replacen(".cfgs", ".cfg", 1),
         ),
@@ -574,7 +622,7 @@ fn contains_unquoted_yaml_control(text: &str) -> bool {
 }
 
 fn validate_closed_workflow_snapshot(workflow: &str) -> Result<(), String> {
-    const EXPECTED_BLOB_ID: &str = "4fed74274af633884c9ffb486e936283558d6558";
+    const EXPECTED_BLOB_ID: &str = "6376d3647180ec868409d7c5bbdb3359ba4995e9";
     let mut child = Command::new("git")
         .args(["hash-object", "--stdin"])
         .stdin(std::process::Stdio::piped())
@@ -852,6 +900,9 @@ fn validate_command_allocation(
                 "cargo build --workspace --bins --locked",
                 "run_filtered 2 cargo test -p ferrum2-crypto --lib --locked tcp_owner_nonce_exhaustion",
                 "run_filtered 4 cargo test -p ferrum2-shadowsocks --lib --locked flow_internal_contract",
+                "replay_count=\"$(cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact --list | grep -c ': test$')\"",
+                "test \"$replay_count\" -eq 1",
+                "cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact",
                 "cargo test -p ferrum2-shadowsocks --test detection_prevention --locked",
                 "cargo test -p ferrum2-shadowsocks --test response_binding --locked",
             ],
@@ -870,6 +921,9 @@ fn validate_command_allocation(
             "m0-local-e2e",
             &[
                 "cargo build --workspace --bins --locked",
+                "config_count=\"$(cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact --list | grep -c ': test$')\"",
+                "test \"$config_count\" -eq 1",
+                "cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact",
                 "run_filtered 3 cargo test -p ferrum2-m0-harness --test local_e2e --locked success",
                 "run_filtered 2 cargo test -p ferrum2-m0-harness --test local_e2e --locked failures",
             ],
@@ -897,7 +951,12 @@ fn validate_command_allocation(
             &[
                 "$env:CC_x86_64_pc_windows_msvc = Join-Path",
                 "$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = Join-Path",
-                "$LASTEXITCODE -ne 1100",
+                "Test-Path -LiteralPath $link -PathType Leaf",
+                "Get-Command -Name $link -CommandType Application",
+                "& $link /? 2>&1",
+                "if ($linkExit -notin 0, 1)",
+                "Microsoft \\(R\\) (?:Incremental )?Linker Version",
+                "$global:LASTEXITCODE = 0",
                 "$buildScripts[0].cfgs",
                 "tests\\platform\\check_config_no_side_effects.rs",
                 "platform-no-side-effect.exe --self-test",
@@ -911,7 +970,13 @@ fn validate_command_allocation(
             &[
                 "CC_x86_64_unknown_linux_gnu: /usr/bin/gcc",
                 "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: /usr/bin/gcc",
+                "resolve_compiler_linker() {",
+                "/*) resolved=\"$reported\" ;;",
+                "resolved=\"$(command -v \"$reported\")\"",
+                "canonical=\"$(readlink -f \"$resolved\")\"",
+                "test -x \"$canonical\"",
                 "underlying_linker_path=",
+                "\"$underlying_linker\" --version",
                 "rows[0][\"cfgs\"]",
                 "$RUNNER_TEMP/gnu-build.json",
                 "tests/platform/check_config_no_side_effects.rs",
@@ -927,7 +992,13 @@ fn validate_command_allocation(
                 "musl=1.2.4-2 musl-dev=1.2.4-2 musl-tools=1.2.4-2",
                 "CC_x86_64_unknown_linux_musl: /usr/bin/musl-gcc",
                 "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: /usr/bin/musl-gcc",
+                "resolve_compiler_linker() {",
+                "/*) resolved=\"$reported\" ;;",
+                "resolved=\"$(command -v \"$reported\")\"",
+                "canonical=\"$(readlink -f \"$resolved\")\"",
+                "test -x \"$canonical\"",
                 "musl_linker_driver_path=",
+                "\"$musl_ld\" --version",
                 "rows[0][\"cfgs\"]",
                 "$RUNNER_TEMP/musl-build.json",
                 "platform-no-side-effect --self-test",
@@ -1050,7 +1121,8 @@ fn validate_exact_cargo_lines(job: &str, block: &str) -> Result<(), String> {
             "cargo test -p ferrum2-shadowsocks --test tcp_duplex --locked",
             "cargo test -p ferrum2-shadowsocks --test tcp_fragmentation --locked",
             "cargo test -p ferrum2-shadowsocks --test tcp_flow_contract --locked",
-            "run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact",
+            "replay_count=\"$(cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact --list | grep -c ': test$')\"",
+            "cargo test -p ferrum2-shadowsocks --test tcp_replay --locked exact_invalid_does_not_poison_then_duplicate_is_rejected -- --exact",
             "run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked concurrent",
             "run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked retention",
             "run_filtered 1 cargo test -p ferrum2-shadowsocks --test tcp_replay --locked capacity",
@@ -1074,7 +1146,8 @@ fn validate_exact_cargo_lines(job: &str, block: &str) -> Result<(), String> {
         ],
         "m0-local-e2e" => &[
             "cargo build --workspace --bins --locked",
-            "run_filtered 1 cargo test -p ferrum2-m0-harness --test config_cli --locked valid",
+            "config_count=\"$(cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact --list | grep -c ': test$')\"",
+            "cargo test -p ferrum2-m0-harness --test config_cli --locked valid_client_and_server_configs_have_exact_offline_output -- --exact",
             "run_filtered 1 cargo test -p ferrum2-m0-harness --test config_cli --locked no_side_effects",
             "cargo test -p ferrum2-m0-harness --test cli_contract --locked",
             "cargo test -p ferrum2-socks5 --locked",
