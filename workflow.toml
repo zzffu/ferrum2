@@ -21,10 +21,10 @@ strategy = "drain"
 # 0 means no artificial wave cap. The no-progress guard still prevents loops.
 max_waves_per_run = 0
 # Legacy fallback for tickets without an explicit risk classification.
-max_repair_attempts_per_ticket = 2
+max_repair_attempts_per_ticket = 1
 # Mechanical repairs (line endings, formatting, filter spelling) do not consume the
 # substantive repair budget.
-repair_budget = { low = 4, medium = 3, high = 2, critical = 1 }
+repair_budget = { low = 1, medium = 1, high = 1, critical = 1 }
 non_counting_repair_classes = ["mechanical"]
 continue_after_independent_failure = true
 auto_close = false
@@ -39,13 +39,13 @@ path = "codex/milestone-workflow-state.json"
 config = ".codex/agents/product-manager.toml"
 name = "product_manager"
 model = "gpt-5.6-sol"
-reasoning_effort = "max"
+reasoning_effort = "medium"
 
 [agents.architect]
 config = ".codex/agents/architect.toml"
 name = "architect"
 model = "gpt-5.6-sol"
-reasoning_effort = "max"
+reasoning_effort = "high"
 
 [agents.engineer]
 config = ".codex/agents/engineer.toml"
@@ -57,7 +57,7 @@ reasoning_effort = "high"
 config = ".codex/agents/qa.toml"
 name = "qa"
 model = "gpt-5.6-sol"
-reasoning_effort = "high"
+reasoning_effort = "medium"
 
 [documents]
 vision = "docs/vision.md"
@@ -69,6 +69,7 @@ spec_dir = "docs/specs"
 test_plan_dir = "docs/test-plans"
 ticket_dir = "docs/tickets"
 handoff_dir = "docs/handoffs"
+review_debt = "docs/review-debt.md"
 
 # Keep these host-local and deterministic. True external interoperability executes
 # only in hosted qualification. Its non-test binary stays Cargo-managed so these
@@ -89,4 +90,43 @@ full = [
   "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
   "cargo test --workspace --all-features --locked",
   "cargo doc --workspace --all-features --no-deps --locked",
+]
+
+[planning]
+contract_style = "outcome"
+max_adrs_per_milestone = 4
+allow_new_adr_during_execute = false
+spec_soft_line_limit = 400
+test_plan_soft_line_limit = 300
+max_acceptance_criteria_per_ticket = 8
+
+[review]
+blocking_severities = ["blocker", "major"]
+max_full_review_rounds = 1
+max_targeted_repair_rounds = 1
+new_blockers_after_first_review = "introduced_by_repair_only"
+pass_with_notes_integrates = true
+freeze_contract_on_execute = true
+write_advisories_to_backlog = true
+
+[quality.test_budget]
+enabled = true
+tool = "builtin"
+mode = "ratchet"
+target_ratio = 1.0
+warn_ratio = 0.85
+max_regression = 0.0
+ratchet_step = 0.05
+max_delta_ratio = 1.0
+delta_test_allowance = 120
+min_code_lines = 200
+baseline_path = "codex/test-budget-baseline.json"
+include_extensions = [".rs"]
+exclude_globs = [
+  ".git/**",
+  ".worktrees/**",
+  "target/**",
+  "**/target/**",
+  "**/generated/**",
+  "**/fixtures/**",
 ]

@@ -14,7 +14,7 @@ owns = ["path/to/module/**", "path/to/tests/**"]
 spec = "docs/specs/SPEC-0000-template.md"
 test_plan = "docs/test-plans/TEST-0000-template.md"
 acceptance = [
-  "Replace with a measurable behavior",
+  "Replace with one measurable outcome",
 ]
 +++
 
@@ -24,48 +24,39 @@ acceptance = [
 
 TODO
 
-## Context
-
-TODO
-
 ## In scope
 
 - TODO
 
 ## Out of scope
 
-- TODO
+- Optional hardening, unrelated cleanup, and release qualification not owned here.
 
-## Implementation notes and constraints
+## Contract references
 
-- TODO
+- ADR/spec/test-plan sections that constrain this ticket.
+
+## Primary evidence
+
+Map each acceptance criterion to one primary existing or planned test/observation.
+Justify any additional layer by a distinct failure mode.
 
 ## Validation commands
 
 ```bash
-# Add ticket-specific commands. Repository quick/full gates remain in workflow.toml.
+# Ticket-specific commands; quick/full remain in workflow.toml.
+# workflow.py test-budget --gate ticket --base <base_branch>
 ```
 
-## Risks
+## Ownership and risks
 
 - TODO
 
-## Blocker record
-
-Use the Git-common-dir runtime ledger for transient blockers. If a durable contract
-blocker must be documented here, include ID, class, gate, root cause, derivatives,
-owner, evidence, authorization state, and unblock condition.
-
-Tracked status is durable: use only `draft`, `ready`, `blocked`, `done`, or
-`deferred`. Record implementation/review/repair/integration/release with
-`workflow.py set-phase`, not by editing this frontmatter.
-
 ## Completion evidence
 
-To be filled by the Team Lead after integration:
+Filled by the Team Lead after integration:
 
-- Branch:
-- Commit(s):
-- Required reviewer role/profile and verdict:
-- Exact candidate SHA:
-- Integrated commit:
+- Candidate and integrated commit:
+- Full/targeted review records and stable finding IDs:
+- Test-budget result:
+- Accepted review debt:

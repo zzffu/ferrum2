@@ -6,62 +6,52 @@
 - **Test plan:** `docs/test-plans/TEST-0000-template.md`
 - **Tickets:** TODO
 
-## Objective
+## Objective and non-goals
 
 TODO
-
-## Non-goals
-
-- TODO
 
 ## User/operator-visible behavior
 
-TODO
+Describe outcomes, not an implementation transcript.
 
-## Current execution path
+## Existing execution path and ownership
 
-TODO: cite files and symbols.
+Cite the current files, symbols, state transitions, and module boundaries.
 
-## Proposed architecture and ownership
+## Required contract
 
-TODO
-
-## Configuration and validation
+### Interfaces, data, and state
 
 TODO
 
-## Types, interfaces, state transitions, and data flow
+### Validation and errors
 
 TODO
 
-## Errors and failure semantics
+### Security, concurrency, and lifecycle invariants
 
-TODO
+TODO or explicitly not applicable.
 
-## Security and privacy
-
-TODO
-
-## Concurrency and resource lifecycle
-
-TODO
-
-## Compatibility and upstream divergence
+### Compatibility, migration, and rollback
 
 TODO
 
 ## Observability
 
-TODO
-
-## Migration and rollback
-
-TODO
+TODO or explicitly not applicable.
 
 ## Acceptance criteria
 
+Keep the list measurable and non-duplicative; active tickets may not exceed the
+configured per-ticket limit.
+
 1. TODO
 
-## Open questions
+## Implementation freedom
 
-- TODO
+List choices intentionally left to the Engineer because they do not alter the outcome
+contract.
+
+## Open decisions
+
+Only unresolved product/architecture decisions. Empty before ticket readiness.

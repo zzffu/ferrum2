@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-28T08:46:54.805442+00:00",
+  "commit": "69c9fb845c28f278b5613b52307e545bd7e3b53c",
+  "tool": "builtin",
+  "counts": {
+    "code": 7031,
+    "tests": 14707,
+    "files": 58,
+    "tool": "builtin",
+    "ratio": 2.091737,
+    "ratio_display": "2.092"
+  },
+  "policy": {
+    "mode": "ratchet",
+    "target_ratio": 1.0,
+    "warn_ratio": 0.85,
+    "max_regression": 0.0,
+    "ratchet_step": 0.05,
+    "max_delta_ratio": 1.0,
+    "delta_test_allowance": 120,
+    "min_code_lines": 200
+  }
+}

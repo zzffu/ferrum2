@@ -5,19 +5,15 @@
 - **Owners:** Architect / Team Lead
 - **Related milestone/spec/tickets:** TODO
 
-## Context and problem
+## Context and decision boundary
 
-TODO
+State the cross-module, protocol, persistence, public API, security, concurrency, or
+hard-to-reverse decision. Routine implementation, formatting, test placement, CI
+spelling, and evidence-only repairs do not require an ADR.
 
-## Why this requires an ADR
+## Outcome invariants
 
-Explain the cross-module, public API, persistence, protocol, security, concurrency,
-platform-abstraction, or hard-to-reverse decision. Routine line-ending, formatting,
-test-filter, CI-probe, or evidence-only repair does not require an ADR.
-
-## Decision drivers and invariants
-
-- TODO
+- TODO: observable invariant that every implementation must preserve.
 
 ## Options considered
 
@@ -31,29 +27,21 @@ TODO
 
 ## Decision
 
-TODO
+State the chosen boundary and why. Do not prescribe replaceable internal helpers.
 
 ## Consequences and tradeoffs
 
-### Positive
+- Positive: TODO
+- Negative: TODO
 
-- TODO
-
-### Negative
-
-- TODO
-
-## Compatibility and upstream divergence
+## Compatibility, migration, and rollback
 
 TODO
 
-## Migration and rollback
+## Verification seam
 
-TODO
-
-## Verification plan
-
-TODO
+Name the smallest evidence seam that proves the decision. Do not require duplicate
+test layers without distinct failure modes.
 
 ## References
 

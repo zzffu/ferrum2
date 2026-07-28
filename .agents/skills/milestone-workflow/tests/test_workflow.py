@@ -582,9 +582,9 @@ class RepairAndStateTests(unittest.TestCase):
             }
         }
         summary = workflow.repair_summary(item, cfg, runtime)
-        self.assertEqual(summary["budget"], 4)
+        self.assertEqual(summary["budget"], 1)
         self.assertEqual(summary["consumed"], 1)
-        self.assertEqual(summary["remaining"], 3)
+        self.assertEqual(summary["remaining"], 0)
 
     def test_persisted_budget_decision_survives_config_change(self) -> None:
         item = ticket("M0-T01", "ready", owns=("a/**",), risk="low")
@@ -1576,6 +1576,319 @@ class SerializationTests(unittest.TestCase):
             self.assertIn("## Blocker record", text)
             self.assertIn("- Required reviewer role/profile and verdict:", text)
             self.assertIn("- Exact candidate SHA:", text)
+
+
+class RepositoryStateTests(unittest.TestCase):
+    def test_unborn_branch_is_reported_until_first_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+            self.assertEqual(workflow.unborn_branch(root), "main")
+            (root / "README.md").write_text("seed\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "seed",
+                ],
+                cwd=root,
+                check=True,
+            )
+            self.assertIsNone(workflow.unborn_branch(root))
+            self.assertTrue(workflow.branch_exists(root, "main"))
+
+
+class TestEconomyTests(unittest.TestCase):
+    def test_hidden_worktree_and_git_paths_are_excluded(self) -> None:
+        settings = workflow.DEFAULT_CONFIG["quality"]["test_budget"]
+        self.assertTrue(workflow._excluded(".git/checkouts/demo/src/lib.rs", settings))
+        self.assertTrue(workflow._excluded("./.worktrees/ticket/src/lib.rs", settings))
+        self.assertTrue(workflow._excluded("target/debug/build/generated.rs", settings))
+        self.assertFalse(workflow._excluded("src/lib.rs", settings))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").write_text("pub fn live() {}\n", encoding="utf-8")
+            (root / ".worktrees" / "ticket" / "src").mkdir(parents=True)
+            (root / ".worktrees" / "ticket" / "src" / "lib.rs").write_text(
+                "#[test]\nfn duplicate() {}\n", encoding="utf-8"
+            )
+            (root / ".git" / "checkouts" / "ticket").mkdir(parents=True)
+            (root / ".git" / "checkouts" / "ticket" / "cached.rs").write_text(
+                "#[test]\nfn cached() {}\n", encoding="utf-8"
+            )
+            counts = workflow.count_working_tree_builtin(root, settings)
+        self.assertEqual((counts.code, counts.tests, counts.files), (1, 0, 1))
+
+    def test_builtin_rust_counter_separates_cfg_test_and_test_paths(self) -> None:
+        source = """pub fn answer() -> u32 {\n    42\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn works() {\n        assert_eq!(super::answer(), 42);\n    }\n}\n"""
+        code, tests = workflow._count_source_text("src/lib.rs", source)
+        self.assertEqual(code, 3)
+        self.assertEqual(tests, 7)
+        path_code, path_tests = workflow._count_source_text(
+            "tests/integration.rs",
+            "fn helper() {}\n#[test]\nfn integration() {}\n",
+        )
+        self.assertEqual(path_code, 0)
+        self.assertEqual(path_tests, 3)
+
+    def test_rustloc_parser_accepts_windows_style_total_row(self) -> None:
+        output = """                  Name                   Code Tests\n───────────────────────────────────────────────────\nTotal (57 files)                         6254 15092\n"""
+        completed = subprocess.CompletedProcess(
+            args=["rustloc"], returncode=0, stdout=output, stderr=""
+        )
+        with (
+            mock.patch.object(workflow.shutil, "which", return_value="rustloc"),
+            mock.patch.object(workflow.subprocess, "run", return_value=completed),
+        ):
+            counts = workflow.count_rustloc(Path.cwd())
+        self.assertEqual((counts.code, counts.tests, counts.files), (6254, 15092, 57))
+
+    def test_fresh_ratchet_uses_target_and_existing_baseline_prevents_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = workflow.deep_merge(
+                workflow.DEFAULT_CONFIG,
+                {
+                    "quality": {
+                        "test_budget": {
+                            "tool": "builtin",
+                            "target_ratio": 1.0,
+                            "max_regression": 0.0,
+                        }
+                    }
+                },
+            )
+            current = workflow.SourceCounts(code=100, tests=80, files=2, tool="builtin")
+            with (
+                mock.patch.object(workflow, "count_working_tree_builtin", return_value=current),
+                mock.patch.object(workflow, "load_test_budget_baseline", return_value=None),
+                mock.patch.object(workflow, "_merge_base", return_value="a" * 40),
+                mock.patch.object(
+                    workflow,
+                    "count_git_ref_builtin",
+                    return_value=workflow.SourceCounts(100, 80, 2, "builtin"),
+                ),
+            ):
+                payload, code = workflow.evaluate_test_budget(
+                    root,
+                    cfg,
+                    gate="ticket",
+                    base="main",
+                    requested_tool="builtin",
+                    write_baseline=False,
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["required_ratio"], 1.0)
+
+            regressed = workflow.SourceCounts(code=100, tests=90, files=2, tool="builtin")
+            baseline = {
+                "schema_version": 1,
+                "tool": "builtin",
+                "counts": {"code": 100, "tests": 80},
+            }
+            with (
+                mock.patch.object(workflow, "count_working_tree_builtin", return_value=regressed),
+                mock.patch.object(workflow, "load_test_budget_baseline", return_value=baseline),
+                mock.patch.object(workflow, "_merge_base", return_value="a" * 40),
+                mock.patch.object(
+                    workflow,
+                    "count_git_ref_builtin",
+                    return_value=workflow.SourceCounts(100, 80, 2, "builtin"),
+                ),
+            ):
+                payload, code = workflow.evaluate_test_budget(
+                    root,
+                    cfg,
+                    gate="ticket",
+                    base="main",
+                    requested_tool="builtin",
+                    write_baseline=False,
+                )
+            self.assertEqual(code, 1)
+            self.assertTrue(any("regressed beyond baseline" in reason for reason in payload["reasons"]))
+
+    def test_ticket_delta_budget_rejects_large_test_only_growth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+            baseline = {
+                "schema_version": 1,
+                "tool": "builtin",
+                "counts": {"code": 1000, "tests": 1000},
+            }
+            current = workflow.SourceCounts(code=1000, tests=1150, files=2, tool="builtin")
+            with (
+                mock.patch.object(workflow, "count_working_tree_builtin", return_value=current),
+                mock.patch.object(workflow, "load_test_budget_baseline", return_value=baseline),
+                mock.patch.object(workflow, "_merge_base", return_value="a" * 40),
+                mock.patch.object(
+                    workflow,
+                    "count_git_ref_builtin",
+                    return_value=workflow.SourceCounts(1000, 1000, 2, "builtin"),
+                ),
+            ):
+                payload, code = workflow.evaluate_test_budget(
+                    root,
+                    cfg,
+                    gate="ticket",
+                    base="main",
+                    requested_tool="builtin",
+                    write_baseline=False,
+                )
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["delta"]["allowed_tests"], 120.0)
+            self.assertTrue(any("test delta 150" in reason for reason in payload["reasons"]))
+
+
+class ReviewConvergenceTests(unittest.TestCase):
+    @staticmethod
+    def review_args(
+        *,
+        reviewer: str,
+        round_name: str,
+        verdict: str,
+        finding: list[str] | None = None,
+        new_finding: list[str] | None = None,
+        resolved: list[str] | None = None,
+        note: list[str] | None = None,
+        sha: str = "a" * 40,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            ticket_id="M0-T01",
+            reviewer=reviewer,
+            round=round_name,
+            verdict=verdict,
+            candidate_sha=sha,
+            finding=finding or [],
+            new_finding=new_finding or [],
+            resolved=resolved or [],
+            note=note or [],
+        )
+
+    def _record(self, state: dict[str, object], item: workflow.Ticket, args: argparse.Namespace) -> int:
+        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+        with (
+            mock.patch.object(workflow, "git_root", return_value=Path.cwd()),
+            mock.patch.object(workflow, "load_config", return_value=cfg),
+            mock.patch.object(workflow, "load_tickets", return_value=[item]),
+            mock.patch.object(workflow, "load_runtime_state", return_value=state),
+            mock.patch.object(workflow, "save_runtime_state", return_value=Path("state.json")),
+            mock.patch.object(workflow, "_append_review_debt"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            return workflow.cmd_record_review(args)
+
+    def test_full_review_is_idempotent_but_cannot_be_reopened(self) -> None:
+        item = ticket("M0-T01", "ready", owns=("a/**",), risk="high")
+        state = workflow.empty_runtime_state()
+        args = self.review_args(
+            reviewer="architect",
+            round_name="full",
+            verdict="block",
+            finding=["ARCH-001:major:observable contract violation"],
+        )
+        self.assertEqual(self._record(state, item, args), 1)
+        self.assertEqual(self._record(state, item, args), 1)
+        changed = self.review_args(
+            reviewer="architect",
+            round_name="full",
+            verdict="block",
+            finding=["ARCH-002:major:different finding"],
+        )
+        with self.assertRaisesRegex(workflow.WorkflowError, "already used its full review"):
+            self._record(state, item, changed)
+
+    def test_targeted_review_requires_substantive_repair_and_resolves_stable_ids(self) -> None:
+        item = ticket("M0-T01", "ready", owns=("a/**",), risk="high")
+        state = workflow.empty_runtime_state()
+        full = self.review_args(
+            reviewer="architect",
+            round_name="full",
+            verdict="block",
+            finding=["ARCH-001:major:contract violation"],
+        )
+        self._record(state, item, full)
+        runtime = workflow.milestone_runtime_state(state, "M0")
+        runtime["repairs"][item.id] = [{"class": "mechanical", "consumes_budget": False}]
+        targeted = self.review_args(
+            reviewer="architect",
+            round_name="targeted",
+            verdict="pass",
+            resolved=["ARCH-001"],
+            sha="b" * 40,
+        )
+        with self.assertRaisesRegex(workflow.WorkflowError, "substantive/evidence repair"):
+            self._record(state, item, targeted)
+        runtime["repairs"][item.id].append(
+            {"class": "substantive", "consumes_budget": True}
+        )
+        self.assertEqual(self._record(state, item, targeted), 0)
+        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+        passed, failures = workflow.review_gate_status(item, runtime, cfg)
+        self.assertFalse(passed)  # QA is still required for a high-risk ticket.
+        self.assertEqual(failures, ["missing qa review"])
+
+    def test_targeted_review_rejects_moving_goalposts_and_second_block(self) -> None:
+        item = ticket("M0-T01", "ready", owns=("a/**",), risk="medium")
+        state = workflow.empty_runtime_state()
+        self._record(
+            state,
+            item,
+            self.review_args(
+                reviewer="qa",
+                round_name="full",
+                verdict="block",
+                finding=["QA-001:major:missing primary evidence"],
+            ),
+        )
+        runtime = workflow.milestone_runtime_state(state, "M0")
+        runtime["repairs"][item.id] = [{"class": "substantive", "consumes_budget": True}]
+        moving = self.review_args(
+            reviewer="qa",
+            round_name="targeted",
+            verdict="escalate",
+            new_finding=["QA-002:major:previously_unobservable:new unrelated edge"],
+        )
+        with self.assertRaisesRegex(workflow.WorkflowError, "violate policy"):
+            self._record(state, item, moving)
+        second_block = self.review_args(
+            reviewer="qa",
+            round_name="targeted",
+            verdict="block",
+            finding=["QA-001:major:still failing"],
+        )
+        with self.assertRaisesRegex(workflow.WorkflowError, "recorded as escalate"):
+            self._record(state, item, second_block)
+
+
+class PlanningBudgetTests(unittest.TestCase):
+    def test_acceptance_cap_is_error_before_execution_and_warning_after_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "spec.md").write_text("spec\n", encoding="utf-8")
+            (root / "test.md").write_text("test\n", encoding="utf-8")
+            cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+            ready = ticket("M0-T01", "ready", owns=("a/**",))
+            ready.metadata["acceptance"] = [f"criterion {index}" for index in range(9)]
+            with mock.patch.object(workflow, "load_tickets", return_value=[ready]):
+                errors, warnings, _ = workflow.validate_tickets(root, cfg)
+            self.assertTrue(any("acceptance criteria exceed" in error for error in errors))
+            self.assertEqual(warnings, [])
+
+            done = ticket("M0-T01", "done", owns=("a/**",))
+            done.metadata["acceptance"] = [f"criterion {index}" for index in range(9)]
+            with mock.patch.object(workflow, "load_tickets", return_value=[done]):
+                errors, warnings, _ = workflow.validate_tickets(root, cfg)
+            self.assertEqual(errors, [])
+            self.assertTrue(any("acceptance criteria exceed" in warning for warning in warnings))
 
 
 if __name__ == "__main__":

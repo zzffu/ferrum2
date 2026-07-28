@@ -156,138 +156,93 @@ Document any additional package/module-specific validation rules here.
 
 ### Control model
 
-- The primary Codex thread is the Team Lead and sole integrator.
-- Use the `milestone-workflow` skill for milestone bootstrap, planning, execution,
-  status, recovery, and closeout.
-- Delegate product planning to `product_manager`, system design/review to
-  `architect`, implementation to `engineer`, and test gates to `qa`.
-- Spawn those exact named roles, never a generic/default agent. The configured
-  reasoning contract is Product Manager/Architect `max` and Engineer/QA `high`;
-  verify the role profile before work when launch metadata is observable, otherwise
-  report it as unverified.
-- Subagents return evidence to the Team Lead. They do not schedule other agents,
-  merge, or publish work.
-- In `execute` mode, the default `drain` strategy keeps recomputing frontiers and
-  scheduling later dependency waves in the same primary-thread invocation. The user
-  does not need to invoke `execute` once per frontier.
+- The primary Codex thread is the Team Lead, sole scheduler, and sole integrator.
+- Use `$milestone-workflow` explicitly for bootstrap, plan, execute, status, resume,
+  and close modes.
+- Delegate outcome/scope analysis to `product_manager`, architecture and bounded
+  design review to `architect`, one-ticket implementation to `engineer`, and
+  evidence/gate execution to `qa`.
+- Subagents do not spawn other subagents, merge branches, publish work, or mutate
+  workflow coordination state.
+- `strategy = "drain"` means one execute invocation keeps scheduling all later
+  dependency-ready waves until ready-to-close or a material stop condition.
 
-### Sources of truth
+### Sources of truth and contract scope
 
-Read these before milestone work:
+Read the nearest applicable `AGENTS.md`, `workflow.toml`, vision/roadmap, relevant
+ADR/spec/test-plan/ticket files, source code, tests, and CI definitions.
 
-1. The nearest applicable `AGENTS.md` or `AGENTS.override.md`.
-2. `workflow.toml` for branch, worktree, document, and validation configuration.
-3. `docs/vision.md` and `docs/roadmap.md` for product and milestone intent.
-4. Applicable files under `docs/adr/`, `docs/specs/`, `docs/test-plans/`, and
-   `docs/tickets/`.
-5. The real source code, tests, build files, and CI definitions.
+Contracts are outcome-oriented. They may constrain observable behavior, interfaces,
+invariants, compatibility, migration, errors, and acceptance evidence. They must not
+prescribe every helper, branch, or test layer. Execute freezes approved MUST
+requirements, ADR decisions, ticket scope, and acceptance criteria. A new blocking
+contract requires evidence that the existing contract is contradictory, unsafe, or
+impossible, plus explicit user approval.
 
-Approved ADRs and specs are contracts. Do not silently rewrite them to justify an
-implementation. When implementation evidence invalidates a decision, stop the gate
-and propose an explicit ADR/spec revision.
+### Planning and ticket economy
 
-### Risk-calibrated gates
+- Prefer small independently verifiable vertical slices.
+- Respect `planning.max_adrs_per_milestone`, document soft limits, and
+  `planning.max_acceptance_criteria_per_ticket`.
+- Separate implementation, review, integration, and release dependencies.
+- Give every ticket explicit, non-overlapping `owns` paths.
+- Map each MUST/acceptance criterion to one primary evidence item. Add another layer
+  only for a distinct named failure mode not observable at the primary seam.
 
-For cross-module, protocol, persistence, public API, security, concurrency, or
-hard-to-reverse changes, use the strict path:
+### Selective TDD and test budget
 
-1. Product scope and measurable exit criteria.
-2. Architecture decision where required.
-3. Implementation-ready spec.
-4. Test plan mapped to acceptance criteria and failure modes.
-5. Tickets with explicit blockers and non-overlapping ownership paths.
-6. Implementation in isolated Git worktrees.
-7. Architect and QA review.
-8. Integration branch validation.
-9. Team Lead fast-forward into the base branch only after all gates pass.
+- TDD is selective, not a test-count objective. Use red-green-refactor for changed
+  behavior, regressions, and hard invariants when a failing test is the clearest seam.
+- Search for an existing table, fixture, or integration seam before creating a new
+  test file or harness.
+- Do not create one test per sentence, branch, helper, reviewer suggestion, or layer.
+- Do not test a test harness unless it is a supported artifact or has a demonstrated
+  failure mode.
+- Product gates prove ticket behavior; integration gates prove cross-ticket
+  interaction; hosted/platform/soak/external-service evidence belongs to release
+  qualification unless the ticket implements that behavior.
+- Run `workflow.py test-budget --gate ticket` before integration and
+  `--gate milestone` at close. Existing high-ratio repositories use a non-regression
+  ratchet baseline; never improve the ratio by adding meaningless production code.
 
-Small local fixes may use a reduced path, but still require a precise acceptance
-criterion, focused tests, and repository validation.
+### Bounded review convergence
 
-Mechanical and evidence-only repairs such as CRLF normalization, formatting, exact
-test-filter spelling, or CI probe portability do not require a new ADR or full
-Product/Architect/QA cycle unless they change an approved contract. Rerun only
-invalidated intermediate gates; the final release candidate still requires its
-configured exact-SHA full/platform evidence.
+- Architect/QA reviews in this workflow are the authoritative milestone gates.
+- Each required reviewer gets one full review bound to the exact candidate SHA.
+- Only `blocker` and `major` findings block. Use stable finding IDs and one canonical
+  root cause; derivative failures do not become separate repair loops.
+- A full `BLOCK` permits exactly one substantive repair. Mechanical cleanup does not
+  consume that repair but does not restart a full review.
+- The same reviewer then gets one targeted re-review limited to original blocking
+  IDs, the repair delta, and invalidated tests.
+- A second blocking result is `ESCALATE`; do not start a third automatic review or
+  repair cycle.
+- `PASS_WITH_NOTES` integrates and records non-blocking debt in
+  `docs/review-debt.md`.
+- Do not implicitly invoke a separate generic `code-review` Skill during execute.
+  Explicit user-requested independent review remains available but cannot silently
+  reopen the milestone loop.
 
-### Parallel work and Git rules
+### Parallel work and Git safety
 
-- Parallelize read-heavy investigation freely when the questions are independent.
-- Never run two write-heavy agents in the same worktree.
-- Every Engineer receives one ticket, one branch, one worktree, and explicit
-  ownership paths.
-- Tickets distinguish `implementation_blocked_by`, `review_blocked_by`,
-  `integration_blocked_by`, and `release_blocked_by`; legacy `blocked_by` means the
-  implementation field. Only implementation dependencies block Engineer startup.
-- Active work and an independent, ownership-disjoint frontier may run concurrently.
-  Unknown or overlapping ownership still means sequential execution.
-- Engineers may commit only their assigned branch. They may not merge, rebase,
-  push, force-push, delete branches, or modify the base worktree.
-- The Team Lead integrates into a milestone integration branch/worktree first.
-- Persist transient execution phases, repair usage, canonical blockers, and exact
-  authorization scopes in the Git-common-dir runtime ledger. Do not create commits
-  solely for implementation/review phases or repair counters. Tracked ticket status
-  remains one of `draft`, `ready`, `blocked`, `done`, or `deferred`; legacy
-  `in_progress`, `review`, and `failed` are migration inputs only.
-- After each accepted integration batch, the Team Lead creates at most one
-  consolidated evidence checkpoint and immediately schedules the next independent
-  work when strategy is `drain`.
-- Do not use `git add .`. Stage files intentionally.
-- Never discard an uncommitted change, abort another agent's operation, or run a
-  destructive Git command without explicit user authorization.
-- Never push, open/merge a PR, publish a release, or mutate remote issue state unless
-  the user explicitly requests that separate action.
-- A matching recorded local authorization may be reused after resume for the exact
-  actions/tickets/classes/risk granted. It never implies remote effects, destructive
-  actions, ownership expansion, contract expansion, push, PR, tag, or release.
-- A blocker's authorization label is not proof of authority. Authorization-requiring
-  repairs must match the exact ledger scope; bounded local scopes consume a use with
-  the repair and keep repair/override scope IDs distinct.
-- Authorization ticket/class lists are non-empty and never mean wildcard. Remote
-  kind must match `remote_effects = true`; repair-budget override is a separate,
-  explicit action. Scope IDs are immutable; revoke and grant a new ID rather than
-  overwriting usage history.
-- Remote authorization binds an exact remote ref, full commit SHA, and use count.
-  Atomically consume a use immediately before the remote mutation.
-- Repair budgets are per canonical root. A consumed, root-bound
-  `repair_budget_override` creates exactly one persisted additional attempt.
-- Open canonical roots fail their named and later gates. Resolving a root (including
-  via a derivative ID) resolves its direct derivatives atomically; no ticket becomes
-  done and no milestone closes while an applicable root remains open.
+- Parallelize independent read-heavy work freely.
+- Never run two write-heavy agents in one worktree.
+- Every Engineer receives one ticket, one branch, one absolute worktree, approved
+  contract paths, ownership paths, and validation commands.
+- Only dependency-ready tickets with disjoint ownership may run in parallel; unknown
+  ownership is overlapping.
+- Engineers never merge, rebase, push, force-push, delete branches, or edit the base
+  worktree. Stage explicit files; do not use `git add .`.
+- Team Lead integrates first into the milestone integration worktree, runs gates, and
+  fast-forwards the clean base only when the base has not moved.
+- Never discard unknown changes, run destructive reset/clean commands, or mutate
+  remote state without separate explicit authorization.
 
-### Implementation and validation
+### Evidence and completion report
 
-- Prefer vertical slices with observable behavior over horizontal scaffolding.
-- Use red-green-refactor at agreed test seams.
-- Treat configured validation commands as deterministic gates; record commands and
-  exit statuses.
-- Record one canonical root blocker and link derivative failures. Setup failures,
-  poisoned follow-on tests, and skipped downstream commands do not consume separate
-  repair attempts.
-- Mechanical repairs do not consume the substantive risk-aware repair budget.
-- A missing or skipped required command is not a pass.
-- Keep unrelated cleanup outside the ticket unless separately approved.
-- Do not place credentials, private endpoints, production data, or secrets in code,
-  tests, fixtures, logs, or documents.
-
-### Optional Matt Pocock skills
-
-When installed, use model-invoked skills as supporting disciplines:
-`research`, `prototype`, `domain-modeling`, `codebase-design`, `tdd`,
-`diagnosing-bugs`, `code-review`, and `resolving-merge-conflicts`.
-
-Do not recursively invoke another user-invoked orchestration skill from
-`milestone-workflow`. The user may run `grill-with-docs`, `wayfinder`, `to-spec`,
-`to-tickets`, `implement`, or `handoff` manually before or between workflow modes.
-
-### Completion report
-
-Every implementation or milestone response must state:
-
-- documents and files changed
-- tickets and branches involved
-- tests and validation commands actually run
-- commit IDs and integration state
-- unresolved risks, blockers, and deferred work
-- whether anything was pushed or published (default: no)
+Never claim a command, review, or gate ran when it did not. Every milestone response
+must report files/documents changed, tickets/branches/worktrees, full and targeted
+review records, stable finding IDs, exact validation commands and exit statuses,
+test-budget counts and baseline, commits/integration state, blockers/debt/deferred
+work, and whether anything was pushed or published (default: no).
 <!-- END CODEX MILESTONE WORKFLOW -->

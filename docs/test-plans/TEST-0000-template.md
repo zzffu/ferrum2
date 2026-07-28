@@ -5,52 +5,47 @@
 - **Spec:** `docs/specs/SPEC-0000-template.md`
 - **Gate profile:** reduced / standard / strict
 
-## Scope and test seams
+## Risk summary and cheapest reliable seams
 
 TODO
 
-## Acceptance-criteria evidence matrix
+## MUST-to-primary-evidence matrix
 
-| Acceptance criterion | Evidence/test | Level | CI job/command |
+One MUST normally maps to one primary item. Add secondary evidence only for a named,
+distinct failure mode.
+
+| MUST / invariant | Primary evidence | Gate | Distinct uncovered failure mode |
 |---|---|---|---|
-| TODO | TODO | unit/integration/e2e/manual | TODO |
+| TODO | TODO | product/integration/release | none / TODO |
 
-## Unit tests
+## Product gate commands
 
-- TODO
+```bash
+# Ticket-local deterministic commands.
+```
 
-## Integration and interoperability tests
+## Integration gate commands
 
-- TODO
+```bash
+# Only cross-ticket interaction evidence.
+```
 
-## Negative and error-path tests
+## Release qualification
 
-- TODO
+Hosted CI, platform matrix, external services, soak, packaging, or publication.
+Explicitly state when not applicable. Release-only failures do not reopen a product
+ticket unless they demonstrate a product defect.
 
-## Security tests
+## Fixtures and harness economy
 
-- TODO
+Reuse existing fixtures and helpers. Justify every new harness/process wrapper and
+state who maintains it.
 
-## Concurrency, race, and soak tests
+## Test-budget expectation
 
-- TODO or explicitly not applicable
+State expected production/test delta and any justified allowance. Do not improve the
+ratio by adding meaningless production code.
 
-## Compatibility and platform matrix
+## Exit conditions and accepted gaps
 
-- TODO
-
-State which platform evidence must exist before ticket review and which may wait for
-the final exact-SHA release gate.
-
-## Performance and resource tests
-
-- TODO or explicitly not applicable
-
-## Test data, fixtures, and isolation
-
-- TODO
-
-## Exit conditions and known gaps
-
-- Identify which changes invalidate only affected evidence and which require a full
-  exact-SHA rerun. The final release gate is never assembled from different SHAs.
+List blocking gaps separately from review debt.

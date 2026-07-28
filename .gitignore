@@ -2,3 +2,5 @@
 skills-lock.json
 __pycache__/
 *.pyc
+.codex/milestone-workflow-backups/
+/target

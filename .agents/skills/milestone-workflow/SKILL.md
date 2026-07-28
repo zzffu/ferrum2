@@ -67,6 +67,45 @@ Do **not** return after the first frontier when strategy is `drain`. Return afte
 frontier only when the user explicitly selects `strategy: wave`, the configured wave
 cap is reached, or a stop condition below applies.
 
+## Contract, review, and test-economy convergence
+
+These rules override any looser third-party TDD or code-review guidance:
+
+1. **Outcome contracts.** ADRs/specs constrain observable behavior, interfaces,
+   invariants, compatibility, migration, and error semantics. They must not prescribe
+   every internal helper or test layer. Respect `planning.max_adrs_per_milestone`,
+   document soft limits, and the ticket acceptance-criteria limit.
+2. **Frozen execute contract.** When execute starts, the approved MUST requirements,
+   ADR decisions, ticket scope, and acceptance criteria are frozen. A new blocking
+   contract requires evidence that the old contract is contradictory, unsafe, or
+   impossible, plus explicit user approval.
+3. **Selective TDD.** Use a failing test for changed behavior or regression when it is
+   the clearest evidence. Do not create one test per sentence, branch, helper, reviewer
+   suggestion, or evidence layer. Reuse and consolidate existing tests first.
+4. **One primary evidence item per MUST.** Add a second test layer only for a distinct
+   failure mode not observable at the primary seam. Hosted/platform/soak evidence is a
+   release gate unless the ticket explicitly implements that behavior.
+5. **Bounded review.** Each required reviewer gets one full review and, after one
+   substantive repair, one targeted re-review. The targeted round checks only stable
+   original blocking IDs, the repair delta, and invalidated tests. It does not restart
+   a full review.
+6. **No moving goalposts.** After the first review, a new blocker is legal only when
+   the repair introduced it under the configured policy. Other findings are
+   `PASS_WITH_NOTES` review debt or an explicit escalation.
+7. **Convergent verdicts.** `PASS` and `PASS_WITH_NOTES` integrate. `BLOCK` allows one
+   substantive repair. A remaining blocker after targeted re-review is `ESCALATE`; do
+   not launch another automatic repair loop.
+8. **Test budget.** Run the configured test-budget report during planning/bootstrap,
+   the ticket gate before integration, and the milestone gate at close. Existing
+   high-ratio repositories use a recorded ratchet baseline rather than an immediate
+   hard reset to the target.
+9. **Single review system.** Do not implicitly invoke a separate general `code-review`
+   Skill during milestone execution. Architect/QA reviews in this workflow are the
+   authoritative gates. Explicit user-requested external review remains allowed.
+
+Read `references/test-economy.md` and `references/review-convergence.md` before plan,
+execute, resume, or close.
+
 ## Mandatory preflight
 
 For every mode:
@@ -79,6 +118,7 @@ For every mode:
    ```bash
    python .agents/skills/milestone-workflow/scripts/workflow.py doctor
    python .agents/skills/milestone-workflow/scripts/workflow.py validate
+   python .agents/skills/milestone-workflow/scripts/workflow.py test-budget --gate report
    python .agents/skills/milestone-workflow/scripts/workflow.py state \
      --milestone <ID>
    ```
@@ -91,7 +131,8 @@ For `execute`, `resume`, and `close`, also read
 `references/integration-and-recovery.md`. For document creation or ticket changes,
 read `references/document-contracts.md`. For optional third-party skills, read
 `references/mattpocock-integration.md`. For any blocked or failed gate, read
-`references/blocker-taxonomy.md`.
+`references/blocker-taxonomy.md`. For test growth and review behavior, read
+`references/test-economy.md` and `references/review-convergence.md`.
 
 ## Global safety and ownership rules
 
@@ -124,9 +165,10 @@ read `references/document-contracts.md`. For optional third-party skills, read
   `not_required` still requires an exact matching ledger scope. A bounded local
   repair consumes one use atomically with the repair record; record repair and
   budget-override scope IDs separately.
-- Repair budget is counted per canonical root. An exhausted root resumes only after
-  one exact `repair_budget_override` use is consumed with that root ID, producing one
-  persisted extra attempt.
+- One substantive automatic repair is the default for every risk level. Mechanical
+  corrections may be non-counting, but they do not reset or repeat the full review.
+  A budget override is an exceptional user-authorized action, not a normal route to a
+  third review cycle.
 - Classify every stop by canonical root blocker. Derived failures, poisoned follow-on
   tests, skipped commands, and environment setup attempts do not become independent
   product blockers. Resolving a root resolves its direct derivatives atomically.
@@ -135,7 +177,8 @@ read `references/document-contracts.md`. For optional third-party skills, read
   root remains open.
 - Keep failed or blocked worktrees intact for diagnosis. Do not conceal partial work.
 - A spec or ADR conflict blocks implementation; it is not resolved by silently
-  editing the contract after the code.
+  editing the contract after the code. During execute, contract changes require the
+  explicit reopening rule above and user approval.
 - Close completed subagent threads after collecting their results so later waves can
   reuse the configured thread capacity.
 
@@ -156,7 +199,9 @@ Purpose: establish the repository control plane without implementing product cod
    - `docs/roadmap.md`
    - `docs/ci-status.md`
 6. Record assumptions, non-goals, milestone exit criteria, and unresolved decisions.
-7. Run validation again. Stop before product-code implementation.
+7. Run `test-budget --gate report`. For a non-empty existing repository with no
+   baseline, write the initial ratchet baseline after confirming the count is sane.
+8. Run validation again. Stop before product-code implementation.
 
 Output: created/updated documents, proposed first milestone, unresolved decisions,
 and the exact next `plan` invocation.
@@ -179,11 +224,14 @@ Purpose: turn one milestone goal into approved, executable contracts.
    - declare implementation, review, integration, and release dependencies
    - declare required review roles for its risk and change surface
    - declare explicit ownership paths
-   - have measurable acceptance criteria
+   - have measurable, non-duplicative acceptance criteria within the configured limit
+   - map each MUST to one primary evidence item in the test plan
+   - distinguish product, integration, and release evidence
    - fit one focused Engineer context
 7. Mark a ticket `ready` only when all document gates pass. Otherwise mark it `draft`
    or `blocked` with the reason in the body.
-8. Run `workflow.py validate`, `workflow.py frontier --milestone <ID>`, and
+8. Run `workflow.py validate`, `workflow.py test-budget --gate report`,
+   `workflow.py frontier --milestone <ID>`, and
    `workflow.py next --milestone <ID> --json`.
 9. Stop before implementation. Planning is an intentional human-visible gate; do not
    silently start coding from `plan` mode.
@@ -303,26 +351,45 @@ For each selected ticket:
    review-only coordination update.
 7. Close completed Engineer threads after collecting their summaries.
 
-#### C3. Ticket review and bounded repair
+#### C3. Ticket review and one bounded repair
 
 For every ticket with runtime phase `review`:
 
-1. Resolve the gate profile from risk and `required_reviews`. Security, protocol,
-   concurrency, cross-module, public API, or hard-to-reverse changes require both
-   `architect` and `qa`; a mechanical/evidence-only repair reruns only affected gates.
-2. Bind every verdict to the explicit role profile and exact candidate SHA.
-3. Required reviews may run concurrently; wait for those reviews only.
-4. PASS proceeds to integration.
-5. PASS_WITH_ACTIONS or a recoverable BLOCK returns the canonical root finding to an
-   Engineer in the same worktree. Apply the risk-aware budget. Mechanical repairs do
-   not consume substantive budget; derived failures do not consume another attempt.
-   Rerun only invalidated gates. An unintegrated local candidate may be amended when
-   provenance remains explicit; never rewrite published history.
-6. A contract contradiction, ambiguous product decision, exhausted repair budget,
-   or non-recoverable failure marks the durable ticket `blocked`. A recoverable
-   failure enters runtime phase `repair`. Preserve its branch/worktree and do not
-   integrate it.
-7. Close completed reviewer threads after collecting verdicts.
+1. Resolve required reviewers from ticket risk and `required_reviews`. Required roles
+   may run concurrently and bind findings to the exact candidate SHA.
+2. Each role performs one full review. Record it deterministically with stable finding
+   IDs, severity, and verdict:
+
+   ```bash
+   python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
+     <TICKET_ID> --reviewer <architect|qa> --round full \
+     --candidate-sha <FULL_SHA> --verdict <pass|pass_with_notes|block> \
+     --finding 'ID:severity:summary'
+   ```
+
+3. `PASS` and `PASS_WITH_NOTES` satisfy that role. Notes are appended once to
+   `docs/review-debt.md`; they do not reopen the ticket.
+4. A full `BLOCK` creates one canonical root blocker and permits exactly one
+   substantive Engineer repair in the same worktree. Record the repair against that
+   root. Mechanical changes do not consume substantive budget but do not trigger a new
+   full review.
+5. After repair, the same affected reviewers perform one targeted re-review only.
+   Explicitly resolve original finding IDs. A new targeted blocker must be marked
+   `introduced_by_repair` and satisfy policy:
+
+   ```bash
+   python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
+     <TICKET_ID> --reviewer <architect|qa> --round targeted \
+     --candidate-sha <REPAIRED_SHA> --verdict <pass|pass_with_notes|escalate> \
+     --resolved <ORIGINAL_ID>
+   ```
+
+6. Do not run a second full review or a second repair. A remaining blocker, contract
+   contradiction, ambiguous product decision, or disallowed new blocker is
+   `ESCALATE`. Preserve the branch/worktree and stop that dependency chain while
+   continuing independent work when configured.
+7. Before integration, require `review-state <TICKET_ID>` and
+   `gate-check <TICKET_ID> integration` to pass. Close completed reviewer threads.
 
 #### C4. Integrate passing tickets
 
@@ -335,10 +402,13 @@ For every ticket with runtime phase `review`:
 
 2. Before each batch, fast-forward the clean integration branch to the current
    material base commit when needed.
-3. Integrate passing ticket commits with traceable provenance; do not create an
-   extra merge solely to record a workflow state.
-4. Run affected quick validation as candidates enter the batch, then the configured
-   full gate once on the assembled integration SHA.
+3. Before admitting a ticket, run its configured tests, quick validation,
+   `test-budget --gate ticket --base <base_branch>`, `review-state`, and the
+   integration `gate-check`. Do not integrate a candidate that fails any gate.
+4. Integrate passing ticket commits with traceable provenance; do not create an
+   extra merge solely to record workflow state. Run affected quick validation as
+   candidates enter the batch, then the configured full gate once on the assembled
+   integration SHA.
 5. Resolve conflicts by intent using user request, exit criteria, ADR, spec, test
    plan, and current public behavior in that order. When intent is ambiguous, stop
    and preserve the conflict state.
@@ -362,7 +432,8 @@ After checkpointing a wave, run `workflow.py next` again.
 - `resume_and_execute_frontier`: resume active work and start the disjoint frontier
   concurrently.
 - `resume_active`: complete the active gate immediately.
-- `ready_to_close`: run one final full validation against the milestone head. When
+- `ready_to_close`: run one final full validation and
+  `test-budget --gate milestone --base <base_branch>` against the milestone head. When
   `auto_close = true`, continue directly into the `close` procedure; otherwise return
   `READY_TO_CLOSE` with the exact close command.
 - `blocked`: stop only after exhausting independent work and matching authorization.
@@ -425,15 +496,19 @@ Purpose: prove that a milestone is complete and create a durable handoff.
 
 1. Require every in-scope ticket to be `done` or explicitly deferred with rationale.
 2. Require a recorded successful full-validation run for the integrated commit.
-3. Spawn in parallel:
+3. Require `test-budget --gate milestone` to pass. In ratchet mode, update the
+   baseline only after the milestone close commit is accepted.
+4. Spawn in parallel:
    - `product_manager` to check exit criteria and deferred scope
    - `architect` to check ADR/spec conformance and architectural debt
    - `qa` to check test evidence, CI coverage, and unresolved failures
-4. Wait for all three. A BLOCK verdict prevents closeout.
-5. The Team Lead updates roadmap and CI status and writes
+5. Wait for all three. A BLOCK or ESCALATE verdict prevents closeout;
+   PASS_WITH_NOTES records debt and allows closeout.
+6. The Team Lead updates roadmap and CI status and writes
    `docs/handoffs/HANDOFF-<milestone>-<date>.md` with commit IDs, decisions, known
    risks, deferred work, and the next milestone entry point.
-6. Commit closeout documents. Do not tag, push, release, or delete branches unless
+7. Commit closeout documents and the updated test-budget baseline. Do not tag, push,
+   release, or delete branches unless
    separately requested.
 
 Output: exit-criteria matrix, gate verdicts, closeout commit, handoff path, deferred
@@ -445,10 +520,10 @@ Always state:
 
 - mode, milestone, strategy, and final scheduler state
 - waves completed and why execution stopped
-- subagents used, repair rounds, and gate verdicts
+- subagents used, full/targeted review rounds, stable finding IDs, and gate verdicts
 - requested and, when observable, actual role/reasoning profile
 - documents, tickets, branches, worktrees, and files changed
-- exact validation commands and exit status
+- exact validation commands, test-budget counts/ratio/baseline, and exit status
 - commit IDs and integration state
 - blockers, risks, and deferred work
 - canonical root blockers, derived failures, and authorization scope used/remaining

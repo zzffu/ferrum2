@@ -1,116 +1,66 @@
-# Document contracts
+# Document Contracts
 
-The templates under `assets/templates/` and `docs/` are starting points. Keep names,
-IDs, paths, and evidence concrete.
+Contracts exist to coordinate independent agents, not to pre-write the implementation.
+Use observable outcomes, explicit boundaries, and the smallest evidence set that proves
+them.
 
-## Vision: `docs/vision.md`
+## Vision and gap analysis
 
-Required sections:
+`docs/vision.md` records target users/operators, outcomes, success measures, scope,
+non-goals, constraints, compatibility, and the milestone map. It is stable, not a task
+log.
 
-- Problem and target users/operators
-- Desired outcomes and success measures
-- Product principles
-- Scope and non-goals
-- Compatibility or upstream relationship
-- Constraints
-- Milestone map
+`docs/gap-analysis.md` records current evidence, target behavior, priority,
+dependencies, proposed milestone, and uncertainty. Separate correctness, feature,
+performance, operational, and platform gaps.
 
-Vision should be stable. Do not turn it into a task log.
+## Roadmap
 
-## Gap analysis: `docs/gap-analysis.md`
+For each milestone record objective, entry/exit criteria, in-scope tickets, deferred
+work, integrated commit, canonical blockers, and risks. Status is evidence-based.
 
-For each capability or subsystem record:
+## ADR
 
-- current behavior and evidence
-- target behavior
-- severity/priority
-- dependencies
-- proposed milestone
-- uncertainty and research needed
+Use an ADR only for cross-module, protocol, persistence, public API, security,
+concurrency, platform abstraction, or hard-to-reverse decisions. Respect
+`planning.max_adrs_per_milestone`. Routine implementation, formatting, test placement,
+CI spelling, or evidence-only repair does not require an ADR.
 
-Separate correctness gaps from feature gaps, performance gaps, operational gaps, and
-platform gaps.
+An ADR specifies outcome invariants, decision boundaries, alternatives, consequences,
+compatibility/migration/rollback, and the cheapest reliable verification seam. It does
+not prescribe replaceable internal helpers.
 
-## Roadmap: `docs/roadmap.md`
+## Spec
 
-For each milestone record:
+A spec states objective/non-goals, visible behavior, current execution path and
+ownership, required interfaces/data/state, validation/errors, security/concurrency/
+lifecycle invariants, compatibility/migration/rollback, observability, acceptance
+criteria, and intentional implementation freedom.
 
-- objective
-- status
-- entry conditions
-- exit criteria
-- in-scope ticket IDs
-- explicit deferred/out-of-scope work
-- integrated commit when available
-- canonical root blockers and risks in separate sections
+Use `planning.spec_soft_line_limit` as a warning that the contract may be
+over-prescriptive. Supporting research belongs in references, not MUST requirements.
+Open product/architecture decisions must be resolved before ticket readiness.
 
-Roadmap status must be evidence-based, not aspirational.
+## Test plan
 
-## ADR: `docs/adr/ADR-NNNN-slug.md`
+Use a MUST-to-primary-evidence matrix. One MUST normally maps to one test or direct
+observation at the cheapest reliable seam. A second layer requires a named, distinct
+failure mode.
 
-Required sections:
+Separate:
 
-- Status: Proposed, Accepted, Superseded, or Rejected
-- Context and problem
-- Decision drivers and invariants
-- Options considered
-- Decision
-- Consequences and tradeoffs
-- Compatibility/upstream divergence
-- Migration and rollback
-- Verification plan
-- References
+- product gate: ticket behavior and invariants;
+- integration gate: interactions among accepted tickets;
+- release gate: hosted CI, platform matrix, external services, soak, packaging, and
+  publication.
 
-Use an ADR for cross-module, public API, persistence, protocol, security, concurrency,
-platform abstraction, or hard-to-reverse choices. Do not use ADRs for routine local
-implementation details. CRLF normalization, formatting, exact test-filter spelling,
-CI probe portability, and evidence-only repairs do not require an ADR unless they
-actually change an approved architecture or public contract.
+Reuse fixtures/harnesses. Justify new infrastructure and state its maintenance owner.
+Record expected production/test delta and test-budget allowance. Use
+`planning.test_plan_soft_line_limit` as a warning against evidence duplication.
 
-## Spec: `docs/specs/SPEC-NNNN-slug.md`
+## Ticket
 
-Required sections:
-
-- Objective and non-goals
-- User/operator-visible behavior
-- Current execution path
-- Proposed architecture and module ownership
-- Configuration/schema and validation
-- Types, interfaces, state transitions, and data flow
-- Errors and failure semantics
-- Security and privacy
-- Concurrency and resource lifecycle
-- Compatibility and upstream divergence
-- Observability
-- Migration/rollback
-- Acceptance criteria
-- Open questions
-- Linked ADRs, test plan, and tickets
-
-A spec must be implementable without inventing core behavior during coding.
-
-## Test plan: `docs/test-plans/TEST-NNNN-slug.md`
-
-Required sections:
-
-- Scope and test seams
-- Acceptance-criteria matrix
-- Unit tests
-- Integration/interoperability tests
-- Negative/error tests
-- Security tests
-- Concurrency/race/soak tests where relevant
-- Compatibility and platform matrix
-- Performance/resource tests where relevant
-- CI placement and commands
-- Test data, fixtures, and isolation
-- Exit conditions and known gaps
-
-Every acceptance criterion must map to a test or explicitly justified evidence.
-
-## Ticket: `docs/tickets/<ID>-slug.md`
-
-Ticket files use TOML frontmatter so the helper script can validate and schedule them:
+Ticket frontmatter is the scheduler contract:
 
 ```toml
 +++
@@ -135,77 +85,29 @@ acceptance = [
 +++
 ```
 
-Legacy `blocked_by` remains accepted as `implementation_blocked_by`. New tickets use
-the four explicit fields. Dependencies are cumulative through their named gate, so an
-integration-only dependency does not serialize implementation. Cycle validation uses
-the cumulative graph through integration; release-only edges are closeout checks and
-do not falsely block implementation.
+Active tickets may not exceed `planning.max_acceptance_criteria_per_ticket`. Split a
+large vertical slice or consolidate equivalent criteria; do not use a long checklist
+to manufacture tests.
 
-Tracked ticket status is durable and uses only `draft`, `ready`, `blocked`, `done`,
-or `deferred`. Implementation, review, repair, integration, and release are runtime
-ledger phases. Legacy tracked `in_progress`, `review`, and `failed` values are
-accepted only for migration.
+Dependencies are cumulative through their named gate. Tracked status is durable:
+`draft`, `ready`, `blocked`, `done`, or `deferred`. Implementation/review/repair/
+integration/release live in the runtime ledger.
 
-Risk and required-review policy:
+Required body sections: Outcome, In scope, Out of scope, Contract references, Primary
+evidence, Validation commands, Ownership/risks, and Completion evidence.
 
-- `low`: mechanical or evidence-only; rerun affected gates
-- `medium`: localized behavior; QA is normally required
-- `high`/`critical`: security, protocol, concurrency, public API, cross-module, or
-  hard-to-reverse; Architect and QA are required
+## Review debt
 
-Blocked tickets include a structured `blocker` table or a runtime-ledger record using
-`references/blocker-taxonomy.md`.
+`docs/review-debt.md` contains non-blocking notes accepted for integration. Each entry
+identifies ticket, reviewer, candidate SHA, impact, and follow-up trigger. It is not a
+hidden blocker list.
 
-The checked-in `*-0000-template.md` files must match their corresponding
-`assets/templates/` sources. `workflow.py validate` reports drift, and
-`workflow.py new-ticket` must emit the same dependency, risk, blocker, reviewer
-profile, and exact-candidate-SHA contract.
+## CI status and handoff
 
-Required body sections:
+CI status records exact SHA, environment, commands, exits, evidence validity,
+canonical blockers, flakes/setup attempts, and unresolved failures. “CI green” alone
+is insufficient.
 
-- Outcome
-- Context
-- In scope
-- Out of scope
-- Implementation notes and constraints
-- Validation commands
-- Risks
-- Completion evidence
-
-Ownership paths are coordination contracts, not broad permission. Prefer narrow
-module/test paths. If a lockfile, registry, generated API, or shared interface must be
-changed, declare it explicitly or execute sequentially.
-
-## CI status: `docs/ci-status.md`
-
-Record:
-
-- exact candidate SHA and evidence validity (`current`, `superseded`, or `historical`)
-- environment/toolchain/platform
-- exact commands
-- exit status
-- date
-- canonical root blocker ID and any `derived_from` relationship
-- known flakes, setup attempts, skipped jobs, and unresolved failures
-
-Do not replace evidence with a generic “CI green”.
-
-## Handoff: `docs/handoffs/HANDOFF-<milestone>-<date>.md`
-
-Required sections:
-
-- Current state and integrated commit
-- Completed work
-- Decisions and contract references
-- Validation evidence
-- Existing branches/worktrees
-- Active transient phases and ownership leases
-- Canonical blockers and derivative failures
-- Active authorization scopes, exact remote ref/SHA/use limits, and remote-effects
-  boundary
-- Root-bound repair override allowances
-- Requested and observable agent role/reasoning provenance
-- Known risks and debt
-- Deferred work
-- Recovery instructions
-- Next recommended action and invocation
+A handoff records integrated commit, completed work, decisions, validation and
+budget evidence, branches/worktrees, active phases, blockers, authorization scopes,
+review rounds/debt, risks, deferred work, recovery commands, and next invocation.

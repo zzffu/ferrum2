@@ -19,6 +19,8 @@ import sys
 import tempfile
 import textwrap
 import tomllib
+import fnmatch
+import math
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Sequence
@@ -61,6 +63,14 @@ BLOCKER_CLASSES = {
 }
 AUTHORIZATION_STATES = {"not_required", "required", "granted", "exhausted"}
 REPAIR_CLASSES = {"mechanical", "evidence", "substantive"}
+REVIEW_ROUNDS = {"full", "targeted"}
+REVIEW_VERDICTS = {"pass", "pass_with_notes", "block", "escalate"}
+REVIEWERS = {"architect", "qa"}
+REVIEW_FINDING_SEVERITIES = {"blocker", "major", "minor", "note"}
+NEW_REVIEW_BLOCKER_ORIGINS = {"introduced_by_repair", "previously_unobservable"}
+TEST_BUDGET_GATES = {"report", "ticket", "milestone"}
+TEST_BUDGET_MODES = {"ratchet", "strict", "off"}
+TEST_BUDGET_TOOLS = {"auto", "builtin", "rustloc"}
 TRANSIENT_PHASES = {"implementation", "review", "repair", "integration", "release"}
 ACTIVE_WRITER_PHASES = {"implementation", "repair"}
 PHASE_DEPENDENCY_GATE = {
@@ -102,12 +112,53 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "execution": {
         "strategy": "drain",
         "max_waves_per_run": 0,
-        "max_repair_attempts_per_ticket": 2,
-        "repair_budget": {"low": 4, "medium": 3, "high": 2, "critical": 1},
+        "max_repair_attempts_per_ticket": 1,
+        "repair_budget": {"low": 1, "medium": 1, "high": 1, "critical": 1},
         "non_counting_repair_classes": ["mechanical"],
         "continue_after_independent_failure": True,
         "auto_close": False,
         "no_progress_limit": 2,
+    },
+    "planning": {
+        "contract_style": "outcome",
+        "max_adrs_per_milestone": 4,
+        "allow_new_adr_during_execute": False,
+        "spec_soft_line_limit": 400,
+        "test_plan_soft_line_limit": 300,
+        "max_acceptance_criteria_per_ticket": 8,
+    },
+    "review": {
+        "blocking_severities": ["blocker", "major"],
+        "max_full_review_rounds": 1,
+        "max_targeted_repair_rounds": 1,
+        "new_blockers_after_first_review": "introduced_by_repair_only",
+        "pass_with_notes_integrates": True,
+        "freeze_contract_on_execute": True,
+        "write_advisories_to_backlog": True,
+    },
+    "quality": {
+        "test_budget": {
+            "enabled": True,
+            "tool": "builtin",
+            "mode": "ratchet",
+            "target_ratio": 1.0,
+            "warn_ratio": 0.85,
+            "max_regression": 0.0,
+            "ratchet_step": 0.05,
+            "max_delta_ratio": 1.0,
+            "delta_test_allowance": 120,
+            "min_code_lines": 200,
+            "baseline_path": "codex/test-budget-baseline.json",
+            "include_extensions": [".rs"],
+            "exclude_globs": [
+                ".git/**",
+                ".worktrees/**",
+                "target/**",
+                "**/target/**",
+                "**/generated/**",
+                "**/fixtures/**",
+            ],
+        }
     },
     "state": {"path": "codex/milestone-workflow-state.json"},
     "agents": {
@@ -146,6 +197,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "test_plan_dir": "docs/test-plans",
         "ticket_dir": "docs/tickets",
         "handoff_dir": "docs/handoffs",
+        "review_debt": "docs/review-debt.md",
     },
     "validation": {"workflow": [], "quick": [], "full": []},
 }
@@ -648,6 +700,81 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
                         f"{milestone}.repair_overrides references {scope} {count} "
                         f"times but authorization uses is {uses!r}"
                     )
+        reviews = runtime.get("reviews", {})
+        if not isinstance(reviews, dict):
+            errors.append(f"{milestone}.reviews must be an object")
+        else:
+            for ticket_id, ticket_reviews in reviews.items():
+                if not isinstance(ticket_reviews, dict):
+                    errors.append(f"{milestone}.reviews.{ticket_id} must be an object")
+                    continue
+                reviewers = ticket_reviews.get("reviewers", {})
+                if not isinstance(reviewers, dict):
+                    errors.append(
+                        f"{milestone}.reviews.{ticket_id}.reviewers must be an object"
+                    )
+                    continue
+                for reviewer, rounds in reviewers.items():
+                    if reviewer not in REVIEWERS:
+                        errors.append(
+                            f"{milestone}.reviews.{ticket_id}.{reviewer} is not a valid reviewer"
+                        )
+                        continue
+                    if not isinstance(rounds, dict):
+                        errors.append(
+                            f"{milestone}.reviews.{ticket_id}.{reviewer} must be an object"
+                        )
+                        continue
+                    for round_name, record in rounds.items():
+                        if round_name not in REVIEW_ROUNDS or not isinstance(record, dict):
+                            errors.append(
+                                f"{milestone}.reviews.{ticket_id}.{reviewer}.{round_name} "
+                                "is invalid"
+                            )
+                            continue
+                        if record.get("verdict") not in REVIEW_VERDICTS:
+                            errors.append(
+                                f"{milestone}.reviews.{ticket_id}.{reviewer}.{round_name}."
+                                "verdict is invalid"
+                            )
+                        candidate_sha = record.get("candidate_sha", "")
+                        if not (
+                            isinstance(candidate_sha, str)
+                            and re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", candidate_sha)
+                        ):
+                            errors.append(
+                                f"{milestone}.reviews.{ticket_id}.{reviewer}.{round_name}."
+                                "candidate_sha must be exact"
+                            )
+                        findings = record.get("findings", [])
+                        if not isinstance(findings, list):
+                            errors.append(
+                                f"{milestone}.reviews.{ticket_id}.{reviewer}.{round_name}."
+                                "findings must be an array"
+                            )
+                            continue
+                        seen_finding_ids: set[str] = set()
+                        for index, finding in enumerate(findings):
+                            prefix = (
+                                f"{milestone}.reviews.{ticket_id}.{reviewer}."
+                                f"{round_name}.findings[{index}]"
+                            )
+                            if not isinstance(finding, dict):
+                                errors.append(prefix + " must be an object")
+                                continue
+                            finding_id = str(finding.get("id", "")).strip()
+                            if not finding_id or finding_id in seen_finding_ids:
+                                errors.append(prefix + ".id must be non-empty and unique")
+                            seen_finding_ids.add(finding_id)
+                            if finding.get("severity") not in REVIEW_FINDING_SEVERITIES:
+                                errors.append(prefix + ".severity is invalid")
+                            if not str(finding.get("summary", "")).strip():
+                                errors.append(prefix + ".summary is required")
+                            origin = finding.get("origin")
+                            if round_name == "targeted" and finding.get("new", False):
+                                if origin not in NEW_REVIEW_BLOCKER_ORIGINS:
+                                    errors.append(prefix + ".origin is invalid for a new finding")
+
         phases = runtime.get("phases", {})
         if not isinstance(phases, dict):
             errors.append(f"{milestone}.phases must be an object")
@@ -854,6 +981,7 @@ def milestone_runtime_state(state: dict[str, Any], milestone: str) -> dict[str, 
             "blockers": {},
             "repairs": {},
             "repair_overrides": {},
+            "reviews": {},
             "phases": {},
             "last_checkpoint": {},
         },
@@ -863,6 +991,7 @@ def milestone_runtime_state(state: dict[str, Any], milestone: str) -> dict[str, 
         "blockers",
         "repairs",
         "repair_overrides",
+        "reviews",
         "phases",
         "last_checkpoint",
     ):
@@ -1288,6 +1417,20 @@ def validate_tickets(root: Path, cfg: dict[str, Any]) -> tuple[list[str], list[s
             not str(item).strip() for item in acceptance
         ):
             errors.append(f"{ticket.id}: acceptance must be a non-empty array of statements")
+        else:
+            maximum_acceptance = int(
+                cfg.get("planning", {}).get("max_acceptance_criteria_per_ticket", 8)
+            )
+            if len(acceptance) > maximum_acceptance:
+                message = (
+                    f"{ticket.id}: {len(acceptance)} acceptance criteria exceed the "
+                    f"configured maximum of {maximum_acceptance}; split the ticket or "
+                    "consolidate duplicate evidence"
+                )
+                if ticket.status in {"draft", "blocked", "ready"}:
+                    errors.append(message)
+                else:
+                    warnings.append(message)
         for label, document in (("spec", ticket.spec), ("test_plan", ticket.test_plan)):
             if not document:
                 errors.append(f"{ticket.id}: {label} path is empty")
@@ -1739,6 +1882,26 @@ def branch_exists(root: Path, branch: str) -> bool:
     return proc.returncode == 0
 
 
+def unborn_branch(root: Path) -> str | None:
+    """Return the symbolic branch name when a repository has no commits yet."""
+
+    head = run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=root,
+        check=False,
+    )
+    if head.returncode != 0:
+        return None
+    committed = run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=root,
+        check=False,
+    )
+    if committed.returncode == 0:
+        return None
+    return head.stdout.strip() or None
+
+
 def slugify(value: str) -> str:
     value = value.strip().lower()
     value = re.sub(r"[^a-z0-9._-]+", "-", value)
@@ -1784,6 +1947,845 @@ def write_if_missing(destination: Path, source: Path) -> bool:
     return True
 
 
+
+@dataclass(frozen=True)
+class SourceCounts:
+    code: int
+    tests: int
+    files: int
+    tool: str
+
+    @property
+    def ratio(self) -> float:
+        if self.code == 0:
+            return 0.0 if self.tests == 0 else math.inf
+        return self.tests / self.code
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "tests": self.tests,
+            "files": self.files,
+            "tool": self.tool,
+            "ratio": None if math.isinf(self.ratio) else round(self.ratio, 6),
+            "ratio_display": "inf" if math.isinf(self.ratio) else f"{self.ratio:.3f}",
+        }
+
+
+def _matches_any_glob(path: str, patterns: Sequence[str]) -> bool:
+    normalized = path.replace("\\", "/")
+    # Remove an explicit relative-path prefix without stripping a meaningful
+    # leading dot from hidden directories such as `.git` or `.worktrees`.
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("/")
+    return any(
+        fnmatch.fnmatch(normalized, pattern)
+        or PurePosixPath(normalized).match(pattern)
+        for pattern in patterns
+    )
+
+
+def _is_test_path(path: str) -> bool:
+    pure = PurePosixPath(path.replace("\\", "/"))
+    parts = {part.lower() for part in pure.parts[:-1]}
+    if parts & {"test", "tests", "testing", "spec", "specs", "bench", "benches", "benchmarks"}:
+        return True
+    stem = pure.stem.lower()
+    return (
+        stem.startswith("test_")
+        or stem.endswith("_test")
+        or stem.endswith("_tests")
+        or stem == "tests"
+    )
+
+
+def _strip_comments_and_strings_for_braces(
+    line: str,
+    *,
+    block_depth: int,
+) -> tuple[str, str, int]:
+    """Return visible code, brace-safe code, and updated /* */ depth.
+
+    This is intentionally a conservative source-line classifier, not a language
+    parser. It handles ordinary Rust comments and quoted strings well enough to
+    distinguish unit-test regions without introducing a parser dependency.
+    """
+
+    visible: list[str] = []
+    brace_safe: list[str] = []
+    index = 0
+    quote: str | None = None
+    escaped = False
+    while index < len(line):
+        ch = line[index]
+        nxt = line[index + 1] if index + 1 < len(line) else ""
+        if block_depth:
+            if ch == "/" and nxt == "*":
+                block_depth += 1
+                index += 2
+                continue
+            if ch == "*" and nxt == "/":
+                block_depth -= 1
+                index += 2
+                continue
+            index += 1
+            continue
+        if quote is not None:
+            visible.append(ch)
+            brace_safe.append(" ")
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            index += 1
+            continue
+        if ch == "/" and nxt == "/":
+            break
+        if ch == "/" and nxt == "*":
+            block_depth = 1
+            index += 2
+            continue
+        if ch in {'"', "'"}:
+            quote = ch
+            visible.append(ch)
+            brace_safe.append(" ")
+            index += 1
+            continue
+        visible.append(ch)
+        brace_safe.append(ch)
+        index += 1
+    return "".join(visible).strip(), "".join(brace_safe), block_depth
+
+
+def _count_source_text(path: str, text: str) -> tuple[int, int]:
+    whole_file_test = _is_test_path(path)
+    extension = PurePosixPath(path).suffix.lower()
+    code = 0
+    tests = 0
+    block_depth = 0
+    brace_depth = 0
+    active_test_base: int | None = None
+    pending_test_item = False
+    test_attribute = re.compile(
+        r"#\s*\[\s*(?:cfg\s*\(\s*test\s*\)|(?:tokio::|async_std::)?test(?:\s*\([^]]*\))?)\s*\]"
+    )
+
+    for raw_line in text.splitlines():
+        visible, brace_safe, block_depth = _strip_comments_and_strings_for_braces(
+            raw_line,
+            block_depth=block_depth,
+        )
+        if not visible:
+            continue
+        if extension != ".rs":
+            if whole_file_test:
+                tests += 1
+            else:
+                code += 1
+            continue
+
+        has_test_attr = bool(test_attribute.search(visible))
+        in_test = whole_file_test or active_test_base is not None or pending_test_item or has_test_attr
+        if in_test:
+            tests += 1
+        else:
+            code += 1
+
+        before_depth = brace_depth
+        opens = brace_safe.count("{")
+        closes = brace_safe.count("}")
+
+        if has_test_attr and active_test_base is None:
+            pending_test_item = True
+        if pending_test_item and opens:
+            active_test_base = before_depth
+            pending_test_item = False
+        elif pending_test_item and ";" in brace_safe:
+            pending_test_item = False
+
+        brace_depth += opens - closes
+        if active_test_base is not None and brace_depth <= active_test_base:
+            active_test_base = None
+    return code, tests
+
+
+def _test_budget_settings(cfg: dict[str, Any]) -> dict[str, Any]:
+    settings = cfg.get("quality", {}).get("test_budget", {})
+    if not isinstance(settings, dict):
+        raise WorkflowError("quality.test_budget must be a table")
+    return settings
+
+
+def _source_extensions(settings: dict[str, Any]) -> set[str]:
+    raw = settings.get("include_extensions", [".rs"])
+    if not isinstance(raw, list):
+        raise WorkflowError("quality.test_budget.include_extensions must be an array")
+    return {str(item).lower() for item in raw}
+
+
+def _excluded(path: str, settings: dict[str, Any]) -> bool:
+    patterns = settings.get("exclude_globs", [])
+    if not isinstance(patterns, list):
+        raise WorkflowError("quality.test_budget.exclude_globs must be an array")
+    return _matches_any_glob(path, [str(item) for item in patterns])
+
+
+def count_working_tree_builtin(root: Path, settings: dict[str, Any]) -> SourceCounts:
+    extensions = _source_extensions(settings)
+    code = tests = files = 0
+    for path in root.rglob("*"):
+        if not path.is_file() or path.is_symlink() or path.suffix.lower() not in extensions:
+            continue
+        relative_path = path.relative_to(root).as_posix()
+        if _excluded(relative_path, settings):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        file_code, file_tests = _count_source_text(relative_path, text)
+        code += file_code
+        tests += file_tests
+        files += 1
+    return SourceCounts(code=code, tests=tests, files=files, tool="builtin")
+
+
+def count_git_ref_builtin(
+    root: Path,
+    ref: str,
+    settings: dict[str, Any],
+) -> SourceCounts:
+    extensions = _source_extensions(settings)
+    listing = run(
+        ["git", "ls-tree", "-r", "--name-only", ref],
+        cwd=root,
+        check=False,
+    )
+    if listing.returncode != 0:
+        raise WorkflowError(f"Cannot read Git ref for test budget: {ref}")
+    code = tests = files = 0
+    for relative_path in listing.stdout.splitlines():
+        if PurePosixPath(relative_path).suffix.lower() not in extensions:
+            continue
+        if _excluded(relative_path, settings):
+            continue
+        blob = run(
+            ["git", "show", f"{ref}:{relative_path}"],
+            cwd=root,
+            check=False,
+        )
+        if blob.returncode != 0:
+            continue
+        file_code, file_tests = _count_source_text(relative_path, blob.stdout)
+        code += file_code
+        tests += file_tests
+        files += 1
+    return SourceCounts(code=code, tests=tests, files=files, tool="builtin")
+
+
+def count_rustloc(root: Path) -> SourceCounts:
+    executable = shutil.which("rustloc")
+    if not executable:
+        raise WorkflowError(
+            "rustloc is not available; install it or set quality.test_budget.tool = 'builtin'"
+        )
+    proc = subprocess.run(
+        [executable, "--lang", "rust", "-t", "code,tests"],
+        cwd=str(root),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise WorkflowError(f"rustloc failed ({proc.returncode}): {detail}")
+    output = re.sub(r"\x1b\[[0-9;]*m", "", proc.stdout)
+    match = re.search(
+        r"Total\s*\([^\n)]*files?\)\s+([0-9][0-9,]*)\s+([0-9][0-9,]*)",
+        output,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        raise WorkflowError("Could not parse rustloc Total row")
+    code = int(match.group(1).replace(",", ""))
+    tests = int(match.group(2).replace(",", ""))
+    file_match = re.search(r"Total\s*\(\s*([0-9,]+)\s+files?\)", output, re.I)
+    files = int(file_match.group(1).replace(",", "")) if file_match else 0
+    return SourceCounts(code=code, tests=tests, files=files, tool="rustloc")
+
+
+def test_budget_baseline_path(root: Path, settings: dict[str, Any]) -> Path:
+    raw = str(settings.get("baseline_path", "")).strip()
+    if not raw:
+        raise WorkflowError("quality.test_budget.baseline_path must not be empty")
+    configured = Path(raw)
+    path = configured if configured.is_absolute() else root / configured
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError as exc:
+        raise WorkflowError("test-budget baseline must stay inside the repository") from exc
+    return resolved
+
+
+def load_test_budget_baseline(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkflowError(f"Cannot parse test-budget baseline {path}: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise WorkflowError(f"Unsupported test-budget baseline schema in {path}")
+    counts = payload.get("counts")
+    if not isinstance(counts, dict):
+        raise WorkflowError(f"Invalid test-budget baseline counts in {path}")
+    for field in ("code", "tests"):
+        value = counts.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise WorkflowError(f"Invalid test-budget baseline {field} in {path}")
+    if payload.get("tool") not in {"builtin", "rustloc"}:
+        raise WorkflowError(f"Invalid test-budget baseline tool in {path}")
+    return payload
+
+
+def write_test_budget_baseline(
+    root: Path,
+    path: Path,
+    counts: SourceCounts,
+    settings: dict[str, Any],
+) -> None:
+    commit = run(["git", "rev-parse", "HEAD"], cwd=root, check=False).stdout.strip()
+    payload = {
+        "schema_version": 1,
+        "generated_at": utc_now(),
+        "commit": commit,
+        "tool": counts.tool,
+        "counts": counts.payload(),
+        "policy": {
+            key: settings.get(key)
+            for key in (
+                "mode",
+                "target_ratio",
+                "warn_ratio",
+                "max_regression",
+                "ratchet_step",
+                "max_delta_ratio",
+                "delta_test_allowance",
+                "min_code_lines",
+            )
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _choose_test_budget_tool(
+    requested: str,
+    baseline: dict[str, Any] | None,
+) -> str:
+    if requested not in TEST_BUDGET_TOOLS:
+        raise WorkflowError(f"Unsupported test-budget tool: {requested}")
+    if requested != "auto":
+        return requested
+    if baseline and baseline.get("tool") in {"builtin", "rustloc"}:
+        chosen = str(baseline["tool"])
+        if chosen == "rustloc" and not shutil.which("rustloc"):
+            raise WorkflowError(
+                "The baseline was created with rustloc, but rustloc is unavailable. "
+                "Install rustloc or explicitly migrate the baseline with "
+                "--tool builtin --write-baseline."
+            )
+        return chosen
+    return "rustloc" if shutil.which("rustloc") else "builtin"
+
+
+def _ratio_from_baseline(baseline: dict[str, Any]) -> float:
+    counts = baseline["counts"]
+    code = int(counts["code"])
+    tests = int(counts["tests"])
+    if code == 0:
+        return 0.0 if tests == 0 else math.inf
+    return tests / code
+
+
+def _merge_base(root: Path, base: str) -> str:
+    proc = run(["git", "merge-base", "HEAD", base], cwd=root, check=False)
+    if proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip()
+    proc = run(["git", "rev-parse", base], cwd=root, check=False)
+    if proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip()
+    raise WorkflowError(f"Cannot resolve test-budget base ref: {base}")
+
+
+def evaluate_test_budget(
+    root: Path,
+    cfg: dict[str, Any],
+    *,
+    gate: str,
+    base: str,
+    requested_tool: str | None,
+    write_baseline: bool,
+) -> tuple[dict[str, Any], int]:
+    if gate not in TEST_BUDGET_GATES:
+        raise WorkflowError(f"Unsupported test-budget gate: {gate}")
+    settings = _test_budget_settings(cfg)
+    enabled = bool(settings.get("enabled", True))
+    mode = str(settings.get("mode", "ratchet"))
+    baseline_path = test_budget_baseline_path(root, settings)
+    baseline = load_test_budget_baseline(baseline_path)
+    tool = _choose_test_budget_tool(
+        requested_tool or str(settings.get("tool", "auto")),
+        baseline,
+    )
+    builtin_current = count_working_tree_builtin(root, settings)
+    current = count_rustloc(root) if tool == "rustloc" else builtin_current
+    warnings: list[str] = []
+    reasons: list[str] = []
+    ratio = current.ratio
+    warn_ratio = float(settings.get("warn_ratio", 0.85))
+    if ratio > warn_ratio:
+        warnings.append(
+            f"test/code ratio {ratio:.3f} exceeds warning ratio {warn_ratio:.3f}"
+        )
+
+    if write_baseline:
+        write_test_budget_baseline(root, baseline_path, current, settings)
+        baseline = load_test_budget_baseline(baseline_path)
+
+    delta_payload: dict[str, Any] | None = None
+    delta_size = 0
+    if gate in {"ticket", "milestone"}:
+        merge_base = _merge_base(root, base)
+        base_counts = count_git_ref_builtin(root, merge_base, settings)
+        delta_code = max(0, builtin_current.code - base_counts.code)
+        delta_tests = max(0, builtin_current.tests - base_counts.tests)
+        delta_size = delta_code + delta_tests
+        allowed_delta_tests = (
+            delta_code * float(settings.get("max_delta_ratio", 1.0))
+            + int(settings.get("delta_test_allowance", 120))
+        )
+        delta_payload = {
+            "base_ref": base,
+            "merge_base": merge_base,
+            "code": delta_code,
+            "tests": delta_tests,
+            "allowed_tests": round(allowed_delta_tests, 3),
+            "ratio": None if delta_code == 0 else round(delta_tests / delta_code, 6),
+        }
+        if delta_tests > allowed_delta_tests:
+            reasons.append(
+                f"test delta {delta_tests} exceeds allowance {allowed_delta_tests:.1f} "
+                f"for code delta {delta_code}"
+            )
+
+    baseline_ratio: float | None = None
+    required_ratio: float | None = None
+    if enabled and mode != "off" and gate != "report":
+        target_ratio = float(settings.get("target_ratio", 1.0))
+        regression = float(settings.get("max_regression", 0.0))
+        if mode == "strict":
+            required_ratio = target_ratio + regression
+            if ratio > required_ratio:
+                reasons.append(
+                    f"ratio {ratio:.3f} exceeds strict target {required_ratio:.3f}"
+                )
+        elif mode == "ratchet":
+            if baseline is None:
+                # Fresh repositories do not have an inherited debt baseline. Treat
+                # the configured target as the initial ceiling so the first ticket
+                # can proceed without an impossible empty-project baseline.
+                required_ratio = target_ratio + regression
+                if ratio > required_ratio:
+                    reasons.append(
+                        f"ratio {ratio:.3f} exceeds initial target {required_ratio:.3f}; "
+                        "write a baseline only when intentionally adopting existing debt"
+                    )
+            else:
+                baseline_ratio = _ratio_from_baseline(baseline)
+                allowed_current = baseline_ratio + regression
+                if ratio > allowed_current:
+                    reasons.append(
+                        f"ratio {ratio:.3f} regressed beyond baseline {baseline_ratio:.3f}"
+                    )
+                if gate == "milestone" and delta_size >= int(
+                    settings.get("min_code_lines", 200)
+                ):
+                    required_ratio = max(
+                        target_ratio,
+                        baseline_ratio - float(settings.get("ratchet_step", 0.05)),
+                    ) + regression
+                    if ratio > required_ratio:
+                        reasons.append(
+                            f"milestone ratio {ratio:.3f} did not reach ratchet target "
+                            f"{required_ratio:.3f}"
+                        )
+
+    verdict = "pass" if not reasons else "fail"
+    payload = {
+        "enabled": enabled,
+        "mode": mode,
+        "gate": gate,
+        "verdict": verdict,
+        "counts": current.payload(),
+        "builtin_counts": builtin_current.payload(),
+        "baseline_path": relative(root, baseline_path),
+        "baseline": baseline,
+        "baseline_ratio": None
+        if baseline_ratio is None or math.isinf(baseline_ratio)
+        else round(baseline_ratio, 6),
+        "required_ratio": None
+        if required_ratio is None or math.isinf(required_ratio)
+        else round(required_ratio, 6),
+        "delta": delta_payload,
+        "warnings": warnings,
+        "reasons": reasons,
+        "baseline_written": write_baseline,
+    }
+    return payload, 0 if verdict == "pass" or gate == "report" or not enabled or mode == "off" else 1
+
+
+def cmd_test_budget(args: argparse.Namespace) -> int:
+    root = git_root(Path(args.cwd).resolve() if args.cwd else None)
+    cfg = load_config(root)
+    payload, exit_code = evaluate_test_budget(
+        root,
+        cfg,
+        gate=args.gate,
+        base=args.base or str(cfg["workflow"]["base_branch"]),
+        requested_tool=args.tool,
+        write_baseline=args.write_baseline,
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return exit_code
+    counts = payload["counts"]
+    print(
+        f"Test budget: {payload['verdict'].upper()} "
+        f"(code={counts['code']}, tests={counts['tests']}, "
+        f"ratio={counts['ratio_display']}, tool={counts['tool']})"
+    )
+    if payload.get("baseline_written"):
+        print(f"  baseline written: {payload['baseline_path']}")
+    if payload.get("baseline_ratio") is not None:
+        print(f"  baseline ratio: {payload['baseline_ratio']:.3f}")
+    if payload.get("required_ratio") is not None:
+        print(f"  required ratio: {payload['required_ratio']:.3f}")
+    delta = payload.get("delta")
+    if isinstance(delta, dict):
+        print(
+            f"  delta from {delta['base_ref']}: code={delta['code']} "
+            f"tests={delta['tests']} allowed_tests={delta['allowed_tests']}"
+        )
+    for warning in payload.get("warnings", []):
+        print(f"  warning: {warning}")
+    for reason in payload.get("reasons", []):
+        print(f"  failure: {reason}")
+    return exit_code
+
+
+def _parse_review_finding(raw: str, *, new: bool) -> dict[str, Any]:
+    parts = raw.split(":", 3 if new else 2)
+    expected = 4 if new else 3
+    if len(parts) != expected:
+        syntax = "ID:severity:origin:summary" if new else "ID:severity:summary"
+        raise WorkflowError(f"Review finding must use {syntax}: {raw!r}")
+    finding_id = parts[0].strip()
+    severity = parts[1].strip().lower()
+    origin = parts[2].strip().lower() if new else "initial_review"
+    summary = parts[3].strip() if new else parts[2].strip()
+    if not finding_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", finding_id):
+        raise WorkflowError(f"Invalid review finding ID: {finding_id!r}")
+    if severity not in REVIEW_FINDING_SEVERITIES:
+        raise WorkflowError(f"Invalid review finding severity: {severity!r}")
+    if new and origin not in NEW_REVIEW_BLOCKER_ORIGINS:
+        raise WorkflowError(f"Invalid new review finding origin: {origin!r}")
+    if not summary:
+        raise WorkflowError("Review finding summary must not be empty")
+    return {
+        "id": finding_id,
+        "severity": severity,
+        "origin": origin,
+        "summary": summary,
+        "new": new,
+    }
+
+
+def _review_passes(verdict: str, cfg: dict[str, Any]) -> bool:
+    return verdict == "pass" or (
+        verdict == "pass_with_notes"
+        and bool(cfg.get("review", {}).get("pass_with_notes_integrates", True))
+    )
+
+
+def review_gate_status(
+    ticket: Ticket,
+    runtime: dict[str, Any],
+    cfg: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    ticket_reviews = runtime.get("reviews", {}).get(ticket.id, {})
+    reviewers = ticket_reviews.get("reviewers", {}) if isinstance(ticket_reviews, dict) else {}
+    failures: list[str] = []
+    for reviewer in ticket.required_reviews:
+        rounds = reviewers.get(reviewer, {}) if isinstance(reviewers, dict) else {}
+        record = None
+        if isinstance(rounds, dict):
+            record = rounds.get("targeted") or rounds.get("full")
+        if not isinstance(record, dict):
+            failures.append(f"missing {reviewer} review")
+            continue
+        verdict = str(record.get("verdict", ""))
+        if not _review_passes(verdict, cfg):
+            failures.append(f"{reviewer} review verdict is {verdict or 'missing'}")
+    return not failures, failures
+
+
+def _append_review_debt(
+    root: Path,
+    cfg: dict[str, Any],
+    *,
+    ticket_id: str,
+    reviewer: str,
+    candidate_sha: str,
+    notes: Sequence[str],
+) -> None:
+    if not notes or not bool(cfg.get("review", {}).get("write_advisories_to_backlog", True)):
+        return
+    raw = str(cfg.get("documents", {}).get("review_debt", "docs/review-debt.md"))
+    path = root / raw
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(
+            "# Review Debt\n\nNon-blocking findings accepted for integration.\n\n",
+            encoding="utf-8",
+        )
+    existing = path.read_text(encoding="utf-8")
+    entries: list[str] = []
+    for note in notes:
+        fingerprint = hashlib.sha256(
+            f"{ticket_id}|{reviewer}|{candidate_sha}|{note}".encode("utf-8")
+        ).hexdigest()[:12]
+        marker = f"<!-- review-debt:{fingerprint} -->"
+        if marker in existing:
+            continue
+        entries.append(
+            f"{marker}\n- `{ticket_id}` `{reviewer}` `{candidate_sha[:12]}`: {note}\n"
+        )
+    if entries:
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            if existing and not existing.endswith("\n"):
+                handle.write("\n")
+            handle.write("".join(entries))
+
+
+def cmd_record_review(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    tickets = load_tickets(root, cfg)
+    ticket = find_ticket(tickets, args.ticket_id)
+    reviewer = args.reviewer
+    round_name = args.round
+    verdict = args.verdict
+    candidate_sha = args.candidate_sha.lower()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", candidate_sha):
+        raise WorkflowError("--candidate-sha must be an exact 40- or 64-hex commit ID")
+    if reviewer not in REVIEWERS or round_name not in REVIEW_ROUNDS:
+        raise WorkflowError("Invalid review role or round")
+
+    findings = [_parse_review_finding(raw, new=False) for raw in args.finding]
+    new_findings = [_parse_review_finding(raw, new=True) for raw in args.new_finding]
+    all_ids = [str(item["id"]) for item in findings + new_findings]
+    if len(all_ids) != len(set(all_ids)):
+        raise WorkflowError("Review finding IDs must be unique in one record")
+    blocking_severities = set(cfg.get("review", {}).get("blocking_severities", []))
+    blocking = [item for item in findings + new_findings if item["severity"] in blocking_severities]
+    if verdict == "block" and not blocking:
+        raise WorkflowError("A block verdict requires at least one blocking finding")
+    if verdict in {"pass", "pass_with_notes"} and blocking:
+        raise WorkflowError("A passing verdict cannot contain unresolved blocking findings")
+    if verdict == "pass_with_notes" and not any(str(note).strip() for note in args.note):
+        raise WorkflowError("pass_with_notes requires at least one --note")
+
+    state = load_runtime_state(root, cfg)
+    runtime = milestone_runtime_state(state, ticket.milestone)
+    phase = runtime.get("phases", {}).get(ticket.id, {})
+    if isinstance(phase, dict) and phase.get("phase") == "review":
+        phase_sha = str(phase.get("candidate_sha", "")).lower()
+        if phase_sha and phase_sha != candidate_sha:
+            raise WorkflowError(
+                f"Review candidate {candidate_sha} does not match active review SHA {phase_sha}"
+            )
+    review_cfg = cfg.get("review", {})
+    ticket_reviews = runtime["reviews"].setdefault(ticket.id, {"reviewers": {}})
+    reviewer_rounds = ticket_reviews.setdefault("reviewers", {}).setdefault(reviewer, {})
+
+    if round_name == "full":
+        maximum = int(review_cfg.get("max_full_review_rounds", 1))
+        if "full" in reviewer_rounds:
+            existing = reviewer_rounds["full"]
+            same = (
+                existing.get("candidate_sha") == candidate_sha
+                and existing.get("verdict") == verdict
+                and existing.get("findings") == findings
+                and existing.get("notes", []) == args.note
+            )
+            if same:
+                print(f"Review already recorded: {ticket.id} {reviewer} full")
+                return 0 if _review_passes(verdict, cfg) else 1
+            raise WorkflowError(
+                f"{ticket.id} {reviewer} already used its full review round; "
+                "record a targeted re-review or escalate"
+            )
+        if maximum < 1:
+            raise WorkflowError("Full review rounds are disabled by configuration")
+        if new_findings:
+            raise WorkflowError("--new-finding is valid only for targeted re-review")
+        record_findings = findings
+    else:
+        maximum = int(review_cfg.get("max_targeted_repair_rounds", 1))
+        if "targeted" in reviewer_rounds:
+            raise WorkflowError(
+                f"{ticket.id} {reviewer} already used its targeted re-review round; escalate"
+            )
+        if maximum < 1:
+            raise WorkflowError("Targeted review rounds are disabled by configuration")
+        full = reviewer_rounds.get("full")
+        if not isinstance(full, dict) or full.get("verdict") != "block":
+            raise WorkflowError("Targeted re-review requires a prior blocking full review")
+        repairs = runtime.get("repairs", {}).get(ticket.id, [])
+        qualifying_repairs = [
+            item
+            for item in repairs
+            if isinstance(item, dict) and bool(item.get("consumes_budget", True))
+        ] if isinstance(repairs, list) else []
+        if not qualifying_repairs:
+            raise WorkflowError(
+                "Targeted re-review requires one recorded substantive/evidence repair; "
+                "a mechanical-only change does not consume the review repair round"
+            )
+        if verdict == "block":
+            raise WorkflowError(
+                "A second blocking verdict must be recorded as escalate; automatic repair is exhausted"
+            )
+        original_blocking = {
+            str(item.get("id")): item
+            for item in full.get("findings", [])
+            if isinstance(item, dict) and item.get("severity") in blocking_severities
+        }
+        unknown_resolved = sorted(set(args.resolved) - set(original_blocking))
+        if unknown_resolved:
+            raise WorkflowError(
+                "--resolved contains unknown full-review findings: "
+                + ", ".join(unknown_resolved)
+            )
+        policy = str(
+            review_cfg.get("new_blockers_after_first_review", "introduced_by_repair_only")
+        )
+        allowed_origins: set[str]
+        if policy == "none":
+            allowed_origins = set()
+        elif policy == "introduced_by_repair_only":
+            allowed_origins = {"introduced_by_repair"}
+        else:
+            allowed_origins = set(NEW_REVIEW_BLOCKER_ORIGINS)
+        disallowed = [item for item in new_findings if item["origin"] not in allowed_origins]
+        if disallowed:
+            raise WorkflowError(
+                "New targeted-review blockers violate policy: "
+                + ", ".join(str(item["id"]) for item in disallowed)
+            )
+        resolved_ids = set(args.resolved)
+        remaining_by_id = {
+            finding_id: dict(item)
+            for finding_id, item in original_blocking.items()
+            if finding_id not in resolved_ids
+        }
+        for item in findings:
+            finding_id = str(item["id"])
+            if finding_id not in original_blocking:
+                raise WorkflowError(
+                    "Targeted --finding must reuse an original full-review ID; "
+                    f"use --new-finding for {finding_id}"
+                )
+            if finding_id in resolved_ids:
+                raise WorkflowError(
+                    f"Targeted finding {finding_id} cannot be both --resolved and still open"
+                )
+            remaining_by_id[finding_id] = item
+        for item in new_findings:
+            finding_id = str(item["id"])
+            if finding_id in original_blocking or finding_id in remaining_by_id:
+                raise WorkflowError(f"New targeted finding ID already exists: {finding_id}")
+            remaining_by_id[finding_id] = item
+        record_findings = list(remaining_by_id.values())
+        remaining_blocking = [
+            item for item in record_findings if item.get("severity") in blocking_severities
+        ]
+        if verdict in {"pass", "pass_with_notes"} and remaining_blocking:
+            raise WorkflowError(
+                "Targeted passing verdict leaves unresolved blocking findings: "
+                + ", ".join(str(item["id"]) for item in remaining_blocking)
+            )
+        if verdict == "escalate" and not remaining_blocking:
+            raise WorkflowError("Escalate verdict requires an unresolved blocking finding")
+
+    record = {
+        "round": round_name,
+        "reviewer": reviewer,
+        "candidate_sha": candidate_sha,
+        "verdict": verdict,
+        "findings": record_findings,
+        "resolved": list(args.resolved),
+        "notes": list(args.note),
+        "recorded_at": utc_now(),
+    }
+    reviewer_rounds[round_name] = record
+    path = save_runtime_state(root, cfg, state)
+    if verdict == "pass_with_notes":
+        _append_review_debt(
+            root,
+            cfg,
+            ticket_id=ticket.id,
+            reviewer=reviewer,
+            candidate_sha=candidate_sha,
+            notes=args.note,
+        )
+    print(
+        f"Recorded {round_name} review: {ticket.id} {reviewer} {verdict} "
+        f"({relative(root, path)})"
+    )
+    return 0 if _review_passes(verdict, cfg) else 1
+
+
+def cmd_review_state(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    tickets = load_tickets(root, cfg)
+    ticket = find_ticket(tickets, args.ticket_id)
+    state = load_runtime_state(root, cfg)
+    runtime = state.get("milestones", {}).get(ticket.milestone.upper(), {})
+    ticket_reviews = runtime.get("reviews", {}).get(ticket.id, {}) if isinstance(runtime, dict) else {}
+    passed, failures = review_gate_status(ticket, runtime if isinstance(runtime, dict) else {}, cfg)
+    payload = {
+        "ticket": ticket.id,
+        "milestone": ticket.milestone,
+        "required_reviews": ticket.required_reviews,
+        "gate_passed": passed,
+        "failures": failures,
+        "reviews": ticket_reviews,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Review gate for {ticket.id}: {'PASS' if passed else 'BLOCK'}")
+        for failure in failures:
+            print(f"  - {failure}")
+    return 0 if passed else 1
+
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     root = git_root()
     cfg = load_config(root)
@@ -1801,6 +2803,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         "gap_analysis": (str(docs["gap_analysis"]), "gap-analysis.md"),
         "roadmap": (str(docs["roadmap"]), "roadmap.md"),
         "ci_status": (str(docs["ci_status"]), "ci-status.md"),
+        "review_debt": (str(docs["review_debt"]), "review-debt.md"),
     }
     mapping.update(
         {
@@ -1832,7 +2835,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    for key in ("vision", "gap_analysis", "roadmap", "ci_status"):
+    for key in ("vision", "gap_analysis", "roadmap", "ci_status", "review_debt"):
         path = root / str(cfg["documents"][key])
         if not path.exists():
             errors.append(f"Missing document: {relative(root, path)}")
@@ -1852,6 +2855,25 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 f"Document template drift: {destination} must match "
                 f"assets/templates/{source_name}"
             )
+
+    planning_limits = cfg.get("planning", {})
+    for directory_key, limit_key, label in (
+        ("spec_dir", "spec_soft_line_limit", "spec"),
+        ("test_plan_dir", "test_plan_soft_line_limit", "test plan"),
+    ):
+        directory = root / str(cfg["documents"][directory_key])
+        limit = int(planning_limits.get(limit_key, 400 if label == "spec" else 300))
+        if directory.is_dir():
+            for path in sorted(directory.glob("*.md")):
+                if path.name.lower() == "readme.md" or "template" in path.name.lower():
+                    continue
+                line_count = len(path.read_text(encoding="utf-8").splitlines())
+                if line_count > limit:
+                    warnings.append(
+                        f"{relative(root, path)} has {line_count} lines, above the "
+                        f"{label} soft limit of {limit}; prefer outcome contracts and "
+                        "move supporting detail to references"
+                    )
 
     ticket_errors, ticket_warnings, _ = validate_tickets(root, cfg)
     errors.extend(ticket_errors)
@@ -1903,6 +2925,96 @@ def cmd_validate(args: argparse.Namespace) -> int:
             "execution.non_counting_repair_classes must contain only "
             + ", ".join(sorted(REPAIR_CLASSES))
         )
+
+    planning = cfg.get("planning", {})
+    if not isinstance(planning, dict):
+        errors.append("planning must be a table")
+        planning = {}
+    if planning.get("contract_style") not in {"outcome", "prescriptive"}:
+        errors.append("planning.contract_style must be outcome or prescriptive")
+    for key, minimum in (
+        ("max_adrs_per_milestone", 0),
+        ("spec_soft_line_limit", 1),
+        ("test_plan_soft_line_limit", 1),
+        ("max_acceptance_criteria_per_ticket", 1),
+    ):
+        value = planning.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            errors.append(f"planning.{key} must be an integer >= {minimum}")
+    if not isinstance(planning.get("allow_new_adr_during_execute"), bool):
+        errors.append("planning.allow_new_adr_during_execute must be true or false")
+
+    review = cfg.get("review", {})
+    if not isinstance(review, dict):
+        errors.append("review must be a table")
+        review = {}
+    severities = review.get("blocking_severities")
+    if not isinstance(severities, list) or not severities or any(
+        item not in REVIEW_FINDING_SEVERITIES for item in severities
+    ):
+        errors.append(
+            "review.blocking_severities must be a non-empty array of valid severities"
+        )
+    for key in ("max_full_review_rounds", "max_targeted_repair_rounds"):
+        value = review.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            errors.append(f"review.{key} must be an integer >= 0")
+    if review.get("new_blockers_after_first_review") not in {
+        "none",
+        "introduced_by_repair_only",
+        "introduced_by_repair_or_previously_unobservable",
+    }:
+        errors.append(
+            "review.new_blockers_after_first_review has an unsupported policy"
+        )
+    for key in (
+        "pass_with_notes_integrates",
+        "freeze_contract_on_execute",
+        "write_advisories_to_backlog",
+    ):
+        if not isinstance(review.get(key), bool):
+            errors.append(f"review.{key} must be true or false")
+
+    quality = cfg.get("quality", {})
+    if not isinstance(quality, dict):
+        errors.append("quality must be a table")
+        quality = {}
+    test_budget = quality.get("test_budget", {})
+    if not isinstance(test_budget, dict):
+        errors.append("quality.test_budget must be a table")
+        test_budget = {}
+    if not isinstance(test_budget.get("enabled"), bool):
+        errors.append("quality.test_budget.enabled must be true or false")
+    if test_budget.get("tool") not in TEST_BUDGET_TOOLS:
+        errors.append("quality.test_budget.tool must be auto, builtin, or rustloc")
+    if test_budget.get("mode") not in TEST_BUDGET_MODES:
+        errors.append("quality.test_budget.mode must be ratchet, strict, or off")
+    for key, minimum in (
+        ("target_ratio", 0.0),
+        ("warn_ratio", 0.0),
+        ("max_regression", 0.0),
+        ("ratchet_step", 0.0),
+        ("max_delta_ratio", 0.0),
+    ):
+        value = test_budget.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < minimum:
+            errors.append(f"quality.test_budget.{key} must be a number >= {minimum}")
+    for key, minimum in (("delta_test_allowance", 0), ("min_code_lines", 0)):
+        value = test_budget.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            errors.append(f"quality.test_budget.{key} must be an integer >= {minimum}")
+    if not str(test_budget.get("baseline_path", "")).strip():
+        errors.append("quality.test_budget.baseline_path must not be empty")
+    extensions = test_budget.get("include_extensions")
+    if not isinstance(extensions, list) or not extensions or any(
+        not isinstance(item, str) or not item.startswith(".") for item in extensions
+    ):
+        errors.append(
+            "quality.test_budget.include_extensions must be a non-empty array of extensions"
+        )
+    excludes = test_budget.get("exclude_globs")
+    if not isinstance(excludes, list) or any(not isinstance(item, str) for item in excludes):
+        errors.append("quality.test_budget.exclude_globs must be an array of strings")
 
     checkpoint_policy = cfg.get("workflow", {}).get("checkpoint_policy")
     if checkpoint_policy not in {"transition", "wave", "integration"}:
@@ -2064,7 +3176,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         configured_base = str(cfg["workflow"]["base_branch"])
         if not branch_exists(root, configured_base):
-            failures.append(f"Configured base branch does not exist: {configured_base}")
+            pending_branch = unborn_branch(root)
+            if pending_branch == configured_base:
+                warnings.append(
+                    f"Configured base branch {configured_base} is unborn; commit the "
+                    "installed workflow before plan/execute creates worktrees"
+                )
+            else:
+                failures.append(f"Configured base branch does not exist: {configured_base}")
     except WorkflowError:
         pass
 
@@ -2768,7 +3887,7 @@ def cmd_set_status(args: argparse.Namespace) -> int:
                 f"Durable transition {current} -> {args.status} is not allowed; use "
                 "--force only after reconciling repository evidence"
             )
-    if args.status == "done":
+    if args.status == "done" and not (current == "done" and ticket.status == "done"):
         by_id = {item.id: item for item in tickets}
         unmet = unmet_dependencies(ticket, "integration", by_id)
         if unmet:
@@ -2786,6 +3905,12 @@ def cmd_set_status(args: argparse.Namespace) -> int:
                 f"{ticket.id} cannot become done; open canonical root blockers "
                 "through integration: "
                 + ", ".join(open_roots)
+            )
+        reviews_clear, review_failures = review_gate_status(ticket, runtime, cfg)
+        if not args.force and not reviews_clear:
+            raise WorkflowError(
+                f"{ticket.id} cannot become done; review gate is incomplete: "
+                + "; ".join(review_failures)
             )
         if not args.force and (
             not isinstance(phase_record, dict)
@@ -2828,6 +3953,11 @@ def cmd_gate_check(args: argparse.Namespace) -> int:
         ticket.id,
         args.phase,
     )
+    reviews_clear = True
+    review_failures: list[str] = []
+    if args.phase in {"integration", "release"}:
+        reviews_clear, review_failures = review_gate_status(ticket, runtime, cfg)
+    gate_clear = not unmet and not open_roots and reviews_clear
     payload = {
         "ticket": ticket.id,
         "phase": args.phase,
@@ -2835,20 +3965,23 @@ def cmd_gate_check(args: argparse.Namespace) -> int:
         "dependencies_through_gate": ticket.dependencies_through(args.phase),
         "unmet": unmet,
         "open_root_blockers": open_roots,
-        "clear": not unmet and not open_roots,
+        "review_failures": review_failures,
+        "clear": gate_clear,
     }
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
-    elif unmet or open_roots:
+    elif not gate_clear:
         reasons = []
         if unmet:
             reasons.append("dependencies=" + ", ".join(unmet))
         if open_roots:
             reasons.append("root blockers=" + ", ".join(open_roots))
+        if review_failures:
+            reasons.append("reviews=" + "; ".join(review_failures))
         print(f"{ticket.id} {args.phase} gate blocked: " + "; ".join(reasons))
     else:
         print(f"{ticket.id} {args.phase} gate clear")
-    return 0 if not unmet and not open_roots else 1
+    return 0 if gate_clear else 1
 
 
 def toml_string(value: str) -> str:
@@ -2885,6 +4018,14 @@ def cmd_new_ticket(args: argparse.Namespace) -> int:
         for field, values in dependency_values.items()
     )
     owns = ", ".join(toml_string(item) for item in args.owns)
+    maximum_acceptance = int(
+        cfg.get("planning", {}).get("max_acceptance_criteria_per_ticket", 8)
+    )
+    if len(args.acceptance) > maximum_acceptance:
+        raise WorkflowError(
+            f"Ticket has {len(args.acceptance)} acceptance criteria; maximum is "
+            f"{maximum_acceptance}. Split the ticket or consolidate duplicate evidence."
+        )
     acceptance = ",\n  ".join(toml_string(item) for item in args.acceptance)
     reviews = args.required_review or (
         ["architect", "qa"]
@@ -3726,6 +4867,8 @@ def build_parser() -> argparse.ArgumentParser:
               workflow.py worktree-create M1-T01
               workflow.py integration-create M1
               workflow.py run-validation quick --cwd .worktrees/m1-t01
+              workflow.py test-budget --gate ticket --base main
+              workflow.py review-state M1-T01 --json
             """
         ),
     )
@@ -3739,6 +4882,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("validate", help="Validate config, documents, and ticket graph")
     p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser(
+        "test-budget",
+        help="Measure and enforce the configured production/test source budget",
+    )
+    p.add_argument("--gate", choices=sorted(TEST_BUDGET_GATES), default="report")
+    p.add_argument("--base", help="Base branch or commit for delta measurement")
+    p.add_argument("--tool", choices=sorted(TEST_BUDGET_TOOLS))
+    p.add_argument("--write-baseline", action="store_true")
+    p.add_argument("--cwd", help="Run against the Git worktree containing this path")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_test_budget)
 
     p = sub.add_parser("status", help="Summarize repository and ticket state")
     p.add_argument("--milestone")
@@ -3938,6 +5093,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--evidence", action="append", default=[])
     p.add_argument("--unblock-condition", required=True)
     p.set_defaults(func=cmd_record_blocker)
+
+    p = sub.add_parser(
+        "record-review",
+        help="Record one bounded full review or targeted re-review",
+    )
+    p.add_argument("ticket_id")
+    p.add_argument("--reviewer", choices=sorted(REVIEWERS), required=True)
+    p.add_argument("--round", choices=sorted(REVIEW_ROUNDS), required=True)
+    p.add_argument("--verdict", choices=sorted(REVIEW_VERDICTS), required=True)
+    p.add_argument("--candidate-sha", required=True)
+    p.add_argument(
+        "--finding",
+        action="append",
+        default=[],
+        help="ID:severity:summary; use for initial or still-open findings",
+    )
+    p.add_argument(
+        "--new-finding",
+        action="append",
+        default=[],
+        help="ID:severity:origin:summary; targeted round only",
+    )
+    p.add_argument("--resolved", action="append", default=[])
+    p.add_argument("--note", action="append", default=[])
+    p.set_defaults(func=cmd_record_review)
+
+    p = sub.add_parser("review-state", help="Show the bounded review gate for one ticket")
+    p.add_argument("ticket_id")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_review_state)
 
     p = sub.add_parser("resolve-blocker", help="Resolve a recorded root blocker")
     p.add_argument("blocker_id")
