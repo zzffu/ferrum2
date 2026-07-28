@@ -362,6 +362,69 @@ fn fixed_baseline_scope_and_provenance_audit() {
         }
     }
     let root = repository_root();
+    let external_entry =
+        fs::read_to_string(root.join("tests/m0-harness/tests/external_interop.rs"))
+            .expect("read external interop entry")
+            .replace("\r\n", "\n");
+    let external_support =
+        fs::read_to_string(root.join("tests/m0-harness/src/external_support/mod.rs"))
+            .expect("read external interop support")
+            .replace("\r\n", "\n");
+    let local_support = fs::read_to_string(root.join("tests/m0-harness/src/local_support/mod.rs"))
+        .expect("read shared local support")
+        .replace("\r\n", "\n");
+    validate_external_interop_same_policy(&external_entry, &external_support, &local_support)
+        .expect("external interop must use the shared same-policy bind-and-listen seam");
+
+    for (label, mutated_external, mutated_local) in [
+        (
+            "omitted Unix reuse",
+            external_support.clone(),
+            local_support.replacen("    socket.set_reuse_address(true)?;\n", "", 1),
+        ),
+        (
+            "reuse weakened to every platform",
+            external_support.clone(),
+            local_support.replacen("#[cfg(unix)]\n", "", 1),
+        ),
+        (
+            "omitted listen",
+            external_support.clone(),
+            local_support.replacen("    socket.listen(128)?;\n", "", 1),
+        ),
+        (
+            "final probe falls back to default bind",
+            external_support.replacen(
+                "bind_loopback_listener(address)",
+                "TcpListener::bind(address)",
+                1,
+            ),
+            local_support.clone(),
+        ),
+        (
+            "reuse-port weakening",
+            external_support.clone(),
+            local_support.replacen(
+                "    socket.set_reuse_address(true)?;\n",
+                "    socket.set_reuse_address(true)?;\n    socket.set_reuse_port(true)?;\n",
+                1,
+            ),
+        ),
+    ] {
+        assert!(
+            mutated_external != external_support || mutated_local != local_support,
+            "same-policy mutation fixture did not change source: {label}"
+        );
+        assert!(
+            validate_external_interop_same_policy(
+                &external_entry,
+                &mutated_external,
+                &mutated_local
+            )
+            .is_err(),
+            "same-policy mutation escaped fail-closed audit: {label}"
+        );
+    }
     let ancestor = Command::new("git")
         .args(["merge-base", "--is-ancestor", BASELINE, "HEAD"])
         .current_dir(&root)
@@ -1368,6 +1431,94 @@ fn is_control_document(path: &str) -> bool {
         "docs/adr/README.md",
     ];
     CONTROL_DOCUMENTS.contains(&path)
+}
+
+fn validate_external_interop_same_policy(
+    entry: &str,
+    external_support: &str,
+    local_support: &str,
+) -> Result<(), String> {
+    let entry = entry.replace("\r\n", "\n");
+    let external_support = external_support.replace("\r\n", "\n");
+    let local_support = local_support.replace("\r\n", "\n");
+    require_once(
+        &entry,
+        "#[path = \"../src/local_support/mod.rs\"]\nmod local_support;",
+        "external interop shared helper composition",
+    )?;
+    require_once(
+        &external_support,
+        "use crate::local_support::bind_loopback_listener;",
+        "external interop shared helper import",
+    )?;
+
+    let production = external_support
+        .split_once("#[cfg(test)]")
+        .map(|(production, _)| production)
+        .unwrap_or(&external_support);
+    let reservations = source_between(production, "impl ReservedPorts {", "fn target_address")?;
+    if reservations.matches("bind_loopback_listener(").count() != 3 {
+        return Err(
+            "all three initial port reservations must use the shared listener helper".into(),
+        );
+    }
+    let final_probe = source_between(production, "fn assert_rebind_all(", "fn ipv4_address(")?;
+    require_once(
+        final_probe,
+        "bind_loopback_listener(address)",
+        "final exact bind-and-listen probe",
+    )?;
+    if production.contains("TcpListener::bind") {
+        return Err("external interop production path bypasses the shared listener helper".into());
+    }
+
+    let helper = source_between(
+        &local_support,
+        "pub fn bind_loopback_listener(",
+        "pub fn reserve_unused_loopback(",
+    )?;
+    for required in [
+        "Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?",
+        "#[cfg(unix)]\n    socket.set_reuse_address(true)?;",
+        "socket.bind(&SocketAddr::V4(address).into())?;",
+        "socket.listen(128)?;",
+        "Ok(socket.into())",
+    ] {
+        require_once(helper, required, "shared bind-and-listen helper")?;
+    }
+    let create = helper.find("Socket::new").expect("required above");
+    let reuse = helper
+        .find("socket.set_reuse_address(true)?;")
+        .expect("required above");
+    let bind = helper.find("socket.bind(").expect("required above");
+    let listen = helper.find("socket.listen(").expect("required above");
+    if !(create < reuse && reuse < bind && bind < listen) {
+        return Err("shared helper must set Unix reuse before bind and listen".into());
+    }
+    for forbidden in [
+        "set_reuse_port",
+        "SO_REUSEPORT",
+        "TcpListener::bind",
+        ".or_else",
+        "unwrap_or_else",
+    ] {
+        if helper.contains(forbidden) {
+            return Err(format!(
+                "shared helper contains forbidden fallback or weakening: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn source_between<'a>(source: &'a str, start: &str, end: &str) -> Result<&'a str, String> {
+    let tail = source
+        .split_once(start)
+        .ok_or_else(|| format!("missing source section start: {start}"))?
+        .1;
+    tail.split_once(end)
+        .map(|(section, _)| section)
+        .ok_or_else(|| format!("missing source section end: {end}"))
 }
 
 fn assert_safe_changed_path(path: &str) {
