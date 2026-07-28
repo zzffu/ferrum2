@@ -237,7 +237,8 @@ non-overlapping ownership。
 
 ## M1 — 完整 TCP 与 TCP 互操作
 
-- **Status:** executing（M1-T01～M1-T04 done；close gates pending）
+- **Status:** validating（M1-T01～M1-T04 done；local execute close gates PASS；
+  `auto_close = false`，尚未执行 close）
 - **Objective:** 在不复制 transport state machine 的前提下，将 TCP 扩展到
   三个指定方法并完成完整 reference interoperability。
 - **Entry conditions:** M0 closed；AES-128 wire/runtime/key lookup contract
@@ -271,7 +272,9 @@ non-overlapping ownership。
   ownership-disjoint；T03 等待 T02；T04 最后集成。
 - **Deferred/out of scope:** UDP、最终平台 qualification 和 performance gate。
 - **Integrated commit:** complete local product/control checkpoint
-  `fba23ca0b628bd6935d0977e3d9df7836b957e78`（M1-T01～M1-T04）
+  `02c7bc7ee37514e479a03751235f3be3a3cf6f0b`（包含 M1-T01～M1-T04
+  product checkpoint `fba23ca0b628bd6935d0977e3d9df7836b957e78` 与 test-budget
+  gate control repair）
 - **Open blockers and risks:** 当前没有 open canonical root blocker。
   T01 的 clean-target process-test build-order advisory 记录为
   `QA-M1-T01-001`，不阻塞后续工作。T02 的 canonical review root
@@ -283,6 +286,11 @@ non-overlapping ownership。
   evidence，不能计作本机 PASS。T04 candidate 的 Architect/QA full review 均
   PASS，local/pure integration gates 已通过；hosted exact-SHA 12/12 与三平台
   evidence 尚未产生，仍需单独授权且不能由 local tests 替代。
+  close gate 首次 test-budget 运行真实暴露脚本把 ticket-only delta allowance
+  错用于 milestone；control commit `81345fbb56ac4cdbf1aea3a3f020d6fd514b187f`
+  仅恢复 TEST-0002 已批准语义。其集成 SHA `02c7bc7` 上 66 项 workflow tests、
+  authoritative full 与 milestone ratchet 均 PASS；ratio `2.041`，required
+  `2.042`，未改写 baseline 或授予预算豁免。
   execute 风险是 method/profile 错配、partial address-family conversion、fixture
   provenance/rights、hot-path allocation/dispatch 与 hosted provider availability；
   ADR-0018/0019、TEST-0002、exact-SHA review 和 fail-closed release gate 已给出

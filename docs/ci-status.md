@@ -2,14 +2,17 @@
 
 ## 当前 M1 execute 状态
 
-- **Current product integration checkpoint:**
-  `fba23ca0b628bd6935d0977e3d9df7836b957e78` on
-  `codex/integration/m1`；包含 reviewed M1-T01 candidate
+- **Current product/control integration checkpoint:**
+  `02c7bc7ee37514e479a03751235f3be3a3cf6f0b` on
+  `codex/integration/m1`；包含 product checkpoint
+  `fba23ca0b628bd6935d0977e3d9df7836b957e78`、reviewed M1-T01 candidate
   `4223051eeae35220b150461cad91daf09a954423` 与 M1-T02 candidate
   `ae84631c515933f60b2aa3f898a86fa3cff11ce9`，以及 M1-T03 candidate
   `4c9ad421e0ef5d193e29e70ed5a674cb30a4aa88`、M1-T04 candidate
   `b7a69899e4053e78fe8824e2cd9215b9d232e106`。本地 workflow-control
-  commits `91bb86b`/`3bdde10` 支持并审计一次性 superseding review。
+  commits `91bb86b`/`3bdde10` 支持并审计一次性 superseding review；
+  `81345fbb56ac4cdbf1aea3a3f020d6fd514b187f` 恢复 ticket/milestone
+  test-budget gate 的既有分层语义。
 - **Date/environment:** 2026-07-28（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1；Python 3.11.9。
 - **Reviews:** T01 Architect full `PASS`、QA full `PASS_WITH_NOTES`
@@ -30,24 +33,31 @@
   尚未 build 而 exit 101；`cargo build --workspace --bins --locked` exit 0 后，
   同一未修改 SHA quick 3/3 exit 0。该 setup-order derivative 已记录为 review
   debt，不是 product blocker。
-- **Full evidence:** integration `fba23ca` 上 binary build、authoritative
-  quick 3/3 与 authoritative full：
+- **Full evidence:** integration `02c7bc7` 上 workspace binary build 与
+  authoritative full：
   `cargo fmt --all -- --check`、
   `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`、
   `cargo test --workspace --all-features --locked`、
   `cargo doc --workspace --all-features --no-deps --locked`，4/4 exit 0；
   `git diff --check` exit 0。
 - **Test budget:** T04 ticket gate PASS：code `7386`、tests `15216`、ratio
-  `2.060`；baseline `7031/14707/2.092`；delta `+0/+120`，allowance `120`。
-- **Workflow control evidence:** 65 unit tests、`workflow.py validate`、
+  `2.060`；delta `+0/+120`，allowance `120`。M1 milestone gate 在
+  `02c7bc7` PASS：code `7720`、tests `15759`、ratio `2.041`；baseline
+  `7031/14707/2.092`；required ratchet ratio `2.042`；planning-base delta
+  `+689/+1052` 只报告、不复用 ticket allowance，baseline 未改写。
+- **Workflow control evidence:** 66 unit tests、`workflow.py validate`、
   `py_compile`、`git diff --check` 均 exit 0；两项 control hardening findings
-  `CTRL-M1-T02-001/002` 在 integration 前关闭。
+  `CTRL-M1-T02-001/002` 在 integration 前关闭。close gate 首次真实 FAIL
+  定位为 ticket allowance 被错误复用于 milestone；最小脚本修复及 focused
+  pass/fail ratchet regression 已在独立 control worktree 提交并由 Team Lead
+  复核，无新授权、豁免或产品改动。
 - **Authorization:** three exact single-use local scopes for the T02 additional
   repair, control amendment, and superseding Architect review were consumed and
   revoked. No ownership/contract expansion or remote/destructive authority was
   granted.
 - **Scheduler/blockers:** M1-T01～M1-T04 done；当前无 active ticket 或 open
-  canonical root。最终 milestone close gates 尚待执行。
+  canonical root。本地 execute close gates 已 PASS；`auto_close = false`，
+  close mode 尚未执行。
 - **Local qualification notes:** 本 Windows host `[::1]` bind 成功但 raw connect
   返回 `WSAEACCES`，所以 T03 real-process IPv6 row 是 **NOT EXECUTED**；IPv4
   fallback 只证明第三方法 echo/half-close。local platform artifact run 另因
