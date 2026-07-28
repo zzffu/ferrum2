@@ -10,7 +10,8 @@ Bootstrap 基线是
 `8318ef106d6cd4e029bd3b02aa64125fabdda462`、本地 full gate 与 GitHub Actions
 run `30331336772` attempt 1 的六项成功证据关闭；M1 已以 exact
 `874c83d0ee71054bd702d6ecac55e88d9e2fbcef`、本地 full gate 与 GitHub Actions
-run `30367147537` attempt 1 的六项成功证据关闭；M2-M4 仍为 `proposed`。
+run `30367147537` attempt 1 的六项成功证据关闭；M2 正在 `executing`，M3-M4
+仍为 `proposed`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`。
 
@@ -24,9 +25,10 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M3 | M1、M2 closed | 运维契约、生命周期和三目标平台资格 |
 | M4 | M3 closed | 性能/资源门及同一 commit 上的 v0 资格证明 |
 
-M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 的下一动作是规划 UDP
-contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满足 dependency-ready
-和 non-overlapping ownership。
+M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 Wave 1 已集成
+method-bound UDP crypto 与 bounded direct UDP runtime，下一 dependency-ready
+动作是 M2-T02 protocol/replay。每个里程碑内的并行 ticket 仍须满足
+dependency-ready 和 non-overlapping ownership。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -313,7 +315,7 @@ contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满�
 
 ## M2 — 完整 UDP 协议纵切与 UDP 互操作
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** 通过 protocol API 和 server direct UDP path 交付三个方法的
   SIP022 UDP，不新增 SOCKS5 `UDP ASSOCIATE` 等公开 inbound。
 - **Entry conditions:** 已满足。M1 closed；shared method/key/address contracts
@@ -334,8 +336,9 @@ contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满�
   7. `M2-UDP-INT-001..012` 在同一authorized exact SHA/run/attempt取得
      12/12+cleanup，缺失/unavailable不得waive。
   8. M0/M1回归、test-budget ratchet、MSRV/三平台和`workflow.toml` full通过。
-- **In-scope tickets:** M2-T01～M2-T05，均`ready`。
-  Initial implementation frontier为M2-T01 + M2-T03：
+- **In-scope tickets:** M2-T01、M2-T03 已 `done`；M2-T02～M2-T05 仍按
+  dependency gates 等待执行。Initial implementation frontier 为
+  M2-T01 + M2-T03：
 
   ```text
   M2-T01 crypto ───────┐
@@ -344,6 +347,12 @@ contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满�
                                                     │
   M2-T04 ───────────── T05 integration/release ─────┘
   ```
+
+  Wave 1 exact product integration
+  `0dff5c104149e7042f5e62dc10831f208a0e16ad` 通过 authoritative quick
+  3/3、full 4/4、combined ticket-budget、workflow validation 和 exact-SHA
+  Architect/QA integration gates；三个 review root findings 均由一次各票
+  bounded repair 关闭，无 accepted debt，未 push/publish。
 
 - **Deferred/out of scope:** public client UDP inbound、SOCKS5 UDP ASSOCIATE、
   SIP023/multi-user、routing/DNS proxy/custom resolver、M3 platform/lifecycle

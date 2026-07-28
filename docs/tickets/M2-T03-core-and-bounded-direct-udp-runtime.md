@@ -2,7 +2,7 @@
 id = "M2-T03"
 title = "Add the minimal core datagram value and bounded direct UDP runtime"
 milestone = "M2"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = []
@@ -85,10 +85,22 @@ git diff --check
 
 ## Completion evidence
 
-由Team Lead integration后填写：
-
-- Branch/worktree/candidate and integrated commit:
-- Architect/QA full/targeted review and stable finding IDs:
-- Exact validation exits and test-budget counts/baseline:
-- Accepted review debt:
-- Push/publish state:
+- Branch/worktree/candidates: `codex/ticket/m2-t03`,
+  `C:\project\ferrum2\.worktrees\m2-t03`; initial
+  `de78a4d41126d8740611bb431fa4839663ed6f31`, repaired
+  `491954d8ea8fdf5faad17b0b360f353283d44898`. Product integration is
+  `0dff5c104149e7042f5e62dc10831f208a0e16ad`.
+- Reviews: Architect and QA full reviews `BLOCK` on
+  `ARCH-M2-T03-001` and `QA-M2-T03-001` (`major`). One combined substantive
+  repair retained direct-owner capacity through task/socket reap and moved
+  activity commit after successful generation-validated handling; both
+  targeted re-reviews `PASS` and resolved their original IDs. Exact-SHA
+  Wave-1 Architect and QA integration gates both `PASS`, with no new finding.
+- Validation: core/runtime package tests and all 12 UDP runtime tests passed;
+  strict Clippy, fmt, `git diff --check`, binary build, authoritative quick
+  3/3 and full 4/4 all exited 0 on the reviewed candidates/integration as
+  applicable.
+- Ticket test budget `PASS`: code `9108`, tests `16545`, ratio `1.817`,
+  baseline `2.041`; delta `1388/786`, allowance `1508`.
+- Accepted review debt: none. No repair override or authorization was used.
+- Push/publish state: nothing pushed or published.

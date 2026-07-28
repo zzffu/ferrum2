@@ -2,7 +2,7 @@
 id = "M2-T01"
 title = "Establish method-bound SIP022 UDP crypto capabilities and fixtures"
 milestone = "M2"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = []
@@ -92,10 +92,21 @@ git diff --check
 
 ## Completion evidence
 
-由Team Lead integration后填写：
-
-- Branch/worktree/candidate and integrated commit:
-- Architect/QA full/targeted review and stable finding IDs:
-- Exact validation exits and test-budget counts/baseline:
-- Accepted review debt:
-- Push/publish state:
+- Branch/worktree/candidates: `codex/ticket/m2-t01`,
+  `C:\project\ferrum2\.worktrees\m2-t01`; initial
+  `594b4c623ccbf84b39ac0af3a65d2737e8ecd126`, repaired
+  `c7ebe918e2d02664ec21fcfad85c301cbb6d3c01`. Product integration is
+  `0dff5c104149e7042f5e62dc10831f208a0e16ad`.
+- Reviews: QA full `PASS`; Architect full `BLOCK` on
+  `ARCH-M2-T01-001` (`blocker`). The one substantive repair bound session
+  identity to its private packet-counter lineage; Architect targeted
+  re-review `PASS` resolved the finding. Exact-SHA Wave-1 Architect and QA
+  integration gates both `PASS`, with no new finding.
+- Validation: crypto tests 20/20 and architecture/workspace-policy tests
+  24/24 passed; strict Clippy, fmt, metadata/tree checks, `git diff --check`,
+  binary build, authoritative quick 3/3 and full 4/4 all exited 0 on the
+  reviewed candidates/integration as applicable.
+- Ticket test budget `PASS`: code `8322`, tests `16151`, ratio `1.941`,
+  baseline `2.041`; delta `602/392`, allowance `722`.
+- Accepted review debt: none. No repair override or authorization was used.
+- Push/publish state: nothing pushed or published.

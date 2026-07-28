@@ -1,5 +1,30 @@
 # CI 与验证状态
 
+## 当前 M2 execute 状态
+
+- **Wave-1 product integration:** exact
+  `0dff5c104149e7042f5e62dc10831f208a0e16ad` on
+  `codex/integration/m2`; contains repaired M2-T01 candidate
+  `c7ebe918e2d02664ec21fcfad85c301cbb6d3c01` and repaired M2-T03
+  candidate `491954d8ea8fdf5faad17b0b360f353283d44898`.
+- **Reviews:** T01 QA full `PASS`; Architect full `BLOCK` on
+  `ARCH-M2-T01-001`, followed by one substantive repair and targeted `PASS`.
+  T03 Architect/QA full `BLOCK` on `ARCH-M2-T03-001` and
+  `QA-M2-T03-001`; one combined repair received both targeted `PASS`
+  verdicts. Wave-1 exact-SHA Architect and QA integration gates both `PASS`;
+  no blocker/major finding or accepted review debt remains.
+- **Local gates:** workspace binary build, authoritative quick 3/3 and full
+  4/4, workflow validation/review-state/integration-gate checks, and
+  `git diff --check` all exit 0. An initial full run lost an exact lifecycle
+  rebind race to the user's existing `sing-box.exe`; the focused harness
+  passed 5/5 and the unchanged-candidate full retry passed. This is recorded
+  as environmental evidence, not a product waiver.
+- **Test budget:** combined ticket gate `PASS`: code `9710`, tests `16937`,
+  ratio `1.744`, baseline `2.041`; delta `1990/1178`, allowance `2110`.
+- **Remote/release:** nothing pushed or published. M2-T05 hosted UDP
+  qualification and exact-SHA remote evidence have not run and are not
+  credited. The next local dependency-ready ticket is M2-T02.
+
 ## 当前 M1 closeout 状态
 
 - **Current product/control integration checkpoint:**
