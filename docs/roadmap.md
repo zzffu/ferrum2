@@ -27,7 +27,7 @@ non-overlapping ownership。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
-- **Status:** executing
+- **Status:** validating
 - **Objective:** 建立第一个真实、可观察的产品路径：两个独立二进制在离线验证
   typed TOML 后，通过 SOCKS5 TCP `CONNECT`、SIP022
   `2022-blake3-aes-128-gcm` 和 server direct outbound 完成 local TCP echo。
@@ -39,8 +39,8 @@ non-overlapping ownership。
     selected conformance profile与mechanical realization，既有安全/协议/release
     结果不变，DEC-014～020已关闭；
   - `SPEC-0001` 与 `TEST-0001` 的ADR-0010～0017 amendments已Approved；
-  - M0-T01～M0-T08已done；M0-T09/T10已ready，其non-overlapping ownership和
-    量化acceptance已通过planning validation及Product/Architect/QA contract gate。
+  - M0-T01～M0-T10均已done；T09/T10的implementation、integration、
+    exact-SHA review与hosted evidence gates均已通过。
 - **Exit criteria:**
   1. Cargo workspace、planned crates、两个 composition roots、pinned MSRV/
      dependencies、`Cargo.lock`、`GPL-3.0-only` metadata 和 workspace
@@ -143,11 +143,11 @@ non-overlapping ownership。
     musl与四项interop对应jobs已通过，剩余四个根因全部位于CI evidence seam。
   - M0-T09：建立Cargo-managed、`test = false`的hosted qualification；本机
     metadata/check/quick/full编译并lint它但不执行reference cases，hosted一次运行
-    聚合四案且4/4才成功。
+    聚合四案且4/4才成功；integrated于`37aba8a`并done。
   - M0-T10：把workflow收敛为quality、MSRV、三平台matrix和interop四个
     definitions/六个rendered results；删除scope/YAML/snapshot自审计、
-    filter/count、linker-help和重复Ubuntu jobs。T09/T10可并行实现，T10只在
-    T09 interface集成后合入。
+    filter/count、linker-help和重复Ubuntu jobs；final candidate `5ad65d6`，
+    integrated于exact material SHA `8318ef1`并done。
 
   Dependency graph：
 
@@ -159,19 +159,20 @@ non-overlapping ownership。
    └─ M0-T06 ─────────────┘
 
   M0-T01 ── … ── M0-T08: done at 5969bfd
-                        ├─ M0-T09 hosted interop seam
-                        └─ M0-T10 workflow profile
-  M0-T10 integration: blocked by M0-T09
+                        ├─ M0-T09 hosted interop seam: done
+                        └─ M0-T10 workflow profile: done
+  material integration: 8318ef1; hosted run 30331336772: 6/6 success
   ```
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** 当前local/remote integration
-  `5969bfdafea9056feb179e0a8454dd5dc7fe5bce`包含M0-T01～T08 reviewed
-  implementation。GitHub Actions run `30322690937` attempt 1是不可豁免的
-  6/11 success、5/11 failure，因此该SHA不是M0 close commit；旧
-  `51fb7327`/`30301746374`也继续作为2/11失败历史。ADR-0017 planning在独立
-  `codex/plan/m0-ci-convergence`进行，尚未集成、推送或触发workflow。
-- **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
+  `8318ef106d6cd4e029bd3b02aa64125fabdda462`包含M0-T01～T10 reviewed
+  implementation。GitHub Actions run `30331336772` attempt 1在该exact SHA
+  整体success，quality、MSRV、Windows MSVC、Linux GNU、Linux musl与interop
+  六项required results全部success；旧失败run保持历史记录。
+- **Resolved blocker history and remaining deferred risks:** M0没有open
+  canonical blocker；performance/10k-idle qualification按路线图留给M4。
+  M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
   CAVP ZIP 不含批准的两组 numeric cases；ADR-0008 窄勘误已经显式授权并把
@@ -355,7 +356,7 @@ non-overlapping ownership。
 | DEC-017 | resolved in M0 narrow amendment | external四案先比较pre-FIN双向各16386-byte distinct payload，再观察ordered clean-EOF convergence且不声明target-FIN causality；peer FIN后新reverse drain继续由同一SHA的M0-E2E-001/M0-LIFE-003独立blocking；pin/wire/product不变 | `ADR-0014`、`SPEC-0001`、`TEST-0001`、M0-T08 |
 | DEC-018 | resolved in M0 hosted-rebind amendment | client/server listener仅在Unix bind前启用reuse-address，Windows保持default且禁止reuse-port；harness首次listener与exact probe镜像同策略bind+listen并保留live-owner collision；新增唯一既有pin的`socket2` dev edge；四类hosted evidence-script portability缺陷fail closed修复 | `ADR-0015`、`SPEC-0001`、`TEST-0001`、M0-T07/M0-T08 |
 | DEC-019 | resolved in M0 invariant/evidence amendment | 产品/安全/release outcome为normative invariant；具体fixture/probe/test-only edge为selected conformance profile，可在执行前以等强、可审计、single-writer方式替换；机械修复不再自动要求新产品ADR | `ADR-0016` Accepted、`SPEC-0001`/`TEST-0001` amendments Approved、M0-T01/T02/T03/T06/T07/T08 |
-| DEC-020 | resolved in M0 CI convergence | qualification保留在Cargo compile/lint policy内但本机不执行external entry；hosted profile收敛为quality、MSRV、三平台matrix与一个四案interop，共六项result；删除11-job/self-audit/filter/link-help机械合同 | `ADR-0017` Accepted、`SPEC-0001`/`TEST-0001` amendments Approved、M0-T09/T10 ready |
+| DEC-020 | resolved in M0 CI convergence | qualification保留在Cargo compile/lint policy内但本机不执行external entry；hosted profile收敛为quality、MSRV、三平台matrix与一个四案interop，共六项result；删除11-job/self-audit/filter/link-help机械合同 | `ADR-0017` Accepted、`SPEC-0001`/`TEST-0001` amendments Approved、M0-T09/T10 done；exact `8318ef1` run `30331336772`六项success |
 
 ## 风险登记
 
@@ -388,4 +389,4 @@ non-overlapping ownership。
 | 2026-07-27 | M0 binary paused-time contract amendment | 接受两个binary-local exact Tokio `test-util` dev edges与zero-additional-lock-delta policy；不改root/normal/production graph | ADR-0012要求targeted binary paused-time tests，但现有manifest ownership使其无法编译；root/normal/injection/real-time替代均更广或更弱 | ADR-0013 Accepted；勘误base `24ddecf`的Product/Architect/QA final gates均PASS |
 | 2026-07-28 | M0 hosted-rebind/evidence portability amendment | 接受Unix-only listener reuse、default Windows、same-policy exact bind+listen及唯一`socket2` harness edge；T08只修正两处full-name exact filters与三个platform linker probes | exact `51fb7327`的run `30301746374`及独立WSL复现把9个failed jobs归约为Linux rebind及四类CI evidence defects；不改变wire/product/API/config/job matrix/remote授权 | ADR-0015 Accepted；SPEC/TEST amendments Approved；Product/Architect/two QA document gates PASS；workflow validate/diff-check |
 | 2026-07-28 | M0 invariant/evidence contract amendment | 接受三层合同与执行前equivalent substitution；T01 ownership改为single-writer默认协调，事实性provenance勘误与机械evidence修复不再自动需要产品ADR | 历史ADR-0008/0011/0013/0014/0015证明写死的来源、probe、test edge或第三方时序会形成非产品blocker；不改变任何wire/security/product/platform/job/exact-SHA gate | ADR-0016 Accepted；SPEC/TEST amendments Approved；proposal `a389aa9`的Product/Architect/QA exact-SHA document gates均PASS |
-| 2026-07-28 | M0 CI evidence convergence | 接受Cargo-managed non-test qualification及四个job definitions/六个rendered results直接证明quality、MSRV、三平台与四案interop；本机编译/lint但不执行external entry；删除scope self-audit、filter/count、link-help及重复jobs | exact `5969bfd` run `30322690937`的6/11、5 failure再次证明mechanical realization被误当release invariant；不改变wire/security/platform/reference/exact-SHA结果 | ADR-0017 Accepted；SPEC/TEST amendments Approved；M0-T09/T10 ready；Product/Architect/QA最终合同复核无BLOCKER/REQUIRED；未实现、未推送 |
+| 2026-07-28 | M0 CI evidence convergence | 接受Cargo-managed non-test qualification及四个job definitions/六个rendered results直接证明quality、MSRV、三平台与四案interop；本机编译/lint但不执行external entry；删除scope self-audit、filter/count、link-help及重复jobs | exact `5969bfd` run `30322690937`的6/11、5 failure再次证明mechanical realization被误当release invariant；不改变wire/security/platform/reference/exact-SHA结果 | ADR-0017 Accepted；SPEC/TEST amendments Approved；M0-T09/T10 done；exact `8318ef1`的local/review gates及run `30331336772`六项success |

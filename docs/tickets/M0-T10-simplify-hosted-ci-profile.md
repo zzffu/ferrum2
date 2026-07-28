@@ -2,7 +2,7 @@
 id = "M0-T10"
 title = "Replace the self-auditing eleven-job workflow with an outcome profile"
 milestone = "M0"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = []
@@ -98,13 +98,36 @@ run建立。
 
 ## Blocker record
 
-本票取代四个mechanical derivatives，不把旧run改为PASS。M0 release仍等待
-M0-T09/T10 integration、local/review gates和一个另行授权的新hosted run。
+本票取代四个mechanical derivatives，不把旧run改为PASS。最终集成候选
+`8318ef106d6cd4e029bd3b02aa64125fabdda462`完成local/review gates后，使用
+一次性精确授权正常推送到`refs/heads/codex/integration/m0`。GitHub Actions
+run `30331336772` attempt 1在同一SHA上完成quality、MSRV、Windows MSVC、
+Linux GNU、Linux musl和interop六项success，整体workflow success。
+`M0-CI-CONVERGENCE`及其MSRV derivative已据此关闭。
 
 ## Completion evidence
 
-- Branch:
-- Commit(s):
-- Required reviewer role/profile and verdict:
-- Exact candidate SHA:
-- Integrated commit:
+- Branch: `codex/ticket/m0-t10`
+- Commit(s): `e06a7eac61b30f14a7b78176d0c4d7830c0a6ee1`,
+  `ba874fa97c2929c6115d9181aaddf73360dd375b`,
+  `3d76d225260c207252a2ced7085975e79e69dfcc`,
+  `5ad65d6eaa9e1cbd6120d599cc5dead763287dfe`
+- Required reviewer role/profile and verdict: Architect
+  (`gpt-5.6-sol/max`) PASS；QA (`gpt-5.6-sol/high`) PASS；最终集成与托管
+  evidence QA均PASS。均未使用fast-mode override；实际launch metadata不可观察，
+  因此标记为unverified。
+- Exact candidate SHA: `5ad65d6eaa9e1cbd6120d599cc5dead763287dfe`
+- Integrated commits: `8ab6292`, `e4b68f3`, `f626ca5`, `e41dbd2`；
+  最终exact integration SHA
+  `8318ef106d6cd4e029bd3b02aa64125fabdda462`
+- Validation: `cargo build --workspace --bins --locked`、authoritative quick
+  3/3、full 4/4、fresh external target的Rust 1.85
+  check→build binaries→workspace test、workflow unit 53/53、qualification
+  pure-state 8/8、workspace policy 17/17、metadata/tree/diff-check/doctor/
+  validate均exit 0。未在本机运行`m0-qualification`、reference、网络或WSL2
+  interoperability。
+- Hosted evidence:
+  [run 30331336772 attempt 1](https://github.com/zzffu/ferrum2/actions/runs/30331336772/attempts/1)
+  在exact integration SHA上整体success，六项required results全部success。
+  匿名job-log下载的HTTP 403仅限制文本可见性；exact reviewed workflow中
+  interop success必然要求两个provider setup为0、qualification exit为0且4/4。

@@ -3,27 +3,27 @@
 ## 当前 M0 执行状态
 
 - **Current product integration checkpoint:**
-  `5969bfdafea9056feb179e0a8454dd5dc7fe5bce` on
-  `codex/integration/m0`; T01～T08 are done at this checkpoint.
+  `8318ef106d6cd4e029bd3b02aa64125fabdda462` on
+  `codex/integration/m0`; it contains reviewed material for M0-T01～T10.
+  Local `master` was fast-forwarded to it, and the current evidence checkpoint
+  records all ten durable ticket states as done.
 - **Date/environment:** 2026-07-28（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1
-- **Latest hosted run:** exact `5969bfd` GitHub Actions run `30322690937`,
-  attempt 1, completed **6 success / 5 failure**. Security、lifecycle、Linux
-  GNU、Linux musl及两个reference interop jobs成功；失败归约为四个CI/evidence
-  mechanics：runner缺`rg`、Linux timeout kind、substring test filter及
-  `link.exe /?` exit假设。没有观测到wire、crypto、replay、config、runtime、
-  artifact或interop产品缺陷。该run保持整体失败，不追认、不拼接。
-- **Current implementation frontier:** `ADR-0017`已Accepted、同步SPEC/TEST
-  amendments已Approved，M0-T09/T10在`codex/plan/m0-ci-convergence`已ready。目标是：
-  qualification由Cargo编译/lint但本机不执行external entry；hosted初始profile为quality、
-  MSRV、三平台matrix及一个四案interop，共四个definitions/六个rendered results；
-  删除11-job self-audit、filter/count、linker-help和重复Ubuntu jobs。
-- **Current blocker ledger:** 仅`M0-CI-CONVERGENCE`保持open，代表T09/T10实现、
-  integration、新SHA本地/review gate及另行授权后的六项hosted evidence尚未完成。
-  `M0-T07-HOSTED-REBIND`已由run `30322690937`的lifecycle success关闭；四个T08
-  mechanics roots按ADR-0017显式迁移并resolve，均不构成对旧失败run的追认。
-- **Authorization:** 当前没有push、rerun、PR、branch-protection、tag或release
-  授权；planning不触发任何remote effect。
+- **Latest hosted run:** exact `8318ef106d6cd4e029bd3b02aa64125fabdda462`
+  GitHub Actions run `30331336772`, attempt 1, push event，整体
+  **success**。同一run/attempt的quality、MSRV、Windows MSVC、Linux GNU、
+  Linux musl和interop六项required results全部success；没有跨run拼接。
+- **Current implementation frontier:** M0-T09/T10已done。Cargo-managed
+  qualification由本机compile/lint与pure-state tests覆盖但不执行external entry；
+  hosted profile已收敛为quality、MSRV、三平台matrix及一个四案interop，共四个
+  definitions/六个rendered results；11-job self-audit、filter/count、
+  linker-help和重复Ubuntu jobs已删除。
+- **Current blocker ledger:** M0没有open canonical root。
+  `M0-CI-CONVERGENCE`及其`M0-T10-MSRV-FRESH-BINARIES` derivative已由
+  exact-SHA local/review gates和run `30331336772`关闭。
+- **Authorization:** 一次性scope
+  `m0-20260728-final-integration-push-8318ef1`已在正常push前原子消费并耗尽。
+  当前没有第二次push、rerun、PR、branch-protection、tag或release授权。
 
 ## 历史修复状态（保留记录）
 
@@ -266,14 +266,14 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 
 | Gate | 状态 | 证据/缺口 | 最早解除里程碑 |
 |---|---|---|---|
-| Workflow doctor/validate | PLANNING PASS | doctor、validate、frontier、next均exit 0；frontier为T09/T10，open root仅`M0-CI-CONVERGENCE` | 当前planning |
-| M0 execution contracts | ACCEPTED / IMPLEMENTATION REQUIRED | 产品/security/platform/reference/exact-SHA结果不变；11-job topology与self-audit改为replaceable profile | M0-T09/T10 |
-| GitHub Actions workflow | `30322690937` FAIL / REDESIGN PLANNED | exact `5969bfd`为6/11、整体失败；四个失败根因均是evidence mechanics。新profile尚未实现或运行 | M0-T10 |
-| Local quick/full | HISTORICAL PASS / NEW SHA REQUIRED | 新合同要求Cargo-managed qualification可编译/lint但不执行external entry；实现后在新exact SHA重跑 | M0-T09/T10 |
-| Security/KAT/negative | HOSTED PASS AT `5969bfd` / NEW SHA REQUIRED | run `30322690937` security成功；最终不能跨SHA继承，由新`quality`完整执行一次 | M0-T10 |
-| Lifecycle/backpressure | HOSTED PASS AT `5969bfd` / NEW SHA REQUIRED | run `30322690937` lifecycle成功，证明rebind已不再是当前根因；最终由新`quality`重跑 | M0-T10 |
-| External interop | HOSTED FOUR DIRECTIONS PASS / PROFILE BLOCKED | 两个旧interop jobs成功，但最终不能拼接；新Cargo-managed non-test driver须一次报告4/4，本机不得执行entry | M0-T09/T10 |
-| Linux GNU/musl + Windows | GNU/MUSL PASS / WINDOWS MECHANICAL FAIL | GNU/musl artifact jobs成功；Windows在artifact gate前被`link /?`假设阻塞。新profile以实际release build/native run证明 | M0-T10 |
+| Workflow doctor/validate | PASS | exact material SHA上的doctor、validate、frontier/next与diff-check均exit 0；无open root | M0 |
+| M0 execution contracts | IMPLEMENTED / PASS | 产品/security/platform/reference/exact-SHA结果不变；薄profile与Cargo-managed qualification已集成和review | M0 |
+| GitHub Actions workflow | `30331336772` SUCCESS | exact `8318ef1`，attempt 1，整体及六项required results全部success | M0 |
+| Local quick/full | PASS | exact `8318ef1` authoritative quick 3/3、full 4/4与workspace binaries build均exit 0 | M0 |
+| Security/KAT/negative | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
+| Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
+| External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
+| Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
 | Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
 
 ## 已接受、待实现的 M0 CI profile
@@ -306,23 +306,20 @@ coverage/profiling output 和 rendered docs 属于 generated artifacts，不提�
 
 ## 已知缺口、flakes 与 skipped coverage
 
-- Remote run `30322690937` 已真实执行且失败；它不是flake或skipped-pass，也不因
-  六个success而部分关闭M0。新的exact SHA必须按ADR-0017新profile重新产生完整
-  六项run。旧`30301746374`同样保持失败历史。
+- Remote run `30331336772`已在exact `8318ef1`真实执行并整体success，六项结果
+  均来自同一attempt。旧`30322690937`与`30301746374`继续保持失败历史，不追认、
+  不拼接。
 - Windows 上技能文档给出的 `python3` 命令不可用；当前可复现入口是 `python`。
   是否修改 workflow helper 的跨平台调用说明留待单独控制面决策，不阻塞本次文档。
 - M0 已固定build compiler 1.97.1、MSRV 1.85.0 check/test、三个target
   triples、reference versions/checksums、fixture provenance、GitHub
   runner/security和unavailable=FAIL/BLOCK contract；job topology不再固定。
-  当前缺少T09/T10实现、新exact SHA本地/review gates及同一新run/attempt的
-  六项success close evidence。
-- `origin` exact URL与push capability已验证；exact `5969bfd`已在
-  `origin/codex/integration/m0`产生run `30322690937`。新exact SHA仍须
-  先通过local integration、Architect与QA并获得separately authorized push，才可
-  非force更新同一授权分支并等待新run；master/PR/tag/release/branch protection/
-  rerun及其他remote mutation仍未授权。
+  T09/T10实现、exact-SHA local/review gates及同一run/attempt六项success均完成。
+- `origin/codex/integration/m0`现精确指向`8318ef1`；一次性push授权已耗尽。
+  master remote、PR、tag、release、branch protection、rerun、第二次push及其他
+  remote mutation仍未授权。
 - 尚未定义 resource stability threshold、soak duration、benchmark hardware
   或 comparison statistics；这是 M4 DEC-010，不阻塞 M0 implementation。
-- M0 CI amendment接受后，workflow doctor/validate、
+- M0 CI amendment实现后，workflow doctor/validate、
   `frontier --milestone M0 --json`、`next --milestone M0 --json` 和
-  `git diff --check` 均须重新通过；最终结果记录在本规划提交的完成报告。
+  `git diff --check`已重新通过；close mode仍负责最终里程碑归档。
