@@ -5,6 +5,10 @@
 - **Owners:** Architect / Team Lead
 - **Related milestone/spec/tickets:** M0；`docs/specs/SPEC-0001-m0-aes128-tcp-vertical-slice.md`；M0-T08；补充 ADR-0006；关闭 DEC-011
 
+`ADR-0017` 部分取代本 ADR 的 exact 11-job topology、job/name/command allocation、
+exact timeout与provider-help probe；GitHub Actions provider、trigger/security、
+fixed runners、exact-SHA single-run和FAIL/BLOCK边界继续规范。
+
 ## Context and problem
 
 ADR-0006 已冻结 M0 的 reference pins、四项互操作、MSRV、三目标 artifact smoke

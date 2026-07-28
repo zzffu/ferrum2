@@ -7,10 +7,11 @@
 - **ADR-0014 amendment:** Approved
 - **ADR-0015 amendment:** Approved
 - **ADR-0016 amendment:** Approved
+- **ADR-0017 amendment:** Approved
 - **Milestone:** M0
-- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`、`ADR-0014`、`ADR-0015`、`ADR-0016`
+- **Related ADRs:** `ADR-0001`、`ADR-0002`、`ADR-0003`、`ADR-0004`、`ADR-0005`、`ADR-0006`、`ADR-0007`、`ADR-0008`、`ADR-0009`、`ADR-0010`、`ADR-0011`、`ADR-0012`、`ADR-0013`、`ADR-0014`、`ADR-0015`、`ADR-0016`、`ADR-0017`
 - **Test plan:** `docs/test-plans/TEST-0001-m0-aes128-tcp-vertical-slice.md`
-- **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08
+- **Tickets:** M0-T01、M0-T02、M0-T03、M0-T04、M0-T05、M0-T06、M0-T07、M0-T08、M0-T09、M0-T10
 
 ## Objective
 
@@ -485,42 +486,54 @@ workflow 使用
 提升权限。required jobs 不使用 cache，不依赖 cache hit，不使用
 `continue-on-error`，不读取 `secrets.*`。
 
-required job ID 和 displayed name、runner、timeout 精确为：
+ADR-0017 的 initial selected profile 为四个 definitions、六个 rendered
+results：
 
-| Required job | Runner | Timeout (minutes) |
-|---|---|---:|
-| `m0-host-quick` | `ubuntu-24.04` | 60 |
-| `m0-security` | `ubuntu-24.04` | 60 |
-| `m0-lifecycle` | `ubuntu-24.04` | 60 |
-| `m0-local-e2e` | `ubuntu-24.04` | 60 |
-| `m0-integration-full` | `ubuntu-24.04` | 60 |
-| `m0-msrv` | `ubuntu-24.04` | 60 |
-| `m0-windows-msvc` | `windows-2022` | 60 |
-| `m0-linux-gnu` | `ubuntu-24.04` | 60 |
-| `m0-linux-musl` | `ubuntu-24.04` | 60 |
-| `m0-interop-sing-box` | `ubuntu-24.04` | 60 |
-| `m0-interop-shadowsocks-rust` | `ubuntu-24.04` | 60 |
+| Definition | Runner / matrix | Required result |
+|---|---|---|
+| `quality` | `ubuntu-24.04` | 先`cargo build --workspace --bins --locked`，再运行`workflow.toml` full四条命令；current-toolchain security、lifecycle、local E2E、unit/integration与docs只运行一次 |
+| `msrv` | `ubuntu-24.04` | Rust 1.85.0 `check --workspace --all-targets --locked`及`test --workspace --locked` |
+| `platform` | explicit matrix：`windows-2022` Windows MSVC；`ubuntu-24.04` Linux GNU/musl | 三个cells均执行各自artifact/config/detection/static结果；`fail-fast: false` |
+| `interop` | `ubuntu-24.04` | Cargo-managed non-test qualification binary尝试并分别报告M0-INT-001～004；4/4才成功 |
 
-`ubuntu-latest`、`windows-latest` 与任何 `*-latest` 禁止。每个 job checkout 后
-断言 clean worktree 和 `git rev-parse HEAD == GITHUB_SHA`。platform/interop
-job 在自己的 fresh VM 内构建当前 commit binaries，不消费其他 job/run 的
-ferrum2 artifact。
+job definition/name/count与exact timeout不是产品不变量。每个job仍有明确bounded
+timeout；`ubuntu-latest`、`windows-latest`与任何`*-latest`禁止。每个job在
+生成文件前断言clean worktree和`git rev-parse HEAD == GITHUB_SHA`，从当前
+commit构建所需ferrum2 artifacts，不消费其他job/run的ferrum artifact。
 
-`m0-linux-musl` 固定安装 `musl`/`musl-dev`/`musl-tools=1.2.4-2`，用
+本机authoritative commands仍只有`workflow.toml` quick/full。hosted
+qualification是`ferrum2-m0-harness`的Cargo-managed binary，manifest显式
+`test = false`；metadata/check/Clippy可见并受workspace unsafe/lint/dependency/
+license/lock policy约束，但普通workspace tests即使带all-features也不执行其
+entry，不要求reference env/binary/network。本机可运行的qualification focused
+tests只能是无socket/process/network的pure state tests。interop job以Cargo构建并
+运行closed无参数entry；entry可用固定参数调用`git`读取checkout identity，随后
+必须在任何network/socket I/O或reference/ferrum child前验证GitHub Linux、clean
+checkout及`HEAD == GITHUB_SHA`，且不接受arbitrary URL/path/version。
+
+`platform/linux-musl` cell固定安装 `musl`/`musl-dev`/`musl-tools=1.2.4-2`，用
 `musl-gcc` 为 linker 构建两个 `x86_64-unknown-linux-musl` release binaries，
 原生运行各自 valid/invalid `--check-config`，并以 `file` 与
 `readelf -hW/-lW/-dW` 证明两个 artifact 均无 `PT_INTERP`/`DT_NEEDED`。
-`m0-linux-gnu` 构建并原生运行两个 `x86_64-unknown-linux-gnu` release
+`platform/linux-gnu` cell构建并原生运行两个 `x86_64-unknown-linux-gnu` release
 artifacts 的 valid/invalid config matrix，同时阻塞运行 M0-DETECT-002。
 Windows 2022 job 同样运行两个 MSVC artifacts 的 config matrix 和
-M0-DETECT-002。精确 command/test allocation 见 TEST-0001。
+M0-DETECT-002。实际release build和native execution证明linker可用；不运行
+`link.exe /?`、GNU/musl linker-help/canonicalization或backend探针。结果与命令
+mapping见TEST-0001。
 
-interop job 执行 reference binary 前必须核实 ADR-0006 既有固定
+interop driver执行reference binary前必须核实ADR-0006既有固定
 SHA-256、size/version 和 license record；只使用 ADR-0006 的 synthetic PSK，
-不读取 repository secrets。每个 required job 记录 run ID/attempt、job、
+不读取repository secrets。它将两个reference分别provision；一个reference失败时
+其两案以同一setup root报告FAIL且不声称执行，另一个reference的可运行cases仍
+尝试。四案分别隔离temp/ports/children/deadline，
+单案失败、timeout、panic或cleanup failure后继续收集其余案，最终输出固定四行
+summary，字段为case ID、PASS/FAIL和可选canonical root；非4/4为失败。
+
+每个required job记录run ID/attempt、job、
 `GITHUB_SHA`、`RUNNER_OS`/`RUNNER_ARCH`、`ImageOS`、`ImageVersion`、
-OS/kernel、rustc/cargo/linker；CI status 链接 `Set up job` 中 exact
-`Included Software` URL。platform job 另记录 artifact SHA-256 和 linkage。
+OS/kernel和rustc/cargo；platform job另记录artifact SHA-256及适用的native
+artifact/linkage evidence。
 
 GitHub-hosted VM 没有本项目可固定的 OCI image digest；上述 provider-native
 runner evidence 被批准用于 M0 smoke，但不是 M3 完整平台资格。job 启动后的
@@ -529,8 +542,10 @@ push、provider 或 required job 不可用导致没有结果是 BLOCKED；missin
 skipped、cancelled 或 neutral 均不是 PASS。
 
 M0 close evidence 只能来自另行授权 push 后的一次完整 GitHub Actions run：
-同一 run ID/attempt 的 11 jobs 全部 success，且 `GITHUB_SHA` 精确等于批准的
-integration commit。不同 SHA 的 PR/manual run 和本机/WSL2 结果不能替代。
+同一run ID/attempt的六个预期rendered results全部success，且`GITHUB_SHA`
+精确等于批准的integration commit。完整workflow conclusion必须success；
+missing/skipped/cancelled/neutral/timed-out或无法归属的result均非PASS。不同SHA
+的PR/manual run和本机/WSL2结果不能替代。
 
 ## Observability
 
@@ -549,8 +564,8 @@ integration commit。不同 SHA 的 PR/manual run 和本机/WSL2 结果不能替
 M0 是首次 schema/wire/runtime，无数据迁移。所有 replay/metric state in-memory。
 rollback 为通过 supervisor shutdown 后回退 integrated commit。更改 wire、
 dependency/module direction、config schema、secret seam、task topology、metrics
-schema、reference pins 或 ADR-0007 的 provider/workflow/job/runner/security/
-evidence contract 必须用新的 ADR/spec revision，不得静默编辑实现理由。远程
+schema、reference pins 或 ADR-0017 的 provider/security/result/failure
+contract 必须用新的 ADR/spec revision，不得静默编辑实现理由。远程
 revert、branch mutation 或 workflow rerun 仍需用户单独授权。
 
 只改变selected conformance profile或mechanical realization、且ADR-0016的全部
@@ -606,9 +621,12 @@ equivalence条件成立时，可以使用执行前的TEST/ticket amendment而不
    supervisor-owned metrics endpoint limits。
 10. **AC-10 Interoperability:** M0-INT-001～004 全部 required PASS；pin、asset
     checksum/version、pre-FIN双向bytes、ordered clean-EOF convergence与
-    sanitized diagnostics齐全，缺环境不得 skip-pass；两个 interop job 分别在
-    自己的 `ubuntu-24.04` clean VM 从
-    `GITHUB_SHA` 构建 ferrum2，并在执行 reference 前验证既有 pin/hash/version。
+    sanitized diagnostics齐全，缺环境不得 skip-pass；一个hosted-only interop
+    job从`GITHUB_SHA`构建ferrum2，并由Cargo-managed non-test qualification在
+    执行reference前验证既有pin/hash/version。driver尝试并分别报告全部四案；
+    一个reference provision或case失败不得掩盖另一个reference的可运行cases，
+    只有4/4与完整cleanup才exit 0。本机quick/full可编译/lint qualification，
+    但不得执行entry、external cases或OS/process helper tests。
     每案先完整逐byte比较双向各16386-byte distinct payload，再依次观察application
     client write-half close后的target clean `Ok(0)`、target成功write-half close后
     的application client clean `Ok(0)`；
@@ -620,45 +638,34 @@ equivalence条件成立时，可以使用执行前的TEST/ticket amendment而不
     M0-GATE-001～002、M0-CI-001～006 通过；三个 target release binaries 在
     固定 hosted runner 完成 valid/invalid config smoke，GNU/Windows
     M0-DETECT-002 和 musl static proof 完整；同一 pushed exact integration
-    commit 的一个 run/attempt 中 11 个固定 job 全部 success。
-12. **AC-12 Scope/provenance:** M0-SCOPE-001 通过；固定从
-    `b41c6127b1834ebd97246451fd92bafea50cb205` 到 integrated `HEAD` 的完整 diff
-    仍被逐项枚举。仅用户明确授权的既有 skill optimization
-    `d1ef4bcfb081a89c5da1185dcb7c57606f8ec77e` 中 23 个 exact out-of-band
-    control-plane paths 不进入 M0 内容/provenance 扫描；该例外必须同时固定
-    `d1ef4bcf` 的精确 parent、完整 commit path set、逐路径 blob identity，并要求
-    `d1ef4bcf` 是 `HEAD` ancestor。任一路径、内容、rename、descendant、near-miss
-    或额外 spillover 不匹配都 fail closed；不得使用目录 glob、移动 baseline 或
-    缩小 diff。其余完整 M0 diff 不含 non-goals、external binaries、generated
-    results 或真实 secrets；所有 fixture/reference/locked dependencies有来源和
-    license review记录；dependency
-    当前selected profile中production dependency surface精确等于ADR-0001经
-    ADR-0009部分取代后的集合；harness direct dev dependencies与lock hunk精确等于
-    ADR-0011经ADR-0015部分取代后的allowlist（两个primitive edges加一个
-    rebind-evidence `socket2` edge），两个binary dev-kind Tokio declarations精确
-    等于ADR-0013 allowlist且production trees不含`test-util`、lock无新增hunk，
-    package identities/resolved crypto features不变。若执行前按ADR-0016批准
-    equivalent substitution，则审计改为精确比较该amended profile，并另外证明
-    production/release graph、安全feature、version/source/license及coverage不弱于
-    本baseline；唯一批准的
-    `.github` path是M0-T08拥有的`.github/workflows/m0.yml`。
+    commit 的一个run/attempt中`quality`、`msrv`、三个platform cells及
+    `interop`六个rendered results全部success；job topology不再是永久不变量。
+    M0-MSRV-001保留Rust 1.85 check全部targets并实际运行workspace tests。
+12. **AC-12 Scope/provenance:** M0-SCOPE-001 通过；Team Lead、Architect和QA对
+    planning commit到integrated `HEAD`的ticket-owned
+    `git diff --name-status --find-renames`、`git diff --check`及
+    `cargo tree --workspace --locked`完成exact-SHA review。diff不含non-goals、
+    real secrets、external binaries或generated results；fixture/reference/
+    locked dependencies保留source、hash和license/rights记录；production graph、
+    unsafe/zeroize/secret policy与批准baseline一致。workflow/YAML/blob、test
+    count、linker help和用户已明确排除的skill optimization不由in-repo
+    `scope_audit`复刻或扫描。
 
 M0 只有在 AC-01～AC-12 同一 integrated commit 证据齐全时才能进入 close。
 
 ## Open questions
 
-ADR-0010～0015已批准，不留给 Engineer 自行决定的 M0 contract 问题。以下是
+ADR-0010～0017批准后，不留给 Engineer 自行决定的 M0 contract 问题。以下是
 执行期验证 contingency，不扩大实现权限：
 
 - T08已固定并验证reference asset byte size、checksum与精确`--version`输出；
   后续run任一不匹配仍阻塞，不自行换版本。
-- GitHub Actions provider 与 required workflow contract 已由 ADR-0007 固定；
-  workflow已实现，exact `51fb7327`已按一次授权push并产生失败run
-  `30301746374`。Origin固定URL已验证正确；修复后的新exact
-  `codex/integration/m0`必须先通过T08 local integration、Architect与QA gates，
-  并获得separately authorized push，才可非force更新同名remote branch并等待新
-  Actions run。master、PR、branch protection、tag/release、rerun及其他remote
-  mutation均未授权。
+- GitHub Actions provider与result/security contract由ADR-0007经ADR-0017部分
+  取代后固定。exact `5969bfd`的run `30322690937`是不可豁免的6/11 overall
+  failure；它只证明该SHA上的六个局部结果，不能拼接。M0-T09/T10新exact
+  integration必须先通过local、Architect与QA gates，并获得separately
+  authorized push，才可非force更新授权remote branch并等待新Actions run。
+  master、PR、branch protection、tag/release、rerun及其他remote mutation均未授权。
 - zero-linger native probe若在 Windows/Linux 无法得到一致批准的 close class，
   必须停止并提议 ADR-0004 revision。
 - DEC-008（UDP）、DEC-009（M3 完整平台 qualification）、DEC-010（M4 performance/

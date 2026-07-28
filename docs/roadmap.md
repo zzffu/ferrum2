@@ -34,12 +34,13 @@ non-overlapping ownership。
 - **Entry conditions:**
   - bootstrap 的 vision、gap analysis、roadmap、CI baseline 已更新并通过
     workflow validation；
-  - `ADR-0001`～`ADR-0016` 已 Accepted；ADR-0016区分normative invariant、
+  - `ADR-0001`～`ADR-0017` 已 Accepted；
+    ADR-0016/0017区分normative invariant、
     selected conformance profile与mechanical realization，既有安全/协议/release
-    结果不变，DEC-014～019已关闭；
-  - `SPEC-0001` 与 `TEST-0001` 及ADR-0010～0016 amendments已 Approved；
-  - M0-T01～M0-T08 的 blockers、non-overlapping ownership 和量化 acceptance
-    已通过 workflow validation。
+    结果不变，DEC-014～020已关闭；
+  - `SPEC-0001` 与 `TEST-0001` 的ADR-0010～0017 amendments已Approved；
+  - M0-T01～M0-T08已done；M0-T09/T10已ready，其non-overlapping ownership和
+    量化acceptance已通过planning validation及Product/Architect/QA contract gate。
 - **Exit criteria:**
   1. Cargo workspace、planned crates、两个 composition roots、pinned MSRV/
      dependencies、`Cargo.lock`、`GPL-3.0-only` metadata 和 workspace
@@ -64,8 +65,9 @@ non-overlapping ownership。
      `x86_64-unknown-linux-gnu`、`x86_64-unknown-linux-musl` 对两个 release
      binaries 完成 locked build 与 matching-runner offline config smoke；
      GNU/Windows M0-DETECT-002、musl `file`/`readelf` static evidence 完整。
-     另行授权 push 后，GitHub Actions 一个 run ID/attempt 的 11 个固定 job 在
-     exact integration `GITHUB_SHA` 全部 success。
+     另行授权push后，GitHub Actions一个run ID/attempt的六个预期rendered
+     results在exact integration `GITHUB_SHA`全部success；job topology不是永久
+     产品合同。
 - **In-scope tickets:**
   - M0-T01：locked workspace、toolchain、license 与 core contracts；原 integration
     已 done，现依用户授权为 ADR-0009 的一次独占 manifest repair reopen，且为
@@ -135,7 +137,17 @@ non-overlapping ownership。
     success不可拼接，其余除T07 rebind外均为exact-filter、GNU/musl bare linker
     或Windows link-help evidence-script缺陷；T08按ADR-0015再次窄reopen。调度依赖已
     分为implementation与integration gate：T08的disjoint证据脚本修复可与active
-    T07并行，但在T07 done前不得集成或进入release gate。
+    T07并行，但在T07 done前不得集成或进入release gate。该轮修复最终集成于
+    `5969bfdafea9056feb179e0a8454dd5dc7fe5bce`，T01～T08均done；第二个
+    hosted run `30322690937`为6/11 success、5/11 failure，lifecycle、GNU、
+    musl与四项interop对应jobs已通过，剩余四个根因全部位于CI evidence seam。
+  - M0-T09：建立Cargo-managed、`test = false`的hosted qualification；本机
+    metadata/check/quick/full编译并lint它但不执行reference cases，hosted一次运行
+    聚合四案且4/4才成功。
+  - M0-T10：把workflow收敛为quality、MSRV、三平台matrix和interop四个
+    definitions/六个rendered results；删除scope/YAML/snapshot自审计、
+    filter/count、linker-help和重复Ubuntu jobs。T09/T10可并行实现，T10只在
+    T09 interface集成后合入。
 
   Dependency graph：
 
@@ -146,17 +158,19 @@ non-overlapping ownership。
    ├─ M0-T05 ─────────────┼─ M0-T07
    └─ M0-T06 ─────────────┘
 
-  M0-T08 implementation: independent on the current repair frontier
-  M0-T08 integration: blocked by M0-T07
+  M0-T01 ── … ── M0-T08: done at 5969bfd
+                        ├─ M0-T09 hosted interop seam
+                        └─ M0-T10 workflow profile
+  M0-T10 integration: blocked by M0-T09
   ```
 - **Deferred/out of scope:** AES-256、ChaCha20-Poly1305、UDP、完整 release
   qualification 和正式性能门；这些只延期到 M1-M4，不从 v0 删除。
 - **Integrated commit:** 当前local/remote integration
-  `51fb7327af966cfc3f4a49058ea6bf2284009dcf`包含M0-T01～T08 reviewed
-  candidates；Rust 1.85、quick/full、focused、interop、platform local evidence
-  及final Architect/QA gates均PASS，并且exact SHA仅推送到授权的
-  `origin/codex/integration/m0`。GitHub Actions run `30301746374` attempt 1
-  是不可豁免的2/11 success、9/11 failure，因此该SHA不是M0 close commit。
+  `5969bfdafea9056feb179e0a8454dd5dc7fe5bce`包含M0-T01～T08 reviewed
+  implementation。GitHub Actions run `30322690937` attempt 1是不可豁免的
+  6/11 success、5/11 failure，因此该SHA不是M0 close commit；旧
+  `51fb7327`/`30301746374`也继续作为2/11失败历史。ADR-0017 planning在独立
+  `codex/plan/m0-ci-convergence`进行，尚未集成、推送或触发workflow。
 - **Open blockers and risks:** M0-T05 与 M0-T06 已完成 ticket/final
   Architect、QA 和 integration gates；M0-T06 使用 repair 1/2 关闭了
   shutdown/accept race 与生命周期证据缺口。M0-T02 验证发现 ADR-0004 固定的
@@ -204,15 +218,14 @@ non-overlapping ownership。
   Architect BLOCK后，follow-up `6139544`已获Architect PASS、QA
   PASS_WITH_ACTIONS；T08 `3d5b1a2`后的follow-up `49c63082`也获Architect PASS、
   QA PASS_WITH_ACTIONS。两者随后已集成于`51fb7327`并通过local same-SHA
-  Team Lead/Architect/QA gates；首次hosted run的失败现由ADR-0015/T07/T08
-  窄reopen处理。
+  Team Lead/Architect/QA gates；后续repair已汇合到`5969bfd`，T01～T08 done。
   repair budget现按canonical root ID及该根因risk计数；mechanical修复与派生失败不消耗substantive
   budget，最终exact-SHA release gate不变。
-  GitHub Actions provider 已由 ADR-0007 固定；origin URL 与只读访问已验证，
-  exact `51fb7327`已按授权push并产生run `30301746374`；该run失败并永久保留。
-  ADR-0015/T07/T08窄修复、同一新SHA本地/Architect/QA再资格和新的11/11
-  run/attempt仍是hard blockers，不能skip，也不能用本机WSL2或旧run的两个interop
-  success代替。
+  GitHub Actions provider由ADR-0007固定，profile由ADR-0017重新收敛；origin URL
+  与只读访问已验证。exact `5969bfd` run `30322690937`为6/11整体失败并永久
+  保留。ADR-0017/T09/T10、同一新SHA local/Architect/QA再资格和新的六项
+  run/attempt仍是hard blockers，不能skip，也不能用本机WSL2或旧run局部success
+  代替。
   AEAD nonce reuse、secret leakage、认证前副作用和 task leak 仍是 P0 实现风险，
   其控制合同见 ADR-0002/0004/0005 与 TEST-0001。
 
@@ -342,6 +355,7 @@ non-overlapping ownership。
 | DEC-017 | resolved in M0 narrow amendment | external四案先比较pre-FIN双向各16386-byte distinct payload，再观察ordered clean-EOF convergence且不声明target-FIN causality；peer FIN后新reverse drain继续由同一SHA的M0-E2E-001/M0-LIFE-003独立blocking；pin/wire/product不变 | `ADR-0014`、`SPEC-0001`、`TEST-0001`、M0-T08 |
 | DEC-018 | resolved in M0 hosted-rebind amendment | client/server listener仅在Unix bind前启用reuse-address，Windows保持default且禁止reuse-port；harness首次listener与exact probe镜像同策略bind+listen并保留live-owner collision；新增唯一既有pin的`socket2` dev edge；四类hosted evidence-script portability缺陷fail closed修复 | `ADR-0015`、`SPEC-0001`、`TEST-0001`、M0-T07/M0-T08 |
 | DEC-019 | resolved in M0 invariant/evidence amendment | 产品/安全/release outcome为normative invariant；具体fixture/probe/test-only edge为selected conformance profile，可在执行前以等强、可审计、single-writer方式替换；机械修复不再自动要求新产品ADR | `ADR-0016` Accepted、`SPEC-0001`/`TEST-0001` amendments Approved、M0-T01/T02/T03/T06/T07/T08 |
+| DEC-020 | resolved in M0 CI convergence | qualification保留在Cargo compile/lint policy内但本机不执行external entry；hosted profile收敛为quality、MSRV、三平台matrix与一个四案interop，共六项result；删除11-job/self-audit/filter/link-help机械合同 | `ADR-0017` Accepted、`SPEC-0001`/`TEST-0001` amendments Approved、M0-T09/T10 ready |
 
 ## 风险登记
 
@@ -354,7 +368,7 @@ non-overlapping ownership。
 | task/session leak、unbounded queue 或错误 half-close | P0 | M0 | owner/termination contract、bounded tests、soak |
 | 外部实现/fixture/version/license 漂移 | P1 | M0 | pin/checksum/provenance 和 required-job policy |
 | musl/Windows 差异发现过晚 | P1 | M0 | early build smoke，M3 full qualification |
-| GitHub-hosted image weekly drift 或 provider outage | P1 | M0 | fixed OS labels、ImageOS/ImageVersion/Included Software evidence、unavailable=FAIL/BLOCK；不宣称M3资格 |
+| GitHub-hosted image weekly drift 或 provider outage | P1 | M0 | fixed OS labels、ImageOS/ImageVersion与toolchain版本用于追溯、unavailable=FAIL/BLOCK；不把Included Software URL形状当控制，也不宣称M3资格 |
 | Linux真实流量后listener exact地址无法立即restart，或reuse策略意外允许live-owner共享 | P0 | M0 | ADR-0015 Unix-only reuse/default Windows、禁止SO_REUSEPORT、same-policy bind+listen与live-owner negative、100-cycle gate |
 | “等价证据”被事后用作waiver或缩减coverage | P0 | M0 | ADR-0016要求执行前mapping、old/new claim、独立性/failure modes、exact candidate SHA与Architect/QA gate；旧失败不可追认 |
 | benchmark 不等价或噪声驱动错误优化 | P1 | M4 | frozen comparable config 和重复统计 |
@@ -374,3 +388,4 @@ non-overlapping ownership。
 | 2026-07-27 | M0 binary paused-time contract amendment | 接受两个binary-local exact Tokio `test-util` dev edges与zero-additional-lock-delta policy；不改root/normal/production graph | ADR-0012要求targeted binary paused-time tests，但现有manifest ownership使其无法编译；root/normal/injection/real-time替代均更广或更弱 | ADR-0013 Accepted；勘误base `24ddecf`的Product/Architect/QA final gates均PASS |
 | 2026-07-28 | M0 hosted-rebind/evidence portability amendment | 接受Unix-only listener reuse、default Windows、same-policy exact bind+listen及唯一`socket2` harness edge；T08只修正两处full-name exact filters与三个platform linker probes | exact `51fb7327`的run `30301746374`及独立WSL复现把9个failed jobs归约为Linux rebind及四类CI evidence defects；不改变wire/product/API/config/job matrix/remote授权 | ADR-0015 Accepted；SPEC/TEST amendments Approved；Product/Architect/two QA document gates PASS；workflow validate/diff-check |
 | 2026-07-28 | M0 invariant/evidence contract amendment | 接受三层合同与执行前equivalent substitution；T01 ownership改为single-writer默认协调，事实性provenance勘误与机械evidence修复不再自动需要产品ADR | 历史ADR-0008/0011/0013/0014/0015证明写死的来源、probe、test edge或第三方时序会形成非产品blocker；不改变任何wire/security/product/platform/job/exact-SHA gate | ADR-0016 Accepted；SPEC/TEST amendments Approved；proposal `a389aa9`的Product/Architect/QA exact-SHA document gates均PASS |
+| 2026-07-28 | M0 CI evidence convergence | 接受Cargo-managed non-test qualification及四个job definitions/六个rendered results直接证明quality、MSRV、三平台与四案interop；本机编译/lint但不执行external entry；删除scope self-audit、filter/count、link-help及重复jobs | exact `5969bfd` run `30322690937`的6/11、5 failure再次证明mechanical realization被误当release invariant；不改变wire/security/platform/reference/exact-SHA结果 | ADR-0017 Accepted；SPEC/TEST amendments Approved；M0-T09/T10 ready；Product/Architect/QA最终合同复核无BLOCKER/REQUIRED；未实现、未推送 |

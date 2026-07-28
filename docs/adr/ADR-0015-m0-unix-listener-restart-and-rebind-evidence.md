@@ -11,6 +11,8 @@ dependency/lock allowlist；ADR-0011 的其余 evidence、ownership、native req
 generation 和 policy 决定继续规范。ADR-0016 将具体probe实现与test-only
 dependency allowlist定义为selected conformance profile；immediate restart、
 live-owner exclusion、Unix/Windows安全边界继续是规范性不变量。
+ADR-0017 进一步取代本 ADR 为旧 11-job profile规定的exact filters、test-count、
+linker-help和workflow self-audit修复；listener行为与lifecycle结果不变。
 
 ## Context and problem
 
@@ -126,6 +128,9 @@ ADR-0011's harness exception is amended as follows:
 - the harness still cannot depend on any `ferrum2-*` package.
 
 ### Hosted evidence-script portability
+
+本节记录旧11-job profile的历史修复合同；ADR-0017接受后由其结果导向profile整体
+取代，不再逐项实现下列filter/linker/scope mechanics。
 
 Run `30301746374` 另有四项 T08-owned evidence-script defects。它们不改变上述
 socket decision，但修复后的单一 SHA 必须同时满足：

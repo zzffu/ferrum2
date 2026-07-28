@@ -12,6 +12,10 @@
   密码、SIP022 wire、安全、production package identity/resolved feature、
   production interface semantics、产品行为、平台结果或 release gate
 
+`ADR-0017` 显式更正本 ADR 曾把 exact 11-job profile列入protected boundary的
+分类错误：受保护的是required结果、exact pushed SHA、single run/attempt和
+security/failure语义；job topology与scope/linker/filter实现可替换。
+
 ## Context and problem
 
 M0 已经通过 ADR-0008、ADR-0011、ADR-0013、ADR-0014 和 ADR-0015 纠正多项
@@ -47,8 +51,9 @@ contract blocker；反过来把所有测试手段都视为可选，又会允许�
   replay、binding、secret lifetime、abortive/normal close classification保持不变。
 - v0/M0 product scope、config/API、one-owner-task lifecycle、half-close behavior、
   immediate-restart/live-owner-exclusion outcomes保持不变。
-- 四项 pinned external interop、MSRV、Windows/GNU/musl、十一项 GitHub Actions
-  job、同一 exact pushed SHA 和 11/11 success close gate保持不变。
+- 四项pinned external interop、MSRV、Windows/GNU/musl、同一exact pushed SHA
+  与single-run complete-success gate保持不变。原文曾同时冻结十一项jobs与
+  11/11；该profile classification由ADR-0017显式取代。
 - missing、skipped、zero-test、unavailable、timeout、unreviewed fixture 或不完整
   evidence 仍不是 PASS。
 - evidence 只能声称其 seam 实际观察到的事实；不得循环调用被测 production
@@ -106,7 +111,7 @@ protected boundary并fail closed；不能用“等价”自行扩大清单。
 | External interop | exact pins/checksums、四reference/direction、双向bytes、ordered clean EOF、本地post-FIN drain | payload字面值、test/helper/filter mechanics | 每方向distinct payload≥16386 bytes且FIN前逐byte相等，四案独立；Architect+QA |
 | Listener restart | terminated owner exact-address immediate restart、live-owner exclusion、Windows default exclusive、no reuse-port | same-policy bind/probe helper与test-only socket dependency | 五类cycles内逐案bind+listen，Unix/Windows分别证明；Architect+QA |
 | Provenance | fixture/reference bytes、expected result、accepted actual source/artifact identity、pin、license/distribution conclusion | 错误attribution的受审事实勘误、URL mirror、size/hash转录、metadata layout | byte identity、source/rights evidence、superseded trail、scope/provenance tests；Architect+QA |
-| GitHub Actions | ADR-0007全部provider/path/trigger/action pin/permission/job ID+name/runner/timeout、exact pushed SHA、one run/attempt、11/11 | shell spelling、完整test filter、compiler/linker executable discovery与evidence formatting | 同一11 jobs全部执行且fail-closed；QA，涉及security/supply-chain时Architect |
+| GitHub Actions（经ADR-0017取代） | provider/path/trigger/action pin/read-only permission/fixed runners、exact pushed SHA、one run/attempt、required results与FAIL/BLOCK | job topology/name/count/timeout allocation、test filter、linker probe、scope/YAML self-audit与evidence formatting | 同一run的全部selected results执行且fail-closed；QA，涉及security/supply-chain时Architect |
 
 ### Equivalent evidence substitution
 

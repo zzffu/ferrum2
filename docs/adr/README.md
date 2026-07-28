@@ -7,3 +7,7 @@ ADR-0016 distinguishes normative invariants from selected conformance profiles a
 mechanical realization. Changing an invariant still requires an explicit ADR/spec
 revision; an evidence-only substitution follows ADR-0016's pre-execution mapping
 and review rules and must not be used as a waiver.
+
+ADR-0017 applies that distinction to M0 CI: required product/security/platform/
+interop results remain contracts, while job topology and workflow self-audit are
+replaceable orchestration.

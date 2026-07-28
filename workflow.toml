@@ -70,9 +70,11 @@ test_plan_dir = "docs/test-plans"
 ticket_dir = "docs/tickets"
 handoff_dir = "docs/handoffs"
 
-# Keep these host-local and deterministic. Target-matrix builds, interoperability
-# tests, security tests, and performance regression checks supplement these Cargo
-# gates when their harnesses are added.
+# Keep these host-local and deterministic. True external interoperability executes
+# only in hosted qualification. Its non-test binary stays Cargo-managed so these
+# gates compile/lint it, but quick/full must never run its entry, download a
+# reference, or spawn an external reference process. Security and local
+# lifecycle/product behavior remain part of these Cargo gates.
 [validation]
 workflow = [
   "python -m unittest discover -s .agents/skills/milestone-workflow/tests -p test_*.py",

@@ -7,7 +7,8 @@
   `SPEC-0001`；`TEST-0001`；M0-T07、M0-T08；部分取代 ADR-0006 对 external
   interop half-close sequence 的未细化表述；ADR-0016将具体external evidence
   sequence定义为selected profile并保留同等或更强替换路径，不改变 ferrum2
-  half-close behavior
+  half-close behavior；ADR-0017进一步取代本ADR的libtest ignored/filter实现与
+  exact 11-job close allocation，但保留四案独立结果及wire/EOF/cleanup语义
 
 ## Context and problem
 
@@ -156,10 +157,11 @@ cargo test -p ferrum2-m0-harness --test local_e2e --locked success
 cargo test -p ferrum2-runtime --test half_close --locked
 ```
 
-- 两个interop jobs逐项用`--ignored --exact`运行四个case，并证明每个filter恰好
-  match/run一个test；一个job不能替代另一个。
-- final T08 scope、quick/full、Architect、QA与exact pushed-SHA 11-job gates仍
-  全部required。
+- 经ADR-0017取代后，一个hosted-only Cargo-managed qualification entry运行并
+  固定报告四个case；不使用libtest `#[ignore]`、filter或test-count guard。四案
+  仍是独立结果，任一案不能替代另一案。
+- final gate采用ADR-0017 selected profile：local quick/full、Architect、QA，
+  以及同一run/attempt对exact pushed SHA的六个rendered results全部success。
 
 ## References
 

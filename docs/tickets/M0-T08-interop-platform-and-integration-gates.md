@@ -36,6 +36,10 @@ acceptance = [
 
 # M0-T08: Qualify pinned interoperability, MSRV, and three target artifacts
 
+> **Superseded future profile:** 本票记录已完成的11-job selected profile及其历史
+> evidence。ADR-0017与M0-T09/T10取代后续M0 close的job/filter/linker/scope
+> mechanics；本票的reference、platform、安全、exact-SHA与失败历史不被改写。
+
 ## Outcome
 
 按 ADR-0007 建立 GitHub Actions workflow，并实际执行M0的黑盒reference harness、
