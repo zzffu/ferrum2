@@ -313,29 +313,46 @@ contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满�
 
 ## M2 — 完整 UDP 协议纵切与 UDP 互操作
 
-- **Status:** proposed
+- **Status:** planned
 - **Objective:** 通过 protocol API 和 server direct UDP path 交付三个方法的
   SIP022 UDP，不新增 SOCKS5 `UDP ASSOCIATE` 等公开 inbound。
-- **Entry conditions:** M1 closed；shared cipher/key lookup/wire contract 稳定；
-  UDP state/session spec 和资源 test plan 已批准。
+- **Entry conditions:** 已满足。M1 closed；shared method/key/address contracts
+  稳定；ADR-0020～0022 Accepted，SPEC/TEST-0003 Approved。
 - **Exit criteria:**
-  1. 三个方法分别通过 UDP KAT、header/address/bounds、tamper/truncation、
-     session/request-response binding 和 semantic failure tests。
-  2. session ID/packet ID 不造成 AEAD key/nonce pair reuse；packet ID
-     per direction monotonic，sliding window per direction 独立。
-  3. replay window 只在 authentication 和完整 semantic header validation
-     成功后原子更新；所需 replay state 至少保留 60 秒。
-  4. session count、buffered bytes、idle lifetime、channels/queues 均有明确
-     limit；背压、并发回收、timeout/cancellation 和 graceful shutdown 无泄漏。
-  5. protocol API 到 direct UDP echo 的成功/失败路径通过；三个方法的
-     `3 × 2 references × 2 directions = 12` 个 UDP interop cases 全部通过。
-  6. M0/M1 回归和 `workflow.toml` full gate 通过。
-- **In-scope tickets:** none yet；由 M2 `plan` 创建。
-- **Deferred/out of scope:** public UDP inbound、SOCKS5 UDP ASSOCIATE。
+  1. 三个方法通过 reviewed primitive/composite UDP fixtures、header/address/
+     65,507 bounds、tamper/truncation、timestamp、binding 和 semantic failures。
+  2. session ID、fresh ChaCha nonce 和 per-direction monotonic packet ID 不造成
+     AEAD key/nonce pair reuse；counter exhaustion fail closed。
+  3. 8,129-value per-direction replay window 只在 authentication、完整 semantics
+     和 capacity reservation 后原子 recheck/commit。
+  4. Server 按 authenticated client session ID 路由并支持 validated roaming；
+     client current+old associations、generation binding和state至少保留60秒。
+  5. session/allocated bytes/depth-4 queues/idle/resolution均执行冻结上限；
+     saturation、并发expiry、timeout/cancel/shutdown不泄漏或驱逐active state。
+  6. server same-port TCP+UDP atomic bind、offline config、closed telemetry和
+     三方法protocol-API→direct UDP local echo通过；TCP-only compatibility回归。
+  7. `M2-UDP-INT-001..012` 在同一authorized exact SHA/run/attempt取得
+     12/12+cleanup，缺失/unavailable不得waive。
+  8. M0/M1回归、test-budget ratchet、MSRV/三平台和`workflow.toml` full通过。
+- **In-scope tickets:** M2-T01～M2-T05，均`ready`。
+  Initial implementation frontier为M2-T01 + M2-T03：
+
+  ```text
+  M2-T01 crypto ───────┐
+                       ├─ M2-T02 protocol/replay ─┬─ M2-T04 composition
+  M2-T03 core/runtime ─┘                          └─ M2-T05 qualification impl
+                                                    │
+  M2-T04 ───────────── T05 integration/release ─────┘
+  ```
+
+- **Deferred/out of scope:** public client UDP inbound、SOCKS5 UDP ASSOCIATE、
+  SIP023/multi-user、routing/DNS proxy/custom resolver、M3 platform/lifecycle
+  qualification和M4 performance。
 - **Integrated commit:** not yet
-- **Open blockers and risks:** UDP API ownership、window/session limits、
-  concurrent eviction、packet reordering 和 state mutation ordering 尚未决；
-  per-packet allocation/copy 优化不能削弱认证或边界。
+- **Open blockers and risks:** planning blocker为零。Execute风险是AES/ChaCha
+  envelope分歧、post-validation mutation ordering、capacity/replay race、
+  roaming/generation ABA、allocated-capacity accounting和same-port dual bind。
+  Hosted execution/push不在隐含权限内；release evidence另需明确授权。
 
 ## M3 — 运维、生命周期与平台资格
 
@@ -402,7 +419,7 @@ contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满�
 | DEC-005 | resolved in M0 plan | full-auth/semantic-before-replay ordering、exact 60s/capacity fail-closed、single I/O、zero-linger、binding | `ADR-0004` |
 | DEC-006 | resolved in M0 plan | one owner task、no data channel、numeric time/buffer caps、half-close/shutdown、fixed trace/metric schema | `ADR-0005` |
 | DEC-007 | resolved in M0 plan | sing-box 1.13.14、shadowsocks-rust 1.24.0、asset hashes、unavailable=FAIL/BLOCK、three exact targets | `ADR-0006`、upstream baseline |
-| DEC-008 | open；M2 plan | UDP protocol API、window/session/buffer/idle limits 与 eviction | M0 明确不实现 UDP |
+| DEC-008 | resolved in M2 plan | bounded UDP protocol API；8,129-value window；client current+old；session 4,096、16 MiB allocated bytes、depth-4 queues、65,507 wire、300s idle；expired-oldest-or-reject eviction | `ADR-0020`～`ADR-0022`、SPEC/TEST-0003 |
 | DEC-009 | partially bounded；M3 plan | M0 已固定 triples/build/config smoke；full native lifecycle/packaging qualification 留 M3 | `ADR-0006` |
 | DEC-010 | open；M4 plan | benchmark hardware/config/statistics 与 10k-idle stability threshold | M0 不设性能声明 |
 | DEC-011 | resolved in M0 CI amendment | GitHub Actions required provider；`.github/workflows/m0.yml`；fixed hosted runners/jobs/security/evidence；本机 WSL2仅作诊断 | `ADR-0007`、`SPEC-0001`、`TEST-0001`、M0-T08 |
@@ -418,6 +435,10 @@ contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满�
 | DEC-021 | resolved in M1 plan | method-bound secret/profile；AES-128 为16-byte、AES-256/ChaCha为32-byte；AEAD owner内分派且TCP state machine唯一；ChaCha 32-byte width显式标为compatibility interpretation | `ADR-0018`、M1 research、SPEC/TEST-0002 |
 | DEC-022 | resolved in M1 plan | target支持IPv4/IPv6/1～255-byte ASCII domain；system resolution最多16 candidates并与全部sequential dial共用absolute deadline；endpoint/reply端到端使用`SocketAddr` | `ADR-0019`、SPEC/TEST-0002 |
 | DEC-023 | resolved in M1 plan | 保留两个reference pins与thin hosted profile；固定M1-INT-001～012，12/12+cleanup且同一exact SHA/run/attempt才PASS | `SPEC-0002`、`TEST-0002`、M1-T04 |
+| DEC-024 | resolved in M2 plan | canonical `MethodProfile` + `TcpMethodProfile` alias；AES UDP separate header/session key与ChaCha direct-PSK XChaCha capability均留在crypto deep module | `ADR-0020`、M2 research、M2-T01 |
+| DEC-025 | resolved in M2 plan | server只按authenticated client session ID；valid roaming；current+old两association；8,128-lag atomic replay与generation-bound response | `ADR-0021`、M2-T02 |
+| DEC-026 | resolved in M2 plan | minimal core datagram value；generic runtime ownership；`server.listen`同端口TCP+UDP且default enabled；双bind transaction和closed UDP telemetry | `ADR-0022`、M2-T03/T04 |
+| DEC-027 | resolved in M2 plan | 固定M2-UDP-INT-001～012；ferrum direction用Cargo example black-box adapter；每案同session三datagrams，12/12+cleanup/exact SHA/run/attempt | `SPEC-0003`、`TEST-0003`、M2-T05 |
 
 ## 风险登记
 
@@ -436,6 +457,10 @@ contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满�
 | 三方法 profile/key/salt width 错配或复制 TCP security state | P0 | M1 | ADR-0018 method-bound capability、one shared flow、profile table KAT/negative/interop |
 | IPv6/domain partial conversion、认证前 resolution/dial 或 deadline reset | P0 | M1 | ADR-0019 normalized target、zero-side-effect recording table、16-candidate/single-deadline paused-time gate |
 | 12-cell qualification 缺案、setup failure短路或不同SHA evidence拼接 | P0 | M1 | 固定case IDs、failure continuation、12/12+cleanup、同一run/attempt exact-SHA gate |
+| AES separate-header或ChaCha XChaCha UDP envelope/key/nonce错误 | P0 | M2 | ADR-0020 opaque capability、primary primitive+independent composite fixtures、双向interop |
+| replay/association在完整校验或capacity前mutation，或source address错作identity | P0 | M2 | ADR-0021 8,129-window、current+old、serialized recheck/commit、roaming/generation tables |
+| UDP session/allocated bytes/queue/accounting泄漏或active eviction | P0 | M2 | ADR-0022 numeric permits、fake-handler saturation/expiry/concurrency、owner snapshots |
+| TCP+UDP partial bind或12案UDP false PASS | P0 | M2 | atomic startup/rollback；fixed IDs、black-box example、failure continuation、exact-SHA 12/12+cleanup |
 | benchmark 不等价或噪声驱动错误优化 | P1 | M4 | frozen comparable config 和重复统计 |
 
 ## 决策与范围变更日志
@@ -454,3 +479,4 @@ contract，不自动开始实现。每个里程碑内的并行 ticket 仍须满�
 | 2026-07-28 | M0 invariant/evidence contract amendment | 接受三层合同与执行前equivalent substitution；T01 ownership改为single-writer默认协调，事实性provenance勘误与机械evidence修复不再自动需要产品ADR | 历史ADR-0008/0011/0013/0014/0015证明写死的来源、probe、test edge或第三方时序会形成非产品blocker；不改变任何wire/security/product/platform/job/exact-SHA gate | ADR-0016 Accepted；SPEC/TEST amendments Approved；proposal `a389aa9`的Product/Architect/QA exact-SHA document gates均PASS |
 | 2026-07-28 | M0 CI evidence convergence | 接受Cargo-managed non-test qualification及四个job definitions/六个rendered results直接证明quality、MSRV、三平台与四案interop；本机编译/lint但不执行external entry；删除scope self-audit、filter/count、link-help及重复jobs | exact `5969bfd` run `30322690937`的6/11、5 failure再次证明mechanical realization被误当release invariant；不改变wire/security/platform/reference/exact-SHA结果 | ADR-0017 Accepted；SPEC/TEST amendments Approved；M0-T09/T10 done；exact `8318ef1`的local/review gates及run `30331336772`六项success |
 | 2026-07-28 | M1 plan | M1 改为 `planned`；接受method-bound三方法profile与完整target/resolution contract，批准SPEC/TEST-0002及四票DAG | M0已关闭；current code仍AES-128/IPv4 hard-code且qualification仅4案，需要先冻结width/address/deadline/fixture/12-cell evidence，避免Engineer临场安全决策 | Product/Architect/QA planning reports；ADR-0018/0019；M1 research；workflow validate/test-budget/frontier/next |
+| 2026-07-28 | M2 plan | M2改为`planned`；接受method-bound UDP envelope、8,129-value replay/current+old association和bounded direct runtime；批准SPEC/TEST-0003及五票DAG | M1已关闭；current code/runtime/server/qualification均TCP-only，需要在execute前冻结crypto分歧、mutation ordering、数值limits、same-port startup和12-cell black-box evidence | Product/Architect/QA planning reports；ADR-0020～0022；M2 research；workflow validate/test-budget/frontier/next |
