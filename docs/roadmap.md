@@ -237,8 +237,8 @@ non-overlapping ownership。
 
 ## M1 — 完整 TCP 与 TCP 互操作
 
-- **Status:** validating（M1-T01～M1-T04 done；local execute close gates PASS；
-  `auto_close = false`，尚未执行 close）
+- **Status:** validating（M1-T01～M1-T04 done；local execute close gates 与
+  exact-SHA hosted qualification PASS；`auto_close = false`，尚未执行 close）
 - **Objective:** 在不复制 transport state machine 的前提下，将 TCP 扩展到
   三个指定方法并完成完整 reference interoperability。
 - **Entry conditions:** M0 closed；AES-128 wire/runtime/key lookup contract
@@ -272,9 +272,9 @@ non-overlapping ownership。
   ownership-disjoint；T03 等待 T02；T04 最后集成。
 - **Deferred/out of scope:** UDP、最终平台 qualification 和 performance gate。
 - **Integrated commit:** complete local product/control checkpoint
-  `02c7bc7ee37514e479a03751235f3be3a3cf6f0b`（包含 M1-T01～M1-T04
+  `874c83d0ee71054bd702d6ecac55e88d9e2fbcef`（包含 M1-T01～M1-T04
   product checkpoint `fba23ca0b628bd6935d0977e3d9df7836b957e78` 与 test-budget
-  gate control repair）
+  gate control repair；remote `codex/integration/m1` 精确指向该 SHA）
 - **Open blockers and risks:** 当前没有 open canonical root blocker。
   T01 的 clean-target process-test build-order advisory 记录为
   `QA-M1-T01-001`，不阻塞后续工作。T02 的 canonical review root
@@ -282,19 +282,21 @@ non-overlapping ownership。
   superseding Architect verification 后关闭；原 full/targeted 记录保留。
   T03 exact candidate 的 Architect/QA full review 均 `PASS_WITH_NOTES`；
   Windows 本机 real-process IPv6 row 因 `WSAEACCES` 未执行，且 fixed port 1080
-  占用阻断 local platform artifact run，这两项保留为 exact-SHA release/platform
-  evidence，不能计作本机 PASS。T04 candidate 的 Architect/QA full review 均
-  PASS，local/pure integration gates 已通过；hosted exact-SHA 12/12 与三平台
-  evidence 尚未产生，仍需单独授权且不能由 local tests 替代。
+  占用阻断 local platform artifact run，不能计作本机 PASS。exact `874c83d`
+  的 hosted run `30367147537` attempt 1 已补齐 quality、MSRV、Windows MSVC、
+  Linux GNU、Linux musl 与 interop 六项 success；interop raw log 中
+  M1-INT-001～012 各一条 PASS。T04 candidate 的 Architect/QA full review 均
+  PASS，local/pure 与 hosted release evidence 均已产生且没有跨 run 拼接。
   close gate 首次 test-budget 运行真实暴露脚本把 ticket-only delta allowance
   错用于 milestone；control commit `81345fbb56ac4cdbf1aea3a3f020d6fd514b187f`
-  仅恢复 TEST-0002 已批准语义。其集成 SHA `02c7bc7` 上 66 项 workflow tests、
+  仅恢复 TEST-0002 已批准语义。final exact SHA `874c83d` 上 66 项 workflow tests、
   authoritative full 与 milestone ratchet 均 PASS；ratio `2.041`，required
   `2.042`，未改写 baseline 或授予预算豁免。
   execute 风险是 method/profile 错配、partial address-family conversion、fixture
   provenance/rights、hot-path allocation/dispatch 与 hosted provider availability；
   ADR-0018/0019、TEST-0002、exact-SHA review 和 fail-closed release gate 已给出
-  控制。push/run 仍需另行授权。
+  控制。一次性 remote qualification scope 已消费并撤销；任何 rerun、第二次
+  push、remote `master`、PR、tag、release 或 publish 仍需另行授权。
 
 ## M2 — 完整 UDP 协议纵切与 UDP 互操作
 

@@ -3,7 +3,7 @@
 ## 当前 M1 execute 状态
 
 - **Current product/control integration checkpoint:**
-  `02c7bc7ee37514e479a03751235f3be3a3cf6f0b` on
+  `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` on
   `codex/integration/m1`；包含 product checkpoint
   `fba23ca0b628bd6935d0977e3d9df7836b957e78`、reviewed M1-T01 candidate
   `4223051eeae35220b150461cad91daf09a954423` 与 M1-T02 candidate
@@ -12,7 +12,8 @@
   `b7a69899e4053e78fe8824e2cd9215b9d232e106`。本地 workflow-control
   commits `91bb86b`/`3bdde10` 支持并审计一次性 superseding review；
   `81345fbb56ac4cdbf1aea3a3f020d6fd514b187f` 恢复 ticket/milestone
-  test-budget gate 的既有分层语义。
+  test-budget gate 的既有分层语义；`02c7bc7` 是其 integration commit，
+  `874c83d` 增加 execute close-gate evidence。
 - **Date/environment:** 2026-07-28（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1；Python 3.11.9。
 - **Reviews:** T01 Architect full `PASS`、QA full `PASS_WITH_NOTES`
@@ -33,7 +34,7 @@
   尚未 build 而 exit 101；`cargo build --workspace --bins --locked` exit 0 后，
   同一未修改 SHA quick 3/3 exit 0。该 setup-order derivative 已记录为 review
   debt，不是 product blocker。
-- **Full evidence:** integration `02c7bc7` 上 workspace binary build 与
+- **Full evidence:** final exact integration `874c83d` 上 workspace binary build 与
   authoritative full：
   `cargo fmt --all -- --check`、
   `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`、
@@ -42,7 +43,7 @@
   `git diff --check` exit 0。
 - **Test budget:** T04 ticket gate PASS：code `7386`、tests `15216`、ratio
   `2.060`；delta `+0/+120`，allowance `120`。M1 milestone gate 在
-  `02c7bc7` PASS：code `7720`、tests `15759`、ratio `2.041`；baseline
+  `874c83d` PASS：code `7720`、tests `15759`、ratio `2.041`；baseline
   `7031/14707/2.092`；required ratchet ratio `2.042`；planning-base delta
   `+689/+1052` 只报告、不复用 ticket allowance，baseline 未改写。
 - **Workflow control evidence:** 66 unit tests、`workflow.py validate`、
@@ -53,19 +54,29 @@
   复核，无新授权、豁免或产品改动。
 - **Authorization:** three exact single-use local scopes for the T02 additional
   repair, control amendment, and superseding Architect review were consumed and
-  revoked. No ownership/contract expansion or remote/destructive authority was
-  granted.
+  revoked。用户随后授权 exact remote qualification；scope
+  `m1-20260728-remote-qualification-874c83d-a1` 在 push 前原子消费并因
+  `max_uses=1` 自动撤销。没有 force-push、rerun、ref deletion、PR、tag、
+  release、publish 或 remote `master` 授权。
 - **Scheduler/blockers:** M1-T01～M1-T04 done；当前无 active ticket 或 open
   canonical root。本地 execute close gates 已 PASS；`auto_close = false`，
   close mode 尚未执行。
 - **Local qualification notes:** 本 Windows host `[::1]` bind 成功但 raw connect
   返回 `WSAEACCES`，所以 T03 real-process IPv6 row 是 **NOT EXECUTED**；IPv4
   fallback 只证明第三方法 echo/half-close。local platform artifact run 另因
-  fixed port 1080 被占而 setup-blocked。两项均等待 exact-SHA release/platform
-  qualification，不计本机 PASS。
-- **Remote/release boundary:** 未 push、未 publish、未运行
-  `m0-qualification` 或 external references；M1 hosted 12-cell evidence 尚未产生，
-  且仍需 exact ref/SHA 的单独授权。
+  fixed port 1080 被占而 setup-blocked，不计本机 PASS。同一 exact-SHA hosted
+  platform matrix 已补齐 Windows MSVC、Linux GNU、Linux musl success；历史
+  IPv6 review note 保留给 close review，不把本机 fallback 改写为 IPv6 PASS。
+- **Hosted qualification:** exact
+  `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 已仅 push 到
+  `origin/codex/integration/m1`。GitHub Actions
+  [run `30367147537`, attempt 1](https://github.com/zzffu/ferrum2/actions/runs/30367147537)
+  为 push event 且整体 **success**；同一 run/attempt/SHA 的 `quality`、`msrv`、
+  `platform / windows-msvc`、`platform / linux-gnu`、
+  `platform / linux-musl`、`interop` 六项全部 success。interop 的 pinned
+  reference provisioning 与 hosted qualification steps success；登录态 raw
+  step log 精确包含 `M1-INT-001`～`M1-INT-012` 各一条 `status=PASS`，无
+  FAIL/missing/duplicate。没有跨 run 拼接、rerun 或 publication。
 
 ## 当前 M0 closeout 状态
 

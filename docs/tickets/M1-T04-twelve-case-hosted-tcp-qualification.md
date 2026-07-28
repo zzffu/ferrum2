@@ -119,9 +119,20 @@ git diff --check
 - Integration validation on `fba23ca`: binary build; authoritative quick
   fmt/check/tests; authoritative full fmt/Clippy/all-feature tests/docs;
   workflow validation and `git diff --check` all exited 0.
-- Hosted run ID/attempt/SHA and 12 case results: **not produced**. No external
-  reference was downloaded, started, or contacted. Same-run/attempt exact-SHA
-  12/12 evidence remains a separately authorized release qualification gate.
+- Hosted qualification: exact
+  `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` was pushed only to
+  `origin/codex/integration/m1`. GitHub Actions run `30367147537`, attempt 1,
+  push event, completed overall `success`; the same run/attempt/SHA reports
+  `quality`, Rust 1.85 `msrv`, Windows MSVC, Linux GNU, Linux musl, and
+  `interop` success.
+- Interop evidence: both pinned-reference provisioning and the hosted
+  qualification step succeeded. The authenticated raw step log contains exactly
+  one `status=PASS` line for every `M1-INT-001` through `M1-INT-012`, with no
+  FAIL, missing, or duplicate case. The job exited successfully only after the
+  report's all-pass and per-case cleanup contract completed.
 - Test budget: ticket gate `PASS`, code `7386`, tests `15216`, ratio `2.060`;
   baseline `7031/14707/2.092`; delta `+0/+120`, allowance `120`.
-- Accepted review debt: none for T04. Push/publish: none.
+- Remote authorization:
+  `m1-20260728-remote-qualification-874c83d-a1` was consumed once immediately
+  before push and automatically revoked. Accepted review debt: none for T04.
+  Push: exact qualification branch only. Publish/rerun/PR/tag/release: none.
