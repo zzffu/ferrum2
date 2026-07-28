@@ -69,11 +69,19 @@ authorization scope.
 The superseding round:
 
 - preserves the full and targeted records, including the escalation;
-- may address only original blocking finding IDs still open in that escalation;
+- may address only blocking finding IDs already present in the immutable targeted
+  escalation, whether inherited from the full review or marked
+  `introduced_by_repair`, and preserves their finding provenance;
+- remains bound to the same canonical root and the active SHA produced by the
+  separately authorized later repair;
 - consumes its exact authorization atomically with the new review record;
 - may conclude `PASS`, `PASS_WITH_NOTES`, or retain `ESCALATE`;
 - is never an automatic third loop and never authorizes another repair, broader
   findings, ownership, contract, remote, destructive, push, or publish action.
+
+Each reviewer requires its own single-use `review_round_override`. Unknown, newly
+discovered, duplicated, or broadened IDs; mismatched roots or candidates; exhausted,
+reused, or multi-use scopes; and any additional repair or review loop remain invalid.
 
 ## Verdicts
 

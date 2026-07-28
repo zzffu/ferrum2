@@ -97,9 +97,10 @@ These rules override any looser third-party TDD or code-review guidance:
    not launch another automatic repair loop. After a separately user-authorized
    budget-consuming repair recorded with its consumed `repair_budget_override`,
    one explicit single-use `review_round_override` scope may authorize a local
-   superseding verification of that same escalated root and original finding IDs.
-   This preserves the full and targeted records, is never automatic, and grants no
-   authority for another repair.
+   superseding verification of that same escalated root and the blocking IDs frozen
+   in its targeted escalation, including IDs marked `introduced_by_repair`. This
+   preserves full/targeted history and finding provenance, binds to the active later
+   repair SHA, is never automatic, and grants no authority for another repair.
 8. **Test budget.** Run the configured test-budget report during planning/bootstrap,
    the ticket gate before integration, and the milestone gate at close. Existing
    high-ratio repositories use a recorded ratchet baseline rather than an immediate
@@ -395,8 +396,10 @@ For every ticket with runtime phase `review`:
    continuing independent work when configured.
    An explicit user-authorized superseding verification is exceptional: it requires
    a separately authorized later repair, an unused local `review_round_override`
-   scope bound to the exact root, and the active repaired SHA. It does not erase the
-   targeted escalation or reopen an automatic repair/review cycle.
+   scope bound to the exact root, and the active repaired SHA. It may dispose only
+   blocking IDs already present in the immutable targeted escalation, including
+   `introduced_by_repair` IDs, while preserving their provenance. It does not erase
+   the targeted escalation or reopen an automatic repair/review cycle.
 7. Before integration, require `review-state <TICKET_ID>` and
    `gate-check <TICKET_ID> integration` to pass. Close completed reviewer threads.
 

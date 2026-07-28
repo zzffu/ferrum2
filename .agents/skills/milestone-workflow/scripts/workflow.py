@@ -794,11 +794,7 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
                             ).lower(),
                             verdict=str(superseding.get("verdict", "")),
                             findings=findings if isinstance(findings, list) else [],
-                            new_findings=[
-                                item
-                                for item in findings
-                                if isinstance(item, dict) and item.get("new", False)
-                            ] if isinstance(findings, list) else [],
+                            new_findings=[],
                             resolved=resolved if isinstance(resolved, list) else [],
                             root_cause_id=str(
                                 superseding.get("root_cause_id", "")
@@ -2753,11 +2749,6 @@ def validate_superseding_review(
             "separately authorized repair_budget_override scope for canonical root "
             f"{root_cause_id}"
         )
-    original = {
-        str(item.get("id")): item
-        for item in full.get("findings", [])
-        if isinstance(item, dict) and item.get("severity") in blocking_severities
-    }
     targeted_open = {
         str(item.get("id")): item
         for item in targeted.get("findings", [])
@@ -2766,12 +2757,6 @@ def validate_superseding_review(
     if not targeted_open:
         raise WorkflowError(
             "Targeted escalation must retain at least one blocking finding"
-        )
-    non_original = sorted(set(targeted_open) - set(original))
-    if non_original:
-        raise WorkflowError(
-            "Superseding review cannot dispose non-original targeted findings: "
-            + ", ".join(non_original)
         )
     resolved_ids = set(resolved)
     if len(resolved_ids) != len(resolved) or not resolved_ids.issubset(targeted_open):
@@ -2785,20 +2770,23 @@ def validate_superseding_review(
     }
     for item in findings:
         finding_id = str(item.get("id", ""))
-        if finding_id not in targeted_open or finding_id not in original:
+        if finding_id not in targeted_open:
             raise WorkflowError(
-                "Superseding --finding must reuse an original full-review "
-                f"finding still open in the targeted escalation: {finding_id}"
+                "Superseding --finding must reuse a blocking finding still open "
+                f"in the targeted escalation: {finding_id}"
             )
         if finding_id in resolved_ids:
             raise WorkflowError(
                 f"Superseding finding {finding_id} cannot be both resolved and open"
             )
-        if item.get("severity") != original[finding_id].get("severity"):
+        targeted_finding = targeted_open[finding_id]
+        if item.get("severity") != targeted_finding.get("severity"):
             raise WorkflowError(
-                f"Superseding finding {finding_id} must retain its original severity"
+                f"Superseding finding {finding_id} must retain its targeted severity"
             )
-        remaining[finding_id] = dict(item)
+        retained = dict(targeted_finding)
+        retained["summary"] = item["summary"]
+        remaining[finding_id] = retained
     if verdict in {"pass", "pass_with_notes"} and remaining:
         raise WorkflowError(
             "Superseding passing verdict leaves unresolved blocking findings: "

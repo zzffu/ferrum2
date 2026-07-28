@@ -1837,6 +1837,8 @@ class ReviewConvergenceTests(unittest.TestCase):
 
     def superseding_fixture(
         self,
+        *,
+        include_repair_finding: bool = False,
     ) -> tuple[dict[str, object], workflow.Ticket, dict[str, object], argparse.Namespace]:
         item = ticket("M0-T01", "ready", owns=("a/**",), risk="critical")
         state = workflow.empty_runtime_state()
@@ -1878,6 +1880,14 @@ class ReviewConvergenceTests(unittest.TestCase):
                 round_name="targeted",
                 verdict="escalate",
                 finding=["ARCH-001:major:security invariant remains violated"],
+                new_finding=(
+                    [
+                        "ARCH-002:major:introduced_by_repair:"
+                        "repair creates a cleanup gap"
+                    ]
+                    if include_repair_finding
+                    else []
+                ),
                 sha="b" * 40,
             ),
         )
@@ -1938,7 +1948,11 @@ class ReviewConvergenceTests(unittest.TestCase):
             reviewer="architect",
             round_name="superseding",
             verdict="pass",
-            resolved=["ARCH-001"],
+            resolved=(
+                ["ARCH-001", "ARCH-002"]
+                if include_repair_finding
+                else ["ARCH-001"]
+            ),
             sha="c" * 40,
             root_blocker="B1",
             authorization_scope="review-override",
@@ -1972,6 +1986,28 @@ class ReviewConvergenceTests(unittest.TestCase):
         self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
         self.assertEqual(workflow.runtime_state_errors(state), [])
 
+    def test_superseding_review_resolves_repair_introduced_targeted_blocker(
+        self,
+    ) -> None:
+        state, item, runtime, args = self.superseding_fixture(
+            include_repair_finding=True
+        )
+        targeted = dict(runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"])
+
+        self.assertEqual(self._record(state, item, args), 0)
+
+        rounds = runtime["reviews"][item.id]["reviewers"]["architect"]
+        self.assertEqual(rounds["targeted"], targeted)
+        self.assertEqual(
+            rounds["superseding"]["resolved"],
+            ["ARCH-001", "ARCH-002"],
+        )
+        self.assertEqual(rounds["superseding"]["findings"], [])
+        self.assertEqual(runtime["authorizations"]["review-override"]["uses"], 1)
+        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+        self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
+        self.assertEqual(workflow.runtime_state_errors(state), [])
+
     def test_superseding_review_rejects_unaudited_or_broadened_dispositions(
         self,
     ) -> None:
@@ -1983,7 +2019,7 @@ class ReviewConvergenceTests(unittest.TestCase):
             ("wrong root", "active repair root"),
             ("second record", "already used"),
             ("new finding", "does not accept new findings"),
-            ("non-original finding", "original full-review"),
+            ("unknown targeted finding", "targeted escalation"),
             ("missing later repair", "later budget-consuming repair"),
             ("repair without override", "separately authorized"),
             ("repair with wrong override", "separately authorized"),
@@ -2022,7 +2058,7 @@ class ReviewConvergenceTests(unittest.TestCase):
                     args.new_finding = [
                         "ARCH-002:major:introduced_by_repair:new security finding"
                     ]
-                elif name == "non-original finding":
+                elif name == "unknown targeted finding":
                     args.finding = ["ARCH-999:major:not an original finding"]
                 elif name == "missing later repair":
                     runtime["repairs"][item.id].pop()
