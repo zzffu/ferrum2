@@ -2,7 +2,7 @@
 id = "M1-T03"
 title = "Compose method-aware binaries and prove the local product matrix"
 milestone = "M1"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M1-T02"]
@@ -100,11 +100,27 @@ git diff --check
 
 ## Completion evidence
 
-Filled by the Team Lead after integration:
-
-- Branch/worktree/candidate and integrated commit:
-- Full/targeted Architect and QA reviews; stable finding IDs:
-- Exact validation exits:
-- Test-budget counts/baseline:
-- Accepted review debt:
-- Push/publish state:
+- Branch/worktree/candidate: `codex/ticket/m1-t03`,
+  `C:\project\ferrum2\.worktrees\m1-t03`,
+  `4c9ad421e0ef5d193e29e70ed5a674cb30a4aa88`; product integration commit
+  `2d4cb763ed632fb6d160679386eaf498ed5044f6`.
+- Reviews: Architect and QA full reviews on the exact candidate both
+  `PASS_WITH_NOTES`; there was no blocker, major finding, or repair round.
+  Stable notes are `ARCH-M1-T03-001`, `QA-M1-T03-001`, and
+  `QA-M1-T03-002`.
+- Candidate validation: config/client/server package tests passed 31/31;
+  the exact five-target harness command passed 17/17, including the fixed
+  5×20 lifecycle matrix; focused strict Clippy, fmt, ticket budget, and
+  `git diff --check` all exited 0. Engineer workspace quick also exited 0.
+- Integration validation on `2d4cb76`: binary build; authoritative quick
+  fmt/check/tests; authoritative full fmt/Clippy/all-feature tests/docs;
+  workflow validation and `git diff --check` all exited 0.
+- Test budget: ticket gate `PASS`, code `7720`, tests `15639`, ratio `2.026`;
+  baseline `7031/14707/2.092`; delta `+10/+128`, allowance `130`.
+- Accepted review debt: this Windows host binds `[::1]` but raw loopback
+  connect fails `WSAEACCES`, so the real-process IPv6 target row was
+  **NOT EXECUTED** and its IPv4 fallback counts only for third-method
+  echo/half-close. The local platform artifact run was setup-blocked by an
+  occupied fixed port 1080. Exact-SHA IPv6-capable and frozen three-platform
+  evidence remain release-qualification requirements and are not local PASS.
+- Push/publish/external qualification: none.

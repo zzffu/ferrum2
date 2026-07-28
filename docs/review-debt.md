@@ -20,3 +20,9 @@ problem or the user explicitly reopens the contract.
   contract，而不能把它视为本 note 已批准。
 <!-- review-debt:8c6ba083f74e -->
 - `M1-T01` `qa` `4223051eeae3`: QA-M1-T01-001: Initial workspace-test setup failed because required process binaries were absent; the unchanged candidate passed after the normal workspace binary build. Keep clean CI/integration setup ordering explicit.
+<!-- review-debt:c0092c86422e -->
+- `M1-T03` `architect` `4c9ad421e0ef`: ARCH-M1-T03-001: Real-process IPv6 target row was NOT EXECUTED on this Windows host because raw [::1] connect fails WSAEACCES; IPv4 fallback proves only third-method echo/half-close. Require an IPv6-capable exact-SHA release/platform run; do not credit local IPv6 PASS.
+<!-- review-debt:b7fa23a5a2c8 -->
+- `M1-T03` `qa` `4c9ad421e0ef`: QA-M1-T03-001: Record real-process IPv6 as NOT EXECUTED on Windows WSAEACCES and require exact-SHA IPv6-capable release/platform evidence; fallback is not IPv6 PASS.
+<!-- review-debt:706cf6f25501 -->
+- `M1-T03` `qa` `4c9ad421e0ef`: QA-M1-T03-002: Local platform smoke artifact run was setup-blocked by occupied fixed port 1080; run the frozen same-SHA three-platform jobs during release qualification.

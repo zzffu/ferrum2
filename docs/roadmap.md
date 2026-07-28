@@ -237,7 +237,7 @@ non-overlapping ownership。
 
 ## M1 — 完整 TCP 与 TCP 互操作
 
-- **Status:** executing（M1-T01、M1-T02 done）
+- **Status:** executing（M1-T01、M1-T02、M1-T03 done）
 - **Objective:** 在不复制 transport state machine 的前提下，将 TCP 扩展到
   三个指定方法并完成完整 reference interoperability。
 - **Entry conditions:** M0 closed；AES-128 wire/runtime/key lookup contract
@@ -271,14 +271,17 @@ non-overlapping ownership。
   ownership-disjoint；T03 等待 T02；T04 最后集成。
 - **Deferred/out of scope:** UDP、最终平台 qualification 和 performance gate。
 - **Integrated commit:** partial product checkpoint
-  `533c224964bb8b142bdc0c8dff5db8714ef9713a`（M1-T01、M1-T02）
+  `2d4cb763ed632fb6d160679386eaf498ed5044f6`（M1-T01～M1-T03）
 - **Open blockers and risks:** 当前没有 open canonical root blocker。
   T01 的 clean-target process-test build-order advisory 记录为
   `QA-M1-T01-001`，不阻塞后续工作。T02 的 canonical review root
   `M1-T02-REVIEW-001` 经两次明确的一次性用户授权完成 additional repair 与
   superseding Architect verification 后关闭；原 full/targeted 记录保留。
-  T03 implementation 已解锁；T04 candidate 的 Architect/QA full review 均
-  PASS，但 integration 仍等待 T03。
+  T03 exact candidate 的 Architect/QA full review 均 `PASS_WITH_NOTES`；
+  Windows 本机 real-process IPv6 row 因 `WSAEACCES` 未执行，且 fixed port 1080
+  占用阻断 local platform artifact run，这两项保留为 exact-SHA release/platform
+  evidence，不能计作本机 PASS。T04 candidate 的 Architect/QA full review 均
+  PASS，integration dependency 现已满足。
   execute 风险是 method/profile 错配、partial address-family conversion、fixture
   provenance/rights、hot-path allocation/dispatch 与 hosted provider availability；
   ADR-0018/0019、TEST-0002、exact-SHA review 和 fail-closed release gate 已给出
