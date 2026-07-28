@@ -2,6 +2,30 @@
 
 ## 当前 M2 execute 状态
 
+- **Wave-3 T04 product integration:** exact
+  `980540bd439c438eb196cbc3096cbea0cda3fb4d`; contains initial T04
+  candidate `aac21f48b6bd3cb3aa940a60628e5b94eaac89d6`, lifecycle repair
+  `6896c6e026797cd62fd9787a66abcca6ec6c7b58`, and mechanical
+  integration-evidence repair `c6ade6d34ee95767852cfa25327a4fb6da520a46`.
+- **Wave-3 reviews:** full Architect/QA `BLOCK` findings
+  `ARCH-M2-T04-001` and `QA-M2-T04-001` were resolved by the one
+  substantive repair; both targeted reviews returned `PASS_WITH_NOTES`.
+  `M2-T04-INTEGRATION-001` was resolved by isolating legacy TCP-only
+  fixtures from default-enabled UDP without weakening config/dual-bind
+  evidence. Exact-SHA Architect/QA integration reviews both
+  `PASS_WITH_NOTES`; `QA-M2-T02-N01` is satisfied.
+- **Wave-3 local gates:** exact binary build, authoritative quick `3/3`,
+  full `4/4`, focused/workspace all-features 100-cycle lifecycle,
+  workflow validation/review/integration checks, and diff checks all exit
+  `0`. Ticket budget `PASS`: code `11582`, tests `18721`, ratio `1.616`,
+  baseline `2.041`; delta `954/774`, allowance `1074`.
+- **M2-T05 escalation:** initial `6c321ebbed07e426e66b8257792920595cfc0dd2`
+  and repaired `975276a90b6ae4b5a9bd984bcc31e3709d473ed5` were not
+  integrated. Targeted Architect/QA both `ESCALATE`: the restored TCP
+  driver violates ADR-0014 pre-FIN reverse-equality ordering, and the
+  mandatory ticket budget fails (`132/523`, allowance `252`; repair
+  `0/815`, allowance `120`). `M2-T05-REVIEW-001` remains open; no further
+  automatic repair/review is permitted.
 - **Wave-2 product integration:** exact
   `6e54cce52e5e29135acd91f6337a4516a094852e`; contains initial M2-T02
   candidate `0d88666d2f46ef85b376c12c55ffb34a784a8451`, repaired candidate
@@ -36,10 +60,11 @@
   as environmental evidence, not a product waiver.
 - **Test budget:** combined ticket gate `PASS`: code `9710`, tests `16937`,
   ratio `1.744`, baseline `2.041`; delta `1990/1178`, allowance `2110`.
-- **Remote/release:** nothing pushed or published. M2-T05 hosted UDP
-  qualification and exact-SHA remote evidence have not run and are not
-  credited. The next local dependency-ready frontier is M2-T04 + M2-T05;
-  T05 integration/release still waits for T04.
+- **Remote/release:** nothing pushed or published. IPv6-capable T04
+  platform evidence, M2-T05 hosted TCP+UDP qualification, and exact-SHA
+  remote evidence have not run and are not credited. T01-T04 are locally
+  integrated; T05 is blocked at bounded review convergence before
+  integration.
 
 ## 当前 M1 closeout 状态
 

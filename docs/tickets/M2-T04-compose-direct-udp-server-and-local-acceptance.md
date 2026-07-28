@@ -2,7 +2,7 @@
 id = "M2-T04"
 title = "Compose the bounded direct UDP server and prove local acceptance"
 milestone = "M2"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = ["M2-T02", "M2-T03"]
@@ -99,10 +99,30 @@ git diff --check
 
 ## Completion evidence
 
-由Team Lead integration后填写：
-
-- Branch/worktree/candidate and integrated commit:
-- Architect/QA full/targeted review and stable finding IDs:
-- Exact validation exits and test-budget counts/baseline:
-- Accepted review debt:
-- Push/publish state:
+- Branch/worktree/candidates: `codex/ticket/m2-t04`,
+  `C:\project\ferrum2\.worktrees\m2-t04`; initial
+  `aac21f48b6bd3cb3aa940a60628e5b94eaac89d6`, lifecycle repair
+  `6896c6e026797cd62fd9787a66abcca6ec6c7b58`, and mechanical
+  integration-evidence repair `c6ade6d34ee95767852cfa25327a4fb6da520a46`.
+  Exact product integration is
+  `980540bd439c438eb196cbc3096cbea0cda3fb4d`.
+- Reviews: Architect/QA full reviews both `BLOCK` on
+  `ARCH-M2-T04-001` and `QA-M2-T04-001`. One substantive repair resolved
+  canonical root `M2-T04-REVIEW-001`; both targeted reviews returned
+  `PASS_WITH_NOTES`. Integration root `M2-T04-INTEGRATION-001` exposed
+  TCP-only fixtures that omitted the now-default UDP configuration; the
+  mechanical repair added explicit TCP-only helpers without changing
+  default-enabled evidence. Exact-SHA Architect/QA integration reviews both
+  returned `PASS_WITH_NOTES`.
+- Validation at `980540bd`: exact binary build, authoritative quick `3/3`,
+  full `4/4`, focused and workspace all-features 100-cycle lifecycle,
+  config/detection/TCP/UDP process suites, workflow validation,
+  review/integration gate, and `git diff --check` all exited `0`.
+- Ticket budget `PASS`: code `11582`, tests `18721`, ratio `1.616`,
+  baseline `2.041`; delta `954/774`, allowance `1074`. Mechanical repair
+  delta was code `0`, tests `35`, allowance `120`.
+- Accepted review debt: `QA-M2-T02-N01` is satisfied at all T04-owned
+  request/response commit call sites. `ARCH-M2-T04-N01` and
+  `QA-M2-T04-N01` retain IPv6 as **NOT EXECUTED** pending an exact-SHA
+  IPv6-capable platform run. Hosted/external qualification was not run.
+- Push/publish state: nothing pushed or published.

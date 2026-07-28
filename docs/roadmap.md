@@ -336,8 +336,9 @@ dependency-ready 和 non-overlapping ownership。
   7. `M2-UDP-INT-001..012` 在同一authorized exact SHA/run/attempt取得
      12/12+cleanup，缺失/unavailable不得waive。
   8. M0/M1回归、test-budget ratchet、MSRV/三平台和`workflow.toml` full通过。
-- **In-scope tickets:** M2-T01、M2-T02、M2-T03 已 `done`；M2-T04 与 M2-T05
-  进入下一 implementation frontier，T05 integration/release 仍等待 T04。
+- **In-scope tickets:** M2-T01、M2-T02、M2-T03、M2-T04 已 `done`；
+  M2-T05 在一次substantive repair后的targeted Architect/QA
+  `ESCALATE`，durable status为 `blocked`，尚未integration。
   Initial implementation frontier 为
   M2-T01 + M2-T03：
 
@@ -362,16 +363,35 @@ dependency-ready 和 non-overlapping ownership。
   关闭；`QA-M2-T02-N01` 作为 nonblocking debt 要求 T04 证明 request/response
   protocol commit 均位于 T03 reserved closure 内。未 push/publish。
 
+  Wave 3 T04 exact product integration
+  `980540bd439c438eb196cbc3096cbea0cda3fb4d` 通过binary build、
+  authoritative quick 3/3、full 4/4、focused/workspace all-features
+  100-cycle、ticket-budget、workflow validation和exact-SHA Architect/QA
+  integration gates。`M2-T04-REVIEW-001`由一次substantive repair关闭；
+  `M2-T04-INTEGRATION-001`由不消耗substantive budget的mechanical
+  TCP-only fixture isolation关闭；`QA-M2-T02-N01`已满足。IPv6仍
+  **NOT EXECUTED**，未 push/publish。
+
+  M2-T05 repaired candidate
+  `975276a90b6ae4b5a9bd984bcc31e3709d473ed5` 未集成。Targeted QA与
+  Architect均`ESCALATE`：combined TCP+UDP topology及cleanup ownership
+  已修复，但TCP path在reverse equality前write-half-close，且mandatory
+  ticket budget以delta `132/523`、allowance `252`失败。Canonical root
+  `M2-T05-REVIEW-001`保持open；bounded convergence下无第二次automatic
+  repair/第三次review。
+
 - **Deferred/out of scope:** public client UDP inbound、SOCKS5 UDP ASSOCIATE、
   SIP023/multi-user、routing/DNS proxy/custom resolver、M3 platform/lifecycle
   qualification和M4 performance。
 - **Integrated commit:** current execute checkpoint
-  `6e54cce52e5e29135acd91f6337a4516a094852e`; final milestone integration
+  `980540bd439c438eb196cbc3096cbea0cda3fb4d`; final milestone integration
   not yet.
-- **Open blockers and risks:** planning blocker为零。Execute风险是AES/ChaCha
-  envelope分歧、post-validation mutation ordering、capacity/replay race、
-  roaming/generation ABA、allocated-capacity accounting和same-port dual bind。
-  Hosted execution/push不在隐含权限内；release evidence另需明确授权。
+- **Open blockers and risks:** `M2-T05-REVIEW-001` (`code`, review,
+  high) 为material stop：current TCP qualification不满足ADR-0014 pre-FIN
+  ordering，且repair-introduced test delta超过ticket allowance。Unblock需要
+  explicit user authorization限定于一次superseding repair/verification；
+  不得以production padding、旧run或different SHA规避。IPv6与hosted
+  execution仍未执行；push/publish不在隐含权限内。
 
 ## M3 — 运维、生命周期与平台资格
 

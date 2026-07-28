@@ -2,7 +2,7 @@
 id = "M2-T05"
 title = "Add the twelve-case fail-closed hosted UDP qualification"
 milestone = "M2"
-status = "ready"
+status = "blocked"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M2-T02"]
@@ -31,6 +31,12 @@ acceptance = [
   "Local quick and full only compile and lint the example and Cargo-managed qualification entry and run the pure aggregation contract; they never execute qualification, download references, open external sockets, or spawn reference processes",
   "After separate authorization, exit zero requires one clean GitHub Actions Linux checkout at exact GITHUB_SHA and an explicit twelve-line 12-of-12 plus cleanup report on one run and attempt; missing or unavailable evidence remains BLOCKED",
 ]
+
+[blocker]
+class = "code"
+authorization = "required"
+root_cause = "M2-T05-REVIEW-001: after the one substantive repair, current-candidate TCP qualification still violates ADR-0014 pre-FIN reverse-equality ordering and the mandatory ticket test-budget gate fails"
+derivatives = ["QA-M2-T05-001", "ARCH-M2-T05-001", "QA-M2-T05-002", "ARCH-M2-T05-003"]
 +++
 
 # M2-T05: Add the twelve-case fail-closed hosted UDP qualification
@@ -99,10 +105,32 @@ git diff --check
 
 ## Completion evidence
 
-由Team Lead integration/release evidence后填写：
-
-- Branch/worktree/candidate and integrated commit:
-- Architect/QA full/targeted review and stable finding IDs:
-- Exact local and hosted validation exits/run/attempt:
-- Test-budget counts/baseline and accepted debt:
-- Push/publish state:
+- Branch/worktree/candidates: `codex/ticket/m2-t05`,
+  `C:\project\ferrum2\.worktrees\m2-t05`; initial
+  `6c321ebbed07e426e66b8257792920595cfc0dd2`, repaired
+  `975276a90b6ae4b5a9bd984bcc31e3709d473ed5`. No T05 candidate was
+  integrated.
+- Reviews: QA full `BLOCK` on `QA-M2-T05-001`; Architect full `BLOCK` on
+  `ARCH-M2-T05-001` and `ARCH-M2-T05-002`. The one substantive repair
+  restored combined TCP+UDP plans and confirmed cleanup ownership.
+  Targeted QA and Architect both returned `ESCALATE`: cleanup finding
+  `ARCH-M2-T05-002` is resolved, but `QA-M2-T05-001` and
+  `ARCH-M2-T05-001` remain open because the restored TCP path performs
+  application write shutdown before reverse-payload equality, contrary to
+  ADR-0014. Repair-introduced budget findings are `QA-M2-T05-002` and
+  `ARCH-M2-T05-003`.
+- Local evidence: example/qualification builds, metadata, strict Clippy,
+  fmt, quick/full workspace gates, docs, diff checks, and the 12-row pure
+  contract exited `0`. The external qualification entry was never invoked;
+  no hosted run/attempt or reference provisioning is credited.
+- Ticket budget `FAIL`: code `10760`, tests `18470`, ratio `1.717`,
+  baseline `2.041`; delta `132/523`, allowance `252`. Repair-only delta
+  was code `0`, tests `815`, allowance `120`. The failure is mandatory
+  under TEST-0003 and was not relabeled as advisory.
+- Blocker: canonical root `M2-T05-REVIEW-001` remains open. Bounded
+  convergence permits no further automatic repair or third review. Unblock
+  requires explicit user authorization for a budget-consuming superseding
+  repair/verification limited to the open root, restoring pre-FIN reverse
+  equality and legitimately consolidating the test delta without production
+  padding.
+- Push/publish state: nothing pushed or published.
