@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "classification": "repository-owned non-official SIP022 method-profile primitive fixture",
+  "context_string": "shadowsocks 2022 session subkey",
+  "aead_plaintext": "000102030405",
+  "cases": [
+    {
+      "method": "2022-blake3-aes-128-gcm",
+      "psk": "000102030405060708090a0b0c0d0e0f",
+      "salt": "101112131415161718191a1b1c1d1e1f",
+      "full_derive_output": "bc32fb8d5205f7b84f9691dfb9f04ff344ce477c416be1d79c419b9e2c04c3e9",
+      "selected_subkey": "bc32fb8d5205f7b84f9691dfb9f04ff3",
+      "nonce_0_ciphertext_and_tag": "f62a40af3d3d52fff46a3432d8f1e338b143cdcf3de5",
+      "nonce_1_ciphertext_and_tag": "e2946b46a54d7be774eb83e65aa587861b82cf84d061"
+    },
+    {
+      "method": "2022-blake3-aes-256-gcm",
+      "psk": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "salt": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "full_derive_output": "374fca03e4dae7f998fd7e59c1edfcc8e3197f4db1c19ca1671be3b66a92ddda",
+      "selected_subkey": "374fca03e4dae7f998fd7e59c1edfcc8e3197f4db1c19ca1671be3b66a92ddda",
+      "nonce_0_ciphertext_and_tag": "aa4ff9d11dee53c573c641b94dbb84faf4b10e3905a7",
+      "nonce_1_ciphertext_and_tag": "ea0cd2af0aee0d557229f39586e13d6b87d7749ec7ea"
+    },
+    {
+      "method": "2022-blake3-chacha20-poly1305",
+      "psk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "salt": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "full_derive_output": "3a9636c62f05754d88923c2cd5b732bc14c024b95077e66eab25b95ba5afd99f",
+      "selected_subkey": "3a9636c62f05754d88923c2cd5b732bc14c024b95077e66eab25b95ba5afd99f",
+      "nonce_0_ciphertext_and_tag": "a4678160814ce7f75910a1ac1f1edb03ee9872f0a54b",
+      "nonce_1_ciphertext_and_tag": "62a52249edef461e30baabfe81d3446e50e0cbc60021"
+    }
+  ]
+}

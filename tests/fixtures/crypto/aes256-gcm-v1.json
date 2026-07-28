@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "classification": "McGrew/Viega GCM proposal test cases 13 and 14, submitter-supplied and historically hosted by NIST; not NIST CAVP or NIST-authored validation vectors",
+  "source_vector_ids": [
+    "McGrew/Viega GCM proposal test case 13",
+    "McGrew/Viega GCM proposal test case 14"
+  ],
+  "cases": [
+    {
+      "id": "aes256-gcm-empty",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "iv": "000000000000000000000000",
+      "aad": "",
+      "plaintext": "",
+      "ciphertext": "",
+      "tag": "530f8afbc74536b9a963b4f1c4cb738b"
+    },
+    {
+      "id": "aes256-gcm-zero-block",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "iv": "000000000000000000000000",
+      "aad": "",
+      "plaintext": "00000000000000000000000000000000",
+      "ciphertext": "cea7403d4d606b6e074ec5d3baf39d18",
+      "tag": "d0d1c8a799996bf0265b98b5d48ab919"
+    }
+  ]
+}

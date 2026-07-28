@@ -1,12 +1,20 @@
+use aes_gcm::{AeadInOut, Aes128Gcm, Aes256Gcm, KeyInit, Nonce};
 use blake3::Hasher;
 use bytes::BytesMut;
-use ferrum2_crypto::{TcpOpener, TcpSealer, TcpSubkey};
+use chacha20poly1305::ChaCha20Poly1305;
 use serde_json::Value;
 use std::path::Path;
 
 const BLAKE3_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/blake3-derive-v1.json");
 const AES128_GCM_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/aes128-gcm-v1.json");
+const AES256_GCM_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/aes256-gcm-v1.json");
+const CHACHA20_POLY1305_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/crypto/chacha20-poly1305-v1.json");
 const SIP022_KDF_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/sip022-kdf-v1.json");
+const SIP022_PROFILE_KDF_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/crypto/sip022-kdf-profiles-v1.json");
+const PROFILE_GENERATOR: &str =
+    include_str!("../../../tests/fixtures/crypto/profile-fixture-generator.rs");
 const PROVENANCE: &str = include_str!("../../../tests/fixtures/crypto/PROVENANCE.toml");
 
 fn decode_array<const N: usize>(encoded: &str) -> [u8; N] {
@@ -43,68 +51,126 @@ fn blake3_official_derive_mode_rows_match() {
     }
 }
 
-#[test]
-fn aes128_gcm_mcgrew_viega_proposal_cases_and_corrupted_tag_match() {
-    let fixture: Value = serde_json::from_str(AES128_GCM_FIXTURE).expect("valid fixture");
-    let cases = fixture["cases"].as_array().expect("cases");
+#[derive(Clone, Copy)]
+enum Primitive {
+    Aes128,
+    Aes256,
+    ChaCha20Poly1305,
+}
 
-    assert_eq!(
-        fixture["classification"].as_str(),
-        Some(
-            "McGrew/Viega GCM proposal test cases 1 and 2, submitter-supplied and historically hosted by NIST; not NIST CAVP or NIST-authored validation vectors"
-        )
-    );
-    assert_eq!(
-        fixture["source_vector_ids"],
-        serde_json::json!([
-            "McGrew/Viega GCM proposal test case 1",
-            "McGrew/Viega GCM proposal test case 2"
-        ])
-    );
-    assert_eq!(cases.len(), 2);
-    for case in cases {
-        assert_eq!(case["iv"].as_str(), Some("000000000000000000000000"));
-        assert_eq!(case["aad"].as_str(), Some(""));
-
-        let key = decode_array::<16>(case["key"].as_str().expect("key"));
-        let plaintext = hex::decode(case["plaintext"].as_str().expect("plaintext"))
-            .expect("hexadecimal plaintext");
-        let mut expected =
-            hex::decode(case["ciphertext"].as_str().expect("ciphertext")).expect("ciphertext");
-        expected.extend(
-            hex::decode(case["tag"].as_str().expect("tag"))
-                .expect("hexadecimal authentication tag"),
-        );
-
-        let mut encrypted = BytesMut::with_capacity(plaintext.len() + 16);
-        encrypted.extend_from_slice(&plaintext);
-        TcpSealer::new(TcpSubkey::from_bytes(key))
-            .seal_in_place(&mut encrypted)
-            .expect("proposal case encryption succeeds");
-        assert_eq!(encrypted.as_ref(), expected);
-
-        TcpOpener::new(TcpSubkey::from_bytes(key))
-            .open_in_place(&mut encrypted)
-            .expect("proposal case decryption succeeds");
-        assert_eq!(encrypted.as_ref(), plaintext);
+impl Primitive {
+    fn encrypt(self, case: &Value, buffer: &mut BytesMut) {
+        let nonce = decode_array::<12>(case["iv"].as_str().expect("nonce"));
+        let aad = hex::decode(case["aad"].as_str().expect("AAD")).expect("hexadecimal AAD");
+        let result = match self {
+            Self::Aes128 => Aes128Gcm::new_from_slice(
+                &hex::decode(case["key"].as_str().expect("key")).expect("hexadecimal key"),
+            )
+            .expect("AES-128 key")
+            .encrypt_in_place(&Nonce::from(nonce), &aad, buffer),
+            Self::Aes256 => Aes256Gcm::new_from_slice(
+                &hex::decode(case["key"].as_str().expect("key")).expect("hexadecimal key"),
+            )
+            .expect("AES-256 key")
+            .encrypt_in_place(&Nonce::from(nonce), &aad, buffer),
+            Self::ChaCha20Poly1305 => ChaCha20Poly1305::new_from_slice(
+                &hex::decode(case["key"].as_str().expect("key")).expect("hexadecimal key"),
+            )
+            .expect("ChaCha20 key")
+            .encrypt_in_place(&Nonce::from(nonce), &aad, buffer),
+        };
+        result.expect("reviewed primitive row encrypts");
     }
 
-    let case = &cases[1];
-    let key = decode_array::<16>(case["key"].as_str().expect("key"));
-    let mut corrupted =
-        hex::decode(case["ciphertext"].as_str().expect("ciphertext")).expect("ciphertext");
-    let mut tag = hex::decode(case["tag"].as_str().expect("tag")).expect("tag");
-    *tag.last_mut().expect("non-empty tag") ^= 1;
-    corrupted.extend(tag);
-    let original = corrupted.clone();
-    let mut corrupted = BytesMut::from(corrupted.as_slice());
+    fn decrypt(self, case: &Value, buffer: &mut BytesMut) -> Result<(), ()> {
+        let nonce = decode_array::<12>(case["iv"].as_str().expect("nonce"));
+        let aad = hex::decode(case["aad"].as_str().expect("AAD")).expect("hexadecimal AAD");
+        let result = match self {
+            Self::Aes128 => Aes128Gcm::new_from_slice(
+                &hex::decode(case["key"].as_str().expect("key")).expect("hexadecimal key"),
+            )
+            .expect("AES-128 key")
+            .decrypt_in_place(&Nonce::from(nonce), &aad, buffer),
+            Self::Aes256 => Aes256Gcm::new_from_slice(
+                &hex::decode(case["key"].as_str().expect("key")).expect("hexadecimal key"),
+            )
+            .expect("AES-256 key")
+            .decrypt_in_place(&Nonce::from(nonce), &aad, buffer),
+            Self::ChaCha20Poly1305 => ChaCha20Poly1305::new_from_slice(
+                &hex::decode(case["key"].as_str().expect("key")).expect("hexadecimal key"),
+            )
+            .expect("ChaCha20 key")
+            .decrypt_in_place(&Nonce::from(nonce), &aad, buffer),
+        };
+        result.map_err(|_| ())
+    }
+}
 
-    assert!(
-        TcpOpener::new(TcpSubkey::from_bytes(key))
-            .open_in_place(&mut corrupted)
-            .is_err()
+#[test]
+fn reviewed_aead_profile_rows_and_corrupted_tags_match() {
+    let fixtures = [
+        (
+            Primitive::Aes128,
+            serde_json::from_str::<Value>(AES128_GCM_FIXTURE).expect("valid AES-128 fixture"),
+        ),
+        (
+            Primitive::Aes256,
+            serde_json::from_str::<Value>(AES256_GCM_FIXTURE).expect("valid AES-256 fixture"),
+        ),
+        (
+            Primitive::ChaCha20Poly1305,
+            serde_json::from_str::<Value>(CHACHA20_POLY1305_FIXTURE).expect("valid ChaCha fixture"),
+        ),
+    ];
+
+    assert_eq!(
+        fixtures[0].1["source_vector_ids"].as_array().unwrap().len(),
+        2
     );
-    assert_eq!(corrupted.as_ref(), original);
+    assert_eq!(
+        fixtures[1].1["source_vector_ids"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        fixtures[2].1["source_vector_ids"].as_array().unwrap().len(),
+        1
+    );
+
+    for (primitive, fixture) in fixtures {
+        let cases = fixture["cases"].as_array().expect("primitive cases");
+        for case in cases {
+            let plaintext = hex::decode(case["plaintext"].as_str().expect("plaintext"))
+                .expect("hexadecimal plaintext");
+            let mut expected =
+                hex::decode(case["ciphertext"].as_str().expect("ciphertext")).expect("ciphertext");
+            expected.extend(
+                hex::decode(case["tag"].as_str().expect("tag"))
+                    .expect("hexadecimal authentication tag"),
+            );
+
+            let mut encrypted = BytesMut::with_capacity(plaintext.len() + 16);
+            encrypted.extend_from_slice(&plaintext);
+            primitive.encrypt(case, &mut encrypted);
+            assert_eq!(encrypted.as_ref(), expected, "fixture row {}", case["id"]);
+
+            primitive
+                .decrypt(case, &mut encrypted)
+                .expect("reviewed primitive row authenticates");
+            assert_eq!(encrypted.as_ref(), plaintext, "fixture row {}", case["id"]);
+        }
+
+        let negative = cases.last().expect("negative source row");
+        let mut corrupted =
+            hex::decode(negative["ciphertext"].as_str().expect("ciphertext")).expect("ciphertext");
+        let mut tag = hex::decode(negative["tag"].as_str().expect("tag")).expect("tag");
+        *tag.last_mut().expect("non-empty tag") ^= 1;
+        corrupted.extend(tag);
+        let original = corrupted.clone();
+        let mut corrupted = BytesMut::from(corrupted.as_slice());
+
+        assert!(primitive.decrypt(negative, &mut corrupted).is_err());
+        assert_eq!(corrupted.as_ref(), original);
+    }
 }
 
 #[test]
@@ -119,8 +185,24 @@ fn fixture_hashes_and_source_provenance_are_pinned() {
             "0c524568d8ee98e4b0a3dda7f4c87c36972fc439174e44716cf33f971393fdf1",
         ),
         (
+            AES256_GCM_FIXTURE,
+            "b3fddcddbbce801620d9147b362be61e6267ee1eea4cfa00bb2a4e722d61b3f1",
+        ),
+        (
+            CHACHA20_POLY1305_FIXTURE,
+            "d9799fb4af314e9c0053bc5f261bf68cb807e5ac91d6ef73fef4e00db104589e",
+        ),
+        (
             SIP022_KDF_FIXTURE,
             "2b74c9ddf95fbf872dfa19bc402e7dd30da56acd25f3ef0ef3f17bd74fed367d",
+        ),
+        (
+            SIP022_PROFILE_KDF_FIXTURE,
+            "f6d0047ad1432707b44201da40cfb831e754cbd70008b28d4538aa160d72f428",
+        ),
+        (
+            PROFILE_GENERATOR,
+            "ddcbdfe3da9c02eada30f4981a1f6b1e3ac73a43cd21d64c9d61f14cf2a65060",
         ),
     ] {
         let normalized = fixture.replace("\r\n", "\n");
@@ -150,6 +232,15 @@ fn fixture_hashes_and_source_provenance_are_pinned() {
         "does not imply NIST endorsement",
         "Do not commit or redistribute the source archive or PDF evidence",
         "Non-official SIP022 primitive fixture",
+        "gcm-test-vectors/vec-13.txt",
+        "a7a76fd69b964918daa559ef5301e1ece5545c1fde61d1039d035bf261a5f8ab",
+        "gcm-test-vectors/vec-14.txt",
+        "9c94ab4c7de60597968cf6131d0d1402be035e66832420da76741ba9a0927305",
+        "RFC 8439 section 2.8.2",
+        "25bef70fbf7a07ff45c2fe4cb7c6ce954eac687413d8610603268b4e4415324c",
+        "e37a978ccf0992d9053fbc039470d6527108e393",
+        "profile-fixture-generator.rs",
+        "imports no ferrum2 crate or reference implementation",
     ] {
         assert!(PROVENANCE.contains(required), "missing provenance field");
     }

@@ -206,6 +206,49 @@ fn core_source_freezes_endpoint_and_reply_ownership_contracts() {
 }
 
 #[test]
+fn crypto_profiles_keep_cipher_dispatch_inside_one_deep_module() {
+    let root = workspace_root();
+    let crypto =
+        fs::read_to_string(root.join("crates/ferrum2-crypto/src/lib.rs")).expect("crypto source");
+    for required in [
+        "pub enum TcpMethodProfile",
+        "pub struct MethodPsk",
+        "pub trait MethodKeyProvider",
+        "enum TcpCipher",
+        "pub struct TcpSealer",
+        "pub struct TcpOpener",
+    ] {
+        assert!(
+            crypto.contains(required),
+            "crypto deep module must contain `{required}`"
+        );
+    }
+    for duplicated_owner in [
+        "Aes256TcpSealer",
+        "Aes256TcpOpener",
+        "ChaChaTcpSealer",
+        "ChaChaTcpOpener",
+    ] {
+        assert!(
+            !crypto.contains(duplicated_owner),
+            "method-specific public flow owner is forbidden: {duplicated_owner}"
+        );
+    }
+
+    for member in MEMBERS {
+        if member == "crates/ferrum2-crypto" {
+            continue;
+        }
+        let manifest =
+            fs::read_to_string(root.join(member).join("Cargo.toml")).expect("member manifest");
+        assert!(
+            !manifest.contains("chacha20poly1305"),
+            "ChaCha primitive dependency must stay inside ferrum2-crypto: {member}"
+        );
+    }
+}
+
+#[test]
 fn all_future_product_targets_are_declared_explicitly() {
     let root = workspace_root();
     for (manifest, declaration) in [

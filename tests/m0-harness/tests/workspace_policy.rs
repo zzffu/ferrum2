@@ -5,7 +5,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const PRE_REPAIR_LOCK_IDENTITIES: &str = r#"aead|0.6.1|registry+https://github.com/rust-lang/crates.io-index|1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99
+const APPROVED_LOCK_IDENTITIES: &str = r#"aead|0.6.1|registry+https://github.com/rust-lang/crates.io-index|1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99
 aes|0.9.1|registry+https://github.com/rust-lang/crates.io-index|f1fc76eaeac4c9164506c466d4ffdd8ec9d0c5bf57ee97177c4d8eceb3a0e138
 aes-gcm|0.11.0|registry+https://github.com/rust-lang/crates.io-index|fdf011db2e21ce0d575593d749db5554b47fed37aff429e4dc50bc91ac93a028
 aho-corasick|1.1.4|registry+https://github.com/rust-lang/crates.io-index|ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301
@@ -19,6 +19,8 @@ block-buffer|0.12.1|registry+https://github.com/rust-lang/crates.io-index|d2f6c7
 bytes|1.12.1|registry+https://github.com/rust-lang/crates.io-index|fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04
 cc|1.4.0|registry+https://github.com/rust-lang/crates.io-index|5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9
 cfg-if|1.0.4|registry+https://github.com/rust-lang/crates.io-index|9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801
+chacha20|0.10.1|registry+https://github.com/rust-lang/crates.io-index|d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81
+chacha20poly1305|0.11.0|registry+https://github.com/rust-lang/crates.io-index|9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb
 cipher|0.5.2|registry+https://github.com/rust-lang/crates.io-index|e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c
 clap|4.6.4|registry+https://github.com/rust-lang/crates.io-index|d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7
 clap_builder|4.6.2|registry+https://github.com/rust-lang/crates.io-index|f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b
@@ -66,6 +68,7 @@ once_cell|1.21.4|registry+https://github.com/rust-lang/crates.io-index|9f7c3e4be
 parking_lot|0.12.5|registry+https://github.com/rust-lang/crates.io-index|93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a
 parking_lot_core|0.9.12|registry+https://github.com/rust-lang/crates.io-index|2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1
 pin-project-lite|0.2.17|registry+https://github.com/rust-lang/crates.io-index|a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd
+poly1305|0.9.1|registry+https://github.com/rust-lang/crates.io-index|6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c
 polyval|0.7.3|registry+https://github.com/rust-lang/crates.io-index|f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd
 proc-macro2|1.0.107|registry+https://github.com/rust-lang/crates.io-index|985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9
 prometheus-client|0.25.0|registry+https://github.com/rust-lang/crates.io-index|ba70bf887030e45213b4a95c9b08d5a450b157f87c1d63661ed0847a12fa2aad
@@ -253,8 +256,8 @@ fn lock_package_dependencies(lock: &str, package_name: &str) -> Result<BTreeSet<
     Err(format!("missing lock dependencies array: {package_name}"))
 }
 
-fn pre_repair_lock_identities() -> Vec<LockIdentity> {
-    let identities: Vec<_> = PRE_REPAIR_LOCK_IDENTITIES
+fn approved_lock_identities() -> Vec<LockIdentity> {
+    let identities: Vec<_> = APPROVED_LOCK_IDENTITIES
         .lines()
         .map(|line| {
             let fields: Vec<_> = line.split('|').collect();
@@ -269,8 +272,8 @@ fn pre_repair_lock_identities() -> Vec<LockIdentity> {
         .collect();
     assert_eq!(
         identities.len(),
-        110,
-        "the ADR-0009 pre-repair baseline must contain 110 identities"
+        113,
+        "the ADR-0018 M1 baseline must contain 113 identities"
     );
     let mut sorted = identities.clone();
     sorted.sort();
@@ -487,6 +490,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "tracing-subscriber = { version = \"=0.3.23\", default-features = false, features = [\"fmt\", \"json\", \"env-filter\"] }",
         "prometheus-client = { version = \"=0.25.0\", default-features = false }",
         "aes-gcm = { version = \"=0.11.0\", default-features = false, features = [\"aes\", \"bytes\", \"zeroize\"] }",
+        "chacha20poly1305 = { version = \"=0.11.0\", default-features = false, features = [\"bytes\", \"zeroize\"] }",
         "ghash = { version = \"=0.6.0\", default-features = false, features = [\"zeroize\"] }",
         "blake3 = { version = \"=1.8.5\", default-features = false, features = [\"std\", \"zeroize\"] }",
         "base64 = { version = \"=0.23.0\", default-features = false, features = [\"std\"] }",
@@ -523,6 +527,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "base64",
         "blake3",
         "bytes",
+        "chacha20poly1305",
         "clap",
         "ferrum2-config",
         "ferrum2-core",
@@ -559,6 +564,8 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "secrecy",
         "subtle =",
         "rand =",
+        "reduced-round",
+        "xchacha",
     ] {
         assert!(
             !manifest.contains(forbidden),
@@ -568,7 +575,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
 }
 
 #[test]
-fn crypto_manifest_declares_exact_zeroize_feature_anchors() {
+fn crypto_manifest_declares_exact_primitive_edges_and_zeroize_anchors() {
     let manifest = fs::read_to_string(
         workspace_root()
             .join("crates")
@@ -588,6 +595,13 @@ fn crypto_manifest_declares_exact_zeroize_feature_anchors() {
         Some("true"),
         "ghash must be inherited from the workspace without member overrides"
     );
+    assert_eq!(
+        dependencies
+            .get("chacha20poly1305.workspace")
+            .map(String::as_str),
+        Some("true"),
+        "ChaCha20-Poly1305 must be inherited without a member feature override"
+    );
     assert!(
         !dependencies.contains_key("aes"),
         "aes must use the exact dotted workspace declaration"
@@ -595,6 +609,10 @@ fn crypto_manifest_declares_exact_zeroize_feature_anchors() {
     assert!(
         !dependencies.contains_key("ghash"),
         "ghash must use the exact dotted workspace declaration"
+    );
+    assert!(
+        !dependencies.contains_key("chacha20poly1305"),
+        "ChaCha20-Poly1305 must use the exact dotted workspace declaration"
     );
 }
 
@@ -1213,6 +1231,49 @@ fn metadata_proves_exact_zeroize_feature_anchor_edges() {
     }
 
     let crypto_node = resolve_node(&metadata, crypto["id"].as_str().expect("crypto package ID"));
+    let chacha_dependencies: Vec<_> = crypto_dependencies
+        .iter()
+        .filter(|dependency| dependency["name"] == "chacha20poly1305")
+        .collect();
+    assert_eq!(
+        chacha_dependencies.len(),
+        1,
+        "crypto must have one direct ChaCha20-Poly1305 edge"
+    );
+    let chacha_dependency = chacha_dependencies[0];
+    assert_eq!(
+        chacha_dependency["source"],
+        "registry+https://github.com/rust-lang/crates.io-index"
+    );
+    assert_eq!(chacha_dependency["req"], "=0.11.0");
+    assert!(chacha_dependency["kind"].is_null());
+    assert!(chacha_dependency["rename"].is_null());
+    assert_eq!(chacha_dependency["optional"], false);
+    assert_eq!(chacha_dependency["uses_default_features"], false);
+    assert_eq!(
+        chacha_dependency["features"],
+        serde_json::json!(["bytes", "zeroize"])
+    );
+    assert!(chacha_dependency["target"].is_null());
+    let chacha_id = unique_registry_package_id(&metadata, "chacha20poly1305", "0.11.0");
+    let chacha_package = packages
+        .iter()
+        .find(|package| package["id"].as_str() == Some(chacha_id.as_str()))
+        .expect("resolved ChaCha20-Poly1305 package");
+    assert_eq!(chacha_package["rust_version"], "1.85");
+    assert_eq!(chacha_package["license"], "Apache-2.0 OR MIT");
+    let chacha_edge = crypto_node["deps"]
+        .as_array()
+        .expect("crypto resolve dependencies")
+        .iter()
+        .find(|dependency| dependency["name"] == "chacha20poly1305")
+        .expect("direct ChaCha20-Poly1305 edge");
+    assert_eq!(chacha_edge["pkg"], chacha_id);
+    assert_eq!(
+        chacha_edge["dep_kinds"],
+        serde_json::json!([{"kind": null, "target": null}])
+    );
+
     let aes_gcm_id = unique_registry_package_id(&metadata, "aes-gcm", "0.11.0");
     let aes_gcm_node = resolve_node(&metadata, &aes_gcm_id);
 
@@ -1246,6 +1307,9 @@ fn resolved_crypto_feature_sets_are_exact() {
     let metadata = metadata();
     for (name, version, expected_features) in [
         ("aes-gcm", "0.11.0", &["aes", "bytes", "zeroize"][..]),
+        ("chacha20poly1305", "0.11.0", &["bytes", "zeroize"][..]),
+        ("chacha20", "0.10.1", &["cipher", "xchacha", "zeroize"][..]),
+        ("poly1305", "0.9.1", &[][..]),
         ("aes", "0.9.1", &["zeroize"][..]),
         ("ghash", "0.6.0", &["zeroize"][..]),
         ("polyval", "0.7.3", &["hazmat", "zeroize"][..]),
@@ -1266,21 +1330,21 @@ fn resolved_crypto_feature_sets_are_exact() {
         let expected: BTreeSet<_> = expected_features.iter().copied().collect();
         assert_eq!(
             actual, expected,
-            "{name} {version} resolved features must exactly match ADR-0009"
+            "{name} {version} resolved features must exactly match the approved crypto policy"
         );
     }
 }
 
 #[test]
-fn lock_package_identities_exactly_match_the_pre_repair_baseline() {
+fn lock_package_identities_exactly_match_the_approved_m1_baseline() {
     let lock = fs::read_to_string(workspace_root().join("Cargo.lock")).expect("Cargo.lock");
     let actual = lock_identities(&lock).expect("candidate lock identities");
-    let expected = pre_repair_lock_identities();
+    let expected = approved_lock_identities();
 
     assert_eq!(
         actual.len(),
-        110,
-        "candidate lock must contain 110 packages"
+        113,
+        "candidate lock must contain 113 packages"
     );
     assert_eq!(
         actual, expected,

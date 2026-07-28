@@ -39,6 +39,7 @@ tracing-subscriber = { version = "=0.3.23", default-features = false, features =
 prometheus-client = { version = "=0.25.0", default-features = false }
 aes = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
 aes-gcm = { version = "=0.11.0", default-features = false, features = ["aes", "bytes", "zeroize"] }
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["bytes", "zeroize"] }
 ghash = { version = "=0.6.0", default-features = false, features = ["zeroize"] }
 blake3 = { version = "=1.8.5", default-features = false, features = ["std", "zeroize"] }
 base64 = { version = "=0.23.0", default-features = false, features = ["std"] }
