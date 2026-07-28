@@ -936,28 +936,36 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
 }
 
 #[test]
-fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
+fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
     let root = workspace_root();
     let manifest =
         fs::read_to_string(root.join("tests/m0-harness/Cargo.toml")).expect("harness manifest");
     let manifest_lf = normalize_line_endings(&manifest).expect("harness line endings");
-    let expected = BTreeMap::from([
+    let expected_dev = BTreeMap::from([
         ("aes-gcm.workspace".to_owned(), "true".to_owned()),
         ("blake3.workspace".to_owned(), "true".to_owned()),
         ("hex.workspace".to_owned(), "true".to_owned()),
         ("serde_json.workspace".to_owned(), "true".to_owned()),
         ("socket2.workspace".to_owned(), "true".to_owned()),
-        ("tempfile.workspace".to_owned(), "true".to_owned()),
     ]);
+    let expected_normal = BTreeMap::from([("tempfile.workspace".to_owned(), "true".to_owned())]);
     assert_eq!(
         dependency_table(&manifest, "[dev-dependencies]").expect("harness dev dependencies"),
-        expected
+        expected_dev
+    );
+    assert_eq!(
+        dependency_table(&manifest, "[dependencies]").expect("harness normal dependencies"),
+        expected_normal
     );
 
     for fixture in [manifest_lf.clone(), manifest_lf.replace('\n', "\r\n")] {
         assert_eq!(
             dependency_table(&fixture, "[dev-dependencies]").expect("line-ending fixture"),
-            expected
+            expected_dev
+        );
+        assert_eq!(
+            dependency_table(&fixture, "[dependencies]").expect("line-ending fixture"),
+            expected_normal
         );
     }
     for mutation in [
@@ -976,11 +984,12 @@ fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
             "tempfile.workspace = true",
             "tempfile.workspace = true\nferrum2-core.workspace = true",
         ),
-        manifest_lf.replace("[dev-dependencies]", "[dependencies]"),
+        manifest_lf.replace("[dependencies]", "[qualification-dependencies]"),
     ] {
-        assert_ne!(
-            dependency_table(&mutation, "[dev-dependencies]").ok(),
-            Some(expected.clone()),
+        assert!(
+            dependency_table(&mutation, "[dev-dependencies]").ok() != Some(expected_dev.clone())
+                || dependency_table(&mutation, "[dependencies]").ok()
+                    != Some(expected_normal.clone()),
             "manifest mutation must not preserve the approved dependency contract"
         );
     }
@@ -1001,11 +1010,18 @@ fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
         .expect("harness dependencies")
         .iter()
         .map(|dependency| {
-            assert_eq!(
-                dependency["kind"], "dev",
-                "every harness direct edge must be test-only"
-            );
             let name = dependency["name"].as_str().expect("dependency name");
+            if name == "tempfile" {
+                assert!(
+                    dependency["kind"].is_null(),
+                    "qualification runtime dependency must be normal"
+                );
+            } else {
+                assert_eq!(
+                    dependency["kind"], "dev",
+                    "all other harness edges must remain test-only"
+                );
+            }
             match name {
                 "aes-gcm" => {
                     assert_eq!(dependency["uses_default_features"], false);
@@ -1079,6 +1095,82 @@ fn harness_dependencies_and_lock_edges_match_the_exact_test_only_exception() {
         );
     }
     assert!(lock_package_dependencies(&lock_lf.replace('\n', "\r"), "ferrum2-m0-harness").is_err());
+}
+
+#[test]
+fn qualification_is_a_cargo_managed_non_test_binary() {
+    let metadata = metadata();
+    let harness = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "ferrum2-m0-harness")
+        .expect("harness package");
+    let targets = harness["targets"].as_array().expect("harness targets");
+    let qualification: Vec<_> = targets
+        .iter()
+        .filter(|target| target["name"] == "m0-qualification")
+        .collect();
+    assert_eq!(
+        qualification.len(),
+        1,
+        "exactly one Cargo qualification target is required"
+    );
+    let qualification = qualification[0];
+    assert_eq!(qualification["kind"], serde_json::json!(["bin"]));
+    assert_eq!(qualification["crate_types"], serde_json::json!(["bin"]));
+    assert_eq!(qualification["test"], false);
+    assert_eq!(qualification["doctest"], false);
+    assert!(
+        qualification["src_path"]
+            .as_str()
+            .expect("qualification source path")
+            .replace('\\', "/")
+            .ends_with("/tests/m0-harness/src/bin/m0_qualification.rs")
+    );
+    assert!(
+        targets
+            .iter()
+            .all(|target| target["name"] != "external_interop"),
+        "external interoperability must not remain in libtest discovery"
+    );
+
+    let root = workspace_root();
+    assert!(
+        !root
+            .join("tests/m0-harness/tests/external_interop.rs")
+            .exists(),
+        "the old ignored libtest entry must be removed"
+    );
+    let external = fs::read_to_string(root.join("tests/m0-harness/src/external_support/mod.rs"))
+        .expect("hosted external support");
+    assert!(
+        !external.contains("#[cfg(test)]"),
+        "OS/process/socket helper tests must not remain embedded in hosted support"
+    );
+    let pure_contract = [
+        fs::read_to_string(root.join("tests/m0-harness/src/qualification/mod.rs"))
+            .expect("qualification state module"),
+        fs::read_to_string(root.join("tests/m0-harness/tests/qualification_contract.rs"))
+            .expect("qualification contract tests"),
+    ]
+    .join("\n");
+    for forbidden in [
+        "std::net",
+        "std::process",
+        "TcpListener",
+        "TcpStream",
+        "Command::new",
+        "RUNNER_TEMP",
+        "versions.toml",
+        "curl",
+        "reqwest",
+    ] {
+        assert!(
+            !pure_contract.contains(forbidden),
+            "local qualification state tests must remain I/O-free: {forbidden}"
+        );
+    }
 }
 
 #[test]

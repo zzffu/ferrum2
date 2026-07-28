@@ -1,13 +1,12 @@
-#![allow(dead_code)]
-
-use crate::local_support::bind_loopback_listener;
+use crate::qualification::{CaseFailure, CaseSpec, Direction, QualificationOps, Reference};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -23,24 +22,59 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 static ACTIVE_CHILDREN: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Clone, Copy, Debug)]
-pub enum Reference {
-    SingBox,
-    ShadowsocksRust,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Direction {
-    FerrumClient,
-    ReferenceClient,
-}
-
 struct Pin {
+    version: String,
+    source_commit: String,
     expected_version: String,
     asset: String,
     size: u64,
     sha256: String,
     license_review: String,
+}
+
+pub struct HostedOperations;
+
+impl HostedOperations {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl QualificationOps for HostedOperations {
+    fn provision(&mut self, reference: Reference) -> Result<(), CaseFailure> {
+        match catch_sanitized(|| provision_reference(reference)) {
+            Ok(()) => Ok(()),
+            Err(payload) => {
+                eprintln!(
+                    "qualification provision failed: reference={reference:?}, diagnostic={}",
+                    panic_diagnostic(payload)
+                );
+                Err(CaseFailure::new(reference.provision_root()))
+            }
+        }
+    }
+
+    fn run_case(&mut self, case: CaseSpec) -> Result<(), CaseFailure> {
+        match catch_sanitized(|| run_case(case.reference, case.direction)) {
+            Ok(()) => Ok(()),
+            Err(payload) => {
+                eprintln!(
+                    "qualification case failed: case_id={}, diagnostic={}",
+                    case.id,
+                    panic_diagnostic(payload)
+                );
+                Err(CaseFailure::new(case.case_root()))
+            }
+        }
+    }
+}
+
+fn catch_sanitized<T>(operation: impl FnOnce() -> T) -> Result<T, Box<dyn std::any::Any + Send>> {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = catch_unwind(AssertUnwindSafe(operation));
+    std::panic::set_hook(previous_hook);
+    result
 }
 
 struct Capture {
@@ -327,12 +361,6 @@ impl ProcessGuard {
         }
     }
 
-    fn finish_natural(&mut self, deadline: CaseDeadline, phase: &str) -> (ExitStatus, String) {
-        let status = self.wait_for_exit(deadline, phase);
-        let diagnostics = self.finish_capture(deadline);
-        (status, diagnostics)
-    }
-
     fn terminate(&mut self, deadline: CaseDeadline) -> String {
         if self.reaped {
             panic!(
@@ -355,6 +383,15 @@ impl ProcessGuard {
     }
 
     fn finish_capture(&mut self, deadline: CaseDeadline) -> String {
+        let (stdout, stderr) = self.finish_captures(deadline);
+        format!(
+            "stdout={}, stderr={}",
+            sanitize_capture(stdout),
+            sanitize_capture(stderr)
+        )
+    }
+
+    fn finish_captures(&mut self, deadline: CaseDeadline) -> (Capture, Capture) {
         fn receive(reader: Option<CaptureReader>, deadline: CaseDeadline, label: &str) -> Capture {
             let Some(mut reader) = reader else {
                 return Capture {
@@ -376,11 +413,7 @@ impl ProcessGuard {
         }
         let stdout = receive(self.stdout.take(), deadline, "stdout capture");
         let stderr = receive(self.stderr.take(), deadline, "stderr capture");
-        format!(
-            "stdout={}, stderr={}",
-            sanitize_capture(stdout),
-            sanitize_capture(stderr)
-        )
+        (stdout, stderr)
     }
 }
 
@@ -451,24 +484,44 @@ fn sanitize_capture(capture: Capture) -> String {
     }
 }
 
-pub fn run_case(reference: Reference, direction: Direction) {
+fn provision_reference(reference: Reference) {
+    let deadline = CaseDeadline::start();
+    let pin = load_pin(reference);
+    let paths = reference_paths(reference, &pin);
+    verify_archive(&paths.archive, &pin, deadline);
+    verify_archive_members(reference, &paths.archive, &pin, deadline);
+    match reference {
+        Reference::SingBox => {
+            verify_binary_location(&paths.server, &paths.extraction_root);
+            verify_version(reference, &paths.server, &pin, deadline);
+        }
+        Reference::ShadowsocksRust => {
+            verify_binary_location(&paths.server, &paths.extraction_root);
+            verify_binary_location(
+                paths.client.as_ref().expect("shadowsocks-rust client path"),
+                &paths.extraction_root,
+            );
+            verify_version(reference, &paths.server, &pin, deadline);
+            verify_version(
+                reference,
+                paths.client.as_ref().expect("shadowsocks-rust client path"),
+                &pin,
+                deadline,
+            );
+        }
+    }
+    deadline.check("final reference provision verification");
+}
+
+fn run_case(reference: Reference, direction: Direction) {
     let deadline = CaseDeadline::start();
     let child_baseline = ACTIVE_CHILDREN.load(Ordering::SeqCst);
     let pin = load_pin(reference);
-    let archive = required_env(reference_archive_env(reference));
-    verify_archive(&archive, &pin, deadline);
-
-    let reference_binary = match (reference, direction) {
-        (Reference::SingBox, _) => required_env("M0_SING_BOX_BIN"),
-        (Reference::ShadowsocksRust, Direction::FerrumClient) => required_env("M0_SSSERVER_BIN"),
-        (Reference::ShadowsocksRust, Direction::ReferenceClient) => required_env("M0_SSLOCAL_BIN"),
+    let paths = reference_paths(reference, &pin);
+    let reference_binary = match direction {
+        Direction::FerrumClient => paths.server,
+        Direction::ReferenceClient => paths.client.unwrap_or(paths.server),
     };
-    verify_version(
-        reference,
-        &reference_binary,
-        &pin.expected_version,
-        deadline,
-    );
 
     let directory = tempfile::tempdir().expect("isolated interop directory");
     let directory_path = directory.path().to_path_buf();
@@ -487,7 +540,10 @@ pub fn run_case(reference: Reference, direction: Direction) {
         target,
         deadline,
         target_shutdown: &target_process.shutdown_gate,
-        application_ack: &target_process.application_ack,
+        application_ack: target_process
+            .application_ack
+            .as_ref()
+            .expect("target application acknowledgement owner"),
         trace: Arc::clone(&trace),
     };
     let (config_checksum, process_evidence) = match direction {
@@ -500,7 +556,6 @@ pub fn run_case(reference: Reference, direction: Direction) {
     let target_evidence = target_process.finish(deadline);
     trace.assert_complete();
     drop(ports);
-    assert_rebind_all([target, proxy, shadowsocks]);
     directory
         .close()
         .unwrap_or_else(|error| panic!("explicit temporary directory close: {error}"));
@@ -927,7 +982,8 @@ impl Drop for ApplicationEofAck<'_> {
 struct TargetProcess {
     result: Receiver<Result<String, String>>,
     shutdown_gate: Receiver<Result<(), String>>,
-    application_ack: Sender<Result<(), String>>,
+    application_ack: Option<Sender<Result<(), String>>>,
+    cancelled: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -936,6 +992,8 @@ impl TargetProcess {
         let (sender, result) = mpsc::channel();
         let (shutdown_sender, shutdown_gate) = mpsc::channel();
         let (application_ack, acknowledgement_receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let target_cancelled = Arc::clone(&cancelled);
         let thread = thread::spawn(move || {
             let outcome = run_target(
                 listener,
@@ -943,13 +1001,15 @@ impl TargetProcess {
                 &trace,
                 &shutdown_sender,
                 &acknowledgement_receiver,
+                &target_cancelled,
             );
             let _ = sender.send(outcome);
         });
         Self {
             result,
             shutdown_gate,
-            application_ack,
+            application_ack: Some(application_ack),
+            cancelled,
             thread: Some(thread),
         }
     }
@@ -968,14 +1028,25 @@ impl TargetProcess {
     }
 }
 
+impl Drop for TargetProcess {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.application_ack.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 fn run_target(
     listener: TcpListener,
     deadline: CaseDeadline,
     trace: &ExchangeTrace,
     shutdown_sender: &Sender<Result<(), String>>,
     acknowledgement_receiver: &Receiver<Result<(), String>>,
+    cancelled: &AtomicBool,
 ) -> Result<String, String> {
-    let prepared = prepare_target(listener, deadline, trace);
+    let prepared = prepare_target(listener, deadline, trace, cancelled);
     let (stream, evidence) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -994,12 +1065,16 @@ fn prepare_target(
     listener: TcpListener,
     deadline: CaseDeadline,
     trace: &ExchangeTrace,
+    cancelled: &AtomicBool,
 ) -> Result<(TcpStream, String), String> {
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("target nonblocking listener: {error}"))?;
     let readiness_end = Instant::now() + deadline.bounded(READINESS_TIMEOUT, "target accept");
     let (mut stream, _) = loop {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err("target cancelled before accept".to_owned());
+        }
         match listener.accept() {
             Ok(accepted) => break accepted,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -1096,23 +1171,6 @@ fn observe_clean_eof_event<S: DeadlineIo + ?Sized>(
     }
 }
 
-fn expect_clean_eof<S: DeadlineIo + ?Sized>(
-    stream: &mut S,
-    deadline: CaseDeadline,
-    label: &str,
-) -> Result<(), String> {
-    let mut extra = [0_u8; 1];
-    match read_once_deadline(stream, &mut extra, deadline, IO_TIMEOUT, label) {
-        Ok(0) => Ok(()),
-        Ok(_) => Err(format!(
-            "{label} received an extra byte after expected payload"
-        )),
-        Err(error) => Err(format!(
-            "{label} expected clean EOF, received error: {error}"
-        )),
-    }
-}
-
 fn wait_for_tcp_listener(
     child: &mut ProcessGuard,
     address: SocketAddrV4,
@@ -1193,11 +1251,11 @@ struct ReservedPorts {
 
 impl ReservedPorts {
     fn new() -> Self {
-        let target = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-            .expect("reserve target");
-        let proxy = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-            .expect("reserve proxy");
-        let shadowsocks = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        let target =
+            TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("reserve target");
+        let proxy =
+            TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("reserve proxy");
+        let shadowsocks = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .expect("reserve Shadowsocks");
         let addresses = [
             ipv4_address(&target),
@@ -1248,17 +1306,6 @@ impl ReservedPorts {
                 .expect("release Shadowsocks only to server child"),
         );
     }
-}
-
-fn assert_rebind_all(addresses: [SocketAddrV4; 3]) {
-    let rebound = addresses
-        .into_iter()
-        .map(|address| {
-            bind_loopback_listener(address)
-                .unwrap_or_else(|error| panic!("exact address did not rebind {address}: {error}"))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(rebound.len(), 3);
 }
 
 fn ipv4_address(listener: &TcpListener) -> SocketAddrV4 {
@@ -1340,10 +1387,9 @@ fn path_text(path: &Path) -> &str {
 }
 
 fn ferrum_binary(name: &str) -> PathBuf {
-    let test_executable = std::env::current_exe().expect("test executable");
-    let profile = test_executable
+    let qualification_executable = std::env::current_exe().expect("qualification executable");
+    let profile = qualification_executable
         .parent()
-        .and_then(Path::parent)
         .expect("Cargo target profile directory");
     let path = profile.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     assert!(
@@ -1355,20 +1401,116 @@ fn ferrum_binary(name: &str) -> PathBuf {
     path
 }
 
-fn reference_archive_env(reference: Reference) -> &'static str {
+struct ReferencePaths {
+    archive: PathBuf,
+    extraction_root: PathBuf,
+    server: PathBuf,
+    client: Option<PathBuf>,
+}
+
+fn reference_paths(reference: Reference, pin: &Pin) -> ReferencePaths {
+    let runner_temp = PathBuf::from(
+        std::env::var_os("RUNNER_TEMP")
+            .expect("GitHub runner did not provide the fixed RUNNER_TEMP directory"),
+    );
+    let archive = runner_temp.join(&pin.asset);
     match reference {
-        Reference::SingBox => "M0_SING_BOX_ARCHIVE",
-        Reference::ShadowsocksRust => "M0_SHADOWSOCKS_RUST_ARCHIVE",
+        Reference::SingBox => {
+            let extraction_root = runner_temp.join(format!("sing-box-{}", pin.version));
+            let binary = extraction_root
+                .join(format!("sing-box-{}-linux-amd64-glibc", pin.version))
+                .join("sing-box");
+            ReferencePaths {
+                archive,
+                extraction_root,
+                server: binary.clone(),
+                client: Some(binary),
+            }
+        }
+        Reference::ShadowsocksRust => {
+            let extraction_root = runner_temp.join(format!("shadowsocks-rust-{}", pin.version));
+            ReferencePaths {
+                archive,
+                server: extraction_root.join("ssserver"),
+                client: Some(extraction_root.join("sslocal")),
+                extraction_root,
+            }
+        }
     }
 }
 
-fn required_env(name: &str) -> PathBuf {
-    let value = std::env::var_os(name).unwrap_or_else(|| {
-        panic!("required external process environment variable missing: {name}")
-    });
-    let path = PathBuf::from(value);
-    assert!(path.is_file(), "required external file missing for {name}");
-    path
+fn verify_binary_location(binary: &Path, extraction_root: &Path) {
+    assert!(
+        binary.is_file(),
+        "required reviewed reference executable is missing"
+    );
+    let canonical_root = extraction_root
+        .canonicalize()
+        .expect("canonical reviewed extraction root");
+    let canonical_binary = binary
+        .canonicalize()
+        .expect("canonical reviewed reference executable");
+    assert!(
+        canonical_binary.starts_with(&canonical_root),
+        "reference executable escaped the reviewed extraction root"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&canonical_binary)
+            .expect("reference executable metadata")
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "reviewed reference file is not executable");
+    }
+}
+
+fn verify_archive_members(reference: Reference, archive: &Path, pin: &Pin, deadline: CaseDeadline) {
+    let mut command = Command::new("tar");
+    match reference {
+        Reference::SingBox => {
+            command.args(["-tzf", path_text(archive)]);
+        }
+        Reference::ShadowsocksRust => {
+            command.args(["-tJf", path_text(archive)]);
+        }
+    }
+    let mut process = ProcessGuard::spawn("reviewed archive member probe", &mut command, deadline);
+    let status = process.wait_for_exit(deadline, "bounded archive member probe");
+    let (stdout, stderr) = process.finish_captures(deadline);
+    assert!(
+        status.success(),
+        "reviewed archive member probe failed: stdout={}, stderr={}",
+        sanitize_capture(stdout),
+        sanitize_capture(stderr)
+    );
+    assert!(
+        !stdout.truncated,
+        "archive member list exceeded bounded capture"
+    );
+    assert!(
+        !stderr.truncated,
+        "archive member stderr exceeded bounded capture"
+    );
+    assert!(
+        stderr.bytes.is_empty(),
+        "archive member probe emitted unexpected stderr"
+    );
+    let members = String::from_utf8(stdout.bytes).expect("archive member list must be UTF-8 text");
+    let actual: Vec<_> = members.lines().collect();
+    let sing_root = format!("sing-box-{}-linux-amd64-glibc", pin.version);
+    let expected = match reference {
+        Reference::SingBox => vec![
+            format!("{sing_root}/"),
+            format!("{sing_root}/LICENSE"),
+            format!("{sing_root}/sing-box"),
+        ],
+        Reference::ShadowsocksRust => ["sslocal", "ssserver", "ssurl", "ssmanager", "ssservice"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    };
+    assert_eq!(actual, expected, "archive member allowlist mismatch");
 }
 
 fn load_pin(reference: Reference) -> Pin {
@@ -1385,6 +1527,8 @@ fn load_pin(reference: Reference) -> Pin {
     let values = parse_section(&text, section);
     let host = if cfg!(windows) { "windows" } else { "linux" };
     Pin {
+        version: value(&values, "version").to_owned(),
+        source_commit: value(&values, "source_commit").to_owned(),
         expected_version: value(&values, "expected_version").to_owned(),
         asset: value(&values, &format!("{host}_asset")).to_owned(),
         size: value(&values, &format!("{host}_size"))
@@ -1393,6 +1537,22 @@ fn load_pin(reference: Reference) -> Pin {
         sha256: value(&values, &format!("{host}_sha256")).to_owned(),
         license_review: value(&values, "license_review").to_owned(),
     }
+}
+
+fn panic_diagnostic(payload: Box<dyn std::any::Any + Send>) -> String {
+    let text = if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_owned()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "non-text panic".to_owned()
+    };
+    text.replace(SYNTHETIC_PSK, "[redacted]")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .chars()
+        .take(4096)
+        .collect()
 }
 
 fn parse_section(text: &str, wanted: &str) -> HashMap<String, String> {
@@ -1440,7 +1600,7 @@ fn verify_archive(path: &Path, pin: &Pin, deadline: CaseDeadline) {
     );
 }
 
-fn verify_version(reference: Reference, binary: &Path, expected: &str, deadline: CaseDeadline) {
+fn verify_version(reference: Reference, binary: &Path, pin: &Pin, deadline: CaseDeadline) {
     let mut command = Command::new(binary);
     match reference {
         Reference::SingBox => {
@@ -1451,19 +1611,39 @@ fn verify_version(reference: Reference, binary: &Path, expected: &str, deadline:
         }
     }
     let mut process = ProcessGuard::spawn("reference version probe", &mut command, deadline);
-    let (status, rendered) = process.finish_natural(deadline, "bounded reference version probe");
+    let status = process.wait_for_exit(deadline, "bounded reference version probe");
+    let (stdout, stderr) = process.finish_captures(deadline);
     assert!(
         status.success(),
-        "reference version probe failed: {rendered}"
+        "reference version probe failed: stdout={}, stderr={}",
+        sanitize_capture(stdout),
+        sanitize_capture(stderr)
     );
+    assert!(!stdout.truncated, "reference version output exceeded cap");
+    assert!(!stderr.truncated, "reference version stderr exceeded cap");
     assert!(
-        rendered.contains(expected),
-        "reference version mismatch: expected reviewed output"
+        stderr.bytes.is_empty(),
+        "reference version probe emitted unexpected stderr"
     );
-}
-
-fn sha256_file(path: &Path) -> String {
-    sha256_file_with_deadline(path, None)
+    let rendered = String::from_utf8(stdout.bytes).expect("reference version output must be UTF-8");
+    match reference {
+        Reference::SingBox => {
+            assert!(
+                rendered.lines().any(|line| line == pin.expected_version),
+                "sing-box version line mismatch"
+            );
+            let revision = format!("Revision: {}", pin.source_commit);
+            assert!(
+                rendered.lines().any(|line| line == revision),
+                "sing-box source revision mismatch"
+            );
+        }
+        Reference::ShadowsocksRust => assert_eq!(
+            rendered.trim_end_matches(['\r', '\n']),
+            pin.expected_version,
+            "shadowsocks-rust version output mismatch"
+        ),
+    }
 }
 
 fn sha256_file_with_deadline(path: &Path, deadline: Option<CaseDeadline>) -> String {
@@ -1677,587 +1857,6 @@ impl Sha256 {
         }
         for (state, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
             *state = state.wrapping_add(value);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        ACTIVE_CHILDREN, ApplicationEofAck, CaseDeadline, DeadlineIo, ExchangeEvent, ExchangeTrace,
-        IO_TIMEOUT, ProcessGuard, await_application_ack_while_holding, expect_clean_eof,
-        forward_payload, observe_clean_eof_event, read_exact_deadline, reverse_payload,
-        run_application_exchange, run_target_exchange, sha256_bytes, sha256_file,
-    };
-    use std::fs;
-    use std::io::{Read, Write};
-    use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-    use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, mpsc};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn sha256_matches_reviewed_known_answer() {
-        assert_eq!(
-            sha256_bytes(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("abc");
-        fs::write(&path, b"abc").expect("write fixture");
-        assert_eq!(sha256_file(&path), sha256_bytes(b"abc"));
-    }
-
-    #[test]
-    fn live_exchange_records_ordered_eof_and_shutdown_operations() {
-        let (mut target, mut application) = connected_pair();
-        let trace = Arc::new(ExchangeTrace::default());
-        let target_trace = Arc::clone(&trace);
-        let (shutdown_sender, shutdown_receiver) = mpsc::channel();
-        let (ack_sender, ack_receiver) = mpsc::channel();
-        let deadline = CaseDeadline::after(Duration::from_secs(5));
-        let target_thread = thread::spawn(move || {
-            let result = run_target_exchange(&mut target, deadline, &target_trace);
-            match result {
-                Ok(evidence) => {
-                    shutdown_sender.send(Ok(())).expect("target shutdown gate");
-                    await_application_ack_while_holding(&target, &ack_receiver, deadline)
-                        .map(|_| evidence)
-                }
-                Err(error) => {
-                    shutdown_sender
-                        .send(Err(error.clone()))
-                        .expect("target failure gate");
-                    Err(error)
-                }
-            }
-        });
-        run_application_exchange(
-            &mut application,
-            deadline,
-            &shutdown_receiver,
-            &ack_sender,
-            &trace,
-        )
-        .expect("live application exchange");
-        target_thread
-            .join()
-            .expect("target thread")
-            .expect("live target exchange");
-        trace.assert_complete();
-    }
-
-    #[test]
-    fn live_target_shutdown_failure_is_not_masked_by_stream_drop() {
-        let (target, application) = connected_pair();
-        let mut target = ShutdownFailureStream { inner: target };
-        let trace = Arc::new(ExchangeTrace::default());
-        let application_trace = Arc::clone(&trace);
-        let (shutdown_sender, shutdown_receiver) = mpsc::channel();
-        let (ack_sender, ack_receiver) = mpsc::channel();
-        let deadline = CaseDeadline::after(Duration::from_secs(5));
-        let application_thread = thread::spawn(move || {
-            let mut application = application;
-            let result = run_application_exchange(
-                &mut application,
-                deadline,
-                &shutdown_receiver,
-                &ack_sender,
-                &application_trace,
-            );
-            (result, application)
-        });
-
-        let target_error = run_target_exchange(&mut target, deadline, &trace)
-            .expect_err("injected target write shutdown failure");
-        assert!(target_error.contains("target write shutdown failed"));
-        shutdown_sender
-            .send(Err(target_error))
-            .expect("target failure gate");
-        let (application_result, mut application) =
-            application_thread.join().expect("application thread");
-        assert!(
-            application_result
-                .expect_err("target failure must block client EOF observation")
-                .contains("target exchange failed before client EOF")
-        );
-        assert!(
-            ack_receiver
-                .recv_timeout(Duration::from_millis(100))
-                .expect("application failure acknowledgement")
-                .is_err(),
-            "target failure must not produce a successful application acknowledgement"
-        );
-        assert_eq!(
-            trace.snapshot(),
-            [
-                ExchangeEvent::ForwardMatched,
-                ExchangeEvent::ReverseMatched,
-                ExchangeEvent::ApplicationShutdown,
-                ExchangeEvent::TargetCleanEof,
-            ],
-            "failed shutdown must not record target shutdown or client EOF"
-        );
-        assert!(
-            target.inner.peer_addr().is_ok(),
-            "target stream must remain alive during the failure assertion"
-        );
-        application
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .expect("client read timeout");
-        let mut byte = [0_u8; 1];
-        let error = application
-            .read(&mut byte)
-            .expect_err("live target stream must not masquerade as client EOF");
-        assert!(matches!(
-            error.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ));
-    }
-
-    #[test]
-    fn omitted_application_eof_observation_sends_failure_acknowledgement() {
-        let (sender, receiver) = mpsc::channel();
-        {
-            let _acknowledgement = ApplicationEofAck::new(&sender);
-        }
-        let error = receiver
-            .recv_timeout(Duration::from_millis(100))
-            .expect("omission acknowledgement")
-            .expect_err("omitted EOF observation must fail");
-        assert!(error.contains("omitted"));
-    }
-
-    #[test]
-    fn client_extra_byte_prevents_eof_event_and_success_acknowledgement() {
-        let trace = ExchangeTrace::default();
-        record_trace_prefix(
-            &trace,
-            &[
-                ExchangeEvent::ForwardMatched,
-                ExchangeEvent::ReverseMatched,
-                ExchangeEvent::ApplicationShutdown,
-                ExchangeEvent::TargetCleanEof,
-                ExchangeEvent::TargetShutdown,
-            ],
-        );
-        let (mut client, mut peer) = connected_pair();
-        peer.write_all(&[0xa5]).expect("extra byte");
-        peer.shutdown(Shutdown::Write).expect("peer shutdown");
-        let (sender, receiver) = mpsc::channel();
-        let mut acknowledgement = ApplicationEofAck::new(&sender);
-        let error = acknowledgement
-            .observe(
-                &mut client,
-                CaseDeadline::after(Duration::from_secs(1)),
-                &trace,
-            )
-            .expect_err("extra byte must reject client EOF");
-        assert!(error.contains("extra byte"));
-        assert!(
-            receiver
-                .recv_timeout(Duration::from_millis(100))
-                .expect("failure acknowledgement")
-                .is_err(),
-            "client EOF failure must not send a successful acknowledgement"
-        );
-        assert_eq!(trace.snapshot().len(), 5);
-    }
-
-    #[test]
-    fn client_read_error_prevents_eof_event_and_success_acknowledgement() {
-        let trace = ExchangeTrace::default();
-        record_trace_prefix(
-            &trace,
-            &[
-                ExchangeEvent::ForwardMatched,
-                ExchangeEvent::ReverseMatched,
-                ExchangeEvent::ApplicationShutdown,
-                ExchangeEvent::TargetCleanEof,
-                ExchangeEvent::TargetShutdown,
-            ],
-        );
-        let mut failing = ReadFailureStream;
-        let (sender, receiver) = mpsc::channel();
-        let mut acknowledgement = ApplicationEofAck::new(&sender);
-        let error = acknowledgement
-            .observe(
-                &mut failing,
-                CaseDeadline::after(Duration::from_secs(1)),
-                &trace,
-            )
-            .expect_err("reset must reject client EOF");
-        assert!(error.contains("injected reset"));
-        assert!(
-            receiver
-                .recv_timeout(Duration::from_millis(100))
-                .expect("failure acknowledgement")
-                .is_err(),
-            "client read error must not send a successful acknowledgement"
-        );
-        assert_eq!(trace.snapshot().len(), 5);
-    }
-
-    #[test]
-    fn target_extra_byte_and_read_error_prevent_clean_eof_event() {
-        let trace = ExchangeTrace::default();
-        record_trace_prefix(
-            &trace,
-            &[
-                ExchangeEvent::ForwardMatched,
-                ExchangeEvent::ReverseMatched,
-                ExchangeEvent::ApplicationShutdown,
-            ],
-        );
-        let (mut target, mut peer) = connected_pair();
-        peer.write_all(&[0x3c]).expect("extra byte");
-        peer.shutdown(Shutdown::Write).expect("peer shutdown");
-        assert!(
-            observe_clean_eof_event(
-                &mut target,
-                CaseDeadline::after(Duration::from_secs(1)),
-                "target mutation",
-                &trace,
-                ExchangeEvent::TargetCleanEof,
-            )
-            .is_err()
-        );
-        assert_eq!(trace.snapshot().len(), 3);
-
-        let mut failing = ReadFailureStream;
-        assert!(
-            observe_clean_eof_event(
-                &mut failing,
-                CaseDeadline::after(Duration::from_secs(1)),
-                "target reset mutation",
-                &trace,
-                ExchangeEvent::TargetCleanEof,
-            )
-            .is_err()
-        );
-        assert_eq!(trace.snapshot().len(), 3);
-    }
-
-    #[test]
-    fn target_stream_is_held_until_application_acknowledgement() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let probe = DropProbe(Arc::clone(&dropped));
-        let (ack_sender, ack_receiver) = mpsc::channel();
-        let (result_sender, result_receiver) = mpsc::channel();
-        let deadline = CaseDeadline::after(Duration::from_secs(1));
-        let waiter = thread::spawn(move || {
-            let result = await_application_ack_while_holding(&probe, &ack_receiver, deadline);
-            result_sender.send(result).expect("wait result");
-        });
-
-        assert!(
-            result_receiver
-                .recv_timeout(Duration::from_millis(50))
-                .is_err(),
-            "target wait must remain blocked before application acknowledgement"
-        );
-        assert!(
-            !dropped.load(Ordering::SeqCst),
-            "target stream owner dropped before application acknowledgement"
-        );
-        ack_sender
-            .send(Ok(()))
-            .expect("application acknowledgement");
-        result_receiver
-            .recv_timeout(Duration::from_millis(100))
-            .expect("bounded acknowledgement result")
-            .expect("successful acknowledgement");
-        waiter.join().expect("acknowledgement waiter");
-        assert!(
-            dropped.load(Ordering::SeqCst),
-            "target stream owner did not drop after acknowledgement"
-        );
-    }
-
-    #[test]
-    fn missing_application_acknowledgement_times_out_under_case_deadline() {
-        let probe = DropProbe(Arc::new(AtomicBool::new(false)));
-        let (_sender, receiver) = mpsc::channel::<Result<(), String>>();
-        let start = Instant::now();
-        let error = await_application_ack_while_holding(
-            &probe,
-            &receiver,
-            CaseDeadline::after(Duration::from_millis(80)),
-        )
-        .expect_err("missing acknowledgement must time out");
-        assert!(error.contains("acknowledgement"));
-        assert!(start.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn payload_contract_is_fixed_complete_and_distinct() {
-        let forward = forward_payload();
-        let reverse = reverse_payload();
-        assert_eq!(forward.len(), 16_386);
-        assert_eq!(reverse.len(), 16_386);
-        assert_ne!(forward, reverse);
-    }
-
-    #[test]
-    fn clean_eof_rejects_extra_byte_and_accepts_only_zero() {
-        let (mut reader, mut writer) = connected_pair();
-        writer.write_all(&[0xa5]).expect("extra byte");
-        writer.shutdown(Shutdown::Write).expect("writer shutdown");
-        assert!(
-            expect_clean_eof(
-                &mut reader,
-                CaseDeadline::after(Duration::from_secs(1)),
-                "mutation",
-            )
-            .is_err()
-        );
-
-        let (mut reader, writer) = connected_pair();
-        writer
-            .shutdown(Shutdown::Write)
-            .expect("clean writer shutdown");
-        expect_clean_eof(
-            &mut reader,
-            CaseDeadline::after(Duration::from_secs(1)),
-            "clean",
-        )
-        .expect("clean zero-length read");
-    }
-
-    #[test]
-    fn absolute_deadline_and_nonzero_child_status_are_enforced() {
-        let expired = CaseDeadline {
-            end: Instant::now() - Duration::from_millis(1),
-        };
-        assert!(std::panic::catch_unwind(|| expired.check("mutation")).is_err());
-
-        let deadline = CaseDeadline::start();
-        let baseline = ACTIVE_CHILDREN.load(Ordering::SeqCst);
-        let mut command = failing_command();
-        let mut child = ProcessGuard::spawn("nonzero status mutation", &mut command, deadline);
-        let (status, _) = child.finish_natural(deadline, "nonzero child");
-        assert!(!status.success());
-        assert_eq!(ACTIVE_CHILDREN.load(Ordering::SeqCst), baseline);
-    }
-
-    #[test]
-    fn absolute_deadline_rejects_drip_progress() {
-        let (mut reader, mut writer) = connected_pair();
-        let drip = thread::spawn(move || {
-            for byte in 0_u8..8 {
-                thread::sleep(Duration::from_millis(30));
-                if writer.write_all(&[byte]).is_err() {
-                    break;
-                }
-            }
-        });
-        let deadline = CaseDeadline::after(Duration::from_millis(120));
-        let mut received = [0_u8; 8];
-        let error = read_exact_deadline(
-            &mut reader,
-            &mut received,
-            deadline,
-            IO_TIMEOUT,
-            "drip mutation",
-        )
-        .expect_err("drip progress must not extend the absolute case deadline");
-        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        drip.join().expect("drip writer");
-    }
-
-    #[test]
-    fn fixed_operation_deadline_rejects_drip_before_longer_case_deadline() {
-        let (mut reader, mut writer) = connected_pair();
-        let drip = thread::spawn(move || {
-            for byte in 0_u8..4 {
-                thread::sleep(Duration::from_millis(35));
-                if writer.write_all(&[byte]).is_err() {
-                    break;
-                }
-            }
-        });
-        let case_deadline = CaseDeadline::after(Duration::from_secs(2));
-        let started = Instant::now();
-        let mut received = [0_u8; 4];
-        let error = read_exact_deadline(
-            &mut reader,
-            &mut received,
-            case_deadline,
-            Duration::from_millis(90),
-            "fixed operation mutation",
-        )
-        .expect_err("partial reads must not re-arm the operation deadline");
-        assert!(matches!(
-            error.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ));
-        assert!(started.elapsed() < Duration::from_millis(500));
-        assert!(
-            case_deadline.end > Instant::now(),
-            "operation cap must fire before the longer case deadline"
-        );
-        drip.join().expect("drip writer");
-    }
-
-    #[test]
-    fn fixed_write_deadline_rejects_partial_progress_before_case_deadline() {
-        let mut writer = DripWriteStream;
-        let case_deadline = CaseDeadline::after(Duration::from_secs(2));
-        let started = Instant::now();
-        let error = super::write_all_deadline(
-            &mut writer,
-            &[1, 2, 3, 4],
-            case_deadline,
-            Duration::from_millis(90),
-            "fixed write operation mutation",
-        )
-        .expect_err("partial writes must not re-arm the operation deadline");
-        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_millis(500));
-        assert!(
-            case_deadline.end > Instant::now(),
-            "write operation cap must fire before the longer case deadline"
-        );
-    }
-
-    fn connected_pair() -> (TcpStream, TcpStream) {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("pair listener");
-        let address = listener.local_addr().expect("pair address");
-        let connector = thread::spawn(move || TcpStream::connect(address).expect("pair connect"));
-        let (accepted, _) = listener.accept().expect("pair accept");
-        (accepted, connector.join().expect("pair connector"))
-    }
-
-    struct ShutdownFailureStream {
-        inner: TcpStream,
-    }
-
-    struct ReadFailureStream;
-
-    struct DripWriteStream;
-
-    impl Read for DripWriteStream {
-        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
-            unreachable!("write-only mutation stream")
-        }
-    }
-
-    impl Write for DripWriteStream {
-        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
-            thread::sleep(Duration::from_millis(35));
-            Ok(1)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl DeadlineIo for DripWriteStream {
-        fn set_read_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
-            Ok(())
-        }
-
-        fn set_write_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
-            Ok(())
-        }
-
-        fn shutdown_write(&self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl Read for ReadFailureStream {
-        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionReset,
-                "injected reset",
-            ))
-        }
-    }
-
-    impl Write for ReadFailureStream {
-        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
-            unreachable!("read-only mutation stream")
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            unreachable!("read-only mutation stream")
-        }
-    }
-
-    impl DeadlineIo for ReadFailureStream {
-        fn set_read_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
-            Ok(())
-        }
-
-        fn set_write_timeout(&self, _timeout: Option<Duration>) -> std::io::Result<()> {
-            Ok(())
-        }
-
-        fn shutdown_write(&self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct DropProbe(Arc<AtomicBool>);
-
-    impl Drop for DropProbe {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
-
-    impl Read for ShutdownFailureStream {
-        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            self.inner.read(buffer)
-        }
-    }
-
-    impl Write for ShutdownFailureStream {
-        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-            self.inner.write(buffer)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.inner.flush()
-        }
-    }
-
-    impl DeadlineIo for ShutdownFailureStream {
-        fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
-            self.inner.set_read_timeout(timeout)
-        }
-
-        fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
-            self.inner.set_write_timeout(timeout)
-        }
-
-        fn shutdown_write(&self) -> std::io::Result<()> {
-            Err(std::io::Error::other("injected target shutdown failure"))
-        }
-    }
-
-    fn record_trace_prefix(trace: &ExchangeTrace, events: &[ExchangeEvent]) {
-        for event in events {
-            trace.record(*event).expect("trace prefix");
-        }
-    }
-
-    fn failing_command() -> Command {
-        #[cfg(windows)]
-        {
-            let mut command = Command::new("cmd");
-            command.args(["/c", "exit", "7"]);
-            command
-        }
-        #[cfg(not(windows))]
-        {
-            let mut command = Command::new("sh");
-            command.args(["-c", "exit 7"]);
-            command
         }
     }
 }
