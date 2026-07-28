@@ -2,7 +2,7 @@
 id = "M0-T09"
 title = "Isolate external interoperability behind one hosted qualification seam"
 milestone = "M0"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = []
@@ -125,8 +125,15 @@ deterministic Cargo tests证明guard、aggregation、failure continuation与summ
 
 ## Completion evidence
 
-- Branch:
-- Commit(s):
-- Required reviewer role/profile and verdict:
-- Exact candidate SHA:
-- Integrated commit:
+- Branch: `codex/ticket/m0-t09`
+- Commit(s): `f6f160c5cf2204cb009b42292627544534d16917`
+- Required reviewer role/profile and verdict: Architect (`gpt-5.6-sol/max`)
+  PASS；QA (`gpt-5.6-sol/high`) PASS。实际 launch metadata 不可观察，
+  因此配置未作运行时声称。
+- Exact candidate SHA: `f6f160c5cf2204cb009b42292627544534d16917`
+- Integrated commit: `42f9a96dd90e1d07a89ec485c5e17422431c81b4`
+  on `codex/integration/m0`
+- Validation: qualification pure-state 6/6、workspace policy 17/17、
+  `cargo build --workspace --bins --locked`、authoritative quick 与 full
+  均 exit 0。未运行 `m0-qualification`、reference interoperability、WSL2
+  或任何 remote action。
