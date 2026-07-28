@@ -2,7 +2,7 @@
 id = "M2-T05"
 title = "Add the twelve-case fail-closed hosted UDP qualification"
 milestone = "M2"
-status = "blocked"
+status = "ready"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M2-T02"]
