@@ -86,12 +86,14 @@ impl Role {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Transport {
     Tcp,
+    Udp,
 }
 
 impl Transport {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Tcp => "tcp",
+            Self::Udp => "udp",
         }
     }
 }
@@ -204,6 +206,25 @@ pub enum Reason {
     Cancelled,
     Shutdown,
     ListenerFailure,
+    Bounds,
+    Type,
+    Timestamp,
+    Address,
+    Padding,
+    Binding,
+    Duplicate,
+    TooOld,
+    SessionLimit,
+    BufferLimit,
+    QueueFull,
+    Clock,
+    Random,
+    Key,
+    Counter,
+    Resolve,
+    Send,
+    Receive,
+    Idle,
 }
 
 impl Reason {
@@ -236,6 +257,25 @@ impl Reason {
             Self::Cancelled => "cancelled",
             Self::Shutdown => "shutdown",
             Self::ListenerFailure => "listener_failure",
+            Self::Bounds => "bounds",
+            Self::Type => "type",
+            Self::Timestamp => "timestamp",
+            Self::Address => "address",
+            Self::Padding => "padding",
+            Self::Binding => "binding",
+            Self::Duplicate => "duplicate",
+            Self::TooOld => "too_old",
+            Self::SessionLimit => "session_limit",
+            Self::BufferLimit => "buffer_limit",
+            Self::QueueFull => "queue_full",
+            Self::Clock => "clock",
+            Self::Random => "random",
+            Self::Key => "key",
+            Self::Counter => "counter",
+            Self::Resolve => "resolve",
+            Self::Send => "send",
+            Self::Receive => "receive",
+            Self::Idle => "idle",
         }
     }
 }
@@ -296,6 +336,12 @@ impl TraceRecord {
 
     pub const fn with_reason(mut self, reason: Reason) -> Self {
         self.reason = Some(reason);
+        self
+    }
+
+    /// Selects the UDP transport without admitting a free-form field.
+    pub const fn udp(mut self) -> Self {
+        self.transport = Transport::Udp;
         self
     }
 
@@ -416,6 +462,8 @@ impl Inbound {
 pub enum Direction {
     InboundToOutbound,
     OutboundToInbound,
+    ClientToTarget,
+    TargetToClient,
 }
 
 impl Direction {
@@ -423,6 +471,8 @@ impl Direction {
         match self {
             Self::InboundToOutbound => "inbound_to_outbound",
             Self::OutboundToInbound => "outbound_to_inbound",
+            Self::ClientToTarget => "client_to_target",
+            Self::TargetToClient => "target_to_client",
         }
     }
 }
@@ -483,14 +533,37 @@ struct ForcedShutdownLabels {
     role: Role,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+struct UdpRoleLabels {
+    role: Role,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+struct UdpDatagramLabels {
+    role: Role,
+    direction: Direction,
+    outcome: Outcome,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+struct UdpReplayLabels {
+    role: Role,
+    direction: Direction,
+    reason: Reason,
+}
+
 type ConnectionFamily = Family<ConnectionLabels, Counter>;
 type ActiveFamily = Family<ActiveLabels, Gauge>;
 type FailureFamily = Family<FailureLabels, Counter>;
 type ByteFamily = Family<ByteLabels, Counter>;
 type ReplayRejectionFamily = Family<ReplayRejectionLabels, Counter>;
 type ForcedShutdownFamily = Family<ForcedShutdownLabels, Counter>;
+type UdpRoleGaugeFamily = Family<UdpRoleLabels, Gauge>;
+type UdpRoleCounterFamily = Family<UdpRoleLabels, Counter>;
+type UdpDatagramFamily = Family<UdpDatagramLabels, Counter>;
+type UdpReplayFamily = Family<UdpReplayLabels, Counter>;
 
-/// Explicit owner of the seven M0 metric families and their registry.
+/// Explicit owner of the seven stable TCP and seven stable UDP metric families.
 ///
 /// This type installs no global recorder and starts no listener or task.
 pub struct Metrics {
@@ -502,10 +575,17 @@ pub struct Metrics {
     replay_entries: Gauge,
     replay_rejections: ReplayRejectionFamily,
     forced_shutdowns: ForcedShutdownFamily,
+    udp_sessions_active: UdpRoleGaugeFamily,
+    udp_datagrams: UdpDatagramFamily,
+    udp_failures: FailureFamily,
+    udp_bytes: ByteFamily,
+    udp_buffered_bytes: UdpRoleGaugeFamily,
+    udp_replay_rejections: UdpReplayFamily,
+    udp_forced_shutdown: UdpRoleCounterFamily,
 }
 
 impl Metrics {
-    /// Creates an isolated registry containing exactly the seven approved families.
+    /// Creates an isolated registry containing exactly the fourteen approved families.
     pub fn new() -> Self {
         let connections = ConnectionFamily::default();
         let active = ActiveFamily::default();
@@ -514,6 +594,13 @@ impl Metrics {
         let replay_entries = Gauge::default();
         let replay_rejections = ReplayRejectionFamily::default();
         let forced_shutdowns = ForcedShutdownFamily::default();
+        let udp_sessions_active = UdpRoleGaugeFamily::default();
+        let udp_datagrams = UdpDatagramFamily::default();
+        let udp_failures = FailureFamily::default();
+        let udp_bytes = ByteFamily::default();
+        let udp_buffered_bytes = UdpRoleGaugeFamily::default();
+        let udp_replay_rejections = UdpReplayFamily::default();
+        let udp_forced_shutdown = UdpRoleCounterFamily::default();
 
         let mut registry = Registry::default();
         registry.register(
@@ -551,6 +638,41 @@ impl Metrics {
             "TCP flows terminated at shutdown deadline",
             forced_shutdowns.clone(),
         );
+        registry.register(
+            "ferrum2_udp_sessions_active",
+            "Active bounded UDP sessions",
+            udp_sessions_active.clone(),
+        );
+        registry.register(
+            "ferrum2_udp_datagrams",
+            "UDP datagram outcomes",
+            udp_datagrams.clone(),
+        );
+        registry.register(
+            "ferrum2_udp_failures",
+            "Closed UDP failure categories",
+            udp_failures.clone(),
+        );
+        registry.register(
+            "ferrum2_udp_bytes",
+            "Authenticated UDP application bytes forwarded",
+            udp_bytes.clone(),
+        );
+        registry.register(
+            "ferrum2_udp_buffered_bytes",
+            "Allocated user-space UDP bytes",
+            udp_buffered_bytes.clone(),
+        );
+        registry.register(
+            "ferrum2_udp_replay_rejections",
+            "UDP replay-related rejections",
+            udp_replay_rejections.clone(),
+        );
+        registry.register(
+            "ferrum2_udp_forced_shutdown",
+            "UDP sessions terminated at shutdown deadline",
+            udp_forced_shutdown.clone(),
+        );
 
         Self {
             registry,
@@ -561,6 +683,13 @@ impl Metrics {
             replay_entries,
             replay_rejections,
             forced_shutdowns,
+            udp_sessions_active,
+            udp_datagrams,
+            udp_failures,
+            udp_bytes,
+            udp_buffered_bytes,
+            udp_replay_rejections,
+            udp_forced_shutdown,
         }
     }
 
@@ -615,6 +744,74 @@ impl Metrics {
     pub fn forced_shutdown(&self, role: Role) {
         self.forced_shutdowns
             .get_or_create(&ForcedShutdownLabels { role })
+            .inc();
+    }
+
+    pub fn udp_sessions_active_inc(&self, role: Role) {
+        self.udp_sessions_active
+            .get_or_create(&UdpRoleLabels { role })
+            .inc();
+    }
+
+    pub fn udp_sessions_active_dec(&self, role: Role) {
+        self.udp_sessions_active
+            .get_or_create(&UdpRoleLabels { role })
+            .dec();
+    }
+
+    pub fn set_udp_sessions_active(&self, role: Role, sessions: usize) {
+        let value = i64::try_from(sessions).unwrap_or(i64::MAX);
+        self.udp_sessions_active
+            .get_or_create(&UdpRoleLabels { role })
+            .set(value);
+    }
+
+    pub fn udp_datagram(&self, role: Role, direction: Direction, outcome: Outcome) {
+        self.udp_datagrams
+            .get_or_create(&UdpDatagramLabels {
+                role,
+                direction,
+                outcome,
+            })
+            .inc();
+    }
+
+    pub fn udp_failure(&self, role: Role, stage: Stage, reason: Reason) {
+        self.udp_failures
+            .get_or_create(&FailureLabels {
+                role,
+                stage,
+                reason,
+            })
+            .inc();
+    }
+
+    pub fn add_udp_bytes(&self, role: Role, direction: Direction, bytes: u64) {
+        self.udp_bytes
+            .get_or_create(&ByteLabels { role, direction })
+            .inc_by(bytes);
+    }
+
+    pub fn set_udp_buffered_bytes(&self, role: Role, bytes: usize) {
+        let value = i64::try_from(bytes).unwrap_or(i64::MAX);
+        self.udp_buffered_bytes
+            .get_or_create(&UdpRoleLabels { role })
+            .set(value);
+    }
+
+    pub fn udp_replay_rejection(&self, role: Role, direction: Direction, reason: Reason) {
+        self.udp_replay_rejections
+            .get_or_create(&UdpReplayLabels {
+                role,
+                direction,
+                reason,
+            })
+            .inc();
+    }
+
+    pub fn udp_forced_shutdown(&self, role: Role) {
+        self.udp_forced_shutdown
+            .get_or_create(&UdpRoleLabels { role })
             .inc();
     }
 

@@ -165,3 +165,39 @@ fn closed_log_level_filters_without_installing_a_global_subscriber() {
     });
     assert_eq!(capture.text().lines().count(), 1);
 }
+
+#[test]
+fn udp_trace_uses_only_closed_categories_and_process_local_numeric_correlation() {
+    let capture = Captured::default();
+    let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
+    let dispatch = Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        ferrum2_observability::emit(
+            TraceRecord::new(
+                LogLevel::Warn,
+                Event::Failure,
+                Role::Server,
+                Stage::Direct,
+                Outcome::Failed,
+            )
+            .udp()
+            .with_reason(Reason::QueueFull)
+            .with_session_id(7),
+        );
+    });
+    let text = capture.text();
+    let value: Value = serde_json::from_str(text.trim_end()).expect("UDP JSON");
+    assert_eq!(value["transport"], "udp");
+    assert_eq!(value["reason"], "queue_full");
+    assert_eq!(value["session_id"], 7);
+    for forbidden in [
+        "M2_SECRET_SENTINEL",
+        "session_id_bytes",
+        "packet_id",
+        "peer",
+        "source",
+        "target",
+    ] {
+        assert!(!text.contains(forbidden));
+    }
+}

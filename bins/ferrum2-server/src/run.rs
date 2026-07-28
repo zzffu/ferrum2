@@ -1,28 +1,32 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
-use ferrum2_config::{LoggingLevel, RuntimeConfig, ValidatedServerConfig};
+use ferrum2_config::{LoggingLevel, RuntimeConfig, UdpConfig, ValidatedServerConfig};
 use ferrum2_core::{
     AbortiveClose, ConnectErrorKind, Inbound as _, LocalEndpoint, Outbound as _, SessionReply as _,
 };
-use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
+use ferrum2_crypto::{Clock as _, MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
     json_subscriber,
 };
 use ferrum2_runtime::{
-    BoundedSupervisor, CancellationToken, DirectOutbound, OwnerRegistry, RelayFailure,
-    RelayRunError, RuntimeTcpStream, TcpConnector, relay_lifecycle,
+    AccountedDatagram, BoundedSupervisor, CancellationToken, DirectOutbound,
+    DirectUdpPacketHandler, DirectUdpRuntime, MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry,
+    RelayFailure, RelayRunError, RuntimeTcpStream, TcpConnector, UdpBufferReservation,
+    UdpCommitError, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
-    DetectionReason, FlowTerminal, MethodKeyAdapter, PlainDuplex, ProtocolReason, ShadowsocksError,
-    ShadowsocksTcpInbound, TcpReplayStore, TransportIo,
+    DetectionReason, FlowTerminal, MethodKeyAdapter, PlainDuplex, ProtocolReason,
+    ServerResponseCapability, ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore, TransportIo,
+    UdpPacketError, UdpPacketScratch, UdpServer,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, ReadBuf};
-use tokio::net::{TcpListener, TcpSocket};
+use tokio::net::{TcpListener, TcpSocket, UdpSocket};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
@@ -31,6 +35,7 @@ pub(crate) enum RunError {
     Listener,
     Replay,
     Supervisor,
+    Udp,
 }
 
 pub(crate) fn run(config: ValidatedServerConfig) -> Result<(), RunError> {
@@ -59,12 +64,28 @@ where
         config.listen,
         u32::from(config.runtime.listen_backlog.get()),
     )?;
+    let udp_listener = if config.udp.enabled {
+        Some(Arc::new(
+            UdpSocket::bind(SocketAddr::V4(config.listen))
+                .await
+                .map_err(|_| RunError::Listener)?,
+        ))
+    } else {
+        None
+    };
     let metrics = Arc::new(Metrics::new());
     let replay = TcpReplayStore::new(config.replay.capacity).map_err(|_| RunError::Replay)?;
+    let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk));
+    let udp_protocol = if config.udp.enabled {
+        Some(Arc::new(UdpServer::new(&keys).map_err(|_| RunError::Udp)?))
+    } else {
+        None
+    };
+    let clock = Arc::new(SystemClock::new());
     let context = Arc::new(ServerContext {
         direct: DirectOutbound::new(TcpConnector::new(config.runtime.connect_timeout)),
-        keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
-        clock: SystemClock::new(),
+        keys,
+        clock: Arc::clone(&clock),
         random: SystemRandom,
         replay,
         runtime: config.runtime,
@@ -84,18 +105,52 @@ where
             server_connection(stream, cancellation, context).await;
         }
     };
+    let udp_config = config.udp;
+    let shutdown_grace = config.runtime.shutdown_grace;
+    let connect_timeout = config.runtime.connect_timeout;
+    let udp_registry = registry.clone();
+    let udp_metrics = Arc::clone(&metrics);
+    let (shutdown_sender, proxy_shutdown) = tokio::sync::watch::channel(false);
+    let proxy_stop = wait_for_shutdown(proxy_shutdown.clone());
+    let proxy = async move {
+        match (udp_listener, udp_protocol) {
+            (Some(listener), Some(protocol)) => {
+                let (dual_sender, dual_stop) = tokio::sync::watch::channel(false);
+                let tcp = supervisor.run_until(handler, wait_for_shutdown(dual_stop.clone()));
+                let udp = run_udp_server(
+                    listener,
+                    protocol,
+                    clock,
+                    udp_config,
+                    connect_timeout,
+                    shutdown_grace,
+                    udp_registry,
+                    udp_metrics,
+                    wait_for_shutdown(dual_stop),
+                );
+                coordinate_tcp_udp(tcp, udp, proxy_stop, dual_sender).await
+            }
+            (None, None) => supervisor
+                .run_until(handler, proxy_stop)
+                .await
+                .map_err(|_| RunError::Supervisor),
+            _ => Err(RunError::Udp),
+        }
+    };
 
     if let Some(metrics_config) = config.metrics {
         let metrics_listener = bind_listener(metrics_config.listen, 16)?;
         let rendered_metrics = Arc::clone(&metrics);
+        let rendered_registry = registry.clone();
         let endpoint = ferrum2_runtime::MetricsEndpoint::new(
             metrics_listener,
-            move || rendered_metrics.encode_text().unwrap_or_default(),
+            move || {
+                update_udp_resource_metrics(&rendered_metrics, &rendered_registry);
+                rendered_metrics.encode_text().unwrap_or_default()
+            },
             registry,
         );
-        let (shutdown_sender, proxy_shutdown) = tokio::sync::watch::channel(false);
         let metrics_shutdown = proxy_shutdown.clone();
-        let proxy = supervisor.run_until(handler, wait_for_shutdown(proxy_shutdown));
         let metrics_server = endpoint.run_until(wait_for_shutdown(metrics_shutdown));
         tokio::pin!(proxy);
         tokio::pin!(metrics_server);
@@ -104,29 +159,528 @@ where
             _ = &mut shutdown => {
                 shutdown_sender.send_replace(true);
                 let (proxy_result, metrics_result) = tokio::join!(proxy, metrics_server);
-                proxy_result.map_err(|_| RunError::Supervisor)?;
+                proxy_result?;
                 metrics_result.map_err(|_| RunError::Supervisor)?;
             }
             proxy_result = &mut proxy => {
                 shutdown_sender.send_replace(true);
                 let metrics_result = metrics_server.await;
-                proxy_result.map_err(|_| RunError::Supervisor)?;
+                proxy_result?;
                 metrics_result.map_err(|_| RunError::Supervisor)?;
             }
             metrics_result = &mut metrics_server => {
                 shutdown_sender.send_replace(true);
                 let proxy_result = proxy.await;
                 metrics_result.map_err(|_| RunError::Supervisor)?;
-                proxy_result.map_err(|_| RunError::Supervisor)?;
+                proxy_result?;
             }
         }
     } else {
-        supervisor
-            .run_until(handler, shutdown)
-            .await
-            .map_err(|_| RunError::Supervisor)?;
+        tokio::pin!(proxy);
+        tokio::pin!(shutdown);
+        tokio::select! {
+            _ = &mut shutdown => {
+                shutdown_sender.send_replace(true);
+                proxy.await?;
+            }
+            result = &mut proxy => {
+                result?;
+            }
+        }
     }
     Ok(())
+}
+
+async fn coordinate_tcp_udp<T, U, S>(
+    tcp: T,
+    udp: U,
+    shutdown: S,
+    stop: tokio::sync::watch::Sender<bool>,
+) -> Result<(), RunError>
+where
+    T: std::future::Future<Output = Result<(), ferrum2_runtime::SupervisorError>>,
+    U: std::future::Future<Output = Result<(), RunError>>,
+    S: std::future::Future<Output = ()>,
+{
+    tokio::pin!(tcp);
+    tokio::pin!(udp);
+    tokio::pin!(shutdown);
+    tokio::select! {
+        _ = &mut shutdown => {
+            stop.send_replace(true);
+            let (tcp, udp) = tokio::join!(tcp, udp);
+            tcp.map_err(|_| RunError::Supervisor)?;
+            udp?;
+        }
+        tcp = &mut tcp => {
+            stop.send_replace(true);
+            let udp = udp.await;
+            tcp.map_err(|_| RunError::Supervisor)?;
+            udp?;
+        }
+        udp = &mut udp => {
+            stop.send_replace(true);
+            let tcp = tcp.await;
+            udp?;
+            tcp.map_err(|_| RunError::Supervisor)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct UdpMappingState {
+    by_capability: HashMap<ServerResponseCapability, UdpSessionHandle>,
+    by_handle: BTreeMap<UdpSessionHandle, ServerResponseCapability>,
+    orphaned: HashMap<ServerResponseCapability, ()>,
+    retired: BTreeSet<UdpSessionHandle>,
+}
+
+struct UdpMappings {
+    state: Mutex<UdpMappingState>,
+    published: tokio::sync::Notify,
+    limit: usize,
+}
+
+impl UdpMappings {
+    fn new(limit: usize) -> Self {
+        Self {
+            state: Mutex::new(UdpMappingState::default()),
+            published: tokio::sync::Notify::new(),
+            limit,
+        }
+    }
+
+    fn handle(&self, capability: ServerResponseCapability) -> Option<UdpSessionHandle> {
+        self.state
+            .lock()
+            .expect("UDP mapping lock poisoned")
+            .by_capability
+            .get(&capability)
+            .copied()
+    }
+
+    async fn capability(&self, handle: UdpSessionHandle) -> Option<ServerResponseCapability> {
+        loop {
+            let notified = self.published.notified();
+            {
+                let state = self.state.lock().expect("UDP mapping lock poisoned");
+                if let Some(capability) = state.by_handle.get(&handle).copied() {
+                    return Some(capability);
+                }
+                if state.retired.contains(&handle) {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn publish(
+        &self,
+        capability: ServerResponseCapability,
+        handle: UdpSessionHandle,
+    ) -> Option<ServerResponseCapability> {
+        let mut state = self.state.lock().expect("UDP mapping lock poisoned");
+        if let Some(old_handle) = state.by_capability.remove(&capability) {
+            state.by_handle.remove(&old_handle);
+            retire_mapping_handle(&mut state, old_handle, self.limit);
+        }
+        state.orphaned.remove(&capability);
+        if let Some(old_capability) = state.by_handle.remove(&handle) {
+            state.by_capability.remove(&old_capability);
+            state.orphaned.insert(old_capability, ());
+        }
+        state.retired.remove(&handle);
+        let evicted = if state.by_handle.len() == self.limit {
+            state.by_handle.pop_first().map(|(old_handle, capability)| {
+                state.by_capability.remove(&capability);
+                state.orphaned.insert(capability, ());
+                retire_mapping_handle(&mut state, old_handle, self.limit);
+                capability
+            })
+        } else {
+            None
+        };
+        state.by_capability.insert(capability, handle);
+        state.by_handle.insert(handle, capability);
+        drop(state);
+        self.published.notify_waiters();
+        evicted
+    }
+
+    fn invalidate_handle(&self, handle: UdpSessionHandle) {
+        let mut state = self.state.lock().expect("UDP mapping lock poisoned");
+        if let Some(capability) = state.by_handle.remove(&handle) {
+            state.by_capability.remove(&capability);
+            state.orphaned.insert(capability, ());
+        }
+        retire_mapping_handle(&mut state, handle, self.limit);
+        drop(state);
+        self.published.notify_waiters();
+    }
+
+    fn clear(&self) {
+        let mut state = self.state.lock().expect("UDP mapping lock poisoned");
+        state.by_capability.clear();
+        state.by_handle.clear();
+        state.orphaned.clear();
+        state.retired.clear();
+        self.published.notify_waiters();
+    }
+
+    fn prune_protocol(&self, protocol: &UdpServer, now: ferrum2_crypto::MonotonicInstant) {
+        let candidates: Vec<_> = self
+            .state
+            .lock()
+            .expect("UDP mapping lock poisoned")
+            .orphaned
+            .keys()
+            .copied()
+            .collect();
+        let removed: Vec<_> = candidates
+            .into_iter()
+            .filter(|capability| protocol.remove_session(*capability, now).unwrap_or(false))
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().expect("UDP mapping lock poisoned");
+        for capability in removed {
+            state.orphaned.remove(&capability);
+        }
+    }
+}
+
+fn retire_mapping_handle(state: &mut UdpMappingState, handle: UdpSessionHandle, limit: usize) {
+    if state.retired.len() == limit {
+        state.retired.pop_first();
+    }
+    state.retired.insert(handle);
+}
+
+struct ResponseCodec {
+    scratch: UdpPacketScratch,
+    wire: Vec<u8>,
+    _scratch_reservation: UdpBufferReservation,
+    _wire_reservation: UdpBufferReservation,
+}
+
+#[derive(Clone, Copy)]
+struct UdpAdapterError;
+
+struct ServerUdpResponseHandler {
+    listener: Arc<UdpSocket>,
+    protocol: Arc<UdpServer>,
+    mappings: Arc<UdpMappings>,
+    clock: Arc<SystemClock>,
+    codec: Arc<OnceLock<tokio::sync::Mutex<ResponseCodec>>>,
+    metrics: Arc<Metrics>,
+}
+
+impl DirectUdpPacketHandler for ServerUdpResponseHandler {
+    type Error = UdpAdapterError;
+
+    async fn handle_target_response(
+        &self,
+        session: UdpSessionHandle,
+        response: AccountedDatagram,
+    ) -> Result<(), Self::Error> {
+        let capability = self
+            .mappings
+            .capability(session)
+            .await
+            .ok_or(UdpAdapterError)?;
+        let codec = self.codec.get().ok_or(UdpAdapterError)?;
+        let mut codec = codec.lock().await;
+        let ResponseCodec { scratch, wire, .. } = &mut *codec;
+        let encoded = self
+            .protocol
+            .encode_response(
+                capability,
+                self.clock.as_ref(),
+                &SystemRandom,
+                response.datagram(),
+                0,
+                wire,
+                scratch,
+            )
+            .map_err(|error| {
+                self.mappings.invalidate_handle(session);
+                record_udp_protocol_failure(&self.metrics, error);
+                UdpAdapterError
+            })?;
+        let wire_len = encoded.wire_len();
+        let peer = encoded.peer();
+        self.listener
+            .send_to(&wire[..wire_len], peer)
+            .await
+            .map_err(|_| {
+                record_udp_failure(&self.metrics, Stage::Direct, Reason::Send, Outcome::Failed);
+                UdpAdapterError
+            })?;
+        self.metrics
+            .udp_datagram(Role::Server, Direction::TargetToClient, Outcome::Completed);
+        self.metrics
+            .add_udp_bytes(Role::Server, Direction::TargetToClient, wire_len as u64);
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_udp_server<S>(
+    listener: Arc<UdpSocket>,
+    protocol: Arc<UdpServer>,
+    clock: Arc<SystemClock>,
+    config: UdpConfig,
+    connect_timeout: std::time::Duration,
+    shutdown_grace: std::time::Duration,
+    registry: OwnerRegistry,
+    metrics: Arc<Metrics>,
+    shutdown: S,
+) -> Result<(), RunError>
+where
+    S: std::future::Future<Output = ()>,
+{
+    let limits = UdpRuntimeLimits::new(
+        config.max_sessions,
+        config.max_buffered_bytes,
+        config.idle_timeout,
+    )
+    .map_err(|_| RunError::Udp)?;
+    let mappings = Arc::new(UdpMappings::new(config.max_sessions));
+    let response_codec = Arc::new(OnceLock::new());
+    let handler = ServerUdpResponseHandler {
+        listener: Arc::clone(&listener),
+        protocol: Arc::clone(&protocol),
+        mappings: Arc::clone(&mappings),
+        clock: Arc::clone(&clock),
+        codec: Arc::clone(&response_codec),
+        metrics: Arc::clone(&metrics),
+    };
+    let mut runtime = DirectUdpRuntime::new(limits, connect_timeout, handler, registry.clone());
+    let budget = runtime.sessions().buffer_budget();
+    let response_scratch = budget
+        .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
+        .map_err(|_| RunError::Udp)?;
+    let response_wire = budget
+        .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
+        .map_err(|_| RunError::Udp)?;
+    response_codec
+        .set(tokio::sync::Mutex::new(ResponseCodec {
+            scratch: UdpPacketScratch::new(),
+            wire: vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES],
+            _scratch_reservation: response_scratch,
+            _wire_reservation: response_wire,
+        }))
+        .map_err(|_| RunError::Udp)?;
+    let _receive_scratch = budget
+        .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
+        .map_err(|_| RunError::Udp)?;
+    let _receive_wire = budget
+        .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
+        .map_err(|_| RunError::Udp)?;
+    let mut scratch = UdpPacketScratch::new();
+    let mut wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+    tokio::pin!(shutdown);
+
+    loop {
+        let received = tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            received = listener.recv_from(&mut wire) => received,
+        };
+        let (wire_len, peer) = received.map_err(|_| RunError::Udp)?;
+        let wire = &wire[..wire_len];
+        let pending = match protocol.prepare_request(clock.as_ref(), wire, &mut scratch) {
+            Ok(pending) => pending,
+            Err(error) => {
+                record_udp_protocol_failure(&metrics, error);
+                continue;
+            }
+        };
+        let existing = protocol
+            .existing_capability(&pending)
+            .map_err(|_| RunError::Udp)?;
+        if let Some((capability, handle)) = existing.and_then(|capability| {
+            mappings
+                .handle(capability)
+                .map(|handle| (capability, handle))
+        }) {
+            match runtime.reserve_datagram(handle, pending.datagram().allocated_capacity()) {
+                Ok(reservation) => {
+                    let (datagram, commit) = pending.into_parts();
+                    let committed =
+                        reservation.commit_with(datagram, tokio::time::Instant::now(), || {
+                            // QA-M2-T02-N01: replay/peer/activity advances only
+                            // while T03 holds this generation/queue reservation.
+                            let accepted = protocol.commit_request(
+                                commit,
+                                peer,
+                                clock.monotonic_now(),
+                                &SystemRandom,
+                            )?;
+                            if accepted.capability() == capability {
+                                Ok(())
+                            } else {
+                                Err(UdpPacketError::Generation)
+                            }
+                        });
+                    match committed {
+                        Ok(()) => record_udp_request_accepted(&metrics, wire_len),
+                        Err(UdpCommitError::Runtime(error)) => {
+                            mappings.invalidate_handle(handle);
+                            record_udp_runtime_failure(&metrics, error);
+                        }
+                        Err(UdpCommitError::Protocol(error)) => {
+                            record_udp_protocol_failure(&metrics, error);
+                        }
+                    }
+                    update_udp_resource_metrics(&metrics, &registry);
+                    continue;
+                }
+                Err(UdpRuntimeError::Cancelled) => {
+                    mappings.invalidate_handle(handle);
+                }
+                Err(error) => {
+                    record_udp_runtime_failure(&metrics, error);
+                    continue;
+                }
+            }
+        }
+        if existing.is_none() {
+            mappings.prune_protocol(&protocol, clock.monotonic_now());
+            if protocol.session_count().map_err(|_| RunError::Udp)? >= config.max_sessions {
+                record_udp_runtime_failure(&metrics, UdpRuntimeError::SessionLimit);
+                continue;
+            }
+        }
+
+        let admission = match runtime
+            .reserve_session(
+                tokio::time::Instant::now(),
+                pending.datagram().allocated_capacity(),
+            )
+            .await
+        {
+            Ok(admission) => admission,
+            Err(error) => {
+                record_udp_runtime_failure(&metrics, error);
+                continue;
+            }
+        };
+        let (datagram, commit) = pending.into_parts();
+        let mut committed_capability = None;
+        let committed =
+            runtime.commit_session_with(admission, datagram, tokio::time::Instant::now(), || {
+                // QA-M2-T02-N01: new protocol state is created only inside
+                // T03's reserved session/bytes/queue commit transition.
+                let accepted =
+                    protocol.commit_request(commit, peer, clock.monotonic_now(), &SystemRandom)?;
+                committed_capability = Some(accepted.capability());
+                Ok(())
+            });
+        match committed {
+            Ok(handle) => {
+                let capability = committed_capability.ok_or(RunError::Udp)?;
+                if mappings.publish(capability, handle).is_some() {
+                    mappings.prune_protocol(&protocol, clock.monotonic_now());
+                }
+                record_udp_request_accepted(&metrics, wire_len);
+            }
+            Err(UdpCommitError::Runtime(error)) => record_udp_runtime_failure(&metrics, error),
+            Err(UdpCommitError::Protocol(error)) => record_udp_protocol_failure(&metrics, error),
+        }
+        update_udp_resource_metrics(&metrics, &registry);
+    }
+
+    let before = registry.snapshot().udp_forced_shutdowns;
+    runtime.shutdown(shutdown_grace).await;
+    let after = registry.snapshot().udp_forced_shutdowns;
+    for _ in before..after {
+        metrics.udp_forced_shutdown(Role::Server);
+    }
+    mappings.clear();
+    update_udp_resource_metrics(&metrics, &registry);
+    Ok(())
+}
+
+fn record_udp_request_accepted(metrics: &Metrics, wire_len: usize) {
+    metrics.udp_datagram(Role::Server, Direction::ClientToTarget, Outcome::Accepted);
+    metrics.add_udp_bytes(Role::Server, Direction::ClientToTarget, wire_len as u64);
+}
+
+fn update_udp_resource_metrics(metrics: &Metrics, registry: &OwnerRegistry) {
+    let snapshot = registry.snapshot();
+    metrics.set_udp_sessions_active(Role::Server, snapshot.udp_sessions);
+    metrics.set_udp_buffered_bytes(Role::Server, snapshot.udp_buffered_bytes);
+}
+
+fn record_udp_protocol_failure(metrics: &Metrics, error: UdpPacketError) {
+    let reason = match error {
+        UdpPacketError::Bounds => Reason::Bounds,
+        UdpPacketError::Authentication => Reason::Authentication,
+        UdpPacketError::Type => Reason::Type,
+        UdpPacketError::Clock => Reason::Clock,
+        UdpPacketError::Timestamp => Reason::Timestamp,
+        UdpPacketError::Address => Reason::Address,
+        UdpPacketError::Padding => Reason::Padding,
+        UdpPacketError::Binding => Reason::Binding,
+        UdpPacketError::Duplicate => Reason::Duplicate,
+        UdpPacketError::TooOld => Reason::TooOld,
+        UdpPacketError::AssociationLimit | UdpPacketError::Generation => Reason::SessionLimit,
+        UdpPacketError::Key => Reason::Key,
+        UdpPacketError::Random => Reason::Random,
+        UdpPacketError::Counter => Reason::Counter,
+        UdpPacketError::StateUnavailable => Reason::Cancelled,
+    };
+    let outcome = match error {
+        UdpPacketError::Authentication
+        | UdpPacketError::Type
+        | UdpPacketError::Timestamp
+        | UdpPacketError::Address
+        | UdpPacketError::Padding
+        | UdpPacketError::Binding
+        | UdpPacketError::Duplicate
+        | UdpPacketError::TooOld => Outcome::Rejected,
+        _ => Outcome::Failed,
+    };
+    if matches!(error, UdpPacketError::Duplicate | UdpPacketError::TooOld) {
+        metrics.udp_replay_rejection(Role::Server, Direction::ClientToTarget, reason);
+    }
+    record_udp_failure(metrics, Stage::Shadowsocks, reason, outcome);
+}
+
+fn record_udp_runtime_failure(metrics: &Metrics, error: UdpRuntimeError) {
+    let reason = match error {
+        UdpRuntimeError::Bounds => Reason::Bounds,
+        UdpRuntimeError::SessionLimit => Reason::SessionLimit,
+        UdpRuntimeError::BufferLimit => Reason::BufferLimit,
+        UdpRuntimeError::QueueFull => Reason::QueueFull,
+        UdpRuntimeError::Counter => Reason::Counter,
+        UdpRuntimeError::Resolve => Reason::Resolve,
+        UdpRuntimeError::Send => Reason::Send,
+        UdpRuntimeError::Receive => Reason::Receive,
+        UdpRuntimeError::Idle => Reason::Idle,
+        UdpRuntimeError::Cancelled => Reason::Cancelled,
+    };
+    let stage = match error {
+        UdpRuntimeError::Resolve | UdpRuntimeError::Send | UdpRuntimeError::Receive => {
+            Stage::Direct
+        }
+        UdpRuntimeError::Idle | UdpRuntimeError::Cancelled => Stage::Shutdown,
+        _ => Stage::Relay,
+    };
+    record_udp_failure(metrics, stage, reason, Outcome::Failed);
+}
+
+fn record_udp_failure(metrics: &Metrics, stage: Stage, reason: Reason, outcome: Outcome) {
+    metrics.udp_failure(Role::Server, stage, reason);
+    emit(
+        TraceRecord::new(LogLevel::Warn, Event::Failure, Role::Server, stage, outcome)
+            .udp()
+            .with_reason(reason),
+    );
 }
 
 fn bind_listener(address: std::net::SocketAddrV4, backlog: u32) -> Result<TcpListener, RunError> {
@@ -156,7 +710,7 @@ async fn wait_for_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
 struct ServerContext {
     direct: DirectOutbound<TcpConnector>,
     keys: MethodKeyAdapter<MethodSinglePskProvider>,
-    clock: SystemClock,
+    clock: Arc<SystemClock>,
     random: SystemRandom,
     replay: TcpReplayStore,
     runtime: RuntimeConfig,
@@ -178,7 +732,7 @@ async fn server_connection(
     };
     let inbound = ShadowsocksTcpInbound::new(
         &context.keys,
-        &context.clock,
+        context.clock.as_ref(),
         &context.random,
         &context.replay,
     );
@@ -696,10 +1250,13 @@ mod tests {
     use std::task::Waker;
     use std::time::Duration;
 
-    use ferrum2_core::{ConnectError, Connector, LocalEndpoint, Outbound, TargetAddr};
-    use ferrum2_crypto::{Aes128Psk, SinglePskProvider};
-    use ferrum2_shadowsocks::ClientTcpOutbound;
+    use ferrum2_core::{ConnectError, Connector, Datagram, LocalEndpoint, Outbound, TargetAddr};
+    use ferrum2_crypto::{
+        Aes128Psk, MethodProfile, MethodPsk, MethodSinglePskProvider, SinglePskProvider,
+    };
+    use ferrum2_runtime::{UdpDirection, UdpSessionManager};
     use ferrum2_shadowsocks::TransportPhase;
+    use ferrum2_shadowsocks::{ClientTcpOutbound, UdpClientSession};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::Notify;
 
@@ -1495,6 +2052,18 @@ mod tests {
     }
 
     fn server_test_config(listen: SocketAddrV4) -> (PathBuf, ValidatedServerConfig) {
+        server_test_config_for_method(
+            listen,
+            "2022-blake3-aes-128-gcm",
+            "AAECAwQFBgcICQoLDA0ODw==",
+        )
+    }
+
+    fn server_test_config_for_method(
+        listen: SocketAddrV4,
+        method: &str,
+        psk: &str,
+    ) -> (PathBuf, ValidatedServerConfig) {
         static CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "ferrum2-server-composition-{}-{}.toml",
@@ -1506,14 +2075,298 @@ mod tests {
              [server]\n\
              listen = \"{listen}\"\n\
              [shadowsocks]\n\
-             method = \"2022-blake3-aes-128-gcm\"\n\
-             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+             method = \"{method}\"\n\
+             psk = \"{psk}\"\n\
              [runtime]\n\
              shutdown_grace_ms = 0\n"
         );
         std::fs::write(&path, source).expect("server test config");
         let config = ferrum2_config::load_server(&path).expect("validated server test config");
         (path, config)
+    }
+
+    #[tokio::test]
+    async fn udp_composition_three_methods_echo_and_deferred_client_commit_table() {
+        let rows: [(MethodProfile, &str, &str, &[u8]); 3] = [
+            (
+                MethodProfile::Blake3Aes128Gcm2022,
+                "2022-blake3-aes-128-gcm",
+                "AAECAwQFBgcICQoLDA0ODw==",
+                &PSK_BYTES,
+            ),
+            (
+                MethodProfile::Blake3Aes256Gcm2022,
+                "2022-blake3-aes-256-gcm",
+                "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+                &[
+                    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                    22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+                ],
+            ),
+            (
+                MethodProfile::Blake3ChaCha20Poly13052022,
+                "2022-blake3-chacha20-poly1305",
+                "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+                &[
+                    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+                    52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+                ],
+            ),
+        ];
+        for (profile, method, encoded_psk, psk) in rows {
+            let listen = reserve_address();
+            let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("echo bind");
+            let echo_target = echo.local_addr().expect("echo address");
+            let echo_task = tokio::spawn(async move {
+                let mut buffer = [0_u8; 64];
+                for _ in 0..3 {
+                    let (length, peer) = echo.recv_from(&mut buffer).await.expect("echo receive");
+                    echo.send_to(&buffer[..length], peer)
+                        .await
+                        .expect("echo reply");
+                }
+            });
+            let (path, config) = server_test_config_for_method(listen, method, encoded_psk);
+            let registry = OwnerRegistry::new();
+            let task_registry = registry.clone();
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                run_with_registry(config, task_registry, async {
+                    let _ = stopped.await;
+                })
+                .await
+            });
+            wait_until_bound(listen).await;
+
+            let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                MethodPsk::try_from_slice(profile, psk).expect("method key"),
+            ));
+            let clock = SystemClock::new();
+            let mut client =
+                UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client protocol");
+            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("client bind");
+            let mut request_scratch = UdpPacketScratch::new();
+            let mut response_scratch = UdpPacketScratch::new();
+            let mut request_wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+            let mut response_wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+            let client_registry = OwnerRegistry::new();
+            let manager =
+                UdpSessionManager::new(UdpRuntimeLimits::default(), client_registry.clone());
+            let mut handle = None;
+
+            for (index, payload) in [b"one".as_slice(), b"two", b"three"]
+                .into_iter()
+                .enumerate()
+            {
+                let target = if profile == MethodProfile::Blake3Aes128Gcm2022 && index == 2 {
+                    TargetAddr::domain("127.0.0.1", echo_target.port())
+                        .expect("numeric domain target")
+                } else {
+                    TargetAddr::ip(echo_target).expect("echo target")
+                };
+                let request =
+                    Datagram::new(target, payload.into(), payload.len()).expect("request");
+                let length = client
+                    .encode_request(
+                        &clock,
+                        &SystemRandom,
+                        &request,
+                        0,
+                        &mut request_wire,
+                        &mut request_scratch,
+                    )
+                    .expect("encode request");
+                socket
+                    .send_to(&request_wire[..length], listen)
+                    .await
+                    .expect("send request");
+                let (length, source) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    socket.recv_from(&mut response_wire),
+                )
+                .await
+                .expect("response deadline")
+                .expect("receive response");
+                assert_eq!(source, SocketAddr::V4(listen));
+                let pending = client
+                    .prepare_response(&clock, &response_wire[..length], &mut response_scratch)
+                    .expect("prepare response");
+                let capacity = pending.datagram().allocated_capacity();
+                let (datagram, commit) = pending.into_parts();
+                let now = tokio::time::Instant::now();
+                let accepted_handle = match handle {
+                    Some(handle) => {
+                        manager
+                            .reserve_datagram(handle, UdpDirection::ToClient, capacity)
+                            .expect("response capacity")
+                            .commit_with(datagram, now, || {
+                                // The local client composition owns this call;
+                                // it mirrors the same deferred T03 transition.
+                                client.commit_response(commit, clock.monotonic_now())
+                            })
+                            .expect("deferred response commit");
+                        handle
+                    }
+                    None => {
+                        let session = manager.reserve_session(now).expect("client session");
+                        let reserved = session
+                            .reserve_datagram(UdpDirection::ToClient, capacity)
+                            .expect("first response capacity");
+                        session
+                            .commit_with(reserved, datagram, now, || {
+                                // The first client association is also deferred
+                                // until session/bytes/queue capacity is reserved.
+                                client.commit_response(commit, clock.monotonic_now())
+                            })
+                            .expect("deferred first response commit")
+                    }
+                };
+                handle = Some(accepted_handle);
+                let accepted = manager
+                    .pop(accepted_handle, UdpDirection::ToClient)
+                    .expect("response queue")
+                    .expect("accepted response");
+                assert_eq!(accepted.datagram().payload(), payload);
+                assert_eq!(
+                    accepted.datagram().target(),
+                    &TargetAddr::ip(echo_target).expect("observed source target")
+                );
+            }
+
+            echo_task.await.expect("echo task");
+            stop.send(()).expect("stop server");
+            assert_eq!(server.await.expect("server task"), Ok(()), "{method}");
+            manager.cancel_all();
+            assert_eq!(client_registry.snapshot().udp_sessions, 0);
+            let final_snapshot = registry.snapshot();
+            assert_eq!(final_snapshot.udp_sessions, 0);
+            assert_eq!(final_snapshot.udp_sockets, 0);
+            assert_eq!(final_snapshot.udp_tasks, 0);
+            assert_eq!(final_snapshot.udp_queued_datagrams, 0);
+            assert_eq!(final_snapshot.udp_buffered_bytes, 0);
+            std::fs::remove_file(path).expect("remove UDP config");
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_real_socket_session_saturation_never_reaches_second_target() {
+        let listen = reserve_address();
+        let (path, _config) = server_test_config(listen);
+        let mut source = std::fs::read_to_string(&path).expect("server config");
+        source.push_str(
+            "[udp]\nmax_sessions = 1\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n",
+        );
+        std::fs::write(&path, source).expect("bounded UDP config");
+        let config = ferrum2_config::load_server(&path).expect("bounded server config");
+        let registry = OwnerRegistry::new();
+        let task_registry = registry.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            run_with_registry(config, task_registry, async {
+                let _ = stopped.await;
+            })
+            .await
+        });
+        wait_until_bound(listen).await;
+
+        let stalled_target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("stalled target");
+        let stalled_address = stalled_target.local_addr().expect("stalled address");
+        let forbidden_target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("forbidden target");
+        let forbidden_address = forbidden_target.local_addr().expect("forbidden address");
+        let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+            MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
+                .expect("method key"),
+        ));
+        let clock = SystemClock::new();
+        let mut first =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("first client");
+        let mut second =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second client");
+        let first_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("first client bind");
+        let second_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("second client bind");
+        let mut scratch = UdpPacketScratch::new();
+        let mut wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+
+        let first_datagram = Datagram::new(
+            TargetAddr::ip(stalled_address).expect("stalled target"),
+            b"occupy".as_slice().into(),
+            6,
+        )
+        .expect("first datagram");
+        let length = first
+            .encode_request(
+                &clock,
+                &SystemRandom,
+                &first_datagram,
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("first encode");
+        first_socket
+            .send_to(&wire[..length], listen)
+            .await
+            .expect("first send");
+        let mut target_buffer = [0_u8; 32];
+        let (received, _) = tokio::time::timeout(
+            Duration::from_secs(5),
+            stalled_target.recv_from(&mut target_buffer),
+        )
+        .await
+        .expect("stalled target deadline")
+        .expect("stalled target receive");
+        assert_eq!(&target_buffer[..received], b"occupy");
+
+        let second_datagram = Datagram::new(
+            TargetAddr::ip(forbidden_address).expect("forbidden target"),
+            b"must-not-send".as_slice().into(),
+            13,
+        )
+        .expect("second datagram");
+        let length = second
+            .encode_request(
+                &clock,
+                &SystemRandom,
+                &second_datagram,
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("second encode");
+        second_socket
+            .send_to(&wire[..length], listen)
+            .await
+            .expect("second send");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                forbidden_target.recv_from(&mut target_buffer)
+            )
+            .await
+            .is_err(),
+            "saturated session reached the second target"
+        );
+
+        stop.send(()).expect("stop server");
+        assert_eq!(server.await.expect("server task"), Ok(()));
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.udp_sessions, 0);
+        assert_eq!(snapshot.udp_sockets, 0);
+        assert_eq!(snapshot.udp_tasks, 0);
+        assert_eq!(snapshot.udp_buffered_bytes, 0);
+        std::fs::remove_file(path).expect("remove saturation config");
     }
 
     async fn wait_until_bound(address: SocketAddrV4) {

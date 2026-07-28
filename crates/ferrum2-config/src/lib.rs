@@ -26,6 +26,9 @@ const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 30_000;
 const DEFAULT_REPLAY_CAPACITY: usize = 65_536;
+const DEFAULT_UDP_MAX_SESSIONS: usize = 4_096;
+const DEFAULT_UDP_MAX_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_UDP_IDLE_TIMEOUT_MS: u64 = 300_000;
 
 /// A validated client configuration with no retained source text.
 pub struct ValidatedClientConfig {
@@ -50,8 +53,18 @@ pub struct ValidatedServerConfig {
     pub psk: MethodPsk,
     pub runtime: RuntimeConfig,
     pub replay: ReplayConfig,
+    pub udp: UdpConfig,
     pub logging: LoggingConfig,
     pub metrics: Option<MetricsConfig>,
+}
+
+/// Validated bounded UDP server settings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UdpConfig {
+    pub enabled: bool,
+    pub max_sessions: usize,
+    pub max_buffered_bytes: usize,
+    pub idle_timeout: Duration,
 }
 
 impl ValidatedServerConfig {
@@ -138,6 +151,9 @@ pub enum ConfigField {
     RuntimeIdleTimeout,
     RuntimeShutdownGrace,
     ReplayCapacity,
+    UdpMaxSessions,
+    UdpMaxBufferedBytes,
+    UdpIdleTimeout,
     LoggingLevel,
     MetricsListen,
 }
@@ -159,6 +175,9 @@ impl ConfigField {
             Self::RuntimeIdleTimeout => "runtime.idle_timeout_ms",
             Self::RuntimeShutdownGrace => "runtime.shutdown_grace_ms",
             Self::ReplayCapacity => "replay.capacity",
+            Self::UdpMaxSessions => "udp.max_sessions",
+            Self::UdpMaxBufferedBytes => "udp.max_buffered_bytes",
+            Self::UdpIdleTimeout => "udp.idle_timeout_ms",
             Self::LoggingLevel => "logging.level",
             Self::MetricsListen => "metrics.listen",
         }
@@ -290,6 +309,7 @@ fn validate_server(raw: RawServerRoot) -> Result<ValidatedServerConfig, ConfigEr
     let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
     let replay = validate_replay(raw.replay)?;
+    let udp = validate_udp(raw.udp)?;
     let logging = validate_logging(raw.logging)?;
     let metrics = validate_metrics(raw.metrics, listen)?;
     Ok(ValidatedServerConfig {
@@ -297,6 +317,7 @@ fn validate_server(raw: RawServerRoot) -> Result<ValidatedServerConfig, ConfigEr
         psk,
         runtime,
         replay,
+        udp,
         logging,
         metrics,
     })
@@ -425,6 +446,27 @@ fn validate_replay(raw: RawReplay) -> Result<ReplayConfig, ConfigError> {
     }
 }
 
+fn validate_udp(raw: RawUdp) -> Result<UdpConfig, ConfigError> {
+    if !(1..=65_535).contains(&raw.max_sessions) {
+        return Err(ConfigError::semantic(ConfigField::UdpMaxSessions));
+    }
+    if !((1024 * 1024)..=(256 * 1024 * 1024)).contains(&raw.max_buffered_bytes) {
+        return Err(ConfigError::semantic(ConfigField::UdpMaxBufferedBytes));
+    }
+    let idle_timeout = bounded_duration(
+        raw.idle_timeout_ms,
+        60_000,
+        86_400_000,
+        ConfigField::UdpIdleTimeout,
+    )?;
+    Ok(UdpConfig {
+        enabled: raw.enabled,
+        max_sessions: raw.max_sessions,
+        max_buffered_bytes: raw.max_buffered_bytes,
+        idle_timeout,
+    })
+}
+
 fn validate_logging(raw: RawLogging) -> Result<LoggingConfig, ConfigError> {
     let level = match raw.level.as_str() {
         "error" => LoggingLevel::Error,
@@ -475,8 +517,34 @@ struct RawServerRoot {
     #[serde(default)]
     replay: RawReplay,
     #[serde(default)]
+    udp: RawUdp,
+    #[serde(default)]
     logging: RawLogging,
     metrics: Option<RawMetrics>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUdp {
+    #[serde(default = "default_udp_enabled")]
+    enabled: bool,
+    #[serde(default = "default_udp_max_sessions")]
+    max_sessions: usize,
+    #[serde(default = "default_udp_max_buffered_bytes")]
+    max_buffered_bytes: usize,
+    #[serde(default = "default_udp_idle_timeout_ms")]
+    idle_timeout_ms: u64,
+}
+
+impl Default for RawUdp {
+    fn default() -> Self {
+        Self {
+            enabled: default_udp_enabled(),
+            max_sessions: default_udp_max_sessions(),
+            max_buffered_bytes: default_udp_max_buffered_bytes(),
+            idle_timeout_ms: default_udp_idle_timeout_ms(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -632,6 +700,22 @@ const fn default_shutdown_grace_ms() -> u64 {
 
 const fn default_replay_capacity() -> usize {
     DEFAULT_REPLAY_CAPACITY
+}
+
+const fn default_udp_enabled() -> bool {
+    true
+}
+
+const fn default_udp_max_sessions() -> usize {
+    DEFAULT_UDP_MAX_SESSIONS
+}
+
+const fn default_udp_max_buffered_bytes() -> usize {
+    DEFAULT_UDP_MAX_BUFFERED_BYTES
+}
+
+const fn default_udp_idle_timeout_ms() -> u64 {
+    DEFAULT_UDP_IDLE_TIMEOUT_MS
 }
 
 fn default_logging_level() -> String {

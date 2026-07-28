@@ -16,7 +16,7 @@ fn series(output: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn registry_exposes_exactly_seven_typed_metric_families() {
+fn registry_preserves_seven_tcp_and_adds_exactly_seven_udp_families() {
     let metrics = Metrics::new();
     metrics.connection(Role::Client, Inbound::Socks5, Outcome::Accepted);
     metrics.active_connections_inc(Role::Client, Inbound::Socks5);
@@ -25,6 +25,13 @@ fn registry_exposes_exactly_seven_typed_metric_families() {
     metrics.set_replay_entries(7);
     metrics.replay_rejection(Reason::Replay);
     metrics.forced_shutdown(Role::Server);
+    metrics.udp_sessions_active_inc(Role::Server);
+    metrics.udp_datagram(Role::Server, Direction::ClientToTarget, Outcome::Accepted);
+    metrics.udp_failure(Role::Server, Stage::Direct, Reason::QueueFull);
+    metrics.add_udp_bytes(Role::Server, Direction::TargetToClient, 321);
+    metrics.set_udp_buffered_bytes(Role::Server, 65_507);
+    metrics.udp_replay_rejection(Role::Server, Direction::ClientToTarget, Reason::Duplicate);
+    metrics.udp_forced_shutdown(Role::Server);
 
     let output = metrics.encode_text().expect("encode metrics");
     let help_names: Vec<_> = output
@@ -42,9 +49,16 @@ fn registry_exposes_exactly_seven_typed_metric_families() {
             "ferrum2_tcp_forced_shutdown",
             "ferrum2_tcp_replay_entries",
             "ferrum2_tcp_replay_rejections",
+            "ferrum2_udp_buffered_bytes",
+            "ferrum2_udp_bytes",
+            "ferrum2_udp_datagrams",
+            "ferrum2_udp_failures",
+            "ferrum2_udp_forced_shutdown",
+            "ferrum2_udp_replay_rejections",
+            "ferrum2_udp_sessions_active",
         ]
     );
-    assert_eq!(help_names.len(), 7);
+    assert_eq!(help_names.len(), 14);
 
     let types: BTreeSet<_> = output
         .lines()
@@ -60,6 +74,13 @@ fn registry_exposes_exactly_seven_typed_metric_families() {
             "ferrum2_tcp_forced_shutdown counter",
             "ferrum2_tcp_replay_entries gauge",
             "ferrum2_tcp_replay_rejections counter",
+            "ferrum2_udp_buffered_bytes gauge",
+            "ferrum2_udp_bytes counter",
+            "ferrum2_udp_datagrams counter",
+            "ferrum2_udp_failures counter",
+            "ferrum2_udp_forced_shutdown counter",
+            "ferrum2_udp_replay_rejections counter",
+            "ferrum2_udp_sessions_active gauge",
         ])
     );
 
@@ -78,6 +99,21 @@ fn registry_exposes_exactly_seven_typed_metric_families() {
     assert!(samples.contains("ferrum2_tcp_replay_entries"));
     assert!(samples.contains("ferrum2_tcp_replay_rejections_total{reason=\"replay\"}"));
     assert!(samples.contains("ferrum2_tcp_forced_shutdown_total{role=\"server\"}"));
+    assert!(samples.contains("ferrum2_udp_sessions_active{role=\"server\"}"));
+    assert!(samples.contains(
+        "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"accepted\"}"
+    ));
+    assert!(samples.contains(
+        "ferrum2_udp_failures_total{role=\"server\",stage=\"direct\",reason=\"queue_full\"}"
+    ));
+    assert!(
+        samples.contains("ferrum2_udp_bytes_total{role=\"server\",direction=\"target_to_client\"}")
+    );
+    assert!(samples.contains("ferrum2_udp_buffered_bytes{role=\"server\"}"));
+    assert!(samples.contains(
+        "ferrum2_udp_replay_rejections_total{role=\"server\",direction=\"client_to_target\",reason=\"duplicate\"}"
+    ));
+    assert!(samples.contains("ferrum2_udp_forced_shutdown_total{role=\"server\"}"));
     assert!(output.ends_with("# EOF\n"));
 }
 
@@ -122,4 +158,37 @@ fn one_thousand_destinations_cannot_change_metric_series_identity() {
     }
     assert!(!output.contains("destination="));
     assert!(!output.contains("error="));
+}
+
+#[test]
+fn udp_secret_and_identity_sentinels_cannot_change_series_identity() {
+    let metrics = Metrics::new();
+    for _sentinel in [
+        "M2_PSK_SENTINEL",
+        "M2_NONCE_SENTINEL",
+        "M2_SESSION_SENTINEL",
+        "192.0.2.31:65000",
+        "example.invalid:53",
+    ] {
+        metrics.udp_failure(Role::Server, Stage::Shadowsocks, Reason::Authentication);
+    }
+    let output = metrics.encode_text().expect("UDP metrics");
+    assert_eq!(
+        series(&output)
+            .into_iter()
+            .filter(|sample| sample.starts_with("ferrum2_udp_failures"))
+            .collect::<Vec<_>>(),
+        [
+            "ferrum2_udp_failures_total{role=\"server\",stage=\"shadowsocks\",reason=\"authentication\"}"
+        ]
+    );
+    for sentinel in [
+        "M2_PSK_SENTINEL",
+        "M2_NONCE_SENTINEL",
+        "M2_SESSION_SENTINEL",
+        "192.0.2.31:65000",
+        "example.invalid:53",
+    ] {
+        assert!(!output.contains(sentinel));
+    }
 }

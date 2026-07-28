@@ -1,7 +1,7 @@
 #[path = "../src/local_support/mod.rs"]
 mod local_support;
 
-use std::net::TcpStream;
+use std::net::{TcpStream, UdpSocket};
 
 use local_support::{
     TCP_METHOD_CONFIGS, reserve_loopback, rewrite_config_method, run_binary, unused_loopback,
@@ -62,6 +62,7 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
     let (server_listener, server_address) = reserve_loopback();
     let (client_metrics, client_metrics_address) = reserve_loopback();
     let (server_metrics, server_metrics_address) = reserve_loopback();
+    let server_udp = UdpSocket::bind(server_address).expect("occupy server UDP");
     let client = write_client_config(
         directory.path(),
         client_address,
@@ -102,6 +103,10 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
             "pre-existing listener was disturbed"
         );
     }
+    assert_eq!(
+        server_udp.local_addr().expect("UDP address"),
+        std::net::SocketAddr::V4(server_address)
+    );
 }
 
 #[test]
@@ -178,6 +183,24 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
             "ferrum2-server",
             format!("{SERVER_BASE}[metrics]\nlisten = \"127.0.0.1:8388\"\n"),
             "error[config.semantic] metrics.listen: configuration value is invalid\n",
+        ),
+        (
+            "server-udp-session-range",
+            "ferrum2-server",
+            format!("{SERVER_BASE}[udp]\nmax_sessions = 0\n"),
+            "error[config.semantic] udp.max_sessions: configuration value is invalid\n",
+        ),
+        (
+            "server-udp-buffer-range",
+            "ferrum2-server",
+            format!("{SERVER_BASE}[udp]\nmax_buffered_bytes = 1048575\n"),
+            "error[config.semantic] udp.max_buffered_bytes: configuration value is invalid\n",
+        ),
+        (
+            "server-udp-idle-range",
+            "ferrum2-server",
+            format!("{SERVER_BASE}[udp]\nidle_timeout_ms = 59999\n"),
+            "error[config.semantic] udp.idle_timeout_ms: configuration value is invalid\n",
         ),
     ];
 

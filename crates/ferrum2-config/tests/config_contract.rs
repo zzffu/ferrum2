@@ -96,6 +96,10 @@ fn role_specific_valid_configs_apply_all_defaults() {
     assert_eq!(server.listen, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8388));
     assert_eq!(server.method(), TcpMethodProfile::Blake3Aes128Gcm2022);
     assert_eq!(server.replay.capacity, 65_536);
+    assert!(server.udp.enabled);
+    assert_eq!(server.udp.max_sessions, 4_096);
+    assert_eq!(server.udp.max_buffered_bytes, 16 * 1024 * 1024);
+    assert_eq!(server.udp.idle_timeout, Duration::from_millis(300_000));
     assert_eq!(server.logging.level, LoggingLevel::Info);
     assert!(server.metrics.is_none());
 
@@ -156,12 +160,18 @@ fn explicit_boundary_values_are_accepted_and_typed() {
          handshake_timeout_ms = 60000\nconnect_timeout_ms = 120000\n\
          idle_timeout_ms = 86400000\nshutdown_grace_ms = 300000\n\
          [replay]\ncapacity = 1048576\n\
+         [udp]\nenabled = false\nmax_sessions = 65535\n\
+         max_buffered_bytes = 268435456\nidle_timeout_ms = 86400000\n\
          [logging]\nlevel = \"trace\"\n"
     ));
     let validated = load_server(server.path()).expect("maximum boundaries");
     assert_eq!(validated.runtime.max_connections.get(), 65_535);
     assert_eq!(validated.runtime.listen_backlog.get(), 65_535);
     assert_eq!(validated.replay.capacity, 1_048_576);
+    assert!(!validated.udp.enabled);
+    assert_eq!(validated.udp.max_sessions, 65_535);
+    assert_eq!(validated.udp.max_buffered_bytes, 268_435_456);
+    assert_eq!(validated.udp.idle_timeout, Duration::from_secs(86_400));
     assert_eq!(validated.logging.level, LoggingLevel::Trace);
 }
 
@@ -275,6 +285,14 @@ fn missing_unknown_and_wrong_role_fields_are_rejected() {
             "unknown replay",
             format!("{SERVER_BASE}\n[replay]\nunexpected = 1\n"),
         ),
+        (
+            "unknown udp",
+            format!("{SERVER_BASE}\n[udp]\nunexpected = 1\n"),
+        ),
+        (
+            "udp role in client",
+            format!("{CLIENT_BASE}\n[udp]\nenabled = false\n"),
+        ),
     ];
     for (name, source) in server_cases {
         let file = TempConfig::text(&source);
@@ -308,6 +326,27 @@ fn every_numeric_range_rejects_values_immediately_outside_it() {
         let file = TempConfig::text(&format!("{SERVER_BASE}\n[replay]\ncapacity = {capacity}\n"));
         let error = load_server(file.path()).err().expect("replay range");
         assert_eq!(error.field(), ConfigField::ReplayCapacity);
+    }
+
+    for (field, values, expected) in [
+        ("max_sessions", [0_u64, 65_536], ConfigField::UdpMaxSessions),
+        (
+            "max_buffered_bytes",
+            [1_048_575, 268_435_457],
+            ConfigField::UdpMaxBufferedBytes,
+        ),
+        (
+            "idle_timeout_ms",
+            [59_999, 86_400_001],
+            ConfigField::UdpIdleTimeout,
+        ),
+    ] {
+        for value in values {
+            let file = TempConfig::text(&format!("{SERVER_BASE}\n[udp]\n{field} = {value}\n"));
+            let error = load_server(file.path()).err().expect("UDP range");
+            assert_eq!(error.kind(), ConfigErrorKind::Semantic, "{field}={value}");
+            assert_eq!(error.field(), expected, "{field}={value}");
+        }
     }
 }
 
