@@ -2,7 +2,7 @@
 id = "M1-T02"
 title = "Extend the shared SIP022 TCP flow through the complete target-address path"
 milestone = "M1"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = ["M1-T01"]
@@ -96,11 +96,28 @@ git diff --check
 
 ## Completion evidence
 
-Filled by the Team Lead after integration:
-
-- Branch/worktree/candidate and integrated commit:
-- Full/targeted Architect and QA reviews; stable finding IDs:
-- Exact validation exits:
-- Test-budget counts/baseline:
-- Accepted review debt:
-- Push/publish state:
+- Branch/worktree/candidate: `codex/ticket/m1-t02`,
+  `C:\project\ferrum2\.worktrees\m1-t02`,
+  `ae84631c515933f60b2aa3f898a86fa3cff11ce9`; product integration commit
+  `533c224964bb8b142bdc0c8dff5db8714ef9713a`.
+- Reviews: Architect/QA full reviews on `2d5dfa27` blocked as
+  `ARCH-M1-T02-001`/`QA-M1-T02-001`; the first bounded repair
+  `6e8e3eda` received QA targeted `PASS` and Architect targeted `ESCALATE`.
+  The one user-authorized additional repair `ae84631c` received Architect
+  superseding `PASS` for the original finding only. Canonical root
+  `M1-T02-REVIEW-001` is resolved; the full and targeted records remain in
+  the runtime audit ledger.
+- Authorization: single-use scopes
+  `m1-t02-review-001-repair-override-20260728-a1`,
+  `m1-t02-arch-001-control-amendment-ae84631-20260728-a1`, and
+  `m1-t02-arch-001-review-round-override-ae84631-20260728-a1` were consumed
+  and revoked at their one-use limits. They granted no ownership, contract,
+  remote, destructive, push, or publish authority.
+- Candidate validation: the four package tests, package Clippy, fmt,
+  workspace all-target check/tests, and `git diff --check` all exited 0.
+  Integration validation on `533c2249`: binary build; authoritative quick
+  fmt/check/tests; and authoritative full fmt/Clippy/all-feature tests/docs
+  all exited 0.
+- Test budget: ticket gate `PASS`, code `7710`, tests `15511`, ratio `2.012`;
+  baseline `7031/14707/2.092`; delta `+324/+415`, allowance `444`.
+- Accepted review debt: none for T02. Push/publish: none.

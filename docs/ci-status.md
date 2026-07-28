@@ -3,29 +3,45 @@
 ## 当前 M1 execute 状态
 
 - **Current product integration checkpoint:**
-  `0ad653fc6846b05ff83ec0cb941c396dfa0f54fe` on
+  `533c224964bb8b142bdc0c8dff5db8714ef9713a` on
   `codex/integration/m1`；包含 reviewed M1-T01 candidate
-  `4223051eeae35220b150461cad91daf09a954423`。
+  `4223051eeae35220b150461cad91daf09a954423` 与 M1-T02 candidate
+  `ae84631c515933f60b2aa3f898a86fa3cff11ce9`。本地 workflow-control
+  commits `91bb86b`/`3bdde10` 支持并审计一次性 superseding review。
 - **Date/environment:** 2026-07-28（Asia/Shanghai）；Windows x86_64；
   Rust/Cargo 1.97.1；Python 3.11.9。
-- **Reviews:** Architect full `PASS`；QA full `PASS_WITH_NOTES`；
-  advisory `QA-M1-T01-001`。无 blocking finding、targeted re-review 或 repair。
-- **Ticket/quick evidence:** T01 ticket commands 均 exit 0；Team Lead candidate
-  quick 的 fmt、workspace all-target check、workspace tests 3/3 exit 0。
+- **Reviews:** T01 Architect full `PASS`、QA full `PASS_WITH_NOTES`
+  （advisory `QA-M1-T01-001`）。T02 初始 Architect/QA full `BLOCK`
+  （`ARCH-M1-T02-001`/`QA-M1-T02-001`）；first repair 后 QA targeted
+  `PASS`、Architect targeted `ESCALATE`；one-use user-authorized additional
+  repair `ae84631c` 后 Architect superseding `PASS`。canonical root
+  `M1-T02-REVIEW-001` 已关闭，历史记录未覆盖。
+- **Ticket/quick evidence:** T01/T02 ticket commands 均 exit 0；Team Lead
+  candidate quick 的 fmt、workspace all-target check、workspace tests 3/3
+  exit 0。
   clean integration target 首次 quick 的 workspace tests 因 process binaries
   尚未 build 而 exit 101；`cargo build --workspace --bins --locked` exit 0 后，
   同一未修改 SHA quick 3/3 exit 0。该 setup-order derivative 已记录为 review
   debt，不是 product blocker。
-- **Full evidence:** integration SHA 上 authoritative full：
+- **Full evidence:** integration `533c2249` 上 binary build、authoritative
+  quick 3/3 与 authoritative full：
   `cargo fmt --all -- --check`、
   `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`、
   `cargo test --workspace --all-features --locked`、
   `cargo doc --workspace --all-features --no-deps --locked`，4/4 exit 0；
   `git diff --check` exit 0。
-- **Test budget:** ticket gate PASS：code `7386`、tests `15096`、ratio `2.044`；
-  baseline `7031/14707/2.092`；delta `+355/+389`，allowance `475`。
-- **Scheduler/blockers:** M1-T01 done；M1-T02 与 M1-T04 implementation ready，
-  M1-T03 等待 T02。当前无 open canonical root、authorization 或 repair usage。
+- **Test budget:** T02 ticket gate PASS：code `7710`、tests `15511`、ratio
+  `2.012`；baseline `7031/14707/2.092`；delta `+324/+415`，allowance `444`。
+- **Workflow control evidence:** 65 unit tests、`workflow.py validate`、
+  `py_compile`、`git diff --check` 均 exit 0；两项 control hardening findings
+  `CTRL-M1-T02-001/002` 在 integration 前关闭。
+- **Authorization:** three exact single-use local scopes for the T02 additional
+  repair, control amendment, and superseding Architect review were consumed and
+  revoked. No ownership/contract expansion or remote/destructive authority was
+  granted.
+- **Scheduler/blockers:** M1-T01、M1-T02 done；M1-T03 implementation ready。
+  M1-T04 exact candidate `b7a69899` 的 Architect/QA full review 均 PASS，
+  integration 等待 T03。当前无 open canonical root。
 - **Remote/release boundary:** 未 push、未 publish、未运行
   `m0-qualification` 或 external references；M1 hosted 12-cell evidence 尚未产生，
   且仍需 exact ref/SHA 的单独授权。
