@@ -80,6 +80,28 @@ pub trait QualificationOps {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SetupAvailability {
+    sing_box: bool,
+    shadowsocks_rust: bool,
+}
+
+impl SetupAvailability {
+    pub fn from_provider_status(sing_box: Option<&str>, shadowsocks_rust: Option<&str>) -> Self {
+        Self {
+            sing_box: sing_box == Some("0"),
+            shadowsocks_rust: shadowsocks_rust == Some("0"),
+        }
+    }
+
+    pub const fn is_ready(self, reference: Reference) -> bool {
+        match reference {
+            Reference::SingBox => self.sing_box,
+            Reference::ShadowsocksRust => self.shadowsocks_rust,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CaseStatus {
     Pass,
     Fail(&'static str),
@@ -114,9 +136,12 @@ impl QualificationReport {
     }
 }
 
-pub fn execute(ops: &mut impl QualificationOps) -> QualificationReport {
-    let sing_box = provision(ops, Reference::SingBox);
-    let shadowsocks_rust = provision(ops, Reference::ShadowsocksRust);
+pub fn execute_with_setup(
+    setup: SetupAvailability,
+    ops: &mut impl QualificationOps,
+) -> QualificationReport {
+    let sing_box = provision_if_ready(setup, ops, Reference::SingBox);
+    let shadowsocks_rust = provision_if_ready(setup, ops, Reference::ShadowsocksRust);
     let provision = |reference| match reference {
         Reference::SingBox => sing_box,
         Reference::ShadowsocksRust => shadowsocks_rust,
@@ -139,10 +164,23 @@ pub fn execute(ops: &mut impl QualificationOps) -> QualificationReport {
 
 pub fn execute_hosted(
     context: &HostedContext<'_>,
+    setup: SetupAvailability,
     ops: &mut impl QualificationOps,
 ) -> Result<QualificationReport, &'static str> {
     validate_hosted(context)?;
-    Ok(execute(ops))
+    Ok(execute_with_setup(setup, ops))
+}
+
+fn provision_if_ready(
+    setup: SetupAvailability,
+    ops: &mut impl QualificationOps,
+    reference: Reference,
+) -> Result<(), CaseFailure> {
+    if setup.is_ready(reference) {
+        provision(ops, reference)
+    } else {
+        Err(CaseFailure::new(reference.provision_root()))
+    }
 }
 
 fn provision(ops: &mut impl QualificationOps, reference: Reference) -> Result<(), CaseFailure> {

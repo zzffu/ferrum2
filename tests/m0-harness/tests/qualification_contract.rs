@@ -2,8 +2,8 @@
 mod qualification;
 
 use qualification::{
-    CaseFailure, CaseSpec, HostedContext, QualificationOps, Reference, execute, execute_hosted,
-    validate_hosted,
+    CaseFailure, CaseSpec, HostedContext, QualificationOps, Reference, SetupAvailability,
+    execute_hosted, execute_with_setup, validate_hosted,
 };
 
 // This table is the explicit disposition for the 15 OS/process/socket helper tests
@@ -77,6 +77,10 @@ struct FakeOps {
     fail_case: Option<&'static str>,
     provisioned: Vec<Reference>,
     attempted: Vec<&'static str>,
+}
+
+fn all_ready() -> SetupAvailability {
+    SetupAvailability::from_provider_status(Some("0"), Some("0"))
 }
 
 impl QualificationOps for FakeOps {
@@ -159,9 +163,61 @@ fn rejected_hosted_context_never_reaches_provision_or_case_operations() {
     };
     let mut ops = FakeOps::default();
 
-    assert!(execute_hosted(&invalid, &mut ops).is_err());
+    assert!(execute_hosted(&invalid, all_ready(), &mut ops).is_err());
     assert!(ops.provisioned.is_empty());
     assert!(ops.attempted.is_empty());
+}
+
+#[test]
+fn only_exact_zero_marks_provider_setup_ready() {
+    assert!(
+        SetupAvailability::from_provider_status(Some("0"), Some("0")).is_ready(Reference::SingBox)
+    );
+    for unavailable in [
+        None,
+        Some(""),
+        Some("1"),
+        Some("00"),
+        Some("+0"),
+        Some("-0"),
+        Some(" 0"),
+        Some("0 "),
+        Some("0\n"),
+        Some("0x0"),
+        Some("ok"),
+        Some("success"),
+        Some("zero"),
+        Some("０"),
+    ] {
+        let availability = SetupAvailability::from_provider_status(unavailable, Some("0"));
+        assert!(!availability.is_ready(Reference::SingBox));
+        assert!(availability.is_ready(Reference::ShadowsocksRust));
+
+        let availability = SetupAvailability::from_provider_status(Some("0"), unavailable);
+        assert!(availability.is_ready(Reference::SingBox));
+        assert!(!availability.is_ready(Reference::ShadowsocksRust));
+    }
+}
+
+#[test]
+fn unavailable_setup_skips_that_reference_and_continues_the_ready_reference() {
+    let availability = SetupAvailability::from_provider_status(Some("7"), Some("0"));
+    let mut ops = FakeOps::default();
+
+    let report = execute_with_setup(availability, &mut ops);
+
+    assert_eq!(ops.provisioned, [Reference::ShadowsocksRust]);
+    assert_eq!(ops.attempted, ["M0-INT-002", "M0-INT-004"]);
+    assert_eq!(
+        report.summary_lines(),
+        [
+            "case_id=M0-INT-001 status=FAIL canonical_root=provision-sing-box",
+            "case_id=M0-INT-002 status=PASS",
+            "case_id=M0-INT-003 status=FAIL canonical_root=provision-sing-box",
+            "case_id=M0-INT-004 status=PASS",
+        ]
+    );
+    assert!(!report.success());
 }
 
 #[test]
@@ -171,7 +227,7 @@ fn provision_failure_marks_only_that_reference_and_does_not_mask_the_other() {
         ..FakeOps::default()
     };
 
-    let report = execute(&mut ops);
+    let report = execute_with_setup(all_ready(), &mut ops);
 
     assert_eq!(
         ops.provisioned,
@@ -197,7 +253,7 @@ fn one_case_failure_does_not_prevent_later_cases() {
         ..FakeOps::default()
     };
 
-    let report = execute(&mut ops);
+    let report = execute_with_setup(all_ready(), &mut ops);
 
     assert_eq!(
         ops.attempted,
@@ -218,7 +274,7 @@ fn one_case_failure_does_not_prevent_later_cases() {
 #[test]
 fn four_passes_are_required_for_success_and_summary_is_minimal() {
     let mut ops = FakeOps::default();
-    let report = execute(&mut ops);
+    let report = execute_with_setup(all_ready(), &mut ops);
 
     assert!(report.success());
     assert_eq!(

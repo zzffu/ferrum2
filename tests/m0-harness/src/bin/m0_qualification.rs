@@ -3,7 +3,7 @@ mod external_support;
 #[path = "../qualification/mod.rs"]
 mod qualification;
 
-use qualification::{HostedContext, execute_hosted};
+use qualification::{HostedContext, SetupAvailability, execute_hosted};
 use std::env;
 use std::process::{Command, ExitCode};
 
@@ -24,6 +24,8 @@ fn run() -> Result<(), String> {
     let github_actions = env::var("GITHUB_ACTIONS").ok();
     let runner_os = env::var("RUNNER_OS").ok();
     let github_sha = env::var("GITHUB_SHA").ok();
+    let sing_box_setup_status = env::var("M0_SING_BOX_SETUP_STATUS").ok();
+    let shadowsocks_rust_setup_status = env::var("M0_SHADOWSOCKS_RUST_SETUP_STATUS").ok();
     let context = HostedContext {
         argument_count,
         github_actions: github_actions.as_deref(),
@@ -32,8 +34,12 @@ fn run() -> Result<(), String> {
         head_sha: head.trim(),
         checkout_clean: status.is_empty(),
     };
+    let setup = SetupAvailability::from_provider_status(
+        sing_box_setup_status.as_deref(),
+        shadowsocks_rust_setup_status.as_deref(),
+    );
     let mut operations = external_support::HostedOperations::new();
-    let report = execute_hosted(&context, &mut operations).map_err(str::to_owned)?;
+    let report = execute_hosted(&context, setup, &mut operations).map_err(str::to_owned)?;
     for line in report.summary_lines() {
         println!("{line}");
     }
