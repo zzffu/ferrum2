@@ -58,18 +58,18 @@ pub struct CaseSpec {
 impl CaseSpec {
     pub fn case_root(self) -> &'static str {
         match self.id {
-            "M1-INT-001" => "case-M1-INT-001",
-            "M1-INT-002" => "case-M1-INT-002",
-            "M1-INT-003" => "case-M1-INT-003",
-            "M1-INT-004" => "case-M1-INT-004",
-            "M1-INT-005" => "case-M1-INT-005",
-            "M1-INT-006" => "case-M1-INT-006",
-            "M1-INT-007" => "case-M1-INT-007",
-            "M1-INT-008" => "case-M1-INT-008",
-            "M1-INT-009" => "case-M1-INT-009",
-            "M1-INT-010" => "case-M1-INT-010",
-            "M1-INT-011" => "case-M1-INT-011",
-            "M1-INT-012" => "case-M1-INT-012",
+            "M2-UDP-INT-001" => "case-M2-UDP-INT-001",
+            "M2-UDP-INT-002" => "case-M2-UDP-INT-002",
+            "M2-UDP-INT-003" => "case-M2-UDP-INT-003",
+            "M2-UDP-INT-004" => "case-M2-UDP-INT-004",
+            "M2-UDP-INT-005" => "case-M2-UDP-INT-005",
+            "M2-UDP-INT-006" => "case-M2-UDP-INT-006",
+            "M2-UDP-INT-007" => "case-M2-UDP-INT-007",
+            "M2-UDP-INT-008" => "case-M2-UDP-INT-008",
+            "M2-UDP-INT-009" => "case-M2-UDP-INT-009",
+            "M2-UDP-INT-010" => "case-M2-UDP-INT-010",
+            "M2-UDP-INT-011" => "case-M2-UDP-INT-011",
+            "M2-UDP-INT-012" => "case-M2-UDP-INT-012",
             _ => "case-unknown",
         }
     }
@@ -94,18 +94,18 @@ use Method::{Aes128Gcm as Aes128, Aes256Gcm as Aes256, ChaCha20Poly1305 as ChaCh
 use Reference::{ShadowsocksRust, SingBox};
 
 pub const CASES: [CaseSpec; 12] = [
-    case("M1-INT-001", Aes128, SingBox, Ferrum),
-    case("M1-INT-002", Aes128, ShadowsocksRust, Ferrum),
-    case("M1-INT-003", Aes128, SingBox, RefClient),
-    case("M1-INT-004", Aes128, ShadowsocksRust, RefClient),
-    case("M1-INT-005", Aes256, SingBox, Ferrum),
-    case("M1-INT-006", Aes256, ShadowsocksRust, Ferrum),
-    case("M1-INT-007", Aes256, SingBox, RefClient),
-    case("M1-INT-008", Aes256, ShadowsocksRust, RefClient),
-    case("M1-INT-009", ChaCha, SingBox, Ferrum),
-    case("M1-INT-010", ChaCha, ShadowsocksRust, Ferrum),
-    case("M1-INT-011", ChaCha, SingBox, RefClient),
-    case("M1-INT-012", ChaCha, ShadowsocksRust, RefClient),
+    case("M2-UDP-INT-001", Aes128, SingBox, Ferrum),
+    case("M2-UDP-INT-002", Aes128, ShadowsocksRust, Ferrum),
+    case("M2-UDP-INT-003", Aes128, SingBox, RefClient),
+    case("M2-UDP-INT-004", Aes128, ShadowsocksRust, RefClient),
+    case("M2-UDP-INT-005", Aes256, SingBox, Ferrum),
+    case("M2-UDP-INT-006", Aes256, ShadowsocksRust, Ferrum),
+    case("M2-UDP-INT-007", Aes256, SingBox, RefClient),
+    case("M2-UDP-INT-008", Aes256, ShadowsocksRust, RefClient),
+    case("M2-UDP-INT-009", ChaCha, SingBox, Ferrum),
+    case("M2-UDP-INT-010", ChaCha, ShadowsocksRust, Ferrum),
+    case("M2-UDP-INT-011", ChaCha, SingBox, RefClient),
+    case("M2-UDP-INT-012", ChaCha, ShadowsocksRust, RefClient),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +122,7 @@ impl CaseFailure {
 pub trait QualificationOps {
     fn provision(&mut self, reference: Reference) -> Result<(), CaseFailure>;
     fn run_case(&mut self, case: CaseSpec) -> Result<(), CaseFailure>;
+    fn finish_cleanup(&mut self) -> Result<(), CaseFailure>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,6 +162,7 @@ struct CaseResult {
 #[derive(Debug, Eq, PartialEq)]
 pub struct QualificationReport {
     results: [CaseResult; 12],
+    cleanup: CaseStatus,
 }
 
 impl QualificationReport {
@@ -168,6 +170,34 @@ impl QualificationReport {
         self.results
             .iter()
             .all(|result| result.status == CaseStatus::Pass)
+            && self.cleanup == CaseStatus::Pass
+    }
+
+    pub const fn cleanup_success(&self) -> bool {
+        matches!(self.cleanup, CaseStatus::Pass)
+    }
+
+    pub fn pass_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| result.status == CaseStatus::Pass)
+            .count()
+    }
+
+    pub fn completion_line(&self, context: &HostedContext<'_>) -> String {
+        format!(
+            "qualification status={} cases={}/12 cleanup={} sha={} run_id={} run_attempt={}",
+            if self.success() { "PASS" } else { "FAIL" },
+            self.pass_count(),
+            if self.cleanup_success() {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+            context.head_sha,
+            context.run_id.unwrap_or("missing"),
+            context.run_attempt.unwrap_or("missing")
+        )
     }
 
     pub fn summary_lines(&self) -> [String; 12] {
@@ -204,7 +234,13 @@ pub fn execute_with_setup(
         CaseResult { case, status }
     });
 
-    QualificationReport { results }
+    let cleanup = match catch_unwind(AssertUnwindSafe(|| ops.finish_cleanup())) {
+        Ok(Ok(())) => CaseStatus::Pass,
+        Ok(Err(failure)) => CaseStatus::Fail(failure.canonical_root),
+        Err(_) => CaseStatus::Fail("cleanup"),
+    };
+
+    QualificationReport { results, cleanup }
 }
 
 pub fn execute_hosted(
@@ -240,6 +276,8 @@ pub struct HostedContext<'a> {
     pub argument_count: usize,
     pub github_actions: Option<&'a str>,
     pub runner_os: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub run_attempt: Option<&'a str>,
     pub github_sha: Option<&'a str>,
     pub head_sha: &'a str,
     pub checkout_clean: bool,
@@ -254,6 +292,11 @@ pub fn validate_hosted(context: &HostedContext<'_>) -> Result<(), &'static str> 
     }
     if context.runner_os != Some("Linux") {
         return Err("qualification requires the fixed Linux runner");
+    }
+    if !context.run_id.is_some_and(valid_run_number)
+        || !context.run_attempt.is_some_and(valid_run_number)
+    {
+        return Err("qualification requires one numeric run and attempt");
     }
     let github_sha = context.github_sha.ok_or("GITHUB_SHA is missing")?;
     if !valid_sha(github_sha) || !valid_sha(context.head_sha) {
@@ -273,4 +316,10 @@ fn valid_sha(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_run_number(value: &str) -> bool {
+    (1..=20).contains(&value.len())
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.bytes().any(|byte| byte != b'0')
 }

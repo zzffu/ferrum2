@@ -8,7 +8,7 @@ use qualification::{
 
 // This table is the explicit disposition for the 15 OS/process/socket helper tests
 // removed from libtest discovery. "hosted" means the claim is observed by every
-// runnable M1-INT case; "quality" means the same-SHA local lifecycle gate owns it;
+// historical M1 hosted cases; "quality" means the same-SHA local lifecycle gate owns it;
 // "discarded-mechanic" means the assertion described an implementation detail
 // rather than a release outcome.
 const REMOVED_HELPER_CLAIMS: [(&str, &str); 15] = [
@@ -76,8 +76,10 @@ struct FakeOps {
     fail_provision: Option<Reference>,
     fail_case: Option<&'static str>,
     panic_case: Option<&'static str>,
+    fail_cleanup: bool,
     provisioned: Vec<Reference>,
     attempted: Vec<&'static str>,
+    cleanup_calls: usize,
 }
 
 fn all_ready() -> SetupAvailability {
@@ -122,6 +124,15 @@ impl QualificationOps for FakeOps {
             Ok(())
         }
     }
+
+    fn finish_cleanup(&mut self) -> Result<(), CaseFailure> {
+        self.cleanup_calls += 1;
+        if self.fail_cleanup {
+            Err(CaseFailure::new("cleanup"))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[test]
@@ -133,18 +144,18 @@ fn case_plan_is_the_frozen_twelve_tuple_matrix() {
     assert_eq!(
         CASES.map(|case| (case.id, case.method, case.reference, case.direction)),
         [
-            ("M1-INT-001", Aes128, SingBox, Ferrum),
-            ("M1-INT-002", Aes128, ShadowsocksRust, Ferrum),
-            ("M1-INT-003", Aes128, SingBox, Client),
-            ("M1-INT-004", Aes128, ShadowsocksRust, Client),
-            ("M1-INT-005", Aes256, SingBox, Ferrum),
-            ("M1-INT-006", Aes256, ShadowsocksRust, Ferrum),
-            ("M1-INT-007", Aes256, SingBox, Client),
-            ("M1-INT-008", Aes256, ShadowsocksRust, Client),
-            ("M1-INT-009", ChaCha, SingBox, Ferrum),
-            ("M1-INT-010", ChaCha, ShadowsocksRust, Ferrum),
-            ("M1-INT-011", ChaCha, SingBox, Client),
-            ("M1-INT-012", ChaCha, ShadowsocksRust, Client),
+            ("M2-UDP-INT-001", Aes128, SingBox, Ferrum),
+            ("M2-UDP-INT-002", Aes128, ShadowsocksRust, Ferrum),
+            ("M2-UDP-INT-003", Aes128, SingBox, Client),
+            ("M2-UDP-INT-004", Aes128, ShadowsocksRust, Client),
+            ("M2-UDP-INT-005", Aes256, SingBox, Ferrum),
+            ("M2-UDP-INT-006", Aes256, ShadowsocksRust, Ferrum),
+            ("M2-UDP-INT-007", Aes256, SingBox, Client),
+            ("M2-UDP-INT-008", Aes256, ShadowsocksRust, Client),
+            ("M2-UDP-INT-009", ChaCha, SingBox, Ferrum),
+            ("M2-UDP-INT-010", ChaCha, ShadowsocksRust, Ferrum),
+            ("M2-UDP-INT-011", ChaCha, SingBox, Client),
+            ("M2-UDP-INT-012", ChaCha, ShadowsocksRust, Client),
         ]
     );
     for (method, name, psk) in [
@@ -177,6 +188,8 @@ fn hosted_guard_rejects_every_unqualified_context() {
         argument_count: 1,
         github_actions: Some("true"),
         runner_os: Some("Linux"),
+        run_id: Some("123456"),
+        run_attempt: Some("1"),
         github_sha: Some("0123456789abcdef0123456789abcdef01234567"),
         head_sha: "0123456789abcdef0123456789abcdef01234567",
         checkout_clean: true,
@@ -198,6 +211,14 @@ fn hosted_guard_rejects_every_unqualified_context() {
         },
         HostedContext {
             runner_os: Some("Windows"),
+            ..valid
+        },
+        HostedContext {
+            run_id: None,
+            ..valid
+        },
+        HostedContext {
+            run_attempt: Some("0"),
             ..valid
         },
         HostedContext {
@@ -225,6 +246,8 @@ fn rejected_hosted_context_never_reaches_provision_or_case_operations() {
         argument_count: 1,
         github_actions: Some("true"),
         runner_os: Some("Linux"),
+        run_id: Some("123456"),
+        run_attempt: Some("1"),
         github_sha: Some("0123456789abcdef0123456789abcdef01234567"),
         head_sha: "1123456789abcdef0123456789abcdef01234567",
         checkout_clean: true,
@@ -309,7 +332,7 @@ fn provision_failure_marks_only_that_reference_and_does_not_mask_the_other() {
 #[test]
 fn one_case_failure_does_not_prevent_later_cases() {
     let mut ops = FakeOps {
-        fail_case: Some("M1-INT-001"),
+        fail_case: Some("M2-UDP-INT-001"),
         ..FakeOps::default()
     };
 
@@ -319,16 +342,16 @@ fn one_case_failure_does_not_prevent_later_cases() {
     let lines = report.summary_lines();
     assert_eq!(
         lines[0],
-        "case_id=M1-INT-001 status=FAIL canonical_root=case-M1-INT-001"
+        "case_id=M2-UDP-INT-001 status=FAIL canonical_root=case-M2-UDP-INT-001"
     );
-    assert_eq!(lines[11], "case_id=M1-INT-012 status=PASS");
+    assert_eq!(lines[11], "case_id=M2-UDP-INT-012 status=PASS");
     assert!(!report.success());
 }
 
 #[test]
 fn case_panic_fails_that_row_and_does_not_prevent_later_cases() {
     let mut ops = FakeOps {
-        panic_case: Some("M1-INT-006"),
+        panic_case: Some("M2-UDP-INT-006"),
         ..FakeOps::default()
     };
 
@@ -336,9 +359,12 @@ fn case_panic_fails_that_row_and_does_not_prevent_later_cases() {
 
     assert_eq!(
         report.summary_lines()[5],
-        "case_id=M1-INT-006 status=FAIL canonical_root=case-M1-INT-006"
+        "case_id=M2-UDP-INT-006 status=FAIL canonical_root=case-M2-UDP-INT-006"
     );
-    assert_eq!(report.summary_lines()[11], "case_id=M1-INT-012 status=PASS");
+    assert_eq!(
+        report.summary_lines()[11],
+        "case_id=M2-UDP-INT-012 status=PASS"
+    );
     assert!(!report.success());
 }
 
@@ -352,6 +378,41 @@ fn twelve_passes_are_required_for_success_and_summary_is_minimal() {
         report.summary_lines(),
         CASES.map(|case| format!("case_id={} status=PASS", case.id))
     );
+    assert!(report.cleanup_success());
+    assert_eq!(ops.cleanup_calls, 1);
+    let context = HostedContext {
+        argument_count: 1,
+        github_actions: Some("true"),
+        runner_os: Some("Linux"),
+        run_id: Some("123456"),
+        run_attempt: Some("2"),
+        github_sha: Some("0123456789abcdef0123456789abcdef01234567"),
+        head_sha: "0123456789abcdef0123456789abcdef01234567",
+        checkout_clean: true,
+    };
+    assert_eq!(
+        report.completion_line(&context),
+        "qualification status=PASS cases=12/12 cleanup=PASS \
+         sha=0123456789abcdef0123456789abcdef01234567 run_id=123456 run_attempt=2"
+    );
+}
+
+#[test]
+fn cleanup_failure_can_never_produce_success() {
+    let mut ops = FakeOps {
+        fail_cleanup: true,
+        ..FakeOps::default()
+    };
+
+    let report = execute_with_setup(all_ready(), &mut ops);
+
+    assert_eq!(
+        report.summary_lines()[11],
+        "case_id=M2-UDP-INT-012 status=PASS"
+    );
+    assert!(!report.cleanup_success());
+    assert!(!report.success());
+    assert_eq!(ops.cleanup_calls, 1);
 }
 
 #[test]

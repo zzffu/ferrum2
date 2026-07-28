@@ -11,7 +11,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("M1 qualification rejected: {error}");
+            eprintln!("M2 UDP qualification rejected: {error}");
             ExitCode::FAILURE
         }
     }
@@ -23,13 +23,17 @@ fn run() -> Result<(), String> {
     let argument_count = env::args_os().count();
     let github_actions = env::var("GITHUB_ACTIONS").ok();
     let runner_os = env::var("RUNNER_OS").ok();
+    let run_id = env::var("GITHUB_RUN_ID").ok();
+    let run_attempt = env::var("GITHUB_RUN_ATTEMPT").ok();
     let github_sha = env::var("GITHUB_SHA").ok();
-    let sing_box_setup_status = env::var("M1_SING_BOX_SETUP_STATUS").ok();
-    let shadowsocks_rust_setup_status = env::var("M1_SHADOWSOCKS_RUST_SETUP_STATUS").ok();
+    let sing_box_setup_status = env::var("M2_SING_BOX_SETUP_STATUS").ok();
+    let shadowsocks_rust_setup_status = env::var("M2_SHADOWSOCKS_RUST_SETUP_STATUS").ok();
     let context = HostedContext {
         argument_count,
         github_actions: github_actions.as_deref(),
         runner_os: runner_os.as_deref(),
+        run_id: run_id.as_deref(),
+        run_attempt: run_attempt.as_deref(),
         github_sha: github_sha.as_deref(),
         head_sha: head.trim(),
         checkout_clean: status.is_empty(),
@@ -43,6 +47,7 @@ fn run() -> Result<(), String> {
     for line in report.summary_lines() {
         println!("{line}");
     }
+    println!("{}", report.completion_line(&context));
     if report.success() {
         Ok(())
     } else {

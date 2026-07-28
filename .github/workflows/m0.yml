@@ -1,4 +1,4 @@
-name: m1
+name: m2
 
 on:
   pull_request:
@@ -353,10 +353,15 @@ jobs:
           mkdir "$directory"
           tar -xzf "$archive" -C "$directory"
           binary="$directory/sing-box-1.13.14-linux-amd64-glibc/sing-box"
+          license="$directory/sing-box-1.13.14-linux-amd64-glibc/LICENSE"
           test -x "$binary"
+          test -s "$license"
+          test "$(stat --format='%s' "$license")" -le 262144
           version_output="$("$binary" version)"
           grep -F 'sing-box version 1.13.14' <<<"$version_output"
           grep -F 'Revision: 25a600db24f7680ad9806ce5427bd0ab8afe1114' <<<"$version_output"
+          grep -F 'source_commit = "25a600db24f7680ad9806ce5427bd0ab8afe1114"' tests/interop/versions.toml
+          grep -F 'license_review = "GPL-3.0-or-later with additional name terms; GitHub SPDX NOASSERTION; execute only as an independent test process; do not redistribute"' tests/interop/versions.toml
           SING_BOX_SETUP
 
           shadowsocks_rust_status=0
@@ -375,6 +380,8 @@ jobs:
           test -x "$directory/ssserver"
           "$directory/sslocal" --version | grep -Fx 'shadowsocks 1.24.0'
           "$directory/ssserver" --version | grep -Fx 'shadowsocks 1.24.0'
+          grep -F 'source_commit = "7ee1aa9223ed8f4d34734aac919036c8ad4502c2"' tests/interop/versions.toml
+          grep -F 'license_review = "MIT; execute only as an independent test process; do not redistribute"' tests/interop/versions.toml
           SHADOWSOCKS_RUST_SETUP
 
           if [ "$sing_box_status" -ne 0 ]; then
@@ -385,32 +392,39 @@ jobs:
           fi
           echo "provider_setup sing_box=$sing_box_status shadowsocks_rust=$shadowsocks_rust_status"
           {
-            printf 'M1_SING_BOX_SETUP_STATUS=%s\n' "$sing_box_status"
-            printf 'M1_SHADOWSOCKS_RUST_SETUP_STATUS=%s\n' "$shadowsocks_rust_status"
+            printf 'M2_SING_BOX_SETUP_STATUS=%s\n' "$sing_box_status"
+            printf 'M2_SHADOWSOCKS_RUST_SETUP_STATUS=%s\n' "$shadowsocks_rust_status"
           } >> "$GITHUB_ENV"
-      - name: Run hosted M1 qualification
+      - name: Run hosted M2 UDP qualification
         shell: bash
         run: |
           set -euo pipefail
           export CARGO_TARGET_DIR
-          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/m1-qualification-target.XXXXXX")"
+          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/m2-udp-qualification-target.XXXXXX")"
           cargo build --workspace --bins --locked
+          cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
           cargo build -p ferrum2-m0-harness --bin m0-qualification --locked
           qualification_status=0
           "$CARGO_TARGET_DIR/debug/m0-qualification" || qualification_status=$?
 
-          sing_box_status="${M1_SING_BOX_SETUP_STATUS:-}"
-          shadowsocks_rust_status="${M1_SHADOWSOCKS_RUST_SETUP_STATUS:-}"
+          sing_box_status="${M2_SING_BOX_SETUP_STATUS:-}"
+          shadowsocks_rust_status="${M2_SHADOWSOCKS_RUST_SETUP_STATUS:-}"
           case "$sing_box_status" in
             ''|*[!0-9]*) echo "invalid persisted sing-box setup status" >&2; exit 1 ;;
           esac
           case "$shadowsocks_rust_status" in
             ''|*[!0-9]*) echo "invalid persisted shadowsocks-rust setup status" >&2; exit 1 ;;
           esac
-          echo "final_status sing_box=$sing_box_status shadowsocks_rust=$shadowsocks_rust_status qualification=$qualification_status"
+          cleanup_status=0
+          rm -rf -- "$CARGO_TARGET_DIR" || cleanup_status=$?
+          if [ -e "$CARGO_TARGET_DIR" ]; then
+            cleanup_status=1
+          fi
+          echo "final_status sing_box=$sing_box_status shadowsocks_rust=$shadowsocks_rust_status qualification=$qualification_status cleanup=$cleanup_status"
           if [ "$sing_box_status" -eq 0 ] &&
              [ "$shadowsocks_rust_status" -eq 0 ] &&
-             [ "$qualification_status" -eq 0 ]; then
+             [ "$qualification_status" -eq 0 ] &&
+             [ "$cleanup_status" -eq 0 ]; then
             exit 0
           fi
           exit 1
