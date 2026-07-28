@@ -19,7 +19,8 @@ impl DomainName {
     pub fn new(value: &str) -> Result<Self, DomainNameError> {
         match value.len() {
             0 => Err(DomainNameError::Empty),
-            1..=MAX_DOMAIN_NAME_BYTES => Ok(Self(value.into())),
+            1..=MAX_DOMAIN_NAME_BYTES if value.is_ascii() => Ok(Self(value.into())),
+            1..=MAX_DOMAIN_NAME_BYTES => Err(DomainNameError::NonAscii),
             _ => Err(DomainNameError::TooLong),
         }
     }
@@ -43,6 +44,8 @@ pub enum DomainNameError {
     Empty,
     /// The encoded domain exceeds the protocol's 255-byte bound.
     TooLong,
+    /// M1 preserves only ASCII domain bytes and does not perform IDNA.
+    NonAscii,
 }
 
 impl fmt::Display for DomainNameError {
@@ -50,6 +53,7 @@ impl fmt::Display for DomainNameError {
         match self {
             Self::Empty => formatter.write_str("domain name is empty"),
             Self::TooLong => formatter.write_str("domain name exceeds 255 bytes"),
+            Self::NonAscii => formatter.write_str("domain name is not ASCII"),
         }
     }
 }
@@ -190,7 +194,7 @@ pub trait Inbound<IO>: Send + Sync {
 
 /// A destination-facing session opener.
 pub trait Outbound: Send + Sync {
-    /// Opened stream with an already stored local IPv4 endpoint.
+    /// Opened stream with an already stored local socket endpoint.
     type Stream: LocalEndpoint;
     /// Closed outbound error.
     type Error;
@@ -204,7 +208,7 @@ pub trait Outbound: Send + Sync {
 
 /// Establishes a protocol-neutral stream for a validated target.
 pub trait Connector: Send + Sync {
-    /// Connected stream with an already stored local IPv4 endpoint.
+    /// Connected stream with an already stored local socket endpoint.
     type Stream: LocalEndpoint;
 
     /// Connects or returns a closed connect error.
@@ -217,7 +221,7 @@ pub trait Connector: Send + Sync {
 /// Access to a local endpoint captured before a stream is returned.
 pub trait LocalEndpoint {
     /// Returns the stored endpoint infallibly without a socket query.
-    fn local_endpoint(&self) -> SocketAddrV4;
+    fn local_endpoint(&self) -> SocketAddr;
 }
 
 /// A one-shot response to an accepted application session.
@@ -226,8 +230,7 @@ pub trait SessionReply: Sized {
     type Error;
 
     /// Consumes the reply owner and reports success using the opened stream's endpoint.
-    fn succeeded(self, bound: SocketAddrV4)
-    -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn succeeded(self, bound: SocketAddr) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Consumes the reply owner and reports a pre-success connect failure.
     fn failed(self, kind: ConnectErrorKind)
@@ -294,7 +297,7 @@ impl Error for ConnectError {}
 #[cfg(test)]
 mod tests {
     use std::future::ready;
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
     use super::*;
 
@@ -302,6 +305,10 @@ mod tests {
     fn domain_names_are_bounded_before_storage() {
         assert_eq!(DomainName::new("").unwrap_err(), DomainNameError::Empty);
         assert!(DomainName::new(&"a".repeat(255)).is_ok());
+        assert_eq!(
+            DomainName::new("é.example").unwrap_err(),
+            DomainNameError::NonAscii
+        );
         assert_eq!(
             DomainName::new(&"a".repeat(256)).unwrap_err(),
             DomainNameError::TooLong
@@ -318,10 +325,10 @@ mod tests {
         assert!(!rendered.contains("443"));
     }
 
-    struct StoredEndpoint(SocketAddrV4);
+    struct StoredEndpoint(SocketAddr);
 
     impl LocalEndpoint for StoredEndpoint {
-        fn local_endpoint(&self) -> SocketAddrV4 {
+        fn local_endpoint(&self) -> SocketAddr {
             self.0
         }
     }
@@ -333,7 +340,7 @@ mod tests {
 
         fn succeeded(
             self,
-            _bound: SocketAddrV4,
+            _bound: SocketAddr,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send {
             ready(Ok(()))
         }
@@ -355,7 +362,7 @@ mod tests {
             &self,
             _target: &TargetAddr,
         ) -> impl Future<Output = Result<Self::Stream, ConnectError>> + Send {
-            let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49152);
+            let endpoint = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 49152, 0, 0));
             ready(Ok(StoredEndpoint(endpoint)))
         }
     }
@@ -363,7 +370,7 @@ mod tests {
     fn assert_send_future<T: Send>(_future: T) {}
 
     #[test]
-    fn connector_stream_carries_an_infallible_stored_ipv4_endpoint() {
+    fn connector_stream_carries_an_infallible_stored_socket_endpoint() {
         let target =
             TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("non-zero port");
         let connector = TestConnector;
@@ -372,7 +379,7 @@ mod tests {
 
     #[test]
     fn reply_contract_requires_the_opened_stream_endpoint() {
-        let bound = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49152);
+        let bound = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 49152, 0, 0));
         let stream = StoredEndpoint(bound);
         let reply = PendingReply;
         assert_send_future(reply.succeeded(stream.local_endpoint()));

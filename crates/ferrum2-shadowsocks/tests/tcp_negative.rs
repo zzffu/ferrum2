@@ -22,6 +22,18 @@ async fn bounds_address_padding_and_empty_content_table_fails_before_replay() {
             DetectionReason::AddressBounds,
             &[1, 127, 0, 0, 1, 0, 0, 0, 1, 0],
         ),
+        (DetectionReason::AddressBounds, &[3, 0, 0, 80, 0, 1, 0]),
+        (
+            DetectionReason::AddressBounds,
+            &[3, 2, 0xc3, 0xa9, 0, 80, 0, 1, 0],
+        ),
+        (DetectionReason::AddressBounds, &[3, 3, b'a', b'b']),
+        (
+            DetectionReason::AddressBounds,
+            &[
+                4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0,
+            ],
+        ),
         (
             DetectionReason::PaddingBounds,
             &[1, 127, 0, 0, 1, 0, 80, 3, 133, 0],

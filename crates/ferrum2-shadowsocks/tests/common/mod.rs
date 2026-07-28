@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 use std::future::ready;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,12 +16,12 @@ use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, LocalEndpoint, TargetAddr,
 };
 use ferrum2_crypto::{
-    Aes128Psk, Clock, ClockError, KeyProvider, KeyProviderError, KeySelector, MonotonicInstant,
-    RandomError, SecretKeyRef, SecureRandom, SinglePskProvider, TcpMethod, TcpSalt, TcpSealer,
+    Aes128Psk, Clock, ClockError, MethodTcpSalt, MonotonicInstant, RandomError, SecureRandom,
+    SinglePskProvider, TcpMethodProfile, TcpOpener, TcpSealer,
 };
 use ferrum2_shadowsocks::{
     BufferObserver, BufferRole, FlowObserver, FlowTerminal, PlainDuplex, REQUEST_FIRST_READ_LEN,
-    ShadowsocksError, TransportIo, encode_request_first_write,
+    ShadowsocksError, TcpKeyError, TcpKeyProvider, TransportIo, encode_request_first_write,
 };
 
 pub const NOW: u64 = 1_700_000_000;
@@ -51,16 +51,19 @@ impl CountingKeyProvider {
     }
 }
 
-impl KeyProvider for CountingKeyProvider {
-    type Error = KeyProviderError;
+impl TcpKeyProvider for CountingKeyProvider {
+    fn tcp_profile(&self) -> TcpMethodProfile {
+        self.inner.tcp_profile()
+    }
 
-    fn with_key<T>(
-        &self,
-        selector: KeySelector<'_>,
-        use_key: impl FnOnce(SecretKeyRef<'_>) -> T,
-    ) -> Result<T, Self::Error> {
+    fn tcp_sealer(&self, salt: &MethodTcpSalt) -> Result<TcpSealer, TcpKeyError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.with_key(selector, use_key)
+        self.inner.tcp_sealer(salt)
+    }
+
+    fn tcp_opener(&self, salt: &MethodTcpSalt) -> Result<TcpOpener, TcpKeyError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.tcp_opener(salt)
     }
 }
 
@@ -78,20 +81,27 @@ impl FailAfterKeyProvider {
     }
 }
 
-impl KeyProvider for FailAfterKeyProvider {
-    type Error = KeyProviderError;
+impl TcpKeyProvider for FailAfterKeyProvider {
+    fn tcp_profile(&self) -> TcpMethodProfile {
+        self.inner.tcp_profile()
+    }
 
-    fn with_key<T>(
-        &self,
-        selector: KeySelector<'_>,
-        use_key: impl FnOnce(SecretKeyRef<'_>) -> T,
-    ) -> Result<T, Self::Error> {
+    fn tcp_sealer(&self, salt: &MethodTcpSalt) -> Result<TcpSealer, TcpKeyError> {
         self.successful_calls_remaining
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
-            .map_err(|_| KeyProviderError::IdentityUnsupported)?;
-        self.inner.with_key(selector, use_key)
+            .map_err(|_| TcpKeyError)?;
+        self.inner.tcp_sealer(salt)
+    }
+
+    fn tcp_opener(&self, salt: &MethodTcpSalt) -> Result<TcpOpener, TcpKeyError> {
+        self.successful_calls_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .map_err(|_| TcpKeyError)?;
+        self.inner.tcp_opener(salt)
     }
 }
 
@@ -103,29 +113,31 @@ pub fn server_target() -> TargetAddr {
     TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8388)).expect("valid server")
 }
 
-pub fn salt_with_last(last: u8) -> TcpSalt {
+pub fn salt_with_last(last: u8) -> MethodTcpSalt {
     let mut salt = [
         0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
         0x00,
     ];
     salt[15] = last;
-    TcpSalt::from_bytes(salt)
+    MethodTcpSalt::try_from_slice(TcpMethodProfile::Blake3Aes128Gcm2022, &salt)
+        .expect("AES-128 salt")
 }
 
-pub fn salt_from_u64(value: u64) -> TcpSalt {
+pub fn salt_from_u64(value: u64) -> MethodTcpSalt {
     let mut salt = [0x5a; 16];
     salt[8..].copy_from_slice(&value.to_be_bytes());
-    TcpSalt::from_bytes(salt)
+    MethodTcpSalt::try_from_slice(TcpMethodProfile::Blake3Aes128Gcm2022, &salt)
+        .expect("AES-128 salt")
 }
 
-pub fn valid_request_wire(timestamp: u64, salt: &TcpSalt) -> Vec<u8> {
+pub fn valid_request_wire(timestamp: u64, salt: &MethodTcpSalt) -> Vec<u8> {
     encode_request_first_write(&provider(), salt, timestamp, &target(), &[0xa1], &[])
         .expect("valid request")
         .to_vec()
 }
 
 pub fn custom_request_wire(
-    salt: &TcpSalt,
+    salt: &MethodTcpSalt,
     message_type: u8,
     timestamp: u64,
     variable: &[u8],
@@ -135,16 +147,11 @@ pub fn custom_request_wire(
     fixed.extend_from_slice(&timestamp.to_be_bytes());
     fixed.extend_from_slice(&(variable.len() as u16).to_be_bytes());
     let mut variable = BytesMut::from(variable);
-    provider()
-        .with_key(KeySelector::Default, |key| {
-            let mut sealer =
-                TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, salt));
-            sealer.seal_in_place(&mut fixed).expect("fixture fixed");
-            sealer
-                .seal_in_place(&mut variable)
-                .expect("fixture variable");
-        })
-        .expect("default key");
+    let mut sealer = provider().tcp_sealer(salt).expect("default key");
+    sealer.seal_in_place(&mut fixed).expect("fixture fixed");
+    sealer
+        .seal_in_place(&mut variable)
+        .expect("fixture variable");
     let mut wire = salt.as_bytes().to_vec();
     wire.extend_from_slice(&fixed);
     wire.extend_from_slice(&variable);
@@ -159,18 +166,14 @@ pub fn seal_data_frame(sealer: &mut TcpSealer, payload: &[u8]) -> (Vec<u8>, Vec<
     (length.to_vec(), payload.to_vec())
 }
 
-pub fn request_data_frames(salt: &TcpSalt, payloads: &[&[u8]]) -> Vec<Vec<u8>> {
+pub fn request_data_frames(salt: &MethodTcpSalt, payloads: &[&[u8]]) -> Vec<Vec<u8>> {
     let variable = [1, 127, 0, 0, 1, 0x1f, 0x90, 0, 1, 0xa1];
     let mut fixed = BytesMut::new();
     fixed.extend_from_slice(&[0]);
     fixed.extend_from_slice(&NOW.to_be_bytes());
     fixed.extend_from_slice(&(variable.len() as u16).to_be_bytes());
     let mut variable = BytesMut::from(&variable[..]);
-    let mut sealer = provider()
-        .with_key(KeySelector::Default, |key| {
-            TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, salt))
-        })
-        .expect("default key");
+    let mut sealer = provider().tcp_sealer(salt).expect("default key");
     sealer.seal_in_place(&mut fixed).expect("fixed");
     sealer.seal_in_place(&mut variable).expect("variable");
     payloads
@@ -183,8 +186,8 @@ pub fn request_data_frames(salt: &TcpSalt, payloads: &[&[u8]]) -> Vec<Vec<u8>> {
 }
 
 pub fn response_wire_and_frames(
-    request_salt: &TcpSalt,
-    response_salt: &TcpSalt,
+    request_salt: &MethodTcpSalt,
+    response_salt: &MethodTcpSalt,
     first_payload: &[u8],
     subsequent: &[&[u8]],
 ) -> (Vec<u8>, Vec<Vec<u8>>) {
@@ -203,11 +206,7 @@ pub fn response_wire_and_frames(
     fixed.extend_from_slice(request_salt.as_bytes());
     fixed.extend_from_slice(&(first_payload.len() as u16).to_be_bytes());
     let mut first = BytesMut::from(first_payload);
-    let mut sealer = provider()
-        .with_key(KeySelector::Default, |key| {
-            TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, response_salt))
-        })
-        .expect("default key");
+    let mut sealer = provider().tcp_sealer(response_salt).expect("default key");
     sealer.seal_in_place(&mut fixed).expect("fixed");
     sealer.seal_in_place(&mut first).expect("first");
     let frames = subsequent
@@ -221,10 +220,10 @@ pub fn response_wire_and_frames(
 }
 
 pub fn custom_response_wire(
-    response_salt: &TcpSalt,
+    response_salt: &MethodTcpSalt,
     message_type: u8,
     timestamp: u64,
-    bound_request_salt: &TcpSalt,
+    bound_request_salt: &MethodTcpSalt,
     first_payload: &[u8],
 ) -> Vec<u8> {
     let mut fixed = BytesMut::new();
@@ -233,17 +232,11 @@ pub fn custom_response_wire(
     fixed.extend_from_slice(bound_request_salt.as_bytes());
     fixed.extend_from_slice(&(first_payload.len() as u16).to_be_bytes());
     let mut payload = BytesMut::from(first_payload);
-    provider()
-        .with_key(KeySelector::Default, |key| {
-            let mut sealer = TcpSealer::new(
-                key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, response_salt),
-            );
-            sealer.seal_in_place(&mut fixed).expect("response fixed");
-            sealer
-                .seal_in_place(&mut payload)
-                .expect("response payload");
-        })
-        .expect("default key");
+    let mut sealer = provider().tcp_sealer(response_salt).expect("default key");
+    sealer.seal_in_place(&mut fixed).expect("response fixed");
+    sealer
+        .seal_in_place(&mut payload)
+        .expect("response payload");
     let mut wire = response_salt.as_bytes().to_vec();
     wire.extend_from_slice(&fixed);
     wire.extend_from_slice(&payload);
@@ -492,12 +485,12 @@ impl AbortiveClose for RecordingIo {
 }
 
 impl LocalEndpoint for RecordingIo {
-    fn local_endpoint(&self) -> SocketAddrV4 {
+    fn local_endpoint(&self) -> SocketAddr {
         self.observation
             .lock()
             .expect("observation lock")
             .endpoint_calls += 1;
-        self.endpoint
+        SocketAddr::V4(self.endpoint)
     }
 }
 
@@ -654,7 +647,7 @@ impl SecureRandom for ScriptedRandom {
     }
 }
 
-pub fn client_random_bytes(request_salt: &TcpSalt) -> Vec<u8> {
+pub fn client_random_bytes(request_salt: &MethodTcpSalt) -> Vec<u8> {
     let mut bytes = request_salt.as_bytes().to_vec();
     bytes.extend_from_slice(&[0, 0]);
     bytes.push(0xa1);

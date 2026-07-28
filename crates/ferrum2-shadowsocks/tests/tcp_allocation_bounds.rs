@@ -1,11 +1,10 @@
 mod common;
 
 use bytes::BytesMut;
-use ferrum2_crypto::{KeyProvider, KeySelector, TcpMethod, TcpOpener, TcpSealer};
 use ferrum2_shadowsocks::{
     BufferRole, ClientTcpOutbound, MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN,
-    MAX_ENCRYPT_WIRE_LEN, ShadowsocksTcpInbound, TcpReplayStore, encode_request_first_write,
-    open_data_frame,
+    MAX_ENCRYPT_WIRE_LEN, ShadowsocksTcpInbound, TcpKeyProvider, TcpReplayStore,
+    encode_request_first_write, open_data_frame,
 };
 
 use common::{
@@ -212,16 +211,8 @@ async fn client_rx_and_server_tx_reuse_storage_across_32_subsequent_frames() {
 fn decoder_accepts_the_full_65535_byte_peer_payload_range() {
     let keys = provider();
     let salt = salt_from_u64(302);
-    let mut sealer = keys
-        .with_key(KeySelector::Default, |key| {
-            TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, &salt))
-        })
-        .expect("default key");
-    let mut opener = keys
-        .with_key(KeySelector::Default, |key| {
-            TcpOpener::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, &salt))
-        })
-        .expect("default key");
+    let mut sealer = keys.tcp_sealer(&salt).expect("default key");
+    let mut opener = keys.tcp_opener(&salt).expect("default key");
     let mut length = BytesMut::from(&u16::MAX.to_be_bytes()[..]);
     let mut payload = BytesMut::from(&vec![0x33; u16::MAX as usize][..]);
     sealer.seal_in_place(&mut length).expect("length seal");

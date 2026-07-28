@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use std::future::{Future, pending, ready};
@@ -10,8 +12,8 @@ use ferrum2_core::{
     ConnectError, ConnectErrorKind, Connector, LocalEndpoint, Outbound, TargetAddr,
 };
 use ferrum2_runtime::{
-    DEFAULT_CONNECT_TIMEOUT, DirectOutbound, RuntimeTcpStream, SocketInspector,
-    SystemSocketInspector, TcpConnector, TcpDialer,
+    DEFAULT_CONNECT_TIMEOUT, DirectOutbound, MAX_RESOLVED_CANDIDATES, RuntimeTcpStream,
+    SocketInspector, SystemSocketInspector, TcpConnector, TcpDialer, TcpResolver,
 };
 use tokio::net::{TcpListener, TcpStream};
 
@@ -60,8 +62,8 @@ async fn stores_an_ipv4_endpoint_after_exactly_one_lookup() {
     let stream =
         RuntimeTcpStream::from_connected_with_inspector(stream, &inspector).expect("IPv4 endpoint");
 
-    assert_eq!(stream.local_endpoint(), expected);
-    assert_eq!(stream.local_endpoint(), expected);
+    assert_eq!(stream.local_endpoint(), SocketAddr::V4(expected));
+    assert_eq!(stream.local_endpoint(), SocketAddr::V4(expected));
     assert_eq!(inspector.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -77,22 +79,23 @@ async fn lookup_failure_returns_no_stream() {
 }
 
 #[tokio::test]
-async fn ipv6_lookup_returns_no_stream() {
+async fn ipv6_lookup_is_stored_without_family_conversion() {
     let stream = connected_stream().await;
     let ipv6 = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 49152, 0, 0);
     let inspector = ScriptedInspector::returning(Ok(SocketAddr::V6(ipv6)));
 
-    let result = RuntimeTcpStream::from_connected_with_inspector(stream, &inspector);
+    let result =
+        RuntimeTcpStream::from_connected_with_inspector(stream, &inspector).expect("IPv6 endpoint");
 
-    assert!(result.is_err());
+    assert_eq!(result.local_endpoint(), SocketAddr::V6(ipv6));
     assert_eq!(inspector.calls.load(Ordering::SeqCst), 1);
 }
 
 #[derive(Clone, Copy)]
-struct StoredEndpoint(SocketAddrV4);
+struct StoredEndpoint(SocketAddr);
 
 impl LocalEndpoint for StoredEndpoint {
-    fn local_endpoint(&self) -> SocketAddrV4 {
+    fn local_endpoint(&self) -> SocketAddr {
         self.0
     }
 }
@@ -109,15 +112,15 @@ impl Connector for RecordingConnector {
         _target: &TargetAddr,
     ) -> impl Future<Output = Result<Self::Stream, ConnectError>> + Send {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        ready(Ok(StoredEndpoint(SocketAddrV4::new(
+        ready(Ok(StoredEndpoint(SocketAddr::V4(SocketAddrV4::new(
             Ipv4Addr::LOCALHOST,
             49152,
-        ))))
+        )))))
     }
 }
 
 #[tokio::test]
-async fn direct_outbound_invokes_connector_only_for_ipv4_targets() {
+async fn direct_outbound_forwards_every_normalized_target_to_the_connector() {
     let calls = Arc::new(AtomicUsize::new(0));
     let outbound = DirectOutbound::new(RecordingConnector {
         calls: Arc::clone(&calls),
@@ -125,10 +128,10 @@ async fn direct_outbound_invokes_connector_only_for_ipv4_targets() {
     let ipv4 = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("IPv4 target");
     let domain = TargetAddr::domain("example.test", 80).expect("bounded domain");
 
-    assert!(outbound.open(&domain).await.is_err());
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(outbound.open(&ipv4).await.is_ok());
+    assert!(outbound.open(&domain).await.is_ok());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(outbound.open(&ipv4).await.is_ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -154,7 +157,7 @@ async fn tcp_connector_returns_the_actual_ipv4_local_endpoint() {
         SocketAddr::V6(_) => panic!("IPv4 peer returned IPv6"),
     };
 
-    assert_eq!(stream.local_endpoint(), peer);
+    assert_eq!(stream.local_endpoint(), SocketAddr::V4(peer));
 }
 
 struct PendingDialer {
@@ -162,10 +165,7 @@ struct PendingDialer {
 }
 
 impl TcpDialer for PendingDialer {
-    fn connect(
-        &self,
-        _address: SocketAddrV4,
-    ) -> impl Future<Output = io::Result<TcpStream>> + Send {
+    fn connect(&self, _address: SocketAddr) -> impl Future<Output = io::Result<TcpStream>> + Send {
         self.calls.fetch_add(1, Ordering::SeqCst);
         pending()
     }
@@ -198,7 +198,7 @@ async fn tcp_connector_timeout_uses_the_injected_dialer_deadline() {
 
 async fn connect_with_scripted_inspector(
     result: io::Result<SocketAddr>,
-) -> (Result<SocketAddrV4, ConnectErrorKind>, usize) {
+) -> (Result<SocketAddr, ConnectErrorKind>, usize) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("bind listener");
@@ -220,15 +220,128 @@ async fn connect_with_scripted_inspector(
 }
 
 #[tokio::test]
-async fn tcp_connector_queries_once_and_returns_no_stream_for_invalid_endpoint_results() {
+async fn tcp_connector_queries_once_and_returns_no_stream_for_lookup_failure() {
     let (lookup_failure, lookup_calls) =
         connect_with_scripted_inspector(Err(io::Error::other("scripted lookup failure"))).await;
     assert_eq!(lookup_failure, Err(ConnectErrorKind::Other));
     assert_eq!(lookup_calls, 1);
+}
 
-    let ipv6 = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 49152, 0, 0);
-    let (ipv6_failure, ipv6_calls) =
-        connect_with_scripted_inspector(Ok(SocketAddr::V6(ipv6))).await;
-    assert_eq!(ipv6_failure, Err(ConnectErrorKind::Other));
-    assert_eq!(ipv6_calls, 1);
+struct ScriptedResolver {
+    calls: Arc<AtomicUsize>,
+    candidates: Vec<SocketAddr>,
+    delay: Duration,
+}
+
+impl TcpResolver for ScriptedResolver {
+    type Candidates = Vec<SocketAddr>;
+
+    async fn resolve(&self, _host: &str, _port: u16) -> io::Result<Self::Candidates> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        Ok(self.candidates.clone())
+    }
+}
+
+struct ScriptedDialer {
+    calls: Arc<AtomicUsize>,
+    seen: Arc<Mutex<Vec<SocketAddr>>>,
+    failures: Mutex<VecDeque<io::ErrorKind>>,
+    delay: Duration,
+}
+
+impl TcpDialer for ScriptedDialer {
+    async fn connect(&self, address: SocketAddr) -> io::Result<TcpStream> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen.lock().expect("seen lock").push(address);
+        tokio::time::sleep(self.delay).await;
+        let kind = self
+            .failures
+            .lock()
+            .expect("failure lock")
+            .pop_front()
+            .unwrap_or(io::ErrorKind::ConnectionRefused);
+        Err(io::Error::new(kind, "scripted dial failure"))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn domain_resolution_and_ordered_candidates_share_one_absolute_deadline() {
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let dial_calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let candidates: Vec<_> = (1..=20)
+        .map(|last| SocketAddr::from(([192, 0, 2, last], 443)))
+        .collect();
+    let connector = TcpConnector::with_resolution_adapters(
+        SystemSocketInspector,
+        ScriptedDialer {
+            calls: Arc::clone(&dial_calls),
+            seen: Arc::clone(&seen),
+            failures: Mutex::new(VecDeque::new()),
+            delay: Duration::from_secs(1),
+        },
+        ScriptedResolver {
+            calls: Arc::clone(&resolver_calls),
+            candidates: candidates.clone(),
+            delay: Duration::from_secs(3),
+        },
+        DEFAULT_CONNECT_TIMEOUT,
+    );
+    let target = TargetAddr::domain("example.test", 443).expect("domain target");
+
+    let error = match connector.connect(&target).await {
+        Ok(_) => panic!("deadline must stop sequential attempts"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), ConnectErrorKind::Timeout);
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    assert!(dial_calls.load(Ordering::SeqCst) < MAX_RESOLVED_CANDIDATES);
+    assert_eq!(
+        &*seen.lock().expect("seen lock"),
+        &candidates[..dial_calls.load(Ordering::SeqCst)]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn domain_candidate_bound_and_last_concrete_failure_are_deterministic() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let candidates: Vec<_> = (1..=20)
+        .map(|last| SocketAddr::from(([198, 51, 100, last], 80)))
+        .collect();
+    let mut failures = VecDeque::from(vec![
+        io::ErrorKind::NetworkUnreachable;
+        MAX_RESOLVED_CANDIDATES
+    ]);
+    *failures.back_mut().expect("last failure") = io::ErrorKind::ConnectionRefused;
+    let connector = TcpConnector::with_resolution_adapters(
+        SystemSocketInspector,
+        ScriptedDialer {
+            calls: Arc::clone(&calls),
+            seen: Arc::clone(&seen),
+            failures: Mutex::new(failures),
+            delay: Duration::ZERO,
+        },
+        ScriptedResolver {
+            calls: Arc::new(AtomicUsize::new(0)),
+            candidates: candidates.clone(),
+            delay: Duration::ZERO,
+        },
+        DEFAULT_CONNECT_TIMEOUT,
+    );
+    let target = TargetAddr::domain("example.test", 80).expect("domain target");
+
+    let error = match connector.connect(&target).await {
+        Ok(_) => panic!("all candidates must fail"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), ConnectErrorKind::ConnectionRefused);
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_RESOLVED_CANDIDATES);
+    assert_eq!(
+        &*seen.lock().expect("seen lock"),
+        &candidates[..MAX_RESOLVED_CANDIDATES]
+    );
 }

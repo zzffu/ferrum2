@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -16,6 +16,8 @@ const NO_AUTHENTICATION: u8 = 0x00;
 const NO_ACCEPTABLE_METHODS: u8 = 0xff;
 const COMMAND_CONNECT: u8 = 0x01;
 const ADDRESS_TYPE_IPV4: u8 = 0x01;
+const ADDRESS_TYPE_DOMAIN: u8 = 0x03;
+const ADDRESS_TYPE_IPV6: u8 = 0x04;
 const REPLY_GENERAL_FAILURE: u8 = 0x01;
 const REPLY_NETWORK_UNREACHABLE: u8 = 0x03;
 const REPLY_HOST_UNREACHABLE: u8 = 0x04;
@@ -24,7 +26,7 @@ const REPLY_COMMAND_NOT_SUPPORTED: u8 = 0x07;
 const REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
 const MAX_METHODS: usize = u8::MAX as usize;
 
-/// The M0 SOCKS5 no-authentication IPv4 `CONNECT` inbound.
+/// The SOCKS5 no-authentication TCP `CONNECT` inbound.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Socks5Inbound;
 
@@ -47,10 +49,10 @@ pub enum SocksError {
     /// The request used a command outside the M0 `CONNECT` scope.
     #[error("SOCKS5 command is not supported")]
     CommandNotSupported,
-    /// The request used an address family outside the M0 IPv4 scope.
+    /// The request used an unsupported address family.
     #[error("SOCKS5 address type is not supported")]
     AddressTypeNotSupported,
-    /// The request did not contain a valid non-zero IPv4 target.
+    /// The request did not contain a valid non-zero target.
     #[error("invalid SOCKS5 target")]
     InvalidTarget,
     /// Transport I/O failed without retaining the source error.
@@ -104,26 +106,17 @@ where
             write_failure(&mut io, REPLY_COMMAND_NOT_SUPPORTED).await?;
             return Err(SocksError::CommandNotSupported);
         }
-        if request_header[3] != ADDRESS_TYPE_IPV4 {
-            write_failure(&mut io, REPLY_ADDRESS_TYPE_NOT_SUPPORTED).await?;
-            return Err(SocksError::AddressTypeNotSupported);
-        }
-
-        let mut address_and_port = [0_u8; 6];
-        read_exact(&mut io, &mut address_and_port).await?;
-        let address = Ipv4Addr::new(
-            address_and_port[0],
-            address_and_port[1],
-            address_and_port[2],
-            address_and_port[3],
-        );
-        let port = u16::from_be_bytes([address_and_port[4], address_and_port[5]]);
-        let target = match TargetAddr::ipv4(SocketAddrV4::new(address, port)) {
+        let target = match read_target(&mut io, request_header[3]).await {
             Ok(target) => target,
-            Err(_) => {
+            Err(SocksError::AddressTypeNotSupported) => {
+                write_failure(&mut io, REPLY_ADDRESS_TYPE_NOT_SUPPORTED).await?;
+                return Err(SocksError::AddressTypeNotSupported);
+            }
+            Err(SocksError::InvalidTarget) => {
                 write_failure(&mut io, REPLY_GENERAL_FAILURE).await?;
                 return Err(SocksError::InvalidTarget);
             }
+            Err(error) => return Err(error),
         };
 
         let io = Arc::new(Mutex::new(io));
@@ -144,23 +137,25 @@ where
 {
     type Error = SocksError;
 
-    async fn succeeded(self, bound: SocketAddrV4) -> Result<(), Self::Error> {
-        let address = bound.ip().octets();
-        let port = bound.port().to_be_bytes();
-        let reply = [
-            SOCKS_VERSION,
-            0x00,
-            0x00,
-            ADDRESS_TYPE_IPV4,
-            address[0],
-            address[1],
-            address[2],
-            address[3],
-            port[0],
-            port[1],
-        ];
+    async fn succeeded(self, bound: SocketAddr) -> Result<(), Self::Error> {
+        let mut reply = [0_u8; 22];
+        reply[..3].copy_from_slice(&[SOCKS_VERSION, 0x00, 0x00]);
+        let reply_len = match bound {
+            SocketAddr::V4(bound) => {
+                reply[3] = ADDRESS_TYPE_IPV4;
+                reply[4..8].copy_from_slice(&bound.ip().octets());
+                reply[8..10].copy_from_slice(&bound.port().to_be_bytes());
+                10
+            }
+            SocketAddr::V6(bound) => {
+                reply[3] = ADDRESS_TYPE_IPV6;
+                reply[4..20].copy_from_slice(&bound.ip().octets());
+                reply[20..22].copy_from_slice(&bound.port().to_be_bytes());
+                22
+            }
+        };
         let mut stream = SocksStream { io: self.io };
-        write_exact(&mut stream, &reply).await
+        write_exact(&mut stream, &reply[..reply_len]).await
     }
 
     async fn failed(self, kind: ConnectErrorKind) -> Result<(), Self::Error> {
@@ -232,6 +227,51 @@ where
         .await
         .map(|_| ())
         .map_err(|_| SocksError::Malformed)
+}
+
+async fn read_target<IO>(io: &mut IO, address_type: u8) -> Result<TargetAddr, SocksError>
+where
+    IO: AsyncRead + Unpin,
+{
+    match address_type {
+        ADDRESS_TYPE_IPV4 => {
+            let mut address_and_port = [0_u8; 6];
+            read_exact(io, &mut address_and_port).await?;
+            let address = Ipv4Addr::new(
+                address_and_port[0],
+                address_and_port[1],
+                address_and_port[2],
+                address_and_port[3],
+            );
+            let port = u16::from_be_bytes([address_and_port[4], address_and_port[5]]);
+            TargetAddr::ip(SocketAddr::new(address.into(), port))
+                .map_err(|_| SocksError::InvalidTarget)
+        }
+        ADDRESS_TYPE_IPV6 => {
+            let mut address_and_port = [0_u8; 18];
+            read_exact(io, &mut address_and_port).await?;
+            let address = Ipv6Addr::from(
+                <[u8; 16]>::try_from(&address_and_port[..16]).expect("fixed IPv6 address region"),
+            );
+            let port = u16::from_be_bytes([address_and_port[16], address_and_port[17]]);
+            TargetAddr::ip(SocketAddr::new(address.into(), port))
+                .map_err(|_| SocksError::InvalidTarget)
+        }
+        ADDRESS_TYPE_DOMAIN => {
+            let mut length = [0_u8; 1];
+            read_exact(io, &mut length).await?;
+            let length = usize::from(length[0]);
+            let mut host = [0_u8; u8::MAX as usize];
+            read_exact(io, &mut host[..length]).await?;
+            let mut port = [0_u8; 2];
+            read_exact(io, &mut port).await?;
+            let host =
+                std::str::from_utf8(&host[..length]).map_err(|_| SocksError::InvalidTarget)?;
+            TargetAddr::domain(host, u16::from_be_bytes(port))
+                .map_err(|_| SocksError::InvalidTarget)
+        }
+        _ => Err(SocksError::AddressTypeNotSupported),
+    }
 }
 
 async fn write_exact<IO>(io: &mut IO, buffer: &[u8]) -> Result<(), SocksError>

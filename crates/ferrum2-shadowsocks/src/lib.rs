@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
-//! SIP022 TCP framing and opaque duplex flows for the AES-128 M0 slice.
+//! SIP022 TCP framing and one opaque duplex flow shared by all supported methods.
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::future::{Future, poll_fn, ready};
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
@@ -17,8 +17,9 @@ use ferrum2_core::{
     SessionReply, TargetAddr,
 };
 use ferrum2_crypto::{
-    AeadError, Clock, KeyProvider, KeySelector, MonotonicInstant, SecureRandom, TcpMethod,
-    TcpOpener, TcpSalt, TcpSealer, generate_request_salt, generate_response_salt,
+    AeadError, Clock, KeyProvider, KeySelector, MethodKeyProvider, MethodSinglePskProvider,
+    MethodTcpSalt, MonotonicInstant, SecureRandom, SinglePskProvider, TcpMethod, TcpMethodProfile,
+    TcpOpener, TcpSalt, TcpSealer, generate_method_request_salt, generate_method_response_salt,
 };
 use thiserror::Error;
 
@@ -37,21 +38,93 @@ pub const MAX_DECRYPT_WIRE_LEN: usize = MAX_PAYLOAD_LEN + TAG_LEN;
 /// Largest application chunk emitted by ferrum2.
 pub const MAX_ENCODE_PAYLOAD_LEN: usize = 16_384;
 /// Fixed usable limit requested for the single per-flow encrypt scratch.
-pub const MAX_ENCRYPT_WIRE_LEN: usize =
-    TCP_SALT_LEN + RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN + MAX_ENCODE_PAYLOAD_LEN + TAG_LEN;
+pub const MAX_ENCRYPT_WIRE_LEN: usize = MAX_TCP_SALT_LEN
+    + MAX_RESPONSE_FIXED_PLAINTEXT_LEN
+    + TAG_LEN
+    + MAX_ENCODE_PAYLOAD_LEN
+    + TAG_LEN;
 /// Largest SIP022 request padding accepted by M0.
 pub const MAX_PADDING_LEN: usize = 900;
 
 const REQUEST_TYPE: u8 = 0;
 const RESPONSE_TYPE: u8 = 1;
 const IPV4_ATYP: u8 = 1;
+const DOMAIN_ATYP: u8 = 3;
+const IPV6_ATYP: u8 = 4;
 const REQUEST_FIXED_PLAINTEXT_LEN: usize = 11;
-const RESPONSE_FIXED_PLAINTEXT_LEN: usize = 27;
+const MAX_TCP_SALT_LEN: usize = 32;
+const MAX_RESPONSE_FIXED_PLAINTEXT_LEN: usize = 43;
 const ENCRYPTED_LENGTH_LEN: usize = 2 + TAG_LEN;
 const REPLAY_RETENTION: Duration = Duration::from_secs(60);
 const DEFAULT_REPLAY_CAPACITY: usize = 65_536;
 const MIN_REPLAY_CAPACITY: usize = 1_024;
 const MAX_REPLAY_CAPACITY: usize = 1_048_576;
+
+/// Narrow method-aware key capability consumed by the shared TCP state machine.
+pub trait TcpKeyProvider: Send + Sync {
+    /// Returns the immutable method profile before wire buffers are read.
+    fn tcp_profile(&self) -> TcpMethodProfile;
+
+    /// Creates the outbound owner for a same-profile salt.
+    fn tcp_sealer(&self, salt: &MethodTcpSalt) -> Result<TcpSealer, TcpKeyError>;
+
+    /// Creates the inbound owner for a same-profile salt.
+    fn tcp_opener(&self, salt: &MethodTcpSalt) -> Result<TcpOpener, TcpKeyError>;
+}
+
+/// Closed method-profile or key-lookup failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("TCP key unavailable")]
+pub struct TcpKeyError;
+
+impl TcpKeyProvider for SinglePskProvider {
+    fn tcp_profile(&self) -> TcpMethodProfile {
+        TcpMethodProfile::Blake3Aes128Gcm2022
+    }
+
+    fn tcp_sealer(&self, salt: &MethodTcpSalt) -> Result<TcpSealer, TcpKeyError> {
+        let legacy = legacy_salt(salt)?;
+        self.with_key(KeySelector::Default, |key| {
+            TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, &legacy))
+        })
+        .map_err(|_| TcpKeyError)
+    }
+
+    fn tcp_opener(&self, salt: &MethodTcpSalt) -> Result<TcpOpener, TcpKeyError> {
+        let legacy = legacy_salt(salt)?;
+        self.with_key(KeySelector::Default, |key| {
+            TcpOpener::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, &legacy))
+        })
+        .map_err(|_| TcpKeyError)
+    }
+}
+
+impl TcpKeyProvider for MethodSinglePskProvider {
+    fn tcp_profile(&self) -> TcpMethodProfile {
+        self.profile()
+    }
+
+    fn tcp_sealer(&self, salt: &MethodTcpSalt) -> Result<TcpSealer, TcpKeyError> {
+        self.with_method_key(KeySelector::Default, |key| {
+            key.derive_tcp_subkey(salt).map(TcpSealer::new)
+        })
+        .map_err(|_| TcpKeyError)?
+        .map_err(|_| TcpKeyError)
+    }
+
+    fn tcp_opener(&self, salt: &MethodTcpSalt) -> Result<TcpOpener, TcpKeyError> {
+        self.with_method_key(KeySelector::Default, |key| {
+            key.derive_tcp_subkey(salt).map(TcpOpener::new)
+        })
+        .map_err(|_| TcpKeyError)?
+        .map_err(|_| TcpKeyError)
+    }
+}
+
+fn legacy_salt(salt: &MethodTcpSalt) -> Result<TcpSalt, TcpKeyError> {
+    let bytes: [u8; TCP_SALT_LEN] = salt.as_bytes().try_into().map_err(|_| TcpKeyError)?;
+    Ok(TcpSalt::from_bytes(bytes))
+}
 
 /// A closed deterministic codec failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -309,8 +382,8 @@ pub struct TcpReplayStore {
 }
 
 struct ReplayState {
-    entries: HashMap<TcpSalt, MonotonicInstant>,
-    insertion_order: VecDeque<TcpSalt>,
+    entries: HashMap<MethodTcpSalt, MonotonicInstant>,
+    insertion_order: VecDeque<MethodTcpSalt>,
 }
 
 /// Invalid replay capacity.
@@ -355,7 +428,7 @@ impl TcpReplayStore {
 
     fn check_and_insert(
         &self,
-        salt: &TcpSalt,
+        salt: &MethodTcpSalt,
         now: MonotonicInstant,
     ) -> Result<(), ReplayInsertError> {
         let mut state = self
@@ -408,10 +481,7 @@ pub struct NoReply;
 impl SessionReply for NoReply {
     type Error = Infallible;
 
-    fn succeeded(
-        self,
-        _bound: SocketAddrV4,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+    fn succeeded(self, _bound: SocketAddr) -> impl Future<Output = Result<(), Self::Error>> + Send {
         ready(Ok(()))
     }
 
@@ -502,7 +572,7 @@ where
 impl<'a, S, K, T, R> ConnectedClientOpen<'a, S, K, T, R>
 where
     S: TransportIo + LocalEndpoint,
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     T: Clock + Sync,
     R: SecureRandom,
 {
@@ -522,7 +592,7 @@ where
             fixed_scratch(BufferRole::Encrypt, MAX_ENCRYPT_WIRE_LEN, observers.buffer);
         let decrypt = fixed_scratch(BufferRole::Decrypt, MAX_DECRYPT_WIRE_LEN, observers.buffer);
 
-        let salt = generate_request_salt(random).map_err(|_| {
+        let salt = generate_method_request_salt(keys.tcp_profile(), random).map_err(|_| {
             terminate_detection(&mut io, observers.flow, DetectionReason::RandomUnavailable)
         })?;
         let timestamp = clock.unix_seconds().map_err(|_| {
@@ -580,7 +650,7 @@ where
 
 impl<'a, K, C, T, R> ClientTcpOutbound<'a, K, C, T, R>
 where
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     C: Connector,
     C::Stream: TransportIo + LocalEndpoint,
     T: Clock + Sync,
@@ -600,7 +670,7 @@ where
 
 impl<'a, K, C, T, R> Outbound for ClientTcpOutbound<'a, K, C, T, R>
 where
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     C: Connector,
     C::Stream: TransportIo + LocalEndpoint,
     T: Clock + Sync,
@@ -648,7 +718,7 @@ impl<'a, K, T, R> ShadowsocksTcpInbound<'a, K, T, R> {
 
 impl<'a, K, T, R> ShadowsocksTcpInbound<'a, K, T, R>
 where
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     T: Clock + Sync,
     R: SecureRandom,
 {
@@ -672,13 +742,16 @@ where
         );
         reset_decrypt(&mut decrypt);
 
+        let profile = self.keys.tcp_profile();
+        let salt_len = profile.salt_bytes();
+        let request_first_read_len = profile.initial_request_read_bytes();
         let first_read =
-            poll_fn(|cx| Pin::new(&mut io).poll_read(cx, &mut decrypt[..REQUEST_FIRST_READ_LEN]))
+            poll_fn(|cx| Pin::new(&mut io).poll_read(cx, &mut decrypt[..request_first_read_len]))
                 .await
                 .map_err(|_| {
                     terminate_detection(&mut io, self.observers.flow, DetectionReason::ReadFailed)
                 })?;
-        if first_read != REQUEST_FIRST_READ_LEN {
+        if first_read != request_first_read_len {
             return Err(terminate_detection(
                 &mut io,
                 self.observers.flow,
@@ -686,15 +759,14 @@ where
             ));
         }
 
-        let request_salt = TcpSalt::from_bytes(
-            decrypt[..TCP_SALT_LEN]
-                .try_into()
-                .expect("fixed salt region"),
-        );
+        let request_salt =
+            MethodTcpSalt::try_from_slice(profile, &decrypt[..salt_len]).map_err(|_| {
+                terminate_detection(&mut io, self.observers.flow, DetectionReason::FrameBounds)
+            })?;
         let mut opener = opener_for(self.keys, &request_salt)
             .map_err(|reason| terminate_detection(&mut io, self.observers.flow, reason))?;
         let fixed_wire: [u8; REQUEST_FIXED_PLAINTEXT_LEN + TAG_LEN] = decrypt
-            [TCP_SALT_LEN..REQUEST_FIRST_READ_LEN]
+            [salt_len..request_first_read_len]
             .try_into()
             .expect("fixed encrypted request width");
         decrypt.clear();
@@ -839,7 +911,7 @@ where
 
 impl<'a, K, T, R, S> Inbound<S> for ShadowsocksTcpInbound<'a, K, T, R>
 where
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     T: Clock + Sync,
     R: SecureRandom,
     S: TransportIo,
@@ -976,7 +1048,7 @@ pub struct ClientFlow<'a, S, K, T> {
     io: S,
     keys: &'a K,
     clock: &'a T,
-    request_salt: TcpSalt,
+    request_salt: MethodTcpSalt,
     request_sealer: TcpSealer,
     response_opener: Option<TcpOpener>,
     rx: ClientRx,
@@ -989,7 +1061,7 @@ pub struct ClientFlow<'a, S, K, T> {
 }
 
 impl<S: LocalEndpoint, K, T> LocalEndpoint for ClientFlow<'_, S, K, T> {
-    fn local_endpoint(&self) -> SocketAddrV4 {
+    fn local_endpoint(&self) -> SocketAddr {
         self.io.local_endpoint()
     }
 }
@@ -1000,7 +1072,7 @@ pub struct ServerFlow<'a, S, K, T, R> {
     keys: &'a K,
     clock: &'a T,
     random: &'a R,
-    request_salt: TcpSalt,
+    request_salt: MethodTcpSalt,
     request_opener: TcpOpener,
     response_sealer: Option<TcpSealer>,
     rx: DataRx,
@@ -1039,7 +1111,7 @@ fn protocol_cipher_boundary(
 impl<'a, S, K, T> ClientFlow<'a, S, K, T>
 where
     S: TransportIo,
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     T: Clock + Sync,
 {
     fn poll_read(
@@ -1061,8 +1133,10 @@ where
         match state {
             ClientRx::ResponseFixed => {
                 reset_decrypt(&mut self.decrypt);
+                let response_first_read_len =
+                    self.request_salt.profile().initial_response_read_bytes();
                 match Pin::new(&mut self.io)
-                    .poll_read(cx, &mut self.decrypt[..RESPONSE_FIRST_READ_LEN])
+                    .poll_read(cx, &mut self.decrypt[..response_first_read_len])
                 {
                     Poll::Pending => {
                         self.rx = ClientRx::ResponseFixed;
@@ -1076,7 +1150,7 @@ where
                         );
                         Poll::Ready(Err(error))
                     }
-                    Poll::Ready(Ok(read)) if read != RESPONSE_FIRST_READ_LEN => {
+                    Poll::Ready(Ok(read)) if read != response_first_read_len => {
                         let error = self.lifecycle.install_detection(
                             &mut self.io,
                             self.observers.flow,
@@ -1201,22 +1275,26 @@ where
     }
 
     fn open_response_fixed(&mut self) -> Result<usize, DetectionReason> {
-        let response_salt =
-            TcpSalt::from_bytes(self.decrypt[..TCP_SALT_LEN].try_into().expect("fixed salt"));
+        let profile = self.request_salt.profile();
+        let salt_len = profile.salt_bytes();
+        let response_first_read_len = profile.initial_response_read_bytes();
+        let fixed_plaintext_len = response_fixed_plaintext_len(profile);
+        let response_salt = MethodTcpSalt::try_from_slice(profile, &self.decrypt[..salt_len])
+            .map_err(|_| DetectionReason::FrameBounds)?;
         if response_salt == self.request_salt {
             return Err(DetectionReason::ResponseBinding);
         }
         let mut opener = opener_for(self.keys, &response_salt)?;
-        let fixed_wire: [u8; RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN] = self.decrypt
-            [TCP_SALT_LEN..RESPONSE_FIRST_READ_LEN]
-            .try_into()
-            .expect("fixed encrypted response width");
+        let mut fixed_wire = [0_u8; MAX_RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN];
+        fixed_wire[..fixed_plaintext_len + TAG_LEN]
+            .copy_from_slice(&self.decrypt[salt_len..response_first_read_len]);
         self.decrypt.clear();
-        self.decrypt.extend_from_slice(&fixed_wire);
+        self.decrypt
+            .extend_from_slice(&fixed_wire[..fixed_plaintext_len + TAG_LEN]);
         opener
             .open_in_place(&mut self.decrypt)
             .map_err(detection_from_aead)?;
-        if self.decrypt.len() != RESPONSE_FIXED_PLAINTEXT_LEN {
+        if self.decrypt.len() != fixed_plaintext_len {
             return Err(DetectionReason::FrameBounds);
         }
         if self.decrypt[0] != RESPONSE_TYPE {
@@ -1230,11 +1308,14 @@ where
         if now.abs_diff(timestamp) > 30 {
             return Err(DetectionReason::TimestampSkew);
         }
-        if self.decrypt[9..25] != *self.request_salt.as_bytes() {
+        let binding_end = 9 + salt_len;
+        if self.decrypt[9..binding_end] != *self.request_salt.as_bytes() {
             return Err(DetectionReason::ResponseBinding);
         }
         let payload_len = usize::from(u16::from_be_bytes(
-            self.decrypt[25..27].try_into().expect("length"),
+            self.decrypt[binding_end..binding_end + 2]
+                .try_into()
+                .expect("length"),
         ));
         if payload_len == 0 {
             return Err(DetectionReason::FrameBounds);
@@ -1269,7 +1350,7 @@ where
 impl<S, K, T> PlainDuplex for ClientFlow<'_, S, K, T>
 where
     S: TransportIo,
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     T: Clock + Sync,
 {
     fn poll_read_plain(
@@ -1338,7 +1419,7 @@ where
 impl<'a, S, K, T, R> ServerFlow<'a, S, K, T, R>
 where
     S: TransportIo,
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     T: Clock + Sync,
     R: SecureRandom,
 {
@@ -1416,7 +1497,8 @@ where
 
         let admitted = source.len().min(MAX_ENCODE_PAYLOAD_LEN);
         if self.tx == TxState::ResponsePending {
-            let response_salt = match generate_response_salt(self.random, &self.request_salt) {
+            let response_salt = match generate_method_response_salt(self.random, &self.request_salt)
+            {
                 Ok(salt) => salt,
                 Err(_) => {
                     let error = self.lifecycle.install_detection(
@@ -1486,7 +1568,7 @@ where
 impl<S, K, T, R> PlainDuplex for ServerFlow<'_, S, K, T, R>
 where
     S: TransportIo,
-    K: KeyProvider + Sync,
+    K: TcpKeyProvider + Sync,
     T: Clock + Sync,
     R: SecureRandom,
 {
@@ -1877,19 +1959,22 @@ struct ParsedRequest {
 }
 
 fn parse_request_variable(variable: &[u8]) -> Result<ParsedRequest, DetectionReason> {
-    const ADDRESS_AND_PADDING_LEN: usize = 9;
-    if variable.len() < ADDRESS_AND_PADDING_LEN || variable[0] != IPV4_ATYP {
+    let (target, address_len) = parse_target(variable)?;
+    let padding_end = address_len
+        .checked_add(2)
+        .ok_or(DetectionReason::FrameBounds)?;
+    if padding_end > variable.len() {
         return Err(DetectionReason::AddressBounds);
     }
-    let address = Ipv4Addr::new(variable[1], variable[2], variable[3], variable[4]);
-    let port = u16::from_be_bytes([variable[5], variable[6]]);
-    let target = TargetAddr::ipv4(SocketAddrV4::new(address, port))
-        .map_err(|_| DetectionReason::AddressBounds)?;
-    let padding_len = usize::from(u16::from_be_bytes([variable[7], variable[8]]));
+    let padding_len = usize::from(u16::from_be_bytes(
+        variable[address_len..padding_end]
+            .try_into()
+            .expect("padding width"),
+    ));
     if padding_len > MAX_PADDING_LEN {
         return Err(DetectionReason::PaddingBounds);
     }
-    let payload_start = ADDRESS_AND_PADDING_LEN
+    let payload_start = padding_end
         .checked_add(padding_len)
         .ok_or(DetectionReason::FrameBounds)?;
     if payload_start > variable.len() {
@@ -1905,16 +1990,63 @@ fn parse_request_variable(variable: &[u8]) -> Result<ParsedRequest, DetectionRea
     })
 }
 
+fn parse_target(variable: &[u8]) -> Result<(TargetAddr, usize), DetectionReason> {
+    let atyp = *variable.first().ok_or(DetectionReason::AddressBounds)?;
+    match atyp {
+        IPV4_ATYP => {
+            if variable.len() < 7 {
+                return Err(DetectionReason::AddressBounds);
+            }
+            let address = Ipv4Addr::new(variable[1], variable[2], variable[3], variable[4]);
+            let port = u16::from_be_bytes([variable[5], variable[6]]);
+            let target = TargetAddr::ip(SocketAddr::new(address.into(), port))
+                .map_err(|_| DetectionReason::AddressBounds)?;
+            Ok((target, 7))
+        }
+        IPV6_ATYP => {
+            if variable.len() < 19 {
+                return Err(DetectionReason::AddressBounds);
+            }
+            let address =
+                Ipv6Addr::from(<[u8; 16]>::try_from(&variable[1..17]).expect("fixed IPv6 region"));
+            let port = u16::from_be_bytes([variable[17], variable[18]]);
+            let target = TargetAddr::ip(SocketAddr::new(address.into(), port))
+                .map_err(|_| DetectionReason::AddressBounds)?;
+            Ok((target, 19))
+        }
+        DOMAIN_ATYP => {
+            let length = usize::from(*variable.get(1).ok_or(DetectionReason::AddressBounds)?);
+            let host_end = 2_usize
+                .checked_add(length)
+                .ok_or(DetectionReason::FrameBounds)?;
+            let port_end = host_end
+                .checked_add(2)
+                .ok_or(DetectionReason::FrameBounds)?;
+            if port_end > variable.len() {
+                return Err(DetectionReason::AddressBounds);
+            }
+            let host = std::str::from_utf8(&variable[2..host_end])
+                .map_err(|_| DetectionReason::AddressBounds)?;
+            let port =
+                u16::from_be_bytes(variable[host_end..port_end].try_into().expect("port width"));
+            let target =
+                TargetAddr::domain(host, port).map_err(|_| DetectionReason::AddressBounds)?;
+            Ok((target, port_end))
+        }
+        _ => Err(DetectionReason::AddressBounds),
+    }
+}
+
 /// Builds a deterministic contiguous request first-write for reviewed fixtures.
-pub fn encode_request_first_write<K: KeyProvider>(
+pub fn encode_request_first_write<K: TcpKeyProvider>(
     keys: &K,
-    salt: &TcpSalt,
+    salt: &MethodTcpSalt,
     timestamp: u64,
     target: &TargetAddr,
     padding: &[u8],
     initial_payload: &[u8],
 ) -> Result<Bytes, FrameError> {
-    let mut scratch = BytesMut::with_capacity(REQUEST_FIRST_READ_LEN + MAX_DECRYPT_WIRE_LEN);
+    let mut scratch = BytesMut::with_capacity(MAX_TCP_SALT_LEN + 27 + MAX_DECRYPT_WIRE_LEN);
     let _ = encode_request_state_into(
         keys,
         salt,
@@ -1927,9 +2059,9 @@ pub fn encode_request_first_write<K: KeyProvider>(
     Ok(scratch.freeze())
 }
 
-fn encode_request_state_into<K: KeyProvider>(
+fn encode_request_state_into<K: TcpKeyProvider>(
     keys: &K,
-    salt: &TcpSalt,
+    salt: &MethodTcpSalt,
     timestamp: u64,
     target: &TargetAddr,
     padding: &[u8],
@@ -1942,14 +2074,13 @@ fn encode_request_state_into<K: KeyProvider>(
     if padding.is_empty() && initial_payload.is_empty() {
         return Err(FrameError::EmptyRequest);
     }
-    let socket = target
-        .as_socket_addr()
-        .ok_or(FrameError::AddressUnsupported)?;
-    let IpAddr::V4(address) = socket.ip() else {
-        return Err(FrameError::AddressUnsupported);
-    };
-    let variable_len = 9_usize
-        .checked_add(padding.len())
+    if keys.tcp_profile() != salt.profile() {
+        return Err(FrameError::KeyUnavailable);
+    }
+    let address_len = encoded_target_len(target)?;
+    let variable_len = address_len
+        .checked_add(2)
+        .and_then(|length| length.checked_add(padding.len()))
         .and_then(|length| length.checked_add(initial_payload.len()))
         .ok_or(FrameError::Bounds)?;
     let variable_u16 = u16::try_from(variable_len).map_err(|_| FrameError::Bounds)?;
@@ -1967,9 +2098,7 @@ fn encode_request_state_into<K: KeyProvider>(
         .expect("fixed encrypted request width");
 
     scratch.clear();
-    scratch.extend_from_slice(&[IPV4_ATYP]);
-    scratch.extend_from_slice(&address.octets());
-    scratch.extend_from_slice(&target.port().get().to_be_bytes());
+    encode_target_into(target, scratch)?;
     scratch.extend_from_slice(
         &u16::try_from(padding.len())
             .map_err(|_| FrameError::PaddingBounds)?
@@ -1981,25 +2110,57 @@ fn encode_request_state_into<K: KeyProvider>(
         .seal_in_place(scratch)
         .map_err(frame_from_seal_aead)?;
     let variable_wire_len = scratch.len();
-    let total = REQUEST_FIRST_READ_LEN
+    let request_first_read_len = salt.profile().initial_request_read_bytes();
+    let salt_len = salt.profile().salt_bytes();
+    let total = request_first_read_len
         .checked_add(variable_wire_len)
         .ok_or(FrameError::Bounds)?;
     if total > scratch.capacity() {
         return Err(FrameError::Bounds);
     }
     scratch.resize(total, 0);
-    scratch.copy_within(0..variable_wire_len, REQUEST_FIRST_READ_LEN);
-    scratch[..TCP_SALT_LEN].copy_from_slice(salt.as_bytes());
-    scratch[TCP_SALT_LEN..REQUEST_FIRST_READ_LEN].copy_from_slice(&fixed);
+    scratch.copy_within(0..variable_wire_len, request_first_read_len);
+    scratch[..salt_len].copy_from_slice(salt.as_bytes());
+    scratch[salt_len..request_first_read_len].copy_from_slice(&fixed);
     Ok(sealer)
 }
 
+fn encoded_target_len(target: &TargetAddr) -> Result<usize, FrameError> {
+    match target.host() {
+        ferrum2_core::TargetHostRef::Ip(IpAddr::V4(_)) => Ok(7),
+        ferrum2_core::TargetHostRef::Ip(IpAddr::V6(_)) => Ok(19),
+        ferrum2_core::TargetHostRef::Domain(host) => {
+            4_usize.checked_add(host.len()).ok_or(FrameError::Bounds)
+        }
+    }
+}
+
+fn encode_target_into(target: &TargetAddr, scratch: &mut BytesMut) -> Result<(), FrameError> {
+    match target.host() {
+        ferrum2_core::TargetHostRef::Ip(IpAddr::V4(address)) => {
+            scratch.extend_from_slice(&[IPV4_ATYP]);
+            scratch.extend_from_slice(&address.octets());
+        }
+        ferrum2_core::TargetHostRef::Ip(IpAddr::V6(address)) => {
+            scratch.extend_from_slice(&[IPV6_ATYP]);
+            scratch.extend_from_slice(&address.octets());
+        }
+        ferrum2_core::TargetHostRef::Domain(host) => {
+            let length = u8::try_from(host.len()).map_err(|_| FrameError::AddressUnsupported)?;
+            scratch.extend_from_slice(&[DOMAIN_ATYP, length]);
+            scratch.extend_from_slice(host.as_bytes());
+        }
+    }
+    scratch.extend_from_slice(&target.port().get().to_be_bytes());
+    Ok(())
+}
+
 /// Builds a deterministic contiguous response first-write for reviewed fixtures.
-pub fn encode_response_first_write<K: KeyProvider>(
+pub fn encode_response_first_write<K: TcpKeyProvider>(
     keys: &K,
-    response_salt: &TcpSalt,
+    response_salt: &MethodTcpSalt,
     timestamp: u64,
-    request_salt: &TcpSalt,
+    request_salt: &MethodTcpSalt,
     first_payload: &[u8],
 ) -> Result<Bytes, FrameError> {
     let mut scratch = BytesMut::with_capacity(MAX_ENCRYPT_WIRE_LEN);
@@ -2014,11 +2175,11 @@ pub fn encode_response_first_write<K: KeyProvider>(
     Ok(scratch.freeze())
 }
 
-fn encode_response_state_into<K: KeyProvider>(
+fn encode_response_state_into<K: TcpKeyProvider>(
     keys: &K,
-    response_salt: &TcpSalt,
+    response_salt: &MethodTcpSalt,
     timestamp: u64,
-    request_salt: &TcpSalt,
+    request_salt: &MethodTcpSalt,
     first_payload: &[u8],
     scratch: &mut BytesMut,
 ) -> Result<TcpSealer, FrameError> {
@@ -2031,6 +2192,11 @@ fn encode_response_state_into<K: KeyProvider>(
     if response_salt == request_salt {
         return Err(FrameError::ResponseSaltReuse);
     }
+    if response_salt.profile() != request_salt.profile()
+        || keys.tcp_profile() != response_salt.profile()
+    {
+        return Err(FrameError::KeyUnavailable);
+    }
     let payload_len = u16::try_from(first_payload.len()).map_err(|_| FrameError::Bounds)?;
 
     scratch.clear();
@@ -2042,9 +2208,9 @@ fn encode_response_state_into<K: KeyProvider>(
     sealer
         .seal_in_place(scratch)
         .map_err(frame_from_seal_aead)?;
-    let fixed: [u8; RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN] = scratch[..]
-        .try_into()
-        .expect("fixed encrypted response width");
+    let fixed_len = response_fixed_plaintext_len(response_salt.profile()) + TAG_LEN;
+    let mut fixed = [0_u8; MAX_RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN];
+    fixed[..fixed_len].copy_from_slice(scratch);
 
     scratch.clear();
     scratch.extend_from_slice(first_payload);
@@ -2052,16 +2218,18 @@ fn encode_response_state_into<K: KeyProvider>(
         .seal_in_place(scratch)
         .map_err(frame_from_seal_aead)?;
     let payload_wire_len = scratch.len();
-    let total = RESPONSE_FIRST_READ_LEN
+    let response_first_read_len = response_salt.profile().initial_response_read_bytes();
+    let salt_len = response_salt.profile().salt_bytes();
+    let total = response_first_read_len
         .checked_add(payload_wire_len)
         .ok_or(FrameError::Bounds)?;
     if total > MAX_ENCRYPT_WIRE_LEN {
         return Err(FrameError::Bounds);
     }
     scratch.resize(total, 0);
-    scratch.copy_within(0..payload_wire_len, RESPONSE_FIRST_READ_LEN);
-    scratch[..TCP_SALT_LEN].copy_from_slice(response_salt.as_bytes());
-    scratch[TCP_SALT_LEN..RESPONSE_FIRST_READ_LEN].copy_from_slice(&fixed);
+    scratch.copy_within(0..payload_wire_len, response_first_read_len);
+    scratch[..salt_len].copy_from_slice(response_salt.as_bytes());
+    scratch[salt_len..response_first_read_len].copy_from_slice(&fixed[..fixed_len]);
     Ok(sealer)
 }
 
@@ -2145,18 +2313,21 @@ fn open_data_frame_into(
     Ok(())
 }
 
-fn sealer_for<K: KeyProvider>(keys: &K, salt: &TcpSalt) -> Result<TcpSealer, FrameError> {
-    keys.with_key(KeySelector::Default, |key| {
-        TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, salt))
-    })
-    .map_err(|_| FrameError::KeyUnavailable)
+fn response_fixed_plaintext_len(profile: TcpMethodProfile) -> usize {
+    11 + profile.salt_bytes()
 }
 
-fn opener_for<K: KeyProvider>(keys: &K, salt: &TcpSalt) -> Result<TcpOpener, DetectionReason> {
-    keys.with_key(KeySelector::Default, |key| {
-        TcpOpener::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, salt))
-    })
-    .map_err(|_| DetectionReason::KeyUnavailable)
+fn sealer_for<K: TcpKeyProvider>(keys: &K, salt: &MethodTcpSalt) -> Result<TcpSealer, FrameError> {
+    keys.tcp_sealer(salt)
+        .map_err(|_| FrameError::KeyUnavailable)
+}
+
+fn opener_for<K: TcpKeyProvider>(
+    keys: &K,
+    salt: &MethodTcpSalt,
+) -> Result<TcpOpener, DetectionReason> {
+    keys.tcp_opener(salt)
+        .map_err(|_| DetectionReason::KeyUnavailable)
 }
 
 fn terminate_detection<S: AbortiveClose>(
@@ -2341,10 +2512,11 @@ mod tests {
         ]))
     }
 
-    fn salt(last: u8) -> TcpSalt {
+    fn salt(last: u8) -> MethodTcpSalt {
         let mut bytes = [0_u8; TCP_SALT_LEN];
         bytes[TCP_SALT_LEN - 1] = last;
-        TcpSalt::from_bytes(bytes)
+        MethodTcpSalt::try_from_slice(TcpMethodProfile::Blake3Aes128Gcm2022, &bytes)
+            .expect("AES-128 salt")
     }
 
     fn assert_scratch_unchanged(scratch: &BytesMut, identity: usize, capacity: usize) {

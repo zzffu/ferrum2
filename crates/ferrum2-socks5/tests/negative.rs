@@ -62,12 +62,24 @@ async fn bind_and_udp_associate_write_command_not_supported() {
 }
 
 #[tokio::test]
-async fn domain_and_ipv6_write_address_type_not_supported() {
-    for address_type in [0x03, 0x04] {
-        let input = [0x05, 0x01, 0x00, 0x05, 0x01, 0x00, address_type];
+async fn unsupported_address_type_writes_address_type_not_supported() {
+    let input = [0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x7f];
+    let mut expected = METHOD_SELECTED.to_vec();
+    expected.extend_from_slice(ADDRESS_TYPE_NOT_SUPPORTED);
+    assert_rejected(&input, &expected, SocksError::AddressTypeNotSupported).await;
+}
+
+#[tokio::test]
+async fn empty_non_ascii_and_zero_port_domains_are_invalid_targets() {
+    for suffix in [
+        vec![0x03, 0, 0, 80],
+        vec![0x03, 2, 0xc3, 0xa9, 0, 80],
+        [vec![0x03, 1], b"a".to_vec(), vec![0, 0]].concat(),
+    ] {
+        let input = [[0x05, 0x01, 0x00, 0x05, 0x01, 0x00].as_slice(), &suffix].concat();
         let mut expected = METHOD_SELECTED.to_vec();
-        expected.extend_from_slice(ADDRESS_TYPE_NOT_SUPPORTED);
-        assert_rejected(&input, &expected, SocksError::AddressTypeNotSupported).await;
+        expected.extend_from_slice(GENERAL_FAILURE);
+        assert_rejected(&input, &expected, SocksError::InvalidTarget).await;
     }
 }
 

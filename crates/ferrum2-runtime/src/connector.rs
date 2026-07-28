@@ -1,5 +1,5 @@
 use std::io;
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -26,12 +26,12 @@ impl SocketInspector for SystemSocketInspector {
     }
 }
 
-/// Establishes the raw IPv4 TCP socket used by the runtime connector.
+/// Establishes one raw TCP socket candidate used by the runtime connector.
 pub trait TcpDialer: Send + Sync {
-    /// Starts one IPv4 TCP connection attempt.
+    /// Starts one TCP connection attempt.
     fn connect(
         &self,
-        address: SocketAddrV4,
+        address: SocketAddr,
     ) -> impl std::future::Future<Output = io::Result<TcpStream>> + Send;
 }
 
@@ -40,19 +40,50 @@ pub trait TcpDialer: Send + Sync {
 pub struct SystemTcpDialer;
 
 impl TcpDialer for SystemTcpDialer {
-    async fn connect(&self, address: SocketAddrV4) -> io::Result<TcpStream> {
-        TcpStream::connect(SocketAddr::V4(address)).await
+    async fn connect(&self, address: SocketAddr) -> io::Result<TcpStream> {
+        TcpStream::connect(address).await
     }
 }
 
-/// An owned Tokio TCP stream with a validated, stored IPv4 local endpoint.
+/// Resolves a bounded ordered sequence of TCP socket candidates.
+pub trait TcpResolver: Send + Sync {
+    /// Bounded candidate storage or iterator returned by this resolver.
+    type Candidates: IntoIterator<Item = SocketAddr> + Send;
+
+    /// Resolves a validated ASCII domain and non-zero port.
+    fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> impl std::future::Future<Output = io::Result<Self::Candidates>> + Send;
+}
+
+/// Production system resolver.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemTcpResolver;
+
+impl TcpResolver for SystemTcpResolver {
+    type Candidates = Vec<SocketAddr>;
+
+    async fn resolve(&self, host: &str, port: u16) -> io::Result<Self::Candidates> {
+        Ok(tokio::net::lookup_host((host, port))
+            .await?
+            .take(MAX_RESOLVED_CANDIDATES)
+            .collect())
+    }
+}
+
+/// Maximum ordered candidates consumed from one domain resolution.
+pub const MAX_RESOLVED_CANDIDATES: usize = 16;
+
+/// An owned Tokio TCP stream with a validated, stored local endpoint.
 pub struct RuntimeTcpStream {
     stream: TcpStream,
-    local_endpoint: SocketAddrV4,
+    local_endpoint: SocketAddr,
 }
 
 impl RuntimeTcpStream {
-    /// Validates and stores the connected socket's local IPv4 endpoint.
+    /// Validates and stores the connected socket's local endpoint.
     pub fn from_connected(stream: TcpStream) -> io::Result<Self> {
         Self::from_connected_with_inspector(stream, &SystemSocketInspector)
     }
@@ -62,15 +93,7 @@ impl RuntimeTcpStream {
     where
         I: SocketInspector + ?Sized,
     {
-        let local_endpoint = match inspector.local_addr(&stream)? {
-            SocketAddr::V4(address) => address,
-            SocketAddr::V6(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrNotAvailable,
-                    "connected socket has no IPv4 local endpoint",
-                ));
-            }
-        };
+        let local_endpoint = inspector.local_addr(&stream)?;
         Ok(Self {
             stream,
             local_endpoint,
@@ -84,7 +107,7 @@ impl RuntimeTcpStream {
 }
 
 impl LocalEndpoint for RuntimeTcpStream {
-    fn local_endpoint(&self) -> SocketAddrV4 {
+    fn local_endpoint(&self) -> SocketAddr {
         self.local_endpoint
     }
 }
@@ -137,77 +160,136 @@ impl AsyncWrite for RuntimeTcpStream {
     }
 }
 
-/// Direct IPv4 TCP connector with a bounded connect deadline.
+/// Direct TCP connector with bounded system resolution and one absolute deadline.
 #[derive(Debug)]
-pub struct TcpConnector<I = SystemSocketInspector, D = SystemTcpDialer> {
+pub struct TcpConnector<I = SystemSocketInspector, D = SystemTcpDialer, R = SystemTcpResolver> {
     inspector: I,
     dialer: D,
+    resolver: R,
     connect_timeout: std::time::Duration,
 }
 
-impl TcpConnector<SystemSocketInspector, SystemTcpDialer> {
+impl TcpConnector<SystemSocketInspector, SystemTcpDialer, SystemTcpResolver> {
     /// Creates a production connector.
     pub fn new(connect_timeout: std::time::Duration) -> Self {
         Self {
             inspector: SystemSocketInspector,
             dialer: SystemTcpDialer,
+            resolver: SystemTcpResolver,
             connect_timeout,
         }
     }
 }
 
-impl<I> TcpConnector<I, SystemTcpDialer> {
+impl<I> TcpConnector<I, SystemTcpDialer, SystemTcpResolver> {
     /// Creates a connector with an injected post-connect socket inspector.
     pub fn with_inspector(inspector: I, connect_timeout: std::time::Duration) -> Self {
         Self {
             inspector,
             dialer: SystemTcpDialer,
+            resolver: SystemTcpResolver,
             connect_timeout,
         }
     }
 }
 
-impl<I, D> TcpConnector<I, D> {
+impl<I, D> TcpConnector<I, D, SystemTcpResolver> {
     /// Creates a connector with injected dial and endpoint-inspection adapters.
     pub fn with_adapters(inspector: I, dialer: D, connect_timeout: std::time::Duration) -> Self {
         Self {
             inspector,
             dialer,
+            resolver: SystemTcpResolver,
             connect_timeout,
         }
     }
 }
 
-impl<I, D> Connector for TcpConnector<I, D>
+impl<I, D, R> TcpConnector<I, D, R> {
+    /// Creates a connector with all resolution, dial, and inspection adapters.
+    pub fn with_resolution_adapters(
+        inspector: I,
+        dialer: D,
+        resolver: R,
+        connect_timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            inspector,
+            dialer,
+            resolver,
+            connect_timeout,
+        }
+    }
+}
+
+impl<I, D, R> Connector for TcpConnector<I, D, R>
+where
+    I: SocketInspector,
+    D: TcpDialer,
+    R: TcpResolver,
+    <R::Candidates as IntoIterator>::IntoIter: Send,
+{
+    type Stream = RuntimeTcpStream;
+
+    async fn connect(&self, target: &TargetAddr) -> Result<Self::Stream, ConnectError> {
+        let deadline = tokio::time::Instant::now() + self.connect_timeout;
+        if let Some(address) = target.as_socket_addr() {
+            return connect_candidate(&self.inspector, &self.dialer, address, deadline).await;
+        }
+
+        let ferrum2_core::TargetHostRef::Domain(host) = target.host() else {
+            return Err(ConnectError::new(ConnectErrorKind::Other));
+        };
+        let candidates = match tokio::time::timeout_at(
+            deadline,
+            self.resolver.resolve(host, target.port().get()),
+        )
+        .await
+        {
+            Ok(Ok(candidates)) => candidates,
+            Ok(Err(_)) => {
+                return Err(ConnectError::new(ConnectErrorKind::HostUnreachable));
+            }
+            Err(_) => return Err(ConnectError::new(ConnectErrorKind::Timeout)),
+        };
+
+        let mut attempted = false;
+        let mut last_error = ConnectError::new(ConnectErrorKind::HostUnreachable);
+        for address in candidates.into_iter().take(MAX_RESOLVED_CANDIDATES) {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ConnectError::new(ConnectErrorKind::Timeout));
+            }
+            attempted = true;
+            match connect_candidate(&self.inspector, &self.dialer, address, deadline).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last_error = error,
+            }
+        }
+        if attempted {
+            Err(last_error)
+        } else {
+            Err(ConnectError::new(ConnectErrorKind::HostUnreachable))
+        }
+    }
+}
+
+async fn connect_candidate<I, D>(
+    inspector: &I,
+    dialer: &D,
+    address: SocketAddr,
+    deadline: tokio::time::Instant,
+) -> Result<RuntimeTcpStream, ConnectError>
 where
     I: SocketInspector,
     D: TcpDialer,
 {
-    type Stream = RuntimeTcpStream;
-
-    fn connect(
-        &self,
-        target: &TargetAddr,
-    ) -> impl std::future::Future<Output = Result<Self::Stream, ConnectError>> + Send {
-        let address = target.as_socket_addr();
-        async move {
-            let Some(SocketAddr::V4(address)) = address else {
-                return Err(ConnectError::new(ConnectErrorKind::Other));
-            };
-            let stream = match tokio::time::timeout(
-                self.connect_timeout,
-                self.dialer.connect(address),
-            )
-            .await
-            {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(error)) => return Err(connect_error_from_io(&error)),
-                Err(_) => return Err(ConnectError::new(ConnectErrorKind::Timeout)),
-            };
-            RuntimeTcpStream::from_connected_with_inspector(stream, &self.inspector)
-                .map_err(|_| ConnectError::new(ConnectErrorKind::Other))
-        }
-    }
+    let stream = match tokio::time::timeout_at(deadline, dialer.connect(address)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => return Err(connect_error_from_io(&error)),
+        Err(_) => return Err(ConnectError::new(ConnectErrorKind::Timeout)),
+    };
+    RuntimeTcpStream::from_connected_with_inspector(stream, inspector)
+        .map_err(|_| ConnectError::new(ConnectErrorKind::Other))
 }
 
 fn connect_error_from_io(error: &io::Error) -> ConnectError {
@@ -221,7 +303,7 @@ fn connect_error_from_io(error: &io::Error) -> ConnectError {
     ConnectError::new(kind)
 }
 
-/// Protocol-neutral direct outbound that accepts only M0 IPv4 targets.
+/// Protocol-neutral direct outbound for every normalized target class.
 #[derive(Clone, Debug)]
 pub struct DirectOutbound<C> {
     connector: C,
@@ -250,12 +332,6 @@ where
         &self,
         target: &TargetAddr,
     ) -> impl std::future::Future<Output = Result<Self::Stream, Self::Error>> + Send {
-        let is_ipv4 = matches!(target.as_socket_addr(), Some(SocketAddr::V4(_)));
-        async move {
-            if !is_ipv4 {
-                return Err(ConnectError::new(ConnectErrorKind::Other));
-            }
-            self.connector.connect(target).await
-        }
+        self.connector.connect(target)
     }
 }

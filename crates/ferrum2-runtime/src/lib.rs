@@ -8,8 +8,9 @@ mod relay;
 mod supervisor;
 
 pub use connector::{
-    DirectOutbound, RuntimeTcpStream, SocketInspector, SystemSocketInspector, SystemTcpDialer,
-    TcpConnector, TcpDialer,
+    DirectOutbound, MAX_RESOLVED_CANDIDATES, RuntimeTcpStream, SocketInspector,
+    SystemSocketInspector, SystemTcpDialer, SystemTcpResolver, TcpConnector, TcpDialer,
+    TcpResolver,
 };
 pub use deadline::{DeadlineError, with_deadline};
 pub use metrics::{
