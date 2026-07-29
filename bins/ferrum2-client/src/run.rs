@@ -15,8 +15,10 @@ use ferrum2_observability::{
     json_subscriber,
 };
 use ferrum2_runtime::{
-    BoundedSupervisor, CancellationToken, OwnerRegistry, RelayFailure, RelayRunError, TcpConnector,
-    relay_lifecycle,
+    BoundedSupervisor, CancellationToken, MetricsEndpoint, MetricsEndpointError, OwnerRegistry,
+    PreparedProcessRoot, ProcessCancellation, ProcessCause, ProcessFuture, ProcessReport,
+    ProcessRoot, ProcessRootExit, ProcessSupervisor, RelayFailure, RelayRunError, SupervisorError,
+    TcpConnector, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
     ClientFlow, ClientTcpOutbound, DetectionReason, FlowTerminal, MethodKeyAdapter, PlainDuplex,
@@ -28,19 +30,47 @@ use tokio::net::{TcpListener, TcpSocket};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
-    Observability,
-    Runtime,
-    Listener,
-    Supervisor,
+    StartupObservability,
+    StartupRuntime,
+    StartupBind,
+    StartupProtocol,
+    RuntimeListener,
+    RuntimeChild,
+    RuntimeRoot,
+    ShutdownCleanup,
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::StartupObservability => {
+                "error[startup.observability] process: unable to initialize diagnostics"
+            }
+            Self::StartupRuntime => {
+                "error[startup.runtime] process: unable to create asynchronous runtime"
+            }
+            Self::StartupBind => "error[startup.bind] process: unable to prepare required endpoint",
+            Self::StartupProtocol => {
+                "error[startup.protocol] process: unable to prepare protocol resources"
+            }
+            Self::RuntimeListener => "error[runtime.listener] process: required listener failed",
+            Self::RuntimeChild => "error[runtime.child] process: required child failed",
+            Self::RuntimeRoot => "error[runtime.root] process: required root stopped",
+            Self::ShutdownCleanup => {
+                "error[shutdown.cleanup] process: unable to reap all process owners"
+            }
+        })
+    }
 }
 
 pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
     let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
-    tracing::subscriber::set_global_default(subscriber).map_err(|_| RunError::Observability)?;
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|_| RunError::StartupObservability)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|_| RunError::Runtime)?;
+        .map_err(|_| RunError::StartupRuntime)?;
     runtime.block_on(run_async(config))
 }
 
@@ -56,12 +86,12 @@ async fn run_with_registry<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
-    let listener = bind_listener(
-        config.listen,
-        u32::from(config.runtime.listen_backlog.get()),
-    )?;
     let metrics = Arc::new(Metrics::new());
-    let server = TargetAddr::ipv4(config.server).map_err(|_| RunError::Listener)?;
+    let server = TargetAddr::ipv4(config.server).map_err(|_| RunError::StartupProtocol)?;
+    let shutdown_grace = config.runtime.shutdown_grace;
+    let listen = config.listen;
+    let listen_backlog = u32::from(config.runtime.listen_backlog.get());
+    let max_connections = usize::from(config.runtime.max_connections.get());
     let context = Arc::new(ClientContext {
         inbound: Socks5Inbound::new(),
         outbound_connector: TokioConnector::new(TcpConnector::new(config.runtime.connect_timeout)),
@@ -73,72 +103,44 @@ where
         registry: registry.clone(),
         metrics: Arc::clone(&metrics),
     });
-    let supervisor = BoundedSupervisor::new(
-        listener,
-        usize::from(config.runtime.max_connections.get()),
-        config.runtime.shutdown_grace,
-        registry.clone(),
-    )
-    .map_err(|_| RunError::Supervisor)?;
-    let handler = move |stream, cancellation| {
-        let context = Arc::clone(&context);
-        async move {
-            client_connection(stream, cancellation, context).await;
-        }
-    };
-
+    let tcp_registry = registry.clone();
+    let tcp_context = Arc::clone(&context);
+    let mut roots = vec![ProcessRoot::new(move || async move {
+        let listener = bind_listener(listen, listen_backlog)?;
+        let supervisor =
+            BoundedSupervisor::new(listener, max_connections, shutdown_grace, tcp_registry)
+                .map_err(|_| RunError::StartupProtocol)?;
+        Ok(ClientTcpRoot {
+            supervisor: Some(supervisor),
+            context: tcp_context,
+        })
+    })];
     if let Some(metrics_config) = config.metrics {
-        let metrics_listener = bind_listener(metrics_config.listen, 16)?;
-        let rendered_metrics = Arc::clone(&metrics);
-        let endpoint = ferrum2_runtime::MetricsEndpoint::new(
-            metrics_listener,
-            move || rendered_metrics.encode_text().unwrap_or_default(),
-            registry,
-        );
-        let (shutdown_sender, proxy_shutdown) = tokio::sync::watch::channel(false);
-        let metrics_shutdown = proxy_shutdown.clone();
-        let proxy = supervisor.run_until(handler, wait_for_shutdown(proxy_shutdown));
-        let metrics_server = endpoint.run_until(wait_for_shutdown(metrics_shutdown));
-        tokio::pin!(proxy);
-        tokio::pin!(metrics_server);
-        tokio::pin!(shutdown);
-        tokio::select! {
-            _ = &mut shutdown => {
-                shutdown_sender.send_replace(true);
-                let (proxy_result, metrics_result) = tokio::join!(proxy, metrics_server);
-                proxy_result.map_err(|_| RunError::Supervisor)?;
-                metrics_result.map_err(|_| RunError::Supervisor)?;
-            }
-            proxy_result = &mut proxy => {
-                shutdown_sender.send_replace(true);
-                let metrics_result = metrics_server.await;
-                proxy_result.map_err(|_| RunError::Supervisor)?;
-                metrics_result.map_err(|_| RunError::Supervisor)?;
-            }
-            metrics_result = &mut metrics_server => {
-                shutdown_sender.send_replace(true);
-                let proxy_result = proxy.await;
-                metrics_result.map_err(|_| RunError::Supervisor)?;
-                proxy_result.map_err(|_| RunError::Supervisor)?;
-            }
-        }
-    } else {
-        supervisor
-            .run_until(handler, shutdown)
-            .await
-            .map_err(|_| RunError::Supervisor)?;
+        let metrics_registry = registry.clone();
+        roots.push(ProcessRoot::new(move || async move {
+            let listener = bind_listener(metrics_config.listen, 16)?;
+            Ok(ClientMetricsRoot {
+                listener: Some(listener),
+                metrics,
+                registry: metrics_registry,
+            })
+        }));
     }
-    Ok(())
+    let supervisor = ProcessSupervisor::new(roots, shutdown_grace, registry)
+        .map_err(|_| RunError::StartupProtocol)?;
+    report_result(supervisor.run_until(shutdown).await)
 }
 
 fn bind_listener(address: std::net::SocketAddrV4, backlog: u32) -> Result<TcpListener, RunError> {
-    let socket = TcpSocket::new_v4().map_err(|_| RunError::Listener)?;
+    let socket = TcpSocket::new_v4().map_err(|_| RunError::StartupBind)?;
     #[cfg(unix)]
-    socket.set_reuseaddr(true).map_err(|_| RunError::Listener)?;
+    socket
+        .set_reuseaddr(true)
+        .map_err(|_| RunError::StartupBind)?;
     socket
         .bind(SocketAddr::V4(address))
-        .map_err(|_| RunError::Listener)?;
-    socket.listen(backlog).map_err(|_| RunError::Listener)
+        .map_err(|_| RunError::StartupBind)?;
+    socket.listen(backlog).map_err(|_| RunError::StartupBind)
 }
 
 async fn shutdown_signal() {
@@ -147,11 +149,108 @@ async fn shutdown_signal() {
     }
 }
 
-async fn wait_for_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
-    while !*receiver.borrow_and_update() {
-        if receiver.changed().await.is_err() {
-            return;
+fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
+    if report.cleanup_failure().is_some() {
+        return Err(RunError::ShutdownCleanup);
+    }
+    match report.cause() {
+        ProcessCause::ExternalShutdown => Ok(()),
+        ProcessCause::PreparationFailed { error, .. }
+        | ProcessCause::ActivationFailed { error, .. } => Err(*error),
+        ProcessCause::PreparationPanicked { .. } | ProcessCause::ActivationPanicked { .. } => {
+            Err(RunError::StartupProtocol)
         }
+        ProcessCause::RootStopped { exit, .. } => match exit {
+            ProcessRootExit::Failed(error) => Err(*error),
+            ProcessRootExit::Panicked | ProcessRootExit::JoinFailed => Err(RunError::RuntimeChild),
+            ProcessRootExit::Completed => Err(RunError::RuntimeRoot),
+        },
+    }
+}
+
+struct ClientTcpRoot {
+    supervisor: Option<BoundedSupervisor<TcpListener>>,
+    context: Arc<ClientContext>,
+}
+
+impl PreparedProcessRoot<RunError> for ClientTcpRoot {
+    fn activate(&mut self) -> Result<(), RunError> {
+        Ok(())
+    }
+
+    fn run(
+        mut self: Box<Self>,
+        mut cancellation: ProcessCancellation,
+    ) -> ProcessFuture<Result<(), RunError>> {
+        let supervisor = self.supervisor.take().expect("prepared TCP root");
+        let context = Arc::clone(&self.context);
+        Box::pin(async move {
+            supervisor
+                .run_until(
+                    move |stream, cancellation| {
+                        let context = Arc::clone(&context);
+                        async move {
+                            client_connection(stream, cancellation, context).await;
+                        }
+                    },
+                    cancellation.cancelled(),
+                )
+                .await
+                .map_err(run_error_for_supervisor)
+        })
+    }
+
+    fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct ClientMetricsRoot {
+    listener: Option<TcpListener>,
+    metrics: Arc<Metrics>,
+    registry: OwnerRegistry,
+}
+
+impl PreparedProcessRoot<RunError> for ClientMetricsRoot {
+    fn activate(&mut self) -> Result<(), RunError> {
+        Ok(())
+    }
+
+    fn run(
+        mut self: Box<Self>,
+        mut cancellation: ProcessCancellation,
+    ) -> ProcessFuture<Result<(), RunError>> {
+        let listener = self.listener.take().expect("prepared metrics root");
+        let metrics = Arc::clone(&self.metrics);
+        let endpoint = MetricsEndpoint::new(
+            listener,
+            move || metrics.encode_text().unwrap_or_default(),
+            self.registry.clone(),
+        );
+        Box::pin(async move {
+            endpoint
+                .run_until(cancellation.cancelled())
+                .await
+                .map_err(run_error_for_metrics)
+        })
+    }
+
+    fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+fn run_error_for_supervisor(error: SupervisorError) -> RunError {
+    match error {
+        SupervisorError::ListenerFailure => RunError::RuntimeListener,
+        SupervisorError::ChildFailure => RunError::RuntimeChild,
+    }
+}
+
+fn run_error_for_metrics(error: MetricsEndpointError) -> RunError {
+    match error {
+        MetricsEndpointError::ListenerFailure => RunError::RuntimeListener,
+        MetricsEndpointError::ChildFailure => RunError::RuntimeChild,
     }
 }
 
@@ -707,7 +806,7 @@ mod tests {
         let rebound = bind_listener(address, 1).expect("exact listener restart");
         assert_eq!(
             bind_listener(address, 1).expect_err("live contender"),
-            RunError::Listener
+            RunError::StartupBind
         );
         drop(rebound);
     }
@@ -1648,8 +1747,8 @@ mod tests {
         assert_eq!(final_snapshot.owned_permits, baseline.owned_permits);
         assert_eq!(final_snapshot.listeners, baseline.listeners);
         assert_eq!(
-            final_snapshot.forced_shutdowns,
-            baseline.forced_shutdowns + 1
+            final_snapshot.process_forced_roots,
+            baseline.process_forced_roots + 1
         );
         std::fs::remove_file(config_path).expect("remove client test config");
     }

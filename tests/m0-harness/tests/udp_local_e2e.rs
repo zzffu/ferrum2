@@ -14,6 +14,9 @@ use local_support::{
     ChildGuard, active_child_count, bind_loopback_listener, run_binary, wait_for_bound,
     write_server_config,
 };
+
+const STARTUP_BIND_DIAGNOSTIC: &[u8] =
+    b"error[startup.bind] process: unable to prepare required endpoint\n";
 use socket2::{Domain, Protocol, Socket, Type};
 
 fn reserve_dual_free_address() -> SocketAddrV4 {
@@ -195,7 +198,7 @@ fn either_bind_failure_rolls_back_the_other_before_any_loop_runs() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, STARTUP_BIND_DIAGNOSTIC);
     let rolled_back_tcp = bind_loopback_listener(udp_address).expect("TCP bind rolled back");
     drop(rolled_back_tcp);
     drop(udp_incumbent);
@@ -210,7 +213,7 @@ fn either_bind_failure_rolls_back_the_other_before_any_loop_runs() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, STARTUP_BIND_DIAGNOSTIC);
     let never_owned_udp = UdpSocket::bind(tcp_address).expect("UDP was never retained");
     drop(never_owned_udp);
     drop(tcp_incumbent);

@@ -33,6 +33,9 @@ fn main() -> ExitCode {
 
     match run::run(config) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
     }
 }
