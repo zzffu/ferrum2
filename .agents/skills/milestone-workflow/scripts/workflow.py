@@ -3291,6 +3291,18 @@ def review_gate_status(
         reviewers = cycle.get("reviewers", {})
         failures: list[str] = []
         final_sha = ""
+        requires_superseding = False
+        if isinstance(reviewers, dict):
+            for required_reviewer in ticket.required_reviews:
+                required_rounds = reviewers.get(required_reviewer, {})
+                targeted = (
+                    required_rounds.get("targeted")
+                    if isinstance(required_rounds, dict)
+                    else None
+                )
+                if isinstance(targeted, dict) and targeted.get("verdict") == "escalate":
+                    requires_superseding = True
+                    break
         for reviewer in ticket.required_reviews:
             rounds = reviewers.get(reviewer, {}) if isinstance(reviewers, dict) else {}
             if not isinstance(rounds, dict) or not isinstance(
@@ -3311,7 +3323,12 @@ def review_gate_status(
                 continue
             record = None
             terminal_round = ""
-            for round_name in ("superseding", "targeted", "full"):
+            terminal_rounds = (
+                ("superseding",)
+                if requires_superseding
+                else ("superseding", "targeted", "full")
+            )
+            for round_name in terminal_rounds:
                 if round_name in rounds:
                     record = rounds[round_name]
                     terminal_round = round_name

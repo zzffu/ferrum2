@@ -2313,7 +2313,10 @@ class ReviewConvergenceTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertEqual(
             failures,
-            ["architect final review verdict is escalate"],
+            [
+                "missing architect final review",
+                "missing qa final review",
+            ],
         )
 
         cycle = runtime["reviews"][item.id]["root_cycles"][-1]
@@ -2384,11 +2387,12 @@ class ReviewConvergenceTests(unittest.TestCase):
             ),
             0,
         )
-        passed, failures = workflow.review_gate_status(item, runtime, cfg)
+        same_sha_runtime = copy.deepcopy(runtime)
+        same_sha_cycle = same_sha_runtime["reviews"][item.id]["root_cycles"][-1]
+        same_sha_cycle["reviewers"]["qa"]["full"]["candidate_sha"] = final_sha
+        passed, failures = workflow.review_gate_status(item, same_sha_runtime, cfg)
         self.assertFalse(passed)
-        self.assertTrue(
-            any("qa final review candidate" in failure for failure in failures)
-        )
+        self.assertEqual(failures, ["missing qa final review"])
         self.assertEqual(
             self._record(
                 state,
