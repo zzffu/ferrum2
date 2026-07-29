@@ -1,0 +1,570 @@
+#!/usr/bin/env python3
+"""Direct native qualification for ferrum2 release binaries.
+
+This driver is intentionally limited to committed synthetic configuration and
+the two release artifacts built by the current GitHub Actions platform row. It
+does not synthesize a report: every PASS field follows a bounded observation of
+the supplied native binaries.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import platform
+import re
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO
+
+
+PROCESS_TIMEOUT_SECONDS = 20
+READINESS_TIMEOUT_SECONDS = 10
+OUTPUT_LIMIT = 64 * 1024
+POLL_SECONDS = 0.05
+SYNTHETIC_PSK = "AAECAwQFBgcICQoLDA0ODw=="
+INVALID_STDERR = (
+    b"error[config.semantic] shadowsocks.psk: configuration value is invalid\n"
+)
+STARTUP_BIND_STDERR = (
+    b"error[startup.bind] process: unable to prepare required endpoint\n"
+)
+
+
+class QualificationError(RuntimeError):
+    """A canonical fail-closed qualification error."""
+
+
+@dataclass(frozen=True)
+class HostedContext:
+    profile: str
+    target: str
+    sha: str
+    run_id: str
+    run_attempt: str
+    runner: str
+    image: str
+    toolchain: str
+
+
+@dataclass(frozen=True)
+class BinarySpec:
+    name: str
+    path: Path
+    valid_config: Path
+    invalid_config: Path
+    role: str
+
+
+@dataclass
+class Capture:
+    threads: tuple[threading.Thread, threading.Thread]
+    slots: dict[str, tuple[bytes, bool]]
+
+
+def require(condition: bool, root: str) -> None:
+    if not condition:
+        raise QualificationError(root)
+
+
+def environment_field(value: str | None) -> str:
+    require(value is not None and value != "", "missing-runner-evidence")
+    return re.sub(r"[^A-Za-z0-9_.:/-]", "_", value)
+
+
+def hosted_context(arguments: argparse.Namespace) -> HostedContext:
+    profiles = {
+        "windows-msvc": ("x86_64-pc-windows-msvc", "Windows"),
+        "linux-gnu": ("x86_64-unknown-linux-gnu", "Linux"),
+        "linux-musl": ("x86_64-unknown-linux-musl", "Linux"),
+    }
+    require(arguments.profile in profiles, "unknown-platform-profile")
+    target, runner_os = profiles[arguments.profile]
+    require(arguments.target == target, "profile-target-mismatch")
+    require(os.environ.get("GITHUB_ACTIONS") == "true", "not-github-actions")
+    require(os.environ.get("RUNNER_OS") == runner_os, "wrong-runner-os")
+    require(os.environ.get("RUNNER_ARCH") == "X64", "wrong-runner-architecture")
+    machine = platform.machine().lower()
+    require(machine in {"amd64", "x86_64"}, "non-native-architecture")
+    if runner_os == "Windows":
+        require(sys.platform == "win32", "non-native-operating-system")
+    else:
+        require(sys.platform.startswith("linux"), "non-native-operating-system")
+
+    sha = os.environ.get("GITHUB_SHA", "")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[0-9a-fA-F]{40}", sha) is not None, "invalid-github-sha")
+    require(run_id.isdecimal() and int(run_id) > 0, "invalid-run-id")
+    require(
+        run_attempt.isdecimal() and int(run_attempt) > 0,
+        "invalid-run-attempt",
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+    ).stdout.decode("ascii").strip()
+    require(head == sha, "checkout-sha-mismatch")
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+    ).stdout
+    require(status == b"", "checkout-not-clean")
+
+    runner = environment_field(os.environ.get("RUNNER_NAME"))
+    image_os = environment_field(os.environ.get("ImageOS"))
+    image_version = environment_field(os.environ.get("ImageVersion"))
+    toolchain_output = bounded_run(["rustc", "+1.97.1", "-Vv"], timeout=10)
+    require(toolchain_output.returncode == 0, "missing-rust-toolchain")
+    release = re.search(rb"(?m)^release: ([^\r\n]+)$", toolchain_output.stdout)
+    require(release is not None and release.group(1) == b"1.97.1", "wrong-rust-toolchain")
+    return HostedContext(
+        profile=arguments.profile,
+        target=arguments.target,
+        sha=sha.lower(),
+        run_id=run_id,
+        run_attempt=run_attempt,
+        runner=runner,
+        image=f"{image_os}/{image_version}",
+        toolchain=release.group(1).decode("ascii"),
+    )
+
+
+def expected_artifact(root: Path, target: str, name: str) -> Path:
+    suffix = ".exe" if sys.platform == "win32" else ""
+    return (root / "target" / target / "release" / f"{name}{suffix}").resolve()
+
+
+def binary_specs(arguments: argparse.Namespace, root: Path) -> tuple[BinarySpec, BinarySpec]:
+    client = Path(arguments.client).resolve()
+    server = Path(arguments.server).resolve()
+    require(
+        client == expected_artifact(root, arguments.target, "ferrum2-client"),
+        "unexpected-client-artifact-path",
+    )
+    require(
+        server == expected_artifact(root, arguments.target, "ferrum2-server"),
+        "unexpected-server-artifact-path",
+    )
+    for artifact in (client, server):
+        require(artifact.is_file() and not artifact.is_symlink(), "missing-release-artifact")
+    config = root / "tests" / "platform" / "config"
+    return (
+        BinarySpec(
+            "ferrum2-client",
+            client,
+            config / "client-valid.toml",
+            config / "client-invalid-key-length.toml",
+            "client",
+        ),
+        BinarySpec(
+            "ferrum2-server",
+            server,
+            config / "server-valid.toml",
+            config / "server-invalid-key-length.toml",
+            "server",
+        ),
+    )
+
+
+def capture_pipe(stream: BinaryIO, name: str, slots: dict[str, tuple[bytes, bool]]) -> None:
+    output = bytearray()
+    exceeded = False
+    try:
+        while chunk := stream.read(4096):
+            remaining = OUTPUT_LIMIT - len(output)
+            output.extend(chunk[: max(remaining, 0)])
+            exceeded |= len(chunk) > remaining
+    finally:
+        stream.close()
+        slots[name] = (bytes(output), exceeded)
+
+
+def start_capture(process: subprocess.Popen[bytes]) -> Capture:
+    require(process.stdout is not None and process.stderr is not None, "capture-not-piped")
+    slots: dict[str, tuple[bytes, bool]] = {}
+    stdout = threading.Thread(
+        target=capture_pipe,
+        args=(process.stdout, "stdout", slots),
+        name="m3-platform-stdout",
+    )
+    stderr = threading.Thread(
+        target=capture_pipe,
+        args=(process.stderr, "stderr", slots),
+        name="m3-platform-stderr",
+    )
+    stdout.start()
+    stderr.start()
+    return Capture((stdout, stderr), slots)
+
+
+def finish_capture(capture: Capture) -> tuple[bytes, bytes]:
+    for thread in capture.threads:
+        thread.join(timeout=5)
+    require(not any(thread.is_alive() for thread in capture.threads), "capture-join-timeout")
+    require(set(capture.slots) == {"stdout", "stderr"}, "capture-incomplete")
+    stdout, stdout_exceeded = capture.slots["stdout"]
+    stderr, stderr_exceeded = capture.slots["stderr"]
+    require(not stdout_exceeded and not stderr_exceeded, "process-output-limit")
+    return stdout, stderr
+
+
+def bounded_run(
+    arguments: list[str], timeout: int = PROCESS_TIMEOUT_SECONDS
+) -> subprocess.CompletedProcess[bytes]:
+    process = subprocess.Popen(
+        arguments,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    capture = start_capture(process)
+    try:
+        status = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        process.wait(timeout=5)
+        finish_capture(capture)
+        raise QualificationError("process-timeout") from error
+    stdout, stderr = finish_capture(capture)
+    require(
+        SYNTHETIC_PSK.encode() not in stdout and SYNTHETIC_PSK.encode() not in stderr,
+        "secret-in-process-output",
+    )
+    return subprocess.CompletedProcess(arguments, status, stdout, stderr)
+
+
+def assert_cli_contract(spec: BinarySpec) -> None:
+    help_result = bounded_run([str(spec.path), "--help"])
+    require(help_result.returncode == 0, "help-exit")
+    require(b"Usage:" in help_result.stdout and help_result.stderr == b"", "help-output")
+
+    version_result = bounded_run([str(spec.path), "--version"])
+    require(version_result.returncode == 0, "version-exit")
+    require(
+        version_result.stdout.startswith(f"{spec.name} ".encode())
+        and version_result.stdout.endswith(b"\n")
+        and version_result.stderr == b"",
+        "version-output",
+    )
+
+    traps = bind_traps(spec)
+    try:
+        valid = bounded_run(
+            [str(spec.path), "--config", str(spec.valid_config), "--check-config"]
+        )
+        require(
+            valid.returncode == 0
+            and valid.stdout == b"configuration valid\n"
+            and valid.stderr == b"",
+            "valid-offline-config",
+        )
+        assert_no_connections(traps)
+
+        invalid = bounded_run(
+            [str(spec.path), "--config", str(spec.invalid_config), "--check-config"]
+        )
+        require(
+            invalid.returncode == 2
+            and invalid.stdout == b""
+            and invalid.stderr == INVALID_STDERR,
+            "invalid-offline-config",
+        )
+        assert_no_connections(traps)
+    finally:
+        for trap in traps:
+            trap.close()
+
+
+def bind_traps(spec: BinarySpec) -> list[socket.socket]:
+    ports = [8388, 9090] if spec.role == "server" else [1080, 8388, 9090]
+    traps = []
+    try:
+        for port in ports:
+            trap = tcp_listener(port)
+            trap.setblocking(False)
+            traps.append(trap)
+    except BaseException:
+        for trap in traps:
+            trap.close()
+        raise
+    return traps
+
+
+def assert_no_connections(traps: list[socket.socket]) -> None:
+    for trap in traps:
+        try:
+            connection, _ = trap.accept()
+        except BlockingIOError:
+            continue
+        connection.close()
+        raise QualificationError("offline-config-side-effect")
+
+
+def tcp_listener(port: int) -> socket.socket:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if sys.platform == "win32":
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    listener.bind(("127.0.0.1", port))
+    listener.listen()
+    return listener
+
+
+def reserve_ports(count: int) -> tuple[int, ...]:
+    reservations = [tcp_listener(0) for _ in range(count)]
+    try:
+        return tuple(int(reservation.getsockname()[1]) for reservation in reservations)
+    finally:
+        for reservation in reservations:
+            reservation.close()
+
+
+def write_runtime_config(path: Path, spec: BinarySpec, listen: int, metrics: int, grace: int) -> None:
+    role = (
+        f'[client]\nlisten = "127.0.0.1:{listen}"\nserver = "127.0.0.1:1"'
+        if spec.role == "client"
+        else f'[server]\nlisten = "127.0.0.1:{listen}"'
+    )
+    path.write_text(
+        f"""schema_version = 1
+
+{role}
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "{SYNTHETIC_PSK}"
+
+[metrics]
+listen = "127.0.0.1:{metrics}"
+
+[runtime]
+shutdown_grace_ms = {grace}
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def assert_startup_rollback(spec: BinarySpec, directory: Path) -> None:
+    listen, metrics = reserve_ports(2)
+    occupied_listen = tcp_listener(listen)
+    config = directory / f"{spec.name}-occupied-listen.toml"
+    write_runtime_config(config, spec, listen, metrics, 1000)
+    probes: list[socket.socket] = []
+    try:
+        result = bounded_run([str(spec.path), "--config", str(config)])
+        require(
+            result.returncode == 1
+            and result.stdout == b""
+            and result.stderr == STARTUP_BIND_STDERR,
+            "occupied-listen-startup-rollback",
+        )
+        probes.append(tcp_listener(metrics))
+        if spec.role == "server":
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp.bind(("127.0.0.1", listen))
+            probes.append(udp)
+    finally:
+        for probe in probes:
+            probe.close()
+        occupied_listen.close()
+    assert_rebindable(spec, listen, metrics)
+
+    listen, metrics = reserve_ports(2)
+    occupied_metrics = tcp_listener(metrics)
+    config = directory / f"{spec.name}-occupied-metrics.toml"
+    write_runtime_config(config, spec, listen, metrics, 1000)
+    try:
+        result = bounded_run([str(spec.path), "--config", str(config)])
+        require(
+            result.returncode == 1
+            and result.stdout == b""
+            and result.stderr == STARTUP_BIND_STDERR,
+            "occupied-startup-rollback",
+        )
+        assert_rebindable(spec, listen, None)
+    finally:
+        occupied_metrics.close()
+    assert_rebindable(spec, listen, metrics)
+
+
+def spawn_live(spec: BinarySpec, config: Path) -> tuple[subprocess.Popen[bytes], Capture]:
+    options: dict[str, object] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if sys.platform == "win32":
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options["start_new_session"] = True
+    process = subprocess.Popen([str(spec.path), "--config", str(config)], **options)
+    return process, start_capture(process)
+
+
+def wait_ready(process: subprocess.Popen[bytes], port: int) -> socket.socket:
+    deadline = time.monotonic() + READINESS_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        require(process.poll() is None, "process-exited-before-readiness")
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=POLL_SECONDS)
+        except OSError:
+            time.sleep(POLL_SECONDS)
+    raise QualificationError("readiness-timeout")
+
+
+def send_genuine_signal(process: subprocess.Popen[bytes]) -> None:
+    if sys.platform == "win32":
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+    else:
+        os.killpg(process.pid, signal.SIGINT)
+
+
+def kill_and_reap(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        process.wait(timeout=2)
+        return
+    if sys.platform == "win32":
+        process.kill()
+    else:
+        os.killpg(process.pid, signal.SIGKILL)
+    process.wait(timeout=5)
+
+
+def signal_cycle(spec: BinarySpec, config: Path, listen: int, hold_connection: bool) -> None:
+    connection: socket.socket | None = None
+    process, capture = spawn_live(spec, config)
+    status: int | None = None
+    try:
+        connection = wait_ready(process, listen)
+        if not hold_connection:
+            connection.close()
+            connection = None
+            time.sleep(0.1)
+        send_genuine_signal(process)
+        try:
+            status = process.wait(timeout=PROCESS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            raise QualificationError("signal-exit-timeout") from error
+        if connection is not None:
+            connection.settimeout(2)
+            try:
+                closed = connection.recv(1) == b""
+            except (ConnectionResetError, ConnectionAbortedError):
+                closed = True
+            require(closed, "forced-connection-not-closed")
+    finally:
+        if connection is not None:
+            connection.close()
+        kill_and_reap(process)
+        output, diagnostics = finish_capture(capture)
+    require(status == 0, "signal-exit")
+    require(SYNTHETIC_PSK.encode() not in output + diagnostics, "secret-in-process-output")
+
+
+def assert_rebindable(spec: BinarySpec, listen: int, metrics: int | None) -> None:
+    deadline = time.monotonic() + 5
+    while True:
+        probes: list[socket.socket] = []
+        try:
+            probes.append(tcp_listener(listen))
+            if spec.role == "server":
+                udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                udp.bind(("127.0.0.1", listen))
+                probes.append(udp)
+            if metrics is not None:
+                probes.append(tcp_listener(metrics))
+            return
+        except OSError as error:
+            if time.monotonic() >= deadline:
+                raise QualificationError("immediate-rebind-failed") from error
+            time.sleep(POLL_SECONDS)
+        finally:
+            for probe in probes:
+                probe.close()
+
+
+def assert_signal_lifecycle(spec: BinarySpec, directory: Path, forced: bool) -> None:
+    listen, metrics = reserve_ports(2)
+    config = directory / f"{spec.name}-{'forced' if forced else 'graceful'}.toml"
+    write_runtime_config(config, spec, listen, metrics, 0 if forced else 3000)
+    signal_cycle(spec, config, listen, hold_connection=forced)
+    assert_rebindable(spec, listen, metrics)
+    signal_cycle(spec, config, listen, hold_connection=False)
+    assert_rebindable(spec, listen, metrics)
+
+
+def artifact_line(context: HostedContext, spec: BinarySpec) -> str:
+    digest = hashlib.sha256(spec.path.read_bytes()).hexdigest()
+    size = spec.path.stat().st_size
+    require(size > 0 and re.fullmatch(r"[0-9a-f]{64}", digest) is not None, "artifact-identity")
+    return (
+        "m3_release_artifact status=PASS "
+        f"profile={context.profile} target={context.target} binary={spec.name} "
+        f"size={size} sha256={digest} toolchain={context.toolchain} "
+        f"runner={context.runner} image={context.image} sha={context.sha} "
+        f"run_id={context.run_id} run_attempt={context.run_attempt}"
+    )
+
+
+def lifecycle_line(context: HostedContext, spec: BinarySpec) -> str:
+    return (
+        "m3_native_lifecycle_completion status=PASS "
+        f"profile={context.profile} target={context.target} binary={spec.name} "
+        "help=PASS version=PASS valid_config=PASS invalid_config=PASS "
+        "startup_rollback=PASS graceful_signal=PASS forced_signal=PASS "
+        "bounded_exit=PASS rebind=PASS cleanup=PASS "
+        f"sha={context.sha} run_id={context.run_id} run_attempt={context.run_attempt}"
+    )
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--client", required=True)
+    parser.add_argument("--server", required=True)
+    return parser.parse_args()
+
+
+def main() -> int:
+    try:
+        arguments = parse_arguments()
+        root = Path.cwd().resolve()
+        context = hosted_context(arguments)
+        specs = binary_specs(arguments, root)
+        lines: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="ferrum2-m3-platform-") as temporary:
+            directory = Path(temporary)
+            for spec in specs:
+                assert_cli_contract(spec)
+                assert_startup_rollback(spec, directory)
+                assert_signal_lifecycle(spec, directory, forced=False)
+                assert_signal_lifecycle(spec, directory, forced=True)
+                lines.extend((artifact_line(context, spec), lifecycle_line(context, spec)))
+        require(len(lines) == 4 and len(set(lines)) == 4, "duplicate-platform-evidence")
+        for line in lines:
+            print(line, flush=True)
+        return 0
+    except (OSError, QualificationError, subprocess.SubprocessError) as error:
+        root = error.args[0] if isinstance(error, QualificationError) else type(error).__name__
+        print(f"m3_platform_failure status=FAIL canonical_root={root}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,4 +1,4 @@
-name: m2
+name: m3
 
 on:
   pull_request:
@@ -59,6 +59,11 @@ jobs:
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           cargo doc --workspace --all-features --no-deps --locked
+          python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py \
+            test-budget --gate milestone \
+            --base 7907cda05a56e1c3b85af2dd8faeb85a385154b7
+          printf 'm3_full_completion status=PASS full=PASS security=PASS process=PASS test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
       - name: Prove focused IPv6 UDP real-process path
         shell: bash
         run: |
@@ -236,6 +241,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 ${{ matrix.target }}
           rustc +1.97.1 -Vv
@@ -244,15 +250,43 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "MSVC release build failed" }
           $client = "target\${{ matrix.target }}\release\ferrum2-client.exe"
           $server = "target\${{ matrix.target }}\release\ferrum2-server.exe"
-          $helper = Join-Path $env:RUNNER_TEMP "platform-no-side-effect.exe"
-          rustc +1.97.1 --edition 2024 tests\platform\check_config_no_side_effects.rs -o $helper
-          if ($LASTEXITCODE -ne 0) { throw "platform helper build failed" }
-          & $helper --self-test
-          if ($LASTEXITCODE -ne 0) { throw "platform helper self-test failed" }
-          & $helper $client $server
-          if ($LASTEXITCODE -ne 0) { throw "MSVC offline config evidence failed" }
-          Get-FileHash -Algorithm SHA256 $client
-          Get-FileHash -Algorithm SHA256 $server
+          $qualificationOutput = & python -X utf8 tests\platform\qualify_native.py `
+            --profile '${{ matrix.profile }}' --target '${{ matrix.target }}' `
+            --client $client --server $server 2>&1 | Out-String
+          $qualificationStatus = $LASTEXITCODE
+          Write-Output $qualificationOutput.TrimEnd()
+          if ($qualificationStatus -ne 0) { throw "MSVC native qualification failed" }
+          $artifactCount = ([regex]::Matches($qualificationOutput, "(?m)^m3_release_artifact status=PASS ")).Count
+          $lifecycleCount = ([regex]::Matches($qualificationOutput, "(?m)^m3_native_lifecycle_completion status=PASS ")).Count
+          if ($artifactCount -ne 2 -or $lifecycleCount -ne 2) {
+            throw "MSVC native evidence marker count mismatch"
+          }
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere is missing" }
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw "VS 2022 C++ tools not found" }
+          $tools = Get-ChildItem "$installation\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $dumpbin = Join-Path $tools.FullName "bin\Hostx64\x64\dumpbin.exe"
+          if (-not (Test-Path -LiteralPath $dumpbin -PathType Leaf)) { throw "dumpbin is missing" }
+          foreach ($entry in @(
+            @{ Name = "ferrum2-client"; Path = $client },
+            @{ Name = "ferrum2-server"; Path = $server }
+          )) {
+            $headers = & $dumpbin /headers $entry.Path | Out-String
+            if ($LASTEXITCODE -ne 0 -or $headers -notmatch "8664 machine \(x64\)") {
+              throw "$($entry.Name) is not an x64 PE image"
+            }
+            Write-Output $headers.TrimEnd()
+            $dependents = & $dumpbin /dependents $entry.Path | Out-String
+            if ($LASTEXITCODE -ne 0 -or $dependents -notmatch "Image has the following dependencies") {
+              throw "$($entry.Name) PE dependents are missing"
+            }
+            Write-Output $dependents.TrimEnd()
+            Write-Output "m3_linkage status=PASS profile=${{ matrix.profile }} target=${{ matrix.target }} binary=$($entry.Name) format=PE arch=x86_64 headers=PASS dependents=PASS"
+          }
+          Write-Output "m3_platform_completion status=PASS profile=${{ matrix.profile }} target=${{ matrix.target }} native=2/2 artifacts=2/2 linkage=2/2 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
+
           cargo +1.97.1 build --workspace --bins --locked
           if ($LASTEXITCODE -ne 0) { throw "native detection binary build failed" }
           cargo +1.97.1 test -p ferrum2-m0-harness --test detection_probe --locked
@@ -272,18 +306,41 @@ jobs:
           cargo +1.97.1 build --workspace --bins --release --locked --target "${{ matrix.target }}"
           client="target/${{ matrix.target }}/release/ferrum2-client"
           server="target/${{ matrix.target }}/release/ferrum2-server"
-          helper="$RUNNER_TEMP/platform-no-side-effect"
-          rustc +1.97.1 --edition 2024 tests/platform/check_config_no_side_effects.rs -o "$helper"
-          "$helper" --self-test
-          "$helper" "$client" "$server"
-          file "$client" "$server"
-          readelf -lW "$client"
-          readelf -dW "$client"
-          readelf -lW "$server"
-          readelf -dW "$server"
-          objdump -T "$client" | grep 'GLIBC_' | sort -u
-          objdump -T "$server" | grep 'GLIBC_' | sort -u
-          sha256sum "$client" "$server"
+          qualification_status=0
+          qualification_output="$(
+            python -X utf8 tests/platform/qualify_native.py \
+              --profile '${{ matrix.profile }}' --target '${{ matrix.target }}' \
+              --client "$client" --server "$server" 2>&1
+          )" || qualification_status=$?
+          printf '%s\n' "$qualification_output"
+          test "$qualification_status" -eq 0
+          test "$(grep -Ec '^m3_release_artifact status=PASS ' <<<"$qualification_output" || true)" -eq 2
+          test "$(grep -Ec '^m3_native_lifecycle_completion status=PASS ' <<<"$qualification_output" || true)" -eq 2
+          for entry in "ferrum2-client:$client" "ferrum2-server:$server"; do
+            name="${entry%%:*}"
+            binary="${entry#*:}"
+            file_output="$(file "$binary")"
+            printf '%s\n' "$file_output"
+            grep -Eq 'ELF 64-bit LSB (pie )?executable, x86-64' <<<"$file_output"
+            header_output="$(readelf -hW "$binary")"
+            program_output="$(readelf -lW "$binary")"
+            dynamic_output="$(readelf -dW "$binary")"
+            objdump_output="$(objdump -p "$binary")"
+            printf '%s\n%s\n%s\n%s\n' \
+              "$header_output" "$program_output" "$dynamic_output" "$objdump_output"
+            grep -Fq 'Class:                             ELF64' <<<"$header_output"
+            grep -Fq 'Machine:                           Advanced Micro Devices X86-64' <<<"$header_output"
+            grep -q 'Requesting program interpreter:' <<<"$program_output"
+            grep -q '(NEEDED)' <<<"$dynamic_output"
+            glibc_requirements="$(objdump -T "$binary" | grep -o 'GLIBC_[0-9.]*' | sort -Vu)"
+            test -n "$glibc_requirements"
+            printf '%s\n' "$glibc_requirements"
+            printf 'm3_linkage status=PASS profile=%s target=%s binary=%s format=ELF arch=x86_64 interp=PASS needed=PASS glibc=PASS\n' \
+              '${{ matrix.profile }}' '${{ matrix.target }}' "$name"
+          done
+          printf 'm3_platform_completion status=PASS profile=%s target=%s native=2/2 artifacts=2/2 linkage=2/2 cleanup=PASS sha=%s run_id=%s run_attempt=%s\n' \
+            '${{ matrix.profile }}' '${{ matrix.target }}' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+
           cargo +1.97.1 build --workspace --bins --locked
           cargo +1.97.1 test -p ferrum2-m0-harness --test detection_probe --locked
       - name: Install exact musl packages
@@ -313,27 +370,41 @@ jobs:
           cargo +1.97.1 build --workspace --bins --release --locked --target "${{ matrix.target }}"
           client="target/${{ matrix.target }}/release/ferrum2-client"
           server="target/${{ matrix.target }}/release/ferrum2-server"
-          helper="$RUNNER_TEMP/platform-no-side-effect"
-          rustc +1.97.1 --edition 2024 tests/platform/check_config_no_side_effects.rs -o "$helper"
-          "$helper" --self-test
-          "$helper" "$client" "$server"
-          for binary in "$client" "$server"; do
+          qualification_status=0
+          qualification_output="$(
+            python -X utf8 tests/platform/qualify_native.py \
+              --profile '${{ matrix.profile }}' --target '${{ matrix.target }}' \
+              --client "$client" --server "$server" 2>&1
+          )" || qualification_status=$?
+          printf '%s\n' "$qualification_output"
+          test "$qualification_status" -eq 0
+          test "$(grep -Ec '^m3_release_artifact status=PASS ' <<<"$qualification_output" || true)" -eq 2
+          test "$(grep -Ec '^m3_native_lifecycle_completion status=PASS ' <<<"$qualification_output" || true)" -eq 2
+          for entry in "ferrum2-client:$client" "ferrum2-server:$server"; do
+            name="${entry%%:*}"
+            binary="${entry#*:}"
             file_output="$(file "$binary")"
             echo "$file_output"
             echo "$file_output" | grep -Eq 'statically linked|static-pie linked'
-            readelf -hW "$binary"
-            readelf -lW "$binary"
-            readelf -dW "$binary"
-            if readelf -lW "$binary" | grep -q 'INTERP'; then
+            header_output="$(readelf -hW "$binary")"
+            program_output="$(readelf -lW "$binary")"
+            dynamic_output="$(readelf -dW "$binary")"
+            printf '%s\n%s\n%s\n' "$header_output" "$program_output" "$dynamic_output"
+            grep -Fq 'Class:                             ELF64' <<<"$header_output"
+            grep -Fq 'Machine:                           Advanced Micro Devices X86-64' <<<"$header_output"
+            if grep -q 'INTERP' <<<"$program_output"; then
               echo "PT_INTERP is forbidden" >&2
               exit 1
             fi
-            if readelf -dW "$binary" | grep -q 'NEEDED'; then
+            if grep -q 'NEEDED' <<<"$dynamic_output"; then
               echo "DT_NEEDED is forbidden" >&2
               exit 1
             fi
+            printf 'm3_linkage status=PASS profile=%s target=%s binary=%s format=ELF arch=x86_64 static=PASS pt_interp=ABSENT dt_needed=ABSENT\n' \
+              '${{ matrix.profile }}' '${{ matrix.target }}' "$name"
           done
-          sha256sum "$client" "$server"
+          printf 'm3_platform_completion status=PASS profile=%s target=%s native=2/2 artifacts=2/2 linkage=2/2 cleanup=PASS sha=%s run_id=%s run_attempt=%s\n' \
+            '${{ matrix.profile }}' '${{ matrix.target }}' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
   interop:
     name: interop
@@ -444,7 +515,8 @@ jobs:
           cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
           cargo build -p ferrum2-m0-harness --bin m0-qualification --locked
           qualification_status=0
-          "$CARGO_TARGET_DIR/debug/m0-qualification" || qualification_status=$?
+          qualification_output="$("$CARGO_TARGET_DIR/debug/m0-qualification" 2>&1)" || qualification_status=$?
+          printf '%s\n' "$qualification_output"
 
           sing_box_status="${M2_SING_BOX_SETUP_STATUS:-}"
           shadowsocks_rust_status="${M2_SHADOWSOCKS_RUST_SETUP_STATUS:-}"
@@ -459,11 +531,55 @@ jobs:
           if [ -e "$CARGO_TARGET_DIR" ]; then
             cleanup_status=1
           fi
+          expected_tcp="qualification transport=tcp status=PASS cases=12/12 cleanup=PASS sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT"
+          expected_udp="qualification transport=udp status=PASS cases=12/12 cleanup=PASS sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT"
+          tcp_count="$(grep -Fxc "$expected_tcp" <<<"$qualification_output" || true)"
+          udp_count="$(grep -Fxc "$expected_udp" <<<"$qualification_output" || true)"
           echo "final_status sing_box=$sing_box_status shadowsocks_rust=$shadowsocks_rust_status qualification=$qualification_status cleanup=$cleanup_status"
           if [ "$sing_box_status" -eq 0 ] &&
              [ "$shadowsocks_rust_status" -eq 0 ] &&
              [ "$qualification_status" -eq 0 ] &&
-             [ "$cleanup_status" -eq 0 ]; then
+             [ "$cleanup_status" -eq 0 ] &&
+             [ "$tcp_count" -eq 1 ] &&
+             [ "$udp_count" -eq 1 ]; then
+            printf 'm3_interop_completion status=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS sha=%s run_id=%s run_attempt=%s\n' \
+              "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
             exit 0
           fi
           exit 1
+
+  qualification:
+    name: qualification
+    if: ${{ always() }}
+    needs:
+      - quality
+      - msrv
+      - platform
+      - interop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Fail closed and record same-run M3 qualification
+        shell: bash
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          MSRV_RESULT: ${{ needs.msrv.result }}
+          PLATFORM_RESULT: ${{ needs.platform.result }}
+          INTEROP_RESULT: ${{ needs.interop.result }}
+        run: |
+          set -euo pipefail
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$QUALITY_RESULT" = "success"
+          test "$MSRV_RESULT" = "success"
+          test "$PLATFORM_RESULT" = "success"
+          test "$INTEROP_RESULT" = "success"
+          printf 'm3_qualification_completion status=PASS full=PASS security=PASS process=PASS msrv=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS platforms=3/3 test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
