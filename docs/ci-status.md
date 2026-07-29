@@ -1,16 +1,20 @@
 # CI 与验证状态
 
-## 当前 M3 execute 完成状态（等待 close）
+## 当前 M3 closed 状态
 
 - **Qualified product SHA:** exact
-  `d9e59d787c3fe78dfca778ee8a36668a45387368` on local `master`,
-  `codex/integration/m3`, and remote
-  `origin/codex/integration/m3` contains M3-T01～T03、T06、T05、T07、T08。
+  `d9e59d787c3fe78dfca778ee8a36668a45387368` remains on remote
+  `origin/codex/integration/m3` and contains M3-T01～T03、T06、T05、T07、
+  T08。Local `master` and `codex/integration/m3` entered close mode at
+  docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`；
+  `d9e59d78...` is its direct product parent, not the current local tip。
   M3-T04 remains explicitly `deferred` after its terminal targeted escalation;
   T06 carries the approved replacement outcome.
 - **Durable workflow state:** M3-T01～T03、T05～T08 are `done`; T04 is
   `deferred`; active runtime phases and open canonical blockers are empty.
-  `workflow.py next --milestone M3` returns `ready_to_close`.
+  The helper's pre-close terminal action remains `ready_to_close` because it
+  has no separate milestone-close mutation；roadmap、verified context audit
+  and handoff now record durable `closed`。
 - **T05 convergence:** initial `441b2903...` received Architect full `PASS`
   and QA full `BLOCK` under major `QA-M3-T05-001`; the sole repair
   `bba40d12...` received same-reviewer targeted `PASS`. Native qualification
@@ -45,11 +49,22 @@
   exposing the distinct server-private readiness defect. Fresh run
   `30494736004/1` resolves `HOSTED-M3-T07-002`; earlier
   `HOSTED-M3-T05-001` was already resolved. No open root remains.
-- **Authorization/publication:** all T05/T07/T08 local and remote grants were
+- **Close reviews:** Product Manager `PASS_WITH_NOTES`、Architect
+  `PASS_WITH_NOTES`、QA `PASS` on local `d784b061...` plus hosted-qualified
+  product `d9e59d78...`/run `30494736004/1`。No blocker/major remains；
+  Architect note `ARCH-M3-CLOSE-N01` was a one-character T06 evidence SHA
+  transcription and was mechanically corrected during closeout。
+- **Close validation source:** execute's final authoritative full gate on exact
+  `d784b061...` passed `6/6` immediately before close；milestone budget against
+  M2 base passed at `12956/19861/1.533` versus baseline `1.642` and required
+  `1.592`。The closeout working tree also passed authoritative full `6/6`；
+  seven-entry context inventory/strict check、workflow validation、
+  control-plane check、budget baseline write and handoff validation passed。
+- **Authorization/publication:** all eight M3 local and remote grants were
   exact, single-use, consumed, and revoked. No rerun, dispatch, remote
   `master` update, force-push, PR, tag, release, archive, upload, signing,
-  publication, ref deletion, or control-plane mutation occurred. Execute mode
-  does not auto-close; the remaining transition is explicit M3 close mode.
+  publication, ref deletion, or control-plane mutation occurred. Close mode
+  performs no remote mutation and creates no new authorization.
 
 ## 当前 M2 closed 状态
 

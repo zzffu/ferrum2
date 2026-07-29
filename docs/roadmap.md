@@ -13,13 +13,16 @@ run `30331336772` attempt 1 的六项成功证据关闭；M1 已以 exact
 run `30367147537` attempt 1 的六项成功证据关闭；M2 已以 exact
 `7907cda05a56e1c3b85af2dd8faeb85a385154b7`、本地 full gate 与 GitHub
 Actions run `30425476328` attempt 1 的六项成功、TCP/UDP 各 12/12 及 focused
-IPv6 UDP real-process 证据关闭。M3 planning baseline
-`3a877b6beeb955b5237ab4048f8dec02a92f06b6` 已批准 context audit、
-ADR-0023/0024、SPEC/TEST-0004 和初始五票DAG；M3 execution正在进行，
-T01～T03已集成，T04 review升级后由T06 replacement继续；M4仍为`proposed`。
+IPv6 UDP real-process 证据关闭。M3 已由 exact qualified product
+`d9e59d787c3fe78dfca778ee8a36668a45387368`、本地 full gate 与 GitHub
+Actions run `30494736004` attempt 1 的七项成功、TCP/UDP 各 12/12、三目标
+native lifecycle/linkage/hash 和关闭审查证据关闭；local closeout source 是
+docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4仍为
+`proposed`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
-`docs/handoffs/HANDOFF-M2-2026-07-29.md`。
+`docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
+`docs/handoffs/HANDOFF-M3-2026-07-30.md`。
 
 ## 依赖顺序
 
@@ -34,9 +37,9 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
 same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
-证据。下一入口是 M3 execute；initial frontier 是 M3-T01/T02/T03。每个
-里程碑内的并行 ticket 仍须满足
-dependency-ready 和 non-overlapping ownership。
+证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
+完成三目标 native qualification。下一入口是显式 M4 plan；每个里程碑内的
+并行 ticket 仍须满足 dependency-ready 和 non-overlapping ownership。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -479,14 +482,15 @@ dependency-ready 和 non-overlapping ownership。
 
 ## M3 — 运维、生命周期与平台资格
 
-- **Status:** ready to close (execute complete; close mode not yet invoked)
+- **Status:** closed
 - **Objective:** 稳定当前 v0 的合法 schema v1、CLI/error、redacted
   tracing和metric identity；建立不依赖永久产品拓扑的事务式supervisor；
   在三目标native release artifacts上证明bounded process lifecycle和same-SHA
   资格。
 - **Entry conditions:**
   - M1、M2 closed，SIP022 TCP/UDP和24-cell interop baseline已有exact-SHA证据；
-  - context audit approved，`AGENTS.md`只把M3记为planned；
+  - context audit verified，`AGENTS.md`已把已证明 M3 结果移入 current facts，
+    `Active planned changes` 为 `None`；
   - ADR-0023/0024 Accepted，SPEC/TEST-0004 Approved；
   - M3-T01～T03、M3-T05～T08均已integrated并为`done`；M3-T04在唯一
     repair与targeted re-review后`deferred`，由T06承接approved replacement
@@ -546,16 +550,20 @@ dependency-ready 和 non-overlapping ownership。
   `bba40d127dee29a719d6ea1d80fb10427149d890` integrates T05，
   `bc14971c51982b6ad9a970593fb3848b2763b112` integrates T07，and final
   qualified product SHA `d9e59d787c3fe78dfca778ee8a36668a45387368`
-  integrates T08。The later coordination-only execute evidence checkpoint is
-  local and is not a separately hosted-qualified product SHA。
+  integrates T08。Later coordination-only execute evidence checkpoint
+  `d784b06171723bb93fd467cea1a799f58f7d60b0` is the local closeout source and
+  is not a separately hosted-qualified product SHA。
 - **Open blockers and risks:** none。All wave-1, T05, T06, and late hosted
   evidence findings are resolved under their bounded review histories；
   T04 remains an explicit historical deferral rather than a rewritten PASS。
   Failed runs `30472227257/1` and `30476271774/1` remain immutable evidence；
   fresh run `30494736004/1` at exact `d9e59d78...` passes all seven required
-  jobs and resolves `HOSTED-M3-T07-002` without splicing。Scheduler is
-  `ready_to_close`；M3 remains planned until explicit close mode performs the
-  final context audit and handoff。M4 performance/RSS/tasks/10k-idle/soak and
+  jobs and resolves `HOSTED-M3-T07-002` without splicing。Pre-close scheduler
+  action remains `ready_to_close` because the helper has no separate close
+  mutation；durable roadmap/context/handoff state is now `closed`。Close Product
+  Manager/Architect/QA verdicts are `PASS_WITH_NOTES`、`PASS_WITH_NOTES`、
+  `PASS` with no blocker/major；`ARCH-M3-CLOSE-N01` was a mechanically corrected
+  SHA transcription note。M4 performance/RSS/tasks/10k-idle/soak and
   packaging/signing/publication remain deferred by scope。
 
 ## M4 — 性能、资源与 v0 资格确认
@@ -670,3 +678,4 @@ dependency-ready 和 non-overlapping ownership。
 | 2026-07-29 | M3 T04 escalation replacement | T04在唯一full/repair/targeted lifecycle后deferred；新建T06承接完整composition outcome，固定terminal UDP local reap与post-Forced 5秒cleanup watchdog，并把internal与black-box evidence按ADR-0016重映射；T05依赖改指T06 | T04的UDP fatal/Forced circular wait与unresponsive-root无bound在原review budget内未关闭；用户确认solution A并一次性授权local T06，不授权remote/T05/publish/control-plane | Product Manager PASS；Architect design PASS；`AUTH-M3-T06-001` consumed/revoked；T04 `b35e809...`/`a90c496...` retained but not integrated |
 | 2026-07-29 | M3 T06 integration | exact `ed615cb...` fast-forward integrated T06；terminal UDP immediate local reap、fixed post-Forced 5s watchdog、portable IPv4 admitted-UDP signal lifecycle与collision-safe/fail-fast fixtures通过 | initial `24561cf...` full reviews发现portable black-box evidence gap；唯一repair关闭canonical `ARC-M3-T06-001`及`QA-M3-T06-001`，不扩展product surface | Architect/QA full BLOCK then targeted PASS；quick `5/5`、full `6/6`、ticket budget/control/diff PASS；no push/publish |
 | 2026-07-30 | M3 T05/T07/T08 qualification | exact `d9e59d78...` integrates native qualification and two narrow late evidence repairs；run `30494736004/1`同SHA通过quality、MSRV、Windows、GNU、musl、interop与final qualification；三票done，M3 ready to close | 两个失败run保留且不拼接；T07隔离process-global child baseline，T08以causal target datagram替换fixed-yield readiness guess，均不改变product behavior | T05 full/targeted convergence、T07/T08 fresh full Architect/QA PASS；quick `5/5`、full `6/6`、milestone budget PASS；exact local/remote scopes consumed/revoked；no release/publication |
+| 2026-07-30 | M3 close | M3 改为 `closed`；七票 done、一票诚实 deferred/T06 replacement；接受 exact `d9e59d78...` run `30494736004/1` 的七项同 run 资格，并以 docs-only `d784b061...` 为 closeout source | 全部八项 exit criteria、七项 context inventory、milestone ratchet 和 bounded review histories 均满足；三方 close review 无 blocker/major | Product `PASS_WITH_NOTES`、Architect `PASS_WITH_NOTES`、QA `PASS`；verified context audit、M3 handoff、budget baseline；close 未 push/publish |

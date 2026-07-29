@@ -60,3 +60,25 @@ problem or the user explicitly reopens the contract.
 - `M2-T05` `qa` `c31290eb572a`: QA-M2-T05-HOSTED-N02: **RESOLVED at `0395d7dfb170`** by separating the application gate from the target worker owner.
 <!-- review-debt:31bb37d17cb3 -->
 - `M2-T05` `architect` `0395d7dfb170`: ARCH-M2-T05-HOSTED-N02: the 100 ms focused scheduler bound remains advisory after one loaded 100-run sequence timed out once and a diagnostic 100/100 repeat passed.
+
+## M3 close review notes
+
+### ARCH-M3-CLOSE-N01 — T06 imported-commit SHA transcription
+
+- **Milestone/ticket:** M3；M3-T06 close evidence。
+- **Reviewer/verdict:** Architect `PASS_WITH_NOTES`。
+- **Reviewed sources:** local closeout source
+  `d784b06171723bb93fd467cea1a799f58f7d60b0`；qualified product
+  `d9e59d787c3fe78dfca778ee8a36668a45387368`。
+- **Impact:** completion evidence wrote nonexistent `263ceddf...`; the correct
+  imported T04 repair is `263cedda699f7f2e2ef1516438c5025296e862ca`。
+  Product lineage, stable patch-id and architecture were unaffected。
+- **Resolution:** mechanically corrected during M3 closeout；no ticket repair,
+  review round, product validation or remote action required。
+
+Product Manager also returned `PASS_WITH_NOTES`: all eight exit criteria passed，
+while closeout still had to refresh AGENTS context、audit、vision、gap analysis、
+roadmap、CI status、handoff and the accepted budget baseline。Those mechanical
+close actions are resolved by the closeout commit。ADR-0023's elapsed
+compatibility window and proposed M4 performance/resource qualification remain
+future contract obligations, not open M3 blockers。

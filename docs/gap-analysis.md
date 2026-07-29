@@ -1,6 +1,34 @@
-# ferrum2 v0 M3 差距分析
+# ferrum2 v0 M3 差距分析与关闭结论
 
-## 当前证据基线
+## M3 关闭结论
+
+M3 已在 local integrated/evidence source
+`d784b06171723bb93fd467cea1a799f58f7d60b0` 完成关闭复核。Remotely
+qualified product SHA 是其直接父提交
+`d9e59d787c3fe78dfca778ee8a36668a45387368`；GitHub Actions run
+`30494736004` attempt `1` 在同一 SHA 上通过 quality、MSRV、Windows MSVC、
+Linux GNU、Linux musl、TCP/UDP interop 和 final qualification。两个早期失败
+runs 保持失败历史，没有证据拼接。
+
+| Planning gap | Close result | Primary close evidence |
+|---|---|---|
+| GAP-M3-O01 | satisfied | ADR-0023、T01 preserved parser-accepted cohort/effective-value table |
+| GAP-M3-O02 | satisfied | T01 non-exhaustive architecture/dependency/deep-seam guards |
+| GAP-M3-O03 | satisfied | T06 client/server stable exit/run-code/redaction 与 zero-resource validation table |
+| GAP-M3-O04 | satisfied | T02 closed trace fields、exact fourteen metric families、cardinality/secret sentinels |
+| GAP-M3-L01 | satisfied | T03 reusable `ProcessSupervisor` state/rollback/owner/cancellation evidence |
+| GAP-M3-L02 | satisfied | T06 production adapters、terminal-root arbitration、single grace/force/reap |
+| GAP-M3-L03 | satisfied | T06 每 binary 至少 100 bounded cycles、half-close、UDP 与 immediate rebind |
+| GAP-M3-P01 | satisfied | T05 native release lifecycle、SHA-256、PE/ELF/GLIBC/static-musl evidence |
+| GAP-M3-G01 | satisfied | exact `d9e59d78...` run `30494736004/1` seven-job fail-closed convergence |
+
+M3-T04 在唯一 full/repair/targeted review lifecycle 后保持 `deferred`；
+M3-T06 导入其未集成产品 lineage，修复 terminal UDP circular wait 与 forced-root
+bound，并通过 fresh bounded reviews。因此 T04 的诚实 deferral 不留下未交付的
+M3 lifecycle outcome。当前 `done=7`、`deferred=1`、active phases/open roots
+均为空；性能、RSS/task、10,000 idle sessions 和 long soak 仍属于 proposed M4。
+
+## Planning 证据基线（历史）
 
 本分析在 2026-07-29 的 M3 planning source
 `master@3a877b6beeb955b5237ab4048f8dec02a92f06b6` 更新。M2 exact qualified
@@ -35,7 +63,7 @@ QA 在 planning baseline 上运行：
 
 这些结果是M3 entry/regression evidence，不证明M3实现或release qualification。
 
-## M3 当前差距
+## M3 planning 差距（已在关闭时满足）
 
 | ID | 当前代码/证据 | M3 必须结果 | 严重度 | Primary owner/evidence |
 |---|---|---|---|---|
@@ -91,7 +119,7 @@ QA 在 planning baseline 上运行：
 | tests继续以比production更快速度膨胀 | P1 | reuse tables；ticket delta allowance 120；milestone ratchet约1.591967 |
 | hosted runner/provider unavailable | P1 | release BLOCKED；不重开product ticket，除非证据指向product defect |
 
-## 票据依赖与执行前沿
+## Planning 票据依赖与执行前沿（历史）
 
 ```text
 M3-T01 config ─────────┐
@@ -105,6 +133,9 @@ implementation/integration等待T04，release等待T01～T04。每票由Architec
 各一次exact-candidate full review；仅blocker/major阻断，至多一次substantive
 repair和一次targeted re-review。
 
-Execute不隐含remote authority。T05可以完成local workflow implementation，
-但push、workflow run/rerun或publication必须由用户对exact target另行授权；
-三目标native evidence到达前M3不能close。
+Execute 不隐含 remote authority。M3 实际执行中只使用了 exact、single-use
+授权把 `bba40d12...`、`bc14971c...` 和最终 `d9e59d78...` 依次
+non-force fast-forward 到 `refs/heads/codex/integration/m3`；所有授权均已
+耗尽并撤销。Close mode 没有 push、rerun、dispatch、PR、tag、release、
+publication 或 ref deletion。关闭后的下一入口是显式
+`mode=plan milestone=M4`。

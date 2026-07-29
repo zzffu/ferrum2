@@ -25,6 +25,10 @@ and command definitions in their authoritative build/config files where possible
   - Both client and server use typed TOML configuration, structured `tracing`
     logs, and bounded-cardinality Prometheus metrics. Each binary must be able
     to validate configuration without starting listeners.
+  - M3 establishes the accepted `schema_version = 1` operator surface plus its
+    CLI, diagnostic, trace, and metric identities as compatibility contracts.
+    The current client and server release binaries are qualified on Windows
+    MSVC, Linux GNU, and Linux musl; packaging and publication remain separate.
   - Required release targets are Linux x86_64 with glibc, Linux x86_64 with
     musl, and Windows. The project is licensed `GPL-3.0-only`.
 
@@ -60,7 +64,11 @@ and command definitions in their authoritative build/config files where possible
       protection, and transport state machines.
     - `crates/ferrum2-socks5`: SOCKS5 parsing and the v0 TCP `CONNECT` inbound.
     - `crates/ferrum2-runtime`: listener orchestration, connection/datagram
-      relays, bounded session tables, cancellation, and graceful shutdown.
+      relays, bounded session tables, cancellation, and graceful shutdown. Its
+      `process` module exposes the topology-neutral `ProcessRoot`,
+      `PreparedProcessRoot`, and `ProcessSupervisor` lifecycle used by both
+      binaries for prepare, activate, rollback, fatal-root arbitration,
+      grace/force shutdown, ownership checks, and bounded reap.
     - `crates/ferrum2-config`: TOML deserialization and complete semantic
       validation before runtime resources are created.
     - `crates/ferrum2-observability`: log/metric initialization and stable,
@@ -72,6 +80,10 @@ and command definitions in their authoritative build/config files where possible
   - Keep dependencies one-way from binaries/runtime toward protocol and core
     crates. `ferrum2-core` must not depend on a concrete inbound, outbound,
     cipher, configuration format, or async runtime implementation.
+  - The client and server `run.rs` composition roots adapt the current single
+    listen/server, optional UDP/metrics, and IPv4-validated operator endpoints
+    to the shared process lifecycle. These are current adapters, not exhaustive
+    future topology.
   - Prefer static dispatch and reusable buffers in per-connection and
     per-packet hot paths. Trait objects are acceptable at composition seams,
     not automatically inside every frame or datagram operation.
@@ -107,6 +119,25 @@ and command definitions in their authoritative build/config files where possible
   - Every spawned task has an owner and a termination path. Cancellation,
     timeout, TCP half-close, listener failure, and graceful shutdown must not
     leak tasks, sockets, buffers, or UDP sessions.
+  - The M3-close parser-accepted `schema_version = 1` cohort remains valid
+    throughout v0.x. After a stable successor schema, removal additionally
+    waits at least 12 months and two stable minor releases and requires notice
+    in the preceding stable release. Compatible v1 evolution is optional,
+    additive, or a safe widening that preserves omitted-field behavior;
+    breaking changes use an explicit new version, never heuristic fallback,
+    silent reinterpretation, or automatic rewrite.
+  - Complete semantic configuration validation happens before subscriber or
+    runtime construction, listeners, sockets, metrics endpoints, session
+    state, channels, or tasks. Offline validation is side-effect free. Stable
+    CLI exits, closed redacted diagnostic codes and trace fields, and the
+    fourteen metric-family identities must not expose secrets or destinations.
+  - Every required process root is prepared before any service loop is polled.
+    Preparation/activation failure rolls back deterministically in reverse
+    order. One transitive owner lineage, monotonic cancellation, one absolute
+    grace deadline, explicit force, the fixed five-second forced-root reap
+    watchdog, awaited termination, and final owner-baseline equality are
+    required; cleanup failure remains explicit and cannot overwrite the primary
+    cause.
   - Do not block Tokio worker threads. Avoid per-packet heap allocation and
     copying where ownership can be transferred safely, but never trade away
     authentication, replay protection, bounds checking, or backpressure for a
@@ -125,9 +156,12 @@ and command definitions in their authoritative build/config files where possible
     results, packet captures, logs, and locally rendered documentation are
     generated artifacts and must not be committed.
   - Commit the workspace `Cargo.lock`, because ferrum2 ships applications.
-  - There is no generated source tree in the planned v0 architecture. If code
+  - The current v0 implementation has no generated source tree. If code
     generation becomes necessary, keep output in Cargo's `OUT_DIR`, document
     the generator and reproducibility contract, and never hand-edit its output.
+  - Native release binaries, SHA-256 records, linkage reports, and hosted
+    qualification logs are generated evidence. They are not committed source
+    or publication artifacts.
   - Protocol known-answer vectors and interoperability fixtures are reviewed
     test inputs, not disposable build output. Commit only non-secret fixtures
     with their source and expected result documented.
@@ -141,18 +175,13 @@ and command definitions in their authoritative build/config files where possible
     local workflow without an explicit project decision.
   - The authoritative quick and full command lists are in `workflow.toml`.
     Run the quick gate during development and the full gate before integration.
-    Cross-platform and external interoperability jobs supplement these
-    host-local commands once their test harnesses exist.
+    Cross-platform native artifact/linkage and pinned external interoperability
+    execute in the hosted `.github/workflows/m0.yml` qualification profile and
+    `tests/platform/**`; they supplement rather than replace host-local gates.
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
 - Active planned changes:
-  - M3 — planned — Stabilize the existing `schema_version = 1` operator, CLI,
-    error, logging, and metrics contracts; establish a reusable transactional
-    supervisor lifecycle; and qualify the three required targets. The current
-    single listen, single server, IPv4 operator endpoints, and two-binary
-    composition are current adapters rather than permanent topology.
-    Multi-inbound, multi-outbound, routing, DNS, Linux transparent inbound, and
-    Windows TUN retain an explicit evolution path but are not implemented in M3.
+  - None.
 
 
 ## Project validation

@@ -1,11 +1,11 @@
 +++
 milestone = "M3"
 goal = "稳定 v0 运维合同、资源生命周期和 Linux GNU、Linux musl、Windows 三目标平台资格，同时保留未来拓扑演进空间"
-status = "approved"
+status = "verified"
 baseline_commit = "3a877b6beeb955b5237ab4048f8dec02a92f06b6"
-verified_commit = ""
+verified_commit = "d784b06171723bb93fd467cea1a799f58f7d60b0"
 before_context_sha256 = "b58311d6db1eaffb4188ff5885aaf92169d9a8e62a79acba544b37f814483ea1"
-after_context_sha256 = "aa9bd4cb87d19ca5dd134e9eb6435f45e51ae422a691903a4107bebcc9bdac86"
+after_context_sha256 = "ce9f3efc9040bf81dcbe8fabf6f1ece1a4dddd34667841d5cd4d292ea65ecd04"
 entries = [
   "Product purpose",
   "Primary languages/frameworks",
@@ -20,9 +20,14 @@ reviewers = ["product_manager", "architect", "qa"]
 
 # Context audit: M3 — operational lifecycle and platform qualification
 
-本审计证明：在批准 M3 计划前，Team Lead 已把 `## Project-specific context`
-的每个顶层条目与仓库证据逐项比较，并将未实现的 M3 意图仅放入
-`Active planned changes`。
+本审计保留 planning 时的逐项清点，并在 M3 close 时把全部七个
+`## Project-specific context` 顶层条目重新绑定到 exact repository evidence。
+关闭源是本地 integrated/evidence commit
+`d784b06171723bb93fd467cea1a799f58f7d60b0`；其直接父提交
+`d9e59d787c3fe78dfca778ee8a36668a45387368` 是 remotely qualified product
+SHA，GitHub Actions run `30494736004` attempt `1` 在同一 SHA 上完成全部七个
+required jobs。两提交之间仅有五份执行证据文档变化，没有 product、test 或 CI
+source delta。
 
 ## Feature request
 
@@ -46,7 +51,7 @@ reviewers = ["product_manager", "architect", "qa"]
 - Evidence：config/CLI、tracing/metrics、runtime lifecycle/process lifecycle
   suites，platform fixtures，以及 M2 exact-SHA handoff/CI status。
 
-## Entry-by-entry audit
+## Planning entry-by-entry audit
 
 | Entry | Classification before update | Repository evidence | Required update | Result after update |
 |---|---|---|---|---|
@@ -60,39 +65,50 @@ reviewers = ["product_manager", "architect", "qa"]
 
 ## Planned-feature placement
 
-M3 请求仅写在 `Active planned changes`。现有单 listen、单 server、IPv4 operator
-endpoint 和两个 composition roots 是当前 adapter；本审计不把 supervisor、
-兼容期或平台资格写成 shipped fact。M3 close 时必须回到 exact integrated SHA
-复核本表，把已证明事实移入当前状态条目并清除或推进 planned item。
+Planning 时 M3 请求仅写在 `Active planned changes`。现有单 listen、单 server、
+IPv4 operator endpoint 和两个 composition roots 被明确视为 current adapters，
+没有被冻结为永久拓扑。Close 复核现已证明 supervisor、兼容合同和三目标资格，
+因此这些事实进入当前条目，M3 planned item 被清除；M4 仍只是 roadmap
+`proposed`，尚不是 active planned change。
 
-## Context update summary
+## Close entry-by-entry verification
 
-- Stale claims removed or corrected：无。
-- Current facts added：无；现状条目已经与仓库一致。
-- Planned-only statements added：M3 运维合同、事务式 supervisor、三目标资格及
-  topology non-freeze 边界。
-- Statements deliberately unchanged：产品范围、技术栈、模块入口、安全不变量、
-  generated artifacts 和本地开发命令。
+| Entry | Close classification | Exact evidence | Close result |
+|---|---|---|---|
+| Product purpose | missing current fact | ADR-0023；client/server CLI/config/observability contracts；`d9e59d78...` run `30494736004/1` | 增加 schema-v1/operator identity compatibility 与三目标 native qualification；publication 仍分离 |
+| Primary languages/frameworks | confirmed | `Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、workspace lints | 无修改；stable Rust/Cargo、Tokio、Serde、tracing、Prometheus、pure-Rust crypto 与 `unsafe_code = "forbid"` 保持准确 |
+| Architecture entry points | missing current fact | `crates/ferrum2-runtime/src/process.rs`；两 binary `run.rs`；architecture tests | 增加 topology-neutral `ProcessRoot`/`PreparedProcessRoot`/`ProcessSupervisor` seam 与 current-adapter 边界 |
+| Critical invariants | missing current fact | ADR-0023/0024、SPEC-0004、T01/T03/T06 evidence | 增加 preserved cohort/evolution、pre-resource validation、closed identities、prepare/rollback/ownership/cancel/grace/force/reap invariants |
+| Generated files | stale/incomplete | `.gitignore`、`tests/platform/qualify_native.py`、run `30494736004/1` | “planned source tree”改为 current fact；native artifacts、hash/linkage/logs明确为不提交的 generated evidence |
+| Local development setup | stale | `workflow.toml`、`.github/workflows/m0.yml`、`tests/platform/**` | 去除“harness 尚不存在”；hosted native/interop 补充但不替代 local quick/full |
+| Active planned changes | stale | roadmap M3 ready-to-close evidence；M4 status `proposed` | 删除已完成 M3，设为 `None` |
 
-## Plan implications
+## Close evidence and implications
 
-- Product/roadmap：旧 v1 cohort 继续有效；未来拓扑通过兼容扩展或显式新 schema
-  引入，M3 不提前实现。
-- Architecture/ownership：config、observability、runtime、binary composition、
-  platform qualification 五个 non-overlapping tickets。
-- Invariants：semantic validation before resources；prepare/activate/rollback；
-  single transitive ownership；monotonic cancellation/deadlines；grace/force/reap。
-- Generated/tooling：native release binaries、hashes、linkage 与 lifecycle logs
-  是不提交的 qualification artifacts；无需 archive/installer/publication。
-- Validation：复用既有表格和 process seams；同一 exact SHA 运行 full、安全、
-  TCP/UDP interop 与三目标 gates。
+- Product/operator：M3 close 时 parser-accepted 合法 v1 cohort 继续受
+  ADR-0023 的 v0.x 与 successor window 保护；future topology 通过兼容扩展或
+  explicit new schema 演进。
+- Architecture/ownership：`ProcessSupervisor` 是 topology-neutral deep seam；
+  所有 roots prepare-before-poll，失败 reverse rollback，active work 只有一条
+  transitive owner/cancellation lineage，并使用一个 absolute grace deadline。
+- Validation/observability：完整 semantic validation 先于 subscriber/runtime
+  与任何资源；CLI exit、closed diagnostics/traces 和十四 metric families 保持
+  redacted、bounded-cardinality identity。
+- Qualification：exact `d9e59d78...` run `30494736004/1` 的 quality、MSRV、
+  Windows MSVC、Linux GNU、Linux musl、TCP/UDP interop 与 final qualification
+  全部 success；failed runs `30472227257/1` 和 `30476271774/1` 不参与拼接。
+- Generated/tooling：native binaries、SHA-256、linkage 与 lifecycle logs 是不提交
+  的 qualification artifacts；archive、installer、signing、upload、release 和
+  publication 均未执行。
 
-## Review verdicts
+## Close review verdicts
 
-- Product Manager：PASS；范围、用户价值、五票依赖图与兼容期建议可执行。
-- Architect：PASS；需要两个 ADR，禁止冻结当前拓扑，并识别 startup partial
-  activation 风险。
-- QA：PASS；现有 focused suites 全部通过，无 blocker/major；记录六项
-  nonblocking planning notes。
-- Team Lead：APPROVED；采用两 ADR、一个 spec/test plan、五票计划，并保持
-  M4 performance/long-soak 与未来 topology features 明确延期。
+- Product Manager：`PASS_WITH_NOTES`；八项 exit criteria 全部 PASS，close
+  context/docs/baseline 同步为非阻塞动作。
+- Architect：`PASS_WITH_NOTES`；无 blocker/major；唯一 note
+  `ARCH-M3-CLOSE-N01` 是 T06 completion evidence 中一个 SHA 字符的机械勘误。
+- QA：`PASS`；十项 MUST、same-SHA hosted convergence、ticket/review/root、
+  milestone budget 与七项 context inventory 均通过。
+- Team Lead：接受三方结论，修正 note，更新全部七项 context，并将 audit
+  `approved` → `verified`。关闭后 hash 为
+  `ce9f3efc9040bf81dcbe8fabf6f1ece1a4dddd34667841d5cd4d292ea65ecd04`。

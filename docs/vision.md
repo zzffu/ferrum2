@@ -98,7 +98,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是现状而�
   manifests 中固定，应用仓库提交 `Cargo.lock`。
 - workspace 级 `unsafe_code = "forbid"`；例外只能位于隔离的性能 crate，
   并经过既定 ADR 和 focused review。
-- planned dependency direction 是 binaries/runtime 指向 protocol/core；
+- dependency direction 是 binaries/runtime 指向 protocol/core；
   `ferrum2-core` 不依赖 concrete protocol、cipher、config format 或 async
   runtime implementation。
 - crypto crate 不拥有 socket 或 policy；protocol crate 不拥有 routing policy、
@@ -119,7 +119,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是现状而�
 | M0 | AES-128-GCM TCP 安全纵切：离线配置、SOCKS5、独立两端、direct outbound、最小观测、互操作与平台冒烟 | closed |
 | M1 | 三种方法的完整 TCP 行为和完整 TCP 互操作矩阵 | closed |
 | M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | closed |
-| M3 | 稳定运维契约、生命周期证明和三目标平台资格 | planned |
+| M3 | 稳定运维契约、生命周期证明和三目标平台资格 | closed |
 | M4 | 可复现性能/资源门与 v0 integrated qualification | proposed |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
@@ -131,10 +131,14 @@ Shadowsocks UDP ingress 到 IPv6-only direct target 的三报文 real-process
 证据关闭。M2 的 ADR-0020～0022、SPEC/TEST-0003 和 M2-T01～T06 均保持
 accepted/approved/done。
 
-M3 planning baseline 是
-`master@3a877b6beeb955b5237ab4048f8dec02a92f06b6`。Context audit、
-ADR-0023/0024、SPEC/TEST-0004 与 M3-T01～T05 已
-approved/accepted/ready；initial frontier 是 ownership-disjoint 的
-M3-T01/T02/T03，T04 等待三票，T05 等待 T04。Planning analysis 没有
-blocker/major，未运行或授权 remote qualification；下一入口是
-`mode=execute milestone=M3 strategy=drain`。
+M3 已由 remotely qualified product SHA
+`d9e59d787c3fe78dfca778ee8a36668a45387368` 关闭产品与 release 结果：
+GitHub Actions run `30494736004` attempt `1` 在同一 SHA 上通过 quality、
+MSRV、Windows MSVC、Linux GNU、Linux musl、TCP/UDP interop 和 final
+qualification。Local integrated/evidence source
+`d784b06171723bb93fd467cea1a799f58f7d60b0` 仅增加执行证据文档；M3-T01～T03、
+T05～T08 为 `done`，T04 保持诚实 `deferred` 并由 fresh-review T06 replacement
+交付其产品结果。Close Product/Architect/QA verdicts 分别为
+`PASS_WITH_NOTES`、`PASS_WITH_NOTES`、`PASS`，无 blocker/major；完整状态见
+M3 handoff。M4 仍为 `proposed`，下一入口是
+`mode=plan milestone=M4`，不自动执行、推送或发布。

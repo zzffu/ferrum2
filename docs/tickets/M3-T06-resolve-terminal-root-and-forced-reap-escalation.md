@@ -161,7 +161,7 @@ Tracked status is durable: use only `draft`, `ready`, `blocked`, `done`, or
 - **Lineage:** material coordination base
   `938e2b9a50310312ea9aef891ce40c7d86b052c3`；imported T04 product-lineage
   commits `47d06d962fc422a4debf64dd68b15daeb3a6c2c6` and
-  `263ceddf50458c49b5d73d88a33eed96e858bf3f`；initial T06 implementation
+  `263cedda699f7f2e2ef1516438c5025296e862ca`；initial T06 implementation
   candidate `24561cf6f5c70ef0d44a6f9e552273db63c178be`；sole substantive repair
   and final candidate `ed615cbcd373d882eaa236ee4556d20eb4e16e48`。
 - **Reviews:** configured Architect profile `gpt-5.6-sol/high` and QA profile
