@@ -83,6 +83,21 @@
   ledger rewrite was used. The canonical root resolution contains the
   exact repair and validation evidence, and workflow validation passes.
   No remote action occurred.
+- **Final authorized M2 hosted qualification:** final reviewed assembly
+  `52d1610a127349e7a817a67c81c77e0383d20d1e` was fast-forward pushed only
+  to `origin/codex/integration/m2` under single-use scope
+  `m2-20260729-remote-qualification-52d1610-a1`. GitHub Actions run
+  `30415717152`, attempt `1`, event `push`, completed `success`; all six
+  expected jobs succeeded: `quality`, `msrv`, `platform / windows-msvc`,
+  `platform / linux-gnu`, `platform / linux-musl`, and `interop`.
+  Interop raw logs record `provider_setup sing_box=0 shadowsocks_rust=0`,
+  TCP `12/12` with `cleanup=PASS`, and UDP `12/12` with `cleanup=PASS`;
+  both summaries bind exact SHA `52d1610a`, run `30415717152`, attempt `1`,
+  and final status is
+  `sing_box=0 shadowsocks_rust=0 qualification=0 cleanup=0`.
+  The authorization was consumed `1/1` before push and auto-revoked. No
+  force-push, rerun, `workflow_dispatch`, `master` push, PR, tag, release,
+  publication, ref deletion, or other remote mutation occurred.
 - **Wave-2 product integration:** exact
   `6e54cce52e5e29135acd91f6337a4516a094852e`; contains initial M2-T02
   candidate `0d88666d2f46ef85b376c12c55ffb34a784a8451`, repaired candidate
@@ -117,13 +132,13 @@
   as environmental evidence, not a product waiver.
 - **Test budget:** combined ticket gate `PASS`: code `9710`, tests `16937`,
   ratio `1.744`, baseline `2.041`; delta `1990/1178`, allowance `2110`.
-- **Remote/release:** the only M2 push/run remains superseded
-  `a168b89` / `30408245840` attempt `1`. No post-repair SHA has been
-  pushed, rerun, or published. T01-T05 are locally integrated, but final
-  exact-SHA IPv6-capable platform evidence, quality/MSRV/Windows/Linux
-  GNU/musl, and hosted TCP `12/12` + UDP `12/12` with cleanup are not
-  credited. `M2-T05-QUALIFICATION-001` remains the separately authorized
-  release gate.
+- **Remote/release:** the failed superseded
+  `a168b89` / `30408245840` attempt `1` remains unchanged historical
+  evidence. Final same-SHA qualification is credited only from
+  `52d1610a` / `30415717152` attempt `1`; the current M2 release gate is
+  clear and `workflow.py next --milestone M2 --json` returns
+  `ready_to_close` with no open root or release blocker. `auto_close=false`,
+  so execute mode has not closed M2.
 
 ## 当前 M1 closeout 状态
 

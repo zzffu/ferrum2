@@ -39,9 +39,10 @@ gate = "release"
 root_cause = "The locally repaired and reviewed candidate has not run hosted Linux qualification at the eventual final integration SHA; run 30408245840 covers only superseded SHA a168b89 and failed three TCP rows."
 derivatives = []
 owner = "team_lead"
-evidence = "Product repair 0395d7dfb170ddc8c3328b2d939210d96c81266f passed bounded Architect/QA verification and preliminary local product/control integration is 6a4e35062bd6d1631a029230e7cffdc3ba0f7db6. No post-repair push, hosted run, or external qualification is authorized or executed."
+evidence = "Initial evidence: product repair 0395d7dfb170ddc8c3328b2d939210d96c81266f passed bounded Architect/QA verification and preliminary local product/control integration was 6a4e35062bd6d1631a029230e7cffdc3ba0f7db6; no post-repair push, hosted run, or external qualification had been authorized or executed when this root was recorded."
 authorization = "required"
 unblock_condition = "After separate exact-SHA remote authorization, one clean hosted run/attempt must pass quality, MSRV, Windows, Linux GNU/musl, provider setup, TCP 12/12 plus cleanup, and UDP 12/12 plus cleanup; missing or failed evidence remains blocking."
+resolution = "Resolved by separately authorized push-triggered GitHub Actions run 30415717152 attempt 1 at exact SHA 52d1610a127349e7a817a67c81c77e0383d20d1e: all six expected jobs succeeded, provider_setup reported sing_box=0 shadowsocks_rust=0, and the same-SHA/run/attempt TCP and UDP summaries each reported 12/12 with cleanup=PASS."
 +++
 
 # M2-T05: Add the twelve-case fail-closed hosted UDP qualification
@@ -150,10 +151,25 @@ git diff --check
   `1086/1024`, allowance `1206`; milestone gate passed at
   `3994/3212`, allowance `4114`.
 - Release evidence: the external qualification entry was never invoked
-  locally. Hosted run `30408245840`, attempt `1`, ran at superseded SHA
-  `a168b89` and failed; no successful post-repair/final-SHA hosted run,
-  IPv6 platform qualification, push, or publication is credited. Those
-  remain a separately authorized release gate.
+  locally. The failed hosted run `30408245840`, attempt `1`, at superseded
+  SHA `a168b89` remains historical evidence and was not rerun or spliced.
+  After separate exact-scope authorization, final qualified SHA
+  `52d1610a127349e7a817a67c81c77e0383d20d1e` was fast-forward pushed only
+  to `origin/codex/integration/m2`. Push-triggered GitHub Actions run
+  `30415717152`, attempt `1`, completed `success`: `quality`, `msrv`,
+  `platform / windows-msvc`, `platform / linux-gnu`,
+  `platform / linux-musl`, and `interop` all succeeded.
+- The interop raw log records
+  `provider_setup sing_box=0 shadowsocks_rust=0`,
+  `qualification transport=tcp status=PASS cases=12/12 cleanup=PASS`, and
+  `qualification transport=udp status=PASS cases=12/12 cleanup=PASS`.
+  Both qualification summaries bind exact SHA `52d1610a`, run
+  `30415717152`, attempt `1`; the final status is
+  `sing_box=0 shadowsocks_rust=0 qualification=0 cleanup=0`.
+- Authorization scope `m2-20260729-remote-qualification-52d1610-a1` was
+  consumed once immediately before the push and auto-revoked. No force-push,
+  rerun, `workflow_dispatch`, `master` push, PR, tag, release, publication,
+  ref deletion, or other remote mutation occurred.
 
 ## Hosted failure repair evidence
 
@@ -188,7 +204,8 @@ git diff --check
   the full workflow suite passed `73/73`, and exact repair Architect/QA gates
   both returned `PASS`.
 - Runtime history closes `M2-T05-HOSTED-001` and its local causal/budget
-  derivatives without claiming hosted success. The remaining exact-final-SHA
-  evidence gap is canonical release root `M2-T05-QUALIFICATION-001`.
-  Qualification rerun, push, publication, and reference-provider operations
-  remain separately authorized release actions.
+  derivatives. The separately authorized final hosted evidence above now
+  satisfies and resolves canonical release root
+  `M2-T05-QUALIFICATION-001`; `workflow.py gate-check M2-T05 release --json`
+  is clear and `workflow.py next --milestone M2 --json` reports
+  `ready_to_close`. Close mode has not been invoked.

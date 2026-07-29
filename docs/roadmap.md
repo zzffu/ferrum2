@@ -315,7 +315,7 @@ dependency-ready 和 non-overlapping ownership。
 
 ## M2 — 完整 UDP 协议纵切与 UDP 互操作
 
-- **Status:** executing
+- **Status:** ready to close (execute complete; close mode not yet invoked)
 - **Objective:** 通过 protocol API 和 server direct UDP path 交付三个方法的
   SIP022 UDP，不新增 SOCKS5 `UDP ASSOCIATE` 等公开 inbound。
 - **Entry conditions:** 已满足。M1 closed；shared method/key/address contracts
@@ -337,9 +337,10 @@ dependency-ready 和 non-overlapping ownership。
      12/12+cleanup，缺失/unavailable不得waive。
   8. M0/M1回归、test-budget ratchet、MSRV/三平台和`workflow.toml` full通过。
 - **In-scope tickets:** M2-T01、M2-T02、M2-T03、M2-T04、M2-T05 均已
-  `done` 并完成本地integration；M2-T05 hosted/platform release
-  qualification首轮已在superseded SHA `a168b89`执行并失败，post-repair
-  final-SHA qualification尚未执行。
+  `done` 并完成本地integration。M2-T05 hosted/platform release
+  qualification首轮在superseded SHA `a168b89`失败；随后保留该失败历史，
+  修复并在final exact SHA `52d1610a127349e7a817a67c81c77e0383d20d1e`
+  的同一push-triggered run/attempt完成通过。
   Initial implementation frontier 为
   M2-T01 + M2-T03：
 
@@ -407,19 +408,37 @@ dependency-ready 和 non-overlapping ownership。
   gates均PASS。Preliminary local product/control checkpoint为
   `6a4e35062bd6d1631a029230e7cffdc3ba0f7db6`。
 
+  Final local assembly
+  `52d1610a127349e7a817a67c81c77e0383d20d1e`通过serialized authoritative
+  quick `3/3`、full `4/4`、workspace binary build、qualification contract
+  `13/13`、workflow `73/73`、policy `17/17`、ticket/milestone budgets以及
+  exact-SHA final Architect/QA assembly gates。Separate exact remote scope
+  `m2-20260729-remote-qualification-52d1610-a1`随后仅允许fast-forward push到
+  `origin/codex/integration/m2`并观察其一次push run；该scope在push前消费
+  `1/1`并自动撤销。
+
+  GitHub Actions run `30415717152`, attempt `1`, event `push`在同一SHA完成
+  `success`。六项expected jobs `quality`、`msrv`、Windows MSVC、Linux GNU、
+  Linux musl与`interop`全部success；interop raw log明确记录
+  `provider_setup sing_box=0 shadowsocks_rust=0`、TCP `12/12` +
+  `cleanup=PASS`以及UDP `12/12` + `cleanup=PASS`，两个summary均绑定相同
+  SHA/run/attempt。没有rerun、`workflow_dispatch`、`master` push、PR、tag、
+  release、publication、ref deletion或其他remote mutation。
+
 - **Deferred/out of scope:** public client UDP inbound、SOCKS5 UDP ASSOCIATE、
   SIP023/multi-user、routing/DNS proxy/custom resolver、M3 platform/lifecycle
   qualification和M4 performance。
-- **Integrated commit:** current reviewed local product/control checkpoint
-  `6a4e35062bd6d1631a029230e7cffdc3ba0f7db6`; coordination closeout follows
-  on the same integration branch.
-- **Open blockers and risks:** 当前没有open implementation/review/integration
-  root。`M2-T05-QUALIFICATION-001`将保持release blocker，直到同一最终exact SHA在
-  separately authorized hosted run/attempt完成quality、MSRV、Windows、
-  Linux GNU/musl、IPv6-capable platform evidence以及12 TCP + 12 UDP
-  interoperability与cleanup。`M2-INT-QA-001`是parallel server-test
-  port/readiness contention的nonblocking advisory；只有复现为authoritative
-  gate失败或shipped server defect时才触发跟进。当前未push/publish。
+- **Integrated commit:** reviewed and remotely qualified product/control
+  commit `52d1610a127349e7a817a67c81c77e0383d20d1e`; coordination-only
+  evidence closeout follows locally on the same integration branch.
+- **Open blockers and risks:** 当前没有open canonical root；
+  `M2-T05-QUALIFICATION-001`已由run `30415717152`的同SHA/attempt证据解决，
+  release gate clear，scheduler为`ready_to_close`。`M2-INT-QA-001`仍是
+  parallel server-test port/readiness contention的nonblocking advisory；
+  `ARCH-M2-T05-HOSTED-N02`的100 ms scheduler bound也保持advisory。只有
+  authoritative gate复现或证据指向shipped defect时才建立新root。M2尚未执行
+  close mode；唯一新增remote state是上述integration ref的授权fast-forward
+  push，没有release/publication。
 
 ## M3 — 运维、生命周期与平台资格
 
