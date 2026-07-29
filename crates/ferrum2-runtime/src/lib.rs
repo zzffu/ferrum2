@@ -4,6 +4,7 @@ mod connector;
 mod deadline;
 mod metrics;
 mod owner;
+mod process;
 mod relay;
 mod supervisor;
 mod udp;
@@ -19,6 +20,11 @@ pub use metrics::{
     MetricsEndpointError, serve_metrics_connection,
 };
 pub use owner::{OwnerRegistry, OwnerSnapshot};
+pub use process::{
+    PreparedProcessRoot, ProcessCancellation, ProcessCancellationPhase, ProcessCause,
+    ProcessCleanupFailure, ProcessExitKind, ProcessFuture, ProcessReport, ProcessRoot,
+    ProcessRootExit, ProcessRootId, ProcessState, ProcessSupervisor, ProcessSupervisorConfigError,
+};
 pub use relay::{
     RELAY_BUFFER_BYTES, RelayFailure, RelayRunError, RelayStats, relay_bidirectional,
     relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout, relay_lifecycle,

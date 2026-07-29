@@ -4,6 +4,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Read-only snapshot of resources with explicit runtime owners.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct OwnerSnapshot {
+    /// Process supervisors currently owning a root transaction.
+    pub process_supervisors: usize,
+    /// Required roots prepared but not yet polling public service loops.
+    pub prepared_process_roots: usize,
+    /// Required process roots currently owned by the active supervisor.
+    pub active_process_roots: usize,
+    /// Active process roots whose completion was observed exactly once.
+    pub process_root_reaps: usize,
+    /// Prepared roots whose rollback completed or failed exactly once.
+    pub process_root_rollbacks: usize,
+    /// Active roots dropped after the process grace deadline.
+    pub process_forced_roots: usize,
     /// Children currently owned by a supervisor `JoinSet`.
     pub active_supervisor_children: usize,
     /// Active connection owner tasks.
@@ -34,6 +46,12 @@ pub struct OwnerSnapshot {
 
 #[derive(Debug, Default)]
 struct OwnerCounters {
+    process_supervisors: AtomicUsize,
+    prepared_process_roots: AtomicUsize,
+    active_process_roots: AtomicUsize,
+    process_root_reaps: AtomicUsize,
+    process_root_rollbacks: AtomicUsize,
+    process_forced_roots: AtomicUsize,
     supervisor_children: AtomicUsize,
     connection_tasks: AtomicUsize,
     buffers: AtomicUsize,
@@ -64,6 +82,12 @@ impl OwnerRegistry {
     /// Returns current owner counts without mutating runtime state.
     pub fn snapshot(&self) -> OwnerSnapshot {
         OwnerSnapshot {
+            process_supervisors: self.counters.process_supervisors.load(Ordering::SeqCst),
+            prepared_process_roots: self.counters.prepared_process_roots.load(Ordering::SeqCst),
+            active_process_roots: self.counters.active_process_roots.load(Ordering::SeqCst),
+            process_root_reaps: self.counters.process_root_reaps.load(Ordering::SeqCst),
+            process_root_rollbacks: self.counters.process_root_rollbacks.load(Ordering::SeqCst),
+            process_forced_roots: self.counters.process_forced_roots.load(Ordering::SeqCst),
             active_supervisor_children: self.counters.supervisor_children.load(Ordering::SeqCst),
             connection_tasks: self.counters.connection_tasks.load(Ordering::SeqCst),
             owned_buffers: self.counters.buffers.load(Ordering::SeqCst),
@@ -82,6 +106,18 @@ impl OwnerRegistry {
 
     pub(crate) fn track_supervisor_child(&self) -> OwnerGuard {
         OwnerGuard::new(self, OwnerKind::SupervisorChild)
+    }
+
+    pub(crate) fn track_process_supervisor(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::ProcessSupervisor)
+    }
+
+    pub(crate) fn track_prepared_process_root(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::PreparedProcessRoot)
+    }
+
+    pub(crate) fn track_active_process_root(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::ActiveProcessRoot)
     }
 
     pub(crate) fn track_connection_task(&self) -> OwnerGuard {
@@ -145,10 +181,31 @@ impl OwnerRegistry {
             .forced_shutdowns
             .fetch_add(count, Ordering::SeqCst);
     }
+
+    pub(crate) fn record_process_root_reap(&self) {
+        self.counters
+            .process_root_reaps
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn record_process_root_rollback(&self) {
+        self.counters
+            .process_root_rollbacks
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn record_process_forced_roots(&self, count: usize) {
+        self.counters
+            .process_forced_roots
+            .fetch_add(count, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 enum OwnerKind {
+    ProcessSupervisor,
+    PreparedProcessRoot,
+    ActiveProcessRoot,
     SupervisorChild,
     ConnectionTask,
     Buffer,
@@ -186,6 +243,9 @@ impl Drop for OwnerGuard {
 
 fn counter(counters: &OwnerCounters, kind: OwnerKind) -> &AtomicUsize {
     match kind {
+        OwnerKind::ProcessSupervisor => &counters.process_supervisors,
+        OwnerKind::PreparedProcessRoot => &counters.prepared_process_roots,
+        OwnerKind::ActiveProcessRoot => &counters.active_process_roots,
         OwnerKind::SupervisorChild => &counters.supervisor_children,
         OwnerKind::ConnectionTask => &counters.connection_tasks,
         OwnerKind::Buffer => &counters.buffers,
@@ -196,5 +256,24 @@ fn counter(counters: &OwnerCounters, kind: OwnerKind) -> &AtomicUsize {
         OwnerKind::UdpTask => &counters.udp_tasks,
         OwnerKind::UdpQueueEntry => &counters.udp_queued_datagrams,
         OwnerKind::UdpScratch => &counters.udp_scratch_buffers,
+    }
+}
+
+impl OwnerSnapshot {
+    pub(crate) fn has_same_active_owners(self, other: Self) -> bool {
+        self.process_supervisors == other.process_supervisors
+            && self.prepared_process_roots == other.prepared_process_roots
+            && self.active_process_roots == other.active_process_roots
+            && self.active_supervisor_children == other.active_supervisor_children
+            && self.connection_tasks == other.connection_tasks
+            && self.owned_buffers == other.owned_buffers
+            && self.owned_permits == other.owned_permits
+            && self.listeners == other.listeners
+            && self.udp_sessions == other.udp_sessions
+            && self.udp_sockets == other.udp_sockets
+            && self.udp_tasks == other.udp_tasks
+            && self.udp_queued_datagrams == other.udp_queued_datagrams
+            && self.udp_buffered_bytes == other.udp_buffered_bytes
+            && self.udp_scratch_buffers == other.udp_scratch_buffers
     }
 }

@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use ferrum2_runtime::{
     AcceptListener, BoundedSupervisor, DEFAULT_HANDSHAKE_TIMEOUT, DeadlineError, OwnerRegistry,
-    RelayFailure, RelayRunError, RelayStats, SupervisorError,
-    relay_bidirectional_with_idle_timeout, relay_lifecycle, with_deadline,
+    PreparedProcessRoot, ProcessCause, ProcessCleanupFailure, ProcessExitKind, ProcessFuture,
+    ProcessRoot, ProcessRootExit, ProcessState, ProcessSupervisor, RelayFailure, RelayRunError,
+    RelayStats, SupervisorError, relay_bidirectional_with_idle_timeout, relay_lifecycle,
+    with_deadline,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::Notify;
@@ -761,4 +763,361 @@ async fn relay_lifecycle_cancel_retains_asymmetric_stats_and_returns_buffers() {
         })
     );
     assert_eq!(registry.snapshot(), baseline);
+}
+
+#[derive(Clone, Copy)]
+enum StartupFailure {
+    Prepare(usize),
+    Activate(usize),
+}
+
+struct FakeProcessRoot {
+    index: usize,
+    activation_failure: Option<usize>,
+    events: Arc<Mutex<Vec<String>>>,
+    polls: Arc<AtomicUsize>,
+}
+
+impl PreparedProcessRoot<&'static str> for FakeProcessRoot {
+    fn activate(&mut self) -> Result<(), &'static str> {
+        self.events
+            .lock()
+            .expect("event lock")
+            .push(format!("activate:{}", self.index));
+        if self.activation_failure == Some(self.index) {
+            Err("activation")
+        } else {
+            Ok(())
+        }
+    }
+
+    fn run(
+        self: Box<Self>,
+        mut cancellation: ferrum2_runtime::ProcessCancellation,
+    ) -> ProcessFuture<Result<(), &'static str>> {
+        Box::pin(async move {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            cancellation.cancelled().await;
+            self.events
+                .lock()
+                .expect("event lock")
+                .push(format!("stopped:{}", self.index));
+            Ok(())
+        })
+    }
+
+    fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), &'static str>> {
+        Box::pin(async move {
+            self.events
+                .lock()
+                .expect("event lock")
+                .push(format!("rollback:{}", self.index));
+            Ok(())
+        })
+    }
+}
+
+fn fake_process_roots(
+    failure: StartupFailure,
+    events: Arc<Mutex<Vec<String>>>,
+    polls: Arc<AtomicUsize>,
+) -> Vec<ProcessRoot<&'static str>> {
+    (0..3)
+        .map(|index| {
+            let events = Arc::clone(&events);
+            let polls = Arc::clone(&polls);
+            ProcessRoot::new(move || async move {
+                events
+                    .lock()
+                    .expect("event lock")
+                    .push(format!("prepare:{index}"));
+                if matches!(failure, StartupFailure::Prepare(failed) if failed == index) {
+                    return Err("preparation");
+                }
+                Ok(FakeProcessRoot {
+                    index,
+                    activation_failure: match failure {
+                        StartupFailure::Activate(failed) => Some(failed),
+                        StartupFailure::Prepare(_) => None,
+                    },
+                    events,
+                    polls,
+                })
+            })
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn process_startup_failure_positions_roll_back_in_reverse_without_polling_roots() {
+    for failure in [
+        StartupFailure::Prepare(0),
+        StartupFailure::Prepare(1),
+        StartupFailure::Prepare(2),
+        StartupFailure::Activate(0),
+        StartupFailure::Activate(1),
+        StartupFailure::Activate(2),
+    ] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let registry = OwnerRegistry::new();
+        let supervisor = ProcessSupervisor::new(
+            fake_process_roots(failure, Arc::clone(&events), Arc::clone(&polls)),
+            Duration::from_secs(5),
+            registry.clone(),
+        )
+        .expect("three required roots");
+
+        let report = supervisor.run_until(pending::<()>()).await;
+
+        assert_eq!(report.exit_kind(), ProcessExitKind::Failed);
+        assert!(report.cleanup_failure().is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        match failure {
+            StartupFailure::Prepare(failed) => {
+                assert!(matches!(
+                    report.cause(),
+                    ProcessCause::PreparationFailed { root, error: "preparation" }
+                        if root.get() == failed
+                ));
+                let mut expected = (0..=failed)
+                    .map(|index| format!("prepare:{index}"))
+                    .collect::<Vec<_>>();
+                expected.extend((0..failed).rev().map(|index| format!("rollback:{index}")));
+                assert_eq!(*events.lock().expect("event lock"), expected);
+                assert_eq!(
+                    report.states(),
+                    &[
+                        ProcessState::Validated,
+                        ProcessState::Preparing,
+                        ProcessState::Rollback,
+                        ProcessState::Stopped,
+                    ]
+                );
+                assert_eq!(registry.snapshot().process_root_rollbacks, failed);
+            }
+            StartupFailure::Activate(failed) => {
+                assert!(matches!(
+                    report.cause(),
+                    ProcessCause::ActivationFailed { root, error: "activation" }
+                        if root.get() == failed
+                ));
+                let mut expected = (0..3)
+                    .map(|index| format!("prepare:{index}"))
+                    .collect::<Vec<_>>();
+                expected.extend((0..=failed).map(|index| format!("activate:{index}")));
+                expected.extend((0..3).rev().map(|index| format!("rollback:{index}")));
+                assert_eq!(*events.lock().expect("event lock"), expected);
+                assert_eq!(
+                    report.states(),
+                    &[
+                        ProcessState::Validated,
+                        ProcessState::Preparing,
+                        ProcessState::Prepared,
+                        ProcessState::Rollback,
+                        ProcessState::Stopped,
+                    ]
+                );
+                assert_eq!(registry.snapshot().process_root_rollbacks, 3);
+            }
+        }
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.process_supervisors, 0);
+        assert_eq!(snapshot.prepared_process_roots, 0);
+        assert_eq!(snapshot.active_process_roots, 0);
+        assert_eq!(snapshot.process_root_reaps, 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn external_shutdown_during_preparation_cancels_the_same_transaction_and_rolls_back() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let preparing_second = Arc::new(Notify::new());
+    let first_events = Arc::clone(&events);
+    let first_polls = Arc::clone(&polls);
+    let second_events = Arc::clone(&events);
+    let second_preparing = Arc::clone(&preparing_second);
+    let registry = OwnerRegistry::new();
+    let supervisor = ProcessSupervisor::new(
+        vec![
+            ProcessRoot::new(move || async move {
+                first_events
+                    .lock()
+                    .expect("event lock")
+                    .push("prepare:0".to_owned());
+                Ok(FakeProcessRoot {
+                    index: 0,
+                    activation_failure: None,
+                    events: first_events,
+                    polls: first_polls,
+                })
+            }),
+            ProcessRoot::new(move || async move {
+                second_events
+                    .lock()
+                    .expect("event lock")
+                    .push("prepare:1".to_owned());
+                second_preparing.notify_one();
+                pending::<Result<FakeProcessRoot, &'static str>>().await
+            }),
+        ],
+        Duration::from_secs(5),
+        registry.clone(),
+    )
+    .expect("two required roots");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run = tokio::spawn(tokio::time::timeout(
+        Duration::from_secs(1),
+        supervisor.run_until(async move {
+            let _ = shutdown_rx.await;
+        }),
+    ));
+
+    preparing_second.notified().await;
+    shutdown_tx.send(()).expect("request startup shutdown");
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let report = run
+        .await
+        .expect("process owner")
+        .expect("startup shutdown must not wait for preparation");
+
+    assert_eq!(report.exit_kind(), ProcessExitKind::Graceful);
+    assert!(matches!(report.cause(), ProcessCause::ExternalShutdown));
+    assert_eq!(
+        report.states(),
+        &[
+            ProcessState::Validated,
+            ProcessState::Preparing,
+            ProcessState::Rollback,
+            ProcessState::Stopped,
+        ]
+    );
+    assert_eq!(
+        *events.lock().expect("event lock"),
+        ["prepare:0", "prepare:1", "rollback:0"]
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    let snapshot = registry.snapshot();
+    assert_eq!(snapshot.process_root_rollbacks, 1);
+    assert_eq!(snapshot.prepared_process_roots, 0);
+    assert_eq!(snapshot.active_process_roots, 0);
+}
+
+#[derive(Clone, Copy)]
+enum RootRun {
+    Complete,
+    Fail,
+    Panic,
+    AwaitCancellation,
+}
+
+struct RunningFakeRoot {
+    behavior: RootRun,
+}
+
+impl PreparedProcessRoot<&'static str> for RunningFakeRoot {
+    fn activate(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn run(
+        self: Box<Self>,
+        mut cancellation: ferrum2_runtime::ProcessCancellation,
+    ) -> ProcessFuture<Result<(), &'static str>> {
+        Box::pin(async move {
+            match self.behavior {
+                RootRun::Complete => Ok(()),
+                RootRun::Fail => Err("root"),
+                RootRun::Panic => panic!("scripted root panic"),
+                RootRun::AwaitCancellation => {
+                    cancellation.cancelled().await;
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), &'static str>> {
+        Box::pin(ready(Ok(())))
+    }
+}
+
+fn running_root(behavior: RootRun) -> ProcessRoot<&'static str> {
+    ProcessRoot::new(move || async move { Ok(RunningFakeRoot { behavior }) })
+}
+
+#[tokio::test]
+async fn required_root_completion_arbitration_and_panic_reap_every_owner_exactly_once() {
+    for (first, second) in [
+        (RootRun::Complete, RootRun::Complete),
+        (RootRun::Fail, RootRun::Fail),
+        (RootRun::Panic, RootRun::AwaitCancellation),
+    ] {
+        let registry = OwnerRegistry::new();
+        let supervisor = ProcessSupervisor::new(
+            vec![
+                running_root(first),
+                running_root(second),
+                running_root(RootRun::AwaitCancellation),
+            ],
+            Duration::from_secs(1),
+            registry.clone(),
+        )
+        .expect("three required roots");
+
+        let report = supervisor.run_until(pending::<()>()).await;
+
+        assert_eq!(report.exit_kind(), ProcessExitKind::Failed);
+        assert_eq!(
+            report.states(),
+            &[
+                ProcessState::Validated,
+                ProcessState::Preparing,
+                ProcessState::Prepared,
+                ProcessState::Active,
+                ProcessState::Fatal,
+                ProcessState::Quiescing,
+                ProcessState::Draining,
+                ProcessState::Stopped,
+            ]
+        );
+        match first {
+            RootRun::Complete => assert!(matches!(
+                report.cause(),
+                ProcessCause::RootStopped {
+                    root,
+                    exit: ProcessRootExit::Completed,
+                } if root.get() == 0
+            )),
+            RootRun::Fail => {
+                assert!(matches!(
+                    report.cause(),
+                    ProcessCause::RootStopped {
+                        root,
+                        exit: ProcessRootExit::Failed("root"),
+                    } if root.get() == 0
+                ));
+                assert!(matches!(
+                    report.cleanup_failure(),
+                    Some(ProcessCleanupFailure::RootFailed { root, error: "root" })
+                        if root.get() == 1
+                ));
+            }
+            RootRun::Panic => assert!(matches!(
+                report.cause(),
+                ProcessCause::RootStopped {
+                    root,
+                    exit: ProcessRootExit::Panicked,
+                } if root.get() == 0
+            )),
+            RootRun::AwaitCancellation => unreachable!(),
+        }
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.process_supervisors, 0);
+        assert_eq!(snapshot.prepared_process_roots, 0);
+        assert_eq!(snapshot.active_process_roots, 0);
+        assert_eq!(snapshot.process_root_reaps, 3);
+    }
 }
