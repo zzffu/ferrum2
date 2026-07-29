@@ -338,7 +338,8 @@ dependency-ready 和 non-overlapping ownership。
   8. M0/M1回归、test-budget ratchet、MSRV/三平台和`workflow.toml` full通过。
 - **In-scope tickets:** M2-T01、M2-T02、M2-T03、M2-T04、M2-T05 均已
   `done` 并完成本地integration；M2-T05 hosted/platform release
-  qualification仍未执行。
+  qualification首轮已在superseded SHA `a168b89`执行并失败，post-repair
+  final-SHA qualification尚未执行。
   Initial implementation frontier 为
   M2-T01 + M2-T03：
 

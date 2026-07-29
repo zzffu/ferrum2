@@ -39,7 +39,7 @@ gate = "release"
 root_cause = "The locally repaired and reviewed candidate has not run hosted Linux qualification at the eventual final integration SHA; run 30408245840 covers only superseded SHA a168b89 and failed three TCP rows."
 derivatives = []
 owner = "team_lead"
-evidence = "Product repair 0395d7dfb170ddc8c3328b2d939210d96c81266f passed bounded Architect/QA verification and preliminary local product/control integration is 6a4e35062bd6d1631a029230e7cffdc3ba0f7db6. No new push, hosted run, or external qualification is authorized or executed."
+evidence = "Product repair 0395d7dfb170ddc8c3328b2d939210d96c81266f passed bounded Architect/QA verification and preliminary local product/control integration is 6a4e35062bd6d1631a029230e7cffdc3ba0f7db6. No post-repair push, hosted run, or external qualification is authorized or executed."
 authorization = "required"
 unblock_condition = "After separate exact-SHA remote authorization, one clean hosted run/attempt must pass quality, MSRV, Windows, Linux GNU/musl, provider setup, TCP 12/12 plus cleanup, and UDP 12/12 plus cleanup; missing or failed evidence remains blocking."
 +++
@@ -150,9 +150,10 @@ git diff --check
   `1086/1024`, allowance `1206`; milestone gate passed at
   `3994/3212`, allowance `4114`.
 - Release evidence: the external qualification entry was never invoked
-  locally. No hosted run/attempt, reference provisioning, IPv6 platform
-  qualification, push, or publication is credited. Those remain a
-  separately authorized release gate.
+  locally. Hosted run `30408245840`, attempt `1`, ran at superseded SHA
+  `a168b89` and failed; no successful post-repair/final-SHA hosted run,
+  IPv6 platform qualification, push, or publication is credited. Those
+  remain a separately authorized release gate.
 
 ## Hosted failure repair evidence
 
