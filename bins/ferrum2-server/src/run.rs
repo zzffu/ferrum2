@@ -2703,17 +2703,6 @@ mod tests {
             .expect("one required UDP root");
         let mut process = tokio::spawn(supervisor.run_until(std::future::pending()));
 
-        for _ in 0..100 {
-            let snapshot = registry.snapshot();
-            if snapshot.active_process_roots == 1 && snapshot.udp_sessions == 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        let live = registry.snapshot();
-        assert_eq!(live.active_process_roots, 1);
-        assert_eq!(live.udp_sessions, 1);
-        assert_eq!(live.udp_tasks, 1);
         let mut target_buffer = [0_u8; 32];
         let (received, source) = tokio::time::timeout(
             Duration::from_secs(1),
@@ -2723,6 +2712,10 @@ mod tests {
         .expect("stalled target receive deadline")
         .expect("stalled target request");
         assert_eq!(&target_buffer[..received], b"listener-failure");
+        let live = registry.snapshot();
+        assert_eq!(live.active_process_roots, 1);
+        assert_eq!(live.udp_sessions, 1);
+        assert_eq!(live.udp_tasks, 1);
         stalled_target
             .send_to(b"blocked-response", source)
             .await
