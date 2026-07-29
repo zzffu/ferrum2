@@ -15,8 +15,8 @@ run `30367147537` attempt 1 的六项成功证据关闭；M2 已以 exact
 Actions run `30425476328` attempt 1 的六项成功、TCP/UDP 各 12/12 及 focused
 IPv6 UDP real-process 证据关闭。M3 planning baseline
 `3a877b6beeb955b5237ab4048f8dec02a92f06b6` 已批准 context audit、
-ADR-0023/0024、SPEC/TEST-0004 和五票DAG，状态为 `planned`；M4仍为
-`proposed`。
+ADR-0023/0024、SPEC/TEST-0004 和初始五票DAG；M3 execution正在进行，
+T01～T03已集成，T04 review升级后由T06 replacement继续；M4仍为`proposed`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`。
@@ -488,7 +488,8 @@ dependency-ready 和 non-overlapping ownership。
   - M1、M2 closed，SIP022 TCP/UDP和24-cell interop baseline已有exact-SHA证据；
   - context audit approved，`AGENTS.md`只把M3记为planned；
   - ADR-0023/0024 Accepted，SPEC/TEST-0004 Approved；
-  - M3-T01～T05 ready、ownership-disjoint且initial frontier不超过三个Engineer；
+  - M3-T01～T03已integrated；M3-T04在唯一repair与targeted re-review后升级，
+    由用户批准的M3-T06 replacement继续；M3-T05等待T06；
   - current pinned target triples/toolchains/provider保持authoritative。
 - **Exit criteria:**
   1. M3 close时全部client/server合法v1配置形成preserved cohort，在v0.x及
@@ -517,23 +518,29 @@ dependency-ready 和 non-overlapping ownership。
   - M3-T01 preserve schema v1 compatibility；
   - M3-T02 stabilize observability contract；
   - M3-T03 build reusable process supervisor；
-  - M3-T04 compose transactional binaries；
+  - M3-T04 compose transactional binaries（deferred after review escalation）；
+  - M3-T06 resolve terminal-root and forced-reap escalation；
   - M3-T05 qualify three native targets。
-- **Dependency order:** T01/T02/T03 initial parallel frontier → T04 → T05；
-  T05 release还等待T01～T04全部integrated。
+- **Dependency order:** T01/T02/T03 initial parallel frontier → T06 → T05；
+  T06 imports the unintegrated T04 product lineage with a fresh bounded review
+  lifecycle；T05 release等待T01～T03与T06全部integrated。
 - **Deferred/out of scope:** multi-inbound/outbound、routing、DNS、Linux
   transparent inbound、Windows TUN、public UDP inbound、SIP023/multi-user、
   hot reload、management API；M4 performance/RSS/tasks/10k idle/long soak；
   archive/installer/signing/upload/publication。
 - **Integrated commit:** wave 1 `da8fa58e0f50dda1637e3a2b205e6f34332a5bec`
-  integrates M3-T01～T03；M3-T04/T05 remain。
+  integrates M3-T01～T03；M3-T04 candidates `b35e809...`/`a90c496...`未集成，
+  T06/T05 remain。
 - **Open blockers and risks:** wave 1的`ARC-M3-T02-001`、
   `ARC-M3-T03-001`、`QA-M3-T03-001`、`QA-M3-T03-002`均在各自唯一
-  targeted round中resolved；当前无open canonical root。剩余execution风险是
-  binary production adapter partial activation、Windows signal/socket差异、
-  GNU GLIBC与musl linkage、native runner availability、same-SHA evidence
-  splicing和test-budget增长。Provider unavailable时M3 release `BLOCKED`，
-  不把旧run或self-test当PASS。
+  targeted round中resolved。T04 canonical `ARC-M3-T04-004`与derivatives
+  `ARC-M3-T04-001/002`、`QA-M3-T04-001`在唯一targeted round后升级；T04
+  review lifecycle已终止并deferred，未完成outcome由T06承接，而非把原candidate
+  改写为PASS。剩余execution风险是terminal UDP root circular wait、unresponsive
+  forced root、production evidence seam、Windows signal/socket差异、GNU GLIBC与
+  musl linkage、native runner availability、same-SHA evidence splicing和
+  test-budget增长。Provider unavailable时M3 release `BLOCKED`，不把旧run或
+  self-test当PASS。
 
 ## M4 — 性能、资源与 v0 资格确认
 
@@ -593,9 +600,10 @@ dependency-ready 和 non-overlapping ownership。
 | DEC-025 | resolved in M2 plan | server只按authenticated client session ID；valid roaming；current+old两association；8,128-lag atomic replay与generation-bound response | `ADR-0021`、M2-T02 |
 | DEC-026 | resolved in M2 plan | minimal core datagram value；generic runtime ownership；`server.listen`同端口TCP+UDP且default enabled；双bind transaction和closed UDP telemetry | `ADR-0022`、M2-T03/T04 |
 | DEC-027 | resolved in M2 plan | 固定M2-UDP-INT-001～012；ferrum direction用Cargo example black-box adapter；每案同session三datagrams，12/12+cleanup/exact SHA/run/attempt | `SPEC-0003`、`TEST-0003`、M2-T05 |
-| DEC-028 | resolved in M3 plan | M3合法v1 config preserved cohort；all v0.x + successor后12个月且2 stable minors + prior notice；optional/widening v1或explicit new schema；no heuristic fallback；current topology不永久冻结 | `ADR-0023`、SPEC/TEST-0004、M3-T01/T02/T04 |
-| DEC-029 | resolved in M3 plan | topology-neutral Validated→Prepare→Active→Quiesce/Drain→Stop outcome；all-root prepare、rollback、single transitive ownership、monotonic cancel/deadline、grace/force/reap | `ADR-0024`、SPEC/TEST-0004、M3-T03/T04 |
+| DEC-028 | resolved in M3 plan | M3合法v1 config preserved cohort；all v0.x + successor后12个月且2 stable minors + prior notice；optional/widening v1或explicit new schema；no heuristic fallback；current topology不永久冻结 | `ADR-0023`、SPEC/TEST-0004、M3-T01/T02/T04/T06 |
+| DEC-029 | resolved in M3 plan | topology-neutral Validated→Prepare→Active→Quiesce/Drain→Stop outcome；all-root prepare、rollback、single transitive ownership、monotonic cancel/deadline、grace/force/reap | `ADR-0024`、SPEC/TEST-0004、M3-T03/T04/T06 |
 | DEC-030 | resolved in M3 plan | 同一exact SHA的Windows MSVC/Linux GNU/Linux musl release binaries native config/lifecycle、SHA-256及PE/ELF/GLIBC/musl linkage；unavailable=BLOCKED；无packaging/publication | `SPEC/TEST-0004`、M3-T05 |
+| DEC-031 | resolved in M3 execute escalation | terminal UDP root先immediate local force/join/reap再返回original fatal；operator仍使用一个configured absolute grace；`Forced`后固定5秒cleanup watchdog，触发即explicit `shutdown.cleanup`且不覆盖primary cause；internal claims用production-used direct composition，OS/process claims用black-box，无product injection surface | User-confirmed solution A、`AUTH-M3-T06-001`、`ADR-0016/0024`、SPEC/TEST-0004、M3-T06 |
 
 ## 风险登记
 
@@ -643,3 +651,4 @@ dependency-ready 和 non-overlapping ownership。
 | 2026-07-28 | M2 plan | M2改为`planned`；接受method-bound UDP envelope、8,129-value replay/current+old association和bounded direct runtime；批准SPEC/TEST-0003及五票DAG | M1已关闭；current code/runtime/server/qualification均TCP-only，需要在execute前冻结crypto分歧、mutation ordering、数值limits、same-port startup和12-cell black-box evidence | Product/Architect/QA planning reports；ADR-0020～0022；M2 research；workflow validate/test-budget/frontier/next |
 | 2026-07-29 | M2 close | M2 改为 `closed`；六票完成，接受 exact `7907cda` 的本地 full、三平台、TCP/UDP 各 12/12 和 focused IPv6 UDP real-process 证据 | `M2-CLOSE-IPV6-001`已由唯一授权 push run `30425476328/1`关闭；三位 close reviewer 无 blocker/major，且没有扩大 public UDP inbound 或其他 v0 scope | Product/Architect/QA close reports；run `30425476328` raw logs；workflow validate/test-budget/status/next；M2 handoff |
 | 2026-07-29 | M3 plan | M3改为`planned`；接受v1 preserved-cohort/evolvable-topology与transactional supervisor两项ADR，批准SPEC/TEST-0004及五票DAG | M2已关闭；current operator contract分散、run cause丢失、binary-local root coordination有partial activation risk，且三目标只有早期build/config smoke；两ADR是最小hard-to-reverse集合 | Context audit；Product/Architect/QA PASS；ADR-0023/0024；workflow validate/context-check/test-budget/frontier/next |
+| 2026-07-29 | M3 T04 escalation replacement | T04在唯一full/repair/targeted lifecycle后deferred；新建T06承接完整composition outcome，固定terminal UDP local reap与post-Forced 5秒cleanup watchdog，并把internal与black-box evidence按ADR-0016重映射；T05依赖改指T06 | T04的UDP fatal/Forced circular wait与unresponsive-root无bound在原review budget内未关闭；用户确认solution A并一次性授权local T06，不授权remote/T05/publish/control-plane | Product Manager PASS；Architect design PASS；`AUTH-M3-T06-001` consumed/revoked；T04 `b35e809...`/`a90c496...` retained but not integrated |

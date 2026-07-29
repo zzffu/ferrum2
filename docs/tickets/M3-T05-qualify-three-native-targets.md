@@ -5,10 +5,10 @@ milestone = "M3"
 status = "ready"
 priority = "P0"
 risk = "high"
-implementation_blocked_by = ["M3-T04"]
+implementation_blocked_by = ["M3-T06"]
 review_blocked_by = []
-integration_blocked_by = ["M3-T04"]
-release_blocked_by = ["M3-T01", "M3-T02", "M3-T03", "M3-T04"]
+integration_blocked_by = ["M3-T06"]
+release_blocked_by = ["M3-T01", "M3-T02", "M3-T03", "M3-T06"]
 required_reviews = ["architect", "qa"]
 owns = [
   ".github/workflows/**",
@@ -86,8 +86,9 @@ remote mutation后才push/run/rerun。本票ready不构成该授权。
 
 ## Ownership and risks
 
-- T05 implementation/integration等待T04，release等待T01～T04；不编辑product或
-  m0-harness files。
+- T05 implementation/integration等待T06，release等待T01～T03与T06；T04因
+  review escalation deferred且由T06 replacement，不编辑product或m0-harness
+  files。
 - Runner/provider/setup unavailable 是 release BLOCKED，不可用旧run、local
   emulation、different SHA 或 self-test豁免。
 - musl必须执行 native artifact并直接检查linkage；cross-build success不足。

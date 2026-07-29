@@ -12,8 +12,10 @@ startup 已服务、root/child 失去 owner、shutdown 假成功，以及不同 
 evidence 拼接。Cheapest reliable seams：
 
 1. existing config/observability table tests冻结 identity/effective values；
-2. paused-time runtime table证明 state/owner/deadline；
-3. production-used local process adapter证明 OS listener/signal/rebind；
+2. paused-time runtime tables与production-used binary-private direct composition
+   证明 internal state、root fatal、owner、deadline和reap；
+3. production-used black-box local process adapter证明 OS listener/signal、
+   TCP half-close、admitted UDP、rollback、exit和exact rebind；
 4. native release runners证明 artifact/linkage，external interop证明兼容。
 
 M3 只允许一个有独特 failure mode 的新 seam：**native release-artifact lifecycle
@@ -29,9 +31,9 @@ helper 的 self-test/mutation 当成 product 或 release PASS。
 | M3-MUST-03 CLI/exits/errors/zero-resource validation | existing `config_cli` + `cli_contract` process table | product | native release binary repeated in MUST-09 for artifact mismatch |
 | M3-MUST-04 trace identity/redaction | existing `tracing_contract` closed-field/sentinel table | product | process startup run-code row in MUST-08 |
 | M3-MUST-05 metric identity/semantics | existing `metrics_contract` exact fourteen-family/type/labels table | product | native endpoint availability in MUST-09 |
-| M3-MUST-06 prepare/rollback/ownership | one paused-time supervisor state/owner snapshot table | product | real bind/activation in MUST-08 |
-| M3-MUST-07 cancel/deadline/isolation/shutdown | existing lifecycle/shutdown/half-close/backpressure/UDP tables extended by state rows | product | OS signal/rebind in MUST-08 |
-| M3-MUST-08 binary composition/100 bounded cycles | existing local process lifecycle suite with production-used adapter | integration | native release/linker differences in MUST-09 |
+| M3-MUST-06 prepare/rollback/ownership | paused-time supervisor table plus production-used direct composition owner snapshots | product | real bind/activation and exact rebind in MUST-08 |
+| M3-MUST-07 cancel/deadline/isolation/shutdown | existing lifecycle/shutdown/backpressure/UDP tables plus direct root-fatal and fixed-watchdog rows | product | OS signal/TCP half-close/admitted UDP in MUST-08 |
+| M3-MUST-08 binary composition/100 bounded cycles | direct composition for internal root/owner claims plus existing black-box lifecycle suite for OS/process claims | integration | native release/linker differences in MUST-09 |
 | M3-MUST-09 three native targets | direct runner execution + artifact SHA-256/linkage reports | release | none |
 | M3-MUST-10 same-SHA convergence | one fail-closed CI evidence summary keyed by exact SHA/run/attempt | release | none |
 
@@ -70,16 +72,35 @@ python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py test-budget
 git diff --check
 ```
 
-### M3-T04 — current binary composition
+### M3-T04 — deferred composition candidate
+
+T04 candidates `b35e809...` and `a90c496...` remain historical escalated
+evidence and are not integration PASS。M3-T06 imports their product lineage, resolves
+the terminal-root/forced-reap defects, and receives a fresh bounded review lifecycle。
+
+### M3-T06 — replacement binary composition
 
 ```powershell
+cargo test -p ferrum2-runtime --test shutdown --test udp_runtime --locked
 cargo test -p ferrum2-client -p ferrum2-server --locked
 cargo test -p ferrum2-m0-harness --test cli_contract --test config_cli --test lifecycle_cycles --test local_e2e --test udp_local_e2e --locked
-cargo clippy -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --all-targets --all-features --locked -- -D warnings
+cargo clippy -p ferrum2-runtime -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --all-targets --all-features --locked -- -D warnings
 cargo fmt --all -- --check
+python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py control-plane-check --base <ticket-base-sha> --candidate-sha <candidate-sha> --json
 python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py test-budget --gate ticket --base <ticket-base-sha>
-git diff --check
+git diff --check <ticket-base-sha>..<candidate-sha>
 ```
+
+T06 selective RED evidence先扩展既有 seams：
+
+- server production-used scripted composition：live admitted UDP session + terminal
+  listener/root error；在无 external shutdown 时证明 immediate local force/join/reap、
+  original fatal cause、forced-session accounting和owner baseline；
+- paused-time process shutdown table：cooperative pre-watchdog completion、fixed
+  five-second unresponsive-root expiry、deterministic multi-root abort/join、preserved
+  primary cause和explicit cleanup failure；
+- existing UDP runtime table：phase-aware operator shutdown与direct immediate
+  force-reap。不得新增product fault-injection surface或第二个lifecycle harness。
 
 ### M3-T05 — qualification implementation
 
@@ -158,10 +179,13 @@ architecture 或 non-native execution 是 `BLOCKED/FAIL`。
   `tests/fixtures/config/**`，不按 field 建 fixture。
 - 扩展 observability existing exact identity/sentinel tables；不再建 process
   logging harness。
-- Runtime state table复用 `OwnerRegistry`、paused Tokio time、existing fake
-  roots；real-process只留一个 production-used adapter。
-- T04 复用 `tests/m0-harness/src/local_support/**`；100 cycles共享 scenario rows，
-  不构造 method×platform×failure 全 cross product。
+- Runtime state table复用 `OwnerRegistry`、paused Tokio time、existing fake roots；
+  production-used binary-private direct composition只证明black-box无法观察的
+  root/owner/reap claims。
+- T06 复用 `tests/m0-harness/src/local_support/**`、
+  `lifecycle_cycles`与`udp_local_e2e`；black-box real-process只证明OS/process
+  behavior，100 cycles共享scenario rows，不构造method×platform×failure全
+  cross product。
 - T05 可替换不能证明 native artifact 的 helper invocation；只有发现具体独立
   failure mode 时才增加第二个 platform harness。
 

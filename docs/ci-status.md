@@ -2,9 +2,10 @@
 
 ## 当前 M3 execution 状态
 
-- **Wave 1 integrated SHA:** exact
-  `da8fa58e0f50dda1637e3a2b205e6f34332a5bec` on `master` and
-  `codex/integration/m3` integrates M3-T01～T03。Ticket candidates were
+- **Wave 1 product SHA:** exact
+  `da8fa58e0f50dda1637e3a2b205e6f34332a5bec` integrates M3-T01～T03；
+  current pre-T06 coordination base on `master` and `codex/integration/m3` is
+  `a1b8fdd501a70a17922ab4ca8428ceeda143fc47`。Ticket candidates were
   `001047e895726debef04b31d781aa1eee73c24a9`,
   `84e5e226eb317e993991226efd104a0bbd0bf703`, and
   `1d7111d2d20df805740c21e98da8fb161141b161`.
@@ -21,10 +22,25 @@
   Architect full BLOCK `ARC-M3-T02-001`, one evidence repair, targeted PASS。
   T03 Architect/QA full BLOCK under canonical `ARC-M3-T03-001` with
   derivatives `QA-M3-T03-001/002`, one substantive repair, both targeted
-  PASS。所有roots/derivatives resolved，accepted review debt为none。
-- **Remaining gates:** M3-T04 binary production adapters and bounded process
-  matrix；M3-T05 three-native-target release qualification and same-SHA hosted
-  evidence。尚未claim三目标、TCP/UDP hosted interop或M3 close PASS。
+  PASS。T01～T03所有roots/derivatives resolved，accepted review debt为none。
+- **T04 escalation:** initial candidate
+  `b35e809eda2c306be7ced27f648d2ad83ceb158c` and sole repair
+  `a90c49644323c2266787c0f259aa4f482bdee60b` remain unintegrated。Architect
+  and QA full `BLOCK` followed by targeted `ESCALATE`; canonical
+  `ARC-M3-T04-004` retains derivatives `ARC-M3-T04-001/002` and
+  `QA-M3-T04-001`。The passing >=100-per-binary and Windows signal evidence
+  does not waive the terminal-UDP circular wait, unresponsive-root bound, or
+  missing evidence rows。
+- **T06 authorized replacement:** Product Manager and Architect design reviews
+  both `PASS`。User-confirmed solution A is recorded as local-only
+  `AUTH-M3-T06-001`; its sole use was consumed and the grant is revoked
+  (`1/1`)。T04 is deferred without rewriting either candidate as PASS；T06
+  receives a fresh exact-SHA full Architect/QA lifecycle。No remote, T05,
+  hosted, push, publication or control-plane action is authorized。
+- **Remaining gates:** M3-T06 replacement binary composition, terminal-root
+  and forced-reap evidence, then M3-T05 three-native-target release
+  qualification and same-SHA hosted evidence。尚未claim T06 product PASS、
+  三目标、TCP/UDP hosted interop或M3 close PASS。
 
 ## 当前 M2 closed 状态
 

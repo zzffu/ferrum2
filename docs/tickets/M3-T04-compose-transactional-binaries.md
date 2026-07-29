@@ -2,7 +2,7 @@
 id = "M3-T04"
 title = "Compose both binaries through the transactional supervisor"
 milestone = "M3"
-status = "blocked"
+status = "deferred"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = ["M3-T01", "M3-T02", "M3-T03"]
@@ -51,6 +51,19 @@ unblock_condition = "Explicit coordination must define a new repair ticket or ap
 把现有 client/server composition 作为 T03 supervisor 的 production adapters，
 稳定 CLI/run diagnostics，并用真实 process/listener/signal证明 transactional
 startup 与 bounded shutdown。
+
+## Disposition
+
+T04 的 initial candidate `b35e809eda2c306be7ced27f648d2ad83ceb158c`
+与唯一 substantive repair
+`a90c49644323c2266787c0f259aa4f482bdee60b` 均未集成。Architect 和 QA
+targeted re-review 保留 `ARC-M3-T04-001/002`、`QA-M3-T04-001`，并以
+`ARC-M3-T04-004` canonical root 升级；本票不得开始第三轮 review 或 repair。
+
+用户已确认 solution A，并通过一次本地 `AUTH-M3-T06-001` 将完整 outcome、
+候选 product lineage 与未完成 evidence 转入 M3-T06。T04 因 review lifecycle
+耗尽而 durable `deferred`；这不是把 `a90c496...` 改写为 PASS，也不是技术缺陷
+已经修复。T06 使用新的 exact candidate SHA 与 fresh bounded review lifecycle。
 
 ## In scope
 
@@ -111,9 +124,14 @@ git diff --check
 
 ## Completion evidence
 
-Filled by the Team Lead after integration:
-
-- Candidate and integrated commit:
-- Full/targeted review records and stable finding IDs:
-- Test-budget result:
-- Accepted review debt:
+- Branch: `codex/ticket/m3-t04`
+- Candidate commits: initial `b35e809eda2c306be7ced27f648d2ad83ceb158c`;
+  sole repair `a90c49644323c2266787c0f259aa4f482bdee60b`
+- Full reviews: Architect/QA `BLOCK`
+- Targeted reviews: Architect/QA `ESCALATE`
+- Stable findings: `ARC-M3-T04-001`, `ARC-M3-T04-002`,
+  `QA-M3-T04-001`; canonical root `ARC-M3-T04-004`
+- Final ticket test budget at repair candidate: PASS, code `12788`, tests
+  `20176`, ratio `1.578`, delta `261/380`, allowance `381`
+- Integrated commit: none
+- Durable result: deferred and replaced by M3-T06; no accepted review debt
