@@ -1,6 +1,6 @@
 use crate::qualification::{
     CaseFailure, CaseSpec, CleanupState, Direction, Method, QualificationOps, Reference,
-    TcpExchangeEvent, TcpExchangeState, TcpTargetShutdownGate, Transport, tcp_target_shutdown_gate,
+    TcpApplicationGate, TcpExchangeEvent, TcpExchangeState, Transport, tcp_shutdown_gate,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -683,7 +683,8 @@ fn run_tcp_transport(
     deadline: CaseDeadline,
 ) -> (String, String, String) {
     let trace = Arc::new(Mutex::new(TcpExchangeState::default()));
-    let target_process = TcpTarget::start(ports.take_target_tcp(), deadline, Arc::clone(&trace));
+    let (target_process, target_shutdown) =
+        TcpTarget::start(ports.take_target_tcp(), deadline, Arc::clone(&trace));
     let (config_checksum, process_evidence) = run_tcp_processes(
         case,
         reference_binary,
@@ -694,7 +695,7 @@ fn run_tcp_transport(
         target,
         deadline,
         &trace,
-        &target_process.shutdown_gate,
+        target_shutdown,
     );
 
     let target_evidence = target_process.finish(deadline);
@@ -716,7 +717,7 @@ fn run_tcp_processes(
     target: SocketAddrV4,
     deadline: CaseDeadline,
     trace: &Arc<Mutex<TcpExchangeState>>,
-    target_shutdown: &TcpTargetShutdownGate,
+    target_shutdown: TcpApplicationGate,
 ) -> (String, String) {
     let config = match case.direction {
         Direction::FerrumClient => {
@@ -783,7 +784,7 @@ fn exercise_socks_tcp(
     target: SocketAddrV4,
     deadline: CaseDeadline,
     trace: &Arc<Mutex<TcpExchangeState>>,
-    target_shutdown: &TcpTargetShutdownGate,
+    target_shutdown: TcpApplicationGate,
 ) {
     let mut stream = TcpStream::connect_timeout(
         &proxy.into(),
@@ -831,7 +832,7 @@ fn exercise_socks_tcp(
     );
     record_tcp_event(trace, TcpExchangeEvent::ApplicationCleanEof);
     application_acknowledgement
-        .complete(Ok(()))
+        .send(Ok(()))
         .unwrap_or_else(|error| panic!("{error}"));
 }
 
@@ -893,47 +894,31 @@ fn read_case(
         .unwrap_or_else(|error| panic!("{label}: {error}"))
 }
 
-struct TcpTarget {
-    worker: CancellableWorker<Result<String, String>>,
-    shutdown_gate: TcpTargetShutdownGate,
-}
+struct TcpTarget(CancellableWorker<Result<String, String>>);
 
 impl TcpTarget {
     fn start(
         listener: TcpListener,
         deadline: CaseDeadline,
         trace: Arc<Mutex<TcpExchangeState>>,
-    ) -> Self {
+    ) -> (Self, TcpApplicationGate) {
         listener
             .set_nonblocking(true)
             .expect("set TCP target listener nonblocking");
-        let (shutdown_notifier, shutdown_gate) = tcp_target_shutdown_gate();
+        let (target_gate, application_gate) = tcp_shutdown_gate();
         let worker = CancellableWorker::spawn(move |cancelled| {
-            let result = run_tcp_target(listener, deadline, &cancelled, &trace);
-            let target_result = result.as_ref().map(|_| ()).map_err(Clone::clone);
-            let acknowledgement = shutdown_notifier.synchronize(
-                target_result,
+            let (stream, evidence) = target_gate.finish(
+                run_tcp_target(listener, deadline, &cancelled, &trace),
                 deadline.remaining("TCP application acknowledgement"),
-            );
-            match result {
-                Ok((stream, evidence)) => {
-                    drop(stream);
-                    acknowledgement.map(|()| evidence)
-                }
-                Err(target_error) => match acknowledgement {
-                    Ok(()) => Err(target_error),
-                    Err(application_error) => Err(format!("{target_error}; {application_error}")),
-                },
-            }
+            )?;
+            drop(stream);
+            Ok(evidence)
         });
-        Self {
-            worker,
-            shutdown_gate,
-        }
+        (Self(worker), application_gate)
     }
 
     fn finish(self, deadline: CaseDeadline) -> String {
-        self.worker
+        self.0
             .finish(deadline, "TCP target completion")
             .unwrap_or_else(|error| panic!("TCP target failed: {error}"))
     }

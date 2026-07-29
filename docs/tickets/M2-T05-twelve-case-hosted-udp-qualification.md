@@ -31,6 +31,17 @@ acceptance = [
   "Local quick and full only compile and lint the example and Cargo-managed qualification entry and run the pure aggregation contract; they never execute qualification, download references, open external sockets, or spawn reference processes",
   "After separate authorization, exit zero requires one clean GitHub Actions Linux checkout at exact GITHUB_SHA and an explicit twelve-line 12-of-12 plus cleanup report on one run and attempt; missing or unavailable evidence remains BLOCKED",
 ]
+
+[blocker]
+id = "ARCH-M2-T05-HOSTED-002"
+class = "test_evidence"
+gate = "review"
+root_cause = "The first hosted-ordering repair fixes the causal event-order defect, but its repair-only delta adds 182 classified test lines with zero classified code lines, exceeding the mandatory allowance of 120 by 62."
+derivatives = ["M2-T05-HOSTED-BUDGET-001", "Architect targeted verdict ESCALATE on c31290eb572aedc236be3613d23136fae17406ff"]
+owner = "team_lead"
+evidence = "Candidate c31290eb572aedc236be3613d23136fae17406ff failed the repair-base budget at 0/182 with allowance 120. The user-authorized local superseding compaction based on that parent passes the repair base at 0/120 and original ticket base at 1086/1144; exact-SHA Architect/QA verification remains pending."
+authorization = "consumed: user authorized local scope 1 superseding compaction only"
+unblock_condition = "Bounded exact-SHA Architect and QA verification must confirm both budgets and the frozen hosted-ordering behavior; no hosted rerun or remote action is credited."
 +++
 
 # M2-T05: Add the twelve-case fail-closed hosted UDP qualification
@@ -160,6 +171,15 @@ git diff --check
   retaining strict raw event-order rejection while proving the bounded
   target-shutdown/application-acknowledgement handshake for all three affected
   rows.
+- Superseding compaction provenance is parent
+  `c31290eb572aedc236be3613d23136fae17406ff`, repair base
+  `a168b89eb8dcd0c7a06df06b95a57d63893f2ab6`, and original ticket base
+  `6946c9ae0099d617b21ba5575d254cf366d50122`. The local repair-base gate passes
+  at code/tests `0/120` with allowance `120`; the original-base gate passes at
+  `1086/1144` with allowance `1206`. The full qualification contract passed
+  `13/13`, and the exact affected scheduling regression passed 100 consecutive
+  executions. `ARCH-M2-T05-HOSTED-002` remains review-blocking until bounded
+  exact-SHA Architect and QA verification.
 - This local evidence does not claim a remote rerun or hosted repair result.
   Qualification rerun, push, publication, and reference-provider operations
   remain separately authorized release actions.

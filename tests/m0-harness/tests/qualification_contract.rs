@@ -4,8 +4,8 @@ mod qualification;
 use qualification::{
     CaseFailure, CaseSpec, CleanupState, Direction, HostedContext, Method, QualificationOps,
     Reference, SetupAvailability, TCP_CASES, TCP_EXCHANGE_ORDER, TcpExchangeEvent,
-    TcpExchangeState, TcpTargetShutdownNotifier, Transport, UDP_CASES, execute_hosted,
-    execute_with_setup, tcp_target_shutdown_gate, validate_hosted,
+    TcpExchangeState, TcpTargetGate, Transport, UDP_CASES, execute_hosted, execute_with_setup,
+    tcp_shutdown_gate, validate_hosted,
 };
 use std::thread;
 use std::time::Duration;
@@ -416,95 +416,61 @@ fn tcp_exchange_accepts_hosted_sing_box_reference_client_observation_order() {
     use Direction::ReferenceClient;
     use TcpExchangeEvent as E;
 
-    let wait = Duration::from_millis(10);
     let bounded = Duration::from_millis(100);
     let affected: Vec<_> = TCP_CASES
         .into_iter()
         .filter(|case| case.reference == Reference::SingBox && case.direction == ReferenceClient)
+        .map(|case| case.id)
         .collect();
-    assert_eq!(
-        affected.iter().map(|case| case.id).collect::<Vec<_>>(),
-        ["M1-INT-003", "M1-INT-007", "M1-INT-011"]
-    );
+    assert_eq!(affected, ["M1-INT-003", "M1-INT-007", "M1-INT-011"]);
     let mut raw_exchange = TcpExchangeState::default();
     for event in TCP_EXCHANGE_ORDER[..3].iter().copied() {
         raw_exchange.record(event).expect("ordered exchange prefix");
     }
     assert!(raw_exchange.record(E::ApplicationCleanEof).is_err());
 
-    let start_target =
-        |target: TcpTargetShutdownNotifier, result: Result<(), String>, timeout: Duration| {
-            thread::spawn(move || target.synchronize(result, timeout))
-        };
+    let start_target = |target: TcpTargetGate, result: Result<(), String>, timeout: Duration| {
+        thread::spawn(move || target.finish(result, timeout))
+    };
 
-    for case in affected {
-        let (target_shutdown, application_gate) = tcp_target_shutdown_gate();
-        let target = start_target(target_shutdown, Ok(()), bounded);
-        let mut exchange = TcpExchangeState::default();
-        for event in TCP_EXCHANGE_ORDER[..5].iter().copied() {
-            exchange.record(event).expect("ordered exchange prefix");
-        }
-        let acknowledgement = application_gate
-            .wait(wait)
-            .expect("application observes target shutdown");
-        assert!(
-            !target.is_finished(),
-            "{} target owner completed before application acknowledgement",
-            case.id
-        );
-        exchange.record(E::ApplicationCleanEof).expect("clean EOF");
-        acknowledgement
-            .complete(Ok(()))
-            .expect("application success acknowledgement");
-        target
-            .join()
-            .expect("target owner")
-            .expect("target success");
-        assert!(exchange.success());
+    let (target_shutdown, application_gate) = tcp_shutdown_gate();
+    let target = start_target(target_shutdown, Ok(()), bounded);
+    let mut exchange = TcpExchangeState::default();
+    for event in TCP_EXCHANGE_ORDER[..5].iter().copied() {
+        exchange.record(event).expect("ordered exchange prefix");
     }
+    let acknowledgement = application_gate.wait(bounded).expect("target shutdown");
+    assert!(!target.is_finished());
+    exchange.record(E::ApplicationCleanEof).expect("clean EOF");
+    acknowledgement.send(Ok(())).expect("application ack");
+    target.join().unwrap().unwrap();
+    assert!(exchange.success());
 
-    for (target_result, acknowledgement, timeout, expected) in [
-        (
-            Err("target probe failed"),
-            None,
-            bounded,
-            "target probe failed",
-        ),
-        (
-            Ok(()),
-            Some(Err("application probe failed")),
-            bounded,
-            "application probe failed",
-        ),
-        (Ok(()), None, bounded, "acknowledgement omitted"),
-        (Ok(()), Some(Ok(())), Duration::ZERO, "timed out"),
-    ] {
-        let (target_shutdown, application_gate) = tcp_target_shutdown_gate();
-        let target = start_target(
-            target_shutdown,
-            target_result.map_err(str::to_owned),
-            timeout,
-        );
-        if let Ok(application) = application_gate.wait(wait) {
-            match acknowledgement {
-                Some(result) => {
-                    let _ = application.complete(result.map_err(str::to_owned));
-                }
-                None => drop(application),
-            }
+    let assert_failed = |target_result: Result<(), &str>,
+                         acknowledgement: Option<Result<(), &str>>,
+                         timeout: Duration,
+                         expected: &str| {
+        let target_failed = target_result.is_err();
+        let (owner, application_gate) = tcp_shutdown_gate();
+        let target = start_target(owner, target_result.map_err(str::to_owned), timeout);
+        let application = application_gate.wait(bounded);
+        assert_eq!(application.is_err(), target_failed);
+        if let (Ok(application), Some(result)) = (application, acknowledgement) {
+            let _ = application.send(result.map_err(str::to_owned));
         }
-        let error = target
-            .join()
-            .expect("target owner")
-            .expect_err("handshake failure must block target success");
+        let error = target.join().unwrap().unwrap_err();
         assert!(error.contains(expected));
-    }
+    };
+    assert_failed(Err("target probe failed"), None, bounded, "target probe");
+    assert_failed(Ok(()), Some(Err("app failed")), bounded, "app failed");
+    assert_failed(Ok(()), None, bounded, "closed");
+    assert_failed(Ok(()), Some(Ok(())), Duration::ZERO, "timed out");
 
-    let (target_shutdown, application_gate) = tcp_target_shutdown_gate();
+    let (target_shutdown, application_gate) = tcp_shutdown_gate();
     drop(application_gate);
-    assert!(target_shutdown.synchronize(Ok(()), wait).is_err());
+    assert!(target_shutdown.finish(Ok(()), bounded).is_err());
 
-    let (target_shutdown, application_gate) = tcp_target_shutdown_gate();
+    let (target_shutdown, application_gate) = tcp_shutdown_gate();
     drop(target_shutdown);
-    assert!(application_gate.wait(wait).is_err());
+    assert!(application_gate.wait(bounded).is_err());
 }
