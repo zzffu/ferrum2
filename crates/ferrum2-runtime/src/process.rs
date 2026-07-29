@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::sync::watch;
+use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
 
 use crate::owner::OwnerGuard;
@@ -189,6 +190,7 @@ pub enum ProcessRootExit<E> {
     Completed,
     Failed(E),
     Panicked,
+    JoinFailed,
 }
 
 /// Deterministic first cause that triggered process termination.
@@ -223,6 +225,9 @@ pub enum ProcessCleanupFailure<E> {
         error: E,
     },
     RootPanicked {
+        root: ProcessRootId,
+    },
+    RootJoinFailed {
         root: ProcessRootId,
     },
     OwnerMismatch {
@@ -491,19 +496,59 @@ where
             );
         }
 
-        let mut active = prepared
+        let mut prepared = prepared.into_iter();
+        let mut unstarted = Vec::with_capacity(prepared.len());
+        while let Some(entry) = prepared.next() {
+            let PreparedEntry {
+                id: root_id,
+                root,
+                guard,
+            } = entry;
+            match catch_unwind(AssertUnwindSafe(|| root.run(cancellation.clone()))) {
+                Ok(future) => unstarted.push(UnstartedEntry {
+                    id: root_id,
+                    future,
+                    guard,
+                }),
+                Err(_) => {
+                    drop(guard);
+                    cancellation_source.quiesce();
+                    states.push(ProcessState::Rollback);
+                    let mut cleanup_failure =
+                        rollback_prepared(prepared.collect(), &registry).await;
+                    let handoff_cleanup = rollback_unstarted(unstarted, &registry).await;
+                    if cleanup_failure.is_none() {
+                        cleanup_failure = handoff_cleanup;
+                    }
+                    return finish_report(
+                        states,
+                        ProcessCause::ActivationPanicked { root: root_id },
+                        0,
+                        cleanup_failure,
+                        FinishContext {
+                            process_guard,
+                            baseline,
+                            registry: &registry,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut active = unstarted
             .into_iter()
             .map(|entry| {
-                let future = entry.root.run(cancellation.clone());
+                let active_guard = registry.track_active_process_root();
                 drop(entry.guard);
                 ActiveEntry {
                     id: entry.id,
-                    future: Some(future),
-                    guard: Some(registry.track_active_process_root()),
+                    task: Some(tokio::spawn(entry.future)),
+                    guard: Some(active_guard),
                 }
             })
             .collect::<Vec<_>>();
         states.push(ProcessState::Active);
+        tokio::task::yield_now().await;
 
         let cause = tokio::select! {
             biased;
@@ -536,10 +581,11 @@ where
             if timed_out {
                 states.push(ProcessState::Forced);
                 cancellation_source.force();
-                for event in poll_roots_once(&mut active, &registry).await {
+                let forced = force_remaining_roots(&mut active, &registry).await;
+                forced_roots = forced.count;
+                for event in forced.events {
                     record_cleanup_event(event, &mut cleanup_failure);
                 }
-                forced_roots = force_remaining_roots(&mut active, &registry);
                 break;
             }
         }
@@ -564,15 +610,29 @@ struct PreparedEntry<E> {
     guard: OwnerGuard,
 }
 
+struct UnstartedEntry<E> {
+    id: ProcessRootId,
+    future: ProcessFuture<Result<(), E>>,
+    guard: OwnerGuard,
+}
+
 struct ActiveEntry<E> {
     id: ProcessRootId,
-    future: Option<ProcessFuture<Result<(), E>>>,
+    task: Option<JoinHandle<Result<(), E>>>,
     guard: Option<OwnerGuard>,
 }
 
 impl<E> ActiveEntry<E> {
     fn is_running(&self) -> bool {
-        self.future.is_some()
+        self.task.is_some()
+    }
+}
+
+impl<E> Drop for ActiveEntry<E> {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -614,6 +674,36 @@ async fn rollback_prepared<E: 'static>(
     cleanup_failure
 }
 
+async fn rollback_unstarted<E: Send + 'static>(
+    mut unstarted: Vec<UnstartedEntry<E>>,
+    registry: &OwnerRegistry,
+) -> Option<ProcessCleanupFailure<E>> {
+    let mut cleanup_failure = None;
+    while let Some(entry) = unstarted.pop() {
+        let task = tokio::spawn(entry.future);
+        task.abort();
+        let result = task.await;
+        drop(entry.guard);
+        registry.record_process_root_rollback();
+        let failure = match result {
+            Err(error) if error.is_cancelled() => None,
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(ProcessCleanupFailure::RootFailed {
+                root: entry.id,
+                error,
+            }),
+            Err(error) if error.is_panic() => {
+                Some(ProcessCleanupFailure::RootPanicked { root: entry.id })
+            }
+            Err(_) => Some(ProcessCleanupFailure::RootJoinFailed { root: entry.id }),
+        };
+        if cleanup_failure.is_none() {
+            cleanup_failure = failure;
+        }
+    }
+    cleanup_failure
+}
+
 async fn catch_process_future<T>(mut future: ProcessFuture<T>) -> Result<T, ()> {
     std::future::poll_fn(|context| {
         match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
@@ -645,17 +735,15 @@ fn poll_next_root<E>(
     context: &mut Context<'_>,
 ) -> Poll<RootEvent<E>> {
     for entry in active {
-        let Some(future) = entry.future.as_mut() else {
+        let Some(task) = entry.task.as_mut() else {
             continue;
         };
-        let result = catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context)));
-        let exit = match result {
-            Ok(Poll::Ready(Ok(()))) => ProcessRootExit::Completed,
-            Ok(Poll::Ready(Err(error))) => ProcessRootExit::Failed(error),
-            Ok(Poll::Pending) => continue,
-            Err(_) => ProcessRootExit::Panicked,
+        let result = match Pin::new(task).poll(context) {
+            Poll::Ready(result) => result,
+            Poll::Pending => continue,
         };
-        entry.future.take();
+        let exit = root_exit(result);
+        entry.task.take();
         entry.guard.take();
         registry.record_process_root_reap();
         return Poll::Ready(RootEvent {
@@ -666,49 +754,51 @@ fn poll_next_root<E>(
     Poll::Pending
 }
 
-async fn poll_roots_once<E>(
-    active: &mut [ActiveEntry<E>],
-    registry: &OwnerRegistry,
-) -> Vec<RootEvent<E>> {
-    std::future::poll_fn(|context| {
-        let mut events = Vec::new();
-        for entry in active.iter_mut() {
-            let Some(future) = entry.future.as_mut() else {
-                continue;
-            };
-            let result = catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context)));
-            let exit = match result {
-                Ok(Poll::Ready(Ok(()))) => Some(ProcessRootExit::Completed),
-                Ok(Poll::Ready(Err(error))) => Some(ProcessRootExit::Failed(error)),
-                Ok(Poll::Pending) => None,
-                Err(_) => Some(ProcessRootExit::Panicked),
-            };
-            if let Some(exit) = exit {
-                entry.future.take();
-                entry.guard.take();
-                registry.record_process_root_reap();
-                events.push(RootEvent {
-                    root: entry.id,
-                    exit,
-                });
-            }
-        }
-        Poll::Ready(events)
-    })
-    .await
+fn root_exit<E>(result: Result<Result<(), E>, JoinError>) -> ProcessRootExit<E> {
+    match result {
+        Ok(Ok(())) => ProcessRootExit::Completed,
+        Ok(Err(error)) => ProcessRootExit::Failed(error),
+        Err(error) if error.is_panic() => ProcessRootExit::Panicked,
+        Err(_) => ProcessRootExit::JoinFailed,
+    }
 }
 
-fn force_remaining_roots<E>(active: &mut [ActiveEntry<E>], registry: &OwnerRegistry) -> usize {
-    let mut forced = 0;
+struct ForcedRoots<E> {
+    count: usize,
+    events: Vec<RootEvent<E>>,
+}
+
+async fn force_remaining_roots<E>(
+    active: &mut [ActiveEntry<E>],
+    registry: &OwnerRegistry,
+) -> ForcedRoots<E> {
+    let forced = active.iter().filter(|entry| entry.is_running()).count();
+    for entry in active.iter() {
+        if let Some(task) = &entry.task {
+            task.abort();
+        }
+    }
+
+    let mut events = Vec::new();
     for entry in active {
-        if entry.future.take().is_some() {
+        if let Some(task) = entry.task.take() {
+            let result = task.await;
             entry.guard.take();
             registry.record_process_root_reap();
-            forced += 1;
+            match result {
+                Err(error) if error.is_cancelled() => {}
+                result => events.push(RootEvent {
+                    root: entry.id,
+                    exit: root_exit(result),
+                }),
+            }
         }
     }
     registry.record_process_forced_roots(forced);
-    forced
+    ForcedRoots {
+        count: forced,
+        events,
+    }
 }
 
 fn record_cleanup_event<E>(
@@ -725,6 +815,9 @@ fn record_cleanup_event<E>(
             error,
         }),
         ProcessRootExit::Panicked => Some(ProcessCleanupFailure::RootPanicked { root: event.root }),
+        ProcessRootExit::JoinFailed => {
+            Some(ProcessCleanupFailure::RootJoinFailed { root: event.root })
+        }
     };
 }
 

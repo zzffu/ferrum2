@@ -10,11 +10,11 @@ pub struct OwnerSnapshot {
     pub prepared_process_roots: usize,
     /// Required process roots currently owned by the active supervisor.
     pub active_process_roots: usize,
-    /// Active process roots whose completion was observed exactly once.
+    /// Active process roots whose terminal join was observed exactly once.
     pub process_root_reaps: usize,
     /// Prepared roots whose rollback completed or failed exactly once.
     pub process_root_rollbacks: usize,
-    /// Active roots dropped after the process grace deadline.
+    /// Active roots explicitly force-cancelled and joined after the grace deadline.
     pub process_forced_roots: usize,
     /// Children currently owned by a supervisor `JoinSet`.
     pub active_supervisor_children: usize,

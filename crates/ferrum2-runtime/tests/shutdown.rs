@@ -3,6 +3,7 @@ use std::future::pending;
 use std::io;
 use std::net::Ipv4Addr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ferrum2_runtime::{
@@ -152,6 +153,13 @@ enum ProcessShutdownBehavior {
 struct ShutdownProcessRoot {
     behavior: ProcessShutdownBehavior,
     phases: std::sync::Arc<Mutex<Vec<ProcessCancellationPhase>>>,
+    terminal_markers: std::sync::Arc<AtomicUsize>,
+}
+
+impl Drop for ShutdownProcessRoot {
+    fn drop(&mut self) {
+        self.terminal_markers.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl PreparedProcessRoot<&'static str> for ShutdownProcessRoot {
@@ -200,15 +208,19 @@ async fn start_process_shutdown_case(
     tokio::sync::oneshot::Sender<()>,
     OwnerRegistry,
     std::sync::Arc<Mutex<Vec<ProcessCancellationPhase>>>,
+    std::sync::Arc<AtomicUsize>,
 ) {
     let phases = std::sync::Arc::new(Mutex::new(Vec::new()));
     let phases_for_root = std::sync::Arc::clone(&phases);
+    let terminal_markers = std::sync::Arc::new(AtomicUsize::new(0));
+    let terminal_markers_for_root = std::sync::Arc::clone(&terminal_markers);
     let registry = OwnerRegistry::new();
     let supervisor = ProcessSupervisor::new(
         vec![ProcessRoot::new(move || async move {
             Ok(ShutdownProcessRoot {
                 behavior,
                 phases: phases_for_root,
+                terminal_markers: terminal_markers_for_root,
             })
         })],
         grace,
@@ -221,7 +233,7 @@ async fn start_process_shutdown_case(
     }));
     for _ in 0..100 {
         if registry.snapshot().active_process_roots == 1 {
-            return (run, shutdown_tx, registry, phases);
+            return (run, shutdown_tx, registry, phases, terminal_markers);
         }
         tokio::task::yield_now().await;
     }
@@ -230,11 +242,12 @@ async fn start_process_shutdown_case(
 
 #[tokio::test(start_paused = true)]
 async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
-    let (graceful, graceful_tx, graceful_registry, graceful_phases) = start_process_shutdown_case(
-        ProcessShutdownBehavior::Drain(Duration::from_secs(2)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let (graceful, graceful_tx, graceful_registry, graceful_phases, graceful_terminal_markers) =
+        start_process_shutdown_case(
+            ProcessShutdownBehavior::Drain(Duration::from_secs(2)),
+            Duration::from_secs(5),
+        )
+        .await;
     graceful_tx.send(()).expect("request graceful shutdown");
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(2)).await;
@@ -257,8 +270,9 @@ async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
         [ProcessCancellationPhase::Quiescing]
     );
     assert_eq!(graceful_registry.snapshot().process_root_reaps, 1);
+    assert_eq!(graceful_terminal_markers.load(Ordering::SeqCst), 1);
 
-    let (forced, forced_tx, forced_registry, forced_phases) =
+    let (forced, forced_tx, forced_registry, forced_phases, forced_terminal_markers) =
         start_process_shutdown_case(ProcessShutdownBehavior::AwaitForce, Duration::from_secs(5))
             .await;
     forced_tx.send(()).expect("request forced shutdown");
@@ -282,21 +296,20 @@ async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
     );
     assert_eq!(
         *forced_phases.lock().expect("phase lock"),
-        [
-            ProcessCancellationPhase::Quiescing,
-            ProcessCancellationPhase::Forced,
-        ]
+        [ProcessCancellationPhase::Quiescing]
     );
     let forced_snapshot = forced_registry.snapshot();
     assert_eq!(forced_snapshot.process_root_reaps, 1);
     assert_eq!(forced_snapshot.process_forced_roots, 1);
     assert_eq!(forced_snapshot.active_process_roots, 0);
+    assert_eq!(forced_terminal_markers.load(Ordering::SeqCst), 1);
 
-    let (failed, failed_tx, failed_registry, _failed_phases) = start_process_shutdown_case(
-        ProcessShutdownBehavior::CleanupFailure,
-        Duration::from_secs(5),
-    )
-    .await;
+    let (failed, failed_tx, failed_registry, _failed_phases, failed_terminal_markers) =
+        start_process_shutdown_case(
+            ProcessShutdownBehavior::CleanupFailure,
+            Duration::from_secs(5),
+        )
+        .await;
     failed_tx.send(()).expect("request cleanup failure");
     let failed = failed.await.expect("failed process owner");
     assert_eq!(failed.exit_kind(), ProcessExitKind::Failed);
@@ -307,4 +320,5 @@ async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
     ));
     assert_eq!(failed_registry.snapshot().active_process_roots, 0);
     assert_eq!(failed_registry.snapshot().process_root_reaps, 1);
+    assert_eq!(failed_terminal_markers.load(Ordering::SeqCst), 1);
 }

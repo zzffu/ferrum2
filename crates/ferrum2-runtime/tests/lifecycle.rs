@@ -1005,6 +1005,106 @@ async fn external_shutdown_during_preparation_cancels_the_same_transaction_and_r
     assert_eq!(snapshot.active_process_roots, 0);
 }
 
+struct HandoffRoot {
+    index: usize,
+    panic_on_run: bool,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl Drop for HandoffRoot {
+    fn drop(&mut self) {
+        self.events
+            .lock()
+            .expect("event lock")
+            .push(format!("terminal:{}", self.index));
+    }
+}
+
+impl PreparedProcessRoot<&'static str> for HandoffRoot {
+    fn activate(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn run(
+        self: Box<Self>,
+        mut cancellation: ferrum2_runtime::ProcessCancellation,
+    ) -> ProcessFuture<Result<(), &'static str>> {
+        self.events
+            .lock()
+            .expect("event lock")
+            .push(format!("handoff:{}", self.index));
+        assert!(!self.panic_on_run, "scripted synchronous run panic");
+        Box::pin(async move {
+            let _root_owner = self;
+            cancellation.cancelled().await;
+            pending().await
+        })
+    }
+
+    fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), &'static str>> {
+        self.events
+            .lock()
+            .expect("event lock")
+            .push(format!("rollback:{}", self.index));
+        Box::pin(ready(Ok(())))
+    }
+}
+
+#[tokio::test]
+async fn synchronous_run_panic_cleans_handed_off_and_remaining_roots_in_reverse_order() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let roots = (0..3)
+        .map(|index| {
+            let events = Arc::clone(&events);
+            ProcessRoot::new(move || async move {
+                Ok(HandoffRoot {
+                    index,
+                    panic_on_run: index == 1,
+                    events,
+                })
+            })
+        })
+        .collect();
+    let registry = OwnerRegistry::new();
+    let supervisor =
+        ProcessSupervisor::new(roots, Duration::ZERO, registry.clone()).expect("three roots");
+
+    let report = supervisor.run_until(pending::<()>()).await;
+
+    assert_eq!(report.exit_kind(), ProcessExitKind::Failed);
+    assert!(matches!(
+        report.cause(),
+        ProcessCause::ActivationPanicked { root } if root.get() == 1
+    ));
+    assert!(report.cleanup_failure().is_none());
+    assert_eq!(
+        report.states(),
+        &[
+            ProcessState::Validated,
+            ProcessState::Preparing,
+            ProcessState::Prepared,
+            ProcessState::Rollback,
+            ProcessState::Stopped,
+        ]
+    );
+    assert_eq!(
+        *events.lock().expect("event lock"),
+        [
+            "handoff:0",
+            "handoff:1",
+            "terminal:1",
+            "rollback:2",
+            "terminal:2",
+            "terminal:0",
+        ]
+    );
+    let snapshot = registry.snapshot();
+    assert_eq!(snapshot.process_root_rollbacks, 2);
+    assert_eq!(snapshot.process_root_reaps, 0);
+    assert_eq!(snapshot.prepared_process_roots, 0);
+    assert_eq!(snapshot.active_process_roots, 0);
+}
+
 #[derive(Clone, Copy)]
 enum RootRun {
     Complete,
