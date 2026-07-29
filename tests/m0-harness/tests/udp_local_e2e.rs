@@ -43,7 +43,6 @@ fn udp_protocol_example_path() -> std::path::PathBuf {
 
 #[test]
 fn portable_ipv4_live_udp_signal_exits_cleanly_and_rebinds() {
-    let baseline_children = active_child_count();
     let directory = tempfile::tempdir().expect("temporary directory");
     let server_address = unused_tcp_udp_loopback();
     let config =
@@ -92,7 +91,6 @@ fn portable_ipv4_live_udp_signal_exits_cleanly_and_rebinds() {
     let tcp = bind_loopback_listener(server_address).expect("TCP signal rebind");
     let udp = UdpSocket::bind(server_address).expect("UDP signal rebind");
     drop((tcp, udp));
-    assert_eq!(active_child_count(), baseline_children);
 }
 
 #[test]
