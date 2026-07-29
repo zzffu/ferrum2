@@ -121,6 +121,15 @@ git diff --check
 - Ticket budget `PASS`: code `11582`, tests `18721`, ratio `1.616`,
   baseline `2.041`; delta `954/774`, allowance `1074`. Mechanical repair
   delta was code `0`, tests `35`, allowance `120`.
+- Final assembly gate reliability root `M2-T04-PORT-001` diagnosed a
+  Windows-only test-fixture mismatch between TCP dynamic allocation and
+  UDP excluded ranges, not a product bind failure. Mechanical repair
+  `87c3c32c508222595cd78f442ce6091b5818e1ec`, integrated as
+  `3fae42ab10d5ef97c0e8924a53d5f6c6b9281569`, reserves and retains a
+  compatible TCP+UDP pair with a 256-attempt expected-error bound. The
+  unchanged occupied-resource assertion passed `256/256`; repair budget
+  passed at code `0`, tests `23`, allowance `120`; exact integration full
+  passed `4/4`.
 - Accepted review debt: `QA-M2-T02-N01` is satisfied at all T04-owned
   request/response commit call sites. `ARCH-M2-T04-N01` and
   `QA-M2-T04-N01` retain IPv6 as **NOT EXECUTED** pending an exact-SHA

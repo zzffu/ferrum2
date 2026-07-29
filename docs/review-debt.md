@@ -46,6 +46,14 @@ problem or the user explicitly reopens the contract.
 - **Follow-up trigger:** 仅当authoritative quick/full或hosted exact-SHA gate
   再现同类失败，或有证据指向product listener ownership/lifecycle缺陷时，
   才建立新的diagnosis/repair root；不得仅凭本次advisory重开T04/T05。
+- **2026-07-29 follow-up:** 两个full gate并发运行时，`6fd07a0`上的
+  lifecycle registry witness再次超时；移除并发后，同一用例单次及`20/20`
+  均通过，后续serialized full也通过，因此没有product lifecycle defect
+  证据。另一次serialized full暴露的是独立fixture缺陷：TCP动态端口可能落入
+  Windows UDP exclusion range。`M2-T04-PORT-001`以`87c3c32`的bounded
+  paired reservation修复并在`3fae42a`通过full `4/4`。本advisory继续保留，
+  并收窄为不得并发运行resource-heavy full gates；若serialized gate再次出现
+  readiness failure，再建立新的root。
 <!-- review-debt:006f5eb5f3bb -->
 - `M2-T05` `qa` `c31290eb572a`: QA-M2-T05-HOSTED-N01: **RESOLVED at `0395d7dfb170`** by replacing the 10 ms wait with the bounded 100 ms test deadline.
 <!-- review-debt:ab2f5bf41a1f -->

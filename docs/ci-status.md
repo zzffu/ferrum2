@@ -63,6 +63,26 @@
   passed focused `5/5`, full workflow `73/73`, targeted Architect `PASS`,
   and QA `PASS`. Preliminary local product/control integration is
   `6a4e35062bd6d1631a029230e7cffdc3ba0f7db6`.
+- **Final local gate reliability repair:** pre-repair assembly `6fd07a0`
+  first ran two full gates concurrently; one passed and the other timed
+  out while observing the production lifecycle registry. The exact failed
+  lifecycle row then passed once and `20/20` in isolation. A later
+  serialized full exposed a separate Windows fixture defect:
+  `config_cli` selected a TCP dynamic port inside a UDP exclusion range
+  and failed with `WSAEACCES` before starting the product. A bounded
+  TCP-port-to-UDP-bind probe reproduced `100/200` failures on excluded
+  ports `59999..60098`. Root `M2-T04-PORT-001` was resolved by mechanical
+  repair `87c3c32c508222595cd78f442ce6091b5818e1ec`, integrated as
+  `3fae42ab10d5ef97c0e8924a53d5f6c6b9281569`: the occupied-port fixture
+  now retains a compatible TCP+UDP pair, retries only expected
+  `PermissionDenied`/`AddrInUse` failures within 256 attempts, and keeps
+  every original assertion. Focused repetition passed `256/256`, repair
+  budget passed at `0/23` with allowance `120`, and the serialized exact
+  integration full gate passed `4/4`. The initial `record-repair` command
+  was rejected because no active repair phase had been set; no force or
+  ledger rewrite was used. The canonical root resolution contains the
+  exact repair and validation evidence, and workflow validation passes.
+  No remote action occurred.
 - **Wave-2 product integration:** exact
   `6e54cce52e5e29135acd91f6337a4516a094852e`; contains initial M2-T02
   candidate `0d88666d2f46ef85b376c12c55ffb34a784a8451`, repaired candidate
