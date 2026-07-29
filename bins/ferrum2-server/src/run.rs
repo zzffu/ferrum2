@@ -2305,14 +2305,28 @@ mod tests {
     }
 
     fn reserve_address() -> SocketAddrV4 {
-        let listener =
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve address");
-        let address = match listener.local_addr().expect("reserved address") {
-            SocketAddr::V4(address) => address,
-            SocketAddr::V6(_) => unreachable!("IPv4 reservation"),
-        };
-        drop(listener);
-        address
+        static ISSUED_SERVER_PORTS: OnceLock<Mutex<BTreeSet<u16>>> = OnceLock::new();
+        loop {
+            let tcp =
+                std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve TCP address");
+            let address = match tcp.local_addr().expect("reserved address") {
+                SocketAddr::V4(address) => address,
+                SocketAddr::V6(_) => unreachable!("IPv4 reservation"),
+            };
+            let Ok(udp) = std::net::UdpSocket::bind(address) else {
+                drop(tcp);
+                continue;
+            };
+            let inserted = ISSUED_SERVER_PORTS
+                .get_or_init(|| Mutex::new(BTreeSet::new()))
+                .lock()
+                .expect("issued server port registry")
+                .insert(address.port());
+            drop((tcp, udp));
+            if inserted {
+                return address;
+            }
+        }
     }
 
     fn server_test_config(listen: SocketAddrV4) -> (PathBuf, ValidatedServerConfig) {
@@ -2412,13 +2426,13 @@ mod tests {
             let registry = OwnerRegistry::new();
             let task_registry = registry.clone();
             let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-            let server = tokio::spawn(async move {
+            let mut server = tokio::spawn(async move {
                 run_with_registry(config, task_registry, async {
                     let _ = stopped.await;
                 })
                 .await
             });
-            wait_until_bound(listen).await;
+            wait_until_bound(&mut server, listen).await;
 
             let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
                 MethodPsk::try_from_slice(profile, psk).expect("method key"),
@@ -2532,13 +2546,13 @@ mod tests {
         let registry = OwnerRegistry::new();
         let task_registry = registry.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(async move {
+        let mut server = tokio::spawn(async move {
             run_with_registry(config, task_registry, async {
                 let _ = stopped.await;
             })
             .await
         });
-        wait_until_bound(listen).await;
+        wait_until_bound(&mut server, listen).await;
 
         let stalled_target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -2941,9 +2955,16 @@ mod tests {
         assert_eq!(manager_registry.snapshot().udp_buffered_bytes, 0);
     }
 
-    async fn wait_until_bound(address: SocketAddrV4) {
+    async fn wait_until_bound(
+        server: &mut tokio::task::JoinHandle<Result<(), RunError>>,
+        address: SocketAddrV4,
+    ) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
+            if server.is_finished() {
+                let result = (&mut *server).await.expect("server task before readiness");
+                panic!("server exited before readiness: {result:?}");
+            }
             match std::net::TcpListener::bind(address) {
                 Err(error) if error.kind() == io::ErrorKind::AddrInUse => return,
                 Ok(listener) => drop(listener),
@@ -2984,13 +3005,13 @@ mod tests {
         let baseline = registry.snapshot();
         let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
         let task_registry = registry.clone();
-        let run_task = tokio::spawn(async move {
+        let mut run_task = tokio::spawn(async move {
             run_with_registry(config, task_registry, async {
                 let _ = shutdown_receiver.await;
             })
             .await
         });
-        wait_until_bound(listen).await;
+        wait_until_bound(&mut run_task, listen).await;
 
         let target_accept =
             tokio::spawn(async move { target_listener.accept().await.expect("target accept").0 });

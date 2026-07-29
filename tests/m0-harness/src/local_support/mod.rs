@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -386,6 +386,65 @@ pub fn wait_for_bound(child: &mut ChildGuard, address: SocketAddrV4) {
     }
 }
 
+pub fn wait_for_tcp_udp_bound(child: &mut ChildGuard, address: SocketAddrV4) {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    let mut occupied_confirmations = 0_usize;
+    loop {
+        child.assert_running();
+        let tcp = bind_loopback_listener(address);
+        let udp = UdpSocket::bind(address);
+        match (tcp, udp) {
+            (Err(tcp_error), Err(udp_error))
+                if tcp_error.kind() == io::ErrorKind::AddrInUse
+                    && udp_error.kind() == io::ErrorKind::AddrInUse =>
+            {
+                occupied_confirmations += 1;
+                if occupied_confirmations >= READINESS_CONFIRMATIONS {
+                    thread::sleep(READINESS_POLL);
+                    child.assert_running();
+                    let tcp_error =
+                        bind_loopback_listener(address).expect_err("TCP readiness confirmation");
+                    let udp_error =
+                        UdpSocket::bind(address).expect_err("UDP readiness confirmation");
+                    if tcp_error.kind() == io::ErrorKind::AddrInUse
+                        && udp_error.kind() == io::ErrorKind::AddrInUse
+                    {
+                        return;
+                    }
+                    occupied_confirmations = 0;
+                }
+            }
+            (Ok(tcp), Ok(udp)) => {
+                drop((tcp, udp));
+                occupied_confirmations = 0;
+            }
+            (Ok(tcp), Err(udp_error)) => {
+                drop(tcp);
+                assert_eq!(
+                    udp_error.kind(),
+                    io::ErrorKind::AddrInUse,
+                    "UDP readiness bind probe failed: {udp_error}"
+                );
+                occupied_confirmations = 0;
+            }
+            (Err(tcp_error), Ok(udp)) => {
+                drop(udp);
+                assert_eq!(
+                    tcp_error.kind(),
+                    io::ErrorKind::AddrInUse,
+                    "TCP readiness bind probe failed: {tcp_error}"
+                );
+                occupied_confirmations = 0;
+            }
+            (Err(tcp_error), Err(udp_error)) => {
+                panic!("dual readiness bind probe failed: TCP={tcp_error}; UDP={udp_error}");
+            }
+        }
+        assert!(Instant::now() < deadline, "listener readiness timed out");
+        thread::sleep(READINESS_POLL);
+    }
+}
+
 pub fn wait_for_metrics_ready(
     child: &mut ChildGuard,
     proxy: SocketAddrV4,
@@ -652,6 +711,25 @@ pub fn reserve_unused_loopback() -> LoopbackReservation {
 
 pub fn unused_loopback() -> SocketAddrV4 {
     reserve_unused_loopback().release()
+}
+
+pub fn unused_tcp_udp_loopback() -> SocketAddrV4 {
+    loop {
+        let (tcp, address) = reserve_loopback();
+        let Ok(udp) = UdpSocket::bind(address) else {
+            drop(tcp);
+            continue;
+        };
+        let inserted = ISSUED_PORTS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .expect("issued-port registry")
+            .insert(address.port());
+        drop((tcp, udp));
+        if inserted {
+            return address;
+        }
+    }
 }
 
 pub fn write_client_config(
