@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import importlib.util
 import io
@@ -1959,6 +1960,25 @@ class ReviewConvergenceTests(unittest.TestCase):
         )
         return state, item, runtime, args
 
+    def root_cycle_verification_fixture(
+        self,
+    ) -> tuple[dict[str, object], workflow.Ticket, dict[str, object], argparse.Namespace]:
+        state, item, runtime, args = self.superseding_fixture(
+            include_repair_finding=True
+        )
+        legacy_reviewers = runtime["reviews"][item.id]["reviewers"]
+        runtime["reviews"][item.id]["root_cycles"] = [
+            {
+                "root_cause_id": "B1",
+                "ticket_id": item.id,
+                "reviewers": {
+                    "architect": copy.deepcopy(legacy_reviewers["architect"]),
+                    "qa": copy.deepcopy(legacy_reviewers["qa"]),
+                },
+            }
+        ]
+        return state, item, runtime, args
+
     def test_superseding_review_preserves_escalation_consumes_scope_and_passes_gate(
         self,
     ) -> None:
@@ -2007,6 +2027,299 @@ class ReviewConvergenceTests(unittest.TestCase):
         cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
         self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
         self.assertEqual(workflow.runtime_state_errors(state), [])
+
+    def test_hosted_root_cycle_preserves_legacy_history_and_requires_one_final_sha(
+        self,
+    ) -> None:
+        state, item, runtime, legacy_args = self.superseding_fixture()
+        self.assertEqual(self._record(state, item, legacy_args), 0)
+        legacy = copy.deepcopy(runtime["reviews"][item.id]["reviewers"])
+        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+        self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
+
+        root_id = "M2-T05-HOSTED-001"
+        base_sha = "a168b89eb8dcd0c7a06df06b95a57d63893f2ab6"
+        repair_sha = "c31290eb572aedc236be3613d23136fae17406ff"
+        final_sha = "d" * 40
+        runtime["blockers"][root_id] = {
+            "id": root_id,
+            "ticket_id": item.id,
+            "class": "test_evidence",
+            "phase": "release",
+            "risk": "critical",
+            "root_cause": "hosted release evidence failed",
+            "root_cause_id": root_id,
+            "derived_from": None,
+            "status": "open",
+        }
+        self.assertEqual(
+            self._record(
+                state,
+                item,
+                self.review_args(
+                    reviewer="architect",
+                    round_name="full",
+                    verdict="block",
+                    finding=[
+                        "ARCH-M2-T05-HOSTED-001:major:"
+                        "hosted causal ordering is invalid"
+                    ],
+                    sha=base_sha,
+                    root_blocker=root_id,
+                ),
+            ),
+            1,
+        )
+        cycle = runtime["reviews"][item.id]["root_cycles"][-1]
+        cycle["reviewers"]["architect"]["full"]["recorded_at"] = (
+            "2026-07-29T00:00:00+00:00"
+        )
+        runtime["repairs"][item.id].append(
+            {
+                "class": "substantive",
+                "root_cause_id": root_id,
+                "consumes_budget": True,
+                "recorded_at": "2026-07-29T00:01:00+00:00",
+            }
+        )
+        self.assertEqual(
+            self._record(
+                state,
+                item,
+                self.review_args(
+                    reviewer="architect",
+                    round_name="targeted",
+                    verdict="escalate",
+                    resolved=["ARCH-M2-T05-HOSTED-001"],
+                    new_finding=[
+                        "ARCH-M2-T05-HOSTED-002:major:introduced_by_repair:"
+                        "repair exceeds its test budget"
+                    ],
+                    sha=repair_sha,
+                    root_blocker=root_id,
+                ),
+            ),
+            1,
+        )
+        self.assertEqual(
+            self._record(
+                state,
+                item,
+                self.review_args(
+                    reviewer="qa",
+                    round_name="full",
+                    verdict="pass_with_notes",
+                    note=["hosted rerun remains release evidence"],
+                    sha=repair_sha,
+                    root_blocker=root_id,
+                ),
+            ),
+            0,
+        )
+        self.assertEqual(runtime["reviews"][item.id]["reviewers"], legacy)
+        passed, failures = workflow.review_gate_status(item, runtime, cfg)
+        self.assertFalse(passed)
+        self.assertIn("missing architect final review", failures)
+        self.assertIn("missing qa final review", failures)
+
+        cycle = runtime["reviews"][item.id]["root_cycles"][-1]
+        architect_targeted = cycle["reviewers"]["architect"]["targeted"]
+        architect_targeted["recorded_at"] = "2026-07-29T00:02:00+00:00"
+        qa_full = cycle["reviewers"]["qa"]["full"]
+        qa_full["recorded_at"] = "2026-07-29T00:02:00+00:00"
+        runtime["repairs"][item.id].append(
+            {
+                "class": "substantive",
+                "root_cause_id": root_id,
+                "consumes_budget": True,
+                "budget_override_authorization_scope": "hosted-repair-override",
+                "recorded_at": "2026-07-29T00:03:00+00:00",
+            }
+        )
+        runtime["repair_overrides"][root_id] = [
+            {"authorization_scope": "hosted-repair-override"}
+        ]
+        runtime["authorizations"]["hosted-repair-override"] = {
+            "kind": "local",
+            "status": "revoked",
+            "actions": ["repair_budget_override"],
+            "tickets": [item.id],
+            "blocker_classes": ["test_evidence"],
+            "max_risk": "critical",
+            "remote_effects": False,
+            "uses": 1,
+            "max_uses": 1,
+        }
+        for reviewer in ("architect", "qa"):
+            runtime["authorizations"][f"hosted-review-{reviewer}"] = {
+                "kind": "local",
+                "status": "granted",
+                "actions": ["review_round_override"],
+                "tickets": [item.id],
+                "blocker_classes": ["test_evidence"],
+                "max_risk": "critical",
+                "remote_effects": False,
+                "uses": 0,
+                "max_uses": 1,
+            }
+        runtime["phases"][item.id] = {
+            "ticket_id": item.id,
+            "phase": "repair",
+            "branch": "codex/repair/m2-t05-hosted",
+            "worktree": str(Path.cwd().resolve()),
+            "candidate_sha": final_sha,
+            "root_cause_id": root_id,
+        }
+
+        self.assertEqual(
+            self._record(
+                state,
+                item,
+                self.review_args(
+                    reviewer="architect",
+                    round_name="superseding",
+                    verdict="pass_with_notes",
+                    resolved=["ARCH-M2-T05-HOSTED-002"],
+                    note=["hosted rerun remains separately authorized release evidence"],
+                    sha=final_sha,
+                    root_blocker=root_id,
+                    authorization_scope="hosted-review-architect",
+                ),
+            ),
+            0,
+        )
+        passed, failures = workflow.review_gate_status(item, runtime, cfg)
+        self.assertFalse(passed)
+        self.assertEqual(failures, ["missing qa final review"])
+        self.assertEqual(
+            self._record(
+                state,
+                item,
+                self.review_args(
+                    reviewer="qa",
+                    round_name="superseding",
+                    verdict="pass",
+                    sha=final_sha,
+                    root_blocker=root_id,
+                    authorization_scope="hosted-review-qa",
+                ),
+            ),
+            0,
+        )
+
+        cycle = runtime["reviews"][item.id]["root_cycles"][-1]
+        self.assertEqual(cycle["root_cause_id"], root_id)
+        self.assertEqual(cycle["ticket_id"], item.id)
+        self.assertEqual(runtime["reviews"][item.id]["reviewers"], legacy)
+        self.assertEqual(
+            cycle["reviewers"]["architect"]["targeted"]["findings"][0]["origin"],
+            "introduced_by_repair",
+        )
+        for reviewer in ("architect", "qa"):
+            final = cycle["reviewers"][reviewer]["superseding"]
+            self.assertEqual(final["candidate_sha"], final_sha)
+            scope = runtime["authorizations"][f"hosted-review-{reviewer}"]
+            self.assertEqual(scope["root_cause_id"], root_id)
+            self.assertEqual(scope["reviewer"], reviewer)
+        self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
+        self.assertEqual(workflow.runtime_state_errors(state), [])
+
+    def test_hosted_root_cycle_rejects_scope_drift_and_prior_evidence_mutation(
+        self,
+    ) -> None:
+        cases = [
+            ("new final finding", "does not accept new findings"),
+            ("cross root", "active repair root"),
+            ("cross ticket", "canonical root exactly"),
+            ("rewrite baseline", "already used its full review"),
+        ]
+        for name, message in cases:
+            with self.subTest(name=name):
+                state, item, runtime, args = self.root_cycle_verification_fixture()
+                if name == "new final finding":
+                    args.new_finding = [
+                        "ARCH-003:major:introduced_by_repair:new final finding"
+                    ]
+                elif name == "cross root":
+                    runtime["blockers"]["B2"] = {
+                        **runtime["blockers"]["B1"],
+                        "id": "B2",
+                        "root_cause_id": "B2",
+                    }
+                    args.root_blocker = "B2"
+                elif name == "cross ticket":
+                    runtime["blockers"]["B2"] = {
+                        **runtime["blockers"]["B1"],
+                        "id": "B2",
+                        "ticket_id": "M0-T02",
+                        "root_cause_id": "B2",
+                    }
+                    args.root_blocker = "B2"
+                else:
+                    args.round = "full"
+                    args.verdict = "block"
+                    args.finding = ["ARCH-999:major:replacement baseline"]
+                    args.new_finding = []
+                    args.resolved = []
+                    args.authorization_scope = ""
+                with self.assertRaisesRegex(workflow.WorkflowError, message):
+                    self._record(state, item, args)
+
+        state, item, runtime, args = self.root_cycle_verification_fixture()
+        self.assertEqual(self._record(state, item, args), 0)
+        reused = self.review_args(
+            reviewer="qa",
+            round_name="superseding",
+            verdict="pass",
+            sha="c" * 40,
+            root_blocker="B1",
+            authorization_scope="review-override",
+        )
+        with self.assertRaisesRegex(workflow.WorkflowError, "unused"):
+            self._record(state, item, reused)
+
+        state, item, runtime, args = self.root_cycle_verification_fixture()
+        self.assertEqual(self._record(state, item, args), 0)
+        runtime["authorizations"]["qa-review-override"] = {
+            **runtime["authorizations"]["review-override"],
+            "status": "granted",
+            "uses": 0,
+        }
+        runtime["authorizations"]["qa-review-override"].pop("root_cause_id", None)
+        runtime["authorizations"]["qa-review-override"].pop("reviewer", None)
+        runtime["phases"][item.id]["candidate_sha"] = "d" * 40
+        self.assertEqual(
+            self._record(
+                state,
+                item,
+                self.review_args(
+                    reviewer="qa",
+                    round_name="superseding",
+                    verdict="pass",
+                    sha="d" * 40,
+                    root_blocker="B1",
+                    authorization_scope="qa-review-override",
+                ),
+            ),
+            0,
+        )
+        passed, failures = workflow.review_gate_status(
+            item,
+            runtime,
+            workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
+        )
+        self.assertFalse(passed)
+        self.assertTrue(any("does not match" in failure for failure in failures))
+
+        state, item, runtime, _args = self.root_cycle_verification_fixture()
+        targeted = runtime["reviews"][item.id]["root_cycles"][0]["reviewers"][
+            "architect"
+        ]["targeted"]
+        targeted["findings"][0]["origin"] = "previously_unobservable"
+        errors = workflow.runtime_state_errors(state)
+        self.assertTrue(
+            any("preserve their ID, severity, and provenance" in error for error in errors)
+        )
 
     def test_superseding_review_rejects_unaudited_or_broadened_dispositions(
         self,

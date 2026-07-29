@@ -400,6 +400,55 @@ def empty_runtime_state() -> dict[str, Any]:
     return {"version": RUNTIME_STATE_VERSION, "revision": 0, "milestones": {}}
 
 
+def review_record_errors(
+    prefix: str,
+    round_name: str,
+    record: object,
+) -> list[str]:
+    errors: list[str] = []
+    if round_name not in REVIEW_ROUNDS or not isinstance(record, dict):
+        return [prefix + " is invalid"]
+    if record.get("round") != round_name:
+        errors.append(prefix + ".round must match its key")
+    if record.get("verdict") not in REVIEW_VERDICTS:
+        errors.append(prefix + ".verdict is invalid")
+    candidate_sha = record.get("candidate_sha", "")
+    if not (
+        isinstance(candidate_sha, str)
+        and re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", candidate_sha)
+    ):
+        errors.append(prefix + ".candidate_sha must be exact")
+    findings = record.get("findings", [])
+    if not isinstance(findings, list):
+        errors.append(prefix + ".findings must be an array")
+        return errors
+    seen_finding_ids: set[str] = set()
+    for index, finding in enumerate(findings):
+        finding_prefix = f"{prefix}.findings[{index}]"
+        if not isinstance(finding, dict):
+            errors.append(finding_prefix + " must be an object")
+            continue
+        finding_id = str(finding.get("id", "")).strip()
+        if not finding_id or finding_id in seen_finding_ids:
+            errors.append(finding_prefix + ".id must be non-empty and unique")
+        seen_finding_ids.add(finding_id)
+        if finding.get("severity") not in REVIEW_FINDING_SEVERITIES:
+            errors.append(finding_prefix + ".severity is invalid")
+        if not str(finding.get("summary", "")).strip():
+            errors.append(finding_prefix + ".summary is required")
+        if round_name == "targeted" and finding.get("new", False):
+            if finding.get("origin") not in NEW_REVIEW_BLOCKER_ORIGINS:
+                errors.append(finding_prefix + ".origin is invalid for a new finding")
+    resolved = record.get("resolved", [])
+    if (
+        not isinstance(resolved, list)
+        or any(not isinstance(item, str) or not item.strip() for item in resolved)
+        or len(resolved) != len(set(resolved))
+    ):
+        errors.append(prefix + ".resolved must contain unique non-empty IDs")
+    return errors
+
+
 def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     milestones = payload.get("milestones", {})
@@ -815,6 +864,200 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
                         )
                     else:
                         superseding_scope_counts[authorization_scope] += 1
+                root_cycles = ticket_reviews.get("root_cycles", [])
+                if not isinstance(root_cycles, list):
+                    errors.append(
+                        f"{milestone}.reviews.{ticket_id}.root_cycles must be an array"
+                    )
+                    continue
+                seen_roots: set[str] = set()
+                for cycle_index, cycle in enumerate(root_cycles):
+                    cycle_prefix = (
+                        f"{milestone}.reviews.{ticket_id}.root_cycles[{cycle_index}]"
+                    )
+                    if not isinstance(cycle, dict):
+                        errors.append(cycle_prefix + " must be an object")
+                        continue
+                    root_cause_id = str(cycle.get("root_cause_id", "")).strip()
+                    if not root_cause_id or root_cause_id in seen_roots:
+                        errors.append(
+                            cycle_prefix
+                            + ".root_cause_id must be non-empty and append-only unique"
+                        )
+                    seen_roots.add(root_cause_id)
+                    if str(cycle.get("ticket_id", "")).upper() != str(
+                        ticket_id
+                    ).upper():
+                        errors.append(
+                            cycle_prefix + ".ticket_id must match its ticket key"
+                        )
+                    try:
+                        canonical_review_root(
+                            runtime,
+                            str(ticket_id),
+                            root_cause_id,
+                            require_open=False,
+                        )
+                    except WorkflowError as exc:
+                        errors.append(cycle_prefix + f" is invalid: {exc}")
+                    cycle_reviewers = cycle.get("reviewers", {})
+                    if not isinstance(cycle_reviewers, dict):
+                        errors.append(cycle_prefix + ".reviewers must be an object")
+                        continue
+                    for reviewer, rounds in cycle_reviewers.items():
+                        reviewer_prefix = cycle_prefix + f".reviewers.{reviewer}"
+                        if reviewer not in REVIEWERS:
+                            errors.append(reviewer_prefix + " is not a valid reviewer")
+                            continue
+                        if not isinstance(rounds, dict):
+                            errors.append(reviewer_prefix + " must be an object")
+                            continue
+                        for round_name, record in rounds.items():
+                            errors.extend(
+                                review_record_errors(
+                                    reviewer_prefix + f".{round_name}",
+                                    round_name,
+                                    record,
+                                )
+                            )
+                            if isinstance(record, dict) and record.get(
+                                "reviewer"
+                            ) != reviewer:
+                                errors.append(
+                                    reviewer_prefix
+                                    + f".{round_name}.reviewer must match its key"
+                                )
+                        full = rounds.get("full")
+                        targeted = rounds.get("targeted")
+                        if not isinstance(full, dict):
+                            errors.append(reviewer_prefix + " requires a full review")
+                            continue
+                        if full.get("verdict") not in {
+                            "pass",
+                            "pass_with_notes",
+                            "block",
+                        }:
+                            errors.append(
+                                reviewer_prefix
+                                + ".full verdict must be pass, pass_with_notes, or block"
+                            )
+                        if isinstance(targeted, dict):
+                            if full.get("verdict") != "block":
+                                errors.append(
+                                    reviewer_prefix
+                                    + ".targeted requires a blocking full review"
+                                )
+                            if targeted.get("verdict") not in {
+                                "pass",
+                                "pass_with_notes",
+                                "escalate",
+                            }:
+                                errors.append(
+                                    reviewer_prefix
+                                    + ".targeted verdict must be pass, "
+                                    "pass_with_notes, or escalate"
+                                )
+                            if targeted.get("candidate_sha") == full.get(
+                                "candidate_sha"
+                            ):
+                                errors.append(
+                                    reviewer_prefix
+                                    + ".targeted candidate must differ from full"
+                                )
+                            full_blocking = {
+                                str(item.get("id")): item
+                                for item in full.get("findings", [])
+                                if isinstance(item, dict)
+                                and item.get("severity")
+                                in BLOCKING_REVIEW_SEVERITIES
+                            }
+                            resolved = targeted.get("resolved", [])
+                            resolved_ids = (
+                                set(resolved) if isinstance(resolved, list) else set()
+                            )
+                            if not resolved_ids.issubset(full_blocking):
+                                errors.append(
+                                    reviewer_prefix
+                                    + ".targeted resolved IDs must come from full"
+                                )
+                            targeted_findings = targeted.get("findings", [])
+                            targeted_ids: set[str] = set()
+                            if isinstance(targeted_findings, list):
+                                for finding in targeted_findings:
+                                    if not isinstance(finding, dict):
+                                        continue
+                                    finding_id = str(finding.get("id", ""))
+                                    targeted_ids.add(finding_id)
+                                    original = full_blocking.get(finding_id)
+                                    if finding.get("new", False):
+                                        if (
+                                            original is not None
+                                            or finding.get("origin")
+                                            != "introduced_by_repair"
+                                        ):
+                                            errors.append(
+                                                reviewer_prefix
+                                                + ".targeted new findings must be "
+                                                "introduced_by_repair with a new ID"
+                                            )
+                                    elif (
+                                        not isinstance(original, dict)
+                                        or finding.get("severity")
+                                        != original.get("severity")
+                                        or finding.get("origin")
+                                        != original.get("origin")
+                                    ):
+                                        errors.append(
+                                            reviewer_prefix
+                                            + ".targeted prior findings must preserve "
+                                            "their ID, severity, and provenance"
+                                        )
+                            expected_retained = set(full_blocking) - resolved_ids
+                            if not expected_retained.issubset(targeted_ids):
+                                errors.append(
+                                    reviewer_prefix
+                                    + ".targeted must retain every unresolved "
+                                    "full-review blocker"
+                                )
+                        superseding = rounds.get("superseding")
+                        if not isinstance(superseding, dict):
+                            continue
+                        authorization_scope = str(
+                            superseding.get("authorization_scope", "")
+                        ).strip()
+                        findings = superseding.get("findings", [])
+                        resolved = superseding.get("resolved", [])
+                        try:
+                            expected_findings, _, _ = validate_superseding_review(
+                                runtime=runtime,
+                                ticket_id=str(ticket_id),
+                                reviewer=reviewer,
+                                reviewer_rounds=rounds,
+                                candidate_sha=str(
+                                    superseding.get("candidate_sha", "")
+                                ).lower(),
+                                verdict=str(superseding.get("verdict", "")),
+                                findings=findings if isinstance(findings, list) else [],
+                                new_findings=[],
+                                resolved=resolved if isinstance(resolved, list) else [],
+                                root_cause_id=root_cause_id,
+                                authorization_scope=authorization_scope,
+                                blocking_severities=BLOCKING_REVIEW_SEVERITIES,
+                                supersedes=superseding.get("supersedes"),
+                                require_available=False,
+                                root_cycle=True,
+                            )
+                            if expected_findings != findings:
+                                raise WorkflowError(
+                                    "Superseding findings do not match frozen "
+                                    "root-cycle blocking IDs"
+                                )
+                        except WorkflowError as exc:
+                            errors.append(
+                                reviewer_prefix + f".superseding is invalid: {exc}"
+                            )
+                        else:
+                            superseding_scope_counts[authorization_scope] += 1
             for scope, count in superseding_scope_counts.items():
                 authorization = (
                     authorizations.get(scope)
@@ -2591,10 +2834,54 @@ def _review_passes(verdict: str, cfg: dict[str, Any]) -> bool:
     )
 
 
+def canonical_review_root(
+    runtime: dict[str, Any],
+    ticket_id: str,
+    root_cause_id: str,
+    *,
+    require_open: bool,
+) -> dict[str, Any]:
+    root = runtime.get("blockers", {}).get(root_cause_id)
+    if (
+        not root_cause_id
+        or not isinstance(root, dict)
+        or root.get("derived_from")
+        or str(root.get("root_cause_id", "")) != root_cause_id
+        or str(root.get("ticket_id", "")).upper() != ticket_id.upper()
+        or (require_open and root.get("status", "open") != "open")
+    ):
+        state = "open " if require_open else ""
+        raise WorkflowError(
+            f"--root-blocker must name {ticket_id}'s {state}canonical root exactly"
+        )
+    return root
+
+
+def find_root_review_cycle(
+    ticket_reviews: dict[str, Any],
+    root_cause_id: str,
+) -> dict[str, Any] | None:
+    cycles = ticket_reviews.get("root_cycles", [])
+    if not isinstance(cycles, list):
+        raise WorkflowError("Root-scoped review cycles must be an array")
+    matching = [
+        cycle
+        for cycle in cycles
+        if isinstance(cycle, dict)
+        and str(cycle.get("root_cause_id", "")) == root_cause_id
+    ]
+    if len(matching) > 1:
+        raise WorkflowError(
+            f"Canonical root {root_cause_id} already has multiple review cycles"
+        )
+    return matching[0] if matching else None
+
+
 def validate_superseding_review(
     *,
     runtime: dict[str, Any],
     ticket_id: str,
+    reviewer: str = "",
     reviewer_rounds: dict[str, Any],
     candidate_sha: str,
     verdict: str,
@@ -2607,6 +2894,7 @@ def validate_superseding_review(
     phase: dict[str, Any] | None = None,
     supersedes: object = None,
     require_available: bool = True,
+    root_cycle: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str]]:
     if any(not isinstance(item, dict) for item in findings + new_findings):
         raise WorkflowError("Superseding review findings must be objects")
@@ -2620,27 +2908,46 @@ def validate_superseding_review(
         raise WorkflowError("Superseding review does not accept new findings")
     full = reviewer_rounds.get("full")
     targeted = reviewer_rounds.get("targeted")
-    if not isinstance(full, dict) or full.get("verdict") != "block":
-        raise WorkflowError("Superseding review requires the original blocking full review")
-    if not isinstance(targeted, dict) or targeted.get("verdict") != "escalate":
-        raise WorkflowError("Superseding review requires a prior targeted escalation")
-    targeted_sha = str(targeted.get("candidate_sha", "")).lower()
-    if candidate_sha == targeted_sha:
+    if not isinstance(full, dict):
+        raise WorkflowError("Superseding review requires the original full review")
+    if root_cycle:
+        if isinstance(targeted, dict):
+            if full.get("verdict") != "block" or targeted.get("verdict") != "escalate":
+                raise WorkflowError(
+                    "Root-cycle targeted verification requires a blocking full "
+                    "review and targeted escalation"
+                )
+            prior = targeted
+        else:
+            if full.get("verdict") not in {"pass", "pass_with_notes"}:
+                raise WorkflowError(
+                    "Root-cycle verification without targeted escalation requires "
+                    "a passing baseline review"
+                )
+            prior = full
+    else:
+        if full.get("verdict") != "block":
+            raise WorkflowError(
+                "Superseding review requires the original blocking full review"
+            )
+        if not isinstance(targeted, dict) or targeted.get("verdict") != "escalate":
+            raise WorkflowError(
+                "Superseding review requires a prior targeted escalation"
+            )
+        prior = targeted
+    prior_sha = str(prior.get("candidate_sha", "")).lower()
+    if candidate_sha == prior_sha:
         raise WorkflowError(
-            "Superseding review candidate must differ from the targeted escalation SHA"
+            "Superseding review candidate must differ from the prior root-cycle SHA"
+            if root_cycle
+            else "Superseding review candidate must differ from the targeted escalation SHA"
         )
-    root = runtime.get("blockers", {}).get(root_cause_id)
-    if (
-        not root_cause_id
-        or not isinstance(root, dict)
-        or root.get("derived_from")
-        or str(root.get("root_cause_id", "")) != root_cause_id
-        or str(root.get("ticket_id", "")).upper() != ticket_id.upper()
-        or (require_available and root.get("status", "open") != "open")
-    ):
-        raise WorkflowError(
-            f"--root-blocker must name {ticket_id}'s open canonical root exactly"
-        )
+    root = canonical_review_root(
+        runtime,
+        ticket_id,
+        root_cause_id,
+        require_open=require_available,
+    )
     if phase is not None and (
         phase.get("phase") != "repair"
         or phase.get("root_cause_id") != root_cause_id
@@ -2701,13 +3008,33 @@ def validate_superseding_review(
             f"Superseding review authorization scope {authorization_scope} "
             f"does not cover {ticket_id}/{blocker_class}/{risk}"
         )
-    targeted_at = recorded_at(targeted.get("recorded_at"))
+    if root_cycle:
+        bound_root = str(authorization.get("root_cause_id", "")).strip()
+        bound_reviewer = str(authorization.get("reviewer", "")).strip()
+        if bound_root and bound_root != root_cause_id:
+            raise WorkflowError(
+                f"Superseding review authorization scope {authorization_scope} "
+                f"is bound to canonical root {bound_root}"
+            )
+        if bound_reviewer and bound_reviewer != reviewer:
+            raise WorkflowError(
+                f"Superseding review authorization scope {authorization_scope} "
+                f"is bound to reviewer {bound_reviewer}"
+            )
+        if not require_available and (
+            bound_root != root_cause_id or bound_reviewer != reviewer
+        ):
+            raise WorkflowError(
+                "Root-cycle verification authorization must preserve its exact "
+                "root and reviewer binding"
+            )
+    prior_at = recorded_at(prior.get("recorded_at"))
     repairs = runtime.get("repairs", {}).get(ticket_id, [])
     authorizations = runtime.get("authorizations", {})
     root_overrides = runtime.get("repair_overrides", {}).get(root_cause_id, [])
 
     def is_authorized_later_repair(item: object) -> bool:
-        if not isinstance(item, dict) or targeted_at is None:
+        if not isinstance(item, dict):
             return False
         scope = str(item.get("budget_override_authorization_scope", "")).strip()
         override = authorizations.get(scope) if isinstance(authorizations, dict) else None
@@ -2715,10 +3042,17 @@ def validate_superseding_review(
         return bool(
             item.get("root_cause_id") == root_cause_id
             and item.get("consumes_budget", True)
-            and (recorded_at(item.get("recorded_at")) or dt.datetime.min.replace(
-                tzinfo=dt.timezone.utc
-            ))
-            > targeted_at
+            and (
+                root_cycle
+                or (
+                    prior_at is not None
+                    and (
+                        recorded_at(item.get("recorded_at"))
+                        or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+                    )
+                    > prior_at
+                )
+            )
             and scope
             and isinstance(root_overrides, list)
             and any(
@@ -2740,51 +3074,64 @@ def validate_superseding_review(
             and override_uses >= 1
         )
 
-    later_repair = isinstance(repairs, list) and any(
-        is_authorized_later_repair(item) for item in repairs
-    )
+    candidate_repairs = repairs if isinstance(repairs, list) else []
+    if root_cycle:
+        root_repairs = [
+            item
+            for item in candidate_repairs
+            if isinstance(item, dict)
+            and item.get("root_cause_id") == root_cause_id
+            and item.get("consumes_budget", True)
+        ]
+        candidate_repairs = root_repairs[1:]
+    later_repair = any(is_authorized_later_repair(item) for item in candidate_repairs)
     if not later_repair:
         raise WorkflowError(
             "Superseding review requires a later budget-consuming repair with a "
             "separately authorized repair_budget_override scope for canonical root "
             f"{root_cause_id}"
         )
-    targeted_open = {
+    prior_open = {
         str(item.get("id")): item
-        for item in targeted.get("findings", [])
+        for item in prior.get("findings", [])
         if isinstance(item, dict) and item.get("severity") in blocking_severities
     }
-    if not targeted_open:
+    if not root_cycle and not prior_open:
         raise WorkflowError(
             "Targeted escalation must retain at least one blocking finding"
         )
     resolved_ids = set(resolved)
-    if len(resolved_ids) != len(resolved) or not resolved_ids.issubset(targeted_open):
+    if len(resolved_ids) != len(resolved) or not resolved_ids.issubset(prior_open):
         raise WorkflowError(
-            "--resolved must uniquely name findings in the targeted escalation"
+            "--resolved must uniquely name findings in the prior root-cycle review"
+            if root_cycle
+            else "--resolved must uniquely name findings in the targeted escalation"
         )
     remaining = {
         finding_id: dict(item)
-        for finding_id, item in targeted_open.items()
+        for finding_id, item in prior_open.items()
         if finding_id not in resolved_ids
     }
     for item in findings:
         finding_id = str(item.get("id", ""))
-        if finding_id not in targeted_open:
+        if finding_id not in prior_open:
             raise WorkflowError(
                 "Superseding --finding must reuse a blocking finding still open "
-                f"in the targeted escalation: {finding_id}"
+                f"in the prior root-cycle review: {finding_id}"
+                if root_cycle
+                else "Superseding --finding must reuse a blocking finding still "
+                f"open in the targeted escalation: {finding_id}"
             )
         if finding_id in resolved_ids:
             raise WorkflowError(
                 f"Superseding finding {finding_id} cannot be both resolved and open"
             )
-        targeted_finding = targeted_open[finding_id]
-        if item.get("severity") != targeted_finding.get("severity"):
+        prior_finding = prior_open[finding_id]
+        if item.get("severity") != prior_finding.get("severity"):
             raise WorkflowError(
                 f"Superseding finding {finding_id} must retain its targeted severity"
             )
-        retained = dict(targeted_finding)
+        retained = dict(prior_finding)
         retained["summary"] = item["summary"]
         remaining[finding_id] = retained
     if verdict in {"pass", "pass_with_notes"} and remaining:
@@ -2797,9 +3144,9 @@ def validate_superseding_review(
             "Superseding escalation must retain at least one blocking finding"
         )
     expected_supersedes = {
-        "round": "targeted",
-        "candidate_sha": targeted_sha,
-        "verdict": "escalate",
+        "round": str(prior.get("round", "")),
+        "candidate_sha": prior_sha,
+        "verdict": str(prior.get("verdict", "")),
     }
     if (
         (not require_available or supersedes is not None)
@@ -2817,6 +3164,46 @@ def review_gate_status(
     cfg: dict[str, Any],
 ) -> tuple[bool, list[str]]:
     ticket_reviews = runtime.get("reviews", {}).get(ticket.id, {})
+    root_cycles = (
+        ticket_reviews.get("root_cycles", [])
+        if isinstance(ticket_reviews, dict)
+        else []
+    )
+    if isinstance(root_cycles, list) and root_cycles:
+        cycle = root_cycles[-1]
+        if not isinstance(cycle, dict):
+            return False, ["latest root review cycle is invalid"]
+        root_cause_id = str(cycle.get("root_cause_id", ""))
+        reviewers = cycle.get("reviewers", {})
+        failures: list[str] = []
+        final_sha = ""
+        for reviewer in ticket.required_reviews:
+            rounds = reviewers.get(reviewer, {}) if isinstance(reviewers, dict) else {}
+            record = rounds.get("superseding") if isinstance(rounds, dict) else None
+            if not isinstance(record, dict):
+                failures.append(f"missing {reviewer} final review")
+                continue
+            if str(record.get("root_cause_id", "")) != root_cause_id:
+                failures.append(
+                    f"{reviewer} final review is not bound to {root_cause_id}"
+                )
+                continue
+            verdict = str(record.get("verdict", ""))
+            if not _review_passes(verdict, cfg):
+                failures.append(
+                    f"{reviewer} final review verdict is {verdict or 'missing'}"
+                )
+                continue
+            candidate_sha = str(record.get("candidate_sha", "")).lower()
+            if not final_sha:
+                final_sha = candidate_sha
+            elif candidate_sha != final_sha:
+                failures.append(
+                    f"{reviewer} final review candidate {candidate_sha or 'missing'} "
+                    f"does not match {final_sha}"
+                )
+        return not failures, failures
+
     reviewers = ticket_reviews.get("reviewers", {}) if isinstance(ticket_reviews, dict) else {}
     failures: list[str] = []
     for reviewer in ticket.required_reviews:
@@ -2888,12 +3275,11 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         raise WorkflowError("--candidate-sha must be an exact 40- or 64-hex commit ID")
     if reviewer not in REVIEWERS or round_name not in REVIEW_ROUNDS:
         raise WorkflowError("Invalid review role or round")
-    if round_name != "superseding" and (
-        str(args.root_blocker).strip() or str(args.authorization_scope).strip()
-    ):
+    root_cause_id = str(args.root_blocker).strip()
+    root_scoped = bool(root_cause_id)
+    if round_name != "superseding" and str(args.authorization_scope).strip():
         raise WorkflowError(
-            "--root-blocker and --authorization-scope are only valid for "
-            "superseding review"
+            "--authorization-scope is only valid for superseding review"
         )
 
     findings = [_parse_review_finding(raw, new=False) for raw in args.finding]
@@ -2913,9 +3299,20 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         raise WorkflowError("A passing verdict cannot contain unresolved blocking findings")
     if verdict == "pass_with_notes" and not any(str(note).strip() for note in args.note):
         raise WorkflowError("pass_with_notes requires at least one --note")
+    if root_scoped and round_name == "full" and verdict == "escalate":
+        raise WorkflowError(
+            "Root-scoped full review verdict must be pass, pass_with_notes, or block"
+        )
 
     state = load_runtime_state(root, cfg)
     runtime = milestone_runtime_state(state, ticket.milestone)
+    if root_scoped:
+        canonical_review_root(
+            runtime,
+            ticket.id,
+            root_cause_id,
+            require_open=True,
+        )
     phase = runtime.get("phases", {}).get(ticket.id, {})
     if isinstance(phase, dict) and phase.get("phase") == "review":
         phase_sha = str(phase.get("candidate_sha", "")).lower()
@@ -2925,7 +3322,41 @@ def cmd_record_review(args: argparse.Namespace) -> int:
             )
     review_cfg = cfg.get("review", {})
     ticket_reviews = runtime["reviews"].setdefault(ticket.id, {"reviewers": {}})
-    reviewer_rounds = ticket_reviews.setdefault("reviewers", {}).setdefault(reviewer, {})
+    cycle = find_root_review_cycle(ticket_reviews, root_cause_id) if root_scoped else None
+    legacy_reviewer_rounds = ticket_reviews.setdefault("reviewers", {}).setdefault(
+        reviewer,
+        {},
+    )
+    root_cycle_scoped = root_scoped and not (
+        round_name == "superseding"
+        and cycle is None
+        and isinstance(legacy_reviewer_rounds.get("full"), dict)
+        and isinstance(legacy_reviewer_rounds.get("targeted"), dict)
+    )
+    if root_cycle_scoped:
+        if cycle is None:
+            if round_name != "full":
+                raise WorkflowError(
+                    f"Root-scoped {round_name} review requires an existing full "
+                    f"review cycle for {root_cause_id}"
+                )
+            cycle = {
+                "root_cause_id": root_cause_id,
+                "ticket_id": ticket.id,
+                "reviewers": {},
+            }
+            ticket_reviews.setdefault("root_cycles", []).append(cycle)
+        elif str(cycle.get("ticket_id", "")).upper() != ticket.id.upper():
+            raise WorkflowError(
+                f"Root review cycle {root_cause_id} belongs to "
+                f"{cycle.get('ticket_id')}, not {ticket.id}"
+            )
+        cycle_reviewers = cycle.setdefault("reviewers", {})
+        if not isinstance(cycle_reviewers, dict):
+            raise WorkflowError("Root-scoped review cycle reviewers must be an object")
+        reviewer_rounds = cycle_reviewers.setdefault(reviewer, {})
+    else:
+        reviewer_rounds = legacy_reviewer_rounds
     record_extra: dict[str, Any] = {}
     authorization_to_consume: dict[str, Any] | None = None
 
@@ -2962,12 +3393,25 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         full = reviewer_rounds.get("full")
         if not isinstance(full, dict) or full.get("verdict") != "block":
             raise WorkflowError("Targeted re-review requires a prior blocking full review")
+        if root_scoped and candidate_sha == str(full.get("candidate_sha", "")).lower():
+            raise WorkflowError(
+                "Root-scoped targeted candidate must differ from the full-review SHA"
+            )
         repairs = runtime.get("repairs", {}).get(ticket.id, [])
-        qualifying_repairs = [
-            item
-            for item in repairs
-            if isinstance(item, dict) and bool(item.get("consumes_budget", True))
-        ] if isinstance(repairs, list) else []
+        qualifying_repairs = (
+            [
+                item
+                for item in repairs
+                if isinstance(item, dict)
+                and bool(item.get("consumes_budget", True))
+                and (
+                    not root_cycle_scoped
+                    or item.get("root_cause_id") == root_cause_id
+                )
+            ]
+            if isinstance(repairs, list)
+            else []
+        )
         if not qualifying_repairs:
             raise WorkflowError(
                 "Targeted re-review requires one recorded substantive/evidence repair; "
@@ -2983,6 +3427,10 @@ def cmd_record_review(args: argparse.Namespace) -> int:
             if isinstance(item, dict) and item.get("severity") in blocking_severities
         }
         unknown_resolved = sorted(set(args.resolved) - set(original_blocking))
+        if root_scoped and len(args.resolved) != len(set(args.resolved)):
+            raise WorkflowError(
+                "Root-scoped --resolved must contain unique finding IDs"
+            )
         if unknown_resolved:
             raise WorkflowError(
                 "--resolved contains unknown full-review findings: "
@@ -3021,6 +3469,14 @@ def cmd_record_review(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     f"Targeted finding {finding_id} cannot be both --resolved and still open"
                 )
+            if root_scoped and (
+                item.get("severity") != original_blocking[finding_id].get("severity")
+                or item.get("origin") != original_blocking[finding_id].get("origin")
+            ):
+                raise WorkflowError(
+                    f"Root-scoped targeted finding {finding_id} must preserve "
+                    "severity and provenance"
+                )
             remaining_by_id[finding_id] = item
         for item in new_findings:
             finding_id = str(item["id"])
@@ -3043,12 +3499,12 @@ def cmd_record_review(args: argparse.Namespace) -> int:
             raise WorkflowError(
                 f"{ticket.id} {reviewer} already used its superseding review round"
             )
-        root_cause_id = str(args.root_blocker).strip()
         authorization_scope = str(args.authorization_scope).strip()
         record_findings, authorization_to_consume, supersedes = (
             validate_superseding_review(
                 runtime=runtime,
                 ticket_id=ticket.id,
+                reviewer=reviewer,
                 reviewer_rounds=reviewer_rounds,
                 candidate_sha=candidate_sha,
                 verdict=verdict,
@@ -3059,6 +3515,7 @@ def cmd_record_review(args: argparse.Namespace) -> int:
                 authorization_scope=authorization_scope,
                 blocking_severities=blocking_severities,
                 phase=phase if isinstance(phase, dict) else {},
+                root_cycle=root_cycle_scoped,
             )
         )
         record_extra = {
@@ -3079,6 +3536,9 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         **record_extra,
     }
     if authorization_to_consume is not None:
+        if root_cycle_scoped:
+            authorization_to_consume["root_cause_id"] = root_cause_id
+            authorization_to_consume["reviewer"] = reviewer
         consume_authorization_record(authorization_to_consume)
     reviewer_rounds[round_name] = record
     path = save_runtime_state(root, cfg, state)
@@ -5433,7 +5893,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "record-review",
-        help="Record one bounded full, targeted, or explicitly authorized superseding review",
+        help=(
+            "Record one bounded full, targeted, or authorized superseding review; "
+            "--root-blocker appends a later root-scoped cycle"
+        ),
     )
     p.add_argument("ticket_id")
     p.add_argument("--reviewer", choices=sorted(REVIEWERS), required=True)
@@ -5454,7 +5917,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--resolved", action="append", default=[])
     p.add_argument("--note", action="append", default=[])
-    p.add_argument("--root-blocker", default="")
+    p.add_argument(
+        "--root-blocker",
+        default="",
+        help="Canonical root for a superseding review or append-only later root cycle",
+    )
     p.add_argument("--authorization-scope", default="")
     p.set_defaults(func=cmd_record_review)
 

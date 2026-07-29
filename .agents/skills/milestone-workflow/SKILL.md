@@ -101,6 +101,12 @@ These rules override any looser third-party TDD or code-review guidance:
    in its targeted escalation, including IDs marked `introduced_by_repair`. This
    preserves full/targeted history and finding provenance, binds to the active later
    repair SHA, is never automatic, and grants no authority for another repair.
+   If a later hosted or release gate opens a new canonical root after the ticket's
+   legacy rounds are already complete, append a root-scoped cycle by adding
+   `--root-blocker <ROOT_ID>` to its full, targeted, and superseding records. Never
+   replace the legacy records or an earlier root cycle. The latest root cycle keeps
+   `review-state` blocked until every required reviewer consumes its own override and
+   passes the same final candidate SHA.
 8. **Test budget.** Run the configured test-budget report during planning/bootstrap,
    the ticket gate before integration, and the milestone gate at close. Existing
    high-ratio repositories use a recorded ratchet baseline rather than an immediate
@@ -400,6 +406,12 @@ For every ticket with runtime phase `review`:
    blocking IDs already present in the immutable targeted escalation, including
    `introduced_by_repair` IDs, while preserving their provenance. It does not erase
    the targeted escalation or reopen an automatic repair/review cycle.
+   A later hosted/release failure after completed legacy rounds uses the same command
+   with `--root-blocker` on every round, which appends a separate canonical-root
+   cycle. A reviewer may enter that cycle with a blocking full/targeted escalation or
+   a passing full baseline. After the separately authorized repair, both paths still
+   require one per-reviewer superseding verification on the identical active final
+   SHA. The latest cycle, not the older passing history, controls `review-state`.
 7. Before integration, require `review-state <TICKET_ID>` and
    `gate-check <TICKET_ID> integration` to pass. Close completed reviewer threads.
 

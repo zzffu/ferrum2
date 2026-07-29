@@ -83,6 +83,53 @@ Each reviewer requires its own single-use `review_round_override`. Unknown, newl
 discovered, duplicated, or broadened IDs; mismatched roots or candidates; exhausted,
 reused, or multi-use scopes; and any additional repair or review loop remain invalid.
 
+## Later hosted or release root cycle
+
+A hosted or release gate may discover a new canonical root after the ticket already
+used its legacy full, targeted, and superseding slots. Do not overwrite those records.
+Append one root-scoped cycle by passing the new canonical root to every record:
+
+```bash
+# Reviewer with a blocking baseline and one repair.
+python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
+  M2-T05 --reviewer architect --round full --root-blocker M2-T05-HOSTED-001 \
+  --candidate-sha <hosted-sha> --verdict block \
+  --finding 'ARCH-HOSTED-001:major:hosted failure'
+python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
+  M2-T05 --reviewer architect --round targeted \
+  --root-blocker M2-T05-HOSTED-001 --candidate-sha <repair-sha> \
+  --verdict escalate --resolved ARCH-HOSTED-001 \
+  --new-finding 'ARCH-HOSTED-002:major:introduced_by_repair:repair gate failed'
+
+# A required reviewer may record a passing baseline on the repaired SHA.
+python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
+  M2-T05 --reviewer qa --round full --root-blocker M2-T05-HOSTED-001 \
+  --candidate-sha <repair-sha> --verdict pass_with_notes --note '<bounded note>'
+```
+
+After a separately authorized budget-consuming repair, each required reviewer records
+one final `superseding` verification with its own unused `review_round_override`:
+
+```bash
+python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
+  M2-T05 --reviewer architect --round superseding \
+  --root-blocker M2-T05-HOSTED-001 --candidate-sha <final-sha> \
+  --verdict pass_with_notes --resolved ARCH-HOSTED-002 --note '<bounded note>' \
+  --authorization-scope <architect-scope>
+python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
+  M2-T05 --reviewer qa --round superseding \
+  --root-blocker M2-T05-HOSTED-001 --candidate-sha <final-sha> \
+  --verdict pass --authorization-scope <qa-scope>
+```
+
+The root and ticket binding is exact. Full and targeted candidates and findings are
+immutable; targeted blockers retain their IDs, severity, and provenance. Final
+verification accepts no new finding, changes candidate after the escalation or
+passing baseline, binds the authorization atomically to that root and reviewer, and
+must match the active repair SHA. `review-state` evaluates the latest appended root
+cycle and fails until all required reviewers have passing final evidence on the same
+SHA. An older cycle or the legacy passing record never substitutes for that evidence.
+
 ## Verdicts
 
 - `pass`: integrate.
