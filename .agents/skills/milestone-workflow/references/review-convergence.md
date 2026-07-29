@@ -90,7 +90,7 @@ used its legacy full, targeted, and superseding slots. Do not overwrite those re
 Append one root-scoped cycle by passing the new canonical root to every record:
 
 ```bash
-# Reviewer with a blocking baseline and one repair.
+# Ordinary convergence: a blocking baseline and one repair may end at targeted PASS.
 python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
   M2-T05 --reviewer architect --round full --root-blocker M2-T05-HOSTED-001 \
   --candidate-sha <hosted-sha> --verdict block \
@@ -98,8 +98,7 @@ python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
 python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
   M2-T05 --reviewer architect --round targeted \
   --root-blocker M2-T05-HOSTED-001 --candidate-sha <repair-sha> \
-  --verdict escalate --resolved ARCH-HOSTED-001 \
-  --new-finding 'ARCH-HOSTED-002:major:introduced_by_repair:repair gate failed'
+  --verdict pass --resolved ARCH-HOSTED-001
 
 # A required reviewer may record a passing baseline on the repaired SHA.
 python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
@@ -107,7 +106,15 @@ python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
   --candidate-sha <repair-sha> --verdict pass_with_notes --note '<bounded note>'
 ```
 
-After a separately authorized budget-consuming repair, each required reviewer records
+In ordinary convergence, each reviewer's effective terminal record is its
+`superseding` record when present, otherwise `targeted`, otherwise `full`. The cycle
+passes when every effective terminal verdict is `PASS` or `PASS_WITH_NOTES`, every
+record remains bound to the exact canonical root, and all required reviewers name one
+common non-empty candidate SHA. A targeted PASS after the one ordinary repair is
+terminal and consumes no `review_round_override`.
+
+If targeted review instead `ESCALATE`s, it remains non-passing. Only after a
+separately authorized budget-consuming later repair may each required reviewer record
 one final `superseding` verification with its own unused `review_round_override`:
 
 ```bash
@@ -139,11 +146,12 @@ verification accepts no new finding, changes candidate after the escalation or
 passing baseline, requires an authorization already bound to that root and reviewer,
 and must match the active repair SHA. Missing, partial, swapped, wrong-root, or
 wrong-reviewer bindings fail before consumption. Unbound historical scopes remain
-valid for legacy superseding records only. `review-state` evaluates the latest
-appended root cycle and fails until all required reviewers have passing final evidence
-on the same SHA. An older cycle or the legacy passing record never substitutes for
-that evidence. It also rechecks full/targeted verdict and blocking-finding parity, so
-tampered baseline or escalation state cannot pass merely because final SHAs match.
+valid for legacy superseding records only. For an escalated cycle that uses the
+exceptional later-repair path, `review-state` fails until all required reviewers have
+passing superseding evidence on the same SHA. An older cycle or the legacy passing
+record never substitutes for the latest cycle's effective terminal evidence. The
+gate also rechecks full/targeted verdict and blocking-finding parity, so tampered
+baseline or escalation state cannot pass merely because terminal SHAs match.
 
 ## Verdicts
 

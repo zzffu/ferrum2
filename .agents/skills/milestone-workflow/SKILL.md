@@ -104,11 +104,15 @@ These rules override any looser third-party TDD or code-review guidance:
    If a later hosted or release gate opens a new canonical root after the ticket's
    legacy rounds are already complete, append a root-scoped cycle by adding
    `--root-blocker <ROOT_ID>` to its full, targeted, and superseding records. Never
-   replace the legacy records or an earlier root cycle. The latest root cycle keeps
-   `review-state` blocked until every required reviewer consumes its own override,
-   pre-bound at grant time to that exact root and reviewer, and passes the same final
-   candidate SHA. Unbound historical scopes remain compatible with legacy
-   superseding records only.
+   replace the legacy records or an earlier root cycle. For each required reviewer,
+   `review-state` selects the effective terminal record in order: superseding,
+   targeted, then full. Ordinary full `BLOCK` followed by one repair and targeted
+   `PASS` or `PASS_WITH_NOTES` is terminal without an override. If targeted review
+   `ESCALATE`s and the user separately authorizes a later repair, every required
+   reviewer must record superseding verification using its own override pre-bound at
+   grant time to that exact root and reviewer. All effective terminal records must
+   pass on one common non-empty candidate SHA. Unbound historical scopes remain
+   compatible with legacy superseding records only.
 8. **Test budget.** Run the configured test-budget report during planning/bootstrap,
    the ticket gate before integration, and the milestone gate at close. Existing
    high-ratio repositories use a recorded ratchet baseline rather than an immediate
@@ -411,10 +415,12 @@ For every ticket with runtime phase `review`:
    A later hosted/release failure after completed legacy rounds uses the same command
    with `--root-blocker` on every round, which appends a separate canonical-root
    cycle. A reviewer may enter that cycle with a blocking full/targeted escalation or
-   a passing full baseline. After the separately authorized repair, both paths still
-   require one per-reviewer superseding verification on the identical active final
-   SHA. Grant each single-use override with the paired `--root-blocker` and
-   `--reviewer` options before verification; consumption never fills in a missing
+   a passing full baseline. An ordinary blocking full review that resolves in its
+   targeted round is complete without an override. Only after targeted escalation
+   and a separately authorized later repair do the escalation and any pass-baseline
+   reviewer paths require one per-reviewer superseding verification on the identical
+   active final SHA. Grant each single-use override with the paired `--root-blocker`
+   and `--reviewer` options before verification; consumption never fills in a missing
    binding. The latest cycle, not the older passing history, controls `review-state`.
 7. Before integration, require `review-state <TICKET_ID>` and
    `gate-check <TICKET_ID> integration` to pass. Close completed reviewer threads.

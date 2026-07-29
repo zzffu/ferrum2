@@ -3309,11 +3309,25 @@ def review_gate_status(
                     for error in invariant_errors
                 )
                 continue
-            record = rounds.get("superseding") if isinstance(rounds, dict) else None
+            record = None
+            terminal_round = ""
+            for round_name in ("superseding", "targeted", "full"):
+                if round_name in rounds:
+                    record = rounds[round_name]
+                    terminal_round = round_name
+                    break
             if not isinstance(record, dict):
                 failures.append(f"missing {reviewer} final review")
                 continue
-            if str(record.get("root_cause_id", "")) != root_cause_id:
+            record_root = str(record.get("root_cause_id", "")).strip()
+            if (
+                terminal_round == "superseding"
+                and record_root != root_cause_id
+            ) or (
+                terminal_round != "superseding"
+                and record_root
+                and record_root != root_cause_id
+            ):
                 failures.append(
                     f"{reviewer} final review is not bound to {root_cause_id}"
                 )
@@ -3325,7 +3339,9 @@ def review_gate_status(
                 )
                 continue
             candidate_sha = str(record.get("candidate_sha", "")).lower()
-            if not final_sha:
+            if not candidate_sha:
+                failures.append(f"{reviewer} final review candidate is missing")
+            elif not final_sha:
                 final_sha = candidate_sha
             elif candidate_sha != final_sha:
                 failures.append(

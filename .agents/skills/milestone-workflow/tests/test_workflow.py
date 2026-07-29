@@ -2071,6 +2071,106 @@ class ReviewConvergenceTests(unittest.TestCase):
         )
         return state, item, runtime
 
+    def converged_root_cycle_fixture(
+        self,
+        *,
+        qa_targeted_sha: str = "b" * 40,
+    ) -> tuple[dict[str, object], workflow.Ticket, dict[str, object]]:
+        item = ticket("M0-T01", "ready", owns=("a/**",), risk="critical")
+        state = workflow.empty_runtime_state()
+        runtime = workflow.milestone_runtime_state(state, "M0")
+        runtime["blockers"]["B1"] = {
+            "id": "B1",
+            "ticket_id": item.id,
+            "class": "security",
+            "phase": "review",
+            "risk": "critical",
+            "root_cause": "security invariant",
+            "root_cause_id": "B1",
+            "derived_from": None,
+            "status": "open",
+        }
+        findings = {
+            "architect": "ARCH-001:major:security invariant is violated",
+            "qa": "QA-001:major:security invariant is violated",
+        }
+        for reviewer, finding in findings.items():
+            self.assertEqual(
+                self._record(
+                    state,
+                    item,
+                    self.review_args(
+                        reviewer=reviewer,
+                        round_name="full",
+                        verdict="block",
+                        finding=[finding],
+                        sha="a" * 40,
+                        root_blocker="B1",
+                    ),
+                ),
+                1,
+            )
+        runtime["repairs"][item.id] = [
+            {
+                "class": "substantive",
+                "root_cause_id": "B1",
+                "consumes_budget": True,
+            }
+        ]
+        for reviewer, finding_id, candidate_sha in (
+            ("architect", "ARCH-001", "b" * 40),
+            ("qa", "QA-001", qa_targeted_sha),
+        ):
+            self.assertEqual(
+                self._record(
+                    state,
+                    item,
+                    self.review_args(
+                        reviewer=reviewer,
+                        round_name="targeted",
+                        verdict="pass",
+                        resolved=[finding_id],
+                        sha=candidate_sha,
+                        root_blocker="B1",
+                    ),
+                ),
+                0,
+            )
+        return state, item, runtime
+
+    def test_root_cycle_targeted_pass_is_terminal_without_override(self) -> None:
+        state, item, runtime = self.converged_root_cycle_fixture()
+        cycle = runtime["reviews"][item.id]["root_cycles"][0]
+
+        for reviewer in ("architect", "qa"):
+            rounds = cycle["reviewers"][reviewer]
+            self.assertNotIn("superseding", rounds)
+            self.assertEqual(rounds["targeted"]["verdict"], "pass")
+            self.assertEqual(rounds["targeted"]["candidate_sha"], "b" * 40)
+        self.assertEqual(runtime["authorizations"], {})
+        self.assertEqual(workflow.runtime_state_errors(state), [])
+        self.assertEqual(
+            workflow.review_gate_status(
+                item,
+                runtime,
+                workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
+            ),
+            (True, []),
+        )
+
+    def test_root_cycle_targeted_pass_requires_one_common_candidate(self) -> None:
+        _state, item, runtime = self.converged_root_cycle_fixture(
+            qa_targeted_sha="c" * 40,
+        )
+
+        passed, failures = workflow.review_gate_status(
+            item,
+            runtime,
+            workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
+        )
+        self.assertFalse(passed)
+        self.assertTrue(any("does not match" in failure for failure in failures))
+
     def test_superseding_review_preserves_escalation_consumes_scope_and_passes_gate(
         self,
     ) -> None:
@@ -2211,8 +2311,10 @@ class ReviewConvergenceTests(unittest.TestCase):
         self.assertEqual(runtime["reviews"][item.id]["reviewers"], legacy)
         passed, failures = workflow.review_gate_status(item, runtime, cfg)
         self.assertFalse(passed)
-        self.assertIn("missing architect final review", failures)
-        self.assertIn("missing qa final review", failures)
+        self.assertEqual(
+            failures,
+            ["architect final review verdict is escalate"],
+        )
 
         cycle = runtime["reviews"][item.id]["root_cycles"][-1]
         architect_targeted = cycle["reviewers"]["architect"]["targeted"]
@@ -2284,7 +2386,9 @@ class ReviewConvergenceTests(unittest.TestCase):
         )
         passed, failures = workflow.review_gate_status(item, runtime, cfg)
         self.assertFalse(passed)
-        self.assertEqual(failures, ["missing qa final review"])
+        self.assertTrue(
+            any("qa final review candidate" in failure for failure in failures)
+        )
         self.assertEqual(
             self._record(
                 state,
