@@ -46,7 +46,7 @@ fn run() -> Result<(), &'static str> {
     if arguments.next().is_some() {
         return Err("unexpected-argument");
     }
-    if !server.is_ipv4() || !target_socket.is_ipv4() || target_socket.port() == 0 {
+    if !server.is_ipv4() || target_socket.port() == 0 {
         return Err("address-unsupported");
     }
 

@@ -54,10 +54,49 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --workspace --bins --locked
+          cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           cargo doc --workspace --all-features --no-deps --locked
+      - name: Prove focused IPv6 UDP real-process path
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_name=ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps
+          expected_listing="$test_name: test"
+          list_output="$(cargo test -p ferrum2-m0-harness --test udp_local_e2e --locked -- --ignored --list)"
+          listing_count="$(grep -Fxc "$expected_listing" <<<"$list_output" || true)"
+          if [ "$listing_count" -ne 1 ]; then
+            echo "focused IPv6 UDP test selection count was $listing_count, expected 1" >&2
+            exit 1
+          fi
+
+          test_status=0
+          test_output="$(
+            timeout --signal=TERM --kill-after=10s 2m \
+              cargo test -p ferrum2-m0-harness --test udp_local_e2e \
+                "$test_name" --locked -- --ignored --exact --nocapture 2>&1
+          )" || test_status=$?
+          printf '%s\n' "$test_output"
+          if [ "$test_status" -ne 0 ]; then
+            echo "focused IPv6 UDP test failed with status $test_status" >&2
+            exit 1
+          fi
+
+          product_marker="m2_ipv6_udp_real_process status=PASS datagrams=3 payload=PASS source=PASS cleanup=PASS"
+          product_marker_count="$(grep -Fxc "$product_marker" <<<"$test_output" || true)"
+          if [ "$product_marker_count" -ne 1 ]; then
+            echo "focused IPv6 UDP product marker count was $product_marker_count, expected 1" >&2
+            exit 1
+          fi
+          result_count="$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured;' <<<"$test_output" || true)"
+          if [ "$result_count" -ne 1 ]; then
+            echo "focused IPv6 UDP executed-test count was not exactly 1" >&2
+            exit 1
+          fi
+          printf 'm2_ipv6_udp_real_process_completion status=PASS sha=%s run_id=%s run_attempt=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
   msrv:
     name: msrv
