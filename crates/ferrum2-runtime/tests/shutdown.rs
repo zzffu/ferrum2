@@ -188,7 +188,7 @@ impl PreparedProcessRoot<&'static str> for ShutdownProcessRoot {
                         .lock()
                         .expect("phase lock")
                         .push(cancellation.phase());
-                    pending().await
+                    Ok(())
                 }
                 ProcessShutdownBehavior::CleanupFailure => Err("cleanup"),
             }
@@ -296,7 +296,10 @@ async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
     );
     assert_eq!(
         *forced_phases.lock().expect("phase lock"),
-        [ProcessCancellationPhase::Quiescing]
+        [
+            ProcessCancellationPhase::Quiescing,
+            ProcessCancellationPhase::Forced,
+        ]
     );
     let forced_snapshot = forced_registry.snapshot();
     assert_eq!(forced_snapshot.process_root_reaps, 1);

@@ -18,6 +18,8 @@ use local_support::{
 };
 
 const CYCLES_PER_CATEGORY: usize = 20;
+const _: () = assert!(CYCLES_PER_CATEGORY * 5 >= 100);
+const _: () = assert!(CYCLES_PER_CATEGORY * 6 >= 100);
 const CHILD_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_SETUP_ATTEMPTS: usize = 3;
 const FOREIGN_OWNERSHIP_CONFIRMATIONS: usize = 3;
@@ -80,7 +82,17 @@ fn spawn_reserved_child(
     reservations: [LoopbackReservation; 2],
     metrics: SocketAddrV4,
 ) -> Result<ChildGuard, ChildSetupError> {
-    spawn_reserved_child_with_hook(binary, config, context, reservations, metrics, |_| 0)
+    spawn_reserved_child_with_hook(binary, config, context, reservations, metrics, false, |_| 0)
+}
+
+fn spawn_reserved_signallable(
+    binary: &str,
+    config: &Path,
+    context: String,
+    reservations: [LoopbackReservation; 2],
+    metrics: SocketAddrV4,
+) -> Result<ChildGuard, ChildSetupError> {
+    spawn_reserved_child_with_hook(binary, config, context, reservations, metrics, true, |_| 0)
 }
 
 fn spawn_reserved_child_with_hook(
@@ -89,12 +101,17 @@ fn spawn_reserved_child_with_hook(
     context: String,
     reservations: [LoopbackReservation; 2],
     metrics: SocketAddrV4,
+    signallable: bool,
     before_spawn: impl FnOnce([SocketAddrV4; 2]) -> usize,
 ) -> Result<ChildGuard, ChildSetupError> {
     let addresses = reservations.each_ref().map(LoopbackReservation::address);
     let _released = reservations.map(LoopbackReservation::release);
     let deferred_exit_checks = before_spawn(addresses);
-    let mut child = ChildGuard::spawn_with_context(binary, config, context);
+    let mut child = if signallable {
+        ChildGuard::spawn_signallable(binary, config, context)
+    } else {
+        ChildGuard::spawn_with_context(binary, config, context)
+    };
     child.defer_exit_observation_for_checks(deferred_exit_checks);
     let exit = match wait_for_metrics_ready(&mut child, addresses[0], metrics) {
         Ok(()) => return Ok(child),
@@ -713,16 +730,130 @@ fn forced_termination_cycle(
     Ok(())
 }
 
+fn append_shutdown_grace(config: &Path, milliseconds: u64) {
+    let mut source = std::fs::read_to_string(config).expect("read lifecycle config");
+    source.push_str(&format!(
+        "\n[runtime]\nshutdown_grace_ms = {milliseconds}\n"
+    ));
+    std::fs::write(config, source).expect("write lifecycle grace");
+}
+
+fn signal_cycle(
+    baseline_children: usize,
+    context: &str,
+    method: (&str, &str),
+    force: bool,
+) -> Result<(), Box<SetupCollision>> {
+    const GRACE: Duration = Duration::from_millis(200);
+    let directory = tempfile::tempdir().expect("signal tempdir");
+    let server_reservation = reserve_unused_loopback();
+    let server = server_reservation.address();
+    let server_metrics_reservation = reserve_unused_loopback();
+    let server_metrics = server_metrics_reservation.address();
+    let client_reservation = reserve_unused_loopback();
+    let client = client_reservation.address();
+    let client_metrics_reservation = reserve_unused_loopback();
+    let client_metrics = client_metrics_reservation.address();
+    let server_config =
+        write_tcp_only_server_config(directory.path(), server, Some(server_metrics))
+            .expect("server signal config");
+    let client_config = write_client_config(directory.path(), client, server, Some(client_metrics))
+        .expect("client signal config");
+    for config in [&server_config, &client_config] {
+        rewrite_config_method(config, method).expect("signal method");
+        append_shutdown_grace(config, GRACE.as_millis() as u64);
+    }
+    let addresses = [client, client_metrics, server, server_metrics];
+    macro_rules! started {
+        ($result:expr, $children:expr) => {
+            match $result {
+                Ok(child) => child,
+                Err(error) => {
+                    return Err(cleanup_failed_attempt(
+                        directory,
+                        $children,
+                        &addresses,
+                        baseline_children,
+                        error,
+                    ));
+                }
+            }
+        };
+    }
+    let server_child = started!(
+        spawn_reserved_signallable(
+            "ferrum2-server",
+            &server_config,
+            format!("{context},child=server"),
+            [server_reservation, server_metrics_reservation],
+            server_metrics,
+        ),
+        Vec::new()
+    );
+    let client_child = started!(
+        spawn_reserved_signallable(
+            "ferrum2-client",
+            &client_config,
+            format!("{context},child=client"),
+            [client_reservation, client_metrics_reservation],
+            client_metrics,
+        ),
+        vec![server_child]
+    );
+
+    let flow = force.then(|| {
+        let (target_listener, target) = recording_target();
+        let observer = observe_target_flow(target_listener);
+        let (socks, reply) = socks_request(client, target);
+        assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+        observer.wait_for_accept();
+        (
+            socks,
+            observer,
+            TcpStream::connect(server).expect("held server handshake"),
+        )
+    });
+    for mut child in [client_child, server_child] {
+        let started = Instant::now();
+        child.request_graceful_shutdown();
+        let exit = child.wait_for_exit(CHILD_DEADLINE);
+        assert_eq!(exit.status.code(), Some(0), "{context}: {exit}");
+        if force {
+            assert!(started.elapsed() >= GRACE, "{context}: forced before grace");
+        }
+    }
+    if let Some((socks, observer, held_handshake)) = flow {
+        drop((socks, held_handshake));
+        assert!(matches!(
+            observer.wait_for_terminal(),
+            TargetTerminal::Eof | TargetTerminal::Reset
+        ));
+    }
+    assert_eq!(active_child_count(), baseline_children);
+    assert_exact_rebind(&addresses);
+    Ok(())
+}
+
+fn os_signal_cycle(
+    baseline_children: usize,
+    context: &str,
+    method: (&str, &str),
+) -> Result<(), Box<SetupCollision>> {
+    signal_cycle(baseline_children, context, method, false)?;
+    signal_cycle(baseline_children, context, method, true)
+}
+
 #[test]
-fn exactly_100_mixed_real_process_cycles_cleanup_every_owned_boundary() {
+fn at_least_100_real_process_cycles_per_binary_cleanup_every_owned_boundary() {
     let _test_guard = LIFECYCLE_TEST_LOCK.lock().expect("lifecycle test lock");
     let baseline_children = active_child_count();
-    let categories: [Cycle; 5] = [
+    let categories: [Cycle; 6] = [
         ("success", success_cycle),
         ("authentication-reject", authentication_reject_cycle),
         ("connect-failure", connect_failure_cycle),
         ("cooperative-cancellation", cooperative_cancellation_cycle),
         ("forced-termination", forced_termination_cycle),
+        ("graceful-and-forced-os-signals", os_signal_cycle),
     ];
     let mut executed = 0_usize;
     for (category, cycle) in categories {
@@ -736,13 +867,7 @@ fn exactly_100_mixed_real_process_cycles_cleanup_every_owned_boundary() {
             );
         }
     }
-    assert_eq!(executed, 100);
-}
-
-#[test]
-fn lifecycle_fixture_uses_exact_five_by_twenty_matrix() {
-    assert_eq!(CYCLES_PER_CATEGORY * 5, 100);
-    assert!(Path::new(env!("CARGO_MANIFEST_DIR")).is_dir());
+    assert_eq!(executed, CYCLES_PER_CATEGORY * categories.len());
 }
 
 #[test]
@@ -857,6 +982,7 @@ fn foreign_listener_is_not_accepted_as_child_readiness() {
                 diagnostic_context.clone(),
                 [client_reservation, client_metrics_reservation],
                 client_metrics,
+                false,
                 move |addresses| {
                     *hook_foreign.lock().expect("foreign setup owner") =
                         Some(ForeignSetup::start(addresses, hook_requests, false));

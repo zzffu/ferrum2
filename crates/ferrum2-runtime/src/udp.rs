@@ -16,8 +16,8 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::OwnerRegistry;
 use crate::owner::OwnerGuard;
+use crate::{OwnerRegistry, ProcessCancellation};
 
 /// Default independent client/server UDP session limit.
 pub const DEFAULT_UDP_MAX_SESSIONS: usize = 4_096;
@@ -1026,28 +1026,54 @@ where
     }
 
     /// Cancels, joins, and if necessary aborts every owned task by one deadline.
-    pub async fn shutdown(mut self, grace: Duration) {
+    pub async fn shutdown(self, grace: Duration) {
+        self.shutdown_with_control(UdpShutdownControl::Relative(Instant::now() + grace))
+            .await;
+    }
+
+    /// Drains until the process lineage forces shutdown, then cancels and reaps
+    /// every owned task without starting another relative grace interval.
+    pub async fn shutdown_with_cancellation(self, cancellation: ProcessCancellation) {
+        self.shutdown_with_control(UdpShutdownControl::Process(cancellation))
+            .await;
+    }
+
+    async fn shutdown_with_control(mut self, mut control: UdpShutdownControl) {
         self.manager.signal_all();
         if self.tasks.is_empty() {
             self.manager.cancel_all();
             return;
         }
-        let deadline = Instant::now() + grace;
         loop {
             tokio::select! {
+                biased;
+                () = control.forced() => break,
                 result = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     if result.is_none() || self.tasks.is_empty() {
                         self.manager.cancel_all();
                         return;
                     }
                 }
-                () = tokio::time::sleep_until(deadline) => break,
             }
         }
         self.registry.record_udp_forced_shutdowns(self.tasks.len());
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
         self.manager.cancel_all();
+    }
+}
+
+enum UdpShutdownControl {
+    Relative(Instant),
+    Process(ProcessCancellation),
+}
+
+impl UdpShutdownControl {
+    async fn forced(&mut self) {
+        match self {
+            Self::Relative(deadline) => tokio::time::sleep_until(*deadline).await,
+            Self::Process(cancellation) => cancellation.forced().await,
+        }
     }
 }
 

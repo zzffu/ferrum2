@@ -71,13 +71,34 @@ impl ChildGuard {
     }
 
     pub fn spawn_with_context(name: &str, config: &Path, context: impl Into<String>) -> Self {
-        let mut child = Command::new(binary_path(name))
+        Self::spawn_with_context_and_signal_group(name, config, context, false)
+    }
+
+    pub fn spawn_signallable(name: &str, config: &Path, context: impl Into<String>) -> Self {
+        Self::spawn_with_context_and_signal_group(name, config, context, true)
+    }
+
+    fn spawn_with_context_and_signal_group(
+        name: &str,
+        config: &Path,
+        context: impl Into<String>,
+        signal_group: bool,
+    ) -> Self {
+        let mut command = Command::new(binary_path(name));
+        command
             .args(["--config", config.to_str().expect("UTF-8 config path")])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn child process");
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        if signal_group {
+            use std::os::windows::process::CommandExt as _;
+            const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+            command.creation_flags(CREATE_NEW_CONSOLE);
+        }
+        #[cfg(not(windows))]
+        let _ = signal_group;
+        let mut child = command.spawn().expect("spawn child process");
         let stdout = child.stdout.take().expect("child stdout pipe");
         let stderr = child.stderr.take().expect("child stderr pipe");
         ACTIVE_CHILDREN.fetch_add(1, Ordering::SeqCst);
@@ -151,13 +172,22 @@ impl ChildGuard {
         let _ = self.wait_for_exit(timeout);
     }
 
-    fn wait_for_exit(&mut self, timeout: Duration) -> ChildExit {
+    pub fn request_graceful_shutdown(&mut self) {
+        assert!(!self.reaped, "child already reaped");
+        send_shutdown_signal(self.child.id());
+    }
+
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> ChildExit {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.child.try_wait().expect("child status") {
                 return self.finish_reap(status);
             }
-            assert!(Instant::now() < deadline, "child reap timed out");
+            if Instant::now() >= deadline {
+                self.child.kill().expect("kill child after reap deadline");
+                let status = self.child.wait().expect("wait child after reap deadline");
+                return self.finish_reap(status);
+            }
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -221,7 +251,7 @@ struct OutputSummary {
 pub struct ChildExit {
     binary: String,
     context: String,
-    status: ExitStatus,
+    pub status: ExitStatus,
     stdout: OutputSummary,
     stderr: OutputSummary,
 }
@@ -250,6 +280,34 @@ impl fmt::Display for ChildExit {
             self.stderr.truncated,
         )
     }
+}
+
+#[cfg(unix)]
+fn send_shutdown_signal(process_id: u32) {
+    let status = Command::new("kill")
+        .args(["-INT", &process_id.to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(status.success(), "SIGINT sender failed: {status}");
+}
+
+#[cfg(windows)]
+fn send_shutdown_signal(process_id: u32) {
+    let script = format!(
+        r#"Add-Type -Namespace Ferrum2 -Name ConsoleSignal -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool FreeConsole(); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint processId); [System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(System.IntPtr handler, bool add); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint signal, uint processGroup);'; [void][Ferrum2.ConsoleSignal]::FreeConsole(); if (-not [Ferrum2.ConsoleSignal]::AttachConsole({process_id})) {{ exit 1 }}; [void][Ferrum2.ConsoleSignal]::SetConsoleCtrlHandler([System.IntPtr]::Zero, $true); $sent = [Ferrum2.ConsoleSignal]::GenerateConsoleCtrlEvent(1, 0); [void][Ferrum2.ConsoleSignal]::FreeConsole(); if (-not $sent) {{ exit 1 }}"#
+    );
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("send CTRL_BREAK_EVENT");
+    const CONTROL_C_EXIT: i32 = -1_073_741_510;
+    assert!(
+        status.success() || status.code() == Some(CONTROL_C_EXIT),
+        "Ctrl-Break sender failed before delivery: {status}"
+    );
 }
 
 fn capture_output(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<OutputSummary> {

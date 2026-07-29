@@ -198,20 +198,20 @@ impl PreparedProcessRoot<RunError> for ServerTcpRoot {
 
     fn run(
         mut self: Box<Self>,
-        mut cancellation: ProcessCancellation,
+        cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), RunError>> {
         let supervisor = self.supervisor.take().expect("prepared TCP root");
         let context = Arc::clone(&self.context);
         Box::pin(async move {
             supervisor
-                .run_until(
+                .run_with_cancellation(
                     move |stream, cancellation| {
                         let context = Arc::clone(&context);
                         async move {
                             server_connection(stream, cancellation, context).await;
                         }
                     },
-                    cancellation.cancelled(),
+                    cancellation,
                 )
                 .await
                 .map_err(run_error_for_supervisor)
@@ -530,7 +530,8 @@ where
     protocol: Arc<UdpServer>,
     clock: Arc<SystemClock>,
     config: UdpConfig,
-    shutdown_grace: std::time::Duration,
+    #[cfg(test)]
+    _shutdown_grace: std::time::Duration,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
     runtime: ProductionUdpRuntime<L>,
@@ -549,7 +550,7 @@ fn prepare_udp_server<L>(
     clock: Arc<SystemClock>,
     config: UdpConfig,
     connect_timeout: std::time::Duration,
-    shutdown_grace: std::time::Duration,
+    _shutdown_grace: std::time::Duration,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
 ) -> Result<PreparedUdpServer<L>, RunError>
@@ -601,7 +602,8 @@ where
         protocol,
         clock,
         config,
-        shutdown_grace,
+        #[cfg(test)]
+        _shutdown_grace,
         registry,
         metrics,
         runtime,
@@ -649,16 +651,45 @@ impl<L> PreparedUdpServer<L>
 where
     L: ServerUdpListener,
 {
+    #[cfg(test)]
     async fn run_until<S>(self, shutdown: S) -> Result<(), RunError>
     where
         S: std::future::Future<Output = ()>,
+    {
+        let shutdown_grace = self._shutdown_grace;
+        self.run_with_shutdown(shutdown, move |runtime| runtime.shutdown(shutdown_grace))
+            .await
+    }
+
+    async fn run_with_cancellation(
+        self,
+        mut cancellation: ProcessCancellation,
+    ) -> Result<(), RunError> {
+        let shutdown_cancellation = cancellation.clone();
+        self.run_with_shutdown(
+            async move { cancellation.cancelled().await },
+            move |runtime| runtime.shutdown_with_cancellation(shutdown_cancellation),
+        )
+        .await
+    }
+
+    async fn run_with_shutdown<S, C, F>(
+        self,
+        shutdown: S,
+        shutdown_runtime: C,
+    ) -> Result<(), RunError>
+    where
+        S: std::future::Future<Output = ()>,
+        C: FnOnce(ProductionUdpRuntime<L>) -> F,
+        F: std::future::Future<Output = ()>,
     {
         let Self {
             listener,
             protocol,
             clock,
             config,
-            shutdown_grace,
+            #[cfg(test)]
+                _shutdown_grace: _,
             registry,
             metrics,
             mut runtime,
@@ -820,7 +851,7 @@ where
         };
 
         let before = registry.snapshot().udp_forced_shutdowns;
-        runtime.shutdown(shutdown_grace).await;
+        shutdown_runtime(runtime).await;
         let after = registry.snapshot().udp_forced_shutdowns;
         for _ in before..after {
             metrics.udp_forced_shutdown(Role::Server);
@@ -840,9 +871,9 @@ impl PreparedProcessRoot<RunError> for PreparedUdpServer<UdpSocket> {
 
     fn run(
         self: Box<Self>,
-        mut cancellation: ProcessCancellation,
+        cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), RunError>> {
-        Box::pin(async move { self.run_until(cancellation.cancelled()).await })
+        Box::pin(async move { self.run_with_cancellation(cancellation).await })
     }
 
     fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
@@ -958,6 +989,26 @@ fn bind_listener(address: std::net::SocketAddrV4, backlog: u32) -> Result<TcpLis
 }
 
 async fn shutdown_signal() {
+    #[cfg(windows)]
+    {
+        let Ok(mut ctrl_break) = tokio::signal::windows::ctrl_break() else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if result.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+            signal = ctrl_break.recv() => {
+                if signal.is_none() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
     if tokio::signal::ctrl_c().await.is_err() {
         std::future::pending::<()>().await;
     }
@@ -3017,6 +3068,11 @@ mod tests {
         assert!(
             final_snapshot.process_forced_roots > baseline.process_forced_roots,
             "zero-grace process did not force any required root: {final_snapshot:?}"
+        );
+        assert_eq!(
+            final_snapshot.forced_shutdowns,
+            baseline.forced_shutdowns + 1,
+            "phase-aware TCP root did not explicitly force and reap its child"
         );
         std::fs::remove_file(config_path).expect("remove server test config");
     }

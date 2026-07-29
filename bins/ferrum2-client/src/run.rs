@@ -144,6 +144,26 @@ fn bind_listener(address: std::net::SocketAddrV4, backlog: u32) -> Result<TcpLis
 }
 
 async fn shutdown_signal() {
+    #[cfg(windows)]
+    {
+        let Ok(mut ctrl_break) = tokio::signal::windows::ctrl_break() else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if result.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+            signal = ctrl_break.recv() => {
+                if signal.is_none() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
     if tokio::signal::ctrl_c().await.is_err() {
         std::future::pending::<()>().await;
     }
@@ -180,20 +200,20 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
 
     fn run(
         mut self: Box<Self>,
-        mut cancellation: ProcessCancellation,
+        cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), RunError>> {
         let supervisor = self.supervisor.take().expect("prepared TCP root");
         let context = Arc::clone(&self.context);
         Box::pin(async move {
             supervisor
-                .run_until(
+                .run_with_cancellation(
                     move |stream, cancellation| {
                         let context = Arc::clone(&context);
                         async move {
                             client_connection(stream, cancellation, context).await;
                         }
                     },
-                    cancellation.cancelled(),
+                    cancellation,
                 )
                 .await
                 .map_err(run_error_for_supervisor)
@@ -1749,6 +1769,11 @@ mod tests {
         assert_eq!(
             final_snapshot.process_forced_roots,
             baseline.process_forced_roots + 1
+        );
+        assert_eq!(
+            final_snapshot.forced_shutdowns,
+            baseline.forced_shutdowns + 1,
+            "phase-aware TCP root did not explicitly force and reap its child"
         );
         std::fs::remove_file(config_path).expect("remove client test config");
     }

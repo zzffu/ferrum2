@@ -568,8 +568,14 @@ where
         let deadline = Instant::now() + shutdown_grace;
         let mut cleanup_failure = None;
         let mut forced_roots = 0;
+        let mut forced = false;
 
         while active.iter().any(ActiveEntry::is_running) {
+            if forced {
+                let event = next_root_event(&mut active, &registry).await;
+                record_cleanup_event(event, &mut cleanup_failure);
+                continue;
+            }
             let timed_out = tokio::select! {
                 biased;
                 event = next_root_event(&mut active, &registry) => {
@@ -581,12 +587,9 @@ where
             if timed_out {
                 states.push(ProcessState::Forced);
                 cancellation_source.force();
-                let forced = force_remaining_roots(&mut active, &registry).await;
-                forced_roots = forced.count;
-                for event in forced.events {
-                    record_cleanup_event(event, &mut cleanup_failure);
-                }
-                break;
+                forced_roots = active.iter().filter(|entry| entry.is_running()).count();
+                registry.record_process_forced_roots(forced_roots);
+                forced = true;
             }
         }
 
@@ -760,44 +763,6 @@ fn root_exit<E>(result: Result<Result<(), E>, JoinError>) -> ProcessRootExit<E> 
         Ok(Err(error)) => ProcessRootExit::Failed(error),
         Err(error) if error.is_panic() => ProcessRootExit::Panicked,
         Err(_) => ProcessRootExit::JoinFailed,
-    }
-}
-
-struct ForcedRoots<E> {
-    count: usize,
-    events: Vec<RootEvent<E>>,
-}
-
-async fn force_remaining_roots<E>(
-    active: &mut [ActiveEntry<E>],
-    registry: &OwnerRegistry,
-) -> ForcedRoots<E> {
-    let forced = active.iter().filter(|entry| entry.is_running()).count();
-    for entry in active.iter() {
-        if let Some(task) = &entry.task {
-            task.abort();
-        }
-    }
-
-    let mut events = Vec::new();
-    for entry in active {
-        if let Some(task) = entry.task.take() {
-            let result = task.await;
-            entry.guard.take();
-            registry.record_process_root_reap();
-            match result {
-                Err(error) if error.is_cancelled() => {}
-                result => events.push(RootEvent {
-                    root: entry.id,
-                    exit: root_exit(result),
-                }),
-            }
-        }
-    }
-    registry.record_process_forced_roots(forced);
-    ForcedRoots {
-        count: forced,
-        events,
     }
 }
 

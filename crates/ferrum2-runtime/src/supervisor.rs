@@ -10,7 +10,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::OwnerRegistry;
+use crate::{OwnerRegistry, ProcessCancellation};
 
 /// Listener boundary used by the bounded supervisor and deterministic tests.
 pub trait AcceptListener: Send + Sync + 'static {
@@ -142,10 +142,46 @@ where
         Fut: Future<Output = ()> + Send + 'static,
         S: Future<Output = ()> + Send,
     {
+        let shutdown_grace = self.shutdown_grace;
+        self.run_with_shutdown(handler, shutdown, DrainMode::Relative(shutdown_grace))
+            .await
+    }
+
+    /// Accepts until the process lineage quiesces, then drains until that same
+    /// lineage forces shutdown without starting another grace interval.
+    pub async fn run_with_cancellation<F, Fut>(
+        self,
+        handler: F,
+        mut cancellation: ProcessCancellation,
+    ) -> Result<(), SupervisorError>
+    where
+        F: Fn(L::Stream, CancellationToken) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let drain_cancellation = cancellation.clone();
+        self.run_with_shutdown(
+            handler,
+            async move { cancellation.cancelled().await },
+            DrainMode::Process(drain_cancellation),
+        )
+        .await
+    }
+
+    async fn run_with_shutdown<F, Fut, S>(
+        self,
+        handler: F,
+        shutdown: S,
+        drain_mode: DrainMode,
+    ) -> Result<(), SupervisorError>
+    where
+        F: Fn(L::Stream, CancellationToken) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+        S: Future<Output = ()> + Send,
+    {
         let Self {
             listener,
             max_connections,
-            shutdown_grace,
+            shutdown_grace: _,
             registry,
         } = self;
         let semaphore = Arc::new(Semaphore::new(max_connections));
@@ -234,20 +270,88 @@ where
         match stop {
             Stop::Fatal(error) => {
                 cancellation_source.cancel();
-                drain_cancelled_children(&mut children, shutdown_grace, &registry).await;
+                match drain_mode {
+                    DrainMode::Relative(shutdown_grace) => {
+                        drain_cancelled_children(&mut children, shutdown_grace, &registry).await;
+                    }
+                    DrainMode::Process(_) => {
+                        force_and_reap_children(&mut children, &registry).await;
+                    }
+                }
                 Err(error)
             }
-            Stop::Operator => {
-                drain_for_shutdown(
-                    &mut children,
-                    shutdown_grace,
-                    &cancellation_source,
-                    &registry,
-                )
-                .await
+            Stop::Operator => match drain_mode {
+                DrainMode::Relative(shutdown_grace) => {
+                    drain_for_shutdown(
+                        &mut children,
+                        shutdown_grace,
+                        &cancellation_source,
+                        &registry,
+                    )
+                    .await
+                }
+                DrainMode::Process(cancellation) => {
+                    drain_for_process_shutdown(
+                        &mut children,
+                        cancellation,
+                        &cancellation_source,
+                        &registry,
+                    )
+                    .await
+                }
+            },
+        }
+    }
+}
+
+enum DrainMode {
+    Relative(Duration),
+    Process(ProcessCancellation),
+}
+
+async fn drain_for_process_shutdown(
+    children: &mut JoinSet<()>,
+    mut cancellation: ProcessCancellation,
+    cancellation_source: &CancellationSource,
+    registry: &OwnerRegistry,
+) -> Result<(), SupervisorError> {
+    if children.is_empty() {
+        return Ok(());
+    }
+    loop {
+        tokio::select! {
+            biased;
+            result = children.join_next(), if !children.is_empty() => {
+                match result {
+                    Some(Ok(())) => {
+                        if children.is_empty() {
+                            return Ok(());
+                        }
+                    }
+                    Some(Err(_)) => {
+                        cancellation_source.cancel();
+                        force_and_reap_children(children, registry).await;
+                        return Err(SupervisorError::ChildFailure);
+                    }
+                    None => return Ok(()),
+                }
+            }
+            () = cancellation.forced() => {
+                cancellation_source.cancel();
+                force_and_reap_children(children, registry).await;
+                return Ok(());
             }
         }
     }
+}
+
+async fn force_and_reap_children(children: &mut JoinSet<()>, registry: &OwnerRegistry) {
+    if children.is_empty() {
+        return;
+    }
+    registry.record_forced_shutdowns(children.len());
+    children.abort_all();
+    reap_children(children).await;
 }
 
 async fn drain_cancelled_children(

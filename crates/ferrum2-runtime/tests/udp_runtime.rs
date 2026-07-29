@@ -13,6 +13,7 @@ use ferrum2_runtime::{
     DEFAULT_UDP_MAX_SESSIONS, DirectUdpPacketHandler, DirectUdpRuntime, DirectUdpSocket,
     DirectUdpSocketFactory, MAX_UDP_IDLE_TIMEOUT, MAX_UDP_MAX_BUFFERED_BYTES, MAX_UDP_MAX_SESSIONS,
     MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_MAX_SESSIONS, OwnerRegistry,
+    PreparedProcessRoot, ProcessCancellation, ProcessFuture, ProcessRoot, ProcessSupervisor,
     UDP_SESSION_QUEUE_DEPTH, UdpCommitError, UdpDirection, UdpLimitError, UdpResolver,
     UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
 };
@@ -388,6 +389,34 @@ impl DirectUdpPacketHandler for RecordingHandler {
             pending::<()>().await;
         }
         Ok(())
+    }
+}
+
+type ScriptedRuntime = DirectUdpRuntime<ScriptedResolver, ScriptedFactory, RecordingHandler>;
+
+struct UdpProcessRoot(ScriptedRuntime);
+
+impl PreparedProcessRoot<()> for UdpProcessRoot {
+    fn activate(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+
+    fn run(
+        self: Box<Self>,
+        mut cancellation: ProcessCancellation,
+    ) -> ProcessFuture<Result<(), ()>> {
+        Box::pin(async move {
+            cancellation.cancelled().await;
+            self.0.shutdown_with_cancellation(cancellation).await;
+            Ok(())
+        })
+    }
+
+    fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), ()>> {
+        Box::pin(async move {
+            self.0.shutdown(Duration::ZERO).await;
+            Ok(())
+        })
     }
 }
 
@@ -767,7 +796,7 @@ async fn graceful_shutdown_drains_admitted_queue_before_reaping() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn response_cancel_and_forced_shutdown_reap_every_owner() {
+async fn process_deadline_forces_response_handler_and_reaps_every_udp_owner() {
     let registry = OwnerRegistry::new();
     let (socket, _) = socket_fixture(Duration::ZERO, []);
     socket
@@ -811,10 +840,29 @@ async fn response_cancel_and_forced_shutdown_reap_every_owner() {
     assert_eq!(registry.snapshot().udp_sockets, 1);
     assert_eq!(registry.snapshot().udp_tasks, 1);
 
-    let shutdown = tokio::spawn(runtime.shutdown(Duration::from_secs(5)));
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(5)).await;
-    shutdown.await.expect("shutdown task");
-    wait_for_zero_udp_owners(&registry).await;
+    let supervisor = ProcessSupervisor::new(
+        vec![ProcessRoot::new(move || async move {
+            Ok(UdpProcessRoot(runtime))
+        })],
+        Duration::ZERO,
+        registry.clone(),
+    )
+    .expect("one UDP process root");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let process = tokio::spawn(supervisor.run_until(async move {
+        let _ = shutdown_rx.await;
+    }));
+    for _ in 0..100 {
+        if registry.snapshot().active_process_roots == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(registry.snapshot().active_process_roots, 1);
+    shutdown_tx.send(()).expect("request process shutdown");
+    let report = process.await.expect("process supervisor task");
+
+    assert_eq!(report.forced_roots(), 1);
     assert_eq!(registry.snapshot().udp_forced_shutdowns, 1);
+    wait_for_zero_udp_owners(&registry).await;
 }
