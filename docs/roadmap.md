@@ -388,14 +388,32 @@ dependency-ready 和 non-overlapping ownership。
   Architect/QA integration gates均通过；QA仅记录nonblocking
   `M2-INT-QA-001`。
 
+  首次authorized M2 hosted run `30408245840` attempt 1在exact
+  `a168b89eb8dcd0c7a06df06b95a57d63893f2ab6`通过quality、MSRV、
+  Windows、Linux GNU/musl和两个provider setup；UDP为`12/12`，TCP为
+  `9/12`。SingBox reference-client的`M1-INT-003/007/011`因
+  `ApplicationCleanEof`早于target EOF/shutdown evidence而失败，旧run保持
+  FAIL且未rerun/splice。Exact local repair `0395d7df`恢复bounded
+  target-shutdown/application-acknowledgement edge；repair-base budget
+  `0/120`、original-base `1086/1144`均PASS，qualification contract
+  `13/13`。QA exact-SHA verification `PASS`，Architect
+  `PASS_WITH_NOTES`，仅保留100 ms scheduler-bound advisory。
+
+  为保留既有legacy review history，append-only root-cycle control
+  `f95b821f`及唯一修复`6bc85d65`已集成。Initial Architect
+  `BLOCK`的`ARCH-M2-T04-001/002`经targeted re-review均RESOLVED；
+  focused root-cycle `5/5`、full workflow `73/73`、Architect/QA repair
+  gates均PASS。Preliminary local product/control checkpoint为
+  `6a4e35062bd6d1631a029230e7cffdc3ba0f7db6`。
+
 - **Deferred/out of scope:** public client UDP inbound、SOCKS5 UDP ASSOCIATE、
   SIP023/multi-user、routing/DNS proxy/custom resolver、M3 platform/lifecycle
   qualification和M4 performance。
 - **Integrated commit:** current reviewed local product/control checkpoint
-  `90c173f014f84761ee485ec584b7aa3fe8e7abab`; coordination closeout follows
+  `6a4e35062bd6d1631a029230e7cffdc3ba0f7db6`; coordination closeout follows
   on the same integration branch.
 - **Open blockers and risks:** 当前没有open implementation/review/integration
-  root。`M2-T05-RELEASE-001`将保持release blocker，直到同一最终exact SHA在
+  root。`M2-T05-QUALIFICATION-001`将保持release blocker，直到同一最终exact SHA在
   separately authorized hosted run/attempt完成quality、MSRV、Windows、
   Linux GNU/musl、IPv6-capable platform evidence以及12 TCP + 12 UDP
   interoperability与cleanup。`M2-INT-QA-001`是parallel server-test

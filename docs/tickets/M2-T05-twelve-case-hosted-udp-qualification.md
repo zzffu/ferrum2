@@ -2,7 +2,7 @@
 id = "M2-T05"
 title = "Add the twelve-case fail-closed hosted UDP qualification"
 milestone = "M2"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M2-T02"]
@@ -33,15 +33,15 @@ acceptance = [
 ]
 
 [blocker]
-id = "ARCH-M2-T05-HOSTED-002"
+id = "M2-T05-QUALIFICATION-001"
 class = "test_evidence"
-gate = "review"
-root_cause = "The first hosted-ordering repair fixes the causal event-order defect, but its repair-only delta adds 182 classified test lines with zero classified code lines, exceeding the mandatory allowance of 120 by 62."
-derivatives = ["M2-T05-HOSTED-BUDGET-001", "Architect targeted verdict ESCALATE on c31290eb572aedc236be3613d23136fae17406ff"]
+gate = "release"
+root_cause = "The locally repaired and reviewed candidate has not run hosted Linux qualification at the eventual final integration SHA; run 30408245840 covers only superseded SHA a168b89 and failed three TCP rows."
+derivatives = []
 owner = "team_lead"
-evidence = "Candidate c31290eb572aedc236be3613d23136fae17406ff failed the repair-base budget at 0/182 with allowance 120. The user-authorized local superseding compaction based on that parent passes the repair base at 0/120 and original ticket base at 1086/1144; exact-SHA Architect/QA verification remains pending."
-authorization = "consumed: user authorized local scope 1 superseding compaction only"
-unblock_condition = "Bounded exact-SHA Architect and QA verification must confirm both budgets and the frozen hosted-ordering behavior; no hosted rerun or remote action is credited."
+evidence = "Product repair 0395d7dfb170ddc8c3328b2d939210d96c81266f passed bounded Architect/QA verification and preliminary local product/control integration is 6a4e35062bd6d1631a029230e7cffdc3ba0f7db6. No new push, hosted run, or external qualification is authorized or executed."
+authorization = "required"
+unblock_condition = "After separate exact-SHA remote authorization, one clean hosted run/attempt must pass quality, MSRV, Windows, Linux GNU/musl, provider setup, TCP 12/12 plus cleanup, and UDP 12/12 plus cleanup; missing or failed evidence remains blocking."
 +++
 
 # M2-T05: Add the twelve-case fail-closed hosted UDP qualification
@@ -177,9 +177,17 @@ git diff --check
   `6946c9ae0099d617b21ba5575d254cf366d50122`. The local repair-base gate passes
   at code/tests `0/120` with allowance `120`; the original-base gate passes at
   `1086/1144` with allowance `1206`. The full qualification contract passed
-  `13/13`, and the exact affected scheduling regression passed 100 consecutive
-  executions. `ARCH-M2-T05-HOSTED-002` remains review-blocking until bounded
-  exact-SHA Architect and QA verification.
-- This local evidence does not claim a remote rerun or hosted repair result.
+  `13/13`. Exact-SHA `0395d7df` QA verification returned `PASS`; Architect
+  returned `PASS_WITH_NOTES` after one loaded 100-run sequence timed out once
+  and a diagnostic repeat passed `100/100`. Both blocking IDs are resolved;
+  the 100 ms focused scheduler bound remains nonblocking debt.
+- Append-only hosted review control is integrated from `f95b821f` plus repair
+  `6bc85d65`. Its initial Architect `BLOCK` IDs `ARCH-M2-T04-001/002` were
+  resolved by the sole targeted repair; focused root-cycle tests passed `5/5`,
+  the full workflow suite passed `73/73`, and exact repair Architect/QA gates
+  both returned `PASS`.
+- Runtime history closes `M2-T05-HOSTED-001` and its local causal/budget
+  derivatives without claiming hosted success. The remaining exact-final-SHA
+  evidence gap is canonical release root `M2-T05-QUALIFICATION-001`.
   Qualification rerun, push, publication, and reference-provider operations
   remain separately authorized release actions.

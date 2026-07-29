@@ -46,3 +46,9 @@ problem or the user explicitly reopens the contract.
 - **Follow-up trigger:** 仅当authoritative quick/full或hosted exact-SHA gate
   再现同类失败，或有证据指向product listener ownership/lifecycle缺陷时，
   才建立新的diagnosis/repair root；不得仅凭本次advisory重开T04/T05。
+<!-- review-debt:006f5eb5f3bb -->
+- `M2-T05` `qa` `c31290eb572a`: QA-M2-T05-HOSTED-N01: **RESOLVED at `0395d7dfb170`** by replacing the 10 ms wait with the bounded 100 ms test deadline.
+<!-- review-debt:ab2f5bf41a1f -->
+- `M2-T05` `qa` `c31290eb572a`: QA-M2-T05-HOSTED-N02: **RESOLVED at `0395d7dfb170`** by separating the application gate from the target worker owner.
+<!-- review-debt:31bb37d17cb3 -->
+- `M2-T05` `architect` `0395d7dfb170`: ARCH-M2-T05-HOSTED-N02: the 100 ms focused scheduler bound remains advisory after one loaded 100-run sequence timed out once and a diagnostic 100/100 repeat passed.

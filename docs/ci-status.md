@@ -44,6 +44,25 @@
   checks all pass. Ticket budget passes at code `11714`, tests `18971`,
   ratio `1.620`, delta `1086/1024`, allowance `1206`; milestone budget
   passes at `3994/3212`, allowance `4114`.
+- **First M2 hosted run:** authorized push-triggered run `30408245840`,
+  attempt `1`, on exact `a168b89eb8dcd0c7a06df06b95a57d63893f2ab6`
+  passed quality, MSRV, Windows, Linux GNU/musl, and both provider setup
+  steps. UDP passed `12/12`; TCP passed `9/12`. SingBox reference-client
+  rows `M1-INT-003/007/011` failed because `ApplicationCleanEof` was
+  recorded before target EOF/shutdown evidence, so combined cleanup
+  remained failed. The run is preserved as failed evidence and was not
+  rerun or spliced.
+- **Hosted-ordering local repair:** exact product candidate
+  `0395d7dfb170ddc8c3328b2d939210d96c81266f` restores the bounded
+  target-shutdown/application-acknowledgement causal edge. Repair-base
+  budget passes at `0/120` with allowance `120`; original ticket-base
+  passes at `1086/1144` with allowance `1206`; qualification contract is
+  `13/13`. QA exact-SHA verification returned `PASS`; Architect returned
+  `PASS_WITH_NOTES`, retaining only the 100 ms scheduler-bound advisory.
+  Append-only review control `f95b821f` plus sole repair `6bc85d65`
+  passed focused `5/5`, full workflow `73/73`, targeted Architect `PASS`,
+  and QA `PASS`. Preliminary local product/control integration is
+  `6a4e35062bd6d1631a029230e7cffdc3ba0f7db6`.
 - **Wave-2 product integration:** exact
   `6e54cce52e5e29135acd91f6337a4516a094852e`; contains initial M2-T02
   candidate `0d88666d2f46ef85b376c12c55ffb34a784a8451`, repaired candidate
@@ -78,11 +97,13 @@
   as environmental evidence, not a product waiver.
 - **Test budget:** combined ticket gate `PASS`: code `9710`, tests `16937`,
   ratio `1.744`, baseline `2.041`; delta `1990/1178`, allowance `2110`.
-- **Remote/release:** nothing pushed or published. T01-T05 are locally
-  integrated, but IPv6-capable platform evidence, exact-SHA quality/MSRV/
-  Windows/Linux GNU/Linux musl jobs, and hosted 12 TCP + 12 UDP
-  interoperability/cleanup have not run and are not credited.
-  `M2-T05-RELEASE-001` remains the separately authorized release gate.
+- **Remote/release:** the only M2 push/run remains superseded
+  `a168b89` / `30408245840` attempt `1`. No post-repair SHA has been
+  pushed, rerun, or published. T01-T05 are locally integrated, but final
+  exact-SHA IPv6-capable platform evidence, quality/MSRV/Windows/Linux
+  GNU/musl, and hosted TCP `12/12` + UDP `12/12` with cleanup are not
+  credited. `M2-T05-QUALIFICATION-001` remains the separately authorized
+  release gate.
 
 ## 当前 M1 closeout 状态
 
