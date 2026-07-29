@@ -1,6 +1,6 @@
 use crate::qualification::{
     CaseFailure, CaseSpec, CleanupState, Direction, Method, QualificationOps, Reference,
-    TcpExchangeEvent, TcpExchangeState, Transport,
+    TcpExchangeEvent, TcpExchangeState, TcpTargetShutdownGate, Transport, tcp_target_shutdown_gate,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -694,6 +694,7 @@ fn run_tcp_transport(
         target,
         deadline,
         &trace,
+        &target_process.shutdown_gate,
     );
 
     let target_evidence = target_process.finish(deadline);
@@ -715,6 +716,7 @@ fn run_tcp_processes(
     target: SocketAddrV4,
     deadline: CaseDeadline,
     trace: &Arc<Mutex<TcpExchangeState>>,
+    target_shutdown: &TcpTargetShutdownGate,
 ) -> (String, String) {
     let config = match case.direction {
         Direction::FerrumClient => {
@@ -767,7 +769,7 @@ fn run_tcp_processes(
         deadline,
         "reference TCP listener",
     );
-    exercise_socks_tcp(proxy, target, deadline, trace);
+    exercise_socks_tcp(proxy, target, deadline, trace, target_shutdown);
     let reference_evidence = reference.terminate(deadline);
     let ferrum_evidence = ferrum.terminate(deadline);
     (
@@ -781,6 +783,7 @@ fn exercise_socks_tcp(
     target: SocketAddrV4,
     deadline: CaseDeadline,
     trace: &Arc<Mutex<TcpExchangeState>>,
+    target_shutdown: &TcpTargetShutdownGate,
 ) {
     let mut stream = TcpStream::connect_timeout(
         &proxy.into(),
@@ -812,6 +815,9 @@ fn exercise_socks_tcp(
         .shutdown(Shutdown::Write)
         .expect("application TCP write half-close");
     record_tcp_event(trace, TcpExchangeEvent::ApplicationShutdown);
+    let application_acknowledgement = target_shutdown
+        .wait(deadline.remaining("TCP target shutdown synchronization"))
+        .unwrap_or_else(|error| panic!("{error}"));
     let mut extra = [0_u8; 1];
     assert_eq!(
         read_case(
@@ -824,6 +830,9 @@ fn exercise_socks_tcp(
         "TCP application expected clean EOF"
     );
     record_tcp_event(trace, TcpExchangeEvent::ApplicationCleanEof);
+    application_acknowledgement
+        .complete(Ok(()))
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 fn record_tcp_event(trace: &Arc<Mutex<TcpExchangeState>>, event: TcpExchangeEvent) {
@@ -884,7 +893,10 @@ fn read_case(
         .unwrap_or_else(|error| panic!("{label}: {error}"))
 }
 
-struct TcpTarget(CancellableWorker<Result<String, String>>);
+struct TcpTarget {
+    worker: CancellableWorker<Result<String, String>>,
+    shutdown_gate: TcpTargetShutdownGate,
+}
 
 impl TcpTarget {
     fn start(
@@ -895,13 +907,33 @@ impl TcpTarget {
         listener
             .set_nonblocking(true)
             .expect("set TCP target listener nonblocking");
-        Self(CancellableWorker::spawn(move |cancelled| {
-            run_tcp_target(listener, deadline, &cancelled, &trace)
-        }))
+        let (shutdown_notifier, shutdown_gate) = tcp_target_shutdown_gate();
+        let worker = CancellableWorker::spawn(move |cancelled| {
+            let result = run_tcp_target(listener, deadline, &cancelled, &trace);
+            let target_result = result.as_ref().map(|_| ()).map_err(Clone::clone);
+            let acknowledgement = shutdown_notifier.synchronize(
+                target_result,
+                deadline.remaining("TCP application acknowledgement"),
+            );
+            match result {
+                Ok((stream, evidence)) => {
+                    drop(stream);
+                    acknowledgement.map(|()| evidence)
+                }
+                Err(target_error) => match acknowledgement {
+                    Ok(()) => Err(target_error),
+                    Err(application_error) => Err(format!("{target_error}; {application_error}")),
+                },
+            }
+        });
+        Self {
+            worker,
+            shutdown_gate,
+        }
     }
 
     fn finish(self, deadline: CaseDeadline) -> String {
-        self.0
+        self.worker
             .finish(deadline, "TCP target completion")
             .unwrap_or_else(|error| panic!("TCP target failed: {error}"))
     }
@@ -912,7 +944,7 @@ fn run_tcp_target(
     deadline: CaseDeadline,
     cancelled: &AtomicBool,
     trace: &Arc<Mutex<TcpExchangeState>>,
-) -> Result<String, String> {
+) -> Result<(TcpStream, String), String> {
     let readiness_end = Instant::now() + deadline.bounded(READINESS_TIMEOUT, "TCP target accept");
     let mut stream = loop {
         if cancelled.load(Ordering::SeqCst) {
@@ -958,10 +990,13 @@ fn run_tcp_target(
         .shutdown(Shutdown::Write)
         .map_err(|error| format!("TCP target write shutdown failed: {error}"))?;
     record_tcp_event(trace, TcpExchangeEvent::TargetShutdown);
-    Ok(format!(
-        "forward_bytes={}, reverse_bytes={}, clean_eof=true",
-        forward.len(),
-        reverse.len()
+    Ok((
+        stream,
+        format!(
+            "forward_bytes={}, reverse_bytes={}, clean_eof=true",
+            forward.len(),
+            reverse.len()
+        ),
     ))
 }
 

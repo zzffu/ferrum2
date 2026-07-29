@@ -2,7 +2,7 @@
 id = "M2-T05"
 title = "Add the twelve-case fail-closed hosted UDP qualification"
 milestone = "M2"
-status = "done"
+status = "ready"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M2-T02"]
@@ -142,3 +142,24 @@ git diff --check
   locally. No hosted run/attempt, reference provisioning, IPv6 platform
   qualification, push, or publication is credited. Those remain a
   separately authorized release gate.
+
+## Hosted failure repair evidence
+
+- Hosted run `30408245840`, attempt `1`, passed setup and every quality/platform
+  job. All twelve UDP rows and the other TCP rows passed, while SingBox
+  reference-client rows `M1-INT-003`, `M1-INT-007`, and `M1-INT-011` failed for
+  canonical root/finding `M2-T05-HOSTED-001` with
+  `TCP exchange event is out of order: ApplicationCleanEof`.
+- Before the two-way repair, the focused command
+  `cargo test -p ferrum2-m0-harness --test qualification_contract --locked
+  tcp_exchange_accepts_hosted_sing_box_reference_client_observation_order --
+  --exact` failed `1/1` with
+  `target owner completed before application acknowledgement`.
+- After the repair, `cargo test -p ferrum2-m0-harness --test
+  qualification_contract --locked tcp_exchange -- --nocapture` passed `2/2`,
+  retaining strict raw event-order rejection while proving the bounded
+  target-shutdown/application-acknowledgement handshake for all three affected
+  rows.
+- This local evidence does not claim a remote rerun or hosted repair result.
+  Qualification rerun, push, publication, and reference-provider operations
+  remain separately authorized release actions.

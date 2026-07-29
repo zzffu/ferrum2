@@ -1,4 +1,6 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Reference {
@@ -212,6 +214,66 @@ impl TcpExchangeState {
 
     pub fn success(&self) -> bool {
         self.0 == TCP_EXCHANGE_ORDER.len()
+    }
+}
+
+type TcpHandshakeResult = Result<(), String>;
+
+pub struct TcpTargetShutdownNotifier(SyncSender<TcpHandshakeResult>, Receiver<TcpHandshakeResult>);
+
+pub struct TcpTargetShutdownGate(Receiver<TcpHandshakeResult>, SyncSender<TcpHandshakeResult>);
+
+#[derive(Debug)]
+pub struct TcpApplicationAcknowledgement(Option<SyncSender<TcpHandshakeResult>>);
+
+pub fn tcp_target_shutdown_gate() -> (TcpTargetShutdownNotifier, TcpTargetShutdownGate) {
+    let (shutdown, shutdown_gate) = mpsc::sync_channel(1);
+    let (application, application_gate) = mpsc::sync_channel(1);
+    (
+        TcpTargetShutdownNotifier(shutdown, application_gate),
+        TcpTargetShutdownGate(shutdown_gate, application),
+    )
+}
+
+impl TcpTargetShutdownNotifier {
+    pub fn synchronize(&self, result: TcpHandshakeResult, timeout: Duration) -> TcpHandshakeResult {
+        self.0
+            .send(result)
+            .map_err(|_| "TCP target shutdown synchronization receiver disconnected".to_owned())?;
+        match self.1.recv_timeout(timeout) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("TCP application failure: {error}")),
+            Err(error) => Err(format!("TCP application acknowledgement failed: {error}")),
+        }
+    }
+}
+
+impl TcpTargetShutdownGate {
+    pub fn wait(&self, timeout: Duration) -> Result<TcpApplicationAcknowledgement, String> {
+        let outcome = match self.0.recv_timeout(timeout) {
+            Ok(Ok(())) => return Ok(TcpApplicationAcknowledgement(Some(self.1.clone()))),
+            Ok(Err(error)) => format!("TCP target failed before application EOF: {error}"),
+            Err(error) => format!("TCP target shutdown synchronization failed: {error}"),
+        };
+        let _ = self.1.send(Err(outcome.clone()));
+        Err(outcome)
+    }
+}
+
+impl TcpApplicationAcknowledgement {
+    pub fn complete(mut self, result: TcpHandshakeResult) -> Result<(), String> {
+        let sender = self.0.take().expect("application acknowledgement owner");
+        sender
+            .send(result)
+            .map_err(|_| "TCP application acknowledgement disconnected".to_owned())
+    }
+}
+
+impl Drop for TcpApplicationAcknowledgement {
+    fn drop(&mut self) {
+        if let Some(application) = self.0.take() {
+            let _ = application.send(Err("TCP application EOF acknowledgement omitted".to_owned()));
+        }
     }
 }
 
