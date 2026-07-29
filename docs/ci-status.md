@@ -1,6 +1,51 @@
 # CI 与验证状态
 
-## 当前 M2 execute 状态
+## 当前 M2 closed 状态
+
+- **Qualified M2 close candidate:** exact
+  `7907cda05a56e1c3b85af2dd8faeb85a385154b7` on
+  `codex/integration/m2` combines the previously qualified T05
+  product/control lineage, reviewed root-cycle control commits
+  `dd646ae861a105ee104425fdb327100209fe1b3c` /
+  `9528679a89853fe7df62b368c6b84c585c811071`, and reviewed T06 evidence
+  candidate `d1c12627632112826fe3dee884caf5facb291e48`. The seven changed paths
+  are tree-equivalent to their exact reviewed component candidates.
+- **Exact local close gates:** authoritative quick `3/3`, full `4/4`,
+  workflow control `75/75`, qualification contract `13/13`, workspace policy
+  `17/17`, and UDP local `3 passed / 1 ignored` all passed. The ignored
+  focused IPv6 row was not credited on Windows. Ticket budget passed at
+  delta code/tests `0/120`, allowance `120`; milestone budget passed at
+  code/tests `3994/3475`, allowance `4114`, with total
+  `11714/19234` and ratio `1.642`.
+- **Final authorized M2 close qualification:** single-use scope
+  `m2-20260729-remote-qualification-7907cda-a1` was consumed `1/1` before
+  fast-forwarding only exact `7907cda` to `origin/codex/integration/m2`, then
+  auto-revoked. GitHub Actions
+  [run `30425476328` attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30425476328),
+  event `push`, completed `success`; all six expected jobs succeeded:
+  `quality` (`90490943645`), `msrv` (`90490943661`),
+  `platform / linux-musl` (`90490943702`),
+  `platform / linux-gnu` (`90490943716`),
+  `platform / windows-msvc` (`90490943726`), and
+  `interop` (`90490943768`).
+- **Focused IPv6 raw-log evidence:** quality selected
+  `ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps`
+  exactly once and reported `ok`, `1 passed`, `0 failed`, `0 ignored`.
+  `m2_ipv6_udp_real_process` appeared once with `datagrams=3` and
+  payload/source/cleanup all `PASS`; its completion marker appeared once and
+  bound exact SHA `7907cda`, run `30425476328`, attempt `1`.
+- **Interop raw-log evidence:** provider setup reported
+  `sing_box=0 shadowsocks_rust=0`; all twelve TCP case IDs and all twelve UDP
+  case IDs reported `PASS`; both transport summaries reported `12/12` and
+  `cleanup=PASS` on the same SHA/run/attempt; final status reported provider,
+  qualification, and cleanup values all zero.
+- **Close state:** `M2-CLOSE-IPV6-001` and the review-control root are
+  resolved, M2-T01～T06 are `done`, active runtime phases and open roots are
+  empty, and the pre-close scheduler returned `ready_to_close`. Product and
+  Architect close reviews returned `PASS_WITH_NOTES`; QA returned `PASS`.
+  Remaining notes are nonblocking `M2-INT-QA-001` and
+  `ARCH-M2-T05-HOSTED-N02`. The later local closeout-document commit is not
+  a separately hosted-qualified product SHA.
 
 - **Wave-3 T04 product integration:** exact
   `980540bd439c438eb196cbc3096cbea0cda3fb4d`; contains initial T04
@@ -83,7 +128,7 @@
   ledger rewrite was used. The canonical root resolution contains the
   exact repair and validation evidence, and workflow validation passes.
   No remote action occurred.
-- **Final authorized M2 hosted qualification:** final reviewed assembly
+- **T05 authorized hosted qualification checkpoint:** reviewed assembly
   `52d1610a127349e7a817a67c81c77e0383d20d1e` was fast-forward pushed only
   to `origin/codex/integration/m2` under single-use scope
   `m2-20260729-remote-qualification-52d1610-a1`. GitHub Actions run
@@ -132,13 +177,15 @@
   as environmental evidence, not a product waiver.
 - **Test budget:** combined ticket gate `PASS`: code `9710`, tests `16937`,
   ratio `1.744`, baseline `2.041`; delta `1990/1178`, allowance `2110`.
-- **Remote/release:** the failed superseded
+- **Remote/release history:** the failed superseded
   `a168b89` / `30408245840` attempt `1` remains unchanged historical
-  evidence. Final same-SHA qualification is credited only from
-  `52d1610a` / `30415717152` attempt `1`; the current M2 release gate is
-  clear and `workflow.py next --milestone M2 --json` returns
-  `ready_to_close` with no open root or release blocker. `auto_close=false`,
-  so execute mode has not closed M2.
+  evidence. T05 qualification was first credited at
+  `52d1610a` / `30415717152` attempt `1`; definitive M2 close evidence is
+  credited only from `7907cda` / `30425476328` attempt `1`. No run is
+  spliced. The release gate is clear, all six tickets are done, no open root
+  or active phase remains, and M2 is closed. No second push, rerun,
+  `workflow_dispatch`, remote `master` update, PR, tag, release, publication,
+  ref deletion, or other remote mutation occurred.
 
 ## 当前 M1 closeout 状态
 

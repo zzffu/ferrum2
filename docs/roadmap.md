@@ -10,10 +10,13 @@ Bootstrap 基线是
 `8318ef106d6cd4e029bd3b02aa64125fabdda462`、本地 full gate 与 GitHub Actions
 run `30331336772` attempt 1 的六项成功证据关闭；M1 已以 exact
 `874c83d0ee71054bd702d6ecac55e88d9e2fbcef`、本地 full gate 与 GitHub Actions
-run `30367147537` attempt 1 的六项成功证据关闭；M2 正在 `executing`，M3-M4
-仍为 `proposed`。
+run `30367147537` attempt 1 的六项成功证据关闭；M2 已以 exact
+`7907cda05a56e1c3b85af2dd8faeb85a385154b7`、本地 full gate 与 GitHub
+Actions run `30425476328` attempt 1 的六项成功、TCP/UDP 各 12/12 及 focused
+IPv6 UDP real-process 证据关闭；M3-M4 仍为 `proposed`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
-`docs/handoffs/HANDOFF-M1-2026-07-28.md`。
+`docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
+`docs/handoffs/HANDOFF-M2-2026-07-29.md`。
 
 ## 依赖顺序
 
@@ -25,9 +28,10 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M3 | M1、M2 closed | 运维契约、生命周期和三目标平台资格 |
 | M4 | M3 closed | 性能/资源门及同一 commit 上的 v0 资格证明 |
 
-M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 Wave 1 已集成
-method-bound UDP crypto 与 bounded direct UDP runtime，下一 dependency-ready
-动作是 M2-T02 protocol/replay。每个里程碑内的并行 ticket 仍须满足
+M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
+method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
+same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
+证据。下一入口是 M3 plan；每个里程碑内的并行 ticket 仍须满足
 dependency-ready 和 non-overlapping ownership。
 
 ## M0 — AES-128-GCM TCP 安全纵切
@@ -315,7 +319,7 @@ dependency-ready 和 non-overlapping ownership。
 
 ## M2 — 完整 UDP 协议纵切与 UDP 互操作
 
-- **Status:** ready to close (execute complete; close mode not yet invoked)
+- **Status:** closed
 - **Objective:** 通过 protocol API 和 server direct UDP path 交付三个方法的
   SIP022 UDP，不新增 SOCKS5 `UDP ASSOCIATE` 等公开 inbound。
 - **Entry conditions:** 已满足。M1 closed；shared method/key/address contracts
@@ -336,11 +340,14 @@ dependency-ready 和 non-overlapping ownership。
   7. `M2-UDP-INT-001..012` 在同一authorized exact SHA/run/attempt取得
      12/12+cleanup，缺失/unavailable不得waive。
   8. M0/M1回归、test-budget ratchet、MSRV/三平台和`workflow.toml` full通过。
-- **In-scope tickets:** M2-T01、M2-T02、M2-T03、M2-T04、M2-T05 均已
-  `done` 并完成本地integration。M2-T05 hosted/platform release
-  qualification首轮在superseded SHA `a168b89`失败；随后保留该失败历史，
-  修复并在final exact SHA `52d1610a127349e7a817a67c81c77e0383d20d1e`
-  的同一push-triggered run/attempt完成通过。
+- **In-scope tickets:** M2-T01～M2-T06 均已 `done` 并完成本地 integration。
+  M2-T05 hosted/platform qualification 首轮在 superseded SHA `a168b89`
+  失败；随后保留该失败历史，修复并在 exact
+  `52d1610a127349e7a817a67c81c77e0383d20d1e` 的同一
+  push-triggered run/attempt 完成 TCP/UDP qualification。M2-T06 再以
+  deterministic focused IPv6 row 关闭 M2-AC-06 的最后证据缺口，并在最终
+  exact `7907cda05a56e1c3b85af2dd8faeb85a385154b7` 重跑全部六项 hosted
+  results。
   Initial implementation frontier 为
   M2-T01 + M2-T03：
 
@@ -371,8 +378,10 @@ dependency-ready 和 non-overlapping ownership。
   100-cycle、ticket-budget、workflow validation和exact-SHA Architect/QA
   integration gates。`M2-T04-REVIEW-001`由一次substantive repair关闭；
   `M2-T04-INTEGRATION-001`由不消耗substantive budget的mechanical
-  TCP-only fixture isolation关闭；`QA-M2-T02-N01`已满足。IPv6仍
-  **NOT EXECUTED**，未 push/publish。
+  TCP-only fixture isolation关闭；`QA-M2-T02-N01`已满足。该 Windows
+  T04 worktree 的 IPv6 row 历史状态仍为 **NOT EXECUTED**；M2-T06 后续在
+  exact-SHA Linux quality job 实际执行并关闭 `ARCH-M2-T04-N01` /
+  `QA-M2-T04-N01`，没有把 Windows 结果改写为 PASS。
 
   Wave 4 T05 exact product integration
   `90c173f014f84761ee485ec584b7aa3fe8e7abab` 包含initial、first repair
@@ -408,7 +417,7 @@ dependency-ready 和 non-overlapping ownership。
   gates均PASS。Preliminary local product/control checkpoint为
   `6a4e35062bd6d1631a029230e7cffdc3ba0f7db6`。
 
-  Final local assembly
+  T05 qualification assembly
   `52d1610a127349e7a817a67c81c77e0383d20d1e`通过serialized authoritative
   quick `3/3`、full `4/4`、workspace binary build、qualification contract
   `13/13`、workflow `73/73`、policy `17/17`、ticket/milestone budgets以及
@@ -425,20 +434,44 @@ dependency-ready 和 non-overlapping ownership。
   SHA/run/attempt。没有rerun、`workflow_dispatch`、`master` push、PR、tag、
   release、publication、ref deletion或其他remote mutation。
 
+  M2 close evidence assembly
+  `7907cda05a56e1c3b85af2dd8faeb85a385154b7`在上述 product/control
+  lineage 上增加 user-authorized root-cycle control
+  `dd646ae861a105ee104425fdb327100209fe1b3c`、唯一 bounded repair
+  `9528679a89853fe7df62b368c6b84c585c811071`，以及 reviewed T06 evidence
+  candidate `d1c12627632112826fe3dee884caf5facb291e48`。Control workflow
+  `75/75`、qualification contract `13/13`、policy `17/17`、authoritative
+  quick `3/3`、full `4/4`、ticket/milestone budgets 和 final exact-SHA
+  Architect/QA assembly gates均PASS。
+
+  Separate single-use remote scope
+  `m2-20260729-remote-qualification-7907cda-a1`仅允许把该 exact SHA
+  fast-forward push 到 `origin/codex/integration/m2`并观察其一次 push run；
+  scope 在 push 前消费 `1/1`并自动撤销。GitHub Actions
+  [run `30425476328` attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30425476328)
+  在同一 SHA 完成 `success`，六项 expected jobs 全部 success。Quality raw
+  log 中 focused IPv4-ingress→IPv6-direct-target row 恰执行一次，结果为
+  `1 passed; 0 ignored`；三报文 payload/source/cleanup marker 与 exact
+  SHA/run/attempt completion marker 各出现一次。Interop raw log 记录两个
+  provider setup 均为 `0`、TCP `12/12` + `cleanup=PASS`、UDP `12/12` +
+  `cleanup=PASS`及全零 final status。没有第二次 push、rerun 或其他 remote
+  mutation。
+
 - **Deferred/out of scope:** public client UDP inbound、SOCKS5 UDP ASSOCIATE、
   SIP023/multi-user、routing/DNS proxy/custom resolver、M3 platform/lifecycle
   qualification和M4 performance。
 - **Integrated commit:** reviewed and remotely qualified product/control
-  commit `52d1610a127349e7a817a67c81c77e0383d20d1e`; coordination-only
-  evidence closeout follows locally on the same integration branch.
+  commit `7907cda05a56e1c3b85af2dd8faeb85a385154b7`；后续 ticket/roadmap/
+  CI/handoff/baseline closeout commit 仅存在于本地，不是另一个 remotely
+  qualified product SHA。
 - **Open blockers and risks:** 当前没有open canonical root；
-  `M2-T05-QUALIFICATION-001`已由run `30415717152`的同SHA/attempt证据解决，
-  release gate clear，scheduler为`ready_to_close`。`M2-INT-QA-001`仍是
-  parallel server-test port/readiness contention的nonblocking advisory；
+  `M2-T05-QUALIFICATION-001`已由run `30415717152`解决，
+  `M2-CLOSE-IPV6-001`已由run `30425476328`的同SHA/attempt证据解决，六票均
+  `done`、runtime phase为空且M2已关闭。`M2-INT-QA-001`仍是parallel
+  server-test port/readiness contention的nonblocking advisory；
   `ARCH-M2-T05-HOSTED-N02`的100 ms scheduler bound也保持advisory。只有
-  authoritative gate复现或证据指向shipped defect时才建立新root。M2尚未执行
-  close mode；唯一新增remote state是上述integration ref的授权fast-forward
-  push，没有release/publication。
+  authoritative serialized gate复现或证据指向shipped defect时才建立新root。
+  下一入口是 M3 plan；close mode 没有release/publication或额外remote state。
 
 ## M3 — 运维、生命周期与平台资格
 
@@ -566,3 +599,4 @@ dependency-ready 和 non-overlapping ownership。
 | 2026-07-28 | M0 CI evidence convergence | 接受Cargo-managed non-test qualification及四个job definitions/六个rendered results直接证明quality、MSRV、三平台与四案interop；本机编译/lint但不执行external entry；删除scope self-audit、filter/count、link-help及重复jobs | exact `5969bfd` run `30322690937`的6/11、5 failure再次证明mechanical realization被误当release invariant；不改变wire/security/platform/reference/exact-SHA结果 | ADR-0017 Accepted；SPEC/TEST amendments Approved；M0-T09/T10 done；exact `8318ef1`的local/review gates及run `30331336772`六项success |
 | 2026-07-28 | M1 plan | M1 改为 `planned`；接受method-bound三方法profile与完整target/resolution contract，批准SPEC/TEST-0002及四票DAG | M0已关闭；current code仍AES-128/IPv4 hard-code且qualification仅4案，需要先冻结width/address/deadline/fixture/12-cell evidence，避免Engineer临场安全决策 | Product/Architect/QA planning reports；ADR-0018/0019；M1 research；workflow validate/test-budget/frontier/next |
 | 2026-07-28 | M2 plan | M2改为`planned`；接受method-bound UDP envelope、8,129-value replay/current+old association和bounded direct runtime；批准SPEC/TEST-0003及五票DAG | M1已关闭；current code/runtime/server/qualification均TCP-only，需要在execute前冻结crypto分歧、mutation ordering、数值limits、same-port startup和12-cell black-box evidence | Product/Architect/QA planning reports；ADR-0020～0022；M2 research；workflow validate/test-budget/frontier/next |
+| 2026-07-29 | M2 close | M2 改为 `closed`；六票完成，接受 exact `7907cda` 的本地 full、三平台、TCP/UDP 各 12/12 和 focused IPv6 UDP real-process 证据 | `M2-CLOSE-IPV6-001`已由唯一授权 push run `30425476328/1`关闭；三位 close reviewer 无 blocker/major，且没有扩大 public UDP inbound 或其他 v0 scope | Product/Architect/QA close reports；run `30425476328` raw logs；workflow validate/test-budget/status/next；M2 handoff |

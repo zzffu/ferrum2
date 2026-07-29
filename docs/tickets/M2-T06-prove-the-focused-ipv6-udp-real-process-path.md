@@ -2,7 +2,7 @@
 id = "M2-T06"
 title = "Prove the focused IPv6 UDP real-process path"
 milestone = "M2"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M2-T04", "M2-T05"]
@@ -113,10 +113,39 @@ cargo test -p ferrum2-m0-harness --test udp_local_e2e \
 
 ## Completion evidence
 
-To be filled by the Team Lead after integration:
-
-- Branch:
-- Commit(s):
-- Required reviewer role/profile and verdict:
-- Exact candidate SHA:
-- Integrated commit:
+- **Ticket branch/candidate:** `codex/ticket/m2-t06` at
+  `d1c12627632112826fe3dee884caf5facb291e48`.
+- **Owned changes:** `.github/workflows/m0.yml`,
+  `crates/ferrum2-shadowsocks/examples/udp_protocol_client.rs`, and
+  `tests/m0-harness/tests/udp_local_e2e.rs`; no product protocol, crypto,
+  replay, runtime, listener, configuration, or public inbound contract changed.
+- **Bounded review cycle:** Architect and QA full reviews at
+  `f4fabe8277ef16c41b637a060f48c84418a3fd2f` returned `BLOCK` with
+  `ARCH-M2-CLOSE-001` and `QA-M2-CLOSE-001`. After the single evidence repair,
+  both targeted reviews at `d1c1262` returned `PASS` and resolved their exact IDs.
+- **Reviewer profiles:** configured Architect
+  `gpt-5.6-sol/high` and QA `gpt-5.6-sol/medium`; actual serving profiles were
+  not exposed and remain unverified.
+- **Integrated and remotely qualified product/control SHA:**
+  `7907cda05a56e1c3b85af2dd8faeb85a385154b7`. Its control paths are
+  tree-equivalent to reviewed `9528679a89853fe7df62b368c6b84c585c811071`,
+  and its three T06 paths are tree-equivalent to reviewed `d1c1262`.
+- **Local exact-SHA gates:** authoritative quick `3/3`, full `4/4`, workflow
+  `75/75`, qualification contract `13/13`, policy `17/17`, and UDP local
+  `3 passed / 1 ignored` all passed. Ticket budget passed at code/tests
+  delta `0/120`, allowance `120`; milestone budget passed at `3994/3475`,
+  allowance `4114`. The Windows host did not execute or credit the ignored
+  IPv6 row.
+- **Hosted qualification:** the separately authorized single fast-forward push
+  of exact `7907cda` to `origin/codex/integration/m2` triggered
+  [run `30425476328` attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30425476328).
+  All six expected jobs succeeded. Quality executed
+  `ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps`
+  exactly once with `1 passed / 0 ignored`; its product marker appeared once
+  with `datagrams=3` and payload/source/cleanup all `PASS`, and its completion
+  marker appeared once with the exact SHA/run/attempt.
+- **Regression/interop:** the same run reported provider setup zero, TCP
+  `12/12` plus cleanup PASS, UDP `12/12` plus cleanup PASS, and final
+  qualification/cleanup status zero. Canonical root `M2-CLOSE-IPV6-001` is
+  resolved; no rerun, evidence splice, second push, PR, tag, release, or
+  publication occurred.

@@ -107,13 +107,16 @@ sing-box 和 shadowsocks-rust 仅作为兼容性研究、互操作和性能比�
 |---|---|---|
 | M0 | AES-128-GCM TCP 安全纵切：离线配置、SOCKS5、独立两端、direct outbound、最小观测、互操作与平台冒烟 | closed |
 | M1 | 三种方法的完整 TCP 行为和完整 TCP 互操作矩阵 | closed |
-| M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | planned |
+| M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | closed |
 | M3 | 稳定运维契约、生命周期证明和三目标平台资格 | proposed |
 | M4 | 可复现性能/资源门与 v0 integrated qualification | proposed |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
-Rust 1.85、三平台和 12/12 TCP 互操作证据关闭。M2 plan 已接受
-ADR-0020～0022、SPEC/TEST-0003 和 M2-T01～T05；下一入口是 M2 `execute`，
-initial frontier 恰为 ownership-disjoint 的 M2-T01 crypto 与 M2-T03
-core/runtime。Execute 不隐含 push、hosted qualification 或其他 remote authority。
+Rust 1.85、三平台和 12/12 TCP 互操作证据关闭。M2 已由 exact
+`7907cda05a56e1c3b85af2dd8faeb85a385154b7` 的本地 full、Rust 1.85、
+Windows/Linux GNU/Linux musl、TCP 与 UDP 各 12/12，以及 IPv4
+Shadowsocks UDP ingress 到 IPv6-only direct target 的三报文 real-process
+证据关闭。M2 的 ADR-0020～0022、SPEC/TEST-0003 和 M2-T01～T06 均保持
+accepted/approved/done；下一入口是 M3 `plan`，不隐含 push、hosted
+qualification 或其他 remote authority。
