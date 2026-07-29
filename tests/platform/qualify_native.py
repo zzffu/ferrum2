@@ -319,6 +319,8 @@ def tcp_listener(port: int) -> socket.socket:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     if sys.platform == "win32":
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", port))
     listener.listen()
     return listener
@@ -477,25 +479,20 @@ def signal_cycle(spec: BinarySpec, config: Path, listen: int, hold_connection: b
 
 
 def assert_rebindable(spec: BinarySpec, listen: int, metrics: int | None) -> None:
-    deadline = time.monotonic() + 5
-    while True:
-        probes: list[socket.socket] = []
-        try:
-            probes.append(tcp_listener(listen))
-            if spec.role == "server":
-                udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                udp.bind(("127.0.0.1", listen))
-                probes.append(udp)
-            if metrics is not None:
-                probes.append(tcp_listener(metrics))
-            return
-        except OSError as error:
-            if time.monotonic() >= deadline:
-                raise QualificationError("immediate-rebind-failed") from error
-            time.sleep(POLL_SECONDS)
-        finally:
-            for probe in probes:
-                probe.close()
+    probes: list[socket.socket] = []
+    try:
+        probes.append(tcp_listener(listen))
+        if spec.role == "server":
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp.bind(("127.0.0.1", listen))
+            probes.append(udp)
+        if metrics is not None:
+            probes.append(tcp_listener(metrics))
+    except OSError as error:
+        raise QualificationError("immediate-rebind-failed") from error
+    finally:
+        for probe in probes:
+            probe.close()
 
 
 def assert_signal_lifecycle(spec: BinarySpec, directory: Path, forced: bool) -> None:
