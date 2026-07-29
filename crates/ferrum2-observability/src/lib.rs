@@ -67,6 +67,7 @@ impl LogLevel {
 }
 
 /// Process role used by tracing and metrics.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Role {
     Client,
@@ -82,7 +83,8 @@ impl Role {
     }
 }
 
-/// The only M0 transport.
+/// Closed transport categories used by tracing.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Transport {
     Tcp,
@@ -99,6 +101,7 @@ impl Transport {
 }
 
 /// Closed tracing stages.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Stage {
     Config,
@@ -127,6 +130,7 @@ impl Stage {
 }
 
 /// Closed tracing outcomes.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Outcome {
     Accepted,
@@ -151,6 +155,7 @@ impl Outcome {
 }
 
 /// Closed event names; callers cannot inject a free-form message.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Event {
     Config,
@@ -177,6 +182,7 @@ impl Event {
 }
 
 /// Closed failure reasons shared by tracing and failure metrics.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Reason {
     ConfigIo,
@@ -442,6 +448,7 @@ pub fn emit(record: TraceRecord) {
 }
 
 /// Closed inbound protocol labels.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Inbound {
     Socks5,
@@ -458,6 +465,7 @@ impl Inbound {
 }
 
 /// Closed byte-flow directions.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Direction {
     InboundToOutbound,
@@ -585,7 +593,9 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Creates an isolated registry containing exactly the fourteen approved families.
+    /// Creates an isolated registry containing the fourteen stable families.
+    ///
+    /// Later releases may add families without removing or repurposing these.
     pub fn new() -> Self {
         let connections = ConnectionFamily::default();
         let active = ActiveFamily::default();

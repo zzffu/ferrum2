@@ -16,7 +16,7 @@ fn series(output: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn registry_preserves_seven_tcp_and_adds_exactly_seven_udp_families() {
+fn registry_preserves_the_fourteen_stable_families_and_allows_additions() {
     let metrics = Metrics::new();
     metrics.connection(Role::Client, Inbound::Socks5, Outcome::Accepted);
     metrics.active_connections_inc(Role::Client, Inbound::Socks5);
@@ -34,55 +34,50 @@ fn registry_preserves_seven_tcp_and_adds_exactly_seven_udp_families() {
     metrics.udp_forced_shutdown(Role::Server);
 
     let output = metrics.encode_text().expect("encode metrics");
-    let help_names: Vec<_> = output
+    let help: BTreeSet<_> = output
         .lines()
         .filter_map(|line| line.strip_prefix("# HELP "))
-        .map(|line| line.split_once(' ').expect("help name").0)
         .collect();
-    assert_eq!(
-        help_names,
-        [
-            "ferrum2_tcp_bytes",
-            "ferrum2_tcp_connections",
-            "ferrum2_tcp_connections_active",
-            "ferrum2_tcp_failures",
-            "ferrum2_tcp_forced_shutdown",
-            "ferrum2_tcp_replay_entries",
-            "ferrum2_tcp_replay_rejections",
-            "ferrum2_udp_buffered_bytes",
-            "ferrum2_udp_bytes",
-            "ferrum2_udp_datagrams",
-            "ferrum2_udp_failures",
-            "ferrum2_udp_forced_shutdown",
-            "ferrum2_udp_replay_rejections",
-            "ferrum2_udp_sessions_active",
-        ]
-    );
-    assert_eq!(help_names.len(), 14);
+    let stable_help = BTreeSet::from([
+        "ferrum2_tcp_bytes Authenticated application bytes forwarded.",
+        "ferrum2_tcp_connections TCP connection outcomes.",
+        "ferrum2_tcp_connections_active Active TCP connections.",
+        "ferrum2_tcp_failures Closed TCP failure categories.",
+        "ferrum2_tcp_forced_shutdown TCP flows terminated at shutdown deadline.",
+        "ferrum2_tcp_replay_entries Current exact TCP replay entries.",
+        "ferrum2_tcp_replay_rejections TCP replay-related rejections.",
+        "ferrum2_udp_buffered_bytes Allocated user-space UDP bytes.",
+        "ferrum2_udp_bytes Authenticated UDP application bytes forwarded.",
+        "ferrum2_udp_datagrams UDP datagram outcomes.",
+        "ferrum2_udp_failures Closed UDP failure categories.",
+        "ferrum2_udp_forced_shutdown UDP sessions terminated at shutdown deadline.",
+        "ferrum2_udp_replay_rejections UDP replay-related rejections.",
+        "ferrum2_udp_sessions_active Active bounded UDP sessions.",
+    ]);
+    assert_eq!(stable_help.len(), 14);
+    assert!(stable_help.is_subset(&help));
 
     let types: BTreeSet<_> = output
         .lines()
         .filter_map(|line| line.strip_prefix("# TYPE "))
         .collect();
-    assert_eq!(
-        types,
-        BTreeSet::from([
-            "ferrum2_tcp_bytes counter",
-            "ferrum2_tcp_connections counter",
-            "ferrum2_tcp_connections_active gauge",
-            "ferrum2_tcp_failures counter",
-            "ferrum2_tcp_forced_shutdown counter",
-            "ferrum2_tcp_replay_entries gauge",
-            "ferrum2_tcp_replay_rejections counter",
-            "ferrum2_udp_buffered_bytes gauge",
-            "ferrum2_udp_bytes counter",
-            "ferrum2_udp_datagrams counter",
-            "ferrum2_udp_failures counter",
-            "ferrum2_udp_forced_shutdown counter",
-            "ferrum2_udp_replay_rejections counter",
-            "ferrum2_udp_sessions_active gauge",
-        ])
-    );
+    let stable_types = BTreeSet::from([
+        "ferrum2_tcp_bytes counter",
+        "ferrum2_tcp_connections counter",
+        "ferrum2_tcp_connections_active gauge",
+        "ferrum2_tcp_failures counter",
+        "ferrum2_tcp_forced_shutdown counter",
+        "ferrum2_tcp_replay_entries gauge",
+        "ferrum2_tcp_replay_rejections counter",
+        "ferrum2_udp_buffered_bytes gauge",
+        "ferrum2_udp_bytes counter",
+        "ferrum2_udp_datagrams counter",
+        "ferrum2_udp_failures counter",
+        "ferrum2_udp_forced_shutdown counter",
+        "ferrum2_udp_replay_rejections counter",
+        "ferrum2_udp_sessions_active gauge",
+    ]);
+    assert!(stable_types.is_subset(&types));
 
     let samples = series(&output);
     assert!(samples.contains(
@@ -162,14 +157,21 @@ fn one_thousand_destinations_cannot_change_metric_series_identity() {
 
 #[test]
 fn udp_secret_and_identity_sentinels_cannot_change_series_identity() {
-    let metrics = Metrics::new();
-    for _sentinel in [
+    const SENTINELS: &[&str] = &[
+        "2022-blake3-aes-128-gcm",
         "M2_PSK_SENTINEL",
+        "M2_KEY_SENTINEL",
         "M2_NONCE_SENTINEL",
         "M2_SESSION_SENTINEL",
+        "M2_PACKET_SENTINEL",
+        "198.51.100.21:61000",
+        "198.51.100.22:62000",
         "192.0.2.31:65000",
         "example.invalid:53",
-    ] {
+        "M2_FREE_TEXT_SENTINEL",
+    ];
+    let metrics = Metrics::new();
+    for _sentinel in SENTINELS {
         metrics.udp_failure(Role::Server, Stage::Shadowsocks, Reason::Authentication);
     }
     let output = metrics.encode_text().expect("UDP metrics");
@@ -182,13 +184,7 @@ fn udp_secret_and_identity_sentinels_cannot_change_series_identity() {
             "ferrum2_udp_failures_total{role=\"server\",stage=\"shadowsocks\",reason=\"authentication\"}"
         ]
     );
-    for sentinel in [
-        "M2_PSK_SENTINEL",
-        "M2_NONCE_SENTINEL",
-        "M2_SESSION_SENTINEL",
-        "192.0.2.31:65000",
-        "example.invalid:53",
-    ] {
+    for sentinel in SENTINELS {
         assert!(!output.contains(sentinel));
     }
 }

@@ -50,10 +50,15 @@ fn newline_json_uses_only_closed_fields_and_redacts_sentinels() {
     const SALT: &str = "M0_REQUEST_RESPONSE_SALT_SENTINEL";
     const NONCE: &str = "M0_NONCE_SENTINEL";
     const RAW_CONFIG: &str = "M0_RAW_CONFIG_SENTINEL";
+    const DECODED_CONFIG: &str = "M0_DECODED_CONFIG_SENTINEL";
     const DESTINATION: &str = "192.0.2.231:65000";
     const FREE_MESSAGE: &str = "M0_FREE_MESSAGE_SENTINEL";
     const FREE_ERROR: &str = "M0_FREE_ERROR_SENTINEL";
     const ARBITRARY_FIELD: &str = "M0_ARBITRARY_FIELD_SENTINEL";
+    const WIRE_ID: &str = "M0_WIRE_ID_SENTINEL";
+    const SOURCE: &str = "198.51.100.11:41000";
+    const PEER: &str = "198.51.100.12:42000";
+    const TARGET: &str = "example.invalid:443";
 
     let capture = Captured::default();
     let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
@@ -63,10 +68,10 @@ fn newline_json_uses_only_closed_fields_and_redacts_sentinels() {
             target: "ferrum2_observability::closed",
             tracing::Level::WARN,
             event = RAW_PSK,
-            role = DESTINATION,
-            transport = "tcp",
-            stage = FREE_ERROR,
-            outcome = ARBITRARY_FIELD,
+            role = DECODED_KEY,
+            transport = DERIVED_KEY,
+            stage = SALT,
+            outcome = NONCE,
             session_id = 1_u64,
             duration_ms = 2_u64,
             bytes = 3_u64,
@@ -74,8 +79,14 @@ fn newline_json_uses_only_closed_fields_and_redacts_sentinels() {
         tracing::event!(
             target: "ferrum2_observability::closed",
             tracing::Level::WARN,
+            source = SOURCE,
+            peer = PEER,
+            target = TARGET,
             destination = DESTINATION,
+            raw_config = RAW_CONFIG,
+            config = DECODED_CONFIG,
             secret = RAW_PSK,
+            wire_id = WIRE_ID,
             error = FREE_ERROR,
             arbitrary = ARBITRARY_FIELD,
             FREE_MESSAGE,
@@ -105,10 +116,15 @@ fn newline_json_uses_only_closed_fields_and_redacts_sentinels() {
         SALT,
         NONCE,
         RAW_CONFIG,
+        DECODED_CONFIG,
         DESTINATION,
         FREE_MESSAGE,
         FREE_ERROR,
         ARBITRARY_FIELD,
+        WIRE_ID,
+        SOURCE,
+        PEER,
+        TARGET,
     ] {
         assert!(!text.contains(sentinel), "leaked sentinel {sentinel}");
     }
@@ -140,10 +156,11 @@ fn newline_json_uses_only_closed_fields_and_redacts_sentinels() {
     assert_eq!(object["session_id"], 42);
     assert_eq!(object["duration_ms"], 7);
     assert_eq!(object["bytes"], 0);
+    assert!(object["timestamp"].is_string());
 }
 
 #[test]
-fn closed_log_level_filters_without_installing_a_global_subscriber() {
+fn minimal_udp_record_omits_optional_fields_and_honors_level_filtering() {
     let capture = Captured::default();
     let subscriber = json_subscriber(capture.clone(), LogLevel::Info);
     let dispatch = Dispatch::new(subscriber);
@@ -155,49 +172,38 @@ fn closed_log_level_filters_without_installing_a_global_subscriber() {
             Stage::Relay,
             Outcome::Completed,
         ));
-        ferrum2_observability::emit(TraceRecord::new(
-            LogLevel::Info,
-            Event::Lifecycle,
-            Role::Client,
-            Stage::Relay,
-            Outcome::Completed,
-        ));
-    });
-    assert_eq!(capture.text().lines().count(), 1);
-}
-
-#[test]
-fn udp_trace_uses_only_closed_categories_and_process_local_numeric_correlation() {
-    let capture = Captured::default();
-    let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
-    let dispatch = Dispatch::new(subscriber);
-    tracing::dispatcher::with_default(&dispatch, || {
         ferrum2_observability::emit(
             TraceRecord::new(
-                LogLevel::Warn,
-                Event::Failure,
-                Role::Server,
-                Stage::Direct,
-                Outcome::Failed,
+                LogLevel::Info,
+                Event::Lifecycle,
+                Role::Client,
+                Stage::Relay,
+                Outcome::Completed,
             )
-            .udp()
-            .with_reason(Reason::QueueFull)
-            .with_session_id(7),
+            .udp(),
         );
     });
+
     let text = capture.text();
-    let value: Value = serde_json::from_str(text.trim_end()).expect("UDP JSON");
+    assert_eq!(text.lines().count(), 1);
+    let value: Value = serde_json::from_str(text.trim_end()).expect("minimal JSON");
+    let actual: BTreeSet<_> = value
+        .as_object()
+        .expect("JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        actual,
+        BTreeSet::from([
+            "event",
+            "level",
+            "outcome",
+            "role",
+            "stage",
+            "timestamp",
+            "transport",
+        ])
+    );
     assert_eq!(value["transport"], "udp");
-    assert_eq!(value["reason"], "queue_full");
-    assert_eq!(value["session_id"], 7);
-    for forbidden in [
-        "M2_SECRET_SENTINEL",
-        "session_id_bytes",
-        "packet_id",
-        "peer",
-        "source",
-        "target",
-    ] {
-        assert!(!text.contains(forbidden));
-    }
 }
