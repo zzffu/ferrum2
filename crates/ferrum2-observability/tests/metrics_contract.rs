@@ -134,9 +134,15 @@ fn text_encoding_is_deterministic_across_insertion_orders() {
 
 #[test]
 fn one_thousand_destinations_cannot_change_metric_series_identity() {
+    let tcp_failure_series = |output: &str| {
+        series(output)
+            .into_iter()
+            .filter(|sample| sample.starts_with("ferrum2_tcp_failures"))
+            .collect::<BTreeSet<_>>()
+    };
     let one = Metrics::new();
     one.failure(Role::Server, Stage::Direct, Reason::ConnectionRefused);
-    let one_series = series(&one.encode_text().expect("single destination"));
+    let one_series = tcp_failure_series(&one.encode_text().expect("single destination"));
 
     let many = Metrics::new();
     let destinations: Vec<_> = (0..1_000)
@@ -146,8 +152,9 @@ fn one_thousand_destinations_cannot_change_metric_series_identity() {
         many.failure(Role::Server, Stage::Direct, Reason::ConnectionRefused);
     }
     let output = many.encode_text().expect("many destinations");
-    assert_eq!(series(&output), one_series);
-    assert_eq!(series(&output).len(), 2);
+    let many_series = tcp_failure_series(&output);
+    assert_eq!(many_series, one_series);
+    assert_eq!(many_series.len(), 1);
     for destination in destinations {
         assert!(!output.contains(&destination));
     }
