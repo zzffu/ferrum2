@@ -145,7 +145,14 @@ and command definitions in their authoritative build/config files where possible
     host-local commands once their test harnesses exist.
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
-- Active planned changes: None.
+- Active planned changes:
+  - M3 — planned — Stabilize the existing `schema_version = 1` operator, CLI,
+    error, logging, and metrics contracts; establish a reusable transactional
+    supervisor lifecycle; and qualify the three required targets. The current
+    single listen, single server, IPv4 operator endpoints, and two-binary
+    composition are current adapters rather than permanent topology.
+    Multi-inbound, multi-outbound, routing, DNS, Linux transparent inbound, and
+    Windows TUN retain an explicit evolution path but are not implemented in M3.
 
 
 ## Project validation

@@ -67,8 +67,9 @@ v0 只有在以下结果都有直接证据时才算完成：
 
 - SOCKS5 `UDP ASSOCIATE` 或其他公开 UDP inbound；
 - SIP023 Extensible Identity Headers、多用户或多 PSK 产品行为；
-- routing rules、DNS proxy/resolver、多个 upstream、load balancing、proxy
-  chaining、hot reload 和 management API；
+- multi-inbound、multi-outbound、routing rules、DNS proxy/resolver、多个
+  upstream、load balancing、proxy chaining、hot reload 和 management API；
+- Linux transparent inbound、Windows TUN 或其他设备/内核流量入口；
 - reduced-round ChaCha、custom executor 和 `io_uring`；
 - 没有独立 ADR、安全论证和 benchmark 证据的 `unsafe`；
 - v0 路线图之外的部署编排、远程控制面或发布自动化。
@@ -80,6 +81,16 @@ ferrum2 独立实现协议核心，不依赖其他代理项目的 Shadowsocks pr
 sing-box 和 shadowsocks-rust 仅作为兼容性研究、互操作和性能比较对象；任何参考
 代码或 fixture 都必须记录 provenance 并经过 license review。实现差异不能通过
 静默偏离 SIP022 来解决，必须进入显式 ADR/spec 决策。
+
+M3 close 时由对应 binary 接受的所有 `schema_version = 1` 配置构成 preserved
+cohort：它们在全部 v0.x 中继续有效；successor schema stable 发布后，移除支持
+还必须同时等待至少 12 个月和至少两个 stable minor releases，并提前一个
+stable release 发出 deprecation notice。后续 v1 可以添加 optional sections/
+fields或安全放宽 endpoint domain，但省略新增项时必须保留 cohort 的 effective
+behavior；breaking change 使用显式新 schema version，不使用 heuristic
+fallback、静默 reinterpret 或自动重写。当前单 listen、单 server、IPv4
+operator endpoint、两个 binary roots 和 workspace member 数量是现状而非永久
+拓扑。
 
 ## 约束
 
@@ -108,7 +119,7 @@ sing-box 和 shadowsocks-rust 仅作为兼容性研究、互操作和性能比�
 | M0 | AES-128-GCM TCP 安全纵切：离线配置、SOCKS5、独立两端、direct outbound、最小观测、互操作与平台冒烟 | closed |
 | M1 | 三种方法的完整 TCP 行为和完整 TCP 互操作矩阵 | closed |
 | M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | closed |
-| M3 | 稳定运维契约、生命周期证明和三目标平台资格 | proposed |
+| M3 | 稳定运维契约、生命周期证明和三目标平台资格 | planned |
 | M4 | 可复现性能/资源门与 v0 integrated qualification | proposed |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
@@ -118,5 +129,12 @@ Rust 1.85、三平台和 12/12 TCP 互操作证据关闭。M2 已由 exact
 Windows/Linux GNU/Linux musl、TCP 与 UDP 各 12/12，以及 IPv4
 Shadowsocks UDP ingress 到 IPv6-only direct target 的三报文 real-process
 证据关闭。M2 的 ADR-0020～0022、SPEC/TEST-0003 和 M2-T01～T06 均保持
-accepted/approved/done；下一入口是 M3 `plan`，不隐含 push、hosted
-qualification 或其他 remote authority。
+accepted/approved/done。
+
+M3 planning baseline 是
+`master@3a877b6beeb955b5237ab4048f8dec02a92f06b6`。Context audit、
+ADR-0023/0024、SPEC/TEST-0004 与 M3-T01～T05 已
+approved/accepted/ready；initial frontier 是 ownership-disjoint 的
+M3-T01/T02/T03，T04 等待三票，T05 等待 T04。Planning analysis 没有
+blocker/major，未运行或授权 remote qualification；下一入口是
+`mode=execute milestone=M3 strategy=drain`。
