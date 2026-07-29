@@ -105,8 +105,10 @@ These rules override any looser third-party TDD or code-review guidance:
    legacy rounds are already complete, append a root-scoped cycle by adding
    `--root-blocker <ROOT_ID>` to its full, targeted, and superseding records. Never
    replace the legacy records or an earlier root cycle. The latest root cycle keeps
-   `review-state` blocked until every required reviewer consumes its own override and
-   passes the same final candidate SHA.
+   `review-state` blocked until every required reviewer consumes its own override,
+   pre-bound at grant time to that exact root and reviewer, and passes the same final
+   candidate SHA. Unbound historical scopes remain compatible with legacy
+   superseding records only.
 8. **Test budget.** Run the configured test-budget report during planning/bootstrap,
    the ticket gate before integration, and the milestone gate at close. Existing
    high-ratio repositories use a recorded ratchet baseline rather than an immediate
@@ -411,7 +413,9 @@ For every ticket with runtime phase `review`:
    cycle. A reviewer may enter that cycle with a blocking full/targeted escalation or
    a passing full baseline. After the separately authorized repair, both paths still
    require one per-reviewer superseding verification on the identical active final
-   SHA. The latest cycle, not the older passing history, controls `review-state`.
+   SHA. Grant each single-use override with the paired `--root-blocker` and
+   `--reviewer` options before verification; consumption never fills in a missing
+   binding. The latest cycle, not the older passing history, controls `review-state`.
 7. Before integration, require `review-state <TICKET_ID>` and
    `gate-check <TICKET_ID> integration` to pass. Close completed reviewer threads.
 

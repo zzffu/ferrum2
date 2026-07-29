@@ -449,6 +449,56 @@ def review_record_errors(
     return errors
 
 
+def root_cycle_round_invariant_errors(
+    rounds: dict[str, Any],
+    blocking_severities: set[str],
+) -> list[str]:
+    errors: list[str] = []
+    full = rounds.get("full")
+    if not isinstance(full, dict):
+        return errors
+    full_blocking = [
+        finding
+        for finding in full.get("findings", [])
+        if isinstance(finding, dict)
+        and finding.get("severity") in blocking_severities
+    ]
+    if full.get("verdict") == "block" and not full_blocking:
+        errors.append("blocking full review requires a blocking finding")
+    if full.get("verdict") in {"pass", "pass_with_notes"} and full_blocking:
+        errors.append("passing full review cannot retain a blocking finding")
+
+    targeted = rounds.get("targeted")
+    if not isinstance(targeted, dict):
+        return errors
+    targeted_findings = [
+        finding
+        for finding in targeted.get("findings", [])
+        if isinstance(finding, dict)
+    ]
+    targeted_blocking = [
+        finding
+        for finding in targeted_findings
+        if finding.get("severity") in blocking_severities
+    ]
+    if targeted.get("verdict") == "escalate" and not targeted_blocking:
+        errors.append("targeted escalation requires a blocking finding")
+    if (
+        targeted.get("verdict") in {"pass", "pass_with_notes"}
+        and targeted_blocking
+    ):
+        errors.append("passing targeted review cannot retain a blocking finding")
+    resolved = targeted.get("resolved", [])
+    finding_ids = {
+        str(finding.get("id", ""))
+        for finding in targeted_findings
+        if str(finding.get("id", "")).strip()
+    }
+    if isinstance(resolved, list) and finding_ids.intersection(resolved):
+        errors.append("targeted findings and resolved IDs cannot overlap")
+    return errors
+
+
 def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     milestones = payload.get("milestones", {})
@@ -606,6 +656,65 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"{milestone}.blockers.{blocker_id}.root_cause_id must equal its id"
                 )
+
+        if isinstance(authorizations, dict):
+            for scope, authorization in authorizations.items():
+                if not isinstance(authorization, dict):
+                    continue
+                bound_root = str(
+                    authorization.get("root_cause_id", "")
+                ).strip()
+                bound_reviewer = str(authorization.get("reviewer", "")).strip()
+                if bool(bound_root) != bool(bound_reviewer):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope} root_cause_id and "
+                        "reviewer must be provided together"
+                    )
+                    continue
+                if not bound_root:
+                    continue
+                root = blockers.get(bound_root)
+                if (
+                    authorization.get("kind") != "local"
+                    or authorization.get("actions") != ["review_round_override"]
+                    or authorization.get("max_uses") != 1
+                ):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope} bound review scope "
+                        "must be local, single-use, and review_round_override-only"
+                    )
+                if bound_reviewer not in REVIEWERS:
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.reviewer is invalid"
+                    )
+                if (
+                    not isinstance(root, dict)
+                    or root.get("derived_from")
+                    or str(root.get("root_cause_id", "")) != bound_root
+                ):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.root_cause_id must "
+                        "name a canonical root"
+                    )
+                    continue
+                expected_ticket = str(root.get("ticket_id", "")).upper()
+                if authorization.get("tickets") != [expected_ticket]:
+                    errors.append(
+                        f"{milestone}.authorizations.{scope}.tickets must contain "
+                        "only the canonical root ticket"
+                    )
+                root_class = str(root.get("class", ""))
+                root_risk = str(root.get("risk", ""))
+                max_risk = str(authorization.get("max_risk", ""))
+                if root_class not in authorization.get("blocker_classes", []) or (
+                    root_risk in RISK_ORDER
+                    and max_risk in RISK_ORDER
+                    and RISK_ORDER[max_risk] < RISK_ORDER[root_risk]
+                ):
+                    errors.append(
+                        f"{milestone}.authorizations.{scope} class/risk must "
+                        "cover its bound canonical root"
+                    )
 
         repairs = runtime.get("repairs", {})
         if not isinstance(repairs, dict):
@@ -932,6 +1041,13 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
                         if not isinstance(full, dict):
                             errors.append(reviewer_prefix + " requires a full review")
                             continue
+                        errors.extend(
+                            reviewer_prefix + ": " + error
+                            for error in root_cycle_round_invariant_errors(
+                                rounds,
+                                BLOCKING_REVIEW_SEVERITIES,
+                            )
+                        )
                         if full.get("verdict") not in {
                             "pass",
                             "pass_with_notes",
@@ -3011,22 +3127,20 @@ def validate_superseding_review(
     if root_cycle:
         bound_root = str(authorization.get("root_cause_id", "")).strip()
         bound_reviewer = str(authorization.get("reviewer", "")).strip()
-        if bound_root and bound_root != root_cause_id:
+        if not bound_root or not bound_reviewer:
+            raise WorkflowError(
+                "Root-cycle verification requires a review_round_override scope "
+                "pre-bound to its canonical root and reviewer"
+            )
+        if bound_root != root_cause_id:
             raise WorkflowError(
                 f"Superseding review authorization scope {authorization_scope} "
                 f"is bound to canonical root {bound_root}"
             )
-        if bound_reviewer and bound_reviewer != reviewer:
+        if bound_reviewer != reviewer:
             raise WorkflowError(
                 f"Superseding review authorization scope {authorization_scope} "
                 f"is bound to reviewer {bound_reviewer}"
-            )
-        if not require_available and (
-            bound_root != root_cause_id or bound_reviewer != reviewer
-        ):
-            raise WorkflowError(
-                "Root-cycle verification authorization must preserve its exact "
-                "root and reviewer binding"
             )
     prior_at = recorded_at(prior.get("recorded_at"))
     repairs = runtime.get("repairs", {}).get(ticket_id, [])
@@ -3096,7 +3210,7 @@ def validate_superseding_review(
         for item in prior.get("findings", [])
         if isinstance(item, dict) and item.get("severity") in blocking_severities
     }
-    if not root_cycle and not prior_open:
+    if isinstance(targeted, dict) and not prior_open:
         raise WorkflowError(
             "Targeted escalation must retain at least one blocking finding"
         )
@@ -3179,6 +3293,22 @@ def review_gate_status(
         final_sha = ""
         for reviewer in ticket.required_reviews:
             rounds = reviewers.get(reviewer, {}) if isinstance(reviewers, dict) else {}
+            if not isinstance(rounds, dict) or not isinstance(
+                rounds.get("full"),
+                dict,
+            ):
+                failures.append(f"{reviewer} root review baseline is missing")
+                continue
+            invariant_errors = root_cycle_round_invariant_errors(
+                rounds,
+                set(cfg.get("review", {}).get("blocking_severities", [])),
+            )
+            if invariant_errors:
+                failures.extend(
+                    f"{reviewer} root review is invalid: {error}"
+                    for error in invariant_errors
+                )
+                continue
             record = rounds.get("superseding") if isinstance(rounds, dict) else None
             if not isinstance(record, dict):
                 failures.append(f"missing {reviewer} final review")
@@ -3536,9 +3666,6 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         **record_extra,
     }
     if authorization_to_consume is not None:
-        if root_cycle_scoped:
-            authorization_to_consume["root_cause_id"] = root_cause_id
-            authorization_to_consume["reviewer"] = reviewer
         consume_authorization_record(authorization_to_consume)
     reviewer_rounds[round_name] = record
     path = save_runtime_state(root, cfg, state)
@@ -5020,6 +5147,40 @@ def cmd_grant_authorization(args: argparse.Namespace) -> int:
             f"Authorization scope {args.scope} already exists and is immutable; "
             "revoke it if needed and grant a new scope ID"
         )
+    bound_root = str(getattr(args, "root_blocker", "")).strip()
+    bound_reviewer = str(getattr(args, "reviewer", "")).strip()
+    if bool(bound_root) != bool(bound_reviewer):
+        raise WorkflowError(
+            "--root-blocker and --reviewer must be provided together"
+        )
+    bound_root_record: dict[str, Any] | None = None
+    if bound_root:
+        if args.kind != "local" or list(args.action) != ["review_round_override"]:
+            raise WorkflowError(
+                "root/reviewer binding is valid only for a local "
+                "review_round_override authorization"
+            )
+        bound_root_record = canonical_review_root(
+            runtime,
+            str(args.ticket[0]) if len(args.ticket) == 1 else "",
+            bound_root,
+            require_open=True,
+        )
+        expected_ticket = str(bound_root_record.get("ticket_id", "")).upper()
+        normalized_tickets = [ticket.upper() for ticket in args.ticket]
+        if normalized_tickets != [expected_ticket]:
+            raise WorkflowError(
+                "bound review authorization must name only its canonical root ticket"
+            )
+        root_class = str(bound_root_record.get("class", ""))
+        root_risk = str(bound_root_record.get("risk", ""))
+        if root_class not in args.blocker_class or (
+            root_risk in RISK_ORDER
+            and RISK_ORDER[args.max_risk] < RISK_ORDER[root_risk]
+        ):
+            raise WorkflowError(
+                "bound review authorization class/risk must cover its canonical root"
+            )
     if (args.kind == "remote") != bool(args.remote_effects):
         raise WorkflowError(
             "--kind remote requires --remote-effects, and local authorization must "
@@ -5052,9 +5213,13 @@ def cmd_grant_authorization(args: argparse.Namespace) -> int:
             raise WorkflowError(
                 "local authorization must not set --remote-ref or --commit-sha"
             )
-        max_uses = args.max_uses
+        max_uses = 1 if bound_root and args.max_uses is None else args.max_uses
         if max_uses is not None and max_uses < 1:
             raise WorkflowError("--max-uses must be at least 1")
+        if bound_root and max_uses != 1:
+            raise WorkflowError(
+                "bound review_round_override authorization must be single-use"
+            )
     record = {
         "kind": args.kind,
         "status": "granted",
@@ -5069,6 +5234,13 @@ def cmd_grant_authorization(args: argparse.Namespace) -> int:
     }
     if max_uses is not None:
         record["max_uses"] = max_uses
+    if bound_root_record is not None:
+        record.update(
+            {
+                "root_cause_id": bound_root,
+                "reviewer": bound_reviewer,
+            }
+        )
     if args.kind == "remote":
         record.update(
             {
@@ -5814,6 +5986,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remote-ref", default="")
     p.add_argument("--commit-sha", default="")
     p.add_argument("--max-uses", type=int)
+    p.add_argument(
+        "--root-blocker",
+        default="",
+        help="Pre-bind one review_round_override to an open canonical root",
+    )
+    p.add_argument(
+        "--reviewer",
+        choices=sorted(REVIEWERS),
+        default="",
+        help="Pre-bind one review_round_override to architect or qa",
+    )
     p.add_argument("--evidence", required=True)
     p.set_defaults(func=cmd_grant_authorization)
 

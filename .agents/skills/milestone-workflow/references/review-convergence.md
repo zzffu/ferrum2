@@ -111,6 +111,17 @@ After a separately authorized budget-consuming repair, each required reviewer re
 one final `superseding` verification with its own unused `review_round_override`:
 
 ```bash
+python .agents/skills/milestone-workflow/scripts/workflow.py grant-authorization \
+  M2 --scope <architect-scope> --action review_round_override --ticket M2-T05 \
+  --blocker-class test_evidence --max-risk high --max-uses 1 \
+  --root-blocker M2-T05-HOSTED-001 --reviewer architect \
+  --evidence '<explicit user authorization>'
+python .agents/skills/milestone-workflow/scripts/workflow.py grant-authorization \
+  M2 --scope <qa-scope> --action review_round_override --ticket M2-T05 \
+  --blocker-class test_evidence --max-risk high --max-uses 1 \
+  --root-blocker M2-T05-HOSTED-001 --reviewer qa \
+  --evidence '<explicit user authorization>'
+
 python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
   M2-T05 --reviewer architect --round superseding \
   --root-blocker M2-T05-HOSTED-001 --candidate-sha <final-sha> \
@@ -125,10 +136,14 @@ python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
 The root and ticket binding is exact. Full and targeted candidates and findings are
 immutable; targeted blockers retain their IDs, severity, and provenance. Final
 verification accepts no new finding, changes candidate after the escalation or
-passing baseline, binds the authorization atomically to that root and reviewer, and
-must match the active repair SHA. `review-state` evaluates the latest appended root
-cycle and fails until all required reviewers have passing final evidence on the same
-SHA. An older cycle or the legacy passing record never substitutes for that evidence.
+passing baseline, requires an authorization already bound to that root and reviewer,
+and must match the active repair SHA. Missing, partial, swapped, wrong-root, or
+wrong-reviewer bindings fail before consumption. Unbound historical scopes remain
+valid for legacy superseding records only. `review-state` evaluates the latest
+appended root cycle and fails until all required reviewers have passing final evidence
+on the same SHA. An older cycle or the legacy passing record never substitutes for
+that evidence. It also rechecks full/targeted verdict and blocking-finding parity, so
+tampered baseline or escalation state cannot pass merely because final SHAs match.
 
 ## Verdicts
 

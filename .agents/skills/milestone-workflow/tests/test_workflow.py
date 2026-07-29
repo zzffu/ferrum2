@@ -827,6 +827,59 @@ class RepairAndStateTests(unittest.TestCase):
             ):
                 workflow.cmd_grant_authorization(args)
 
+    def test_review_override_grant_persists_exact_root_and_reviewer_binding(
+        self,
+    ) -> None:
+        state = workflow.empty_runtime_state()
+        runtime = workflow.milestone_runtime_state(state, "M0")
+        runtime["blockers"]["B1"] = {
+            "id": "B1",
+            "ticket_id": "M0-T01",
+            "class": "test_evidence",
+            "phase": "review",
+            "risk": "high",
+            "root_cause": "hosted evidence failed",
+            "root_cause_id": "B1",
+            "derived_from": None,
+            "status": "open",
+        }
+        args = argparse.Namespace(
+            milestone="M0",
+            scope="qa-root-review",
+            kind="local",
+            action=["review_round_override"],
+            ticket=["M0-T01"],
+            blocker_class=["test_evidence"],
+            max_risk="high",
+            remote_effects=False,
+            remote_ref="",
+            commit_sha="",
+            max_uses=1,
+            evidence="explicit bounded QA verification",
+            root_blocker="B1",
+            reviewer="qa",
+        )
+        with (
+            mock.patch.object(workflow, "git_root", return_value=Path.cwd()),
+            mock.patch.object(
+                workflow,
+                "load_config",
+                return_value=workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
+            ),
+            mock.patch.object(workflow, "load_runtime_state", return_value=state),
+            mock.patch.object(
+                workflow,
+                "save_runtime_state",
+                return_value=Path("state.json"),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(workflow.cmd_grant_authorization(args), 0)
+        record = runtime["authorizations"]["qa-root-review"]
+        self.assertEqual(record["root_cause_id"], "B1")
+        self.assertEqual(record["reviewer"], "qa")
+        self.assertEqual(workflow.runtime_state_errors(state), [])
+
     def test_runtime_state_rejects_derivative_without_direct_root(self) -> None:
         state = workflow.empty_runtime_state()
         runtime = workflow.milestone_runtime_state(state, "M0")
@@ -1977,7 +2030,46 @@ class ReviewConvergenceTests(unittest.TestCase):
                 },
             }
         ]
+        runtime["authorizations"]["review-override"].update(
+            root_cause_id="B1",
+            reviewer="architect",
+        )
         return state, item, runtime, args
+
+    def completed_root_cycle_fixture(
+        self,
+    ) -> tuple[dict[str, object], workflow.Ticket, dict[str, object]]:
+        state, item, runtime, architect_args = self.root_cycle_verification_fixture()
+        self.assertEqual(self._record(state, item, architect_args), 0)
+        runtime["authorizations"]["qa-review-override"] = {
+            "kind": "local",
+            "status": "granted",
+            "actions": ["review_round_override"],
+            "tickets": [item.id],
+            "blocker_classes": ["security"],
+            "max_risk": "critical",
+            "remote_effects": False,
+            "uses": 0,
+            "max_uses": 1,
+            "root_cause_id": "B1",
+            "reviewer": "qa",
+        }
+        self.assertEqual(
+            self._record(
+                state,
+                item,
+                self.review_args(
+                    reviewer="qa",
+                    round_name="superseding",
+                    verdict="pass",
+                    sha="c" * 40,
+                    root_blocker="B1",
+                    authorization_scope="qa-review-override",
+                ),
+            ),
+            0,
+        )
+        return state, item, runtime
 
     def test_superseding_review_preserves_escalation_consumes_scope_and_passes_gate(
         self,
@@ -2161,6 +2253,8 @@ class ReviewConvergenceTests(unittest.TestCase):
                 "remote_effects": False,
                 "uses": 0,
                 "max_uses": 1,
+                "root_cause_id": root_id,
+                "reviewer": reviewer,
             }
         runtime["phases"][item.id] = {
             "ticket_id": item.id,
@@ -2287,6 +2381,10 @@ class ReviewConvergenceTests(unittest.TestCase):
         }
         runtime["authorizations"]["qa-review-override"].pop("root_cause_id", None)
         runtime["authorizations"]["qa-review-override"].pop("reviewer", None)
+        runtime["authorizations"]["qa-review-override"].update(
+            root_cause_id="B1",
+            reviewer="qa",
+        )
         runtime["phases"][item.id]["candidate_sha"] = "d" * 40
         self.assertEqual(
             self._record(
@@ -2320,6 +2418,109 @@ class ReviewConvergenceTests(unittest.TestCase):
         self.assertTrue(
             any("preserve their ID, severity, and provenance" in error for error in errors)
         )
+
+    def test_root_cycle_rejects_unbound_or_swapped_override_before_consumption(
+        self,
+    ) -> None:
+        state, item, runtime, args = self.root_cycle_verification_fixture()
+        runtime["authorizations"]["review-override"].pop("root_cause_id")
+        runtime["authorizations"]["review-override"].pop("reviewer")
+        with self.assertRaisesRegex(workflow.WorkflowError, "pre-bound"):
+            self._record(state, item, args)
+        self.assertEqual(runtime["authorizations"]["review-override"]["uses"], 0)
+
+        state, item, runtime, args = self.root_cycle_verification_fixture()
+        runtime["authorizations"]["qa-unused-override"] = {
+            **runtime["authorizations"]["review-override"],
+            "reviewer": "qa",
+        }
+        args.authorization_scope = "qa-unused-override"
+        with self.assertRaisesRegex(workflow.WorkflowError, "bound to reviewer qa"):
+            self._record(state, item, args)
+        self.assertEqual(runtime["authorizations"]["qa-unused-override"]["uses"], 0)
+
+        state, item, runtime, args = self.root_cycle_verification_fixture()
+        runtime["blockers"]["B2"] = {
+            **runtime["blockers"]["B1"],
+            "id": "B2",
+            "root_cause_id": "B2",
+        }
+        runtime["authorizations"]["wrong-root-unused-override"] = {
+            **runtime["authorizations"]["review-override"],
+            "root_cause_id": "B2",
+        }
+        args.authorization_scope = "wrong-root-unused-override"
+        with self.assertRaisesRegex(
+            workflow.WorkflowError,
+            "bound to canonical root B2",
+        ):
+            self._record(state, item, args)
+        self.assertEqual(
+            runtime["authorizations"]["wrong-root-unused-override"]["uses"],
+            0,
+        )
+
+    def test_root_cycle_runtime_verdict_parity_and_gate_reject_tampering(
+        self,
+    ) -> None:
+        cases = [
+            (
+                "full block without blocker",
+                lambda rounds: rounds["full"].update(findings=[]),
+                "blocking full review requires",
+            ),
+            (
+                "full pass with blocker",
+                lambda rounds: rounds["full"].update(verdict="pass"),
+                "passing full review cannot retain",
+            ),
+            (
+                "targeted escalation without blocker",
+                lambda rounds: rounds["targeted"].update(findings=[]),
+                "targeted escalation requires",
+            ),
+            (
+                "targeted pass with blocker",
+                lambda rounds: rounds["targeted"].update(verdict="pass"),
+                "passing targeted review cannot retain",
+            ),
+            (
+                "targeted finding resolved and open",
+                lambda rounds: rounds["targeted"]["resolved"].append("ARCH-001"),
+                "targeted findings and resolved IDs cannot overlap",
+            ),
+        ]
+        for name, mutate, expected in cases:
+            with self.subTest(name=name):
+                state, item, runtime = self.completed_root_cycle_fixture()
+                rounds = runtime["reviews"][item.id]["root_cycles"][0]["reviewers"][
+                    "architect"
+                ]
+                mutate(rounds)
+                errors = workflow.runtime_state_errors(state)
+                self.assertTrue(
+                    any(expected in error for error in errors),
+                    errors,
+                )
+                passed, failures = workflow.review_gate_status(
+                    item,
+                    runtime,
+                    workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
+                )
+                self.assertFalse(passed)
+                self.assertTrue(failures)
+
+    def test_root_cycle_final_rejects_targeted_escalation_without_open_blocker(
+        self,
+    ) -> None:
+        state, item, runtime, args = self.root_cycle_verification_fixture()
+        targeted = runtime["reviews"][item.id]["root_cycles"][0]["reviewers"][
+            "architect"
+        ]["targeted"]
+        targeted["findings"] = []
+        args.resolved = []
+        with self.assertRaisesRegex(workflow.WorkflowError, "retain.*blocking"):
+            self._record(state, item, args)
 
     def test_superseding_review_rejects_unaudited_or_broadened_dispositions(
         self,
