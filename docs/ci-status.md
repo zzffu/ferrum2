@@ -2,22 +2,21 @@
 
 ## 当前 M3 execution 状态
 
-- **Wave 1 product SHA:** exact
-  `da8fa58e0f50dda1637e3a2b205e6f34332a5bec` integrates M3-T01～T03；
-  current pre-T06 coordination base on `master` and `codex/integration/m3` is
-  `a1b8fdd501a70a17922ab4ca8428ceeda143fc47`。Ticket candidates were
-  `001047e895726debef04b31d781aa1eee73c24a9`,
-  `84e5e226eb317e993991226efd104a0bbd0bf703`, and
-  `1d7111d2d20df805740c21e98da8fb161141b161`.
-- **Authoritative local integration gates:** `workflow.py run-validation quick`
-  passed all `5/5` configured commands；`run-validation full` passed all
-  `6/6` commands，包括strict workspace Clippy、all-feature tests、100-cycle
-  process matrix和workspace docs。Linux-only IPv6 qualification row仍为
-  pre-existing ignored release-host evidence，未计作PASS。
-- **Budget/control evidence:** ticket integration gate PASS at code `12527`,
-  tests `19796`, ratio `1.580` versus baseline `1.642`; delta code/tests
-  `813/562`, allowance `933`。`workflow.py validate`、candidate
-  `control-plane-check`和`git diff --check`均exit `0`.
+- **Integrated product SHA:** exact
+  `ed615cbcd373d882eaa236ee4556d20eb4e16e48` on `master` and
+  `codex/integration/m3` integrates M3-T01～T03 plus M3-T06。Wave 1 remains
+  traceable at `da8fa58e0f50dda1637e3a2b205e6f34332a5bec`; T06's material base was
+  `938e2b9a50310312ea9aef891ce40c7d86b052c3`.
+- **Authoritative T06 local integration gates:** `workflow.py run-validation
+  quick` passed all `5/5` configured commands and `run-validation full` passed
+  all `6/6` commands at exact `ed615cb...`，including strict workspace Clippy,
+  all-feature tests, the >=100-cycle-per-binary process matrix, portable IPv4
+  admitted-UDP signal evidence, and workspace docs。The Linux-only IPv6 row
+  remains ignored release-host evidence and was not counted as local PASS。
+- **Budget/control evidence:** T06 ticket gate PASS at code `12956`, tests
+  `20211`, ratio `1.560` versus baseline `1.642`; delta code/tests `429/415`
+  with allowance `549`。Candidate `control-plane-check`, both repair/full
+  `git diff --check`, ownership and integration gate checks all exited `0`.
 - **Review convergence:** T01 Architect/QA full PASS。T02 QA full PASS；
   Architect full BLOCK `ARC-M3-T02-001`, one evidence repair, targeted PASS。
   T03 Architect/QA full BLOCK under canonical `ARC-M3-T03-001` with
@@ -31,16 +30,20 @@
   `QA-M3-T04-001`。The passing >=100-per-binary and Windows signal evidence
   does not waive the terminal-UDP circular wait, unresponsive-root bound, or
   missing evidence rows。
-- **T06 authorized replacement:** Product Manager and Architect design reviews
-  both `PASS`。User-confirmed solution A is recorded as local-only
-  `AUTH-M3-T06-001`; its sole use was consumed and the grant is revoked
-  (`1/1`)。T04 is deferred without rewriting either candidate as PASS；T06
-  receives a fresh exact-SHA full Architect/QA lifecycle。No remote, T05,
-  hosted, push, publication or control-plane action is authorized。
-- **Remaining gates:** M3-T06 replacement binary composition, terminal-root
-  and forced-reap evidence, then M3-T05 three-native-target release
-  qualification and same-SHA hosted evidence。尚未claim T06 product PASS、
-  三目标、TCP/UDP hosted interop或M3 close PASS。
+- **T06 review convergence:** initial candidate `24561cf...` resolved the
+  terminal-UDP circular wait and fixed five-second forced-reap bound, but fresh
+  Architect/QA full reviews both `BLOCK` under canonical
+  `ARC-M3-T06-001` and derivative `QA-M3-T06-001` for missing portable
+  admitted-UDP signal evidence。The sole substantive repair `ed615cb...`
+  added that real-process IPv4 row and collision-safe, fail-fast fixtures；
+  both same-reviewer targeted re-reviews `PASS` and both findings are
+  resolved。Repair budget is `1/1`；accepted review debt is none。
+- **Authorization and publication:** local-only `AUTH-M3-T06-001` was consumed
+  and auto-revoked `1/1`。No remote action, push, hosted run, publication, T05
+  implementation, or control-plane mutation occurred。
+- **Remaining gates:** only M3-T05 three-native-target release qualification
+  and same-SHA hosted evidence remain before M3 close。No three-target,
+  hosted TCP/UDP interop, artifact/linkage, or M3 close PASS is claimed。
 
 ## 当前 M2 closed 状态
 

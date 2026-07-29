@@ -102,6 +102,20 @@ T06 selective RED evidence先扩展既有 seams：
 - existing UDP runtime table：phase-aware operator shutdown与direct immediate
   force-reap。不得新增product fault-injection surface或第二个lifecycle harness。
 
+T06 execution record：
+
+- material base `938e2b9a50310312ea9aef891ce40c7d86b052c3`；initial candidate
+  `24561cf6f5c70ef0d44a6f9e552273db63c178be`；
+- fresh Architect/QA full reviews均因portable real-process admitted-UDP signal
+  evidence缺口而`BLOCK`（`ARC-M3-T06-001`、`QA-M3-T06-001`）；
+- sole substantive repair `ed615cbcd373d882eaa236ee4556d20eb4e16e48`
+  在既有`udp_local_e2e`/local-support seam增加IPv4 authenticated live-UDP、
+  genuine signal、exit/baseline和exact TCP+UDP rebind，并加固dual-protocol
+  reservation/task-aware readiness；same reviewers targeted `PASS`；
+- exact repaired SHA的focused gates、ticket budget、control-plane/diff、
+  authoritative quick `5/5`与full `6/6`均exit `0`。Linux IPv6-only row仍为
+  ignored release-host evidence，未计作Windows local PASS。
+
 ### M3-T05 — qualification implementation
 
 ```powershell

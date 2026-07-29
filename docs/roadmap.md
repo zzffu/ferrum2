@@ -488,8 +488,8 @@ dependency-ready 和 non-overlapping ownership。
   - M1、M2 closed，SIP022 TCP/UDP和24-cell interop baseline已有exact-SHA证据；
   - context audit approved，`AGENTS.md`只把M3记为planned；
   - ADR-0023/0024 Accepted，SPEC/TEST-0004 Approved；
-  - M3-T01～T03已integrated；M3-T04在唯一repair与targeted re-review后升级，
-    由用户批准的M3-T06 replacement继续；M3-T05等待T06；
+  - M3-T01～T03与M3-T06已integrated；M3-T04在唯一repair与targeted
+    re-review后deferred；M3-T05进入剩余release qualification frontier；
   - current pinned target triples/toolchains/provider保持authoritative。
 - **Exit criteria:**
   1. M3 close时全部client/server合法v1配置形成preserved cohort，在v0.x及
@@ -519,7 +519,7 @@ dependency-ready 和 non-overlapping ownership。
   - M3-T02 stabilize observability contract；
   - M3-T03 build reusable process supervisor；
   - M3-T04 compose transactional binaries（deferred after review escalation）；
-  - M3-T06 resolve terminal-root and forced-reap escalation；
+  - M3-T06 resolve terminal-root and forced-reap escalation（done）；
   - M3-T05 qualify three native targets。
 - **Dependency order:** T01/T02/T03 initial parallel frontier → T06 → T05；
   T06 imports the unintegrated T04 product lineage with a fresh bounded review
@@ -529,18 +529,21 @@ dependency-ready 和 non-overlapping ownership。
   hot reload、management API；M4 performance/RSS/tasks/10k idle/long soak；
   archive/installer/signing/upload/publication。
 - **Integrated commit:** wave 1 `da8fa58e0f50dda1637e3a2b205e6f34332a5bec`
-  integrates M3-T01～T03；M3-T04 candidates `b35e809...`/`a90c496...`未集成，
-  T06/T05 remain。
+  integrates M3-T01～T03；exact `ed615cbcd373d882eaa236ee4556d20eb4e16e48`
+  integrates M3-T06 on top of material base `938e2b9...`。M3-T04 candidates
+  `b35e809...`/`a90c496...` remain unintegrated historical evidence；T05 remains。
 - **Open blockers and risks:** wave 1的`ARC-M3-T02-001`、
   `ARC-M3-T03-001`、`QA-M3-T03-001`、`QA-M3-T03-002`均在各自唯一
   targeted round中resolved。T04 canonical `ARC-M3-T04-004`与derivatives
   `ARC-M3-T04-001/002`、`QA-M3-T04-001`在唯一targeted round后升级；T04
   review lifecycle已终止并deferred，未完成outcome由T06承接，而非把原candidate
-  改写为PASS。剩余execution风险是terminal UDP root circular wait、unresponsive
-  forced root、production evidence seam、Windows signal/socket差异、GNU GLIBC与
-  musl linkage、native runner availability、same-SHA evidence splicing和
-  test-budget增长。Provider unavailable时M3 release `BLOCKED`，不把旧run或
-  self-test当PASS。
+  改写为PASS。T06 full findings `ARC-M3-T06-001`/`QA-M3-T06-001`在唯一
+  repair `ed615cb...`及same-reviewer targeted PASS后resolved；terminal UDP
+  circular wait、unresponsive forced-root bound和portable admitted-UDP evidence
+  不再是open product blockers。剩余release风险是Windows signal/socket差异、
+  GNU GLIBC与musl linkage、native runner availability、same-SHA evidence
+  splicing和test-budget增长。Provider unavailable时M3 release `BLOCKED`，
+  不把旧run或self-test当PASS。
 
 ## M4 — 性能、资源与 v0 资格确认
 
@@ -652,3 +655,4 @@ dependency-ready 和 non-overlapping ownership。
 | 2026-07-29 | M2 close | M2 改为 `closed`；六票完成，接受 exact `7907cda` 的本地 full、三平台、TCP/UDP 各 12/12 和 focused IPv6 UDP real-process 证据 | `M2-CLOSE-IPV6-001`已由唯一授权 push run `30425476328/1`关闭；三位 close reviewer 无 blocker/major，且没有扩大 public UDP inbound 或其他 v0 scope | Product/Architect/QA close reports；run `30425476328` raw logs；workflow validate/test-budget/status/next；M2 handoff |
 | 2026-07-29 | M3 plan | M3改为`planned`；接受v1 preserved-cohort/evolvable-topology与transactional supervisor两项ADR，批准SPEC/TEST-0004及五票DAG | M2已关闭；current operator contract分散、run cause丢失、binary-local root coordination有partial activation risk，且三目标只有早期build/config smoke；两ADR是最小hard-to-reverse集合 | Context audit；Product/Architect/QA PASS；ADR-0023/0024；workflow validate/context-check/test-budget/frontier/next |
 | 2026-07-29 | M3 T04 escalation replacement | T04在唯一full/repair/targeted lifecycle后deferred；新建T06承接完整composition outcome，固定terminal UDP local reap与post-Forced 5秒cleanup watchdog，并把internal与black-box evidence按ADR-0016重映射；T05依赖改指T06 | T04的UDP fatal/Forced circular wait与unresponsive-root无bound在原review budget内未关闭；用户确认solution A并一次性授权local T06，不授权remote/T05/publish/control-plane | Product Manager PASS；Architect design PASS；`AUTH-M3-T06-001` consumed/revoked；T04 `b35e809...`/`a90c496...` retained but not integrated |
+| 2026-07-29 | M3 T06 integration | exact `ed615cb...` fast-forward integrated T06；terminal UDP immediate local reap、fixed post-Forced 5s watchdog、portable IPv4 admitted-UDP signal lifecycle与collision-safe/fail-fast fixtures通过 | initial `24561cf...` full reviews发现portable black-box evidence gap；唯一repair关闭canonical `ARC-M3-T06-001`及`QA-M3-T06-001`，不扩展product surface | Architect/QA full BLOCK then targeted PASS；quick `5/5`、full `6/6`、ticket budget/control/diff PASS；no push/publish |

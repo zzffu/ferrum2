@@ -2,7 +2,7 @@
 id = "M3-T06"
 title = "Resolve terminal-root and forced-reap escalation"
 milestone = "M3"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = ["M3-T01", "M3-T02", "M3-T03"]
@@ -155,10 +155,35 @@ Tracked status is durable: use only `draft`, `ready`, `blocked`, `done`, or
 
 ## Completion evidence
 
-To be filled by the Team Lead after integration:
-
-- Branch:
-- Commit(s):
-- Required reviewer role/profile and verdict:
-- Exact candidate SHA:
-- Integrated commit:
+- **Branch/worktrees:** ticket branch `codex/ticket/m3-t06` in
+  `C:\project\ferrum2\.worktrees\m3-t06`；integration branch
+  `codex/integration/m3` in `C:\project\ferrum2\.worktrees\_integration-m3`。
+- **Lineage:** material coordination base
+  `938e2b9a50310312ea9aef891ce40c7d86b052c3`；imported T04 product-lineage
+  commits `47d06d962fc422a4debf64dd68b15daeb3a6c2c6` and
+  `263ceddf50458c49b5d73d88a33eed96e858bf3f`；initial T06 implementation
+  candidate `24561cf6f5c70ef0d44a6f9e552273db63c178be`；sole substantive repair
+  and final candidate `ed615cbcd373d882eaa236ee4556d20eb4e16e48`。
+- **Reviews:** configured Architect profile `gpt-5.6-sol/high` and QA profile
+  `gpt-5.6-sol/medium`；actual runtime metadata was not observable and remains
+  unverified。Both full reviews at `24561cf...` `BLOCK` under
+  `ARC-M3-T06-001`/`QA-M3-T06-001`；repair budget `1/1`；both same-reviewer
+  targeted re-reviews at `ed615cb...` `PASS` and resolve the findings。No
+  accepted review debt。
+- **Focused evidence:** exact terminal-UDP and five-second watchdog regressions,
+  runtime shutdown/UDP suites, client/server suites, CLI/config/lifecycle/local
+  TCP/UDP process suites, scoped strict Clippy and formatting all exited `0`。
+  Portable IPv4 UDP signal evidence passed；full UDP E2E was `4 passed /
+  1` retained Linux-only IPv6 ignore。
+- **Budget/control:** ticket budget `PASS` at code `12956`, tests `20211`,
+  ratio `1.560` versus baseline `1.642`; delta `429/415`, allowance `549`。
+  Candidate control-plane, ownership, ancestry and diff checks all exited `0`。
+- **Integration:** `codex/integration/m3` and clean `master` were
+  fast-forwarded without a merge commit to exact
+  `ed615cbcd373d882eaa236ee4556d20eb4e16e48`。Authoritative quick gate passed
+  `5/5`; authoritative full gate passed `6/6`。
+- **Authorization/publication:** local-only `AUTH-M3-T06-001` was consumed and
+  auto-revoked `1/1`。No T05 implementation, remote action, push, hosted run,
+  publication or control-plane mutation occurred。
+- **Context:** no `AGENTS.md` Project-specific context change was required；
+  M3 remains planned until downstream M3-T05 qualification and milestone close。
