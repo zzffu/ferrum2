@@ -1,5 +1,31 @@
 # CI 与验证状态
 
+## 当前 M3 execution 状态
+
+- **Wave 1 integrated SHA:** exact
+  `da8fa58e0f50dda1637e3a2b205e6f34332a5bec` on `master` and
+  `codex/integration/m3` integrates M3-T01～T03。Ticket candidates were
+  `001047e895726debef04b31d781aa1eee73c24a9`,
+  `84e5e226eb317e993991226efd104a0bbd0bf703`, and
+  `1d7111d2d20df805740c21e98da8fb161141b161`.
+- **Authoritative local integration gates:** `workflow.py run-validation quick`
+  passed all `5/5` configured commands；`run-validation full` passed all
+  `6/6` commands，包括strict workspace Clippy、all-feature tests、100-cycle
+  process matrix和workspace docs。Linux-only IPv6 qualification row仍为
+  pre-existing ignored release-host evidence，未计作PASS。
+- **Budget/control evidence:** ticket integration gate PASS at code `12527`,
+  tests `19796`, ratio `1.580` versus baseline `1.642`; delta code/tests
+  `813/562`, allowance `933`。`workflow.py validate`、candidate
+  `control-plane-check`和`git diff --check`均exit `0`.
+- **Review convergence:** T01 Architect/QA full PASS。T02 QA full PASS；
+  Architect full BLOCK `ARC-M3-T02-001`, one evidence repair, targeted PASS。
+  T03 Architect/QA full BLOCK under canonical `ARC-M3-T03-001` with
+  derivatives `QA-M3-T03-001/002`, one substantive repair, both targeted
+  PASS。所有roots/derivatives resolved，accepted review debt为none。
+- **Remaining gates:** M3-T04 binary production adapters and bounded process
+  matrix；M3-T05 three-native-target release qualification and same-SHA hosted
+  evidence。尚未claim三目标、TCP/UDP hosted interop或M3 close PASS。
+
 ## 当前 M2 closed 状态
 
 - **Qualified M2 close candidate:** exact

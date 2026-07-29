@@ -479,7 +479,7 @@ dependency-ready 和 non-overlapping ownership。
 
 ## M3 — 运维、生命周期与平台资格
 
-- **Status:** planned
+- **Status:** in progress
 - **Objective:** 稳定当前 v0 的合法 schema v1、CLI/error、redacted
   tracing和metric identity；建立不依赖永久产品拓扑的事务式supervisor；
   在三目标native release artifacts上证明bounded process lifecycle和same-SHA
@@ -525,12 +525,15 @@ dependency-ready 和 non-overlapping ownership。
   transparent inbound、Windows TUN、public UDP inbound、SIP023/multi-user、
   hot reload、management API；M4 performance/RSS/tasks/10k idle/long soak；
   archive/installer/signing/upload/publication。
-- **Integrated commit:** not yet
-- **Open blockers and risks:** planning无open blocker/major；execution风险是
-  partial activation、compatibility fixture被误当完整集合、Windows signal/
-  socket差异、GNU GLIBC与musl linkage、native runner availability、same-SHA
-  evidence splicing和test-budget增长。Provider unavailable时M3 release
-  `BLOCKED`，不把旧run或self-test当PASS。
+- **Integrated commit:** wave 1 `da8fa58e0f50dda1637e3a2b205e6f34332a5bec`
+  integrates M3-T01～T03；M3-T04/T05 remain。
+- **Open blockers and risks:** wave 1的`ARC-M3-T02-001`、
+  `ARC-M3-T03-001`、`QA-M3-T03-001`、`QA-M3-T03-002`均在各自唯一
+  targeted round中resolved；当前无open canonical root。剩余execution风险是
+  binary production adapter partial activation、Windows signal/socket差异、
+  GNU GLIBC与musl linkage、native runner availability、same-SHA evidence
+  splicing和test-budget增长。Provider unavailable时M3 release `BLOCKED`，
+  不把旧run或self-test当PASS。
 
 ## M4 — 性能、资源与 v0 资格确认
 

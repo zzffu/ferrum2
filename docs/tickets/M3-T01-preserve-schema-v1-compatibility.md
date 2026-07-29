@@ -2,7 +2,7 @@
 id = "M3-T01"
 title = "Preserve the schema v1 cohort without freezing current topology"
 milestone = "M3"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = []
@@ -89,9 +89,11 @@ git diff --check
 
 ## Completion evidence
 
-Filled by the Team Lead after integration:
-
-- Candidate and integrated commit:
-- Full/targeted review records and stable finding IDs:
-- Test-budget result:
-- Accepted review debt:
+- Candidate `001047e895726debef04b31d781aa1eee73c24a9`; integrated as
+  `540c5fb9a2be648e1c3fbcddfb6f66cc3d581747` in wave tip
+  `da8fa58e0f50dda1637e3a2b205e6f34332a5bec`.
+- Full Architect and QA reviews: PASS at the candidate SHA; no targeted round
+  and no finding ID.
+- Ticket test budget: PASS, code `11714`, tests `19182`, ratio `1.638`
+  against baseline `1.642`.
+- Accepted review debt: none.

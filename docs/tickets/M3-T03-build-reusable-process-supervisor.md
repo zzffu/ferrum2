@@ -2,7 +2,7 @@
 id = "M3-T03"
 title = "Build the topology-neutral transactional process supervisor"
 milestone = "M3"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = []
@@ -89,9 +89,15 @@ git diff --check
 
 ## Completion evidence
 
-Filled by the Team Lead after integration:
-
-- Candidate and integrated commit:
-- Full/targeted review records and stable finding IDs:
-- Test-budget result:
-- Accepted review debt:
+- Initial candidate `c1cf718bcf94777aa8aa05ea5975d3822dd2573d`;
+  repaired candidate `1d7111d2d20df805740c21e98da8fb161141b161`;
+  integrated as `c521150265d5c49fe5cb0eb8fcd8159b93489995` plus
+  `da8fa58e0f50dda1637e3a2b205e6f34332a5bec`.
+- Architect full review: BLOCK on canonical
+  `ARC-M3-T03-001` (major). QA full review: BLOCK on derivatives
+  `QA-M3-T03-001` and `QA-M3-T03-002` (major). One substantive repair
+  consumed the `1/1` budget; both targeted reviews PASS and the canonical
+  root plus both derivatives were resolved.
+- Repaired ticket test budget: PASS, code `12519`, tests `19839`, ratio
+  `1.585` against baseline `1.642`.
+- Accepted review debt: none.

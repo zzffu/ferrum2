@@ -2,7 +2,7 @@
 id = "M3-T02"
 title = "Stabilize redacted tracing and metric identity"
 milestone = "M3"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = []
@@ -84,9 +84,15 @@ git diff --check
 
 ## Completion evidence
 
-Filled by the Team Lead after integration:
-
-- Candidate and integrated commit:
-- Full/targeted review records and stable finding IDs:
-- Test-budget result:
-- Accepted review debt:
+- Initial candidate `4a9ac5d8a8a1db39a85030120c39b4dd8f299e46`;
+  repaired candidate `84e5e226eb317e993991226efd104a0bbd0bf703`;
+  integrated as `f87b65fa92ac73126fd70a561309bb119aa81564` plus
+  `070ceaa1311ffd309a0cac202a7263865028d425` in wave tip
+  `da8fa58e0f50dda1637e3a2b205e6f34332a5bec`.
+- QA full review: PASS. Architect full review: BLOCK on
+  `ARC-M3-T02-001` (major); one evidence repair consumed the `1/1`
+  budget, targeted Architect review PASS, and the canonical root was
+  resolved with zero derivatives.
+- Repaired ticket test budget: PASS, code `11722`, tests `19243`, ratio
+  `1.642` against baseline `1.642`.
+- Accepted review debt: none.
