@@ -5,7 +5,9 @@ base_branch = "master"
 worktree_root = ".worktrees"
 engineer_branch_prefix = "codex/ticket"
 integration_branch_prefix = "codex/integration"
-max_parallel_engineers = 8
+# M2 showed that an eight-writer frontier leaves no headroom for reviewers and
+# integration work. Three writers still permit disjoint slices to drain in parallel.
+max_parallel_engineers = 3
 require_clean_base = true
 auto_remove_worktrees = false
 # Transient implementation/review state lives in the local runtime ledger. Commit
@@ -79,17 +81,27 @@ context_audit_dir = "docs/context-audits"
 # reference, or spawn an external reference process. Security and local
 # lifecycle/product behavior remain part of these Cargo gates.
 [validation]
+# Force UTF-8 for the workflow package on Windows. Standalone workflow.py commands
+# should use the same `python -X utf8` launcher.
 workflow = [
-  "python -m unittest discover -s .agents/skills/milestone-workflow/tests -p test_*.py",
+  "python -X utf8 -m unittest discover -s .agents/skills/milestone-workflow/tests -p test_*.py",
 ]
+# The real-process suites resolve un-hashed binaries and the UDP protocol example
+# from Cargo's target profile directory, so a clean gate must build them explicitly.
 quick = [
   "cargo fmt --all -- --check",
   "cargo check --workspace --all-targets --locked",
+  "cargo build --workspace --bins --locked",
+  "cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked",
   "cargo test --workspace --locked",
 ]
+# M2-INT-QA-001: run this full command list once and never concurrently in multiple
+# worktrees; concurrent full gates produced a false lifecycle-witness timeout.
 full = [
   "cargo fmt --all -- --check",
   "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+  "cargo build --workspace --bins --locked",
+  "cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked",
   "cargo test --workspace --all-features --locked",
   "cargo doc --workspace --all-features --no-deps --locked",
 ]

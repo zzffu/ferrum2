@@ -45,7 +45,7 @@
   "protected_files": {
     ".agents/skills/code-review/agents/openai.yaml": "acad68bab4274ee19a564d2d2ab19f6f2818e5716fc24f536c7a4b2ae658111c",
     ".codex/config.toml": "9aa54c4fbe7ca1d85ae4babedc7a852d7c3aaef217554c166181c97444a6379f",
-    "workflow.toml": "ed0c7f4d8003352f0de1724c903f575ff58853d4fd01f2fcc931b27193c7afea"
+    "workflow.toml": "36cb3a050fb5ee9c926963dad90bf42fad85da194c8f8bed54959fdb51d4ddf4"
   },
   "protected_sections": {
     ".gitattributes#codex_milestone_workflow_control_plane": "a7e217f1eef11acd48e46a8b1c99cb5fcdd91bf30b2ecf7d7235fe568d3e6c05",
