@@ -2,7 +2,7 @@
 id = "M3-T07"
 title = "Isolate portable UDP lifecycle evidence under parallel execution"
 milestone = "M3"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M3-T06"]
@@ -128,12 +128,33 @@ before integration and the new hosted qualification.
 
 ## Completion evidence
 
-Filled by the Team Lead after integration and hosted qualification:
-
-- Contract/base and candidate commits:
-- Branch/worktree and changed paths:
-- Full/targeted review records and stable finding IDs:
-- Focused/repeated/quick/full commands and exit statuses:
-- Test-budget/control/diff results:
-- Hosted run/SHA/attempt/job results:
-- Authorization and publication state:
+- **Contract/base and candidate:** contract commit
+  `0936ccd830a040245ee9c7823e84f4e74e17a62c`; final ticket candidate
+  `bc14971c51982b6ad9a970593fb3848b2763b112`; final cumulative qualified
+  product SHA `d9e59d787c3fe78dfca778ee8a36668a45387368`.
+- **Branch/worktree and scope:** `codex/ticket/m3-t07` in
+  `C:\project\ferrum2\.worktrees\m3-t07`; integrated through
+  `codex/integration/m3`. The implementation changed only
+  `tests/m0-harness/tests/udp_local_e2e.rs`, deleting the process-global
+  child-count baseline comparison while retaining owned wait/reap and
+  immediate exact TCP+UDP rebind evidence.
+- **Reviews:** fresh Architect and QA full reviews at exact `bc14971c...` both
+  returned `PASS` with no findings. No targeted round, repair budget, or
+  accepted review debt was required.
+- **Local evidence:** the complete non-ignored four-thread
+  `udp_local_e2e` binary passed `100/100`; focused harness, formatting,
+  strict Clippy, ownership, diff, control-plane, review, integration,
+  authoritative quick `5/5`, and authoritative full `6/6` gates exited `0`.
+  Ticket budget passed at code `12956`, tests `19868`, ratio `1.533`;
+  milestone budget passed at delta code/tests `1242/634`, allowance `1362`.
+- **Hosted evidence:** run `30476271774/1` at `bc14971c...` proved the repaired
+  portable row in both quality and MSRV and resolved
+  `HOSTED-M3-T05-001`, but remains an immutable failed run because it exposed
+  distinct root `HOSTED-M3-T07-002`. Fresh descendant run
+  `30494736004/1` at exact `d9e59d78...` completed all seven required jobs
+  successfully and resolved that second root without evidence splicing.
+- **Authorization/publication:** local scope `AUTH-M3-T07-LOCAL-001` and exact
+  remote scope `AUTH-M3-T07-REMOTE-001` were each consumed and revoked `1/1`.
+  No rerun, dispatch, remote `master` update, force-push, PR, tag, release,
+  upload, signing, publication, ref deletion, or control-plane mutation
+  occurred.

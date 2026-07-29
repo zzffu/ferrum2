@@ -479,7 +479,7 @@ dependency-ready 和 non-overlapping ownership。
 
 ## M3 — 运维、生命周期与平台资格
 
-- **Status:** in progress
+- **Status:** ready to close (execute complete; close mode not yet invoked)
 - **Objective:** 稳定当前 v0 的合法 schema v1、CLI/error、redacted
   tracing和metric identity；建立不依赖永久产品拓扑的事务式supervisor；
   在三目标native release artifacts上证明bounded process lifecycle和same-SHA
@@ -488,10 +488,12 @@ dependency-ready 和 non-overlapping ownership。
   - M1、M2 closed，SIP022 TCP/UDP和24-cell interop baseline已有exact-SHA证据；
   - context audit approved，`AGENTS.md`只把M3记为planned；
   - ADR-0023/0024 Accepted，SPEC/TEST-0004 Approved；
-  - M3-T01～T03、M3-T06、M3-T05 local implementation与M3-T07均已integrated；
-    M3-T04在唯一repair与targeted re-review后deferred；T07 exact-SHA hosted
-    qualification解决首个parallel evidence root后暴露第二个server-private
-    readiness root，M3-T08成为fresh repair frontier；
+  - M3-T01～T03、M3-T05～T08均已integrated并为`done`；M3-T04在唯一
+    repair与targeted re-review后`deferred`，由T06承接approved replacement
+    outcome；
+  - exact `d9e59d787c3fe78dfca778ee8a36668a45387368`的same-run hosted
+    qualification通过quality、MSRV、Windows、GNU、musl、interop与final
+    qualification，两个late evidence roots均resolved；
   - current pinned target triples/toolchains/provider保持authoritative。
 - **Exit criteria:**
   1. M3 close时全部client/server合法v1配置形成preserved cohort，在v0.x及
@@ -522,9 +524,11 @@ dependency-ready 和 non-overlapping ownership。
   - M3-T03 build reusable process supervisor；
   - M3-T04 compose transactional binaries（deferred after review escalation）；
   - M3-T06 resolve terminal-root and forced-reap escalation（done）；
-  - M3-T05 qualify three native targets；
-  - M3-T07 isolate portable UDP lifecycle evidence under parallel execution；
-  - M3-T08 synchronize terminal UDP test readiness on its causal event。
+  - M3-T05 qualify three native targets（done）；
+  - M3-T07 isolate portable UDP lifecycle evidence under parallel execution
+    （done）；
+  - M3-T08 synchronize terminal UDP test readiness on its causal event
+    （done）。
 - **Dependency order:** T01/T02/T03 initial parallel frontier → T06 → T05 local
   implementation → T07 first hosted evidence repair → T08 second hosted evidence
   repair → new T05/T07/T08 qualification；
@@ -539,26 +543,20 @@ dependency-ready 和 non-overlapping ownership。
   integrates M3-T01～T03；exact `ed615cbcd373d882eaa236ee4556d20eb4e16e48`
   integrates M3-T06 on top of material base `938e2b9...`。M3-T04 candidates
   `b35e809...`/`a90c496...` remain unintegrated historical evidence；exact
-  `bba40d127dee29a719d6ea1d80fb10427149d890` locally integrates T05
-  qualification implementation and its sole review repair；T07 remains。
-- **Open blockers and risks:** wave 1的`ARC-M3-T02-001`、
-  `ARC-M3-T03-001`、`QA-M3-T03-001`、`QA-M3-T03-002`均在各自唯一
-  targeted round中resolved。T04 canonical `ARC-M3-T04-004`与derivatives
-  `ARC-M3-T04-001/002`、`QA-M3-T04-001`在唯一targeted round后升级；T04
-  review lifecycle已终止并deferred，未完成outcome由T06承接，而非把原candidate
-  改写为PASS。T06 full findings `ARC-M3-T06-001`/`QA-M3-T06-001`在唯一
-  repair `ed615cb...`及same-reviewer targeted PASS后resolved；terminal UDP
-  circular wait、unresponsive forced-root bound和portable admitted-UDP product
-  behavior不再是open product blockers。T05 Architect full PASS；QA full finding
-  `QA-M3-T05-001`经唯一repair `bba40d...`和targeted PASS resolved。授权push后的
-  run `30472227257`在exact `bba40d...`暴露process-global child baseline root；
-  fresh M3-T07 candidate `bc14971...`经full Architect/QA PASS与local integration
-  后在run `30476271774`的quality/MSRV中证明旧portable row已PASS，Windows、
-  GNU、musl与interop也PASS。该run随后在`run.rs:2715`因固定100次yield尚未
-  建立UDP session而失败，final qualification为derivative。Canonical
-  `HOSTED-M3-T07-002`由fresh M3-T08承接，不重开T06/T07 review，不rerun或拼接
-  旧run。剩余release风险是server-private evidence readiness、native runner
-  availability和new same-SHA convergence；provider unavailable仍为`BLOCKED`。
+  `bba40d127dee29a719d6ea1d80fb10427149d890` integrates T05，
+  `bc14971c51982b6ad9a970593fb3848b2763b112` integrates T07，and final
+  qualified product SHA `d9e59d787c3fe78dfca778ee8a36668a45387368`
+  integrates T08。The later coordination-only execute evidence checkpoint is
+  local and is not a separately hosted-qualified product SHA。
+- **Open blockers and risks:** none。All wave-1, T05, T06, and late hosted
+  evidence findings are resolved under their bounded review histories；
+  T04 remains an explicit historical deferral rather than a rewritten PASS。
+  Failed runs `30472227257/1` and `30476271774/1` remain immutable evidence；
+  fresh run `30494736004/1` at exact `d9e59d78...` passes all seven required
+  jobs and resolves `HOSTED-M3-T07-002` without splicing。Scheduler is
+  `ready_to_close`；M3 remains planned until explicit close mode performs the
+  final context audit and handoff。M4 performance/RSS/tasks/10k-idle/soak and
+  packaging/signing/publication remain deferred by scope。
 
 ## M4 — 性能、资源与 v0 资格确认
 
@@ -671,3 +669,4 @@ dependency-ready 和 non-overlapping ownership。
 | 2026-07-29 | M3 plan | M3改为`planned`；接受v1 preserved-cohort/evolvable-topology与transactional supervisor两项ADR，批准SPEC/TEST-0004及五票DAG | M2已关闭；current operator contract分散、run cause丢失、binary-local root coordination有partial activation risk，且三目标只有早期build/config smoke；两ADR是最小hard-to-reverse集合 | Context audit；Product/Architect/QA PASS；ADR-0023/0024；workflow validate/context-check/test-budget/frontier/next |
 | 2026-07-29 | M3 T04 escalation replacement | T04在唯一full/repair/targeted lifecycle后deferred；新建T06承接完整composition outcome，固定terminal UDP local reap与post-Forced 5秒cleanup watchdog，并把internal与black-box evidence按ADR-0016重映射；T05依赖改指T06 | T04的UDP fatal/Forced circular wait与unresponsive-root无bound在原review budget内未关闭；用户确认solution A并一次性授权local T06，不授权remote/T05/publish/control-plane | Product Manager PASS；Architect design PASS；`AUTH-M3-T06-001` consumed/revoked；T04 `b35e809...`/`a90c496...` retained but not integrated |
 | 2026-07-29 | M3 T06 integration | exact `ed615cb...` fast-forward integrated T06；terminal UDP immediate local reap、fixed post-Forced 5s watchdog、portable IPv4 admitted-UDP signal lifecycle与collision-safe/fail-fast fixtures通过 | initial `24561cf...` full reviews发现portable black-box evidence gap；唯一repair关闭canonical `ARC-M3-T06-001`及`QA-M3-T06-001`，不扩展product surface | Architect/QA full BLOCK then targeted PASS；quick `5/5`、full `6/6`、ticket budget/control/diff PASS；no push/publish |
+| 2026-07-30 | M3 T05/T07/T08 qualification | exact `d9e59d78...` integrates native qualification and two narrow late evidence repairs；run `30494736004/1`同SHA通过quality、MSRV、Windows、GNU、musl、interop与final qualification；三票done，M3 ready to close | 两个失败run保留且不拼接；T07隔离process-global child baseline，T08以causal target datagram替换fixed-yield readiness guess，均不改变product behavior | T05 full/targeted convergence、T07/T08 fresh full Architect/QA PASS；quick `5/5`、full `6/6`、milestone budget PASS；exact local/remote scopes consumed/revoked；no release/publication |

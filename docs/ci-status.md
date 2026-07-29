@@ -1,54 +1,55 @@
 # CI 与验证状态
 
-## 当前 M3 execution 状态
+## 当前 M3 execute 完成状态（等待 close）
 
-- **Local integration SHA:** exact
-  `bc14971c51982b6ad9a970593fb3848b2763b112` on clean `master` and
-  `codex/integration/m3` contains M3-T01～T03、M3-T06、T05 qualification
-  implementation and M3-T07。T04 remains deferred after its terminal targeted
-  escalation。
-- **T05 local convergence:** initial candidate `441b2903...` received Architect
-  full `PASS` and QA full `BLOCK` under `QA-M3-T05-001`。The sole repair
-  `bba40d12...` changed only `tests/platform/qualify_native.py`; same-reviewer
-  targeted QA returned `PASS`。Local quick `5/5` and full `6/6` passed；
-  ticket budget passed at code `12956`, tests `19870`, ratio `1.534`, delta
-  `0/0`；milestone budget passed at delta `1242/636`, allowance `1362`。
-- **T07 local convergence:** contract base `0936ccd8...` and candidate
-  `bc14971c...` changed only `tests/m0-harness/tests/udp_local_e2e.rs` by two
-  deletions。The complete four-thread binary passed `100/100`；fresh Architect and
-  QA full reviews both returned `PASS`；authoritative quick `5/5` and full `6/6`
-  passed。Ticket budget passed at code `12956`, tests `19868`, ratio `1.533`；
-  milestone budget passed at delta `1242/634`, allowance `1362`。
-- **Authorized T07 hosted attempt:** exact single-use remote scope
-  `AUTH-M3-T07-REMOTE-001` was consumed `1/1` for one non-force push of
-  `bc14971c...` to `refs/heads/codex/integration/m3`。GitHub Actions run
-  `30476271774`, attempt `1`, event `push`, completed `failure`。
-- **Same-run job evidence:** Windows MSVC job `90658650047`、Linux GNU
-  `90658649992`、Linux musl `90658650121` and interop `90658649948` passed。
-  Quality `90658650037` and MSRV `90658649997` both report
-  `portable_ipv4_live_udp_signal_exits_cleanly_and_rebinds ... ok`，resolving
-  `HOSTED-M3-T05-001`。Both later failed
-  `udp_terminal_error_with_live_session_notifies_process_and_reaps` at
-  `bins/ferrum2-server/src/run.rs:2715` with left `0`/right `1`；qualification
-  `90659341369` is derivative failure。
-- **Canonical root:** `HOSTED-M3-T07-002` is a `test_evidence` release root。
-  The server-private test checks live UDP owner counts after at most 100
-  `yield_now` calls but before its existing bounded target-datagram receive。
-  The scheduler-count loop is not a readiness event；local exact execution passed
-  once and the two-thread UDP subset passed `150/150`，so no product lifecycle
-  defect is established。
-- **Fresh repair frontier:** user authorized
-  `AUTH-M3-T08-LOCAL-001` for one M3-T08 ticket owning the path
-  `bins/ferrum2-server/src/run.rs` but changing only the named private test body。
-  The existing target datagram becomes the causal readiness boundary；T06/T07
-  review histories remain immutable。
-- **Authorization/publication:** the T08 local scope was consumed `1/1` and excludes
-  every remote effect。No additional push、rerun、dispatch、master push、publication、
-  upload、signing、tagging、force or deletion occurred。
-- **Remaining gates:** M3-T08 implementation、100 parallel UDP-subset runs、fresh
-  Architect/QA full reviews、local quick/full/budget/control integration and one
-  separately authorized all-success same-SHA hosted run remain before M3 can become
-  ready to close。
+- **Qualified product SHA:** exact
+  `d9e59d787c3fe78dfca778ee8a36668a45387368` on local `master`,
+  `codex/integration/m3`, and remote
+  `origin/codex/integration/m3` contains M3-T01～T03、T06、T05、T07、T08。
+  M3-T04 remains explicitly `deferred` after its terminal targeted escalation;
+  T06 carries the approved replacement outcome.
+- **Durable workflow state:** M3-T01～T03、T05～T08 are `done`; T04 is
+  `deferred`; active runtime phases and open canonical blockers are empty.
+  `workflow.py next --milestone M3` returns `ready_to_close`.
+- **T05 convergence:** initial `441b2903...` received Architect full `PASS`
+  and QA full `BLOCK` under major `QA-M3-T05-001`; the sole repair
+  `bba40d12...` received same-reviewer targeted `PASS`. Native qualification
+  contract, focused platform evidence, quick `5/5`, full `6/6`, ticket
+  budget, diff, ownership, control-plane, review and integration gates passed.
+- **T07 convergence:** exact `bc14971c...` removed only the non-isolated
+  process-global child baseline from the portable UDP row. The complete
+  four-thread binary passed `100/100`; fresh Architect/QA full reviews both
+  returned `PASS`; quick `5/5`, full `6/6`, budget/control/diff gates passed.
+- **T08 convergence:** exact `d9e59d78...` changed only the named
+  server-private terminal-UDP test, substituting the existing bounded target
+  datagram for the fixed 100-yield readiness guess. The exact test, affected
+  two-thread UDP subset `100/100`, server suite `16/16`, fresh full
+  Architect/QA `PASS`, quick `5/5`, full `6/6`, budget/control/diff gates all
+  passed. No production behavior changed.
+- **Final local budget:** milestone gate against M2 base
+  `7907cda05a56e1c3b85af2dd8faeb85a385154b7` passed at code `12956`,
+  tests `19861`, ratio `1.533`, delta code/tests `1242/627`, allowance `1362`.
+- **Final hosted qualification:** exact one-use scope
+  `AUTH-M3-T08-REMOTE-001` was consumed and auto-revoked `1/1` immediately
+  before one non-force fast-forward push of `d9e59d78...` to
+  `refs/heads/codex/integration/m3`. GitHub Actions
+  [run `30494736004`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30494736004),
+  event `push`, completed `success`.
+- **Same-run jobs:** quality `90720794923`, MSRV `90720794873`, Windows MSVC
+  `90720794992`, Linux GNU `90720795107`, Linux musl `90720794921`, interop
+  `90720794966`, and final qualification `90721365575` all completed
+  `success` on the same exact SHA/run/attempt.
+- **Failure history and roots:** failed runs `30472227257/1` at `bba40d12...`
+  and `30476271774/1` at `bc14971c...` remain immutable and are not spliced.
+  The latter proved the repaired portable row in both quality and MSRV before
+  exposing the distinct server-private readiness defect. Fresh run
+  `30494736004/1` resolves `HOSTED-M3-T07-002`; earlier
+  `HOSTED-M3-T05-001` was already resolved. No open root remains.
+- **Authorization/publication:** all T05/T07/T08 local and remote grants were
+  exact, single-use, consumed, and revoked. No rerun, dispatch, remote
+  `master` update, force-push, PR, tag, release, archive, upload, signing,
+  publication, ref deletion, or control-plane mutation occurred. Execute mode
+  does not auto-close; the remaining transition is explicit M3 close mode.
 
 ## 当前 M2 closed 状态
 

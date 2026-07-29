@@ -2,7 +2,7 @@
 id = "M3-T08"
 title = "Synchronize terminal UDP test readiness on its causal event"
 milestone = "M3"
-status = "ready"
+status = "done"
 priority = "P0"
 risk = "high"
 implementation_blocked_by = ["M3-T06"]
@@ -146,12 +146,36 @@ separate remote authorization.
 
 ## Completion evidence
 
-Filled by the Team Lead after local integration and later hosted qualification:
-
-- Contract/base and candidate commits:
-- Branch/worktree and changed paths:
-- Full/targeted review records and stable finding IDs:
-- Focused/repeated/quick/full commands and exit statuses:
-- Test-budget/control/diff results:
-- Hosted run/SHA/attempt/job results:
-- Authorization and publication state:
+- **Contract/base and candidate:** contract commit
+  `04aaba1dc1010c65f2be1bb40ef9c027b78dcbc5`; final ticket and cumulative
+  qualified product SHA
+  `d9e59d787c3fe78dfca778ee8a36668a45387368`.
+- **Branch/worktree and scope:** `codex/ticket/m3-t08` in
+  `C:\project\ferrum2\.worktrees\m3-t08`; integrated through
+  `codex/integration/m3`. The only implementation delta is inside the named
+  private test in `bins/ferrum2-server/src/run.rs`: four insertions and eleven
+  deletions replace the fixed-yield readiness guess with the existing bounded
+  target-datagram event. Production behavior is unchanged.
+- **Reviews:** fresh Architect and QA full reviews at exact `d9e59d78...` both
+  returned `PASS` with no findings. No targeted round, repair budget, or
+  accepted review debt was required.
+- **Local evidence:** the exact test passed; the complete affected two-thread
+  UDP subset passed `100/100`; the server suite passed `16/16`. Formatting,
+  scoped strict Clippy, ownership, diff, control-plane, review, integration,
+  authoritative quick `5/5`, and authoritative full `6/6` gates exited `0`.
+  Ticket budget passed at code `12956`, tests `19861`, ratio `1.533`, delta
+  `0/0`, allowance `120`; milestone budget passed at delta code/tests
+  `1242/627`, allowance `1362`.
+- **Hosted evidence:** GitHub Actions run `30494736004`, attempt `1`, event
+  `push`, at exact `d9e59d78...` completed `success`. Job IDs
+  `90720794923` (quality), `90720794873` (MSRV), `90720794992` (Windows
+  MSVC), `90720795107` (Linux GNU), `90720794921` (Linux musl),
+  `90720794966` (interop), and `90721365575` (final qualification) all
+  succeeded on the same SHA/run/attempt, resolving `HOSTED-M3-T07-002`.
+- **Authorization/publication:** local scope `AUTH-M3-T08-LOCAL-001` and exact
+  remote scope `AUTH-M3-T08-REMOTE-001` were each consumed and revoked `1/1`.
+  The remote grant covered exactly one non-force fast-forward push to
+  `refs/heads/codex/integration/m3` plus read-only monitoring. No additional
+  push, rerun, dispatch, remote `master` update, force, PR, tag, release,
+  upload, signing, publication, ref deletion, or control-plane mutation
+  occurred.
