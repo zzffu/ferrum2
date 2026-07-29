@@ -5,7 +5,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const MEMBERS: [&str; 10] = [
+const CURRENT_COMPATIBILITY_MEMBERS: [&str; 10] = [
     "bins/ferrum2-client",
     "bins/ferrum2-server",
     "crates/ferrum2-config",
@@ -59,10 +59,10 @@ fn contains_explicit_target_declaration(manifest: &str, declaration: &str) -> bo
 }
 
 #[test]
-fn workspace_has_exactly_the_approved_members() {
+fn workspace_contains_current_compatibility_members_without_exhausting_future_topology() {
     let metadata = metadata();
     let root = PathBuf::from(metadata["workspace_root"].as_str().expect("workspace root"));
-    let mut actual: Vec<_> = metadata["workspace_members"]
+    let actual: BTreeSet<_> = metadata["workspace_members"]
         .as_array()
         .expect("workspace members")
         .iter()
@@ -84,13 +84,17 @@ fn workspace_has_exactly_the_approved_members() {
                 .replace('\\', "/")
         })
         .collect();
-    actual.sort();
 
-    assert_eq!(actual, MEMBERS);
+    for required in CURRENT_COMPATIBILITY_MEMBERS {
+        assert!(
+            actual.contains(required),
+            "current compatibility member is missing: {required}"
+        );
+    }
 }
 
 #[test]
-fn internal_dependency_edges_follow_the_approved_direction() {
+fn current_deep_modules_keep_one_way_internal_dependencies() {
     let metadata = metadata();
     let names = package_names_by_id(&metadata);
     let workspace_ids: BTreeSet<_> = metadata["workspace_members"]
@@ -101,35 +105,11 @@ fn internal_dependency_edges_follow_the_approved_direction() {
         .collect();
     let allowed: BTreeMap<&str, BTreeSet<&str>> = [
         (
-            "ferrum2-client",
-            BTreeSet::from([
-                "ferrum2-config",
-                "ferrum2-core",
-                "ferrum2-crypto",
-                "ferrum2-observability",
-                "ferrum2-runtime",
-                "ferrum2-shadowsocks",
-                "ferrum2-socks5",
-            ]),
-        ),
-        (
-            "ferrum2-server",
-            BTreeSet::from([
-                "ferrum2-config",
-                "ferrum2-core",
-                "ferrum2-crypto",
-                "ferrum2-observability",
-                "ferrum2-runtime",
-                "ferrum2-shadowsocks",
-            ]),
-        ),
-        (
             "ferrum2-config",
             BTreeSet::from(["ferrum2-core", "ferrum2-crypto"]),
         ),
         ("ferrum2-core", BTreeSet::new()),
         ("ferrum2-crypto", BTreeSet::new()),
-        ("ferrum2-m0-harness", BTreeSet::new()),
         ("ferrum2-observability", BTreeSet::new()),
         ("ferrum2-runtime", BTreeSet::from(["ferrum2-core"])),
         (
@@ -140,6 +120,10 @@ fn internal_dependency_edges_follow_the_approved_direction() {
     ]
     .into_iter()
     .collect();
+    let workspace_names: BTreeSet<_> = workspace_ids
+        .iter()
+        .map(|id| names.get(id).expect("workspace package name").as_str())
+        .collect();
 
     for package in metadata["packages"].as_array().expect("packages") {
         let package_id = package["id"].as_str().expect("package id");
@@ -152,18 +136,22 @@ fn internal_dependency_edges_follow_the_approved_direction() {
             .expect("dependencies")
             .iter()
             .filter_map(|dependency| {
-                let path = dependency["path"].as_str()?;
                 let dependency_name = dependency["name"].as_str().expect("dependency name");
-                path.contains("ferrum2").then_some(dependency_name)
+                workspace_names
+                    .contains(dependency_name)
+                    .then_some(dependency_name)
             })
             .collect();
-        assert_eq!(
-            actual,
-            *allowed
-                .get(package_name.as_str())
-                .expect("approved package"),
-            "unexpected internal dependency edge for {package_name}"
+        assert!(
+            actual.is_disjoint(&BTreeSet::from(["ferrum2-client", "ferrum2-server"])),
+            "internal package must not depend on a composition root: {package_name}"
         );
+        if let Some(permitted) = allowed.get(package_name.as_str()) {
+            assert!(
+                actual.is_subset(permitted),
+                "deep module has an upward or cross-layer dependency: {package_name}"
+            );
+        }
     }
 }
 
@@ -187,16 +175,15 @@ fn core_is_runtime_and_protocol_neutral() {
 }
 
 #[test]
-fn core_source_freezes_endpoint_and_reply_ownership_contracts() {
+fn core_source_preserves_endpoint_ownership_without_freezing_address_family() {
     let source = fs::read_to_string(workspace_root().join("crates/ferrum2-core/src/lib.rs"))
         .expect("core source");
 
     for required in [
         "type Stream: LocalEndpoint;",
-        "fn local_endpoint(&self) -> SocketAddrV4;",
-        "fn succeeded(",
-        "self,",
-        "bound: SocketAddrV4",
+        "fn local_socket_addr(&self) -> SocketAddr",
+        "fn succeeded_socket(",
+        "bound: SocketAddr",
     ] {
         assert!(
             source.contains(required),
@@ -208,6 +195,7 @@ fn core_source_freezes_endpoint_and_reply_ownership_contracts() {
 #[test]
 fn crypto_profiles_keep_cipher_dispatch_inside_one_deep_module() {
     let root = workspace_root();
+    let metadata = metadata();
     let crypto =
         fs::read_to_string(root.join("crates/ferrum2-crypto/src/lib.rs")).expect("crypto source");
     for required in [
@@ -254,21 +242,29 @@ fn crypto_profiles_keep_cipher_dispatch_inside_one_deep_module() {
         );
     }
 
-    for member in MEMBERS {
-        if member == "crates/ferrum2-crypto" {
+    let workspace_ids: BTreeSet<_> = metadata["workspace_members"]
+        .as_array()
+        .expect("workspace members")
+        .iter()
+        .map(|id| id.as_str().expect("workspace member id"))
+        .collect();
+    for package in metadata["packages"].as_array().expect("packages") {
+        let package_id = package["id"].as_str().expect("package id");
+        if !workspace_ids.contains(package_id) || package["name"] == "ferrum2-crypto" {
             continue;
         }
-        let manifest =
-            fs::read_to_string(root.join(member).join("Cargo.toml")).expect("member manifest");
+        let manifest_path = package["manifest_path"].as_str().expect("manifest path");
+        let manifest = fs::read_to_string(manifest_path).expect("member manifest");
         assert!(
             !manifest.contains("chacha20poly1305"),
-            "ChaCha primitive dependency must stay inside ferrum2-crypto: {member}"
+            "ChaCha primitive dependency must stay inside ferrum2-crypto: {}",
+            package["name"]
         );
     }
 }
 
 #[test]
-fn all_future_product_targets_are_declared_explicitly() {
+fn current_product_targets_are_explicit_without_exhausting_future_targets() {
     let root = workspace_root();
     for (manifest, declaration) in [
         (
@@ -313,7 +309,7 @@ fn all_future_product_targets_are_declared_explicitly() {
 }
 
 #[test]
-fn explicit_target_declaration_matching_accepts_crlf() {
+fn current_target_declaration_matching_accepts_crlf() {
     let manifest = "[[bin]]\r\nname = \"ferrum2-client\"\r\npath = \"src/main.rs\"\r\n";
     let declaration = "[[bin]]\nname = \"ferrum2-client\"\npath = \"src/main.rs\"";
 

@@ -1,0 +1,31 @@
+schema_version = 1
+
+[server]
+listen = "127.0.0.1:8388"
+
+[shadowsocks]
+method = "2022-blake3-chacha20-poly1305"
+psk = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8="
+
+[runtime]
+max_connections = 65535
+listen_backlog = 65535
+handshake_timeout_ms = 60000
+connect_timeout_ms = 120000
+idle_timeout_ms = 86400000
+shutdown_grace_ms = 300000
+
+[replay]
+capacity = 1048576
+
+[udp]
+enabled = true
+max_sessions = 65535
+max_buffered_bytes = 268435456
+idle_timeout_ms = 86400000
+
+[logging]
+level = "trace"
+
+[metrics]
+listen = "127.0.0.1:9091"

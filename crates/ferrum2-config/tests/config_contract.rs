@@ -1,13 +1,13 @@
 use std::error::Error;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ferrum2_config::{
-    ConfigErrorKind, ConfigField, LoggingLevel, MAX_CONFIG_BYTES, load_client, load_server,
+    ConfigErrorKind, ConfigField, LoggingLevel, MAX_CONFIG_BYTES, RuntimeConfig, load_client,
+    load_server,
 };
 use ferrum2_crypto::TcpMethodProfile;
 
@@ -64,315 +64,227 @@ impl Drop for TempConfig {
     }
 }
 
-#[test]
-fn role_specific_valid_configs_apply_all_defaults() {
-    let client = load_client(fixture("client-valid.toml")).expect("valid client fixture");
-    assert_eq!(client.listen, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1080));
-    assert_eq!(client.server, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8388));
-    assert_eq!(client.method(), TcpMethodProfile::Blake3Aes128Gcm2022);
-    assert_eq!(format!("{:?}", client.psk), "MethodPsk([REDACTED])");
-    assert_eq!(
-        client.runtime.max_connections,
-        NonZeroU16::new(4096).expect("non-zero")
-    );
-    assert_eq!(
-        client.runtime.listen_backlog,
-        NonZeroU16::new(1024).expect("non-zero")
-    );
-    assert_eq!(
-        client.runtime.handshake_timeout,
-        Duration::from_millis(5_000)
-    );
-    assert_eq!(
-        client.runtime.connect_timeout,
-        Duration::from_millis(10_000)
-    );
-    assert_eq!(client.runtime.idle_timeout, Duration::from_millis(300_000));
-    assert_eq!(client.runtime.shutdown_grace, Duration::from_millis(30_000));
-    assert_eq!(client.logging.level, LoggingLevel::Info);
-    assert!(client.metrics.is_none());
+#[derive(Clone, Copy)]
+enum ConfigRole {
+    Client,
+    Server,
+}
 
-    let server = load_server(fixture("server-valid.toml")).expect("valid server fixture");
-    assert_eq!(server.listen, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8388));
-    assert_eq!(server.method(), TcpMethodProfile::Blake3Aes128Gcm2022);
-    assert_eq!(server.replay.capacity, 65_536);
-    assert!(server.udp.enabled);
-    assert_eq!(server.udp.max_sessions, 4_096);
-    assert_eq!(server.udp.max_buffered_bytes, 16 * 1024 * 1024);
-    assert_eq!(server.udp.idle_timeout, Duration::from_millis(300_000));
-    assert_eq!(server.logging.level, LoggingLevel::Info);
-    assert!(server.metrics.is_none());
+struct CohortCase {
+    name: &'static str,
+    fixture: &'static str,
+    role: ConfigRole,
+    method: TcpMethodProfile,
+    runtime: [u64; 6],
+    replay_capacity: Option<usize>,
+    udp: Option<(bool, usize, usize, u64)>,
+    logging: LoggingLevel,
+    metrics_port: Option<u16>,
+}
 
-    for (method, psk, expected) in [
-        (
-            "2022-blake3-aes-256-gcm",
-            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-            TcpMethodProfile::Blake3Aes256Gcm2022,
-        ),
-        (
-            "2022-blake3-chacha20-poly1305",
-            "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
-            TcpMethodProfile::Blake3ChaCha20Poly13052022,
-        ),
-    ] {
-        let client = TempConfig::text(
-            &CLIENT_BASE
-                .replace("2022-blake3-aes-128-gcm", method)
-                .replace("AAECAwQFBgcICQoLDA0ODw==", psk),
-        );
-        let client = load_client(client.path()).expect(method);
-        assert_eq!(client.method(), expected, "{method}");
-    }
+struct SchemaV1CompatibilityPolicy {
+    all_v0_releases: bool,
+    successor_minimum_months: u8,
+    successor_minimum_stable_minors: u8,
+    prior_stable_release_notice: bool,
+    elapsed_time_proven_at_m3_close: bool,
+}
+
+const SCHEMA_V1_COMPATIBILITY_POLICY: SchemaV1CompatibilityPolicy = SchemaV1CompatibilityPolicy {
+    all_v0_releases: true,
+    successor_minimum_months: 12,
+    successor_minimum_stable_minors: 2,
+    prior_stable_release_notice: true,
+    elapsed_time_proven_at_m3_close: false,
+};
+
+fn assert_runtime(actual: RuntimeConfig, expected: [u64; 6], name: &str) {
+    assert_eq!(
+        u64::from(actual.max_connections.get()),
+        expected[0],
+        "{name}"
+    );
+    assert_eq!(
+        u64::from(actual.listen_backlog.get()),
+        expected[1],
+        "{name}"
+    );
+    assert_eq!(
+        actual.handshake_timeout,
+        Duration::from_millis(expected[2]),
+        "{name}"
+    );
+    assert_eq!(
+        actual.connect_timeout,
+        Duration::from_millis(expected[3]),
+        "{name}"
+    );
+    assert_eq!(
+        actual.idle_timeout,
+        Duration::from_millis(expected[4]),
+        "{name}"
+    );
+    assert_eq!(
+        actual.shutdown_grace,
+        Duration::from_millis(expected[5]),
+        "{name}"
+    );
 }
 
 #[test]
-fn explicit_boundary_values_are_accepted_and_typed() {
-    let client = TempConfig::text(&format!(
-        "{CLIENT_BASE}\n[runtime]\n\
-         max_connections = 1\nlisten_backlog = 1\n\
-         handshake_timeout_ms = 100\nconnect_timeout_ms = 100\n\
-         idle_timeout_ms = 1000\nshutdown_grace_ms = 0\n\
-         [logging]\nlevel = \"error\"\n\
-         [metrics]\nlisten = \"127.0.0.1:9090\"\n"
-    ));
-    let validated = load_client(client.path()).expect("minimum boundaries");
-    assert_eq!(validated.runtime.max_connections.get(), 1);
-    assert_eq!(validated.runtime.listen_backlog.get(), 1);
-    assert_eq!(
-        validated.runtime.handshake_timeout,
-        Duration::from_millis(100)
-    );
-    assert_eq!(
-        validated.runtime.connect_timeout,
-        Duration::from_millis(100)
-    );
-    assert_eq!(validated.runtime.idle_timeout, Duration::from_millis(1_000));
-    assert_eq!(validated.runtime.shutdown_grace, Duration::ZERO);
-    assert_eq!(validated.logging.level, LoggingLevel::Error);
-    assert_eq!(
-        validated.metrics.expect("enabled").listen,
-        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9090)
-    );
-
-    let server = TempConfig::text(&format!(
-        "{SERVER_BASE}\n[runtime]\n\
-         max_connections = 65535\nlisten_backlog = 65535\n\
-         handshake_timeout_ms = 60000\nconnect_timeout_ms = 120000\n\
-         idle_timeout_ms = 86400000\nshutdown_grace_ms = 300000\n\
-         [replay]\ncapacity = 1048576\n\
-         [udp]\nenabled = false\nmax_sessions = 65535\n\
-         max_buffered_bytes = 268435456\nidle_timeout_ms = 86400000\n\
-         [logging]\nlevel = \"trace\"\n"
-    ));
-    let validated = load_server(server.path()).expect("maximum boundaries");
-    assert_eq!(validated.runtime.max_connections.get(), 65_535);
-    assert_eq!(validated.runtime.listen_backlog.get(), 65_535);
-    assert_eq!(validated.replay.capacity, 1_048_576);
-    assert!(!validated.udp.enabled);
-    assert_eq!(validated.udp.max_sessions, 65_535);
-    assert_eq!(validated.udp.max_buffered_bytes, 268_435_456);
-    assert_eq!(validated.udp.idle_timeout, Duration::from_secs(86_400));
-    assert_eq!(validated.logging.level, LoggingLevel::Trace);
-}
-
-#[test]
-fn missing_unknown_and_wrong_role_fields_are_rejected() {
-    let client_cases = [
-        ("missing schema", CLIENT_BASE.replacen("schema_version = 1\n", "", 1)),
-        (
-            "missing client",
-            CLIENT_BASE.replace(
-                "[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n",
-                "",
-            ),
-        ),
-        (
-            "missing client listen",
-            CLIENT_BASE.replacen("listen = \"127.0.0.1:1080\"\n", "", 1),
-        ),
-        (
-            "missing client server",
-            CLIENT_BASE.replacen("server = \"127.0.0.1:8388\"\n", "", 1),
-        ),
-        (
-            "missing shadowsocks",
-            CLIENT_BASE.replace(
-                "[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
-                "",
-            ),
-        ),
-        (
-            "missing method",
-            CLIENT_BASE.replacen("method = \"2022-blake3-aes-128-gcm\"\n", "", 1),
-        ),
-        (
-            "missing psk",
-            CLIENT_BASE.replacen("psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n", "", 1),
-        ),
-        (
-            "unknown root",
-            CLIENT_BASE.replacen(
-                "schema_version = 1\n",
-                "schema_version = 1\nunexpected = 1\n",
-                1,
-            ),
-        ),
-        (
-            "unknown client",
-            CLIENT_BASE.replacen(
-                "server = \"127.0.0.1:8388\"\n",
-                "server = \"127.0.0.1:8388\"\nunexpected = 1\n",
-                1,
-            ),
-        ),
-        (
-            "unknown shadowsocks",
-            CLIENT_BASE.replacen(
-                "psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
-                "psk = \"AAECAwQFBgcICQoLDA0ODw==\"\nunexpected = 1\n",
-                1,
-            ),
-        ),
-        (
-            "unknown runtime",
-            format!("{CLIENT_BASE}\n[runtime]\nunexpected = 1\n"),
-        ),
-        (
-            "unknown logging",
-            format!("{CLIENT_BASE}\n[logging]\nunexpected = 1\n"),
-        ),
-        (
-            "unknown metrics",
-            format!(
-                "{CLIENT_BASE}\n[metrics]\nlisten = \"127.0.0.1:9090\"\nunexpected = 1\n"
-            ),
-        ),
-        (
-            "server role in client",
-            format!("{CLIENT_BASE}\n[server]\nlisten = \"127.0.0.1:9000\"\n"),
-        ),
-        (
-            "replay role in client",
-            format!("{CLIENT_BASE}\n[replay]\ncapacity = 65536\n"),
-        ),
+fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
+    let cases = [
+        CohortCase {
+            name: "client defaults",
+            fixture: "client-valid.toml",
+            role: ConfigRole::Client,
+            method: TcpMethodProfile::Blake3Aes128Gcm2022,
+            runtime: [4_096, 1_024, 5_000, 10_000, 300_000, 30_000],
+            replay_capacity: None,
+            udp: None,
+            logging: LoggingLevel::Info,
+            metrics_port: None,
+        },
+        CohortCase {
+            name: "client minimum boundaries",
+            fixture: "client-preserved-minimum.toml",
+            role: ConfigRole::Client,
+            method: TcpMethodProfile::Blake3Aes256Gcm2022,
+            runtime: [1, 1, 100, 100, 1_000, 0],
+            replay_capacity: None,
+            udp: None,
+            logging: LoggingLevel::Error,
+            metrics_port: Some(9_090),
+        },
+        CohortCase {
+            name: "server defaults",
+            fixture: "server-valid.toml",
+            role: ConfigRole::Server,
+            method: TcpMethodProfile::Blake3Aes128Gcm2022,
+            runtime: [4_096, 1_024, 5_000, 10_000, 300_000, 30_000],
+            replay_capacity: Some(65_536),
+            udp: Some((true, 4_096, 16_777_216, 300_000)),
+            logging: LoggingLevel::Info,
+            metrics_port: None,
+        },
+        CohortCase {
+            name: "server minimum boundaries",
+            fixture: "server-preserved-minimum.toml",
+            role: ConfigRole::Server,
+            method: TcpMethodProfile::Blake3Aes256Gcm2022,
+            runtime: [1, 1, 100, 100, 1_000, 0],
+            replay_capacity: Some(1_024),
+            udp: Some((false, 1, 1_048_576, 60_000)),
+            logging: LoggingLevel::Warn,
+            metrics_port: None,
+        },
+        CohortCase {
+            name: "server maximum boundaries",
+            fixture: "server-preserved-maximum.toml",
+            role: ConfigRole::Server,
+            method: TcpMethodProfile::Blake3ChaCha20Poly13052022,
+            runtime: [65_535, 65_535, 60_000, 120_000, 86_400_000, 300_000],
+            replay_capacity: Some(1_048_576),
+            udp: Some((true, 65_535, 268_435_456, 86_400_000)),
+            logging: LoggingLevel::Trace,
+            metrics_port: Some(9_091),
+        },
     ];
-    for (name, source) in client_cases {
-        let file = TempConfig::text(&source);
-        let error = load_client(file.path()).err().expect(name);
-        assert_eq!(error.kind(), ConfigErrorKind::Syntax, "{name}");
-    }
 
-    let server_cases = [
-        (
-            "missing server listen",
-            SERVER_BASE.replacen("listen = \"127.0.0.1:8388\"\n", "", 1),
-        ),
-        (
-            "unknown server",
-            SERVER_BASE.replacen(
-                "listen = \"127.0.0.1:8388\"\n",
-                "listen = \"127.0.0.1:8388\"\nunexpected = 1\n",
-                1,
-            ),
-        ),
-        (
-            "client role in server",
-            format!(
-                "{SERVER_BASE}\n[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n"
-            ),
-        ),
-        (
-            "unknown replay",
-            format!("{SERVER_BASE}\n[replay]\nunexpected = 1\n"),
-        ),
-        (
-            "unknown udp",
-            format!("{SERVER_BASE}\n[udp]\nunexpected = 1\n"),
-        ),
-        (
-            "udp role in client",
-            format!("{CLIENT_BASE}\n[udp]\nenabled = false\n"),
-        ),
-    ];
-    for (name, source) in server_cases {
-        let file = TempConfig::text(&source);
-        let error = load_server(file.path()).err().expect(name);
-        assert_eq!(error.kind(), ConfigErrorKind::Syntax, "{name}");
-    }
-}
-
-#[test]
-fn every_numeric_range_rejects_values_immediately_outside_it() {
-    let runtime_cases = [
-        ("max_connections", 0_u64),
-        ("max_connections", 65_536),
-        ("listen_backlog", 0),
-        ("listen_backlog", 65_536),
-        ("handshake_timeout_ms", 99),
-        ("handshake_timeout_ms", 60_001),
-        ("connect_timeout_ms", 99),
-        ("connect_timeout_ms", 120_001),
-        ("idle_timeout_ms", 999),
-        ("idle_timeout_ms", 86_400_001),
-        ("shutdown_grace_ms", 300_001),
-    ];
-    for (field, value) in runtime_cases {
-        let file = TempConfig::text(&format!("{CLIENT_BASE}\n[runtime]\n{field} = {value}\n"));
-        let error = load_client(file.path()).err().expect(field);
-        assert_eq!(error.kind(), ConfigErrorKind::Semantic, "{field}={value}");
-    }
-
-    for capacity in [1_023, 1_048_577] {
-        let file = TempConfig::text(&format!("{SERVER_BASE}\n[replay]\ncapacity = {capacity}\n"));
-        let error = load_server(file.path()).err().expect("replay range");
-        assert_eq!(error.field(), ConfigField::ReplayCapacity);
-    }
-
-    for (field, values, expected) in [
-        ("max_sessions", [0_u64, 65_536], ConfigField::UdpMaxSessions),
-        (
-            "max_buffered_bytes",
-            [1_048_575, 268_435_457],
-            ConfigField::UdpMaxBufferedBytes,
-        ),
-        (
-            "idle_timeout_ms",
-            [59_999, 86_400_001],
-            ConfigField::UdpIdleTimeout,
-        ),
-    ] {
-        for value in values {
-            let file = TempConfig::text(&format!("{SERVER_BASE}\n[udp]\n{field} = {value}\n"));
-            let error = load_server(file.path()).err().expect("UDP range");
-            assert_eq!(error.kind(), ConfigErrorKind::Semantic, "{field}={value}");
-            assert_eq!(error.field(), expected, "{field}={value}");
+    for case in cases {
+        let path = fixture(case.fixture);
+        let source_before = fs::read(&path).expect(case.name);
+        match case.role {
+            ConfigRole::Client => {
+                let config = load_client(&path).expect(case.name);
+                assert_eq!(
+                    config.listen,
+                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1_080),
+                    "{}",
+                    case.name
+                );
+                assert_eq!(
+                    config.server,
+                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388),
+                    "{}",
+                    case.name
+                );
+                assert_eq!(config.method(), case.method, "{}", case.name);
+                assert_eq!(format!("{:?}", config.psk), "MethodPsk([REDACTED])");
+                assert_runtime(config.runtime, case.runtime, case.name);
+                assert_eq!(config.logging.level, case.logging, "{}", case.name);
+                assert_eq!(
+                    config.metrics.map(|metrics| metrics.listen.port()),
+                    case.metrics_port,
+                    "{}",
+                    case.name
+                );
+                assert!(case.replay_capacity.is_none());
+                assert!(case.udp.is_none());
+            }
+            ConfigRole::Server => {
+                let config = load_server(&path).expect(case.name);
+                assert_eq!(
+                    config.listen,
+                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388),
+                    "{}",
+                    case.name
+                );
+                assert_eq!(config.method(), case.method, "{}", case.name);
+                assert_eq!(format!("{:?}", config.psk), "MethodPsk([REDACTED])");
+                assert_runtime(config.runtime, case.runtime, case.name);
+                assert_eq!(
+                    Some(config.replay.capacity),
+                    case.replay_capacity,
+                    "{}",
+                    case.name
+                );
+                let expected_udp = case.udp.expect("server UDP expectation");
+                assert_eq!(
+                    (
+                        config.udp.enabled,
+                        config.udp.max_sessions,
+                        config.udp.max_buffered_bytes,
+                        config.udp.idle_timeout.as_millis() as u64,
+                    ),
+                    expected_udp,
+                    "{}",
+                    case.name
+                );
+                assert_eq!(config.logging.level, case.logging, "{}", case.name);
+                assert_eq!(
+                    config.metrics.map(|metrics| metrics.listen.port()),
+                    case.metrics_port,
+                    "{}",
+                    case.name
+                );
+            }
         }
+        assert_eq!(
+            fs::read(&path).expect(case.name),
+            source_before,
+            "{}",
+            case.name
+        );
     }
+
+    let policy = SCHEMA_V1_COMPATIBILITY_POLICY;
+    assert!(policy.all_v0_releases);
+    assert_eq!(policy.successor_minimum_months, 12);
+    assert_eq!(policy.successor_minimum_stable_minors, 2);
+    assert!(policy.prior_stable_release_notice);
+    assert!(!policy.elapsed_time_proven_at_m3_close);
+
+    let mut exact_limit = format!("{CLIENT_BASE}\n#").into_bytes();
+    exact_limit.resize(MAX_CONFIG_BYTES - 1, b'a');
+    exact_limit.push(b'\n');
+    let file = TempConfig::bytes(&exact_limit);
+    load_client(file.path()).expect("the documented maximum size remains accepted");
 }
 
 #[test]
 fn endpoint_method_key_and_cross_field_rules_are_enforced() {
     let cases = [
-        (
-            "schema version",
-            CLIENT_BASE.replacen("schema_version = 1", "schema_version = 2", 1),
-            ConfigField::SchemaVersion,
-        ),
-        (
-            "hostname",
-            CLIENT_BASE.replacen("127.0.0.1:1080", "localhost:1080", 1),
-            ConfigField::ClientListen,
-        ),
-        (
-            "ipv6",
-            CLIENT_BASE.replacen("127.0.0.1:1080", "[::1]:1080", 1),
-            ConfigField::ClientListen,
-        ),
-        (
-            "zero port",
-            CLIENT_BASE.replacen("127.0.0.1:1080", "127.0.0.1:0", 1),
-            ConfigField::ClientListen,
-        ),
         (
             "client endpoints equal",
             CLIENT_BASE.replacen("127.0.0.1:1080", "127.0.0.1:8388", 1),
@@ -401,20 +313,6 @@ fn endpoint_method_key_and_cross_field_rules_are_enforced() {
         (
             "url safe base64",
             CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "_____________________w==", 1),
-            ConfigField::ShadowsocksPsk,
-        ),
-        (
-            "wrong key length",
-            CLIENT_BASE.replacen(
-                "AAECAwQFBgcICQoLDA0ODw==",
-                "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-                1,
-            ),
-            ConfigField::ShadowsocksPsk,
-        ),
-        (
-            "non-canonical trailing bits",
-            CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "AAECAwQFBgcICQoLDA0ODx==", 1),
             ConfigField::ShadowsocksPsk,
         ),
     ];
@@ -472,69 +370,118 @@ fn endpoint_method_key_and_cross_field_rules_are_enforced() {
             .field(),
         ConfigField::MetricsListen
     );
-
-    let replay_minimum = TempConfig::text(&format!("{SERVER_BASE}\n[replay]\ncapacity = 1024\n"));
-    assert_eq!(
-        load_server(replay_minimum.path())
-            .expect("replay lower boundary")
-            .replay
-            .capacity,
-        1024
-    );
-
-    let malformed = TempConfig::text("schema_version = [\nM0_SOURCE_SENTINEL");
-    assert_eq!(
-        load_client(malformed.path())
-            .err()
-            .expect("malformed TOML")
-            .kind(),
-        ConfigErrorKind::Syntax
-    );
 }
 
 #[test]
-fn bounded_utf8_reader_accepts_exact_limit_and_rejects_one_byte_more() {
-    let prefix = format!("{CLIENT_BASE}\n#");
-    let mut exact = prefix.into_bytes();
-    exact.resize(MAX_CONFIG_BYTES - 1, b'a');
-    exact.push(b'\n');
-    assert_eq!(exact.len(), MAX_CONFIG_BYTES);
-    let file = TempConfig::bytes(&exact);
-    load_client(file.path()).expect("exactly one MiB is accepted");
+fn invalid_cohort_rows_keep_stable_redacted_categories_and_fields() {
+    const SOURCE_SENTINEL: &str = "M3_RAW_CONFIG_SOURCE_SENTINEL";
+    let mut oversized = CLIENT_BASE.as_bytes().to_vec();
+    oversized.resize(MAX_CONFIG_BYTES + 1, b' ');
+    let cases = [
+        (
+            "missing required section",
+            ConfigRole::Client,
+            CLIENT_BASE
+                .replace(
+                    "[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n",
+                    "",
+                )
+                .into_bytes(),
+            ConfigErrorKind::Syntax,
+            ConfigField::Config,
+        ),
+        (
+            "current reader rejects a later optional field",
+            ConfigRole::Client,
+            fs::read(fixture("client-invalid-unknown-field.toml")).expect("unknown fixture"),
+            ConfigErrorKind::Syntax,
+            ConfigField::Config,
+        ),
+        (
+            "oversized",
+            ConfigRole::Client,
+            oversized,
+            ConfigErrorKind::TooLarge,
+            ConfigField::Config,
+        ),
+        (
+            "malformed",
+            ConfigRole::Client,
+            format!("schema_version = [\n# {SOURCE_SENTINEL}").into_bytes(),
+            ConfigErrorKind::Syntax,
+            ConfigField::Config,
+        ),
+        (
+            "wrong declared version",
+            ConfigRole::Client,
+            CLIENT_BASE
+                .replacen("schema_version = 1", "schema_version = 2", 1)
+                .into_bytes(),
+            ConfigErrorKind::Semantic,
+            ConfigField::SchemaVersion,
+        ),
+        (
+            "zero-port endpoint",
+            ConfigRole::Client,
+            CLIENT_BASE
+                .replacen("127.0.0.1:1080", "127.0.0.1:0", 1)
+                .into_bytes(),
+            ConfigErrorKind::Semantic,
+            ConfigField::ClientListen,
+        ),
+        (
+            "invalid range",
+            ConfigRole::Client,
+            format!("{CLIENT_BASE}\n[runtime]\nmax_connections = 0\n").into_bytes(),
+            ConfigErrorKind::Semantic,
+            ConfigField::RuntimeMaxConnections,
+        ),
+        (
+            "noncanonical psk",
+            ConfigRole::Client,
+            CLIENT_BASE
+                .replacen("AAECAwQFBgcICQoLDA0ODw==", "AAECAwQFBgcICQoLDA0ODx==", 1)
+                .into_bytes(),
+            ConfigErrorKind::Semantic,
+            ConfigField::ShadowsocksPsk,
+        ),
+        (
+            "client wrong-length psk fixture",
+            ConfigRole::Client,
+            fs::read(fixture("client-invalid-key-length.toml")).expect("client key fixture"),
+            ConfigErrorKind::Semantic,
+            ConfigField::ShadowsocksPsk,
+        ),
+        (
+            "server wrong-length psk fixture",
+            ConfigRole::Server,
+            fs::read(fixture("server-invalid-key-length.toml")).expect("server key fixture"),
+            ConfigErrorKind::Semantic,
+            ConfigField::ShadowsocksPsk,
+        ),
+    ];
 
-    exact.push(b'\n');
-    let file = TempConfig::bytes(&exact);
-    assert_eq!(
-        load_client(file.path())
-            .err()
-            .expect("one byte too large")
-            .kind(),
-        ConfigErrorKind::TooLarge
-    );
-
-    let file = TempConfig::bytes(&[0xff, 0xfe, 0xfd]);
-    assert_eq!(
-        load_client(file.path())
-            .err()
-            .expect("invalid UTF-8")
-            .kind(),
-        ConfigErrorKind::Syntax
-    );
-}
-
-#[test]
-fn errors_never_retain_or_render_secret_or_source_text() {
-    const SECRET: &str = "M0_CONFIG_SECRET_SENTINEL";
-    const SOURCE: &str = "M0_RAW_CONFIG_SOURCE_SENTINEL";
-    let file = TempConfig::text(&format!(
-        "{CLIENT_BASE}\n[logging]\nlevel = \"{SOURCE}\"\n# {SECRET}\n"
-    ));
-    let error = load_client(file.path()).err().expect("invalid config");
-    let rendered = format!("{error}\n{error:?}");
-    assert!(!rendered.contains(SECRET));
-    assert!(!rendered.contains(SOURCE));
-    assert!(!rendered.contains("AAECAwQFBgcICQoLDA0ODw=="));
-    assert!(rendered.contains("config.semantic"));
+    for (name, role, source, expected_kind, expected_field) in cases {
+        let file = TempConfig::bytes(&source);
+        let error = match role {
+            ConfigRole::Client => load_client(file.path()).err(),
+            ConfigRole::Server => load_server(file.path()).err(),
+        }
+        .expect(name);
+        assert_eq!(error.kind(), expected_kind, "{name}");
+        assert_eq!(error.field(), expected_field, "{name}");
+        assert_eq!(error.code(), expected_kind.code(), "{name}");
+        assert_eq!(fs::read(file.path()).expect(name), source, "{name}");
+        let rendered = format!("{error}\n{error:?}");
+        assert!(!rendered.contains(SOURCE_SENTINEL), "{name}");
+        let source_text = String::from_utf8_lossy(&source);
+        if let Some(secret) = source_text.lines().find_map(|line| {
+            line.strip_prefix("psk = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        }) {
+            assert!(!rendered.contains(secret), "{name}");
+        }
+    }
 
     let missing = fixture("does-not-exist.toml");
     let io_error = load_client(missing).err().expect("I/O failure");

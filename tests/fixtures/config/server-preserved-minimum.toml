@@ -1,0 +1,28 @@
+schema_version = 1
+
+[server]
+listen = "127.0.0.1:8388"
+
+[shadowsocks]
+method = "2022-blake3-aes-256-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
+[runtime]
+max_connections = 1
+listen_backlog = 1
+handshake_timeout_ms = 100
+connect_timeout_ms = 100
+idle_timeout_ms = 1000
+shutdown_grace_ms = 0
+
+[replay]
+capacity = 1024
+
+[udp]
+enabled = false
+max_sessions = 1
+max_buffered_bytes = 1048576
+idle_timeout_ms = 60000
+
+[logging]
+level = "warn"

@@ -1,0 +1,23 @@
+schema_version = 1
+
+[client]
+listen = "127.0.0.1:1080"
+server = "127.0.0.1:8388"
+
+[shadowsocks]
+method = "2022-blake3-aes-256-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
+[runtime]
+max_connections = 1
+listen_backlog = 1
+handshake_timeout_ms = 100
+connect_timeout_ms = 100
+idle_timeout_ms = 1000
+shutdown_grace_ms = 0
+
+[logging]
+level = "error"
+
+[metrics]
+listen = "127.0.0.1:9090"
