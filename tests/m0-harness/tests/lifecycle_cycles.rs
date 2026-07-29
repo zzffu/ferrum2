@@ -18,7 +18,6 @@ use local_support::{
 };
 
 const CYCLES_PER_CATEGORY: usize = 20;
-const _: () = assert!(CYCLES_PER_CATEGORY * 5 >= 100);
 const _: () = assert!(CYCLES_PER_CATEGORY * 6 >= 100);
 const CHILD_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_SETUP_ATTEMPTS: usize = 3;
@@ -83,16 +82,6 @@ fn spawn_reserved_child(
     metrics: SocketAddrV4,
 ) -> Result<ChildGuard, ChildSetupError> {
     spawn_reserved_child_with_hook(binary, config, context, reservations, metrics, false, |_| 0)
-}
-
-fn spawn_reserved_signallable(
-    binary: &str,
-    config: &Path,
-    context: String,
-    reservations: [LoopbackReservation; 2],
-    metrics: SocketAddrV4,
-) -> Result<ChildGuard, ChildSetupError> {
-    spawn_reserved_child_with_hook(binary, config, context, reservations, metrics, true, |_| 0)
 }
 
 fn spawn_reserved_child_with_hook(
@@ -730,14 +719,6 @@ fn forced_termination_cycle(
     Ok(())
 }
 
-fn append_shutdown_grace(config: &Path, milliseconds: u64) {
-    let mut source = std::fs::read_to_string(config).expect("read lifecycle config");
-    source.push_str(&format!(
-        "\n[runtime]\nshutdown_grace_ms = {milliseconds}\n"
-    ));
-    std::fs::write(config, source).expect("write lifecycle grace");
-}
-
 fn signal_cycle(
     baseline_children: usize,
     context: &str,
@@ -761,7 +742,10 @@ fn signal_cycle(
         .expect("client signal config");
     for config in [&server_config, &client_config] {
         rewrite_config_method(config, method).expect("signal method");
-        append_shutdown_grace(config, GRACE.as_millis() as u64);
+        let mut source = std::fs::read_to_string(config).expect("read lifecycle config");
+        let grace_ms = GRACE.as_millis();
+        source.push_str(&format!("\n[runtime]\nshutdown_grace_ms = {grace_ms}\n"));
+        std::fs::write(config, source).expect("write lifecycle grace");
     }
     let addresses = [client, client_metrics, server, server_metrics];
     macro_rules! started {
@@ -781,22 +765,26 @@ fn signal_cycle(
         };
     }
     let server_child = started!(
-        spawn_reserved_signallable(
+        spawn_reserved_child_with_hook(
             "ferrum2-server",
             &server_config,
             format!("{context},child=server"),
             [server_reservation, server_metrics_reservation],
             server_metrics,
+            true,
+            |_| 0,
         ),
         Vec::new()
     );
     let client_child = started!(
-        spawn_reserved_signallable(
+        spawn_reserved_child_with_hook(
             "ferrum2-client",
             &client_config,
             format!("{context},child=client"),
             [client_reservation, client_metrics_reservation],
             client_metrics,
+            true,
+            |_| 0,
         ),
         vec![server_child]
     );
@@ -834,15 +822,6 @@ fn signal_cycle(
     Ok(())
 }
 
-fn os_signal_cycle(
-    baseline_children: usize,
-    context: &str,
-    method: (&str, &str),
-) -> Result<(), Box<SetupCollision>> {
-    signal_cycle(baseline_children, context, method, false)?;
-    signal_cycle(baseline_children, context, method, true)
-}
-
 #[test]
 fn at_least_100_real_process_cycles_per_binary_cleanup_every_owned_boundary() {
     let _test_guard = LIFECYCLE_TEST_LOCK.lock().expect("lifecycle test lock");
@@ -853,7 +832,13 @@ fn at_least_100_real_process_cycles_per_binary_cleanup_every_owned_boundary() {
         ("connect-failure", connect_failure_cycle),
         ("cooperative-cancellation", cooperative_cancellation_cycle),
         ("forced-termination", forced_termination_cycle),
-        ("graceful-and-forced-os-signals", os_signal_cycle),
+        (
+            "graceful-and-forced-os-signals",
+            |baseline, context, method| {
+                signal_cycle(baseline, context, method, false)?;
+                signal_cycle(baseline, context, method, true)
+            },
+        ),
     ];
     let mut executed = 0_usize;
     for (category, cycle) in categories {

@@ -1047,13 +1047,13 @@ where
         loop {
             tokio::select! {
                 biased;
-                () = control.forced() => break,
                 result = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     if result.is_none() || self.tasks.is_empty() {
                         self.manager.cancel_all();
                         return;
                     }
                 }
+                () = control.forced() => break,
             }
         }
         self.registry.record_udp_forced_shutdowns(self.tasks.len());

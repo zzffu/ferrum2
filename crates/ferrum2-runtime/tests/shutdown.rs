@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use ferrum2_runtime::{
     AcceptListener, BoundedSupervisor, DEFAULT_SHUTDOWN_GRACE, OwnerRegistry, PreparedProcessRoot,
-    ProcessCancellation, ProcessCancellationPhase, ProcessCleanupFailure, ProcessExitKind,
-    ProcessFuture, ProcessRoot, ProcessState, ProcessSupervisor,
+    ProcessCancellation, ProcessCancellationPhase, ProcessCause, ProcessCleanupFailure,
+    ProcessExitKind, ProcessFuture, ProcessRoot, ProcessState, ProcessSupervisor,
 };
 use tokio::sync::Notify;
 
@@ -148,6 +148,7 @@ enum ProcessShutdownBehavior {
     Drain(Duration),
     AwaitForce,
     CleanupFailure,
+    Uncooperative,
 }
 
 struct ShutdownProcessRoot {
@@ -191,6 +192,7 @@ impl PreparedProcessRoot<&'static str> for ShutdownProcessRoot {
                     Ok(())
                 }
                 ProcessShutdownBehavior::CleanupFailure => Err("cleanup"),
+                ProcessShutdownBehavior::Uncooperative => pending().await,
             }
         })
     }
@@ -198,6 +200,22 @@ impl PreparedProcessRoot<&'static str> for ShutdownProcessRoot {
     fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), &'static str>> {
         Box::pin(async { Ok(()) })
     }
+}
+
+fn shutdown_process_root(
+    behavior: ProcessShutdownBehavior,
+    phases: &std::sync::Arc<Mutex<Vec<ProcessCancellationPhase>>>,
+    terminal_markers: &std::sync::Arc<AtomicUsize>,
+) -> ProcessRoot<&'static str> {
+    let phases = std::sync::Arc::clone(phases);
+    let terminal_markers = std::sync::Arc::clone(terminal_markers);
+    ProcessRoot::new(move || async move {
+        Ok(ShutdownProcessRoot {
+            behavior,
+            phases,
+            terminal_markers,
+        })
+    })
 }
 
 async fn start_process_shutdown_case(
@@ -211,18 +229,10 @@ async fn start_process_shutdown_case(
     std::sync::Arc<AtomicUsize>,
 ) {
     let phases = std::sync::Arc::new(Mutex::new(Vec::new()));
-    let phases_for_root = std::sync::Arc::clone(&phases);
     let terminal_markers = std::sync::Arc::new(AtomicUsize::new(0));
-    let terminal_markers_for_root = std::sync::Arc::clone(&terminal_markers);
     let registry = OwnerRegistry::new();
     let supervisor = ProcessSupervisor::new(
-        vec![ProcessRoot::new(move || async move {
-            Ok(ShutdownProcessRoot {
-                behavior,
-                phases: phases_for_root,
-                terminal_markers: terminal_markers_for_root,
-            })
-        })],
+        vec![shutdown_process_root(behavior, &phases, &terminal_markers)],
         grace,
         registry.clone(),
     )
@@ -324,4 +334,65 @@ async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
     assert_eq!(failed_registry.snapshot().active_process_roots, 0);
     assert_eq!(failed_registry.snapshot().process_root_reaps, 1);
     assert_eq!(failed_terminal_markers.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn uncooperative_forced_root_is_aborted_and_reports_cleanup_failure() {
+    let phases = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let terminal_markers = std::sync::Arc::new(AtomicUsize::new(0));
+    let roots = [
+        ProcessShutdownBehavior::Uncooperative,
+        ProcessShutdownBehavior::Uncooperative,
+        ProcessShutdownBehavior::CleanupFailure,
+    ]
+    .into_iter()
+    .map(|behavior| shutdown_process_root(behavior, &phases, &terminal_markers))
+    .collect();
+    let registry = OwnerRegistry::new();
+    let supervisor = ProcessSupervisor::new(roots, Duration::ZERO, registry.clone())
+        .expect("three required roots");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let process = tokio::spawn(supervisor.run_until(async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    for _ in 0..100 {
+        if registry.snapshot().active_process_roots == 3 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    shutdown_tx.send(()).expect("request zero-grace shutdown");
+    tokio::task::yield_now().await;
+    assert!(registry.snapshot().process_forced_roots >= 2);
+    assert!(!process.is_finished());
+    tokio::time::advance(Duration::from_millis(4_999)).await;
+    assert!(!process.is_finished());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    if !process.is_finished() {
+        process.abort();
+        let _ = process.await;
+        panic!("forced roots were not reaped by the fixed five-second watchdog");
+    }
+    let report = process.await.expect("bounded forced reap");
+
+    assert_eq!(report.cause(), &ProcessCause::ExternalShutdown);
+    assert!(matches!(
+        report.cleanup_failure(),
+        Some(ProcessCleanupFailure::ForceReapTimedOut {
+            roots,
+            prior: Some(prior),
+        })
+            if roots.iter().map(|root| root.get()).collect::<Vec<_>>() == [0, 1]
+                && matches!(
+                    prior.as_ref(),
+                    ProcessCleanupFailure::RootFailed { root, error: "cleanup" }
+                        if root.get() == 2
+                )
+    ));
+    assert!(report.forced_roots() >= 2);
+    assert_eq!(terminal_markers.load(Ordering::SeqCst), 3);
+    assert_eq!(registry.snapshot().active_process_roots, 0);
+    assert_eq!(registry.snapshot().process_root_reaps, 3);
 }

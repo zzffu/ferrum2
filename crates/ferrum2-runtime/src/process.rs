@@ -11,6 +11,8 @@ use tokio::time::Instant;
 use crate::owner::OwnerGuard;
 use crate::{OwnerRegistry, OwnerSnapshot};
 
+const FORCE_REAP_WATCHDOG: Duration = Duration::from_secs(5);
+
 /// Owned future used by topology-neutral process-root adapters.
 pub type ProcessFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
@@ -217,7 +219,7 @@ pub enum ProcessCause<E> {
     },
 }
 
-/// First cleanup failure observed after the primary process cause.
+/// Closed cleanup outcome observed after the primary process cause.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProcessCleanupFailure<E> {
     RootFailed {
@@ -229,6 +231,12 @@ pub enum ProcessCleanupFailure<E> {
     },
     RootJoinFailed {
         root: ProcessRootId,
+    },
+    /// Forced roots did not prove cooperative reap before the fixed cleanup bound.
+    ForceReapTimedOut {
+        roots: Vec<ProcessRootId>,
+        /// Earlier cleanup failure retained when the watchdog takes precedence.
+        prior: Option<Box<ProcessCleanupFailure<E>>>,
     },
     OwnerMismatch {
         baseline: Box<OwnerSnapshot>,
@@ -568,12 +576,25 @@ where
         let deadline = Instant::now() + shutdown_grace;
         let mut cleanup_failure = None;
         let mut forced_roots = 0;
-        let mut forced = false;
+        let mut force_reap_deadline = None;
 
         while active.iter().any(ActiveEntry::is_running) {
-            if forced {
-                let event = next_root_event(&mut active, &registry).await;
-                record_cleanup_event(event, &mut cleanup_failure);
+            if let Some(force_reap_deadline) = force_reap_deadline {
+                let timed_out = tokio::select! {
+                    biased;
+                    event = next_root_event(&mut active, &registry) => {
+                        record_cleanup_event(event, &mut cleanup_failure);
+                        false
+                    }
+                    () = tokio::time::sleep_until(force_reap_deadline) => true,
+                };
+                if timed_out {
+                    let roots = abort_and_reap_remaining(&mut active, &registry).await;
+                    cleanup_failure = Some(ProcessCleanupFailure::ForceReapTimedOut {
+                        roots,
+                        prior: cleanup_failure.take().map(Box::new),
+                    });
+                }
                 continue;
             }
             let timed_out = tokio::select! {
@@ -589,7 +610,7 @@ where
                 cancellation_source.force();
                 forced_roots = active.iter().filter(|entry| entry.is_running()).count();
                 registry.record_process_forced_roots(forced_roots);
-                forced = true;
+                force_reap_deadline = Some(Instant::now() + FORCE_REAP_WATCHDOG);
             }
         }
 
@@ -784,6 +805,30 @@ fn record_cleanup_event<E>(
             Some(ProcessCleanupFailure::RootJoinFailed { root: event.root })
         }
     };
+}
+
+async fn abort_and_reap_remaining<E>(
+    active: &mut [ActiveEntry<E>],
+    registry: &OwnerRegistry,
+) -> Vec<ProcessRootId> {
+    let roots = active
+        .iter()
+        .filter(|entry| entry.is_running())
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    for entry in active.iter() {
+        if let Some(task) = &entry.task {
+            task.abort();
+        }
+    }
+    for entry in active {
+        if let Some(task) = entry.task.take() {
+            let _ = task.await;
+            entry.guard.take();
+            registry.record_process_root_reap();
+        }
+    }
+    roots
 }
 
 struct FinishContext<'a> {

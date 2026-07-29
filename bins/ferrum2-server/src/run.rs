@@ -145,7 +145,6 @@ where
                 udp_clock,
                 udp_config,
                 connect_timeout,
-                shutdown_grace,
                 udp_registry,
                 udp_metrics,
             )
@@ -530,8 +529,6 @@ where
     protocol: Arc<UdpServer>,
     clock: Arc<SystemClock>,
     config: UdpConfig,
-    #[cfg(test)]
-    _shutdown_grace: std::time::Duration,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
     runtime: ProductionUdpRuntime<L>,
@@ -543,14 +540,12 @@ where
     _receive_wire: UdpBufferReservation,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn prepare_udp_server<L>(
     listener: Arc<L>,
     protocol: Arc<UdpServer>,
     clock: Arc<SystemClock>,
     config: UdpConfig,
     connect_timeout: std::time::Duration,
-    _shutdown_grace: std::time::Duration,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
 ) -> Result<PreparedUdpServer<L>, RunError>
@@ -602,8 +597,6 @@ where
         protocol,
         clock,
         config,
-        #[cfg(test)]
-        _shutdown_grace,
         registry,
         metrics,
         runtime,
@@ -616,51 +609,10 @@ where
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-async fn run_udp_server<S, L>(
-    listener: Arc<L>,
-    protocol: Arc<UdpServer>,
-    clock: Arc<SystemClock>,
-    config: UdpConfig,
-    connect_timeout: std::time::Duration,
-    shutdown_grace: std::time::Duration,
-    registry: OwnerRegistry,
-    metrics: Arc<Metrics>,
-    shutdown: S,
-) -> Result<(), RunError>
-where
-    S: std::future::Future<Output = ()>,
-    L: ServerUdpListener,
-{
-    prepare_udp_server(
-        listener,
-        protocol,
-        clock,
-        config,
-        connect_timeout,
-        shutdown_grace,
-        registry,
-        metrics,
-    )?
-    .run_until(shutdown)
-    .await
-}
-
 impl<L> PreparedUdpServer<L>
 where
     L: ServerUdpListener,
 {
-    #[cfg(test)]
-    async fn run_until<S>(self, shutdown: S) -> Result<(), RunError>
-    where
-        S: std::future::Future<Output = ()>,
-    {
-        let shutdown_grace = self._shutdown_grace;
-        self.run_with_shutdown(shutdown, move |runtime| runtime.shutdown(shutdown_grace))
-            .await
-    }
-
     async fn run_with_cancellation(
         self,
         mut cancellation: ProcessCancellation,
@@ -688,8 +640,6 @@ where
             protocol,
             clock,
             config,
-            #[cfg(test)]
-                _shutdown_grace: _,
             registry,
             metrics,
             mut runtime,
@@ -851,7 +801,11 @@ where
         };
 
         let before = registry.snapshot().udp_forced_shutdowns;
-        shutdown_runtime(runtime).await;
+        if terminal.is_err() {
+            runtime.shutdown(std::time::Duration::ZERO).await;
+        } else {
+            shutdown_runtime(runtime).await;
+        }
         let after = registry.snapshot().udp_forced_shutdowns;
         for _ in before..after {
             metrics.udp_forced_shutdown(Role::Server);
@@ -864,7 +818,10 @@ where
     }
 }
 
-impl PreparedProcessRoot<RunError> for PreparedUdpServer<UdpSocket> {
+impl<L> PreparedProcessRoot<RunError> for PreparedUdpServer<L>
+where
+    L: ServerUdpListener,
+{
     fn activate(&mut self) -> Result<(), RunError> {
         Ok(())
     }
@@ -1550,7 +1507,6 @@ fn framed_error(error: ShadowsocksError) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -2393,6 +2349,22 @@ mod tests {
         (path, config)
     }
 
+    fn encoded_udp_request(
+        client: &mut UdpClientSession,
+        clock: &SystemClock,
+        target: TargetAddr,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let request = Datagram::new(target, payload.into(), payload.len()).expect("UDP request");
+        let mut scratch = UdpPacketScratch::new();
+        let mut wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+        let length = client
+            .encode_request(clock, &SystemRandom, &request, 0, &mut wire, &mut scratch)
+            .expect("encode UDP request");
+        wire.truncate(length);
+        wire
+    }
+
     #[tokio::test]
     async fn udp_composition_three_methods_echo_and_deferred_client_commit_table() {
         let rows: [(MethodProfile, &str, &str, &[u8]); 3] = [
@@ -2457,9 +2429,7 @@ mod tests {
             let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
                 .await
                 .expect("client bind");
-            let mut request_scratch = UdpPacketScratch::new();
             let mut response_scratch = UdpPacketScratch::new();
-            let mut request_wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
             let mut response_wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
             let client_registry = OwnerRegistry::new();
             let manager =
@@ -2476,20 +2446,9 @@ mod tests {
                 } else {
                     TargetAddr::ip(echo_target).expect("echo target")
                 };
-                let request =
-                    Datagram::new(target, payload.into(), payload.len()).expect("request");
-                let length = client
-                    .encode_request(
-                        &clock,
-                        &SystemRandom,
-                        &request,
-                        0,
-                        &mut request_wire,
-                        &mut request_scratch,
-                    )
-                    .expect("encode request");
+                let request_wire = encoded_udp_request(&mut client, &clock, target, payload);
                 socket
-                    .send_to(&request_wire[..length], listen)
+                    .send_to(&request_wire, listen)
                     .await
                     .expect("send request");
                 let (length, source) = tokio::time::timeout(
@@ -2604,27 +2563,14 @@ mod tests {
         let second_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("second client bind");
-        let mut scratch = UdpPacketScratch::new();
-        let mut wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
-
-        let first_datagram = Datagram::new(
+        let wire = encoded_udp_request(
+            &mut first,
+            &clock,
             TargetAddr::ip(stalled_address).expect("stalled target"),
-            b"occupy".as_slice().into(),
-            6,
-        )
-        .expect("first datagram");
-        let length = first
-            .encode_request(
-                &clock,
-                &SystemRandom,
-                &first_datagram,
-                0,
-                &mut wire,
-                &mut scratch,
-            )
-            .expect("first encode");
+            b"occupy",
+        );
         first_socket
-            .send_to(&wire[..length], listen)
+            .send_to(&wire, listen)
             .await
             .expect("first send");
         let mut target_buffer = [0_u8; 32];
@@ -2637,24 +2583,14 @@ mod tests {
         .expect("stalled target receive");
         assert_eq!(&target_buffer[..received], b"occupy");
 
-        let second_datagram = Datagram::new(
+        let wire = encoded_udp_request(
+            &mut second,
+            &clock,
             TargetAddr::ip(forbidden_address).expect("forbidden target"),
-            b"must-not-send".as_slice().into(),
-            13,
-        )
-        .expect("second datagram");
-        let length = second
-            .encode_request(
-                &clock,
-                &SystemRandom,
-                &second_datagram,
-                0,
-                &mut wire,
-                &mut scratch,
-            )
-            .expect("second encode");
+            b"must-not-send",
+        );
         second_socket
-            .send_to(&wire[..length], listen)
+            .send_to(&wire, listen)
             .await
             .expect("second send");
         assert!(
@@ -2677,27 +2613,136 @@ mod tests {
         std::fs::remove_file(path).expect("remove saturation config");
     }
 
-    type ScriptedUdpEvent = io::Result<(Vec<u8>, SocketAddr)>;
-
     struct ScriptedUdpListener {
-        events: Mutex<VecDeque<ScriptedUdpEvent>>,
+        request: Mutex<Option<(Vec<u8>, SocketAddr)>>,
+        handler_entered: Arc<Notify>,
+        response_gate: Arc<Notify>,
     }
 
     impl ServerUdpListener for ScriptedUdpListener {
         async fn recv_from(&self, destination: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-            let (wire, peer) = self
-                .events
-                .lock()
-                .expect("scripted UDP events")
-                .pop_front()
-                .expect("scripted UDP event")?;
+            let request = self.request.lock().expect("scripted UDP request").take();
+            let Some((wire, peer)) = request else {
+                self.handler_entered.notified().await;
+                return Err(io::Error::other("listener terminal"));
+            };
             destination[..wire.len()].copy_from_slice(&wire);
             Ok((wire.len(), peer))
         }
 
         async fn send_to(&self, source: &[u8], _peer: SocketAddr) -> io::Result<usize> {
+            self.handler_entered.notify_one();
+            self.response_gate.notified().await;
             Ok(source.len())
         }
+    }
+
+    #[tokio::test]
+    async fn udp_terminal_error_with_live_session_notifies_process_and_reaps() {
+        let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+        let (path, config) = server_test_config(listen);
+        let stalled_target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("stalled target");
+        let target = stalled_target.local_addr().expect("stalled target address");
+        let client_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+            MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
+                .expect("client key"),
+        ));
+        let client_clock = SystemClock::new();
+        let mut client =
+            UdpClientSession::new(&client_keys, &SystemRandom, |_| false).expect("client");
+        let wire = encoded_udp_request(
+            &mut client,
+            &client_clock,
+            TargetAddr::ip(target).expect("target"),
+            b"listener-failure",
+        );
+        let handler_entered = Arc::new(Notify::new());
+        let listener = Arc::new(ScriptedUdpListener {
+            request: Mutex::new(Some((
+                wire,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_089)),
+            ))),
+            handler_entered,
+            response_gate: Arc::new(Notify::new()),
+        });
+        let server_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk));
+        let protocol = Arc::new(UdpServer::new(&server_keys).expect("server protocol"));
+        let registry = OwnerRegistry::new();
+        let metrics = Arc::new(Metrics::new());
+        let shutdown_grace = config.runtime.shutdown_grace;
+        let root_registry = registry.clone();
+        let root_metrics = Arc::clone(&metrics);
+        let root = ProcessRoot::new(move || async move {
+            prepare_udp_server(
+                listener,
+                protocol,
+                Arc::new(SystemClock::new()),
+                config.udp,
+                config.runtime.connect_timeout,
+                root_registry,
+                root_metrics,
+            )
+        });
+        let supervisor = ProcessSupervisor::new(vec![root], shutdown_grace, registry.clone())
+            .expect("one required UDP root");
+        let mut process = tokio::spawn(supervisor.run_until(std::future::pending()));
+
+        for _ in 0..100 {
+            let snapshot = registry.snapshot();
+            if snapshot.active_process_roots == 1 && snapshot.udp_sessions == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let live = registry.snapshot();
+        assert_eq!(live.active_process_roots, 1);
+        assert_eq!(live.udp_sessions, 1);
+        assert_eq!(live.udp_tasks, 1);
+        let mut target_buffer = [0_u8; 32];
+        let (received, source) = tokio::time::timeout(
+            Duration::from_secs(1),
+            stalled_target.recv_from(&mut target_buffer),
+        )
+        .await
+        .expect("stalled target receive deadline")
+        .expect("stalled target request");
+        assert_eq!(&target_buffer[..received], b"listener-failure");
+        stalled_target
+            .send_to(b"blocked-response", source)
+            .await
+            .expect("target response");
+
+        let report = match tokio::time::timeout(Duration::from_millis(500), &mut process).await {
+            Ok(Ok(report)) => report,
+            Ok(Err(error)) => panic!("process owner failed: {error}"),
+            Err(_) => {
+                process.abort();
+                let _ = process.await;
+                panic!("terminal UDP root waited for process Forced before returning");
+            }
+        };
+        assert!(matches!(
+            report.cause(),
+            ProcessCause::RootStopped {
+                root,
+                exit: ProcessRootExit::Failed(RunError::RuntimeListener),
+            } if root.get() == 0
+        ));
+        assert_eq!(report.cleanup_failure(), None);
+        assert_eq!(report.forced_roots(), 0);
+        assert_eq!(registry.snapshot().active_process_roots, 0);
+        assert_eq!(registry.snapshot().process_root_reaps, 1);
+        assert_eq!(registry.snapshot().udp_sessions, 0);
+        assert_eq!(registry.snapshot().udp_forced_shutdowns, 1);
+        assert!(
+            metrics
+                .encode_text()
+                .expect("metrics exposition")
+                .contains("ferrum2_udp_forced_shutdown_total{role=\"server\"} 1")
+        );
+        std::fs::remove_file(path).expect("remove terminal UDP config");
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2712,19 +2757,15 @@ mod tests {
         payload: &'static [u8],
         protocol_now: ferrum2_crypto::MonotonicInstant,
         scratch: &mut UdpPacketScratch,
-        wire: &mut [u8],
     ) -> (ServerResponseCapability, UdpSessionHandle) {
-        let request = Datagram::new(
+        let wire = encoded_udp_request(
+            client,
+            clock,
             TargetAddr::ip(target).expect("lifecycle target"),
-            payload.into(),
-            payload.len(),
-        )
-        .expect("lifecycle request");
-        let length = client
-            .encode_request(clock, &SystemRandom, &request, 0, wire, scratch)
-            .expect("encode lifecycle request");
+            payload,
+        );
         let pending = protocol
-            .prepare_request(clock, &wire[..length], scratch)
+            .prepare_request(clock, &wire, scratch)
             .expect("prepare lifecycle request");
         let now = tokio::time::Instant::now();
         let session = manager.reserve_session(now).expect("reserve generation");
@@ -2758,69 +2799,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_generation_termination_retention_replacement_and_listener_error_cleanup() {
-        let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
-        let (path, config) = server_test_config(listen);
+    async fn udp_generation_termination_retention_and_replacement_cleanup() {
         let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9));
-        let client_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
-                .expect("client key"),
-        ));
         let client_clock = SystemClock::new();
-        let mut client =
-            UdpClientSession::new(&client_keys, &SystemRandom, |_| false).expect("client");
-        let datagram = Datagram::new(
-            TargetAddr::ip(target).expect("target"),
-            b"listener-failure".as_slice().into(),
-            16,
-        )
-        .expect("datagram");
-        let mut scratch = UdpPacketScratch::new();
-        let mut wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
-        let wire_len = client
-            .encode_request(
-                &client_clock,
-                &SystemRandom,
-                &datagram,
-                0,
-                &mut wire,
-                &mut scratch,
-            )
-            .expect("request");
-        wire.truncate(wire_len);
-        let listener = Arc::new(ScriptedUdpListener {
-            events: Mutex::new(VecDeque::from([
-                Ok((
-                    wire,
-                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_090)),
-                )),
-                Err(io::Error::other("listener terminal")),
-            ])),
-        });
-        let server_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk));
-        let protocol = Arc::new(UdpServer::new(&server_keys).expect("server protocol"));
-        let registry = OwnerRegistry::new();
-        let result = run_udp_server(
-            listener,
-            Arc::clone(&protocol),
-            Arc::new(SystemClock::new()),
-            config.udp,
-            config.runtime.connect_timeout,
-            config.runtime.shutdown_grace,
-            registry.clone(),
-            Arc::new(Metrics::new()),
-            std::future::pending(),
-        )
-        .await;
-        assert_eq!(result, Err(RunError::RuntimeListener));
-        let snapshot = registry.snapshot();
-        assert_eq!(snapshot.udp_sessions, 0);
-        assert_eq!(snapshot.udp_sockets, 0);
-        assert_eq!(snapshot.udp_tasks, 0);
-        assert_eq!(snapshot.udp_queued_datagrams, 0);
-        assert_eq!(snapshot.udp_buffered_bytes, 0);
-        assert_eq!(snapshot.udp_scratch_buffers, 0);
-
         let lifecycle_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
             MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
                 .expect("lifecycle key"),
@@ -2851,7 +2832,6 @@ mod tests {
             b"generation-a",
             protocol_zero,
             &mut lifecycle_scratch,
-            &mut lifecycle_wire,
         );
         assert_eq!(
             lifecycle_protocol
@@ -2927,7 +2907,6 @@ mod tests {
             b"generation-b",
             ferrum2_crypto::MonotonicInstant::from_duration(Duration::from_secs(60)),
             &mut lifecycle_scratch,
-            &mut lifecycle_wire,
         );
         assert_ne!(capability_b, capability_a);
         assert_eq!(
@@ -2960,7 +2939,6 @@ mod tests {
         );
         assert_eq!(manager_registry.snapshot().udp_sessions, 0);
         assert_eq!(manager_registry.snapshot().udp_buffered_bytes, 0);
-        std::fs::remove_file(path).expect("remove lifecycle config");
     }
 
     async fn wait_until_bound(address: SocketAddrV4) {
