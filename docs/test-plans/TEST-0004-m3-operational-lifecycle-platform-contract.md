@@ -128,6 +128,37 @@ git diff --check
 T05 local tests validate fail-closed evidence parsing/markers only；它们不 substitute
 native execution，且不得通过自测/模拟一份平台报告来声称 target PASS。
 
+### M3-T07 — hosted lifecycle evidence isolation repair
+
+Run `30472227257` at exact
+`bba40d127dee29a719d6ea1d80fb10427149d890` is immutable failed release evidence：
+quality and MSRV both failed the portable admitted-UDP signal row because it compared
+a process-global active-child snapshot while sibling tests in the same binary ran in
+parallel。Windows MSVC、Linux GNU、Linux musl and interop passed in that attempt, but
+their rows cannot be spliced into a later PASS。
+
+T07 reuses the existing `udp_local_e2e` seam and changes only the portable IPv4 row。
+Its cleanup evidence is test-owned server wait/reap, explicit UDP-example reap, exit
+code zero and one immediate exact TCP+UDP rebind；it does not use a global child
+snapshot, serialization, ignore or retry。
+
+```powershell
+cargo test -p ferrum2-m0-harness --test udp_local_e2e --locked -- --test-threads=4
+1..100 | ForEach-Object {
+  cargo test -p ferrum2-m0-harness --test udp_local_e2e --locked -- --test-threads=4
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+cargo fmt --all -- --check
+python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py control-plane-check --base <ticket-base-sha> --candidate-sha <candidate-sha> --json
+python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py test-budget --gate ticket --base <ticket-base-sha>
+git diff --check <ticket-base-sha>..<candidate-sha>
+```
+
+After fresh Architect/QA full reviews and local integration, one new exact-descendant
+push-triggered run must pass quality、MSRV、all three platform rows、interop and final
+qualification on the same SHA/run/attempt。The old run is not rerun and contributes
+no PASS evidence。
+
 ## Integration gate commands
 
 在 milestone integration worktree 串行运行 `workflow.toml` authoritative full：

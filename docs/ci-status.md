@@ -2,48 +2,42 @@
 
 ## 当前 M3 execution 状态
 
-- **Integrated product SHA:** exact
-  `ed615cbcd373d882eaa236ee4556d20eb4e16e48` on `master` and
-  `codex/integration/m3` integrates M3-T01～T03 plus M3-T06。Wave 1 remains
-  traceable at `da8fa58e0f50dda1637e3a2b205e6f34332a5bec`; T06's material base was
-  `938e2b9a50310312ea9aef891ce40c7d86b052c3`.
-- **Authoritative T06 local integration gates:** `workflow.py run-validation
-  quick` passed all `5/5` configured commands and `run-validation full` passed
-  all `6/6` commands at exact `ed615cb...`，including strict workspace Clippy,
-  all-feature tests, the >=100-cycle-per-binary process matrix, portable IPv4
-  admitted-UDP signal evidence, and workspace docs。The Linux-only IPv6 row
-  remains ignored release-host evidence and was not counted as local PASS。
-- **Budget/control evidence:** T06 ticket gate PASS at code `12956`, tests
-  `20211`, ratio `1.560` versus baseline `1.642`; delta code/tests `429/415`
-  with allowance `549`。Candidate `control-plane-check`, both repair/full
-  `git diff --check`, ownership and integration gate checks all exited `0`.
-- **Review convergence:** T01 Architect/QA full PASS。T02 QA full PASS；
-  Architect full BLOCK `ARC-M3-T02-001`, one evidence repair, targeted PASS。
-  T03 Architect/QA full BLOCK under canonical `ARC-M3-T03-001` with
-  derivatives `QA-M3-T03-001/002`, one substantive repair, both targeted
-  PASS。T01～T03所有roots/derivatives resolved，accepted review debt为none。
-- **T04 escalation:** initial candidate
-  `b35e809eda2c306be7ced27f648d2ad83ceb158c` and sole repair
-  `a90c49644323c2266787c0f259aa4f482bdee60b` remain unintegrated。Architect
-  and QA full `BLOCK` followed by targeted `ESCALATE`; canonical
-  `ARC-M3-T04-004` retains derivatives `ARC-M3-T04-001/002` and
-  `QA-M3-T04-001`。The passing >=100-per-binary and Windows signal evidence
-  does not waive the terminal-UDP circular wait, unresponsive-root bound, or
-  missing evidence rows。
-- **T06 review convergence:** initial candidate `24561cf...` resolved the
-  terminal-UDP circular wait and fixed five-second forced-reap bound, but fresh
-  Architect/QA full reviews both `BLOCK` under canonical
-  `ARC-M3-T06-001` and derivative `QA-M3-T06-001` for missing portable
-  admitted-UDP signal evidence。The sole substantive repair `ed615cb...`
-  added that real-process IPv4 row and collision-safe, fail-fast fixtures；
-  both same-reviewer targeted re-reviews `PASS` and both findings are
-  resolved。Repair budget is `1/1`；accepted review debt is none。
-- **Authorization and publication:** local-only `AUTH-M3-T06-001` was consumed
-  and auto-revoked `1/1`。No remote action, push, hosted run, publication, T05
-  implementation, or control-plane mutation occurred。
-- **Remaining gates:** only M3-T05 three-native-target release qualification
-  and same-SHA hosted evidence remain before M3 close。No three-target,
-  hosted TCP/UDP interop, artifact/linkage, or M3 close PASS is claimed。
+- **Local integration SHA:** exact
+  `bba40d127dee29a719d6ea1d80fb10427149d890` on clean `master` and
+  `codex/integration/m3` contains M3-T01～T03、M3-T06 and T05 qualification
+  implementation。T04 remains deferred after its terminal targeted escalation。
+- **T05 local convergence:** initial candidate `441b2903...` received Architect
+  full `PASS` and QA full `BLOCK` under `QA-M3-T05-001`。The sole repair
+  `bba40d12...` changed only `tests/platform/qualify_native.py`; same-reviewer
+  targeted QA returned `PASS`。Local quick `5/5` and full `6/6` passed；
+  ticket budget passed at code `12956`, tests `19870`, ratio `1.534`, delta
+  `0/0`；milestone budget passed at delta `1242/636`, allowance `1362`。
+- **Authorized hosted attempt:** exact single-use remote scope
+  `AUTH-M3-T05-REMOTE-001` was consumed `1/1` for one non-force push of
+  `bba40d12...` to `refs/heads/codex/integration/m3`。GitHub Actions run
+  `30472227257`, attempt `1`, event `push`, completed `failure`。
+- **Same-run job evidence:** Windows MSVC job `90645054205`、Linux GNU
+  `90645054119`、Linux musl `90645054050` and interop `90645054073` passed。
+  Quality `90645053989` and MSRV `90645054062` both failed
+  `portable_ipv4_live_udp_signal_exits_cleanly_and_rebinds` at
+  `tests/m0-harness/tests/udp_local_e2e.rs:95`；final qualification
+  `90645828144` is derivative failure。
+- **Canonical root:** `HOSTED-M3-T05-001` is a `test_evidence` release root。
+  The portable row compares a process-global `ACTIVE_CHILDREN` baseline while
+  sibling tests spawn/reap independently；quality observed current/baseline
+  `1/2` and MSRV observed `1/0`。The exact row passed `30/30` alone，so no
+  product lifecycle defect is established。
+- **Fresh repair frontier:** user confirmed solution A and local scope
+  `AUTH-M3-T07-LOCAL-001` was consumed `1/1` for a new M3-T07 ticket owning
+  only `tests/m0-harness/tests/udp_local_e2e.rs` plus Team Lead contract/evidence
+  reconciliation。T05/T06 review histories are immutable；the old hosted run is
+  not rerun or evidence-spliced。
+- **Authorization/publication:** no second push、rerun、dispatch、master push、
+  publication、upload、signing、tagging、force or deletion occurred。The user's
+  later-push intent remains unconsumed until a new exact full SHA/ref exists。
+- **Remaining gates:** M3-T07 implementation、100 parallel runs、fresh
+  Architect/QA full reviews、local quick/full/budget/control integration and one
+  new all-success same-SHA hosted run remain before M3 can become ready to close。
 
 ## 当前 M2 closed 状态
 
