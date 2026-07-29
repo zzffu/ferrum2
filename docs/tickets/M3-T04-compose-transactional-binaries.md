@@ -2,7 +2,7 @@
 id = "M3-T04"
 title = "Compose both binaries through the transactional supervisor"
 milestone = "M3"
-status = "ready"
+status = "blocked"
 priority = "P0"
 risk = "critical"
 implementation_blocked_by = ["M3-T01", "M3-T02", "M3-T03"]
@@ -31,6 +31,17 @@ acceptance = [
   "One bounded production-used process table performs at least 100 startup, occupied proxy or metrics rollback, TCP and UDP root failure, graceful and forced shutdown, and restart or immediate rebind cycles for the current client and server adapters with no owner growth or leaked resource",
   "Current three-method TCP and UDP local product paths, UDP disabled behavior, CLI and config suites, strict Clippy, formatting, ticket test-budget, and diff checks pass without edits outside this ticket's ownership",
 ]
+
+[blocker]
+id = "ARC-M3-T04-004"
+class = "code"
+gate = "review"
+root_cause = "After the sole substantive repair, a terminal UDP root error with live work can wait for ProcessCancellation::Forced before returning the error that would cause ProcessSupervisor to enter Fatal and broadcast Forced; forced shutdown also lacks a bounded fallback for an uncooperative root."
+derivatives = ["ARC-M3-T04-001", "ARC-M3-T04-002", "QA-M3-T04-001"]
+owner = "team_lead"
+evidence = "Architect and QA targeted re-reviews at a90c49644323c2266787c0f259aa4f482bdee60b both escalated. The >=100-per-binary and genuine Windows signal rows passed, but the designated production matrix still lacks UDP-enabled, required-root-fatal, signal-grace half-close/admitted-UDP, and partial-preparation observations."
+authorization = "not_required"
+unblock_condition = "Explicit coordination must define a new repair ticket or approved review lifecycle before any further code change; that work must break the UDP fatal/Forced dependency, restore bounded forced-root termination, add the missing primary production lifecycle observations, and receive fresh bounded review."
 +++
 
 # M3-T04: Compose both binaries through the transactional supervisor
