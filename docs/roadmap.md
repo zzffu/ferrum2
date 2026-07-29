@@ -488,9 +488,10 @@ dependency-ready 和 non-overlapping ownership。
   - M1、M2 closed，SIP022 TCP/UDP和24-cell interop baseline已有exact-SHA证据；
   - context audit approved，`AGENTS.md`只把M3记为planned；
   - ADR-0023/0024 Accepted，SPEC/TEST-0004 Approved；
-  - M3-T01～T03、M3-T06与M3-T05 local implementation已integrated；M3-T04在
-    唯一repair与targeted re-review后deferred；T05首次hosted qualification
-    暴露parallel evidence isolation root，M3-T07成为fresh repair frontier；
+  - M3-T01～T03、M3-T06、M3-T05 local implementation与M3-T07均已integrated；
+    M3-T04在唯一repair与targeted re-review后deferred；T07 exact-SHA hosted
+    qualification解决首个parallel evidence root后暴露第二个server-private
+    readiness root，M3-T08成为fresh repair frontier；
   - current pinned target triples/toolchains/provider保持authoritative。
 - **Exit criteria:**
   1. M3 close时全部client/server合法v1配置形成preserved cohort，在v0.x及
@@ -522,9 +523,11 @@ dependency-ready 和 non-overlapping ownership。
   - M3-T04 compose transactional binaries（deferred after review escalation）；
   - M3-T06 resolve terminal-root and forced-reap escalation（done）；
   - M3-T05 qualify three native targets；
-  - M3-T07 isolate portable UDP lifecycle evidence under parallel execution。
+  - M3-T07 isolate portable UDP lifecycle evidence under parallel execution；
+  - M3-T08 synchronize terminal UDP test readiness on its causal event。
 - **Dependency order:** T01/T02/T03 initial parallel frontier → T06 → T05 local
-  implementation → T07 hosted evidence repair → new T05/T07 qualification；
+  implementation → T07 first hosted evidence repair → T08 second hosted evidence
+  repair → new T05/T07/T08 qualification；
   T06 imports the unintegrated T04 product lineage with a fresh bounded review
   lifecycle；T07 scheduler metadata依赖已done的T06，不把尚未release-done的T05
   写成实现依赖，避免late-repair deadlock。
@@ -548,11 +551,13 @@ dependency-ready 和 non-overlapping ownership。
   circular wait、unresponsive forced-root bound和portable admitted-UDP product
   behavior不再是open product blockers。T05 Architect full PASS；QA full finding
   `QA-M3-T05-001`经唯一repair `bba40d...`和targeted PASS resolved。授权push后的
-  run `30472227257`在exact `bba40d...`通过Windows、GNU、musl与interop，但
-  quality/MSRV均在`udp_local_e2e.rs:95`因parallel test读取process-global
-  child baseline失败；final qualification为derivative failure。Canonical
-  `HOSTED-M3-T05-001`由fresh M3-T07承接，不重开T05/T06 review，不rerun或拼接
-  旧run。剩余release风险是parallel harness reliability、native runner
+  run `30472227257`在exact `bba40d...`暴露process-global child baseline root；
+  fresh M3-T07 candidate `bc14971...`经full Architect/QA PASS与local integration
+  后在run `30476271774`的quality/MSRV中证明旧portable row已PASS，Windows、
+  GNU、musl与interop也PASS。该run随后在`run.rs:2715`因固定100次yield尚未
+  建立UDP session而失败，final qualification为derivative。Canonical
+  `HOSTED-M3-T07-002`由fresh M3-T08承接，不重开T06/T07 review，不rerun或拼接
+  旧run。剩余release风险是server-private evidence readiness、native runner
   availability和new same-SHA convergence；provider unavailable仍为`BLOCKED`。
 
 ## M4 — 性能、资源与 v0 资格确认

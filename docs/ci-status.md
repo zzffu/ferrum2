@@ -3,41 +3,52 @@
 ## 当前 M3 execution 状态
 
 - **Local integration SHA:** exact
-  `bba40d127dee29a719d6ea1d80fb10427149d890` on clean `master` and
-  `codex/integration/m3` contains M3-T01～T03、M3-T06 and T05 qualification
-  implementation。T04 remains deferred after its terminal targeted escalation。
+  `bc14971c51982b6ad9a970593fb3848b2763b112` on clean `master` and
+  `codex/integration/m3` contains M3-T01～T03、M3-T06、T05 qualification
+  implementation and M3-T07。T04 remains deferred after its terminal targeted
+  escalation。
 - **T05 local convergence:** initial candidate `441b2903...` received Architect
   full `PASS` and QA full `BLOCK` under `QA-M3-T05-001`。The sole repair
   `bba40d12...` changed only `tests/platform/qualify_native.py`; same-reviewer
   targeted QA returned `PASS`。Local quick `5/5` and full `6/6` passed；
   ticket budget passed at code `12956`, tests `19870`, ratio `1.534`, delta
   `0/0`；milestone budget passed at delta `1242/636`, allowance `1362`。
-- **Authorized hosted attempt:** exact single-use remote scope
-  `AUTH-M3-T05-REMOTE-001` was consumed `1/1` for one non-force push of
-  `bba40d12...` to `refs/heads/codex/integration/m3`。GitHub Actions run
-  `30472227257`, attempt `1`, event `push`, completed `failure`。
-- **Same-run job evidence:** Windows MSVC job `90645054205`、Linux GNU
-  `90645054119`、Linux musl `90645054050` and interop `90645054073` passed。
-  Quality `90645053989` and MSRV `90645054062` both failed
-  `portable_ipv4_live_udp_signal_exits_cleanly_and_rebinds` at
-  `tests/m0-harness/tests/udp_local_e2e.rs:95`；final qualification
-  `90645828144` is derivative failure。
-- **Canonical root:** `HOSTED-M3-T05-001` is a `test_evidence` release root。
-  The portable row compares a process-global `ACTIVE_CHILDREN` baseline while
-  sibling tests spawn/reap independently；quality observed current/baseline
-  `1/2` and MSRV observed `1/0`。The exact row passed `30/30` alone，so no
-  product lifecycle defect is established。
-- **Fresh repair frontier:** user confirmed solution A and local scope
-  `AUTH-M3-T07-LOCAL-001` was consumed `1/1` for a new M3-T07 ticket owning
-  only `tests/m0-harness/tests/udp_local_e2e.rs` plus Team Lead contract/evidence
-  reconciliation。T05/T06 review histories are immutable；the old hosted run is
-  not rerun or evidence-spliced。
-- **Authorization/publication:** no second push、rerun、dispatch、master push、
-  publication、upload、signing、tagging、force or deletion occurred。The user's
-  later-push intent remains unconsumed until a new exact full SHA/ref exists。
-- **Remaining gates:** M3-T07 implementation、100 parallel runs、fresh
+- **T07 local convergence:** contract base `0936ccd8...` and candidate
+  `bc14971c...` changed only `tests/m0-harness/tests/udp_local_e2e.rs` by two
+  deletions。The complete four-thread binary passed `100/100`；fresh Architect and
+  QA full reviews both returned `PASS`；authoritative quick `5/5` and full `6/6`
+  passed。Ticket budget passed at code `12956`, tests `19868`, ratio `1.533`；
+  milestone budget passed at delta `1242/634`, allowance `1362`。
+- **Authorized T07 hosted attempt:** exact single-use remote scope
+  `AUTH-M3-T07-REMOTE-001` was consumed `1/1` for one non-force push of
+  `bc14971c...` to `refs/heads/codex/integration/m3`。GitHub Actions run
+  `30476271774`, attempt `1`, event `push`, completed `failure`。
+- **Same-run job evidence:** Windows MSVC job `90658650047`、Linux GNU
+  `90658649992`、Linux musl `90658650121` and interop `90658649948` passed。
+  Quality `90658650037` and MSRV `90658649997` both report
+  `portable_ipv4_live_udp_signal_exits_cleanly_and_rebinds ... ok`，resolving
+  `HOSTED-M3-T05-001`。Both later failed
+  `udp_terminal_error_with_live_session_notifies_process_and_reaps` at
+  `bins/ferrum2-server/src/run.rs:2715` with left `0`/right `1`；qualification
+  `90659341369` is derivative failure。
+- **Canonical root:** `HOSTED-M3-T07-002` is a `test_evidence` release root。
+  The server-private test checks live UDP owner counts after at most 100
+  `yield_now` calls but before its existing bounded target-datagram receive。
+  The scheduler-count loop is not a readiness event；local exact execution passed
+  once and the two-thread UDP subset passed `150/150`，so no product lifecycle
+  defect is established。
+- **Fresh repair frontier:** user authorized
+  `AUTH-M3-T08-LOCAL-001` for one M3-T08 ticket owning the path
+  `bins/ferrum2-server/src/run.rs` but changing only the named private test body。
+  The existing target datagram becomes the causal readiness boundary；T06/T07
+  review histories remain immutable。
+- **Authorization/publication:** the T08 local scope was consumed `1/1` and excludes
+  every remote effect。No additional push、rerun、dispatch、master push、publication、
+  upload、signing、tagging、force or deletion occurred。
+- **Remaining gates:** M3-T08 implementation、100 parallel UDP-subset runs、fresh
   Architect/QA full reviews、local quick/full/budget/control integration and one
-  new all-success same-SHA hosted run remain before M3 can become ready to close。
+  separately authorized all-success same-SHA hosted run remain before M3 can become
+  ready to close。
 
 ## 当前 M2 closed 状态
 

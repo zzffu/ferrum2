@@ -159,6 +159,39 @@ push-triggered run must pass quality、MSRV、all three platform rows、interop 
 qualification on the same SHA/run/attempt。The old run is not rerun and contributes
 no PASS evidence。
 
+### M3-T08 — terminal UDP causal-readiness evidence repair
+
+Run `30476271774` at exact
+`bc14971c51982b6ad9a970593fb3848b2763b112` is immutable failed release evidence。
+The M3-T07 portable row passed in both quality and MSRV，and all three platform jobs
+plus interop passed；quality and MSRV later failed the same server-private terminal-UDP
+test at `bins/ferrum2-server/src/run.rs:2715` with `udp_sessions` observed as zero。
+Final qualification is derivative，and no row from this failed run may be spliced。
+
+T08 changes only
+`udp_terminal_error_with_live_session_notifies_process_and_reaps`。The existing
+one-second target-side datagram receive becomes the causal admission boundary before
+the live root/session/task snapshot；the fixed 100-yield scheduler-count loop is
+removed。The existing payload、500 ms terminal process bound、fatal cause、cleanup、
+reap、forced-session and metric assertions remain unchanged。
+
+```powershell
+cargo test -p ferrum2-server --bin ferrum2-server run::tests::udp_terminal_error_with_live_session_notifies_process_and_reaps --locked -- --exact
+1..100 | ForEach-Object {
+  cargo test -p ferrum2-server --bin ferrum2-server 'run::tests::udp_' --locked -- --test-threads=2
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+cargo test -p ferrum2-server --bin ferrum2-server --locked
+cargo fmt --all -- --check
+python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py control-plane-check --base <ticket-base-sha> --candidate-sha <candidate-sha> --json
+python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py test-budget --gate ticket --base <ticket-base-sha>
+git diff --check <ticket-base-sha>..<candidate-sha>
+```
+
+M3-T08 receives fresh Architect/QA full reviews and local integration。Its local
+authorization does not include a push、dispatch or rerun；a later hosted attempt must
+use a separately authorized exact SHA/ref。
+
 ## Integration gate commands
 
 在 milestone integration worktree 串行运行 `workflow.toml` authoritative full：
