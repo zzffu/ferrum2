@@ -1,0 +1,10 @@
+# BEGIN CODEX MILESTONE WORKFLOW CONTROL PLANE
+/.agents/skills/** text eol=lf
+/.agents/AGENTS.override.md text eol=lf
+/.codex/agents/** text eol=lf
+/.codex/AGENTS.override.md text eol=lf
+/.codex/config.toml text eol=lf
+/.codex/milestone-workflow-install.json text eol=lf
+/workflow.toml text eol=lf
+/skills-lock.json text eol=lf
+# END CODEX MILESTONE WORKFLOW CONTROL PLANE

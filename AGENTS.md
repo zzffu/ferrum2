@@ -145,6 +145,8 @@ and command definitions in their authoritative build/config files where possible
     host-local commands once their test harnesses exist.
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
+- Active planned changes: None.
+
 
 ## Project validation
 
@@ -157,8 +159,9 @@ Document any additional package/module-specific validation rules here.
 ### Control model
 
 - The primary Codex thread is the Team Lead, sole scheduler, and sole integrator.
-- Use `$milestone-workflow` explicitly for bootstrap, plan, execute, status, resume,
-  and close modes.
+- Use `$milestone-workflow` explicitly for bootstrap, feature, plan, execute, status,
+  resume, and close modes. Use `feature` for a new capability after prior milestones;
+  it auto-allocates the next milestone, refreshes Project-specific context, and plans.
 - Delegate outcome/scope analysis to `product_manager`, architecture and bounded
   design review to `architect`, one-ticket implementation to `engineer`, and
   evidence/gate execution to `qa`.
@@ -167,10 +170,29 @@ Document any additional package/module-specific validation rules here.
 - `strategy = "drain"` means one execute invocation keeps scheduling all later
   dependency-ready waves until ready-to-close or a material stop condition.
 
+### Control-plane boundary
+
+The installed workflow is infrastructure, not product scope. During bootstrap,
+feature, plan, execute, resume, and close, do not edit any `.agents/skills/**`,
+`.codex/agents/**`, `.codex/config.toml`, `workflow.toml`, the install manifest, or the
+nested control-plane `AGENTS.override.md` files. The delimited workflow-policy block
+in this file is package-owned; only `## Project-specific context` is updated during
+product work. Run `workflow.py control-plane-check`
+before scheduling and integration. Record a missing capability in
+`docs/workflow-debt.md` and stop with `CONTROL_PLANE_CHANGE_REQUIRED`; change the
+workflow only in a separate explicit maintenance/upgrade task.
+
 ### Sources of truth and contract scope
 
 Read the nearest applicable `AGENTS.md`, `workflow.toml`, vision/roadmap, relevant
 ADR/spec/test-plan/ticket files, source code, tests, and CI definitions.
+
+`## Project-specific context` is maintained repository truth. Before planning a new
+feature and at milestone close, inventory every configured and project-added top-level
+entry, compare it with exact repository evidence, write a context audit, and update the
+section. Current shipped facts stay separate from `Active planned changes`; a requested
+feature is `planned` until its integrated closeout proves otherwise. The Team Lead is
+the only writer of AGENTS.md.
 
 Contracts are outcome-oriented. They may constrain observable behavior, interfaces,
 invariants, compatibility, migration, errors, and acceptance evidence. They must not
@@ -216,7 +238,8 @@ impossible, plus explicit user approval.
 - The same reviewer then gets one targeted re-review limited to original blocking
   IDs, the repair delta, and invalidated tests.
 - A second blocking result is `ESCALATE`; do not start a third automatic review or
-  repair cycle.
+  repair cycle. A later integration/release root becomes a new repair ticket, not a
+  superseding review or append-only review cycle on the completed ticket.
 - `PASS_WITH_NOTES` integrates and records non-blocking debt in
   `docs/review-debt.md`.
 - Do not implicitly invoke a separate generic `code-review` Skill during execute.
@@ -241,7 +264,8 @@ impossible, plus explicit user approval.
 ### Evidence and completion report
 
 Never claim a command, review, or gate ran when it did not. Every milestone response
-must report files/documents changed, tickets/branches/worktrees, full and targeted
+must report context-audit and AGENTS.md changes, files/documents changed,
+tickets/branches/worktrees, full and targeted
 review records, stable finding IDs, exact validation commands and exit statuses,
 test-budget counts and baseline, commits/integration state, blockers/debt/deferred
 work, and whether anything was pushed or published (default: no).

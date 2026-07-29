@@ -57,102 +57,6 @@ policy. Record it with:
 If any blocker remains after the targeted round, return `ESCALATE`. Do not start a
 third automatic cycle.
 
-## Explicit superseding verification
-
-A targeted `ESCALATE` remains the normal terminal result. Exceptionally, the user may
-authorize one later budget-consuming repair and one local superseding verification
-for the same canonical root. The repair must name its consumed
-`repair_budget_override`. Record the verification as a separate `superseding` round
-bound to the active repaired SHA and an unused single-use `review_round_override`
-authorization scope.
-
-The superseding round:
-
-- preserves the full and targeted records, including the escalation;
-- may address only blocking finding IDs already present in the immutable targeted
-  escalation, whether inherited from the full review or marked
-  `introduced_by_repair`, and preserves their finding provenance;
-- remains bound to the same canonical root and the active SHA produced by the
-  separately authorized later repair;
-- consumes its exact authorization atomically with the new review record;
-- may conclude `PASS`, `PASS_WITH_NOTES`, or retain `ESCALATE`;
-- is never an automatic third loop and never authorizes another repair, broader
-  findings, ownership, contract, remote, destructive, push, or publish action.
-
-Each reviewer requires its own single-use `review_round_override`. Unknown, newly
-discovered, duplicated, or broadened IDs; mismatched roots or candidates; exhausted,
-reused, or multi-use scopes; and any additional repair or review loop remain invalid.
-
-## Later hosted or release root cycle
-
-A hosted or release gate may discover a new canonical root after the ticket already
-used its legacy full, targeted, and superseding slots. Do not overwrite those records.
-Append one root-scoped cycle by passing the new canonical root to every record:
-
-```bash
-# Ordinary convergence: a blocking baseline and one repair may end at targeted PASS.
-python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
-  M2-T05 --reviewer architect --round full --root-blocker M2-T05-HOSTED-001 \
-  --candidate-sha <hosted-sha> --verdict block \
-  --finding 'ARCH-HOSTED-001:major:hosted failure'
-python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
-  M2-T05 --reviewer architect --round targeted \
-  --root-blocker M2-T05-HOSTED-001 --candidate-sha <repair-sha> \
-  --verdict pass --resolved ARCH-HOSTED-001
-
-# A required reviewer may record a passing baseline on the repaired SHA.
-python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
-  M2-T05 --reviewer qa --round full --root-blocker M2-T05-HOSTED-001 \
-  --candidate-sha <repair-sha> --verdict pass_with_notes --note '<bounded note>'
-```
-
-In ordinary convergence, each reviewer's effective terminal record is its
-`superseding` record when present, otherwise `targeted`, otherwise `full`. The cycle
-passes when every effective terminal verdict is `PASS` or `PASS_WITH_NOTES`, every
-record remains bound to the exact canonical root, and all required reviewers name one
-common non-empty candidate SHA. A targeted PASS after the one ordinary repair is
-terminal and consumes no `review_round_override`.
-
-If targeted review instead `ESCALATE`s, it remains non-passing. Only after a
-separately authorized budget-consuming later repair may each required reviewer record
-one final `superseding` verification with its own unused `review_round_override`:
-
-```bash
-python .agents/skills/milestone-workflow/scripts/workflow.py grant-authorization \
-  M2 --scope <architect-scope> --action review_round_override --ticket M2-T05 \
-  --blocker-class test_evidence --max-risk high --max-uses 1 \
-  --root-blocker M2-T05-HOSTED-001 --reviewer architect \
-  --evidence '<explicit user authorization>'
-python .agents/skills/milestone-workflow/scripts/workflow.py grant-authorization \
-  M2 --scope <qa-scope> --action review_round_override --ticket M2-T05 \
-  --blocker-class test_evidence --max-risk high --max-uses 1 \
-  --root-blocker M2-T05-HOSTED-001 --reviewer qa \
-  --evidence '<explicit user authorization>'
-
-python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
-  M2-T05 --reviewer architect --round superseding \
-  --root-blocker M2-T05-HOSTED-001 --candidate-sha <final-sha> \
-  --verdict pass_with_notes --resolved ARCH-HOSTED-002 --note '<bounded note>' \
-  --authorization-scope <architect-scope>
-python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
-  M2-T05 --reviewer qa --round superseding \
-  --root-blocker M2-T05-HOSTED-001 --candidate-sha <final-sha> \
-  --verdict pass --authorization-scope <qa-scope>
-```
-
-The root and ticket binding is exact. Full and targeted candidates and findings are
-immutable; targeted blockers retain their IDs, severity, and provenance. Final
-verification accepts no new finding, changes candidate after the escalation or
-passing baseline, requires an authorization already bound to that root and reviewer,
-and must match the active repair SHA. Missing, partial, swapped, wrong-root, or
-wrong-reviewer bindings fail before consumption. Unbound historical scopes remain
-valid for legacy superseding records only. For an escalated cycle that uses the
-exceptional later-repair path, `review-state` fails until all required reviewers have
-passing superseding evidence on the same SHA. An older cycle or the legacy passing
-record never substitutes for the latest cycle's effective terminal evidence. The
-gate also rechecks full/targeted verdict and blocking-finding parity, so tampered
-baseline or escalation state cannot pass merely because terminal SHAs match.
-
 ## Verdicts
 
 - `pass`: integrate.
@@ -166,3 +70,22 @@ During milestone execution, Architect and QA are the only authoritative review
 gates. Disable implicit invocation of a general code-review skill. An explicit user
 request for an independent review is allowed, but its advisory output does not silently
 restart the milestone repair loop.
+
+## Late failures and legacy history
+
+A new failure discovered after a ticket completed its bounded full/targeted cycle is
+new work. Create a narrow repair or qualification ticket that records:
+
+- the affected completed ticket;
+- the canonical failure/root evidence;
+- whether it came from integration, hosted qualification, or release;
+- the exact candidate and failing command/evidence;
+- minimal ownership and acceptance criteria.
+
+The new ticket receives the ordinary one-full/one-targeted lifecycle. Do not reopen the
+completed ticket by adding a third review round.
+
+Runtime ledgers created by older workflow revisions may contain `superseding` records
+or append-only `root_cycles`. v1.4 validates and reads those records so historical
+milestones remain recoverable, but treats them as immutable compatibility data. The
+`record-review` command intentionally creates only `full` and `targeted` records.

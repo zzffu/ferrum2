@@ -1,6 +1,6 @@
 ---
 name: milestone-workflow
-description: Orchestrate a repository milestone with Product Manager, Architect, Engineer, and QA subagents. Use explicitly for bootstrap, plan, execute, status, resume, or close modes; creates ADR/spec/test-plan/ticket contracts, drains dependency-ready tickets through isolated Git worktrees, reviews and integrates them, and records milestone evidence. Never pushes or publishes by default.
+description: Orchestrate repository milestones and new features with Product Manager, Architect, Engineer, and QA subagents. Use explicitly for bootstrap, feature, plan, execute, status, resume, or close modes; refreshes every Project-specific context entry, creates ADR/spec/test-plan/ticket contracts, drains dependency-ready tickets through isolated Git worktrees, reviews and integrates them, and records milestone evidence. Never pushes or publishes by default.
 ---
 
 # Milestone Workflow
@@ -32,13 +32,14 @@ profile before the agent starts. If it does not, report the launch profile as
 Accept natural language or these explicit fields:
 
 ```text
-mode: bootstrap | plan | execute | status | resume | close
-milestone: M0               # required for plan/execute/close when not inferable
-goal: ...                   # required for bootstrap/plan when not already documented
+mode: bootstrap | feature | plan | execute | status | resume | close
+milestone: M5               # optional for feature; auto-allocates the next numeric ID
+goal: ...                   # required for bootstrap/feature/plan when undocumented
 strategy: drain | wave      # execute only; default comes from workflow.toml
 max_parallel: 3             # never exceed workflow.toml or Codex capacity
 max_waves: 0                # execute only; 0 means no artificial cap
 auto_close: false           # execute only; true performs closeout after completion
+allow_open_milestones: false # feature only; explicit exception to sequential roadmap
 scope: ...                  # optional path/module restriction
 ```
 
@@ -67,6 +68,67 @@ Do **not** return after the first frontier when strategy is `drain`. Return afte
 frontier only when the user explicitly selects `strategy: wave`, the configured wave
 cap is reached, or a stop condition below applies.
 
+## Control-plane immutability
+
+Product modes may read but must not modify the installed workflow control plane:
+
+```text
+.agents/skills/**
+.agents/AGENTS.override.md
+.codex/agents/**
+.codex/AGENTS.override.md
+.codex/config.toml
+.codex/milestone-workflow-install.json
+workflow.toml
+skills-lock.json
+```
+
+Run `workflow.py control-plane-check` before planning, scheduling, candidate review,
+integration, and closeout. The installer manifest uses line-ending-normalized hashes, so Windows CRLF/LF
+representation alone is not drift. It also protects the delimited workflow-policy
+section inside root `AGENTS.md` while permitting evidence-backed updates to
+`## Project-specific context`. A product candidate that changes any installed Skill,
+a protected file, or that protected document section is ineligible for integration
+even when its product tests pass.
+
+If product work exposes a missing workflow capability, do not self-patch the Skill,
+helper, role instructions, or policy. Record it with:
+
+```bash
+python .agents/skills/milestone-workflow/scripts/workflow.py workflow-debt \
+  --milestone <ID> --ticket <ID> --summary "<capability gap>" \
+  --evidence "<repository evidence>" --proposed-fix "<separate change>"
+```
+
+Then report `CONTROL_PLANE_CHANGE_REQUIRED` and stop that path. A workflow change is a
+separate user-requested maintenance/upgrade task with its own package tests and
+installer migration; it is never an automatic repair for a product ticket.
+
+## Project-specific context truth contract
+
+`## Project-specific context` in the configured `AGENTS.md` is a maintained source of
+repository truth, not a bootstrap-only note. Before a new feature is planned and again
+when its milestone closes:
+
+1. Inventory **every** top-level context entry, including configured required entries
+   and project-added entries. Use `workflow.py context-inventory --json`.
+2. Compare each claim with current manifests, source entry points, tests, CI, generated
+   artifacts, local setup, roadmap, and the exact baseline commit. Classify it as
+   `confirmed`, `stale`, `contradicted`, `missing`, or `planned-only`.
+3. Keep current shipped facts separate from intent. At plan time the new feature may
+   appear only under the configured `Active planned changes` entry with milestone and
+   `planned` status. Do not describe it as implemented.
+4. The Team Lead is the sole writer of `AGENTS.md`. Subagents return evidence and
+   proposed edits; they do not concurrently edit repository instructions.
+5. Record the entry-by-entry evidence in `docs/context-audits/CONTEXT-<milestone>-*.md`.
+   An approved audit must bind the before/after section hashes and Product Manager,
+   Architect, and QA review.
+6. At close, re-audit the integrated commit, move verified capabilities into the
+   appropriate current-state entries, remove or advance the active planned item, mark
+   the audit `verified`, and run strict context validation.
+
+Read `references/feature-and-context.md` for feature or close mode.
+
 ## Contract, review, and test-economy convergence
 
 These rules override any looser third-party TDD or code-review guidance:
@@ -94,25 +156,7 @@ These rules override any looser third-party TDD or code-review guidance:
    `PASS_WITH_NOTES` review debt or an explicit escalation.
 7. **Convergent verdicts.** `PASS` and `PASS_WITH_NOTES` integrate. `BLOCK` allows one
    substantive repair. A remaining blocker after targeted re-review is `ESCALATE`; do
-   not launch another automatic repair loop. After a separately user-authorized
-   budget-consuming repair recorded with its consumed `repair_budget_override`,
-   one explicit single-use `review_round_override` scope may authorize a local
-   superseding verification of that same escalated root and the blocking IDs frozen
-   in its targeted escalation, including IDs marked `introduced_by_repair`. This
-   preserves full/targeted history and finding provenance, binds to the active later
-   repair SHA, is never automatic, and grants no authority for another repair.
-   If a later hosted or release gate opens a new canonical root after the ticket's
-   legacy rounds are already complete, append a root-scoped cycle by adding
-   `--root-blocker <ROOT_ID>` to its full, targeted, and superseding records. Never
-   replace the legacy records or an earlier root cycle. For each required reviewer,
-   `review-state` selects the effective terminal record in order: superseding,
-   targeted, then full. Ordinary full `BLOCK` followed by one repair and targeted
-   `PASS` or `PASS_WITH_NOTES` is terminal without an override. If targeted review
-   `ESCALATE`s and the user separately authorizes a later repair, every required
-   reviewer must record superseding verification using its own override pre-bound at
-   grant time to that exact root and reviewer. All effective terminal records must
-   pass on one common non-empty candidate SHA. Unbound historical scopes remain
-   compatible with legacy superseding records only.
+   not launch another automatic repair loop.
 8. **Test budget.** Run the configured test-budget report during planning/bootstrap,
    the ticket gate before integration, and the milestone gate at close. Existing
    high-ratio repositories use a recorded ratchet baseline rather than an immediate
@@ -136,6 +180,8 @@ For every mode:
    ```bash
    python .agents/skills/milestone-workflow/scripts/workflow.py doctor
    python .agents/skills/milestone-workflow/scripts/workflow.py validate
+   python .agents/skills/milestone-workflow/scripts/workflow.py control-plane-check --json
+   python .agents/skills/milestone-workflow/scripts/workflow.py context-inventory --json
    python .agents/skills/milestone-workflow/scripts/workflow.py test-budget --gate report
    python .agents/skills/milestone-workflow/scripts/workflow.py state \
      --milestone <ID>
@@ -145,7 +191,8 @@ For every mode:
 4. Treat approved ADRs, specs, test plans, and ticket frontmatter as contracts.
 5. Never claim a gate passed without direct evidence.
 
-For `execute`, `resume`, and `close`, also read
+For `feature` and `close`, also read `references/feature-and-context.md`. For
+`execute`, `resume`, and `close`, also read
 `references/integration-and-recovery.md`. For document creation or ticket changes,
 read `references/document-contracts.md`. For optional third-party skills, read
 `references/mattpocock-integration.md`. For any blocked or failed gate, read
@@ -154,6 +201,9 @@ read `references/document-contracts.md`. For optional third-party skills, read
 
 ## Global safety and ownership rules
 
+- Never edit a protected control-plane path during product modes. If such a change
+  appears in an Engineer or integration candidate, reject the candidate and record
+  workflow debt; do not cherry-pick the control-plane part.
 - Never push, open or merge a remote PR, publish a release, mutate remote issues, or
   delete remote/local branches unless the user separately and explicitly requests it.
 - Never force-push, use destructive reset/clean commands, discard unknown changes,
@@ -211,24 +261,91 @@ Purpose: establish the repository control plane without implementing product cod
    both reports.
 4. Spawn `qa` after the initial reports to identify baseline test/CI gaps. QA must not
    edit tracked files.
-5. Synthesize and write/update:
+5. Inventory every configured `Project-specific context` entry. Use the three role
+   reports to replace TODO/stale claims with current repository facts and add
+   `Active planned changes: None` unless an approved roadmap item is already active.
+   The Team Lead updates `AGENTS.md`; do not claim proposed milestones are shipped.
+6. Synthesize and write/update:
+   - `AGENTS.md` (`## Project-specific context` only where facts changed)
    - `docs/vision.md`
    - `docs/gap-analysis.md`
    - `docs/roadmap.md`
    - `docs/ci-status.md`
-6. Record assumptions, non-goals, milestone exit criteria, and unresolved decisions.
-7. Run `test-budget --gate report`. For a non-empty existing repository with no
+7. Record assumptions, non-goals, milestone exit criteria, and unresolved decisions.
+8. Run `context-check --strict` and `test-budget --gate report`. For a non-empty
+   existing repository with no
    baseline, write the initial ratchet baseline after confirming the count is sane.
-8. Run validation again. Stop before product-code implementation.
+9. Run validation again. Stop before product-code implementation.
 
 Output: created/updated documents, proposed first milestone, unresolved decisions,
 and the exact next `plan` invocation.
+
+## Mode: `feature`
+
+Purpose: add a new feature after existing roadmap milestones without rerunning
+bootstrap. This mode performs a repository-truth refresh and produces a new approved
+plan; it does not implement product code.
+
+1. Resolve the goal from the request. Run:
+
+   ```bash
+   python .agents/skills/milestone-workflow/scripts/workflow.py feature-preflight \
+     --goal "<requested outcome>" --write-audit --json
+   ```
+
+   Omit `--milestone` to allocate the next numeric ID. If M0-M4 exist, the default is
+   M5. Do not reuse a closed milestone. When configured, any previous milestone not
+   marked `closed` blocks the new feature unless the user explicitly requests
+   `allow_open_milestones: true`.
+2. Bind all investigations to the exact baseline commit and context hash returned by
+   preflight. Spawn in parallel:
+   - `product_manager`: audit Product purpose, user value, current vs planned scope,
+     roadmap impact, non-goals, and the Active planned changes wording.
+   - `architect`: audit languages/frameworks, actual architecture entry points,
+     dependency boundaries, critical invariants, generated files, and development
+     setup; trace the feature's execution path and decision surface.
+   - `qa`: independently verify all context claims against build manifests, commands,
+     tests, CI, generated artifacts, platform setup, and current test-budget state.
+3. Require each report to address every configured context entry and every additional
+   top-level entry discovered by `context-inventory`. Missing evidence is a planning
+   blocker, not permission to preserve a stale claim.
+4. The Team Lead completes the generated context audit and updates
+   `## Project-specific context`:
+   - correct stale or contradicted current facts;
+   - add newly discovered current entry points/invariants/setup constraints;
+   - preserve additional project-specific entries;
+   - put the requested feature only under `Active planned changes` as
+     `<milestone> — planned — <outcome>`;
+   - do not write future implementation details as current facts.
+5. Set the audit to `approved`, record exact before/after hashes and baseline commit,
+   list `product_manager`, `architect`, and `qa` as reviewers, and remove every TODO.
+   Run:
+
+   ```bash
+   python .agents/skills/milestone-workflow/scripts/workflow.py context-check \
+     --strict --milestone <ID> --require-audit
+   ```
+
+6. Update vision/gap analysis where the feature changes product scope or closes/adds a
+   documented gap. Append a new roadmap section for the allocated milestone. Do not
+   rewrite closed milestone evidence.
+7. Continue with the complete `plan` procedure below for the new milestone: outcome
+   scope, architecture decisions only where necessary, implementation-ready spec,
+   economical test plan, vertical-slice tickets, dependencies, ownership, and
+   readiness validation.
+8. Stop before implementation and report the exact one-shot execution command:
+   `$milestone-workflow mode=execute milestone=<ID> strategy=drain`.
+
+Output: allocated milestone, context audit, exact `AGENTS.md` context changes, roadmap
+entry, contracts/tickets, validation evidence, unresolved decisions, and execute
+command.
 
 ## Mode: `plan`
 
 Purpose: turn one milestone goal into approved, executable contracts.
 
-1. Resolve the milestone and objective from the request and roadmap.
+1. Resolve the milestone and objective from the request and roadmap. For a brand-new
+   feature, use `mode: feature` rather than bypassing the context audit.
 2. Spawn `product_manager` for scope, vertical slices, blockers, and exit criteria.
 3. Spawn `architect` for execution-path tracing, options, ADR requirements, interfaces,
    errors, compatibility, migration, and rollback.
@@ -308,9 +425,10 @@ and validation in a single primary-thread invocation.
 1. Require the configured base branch and a clean base worktree. If dirty, stop and
    identify exact paths; never stash or discard them.
 2. Inspect tickets, branches, worktrees, commits, and any integration branch.
-3. Run:
+3. Run the control-plane gate, then scheduler state:
 
    ```bash
+   python .agents/skills/milestone-workflow/scripts/workflow.py control-plane-check --json
    python .agents/skills/milestone-workflow/scripts/workflow.py next \
      --milestone <ID> --limit <N> --json
    ```
@@ -343,6 +461,9 @@ When the scheduler action is `execute_frontier` or
 
 #### C2. Isolated Engineer implementation
 
+Before launch, give the Engineer the protected-glob list and require a clean
+`control-plane-check`. The ticket `owns` set must not include any protected path.
+
 For each selected ticket:
 
 1. Reconcile the ledger, `worktree-list`, and branch history first. If any existing
@@ -370,6 +491,10 @@ For each selected ticket:
 7. Close completed Engineer threads after collecting their summaries.
 
 #### C3. Ticket review and one bounded repair
+
+Architect and QA must reject any candidate that changes a protected control-plane
+path before substantive product review. Reviewers cannot repair their own gate by
+changing workflow code or adding a new review round.
 
 For every ticket with runtime phase `review`:
 
@@ -406,26 +531,14 @@ For every ticket with runtime phase `review`:
    contradiction, ambiguous product decision, or disallowed new blocker is
    `ESCALATE`. Preserve the branch/worktree and stop that dependency chain while
    continuing independent work when configured.
-   An explicit user-authorized superseding verification is exceptional: it requires
-   a separately authorized later repair, an unused local `review_round_override`
-   scope bound to the exact root, and the active repaired SHA. It may dispose only
-   blocking IDs already present in the immutable targeted escalation, including
-   `introduced_by_repair` IDs, while preserving their provenance. It does not erase
-   the targeted escalation or reopen an automatic repair/review cycle.
-   A later hosted/release failure after completed legacy rounds uses the same command
-   with `--root-blocker` on every round, which appends a separate canonical-root
-   cycle. A reviewer may enter that cycle with a blocking full/targeted escalation or
-   a passing full baseline. An ordinary blocking full review that resolves in its
-   targeted round is complete without an override. Only after targeted escalation
-   and a separately authorized later repair do the escalation and any pass-baseline
-   reviewer paths require one per-reviewer superseding verification on the identical
-   active final SHA. Grant each single-use override with the paired `--root-blocker`
-   and `--reviewer` options before verification; consumption never fills in a missing
-   binding. The latest cycle, not the older passing history, controls `review-state`.
 7. Before integration, require `review-state <TICKET_ID>` and
    `gate-check <TICKET_ID> integration` to pass. Close completed reviewer threads.
 
 #### C4. Integrate passing tickets
+
+Run `gate-check <ticket> integration --base <base> --candidate-sha <sha>` for each
+candidate. A control-plane violation blocks integration independently of product
+review verdicts.
 
 1. Create or reuse the milestone integration worktree:
 
@@ -483,6 +596,13 @@ or a stop condition occurs.
 
 ### E. Execute stop conditions
 
+A late integration/hosted/release failure after a ticket's bounded review cycle does
+not reopen or supersede that ticket's immutable review history. Create a new, narrow
+repair/qualification ticket that names the affected ticket, canonical failure, gate,
+ownership, and evidence. The new ticket receives the normal one-full/one-targeted
+review lifecycle. Existing `superseding` and `root_cycles` records from older workflow
+versions are read-only compatibility history and must never be extended.
+
 Stop without asking routine progress questions only for a material condition:
 
 - dirty base worktree or unexpected user changes
@@ -538,10 +658,17 @@ Purpose: prove that a milestone is complete and create a durable handoff.
    - `qa` to check test evidence, CI coverage, and unresolved failures
 5. Wait for all three. A BLOCK or ESCALATE verdict prevents closeout;
    PASS_WITH_NOTES records debt and allows closeout.
-6. The Team Lead updates roadmap and CI status and writes
+6. When `context.refresh_on_close = true`, reuse the closeout reports to re-audit
+   every `Project-specific context` entry against the exact integrated commit. Update
+   current capabilities, architecture entry points, invariants, generated files, and
+   local setup where the milestone changed them. Remove the completed item from
+   `Active planned changes` or replace it with the next already-approved item. Update
+   the feature context audit to `verified`, set `verified_commit`, refresh the context
+   hash, and run `context-check --strict --milestone <ID> --require-audit`.
+7. The Team Lead updates roadmap and CI status and writes
    `docs/handoffs/HANDOFF-<milestone>-<date>.md` with commit IDs, decisions, known
-   risks, deferred work, and the next milestone entry point.
-7. Commit closeout documents and the updated test-budget baseline. Do not tag, push,
+   risks, deferred work, context-audit evidence, and the next milestone entry point.
+8. Commit closeout documents and the updated test-budget baseline. Do not tag, push,
    release, or delete branches unless
    separately requested.
 

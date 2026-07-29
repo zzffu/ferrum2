@@ -50,6 +50,7 @@ RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 BLOCKER_CLASSES = {
     "authorization",
     "code",
+    "control_plane",
     "contract",
     "decision",
     "dependency",
@@ -63,15 +64,33 @@ BLOCKER_CLASSES = {
 }
 AUTHORIZATION_STATES = {"not_required", "required", "granted", "exhausted"}
 REPAIR_CLASSES = {"mechanical", "evidence", "substantive"}
-REVIEW_ROUNDS = {"full", "targeted", "superseding"}
+REVIEW_ROUNDS = {"full", "targeted"}
+LEGACY_REVIEW_ROUNDS = {"superseding"}
 REVIEW_VERDICTS = {"pass", "pass_with_notes", "block", "escalate"}
 REVIEWERS = {"architect", "qa"}
 REVIEW_FINDING_SEVERITIES = {"blocker", "major", "minor", "note"}
-BLOCKING_REVIEW_SEVERITIES = {"blocker", "major"}
 NEW_REVIEW_BLOCKER_ORIGINS = {"introduced_by_repair", "previously_unobservable"}
 TEST_BUDGET_GATES = {"report", "ticket", "milestone"}
 TEST_BUDGET_MODES = {"ratchet", "strict", "off"}
 TEST_BUDGET_TOOLS = {"auto", "builtin", "rustloc"}
+CONTROL_PLANE_POLICIES = {"block", "warn", "off"}
+INSTALL_METADATA_PATH = ".codex/milestone-workflow-install.json"
+AGENTS_WORKFLOW_BEGIN = "<!-- BEGIN CODEX MILESTONE WORKFLOW -->"
+AGENTS_WORKFLOW_END = "<!-- END CODEX MILESTONE WORKFLOW -->"
+GITATTRIBUTES_WORKFLOW_BEGIN = "# BEGIN CODEX MILESTONE WORKFLOW CONTROL PLANE"
+GITATTRIBUTES_WORKFLOW_END = "# END CODEX MILESTONE WORKFLOW CONTROL PLANE"
+CONTEXT_AUDIT_STATUSES = {"draft", "approved", "verified"}
+CONTEXT_CLASSIFICATIONS = {
+    "confirmed",
+    "stale",
+    "contradicted",
+    "missing",
+    "planned-only",
+}
+MILESTONE_ID_RE = re.compile(r"^M(\d+)$", re.IGNORECASE)
+ROADMAP_MILESTONE_HEADING_RE = re.compile(
+    r"(?m)^##\s+(M\d+)\b(?:\s*[—-].*)?$", re.IGNORECASE
+)
 TRANSIENT_PHASES = {"implementation", "review", "repair", "integration", "release"}
 ACTIVE_WRITER_PHASES = {"implementation", "repair"}
 PHASE_DEPENDENCY_GATE = {
@@ -109,6 +128,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "require_clean_base": True,
         "auto_remove_worktrees": False,
         "checkpoint_policy": "integration",
+    },
+    "control_plane": {
+        "managed_drift_policy": "block",
+        "manifest_path": INSTALL_METADATA_PATH,
+        "workflow_debt_path": "docs/workflow-debt.md",
+        "protected_globs": [
+            ".agents/skills/**",
+            ".agents/AGENTS.override.md",
+            ".codex/agents/**",
+            ".codex/AGENTS.override.md",
+            ".codex/config.toml",
+            ".codex/milestone-workflow-install.json",
+            "workflow.toml",
+            "skills-lock.json",
+        ],
     },
     "execution": {
         "strategy": "drain",
@@ -161,6 +195,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
             ],
         }
     },
+    "context": {
+        "agents_file": "AGENTS.md",
+        "section_heading": "Project-specific context",
+        "required_entries": [
+            "Product purpose",
+            "Primary languages/frameworks",
+            "Architecture entry points",
+            "Critical invariants",
+            "Generated files",
+            "Local development setup",
+            "Active planned changes",
+        ],
+        "planned_changes_entry": "Active planned changes",
+        "require_feature_audit": True,
+        "require_previous_milestones_closed": True,
+        "refresh_on_close": True,
+    },
     "state": {"path": "codex/milestone-workflow-state.json"},
     "agents": {
         "product_manager": {
@@ -198,7 +249,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "test_plan_dir": "docs/test-plans",
         "ticket_dir": "docs/tickets",
         "handoff_dir": "docs/handoffs",
+        "context_audit_dir": "docs/context-audits",
         "review_debt": "docs/review-debt.md",
+        "workflow_debt": "docs/workflow-debt.md",
     },
     "validation": {"workflow": [], "quick": [], "full": []},
 }
@@ -400,105 +453,6 @@ def empty_runtime_state() -> dict[str, Any]:
     return {"version": RUNTIME_STATE_VERSION, "revision": 0, "milestones": {}}
 
 
-def review_record_errors(
-    prefix: str,
-    round_name: str,
-    record: object,
-) -> list[str]:
-    errors: list[str] = []
-    if round_name not in REVIEW_ROUNDS or not isinstance(record, dict):
-        return [prefix + " is invalid"]
-    if record.get("round") != round_name:
-        errors.append(prefix + ".round must match its key")
-    if record.get("verdict") not in REVIEW_VERDICTS:
-        errors.append(prefix + ".verdict is invalid")
-    candidate_sha = record.get("candidate_sha", "")
-    if not (
-        isinstance(candidate_sha, str)
-        and re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", candidate_sha)
-    ):
-        errors.append(prefix + ".candidate_sha must be exact")
-    findings = record.get("findings", [])
-    if not isinstance(findings, list):
-        errors.append(prefix + ".findings must be an array")
-        return errors
-    seen_finding_ids: set[str] = set()
-    for index, finding in enumerate(findings):
-        finding_prefix = f"{prefix}.findings[{index}]"
-        if not isinstance(finding, dict):
-            errors.append(finding_prefix + " must be an object")
-            continue
-        finding_id = str(finding.get("id", "")).strip()
-        if not finding_id or finding_id in seen_finding_ids:
-            errors.append(finding_prefix + ".id must be non-empty and unique")
-        seen_finding_ids.add(finding_id)
-        if finding.get("severity") not in REVIEW_FINDING_SEVERITIES:
-            errors.append(finding_prefix + ".severity is invalid")
-        if not str(finding.get("summary", "")).strip():
-            errors.append(finding_prefix + ".summary is required")
-        if round_name == "targeted" and finding.get("new", False):
-            if finding.get("origin") not in NEW_REVIEW_BLOCKER_ORIGINS:
-                errors.append(finding_prefix + ".origin is invalid for a new finding")
-    resolved = record.get("resolved", [])
-    if (
-        not isinstance(resolved, list)
-        or any(not isinstance(item, str) or not item.strip() for item in resolved)
-        or len(resolved) != len(set(resolved))
-    ):
-        errors.append(prefix + ".resolved must contain unique non-empty IDs")
-    return errors
-
-
-def root_cycle_round_invariant_errors(
-    rounds: dict[str, Any],
-    blocking_severities: set[str],
-) -> list[str]:
-    errors: list[str] = []
-    full = rounds.get("full")
-    if not isinstance(full, dict):
-        return errors
-    full_blocking = [
-        finding
-        for finding in full.get("findings", [])
-        if isinstance(finding, dict)
-        and finding.get("severity") in blocking_severities
-    ]
-    if full.get("verdict") == "block" and not full_blocking:
-        errors.append("blocking full review requires a blocking finding")
-    if full.get("verdict") in {"pass", "pass_with_notes"} and full_blocking:
-        errors.append("passing full review cannot retain a blocking finding")
-
-    targeted = rounds.get("targeted")
-    if not isinstance(targeted, dict):
-        return errors
-    targeted_findings = [
-        finding
-        for finding in targeted.get("findings", [])
-        if isinstance(finding, dict)
-    ]
-    targeted_blocking = [
-        finding
-        for finding in targeted_findings
-        if finding.get("severity") in blocking_severities
-    ]
-    if targeted.get("verdict") == "escalate" and not targeted_blocking:
-        errors.append("targeted escalation requires a blocking finding")
-    if (
-        targeted.get("verdict") in {"pass", "pass_with_notes"}
-        and targeted_blocking
-    ):
-        errors.append("passing targeted review cannot retain a blocking finding")
-    resolved = targeted.get("resolved", [])
-    finding_ids = {
-        str(finding.get("id", ""))
-        for finding in targeted_findings
-        if str(finding.get("id", "")).strip()
-    }
-    if isinstance(resolved, list) and finding_ids.intersection(resolved):
-        errors.append("targeted findings and resolved IDs cannot overlap")
-    return errors
-
-
 def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     milestones = payload.get("milestones", {})
@@ -657,65 +611,6 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
                     f"{milestone}.blockers.{blocker_id}.root_cause_id must equal its id"
                 )
 
-        if isinstance(authorizations, dict):
-            for scope, authorization in authorizations.items():
-                if not isinstance(authorization, dict):
-                    continue
-                bound_root = str(
-                    authorization.get("root_cause_id", "")
-                ).strip()
-                bound_reviewer = str(authorization.get("reviewer", "")).strip()
-                if bool(bound_root) != bool(bound_reviewer):
-                    errors.append(
-                        f"{milestone}.authorizations.{scope} root_cause_id and "
-                        "reviewer must be provided together"
-                    )
-                    continue
-                if not bound_root:
-                    continue
-                root = blockers.get(bound_root)
-                if (
-                    authorization.get("kind") != "local"
-                    or authorization.get("actions") != ["review_round_override"]
-                    or authorization.get("max_uses") != 1
-                ):
-                    errors.append(
-                        f"{milestone}.authorizations.{scope} bound review scope "
-                        "must be local, single-use, and review_round_override-only"
-                    )
-                if bound_reviewer not in REVIEWERS:
-                    errors.append(
-                        f"{milestone}.authorizations.{scope}.reviewer is invalid"
-                    )
-                if (
-                    not isinstance(root, dict)
-                    or root.get("derived_from")
-                    or str(root.get("root_cause_id", "")) != bound_root
-                ):
-                    errors.append(
-                        f"{milestone}.authorizations.{scope}.root_cause_id must "
-                        "name a canonical root"
-                    )
-                    continue
-                expected_ticket = str(root.get("ticket_id", "")).upper()
-                if authorization.get("tickets") != [expected_ticket]:
-                    errors.append(
-                        f"{milestone}.authorizations.{scope}.tickets must contain "
-                        "only the canonical root ticket"
-                    )
-                root_class = str(root.get("class", ""))
-                root_risk = str(root.get("risk", ""))
-                max_risk = str(authorization.get("max_risk", ""))
-                if root_class not in authorization.get("blocker_classes", []) or (
-                    root_risk in RISK_ORDER
-                    and max_risk in RISK_ORDER
-                    and RISK_ORDER[max_risk] < RISK_ORDER[root_risk]
-                ):
-                    errors.append(
-                        f"{milestone}.authorizations.{scope} class/risk must "
-                        "cover its bound canonical root"
-                    )
-
         repairs = runtime.get("repairs", {})
         if not isinstance(repairs, dict):
             errors.append(f"{milestone}.repairs must be an object")
@@ -863,333 +758,100 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
         if not isinstance(reviews, dict):
             errors.append(f"{milestone}.reviews must be an object")
         else:
-            superseding_scope_counts: collections.Counter[str] = collections.Counter()
+            def validate_rounds(
+                rounds: Any,
+                *,
+                prefix: str,
+                allow_legacy: bool,
+            ) -> None:
+                if not isinstance(rounds, dict):
+                    errors.append(prefix + " must be an object")
+                    return
+                allowed = REVIEW_ROUNDS | (LEGACY_REVIEW_ROUNDS if allow_legacy else set())
+                for round_name, record in rounds.items():
+                    if round_name not in allowed or not isinstance(record, dict):
+                        errors.append(prefix + f".{round_name} is invalid")
+                        continue
+                    if record.get("verdict") not in REVIEW_VERDICTS:
+                        errors.append(prefix + f".{round_name}.verdict is invalid")
+                    candidate_sha = record.get("candidate_sha", "")
+                    if not (
+                        isinstance(candidate_sha, str)
+                        and re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", candidate_sha)
+                    ):
+                        errors.append(prefix + f".{round_name}.candidate_sha must be exact")
+                    findings = record.get("findings", [])
+                    if not isinstance(findings, list):
+                        errors.append(prefix + f".{round_name}.findings must be an array")
+                        continue
+                    seen_finding_ids: set[str] = set()
+                    for index, finding in enumerate(findings):
+                        finding_prefix = f"{prefix}.{round_name}.findings[{index}]"
+                        if not isinstance(finding, dict):
+                            errors.append(finding_prefix + " must be an object")
+                            continue
+                        finding_id = str(finding.get("id", "")).strip()
+                        if not finding_id or finding_id in seen_finding_ids:
+                            errors.append(finding_prefix + ".id must be non-empty and unique")
+                        seen_finding_ids.add(finding_id)
+                        if finding.get("severity") not in REVIEW_FINDING_SEVERITIES:
+                            errors.append(finding_prefix + ".severity is invalid")
+                        if not str(finding.get("summary", "")).strip():
+                            errors.append(finding_prefix + ".summary is required")
+                        origin = finding.get("origin")
+                        if round_name == "targeted" and finding.get("new", False):
+                            if origin not in NEW_REVIEW_BLOCKER_ORIGINS:
+                                errors.append(finding_prefix + ".origin is invalid for a new finding")
+
             for ticket_id, ticket_reviews in reviews.items():
+                prefix = f"{milestone}.reviews.{ticket_id}"
                 if not isinstance(ticket_reviews, dict):
-                    errors.append(f"{milestone}.reviews.{ticket_id} must be an object")
+                    errors.append(prefix + " must be an object")
                     continue
                 reviewers = ticket_reviews.get("reviewers", {})
                 if not isinstance(reviewers, dict):
-                    errors.append(
-                        f"{milestone}.reviews.{ticket_id}.reviewers must be an object"
-                    )
-                    continue
-                for reviewer, rounds in reviewers.items():
-                    if reviewer not in REVIEWERS:
-                        errors.append(
-                            f"{milestone}.reviews.{ticket_id}.{reviewer} is not a valid reviewer"
-                        )
-                        continue
-                    if not isinstance(rounds, dict):
-                        errors.append(
-                            f"{milestone}.reviews.{ticket_id}.{reviewer} must be an object"
-                        )
-                        continue
-                    for round_name, record in rounds.items():
-                        if round_name not in REVIEW_ROUNDS or not isinstance(record, dict):
-                            errors.append(
-                                f"{milestone}.reviews.{ticket_id}.{reviewer}.{round_name} "
-                                "is invalid"
-                            )
+                    errors.append(prefix + ".reviewers must be an object")
+                else:
+                    for reviewer, rounds in reviewers.items():
+                        if reviewer not in REVIEWERS:
+                            errors.append(prefix + f".{reviewer} is not a valid reviewer")
                             continue
-                        if record.get("verdict") not in REVIEW_VERDICTS:
-                            errors.append(
-                                f"{milestone}.reviews.{ticket_id}.{reviewer}.{round_name}."
-                                "verdict is invalid"
-                            )
-                        candidate_sha = record.get("candidate_sha", "")
-                        if not (
-                            isinstance(candidate_sha, str)
-                            and re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", candidate_sha)
-                        ):
-                            errors.append(
-                                f"{milestone}.reviews.{ticket_id}.{reviewer}.{round_name}."
-                                "candidate_sha must be exact"
-                            )
-                        findings = record.get("findings", [])
-                        if not isinstance(findings, list):
-                            errors.append(
-                                f"{milestone}.reviews.{ticket_id}.{reviewer}.{round_name}."
-                                "findings must be an array"
-                            )
-                            continue
-                        seen_finding_ids: set[str] = set()
-                        for index, finding in enumerate(findings):
-                            prefix = (
-                                f"{milestone}.reviews.{ticket_id}.{reviewer}."
-                                f"{round_name}.findings[{index}]"
-                            )
-                            if not isinstance(finding, dict):
-                                errors.append(prefix + " must be an object")
-                                continue
-                            finding_id = str(finding.get("id", "")).strip()
-                            if not finding_id or finding_id in seen_finding_ids:
-                                errors.append(prefix + ".id must be non-empty and unique")
-                            seen_finding_ids.add(finding_id)
-                            if finding.get("severity") not in REVIEW_FINDING_SEVERITIES:
-                                errors.append(prefix + ".severity is invalid")
-                            if not str(finding.get("summary", "")).strip():
-                                errors.append(prefix + ".summary is required")
-                            origin = finding.get("origin")
-                            if round_name == "targeted" and finding.get("new", False):
-                                if origin not in NEW_REVIEW_BLOCKER_ORIGINS:
-                                    errors.append(prefix + ".origin is invalid for a new finding")
-                    superseding = rounds.get("superseding")
-                    if not isinstance(superseding, dict):
-                        continue
-                    authorization_scope = str(
-                        superseding.get("authorization_scope", "")
-                    ).strip()
-                    findings = superseding.get("findings", [])
-                    resolved = superseding.get("resolved", [])
-                    try:
-                        expected_findings, _, _ = validate_superseding_review(
-                            runtime=runtime,
-                            ticket_id=str(ticket_id),
-                            reviewer_rounds=rounds,
-                            candidate_sha=str(
-                                superseding.get("candidate_sha", "")
-                            ).lower(),
-                            verdict=str(superseding.get("verdict", "")),
-                            findings=findings if isinstance(findings, list) else [],
-                            new_findings=[],
-                            resolved=resolved if isinstance(resolved, list) else [],
-                            root_cause_id=str(
-                                superseding.get("root_cause_id", "")
-                            ).strip(),
-                            authorization_scope=authorization_scope,
-                            blocking_severities=BLOCKING_REVIEW_SEVERITIES,
-                            supersedes=superseding.get("supersedes"),
-                            require_available=False,
+                        validate_rounds(
+                            rounds,
+                            prefix=prefix + f".{reviewer}",
+                            allow_legacy=True,
                         )
-                        if expected_findings != findings:
-                            raise WorkflowError(
-                                "Superseding findings do not match unresolved targeted IDs"
-                            )
-                    except WorkflowError as exc:
-                        errors.append(
-                            f"{milestone}.reviews.{ticket_id}.{reviewer}."
-                            f"superseding is invalid: {exc}"
-                        )
-                    else:
-                        superseding_scope_counts[authorization_scope] += 1
                 root_cycles = ticket_reviews.get("root_cycles", [])
+                if root_cycles is None:
+                    root_cycles = []
                 if not isinstance(root_cycles, list):
-                    errors.append(
-                        f"{milestone}.reviews.{ticket_id}.root_cycles must be an array"
-                    )
+                    errors.append(prefix + ".root_cycles must be an array")
                     continue
                 seen_roots: set[str] = set()
-                for cycle_index, cycle in enumerate(root_cycles):
-                    cycle_prefix = (
-                        f"{milestone}.reviews.{ticket_id}.root_cycles[{cycle_index}]"
-                    )
+                for index, cycle in enumerate(root_cycles):
+                    cycle_prefix = prefix + f".root_cycles[{index}]"
                     if not isinstance(cycle, dict):
                         errors.append(cycle_prefix + " must be an object")
                         continue
-                    root_cause_id = str(cycle.get("root_cause_id", "")).strip()
-                    if not root_cause_id or root_cause_id in seen_roots:
-                        errors.append(
-                            cycle_prefix
-                            + ".root_cause_id must be non-empty and append-only unique"
-                        )
-                    seen_roots.add(root_cause_id)
-                    if str(cycle.get("ticket_id", "")).upper() != str(
-                        ticket_id
-                    ).upper():
-                        errors.append(
-                            cycle_prefix + ".ticket_id must match its ticket key"
-                        )
-                    try:
-                        canonical_review_root(
-                            runtime,
-                            str(ticket_id),
-                            root_cause_id,
-                            require_open=False,
-                        )
-                    except WorkflowError as exc:
-                        errors.append(cycle_prefix + f" is invalid: {exc}")
+                    root_id = str(cycle.get("root_cause_id", "")).strip()
+                    if not root_id or root_id in seen_roots:
+                        errors.append(cycle_prefix + ".root_cause_id must be non-empty and unique")
+                    seen_roots.add(root_id)
+                    if str(cycle.get("ticket_id", ticket_id)).upper() != str(ticket_id).upper():
+                        errors.append(cycle_prefix + ".ticket_id must match its parent ticket")
                     cycle_reviewers = cycle.get("reviewers", {})
                     if not isinstance(cycle_reviewers, dict):
                         errors.append(cycle_prefix + ".reviewers must be an object")
                         continue
                     for reviewer, rounds in cycle_reviewers.items():
-                        reviewer_prefix = cycle_prefix + f".reviewers.{reviewer}"
                         if reviewer not in REVIEWERS:
-                            errors.append(reviewer_prefix + " is not a valid reviewer")
+                            errors.append(cycle_prefix + f".{reviewer} is not a valid reviewer")
                             continue
-                        if not isinstance(rounds, dict):
-                            errors.append(reviewer_prefix + " must be an object")
-                            continue
-                        for round_name, record in rounds.items():
-                            errors.extend(
-                                review_record_errors(
-                                    reviewer_prefix + f".{round_name}",
-                                    round_name,
-                                    record,
-                                )
-                            )
-                            if isinstance(record, dict) and record.get(
-                                "reviewer"
-                            ) != reviewer:
-                                errors.append(
-                                    reviewer_prefix
-                                    + f".{round_name}.reviewer must match its key"
-                                )
-                        full = rounds.get("full")
-                        targeted = rounds.get("targeted")
-                        if not isinstance(full, dict):
-                            errors.append(reviewer_prefix + " requires a full review")
-                            continue
-                        errors.extend(
-                            reviewer_prefix + ": " + error
-                            for error in root_cycle_round_invariant_errors(
-                                rounds,
-                                BLOCKING_REVIEW_SEVERITIES,
-                            )
+                        validate_rounds(
+                            rounds,
+                            prefix=cycle_prefix + f".{reviewer}",
+                            allow_legacy=True,
                         )
-                        if full.get("verdict") not in {
-                            "pass",
-                            "pass_with_notes",
-                            "block",
-                        }:
-                            errors.append(
-                                reviewer_prefix
-                                + ".full verdict must be pass, pass_with_notes, or block"
-                            )
-                        if isinstance(targeted, dict):
-                            if full.get("verdict") != "block":
-                                errors.append(
-                                    reviewer_prefix
-                                    + ".targeted requires a blocking full review"
-                                )
-                            if targeted.get("verdict") not in {
-                                "pass",
-                                "pass_with_notes",
-                                "escalate",
-                            }:
-                                errors.append(
-                                    reviewer_prefix
-                                    + ".targeted verdict must be pass, "
-                                    "pass_with_notes, or escalate"
-                                )
-                            if targeted.get("candidate_sha") == full.get(
-                                "candidate_sha"
-                            ):
-                                errors.append(
-                                    reviewer_prefix
-                                    + ".targeted candidate must differ from full"
-                                )
-                            full_blocking = {
-                                str(item.get("id")): item
-                                for item in full.get("findings", [])
-                                if isinstance(item, dict)
-                                and item.get("severity")
-                                in BLOCKING_REVIEW_SEVERITIES
-                            }
-                            resolved = targeted.get("resolved", [])
-                            resolved_ids = (
-                                set(resolved) if isinstance(resolved, list) else set()
-                            )
-                            if not resolved_ids.issubset(full_blocking):
-                                errors.append(
-                                    reviewer_prefix
-                                    + ".targeted resolved IDs must come from full"
-                                )
-                            targeted_findings = targeted.get("findings", [])
-                            targeted_ids: set[str] = set()
-                            if isinstance(targeted_findings, list):
-                                for finding in targeted_findings:
-                                    if not isinstance(finding, dict):
-                                        continue
-                                    finding_id = str(finding.get("id", ""))
-                                    targeted_ids.add(finding_id)
-                                    original = full_blocking.get(finding_id)
-                                    if finding.get("new", False):
-                                        if (
-                                            original is not None
-                                            or finding.get("origin")
-                                            != "introduced_by_repair"
-                                        ):
-                                            errors.append(
-                                                reviewer_prefix
-                                                + ".targeted new findings must be "
-                                                "introduced_by_repair with a new ID"
-                                            )
-                                    elif (
-                                        not isinstance(original, dict)
-                                        or finding.get("severity")
-                                        != original.get("severity")
-                                        or finding.get("origin")
-                                        != original.get("origin")
-                                    ):
-                                        errors.append(
-                                            reviewer_prefix
-                                            + ".targeted prior findings must preserve "
-                                            "their ID, severity, and provenance"
-                                        )
-                            expected_retained = set(full_blocking) - resolved_ids
-                            if not expected_retained.issubset(targeted_ids):
-                                errors.append(
-                                    reviewer_prefix
-                                    + ".targeted must retain every unresolved "
-                                    "full-review blocker"
-                                )
-                        superseding = rounds.get("superseding")
-                        if not isinstance(superseding, dict):
-                            continue
-                        authorization_scope = str(
-                            superseding.get("authorization_scope", "")
-                        ).strip()
-                        findings = superseding.get("findings", [])
-                        resolved = superseding.get("resolved", [])
-                        try:
-                            expected_findings, _, _ = validate_superseding_review(
-                                runtime=runtime,
-                                ticket_id=str(ticket_id),
-                                reviewer=reviewer,
-                                reviewer_rounds=rounds,
-                                candidate_sha=str(
-                                    superseding.get("candidate_sha", "")
-                                ).lower(),
-                                verdict=str(superseding.get("verdict", "")),
-                                findings=findings if isinstance(findings, list) else [],
-                                new_findings=[],
-                                resolved=resolved if isinstance(resolved, list) else [],
-                                root_cause_id=root_cause_id,
-                                authorization_scope=authorization_scope,
-                                blocking_severities=BLOCKING_REVIEW_SEVERITIES,
-                                supersedes=superseding.get("supersedes"),
-                                require_available=False,
-                                root_cycle=True,
-                            )
-                            if expected_findings != findings:
-                                raise WorkflowError(
-                                    "Superseding findings do not match frozen "
-                                    "root-cycle blocking IDs"
-                                )
-                        except WorkflowError as exc:
-                            errors.append(
-                                reviewer_prefix + f".superseding is invalid: {exc}"
-                            )
-                        else:
-                            superseding_scope_counts[authorization_scope] += 1
-            for scope, count in superseding_scope_counts.items():
-                authorization = (
-                    authorizations.get(scope)
-                    if isinstance(authorizations, dict)
-                    else None
-                )
-                uses = (
-                    authorization.get("uses", 0)
-                    if isinstance(authorization, dict)
-                    else 0
-                )
-                if not isinstance(uses, int) or uses < count:
-                    errors.append(
-                        f"{milestone}.reviews superseding records reference {scope} "
-                        f"{count} times but authorization uses is {uses!r}"
-                    )
 
         phases = runtime.get("phases", {})
         if not isinstance(phases, dict):
@@ -1231,6 +893,36 @@ def runtime_state_errors(payload: dict[str, Any]) -> list[str]:
                             "a canonical root blocker during repair"
                         )
     return errors
+
+
+def runtime_state_legacy_warnings(payload: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    milestones = payload.get("milestones", {})
+    if not isinstance(milestones, dict):
+        return warnings
+    for milestone, runtime in milestones.items():
+        reviews = runtime.get("reviews", {}) if isinstance(runtime, dict) else {}
+        if not isinstance(reviews, dict):
+            continue
+        for ticket_id, ticket_reviews in reviews.items():
+            if not isinstance(ticket_reviews, dict):
+                continue
+            reviewers = ticket_reviews.get("reviewers", {})
+            if isinstance(reviewers, dict) and any(
+                isinstance(rounds, dict) and "superseding" in rounds
+                for rounds in reviewers.values()
+            ):
+                warnings.append(
+                    f"{milestone}.{ticket_id} contains legacy superseding review history; "
+                    "v1.4 reads it but never creates another superseding round"
+                )
+            cycles = ticket_reviews.get("root_cycles", [])
+            if isinstance(cycles, list) and cycles:
+                warnings.append(
+                    f"{milestone}.{ticket_id} contains {len(cycles)} legacy root review "
+                    "cycle(s); future late failures must use a new repair ticket"
+                )
+    return warnings
 
 
 def load_runtime_state(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -1617,18 +1309,6 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def recorded_at(value: object) -> dt.datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = dt.datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(dt.timezone.utc)
-
-
 def relative(root: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
@@ -1916,6 +1596,17 @@ def validate_tickets(root: Path, cfg: dict[str, Any]) -> tuple[list[str], list[s
                 warnings.append(
                     f"Potential ownership overlap in {left.milestone}: {left.id} and {right.id}"
                 )
+    active_feature_milestones = sorted(
+        {
+            item.milestone.upper()
+            for item in tickets
+            if item.status in {"ready", "done", "deferred"}
+            and MILESTONE_ID_RE.fullmatch(item.milestone.upper())
+        },
+        key=_milestone_number,
+    )
+    for milestone in active_feature_milestones:
+        errors.extend(feature_context_gate_errors(root, cfg, milestone))
     if not tickets:
         warnings.append("No non-template tickets found")
     return errors, warnings, tickets
@@ -2364,6 +2055,7 @@ def document_template_mapping(cfg: dict[str, Any]) -> dict[str, str]:
         str(Path(docs["test_plan_dir"]) / "TEST-0000-template.md"): "test-plan.md",
         str(Path(docs["ticket_dir"]) / "TICKET-0000-template.md"): "ticket.md",
         str(Path(docs["handoff_dir"]) / "HANDOFF-0000-template.md"): "handoff.md",
+        str(Path(docs["context_audit_dir"]) / "CONTEXT-0000-template.md"): "context-audit.md",
     }
 
 
@@ -2374,6 +2066,499 @@ def write_if_missing(destination: Path, source: Path) -> bool:
     shutil.copy2(source, destination)
     return True
 
+
+@dataclass(frozen=True)
+class ContextEntry:
+    name: str
+    content: str
+    line_start: int
+    line_end: int
+
+    @property
+    def normalized_name(self) -> str:
+        return normalize_context_name(self.name)
+
+    @property
+    def has_todo(self) -> bool:
+        return bool(
+            re.search(
+                r"(?i)(?:\bTODO\b|replace with|fill this|not yet documented)",
+                self.content,
+            )
+        )
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "content": self.content,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+            "has_todo": self.has_todo,
+        }
+
+
+def normalize_context_name(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip()).casefold()
+
+
+def configured_context_path(root: Path, cfg: dict[str, Any]) -> Path:
+    raw = str(cfg.get("context", {}).get("agents_file", "AGENTS.md")).strip()
+    if not raw:
+        raise WorkflowError("context.agents_file must not be empty")
+    path = Path(raw)
+    if path.is_absolute():
+        raise WorkflowError("context.agents_file must be repository-relative")
+    resolved = (root / path).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError as exc:
+        raise WorkflowError("context.agents_file must stay inside the repository") from exc
+    return resolved
+
+
+def project_context_inventory(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+    path = configured_context_path(root, cfg)
+    if not path.exists():
+        raise WorkflowError(f"Missing context file: {relative(root, path)}")
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    section_heading = str(
+        cfg.get("context", {}).get("section_heading", "Project-specific context")
+    ).strip()
+    if not section_heading:
+        raise WorkflowError("context.section_heading must not be empty")
+    heading_re = re.compile(rf"^##\s+{re.escape(section_heading)}\s*$", re.IGNORECASE)
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if heading_re.match(line.strip()):
+            if start is not None:
+                raise WorkflowError(
+                    f"Duplicate ## {section_heading} sections in {relative(root, path)}"
+                )
+            start = index
+    if start is None:
+        raise WorkflowError(
+            f"Missing ## {section_heading} in {relative(root, path)}"
+        )
+    stop = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^##\s+", lines[index]):
+            stop = index
+            break
+
+    entry_re = re.compile(r"^-\s+([^:\n]+):(?:\s*(.*))?$")
+    starts: list[tuple[int, str, str]] = []
+    for index in range(start + 1, stop):
+        match = entry_re.match(lines[index])
+        if match:
+            starts.append((index, match.group(1).strip(), (match.group(2) or "").strip()))
+
+    entries: list[ContextEntry] = []
+    for position, (index, name, inline) in enumerate(starts):
+        next_index = starts[position + 1][0] if position + 1 < len(starts) else stop
+        body_lines: list[str] = []
+        if inline:
+            body_lines.append(inline)
+        body_lines.extend(lines[index + 1 : next_index])
+        content = "\n".join(body_lines).strip()
+        entries.append(
+            ContextEntry(
+                name=name,
+                content=content,
+                line_start=index + 1,
+                line_end=max(index + 1, next_index),
+            )
+        )
+
+    by_name: dict[str, list[ContextEntry]] = collections.defaultdict(list)
+    for entry in entries:
+        by_name[entry.normalized_name].append(entry)
+    duplicates = [items[0].name for items in by_name.values() if len(items) > 1]
+
+    configured_required = cfg.get("context", {}).get("required_entries", [])
+    required = [str(item).strip() for item in configured_required] if isinstance(
+        configured_required, list
+    ) else []
+    required = [item for item in required if item]
+    existing_names = set(by_name)
+    missing = [item for item in required if normalize_context_name(item) not in existing_names]
+    required_names = {normalize_context_name(item) for item in required}
+    extras = [entry.name for entry in entries if entry.normalized_name not in required_names]
+    section_text = "\n".join(lines[start:stop]).rstrip() + "\n"
+    digest = hashlib.sha256(section_text.encode("utf-8")).hexdigest()
+    return {
+        "path": relative(root, path),
+        "section_heading": section_heading,
+        "line_start": start + 1,
+        "line_end": stop,
+        "sha256": digest,
+        "entries": [entry.payload() for entry in entries],
+        "required_entries": required,
+        "missing_required": missing,
+        "duplicate_entries": duplicates,
+        "extra_entries": extras,
+        "todo_entries": [entry.name for entry in entries if entry.has_todo],
+    }
+
+
+def _milestone_number(value: str) -> int:
+    match = MILESTONE_ID_RE.fullmatch(value.strip())
+    if not match:
+        raise WorkflowError(f"Invalid milestone ID: {value}")
+    return int(match.group(1))
+
+
+def known_milestones(root: Path, cfg: dict[str, Any]) -> list[str]:
+    values: set[str] = set()
+    roadmap = root / str(cfg["documents"]["roadmap"])
+    if roadmap.exists():
+        for match in ROADMAP_MILESTONE_HEADING_RE.finditer(
+            roadmap.read_text(encoding="utf-8")
+        ):
+            values.add(match.group(1).upper())
+    for ticket in load_tickets(root, cfg):
+        if MILESTONE_ID_RE.fullmatch(ticket.milestone.strip()):
+            values.add(ticket.milestone.upper())
+    audit_dir = root / str(cfg["documents"].get("context_audit_dir", "docs/context-audits"))
+    if audit_dir.is_dir():
+        for path in audit_dir.glob("*.md"):
+            if "template" in path.name.lower():
+                continue
+            try:
+                metadata, _ = parse_frontmatter(path)
+            except WorkflowError:
+                continue
+            milestone = str(metadata.get("milestone", "")).upper()
+            status = str(metadata.get("status", "")).lower()
+            if status in {"approved", "verified"} and MILESTONE_ID_RE.fullmatch(milestone):
+                values.add(milestone)
+    try:
+        state = load_runtime_state(root, cfg)
+    except WorkflowError:
+        state = {}
+    milestones = state.get("milestones", {}) if isinstance(state, dict) else {}
+    if isinstance(milestones, dict):
+        for milestone in milestones:
+            normalized = str(milestone).upper()
+            if MILESTONE_ID_RE.fullmatch(normalized):
+                values.add(normalized)
+    return sorted(values, key=_milestone_number)
+
+
+def next_milestone_id(root: Path, cfg: dict[str, Any]) -> str:
+    milestones = known_milestones(root, cfg)
+    return f"M{max((_milestone_number(item) for item in milestones), default=-1) + 1}"
+
+
+def roadmap_milestone_statuses(root: Path, cfg: dict[str, Any]) -> dict[str, str]:
+    path = root / str(cfg["documents"]["roadmap"])
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    matches = list(ROADMAP_MILESTONE_HEADING_RE.finditer(text))
+    statuses: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        body_start = match.end()
+        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[body_start:body_end]
+        status_match = re.search(
+            r"(?im)^\s*[-*]?\s*\*\*Status:\*\*\s*`?([A-Za-z0-9_-]+)`?",
+            body,
+        )
+        statuses[match.group(1).upper()] = (
+            status_match.group(1).lower() if status_match else "unknown"
+        )
+    return statuses
+
+
+def milestone_completion_state(
+    root: Path, cfg: dict[str, Any], milestone: str
+) -> dict[str, Any]:
+    normalized = milestone.upper()
+    roadmap_status = roadmap_milestone_statuses(root, cfg).get(normalized, "unknown")
+    tickets = [ticket for ticket in load_tickets(root, cfg) if ticket.milestone.upper() == normalized]
+    ticket_statuses = {ticket.id: ticket.status for ticket in tickets}
+    all_terminal = bool(tickets) and all(
+        ticket.status in {"done", "deferred"} for ticket in tickets
+    )
+    closed = roadmap_status == "closed"
+    return {
+        "milestone": normalized,
+        "roadmap_status": roadmap_status,
+        "ticket_statuses": ticket_statuses,
+        "all_tickets_terminal": all_terminal,
+        "closed": closed,
+        "state": "closed" if closed else "terminal_unclosed" if all_terminal else roadmap_status,
+    }
+
+
+def open_prior_milestones(
+    root: Path, cfg: dict[str, Any], candidate: str
+) -> list[dict[str, Any]]:
+    candidate_number = _milestone_number(candidate)
+    result: list[dict[str, Any]] = []
+    for milestone in known_milestones(root, cfg):
+        if _milestone_number(milestone) >= candidate_number:
+            continue
+        state = milestone_completion_state(root, cfg, milestone)
+        if not state["closed"]:
+            result.append(state)
+    return result
+
+
+def _safe_goal_slug(goal: str) -> str:
+    ascii_value = goal.encode("ascii", "ignore").decode("ascii")
+    try:
+        slug = slugify(ascii_value)
+    except WorkflowError:
+        slug = "feature"
+    return slug[:48].rstrip("-._") or "feature"
+
+
+def current_commit(root: Path) -> str:
+    proc = run(["git", "rev-parse", "HEAD"], cwd=root, check=False)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def render_context_audit(
+    *,
+    milestone: str,
+    goal: str,
+    baseline_commit: str,
+    inventory: dict[str, Any],
+) -> str:
+    entry_names = [str(item["name"]) for item in inventory["entries"]]
+    known = {normalize_context_name(item) for item in entry_names}
+    for required in inventory["required_entries"]:
+        if normalize_context_name(required) not in known:
+            entry_names.append(required)
+            known.add(normalize_context_name(required))
+    rows = "\n".join(
+        f"| {name} | TODO | TODO | TODO | TODO |" for name in entry_names
+    )
+    rendered_entries = json.dumps(entry_names, ensure_ascii=False, indent=2)
+    return f'''+++
+milestone = {json.dumps(milestone)}
+goal = {json.dumps(goal, ensure_ascii=False)}
+status = "draft"
+baseline_commit = {json.dumps(baseline_commit)}
+verified_commit = ""
+before_context_sha256 = {json.dumps(str(inventory["sha256"]))}
+after_context_sha256 = ""
+entries = {rendered_entries}
+reviewers = []
++++
+
+# Context audit: {milestone} — {goal}
+
+This audit covers every top-level entry under `## {inventory["section_heading"]}`.
+Current shipped facts and planned intent must remain distinct.
+
+## Feature request
+
+- Requested outcome: {goal}
+- User/operator value: TODO
+- Scope hint: TODO or not supplied
+- Proposed milestone: {milestone}
+
+## Repository baseline
+
+- Exact baseline commit: {baseline_commit or "unborn repository"}
+- Current branch: TODO
+- Relevant manifests/build files: TODO
+- Relevant source entry points: TODO
+- Relevant tests/CI/configuration: TODO
+
+## Entry-by-entry audit
+
+`Classification` is one of `confirmed`, `stale`, `contradicted`, `missing`, or
+`planned-only`.
+
+| Entry | Classification before update | Repository evidence | Required update | Result after update |
+|---|---|---|---|---|
+{rows}
+
+## Planned-feature placement
+
+At planning time, place the requested feature only under the configured planned-change
+entry with `{milestone}` and `planned` status. Do not describe it as shipped. At close,
+refresh every entry against the integrated commit and move verified facts into the
+appropriate current-state entries.
+
+## Context update summary
+
+- Stale claims removed or corrected: TODO
+- Current facts added: TODO
+- Planned-only statements added: TODO
+- Statements deliberately unchanged: TODO
+
+## Plan implications
+
+- Product/roadmap implications: TODO
+- Architecture/ownership implications: TODO
+- Invariants/security/compatibility implications: TODO
+- Generated-file/tooling implications: TODO
+- Local development/validation implications: TODO
+
+## Review verdicts
+
+- Product Manager: TODO
+- Architect: TODO
+- QA: TODO
+- Team Lead: TODO
+'''
+
+
+def context_audit_errors(
+    root: Path,
+    cfg: dict[str, Any],
+    path: Path,
+    *,
+    expected_milestone: str | None = None,
+    require_approved: bool = False,
+) -> list[str]:
+    errors: list[str] = []
+    try:
+        metadata, body = parse_frontmatter(path)
+    except WorkflowError as exc:
+        return [str(exc)]
+    milestone = str(metadata.get("milestone", "")).upper()
+    if not MILESTONE_ID_RE.fullmatch(milestone):
+        errors.append(f"{relative(root, path)}: milestone is invalid")
+    if expected_milestone and milestone != expected_milestone.upper():
+        errors.append(
+            f"{relative(root, path)}: milestone {milestone!r} does not match "
+            f"{expected_milestone.upper()}"
+        )
+    if not str(metadata.get("goal", "")).strip():
+        errors.append(f"{relative(root, path)}: goal is required")
+    status = str(metadata.get("status", "")).lower()
+    if status not in CONTEXT_AUDIT_STATUSES:
+        errors.append(f"{relative(root, path)}: status must be draft, approved, or verified")
+    before_hash = str(metadata.get("before_context_sha256", ""))
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", before_hash):
+        errors.append(f"{relative(root, path)}: before_context_sha256 must be SHA-256")
+    baseline_commit = str(metadata.get("baseline_commit", ""))
+    if status in {"approved", "verified"} and not re.fullmatch(
+        r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", baseline_commit
+    ):
+        errors.append(f"{relative(root, path)}: baseline_commit must be exact")
+    if status == "verified" and not re.fullmatch(
+        r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+        str(metadata.get("verified_commit", "")),
+    ):
+        errors.append(f"{relative(root, path)}: verified_commit must be exact")
+
+    entries = metadata.get("entries", [])
+    if not isinstance(entries, list) or not entries or any(
+        not str(item).strip() for item in entries
+    ):
+        errors.append(f"{relative(root, path)}: entries must be a non-empty string array")
+        entries = []
+    inventory = project_context_inventory(root, cfg)
+    required = {
+        normalize_context_name(str(item))
+        for item in inventory.get("required_entries", [])
+    }
+    recorded = {normalize_context_name(str(item)) for item in entries}
+    missing = sorted(required - recorded)
+    if missing:
+        errors.append(
+            f"{relative(root, path)}: audit omits required entries: " + ", ".join(missing)
+        )
+    for item in entries:
+        if str(item) not in body:
+            errors.append(
+                f"{relative(root, path)}: body has no audit row/section for {item}"
+            )
+
+    if require_approved or status in {"approved", "verified"}:
+        if status not in {"approved", "verified"}:
+            errors.append(f"{relative(root, path)}: audit is not approved")
+        after_hash = str(metadata.get("after_context_sha256", ""))
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", after_hash):
+            errors.append(f"{relative(root, path)}: after_context_sha256 must be SHA-256")
+        elif after_hash.lower() != str(inventory["sha256"]).lower():
+            errors.append(
+                f"{relative(root, path)}: after_context_sha256 does not match current "
+                f"## {inventory['section_heading']}"
+            )
+        reviewers = metadata.get("reviewers", [])
+        expected_reviewers = {"product_manager", "architect", "qa"}
+        actual_reviewers = (
+            {str(item) for item in reviewers} if isinstance(reviewers, list) else set()
+        )
+        if not expected_reviewers.issubset(actual_reviewers):
+            errors.append(
+                f"{relative(root, path)}: approved audit requires product_manager, "
+                "architect, and qa reviewers"
+            )
+        if re.search(r"(?i)\bTODO\b", body):
+            errors.append(f"{relative(root, path)}: approved audit still contains TODO")
+    return errors
+
+
+def iter_context_audit_paths(root: Path, cfg: dict[str, Any]) -> list[Path]:
+    directory = root / str(cfg["documents"].get("context_audit_dir", "docs/context-audits"))
+    if not directory.is_dir():
+        return []
+    return [
+        path
+        for path in sorted(directory.glob("*.md"))
+        if "template" not in path.name.lower() and path.name.lower() != "readme.md"
+    ]
+
+
+def milestone_context_audit_paths(
+    root: Path,
+    cfg: dict[str, Any],
+    milestone: str,
+) -> list[Path]:
+    expected = milestone.upper()
+    matches: list[Path] = []
+    for path in iter_context_audit_paths(root, cfg):
+        try:
+            metadata, _ = parse_frontmatter(path)
+        except WorkflowError:
+            continue
+        if str(metadata.get("milestone", "")).upper() == expected:
+            matches.append(path)
+    return matches
+
+
+def feature_context_gate_errors(
+    root: Path,
+    cfg: dict[str, Any],
+    milestone: str,
+) -> list[str]:
+    """Return feature-context gate failures for milestones that have an audit.
+
+    Bootstrap/ordinary-plan milestones remain compatible when they have no audit.
+    Once feature mode creates one, the approved/verified audit is mandatory before
+    any ticket in that milestone may become ready.
+    """
+
+    if not bool(cfg.get("context", {}).get("require_feature_audit", True)):
+        return []
+    paths = milestone_context_audit_paths(root, cfg, milestone)
+    if not paths:
+        return []
+    errors: list[str] = []
+    if len(paths) != 1:
+        errors.append(
+            f"{milestone.upper()}: expected exactly one context audit, found {len(paths)}"
+        )
+    for path in paths:
+        errors.extend(
+            context_audit_errors(
+                root,
+                cfg,
+                path,
+                expected_milestone=milestone,
+                require_approved=True,
+            )
+        )
+    return errors
 
 
 @dataclass(frozen=True)
@@ -2412,6 +2597,347 @@ def _matches_any_glob(path: str, patterns: Sequence[str]) -> bool:
         or PurePosixPath(normalized).match(pattern)
         for pattern in patterns
     )
+
+
+def _normalized_text_bytes(data: bytes) -> bytes:
+    """Normalize only line endings for deterministic cross-platform hashes."""
+
+    if b"\0" in data:
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
+def _logical_hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(_normalized_text_bytes(data)).hexdigest()
+
+
+def _git_blob(root: Path, ref: str, path: str) -> bytes | None:
+    proc = subprocess.run(
+        ["git", "show", f"{ref}:{path}"],
+        cwd=str(root),
+        capture_output=True,
+        check=False,
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _git_has_commit(root: Path, ref: str = "HEAD") -> bool:
+    return run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root, check=False).returncode == 0
+
+
+def _status_paths(root: Path) -> list[tuple[str, str]]:
+    proc = run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=root,
+    )
+    result: list[tuple[str, str]] = []
+    for raw in proc.stdout.splitlines():
+        if len(raw) < 4:
+            continue
+        status = raw[:2]
+        value = raw[3:].strip()
+        if " -> " in value:
+            old, new = value.split(" -> ", 1)
+            result.append((status, old.strip('"')))
+            result.append((status, new.strip('"')))
+        else:
+            result.append((status, value.strip('"')))
+    return result
+
+
+def _protected_paths_in_diff(
+    root: Path,
+    patterns: Sequence[str],
+    *,
+    base: str,
+    candidate: str,
+) -> list[str]:
+    proc = run(
+        ["git", "diff", "--name-only", "--no-renames", base, candidate],
+        cwd=root,
+    )
+    return sorted(
+        {
+            path.strip().replace("\\", "/")
+            for path in proc.stdout.splitlines()
+            if path.strip() and _matches_any_glob(path.strip(), patterns)
+        }
+    )
+
+
+def _extract_protected_section_bytes(data: bytes, key: str) -> bytes | None:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if key == "AGENTS.md#codex_milestone_workflow":
+        begin, end_marker = AGENTS_WORKFLOW_BEGIN, AGENTS_WORKFLOW_END
+    elif key == ".gitattributes#codex_milestone_workflow_control_plane":
+        begin, end_marker = GITATTRIBUTES_WORKFLOW_BEGIN, GITATTRIBUTES_WORKFLOW_END
+    else:
+        return None
+    if normalized.count(begin) != 1 or normalized.count(end_marker) != 1:
+        return None
+    start = normalized.index(begin)
+    end = normalized.index(end_marker, start) + len(end_marker)
+    return normalized[start:end].encode("utf-8")
+
+
+def _extract_protected_section(root: Path, key: str) -> bytes | None:
+    """Read a package-owned section embedded in a project-owned file."""
+
+    path_name = key.split("#", 1)[0]
+    path = root / path_name
+    if not path.is_file():
+        return None
+    try:
+        return _extract_protected_section_bytes(path.read_bytes(), key)
+    except OSError:
+        return None
+
+
+def control_plane_report(
+    root: Path,
+    cfg: dict[str, Any],
+    *,
+    base: str | None = None,
+    candidate: str | None = None,
+    include_worktree: bool = True,
+) -> dict[str, Any]:
+    section = cfg.get("control_plane", {})
+    if not isinstance(section, dict):
+        section = {}
+    policy = str(section.get("managed_drift_policy", "block"))
+    patterns = section.get("protected_globs", [])
+    if not isinstance(patterns, list):
+        patterns = []
+    patterns = [str(item) for item in patterns if str(item).strip()]
+    violations: list[str] = []
+    warnings: list[str] = []
+    manifest_drift: list[dict[str, str]] = []
+    section_drift: list[dict[str, str]] = []
+    candidate_section_drift: list[dict[str, str]] = []
+    worktree_paths: list[str] = []
+    candidate_paths: list[str] = []
+
+    manifest_rel = str(section.get("manifest_path", INSTALL_METADATA_PATH)).strip()
+    manifest_path = root / manifest_rel
+    metadata: dict[str, Any] = {}
+    expected: dict[str, str] = {}
+    expected_sections: dict[str, str] = {}
+    if policy != "off":
+        if not manifest_path.exists():
+            installed_skill = root / ".agents/skills/milestone-workflow/SKILL.md"
+            if installed_skill.exists():
+                violations.append(f"missing control-plane manifest: {manifest_rel}")
+            else:
+                warnings.append(
+                    "control-plane manifest is absent in a minimal/non-installed fixture"
+                )
+        else:
+            try:
+                metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                violations.append(f"cannot parse control-plane manifest {manifest_rel}: {exc}")
+                metadata = {}
+            for field in ("managed_files", "protected_files"):
+                values = metadata.get(field, {})
+                if values is None:
+                    continue
+                if not isinstance(values, dict):
+                    violations.append(f"{manifest_rel}.{field} must be an object")
+                    continue
+                for path, digest in values.items():
+                    expected[str(path)] = str(digest)
+            for path, digest in sorted(expected.items()):
+                destination = root / path
+                if not destination.is_file():
+                    manifest_drift.append(
+                        {"path": path, "expected": digest, "actual": "missing"}
+                    )
+                    continue
+                actual = _logical_hash_bytes(destination.read_bytes())
+                if actual != digest:
+                    manifest_drift.append(
+                        {"path": path, "expected": digest, "actual": actual}
+                    )
+            raw_sections = metadata.get("protected_sections", {})
+            if raw_sections is None:
+                raw_sections = {}
+            if not isinstance(raw_sections, dict):
+                violations.append(f"{manifest_rel}.protected_sections must be an object")
+            else:
+                for key, digest in sorted(raw_sections.items()):
+                    key_text = str(key)
+                    expected_digest = str(digest)
+                    expected_sections[key_text] = expected_digest
+                    current = _extract_protected_section(root, key_text)
+                    actual = "missing" if current is None else _logical_hash_bytes(current)
+                    if actual != expected_digest:
+                        section_drift.append(
+                            {"path": key_text, "expected": expected_digest, "actual": actual}
+                        )
+            if manifest_drift:
+                violations.append(
+                    "installed control-plane files drifted from the installer manifest: "
+                    + ", ".join(item["path"] for item in manifest_drift)
+                )
+            if section_drift:
+                violations.append(
+                    "package-owned document sections drifted from the installer manifest: "
+                    + ", ".join(item["path"] for item in section_drift)
+                )
+
+    has_head = _git_has_commit(root)
+    if include_worktree and policy != "off":
+        for status, path in _status_paths(root):
+            normalized = path.replace("\\", "/")
+            if not _matches_any_glob(normalized, patterns):
+                continue
+            current = root / normalized
+            current_hash = _logical_hash_bytes(current.read_bytes()) if current.is_file() else ""
+            if normalized in expected and current_hash == expected[normalized]:
+                warnings.append(
+                    f"installer-authenticated control-plane update is not committed: {normalized}"
+                )
+                continue
+            if normalized == manifest_rel and current.is_file() and metadata:
+                warnings.append(
+                    f"installer control-plane manifest is not committed: {normalized}"
+                )
+                continue
+            head_blob = _git_blob(root, "HEAD", normalized) if has_head else None
+            if current.is_file() and head_blob is not None:
+                if current_hash == _logical_hash_bytes(head_blob):
+                    continue
+            worktree_paths.append(normalized)
+        worktree_paths = sorted(set(worktree_paths))
+        if worktree_paths:
+            if has_head:
+                violations.append(
+                    "protected control-plane paths have working-tree changes: "
+                    + ", ".join(worktree_paths)
+                )
+            else:
+                warnings.append(
+                    "initial control-plane files are uncommitted; create the first Git commit "
+                    "before plan/execute"
+                )
+
+    if candidate and policy != "off":
+        selected_base = base or str(cfg.get("workflow", {}).get("base_branch", "main"))
+        if not _git_has_commit(root, selected_base):
+            violations.append(f"control-plane diff base is not a commit: {selected_base}")
+        elif not _git_has_commit(root, candidate):
+            violations.append(f"control-plane candidate is not a commit: {candidate}")
+        else:
+            candidate_paths = _protected_paths_in_diff(
+                root,
+                patterns,
+                base=selected_base,
+                candidate=candidate,
+            )
+            if candidate_paths:
+                violations.append(
+                    f"candidate {candidate} changes protected control-plane paths: "
+                    + ", ".join(candidate_paths)
+                )
+            for key, expected_digest in sorted(expected_sections.items()):
+                path_name = key.split("#", 1)[0]
+                blob = _git_blob(root, candidate, path_name)
+                current = (
+                    None
+                    if blob is None
+                    else _extract_protected_section_bytes(blob, key)
+                )
+                actual = "missing" if current is None else _logical_hash_bytes(current)
+                if actual != expected_digest:
+                    candidate_section_drift.append(
+                        {"path": key, "expected": expected_digest, "actual": actual}
+                    )
+            if candidate_section_drift:
+                violations.append(
+                    f"candidate {candidate} changes package-owned document sections: "
+                    + ", ".join(item["path"] for item in candidate_section_drift)
+                )
+
+    clear = not violations or policy in {"warn", "off"}
+    if policy == "warn" and violations:
+        warnings.extend(violations)
+    return {
+        "policy": policy,
+        "manifest": manifest_rel,
+        "manifest_package_version": metadata.get("package_version"),
+        "manifest_drift": manifest_drift,
+        "section_drift": section_drift,
+        "candidate_section_drift": candidate_section_drift,
+        "worktree_paths": worktree_paths,
+        "candidate_paths": candidate_paths,
+        "violations": violations,
+        "warnings": sorted(set(warnings)),
+        "clear": clear,
+    }
+
+
+def _append_workflow_debt(
+    root: Path,
+    cfg: dict[str, Any],
+    *,
+    milestone: str,
+    ticket_id: str,
+    summary: str,
+    evidence: Sequence[str],
+    proposed_fix: str,
+) -> bool:
+    section = cfg.get("control_plane", {})
+    configured = str(
+        section.get(
+            "workflow_debt_path",
+            cfg.get("documents", {}).get("workflow_debt", "docs/workflow-debt.md"),
+        )
+    )
+    path = root / configured
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(
+            "# Workflow Debt\n\nControl-plane capability gaps discovered during product work.\n\n",
+            encoding="utf-8",
+        )
+    fingerprint = hashlib.sha256(
+        f"{milestone}|{ticket_id}|{summary}".encode("utf-8")
+    ).hexdigest()[:12]
+    marker = f"<!-- workflow-debt:{fingerprint} -->"
+    existing = path.read_text(encoding="utf-8")
+    if marker in existing:
+        return False
+    lines = [
+        marker,
+        f"## {milestone.upper()} / {ticket_id.upper() or 'milestone'} — {summary.strip()}",
+        "",
+        "- Status: proposed",
+        "- Discovered during product execution: yes",
+    ]
+    for item in evidence:
+        if str(item).strip():
+            lines.append(f"- Evidence: {str(item).strip()}")
+    if proposed_fix.strip():
+        lines.append(f"- Proposed workflow change: {proposed_fix.strip()}")
+    lines.extend(
+        [
+            "- Required action: stop product execution and run an explicit workflow-maintenance/upgrade task.",
+            "",
+        ]
+    )
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        if existing and not existing.endswith("\n"):
+            handle.write("\n")
+        handle.write("\n".join(lines))
+    return True
 
 
 def _is_test_path(path: str) -> bool:
@@ -2805,7 +3331,7 @@ def evaluate_test_budget(
             "allowed_tests": round(allowed_delta_tests, 3),
             "ratio": None if delta_code == 0 else round(delta_tests / delta_code, 6),
         }
-        if gate == "ticket" and delta_tests > allowed_delta_tests:
+        if delta_tests > allowed_delta_tests:
             reasons.append(
                 f"test delta {delta_tests} exceeds allowance {allowed_delta_tests:.1f} "
                 f"for code delta {delta_code}"
@@ -2950,326 +3476,14 @@ def _review_passes(verdict: str, cfg: dict[str, Any]) -> bool:
     )
 
 
-def canonical_review_root(
-    runtime: dict[str, Any],
-    ticket_id: str,
-    root_cause_id: str,
-    *,
-    require_open: bool,
-) -> dict[str, Any]:
-    root = runtime.get("blockers", {}).get(root_cause_id)
-    if (
-        not root_cause_id
-        or not isinstance(root, dict)
-        or root.get("derived_from")
-        or str(root.get("root_cause_id", "")) != root_cause_id
-        or str(root.get("ticket_id", "")).upper() != ticket_id.upper()
-        or (require_open and root.get("status", "open") != "open")
-    ):
-        state = "open " if require_open else ""
-        raise WorkflowError(
-            f"--root-blocker must name {ticket_id}'s {state}canonical root exactly"
-        )
-    return root
-
-
-def find_root_review_cycle(
-    ticket_reviews: dict[str, Any],
-    root_cause_id: str,
-) -> dict[str, Any] | None:
-    cycles = ticket_reviews.get("root_cycles", [])
-    if not isinstance(cycles, list):
-        raise WorkflowError("Root-scoped review cycles must be an array")
-    matching = [
-        cycle
-        for cycle in cycles
-        if isinstance(cycle, dict)
-        and str(cycle.get("root_cause_id", "")) == root_cause_id
-    ]
-    if len(matching) > 1:
-        raise WorkflowError(
-            f"Canonical root {root_cause_id} already has multiple review cycles"
-        )
-    return matching[0] if matching else None
-
-
-def validate_superseding_review(
-    *,
-    runtime: dict[str, Any],
-    ticket_id: str,
-    reviewer: str = "",
-    reviewer_rounds: dict[str, Any],
-    candidate_sha: str,
-    verdict: str,
-    findings: Sequence[dict[str, Any]],
-    new_findings: Sequence[dict[str, Any]],
-    resolved: Sequence[str],
-    root_cause_id: str,
-    authorization_scope: str,
-    blocking_severities: set[str],
-    phase: dict[str, Any] | None = None,
-    supersedes: object = None,
-    require_available: bool = True,
-    root_cycle: bool = False,
-) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str]]:
-    if any(not isinstance(item, dict) for item in findings + new_findings):
-        raise WorkflowError("Superseding review findings must be objects")
-    if any(not isinstance(item, str) or not item.strip() for item in resolved):
-        raise WorkflowError("Superseding resolved IDs must be non-empty strings")
-    if verdict not in {"pass", "pass_with_notes", "escalate"}:
-        raise WorkflowError(
-            "Superseding review verdict must be pass, pass_with_notes, or escalate"
-        )
-    if new_findings:
-        raise WorkflowError("Superseding review does not accept new findings")
-    full = reviewer_rounds.get("full")
-    targeted = reviewer_rounds.get("targeted")
-    if not isinstance(full, dict):
-        raise WorkflowError("Superseding review requires the original full review")
-    if root_cycle:
-        if isinstance(targeted, dict):
-            if full.get("verdict") != "block" or targeted.get("verdict") != "escalate":
-                raise WorkflowError(
-                    "Root-cycle targeted verification requires a blocking full "
-                    "review and targeted escalation"
-                )
-            prior = targeted
-        else:
-            if full.get("verdict") not in {"pass", "pass_with_notes"}:
-                raise WorkflowError(
-                    "Root-cycle verification without targeted escalation requires "
-                    "a passing baseline review"
-                )
-            prior = full
-    else:
-        if full.get("verdict") != "block":
-            raise WorkflowError(
-                "Superseding review requires the original blocking full review"
-            )
-        if not isinstance(targeted, dict) or targeted.get("verdict") != "escalate":
-            raise WorkflowError(
-                "Superseding review requires a prior targeted escalation"
-            )
-        prior = targeted
-    prior_sha = str(prior.get("candidate_sha", "")).lower()
-    if candidate_sha == prior_sha:
-        raise WorkflowError(
-            "Superseding review candidate must differ from the prior root-cycle SHA"
-            if root_cycle
-            else "Superseding review candidate must differ from the targeted escalation SHA"
-        )
-    root = canonical_review_root(
-        runtime,
-        ticket_id,
-        root_cause_id,
-        require_open=require_available,
-    )
-    if phase is not None and (
-        phase.get("phase") != "repair"
-        or phase.get("root_cause_id") != root_cause_id
-    ):
-        raise WorkflowError(
-            f"Superseding review root {root_cause_id} does not match the active repair root"
-        )
-    if phase is not None:
-        phase_sha = str(phase.get("candidate_sha", "")).lower()
-        if not phase_sha or phase_sha != candidate_sha:
-            raise WorkflowError(
-                f"Superseding review candidate {candidate_sha} does not match "
-                f"active repair SHA {phase_sha or 'missing'}"
-            )
-    if not authorization_scope:
-        raise WorkflowError("Superseding review requires --authorization-scope")
-    authorization = runtime.get("authorizations", {}).get(authorization_scope)
-    blocker_class = str(root.get("class", ""))
-    risk = str(root.get("risk", ""))
-    if not isinstance(authorization, dict):
-        raise WorkflowError(
-            f"Superseding review authorization scope {authorization_scope} is missing"
-        )
-    if authorization.get("max_uses") != 1:
-        raise WorkflowError(
-            "Superseding review requires a single-use review_round_override scope"
-        )
-    uses = authorization.get("uses", 0)
-    if require_available and (isinstance(uses, bool) or uses != 0):
-        raise WorkflowError(
-            f"Superseding review requires an unused authorization scope; "
-            f"{authorization_scope} is exhausted or revoked"
-        )
-    if not require_available and (
-        isinstance(uses, bool)
-        or uses != 1
-        or authorization.get("status") != "revoked"
-    ):
-        raise WorkflowError(
-            "Superseding runtime record requires its consumed single-use "
-            "review_round_override scope"
-        )
-    if not authorization_record_covers(
-        authorization,
-        action="review_round_override",
-        ticket_id=ticket_id,
-        blocker_class=blocker_class,
-        risk=risk,
-        remote_effects=False,
-        require_available=require_available,
-    ):
-        if require_available and authorization.get("status") != "granted":
-            raise WorkflowError(
-                f"Superseding review requires an unused authorization scope; "
-                f"{authorization_scope} is exhausted or revoked"
-            )
-        raise WorkflowError(
-            f"Superseding review authorization scope {authorization_scope} "
-            f"does not cover {ticket_id}/{blocker_class}/{risk}"
-        )
-    if root_cycle:
-        bound_root = str(authorization.get("root_cause_id", "")).strip()
-        bound_reviewer = str(authorization.get("reviewer", "")).strip()
-        if not bound_root or not bound_reviewer:
-            raise WorkflowError(
-                "Root-cycle verification requires a review_round_override scope "
-                "pre-bound to its canonical root and reviewer"
-            )
-        if bound_root != root_cause_id:
-            raise WorkflowError(
-                f"Superseding review authorization scope {authorization_scope} "
-                f"is bound to canonical root {bound_root}"
-            )
-        if bound_reviewer != reviewer:
-            raise WorkflowError(
-                f"Superseding review authorization scope {authorization_scope} "
-                f"is bound to reviewer {bound_reviewer}"
-            )
-    prior_at = recorded_at(prior.get("recorded_at"))
-    repairs = runtime.get("repairs", {}).get(ticket_id, [])
-    authorizations = runtime.get("authorizations", {})
-    root_overrides = runtime.get("repair_overrides", {}).get(root_cause_id, [])
-
-    def is_authorized_later_repair(item: object) -> bool:
-        if not isinstance(item, dict):
-            return False
-        scope = str(item.get("budget_override_authorization_scope", "")).strip()
-        override = authorizations.get(scope) if isinstance(authorizations, dict) else None
-        override_uses = override.get("uses", 0) if isinstance(override, dict) else 0
-        return bool(
-            item.get("root_cause_id") == root_cause_id
-            and item.get("consumes_budget", True)
-            and (
-                root_cycle
-                or (
-                    prior_at is not None
-                    and (
-                        recorded_at(item.get("recorded_at"))
-                        or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
-                    )
-                    > prior_at
-                )
-            )
-            and scope
-            and isinstance(root_overrides, list)
-            and any(
-                isinstance(entry, dict)
-                and entry.get("authorization_scope") == scope
-                for entry in root_overrides
-            )
-            and isinstance(override, dict)
-            and authorization_record_covers(
-                override,
-                action="repair_budget_override",
-                ticket_id=ticket_id,
-                blocker_class=blocker_class,
-                risk=risk,
-                remote_effects=False,
-                require_available=False,
-            )
-            and not isinstance(override_uses, bool)
-            and override_uses >= 1
-        )
-
-    candidate_repairs = repairs if isinstance(repairs, list) else []
-    if root_cycle:
-        root_repairs = [
-            item
-            for item in candidate_repairs
-            if isinstance(item, dict)
-            and item.get("root_cause_id") == root_cause_id
-            and item.get("consumes_budget", True)
-        ]
-        candidate_repairs = root_repairs[1:]
-    later_repair = any(is_authorized_later_repair(item) for item in candidate_repairs)
-    if not later_repair:
-        raise WorkflowError(
-            "Superseding review requires a later budget-consuming repair with a "
-            "separately authorized repair_budget_override scope for canonical root "
-            f"{root_cause_id}"
-        )
-    prior_open = {
-        str(item.get("id")): item
-        for item in prior.get("findings", [])
-        if isinstance(item, dict) and item.get("severity") in blocking_severities
-    }
-    if isinstance(targeted, dict) and not prior_open:
-        raise WorkflowError(
-            "Targeted escalation must retain at least one blocking finding"
-        )
-    resolved_ids = set(resolved)
-    if len(resolved_ids) != len(resolved) or not resolved_ids.issubset(prior_open):
-        raise WorkflowError(
-            "--resolved must uniquely name findings in the prior root-cycle review"
-            if root_cycle
-            else "--resolved must uniquely name findings in the targeted escalation"
-        )
-    remaining = {
-        finding_id: dict(item)
-        for finding_id, item in prior_open.items()
-        if finding_id not in resolved_ids
-    }
-    for item in findings:
-        finding_id = str(item.get("id", ""))
-        if finding_id not in prior_open:
-            raise WorkflowError(
-                "Superseding --finding must reuse a blocking finding still open "
-                f"in the prior root-cycle review: {finding_id}"
-                if root_cycle
-                else "Superseding --finding must reuse a blocking finding still "
-                f"open in the targeted escalation: {finding_id}"
-            )
-        if finding_id in resolved_ids:
-            raise WorkflowError(
-                f"Superseding finding {finding_id} cannot be both resolved and open"
-            )
-        prior_finding = prior_open[finding_id]
-        if item.get("severity") != prior_finding.get("severity"):
-            raise WorkflowError(
-                f"Superseding finding {finding_id} must retain its targeted severity"
-            )
-        retained = dict(prior_finding)
-        retained["summary"] = item["summary"]
-        remaining[finding_id] = retained
-    if verdict in {"pass", "pass_with_notes"} and remaining:
-        raise WorkflowError(
-            "Superseding passing verdict leaves unresolved blocking findings: "
-            + ", ".join(sorted(remaining))
-        )
-    if verdict == "escalate" and not remaining:
-        raise WorkflowError(
-            "Superseding escalation must retain at least one blocking finding"
-        )
-    expected_supersedes = {
-        "round": str(prior.get("round", "")),
-        "candidate_sha": prior_sha,
-        "verdict": str(prior.get("verdict", "")),
-    }
-    if (
-        (not require_available or supersedes is not None)
-        and supersedes != expected_supersedes
-    ):
-        raise WorkflowError(
-            "Superseding record must exactly preserve targeted SHA/verdict"
-        )
-    return list(remaining.values()), authorization, expected_supersedes
+def _effective_review_record(rounds: Any) -> tuple[str, dict[str, Any] | None]:
+    if not isinstance(rounds, dict):
+        return "", None
+    for name in ("superseding", "targeted", "full"):
+        record = rounds.get(name)
+        if isinstance(record, dict):
+            return name, record
+    return "", None
 
 
 def review_gate_status(
@@ -3278,112 +3492,39 @@ def review_gate_status(
     cfg: dict[str, Any],
 ) -> tuple[bool, list[str]]:
     ticket_reviews = runtime.get("reviews", {}).get(ticket.id, {})
-    root_cycles = (
-        ticket_reviews.get("root_cycles", [])
-        if isinstance(ticket_reviews, dict)
-        else []
-    )
-    if isinstance(root_cycles, list) and root_cycles:
-        cycle = root_cycles[-1]
-        if not isinstance(cycle, dict):
-            return False, ["latest root review cycle is invalid"]
-        root_cause_id = str(cycle.get("root_cause_id", ""))
-        reviewers = cycle.get("reviewers", {})
-        failures: list[str] = []
-        final_sha = ""
-        requires_superseding = False
-        if isinstance(reviewers, dict):
-            for required_reviewer in ticket.required_reviews:
-                required_rounds = reviewers.get(required_reviewer, {})
-                targeted = (
-                    required_rounds.get("targeted")
-                    if isinstance(required_rounds, dict)
-                    else None
-                )
-                if isinstance(targeted, dict) and targeted.get("verdict") == "escalate":
-                    requires_superseding = True
-                    break
-        for reviewer in ticket.required_reviews:
-            rounds = reviewers.get(reviewer, {}) if isinstance(reviewers, dict) else {}
-            if not isinstance(rounds, dict) or not isinstance(
-                rounds.get("full"),
-                dict,
-            ):
-                failures.append(f"{reviewer} root review baseline is missing")
-                continue
-            invariant_errors = root_cycle_round_invariant_errors(
-                rounds,
-                set(cfg.get("review", {}).get("blocking_severities", [])),
-            )
-            if invariant_errors:
-                failures.extend(
-                    f"{reviewer} root review is invalid: {error}"
-                    for error in invariant_errors
-                )
-                continue
-            record = None
-            terminal_round = ""
-            terminal_rounds = (
-                ("superseding",)
-                if requires_superseding
-                else ("superseding", "targeted", "full")
-            )
-            for round_name in terminal_rounds:
-                if round_name in rounds:
-                    record = rounds[round_name]
-                    terminal_round = round_name
-                    break
-            if not isinstance(record, dict):
-                failures.append(f"missing {reviewer} final review")
-                continue
-            record_root = str(record.get("root_cause_id", "")).strip()
-            if (
-                terminal_round == "superseding"
-                and record_root != root_cause_id
-            ) or (
-                terminal_round != "superseding"
-                and record_root
-                and record_root != root_cause_id
-            ):
-                failures.append(
-                    f"{reviewer} final review is not bound to {root_cause_id}"
-                )
-                continue
-            verdict = str(record.get("verdict", ""))
-            if not _review_passes(verdict, cfg):
-                failures.append(
-                    f"{reviewer} final review verdict is {verdict or 'missing'}"
-                )
-                continue
-            candidate_sha = str(record.get("candidate_sha", "")).lower()
-            if not candidate_sha:
-                failures.append(f"{reviewer} final review candidate is missing")
-            elif not final_sha:
-                final_sha = candidate_sha
-            elif candidate_sha != final_sha:
-                failures.append(
-                    f"{reviewer} final review candidate {candidate_sha or 'missing'} "
-                    f"does not match {final_sha}"
-                )
-        return not failures, failures
-
-    reviewers = ticket_reviews.get("reviewers", {}) if isinstance(ticket_reviews, dict) else {}
     failures: list[str] = []
+    selected_cycle: dict[str, Any] | None = None
+    if isinstance(ticket_reviews, dict):
+        cycles = ticket_reviews.get("root_cycles", [])
+        if isinstance(cycles, list) and cycles:
+            candidate = cycles[-1]
+            if isinstance(candidate, dict):
+                selected_cycle = candidate
+    reviewers = (
+        selected_cycle.get("reviewers", {})
+        if isinstance(selected_cycle, dict)
+        else ticket_reviews.get("reviewers", {}) if isinstance(ticket_reviews, dict) else {}
+    )
+    selected_candidates: list[str] = []
     for reviewer in ticket.required_reviews:
         rounds = reviewers.get(reviewer, {}) if isinstance(reviewers, dict) else {}
-        record = None
-        if isinstance(rounds, dict):
-            record = (
-                rounds.get("superseding")
-                or rounds.get("targeted")
-                or rounds.get("full")
-            )
+        round_name, record = _effective_review_record(rounds)
         if not isinstance(record, dict):
-            failures.append(f"missing {reviewer} review")
+            label = "latest legacy root cycle " if selected_cycle is not None else ""
+            failures.append(f"missing {reviewer} {label}review")
             continue
         verdict = str(record.get("verdict", ""))
         if not _review_passes(verdict, cfg):
-            failures.append(f"{reviewer} review verdict is {verdict or 'missing'}")
+            failures.append(
+                f"{reviewer} {round_name or 'review'} verdict is {verdict or 'missing'}"
+            )
+        candidate_sha = str(record.get("candidate_sha", ""))
+        if candidate_sha:
+            selected_candidates.append(candidate_sha)
+    if selected_cycle is not None and len(set(selected_candidates)) > 1:
+        failures.append(
+            "latest legacy root-cycle reviewers do not reference one candidate SHA"
+        )
     return not failures, failures
 
 
@@ -3438,12 +3579,6 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         raise WorkflowError("--candidate-sha must be an exact 40- or 64-hex commit ID")
     if reviewer not in REVIEWERS or round_name not in REVIEW_ROUNDS:
         raise WorkflowError("Invalid review role or round")
-    root_cause_id = str(args.root_blocker).strip()
-    root_scoped = bool(root_cause_id)
-    if round_name != "superseding" and str(args.authorization_scope).strip():
-        raise WorkflowError(
-            "--authorization-scope is only valid for superseding review"
-        )
 
     findings = [_parse_review_finding(raw, new=False) for raw in args.finding]
     new_findings = [_parse_review_finding(raw, new=True) for raw in args.new_finding]
@@ -3452,30 +3587,15 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         raise WorkflowError("Review finding IDs must be unique in one record")
     blocking_severities = set(cfg.get("review", {}).get("blocking_severities", []))
     blocking = [item for item in findings + new_findings if item["severity"] in blocking_severities]
-    if round_name != "superseding" and verdict == "block" and not blocking:
+    if verdict == "block" and not blocking:
         raise WorkflowError("A block verdict requires at least one blocking finding")
-    if (
-        round_name != "superseding"
-        and verdict in {"pass", "pass_with_notes"}
-        and blocking
-    ):
+    if verdict in {"pass", "pass_with_notes"} and blocking:
         raise WorkflowError("A passing verdict cannot contain unresolved blocking findings")
     if verdict == "pass_with_notes" and not any(str(note).strip() for note in args.note):
         raise WorkflowError("pass_with_notes requires at least one --note")
-    if root_scoped and round_name == "full" and verdict == "escalate":
-        raise WorkflowError(
-            "Root-scoped full review verdict must be pass, pass_with_notes, or block"
-        )
 
     state = load_runtime_state(root, cfg)
     runtime = milestone_runtime_state(state, ticket.milestone)
-    if root_scoped:
-        canonical_review_root(
-            runtime,
-            ticket.id,
-            root_cause_id,
-            require_open=True,
-        )
     phase = runtime.get("phases", {}).get(ticket.id, {})
     if isinstance(phase, dict) and phase.get("phase") == "review":
         phase_sha = str(phase.get("candidate_sha", "")).lower()
@@ -3485,43 +3605,7 @@ def cmd_record_review(args: argparse.Namespace) -> int:
             )
     review_cfg = cfg.get("review", {})
     ticket_reviews = runtime["reviews"].setdefault(ticket.id, {"reviewers": {}})
-    cycle = find_root_review_cycle(ticket_reviews, root_cause_id) if root_scoped else None
-    legacy_reviewer_rounds = ticket_reviews.setdefault("reviewers", {}).setdefault(
-        reviewer,
-        {},
-    )
-    root_cycle_scoped = root_scoped and not (
-        round_name == "superseding"
-        and cycle is None
-        and isinstance(legacy_reviewer_rounds.get("full"), dict)
-        and isinstance(legacy_reviewer_rounds.get("targeted"), dict)
-    )
-    if root_cycle_scoped:
-        if cycle is None:
-            if round_name != "full":
-                raise WorkflowError(
-                    f"Root-scoped {round_name} review requires an existing full "
-                    f"review cycle for {root_cause_id}"
-                )
-            cycle = {
-                "root_cause_id": root_cause_id,
-                "ticket_id": ticket.id,
-                "reviewers": {},
-            }
-            ticket_reviews.setdefault("root_cycles", []).append(cycle)
-        elif str(cycle.get("ticket_id", "")).upper() != ticket.id.upper():
-            raise WorkflowError(
-                f"Root review cycle {root_cause_id} belongs to "
-                f"{cycle.get('ticket_id')}, not {ticket.id}"
-            )
-        cycle_reviewers = cycle.setdefault("reviewers", {})
-        if not isinstance(cycle_reviewers, dict):
-            raise WorkflowError("Root-scoped review cycle reviewers must be an object")
-        reviewer_rounds = cycle_reviewers.setdefault(reviewer, {})
-    else:
-        reviewer_rounds = legacy_reviewer_rounds
-    record_extra: dict[str, Any] = {}
-    authorization_to_consume: dict[str, Any] | None = None
+    reviewer_rounds = ticket_reviews.setdefault("reviewers", {}).setdefault(reviewer, {})
 
     if round_name == "full":
         maximum = int(review_cfg.get("max_full_review_rounds", 1))
@@ -3545,7 +3629,7 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         if new_findings:
             raise WorkflowError("--new-finding is valid only for targeted re-review")
         record_findings = findings
-    elif round_name == "targeted":
+    else:
         maximum = int(review_cfg.get("max_targeted_repair_rounds", 1))
         if "targeted" in reviewer_rounds:
             raise WorkflowError(
@@ -3556,25 +3640,12 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         full = reviewer_rounds.get("full")
         if not isinstance(full, dict) or full.get("verdict") != "block":
             raise WorkflowError("Targeted re-review requires a prior blocking full review")
-        if root_scoped and candidate_sha == str(full.get("candidate_sha", "")).lower():
-            raise WorkflowError(
-                "Root-scoped targeted candidate must differ from the full-review SHA"
-            )
         repairs = runtime.get("repairs", {}).get(ticket.id, [])
-        qualifying_repairs = (
-            [
-                item
-                for item in repairs
-                if isinstance(item, dict)
-                and bool(item.get("consumes_budget", True))
-                and (
-                    not root_cycle_scoped
-                    or item.get("root_cause_id") == root_cause_id
-                )
-            ]
-            if isinstance(repairs, list)
-            else []
-        )
+        qualifying_repairs = [
+            item
+            for item in repairs
+            if isinstance(item, dict) and bool(item.get("consumes_budget", True))
+        ] if isinstance(repairs, list) else []
         if not qualifying_repairs:
             raise WorkflowError(
                 "Targeted re-review requires one recorded substantive/evidence repair; "
@@ -3590,10 +3661,6 @@ def cmd_record_review(args: argparse.Namespace) -> int:
             if isinstance(item, dict) and item.get("severity") in blocking_severities
         }
         unknown_resolved = sorted(set(args.resolved) - set(original_blocking))
-        if root_scoped and len(args.resolved) != len(set(args.resolved)):
-            raise WorkflowError(
-                "Root-scoped --resolved must contain unique finding IDs"
-            )
         if unknown_resolved:
             raise WorkflowError(
                 "--resolved contains unknown full-review findings: "
@@ -3632,14 +3699,6 @@ def cmd_record_review(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     f"Targeted finding {finding_id} cannot be both --resolved and still open"
                 )
-            if root_scoped and (
-                item.get("severity") != original_blocking[finding_id].get("severity")
-                or item.get("origin") != original_blocking[finding_id].get("origin")
-            ):
-                raise WorkflowError(
-                    f"Root-scoped targeted finding {finding_id} must preserve "
-                    "severity and provenance"
-                )
             remaining_by_id[finding_id] = item
         for item in new_findings:
             finding_id = str(item["id"])
@@ -3657,35 +3716,6 @@ def cmd_record_review(args: argparse.Namespace) -> int:
             )
         if verdict == "escalate" and not remaining_blocking:
             raise WorkflowError("Escalate verdict requires an unresolved blocking finding")
-    else:
-        if "superseding" in reviewer_rounds:
-            raise WorkflowError(
-                f"{ticket.id} {reviewer} already used its superseding review round"
-            )
-        authorization_scope = str(args.authorization_scope).strip()
-        record_findings, authorization_to_consume, supersedes = (
-            validate_superseding_review(
-                runtime=runtime,
-                ticket_id=ticket.id,
-                reviewer=reviewer,
-                reviewer_rounds=reviewer_rounds,
-                candidate_sha=candidate_sha,
-                verdict=verdict,
-                findings=findings,
-                new_findings=new_findings,
-                resolved=args.resolved,
-                root_cause_id=root_cause_id,
-                authorization_scope=authorization_scope,
-                blocking_severities=blocking_severities,
-                phase=phase if isinstance(phase, dict) else {},
-                root_cycle=root_cycle_scoped,
-            )
-        )
-        record_extra = {
-            "authorization_scope": authorization_scope,
-            "root_cause_id": root_cause_id,
-            "supersedes": supersedes,
-        }
 
     record = {
         "round": round_name,
@@ -3696,10 +3726,7 @@ def cmd_record_review(args: argparse.Namespace) -> int:
         "resolved": list(args.resolved),
         "notes": list(args.note),
         "recorded_at": utc_now(),
-        **record_extra,
     }
-    if authorization_to_consume is not None:
-        consume_authorization_record(authorization_to_consume)
     reviewer_rounds[round_name] = record
     path = save_runtime_state(root, cfg, state)
     if verdict == "pass_with_notes":
@@ -3743,12 +3770,305 @@ def cmd_review_state(args: argparse.Namespace) -> int:
             print(f"  - {failure}")
     return 0 if passed else 1
 
+def cmd_control_plane_check(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    report = control_plane_report(
+        root,
+        cfg,
+        base=args.base,
+        candidate=args.candidate_sha,
+        include_worktree=not args.no_worktree,
+    )
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(f"Control-plane policy: {report['policy']}")
+        if report["manifest_package_version"]:
+            print(f"Installed package: {report['manifest_package_version']}")
+        for warning in report["warnings"]:
+            print(f"WARNING: {warning}")
+        for violation in report["violations"]:
+            print(f"BLOCK: {violation}")
+        print("Control-plane check: " + ("PASS" if report["clear"] else "BLOCK"))
+    return 0 if report["clear"] else 1
+
+
+def cmd_workflow_debt(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    created = _append_workflow_debt(
+        root,
+        cfg,
+        milestone=args.milestone,
+        ticket_id=args.ticket or "",
+        summary=args.summary,
+        evidence=args.evidence,
+        proposed_fix=args.proposed_fix or "",
+    )
+    path = str(
+        cfg.get("control_plane", {}).get(
+            "workflow_debt_path", "docs/workflow-debt.md"
+        )
+    )
+    print(("Recorded" if created else "Already recorded") + f" workflow debt in {path}")
+    print("CONTROL_PLANE_CHANGE_REQUIRED")
+    return 2
+
+
+def cmd_context_inventory(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    payload = project_context_inventory(root, cfg)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"Context: {payload['path']} lines {payload['line_start']}-"
+            f"{payload['line_end']} sha256={payload['sha256']}"
+        )
+        for entry in payload["entries"]:
+            marker = " [TODO]" if entry["has_todo"] else ""
+            print(
+                f"  - {entry['name']} (lines {entry['line_start']}-"
+                f"{entry['line_end']}){marker}"
+            )
+        if payload["missing_required"]:
+            print("Missing required entries:")
+            for item in payload["missing_required"]:
+                print(f"  - {item}")
+        if payload["duplicate_entries"]:
+            print("Duplicate entries:")
+            for item in payload["duplicate_entries"]:
+                print(f"  - {item}")
+    return 0
+
+
+def cmd_next_milestone(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    known = known_milestones(root, cfg)
+    candidate = next_milestone_id(root, cfg)
+    payload = {
+        "known_milestones": known,
+        "next_milestone": candidate,
+        "states": [milestone_completion_state(root, cfg, item) for item in known],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(candidate)
+        if known:
+            print("Known milestones: " + ", ".join(known))
+    return 0
+
+
+def cmd_feature_preflight(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    control = control_plane_report(root, cfg, include_worktree=True)
+    if not control["clear"]:
+        raise WorkflowError("Control-plane gate failed: " + "; ".join(control["violations"]))
+    goal = str(args.goal).strip()
+    if not goal:
+        raise WorkflowError("--goal must not be empty")
+    known = known_milestones(root, cfg)
+    milestone = (args.milestone or next_milestone_id(root, cfg)).strip().upper()
+    _milestone_number(milestone)
+    existing = milestone in known
+    if existing and not args.reuse_existing:
+        raise WorkflowError(
+            f"{milestone} already exists; omit --milestone to allocate the next ID or "
+            "use --reuse-existing only for an explicitly reopened plan"
+        )
+
+    inventory = project_context_inventory(root, cfg)
+    clean, dirty_paths = is_clean(root)
+    require_clean = bool(cfg.get("workflow", {}).get("require_clean_base", True))
+    open_prior = open_prior_milestones(root, cfg, milestone)
+    require_closed = bool(
+        cfg.get("context", {}).get("require_previous_milestones_closed", True)
+    )
+    blockers: list[str] = []
+    if require_clean and not clean:
+        blockers.append("base worktree is dirty")
+    if require_closed and open_prior and not args.allow_open_milestones:
+        blockers.append("previous milestones are not closed")
+    if inventory["duplicate_entries"]:
+        blockers.append("Project-specific context contains duplicate top-level entries")
+
+    audit_dir = root / str(
+        cfg["documents"].get("context_audit_dir", "docs/context-audits")
+    )
+    slug = args.slug.strip() if args.slug else _safe_goal_slug(goal)
+    if args.slug:
+        slug = slugify(args.slug)[:48]
+    audit_path = audit_dir / f"CONTEXT-{milestone}-{slug}.md"
+    created = False
+    if args.write_audit and not blockers:
+        if audit_path.exists():
+            if args.force:
+                audit_path.write_text(
+                    render_context_audit(
+                        milestone=milestone,
+                        goal=goal,
+                        baseline_commit=current_commit(root),
+                        inventory=inventory,
+                    ),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                created = True
+        else:
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            audit_path.write_text(
+                render_context_audit(
+                    milestone=milestone,
+                    goal=goal,
+                    baseline_commit=current_commit(root),
+                    inventory=inventory,
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            created = True
+
+    payload = {
+        "ready": not blockers,
+        "goal": goal,
+        "milestone": milestone,
+        "milestone_was_explicit": bool(args.milestone),
+        "known_milestones": known,
+        "previous_open_milestones": open_prior,
+        "context": inventory,
+        "base_clean": clean,
+        "dirty_paths": dirty_paths,
+        "audit_path": relative(root, audit_path),
+        "audit_created": created,
+        "blockers": blockers,
+        "next_action": (
+            "complete context audit, update AGENTS.md, then plan contracts"
+            if not blockers
+            else "resolve blockers and rerun feature-preflight"
+        ),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Feature milestone: {milestone}")
+        print(f"Context audit: {relative(root, audit_path)}")
+        print(f"Context hash: {inventory['sha256']}")
+        if created:
+            print("Audit skeleton created.")
+        if blockers:
+            print("Blocked:")
+            for blocker in blockers:
+                print(f"  - {blocker}")
+        else:
+            print("Feature preflight passed; semantic context audit and plan are required.")
+    return 0 if not blockers else 1
+
+
+def cmd_context_check(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg = load_config(root)
+    errors: list[str] = []
+    warnings: list[str] = []
+    inventory = project_context_inventory(root, cfg)
+    if inventory["missing_required"]:
+        errors.append(
+            "missing required Project-specific context entries: "
+            + ", ".join(inventory["missing_required"])
+        )
+    if inventory["duplicate_entries"]:
+        errors.append(
+            "duplicate Project-specific context entries: "
+            + ", ".join(inventory["duplicate_entries"])
+        )
+    empty_entries = [
+        str(item["name"])
+        for item in inventory["entries"]
+        if not str(item["content"]).strip()
+    ]
+    todo_entries = list(inventory["todo_entries"])
+    if args.strict:
+        if empty_entries:
+            errors.append("empty context entries: " + ", ".join(empty_entries))
+        if todo_entries:
+            errors.append("context entries still contain TODO: " + ", ".join(todo_entries))
+    else:
+        if empty_entries:
+            warnings.append("empty context entries: " + ", ".join(empty_entries))
+        if todo_entries:
+            warnings.append("context entries still contain TODO: " + ", ".join(todo_entries))
+
+    audit_paths: list[Path] = []
+    if args.audit:
+        candidate = Path(args.audit)
+        audit_paths = [candidate if candidate.is_absolute() else root / candidate]
+    elif args.milestone:
+        expected = args.milestone.upper()
+        for path in iter_context_audit_paths(root, cfg):
+            try:
+                metadata, _ = parse_frontmatter(path)
+            except WorkflowError:
+                continue
+            if str(metadata.get("milestone", "")).upper() == expected:
+                audit_paths.append(path)
+    if args.require_audit and not audit_paths:
+        errors.append(
+            f"no context audit found for {args.milestone or 'the requested feature'}"
+        )
+    for path in audit_paths:
+        if not path.exists():
+            errors.append(f"missing context audit: {relative(root, path)}")
+            continue
+        errors.extend(
+            context_audit_errors(
+                root,
+                cfg,
+                path,
+                expected_milestone=args.milestone,
+                require_approved=args.require_audit,
+            )
+        )
+
+    payload = {
+        "passed": not errors,
+        "context": inventory,
+        "audits": [relative(root, path) for path in audit_paths],
+        "warnings": sorted(set(warnings)),
+        "errors": sorted(set(errors)),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        if warnings:
+            print("Warnings:")
+            for warning in sorted(set(warnings)):
+                print(f"  - {warning}")
+        if errors:
+            print("Errors:")
+            for error in sorted(set(errors)):
+                print(f"  - {error}")
+        else:
+            print("Project-specific context check passed.")
+    return 0 if not errors else 1
+
+
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     root = git_root()
     cfg = load_config(root)
     docs = cfg["documents"]
     created: list[str] = []
-    for key in ("adr_dir", "spec_dir", "test_plan_dir", "ticket_dir", "handoff_dir"):
+    for key in (
+        "adr_dir",
+        "spec_dir",
+        "test_plan_dir",
+        "ticket_dir",
+        "handoff_dir",
+        "context_audit_dir",
+    ):
         path = root / str(docs[key])
         if not path.exists():
             path.mkdir(parents=True)
@@ -3761,6 +4081,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         "roadmap": (str(docs["roadmap"]), "roadmap.md"),
         "ci_status": (str(docs["ci_status"]), "ci-status.md"),
         "review_debt": (str(docs["review_debt"]), "review-debt.md"),
+        "workflow_debt": (str(docs["workflow_debt"]), "workflow-debt.md"),
     }
     mapping.update(
         {
@@ -3792,11 +4113,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    for key in ("vision", "gap_analysis", "roadmap", "ci_status", "review_debt"):
+    for key in (
+        "vision", "gap_analysis", "roadmap", "ci_status", "review_debt", "workflow_debt"
+    ):
         path = root / str(cfg["documents"][key])
         if not path.exists():
             errors.append(f"Missing document: {relative(root, path)}")
-    for key in ("adr_dir", "spec_dir", "test_plan_dir", "ticket_dir", "handoff_dir"):
+    for key in (
+        "adr_dir",
+        "spec_dir",
+        "test_plan_dir",
+        "ticket_dir",
+        "handoff_dir",
+        "context_audit_dir",
+    ):
         path = root / str(cfg["documents"][key])
         if not path.is_dir():
             errors.append(f"Missing document directory: {relative(root, path)}")
@@ -3812,6 +4142,77 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 f"Document template drift: {destination} must match "
                 f"assets/templates/{source_name}"
             )
+
+    context_cfg = cfg.get("context", {})
+    context_inventory: dict[str, Any] | None = None
+    if not isinstance(context_cfg, dict):
+        errors.append("context must be a table")
+        context_cfg = {}
+    if not str(context_cfg.get("agents_file", "")).strip():
+        errors.append("context.agents_file must not be empty")
+    if not str(context_cfg.get("section_heading", "")).strip():
+        errors.append("context.section_heading must not be empty")
+    required_entries = context_cfg.get("required_entries")
+    if not isinstance(required_entries, list) or not required_entries or any(
+        not isinstance(item, str) or not item.strip() for item in required_entries
+    ):
+        errors.append("context.required_entries must be a non-empty string array")
+    planned_entry = str(context_cfg.get("planned_changes_entry", "")).strip()
+    if not planned_entry:
+        errors.append("context.planned_changes_entry must not be empty")
+    elif isinstance(required_entries, list) and normalize_context_name(planned_entry) not in {
+        normalize_context_name(str(item)) for item in required_entries
+    }:
+        errors.append("context.planned_changes_entry must be present in required_entries")
+    for key in (
+        "require_feature_audit",
+        "require_previous_milestones_closed",
+        "refresh_on_close",
+    ):
+        if not isinstance(context_cfg.get(key), bool):
+            errors.append(f"context.{key} must be true or false")
+    try:
+        context_inventory = project_context_inventory(root, cfg)
+    except WorkflowError as exc:
+        errors.append(str(exc))
+    else:
+        if context_inventory["missing_required"]:
+            warnings.append(
+                "Missing Project-specific context entries (feature mode will add them): "
+                + ", ".join(context_inventory["missing_required"])
+            )
+        if context_inventory["duplicate_entries"]:
+            errors.append(
+                "Duplicate Project-specific context entries: "
+                + ", ".join(context_inventory["duplicate_entries"])
+            )
+        if context_inventory["todo_entries"]:
+            warnings.append(
+                "Project-specific context still contains TODO: "
+                + ", ".join(context_inventory["todo_entries"])
+            )
+        empty_entries = [
+            str(item["name"])
+            for item in context_inventory["entries"]
+            if not str(item["content"]).strip()
+        ]
+        if empty_entries:
+            warnings.append(
+                "Project-specific context entries are empty: " + ", ".join(empty_entries)
+            )
+        for audit_path in iter_context_audit_paths(root, cfg):
+            try:
+                metadata, _ = parse_frontmatter(audit_path)
+                audit_status = str(metadata.get("status", "")).lower()
+            except WorkflowError:
+                audit_status = "invalid"
+            audit_errors = context_audit_errors(root, cfg, audit_path)
+            errors.extend(audit_errors)
+            if audit_status == "draft":
+                warnings.append(
+                    f"Draft context audit is not a planning gate yet: "
+                    f"{relative(root, audit_path)}"
+                )
 
     planning_limits = cfg.get("planning", {})
     for directory_key, limit_key, label in (
@@ -3848,6 +4249,31 @@ def cmd_validate(args: argparse.Namespace) -> int:
     for scope in ("quick", "full"):
         if not validation.get(scope):
             warnings.append(f"validation.{scope} is empty; that gate cannot pass")
+
+    control_plane = cfg.get("control_plane", {})
+    if not isinstance(control_plane, dict):
+        errors.append("control_plane must be a table")
+        control_plane = {}
+    policy = control_plane.get("managed_drift_policy")
+    if policy not in CONTROL_PLANE_POLICIES:
+        errors.append("control_plane.managed_drift_policy must be block, warn, or off")
+    if not str(control_plane.get("manifest_path", "")).strip():
+        errors.append("control_plane.manifest_path must not be empty")
+    if not str(control_plane.get("workflow_debt_path", "")).strip():
+        errors.append("control_plane.workflow_debt_path must not be empty")
+    protected_globs = control_plane.get("protected_globs")
+    if not isinstance(protected_globs, list) or not protected_globs or any(
+        not isinstance(item, str) or not item.strip() for item in protected_globs
+    ):
+        errors.append("control_plane.protected_globs must be a non-empty string array")
+    try:
+        control_report = control_plane_report(root, cfg, include_worktree=False)
+    except WorkflowError as exc:
+        errors.append(str(exc))
+    else:
+        if control_report["violations"] and policy == "block":
+            errors.extend(control_report["violations"])
+        warnings.extend(control_report["warnings"])
 
     execution = cfg.get("execution", {})
     strategy = execution.get("strategy")
@@ -3980,7 +4406,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         )
     try:
         runtime_state_path(root, cfg)
-        load_runtime_state(root, cfg)
+        runtime_payload = load_runtime_state(root, cfg)
+        warnings.extend(runtime_state_legacy_warnings(runtime_payload))
     except WorkflowError as exc:
         errors.append(str(exc))
 
@@ -4057,6 +4484,38 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"Auto close: {cfg['execution']['auto_close']}")
         print(f"Checkpoint policy: {cfg['workflow']['checkpoint_policy']}")
         print(f"Runtime state: {runtime_state_path(root, cfg)}")
+        inventory = project_context_inventory(root, cfg)
+        print(
+            f"Project context: {inventory['path']} / {len(inventory['entries'])} "
+            f"entries / {inventory['sha256'][:12]}"
+        )
+        print(f"Next milestone: {next_milestone_id(root, cfg)}")
+        runtime_payload = load_runtime_state(root, cfg)
+        warnings.extend(runtime_state_legacy_warnings(runtime_payload))
+        control_report = control_plane_report(root, cfg, include_worktree=True)
+        print(
+            "Control plane: "
+            + ("PASS" if control_report["clear"] else "BLOCK")
+            + f" / policy={control_report['policy']}"
+        )
+        warnings.extend(control_report["warnings"])
+        if control_report["violations"] and control_report["policy"] == "block":
+            failures.extend(control_report["violations"])
+        if inventory["missing_required"]:
+            warnings.append(
+                "Missing Project-specific context entries (run feature context refresh): "
+                + ", ".join(inventory["missing_required"])
+            )
+        if inventory["duplicate_entries"]:
+            failures.append(
+                "Duplicate Project-specific context entries: "
+                + ", ".join(inventory["duplicate_entries"])
+            )
+        if inventory["todo_entries"]:
+            warnings.append(
+                "Project-specific context still contains TODO: "
+                + ", ".join(inventory["todo_entries"])
+            )
     except WorkflowError as exc:
         failures.append(str(exc))
         cfg = deep_merge(DEFAULT_CONFIG, {})
@@ -4065,7 +4524,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         root / "AGENTS.md",
         root / "workflow.toml",
         root / ".codex" / "config.toml",
+        root / ".codex" / "AGENTS.override.md",
+        root / ".agents" / "AGENTS.override.md",
         root / ".agents" / "skills" / "milestone-workflow" / "SKILL.md",
+        root / str(cfg.get("control_plane", {}).get("manifest_path", INSTALL_METADATA_PATH)),
+        root / str(cfg.get("documents", {}).get("workflow_debt", "docs/workflow-debt.md")),
     ]
     profiles = cfg.get("agents", {})
     if not isinstance(profiles, dict):
@@ -4210,6 +4673,9 @@ def ticket_to_dict(root: Path, ticket: Ticket) -> dict[str, Any]:
 def cmd_frontier(args: argparse.Namespace) -> int:
     root = git_root()
     cfg = load_config(root)
+    control = control_plane_report(root, cfg, include_worktree=True)
+    if not control["clear"]:
+        raise WorkflowError("Control-plane gate failed: " + "; ".join(control["violations"]))
     errors, warnings, tickets = validate_tickets(root, cfg)
     if errors:
         raise WorkflowError("Ticket validation failed; run workflow.py validate")
@@ -4298,6 +4764,9 @@ def cmd_frontier(args: argparse.Namespace) -> int:
 def cmd_next(args: argparse.Namespace) -> int:
     root = git_root()
     cfg = load_config(root)
+    control = control_plane_report(root, cfg, include_worktree=True)
+    if not control["clear"]:
+        raise WorkflowError("Control-plane gate failed: " + "; ".join(control["violations"]))
     errors, warnings, tickets = validate_tickets(root, cfg)
     if errors:
         raise WorkflowError("Ticket validation failed; run workflow.py validate")
@@ -4415,6 +4884,9 @@ def create_worktree(root: Path, path: Path, branch: str, base: str) -> dict[str,
 def cmd_worktree_create(args: argparse.Namespace) -> int:
     root = git_root()
     cfg = load_config(root)
+    control = control_plane_report(root, cfg, include_worktree=True)
+    if not control["clear"]:
+        raise WorkflowError("Control-plane gate failed: " + "; ".join(control["violations"]))
     tickets = load_tickets(root, cfg)
     ticket = find_ticket(tickets, args.ticket_id)
     base = ensure_base_branch(root, cfg)
@@ -4439,6 +4911,9 @@ def cmd_worktree_create(args: argparse.Namespace) -> int:
 def cmd_integration_create(args: argparse.Namespace) -> int:
     root = git_root()
     cfg = load_config(root)
+    control = control_plane_report(root, cfg, include_worktree=True)
+    if not control["clear"]:
+        raise WorkflowError("Control-plane gate failed: " + "; ".join(control["violations"]))
     base = ensure_base_branch(root, cfg)
     slug = slugify(args.milestone)
     branch = f"{str(cfg['workflow']['integration_branch_prefix']).rstrip('/')}/{slug}"
@@ -4827,6 +5302,13 @@ def cmd_set_status(args: argparse.Namespace) -> int:
         )
     current = "ready" if ticket.status in LEGACY_TRANSIENT_STATUSES else ticket.status
     phase_record = runtime["phases"].get(ticket.id)
+    if args.status == "ready":
+        context_failures = feature_context_gate_errors(root, cfg, ticket.milestone)
+        if context_failures:
+            raise WorkflowError(
+                f"{ticket.id} cannot become ready; feature context gate is incomplete: "
+                + "; ".join(context_failures)
+            )
     if (
         current == args.status
         and ticket.status == args.status
@@ -4914,7 +5396,16 @@ def cmd_gate_check(args: argparse.Namespace) -> int:
     review_failures: list[str] = []
     if args.phase in {"integration", "release"}:
         reviews_clear, review_failures = review_gate_status(ticket, runtime, cfg)
-    gate_clear = not unmet and not open_roots and reviews_clear
+    control_report = {"clear": True, "violations": [], "candidate_paths": []}
+    if args.phase in {"integration", "release"} and args.candidate_sha:
+        control_report = control_plane_report(
+            root,
+            cfg,
+            base=args.base,
+            candidate=args.candidate_sha,
+            include_worktree=False,
+        )
+    gate_clear = not unmet and not open_roots and reviews_clear and bool(control_report["clear"])
     payload = {
         "ticket": ticket.id,
         "phase": args.phase,
@@ -4923,6 +5414,8 @@ def cmd_gate_check(args: argparse.Namespace) -> int:
         "unmet": unmet,
         "open_root_blockers": open_roots,
         "review_failures": review_failures,
+        "control_plane_violations": control_report["violations"],
+        "control_plane_candidate_paths": control_report["candidate_paths"],
         "clear": gate_clear,
     }
     if args.json:
@@ -4935,6 +5428,8 @@ def cmd_gate_check(args: argparse.Namespace) -> int:
             reasons.append("root blockers=" + ", ".join(open_roots))
         if review_failures:
             reasons.append("reviews=" + "; ".join(review_failures))
+        if control_report["violations"]:
+            reasons.append("control-plane=" + "; ".join(control_report["violations"]))
         print(f"{ticket.id} {args.phase} gate blocked: " + "; ".join(reasons))
     else:
         print(f"{ticket.id} {args.phase} gate clear")
@@ -5180,40 +5675,6 @@ def cmd_grant_authorization(args: argparse.Namespace) -> int:
             f"Authorization scope {args.scope} already exists and is immutable; "
             "revoke it if needed and grant a new scope ID"
         )
-    bound_root = str(getattr(args, "root_blocker", "")).strip()
-    bound_reviewer = str(getattr(args, "reviewer", "")).strip()
-    if bool(bound_root) != bool(bound_reviewer):
-        raise WorkflowError(
-            "--root-blocker and --reviewer must be provided together"
-        )
-    bound_root_record: dict[str, Any] | None = None
-    if bound_root:
-        if args.kind != "local" or list(args.action) != ["review_round_override"]:
-            raise WorkflowError(
-                "root/reviewer binding is valid only for a local "
-                "review_round_override authorization"
-            )
-        bound_root_record = canonical_review_root(
-            runtime,
-            str(args.ticket[0]) if len(args.ticket) == 1 else "",
-            bound_root,
-            require_open=True,
-        )
-        expected_ticket = str(bound_root_record.get("ticket_id", "")).upper()
-        normalized_tickets = [ticket.upper() for ticket in args.ticket]
-        if normalized_tickets != [expected_ticket]:
-            raise WorkflowError(
-                "bound review authorization must name only its canonical root ticket"
-            )
-        root_class = str(bound_root_record.get("class", ""))
-        root_risk = str(bound_root_record.get("risk", ""))
-        if root_class not in args.blocker_class or (
-            root_risk in RISK_ORDER
-            and RISK_ORDER[args.max_risk] < RISK_ORDER[root_risk]
-        ):
-            raise WorkflowError(
-                "bound review authorization class/risk must cover its canonical root"
-            )
     if (args.kind == "remote") != bool(args.remote_effects):
         raise WorkflowError(
             "--kind remote requires --remote-effects, and local authorization must "
@@ -5246,13 +5707,9 @@ def cmd_grant_authorization(args: argparse.Namespace) -> int:
             raise WorkflowError(
                 "local authorization must not set --remote-ref or --commit-sha"
             )
-        max_uses = 1 if bound_root and args.max_uses is None else args.max_uses
+        max_uses = args.max_uses
         if max_uses is not None and max_uses < 1:
             raise WorkflowError("--max-uses must be at least 1")
-        if bound_root and max_uses != 1:
-            raise WorkflowError(
-                "bound review_round_override authorization must be single-use"
-            )
     record = {
         "kind": args.kind,
         "status": "granted",
@@ -5267,13 +5724,6 @@ def cmd_grant_authorization(args: argparse.Namespace) -> int:
     }
     if max_uses is not None:
         record["max_uses"] = max_uses
-    if bound_root_record is not None:
-        record.update(
-            {
-                "root_cause_id": bound_root,
-                "reviewer": bound_reviewer,
-            }
-        )
     if args.kind == "remote":
         record.update(
             {
@@ -5864,6 +6314,11 @@ def build_parser() -> argparse.ArgumentParser:
             """
             Examples:
               workflow.py doctor
+              workflow.py control-plane-check --json
+              workflow.py context-inventory --json
+              workflow.py next-milestone --json
+              workflow.py feature-preflight --goal "Add routing" --write-audit --json
+              workflow.py context-check --strict --milestone M5 --require-audit
               workflow.py frontier --milestone M1 --limit 3 --json
               workflow.py next --milestone M1 --limit 3 --json
               workflow.py worktree-create M1-T01
@@ -5875,6 +6330,66 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser(
+        "control-plane-check",
+        help="Detect installer-managed drift and protected candidate changes",
+    )
+    p.add_argument("--base", help="Base branch/commit for candidate diff")
+    p.add_argument("--candidate-sha", help="Candidate commit to inspect")
+    p.add_argument("--no-worktree", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_control_plane_check)
+
+    p = sub.add_parser(
+        "workflow-debt",
+        help="Record a missing control-plane capability and stop product execution",
+    )
+    p.add_argument("--milestone", required=True)
+    p.add_argument("--ticket")
+    p.add_argument("--summary", required=True)
+    p.add_argument("--evidence", action="append", default=[])
+    p.add_argument("--proposed-fix")
+    p.set_defaults(func=cmd_workflow_debt)
+
+    p = sub.add_parser(
+        "context-inventory",
+        help="Inventory every top-level Project-specific context entry",
+    )
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_context_inventory)
+
+    p = sub.add_parser(
+        "next-milestone",
+        help="Allocate the next numeric milestone ID from repository state",
+    )
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_next_milestone)
+
+    p = sub.add_parser(
+        "feature-preflight",
+        help="Prepare a new feature milestone and context-audit skeleton",
+    )
+    p.add_argument("--goal", required=True)
+    p.add_argument("--milestone")
+    p.add_argument("--slug")
+    p.add_argument("--write-audit", action="store_true")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--allow-open-milestones", action="store_true")
+    p.add_argument("--reuse-existing", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_feature_preflight)
+
+    p = sub.add_parser(
+        "context-check",
+        help="Validate Project-specific context and an optional feature audit",
+    )
+    p.add_argument("--strict", action="store_true")
+    p.add_argument("--audit")
+    p.add_argument("--milestone")
+    p.add_argument("--require-audit", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_context_check)
 
     p = sub.add_parser("bootstrap", help="Create missing workflow document structure")
     p.set_defaults(func=cmd_bootstrap)
@@ -5975,6 +6490,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("gate-check", help="Check one ticket dependency gate")
     p.add_argument("ticket_id")
     p.add_argument("phase", choices=tuple(DEPENDENCY_FIELDS))
+    p.add_argument("--base", help="Base branch/commit for control-plane diff")
+    p.add_argument("--candidate-sha", help="Candidate commit for control-plane diff")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_gate_check)
 
@@ -6019,17 +6536,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remote-ref", default="")
     p.add_argument("--commit-sha", default="")
     p.add_argument("--max-uses", type=int)
-    p.add_argument(
-        "--root-blocker",
-        default="",
-        help="Pre-bind one review_round_override to an open canonical root",
-    )
-    p.add_argument(
-        "--reviewer",
-        choices=sorted(REVIEWERS),
-        default="",
-        help="Pre-bind one review_round_override to architect or qa",
-    )
     p.add_argument("--evidence", required=True)
     p.set_defaults(func=cmd_grant_authorization)
 
@@ -6109,10 +6615,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "record-review",
-        help=(
-            "Record one bounded full, targeted, or authorized superseding review; "
-            "--root-blocker appends a later root-scoped cycle"
-        ),
+        help="Record one bounded full review or targeted re-review",
     )
     p.add_argument("ticket_id")
     p.add_argument("--reviewer", choices=sorted(REVIEWERS), required=True)
@@ -6133,12 +6636,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--resolved", action="append", default=[])
     p.add_argument("--note", action="append", default=[])
-    p.add_argument(
-        "--root-blocker",
-        default="",
-        help="Canonical root for a superseding review or append-only later root cycle",
-    )
-    p.add_argument("--authorization-scope", default="")
     p.set_defaults(func=cmd_record_review)
 
     p = sub.add_parser("review-state", help="Show the bounded review gate for one ticket")

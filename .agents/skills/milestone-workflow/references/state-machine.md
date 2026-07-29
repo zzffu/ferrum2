@@ -1,5 +1,38 @@
 # Workflow state machine
 
+## Lifecycle across initial roadmap and later features
+
+```text
+bootstrap (once)
+  -> initial roadmap / M0...Mn
+  -> plan / execute / close each milestone
+  -> feature (for every later capability)
+       -> allocate next numeric milestone
+       -> audit and update every Project-specific context entry
+       -> approve feature context audit
+       -> plan contracts/tickets
+  -> execute / close
+  -> feature again
+```
+
+`bootstrap` establishes the control plane and initial roadmap. It is not a recurring
+feature command. `feature` is the planning transition from a closed roadmap state to a
+new milestone. By default it refuses to allocate the new milestone while any earlier
+numeric milestone is not `closed`.
+
+A feature milestone has an additional durable planning gate:
+
+```text
+context audit draft
+  -> PM / Architect / QA evidence
+  -> AGENTS.md context update
+  -> audit approved and hash-matched
+  -> tickets may become READY
+```
+
+At close, the audit becomes `verified` against the exact integrated commit and the
+planned change is converted into current repository facts.
+
 ## Durable and transient state
 
 Product history stores only durable outcomes:
@@ -89,6 +122,8 @@ mandatory.
 
 A ticket may become ready only when:
 
+- a feature milestone's context audit is approved, covers every configured and
+  project-added context entry, and matches the current context hash
 - product outcome, scope, non-goals, risk, and measurable acceptance are documented
 - spec and test plan exist
 - four dependency lists are valid

@@ -1,6 +1,6 @@
 interface:
   display_name: "Milestone Engineering Workflow"
-  short_description: "Plan, parallelize, review, and integrate milestone work"
+  short_description: "Refresh context, plan features, and execute milestones"
   default_prompt: "Run the milestone workflow in status mode for this repository."
 
 policy:

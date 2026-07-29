@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .codex/milestone-workflow-backups/
 /target
+*.py[cod]

@@ -70,6 +70,8 @@ test_plan_dir = "docs/test-plans"
 ticket_dir = "docs/tickets"
 handoff_dir = "docs/handoffs"
 review_debt = "docs/review-debt.md"
+workflow_debt = "docs/workflow-debt.md"
+context_audit_dir = "docs/context-audits"
 
 # Keep these host-local and deterministic. True external interoperability executes
 # only in hosted qualification. Its non-test binary stays Cargo-managed so these
@@ -130,3 +132,35 @@ exclude_globs = [
   "**/generated/**",
   "**/fixtures/**",
 ]
+
+[control_plane]
+managed_drift_policy = "block"
+manifest_path = ".codex/milestone-workflow-install.json"
+workflow_debt_path = "docs/workflow-debt.md"
+protected_globs = [
+  ".agents/skills/**",
+  ".agents/AGENTS.override.md",
+  ".codex/agents/**",
+  ".codex/AGENTS.override.md",
+  ".codex/config.toml",
+  ".codex/milestone-workflow-install.json",
+  "workflow.toml",
+  "skills-lock.json",
+]
+
+[context]
+agents_file = "AGENTS.md"
+section_heading = "Project-specific context"
+required_entries = [
+  "Product purpose",
+  "Primary languages/frameworks",
+  "Architecture entry points",
+  "Critical invariants",
+  "Generated files",
+  "Local development setup",
+  "Active planned changes",
+]
+planned_changes_entry = "Active planned changes"
+require_feature_audit = true
+require_previous_milestones_closed = true
+refresh_on_close = true

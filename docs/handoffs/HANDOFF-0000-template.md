@@ -14,6 +14,8 @@ TODO
 
 ## Decisions and contracts
 
+- Context audit and final context hash: TODO
+- AGENTS.md current/planned context changes: TODO
 - ADRs: TODO
 - Specs: TODO
 - Test plans: TODO

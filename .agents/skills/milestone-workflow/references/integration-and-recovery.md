@@ -103,6 +103,20 @@ must specify actions, tickets, blocker classes, maximum risk, and
 bind its exact remote ref, full commit SHA, and use count. Atomically run
 `consume-authorization` immediately before the authorized remote mutation.
 
+## Feature-plan and context recovery
+
+A feature plan is recoverable from Git rather than chat history. Preserve:
+
+- the draft/approved `docs/context-audits/CONTEXT-<milestone>-*.md`;
+- exact `baseline_commit`, `before_context_sha256`, and `after_context_sha256`;
+- the current `AGENTS.md` Project-specific context section;
+- roadmap/spec/test-plan/ticket documents and their milestone ID.
+
+If interruption occurs after `feature-preflight`, use `mode: resume` or explicitly
+reuse the same milestone. Do not allocate a second milestone merely because a draft
+audit exists. Before tickets become ready, rerun strict context validation. At close,
+recompute evidence from the integrated commit rather than trusting the planning audit.
+
 ## Interruption recovery
 
 After interruption:
@@ -146,3 +160,21 @@ required final exact-SHA release gate. Never force-update the base.
 - optionally remove clean integrated worktrees after closeout
 - preserve branches unless deletion is explicitly authorized
 - never use forced worktree removal to hide partial work
+
+## Control-plane recovery boundary
+
+Before adopting, reviewing, or integrating a candidate, run:
+
+```bash
+python .agents/skills/milestone-workflow/scripts/workflow.py control-plane-check \
+  --base <base> --candidate-sha <candidate> --json
+```
+
+A protected-path change is not a product repair. Preserve the candidate for diagnosis,
+record the capability gap in `docs/workflow-debt.md`, and stop with
+`CONTROL_PLANE_CHANGE_REQUIRED`. Do not amend/cherry-pick a self-modified workflow into
+the product milestone.
+
+If a hosted or release gate finds a new root after the original ticket review is
+terminal, create a new repair/qualification ticket. Historical `superseding` and
+`root_cycles` ledger entries remain readable but are never extended.

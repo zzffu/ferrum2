@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import contextlib
 import importlib.util
 import io
@@ -826,59 +825,6 @@ class RepairAndStateTests(unittest.TestCase):
                 "already exists and is immutable",
             ):
                 workflow.cmd_grant_authorization(args)
-
-    def test_review_override_grant_persists_exact_root_and_reviewer_binding(
-        self,
-    ) -> None:
-        state = workflow.empty_runtime_state()
-        runtime = workflow.milestone_runtime_state(state, "M0")
-        runtime["blockers"]["B1"] = {
-            "id": "B1",
-            "ticket_id": "M0-T01",
-            "class": "test_evidence",
-            "phase": "review",
-            "risk": "high",
-            "root_cause": "hosted evidence failed",
-            "root_cause_id": "B1",
-            "derived_from": None,
-            "status": "open",
-        }
-        args = argparse.Namespace(
-            milestone="M0",
-            scope="qa-root-review",
-            kind="local",
-            action=["review_round_override"],
-            ticket=["M0-T01"],
-            blocker_class=["test_evidence"],
-            max_risk="high",
-            remote_effects=False,
-            remote_ref="",
-            commit_sha="",
-            max_uses=1,
-            evidence="explicit bounded QA verification",
-            root_blocker="B1",
-            reviewer="qa",
-        )
-        with (
-            mock.patch.object(workflow, "git_root", return_value=Path.cwd()),
-            mock.patch.object(
-                workflow,
-                "load_config",
-                return_value=workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
-            ),
-            mock.patch.object(workflow, "load_runtime_state", return_value=state),
-            mock.patch.object(
-                workflow,
-                "save_runtime_state",
-                return_value=Path("state.json"),
-            ),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            self.assertEqual(workflow.cmd_grant_authorization(args), 0)
-        record = runtime["authorizations"]["qa-root-review"]
-        self.assertEqual(record["root_cause_id"], "B1")
-        self.assertEqual(record["reviewer"], "qa")
-        self.assertEqual(workflow.runtime_state_errors(state), [])
 
     def test_runtime_state_rejects_derivative_without_direct_root(self) -> None:
         state = workflow.empty_runtime_state()
@@ -1801,51 +1747,6 @@ class TestEconomyTests(unittest.TestCase):
             self.assertEqual(payload["delta"]["allowed_tests"], 120.0)
             self.assertTrue(any("test delta 150" in reason for reason in payload["reasons"]))
 
-    def test_milestone_delta_is_reported_without_ticket_allowance_enforcement(self) -> None:
-        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
-        baseline = {
-            "schema_version": 1,
-            "tool": "builtin",
-            "counts": {"code": 1000, "tests": 2000},
-        }
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            mock.patch.object(
-                workflow, "load_test_budget_baseline", return_value=baseline
-            ),
-            mock.patch.object(workflow, "_merge_base", return_value="a" * 40),
-            mock.patch.object(
-                workflow,
-                "count_git_ref_builtin",
-                return_value=workflow.SourceCounts(1000, 2000, 2, "builtin"),
-            ),
-        ):
-            for current_tests, expected_code in ((2500, 0), (2550, 1)):
-                with self.subTest(current_tests=current_tests), mock.patch.object(
-                    workflow,
-                    "count_working_tree_builtin",
-                    return_value=workflow.SourceCounts(1300, current_tests, 2, "builtin"),
-                ):
-                    payload, code = workflow.evaluate_test_budget(
-                        Path(directory),
-                        cfg,
-                        gate="milestone",
-                        base="main",
-                        requested_tool="builtin",
-                        write_baseline=False,
-                    )
-                self.assertEqual(code, expected_code)
-                self.assertGreater(
-                    payload["delta"]["tests"], payload["delta"]["allowed_tests"]
-                )
-                self.assertFalse(
-                    any("test delta" in reason for reason in payload["reasons"])
-                )
-                self.assertEqual(
-                    any("did not reach ratchet target" in reason for reason in payload["reasons"]),
-                    expected_code == 1,
-                )
-
 
 class ReviewConvergenceTests(unittest.TestCase):
     @staticmethod
@@ -1859,8 +1760,6 @@ class ReviewConvergenceTests(unittest.TestCase):
         resolved: list[str] | None = None,
         note: list[str] | None = None,
         sha: str = "a" * 40,
-        root_blocker: str = "",
-        authorization_scope: str = "",
     ) -> argparse.Namespace:
         return argparse.Namespace(
             ticket_id="M0-T01",
@@ -1872,8 +1771,6 @@ class ReviewConvergenceTests(unittest.TestCase):
             new_finding=new_finding or [],
             resolved=resolved or [],
             note=note or [],
-            root_blocker=root_blocker,
-            authorization_scope=authorization_scope,
         )
 
     def _record(self, state: dict[str, object], item: workflow.Ticket, args: argparse.Namespace) -> int:
@@ -1888,853 +1785,6 @@ class ReviewConvergenceTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             return workflow.cmd_record_review(args)
-
-    def superseding_fixture(
-        self,
-        *,
-        include_repair_finding: bool = False,
-    ) -> tuple[dict[str, object], workflow.Ticket, dict[str, object], argparse.Namespace]:
-        item = ticket("M0-T01", "ready", owns=("a/**",), risk="critical")
-        state = workflow.empty_runtime_state()
-        runtime = workflow.milestone_runtime_state(state, "M0")
-        runtime["blockers"]["B1"] = {
-            "id": "B1",
-            "ticket_id": item.id,
-            "class": "security",
-            "phase": "review",
-            "risk": "critical",
-            "root_cause": "security invariant",
-            "root_cause_id": "B1",
-            "derived_from": None,
-            "status": "open",
-        }
-        self._record(
-            state,
-            item,
-            self.review_args(
-                reviewer="architect",
-                round_name="full",
-                verdict="block",
-                finding=["ARCH-001:major:security invariant is violated"],
-            ),
-        )
-        runtime["repairs"][item.id] = [
-            {
-                "class": "substantive",
-                "root_cause_id": "B1",
-                "consumes_budget": True,
-                "recorded_at": "2026-07-28T00:01:00+00:00",
-            }
-        ]
-        self._record(
-            state,
-            item,
-            self.review_args(
-                reviewer="architect",
-                round_name="targeted",
-                verdict="escalate",
-                finding=["ARCH-001:major:security invariant remains violated"],
-                new_finding=(
-                    [
-                        "ARCH-002:major:introduced_by_repair:"
-                        "repair creates a cleanup gap"
-                    ]
-                    if include_repair_finding
-                    else []
-                ),
-                sha="b" * 40,
-            ),
-        )
-        targeted = runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"]
-        targeted["recorded_at"] = "2026-07-28T00:02:00+00:00"
-        runtime["repairs"][item.id].append(
-            {
-                "class": "substantive",
-                "root_cause_id": "B1",
-                "consumes_budget": True,
-                "budget_override_authorization_scope": "repair-override",
-                "recorded_at": "2026-07-28T00:03:00+00:00",
-            }
-        )
-        self._record(
-            state,
-            item,
-            self.review_args(
-                reviewer="qa",
-                round_name="full",
-                verdict="pass",
-            ),
-        )
-        runtime["phases"][item.id] = {
-            "ticket_id": item.id,
-            "phase": "repair",
-            "branch": "codex/ticket/m0-t01",
-            "worktree": str(Path.cwd().resolve()),
-            "candidate_sha": "c" * 40,
-            "root_cause_id": "B1",
-        }
-        runtime["authorizations"]["review-override"] = {
-            "kind": "local",
-            "status": "granted",
-            "actions": ["review_round_override"],
-            "tickets": [item.id],
-            "blocker_classes": ["security"],
-            "max_risk": "critical",
-            "remote_effects": False,
-            "uses": 0,
-            "max_uses": 1,
-        }
-        runtime["authorizations"]["repair-override"] = {
-            "kind": "local",
-            "status": "revoked",
-            "actions": ["repair_budget_override"],
-            "tickets": [item.id],
-            "blocker_classes": ["security"],
-            "max_risk": "critical",
-            "remote_effects": False,
-            "uses": 1,
-            "max_uses": 1,
-        }
-        runtime["repair_overrides"]["B1"] = [
-            {"authorization_scope": "repair-override"}
-        ]
-        args = self.review_args(
-            reviewer="architect",
-            round_name="superseding",
-            verdict="pass",
-            resolved=(
-                ["ARCH-001", "ARCH-002"]
-                if include_repair_finding
-                else ["ARCH-001"]
-            ),
-            sha="c" * 40,
-            root_blocker="B1",
-            authorization_scope="review-override",
-        )
-        return state, item, runtime, args
-
-    def root_cycle_verification_fixture(
-        self,
-    ) -> tuple[dict[str, object], workflow.Ticket, dict[str, object], argparse.Namespace]:
-        state, item, runtime, args = self.superseding_fixture(
-            include_repair_finding=True
-        )
-        legacy_reviewers = runtime["reviews"][item.id]["reviewers"]
-        runtime["reviews"][item.id]["root_cycles"] = [
-            {
-                "root_cause_id": "B1",
-                "ticket_id": item.id,
-                "reviewers": {
-                    "architect": copy.deepcopy(legacy_reviewers["architect"]),
-                    "qa": copy.deepcopy(legacy_reviewers["qa"]),
-                },
-            }
-        ]
-        runtime["authorizations"]["review-override"].update(
-            root_cause_id="B1",
-            reviewer="architect",
-        )
-        return state, item, runtime, args
-
-    def completed_root_cycle_fixture(
-        self,
-    ) -> tuple[dict[str, object], workflow.Ticket, dict[str, object]]:
-        state, item, runtime, architect_args = self.root_cycle_verification_fixture()
-        self.assertEqual(self._record(state, item, architect_args), 0)
-        runtime["authorizations"]["qa-review-override"] = {
-            "kind": "local",
-            "status": "granted",
-            "actions": ["review_round_override"],
-            "tickets": [item.id],
-            "blocker_classes": ["security"],
-            "max_risk": "critical",
-            "remote_effects": False,
-            "uses": 0,
-            "max_uses": 1,
-            "root_cause_id": "B1",
-            "reviewer": "qa",
-        }
-        self.assertEqual(
-            self._record(
-                state,
-                item,
-                self.review_args(
-                    reviewer="qa",
-                    round_name="superseding",
-                    verdict="pass",
-                    sha="c" * 40,
-                    root_blocker="B1",
-                    authorization_scope="qa-review-override",
-                ),
-            ),
-            0,
-        )
-        return state, item, runtime
-
-    def converged_root_cycle_fixture(
-        self,
-        *,
-        qa_targeted_sha: str = "b" * 40,
-    ) -> tuple[dict[str, object], workflow.Ticket, dict[str, object]]:
-        item = ticket("M0-T01", "ready", owns=("a/**",), risk="critical")
-        state = workflow.empty_runtime_state()
-        runtime = workflow.milestone_runtime_state(state, "M0")
-        runtime["blockers"]["B1"] = {
-            "id": "B1",
-            "ticket_id": item.id,
-            "class": "security",
-            "phase": "review",
-            "risk": "critical",
-            "root_cause": "security invariant",
-            "root_cause_id": "B1",
-            "derived_from": None,
-            "status": "open",
-        }
-        findings = {
-            "architect": "ARCH-001:major:security invariant is violated",
-            "qa": "QA-001:major:security invariant is violated",
-        }
-        for reviewer, finding in findings.items():
-            self.assertEqual(
-                self._record(
-                    state,
-                    item,
-                    self.review_args(
-                        reviewer=reviewer,
-                        round_name="full",
-                        verdict="block",
-                        finding=[finding],
-                        sha="a" * 40,
-                        root_blocker="B1",
-                    ),
-                ),
-                1,
-            )
-        runtime["repairs"][item.id] = [
-            {
-                "class": "substantive",
-                "root_cause_id": "B1",
-                "consumes_budget": True,
-            }
-        ]
-        for reviewer, finding_id, candidate_sha in (
-            ("architect", "ARCH-001", "b" * 40),
-            ("qa", "QA-001", qa_targeted_sha),
-        ):
-            self.assertEqual(
-                self._record(
-                    state,
-                    item,
-                    self.review_args(
-                        reviewer=reviewer,
-                        round_name="targeted",
-                        verdict="pass",
-                        resolved=[finding_id],
-                        sha=candidate_sha,
-                        root_blocker="B1",
-                    ),
-                ),
-                0,
-            )
-        return state, item, runtime
-
-    def test_root_cycle_targeted_pass_is_terminal_without_override(self) -> None:
-        state, item, runtime = self.converged_root_cycle_fixture()
-        cycle = runtime["reviews"][item.id]["root_cycles"][0]
-
-        for reviewer in ("architect", "qa"):
-            rounds = cycle["reviewers"][reviewer]
-            self.assertNotIn("superseding", rounds)
-            self.assertEqual(rounds["targeted"]["verdict"], "pass")
-            self.assertEqual(rounds["targeted"]["candidate_sha"], "b" * 40)
-        self.assertEqual(runtime["authorizations"], {})
-        self.assertEqual(workflow.runtime_state_errors(state), [])
-        self.assertEqual(
-            workflow.review_gate_status(
-                item,
-                runtime,
-                workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
-            ),
-            (True, []),
-        )
-
-    def test_root_cycle_targeted_pass_requires_one_common_candidate(self) -> None:
-        _state, item, runtime = self.converged_root_cycle_fixture(
-            qa_targeted_sha="c" * 40,
-        )
-
-        passed, failures = workflow.review_gate_status(
-            item,
-            runtime,
-            workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
-        )
-        self.assertFalse(passed)
-        self.assertTrue(any("does not match" in failure for failure in failures))
-
-    def test_superseding_review_preserves_escalation_consumes_scope_and_passes_gate(
-        self,
-    ) -> None:
-        state, item, runtime, args = self.superseding_fixture()
-        targeted = dict(runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"])
-
-        self.assertEqual(self._record(state, item, args), 0)
-
-        rounds = runtime["reviews"][item.id]["reviewers"]["architect"]
-        self.assertEqual(rounds["targeted"], targeted)
-        superseding = rounds["superseding"]
-        self.assertEqual(superseding["root_cause_id"], "B1")
-        self.assertEqual(superseding["authorization_scope"], "review-override")
-        self.assertEqual(
-            superseding["supersedes"],
-            {
-                "round": "targeted",
-                "candidate_sha": "b" * 40,
-                "verdict": "escalate",
-            },
-        )
-        self.assertEqual(runtime["authorizations"]["review-override"]["uses"], 1)
-        self.assertEqual(runtime["authorizations"]["review-override"]["status"], "revoked")
-        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
-        self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
-        self.assertEqual(workflow.runtime_state_errors(state), [])
-
-    def test_superseding_review_resolves_repair_introduced_targeted_blocker(
-        self,
-    ) -> None:
-        state, item, runtime, args = self.superseding_fixture(
-            include_repair_finding=True
-        )
-        targeted = dict(runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"])
-
-        self.assertEqual(self._record(state, item, args), 0)
-
-        rounds = runtime["reviews"][item.id]["reviewers"]["architect"]
-        self.assertEqual(rounds["targeted"], targeted)
-        self.assertEqual(
-            rounds["superseding"]["resolved"],
-            ["ARCH-001", "ARCH-002"],
-        )
-        self.assertEqual(rounds["superseding"]["findings"], [])
-        self.assertEqual(runtime["authorizations"]["review-override"]["uses"], 1)
-        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
-        self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
-        self.assertEqual(workflow.runtime_state_errors(state), [])
-
-    def test_hosted_root_cycle_preserves_legacy_history_and_requires_one_final_sha(
-        self,
-    ) -> None:
-        state, item, runtime, legacy_args = self.superseding_fixture()
-        self.assertEqual(self._record(state, item, legacy_args), 0)
-        legacy = copy.deepcopy(runtime["reviews"][item.id]["reviewers"])
-        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
-        self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
-
-        root_id = "M2-T05-HOSTED-001"
-        base_sha = "a168b89eb8dcd0c7a06df06b95a57d63893f2ab6"
-        repair_sha = "c31290eb572aedc236be3613d23136fae17406ff"
-        final_sha = "d" * 40
-        runtime["blockers"][root_id] = {
-            "id": root_id,
-            "ticket_id": item.id,
-            "class": "test_evidence",
-            "phase": "release",
-            "risk": "critical",
-            "root_cause": "hosted release evidence failed",
-            "root_cause_id": root_id,
-            "derived_from": None,
-            "status": "open",
-        }
-        self.assertEqual(
-            self._record(
-                state,
-                item,
-                self.review_args(
-                    reviewer="architect",
-                    round_name="full",
-                    verdict="block",
-                    finding=[
-                        "ARCH-M2-T05-HOSTED-001:major:"
-                        "hosted causal ordering is invalid"
-                    ],
-                    sha=base_sha,
-                    root_blocker=root_id,
-                ),
-            ),
-            1,
-        )
-        cycle = runtime["reviews"][item.id]["root_cycles"][-1]
-        cycle["reviewers"]["architect"]["full"]["recorded_at"] = (
-            "2026-07-29T00:00:00+00:00"
-        )
-        runtime["repairs"][item.id].append(
-            {
-                "class": "substantive",
-                "root_cause_id": root_id,
-                "consumes_budget": True,
-                "recorded_at": "2026-07-29T00:01:00+00:00",
-            }
-        )
-        self.assertEqual(
-            self._record(
-                state,
-                item,
-                self.review_args(
-                    reviewer="architect",
-                    round_name="targeted",
-                    verdict="escalate",
-                    resolved=["ARCH-M2-T05-HOSTED-001"],
-                    new_finding=[
-                        "ARCH-M2-T05-HOSTED-002:major:introduced_by_repair:"
-                        "repair exceeds its test budget"
-                    ],
-                    sha=repair_sha,
-                    root_blocker=root_id,
-                ),
-            ),
-            1,
-        )
-        self.assertEqual(
-            self._record(
-                state,
-                item,
-                self.review_args(
-                    reviewer="qa",
-                    round_name="full",
-                    verdict="pass_with_notes",
-                    note=["hosted rerun remains release evidence"],
-                    sha=repair_sha,
-                    root_blocker=root_id,
-                ),
-            ),
-            0,
-        )
-        self.assertEqual(runtime["reviews"][item.id]["reviewers"], legacy)
-        passed, failures = workflow.review_gate_status(item, runtime, cfg)
-        self.assertFalse(passed)
-        self.assertEqual(
-            failures,
-            [
-                "missing architect final review",
-                "missing qa final review",
-            ],
-        )
-
-        cycle = runtime["reviews"][item.id]["root_cycles"][-1]
-        architect_targeted = cycle["reviewers"]["architect"]["targeted"]
-        architect_targeted["recorded_at"] = "2026-07-29T00:02:00+00:00"
-        qa_full = cycle["reviewers"]["qa"]["full"]
-        qa_full["recorded_at"] = "2026-07-29T00:02:00+00:00"
-        runtime["repairs"][item.id].append(
-            {
-                "class": "substantive",
-                "root_cause_id": root_id,
-                "consumes_budget": True,
-                "budget_override_authorization_scope": "hosted-repair-override",
-                "recorded_at": "2026-07-29T00:03:00+00:00",
-            }
-        )
-        runtime["repair_overrides"][root_id] = [
-            {"authorization_scope": "hosted-repair-override"}
-        ]
-        runtime["authorizations"]["hosted-repair-override"] = {
-            "kind": "local",
-            "status": "revoked",
-            "actions": ["repair_budget_override"],
-            "tickets": [item.id],
-            "blocker_classes": ["test_evidence"],
-            "max_risk": "critical",
-            "remote_effects": False,
-            "uses": 1,
-            "max_uses": 1,
-        }
-        for reviewer in ("architect", "qa"):
-            runtime["authorizations"][f"hosted-review-{reviewer}"] = {
-                "kind": "local",
-                "status": "granted",
-                "actions": ["review_round_override"],
-                "tickets": [item.id],
-                "blocker_classes": ["test_evidence"],
-                "max_risk": "critical",
-                "remote_effects": False,
-                "uses": 0,
-                "max_uses": 1,
-                "root_cause_id": root_id,
-                "reviewer": reviewer,
-            }
-        runtime["phases"][item.id] = {
-            "ticket_id": item.id,
-            "phase": "repair",
-            "branch": "codex/repair/m2-t05-hosted",
-            "worktree": str(Path.cwd().resolve()),
-            "candidate_sha": final_sha,
-            "root_cause_id": root_id,
-        }
-
-        self.assertEqual(
-            self._record(
-                state,
-                item,
-                self.review_args(
-                    reviewer="architect",
-                    round_name="superseding",
-                    verdict="pass_with_notes",
-                    resolved=["ARCH-M2-T05-HOSTED-002"],
-                    note=["hosted rerun remains separately authorized release evidence"],
-                    sha=final_sha,
-                    root_blocker=root_id,
-                    authorization_scope="hosted-review-architect",
-                ),
-            ),
-            0,
-        )
-        same_sha_runtime = copy.deepcopy(runtime)
-        same_sha_cycle = same_sha_runtime["reviews"][item.id]["root_cycles"][-1]
-        same_sha_cycle["reviewers"]["qa"]["full"]["candidate_sha"] = final_sha
-        passed, failures = workflow.review_gate_status(item, same_sha_runtime, cfg)
-        self.assertFalse(passed)
-        self.assertEqual(failures, ["missing qa final review"])
-        self.assertEqual(
-            self._record(
-                state,
-                item,
-                self.review_args(
-                    reviewer="qa",
-                    round_name="superseding",
-                    verdict="pass",
-                    sha=final_sha,
-                    root_blocker=root_id,
-                    authorization_scope="hosted-review-qa",
-                ),
-            ),
-            0,
-        )
-
-        cycle = runtime["reviews"][item.id]["root_cycles"][-1]
-        self.assertEqual(cycle["root_cause_id"], root_id)
-        self.assertEqual(cycle["ticket_id"], item.id)
-        self.assertEqual(runtime["reviews"][item.id]["reviewers"], legacy)
-        self.assertEqual(
-            cycle["reviewers"]["architect"]["targeted"]["findings"][0]["origin"],
-            "introduced_by_repair",
-        )
-        for reviewer in ("architect", "qa"):
-            final = cycle["reviewers"][reviewer]["superseding"]
-            self.assertEqual(final["candidate_sha"], final_sha)
-            scope = runtime["authorizations"][f"hosted-review-{reviewer}"]
-            self.assertEqual(scope["root_cause_id"], root_id)
-            self.assertEqual(scope["reviewer"], reviewer)
-        self.assertEqual(workflow.review_gate_status(item, runtime, cfg), (True, []))
-        self.assertEqual(workflow.runtime_state_errors(state), [])
-
-    def test_hosted_root_cycle_rejects_scope_drift_and_prior_evidence_mutation(
-        self,
-    ) -> None:
-        cases = [
-            ("new final finding", "does not accept new findings"),
-            ("cross root", "active repair root"),
-            ("cross ticket", "canonical root exactly"),
-            ("rewrite baseline", "already used its full review"),
-        ]
-        for name, message in cases:
-            with self.subTest(name=name):
-                state, item, runtime, args = self.root_cycle_verification_fixture()
-                if name == "new final finding":
-                    args.new_finding = [
-                        "ARCH-003:major:introduced_by_repair:new final finding"
-                    ]
-                elif name == "cross root":
-                    runtime["blockers"]["B2"] = {
-                        **runtime["blockers"]["B1"],
-                        "id": "B2",
-                        "root_cause_id": "B2",
-                    }
-                    args.root_blocker = "B2"
-                elif name == "cross ticket":
-                    runtime["blockers"]["B2"] = {
-                        **runtime["blockers"]["B1"],
-                        "id": "B2",
-                        "ticket_id": "M0-T02",
-                        "root_cause_id": "B2",
-                    }
-                    args.root_blocker = "B2"
-                else:
-                    args.round = "full"
-                    args.verdict = "block"
-                    args.finding = ["ARCH-999:major:replacement baseline"]
-                    args.new_finding = []
-                    args.resolved = []
-                    args.authorization_scope = ""
-                with self.assertRaisesRegex(workflow.WorkflowError, message):
-                    self._record(state, item, args)
-
-        state, item, runtime, args = self.root_cycle_verification_fixture()
-        self.assertEqual(self._record(state, item, args), 0)
-        reused = self.review_args(
-            reviewer="qa",
-            round_name="superseding",
-            verdict="pass",
-            sha="c" * 40,
-            root_blocker="B1",
-            authorization_scope="review-override",
-        )
-        with self.assertRaisesRegex(workflow.WorkflowError, "unused"):
-            self._record(state, item, reused)
-
-        state, item, runtime, args = self.root_cycle_verification_fixture()
-        self.assertEqual(self._record(state, item, args), 0)
-        runtime["authorizations"]["qa-review-override"] = {
-            **runtime["authorizations"]["review-override"],
-            "status": "granted",
-            "uses": 0,
-        }
-        runtime["authorizations"]["qa-review-override"].pop("root_cause_id", None)
-        runtime["authorizations"]["qa-review-override"].pop("reviewer", None)
-        runtime["authorizations"]["qa-review-override"].update(
-            root_cause_id="B1",
-            reviewer="qa",
-        )
-        runtime["phases"][item.id]["candidate_sha"] = "d" * 40
-        self.assertEqual(
-            self._record(
-                state,
-                item,
-                self.review_args(
-                    reviewer="qa",
-                    round_name="superseding",
-                    verdict="pass",
-                    sha="d" * 40,
-                    root_blocker="B1",
-                    authorization_scope="qa-review-override",
-                ),
-            ),
-            0,
-        )
-        passed, failures = workflow.review_gate_status(
-            item,
-            runtime,
-            workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
-        )
-        self.assertFalse(passed)
-        self.assertTrue(any("does not match" in failure for failure in failures))
-
-        state, item, runtime, _args = self.root_cycle_verification_fixture()
-        targeted = runtime["reviews"][item.id]["root_cycles"][0]["reviewers"][
-            "architect"
-        ]["targeted"]
-        targeted["findings"][0]["origin"] = "previously_unobservable"
-        errors = workflow.runtime_state_errors(state)
-        self.assertTrue(
-            any("preserve their ID, severity, and provenance" in error for error in errors)
-        )
-
-    def test_root_cycle_rejects_unbound_or_swapped_override_before_consumption(
-        self,
-    ) -> None:
-        state, item, runtime, args = self.root_cycle_verification_fixture()
-        runtime["authorizations"]["review-override"].pop("root_cause_id")
-        runtime["authorizations"]["review-override"].pop("reviewer")
-        with self.assertRaisesRegex(workflow.WorkflowError, "pre-bound"):
-            self._record(state, item, args)
-        self.assertEqual(runtime["authorizations"]["review-override"]["uses"], 0)
-
-        state, item, runtime, args = self.root_cycle_verification_fixture()
-        runtime["authorizations"]["qa-unused-override"] = {
-            **runtime["authorizations"]["review-override"],
-            "reviewer": "qa",
-        }
-        args.authorization_scope = "qa-unused-override"
-        with self.assertRaisesRegex(workflow.WorkflowError, "bound to reviewer qa"):
-            self._record(state, item, args)
-        self.assertEqual(runtime["authorizations"]["qa-unused-override"]["uses"], 0)
-
-        state, item, runtime, args = self.root_cycle_verification_fixture()
-        runtime["blockers"]["B2"] = {
-            **runtime["blockers"]["B1"],
-            "id": "B2",
-            "root_cause_id": "B2",
-        }
-        runtime["authorizations"]["wrong-root-unused-override"] = {
-            **runtime["authorizations"]["review-override"],
-            "root_cause_id": "B2",
-        }
-        args.authorization_scope = "wrong-root-unused-override"
-        with self.assertRaisesRegex(
-            workflow.WorkflowError,
-            "bound to canonical root B2",
-        ):
-            self._record(state, item, args)
-        self.assertEqual(
-            runtime["authorizations"]["wrong-root-unused-override"]["uses"],
-            0,
-        )
-
-    def test_root_cycle_runtime_verdict_parity_and_gate_reject_tampering(
-        self,
-    ) -> None:
-        cases = [
-            (
-                "full block without blocker",
-                lambda rounds: rounds["full"].update(findings=[]),
-                "blocking full review requires",
-            ),
-            (
-                "full pass with blocker",
-                lambda rounds: rounds["full"].update(verdict="pass"),
-                "passing full review cannot retain",
-            ),
-            (
-                "targeted escalation without blocker",
-                lambda rounds: rounds["targeted"].update(findings=[]),
-                "targeted escalation requires",
-            ),
-            (
-                "targeted pass with blocker",
-                lambda rounds: rounds["targeted"].update(verdict="pass"),
-                "passing targeted review cannot retain",
-            ),
-            (
-                "targeted finding resolved and open",
-                lambda rounds: rounds["targeted"]["resolved"].append("ARCH-001"),
-                "targeted findings and resolved IDs cannot overlap",
-            ),
-        ]
-        for name, mutate, expected in cases:
-            with self.subTest(name=name):
-                state, item, runtime = self.completed_root_cycle_fixture()
-                rounds = runtime["reviews"][item.id]["root_cycles"][0]["reviewers"][
-                    "architect"
-                ]
-                mutate(rounds)
-                errors = workflow.runtime_state_errors(state)
-                self.assertTrue(
-                    any(expected in error for error in errors),
-                    errors,
-                )
-                passed, failures = workflow.review_gate_status(
-                    item,
-                    runtime,
-                    workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
-                )
-                self.assertFalse(passed)
-                self.assertTrue(failures)
-
-    def test_root_cycle_final_rejects_targeted_escalation_without_open_blocker(
-        self,
-    ) -> None:
-        state, item, runtime, args = self.root_cycle_verification_fixture()
-        targeted = runtime["reviews"][item.id]["root_cycles"][0]["reviewers"][
-            "architect"
-        ]["targeted"]
-        targeted["findings"] = []
-        args.resolved = []
-        with self.assertRaisesRegex(workflow.WorkflowError, "retain.*blocking"):
-            self._record(state, item, args)
-
-    def test_superseding_review_rejects_unaudited_or_broadened_dispositions(
-        self,
-    ) -> None:
-        cases = [
-            ("missing scope", "requires --authorization-scope"),
-            ("wrong scope", "does not cover"),
-            ("exhausted scope", "unused"),
-            ("wrong candidate", "active repair SHA"),
-            ("wrong root", "active repair root"),
-            ("second record", "already used"),
-            ("new finding", "does not accept new findings"),
-            ("unknown targeted finding", "targeted escalation"),
-            ("missing later repair", "later budget-consuming repair"),
-            ("repair without override", "separately authorized"),
-            ("repair with wrong override", "separately authorized"),
-            ("unbounded review scope", "single-use"),
-            ("multi-use review scope", "single-use"),
-            ("target not escalated", "targeted escalation"),
-            ("escalation without blocker", "blocking finding"),
-            ("second block", "verdict must be"),
-            ("passing with open finding", "unresolved"),
-        ]
-        for name, message in cases:
-            with self.subTest(name=name):
-                state, item, runtime, args = self.superseding_fixture()
-                if name == "missing scope":
-                    args.authorization_scope = ""
-                elif name == "wrong scope":
-                    runtime["authorizations"]["review-override"]["tickets"] = ["M0-T02"]
-                elif name == "exhausted scope":
-                    runtime["authorizations"]["review-override"].update(
-                        status="revoked", uses=1
-                    )
-                elif name == "wrong candidate":
-                    args.candidate_sha = "d" * 40
-                elif name == "wrong root":
-                    runtime["blockers"]["B2"] = {
-                        **runtime["blockers"]["B1"],
-                        "id": "B2",
-                        "root_cause_id": "B2",
-                    }
-                    args.root_blocker = "B2"
-                elif name == "second record":
-                    runtime["reviews"][item.id]["reviewers"]["architect"][
-                        "superseding"
-                    ] = {}
-                elif name == "new finding":
-                    args.new_finding = [
-                        "ARCH-002:major:introduced_by_repair:new security finding"
-                    ]
-                elif name == "unknown targeted finding":
-                    args.finding = ["ARCH-999:major:not an original finding"]
-                elif name == "missing later repair":
-                    runtime["repairs"][item.id].pop()
-                elif name == "repair without override":
-                    runtime["repairs"][item.id][-1][
-                        "budget_override_authorization_scope"
-                    ] = ""
-                elif name == "repair with wrong override":
-                    runtime["repairs"][item.id][-1][
-                        "budget_override_authorization_scope"
-                    ] = "review-override"
-                elif name == "unbounded review scope":
-                    del runtime["authorizations"]["review-override"]["max_uses"]
-                elif name == "multi-use review scope":
-                    runtime["authorizations"]["review-override"]["max_uses"] = 2
-                elif name == "target not escalated":
-                    runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"][
-                        "verdict"
-                    ] = "pass"
-                elif name == "escalation without blocker":
-                    runtime["reviews"][item.id]["reviewers"]["architect"]["targeted"][
-                        "findings"
-                    ] = []
-                elif name == "second block":
-                    args.verdict = "block"
-                    args.resolved = []
-                    args.finding = ["ARCH-001:major:still blocked"]
-                else:
-                    args.resolved = []
-                uses_before = runtime["authorizations"]["review-override"]["uses"]
-                with self.assertRaisesRegex(workflow.WorkflowError, message):
-                    self._record(state, item, args)
-                self.assertEqual(
-                    runtime["authorizations"]["review-override"]["uses"],
-                    uses_before,
-                )
-
-        state, item, runtime, args = self.superseding_fixture()
-        self._record(state, item, args)
-        runtime["reviews"][item.id]["reviewers"]["architect"]["superseding"][
-            "authorization_scope"
-        ] = "missing"
-        errors = workflow.runtime_state_errors(state)
-        self.assertTrue(any("authorization scope" in error for error in errors))
-
-        for round_name in ("full", "targeted"):
-            with self.subTest(round_name=round_name):
-                state, item, _runtime, args = self.superseding_fixture()
-                args.round = round_name
-                with self.assertRaisesRegex(
-                    workflow.WorkflowError,
-                    "only valid for superseding",
-                ):
-                    self._record(state, item, args)
 
     def test_full_review_is_idempotent_but_cannot_be_reopened(self) -> None:
         item = ticket("M0-T01", "ready", owns=("a/**",), risk="high")
@@ -2839,6 +1889,674 @@ class PlanningBudgetTests(unittest.TestCase):
                 errors, warnings, _ = workflow.validate_tickets(root, cfg)
             self.assertEqual(errors, [])
             self.assertTrue(any("acceptance criteria exceed" in warning for warning in warnings))
+
+
+class FeatureContextTests(unittest.TestCase):
+    @staticmethod
+    def _context_text(*, include_planned: bool = True, todo: bool = False) -> str:
+        value = "TODO" if todo else "verified"
+        planned = (
+            f"- Active planned changes: None.\n" if include_planned else ""
+        )
+        return (
+            "# Repository instructions\n\n"
+            "## Project-specific context\n\n"
+            f"- Product purpose: {value} product purpose.\n"
+            f"- Primary languages/frameworks: {value} Rust workspace.\n"
+            f"- Architecture entry points: {value} src/lib.rs.\n"
+            f"- Critical invariants: {value} compatibility invariant.\n"
+            f"- Generated files: {value} target is generated.\n"
+            f"- Local development setup: {value} cargo test.\n"
+            + planned
+            + "- Deployment topology: verified local process.\n\n"
+            "## Project validation\n\nUse workflow.toml.\n"
+        )
+
+    @staticmethod
+    def _roadmap(statuses: list[tuple[str, str]]) -> str:
+        body = ["# Roadmap", ""]
+        for milestone, status in statuses:
+            body.extend(
+                [
+                    f"## {milestone} — milestone",
+                    "",
+                    f"- **Status:** `{status}`",
+                    "",
+                ]
+            )
+        return "\n".join(body)
+
+    def _repo(
+        self,
+        root: Path,
+        *,
+        context_text: str | None = None,
+        statuses: list[tuple[str, str]] | None = None,
+    ) -> dict[str, object]:
+        cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+        (root / "docs/tickets").mkdir(parents=True)
+        (root / "docs/context-audits").mkdir(parents=True)
+        (root / "docs").mkdir(exist_ok=True)
+        (root / "AGENTS.md").write_text(
+            context_text or self._context_text(), encoding="utf-8"
+        )
+        (root / "docs/roadmap.md").write_text(
+            self._roadmap(statuses or []), encoding="utf-8"
+        )
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "workflow@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Workflow Tests"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "baseline"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return cfg
+
+    def test_inventory_covers_required_and_project_added_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = self._repo(root)
+            inventory = workflow.project_context_inventory(root, cfg)
+            names = [item["name"] for item in inventory["entries"]]
+            self.assertIn("Active planned changes", names)
+            self.assertIn("Deployment topology", names)
+            self.assertEqual(inventory["missing_required"], [])
+            self.assertEqual(inventory["extra_entries"], ["Deployment topology"])
+            self.assertRegex(inventory["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_inventory_reports_missing_planned_changes_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = self._repo(
+                root,
+                context_text=self._context_text(include_planned=False),
+            )
+            inventory = workflow.project_context_inventory(root, cfg)
+            self.assertEqual(
+                inventory["missing_required"], ["Active planned changes"]
+            )
+
+    def test_next_milestone_is_m5_after_m0_through_m4(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = self._repo(
+                root,
+                statuses=[(f"M{index}", "closed") for index in range(5)],
+            )
+            self.assertEqual(workflow.known_milestones(root, cfg), [f"M{i}" for i in range(5)])
+            self.assertEqual(workflow.next_milestone_id(root, cfg), "M5")
+            self.assertEqual(workflow.open_prior_milestones(root, cfg, "M5"), [])
+
+    def test_feature_preflight_rejects_open_previous_milestone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = self._repo(
+                root,
+                statuses=[("M0", "closed"), ("M1", "proposed")],
+            )
+            args = argparse.Namespace(
+                goal="Add multi-user support",
+                milestone=None,
+                slug=None,
+                write_audit=True,
+                force=False,
+                allow_open_milestones=False,
+                reuse_existing=False,
+                json=True,
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(workflow, "git_root", return_value=root),
+                mock.patch.object(workflow, "load_config", return_value=cfg),
+                contextlib.redirect_stdout(output),
+            ):
+                code = workflow.cmd_feature_preflight(args)
+            payload = __import__("json").loads(output.getvalue())
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ready"])
+            self.assertEqual(payload["milestone"], "M2")
+            self.assertIn("previous milestones are not closed", payload["blockers"])
+            self.assertFalse((root / payload["audit_path"]).exists())
+
+    def test_feature_preflight_creates_m5_audit_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = self._repo(
+                root,
+                statuses=[(f"M{index}", "closed") for index in range(5)],
+            )
+            args = argparse.Namespace(
+                goal="增加多用户管理",
+                milestone=None,
+                slug=None,
+                write_audit=True,
+                force=False,
+                allow_open_milestones=False,
+                reuse_existing=False,
+                json=True,
+            )
+            payloads: list[dict[str, object]] = []
+            output = io.StringIO()
+            with (
+                mock.patch.object(workflow, "git_root", return_value=root),
+                mock.patch.object(workflow, "load_config", return_value=cfg),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(workflow.cmd_feature_preflight(args), 0)
+            payloads.append(__import__("json").loads(output.getvalue()))
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "draft context audit"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(workflow, "git_root", return_value=root),
+                mock.patch.object(workflow, "load_config", return_value=cfg),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(workflow.cmd_feature_preflight(args), 0)
+            payloads.append(__import__("json").loads(output.getvalue()))
+            self.assertEqual(payloads[0]["milestone"], "M5")
+            self.assertEqual(payloads[1]["milestone"], "M5")
+            self.assertEqual(
+                payloads[0]["audit_path"], "docs/context-audits/CONTEXT-M5-feature.md"
+            )
+            self.assertTrue(payloads[0]["audit_created"])
+            self.assertFalse(payloads[1]["audit_created"])
+            audit = root / str(payloads[0]["audit_path"])
+            self.assertTrue(audit.is_file())
+            metadata, body = workflow.parse_frontmatter(audit)
+            self.assertEqual(metadata["milestone"], "M5")
+            self.assertEqual(metadata["status"], "draft")
+            self.assertIn("Deployment topology", metadata["entries"])
+            self.assertIn("增加多用户管理", body)
+
+    def test_ready_feature_ticket_requires_approved_context_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = self._repo(
+                root,
+                statuses=[(f"M{index}", "closed") for index in range(5)],
+            )
+            inventory = workflow.project_context_inventory(root, cfg)
+            audit = root / "docs/context-audits/CONTEXT-M5-feature.md"
+            audit.write_text(
+                workflow.render_context_audit(
+                    milestone="M5",
+                    goal="Add feature",
+                    baseline_commit=workflow.current_commit(root),
+                    inventory=inventory,
+                ),
+                encoding="utf-8",
+            )
+            (root / "spec.md").write_text("spec\n", encoding="utf-8")
+            (root / "test.md").write_text("test\n", encoding="utf-8")
+            item = ticket("M5-T01", "ready", owns=("src/**",))
+            item.metadata["milestone"] = "M5"
+            with mock.patch.object(workflow, "load_tickets", return_value=[item]):
+                errors, _, _ = workflow.validate_tickets(root, cfg)
+            self.assertTrue(any("audit is not approved" in error for error in errors))
+
+    def test_approved_context_audit_passes_then_detects_context_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = self._repo(
+                root,
+                statuses=[(f"M{index}", "closed") for index in range(5)],
+            )
+            inventory = workflow.project_context_inventory(root, cfg)
+            baseline = workflow.current_commit(root)
+            text = workflow.render_context_audit(
+                milestone="M5",
+                goal="Add multi-user support",
+                baseline_commit=baseline,
+                inventory=inventory,
+            )
+            text = text.replace('status = "draft"', 'status = "approved"')
+            text = text.replace(
+                'after_context_sha256 = ""',
+                f'after_context_sha256 = "{inventory["sha256"]}"',
+            )
+            text = text.replace(
+                "reviewers = []",
+                'reviewers = ["product_manager", "architect", "qa"]',
+            )
+            text = text.replace("TODO", "verified evidence")
+            audit = root / "docs/context-audits/CONTEXT-M5-multi-user.md"
+            audit.write_text(text, encoding="utf-8")
+            self.assertEqual(
+                workflow.context_audit_errors(
+                    root,
+                    cfg,
+                    audit,
+                    expected_milestone="M5",
+                    require_approved=True,
+                ),
+                [],
+            )
+            agents = root / "AGENTS.md"
+            agents.write_text(
+                agents.read_text(encoding="utf-8").replace(
+                    "verified product purpose", "changed product purpose"
+                ),
+                encoding="utf-8",
+            )
+            errors = workflow.context_audit_errors(
+                root,
+                cfg,
+                audit,
+                expected_milestone="M5",
+                require_approved=True,
+            )
+            self.assertTrue(any("after_context_sha256 does not match" in item for item in errors))
+
+
+
+class ControlPlaneTests(unittest.TestCase):
+    def init_repo(self, root: Path) -> None:
+        subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+
+    def write_manifest(self, root: Path, rel: str, content: bytes) -> None:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        manifest = root / workflow.INSTALL_METADATA_PATH
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(
+            __import__("json").dumps(
+                {
+                    "schema_version": 1,
+                    "package_version": "test",
+                    "managed_files": {
+                        rel: workflow._logical_hash_bytes(content),
+                    },
+                    "protected_files": {},
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def test_manifest_detects_semantic_drift_but_ignores_eol_only_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.init_repo(root)
+            rel = ".agents/skills/milestone-workflow/SKILL.md"
+            self.write_manifest(root, rel, b"line one\nline two\n")
+            (root / "workflow.toml").write_text("version = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=root, check=True, capture_output=True)
+            cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+
+            clear = workflow.control_plane_report(root, cfg)
+            self.assertTrue(clear["clear"], clear)
+
+            (root / rel).write_bytes(b"line one\r\nline two\r\n")
+            eol = workflow.control_plane_report(root, cfg)
+            self.assertTrue(eol["clear"], eol)
+            self.assertEqual(eol["manifest_drift"], [])
+
+            (root / rel).write_text("semantic change\n", encoding="utf-8")
+            drift = workflow.control_plane_report(root, cfg)
+            self.assertFalse(drift["clear"])
+            self.assertEqual(drift["manifest_drift"][0]["path"], rel)
+
+
+    def test_agents_workflow_section_is_protected_while_context_may_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.init_repo(root)
+            rel = ".agents/skills/milestone-workflow/SKILL.md"
+            self.write_manifest(root, rel, b"skill\n")
+            agents = root / "AGENTS.md"
+            agents.write_text(
+                "## Project-specific context\n\n"
+                "- Product purpose: original\n\n"
+                f"{workflow.AGENTS_WORKFLOW_BEGIN}\n"
+                "workflow policy\n"
+                f"{workflow.AGENTS_WORKFLOW_END}\n",
+                encoding="utf-8",
+            )
+            manifest = root / workflow.INSTALL_METADATA_PATH
+            payload = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+            section = workflow._extract_protected_section(
+                root, "AGENTS.md#codex_milestone_workflow"
+            )
+            self.assertIsNotNone(section)
+            payload["protected_sections"] = {
+                "AGENTS.md#codex_milestone_workflow": workflow._logical_hash_bytes(section)
+            }
+            manifest.write_text(
+                __import__("json").dumps(payload, indent=2) + "\n", encoding="utf-8"
+            )
+            (root / "workflow.toml").write_text("version = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "base"], cwd=root, check=True, capture_output=True
+            )
+            cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+
+            agents.write_text(
+                agents.read_text(encoding="utf-8").replace("original", "updated truth"),
+                encoding="utf-8",
+            )
+            context_only = workflow.control_plane_report(root, cfg)
+            self.assertTrue(context_only["clear"], context_only)
+            self.assertEqual(context_only["section_drift"], [])
+
+            agents.write_text(
+                agents.read_text(encoding="utf-8").replace(
+                    "workflow policy", "self-modified workflow policy"
+                ),
+                encoding="utf-8",
+            )
+            drift = workflow.control_plane_report(root, cfg)
+            self.assertFalse(drift["clear"])
+            self.assertEqual(
+                drift["section_drift"][0]["path"],
+                "AGENTS.md#codex_milestone_workflow",
+            )
+
+    def test_candidate_section_change_is_rejected_without_blocking_context_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.init_repo(root)
+            rel = ".agents/skills/milestone-workflow/SKILL.md"
+            self.write_manifest(root, rel, b"skill\n")
+            agents = root / "AGENTS.md"
+            agents.write_text(
+                "## Project-specific context\n\n"
+                "- Product purpose: original\n\n"
+                f"{workflow.AGENTS_WORKFLOW_BEGIN}\n"
+                "workflow policy\n"
+                f"{workflow.AGENTS_WORKFLOW_END}\n",
+                encoding="utf-8",
+            )
+            manifest = root / workflow.INSTALL_METADATA_PATH
+            payload = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+            section = workflow._extract_protected_section(
+                root, "AGENTS.md#codex_milestone_workflow"
+            )
+            assert section is not None
+            payload["protected_sections"] = {
+                "AGENTS.md#codex_milestone_workflow": workflow._logical_hash_bytes(section)
+            }
+            manifest.write_text(
+                __import__("json").dumps(payload, indent=2) + "\n", encoding="utf-8"
+            )
+            (root / "workflow.toml").write_text("version = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "base"], cwd=root, check=True, capture_output=True
+            )
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+            ).stdout.strip()
+
+            agents.write_text(
+                agents.read_text(encoding="utf-8")
+                .replace("original", "valid feature truth")
+                .replace("workflow policy", "candidate self modification"),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "AGENTS.md"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "candidate"], cwd=root, check=True, capture_output=True
+            )
+            candidate = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+            ).stdout.strip()
+            subprocess.run(["git", "checkout", "--detach", base], cwd=root, check=True, capture_output=True)
+            cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+            report = workflow.control_plane_report(
+                root, cfg, base=base, candidate=candidate, include_worktree=False
+            )
+            self.assertFalse(report["clear"])
+            self.assertEqual(report["candidate_paths"], [])
+            self.assertEqual(
+                report["candidate_section_drift"][0]["path"],
+                "AGENTS.md#codex_milestone_workflow",
+            )
+
+
+    def test_gitattributes_control_section_is_protected_but_project_rules_may_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.init_repo(root)
+            rel = ".agents/skills/milestone-workflow/SKILL.md"
+            self.write_manifest(root, rel, b"skill\n")
+            attrs = root / ".gitattributes"
+            attrs.write_text(
+                "*.rs text eol=lf\n"
+                f"{workflow.GITATTRIBUTES_WORKFLOW_BEGIN}\n"
+                "/.agents/skills/** text eol=lf\n"
+                f"{workflow.GITATTRIBUTES_WORKFLOW_END}\n",
+                encoding="utf-8",
+            )
+            manifest = root / workflow.INSTALL_METADATA_PATH
+            payload = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+            section = workflow._extract_protected_section(
+                root, ".gitattributes#codex_milestone_workflow_control_plane"
+            )
+            assert section is not None
+            payload["protected_sections"] = {
+                ".gitattributes#codex_milestone_workflow_control_plane":
+                    workflow._logical_hash_bytes(section)
+            }
+            manifest.write_text(
+                __import__("json").dumps(payload, indent=2) + "\n", encoding="utf-8"
+            )
+            (root / "workflow.toml").write_text("version = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "base"], cwd=root, check=True, capture_output=True
+            )
+            cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+
+            attrs.write_text(
+                attrs.read_text(encoding="utf-8") + "*.bin binary\n", encoding="utf-8"
+            )
+            project_rule = workflow.control_plane_report(root, cfg)
+            self.assertTrue(project_rule["clear"], project_rule)
+
+            attrs.write_text(
+                attrs.read_text(encoding="utf-8").replace(
+                    "/.agents/skills/** text eol=lf",
+                    "/.agents/skills/** -text",
+                ),
+                encoding="utf-8",
+            )
+            drift = workflow.control_plane_report(root, cfg)
+            self.assertFalse(drift["clear"])
+            self.assertEqual(
+                drift["section_drift"][0]["path"],
+                ".gitattributes#codex_milestone_workflow_control_plane",
+            )
+
+    def test_all_repository_skills_are_candidate_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.init_repo(root)
+            managed = ".agents/skills/milestone-workflow/SKILL.md"
+            self.write_manifest(root, managed, b"managed\n")
+            third_party = root / ".agents/skills/tdd/SKILL.md"
+            third_party.parent.mkdir(parents=True, exist_ok=True)
+            third_party.write_text("original\n", encoding="utf-8")
+            (root / "workflow.toml").write_text("version = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "base"], cwd=root, check=True, capture_output=True
+            )
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+            ).stdout.strip()
+            third_party.write_text("changed by product task\n", encoding="utf-8")
+            subprocess.run(["git", "add", third_party.relative_to(root).as_posix()], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "change skill"], cwd=root, check=True, capture_output=True
+            )
+            candidate = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+            ).stdout.strip()
+            cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+            report = workflow.control_plane_report(
+                root, cfg, base=base, candidate=candidate, include_worktree=False
+            )
+            self.assertFalse(report["clear"])
+            self.assertEqual(report["candidate_paths"], [".agents/skills/tdd/SKILL.md"])
+
+    def test_candidate_diff_rejects_protected_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.init_repo(root)
+            rel = ".agents/skills/milestone-workflow/SKILL.md"
+            self.write_manifest(root, rel, b"v1\n")
+            (root / "workflow.toml").write_text("version = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=root, check=True, capture_output=True)
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+            ).stdout.strip()
+            (root / rel).write_text("v2\n", encoding="utf-8")
+            subprocess.run(["git", "add", rel], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "self modify"], cwd=root, check=True, capture_output=True)
+            candidate = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+            ).stdout.strip()
+            cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+            report = workflow.control_plane_report(
+                root, cfg, base=base, candidate=candidate, include_worktree=False
+            )
+            self.assertFalse(report["clear"])
+            self.assertEqual(report["candidate_paths"], [rel])
+
+    def test_workflow_debt_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = workflow.deep_merge(workflow.DEFAULT_CONFIG, {})
+            first = workflow._append_workflow_debt(
+                root,
+                cfg,
+                milestone="M2",
+                ticket_id="M2-T05",
+                summary="review protocol cannot represent a late root",
+                evidence=["hosted gate failed after close"],
+                proposed_fix="add a separate repair-ticket flow",
+            )
+            second = workflow._append_workflow_debt(
+                root,
+                cfg,
+                milestone="M2",
+                ticket_id="M2-T05",
+                summary="review protocol cannot represent a late root",
+                evidence=["hosted gate failed after close"],
+                proposed_fix="add a separate repair-ticket flow",
+            )
+            self.assertTrue(first)
+            self.assertFalse(second)
+            content = (root / "docs/workflow-debt.md").read_text(encoding="utf-8")
+            self.assertEqual(content.count("workflow-debt:"), 1)
+
+
+class LegacyReviewCompatibilityTests(unittest.TestCase):
+    def record(self, reviewer: str, verdict: str, sha: str) -> dict[str, object]:
+        return {
+            "round": "superseding",
+            "reviewer": reviewer,
+            "candidate_sha": sha,
+            "verdict": verdict,
+            "findings": [],
+            "resolved": [],
+            "notes": [],
+        }
+
+    def test_legacy_superseding_and_root_cycles_are_read_only_compatible(self) -> None:
+        sha = "a" * 40
+        state = {
+            "version": 1,
+            "revision": 1,
+            "milestones": {
+                "M0": {
+                    "authorizations": {},
+                    "blockers": {},
+                    "repairs": {},
+                    "repair_overrides": {},
+                    "phases": {},
+                    "last_checkpoint": {},
+                    "reviews": {
+                        "M0-T01": {
+                            "reviewers": {
+                                "architect": {"superseding": self.record("architect", "pass", sha)},
+                                "qa": {"targeted": {**self.record("qa", "pass", sha), "round": "targeted"}},
+                            },
+                            "root_cycles": [
+                                {
+                                    "root_cause_id": "M0-LATE-001",
+                                    "ticket_id": "M0-T01",
+                                    "reviewers": {
+                                        "architect": {"superseding": self.record("architect", "pass", sha)},
+                                        "qa": {"targeted": {**self.record("qa", "pass_with_notes", sha), "round": "targeted"}},
+                                    },
+                                }
+                            ],
+                        }
+                    },
+                }
+            },
+        }
+        self.assertEqual(workflow.runtime_state_errors(state), [])
+        warnings = workflow.runtime_state_legacy_warnings(state)
+        self.assertEqual(len(warnings), 2)
+        item = ticket("M0-T01", "done", owns=("src/**",), risk="high")
+        passed, failures = workflow.review_gate_status(
+            item,
+            state["milestones"]["M0"],
+            workflow.deep_merge(workflow.DEFAULT_CONFIG, {}),
+        )
+        self.assertTrue(passed, failures)
+
+    def test_cli_cannot_create_superseding_review(self) -> None:
+        parser = workflow.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "record-review",
+                    "M0-T01",
+                    "--reviewer",
+                    "qa",
+                    "--round",
+                    "superseding",
+                    "--candidate-sha",
+                    "a" * 40,
+                    "--verdict",
+                    "pass",
+                ]
+            )
 
 
 if __name__ == "__main__":

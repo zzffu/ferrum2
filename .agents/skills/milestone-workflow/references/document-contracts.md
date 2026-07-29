@@ -19,6 +19,19 @@ performance, operational, and platform gaps.
 For each milestone record objective, entry/exit criteria, in-scope tickets, deferred
 work, integrated commit, canonical blockers, and risks. Status is evidence-based.
 
+## Project context audit
+
+A new feature requires `docs/context-audits/CONTEXT-<milestone>-<slug>.md`. The audit
+binds the feature goal, baseline commit, before/after SHA-256 of the configured
+`Project-specific context` section, the complete union of configured and project-added
+entries, and Product Manager/Architect/QA review.
+
+Every entry gets current repository evidence, a classification, required update, and
+post-update result. The audit is repository truth evidence, not a duplicate spec. At
+planning it is `approved` and the feature remains under Active planned changes. At
+close it is `verified`, names the integrated commit, and current-state context reflects
+only integrated behavior.
+
 ## ADR
 
 Use an ADR only for cross-module, protocol, persistence, public API, security,
@@ -109,5 +122,6 @@ canonical blockers, flakes/setup attempts, and unresolved failures. â€œCI greenâ
 is insufficient.
 
 A handoff records integrated commit, completed work, decisions, validation and
-budget evidence, branches/worktrees, active phases, blockers, authorization scopes,
-review rounds/debt, risks, deferred work, recovery commands, and next invocation.
+budget evidence, context-audit status/hash, AGENTS.md context updates,
+branches/worktrees, active phases, blockers, authorization scopes, review rounds/debt,
+risks, deferred work, recovery commands, and next invocation.
