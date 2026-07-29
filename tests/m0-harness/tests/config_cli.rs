@@ -1,7 +1,8 @@
 #[path = "../src/local_support/mod.rs"]
 mod local_support;
 
-use std::net::{TcpStream, UdpSocket};
+use std::io;
+use std::net::{SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 
 use local_support::{
     TCP_METHOD_CONFIGS, reserve_loopback, rewrite_config_method, run_binary, unused_loopback,
@@ -22,6 +23,31 @@ const SERVER_BASE: &str = "schema_version = 1\n\
     [shadowsocks]\n\
     method = \"2022-blake3-aes-128-gcm\"\n\
     psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+
+const PAIRED_PORT_ATTEMPTS: usize = 256;
+
+fn reserve_server_tcp_udp() -> (TcpListener, UdpSocket, SocketAddrV4) {
+    let mut last_retry = None;
+    for _ in 0..PAIRED_PORT_ATTEMPTS {
+        let (tcp, address) = reserve_loopback();
+        match UdpSocket::bind(address) {
+            Ok(udp) => return (tcp, udp, address),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse
+                ) =>
+            {
+                last_retry = Some(error);
+            }
+            Err(error) => panic!("reserve server UDP port {address} failed: {error}"),
+        }
+    }
+    panic!(
+        "no paired TCP/UDP loopback port after {PAIRED_PORT_ATTEMPTS} attempts: {}",
+        last_retry.expect("at least one retry")
+    );
+}
 
 #[test]
 fn valid_client_and_server_configs_have_exact_offline_output() {
@@ -59,10 +85,9 @@ fn valid_client_and_server_configs_have_exact_offline_output() {
 fn no_side_effects_even_when_all_configured_ports_are_occupied() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (client_listener, client_address) = reserve_loopback();
-    let (server_listener, server_address) = reserve_loopback();
+    let (server_listener, server_udp, server_address) = reserve_server_tcp_udp();
     let (client_metrics, client_metrics_address) = reserve_loopback();
     let (server_metrics, server_metrics_address) = reserve_loopback();
-    let server_udp = UdpSocket::bind(server_address).expect("occupy server UDP");
     let client = write_client_config(
         directory.path(),
         client_address,
