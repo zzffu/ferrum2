@@ -188,7 +188,12 @@ and command definitions in their authoritative build/config files where possible
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
 - Active planned changes:
-  - None.
+  - M4 — planned — Add one Cargo-managed qualification driver, record a diagnostic
+    ferrum2/shadowsocks-rust loopback TCP baseline, run the single bounded 10,000-idle
+    resource qualification in one GitHub-hosted `ubuntu-24.04` job, and converge
+    existing full, interop, and native-platform gates in the same workflow run for one
+    exact commit. Local WSL2 is diagnostic only. No throughput floor, long soak,
+    product-surface expansion, packaging, release, or publication is included.
 
 
 ## Project validation

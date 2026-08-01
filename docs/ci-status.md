@@ -630,7 +630,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | NOT_PRESENT | 无 benchmark contract、runner 或 baseline | M4 |
+| Performance/10k idle | PLANNED | SPEC/TEST-0005固定driver、GitHub-hosted `performance` job/profile和阈值；尚无run或baseline | M4 |
 
 ## 已实现并通过的 M0 CI profile
 
@@ -674,8 +674,9 @@ coverage/profiling output 和 rendered docs 属于 generated artifacts，不提�
 - `origin/codex/integration/m0`现精确指向`8318ef1`；一次性push授权已耗尽。
   master remote、PR、tag、release、branch protection、rerun、第二次push及其他
   remote mutation仍未授权。
-- 尚未定义 resource stability threshold、soak duration、benchmark hardware
-  或 comparison statistics；这是 M4 DEC-010，不阻塞 M0 implementation。
+- SPEC/TEST-0005已固定M4 GitHub-hosted execution profile、bounded 10k-idle
+  threshold和comparison statistics；driver、workflow job与实际run尚未实现，
+  本机/WSL2结果不能宣称M4 PASS。
 - M0 closeout已重新执行workflow doctor/validate、release dependency checks、
   exact-SHA full gate和`git diff --check`；最终里程碑状态与恢复入口记录在
   `docs/handoffs/HANDOFF-M0-2026-07-28.md`。
