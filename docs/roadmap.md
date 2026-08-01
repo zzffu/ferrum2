@@ -21,8 +21,9 @@ docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
 M4-T01已在exact `7730ec7`集成到独立non-shipping tools package；M4-T02 exact
 `2f4190c`的run `30700273019/1`通过六项独立gate与throughput，但RSS window 2
-超过105%；exact `7b63bd5`已完成bounded诊断修复与双审，T02因没有新的remote
-授权而`blocked`。
+超过105%；exact `7b63bd5`已完成bounded诊断修复，exact `7c19e80`已完成WSL
+synthetic-target backlog修复、双审、本地Full及完整资源diagnostic，T02因没有
+新的remote授权而`blocked`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -609,9 +610,11 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
   - M4-T02：exact `56aadd4`修复pre-load lazy metric wait后，exact `2f4190c`
     run `30700273019/1`通过quality/MSRV/interop/三平台与throughput，并完成10k及
     180个stable owner/task samples；RSS window 2超过105%。当前因失败错误缺少
-    binary/first/current medians而失败。Exact `7b63bd5`已补齐bounded诊断并通过
-    TDD及Architect/QA双审；当前因无新remote授权而`blocked`，之后仍须一个新授权
-    push run/attempt完成root diagnosis、全部qualification及close summary。
+    binary/first/current medians而失败。Exact `7b63bd5`已补齐bounded诊断；exact
+    `7c19e80`修复仅在WSL暴露的synthetic resource target默认backlog，并通过双审、
+    Full、budgets及完整本地10k/180 samples/6 RSS windows/exact drain。WSL结果仅作
+    diagnostic；当前因无新remote授权而`blocked`，之后仍须一个新授权push
+    run/attempt完成hosted root diagnosis、全部qualification及close summary。
 
   Dependency graph：
 
@@ -626,6 +629,8 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
   local M4-T02 resource repair exact `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`；
   remote M4-T02 diagnostic candidate exact `2f4190c272f79c5d90ebb2d70cdade0378e44e02`；
   local M4-T02 RSS diagnostic repair exact `7b63bd588e1be600beb417636ed0d37ac3b0fb44`；
+  local M4-T02 WSL target-backlog repair exact
+  `7c19e80f7c7fcb68e3c6b3e562c6d01a379ebf47`；
   M4 accepted hosted qualification commit尚待T02。
 - **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
   driver迁到独立tools package解除；authoritative allowance、classifier、baseline

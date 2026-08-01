@@ -59,7 +59,8 @@ git status --short
 - Probe repair candidate: `57d317ddb554bbbbc5cc324046277a514ce54324`
 - Resource-readiness repair: `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`
 - RSS diagnostic repair: `7b63bd588e1be600beb417636ed0d37ac3b0fb44`
-- Review: Architect `PASS`; QA `PASS`; no findings on either local resource repair
+- WSL target-backlog repair: `7c19e80f7c7fcb68e3c6b3e562c6d01a379ebf47`
+- Review: Architect `PASS`; QA `PASS`; no findings on the local resource repairs
 - Notes: the probe repair keeps every external probe bounded, assigns a static redacted
   identity and distinct failure class, and raises only the identity/reference/hash
   probe limit from five to thirty seconds. `IO_TIMEOUT` and `REAP_TIMEOUT` remain five
@@ -82,6 +83,14 @@ git status --short
   exactly `checkout status probe timed out`. The old hosted command cannot be recovered
   from its collapsed immutable log; thirty seconds is bounded diagnostic headroom, not
   a waiver or a throughput measurement change.
+- WSL2 resource validation: exact `7c19e80` requested backlog `10000` only for the
+  synthetic resource target. Architect and QA independently returned `PASS` with no
+  findings. Full passed `6/6`; ticket and milestone budgets passed at code `13906`,
+  tests `20756`, ratio `1.492593`. The native ext4 run reached exact `10000` target
+  accepts, completed `180/180` samples and `6/6` RSS windows, passed exact drain, and
+  exited `0` after `2131` seconds. All six client/server median-twice values remained
+  `1909544/1966728` KiB; Linux reported zero listen overflow/drop and cleanup left no
+  driver/client/server process. This is diagnostic evidence, not hosted qualification.
 - Historical hosted result: single-use scope `M4-REMOTE-4cee0a1-A1` was consumed and
   auto-revoked before one non-force push of
   `4cee0a1e18450eb0a95c3e16a0903a735969591c`. GitHub Actions run
@@ -140,4 +149,6 @@ git status --short
   already pinned workspace `socket2` dependency, set an explicit synthetic-target
   backlog without weakening the profile, update the exact dependency policy/lock edge,
   run local reviews and WSL2 validation, and integrate the reviewed repair locally.
-  The scope authorizes no push, workflow run/dispatch, PR, release, or publication.
+  Exact `7c19e80` implements the repair and passed both reviews, Full, both budgets,
+  and the complete WSL2 resource mode above. The scope is consumed and revoked. It
+  authorized no push, workflow run/dispatch, PR, release, or publication.

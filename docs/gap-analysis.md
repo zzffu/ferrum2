@@ -28,8 +28,10 @@ bound，并通过 fresh bounded reviews。因此 T04 的诚实 deferral 不留�
 M3 lifecycle outcome。当前 `done=7`、`deferred=1`、active phases/open roots
 均为空；性能基线与单个GitHub-hosted runner上的bounded 10k-idle resource
 qualification现由executing M4的SPEC/TEST-0005及M4-T01/T02拥有；T01已在exact
-`7730ec7`集成到独立non-shipping tools package并通过双审，尚无hosted执行证据；
-本机WSL2仅作test-code diagnostic。
+`7730ec7`集成到独立non-shipping tools package并通过双审。Hosted exact
+`2f4190c`已记录throughput并完成10k/180 samples后因RSS window 2失败；local exact
+`7c19e80`已在WSL2完整通过10k/180 samples/6 RSS windows/drain，但本机WSL2仍仅作
+test-code diagnostic，不能替代hosted资格。
 
 ## Planning 证据基线（历史）
 

@@ -40,13 +40,11 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 
 Preserve failed run `30700273019/1` on exact `2f4190c`: all six independent
 quality/MSRV/interop/platform jobs succeeded, TCP/UDP recorded `12/12` with cleanup,
-and throughput recorded `9013384 / 480717482`, ratio `0.018749857`. Resource passed
-readiness, exact 10k load, and 180 stable active/fd/task samples, then failed because
-RSS window 2 exceeded 105%; cleanup succeeded and drain was not reached. Raw samples
-were correctly deleted, but the bounded error omits the binary and first/current
-medians. Exact `7b63bd5` adds only that bounded redacted diagnostic while preserving
-the 105% threshold, sample profile, and drain contract; TDD, Architect/QA reviews,
-focused checks, and both budgets pass. Local scope `M4-LOCAL-RSS-DIAG-001` is consumed
-and revoked. Finish Full on the integration docs descendant, then obtain a new exact
-single-use remote authorization to observe attributable RSS values. No rerun or new
-push is currently authorized.
+throughput recorded `9013384 / 480717482`, ratio `0.018749857`, and resource completed
+10k plus 180 stable active/fd/task samples before RSS window 2 exceeded 105%. Exact
+`7b63bd5` adds bounded binary/first/current medians. Exact `7c19e80` additionally
+repairs only the WSL-exposed default backlog of the synthetic resource target; both
+reviews, Full `6/6`, both budgets, and a complete native ext4 WSL2 run of 10k,
+180 samples, six RSS windows, and exact drain pass. WSL2 remains diagnostic. Obtain a
+new exact single-use remote authorization before any push/run that observes hosted RSS
+values on the current integrated source. No rerun or new push is currently authorized.
