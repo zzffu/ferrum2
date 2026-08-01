@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: active
+status: blocked
 depends_on: [M4-T01]
 owns:
   - tools/ferrum2-m4-qualification/src/m4_support/mod.rs
@@ -50,11 +50,23 @@ git status --short
 
 ## Result
 
-- Commit: `4cee0a1e18450eb0a95c3e16a0903a735969591c`
-- Review: hosted qualification `FAIL`; no result was waived or spliced
-- Notes: local Full `6/6` and the milestone budget passed before the authorized push.
-  Single-use scope `M4-REMOTE-4cee0a1-A1` was consumed and auto-revoked before one
-  non-force push to `refs/heads/codex/integration/m4`. GitHub Actions run
+- Local repair candidate: `57d317ddb554bbbbc5cc324046277a514ce54324`
+- Review: Architect `PASS`; QA `PASS`; no findings
+- Notes: the repair keeps every external probe bounded, assigns a static redacted
+  identity and distinct failure class, and raises only the identity/reference/hash
+  probe limit from five to thirty seconds. `IO_TIMEOUT` and `REAP_TIMEOUT` remain five
+  seconds. Release self-check passed with `mutations=10`; authoritative Full passed
+  `6/6`; ticket and milestone budgets passed at code `13812`, tests `20740`, ratio
+  `1.501593`.
+- WSL2 diagnosis: the original five-second candidate completed the full hosted identity
+  path `50/50` on a native Linux checkout. Mounted-worktree `git status` samples ranged
+  from `0.775` to `3.297` seconds; a controlled six-second `git status` delay produced
+  exactly `checkout status probe timed out`. The old hosted command cannot be recovered
+  from its collapsed immutable log; thirty seconds is bounded diagnostic headroom, not
+  a waiver or a throughput measurement change.
+- Historical hosted result: single-use scope `M4-REMOTE-4cee0a1-A1` was consumed and
+  auto-revoked before one non-force push of
+  `4cee0a1e18450eb0a95c3e16a0903a735969591c`. GitHub Actions run
   [`30697247986`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30697247986)
   completed `failure`: quality, MSRV, interop, and all three native-platform rows
   succeeded; performance job `91362102185` failed after hosted preflight and the
@@ -64,12 +76,10 @@ git status --short
 
 ## Blocker
 
-- `HOSTED-M4-T02-001`: the immutable run proves that one five-second bounded probe
-  failed, but `probe_text` collapses timeout, nonzero exit, output truncation, and
-  secret detection for every probe into the same redacted message. The log therefore
-  cannot identify the failing command without speculation.
-- Unblock by making probe identity/failure class observable without emitting captured
-  output or secrets, validating the narrow repair locally, and obtaining a new exact,
-  single-use authorization for one fresh push-triggered run. No rerun or second push
-  is authorized. The user authorized the local repair and WSL2 diagnostic on
-  2026-08-01; that authorization does not include any remote mutation.
+- `HOSTED-M4-T02-001`: local candidate `57d317d` repairs the diagnostic defect, but the
+  root remains open until one fresh exact-SHA hosted run produces the required
+  performance/resource evidence. The historical failing command remains unknowable;
+  no result is waived or spliced.
+- `M4-T02-REMOTE-002`: obtain a new exact, single-use authorization before pushing
+  `57d317d` and observing one fresh push-triggered run. No rerun, dispatch, second push,
+  PR, release, publication, or other remote mutation is currently authorized.

@@ -19,7 +19,8 @@ Actions run `30494736004` attempt 1 的七项成功、TCP/UDP 各 12/12、三目
 native lifecycle/linkage/hash 和关闭审查证据关闭；local closeout source 是
 docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
-M4-T01已在exact `7730ec7`集成到独立non-shipping tools package。
+M4-T01已在exact `7730ec7`集成到独立non-shipping tools package；M4-T02的
+local probe repair candidate是exact `57d317d`，双审、Full与budget已通过。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -41,7 +42,7 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
 完成三目标 native qualification。M4-T01已把non-test driver迁到独立tools
 package并在exact `7730ec7`通过双审与authoritative ticket budget；下一入口是
-M4-T02 local Full/milestone diagnostics，remote仍需单独授权。
+M4-T02仍blocked于fresh exact-SHA hosted qualification，remote需单独授权。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -602,9 +603,10 @@ M4-T02 local Full/milestone diagnostics，remote仍需单独授权。
   - M4-T01：在独立non-shipping `ferrum2-m4-qualification` package内增加唯一
     Cargo-managed、non-default throughput/resource driver与短self-check，并在
     既有workflow增加唯一hosted `performance` job；exact `7730ec7`已`done`；
-  - M4-T02：在T01 accepted integration上以一次授权push运行同SHA hosted
+  - M4-T02：local exact `57d317d`已修复probe诊断并通过双审、Full `6/6`与
+    milestone budget；仍须在一次新授权push上运行同SHA hosted
     performance/resource、full、test-budget、24-case/three-target qualification并
-    记录close summary，当前`ready`且remote step仍需另行明确授权。
+    记录close summary，当前`blocked`且remote step仍需另行明确授权。
 
   Dependency graph：
 
@@ -616,7 +618,8 @@ M4-T02 local Full/milestone diagnostics，remote仍需单独授权。
   proxy chaining、Linux transparent inbound、Windows TUN、hot reload、
   management API、reduced-round ChaCha、custom executor 和 `io_uring`。
 - **Integrated commit:** M4-T01 exact `7730ec730258971652270cc6ef41be9457abc2a7`；
-  M4 accepted qualification commit尚待T02。
+  local M4-T02 repair candidate exact `57d317ddb554bbbbc5cc324046277a514ce54324`；
+  M4 accepted hosted qualification commit尚待T02。
 - **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
   driver迁到独立tools package解除；authoritative allowance、classifier、baseline
   和evidence均不变。T02仍必须先取得一次exact integration push/run scope；未授权
@@ -717,3 +720,4 @@ M4-T02 local Full/milestone diagnostics，remote仍需单独授权。
 | 2026-08-01 | M4-T01 integration | exact `7730ec7`集成non-shipping Cargo driver和既有workflow的单一`performance` job；T01 `done`、T02 `ready` | 独立tools seam保持产品依赖单向；双审修复fixed throughput window、worker join、absolute drain与sample-slot fail-closed；预算政策不变 | Architect/QA final `PASS`；quick、MSRV、Clippy、self-check、harness及ticket budget `PASS_ADVANCE`；无push/hosted run/publication |
 | 2026-08-01 | M4 first hosted qualification | exact `4cee0a1` run `30697247986/1` 的quality、MSRV、interop和三平台全部success，但performance在preflight与release build成功后以`bounded identity probe failed`终止，final qualification failure；T02 `blocked` | 共享`probe_text`丢弃了具体probe及timeout/nonzero/truncation/secret失败类别，不可变日志无法在不猜测的前提下定位；未throughput/resource证据 | `M4-REMOTE-4cee0a1-A1` 1/1在non-force push前消费并自动撤销；cleanup success；失败run保留且不重跑/拼接；无第二push/release/publication |
 | 2026-08-01 | M4 probe repair authorization | M4-T02从`blocked`恢复为`active`，临时租用资格驱动的单一`m4_support` source，先修复static redacted probe identity/failure class并在WSL2诊断5秒边界 | 确定缺陷在共享probe seam；不改product/wire/reference/ratio/resource或same-run gate | 用户授权本地修复与WSL2 diagnostic；不授权push/rerun/dispatch/release/publication |
+| 2026-08-01 | M4 local probe repair | exact `57d317d`以static probe identity、distinct redacted failure class和shared 30秒probe limit关闭本地诊断缺陷；`IO_TIMEOUT`/`REAP_TIMEOUT`仍为5秒，双审、Full `6/6`、budget通过，T02转为remote-blocked | WSL2 native checkout在旧5秒边界50/50通过；受控6秒`git status`准确命中timeout class，旧hosted具体命令因历史日志折叠不可恢复 | Architect/QA `PASS`；code `13812`、tests `20740`、ratio `1.501593`；等待fresh exact-SHA单次remote授权 |

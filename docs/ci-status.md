@@ -2,12 +2,18 @@
 
 ## 当前 M4 executing 状态
 
-- **Candidate and authorization:** exact
-  `4cee0a1e18450eb0a95c3e16a0903a735969591c` passed local Full `6/6` and
-  milestone budget (`13744` code, `20740` tests, ratio `1.509022`). Single-use
-  scope `M4-REMOTE-4cee0a1-A1` was consumed and auto-revoked immediately before
-  one non-force push to `origin/codex/integration/m4`; no rerun, dispatch, second
-  push, PR, tag, release, or publication occurred.
+- **Local repair candidate:** exact
+  `57d317ddb554bbbbc5cc324046277a514ce54324` has Architect and QA `PASS`,
+  release self-check `mutations=10`, authoritative Full `6/6`, and ticket/milestone
+  budget `PASS_ADVANCE` (`13812` code, `20740` tests, ratio `1.501593`). The remote
+  branch remains at `4cee0a1e18450eb0a95c3e16a0903a735969591c`; no new remote
+  scope exists.
+- **WSL2 diagnosis:** exact five-second diagnostic candidate `e9dbe54` completed the
+  hosted identity path `50/50` on a native WSL checkout. Mounted-worktree `git status`
+  samples were `0.775`–`3.297` seconds; a controlled six-second delay returned the
+  exact redacted class `checkout status probe timed out`. The final candidate uses a
+  shared thirty-second limit only for identity/reference/hash probes and preserves the
+  five-second I/O and reap limits.
 - **Hosted result:** push run
   [`30697247986`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30697247986)
   completed `failure` on that exact SHA. Quality `91362102217`, MSRV
@@ -19,12 +25,12 @@
   seconds with `M4 qualification rejected: bounded identity probe failed`; the
   always-run process/evidence cleanup succeeded. No throughput trial, median, ratio,
   10k-idle sample, RSS window, or drain result may be credited.
-- **Open root:** `HOSTED-M4-T02-001`. The shared `probe_text` path maps timeout,
-  nonzero exit, truncation, and secret detection for all identity/reference/hash
-  probes to one message and discards command identity. The immutable log cannot
-  safely distinguish the failing probe. T02 remains blocked pending a narrow
-  redacted-diagnostic repair, local revalidation, and separate authorization for a
-  fresh exact-SHA run; the failed run will not be rerun or spliced.
+- **Open root:** `HOSTED-M4-T02-001`. Candidate `57d317d` repairs the shared
+  diagnostic seam with static identities and distinct redacted timeout, nonzero,
+  output-bound, secret-output, and UTF-8 classes. The historical failing command is
+  unrecoverable from run `30697247986/1`; closure still requires fresh same-SHA hosted
+  evidence. `M4-T02-REMOTE-002` blocks on a new exact, single-use authorization. The
+  failed run will not be rerun or spliced.
 
 ## 当前 M3 closed 状态
 
@@ -656,7 +662,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | exact `4cee0a1` run `30697247986/1` 的preflight/build通过，但performance以`bounded identity probe failed`终止；未产生throughput/resource证据，`HOSTED-M4-T02-001`待修复 | M4 |
+| Performance/10k idle | BLOCKED | local exact `57d317d`已修复probe诊断并通过双审、Full与budget；remote仍为`4cee0a1`，fresh exact-SHA hosted run等待`M4-T02-REMOTE-002`授权 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 

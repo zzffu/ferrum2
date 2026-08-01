@@ -34,15 +34,14 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
-| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | active |
+| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | blocked |
 
 ## Next action
 
-Authorized run `30697247986/1` on exact `4cee0a1e18450eb0a95c3e16a0903a735969591c`
-passed quality, MSRV, interop, and all three native-platform rows, but performance
-failed after its successful preflight and release build with the non-attributable
-message `bounded identity probe failed`; final qualification therefore failed. Keep
-the run immutable. The user authorized one local T02 repair and WSL2 diagnostic:
-preserve static redacted probe identity and failure class, diagnose the five-second
-boundary, then run the affected and repository gates. Stop afterward for a new exact
-single-use remote authorization; no rerun or second push is currently allowed.
+Local repair candidate `57d317ddb554bbbbc5cc324046277a514ce54324` has Architect
+and QA `PASS`, WSL2 diagnosis, release self-check `mutations=10`, Full `6/6`, and
+milestone budget `PASS_ADVANCE`. It replaces the collapsed probe error with static
+redacted identity/failure classes and uses one thirty-second external-probe bound;
+five-second I/O and reap bounds are unchanged. Preserve failed run `30697247986/1` on
+`4cee0a1` as immutable evidence. Stop for a new exact, single-use authorization to push
+`57d317d` and observe one fresh run; no remote action is currently allowed.
