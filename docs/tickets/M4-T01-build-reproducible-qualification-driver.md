@@ -1,7 +1,7 @@
 ---
 id: M4-T01
 milestone: M4
-status: ready
+status: blocked
 depends_on: []
 owns:
   - .github/workflows/m0.yml
@@ -51,5 +51,13 @@ git diff --check 701925681df78ad83076ed67863bf4fecf46f77c..<candidate-sha>
 ## Result
 
 - Commit: —
-- Review: —
-- Notes: No performance threshold, new workflow, or optimization work belongs here.
+- Review: Architect `ESCALATE` (`M4-BUDGET-001`); no candidate correctness review.
+- Notes: The isolated worktree contains only the manifest entry and driver/support
+  paths, unstaged and uncommitted. `fmt`, harness `check`, release `self-check`
+  (`mutations=9`), workspace binary build, UDP example build, harness tests (57 passed,
+  2 ignored), and diff-check passed. Hosted modes were not run. An alternate temporary
+  index left the real index untouched and produced
+  `BLOCKED reason=ticket_allowance_exceeded`: exact-base code growth is zero and the
+  new driver contributes 1,802 test-classified lines against the 120-line allowance.
+  Resume requires an explicitly authorized plan/control-policy amendment; no
+  performance threshold, hook bypass, baseline advance, or remote action occurred.

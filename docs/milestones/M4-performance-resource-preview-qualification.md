@@ -1,6 +1,6 @@
 # M4 — Performance, resource, and v0 preview qualification
 
-- Status: planned
+- Status: executing
 - Baseline: `701925681df78ad83076ed67863bf4fecf46f77c`
 - Owner: primary thread
 
@@ -33,11 +33,16 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | ready |
+| M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | blocked |
 | M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | todo |
 
 ## Blocker / next action
 
-Start M4-T01 from the pinned baseline. Local Windows/WSL2 runs are diagnostic only;
-T02 cannot produce qualification evidence until an exact integration push and its
-GitHub Actions run receive separate explicit authorization.
+`M4-BUDGET-001` blocks M4-T01 before a candidate commit: pinned `rustloc 0.19.1`
+classifies the required non-test Cargo driver's 1,802 new Rust lines below
+`tests/m0-harness` as test growth, while `scripts/test-budget.sh` permits 120. The
+alternate-index ticket gate returned `BLOCKED reason=ticket_allowance_exceeded`.
+The validated working tree is parked at `.worktrees/m4-t01`; no hook bypass,
+classifier gaming, baseline advance, or deletion of independent evidence is allowed.
+Resume requires explicit authorization for a separately planned control-policy
+amendment. T02's push/run remains separately unauthorized.

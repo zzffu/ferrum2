@@ -18,7 +18,8 @@ IPv6 UDP real-process 证据关闭。M3 已由 exact qualified product
 Actions run `30494736004` attempt 1 的七项成功、TCP/UDP 各 12/12、三目标
 native lifecycle/linkage/hash 和关闭审查证据关闭；local closeout source 是
 docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
-baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`planned`。
+baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
+M4-T01因`M4-BUDGET-001`在candidate commit前blocked。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -38,8 +39,9 @@ M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验�
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
 same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
-完成三目标 native qualification。M4下一入口是execute M4-T01；M4-T02等待T01
-integrated，两个ticket按drain策略串行执行。
+完成三目标 native qualification。M4-T01的实现工作树已通过本地focused gates，
+但authoritative ticket budget fail closed；下一入口是授权独立plan/control-policy
+amendment。M4-T02继续等待T01 integrated。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -570,7 +572,7 @@ integrated，两个ticket按drain策略串行执行。
 
 ## M4 — 性能基线、资源与 v0 preview 资格确认
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** 在功能和平台 contract 冻结后建立可复现性能基线，并证明同一
   integrated commit 满足全部 v0 preview gates；本里程碑不执行发布。
 - **Entry conditions:** 已满足。M3 closed；SPEC/TEST-0005在planning baseline
@@ -599,7 +601,7 @@ integrated，两个ticket按drain策略串行执行。
 - **In-scope tickets:**
   - M4-T01：在既有`ferrum2-m0-harness`内增加唯一Cargo-managed、non-default
     throughput/resource qualification driver与短self-check，并在既有workflow增加
-    唯一hosted `performance` job，`ready`；
+    唯一hosted `performance` job；`M4-BUDGET-001`使其在commit前`blocked`；
   - M4-T02：在T01 accepted integration上以一次授权push运行同SHA hosted
     performance/resource、full、test-budget、24-case/three-target qualification并
     记录close summary，`todo`且remote step仍需另行明确授权。
@@ -614,8 +616,11 @@ integrated，两个ticket按drain策略串行执行。
   proxy chaining、Linux transparent inbound、Windows TUN、hot reload、
   management API、reduced-round ChaCha、custom executor 和 `io_uring`。
 - **Integrated commit:** not yet
-- **Open blockers and risks:** T01没有planning blocker。T02必须先取得一次exact
-  integration push/run scope；未授权或provider unavailable为BLOCKED，runner
+- **Open blockers and risks:** `M4-BUDGET-001`：pinned rustloc把T01 required
+  non-test Cargo driver的1,802行全部计为test growth，authoritative 120行ticket
+  allowance返回BLOCKED；需要显式授权独立plan/control-policy amendment，禁止
+  hook bypass、classifier gaming、提前baseline advance或删除独立evidence。T02
+  仍必须先取得一次exact integration push/run scope；未授权或provider unavailable为BLOCKED，runner
   class不足、missing sample或cleanup失败为FAIL。GitHub-hosted image/hardware会
   滚动，因此记录实际profile并在同一VM交错比较；吞吐比不作preview门槛，性能
   压力不得绕过`unsafe` policy、安全或backpressure。
@@ -707,3 +712,4 @@ integrated，两个ticket按drain策略串行执行。
 | 2026-07-30 | M3 T05/T07/T08 qualification | exact `d9e59d78...` integrates native qualification and two narrow late evidence repairs；run `30494736004/1`同SHA通过quality、MSRV、Windows、GNU、musl、interop与final qualification；三票done，M3 ready to close | 两个失败run保留且不拼接；T07隔离process-global child baseline，T08以causal target datagram替换fixed-yield readiness guess，均不改变product behavior | T05 full/targeted convergence、T07/T08 fresh full Architect/QA PASS；quick `5/5`、full `6/6`、milestone budget PASS；exact local/remote scopes consumed/revoked；no release/publication |
 | 2026-07-30 | M3 close | M3 改为 `closed`；七票 done、一票诚实 deferred/T06 replacement；接受 exact `d9e59d78...` run `30494736004/1` 的七项同 run 资格，并以 docs-only `d784b061...` 为 closeout source | 全部八项 exit criteria、七项 context inventory、milestone ratchet 和 bounded review histories 均满足；三方 close review 无 blocker/major | Product `PASS_WITH_NOTES`、Architect `PASS_WITH_NOTES`、QA `PASS`；verified context audit、M3 handoff、budget baseline；close 未 push/publish |
 | 2026-08-01 | M4 plan | M4改为`planned`；SPEC/TEST-0005固定GitHub-hosted `M4-GHA-01`、diagnostic throughput profile、唯一bounded 10k-idle gate及两票drain DAG；本机WSL2仅作test-code diagnostic | M3已关闭且pre-M4 lifecycle/control repairs已在exact `7019256`集成；复用既有harness、active metric、reference pin与workflow，仅新增一个hosted job，不新增workflow、产品surface、dependency、ADR或optimization ticket | baseline `701925681df78ad83076ed67863bf4fecf46f77c`；M4 milestone、SPEC/TEST-0005、M4-T01/T02；plan-only，无remote/release/publication |
+| 2026-08-01 | M4 execute blocker | M4改为`executing`，M4-T01因`M4-BUDGET-001`在candidate commit前blocked；保留isolated working tree，不绕过hook | required driver在ticket-owned `tests/m0-harness`下被pinned rustloc计为1,802行test growth，超过allowance 120；无合法in-scope缩减 | focused local gates PASS；alternate-index machine gate `BLOCKED reason=ticket_allowance_exceeded`；Architect `ESCALATE`；无push/hosted run/publication |

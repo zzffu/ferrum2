@@ -27,8 +27,9 @@ M3-T06 导入其未集成产品 lineage，修复 terminal UDP circular wait 与 
 bound，并通过 fresh bounded reviews。因此 T04 的诚实 deferral 不留下未交付的
 M3 lifecycle outcome。当前 `done=7`、`deferred=1`、active phases/open roots
 均为空；性能基线与单个GitHub-hosted runner上的bounded 10k-idle resource
-qualification现由planned M4的SPEC/TEST-0005及M4-T01/T02拥有，尚无执行证据；
-本机WSL2仅作test-code diagnostic。
+qualification现由executing M4的SPEC/TEST-0005及M4-T01/T02拥有；M4-T01因
+`M4-BUDGET-001`在candidate commit前blocked，尚无hosted执行证据；本机WSL2
+仅作test-code diagnostic。
 
 ## Planning 证据基线（历史）
 
@@ -141,5 +142,6 @@ Execute 不隐含 remote authority。M3 实际执行中只使用了 exact、sing
 non-force fast-forward 到 `refs/heads/codex/integration/m3`；所有授权均已
 耗尽并撤销。Close mode 没有 push、rerun、dispatch、PR、tag、release、
 publication 或 ref deletion。M4 planning baseline是
-`701925681df78ad83076ed67863bf4fecf46f77c`；下一入口是显式
-`mode=execute milestone=M4`，initial frontier仅M4-T01。
+`701925681df78ad83076ed67863bf4fecf46f77c`；M4-T01当前因required driver的
+rustloc classification与120行ticket allowance冲突而blocked。下一入口是先显式
+授权独立plan/control-policy amendment；remote scope仍未授权。

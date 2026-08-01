@@ -188,12 +188,11 @@ and command definitions in their authoritative build/config files where possible
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
 - Active planned changes:
-  - M4 — planned — Add one Cargo-managed qualification driver, record a diagnostic
-    ferrum2/shadowsocks-rust loopback TCP baseline, run the single bounded 10,000-idle
-    resource qualification in one GitHub-hosted `ubuntu-24.04` job, and converge
-    existing full, interop, and native-platform gates in the same workflow run for one
-    exact commit. Local WSL2 is diagnostic only. No throughput floor, long soak,
-    product-surface expansion, packaging, release, or publication is included.
+  - M4 — executing/blocked — M4-T01's required driver is parked in its isolated
+    worktree, but pinned `rustloc 0.19.1` classifies its 1,802 Rust lines as test growth
+    and the authoritative 120-line ticket allowance rejects it (`M4-BUDGET-001`). A
+    plan/control-policy amendment requires explicit authorization before execution can
+    resume. No push, hosted run, packaging, release, or publication is authorized.
 
 
 ## Project validation
