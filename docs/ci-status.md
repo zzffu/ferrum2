@@ -1,5 +1,31 @@
 # CI 与验证状态
 
+## 当前 M4 executing 状态
+
+- **Candidate and authorization:** exact
+  `4cee0a1e18450eb0a95c3e16a0903a735969591c` passed local Full `6/6` and
+  milestone budget (`13744` code, `20740` tests, ratio `1.509022`). Single-use
+  scope `M4-REMOTE-4cee0a1-A1` was consumed and auto-revoked immediately before
+  one non-force push to `origin/codex/integration/m4`; no rerun, dispatch, second
+  push, PR, tag, release, or publication occurred.
+- **Hosted result:** push run
+  [`30697247986`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30697247986)
+  completed `failure` on that exact SHA. Quality `91362102217`, MSRV
+  `91362102198`, interop `91362102206`, Linux GNU `91362102192`, Linux musl
+  `91362102207`, and Windows MSVC `91362102234` completed `success`.
+  Performance `91362102185` failed, so final qualification `91362498191` failed.
+- **Performance evidence:** hosted-profile preflight, pinned reference checks, and
+  the locked workspace release build succeeded. The driver then exited after five
+  seconds with `M4 qualification rejected: bounded identity probe failed`; the
+  always-run process/evidence cleanup succeeded. No throughput trial, median, ratio,
+  10k-idle sample, RSS window, or drain result may be credited.
+- **Open root:** `HOSTED-M4-T02-001`. The shared `probe_text` path maps timeout,
+  nonzero exit, truncation, and secret detection for all identity/reference/hash
+  probes to one message and discards command identity. The immutable log cannot
+  safely distinguish the failing probe. T02 remains blocked pending a narrow
+  redacted-diagnostic repair, local revalidation, and separate authorization for a
+  fresh exact-SHA run; the failed run will not be rerun or spliced.
+
 ## 当前 M3 closed 状态
 
 - **Qualified product SHA:** exact
@@ -630,7 +656,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | IMPLEMENTED / NOT RUN | T01 exact `7730ec7`已集成并通过双审、quick及ticket budget；正式hosted throughput/resource与baseline尚未授权或执行 | M4 |
+| Performance/10k idle | BLOCKED | exact `4cee0a1` run `30697247986/1` 的preflight/build通过，但performance以`bounded identity probe failed`终止；未产生throughput/resource证据，`HOSTED-M4-T02-001`待修复 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 
