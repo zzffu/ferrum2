@@ -350,6 +350,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrum2-m4-qualification"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "ferrum2-observability"
 version = "0.1.0"
 dependencies = [

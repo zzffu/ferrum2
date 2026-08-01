@@ -10,6 +10,7 @@ members = [
     "crates/ferrum2-config",
     "crates/ferrum2-observability",
     "tests/m0-harness",
+    "tools/ferrum2-m4-qualification",
 ]
 resolver = "3"
 

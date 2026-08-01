@@ -42,6 +42,7 @@ ferrum2-config|0.1.0||
 ferrum2-core|0.1.0||
 ferrum2-crypto|0.1.0||
 ferrum2-m0-harness|0.1.0||
+ferrum2-m4-qualification|0.1.0||
 ferrum2-observability|0.1.0||
 ferrum2-runtime|0.1.0||
 ferrum2-server|0.1.0||
@@ -272,8 +273,8 @@ fn approved_lock_identities() -> Vec<LockIdentity> {
         .collect();
     assert_eq!(
         identities.len(),
-        113,
-        "the ADR-0018 M1 baseline must contain 113 identities"
+        114,
+        "the approved workspace baseline must contain 114 identities"
     );
     let mut sorted = identities.clone();
     sorted.sort();
@@ -1189,6 +1190,54 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
             "local qualification state tests must remain I/O-free: {forbidden}"
         );
     }
+
+    let m4 = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "ferrum2-m4-qualification")
+        .expect("M4 qualification package");
+    assert_eq!(
+        m4["dependencies"],
+        serde_json::json!([{
+            "name": "tempfile",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "req": "=3.27.0",
+            "kind": null,
+            "rename": null,
+            "optional": false,
+            "uses_default_features": true,
+            "features": [],
+            "target": null,
+            "registry": null
+        }])
+    );
+    let targets = m4["targets"].as_array().expect("M4 targets");
+    assert_eq!(targets.len(), 1);
+    let target = &targets[0];
+    assert_eq!(target["name"], "m4-qualification");
+    assert_eq!(target["kind"], serde_json::json!(["bin"]));
+    assert_eq!(target["crate_types"], serde_json::json!(["bin"]));
+    assert_eq!(target["test"], false);
+    assert_eq!(target["doctest"], false);
+    assert!(
+        target["src_path"]
+            .as_str()
+            .expect("M4 source path")
+            .replace('\\', "/")
+            .ends_with("/tools/ferrum2-m4-qualification/src/main.rs")
+    );
+    let manifest = fs::read_to_string(root.join("tools/ferrum2-m4-qualification/Cargo.toml"))
+        .expect("M4 qualification manifest");
+    assert_eq!(
+        dependency_table(&manifest, "[dependencies]").expect("M4 dependencies"),
+        BTreeMap::from([("tempfile.workspace".to_owned(), "true".to_owned())])
+    );
+    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock");
+    assert_eq!(
+        lock_package_dependencies(&lock, "ferrum2-m4-qualification").expect("M4 lock dependencies"),
+        BTreeSet::from(["tempfile".to_owned()])
+    );
 }
 
 #[test]
@@ -1336,15 +1385,15 @@ fn resolved_crypto_feature_sets_are_exact() {
 }
 
 #[test]
-fn lock_package_identities_exactly_match_the_approved_m1_baseline() {
+fn lock_package_identities_exactly_match_the_approved_workspace_baseline() {
     let lock = fs::read_to_string(workspace_root().join("Cargo.lock")).expect("Cargo.lock");
     let actual = lock_identities(&lock).expect("candidate lock identities");
     let expected = approved_lock_identities();
 
     assert_eq!(
         actual.len(),
-        113,
-        "candidate lock must contain 113 packages"
+        114,
+        "candidate lock must contain 114 packages"
     );
     assert_eq!(
         actual, expected,
