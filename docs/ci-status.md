@@ -63,6 +63,14 @@
   focused checks, and both budgets pass with no findings. The 105% gate and profile are
   unchanged. Local scope `M4-LOCAL-RSS-DIAG-001` is consumed and revoked; hosted
   observation is blocked pending a new exact single-use authorization.
+- **Local WSL2 resource setup:** exact `d28ed0a` failed twice before sampling with
+  `target did not accept 10000 streams`. In both runs the client/server active gauges
+  reached exact `10000`; the driver held fewer target-side streams, and Linux recorded
+  listener overflows/drops. Root cause is the resource-only synthetic target's default
+  listen backlog under fixed setup concurrency `256`, not a product listener setting.
+  Local scope `M4-LOCAL-WSL-TARGET-BACKLOG-001` authorizes one minimal explicit-backlog
+  harness repair, exact dependency-policy reconciliation, reviews, WSL2 validation,
+  and local integration only. No remote mutation is authorized.
 
 ## 当前 M3 closed 状态
 

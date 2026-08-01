@@ -4,7 +4,10 @@ milestone: M4
 status: blocked
 depends_on: [M4-T01]
 owns:
+  - Cargo.lock
+  - tools/ferrum2-m4-qualification/Cargo.toml
   - tools/ferrum2-m4-qualification/src/m4_support/mod.rs
+  - tests/m0-harness/tests/workspace_policy.rs
   - docs/ci-status.md
   - docs/tickets/M4-T02-qualify-preview-on-one-exact-commit.md
 ---
@@ -128,3 +131,13 @@ git status --short
   Local scope `M4-LOCAL-RSS-DIAG-001` is consumed and revoked. Hosted observation is
   blocked pending a new exact single-use push authorization. No rerun, second push,
   dispatch, PR, release, publication, or other remote mutation is authorized.
+- `LOCAL-M4-T02-004`: exact `d28ed0a` reproduced `target did not accept 10000
+  streams` in two native WSL2 runs. Both product active gauges reached exact `10000`,
+  while the qualification driver retained fewer target-side streams and Linux
+  reported listener overflows/drops. The resource-only synthetic target uses the
+  platform-default `TcpListener::bind` backlog against fixed setup concurrency `256`.
+  Local scope `M4-LOCAL-WSL-TARGET-BACKLOG-001` authorizes one writer to reuse the
+  already pinned workspace `socket2` dependency, set an explicit synthetic-target
+  backlog without weakening the profile, update the exact dependency policy/lock edge,
+  run local reviews and WSL2 validation, and integrate the reviewed repair locally.
+  The scope authorizes no push, workflow run/dispatch, PR, release, or publication.
