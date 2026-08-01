@@ -1,7 +1,7 @@
 ---
 id: PRE-M4-T01
 milestone: pre-M4
-status: active
+status: blocked
 depends_on: []
 owns:
   - tests/m0-harness/src/local_support/mod.rs
@@ -27,17 +27,17 @@ or edit an Accepted ADR.
 
 ## Acceptance
 
-- [ ] Windows signallable children use `CREATE_NEW_PROCESS_GROUP`, never
+- [x] Windows signallable children use `CREATE_NEW_PROCESS_GROUP`, never
   `CREATE_NEW_CONSOLE`, and Ctrl-Break targets only the child PID's process group.
-- [ ] One shared lifecycle matrix runs one iteration per category by default and an
+- [x] One shared lifecycle matrix runs one iteration per category by default and an
   ignored exact-name full qualification runs 20 per category.
-- [ ] Full qualification guarantees at least 100 real client and 100 real server
+- [x] Full qualification guarantees at least 100 real client and 100 real server
   starts while preserving signal, exit, reap, cleanup, and immediate-rebind assertions.
 - [ ] Authoritative full validation and CI explicitly execute the full test on the same
   SHA; quick/default workspace tests execute only smoke.
-- [ ] No dependency, production code, new harness, or hidden environment-variable
+- [x] No dependency, production code, new harness, or hidden environment-variable
   control is added.
-- [ ] Focused and repository validation pass.
+- [x] Focused and repository validation pass.
 
 ## Validation
 
@@ -51,6 +51,9 @@ cargo test --workspace --locked
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `68f94c3` (test implementation, test plans, and authoritative local gate)
+- Review: `PRE-M4-T01-REVIEW-001` PASS with no findings
+- Notes: The exact CI command is present as an uncommitted one-line change. The normal
+  commit hook rejects `.github/workflows/m0.yml` with `control_plane_changed`; the
+  current workflow defines no sanctioned control-maintenance commit path, so the hook
+  was not bypassed.
