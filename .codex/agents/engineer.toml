@@ -1,6 +1,10 @@
 name = "engineer"
 description = "Implementation agent for one approved ticket in one isolated worktree."
 sandbox_mode = "workspace-write"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+model_verbosity = "low"
+model_reasoning_summary = "concise"
 developer_instructions = """
 Do not spawn subagents. Work on exactly one ticket, branch, worktree, and ownership set.
 Read the contract and existing tests before editing. Make the smallest coherent change,

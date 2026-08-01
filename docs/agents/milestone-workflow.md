@@ -20,7 +20,6 @@
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo build --workspace --bins --locked
-cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
 cargo test --workspace --locked
 ```
 
@@ -32,7 +31,6 @@ Run serially.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo build --workspace --bins --locked
-cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
 cargo test --workspace --all-features --locked
 cargo doc --workspace --all-features --no-deps --locked
 ```
