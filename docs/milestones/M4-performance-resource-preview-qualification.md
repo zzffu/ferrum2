@@ -34,7 +34,8 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
-| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | blocked |
+| M4-THP-PROFILE-001 | Bind and restore the hosted `max_ptes_none=0` profile | M4-T01 | active |
+| M4-T02 | Run and record all M4 gates on one exact commit | M4-THP-PROFILE-001 | blocked |
 
 ## Next action
 
@@ -44,6 +45,9 @@ performance failed the unchanged 105% resource gate at window 2 and final
 qualification failed closed. The paired trajectories show exact `VmRSS == Rss`,
 anonymous-only growth, large `AnonHugePages` growth, and a final plateau while all
 active/fd/task tuples remain stable. This rules out the former RSS-accounting-only
-hypothesis and contradicts an owner-count leak. Remote scope `M4-REMOTE-a53a5d7-A1`
-is consumed and revoked. Request a separately authorized local repair decision before
-changing the fixed profile or product; no rerun or new push is currently authorized.
+hypothesis and contradicts an owner-count leak, while remaining only consistent with
+delayed THP backing rather than proving the hosted allocator/kernel causal path. Execute
+the authorized local `M4-THP-PROFILE-001` repair from exact `d9aa968`; it binds only the
+selected hosted conformance profile and leaves product behavior and all resource
+quantities, thresholds, and timing unchanged. Remote scope `M4-REMOTE-a53a5d7-A1` is
+consumed and revoked; no rerun or new push is currently authorized.

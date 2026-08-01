@@ -1,6 +1,6 @@
 # TEST-0005 — M4 performance, resource, and v0 preview qualification
 
-- Status: planned
+- Status: executing
 - Milestone: M4
 - Spec: `docs/specs/SPEC-0005-m4-performance-resource-preview-qualification.md`
 - Baseline: `701925681df78ad83076ed67863bf4fecf46f77c`
@@ -21,6 +21,62 @@ They reuse the release binaries, SOCKS/metrics mechanics,
 stable active gauge, `/proc`, and reference pin. A new workflow, product endpoint,
 benchmark dependency, or separate soak harness would duplicate existing evidence
 without a distinct failure mode.
+
+## M4-THP-PROFILE-001 focused validation
+
+The existing public CLI `m4-qualification self-check` is the driver seam. It accepts a
+canonical `0` fixture and rejects missing/unreadable, malformed, and nonzero fixtures
+with the exact errors `THP max_ptes_none profile is unavailable`,
+`THP max_ptes_none profile is malformed`, and
+`THP max_ptes_none profile is not zero`. The existing
+`tests/m0-harness/tests/workspace_policy.rs` file is the separate workflow-behavior
+seam; no new CLI mode, harness, or dependency is introduced.
+
+Use vertical RED-to-GREEN slices for the CLI seam. The workflow-policy test is then
+committed RED with its exact failure before the protected workflow/optional-Markdown
+control commit makes it GREEN. The four linear single-parent commits are: Markdown
+contract; driver plus self-check GREEN; workspace-policy RED; workflow plus optional
+Markdown GREEN. Driver and self-check remain together in commit 2; the vertical slices
+do not require separate commits. The ticket test-budget base is exact
+`d9aa96860f1388d32b84cc56307e165054557840`.
+
+For each slice in order — canonical zero, missing/unreadable, malformed, then nonzero —
+run the exact public release command below before implementation and record RED exit
+`1` caused by the newly expected case. Implement only that slice, rerun the same command,
+and record GREEN exit `0` before starting the next slice.
+
+```sh
+cargo run --release -p ferrum2-m4-qualification --bin m4-qualification --locked -- self-check
+```
+
+The primary failure matrix is:
+
+| Case | Required result |
+|---|---|
+| knob missing or unreadable | fail before resource state with static `unavailable` class |
+| original nonnumeric | fail before mutation with static `malformed` class |
+| canonical original `0` | accept, apply/read back `0`, and restore/read back `0` |
+| canonical original `511` | save `511`, apply/read back `0`, then restore/read back exact `511` |
+| write failure | fail closed; armed restoration and `always()` backstop still run |
+| apply readback missing, malformed, or nonzero (including `511`) | fail closed; never start resource mode |
+| resource failure after mutation | restore and exact-readback original; preserve primary failure |
+| restore write or readback failure | cleanup fails explicitly without skipping remaining cleanup |
+| repeated main/backstop cleanup | idempotent; exact original remains restored |
+| throughput failure | no knob mutation or restoration state is created |
+
+The policy seam MUST prove throughput completion precedes durable original-state
+creation and mutation; mutation precedes resource start; and both the main-step
+`EXIT`/`TERM` path and independent `always()` path restore and verify before evidence
+deletion. Process reap, restoration, restore readback, and deletion must remain
+independently attempted.
+
+The CLI self-check proves exact-zero acceptance plus redacted unavailable, malformed,
+and nonzero rejection. Focused review confirms that the first validation follows hosted
+identity load but precedes evidence/temp/listener/config/child creation, the final
+validation follows drain and precedes PASS, and `resource_profile` names
+`max_ptes_none=0`. Neither seam may emit the path or observed value. Runner loss and
+`SIGKILL` cannot prove restoration and are documented invalid-run boundaries rather
+than simulated success cases.
 
 ## M4-T01 focused validation
 
@@ -103,11 +159,14 @@ work="$RUNNER_TEMP/m4"
 ```
 
 Run throughput before resource qualification so the 10k drain's `TIME_WAIT` population
-cannot affect the comparison. Success requires one bounded
+cannot affect the comparison. Only after throughput validation, apply the
+`max_ptes_none=0` profile with the save/apply/readback/restore contract above. Success
+requires one bounded
 `m4_performance_completion` line containing the medians/ratio, `sessions=10000`,
 `samples=180`, `rss_windows=6/6`, `drain=PASS`, SHA, run ID, and run attempt. An `always`
-cleanup step terminates owned processes, deletes `$RUNNER_TEMP/m4`, and fails if cleanup
-cannot be proven. A failed or interrupted mode invalidates the whole job.
+cleanup step independently terminates owned processes, restores and verifies the exact
+original knob value, deletes `$RUNNER_TEMP/m4`, and fails if cleanup cannot be proven.
+A failed or interrupted mode invalidates the whole job.
 
 ## Same-SHA repository and hosted gates
 
@@ -131,6 +190,9 @@ dispatch, PR, tag, release, or publication is authorized by this plan.
 
 - Any identity mismatch, timeout, missing sample, non-finite measurement, changing
   owner/task tuple, RSS-window violation, incomplete drain, early child exit, or leak.
+- A missing/unreadable/malformed/nonzero THP profile, failed apply or exact readback,
+  failed exact restoration, unprovable restoration after runner loss/`SIGKILL`, or
+  resource evidence created before initial profile validation.
 - Raw evidence outside the allowed local/runner temp tree, an uploaded raw artifact,
   secret/destination output, failed temp cleanup, or a committed generated artifact.
 - A failed/skipped full, test-budget, interop, platform, or blocking review gate.

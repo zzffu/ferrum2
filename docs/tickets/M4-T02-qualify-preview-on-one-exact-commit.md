@@ -2,7 +2,7 @@
 id: M4-T02
 milestone: M4
 status: blocked
-depends_on: [M4-T01]
+depends_on: [M4-T01, M4-THP-PROFILE-001]
 owns:
   - Cargo.lock
   - tools/ferrum2-m4-qualification/Cargo.toml
@@ -165,6 +165,15 @@ git status --short
   `2387968/2437120` median-twice KiB and both RSS trajectories plateaued. Performance
   and final qualification failed closed; always-run cleanup succeeded and drain was
   not reached.
+- Selected-profile repair: local ticket `M4-THP-PROFILE-001` is active from exact
+  `d9aa96860f1388d32b84cc56307e165054557840`. It changes only the selected hosted
+  profile to save, apply, validate, and restore
+  `/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none = 0`, plus driver and
+  existing policy evidence. The repair preserves the exact throughput profile, 10k
+  load, setup concurrency 256, five-minute stabilization, `180 x 10`-second samples,
+  six windows, 105%, active/fd/task invariants, and two-minute drain. WSL2 remains
+  diagnostic; no product, dependency, push, rerun, dispatch, PR, release, or
+  publication is authorized.
 
 ## Blocker
 
@@ -191,11 +200,11 @@ git status --short
   anonymous/THP-associated RSS reaches its plateau, so the unchanged 30-minute 105%
   window gate correctly fails at window 2. The paired evidence contradicts
   owner-count growth and is consistent in scale with the retained protocol and Tokio
-  relay buffers, but it does not establish the hosted allocator/kernel causal path and
-  no product or profile repair is yet authorized. Scope `M4-REMOTE-a53a5d7-A1` is
-  consumed and revoked; T02 is blocked
-  pending a separately authorized local repair. No push, rerun, dispatch, PR, release,
-  publication, or other remote mutation is authorized.
+  relay buffers, but it does not establish the hosted allocator/kernel causal path.
+  The authorized local `M4-THP-PROFILE-001` selected-profile repair is active; T02
+  remains blocked on its reviewed local completion and later separate remote
+  authorization. Scope `M4-REMOTE-a53a5d7-A1` is consumed and revoked. No push, rerun,
+  dispatch, PR, release, publication, or other remote mutation is authorized.
 - `LOCAL-M4-T02-004`: exact `d28ed0a` reproduced `target did not accept 10000
   streams` in two native WSL2 runs. Both product active gauges reached exact `10000`,
   while the qualification driver retained fewer target-side streams and Linux

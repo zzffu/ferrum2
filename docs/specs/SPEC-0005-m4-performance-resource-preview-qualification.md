@@ -1,11 +1,11 @@
 # SPEC-0005 — M4 performance, resource, and v0 preview qualification
 
-- Status: planned
+- Status: executing
 - Milestone: M4
 - Baseline: `701925681df78ad83076ed67863bf4fecf46f77c`
 - Related contracts: ADR-0016, ADR-0017, ADR-0024, SPEC-0002, SPEC-0004
 - Test plan: `docs/test-plans/TEST-0005-m4-performance-resource-preview-qualification.md`
-- Tickets: M4-T01, M4-T02
+- Tickets: M4-T01, M4-THP-PROFILE-001, M4-T02
 
 ## Scope
 
@@ -92,6 +92,32 @@ handshakes with at most 256 setup operations in flight, retains all application 
 target streams, and requires both production active-connection gauges to equal 10,000
 before stabilization starts.
 
+Before starting resource qualification, the selected hosted profile MUST bind
+`/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none` to exact `0`. This
+mutation occurs only after throughput completion and validation. The main step MUST
+first read a canonical unsigned decimal original (`0` or `[1-9][0-9]*`), durably arm
+restoration state, use the
+fixed value through stdin with non-interactive `sudo -n`, and immediately require
+exact `0` readback. It MUST arm `EXIT` and `TERM` restoration; an independent
+`if: always()` step is the backstop. Process reap, restore, exact restore readback, and
+evidence deletion are each attempted even if another cleanup action fails. Cleanup
+failure remains explicit and cannot replace the primary qualification failure.
+
+Runner loss or `SIGKILL` makes restoration unprovable and therefore invalidates the
+run; disposal of the fresh temporary VM is containment only, not evidence of successful
+restoration. The profile assumes the dedicated runner has no other authorized
+privileged mutator. Apply/readback and the final driver check bound interference but do
+not claim to eliminate a transient TOCTOU.
+
+After `M4-GHA-01` hosted identity validation and before creating evidence or temporary
+state, listeners, configuration, or children, the driver MUST reject unavailable,
+malformed, or nonzero knob state with the exact static redacted errors
+`THP max_ptes_none profile is unavailable`,
+`THP max_ptes_none profile is malformed`, and
+`THP max_ptes_none profile is not zero`, respectively. These errors contain neither
+path nor value. It MUST require exact `0` again after exact drain and before emitting
+PASS. The generated `resource_profile` MUST record `max_ptes_none=0`.
+
 After five stable minutes, the driver records exactly 180 samples at 10-second
 intervals. Each sample contains:
 
@@ -108,6 +134,14 @@ Every non-RSS owner/task tuple MUST equal the first stable tuple, including acti
 gauges of exactly 10,000. The 180 RSS values form six consecutive 30-sample windows;
 for each binary, every window median MUST be no more than 105% of its first-window
 median using exact integer comparison.
+
+The THP binding is a selected conformance profile amendment, not a product fix or a
+relaxed resource gate. Setup concurrency 256, five-minute stabilization, exactly 180
+10-second samples, six 30-sample windows, 105%, active/fd/task invariants, the absolute
+two-minute drain deadline, and the throughput profile remain unchanged. No `VmSize`
+rule, extra stabilization, allocator/buffer/protocol change, or dependency is added.
+Absolute RSS results are comparable only when the named selected profile is also
+recorded.
 
 After the driver closes all application streams, the target MUST observe closure and,
 within one absolute two-minute deadline, both active gauges, fd counts, and task counts
@@ -147,6 +181,8 @@ publication.
 - A throughput floor, performance certification, optimization ticket, profiler work,
   custom allocator, unsafe code, or changed security/backpressure behavior.
 - More methods, reference implementations, load shapes, runner classes, or soaks.
+- Treating WSL2 or the historical failed `a53a5d7` run as passing evidence, or claiming
+  that the hosted allocator/kernel causal path has been proved.
 - New metrics, management/debug endpoints, product configuration, or dependencies.
 - Packaging, signing, publication, SIP023, multi-user, public UDP inbound, routing,
   DNS proxying, chaining, hot reload, TUN, transparent proxying, or `io_uring`.
