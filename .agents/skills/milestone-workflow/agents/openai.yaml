@@ -1,7 +1,7 @@
 interface:
-  display_name: "Milestone Engineering Workflow"
-  short_description: "Refresh context, plan features, and execute milestones"
-  default_prompt: "Run the milestone workflow in status mode for this repository."
+  display_name: "Milestone Workflow"
+  short_description: "Plan and deliver milestones with Git-native evidence"
+  default_prompt: "Run milestone-workflow in status mode for this repository."
 
 policy:
   allow_implicit_invocation: false

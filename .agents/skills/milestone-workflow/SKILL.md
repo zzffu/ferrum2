@@ -1,691 +1,100 @@
 ---
 name: milestone-workflow
-description: Orchestrate repository milestones and new features with Product Manager, Architect, Engineer, and QA subagents. Use explicitly for bootstrap, feature, plan, execute, status, resume, or close modes; refreshes every Project-specific context entry, creates ADR/spec/test-plan/ticket contracts, drains dependency-ready tickets through isolated Git worktrees, reviews and integrates them, and records milestone evidence. Never pushes or publishes by default.
+description: Plan, execute, resume, inspect, and close repository milestones with concise Markdown contracts, isolated Git worktrees, bounded review, and explicit validation. Use when the user asks for milestone or feature planning, coordinated ticket execution, status, recovery, or closeout. Never pushes or publishes without explicit approval.
 ---
 
-# Milestone Workflow
+# Milestone workflow
 
-The primary thread is the **Team Lead** and sole scheduler/integrator. Subagents do
-bounded specialist work and return evidence to the primary thread. Subagents must not
-schedule other subagents. Engineers are the only subagents that normally edit product
-code, and every Engineer works in a separate Git worktree.
+Keep the workflow visible and repository-native. Git records implementation state;
+tracked Markdown records intent, decisions, acceptance, evidence, and handoff.
 
-## Agent launch contract
+## Inputs
 
-Always spawn the configured named role with an explicit `agent_type`; never use a
-generic/default agent for a milestone gate. Before assigning work, verify the role
-profile with `workflow.py doctor`. The repository defaults are:
-
-| Role | Reasoning effort | Mutation |
-|---|---|---|
-| `product_manager` | `max` | read-only |
-| `architect` | `max` | read-only |
-| `engineer` | `high` | assigned worktree only |
-| `qa` | `high` | test artifacts only; no tracked edits |
-
-If the runtime exposes actual launch metadata, compare it with the configured
-profile before the agent starts. If it does not, report the launch profile as
-`unverified`; never claim a reasoning level merely from the requested role.
-
-## Invocation
-
-Accept natural language or these explicit fields:
+Accept natural language or these fields:
 
 ```text
-mode: bootstrap | feature | plan | execute | status | resume | close
-milestone: M5               # optional for feature; auto-allocates the next numeric ID
-goal: ...                   # required for bootstrap/feature/plan when undocumented
-strategy: drain | wave      # execute only; default comes from workflow.toml
-max_parallel: 3             # never exceed workflow.toml or Codex capacity
-max_waves: 0                # execute only; 0 means no artificial cap
-auto_close: false           # execute only; true performs closeout after completion
-allow_open_milestones: false # feature only; explicit exception to sequential roadmap
-scope: ...                  # optional path/module restriction
+mode: bootstrap | feature | plan | execute | status | resume | close | recover
+milestone: M3
+goal: outcome to deliver
+scope: optional paths or modules
+strategy: drain | wave
 ```
 
-Infer omitted non-critical values from `workflow.toml`, `docs/roadmap.md`, ticket
-metadata, and the current branch. State assumptions. Do not turn an execution request
-into an extended interview.
+Infer non-critical omissions from the repository and state each assumption. Do not turn
+an execution request into a long interview.
 
-### Execute default
+## Read first
 
-`strategy: drain` is the default. One user invocation of `mode: execute` owns the
-entire scheduling loop:
+1. The applicable `AGENTS.md` chain.
+2. `docs/agents/milestone-workflow.md` if present.
+3. `docs/roadmap.md`, the active milestone file, and relevant ADR/spec/test plan/tickets.
+4. `git status`, current branch, worktrees, recent commits, and the fixed comparison base.
+
+A bad ref, dirty base, conflicting contract, or missing required evidence is a blocker;
+do not hide it with generated state.
+
+## Invariants
+
+- The primary thread schedules and integrates. Subagents do not spawn subagents.
+- One Engineer owns one ticket, branch, and worktree. Parallel writers need disjoint paths.
+- Product work does not edit this skill or `.codex/agents/**`.
+- Contracts describe outcomes and invariants, not an implementation transcript.
+- Use existing tests and seams before creating another harness or evidence layer.
+- One full review and one targeted re-review are the default bound. Remaining blockers
+  escalate; notes become debt.
+- Run commands exactly as recorded. Never claim an unrun or skipped gate passed.
+- Never reset unknown work, force-push, publish, release, or mutate remotes without
+  explicit authorization.
+
+## Route
+
+- `bootstrap`, `feature`, `plan`: read `references/plan.md`.
+- `execute`, `resume`: read `references/execute.md`.
+- `status`, `close`: read `references/close.md`.
+- `recover`: read `references/recovery.md`.
+- Before writing workflow documents, read `references/documents.md`.
+
+Load only the relevant reference. Do not preload every file.
+
+## Minimal lifecycle
 
 ```text
-reconcile existing state
-  -> resume active work and select every independent implementation-ready ticket
-  -> spawn isolated Engineers up to capacity
-  -> review each completed candidate without waiting for unrelated Engineers
-  -> repair bounded failures when possible
-  -> integrate compatible passing candidates as a batch
-  -> validate and write one material checkpoint
-  -> recompute the next wave
-  -> repeat without asking the user to invoke execute again
+inspect -> define outcome -> split dependency-ready tickets -> implement in worktrees
+-> review exact commits -> integrate -> validate -> close -> handoff
 ```
 
-Do **not** return after the first frontier when strategy is `drain`. Return after one
-frontier only when the user explicitly selects `strategy: wave`, the configured wave
-cap is reached, or a stop condition below applies.
+Use `strategy: drain` unless the user asks for one wave. Recompute readiness after each
+integration; stop on completion, a real blocker, a moved/dirty base, exhausted review
+bound, or missing authorization.
 
-## Control-plane immutability
+## Repository files
 
-Product modes may read but must not modify the installed workflow control plane:
+Default paths are defined in `docs/agents/milestone-workflow.md`:
 
 ```text
-.agents/skills/**
-.agents/AGENTS.override.md
-.codex/agents/**
-.codex/AGENTS.override.md
-.codex/config.toml
-.codex/milestone-workflow-install.json
-workflow.toml
-skills-lock.json
+docs/milestones/   active milestone summaries
+docs/tickets/      executable work items
+docs/adr/          durable decisions
+docs/specs/        observable behavior contracts
+docs/test-plans/   evidence plan
+docs/handoffs/     concise continuation notes
+docs/history/      archived closed work
+.worktrees/        local isolated worktrees
 ```
 
-Run `workflow.py control-plane-check` before planning, scheduling, candidate review,
-integration, and closeout. The installer manifest uses line-ending-normalized hashes, so Windows CRLF/LF
-representation alone is not drift. It also protects the delimited workflow-policy
-section inside root `AGENTS.md` while permitting evidence-backed updates to
-`## Project-specific context`. A product candidate that changes any installed Skill,
-a protected file, or that protected document section is ineligible for integration
-even when its product tests pass.
+Templates live under `assets/templates/`. Copy and fill them; remove unused headings.
 
-If product work exposes a missing workflow capability, do not self-patch the Skill,
-helper, role instructions, or policy. Record it with:
+## Shell helper
 
-```bash
-python .agents/skills/milestone-workflow/scripts/workflow.py workflow-debt \
-  --milestone <ID> --ticket <ID> --summary "<capability gap>" \
-  --evidence "<repository evidence>" --proposed-fix "<separate change>"
-```
+`./scripts/migrate-history.sh` archives closed ticket and handoff bodies. It is
+idempotent and dry-run-first. It is not a workflow runtime or source of truth.
 
-Then report `CONTROL_PLANE_CHANGE_REQUIRED` and stop that path. A workflow change is a
-separate user-requested maintenance/upgrade task with its own package tests and
-installer migration; it is never an automatic repair for a product ticket.
+## Completion response
 
-## Project-specific context truth contract
+Report:
 
-`## Project-specific context` in the configured `AGENTS.md` is a maintained source of
-repository truth, not a bootstrap-only note. Before a new feature is planned and again
-when its milestone closes:
-
-1. Inventory **every** top-level context entry, including configured required entries
-   and project-added entries. Use `workflow.py context-inventory --json`.
-2. Compare each claim with current manifests, source entry points, tests, CI, generated
-   artifacts, local setup, roadmap, and the exact baseline commit. Classify it as
-   `confirmed`, `stale`, `contradicted`, `missing`, or `planned-only`.
-3. Keep current shipped facts separate from intent. At plan time the new feature may
-   appear only under the configured `Active planned changes` entry with milestone and
-   `planned` status. Do not describe it as implemented.
-4. The Team Lead is the sole writer of `AGENTS.md`. Subagents return evidence and
-   proposed edits; they do not concurrently edit repository instructions.
-5. Record the entry-by-entry evidence in `docs/context-audits/CONTEXT-<milestone>-*.md`.
-   An approved audit must bind the before/after section hashes and Product Manager,
-   Architect, and QA review.
-6. At close, re-audit the integrated commit, move verified capabilities into the
-   appropriate current-state entries, remove or advance the active planned item, mark
-   the audit `verified`, and run strict context validation.
-
-Read `references/feature-and-context.md` for feature or close mode.
-
-## Contract, review, and test-economy convergence
-
-These rules override any looser third-party TDD or code-review guidance:
-
-1. **Outcome contracts.** ADRs/specs constrain observable behavior, interfaces,
-   invariants, compatibility, migration, and error semantics. They must not prescribe
-   every internal helper or test layer. Respect `planning.max_adrs_per_milestone`,
-   document soft limits, and the ticket acceptance-criteria limit.
-2. **Frozen execute contract.** When execute starts, the approved MUST requirements,
-   ADR decisions, ticket scope, and acceptance criteria are frozen. A new blocking
-   contract requires evidence that the old contract is contradictory, unsafe, or
-   impossible, plus explicit user approval.
-3. **Selective TDD.** Use a failing test for changed behavior or regression when it is
-   the clearest evidence. Do not create one test per sentence, branch, helper, reviewer
-   suggestion, or evidence layer. Reuse and consolidate existing tests first.
-4. **One primary evidence item per MUST.** Add a second test layer only for a distinct
-   failure mode not observable at the primary seam. Hosted/platform/soak evidence is a
-   release gate unless the ticket explicitly implements that behavior.
-5. **Bounded review.** Each required reviewer gets one full review and, after one
-   substantive repair, one targeted re-review. The targeted round checks only stable
-   original blocking IDs, the repair delta, and invalidated tests. It does not restart
-   a full review.
-6. **No moving goalposts.** After the first review, a new blocker is legal only when
-   the repair introduced it under the configured policy. Other findings are
-   `PASS_WITH_NOTES` review debt or an explicit escalation.
-7. **Convergent verdicts.** `PASS` and `PASS_WITH_NOTES` integrate. `BLOCK` allows one
-   substantive repair. A remaining blocker after targeted re-review is `ESCALATE`; do
-   not launch another automatic repair loop.
-8. **Test budget.** Run the configured test-budget report during planning/bootstrap,
-   the ticket gate before integration, and the milestone gate at close. Existing
-   high-ratio repositories use a recorded ratchet baseline rather than an immediate
-   hard reset to the target.
-9. **Single review system.** Do not implicitly invoke a separate general `code-review`
-   Skill during milestone execution. Architect/QA reviews in this workflow are the
-   authoritative gates. Explicit user-requested external review remains allowed.
-
-Read `references/test-economy.md` and `references/review-convergence.md` before plan,
-execute, resume, or close.
-
-## Mandatory preflight
-
-For every mode:
-
-1. Read the applicable `AGENTS.md` chain and `workflow.toml`.
-2. Resolve a Python 3.11+ launcher once (`python` in this repository's Windows
-   workflow; use `python3` only where that is the installed launcher). Run `doctor`
-   and `validate`. When a milestone is known, also inspect its state:
-
-   ```bash
-   python .agents/skills/milestone-workflow/scripts/workflow.py doctor
-   python .agents/skills/milestone-workflow/scripts/workflow.py validate
-   python .agents/skills/milestone-workflow/scripts/workflow.py control-plane-check --json
-   python .agents/skills/milestone-workflow/scripts/workflow.py context-inventory --json
-   python .agents/skills/milestone-workflow/scripts/workflow.py test-budget --gate report
-   python .agents/skills/milestone-workflow/scripts/workflow.py state \
-     --milestone <ID>
-   ```
-
-3. Read `references/state-machine.md` and the mode-specific section below.
-4. Treat approved ADRs, specs, test plans, and ticket frontmatter as contracts.
-5. Never claim a gate passed without direct evidence.
-
-For `feature` and `close`, also read `references/feature-and-context.md`. For
-`execute`, `resume`, and `close`, also read
-`references/integration-and-recovery.md`. For document creation or ticket changes,
-read `references/document-contracts.md`. For optional third-party skills, read
-`references/mattpocock-integration.md`. For any blocked or failed gate, read
-`references/blocker-taxonomy.md`. For test growth and review behavior, read
-`references/test-economy.md` and `references/review-convergence.md`.
-
-## Global safety and ownership rules
-
-- Never edit a protected control-plane path during product modes. If such a change
-  appears in an Engineer or integration candidate, reject the candidate and record
-  workflow debt; do not cherry-pick the control-plane part.
-- Never push, open or merge a remote PR, publish a release, mutate remote issues, or
-  delete remote/local branches unless the user separately and explicitly requests it.
-- Never force-push, use destructive reset/clean commands, discard unknown changes,
-  or abort another agent's Git operation.
-- The base worktree must remain clean during execution. Do not stash user changes.
-- The Team Lead is the only actor allowed to integrate branches or mutate workflow
-  coordination state.
-- Do not run multiple write-heavy agents in one worktree.
-- Parallel tickets must be dependency-ready and have disjoint `owns` paths. Unknown
-  ownership is treated as overlapping.
-- Only `implementation_blocked_by` prevents Engineer startup. Review, integration,
-  and release dependencies are enforced at their named gates. Legacy `blocked_by`
-  means `implementation_blocked_by`.
-- Record explicit user authorization in the local runtime ledger with its exact
-  action, ticket, risk, blocker class, and remote-effects boundary. A matching
-  granted local authorization is reusable after resume; it never implies remote,
-  destructive, publish, contract-expansion, or ownership-expansion authority.
-- Authorization ticket and blocker-class lists must be non-empty; an empty list is
-  never a wildcard. `kind = remote` and `remote_effects = true` must agree. A repair
-  budget override requires its own exact `repair_budget_override` action.
-  Authorization scope IDs are immutable: revoke an existing scope and grant a new
-  ID rather than overwriting its use history.
-- A remote authorization also names the exact remote ref, full commit SHA, and
-  maximum use count. Run `consume-authorization` immediately before the remote
-  mutation; consumption is atomic and an exhausted grant cannot match again.
-- A blocker's `authorization` label is descriptive only: any value other than
-  `not_required` still requires an exact matching ledger scope. A bounded local
-  repair consumes one use atomically with the repair record; record repair and
-  budget-override scope IDs separately.
-- One substantive automatic repair is the default for every risk level. Mechanical
-  corrections may be non-counting, but they do not reset or repeat the full review.
-  A budget override is an exceptional user-authorized action, not a normal route to a
-  third review cycle.
-- Classify every stop by canonical root blocker. Derived failures, poisoned follow-on
-  tests, skipped commands, and environment setup attempts do not become independent
-  product blockers. Resolving a root resolves its direct derivatives atomically.
-- Open canonical roots fail their named gate and every later gate. A ticket cannot
-  become `done`, and a milestone cannot become `ready_to_close`, while an applicable
-  root remains open.
-- Keep failed or blocked worktrees intact for diagnosis. Do not conceal partial work.
-- A spec or ADR conflict blocks implementation; it is not resolved by silently
-  editing the contract after the code. During execute, contract changes require the
-  explicit reopening rule above and user approval.
-- Close completed subagent threads after collecting their results so later waves can
-  reuse the configured thread capacity.
-
-## Mode: `bootstrap`
-
-Purpose: establish the repository control plane without implementing product code.
-
-1. Run `workflow.py bootstrap` to create missing directories/templates safely.
-2. Inspect the repository, current docs, build files, CI, tests, and recent history.
-3. Spawn `product_manager` and `architect` in parallel as read-only investigations.
-   Give both the same goal and ask them to cite concrete repository evidence. Wait for
-   both reports.
-4. Spawn `qa` after the initial reports to identify baseline test/CI gaps. QA must not
-   edit tracked files.
-5. Inventory every configured `Project-specific context` entry. Use the three role
-   reports to replace TODO/stale claims with current repository facts and add
-   `Active planned changes: None` unless an approved roadmap item is already active.
-   The Team Lead updates `AGENTS.md`; do not claim proposed milestones are shipped.
-6. Synthesize and write/update:
-   - `AGENTS.md` (`## Project-specific context` only where facts changed)
-   - `docs/vision.md`
-   - `docs/gap-analysis.md`
-   - `docs/roadmap.md`
-   - `docs/ci-status.md`
-7. Record assumptions, non-goals, milestone exit criteria, and unresolved decisions.
-8. Run `context-check --strict` and `test-budget --gate report`. For a non-empty
-   existing repository with no
-   baseline, write the initial ratchet baseline after confirming the count is sane.
-9. Run validation again. Stop before product-code implementation.
-
-Output: created/updated documents, proposed first milestone, unresolved decisions,
-and the exact next `plan` invocation.
-
-## Mode: `feature`
-
-Purpose: add a new feature after existing roadmap milestones without rerunning
-bootstrap. This mode performs a repository-truth refresh and produces a new approved
-plan; it does not implement product code.
-
-1. Resolve the goal from the request. Run:
-
-   ```bash
-   python .agents/skills/milestone-workflow/scripts/workflow.py feature-preflight \
-     --goal "<requested outcome>" --write-audit --json
-   ```
-
-   Omit `--milestone` to allocate the next numeric ID. If M0-M4 exist, the default is
-   M5. Do not reuse a closed milestone. When configured, any previous milestone not
-   marked `closed` blocks the new feature unless the user explicitly requests
-   `allow_open_milestones: true`.
-2. Bind all investigations to the exact baseline commit and context hash returned by
-   preflight. Spawn in parallel:
-   - `product_manager`: audit Product purpose, user value, current vs planned scope,
-     roadmap impact, non-goals, and the Active planned changes wording.
-   - `architect`: audit languages/frameworks, actual architecture entry points,
-     dependency boundaries, critical invariants, generated files, and development
-     setup; trace the feature's execution path and decision surface.
-   - `qa`: independently verify all context claims against build manifests, commands,
-     tests, CI, generated artifacts, platform setup, and current test-budget state.
-3. Require each report to address every configured context entry and every additional
-   top-level entry discovered by `context-inventory`. Missing evidence is a planning
-   blocker, not permission to preserve a stale claim.
-4. The Team Lead completes the generated context audit and updates
-   `## Project-specific context`:
-   - correct stale or contradicted current facts;
-   - add newly discovered current entry points/invariants/setup constraints;
-   - preserve additional project-specific entries;
-   - put the requested feature only under `Active planned changes` as
-     `<milestone> — planned — <outcome>`;
-   - do not write future implementation details as current facts.
-5. Set the audit to `approved`, record exact before/after hashes and baseline commit,
-   list `product_manager`, `architect`, and `qa` as reviewers, and remove every TODO.
-   Run:
-
-   ```bash
-   python .agents/skills/milestone-workflow/scripts/workflow.py context-check \
-     --strict --milestone <ID> --require-audit
-   ```
-
-6. Update vision/gap analysis where the feature changes product scope or closes/adds a
-   documented gap. Append a new roadmap section for the allocated milestone. Do not
-   rewrite closed milestone evidence.
-7. Continue with the complete `plan` procedure below for the new milestone: outcome
-   scope, architecture decisions only where necessary, implementation-ready spec,
-   economical test plan, vertical-slice tickets, dependencies, ownership, and
-   readiness validation.
-8. Stop before implementation and report the exact one-shot execution command:
-   `$milestone-workflow mode=execute milestone=<ID> strategy=drain`.
-
-Output: allocated milestone, context audit, exact `AGENTS.md` context changes, roadmap
-entry, contracts/tickets, validation evidence, unresolved decisions, and execute
-command.
-
-## Mode: `plan`
-
-Purpose: turn one milestone goal into approved, executable contracts.
-
-1. Resolve the milestone and objective from the request and roadmap. For a brand-new
-   feature, use `mode: feature` rather than bypassing the context audit.
-2. Spawn `product_manager` for scope, vertical slices, blockers, and exit criteria.
-3. Spawn `architect` for execution-path tracing, options, ADR requirements, interfaces,
-   errors, compatibility, migration, and rollback.
-4. After those reports, spawn `qa` for an acceptance-to-test matrix and CI strategy.
-5. The Team Lead writes or updates the required ADR, spec, test plan, roadmap entry,
-   and tickets. Do not let subagents write these concurrently.
-6. Every ticket must:
-   - be a verifiable vertical slice
-   - reference an approved spec and test plan
-   - declare `risk = low | medium | high | critical`
-   - declare implementation, review, integration, and release dependencies
-   - declare required review roles for its risk and change surface
-   - declare explicit ownership paths
-   - have measurable, non-duplicative acceptance criteria within the configured limit
-   - map each MUST to one primary evidence item in the test plan
-   - distinguish product, integration, and release evidence
-   - fit one focused Engineer context
-7. Mark a ticket `ready` only when all document gates pass. Otherwise mark it `draft`
-   or `blocked` with the reason in the body.
-8. Run `workflow.py validate`, `workflow.py test-budget --gate report`,
-   `workflow.py frontier --milestone <ID>`, and
-   `workflow.py next --milestone <ID> --json`.
-9. Stop before implementation. Planning is an intentional human-visible gate; do not
-   silently start coding from `plan` mode.
-
-Output: decisions, documents, ticket dependency graph, ready frontier, and blocked
-items.
-
-## Mode: `status`
-
-Purpose: report authoritative workflow state without changing code.
-
-1. Run:
-
-   ```bash
-   python .agents/skills/milestone-workflow/scripts/workflow.py status
-   python .agents/skills/milestone-workflow/scripts/workflow.py worktree-list
-   python .agents/skills/milestone-workflow/scripts/workflow.py state \
-     --milestone <ID>
-   python .agents/skills/milestone-workflow/scripts/workflow.py next \
-     --milestone <ID> --json
-   ```
-
-2. Compare ticket metadata with branches, worktrees, commits, roadmap, and CI status.
-3. Report inconsistencies instead of silently repairing them.
-4. Do not mutate tracked files unless the user explicitly asks for reconciliation.
-
-Output: milestone counts, next scheduler action, ready frontier, active/review work,
-worktrees, blockers, and recommended next mode.
-
-## Mode: `execute`
-
-Purpose: drain all executable work for one milestone through subagents, integration,
-and validation in a single primary-thread invocation.
-
-### A. Resolve scheduler policy
-
-1. Resolve `strategy`, `max_parallel`, `max_waves`, and `auto_close` from the request,
-   then `workflow.toml` defaults.
-2. `drain` means continue scheduling waves automatically. `wave` means run exactly
-   one frontier and return after checkpointing it.
-3. `max_waves = 0` means no artificial cap. A positive value caps waves in this run,
-   not the milestone itself.
-4. Use at most the smaller of the requested concurrency, `workflow.toml` limit, and
-   current Codex thread capacity.
-5. A new execute invocation starts its wave/no-progress counter with
-   `workflow.py checkpoint --milestone <ID> --progress material --new-run`; resume
-   reuses the existing checkpoint.
-6. Only a product/test delta, root
-   blocker resolution, new candidate-SHA evidence, or integration result is material
-   progress. Pure status edits, coordination commits, repeated derived failures, and
-   unchanged gate reruns do not reset the no-progress counter. Persist checkpoints
-   with `workflow.py checkpoint`.
-
-### B. Reconcile before scheduling
-
-1. Require the configured base branch and a clean base worktree. If dirty, stop and
-   identify exact paths; never stash or discard them.
-2. Inspect tickets, branches, worktrees, commits, and any integration branch.
-3. Run the control-plane gate, then scheduler state:
-
-   ```bash
-   python .agents/skills/milestone-workflow/scripts/workflow.py control-plane-check --json
-   python .agents/skills/milestone-workflow/scripts/workflow.py next \
-     --milestone <ID> --limit <N> --json
-   ```
-
-4. If the action is `resume_active` or `resume_and_execute_frontier`, resume active
-   gates while also starting every selected, ownership-disjoint ticket:
-   - `implementation` phase: resume or replace the assigned Engineer in the existing
-     worktree
-   - `review` phase: run or finish Architect/QA ticket gates
-   - `repair` phase: inspect preserved evidence and retry only when the failure is
-     recoverable and the repair budget permits it
-   - `integration` phase: finish merge, validation, or base fast-forward recovery
-5. Never recreate an existing branch or worktree containing partial work.
-
-### C. Execute one pipeline batch
-
-When the scheduler action is `execute_frontier` or
-`resume_and_execute_frontier`:
-
-#### C1. Local execution checkpoint
-
-1. Select the implementation-ready, ownership-disjoint frontier reported by
-   `workflow.py`.
-2. Record transient execution phase in the local runtime ledger with `set-phase`.
-   Clear it with `clear-phase` or a durable `set-status` transition. Do not create a
-   Git commit solely for implementation/review phase, repair count, or authorization
-   state.
-3. Update and commit contracts only for a material scope/decision change.
-4. Confirm the base worktree remains clean.
-
-#### C2. Isolated Engineer implementation
-
-Before launch, give the Engineer the protected-glob list and require a clean
-`control-plane-check`. The ticket `owns` set must not include any protected path.
-
-For each selected ticket:
-
-1. Reconcile the ledger, `worktree-list`, and branch history first. If any existing
-   ticket or repair worktree contains partial/current work, adopt its exact absolute
-   path, branch, and HEAD with `set-phase`; do not redirect the ticket to the default
-   worktree name. Only when no existing worktree applies, create one from the current
-   material base commit:
-
-   ```bash
-   python .agents/skills/milestone-workflow/scripts/workflow.py \
-     worktree-create <TICKET_ID>
-   ```
-
-2. Spawn one `engineer` with the ticket ID/path, absolute worktree, branch, spec,
-   test plan, ownership paths, and quick validation commands.
-3. Engineers in the same wave may run in parallel because their worktrees and
-   ownership paths are isolated.
-4. As each Engineer finishes, verify and start its review; unrelated Engineers may
-   continue. Do not impose a wait-for-all barrier.
-5. Verify every reported commit exists, belongs to the assigned branch, contains no
-   out-of-scope tracked changes, and leaves its worktree clean.
-6. Record successful candidates as review-ready in the local ledger; retain
-   blocked/failed worktrees and record the canonical root blocker. Do not commit a
-   review-only coordination update.
-7. Close completed Engineer threads after collecting their summaries.
-
-#### C3. Ticket review and one bounded repair
-
-Architect and QA must reject any candidate that changes a protected control-plane
-path before substantive product review. Reviewers cannot repair their own gate by
-changing workflow code or adding a new review round.
-
-For every ticket with runtime phase `review`:
-
-1. Resolve required reviewers from ticket risk and `required_reviews`. Required roles
-   may run concurrently and bind findings to the exact candidate SHA.
-2. Each role performs one full review. Record it deterministically with stable finding
-   IDs, severity, and verdict:
-
-   ```bash
-   python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
-     <TICKET_ID> --reviewer <architect|qa> --round full \
-     --candidate-sha <FULL_SHA> --verdict <pass|pass_with_notes|block> \
-     --finding 'ID:severity:summary'
-   ```
-
-3. `PASS` and `PASS_WITH_NOTES` satisfy that role. Notes are appended once to
-   `docs/review-debt.md`; they do not reopen the ticket.
-4. A full `BLOCK` creates one canonical root blocker and permits exactly one
-   substantive Engineer repair in the same worktree. Record the repair against that
-   root. Mechanical changes do not consume substantive budget but do not trigger a new
-   full review.
-5. After repair, the same affected reviewers perform one targeted re-review only.
-   Explicitly resolve original finding IDs. A new targeted blocker must be marked
-   `introduced_by_repair` and satisfy policy:
-
-   ```bash
-   python .agents/skills/milestone-workflow/scripts/workflow.py record-review \
-     <TICKET_ID> --reviewer <architect|qa> --round targeted \
-     --candidate-sha <REPAIRED_SHA> --verdict <pass|pass_with_notes|escalate> \
-     --resolved <ORIGINAL_ID>
-   ```
-
-6. Do not run a second full review or a second repair. A remaining blocker, contract
-   contradiction, ambiguous product decision, or disallowed new blocker is
-   `ESCALATE`. Preserve the branch/worktree and stop that dependency chain while
-   continuing independent work when configured.
-7. Before integration, require `review-state <TICKET_ID>` and
-   `gate-check <TICKET_ID> integration` to pass. Close completed reviewer threads.
-
-#### C4. Integrate passing tickets
-
-Run `gate-check <ticket> integration --base <base> --candidate-sha <sha>` for each
-candidate. A control-plane violation blocks integration independently of product
-review verdicts.
-
-1. Create or reuse the milestone integration worktree:
-
-   ```bash
-   python .agents/skills/milestone-workflow/scripts/workflow.py \
-     integration-create <ID>
-   ```
-
-2. Before each batch, fast-forward the clean integration branch to the current
-   material base commit when needed.
-3. Before admitting a ticket, run its configured tests, quick validation,
-   `test-budget --gate ticket --base <base_branch>`, `review-state`, and the
-   integration `gate-check`. Do not integrate a candidate that fails any gate.
-4. Integrate passing ticket commits with traceable provenance; do not create an
-   extra merge solely to record workflow state. Run affected quick validation as
-   candidates enter the batch, then the configured full gate once on the assembled
-   integration SHA.
-5. Resolve conflicts by intent using user request, exit criteria, ADR, spec, test
-   plan, and current public behavior in that order. When intent is ambiguous, stop
-   and preserve the conflict state.
-6. Run final integration reviews when required by risk, cross-ticket interaction, or
-   release-candidate policy. Final release evidence remains bound to the exact SHA.
-7. Only when full validation and all required gates PASS, fast-forward the clean base branch
-   to the integration branch. If the base moved, stop and rebuild/review integration;
-   never force it.
-8. Mark integrated tickets `done`, update roadmap and CI status with material commit
-   and test evidence, and create at most one consolidated evidence checkpoint for
-   the integrated batch.
-9. Passing independent tickets may be integrated even when another ticket in the
-    wave failed, when `execution.continue_after_independent_failure = true` and no
-    contract or ownership dependency connects them.
-
-### D. Automatic drain loop
-
-After checkpointing a wave, run `workflow.py next` again.
-
-- `execute_frontier`: start the next wave immediately. Do not return to the user.
-- `resume_and_execute_frontier`: resume active work and start the disjoint frontier
-  concurrently.
-- `resume_active`: complete the active gate immediately.
-- `ready_to_close`: run one final full validation and
-  `test-budget --gate milestone --base <base_branch>` against the milestone head. When
-  `auto_close = true`, continue directly into the `close` procedure; otherwise return
-  `READY_TO_CLOSE` with the exact close command.
-- `blocked`: stop only after exhausting independent work and matching authorization.
-  Report blocker ID/class/gate/root cause/derived failures/owner/evidence/unblock
-  condition.
-- `run_limit_reached`: return after the configured wave/no-progress guard and include
-  the exact resume invocation; do not start the suppressed frontier.
-- `no_tickets`: stop because planning is incomplete or the milestone ID is wrong.
-
-When strategy is `wave`, return after the first durable wave checkpoint. When
-strategy is `drain`, continue until `ready_to_close`, `blocked`, a configured wave cap,
-or a stop condition occurs.
-
-### E. Execute stop conditions
-
-A late integration/hosted/release failure after a ticket's bounded review cycle does
-not reopen or supersede that ticket's immutable review history. Create a new, narrow
-repair/qualification ticket that names the affected ticket, canonical failure, gate,
-ownership, and evidence. The new ticket receives the normal one-full/one-targeted
-review lifecycle. Existing `superseding` and `root_cycles` records from older workflow
-versions are read-only compatibility history and must never be extended.
-
-Stop without asking routine progress questions only for a material condition:
-
-- dirty base worktree or unexpected user changes
-- missing/contradictory ADR, spec, test plan, or acceptance contract
-- permission or approval that cannot be surfaced or granted in the current run
-- ambiguous merge conflict or base-branch movement requiring re-planning
-- exhausted repair/no-progress budget
-- validation failure that cannot be repaired within ticket scope
-- all remaining tickets are draft, blocked, or depend on such tickets
-- user interrupt or execution-environment interruption
-
-On interruption, persist the latest local checkpoint without requiring a Git commit
-and return the exact `resume` command.
-
-Output: all waves attempted, subagent results, repair rounds, integration commits,
-validation evidence, ticket/document updates, retained worktrees, final scheduler
-state, and publish state.
-
-## Mode: `resume`
-
-Purpose: recover safely after interruption and continue the same drain loop.
-
-1. Run `status`, `worktree-list`, `state`, `next`, and inspect the newest handoff.
-2. Reconcile ticket states with actual clean/dirty worktrees, branches, commits, and
-   integration state.
-3. Never recreate a branch/worktree that already contains work.
-4. Recover active authorization, canonical blockers, repair usage, and execution
-   phases. Resume incomplete gates and independent ready work together:
-   - implementation
-   - ticket review/repair
-   - integration
-   - full validation
-   - milestone closeout
-5. After recovering that gate, continue using the configured `drain` or `wave`
-   strategy. In `drain`, do not return merely because the recovered gate completed.
-6. If state is ambiguous, preserve everything and produce a recovery plan rather than
-   guessing or resetting.
-
-Output: recovered evidence, inconsistencies, selected resume point, subsequent waves
-completed, and final scheduler state.
-
-## Mode: `close`
-
-Purpose: prove that a milestone is complete and create a durable handoff.
-
-1. Require every in-scope ticket to be `done` or explicitly deferred with rationale.
-2. Require a recorded successful full-validation run for the integrated commit.
-3. Require `test-budget --gate milestone` to pass. In ratchet mode, update the
-   baseline only after the milestone close commit is accepted.
-4. Spawn in parallel:
-   - `product_manager` to check exit criteria and deferred scope
-   - `architect` to check ADR/spec conformance and architectural debt
-   - `qa` to check test evidence, CI coverage, and unresolved failures
-5. Wait for all three. A BLOCK or ESCALATE verdict prevents closeout;
-   PASS_WITH_NOTES records debt and allows closeout.
-6. When `context.refresh_on_close = true`, reuse the closeout reports to re-audit
-   every `Project-specific context` entry against the exact integrated commit. Update
-   current capabilities, architecture entry points, invariants, generated files, and
-   local setup where the milestone changed them. Remove the completed item from
-   `Active planned changes` or replace it with the next already-approved item. Update
-   the feature context audit to `verified`, set `verified_commit`, refresh the context
-   hash, and run `context-check --strict --milestone <ID> --require-audit`.
-7. The Team Lead updates roadmap and CI status and writes
-   `docs/handoffs/HANDOFF-<milestone>-<date>.md` with commit IDs, decisions, known
-   risks, deferred work, context-audit evidence, and the next milestone entry point.
-8. Commit closeout documents and the updated test-budget baseline. Do not tag, push,
-   release, or delete branches unless
-   separately requested.
-
-Output: exit-criteria matrix, gate verdicts, closeout commit, handoff path, deferred
-work, and next milestone.
-
-## Final response contract
-
-Always state:
-
-- mode, milestone, strategy, and final scheduler state
-- waves completed and why execution stopped
-- subagents used, full/targeted review rounds, stable finding IDs, and gate verdicts
-- requested and, when observable, actual role/reasoning profile
-- documents, tickets, branches, worktrees, and files changed
-- exact validation commands, test-budget counts/ratio/baseline, and exit status
-- commit IDs and integration state
-- blockers, risks, and deferred work
-- canonical root blockers, derived failures, and authorization scope used/remaining
-- whether anything was pushed or published; default is **no**
+1. outcome and current milestone state;
+2. files, tickets, branches, worktrees, and commits changed;
+3. reviews and unresolved finding IDs;
+4. commands with exit status and any unrun gates;
+5. next action, blocker, and remote-action status.

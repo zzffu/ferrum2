@@ -1,73 +1,21 @@
-# Handoff: milestone M0
+# Handoff — {{MILESTONE}}
 
-- **Date:** YYYY-MM-DD
-- **Base branch/commit:** TODO
-- **Milestone status:** TODO
+- Commit: `{{SHA}}`
+- State: {{STATE}}
+- Remote actions: none
 
-## Current state
+## Completed
 
-TODO
+- {{OUTCOME_AND_LINK}}
 
-## Completed work
+## Remaining
 
-- TODO
+- {{BLOCKER_OR_NEXT_ACTION}}
 
-## Decisions and contracts
+## Verified
 
-- Context audit and final context hash: TODO
-- AGENTS.md current/planned context changes: TODO
-- ADRs: TODO
-- Specs: TODO
-- Test plans: TODO
-- Tickets: TODO
+- `{{COMMAND}}` — exit {{STATUS}}
 
-## Validation evidence
+## Resume
 
-- TODO
-
-## Existing branches and worktrees
-
-- TODO
-
-## Active execution phases and ownership
-
-- TODO
-
-## Canonical blockers and derivatives
-
-- TODO
-
-## Active authorization scopes
-
-- Actions/tickets/classes/max risk: TODO
-- Kind/remote effects: local / false
-- Exact remote ref/commit/max uses/uses (remote only): TODO
-- Root-bound repair override allowances: TODO
-
-## Agent and gate provenance
-
-- Requested role/model/reasoning, observable actual profile, candidate SHA: TODO
-
-## Known risks and debt
-
-- TODO
-
-## Deferred work
-
-- TODO
-
-## Recovery instructions
-
-```bash
-python .agents/skills/milestone-workflow/scripts/workflow.py status
-python .agents/skills/milestone-workflow/scripts/workflow.py worktree-list
-python .agents/skills/milestone-workflow/scripts/workflow.py state --milestone M0
-python .agents/skills/milestone-workflow/scripts/workflow.py next \
-  --milestone M0 --json
-```
-
-## Next recommended action
-
-```text
-$milestone-workflow mode=...
-```
+{{FIRST_CONCRETE_STEP}}
