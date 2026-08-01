@@ -1096,6 +1096,16 @@ fn run_self_check() -> Result<String, String> {
     if probe_error != "self-check nonzero probe exited nonzero" {
         return Err(format!("probe diagnostic mismatch: {probe_error}"));
     }
+    let lazy_absent = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n\
+# TYPE ferrum2_tcp_replay_entries gauge\n\
+ferrum2_tcp_replay_entries 0\n\
+# EOF\n";
+    if parse_active_metric_response(lazy_absent) != Ok(0) {
+        return Err("valid lazy active metric absence was rejected".to_owned());
+    }
+    expect_rejected("unidentified active metric absence", || {
+        parse_active_metric_response(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n# EOF\n")
+    })?;
     expect_rejected("wrong SHA", || {
         validate_environment("1123456789abcdef0123456789abcdef01234567", &good)
     })?;
@@ -1156,12 +1166,12 @@ fn run_self_check() -> Result<String, String> {
     fs::create_dir_all(&root).map_err(clean_io)?;
     let path = root.join("self-check.jsonl");
     let mut file = BufWriter::new(File::create(&path).map_err(clean_io)?);
-    let line = "{\"kind\":\"self_check\",\"mutations\":10,\"status\":\"PASS\"}\n";
+    let line = "{\"kind\":\"self_check\",\"mutations\":11,\"status\":\"PASS\"}\n";
     ensure_redacted(line)?;
     file.write_all(line.as_bytes()).map_err(clean_io)?;
     file.flush().map_err(clean_io)?;
     assert_no_owners()?;
-    Ok("m4_self_check status=PASS mutations=10".to_owned())
+    Ok("m4_self_check status=PASS mutations=11".to_owned())
 }
 
 fn expect_rejected<T>(
@@ -1408,23 +1418,78 @@ fn active_metric(address: SocketAddrV4, deadline: Instant) -> Result<u64, String
             Err(error) => return Err(clean_io(error)),
         }
     }
-    let body = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| &response[index + 4..])
-        .ok_or_else(|| "metrics response is malformed".to_owned())?;
-    let body = std::str::from_utf8(body).map_err(|_| "metrics body is not UTF-8".to_owned())?;
-    let active = body
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(' ')?;
-            (name.starts_with("ferrum2_tcp_connections_active{"))
-                .then(|| value.parse().ok())
-                .flatten()
-        })
-        .ok_or_else(|| "active metric is missing or malformed".to_owned())?;
+    let active = parse_active_metric_response(&response)?;
     remaining(deadline)?;
     Ok(active)
+}
+
+fn parse_active_metric_response(response: &[u8]) -> Result<u64, String> {
+    const ACTIVE: &str = "ferrum2_tcp_connections_active";
+    const CLIENT_ACTIVE: &str =
+        "ferrum2_tcp_connections_active{role=\"client\",inbound=\"socks5\"}";
+    const SERVER_ACTIVE: &str =
+        "ferrum2_tcp_connections_active{role=\"server\",inbound=\"shadowsocks\"}";
+    const REPLAY: &str = "ferrum2_tcp_replay_entries";
+    const REPLAY_TYPE: &str = "# TYPE ferrum2_tcp_replay_entries gauge";
+
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "metrics response is malformed".to_owned())?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| "metrics response is malformed".to_owned())?;
+    let mut status = headers
+        .lines()
+        .next()
+        .ok_or_else(|| "metrics response is malformed".to_owned())?
+        .split_whitespace();
+    if !status
+        .next()
+        .is_some_and(|value| value.starts_with("HTTP/"))
+        || status.next() != Some("200")
+    {
+        return Err("metrics response status is not 200".to_owned());
+    }
+    let body = &response[header_end + 4..];
+    let body = std::str::from_utf8(body).map_err(|_| "metrics body is not UTF-8".to_owned())?;
+    if !body.ends_with("# EOF\n") || body.lines().filter(|line| *line == "# EOF").count() != 1 {
+        return Err("metrics exposition is incomplete".to_owned());
+    }
+
+    let mut active = None;
+    let mut replay_type = 0;
+    let mut replay_sample = false;
+    for line in body.lines() {
+        if line == REPLAY_TYPE {
+            replay_type += 1;
+        } else if !line.starts_with('#') && line.starts_with(ACTIVE) {
+            let (name, value) = line
+                .split_once(' ')
+                .ok_or_else(|| "active metric is malformed".to_owned())?;
+            if (name != CLIENT_ACTIVE && name != SERVER_ACTIVE) || active.is_some() {
+                return Err("active metric is malformed or duplicated".to_owned());
+            }
+            active = Some(
+                value
+                    .parse()
+                    .map_err(|_| "active metric is malformed".to_owned())?,
+            );
+        } else if !line.starts_with('#') && line.starts_with(REPLAY) {
+            let (name, value) = line
+                .split_once(' ')
+                .ok_or_else(|| "metrics exposition identity is malformed".to_owned())?;
+            if name != REPLAY || replay_sample || value.parse::<i64>().is_err() {
+                return Err("metrics exposition identity is malformed".to_owned());
+            }
+            replay_sample = true;
+        }
+    }
+    if replay_type > 1 {
+        return Err("metrics exposition identity is malformed".to_owned());
+    }
+    active
+        .or_else(|| (replay_type == 1 && replay_sample).then_some(0))
+        .ok_or_else(|| "active metric is absent from an unidentified exposition".to_owned())
 }
 
 fn socks_connect(
