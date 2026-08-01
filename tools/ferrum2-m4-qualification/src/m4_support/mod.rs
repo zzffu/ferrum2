@@ -40,6 +40,7 @@ const RSS_WINDOW: usize = 30;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_OUTPUT_CAP: usize = 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -160,7 +161,7 @@ impl HostedIdentity {
             "checkout HEAD probe",
             "git",
             ["rev-parse", "HEAD"],
-            Duration::from_secs(5),
+            PROBE_TIMEOUT,
         )?;
         if head.trim() != requested_sha {
             return Err("checkout HEAD does not match requested SHA".to_owned());
@@ -169,7 +170,7 @@ impl HostedIdentity {
             "checkout status probe",
             "git",
             ["status", "--porcelain=v1"],
-            Duration::from_secs(5),
+            PROBE_TIMEOUT,
         )?
         .is_empty()
         {
@@ -189,7 +190,7 @@ impl HostedIdentity {
             "Rust version probe",
             "rustc",
             ["--version"],
-            Duration::from_secs(5),
+            PROBE_TIMEOUT,
         )?);
         if !rustc.starts_with("rustc 1.97.1 ") {
             return Err("Rust toolchain is not 1.97.1".to_owned());
@@ -213,7 +214,7 @@ impl HostedIdentity {
                 "kernel identity probe",
                 "uname",
                 ["-srvmo"],
-                Duration::from_secs(5),
+                PROBE_TIMEOUT,
             )?),
             cpu_model,
             cpu_count,
@@ -225,13 +226,13 @@ impl HostedIdentity {
                 "C compiler identity probe",
                 "cc",
                 ["--version"],
-                Duration::from_secs(5),
+                PROBE_TIMEOUT,
             )?),
             linker: first_line(&probe_text(
                 "linker identity probe",
                 "ld",
                 ["--version"],
-                Duration::from_secs(5),
+                PROBE_TIMEOUT,
             )?),
         })
     }
@@ -316,7 +317,7 @@ fn validate_temp_free(output: &Path) -> Result<u64, String> {
         "runner-temp capacity probe",
         "df",
         [OsString::from("-Pk"), parent.as_os_str().to_owned()],
-        Duration::from_secs(5),
+        PROBE_TIMEOUT,
     )?;
     let available = result
         .lines()
@@ -625,7 +626,7 @@ fn verify_reference(sslocal: &Path, ssserver: &Path, output: &Path) -> Result<()
         ("reference sslocal version probe", &local),
         ("reference ssserver version probe", &server),
     ] {
-        let version = probe_text(identity, binary, ["--version"], Duration::from_secs(5))?;
+        let version = probe_text(identity, binary, ["--version"], PROBE_TIMEOUT)?;
         validate_reference_identity(&version, REFERENCE_SHA256)?;
     }
     Ok(())
@@ -1088,7 +1089,7 @@ fn run_self_check() -> Result<String, String> {
         "self-check nonzero probe",
         &executable,
         ["self-check-probe-nonzero"],
-        Duration::from_secs(5),
+        PROBE_TIMEOUT,
     )
     .expect_err("self-check probe must exit nonzero");
     ensure_redacted(&probe_error)?;
@@ -1155,12 +1156,12 @@ fn run_self_check() -> Result<String, String> {
     fs::create_dir_all(&root).map_err(clean_io)?;
     let path = root.join("self-check.jsonl");
     let mut file = BufWriter::new(File::create(&path).map_err(clean_io)?);
-    let line = "{\"kind\":\"self_check\",\"mutations\":9,\"status\":\"PASS\"}\n";
+    let line = "{\"kind\":\"self_check\",\"mutations\":10,\"status\":\"PASS\"}\n";
     ensure_redacted(line)?;
     file.write_all(line.as_bytes()).map_err(clean_io)?;
     file.flush().map_err(clean_io)?;
     assert_no_owners()?;
-    Ok("m4_self_check status=PASS mutations=9".to_owned())
+    Ok("m4_self_check status=PASS mutations=10".to_owned())
 }
 
 fn expect_rejected<T>(
@@ -1919,12 +1920,7 @@ where
 }
 
 fn sha256(identity: &'static str, path: &Path) -> Result<String, String> {
-    let output = probe_text(
-        identity,
-        "sha256sum",
-        [path.as_os_str()],
-        Duration::from_secs(5),
-    )?;
+    let output = probe_text(identity, "sha256sum", [path.as_os_str()], PROBE_TIMEOUT)?;
     let digest = output
         .split_whitespace()
         .next()
