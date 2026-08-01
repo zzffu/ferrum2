@@ -32,6 +32,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo build --workspace --bins --locked
 cargo test --workspace --all-features --locked
+cargo test -p ferrum2-m0-harness --test lifecycle_cycles full_qualification_runs_twenty_cycles_per_category_and_at_least_100_per_binary --locked -- --ignored --exact --nocapture
 cargo doc --workspace --all-features --no-deps --locked
 ```
 

@@ -172,7 +172,7 @@ hosted allocation；其余Cargo命令标识由`quality`/full覆盖的完整targe
 | M0-LIFE-002 | AC-08 | handshake/connect/idle timeout、cancel、listener failure；connect与request first-write budgets独立；relay failure保留每方向partial stats | fake-time integration | `cargo test -p ferrum2-runtime --test lifecycle --locked`；`cargo test -p ferrum2-client --locked` |
 | M0-LIFE-003 | AC-07/08 | one-way EOF后 reverse drain | integration | `cargo test -p ferrum2-runtime --test half_close --locked` |
 | M0-LIFE-004 | AC-08 | graceful drain/deadline/forced termination | process/integration | `cargo test -p ferrum2-runtime --test shutdown --locked` |
-| M0-LIFE-005 | AC-08 | 黑盒恰好100 cycles（success/auth reject/connect failure/cooperative cancel/forced termination各20）证明child wait、三类ports与temp cleanup；Unix真实流量后exact地址立即bind+listen，Windows保持default，live same-policy owner阻止第二listener；T06 direct counters及两个binary production-used registry composition tests先见live nonzero再回baseline，forced counter精确+1 | compositional deterministic repetition | `cargo test -p ferrum2-runtime --test lifecycle --locked`；`cargo test -p ferrum2-runtime --test shutdown --locked`；`cargo test -p ferrum2-client --locked`；`cargo test -p ferrum2-server --locked`；`cargo test -p ferrum2-m0-harness --test lifecycle_cycles --locked` |
+| M0-LIFE-005 | AC-08 | 黑盒full qualification复用一个matrix，五类contract rows与graceful/forced OS-signal row各20次，保证真实client/server starts分别100/120并证明child wait、三类ports与temp cleanup；Unix真实流量后exact地址立即bind+listen，Windows用无新控制台的child process group定向Ctrl-Break，live same-policy owner阻止第二listener；T06 direct counters及两个binary production-used registry composition tests先见live nonzero再回baseline，forced counter精确+1 | compositional deterministic repetition | `cargo test -p ferrum2-runtime --test lifecycle --locked`；`cargo test -p ferrum2-runtime --test shutdown --locked`；`cargo test -p ferrum2-client --locked`；`cargo test -p ferrum2-server --locked`；`cargo test -p ferrum2-m0-harness --test lifecycle_cycles --locked`；`cargo test -p ferrum2-m0-harness --test lifecycle_cycles full_qualification_runs_twenty_cycles_per_category_and_at_least_100_per_binary --locked -- --ignored --exact --nocapture` |
 | M0-OBS-001 | AC-09 | JSON schema + sentinel secret/destination scan | integration/snapshot | `cargo test -p ferrum2-observability --test tracing_contract --locked` |
 | M0-OBS-002 | AC-09 | exposition names/types/labels/cardinality | integration/snapshot | `cargo test -p ferrum2-observability --test metrics_contract --locked` |
 | M0-OBS-003 | AC-09 | runtime-owned `/metrics` permits/timeout/header/method bounds | runtime integration | `cargo test -p ferrum2-runtime --test metrics_endpoint --locked` |
@@ -500,10 +500,11 @@ case timeout 60 秒，readiness 10 秒，I/O 10秒，stdout/stderr各 cap 256 Ki
   `run_with_registry` tests必须先观察active child/task/buffer/permit/listener的
   nonzero witness，再等待supervisor/JoinSet完成并回baseline；cumulative
   `forced_shutdowns`断言精确`+1`。
-- `lifecycle_cycles`恰好100轮，success、auth reject、connect failure、cooperative
-  cancel和forced termination各20。每个child timed-waited，proxy/metrics/target
-  原地址逐一重绑，temporary path不存在，harness child registry回起点。黑盒结果
-  不得声称直接观察进程内counter。
+- 默认`lifecycle_smoke_runs_each_category_once`对六个既有category各运行1次；
+  ignored full qualification由authoritative full gate按exact name显式运行，每类20次，
+  保证真实client/server starts分别为100/120。两者复用同一个matrix helper；每个child
+  timed-waited，proxy/metrics/target原地址逐一重绑，temporary path不存在，harness
+  child registry回起点。黑盒结果不得声称直接观察进程内counter。
 - runtime relay failure tests对I/O、idle和cancel逐方向断言failure前successful
   application writes保留在`RelayStats`；read-ahead/pending/write-zero不计数。
 - M0 不以 ThreadSanitizer/RSS/长 soak为 pass条件；M3扩展平台 lifecycle，M4执行

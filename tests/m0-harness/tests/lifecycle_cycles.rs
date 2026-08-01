@@ -17,14 +17,15 @@ use local_support::{
     write_tcp_only_server_config,
 };
 
-const CYCLES_PER_CATEGORY: usize = 20;
-const _: () = assert!(CYCLES_PER_CATEGORY * 6 >= 100);
+const SMOKE_CYCLES_PER_CATEGORY: usize = 1;
+const FULL_CYCLES_PER_CATEGORY: usize = 20;
 const CHILD_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_SETUP_ATTEMPTS: usize = 3;
 const FOREIGN_OWNERSHIP_CONFIRMATIONS: usize = 3;
 static LIFECYCLE_TEST_LOCK: Mutex<()> = Mutex::new(());
 type Cycle = (
     &'static str,
+    (usize, usize),
     fn(usize, &str, (&str, &str)) -> Result<(), Box<SetupCollision>>,
 );
 
@@ -822,18 +823,22 @@ fn signal_cycle(
     Ok(())
 }
 
-#[test]
-fn at_least_100_real_process_cycles_per_binary_cleanup_every_owned_boundary() {
+fn run_lifecycle_matrix(cycles_per_category: usize) -> (usize, usize) {
     let _test_guard = LIFECYCLE_TEST_LOCK.lock().expect("lifecycle test lock");
     let baseline_children = active_child_count();
     let categories: [Cycle; 6] = [
-        ("success", success_cycle),
-        ("authentication-reject", authentication_reject_cycle),
-        ("connect-failure", connect_failure_cycle),
-        ("cooperative-cancellation", cooperative_cancellation_cycle),
-        ("forced-termination", forced_termination_cycle),
+        ("success", (1, 1), success_cycle),
+        ("authentication-reject", (0, 1), authentication_reject_cycle),
+        ("connect-failure", (1, 0), connect_failure_cycle),
+        (
+            "cooperative-cancellation",
+            (1, 1),
+            cooperative_cancellation_cycle,
+        ),
+        ("forced-termination", (0, 1), forced_termination_cycle),
         (
             "graceful-and-forced-os-signals",
+            (2, 2),
             |baseline, context, method| {
                 signal_cycle(baseline, context, method, false)?;
                 signal_cycle(baseline, context, method, true)
@@ -841,10 +846,13 @@ fn at_least_100_real_process_cycles_per_binary_cleanup_every_owned_boundary() {
         ),
     ];
     let mut executed = 0_usize;
-    for (category, cycle) in categories {
-        for iteration in 0..CYCLES_PER_CATEGORY {
+    let mut starts = (0_usize, 0_usize);
+    for (category, (client_starts, server_starts), cycle) in categories {
+        for iteration in 0..cycles_per_category {
             run_cycle_with_retries(category, iteration, baseline_children, cycle);
             executed += 1;
+            starts.0 += client_starts;
+            starts.1 += server_starts;
             assert_eq!(
                 active_child_count(),
                 baseline_children,
@@ -852,7 +860,19 @@ fn at_least_100_real_process_cycles_per_binary_cleanup_every_owned_boundary() {
             );
         }
     }
-    assert_eq!(executed, CYCLES_PER_CATEGORY * categories.len());
+    assert_eq!(executed, cycles_per_category * categories.len());
+    starts
+}
+
+#[test]
+fn lifecycle_smoke_runs_each_category_once() {
+    assert_eq!(run_lifecycle_matrix(SMOKE_CYCLES_PER_CATEGORY), (5, 6));
+}
+
+#[test]
+#[ignore = "run explicitly by the authoritative full qualification gate"]
+fn full_qualification_runs_twenty_cycles_per_category_and_at_least_100_per_binary() {
+    assert_eq!(run_lifecycle_matrix(FULL_CYCLES_PER_CATEGORY), (100, 120));
 }
 
 #[test]

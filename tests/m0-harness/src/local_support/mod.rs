@@ -93,8 +93,8 @@ impl ChildGuard {
         #[cfg(windows)]
         if signal_group {
             use std::os::windows::process::CommandExt as _;
-            const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-            command.creation_flags(CREATE_NEW_CONSOLE);
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            command.creation_flags(CREATE_NEW_PROCESS_GROUP);
         }
         #[cfg(not(windows))]
         let _ = signal_group;
@@ -294,7 +294,7 @@ fn send_shutdown_signal(process_id: u32) {
 #[cfg(windows)]
 fn send_shutdown_signal(process_id: u32) {
     let script = format!(
-        r#"Add-Type -Namespace Ferrum2 -Name ConsoleSignal -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool FreeConsole(); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint processId); [System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(System.IntPtr handler, bool add); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint signal, uint processGroup);'; [void][Ferrum2.ConsoleSignal]::FreeConsole(); if (-not [Ferrum2.ConsoleSignal]::AttachConsole({process_id})) {{ exit 1 }}; [void][Ferrum2.ConsoleSignal]::SetConsoleCtrlHandler([System.IntPtr]::Zero, $true); $sent = [Ferrum2.ConsoleSignal]::GenerateConsoleCtrlEvent(1, 0); [void][Ferrum2.ConsoleSignal]::FreeConsole(); if (-not $sent) {{ exit 1 }}"#
+        r#"Add-Type -Namespace Ferrum2 -Name ConsoleSignal -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool FreeConsole(); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint processId); [System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(System.IntPtr handler, bool add); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint signal, uint processGroup);'; [void][Ferrum2.ConsoleSignal]::FreeConsole(); if (-not [Ferrum2.ConsoleSignal]::AttachConsole({process_id})) {{ exit 1 }}; [void][Ferrum2.ConsoleSignal]::SetConsoleCtrlHandler([System.IntPtr]::Zero, $true); $sent = [Ferrum2.ConsoleSignal]::GenerateConsoleCtrlEvent(1, {process_id}); [void][Ferrum2.ConsoleSignal]::FreeConsole(); if (-not $sent) {{ exit 1 }}"#
     );
     let status = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])

@@ -202,6 +202,7 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo build --workspace --bins --locked
 cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
 cargo test --workspace --all-features --locked
+cargo test -p ferrum2-m0-harness --test lifecycle_cycles full_qualification_runs_twenty_cycles_per_category_and_at_least_100_per_binary --locked -- --ignored --exact --nocapture
 cargo doc --workspace --all-features --no-deps --locked
 python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py test-budget --gate milestone --base <milestone-base-sha>
 python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py validate
@@ -210,7 +211,10 @@ git diff --check
 
 Full gate不得并发运行于多个 worktree。Security/config/observability/runtime/process
 suites由 workspace all-features command 包含；若实现改变 suite routing，必须在
-candidate review 前记录等价映射。
+candidate review 前记录等价映射。默认 workspace suite只运行共享matrix的每类1次
+smoke；紧随其后的exact ignored test在同一SHA上运行每类20次，保证真实
+client/server starts分别为100/120，且不改变M3-MUST-08/09的lifecycle、signal、
+exit、reap、cleanup或immediate-rebind证据。
 
 ## Release qualification
 
@@ -262,8 +266,8 @@ architecture 或 non-native execution 是 `BLOCKED/FAIL`。
   root/owner/reap claims。
 - T06 复用 `tests/m0-harness/src/local_support/**`、
   `lifecycle_cycles`与`udp_local_e2e`；black-box real-process只证明OS/process
-  behavior，100 cycles共享scenario rows，不构造method×platform×failure全
-  cross product。
+  behavior，default smoke与20次full qualification共享scenario rows，不构造
+  method×platform×failure全cross product。
 - T05 可替换不能证明 native artifact 的 helper invocation；只有发现具体独立
   failure mode 时才增加第二个 platform harness。
 
