@@ -1042,6 +1042,11 @@ fn run_self_check() -> Result<String, String> {
     {
         return Err("throughput measurement boundary is invalid".to_owned());
     }
+    let past_slot = Instant::now();
+    let admission_now = past_slot + Duration::from_nanos(1);
+    if sample_slot_delay(admission_now, past_slot, admission_now + SAMPLE_INTERVAL).is_ok() {
+        return Err("past resource sample slot was admitted".to_owned());
+    }
     expect_rejected("wrong SHA", || {
         validate_environment("1123456789abcdef0123456789abcdef01234567", &good)
     })?;
@@ -1897,13 +1902,16 @@ fn join_unit_workers(workers: Vec<JoinHandle<Result<(), String>>>) -> Result<(),
 }
 
 fn wait_for_sample_slot(slot: Instant, next_slot: Instant) -> Result<(), String> {
-    if Instant::now() >= next_slot {
+    let delay = sample_slot_delay(Instant::now(), slot, next_slot)?;
+    thread::sleep(delay);
+    remaining(next_slot).map(|_| ())
+}
+
+fn sample_slot_delay(now: Instant, slot: Instant, next_slot: Instant) -> Result<Duration, String> {
+    if slot < now || slot >= next_slot {
         return Err("resource sample slot was missed".to_owned());
     }
-    if let Some(delay) = slot.checked_duration_since(Instant::now()) {
-        thread::sleep(delay);
-    }
-    remaining(next_slot).map(|_| ())
+    Ok(slot.duration_since(now))
 }
 
 fn repository_root() -> Result<PathBuf, String> {
