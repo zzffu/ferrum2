@@ -13,6 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const PROFILE: &str = "M4-GHA-01";
+const THP_MAX_PTES_NONE_PATH: &str = "/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none";
 const PSK: &str = "AAECAwQFBgcICQoLDA0ODw==";
 const REFERENCE_VERSION: &str = "shadowsocks 1.24.0";
 const REFERENCE_SHA256: &str = "5f528efb4e51e732352f5c69538dcc76e8cf8f6d1a240dfb5b748a67f0b05f65";
@@ -636,6 +637,7 @@ fn verify_reference(sslocal: &Path, ssserver: &Path, output: &Path) -> Result<()
 
 fn run_resource(arguments: HostedArgs) -> Result<String, String> {
     let identity = HostedIdentity::load(&arguments.sha, &arguments.output)?;
+    validate_thp_profile(Path::new(THP_MAX_PTES_NONE_PATH))?;
     let mut output = Evidence::create(&arguments.output)?;
     output.line(format!(
         "{{\"kind\":\"identity\",{}}}",
@@ -678,7 +680,7 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
     let client_hash = sha256("resource client config SHA-256 probe", &client_config)?;
     let server_hash = sha256("resource server config SHA-256 probe", &server_config)?;
     output.line(format!(
-        "{{\"kind\":\"resource_profile\",\"sessions\":10000,\"setup_concurrency\":256,\
+        "{{\"kind\":\"resource_profile\",\"max_ptes_none\":0,\"sessions\":10000,\"setup_concurrency\":256,\
          \"stabilization_samples\":30,\"samples\":180,\"interval_seconds\":10,\
          \"client_config_sha256\":{},\"server_config_sha256\":{}}}",
         json(&client_hash),
@@ -782,6 +784,7 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
         }
         thread::sleep(remaining(drain_deadline)?.min(Duration::from_millis(100)));
     }
+    validate_thp_profile(Path::new(THP_MAX_PTES_NONE_PATH))?;
     client_process.ensure_running()?;
     server_process.ensure_running()?;
     client_process.terminate()?;
@@ -799,6 +802,26 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
          drain=PASS sha={} run_id={} run_attempt={}",
         identity.sha, identity.run_id, identity.run_attempt
     ))
+}
+
+fn validate_thp_profile(path: &Path) -> Result<(), String> {
+    let profile = fs::read_to_string(path)
+        .map_err(|_| "THP max_ptes_none profile is unavailable".to_owned())?;
+    let value = profile
+        .strip_suffix('\n')
+        .ok_or_else(|| "THP max_ptes_none profile is malformed".to_owned())?;
+    if value == "0" {
+        return Ok(());
+    }
+    if value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| matches!(*byte, b'1'..=b'9'))
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("THP max_ptes_none profile is not zero".to_owned());
+    }
+    Err("THP max_ptes_none profile is malformed".to_owned())
 }
 
 fn establish_sessions(proxy: SocketAddrV4, target: SocketAddrV4) -> Result<Vec<TcpStream>, String> {
@@ -1201,6 +1224,29 @@ fn run_self_check() -> Result<String, String> {
         github_sha: sha.to_owned(),
     };
     validate_environment(sha, &good)?;
+    let thp = tempfile::tempdir().map_err(clean_io)?;
+    let thp_profile = thp.path().join("max_ptes_none");
+    fs::write(&thp_profile, "0\n").map_err(clean_io)?;
+    validate_thp_profile(&thp_profile)
+        .map_err(|_| "canonical THP max_ptes_none profile was rejected".to_owned())?;
+    for unavailable in [&thp.path().join("missing"), thp.path()] {
+        if validate_thp_profile(unavailable)
+            != Err("THP max_ptes_none profile is unavailable".to_owned())
+        {
+            return Err("unavailable THP max_ptes_none profile had wrong failure".to_owned());
+        }
+    }
+    fs::write(&thp_profile, "00\n").map_err(clean_io)?;
+    if validate_thp_profile(&thp_profile)
+        != Err("THP max_ptes_none profile is malformed".to_owned())
+    {
+        return Err("malformed THP max_ptes_none profile had wrong failure".to_owned());
+    }
+    fs::write(&thp_profile, "511\n").map_err(clean_io)?;
+    if validate_thp_profile(&thp_profile) != Err("THP max_ptes_none profile is not zero".to_owned())
+    {
+        return Err("nonzero THP max_ptes_none profile had wrong failure".to_owned());
+    }
     let transfer_start = Instant::now();
     let warm_end = transfer_start + WARMUP;
     let measure_end = warm_end + MEASURE;
@@ -1429,12 +1475,12 @@ ferrum2_tcp_replay_entries 0\n\
     fs::create_dir_all(&root).map_err(clean_io)?;
     let path = root.join("self-check.jsonl");
     let mut file = BufWriter::new(File::create(&path).map_err(clean_io)?);
-    let line = "{\"kind\":\"self_check\",\"mutations\":17,\"status\":\"PASS\"}\n";
+    let line = "{\"kind\":\"self_check\",\"mutations\":20,\"status\":\"PASS\"}\n";
     ensure_redacted(line)?;
     file.write_all(line.as_bytes()).map_err(clean_io)?;
     file.flush().map_err(clean_io)?;
     assert_no_owners()?;
-    Ok("m4_self_check status=PASS mutations=17".to_owned())
+    Ok("m4_self_check status=PASS mutations=20".to_owned())
 }
 
 fn expect_rejected<T>(
