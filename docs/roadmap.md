@@ -42,7 +42,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
 完成三目标 native qualification。M4-T01已把non-test driver迁到独立tools
 package并在exact `7730ec7`通过双审与authoritative ticket budget；下一入口是
-M4-T02仍blocked于fresh exact-SHA hosted qualification，remote需单独授权。
+M4-T02正在修复run `30698815475/1`暴露的pre-load lazy active metric circular wait；
+remote scope已消费撤销，后续仍需单独授权。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -603,10 +604,11 @@ M4-T02仍blocked于fresh exact-SHA hosted qualification，remote需单独授权�
   - M4-T01：在独立non-shipping `ferrum2-m4-qualification` package内增加唯一
     Cargo-managed、non-default throughput/resource driver与短self-check，并在
     既有workflow增加唯一hosted `performance` job；exact `7730ec7`已`done`；
-  - M4-T02：local exact `57d317d`已修复probe诊断并通过双审、Full `6/6`与
-    milestone budget；仍须在一次新授权push上运行同SHA hosted
+  - M4-T02：exact `57d317d`已修复probe诊断并通过双审、Full `6/6`与
+    milestone budget；run `30698815475/1`进一步暴露pre-load lazy active metric
+    circular wait，当前窄修复`active`；之后仍须在一次新授权push上运行同SHA hosted
     performance/resource、full、test-budget、24-case/three-target qualification并
-    记录close summary，当前`blocked`且remote step仍需另行明确授权。
+    记录close summary，remote step仍需另行明确授权。
 
   Dependency graph：
 
@@ -721,3 +723,4 @@ M4-T02仍blocked于fresh exact-SHA hosted qualification，remote需单独授权�
 | 2026-08-01 | M4 first hosted qualification | exact `4cee0a1` run `30697247986/1` 的quality、MSRV、interop和三平台全部success，但performance在preflight与release build成功后以`bounded identity probe failed`终止，final qualification failure；T02 `blocked` | 共享`probe_text`丢弃了具体probe及timeout/nonzero/truncation/secret失败类别，不可变日志无法在不猜测的前提下定位；未throughput/resource证据 | `M4-REMOTE-4cee0a1-A1` 1/1在non-force push前消费并自动撤销；cleanup success；失败run保留且不重跑/拼接；无第二push/release/publication |
 | 2026-08-01 | M4 probe repair authorization | M4-T02从`blocked`恢复为`active`，临时租用资格驱动的单一`m4_support` source，先修复static redacted probe identity/failure class并在WSL2诊断5秒边界 | 确定缺陷在共享probe seam；不改product/wire/reference/ratio/resource或same-run gate | 用户授权本地修复与WSL2 diagnostic；不授权push/rerun/dispatch/release/publication |
 | 2026-08-01 | M4 local probe repair | exact `57d317d`以static probe identity、distinct redacted failure class和shared 30秒probe limit关闭本地诊断缺陷；`IO_TIMEOUT`/`REAP_TIMEOUT`仍为5秒，双审、Full `6/6`、budget通过，T02转为remote-blocked | WSL2 native checkout在旧5秒边界50/50通过；受控6秒`git status`准确命中timeout class，旧hosted具体命令因历史日志折叠不可恢复 | Architect/QA `PASS`；code `13812`、tests `20740`、ratio `1.501593`；等待fresh exact-SHA单次remote授权 |
+| 2026-08-01 | M4 second hosted qualification | exact `57d317d` run `30698815475/1`通过quality、MSRV、interop、三平台与throughput，记录ferrum/reference `7977915/478773248`、ratio `0.016663243`；resource在pre-load以`metrics readiness timed out`失败，final failure | driver在创建首个flow前要求active series，但Prometheus labelled family只在首个flow时实例化；WSL2 exact resource `2/2`复现，独立scrape证明HTTP/OpenMetrics有效而series缺失 | `M4-REMOTE-57d317d-A1` 1/1消费撤销；cleanup success；`HOSTED-M4-T02-001` resolved、`HOSTED-M4-T02-002` active；无rerun/第二push/release/publication |

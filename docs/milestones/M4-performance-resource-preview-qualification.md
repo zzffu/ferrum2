@@ -34,14 +34,15 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
-| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | blocked |
+| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | active |
 
 ## Next action
 
-Local repair candidate `57d317ddb554bbbbc5cc324046277a514ce54324` has Architect
-and QA `PASS`, WSL2 diagnosis, release self-check `mutations=10`, Full `6/6`, and
-milestone budget `PASS_ADVANCE`. It replaces the collapsed probe error with static
-redacted identity/failure classes and uses one thirty-second external-probe bound;
-five-second I/O and reap bounds are unchanged. Preserve failed run `30697247986/1` on
-`4cee0a1` as immutable evidence. Stop for a new exact, single-use authorization to push
-`57d317d` and observe one fresh run; no remote action is currently allowed.
+Preserve failed run `30698815475/1` on exact `57d317d`: all six independent
+quality/MSRV/interop/platform jobs succeeded and throughput recorded
+`7977915 / 478773248`, ratio `0.016663243`, but
+resource failed before load with `metrics readiness timed out`; cleanup succeeded.
+WSL2 reproduces the exact failure `2/2`. Repair only the circular pre-load evidence
+seam caused by the lazy active-flow metric family, retain fail-closed exposition
+identity and exact post-load `10000` checks, then repeat local reviews and gates. The
+consumed remote scope is revoked; no rerun or new push is authorized.

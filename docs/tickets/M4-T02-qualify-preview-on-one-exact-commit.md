@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: blocked
+status: active
 depends_on: [M4-T01]
 owns:
   - tools/ferrum2-m4-qualification/src/m4_support/mod.rs
@@ -38,6 +38,9 @@ the bounded summary needed for M4 close.
       probe remains fail-closed and emits no command arguments, paths, or captured text.
 - [ ] The five-second probe boundary is diagnosed under WSL2 before the final bounded
       timeout is selected; WSL2 remains diagnostic and cannot satisfy hosted acceptance.
+- [ ] A valid initial ferrum2 metrics exposition with no lazily-created active-flow
+      series is admitted as the zero pre-load baseline; malformed/unidentified metrics
+      remain fail-closed, and post-load samples still require exact `10000` gauges.
 
 ## Validation
 
@@ -73,13 +76,23 @@ git status --short
   release build, and final qualification `91362498191` consequently failed. The
   performance log ended with `M4 qualification rejected: bounded identity probe
   failed`; cleanup succeeded, but no throughput or resource evidence was produced.
+- Fresh hosted result: scope `M4-REMOTE-57d317d-A1` was consumed and auto-revoked
+  before one non-force push of exact `57d317d`. GitHub Actions
+  [`30698815475`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30698815475)
+  completed `failure`: quality, MSRV, TCP/UDP `12/12` interop, and all three native
+  platforms succeeded. Throughput completed five trials per topology with ferrum2
+  median `7977915`, reference median `478773248`, and ratio `0.016663243`; resource
+  then failed before load with `metrics readiness timed out`. Cleanup succeeded and
+  final qualification failed. No resource sample, RSS window, or drain is credited.
 
 ## Blocker
 
-- `HOSTED-M4-T02-001`: local candidate `57d317d` repairs the diagnostic defect, but the
-  root remains open until one fresh exact-SHA hosted run produces the required
-  performance/resource evidence. The historical failing command remains unknowable;
-  no result is waived or spliced.
-- `M4-T02-REMOTE-002`: obtain a new exact, single-use authorization before pushing
-  `57d317d` and observing one fresh push-triggered run. No rerun, dispatch, second push,
-  PR, release, publication, or other remote mutation is currently authorized.
+- `HOSTED-M4-T02-001` is resolved: run `30698815475/1` passed every bounded identity,
+  reference, and hash probe and completed throughput.
+- `HOSTED-M4-T02-002`: the resource driver waits for an active-flow sample before it
+  creates any flow, while the Prometheus `Family` creates that labelled series only on
+  the first flow. Exact `57d317d` reproduces the circular wait `2/2` in WSL2 within
+  `15.5` seconds; an independent server scrape returns valid HTTP/OpenMetrics with the
+  active sample absent. Repair only this pre-load evidence seam, preserve exact post-load
+  `10000` checks, then repeat local review/gates. No rerun, second push, dispatch, PR,
+  release, publication, or other remote mutation is authorized.

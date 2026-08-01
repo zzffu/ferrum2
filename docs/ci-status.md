@@ -2,19 +2,18 @@
 
 ## 当前 M4 executing 状态
 
-- **Local repair candidate:** exact
-  `57d317ddb554bbbbc5cc324046277a514ce54324` has Architect and QA `PASS`,
-  release self-check `mutations=10`, authoritative Full `6/6`, and ticket/milestone
-  budget `PASS_ADVANCE` (`13812` code, `20740` tests, ratio `1.501593`). The remote
-  branch remains at `4cee0a1e18450eb0a95c3e16a0903a735969591c`; no new remote
-  scope exists.
+- **Candidate and authorization:** exact
+  `57d317ddb554bbbbc5cc324046277a514ce54324` passed Architect/QA review,
+  release self-check, Full `6/6`, and ticket/milestone budget. Single-use scope
+  `M4-REMOTE-57d317d-A1` was consumed and auto-revoked before one non-force push;
+  the remote branch now resolves to that exact SHA.
 - **WSL2 diagnosis:** exact five-second diagnostic candidate `e9dbe54` completed the
   hosted identity path `50/50` on a native WSL checkout. Mounted-worktree `git status`
   samples were `0.775`–`3.297` seconds; a controlled six-second delay returned the
   exact redacted class `checkout status probe timed out`. The final candidate uses a
   shared thirty-second limit only for identity/reference/hash probes and preserves the
   five-second I/O and reap limits.
-- **Hosted result:** push run
+- **Prior hosted result:** push run
   [`30697247986`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30697247986)
   completed `failure` on that exact SHA. Quality `91362102217`, MSRV
   `91362102198`, interop `91362102206`, Linux GNU `91362102192`, Linux musl
@@ -25,12 +24,22 @@
   seconds with `M4 qualification rejected: bounded identity probe failed`; the
   always-run process/evidence cleanup succeeded. No throughput trial, median, ratio,
   10k-idle sample, RSS window, or drain result may be credited.
-- **Open root:** `HOSTED-M4-T02-001`. Candidate `57d317d` repairs the shared
-  diagnostic seam with static identities and distinct redacted timeout, nonzero,
-  output-bound, secret-output, and UTF-8 classes. The historical failing command is
-  unrecoverable from run `30697247986/1`; closure still requires fresh same-SHA hosted
-  evidence. `M4-T02-REMOTE-002` blocks on a new exact, single-use authorization. The
-  failed run will not be rerun or spliced.
+- **Fresh hosted result:** push run
+  [`30698815475`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30698815475)
+  completed `failure` on exact `57d317d`. Quality `91366096428`, MSRV `91366096397`,
+  interop `91366096415`, Linux GNU `91366096453`, Linux musl `91366096419`, and
+  Windows MSVC `91366096439` succeeded; interop recorded TCP/UDP `12/12` with cleanup.
+  Performance `91366096426` and final qualification `91366811029` failed.
+- **Fresh performance evidence:** all hosted probes and ten throughput trials passed.
+  Ferrum2 median was `7977915` bytes/s, reference median `478773248` bytes/s, ratio
+  `0.016663243`. Resource then failed before load with `metrics readiness timed out`;
+  cleanup succeeded. No resource sample, RSS window, or drain result may be credited.
+- **Open root:** `HOSTED-M4-T02-001` is resolved by the fresh run. New root
+  `HOSTED-M4-T02-002` is a deterministic pre-load circular wait: the driver requires
+  an active-flow series before creating a flow, while the production Prometheus family
+  creates that labelled series on the first flow. WSL2 reproduces it `2/2`; an isolated
+  scrape proves valid HTTP/OpenMetrics with that series absent. The narrow local repair
+  is active; no new remote action is authorized.
 
 ## 当前 M3 closed 状态
 
@@ -662,7 +671,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | local exact `57d317d`已修复probe诊断并通过双审、Full与budget；remote仍为`4cee0a1`，fresh exact-SHA hosted run等待`M4-T02-REMOTE-002`授权 | M4 |
+| Performance/10k idle | BLOCKED | exact `57d317d` run `30698815475/1` throughput通过并记录ratio，但resource在pre-load lazy active metric circular wait失败；`HOSTED-M4-T02-002`本地修复active | M4 |
 
 ## 已实现并通过的 M0 CI profile
 
