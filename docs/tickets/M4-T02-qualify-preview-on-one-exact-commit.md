@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: active
+status: blocked
 depends_on: [M4-T01]
 owns:
   - tools/ferrum2-m4-qualification/src/m4_support/mod.rs
@@ -53,14 +53,18 @@ git status --short
 
 ## Result
 
-- Local repair candidate: `57d317ddb554bbbbc5cc324046277a514ce54324`
-- Review: Architect `PASS`; QA `PASS`; no findings
-- Notes: the repair keeps every external probe bounded, assigns a static redacted
+- Probe repair candidate: `57d317ddb554bbbbc5cc324046277a514ce54324`
+- Resource-readiness repair: `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`
+- Review: Architect `PASS`; QA `PASS`; no findings on the resource repair
+- Notes: the probe repair keeps every external probe bounded, assigns a static redacted
   identity and distinct failure class, and raises only the identity/reference/hash
   probe limit from five to thirty seconds. `IO_TIMEOUT` and `REAP_TIMEOUT` remain five
-  seconds. Release self-check passed with `mutations=10`; authoritative Full passed
-  `6/6`; ticket and milestone budgets passed at code `13812`, tests `20740`, ratio
-  `1.501593`.
+  seconds. The resource repair treats lazy active-series absence as zero only for a
+  complete HTTP 200 exposition anchored by the stable eager replay gauge; malformed,
+  duplicate, or unidentified input remains rejected, and post-load exact `10000` is
+  unchanged. Release self-check passed with `mutations=11`; authoritative Full passed
+  `6/6`; ticket and milestone budgets passed at code `13879`, tests `20740`, ratio
+  `1.494344`.
 - WSL2 diagnosis: the original five-second candidate completed the full hosted identity
   path `50/50` on a native Linux checkout. Mounted-worktree `git status` samples ranged
   from `0.775` to `3.297` seconds; a controlled six-second `git status` delay produced
@@ -94,5 +98,8 @@ git status --short
   the first flow. Exact `57d317d` reproduces the circular wait `2/2` in WSL2 within
   `15.5` seconds; an independent server scrape returns valid HTTP/OpenMetrics with the
   active sample absent. Repair only this pre-load evidence seam, preserve exact post-load
-  `10000` checks, then repeat local review/gates. No rerun, second push, dispatch, PR,
-  release, publication, or other remote mutation is authorized.
+  `10000` checks. Exact `56aadd4` implements that repair; both reviews and all local
+  gates passed, and the WSL resource path then survived the 25-second readiness window
+  with no readiness error and cleaned up. Hosted acceptance remains blocked pending a
+  new exact single-use push authorization. No rerun, second push, dispatch, PR, release,
+  publication, or other remote mutation is currently authorized.

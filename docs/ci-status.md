@@ -2,11 +2,17 @@
 
 ## 当前 M4 executing 状态
 
-- **Candidate and authorization:** exact
-  `57d317ddb554bbbbc5cc324046277a514ce54324` passed Architect/QA review,
-  release self-check, Full `6/6`, and ticket/milestone budget. Single-use scope
-  `M4-REMOTE-57d317d-A1` was consumed and auto-revoked before one non-force push;
-  the remote branch now resolves to that exact SHA.
+- **Remote candidate and authorization:** exact
+  `57d317ddb554bbbbc5cc324046277a514ce54324` passed its local gates. Single-use
+  scope `M4-REMOTE-57d317d-A1` was consumed and auto-revoked before one non-force
+  push; the remote branch remains at that exact SHA.
+- **Local resource repair:** exact
+  `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8` admits a complete identified initial
+  exposition with no lazy active-flow sample as zero, while malformed or unidentified
+  exposition still fails closed and post-load remains exact `10000`. Architect and QA
+  independently returned `PASS` with no findings; release self-check reported
+  `mutations=11`, Full passed `6/6`, and ticket/milestone budgets passed at code
+  `13879`, tests `20740`, ratio `1.494344`.
 - **WSL2 diagnosis:** exact five-second diagnostic candidate `e9dbe54` completed the
   hosted identity path `50/50` on a native WSL checkout. Mounted-worktree `git status`
   samples were `0.775`–`3.297` seconds; a controlled six-second delay returned the
@@ -34,12 +40,15 @@
   Ferrum2 median was `7977915` bytes/s, reference median `478773248` bytes/s, ratio
   `0.016663243`. Resource then failed before load with `metrics readiness timed out`;
   cleanup succeeded. No resource sample, RSS window, or drain result may be credited.
-- **Open root:** `HOSTED-M4-T02-001` is resolved by the fresh run. New root
-  `HOSTED-M4-T02-002` is a deterministic pre-load circular wait: the driver requires
+- **Open root:** `HOSTED-M4-T02-001` is resolved by the fresh run.
+  `HOSTED-M4-T02-002` was a deterministic pre-load circular wait: the driver required
   an active-flow series before creating a flow, while the production Prometheus family
   creates that labelled series on the first flow. WSL2 reproduces it `2/2`; an isolated
-  scrape proves valid HTTP/OpenMetrics with that series absent. The narrow local repair
-  is active; no new remote action is authorized.
+  scrape proves valid HTTP/OpenMetrics with that series absent. Exact `56aadd4` repairs
+  the evidence seam; the same WSL resource path then survived the readiness window for
+  25 seconds with no readiness error and cleaned up. Hosted acceptance remains blocked
+  until a new exact single-use push authorization is granted; no remote action is
+  currently authorized.
 
 ## 当前 M3 closed 状态
 
@@ -671,7 +680,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | exact `57d317d` run `30698815475/1` throughput通过并记录ratio，但resource在pre-load lazy active metric circular wait失败；`HOSTED-M4-T02-002`本地修复active | M4 |
+| Performance/10k idle | BLOCKED | exact `57d317d` run `30698815475/1` throughput通过并记录ratio，但resource在pre-load lazy active metric circular wait失败；exact `56aadd4`本地修复与门禁PASS，尚缺新的exact-SHA remote授权/hosted结果 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 
