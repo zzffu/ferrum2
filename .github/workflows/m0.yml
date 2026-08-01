@@ -59,9 +59,37 @@ jobs:
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           cargo doc --workspace --all-features --no-deps --locked
-          python -X utf8 .agents/skills/milestone-workflow/scripts/workflow.py \
-            test-budget --gate milestone \
-            --base 7907cda05a56e1c3b85af2dd8faeb85a385154b7
+      - name: Enforce test budget on the exact SHA
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          cargo install --locked rustloc --version '=0.19.1' --root "$RUNNER_TEMP/rustloc"
+          rustloc_bin="$RUNNER_TEMP/rustloc/bin/rustloc"
+          test "$("$rustloc_bin" --version)" = "rustloc 0.19.1"
+
+          base=""
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA" ;;
+            push) base="$PUSH_BASE_SHA" ;;
+          esac
+          case "$base" in
+            ""|0000000000000000000000000000000000000000)
+              RUSTLOC="$rustloc_bin" sh scripts/test-budget.sh ci \
+                --candidate "$GITHUB_SHA"
+              ;;
+            *)
+              RUSTLOC="$rustloc_bin" sh scripts/test-budget.sh ci \
+                --base "$base" --candidate "$GITHUB_SHA"
+              ;;
+          esac
+      - name: Record authoritative full-gate completion
+        shell: bash
+        run: |
+          set -euo pipefail
           printf 'm3_full_completion status=PASS full=PASS security=PASS process=PASS test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
       - name: Prove focused IPv6 UDP real-process path

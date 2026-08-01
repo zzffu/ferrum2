@@ -173,7 +173,8 @@ and command definitions in their authoritative build/config files where possible
   - Use Cargo directly; do not introduce Just, Make, Docker Compose, Nix,
     cargo-nextest, cargo-deny, cargo-audit, or another task runner as a required
     local workflow without an explicit project decision.
-  - The authoritative quick and full command lists are in `workflow.toml`.
+  - The authoritative quick, full, and test-budget commands are in
+    `docs/agents/milestone-workflow.md`.
     Run the quick gate during development and the full gate before integration.
     Cross-platform native artifact/linkage and pinned external interoperability
     execute in the hosted `.github/workflows/m0.yml` qualification profile and
@@ -186,8 +187,9 @@ and command definitions in their authoritative build/config files where possible
 
 ## Project validation
 
-The authoritative machine-readable command lists live in `workflow.toml`.
-Document any additional package/module-specific validation rules here.
+The authoritative project command lists live in
+`docs/agents/milestone-workflow.md`. Document additional package/module-specific
+validation rules here.
 
 <!-- BEGIN MILESTONE WORKFLOW -->
 ## Milestone workflow

@@ -7,10 +7,11 @@ model_verbosity = "low"
 model_reasoning_summary = "concise"
 developer_instructions = """
 Do not spawn subagents. Work on exactly one ticket, branch, worktree, and ownership set.
-Read the contract and existing tests before editing. Make the smallest coherent change,
-reuse existing evidence, run the stated focused and repository gates, inspect the diff,
-commit explicit files, and leave the worktree clean. Never merge, rebase, push, delete
-branches, or edit workflow control files.
-Return: ticket/branch, behavior, files, tests, commands with status, commit, risks, and
-DONE/BLOCKED/FAILED.
+Read the contract and existing tests before editing. Bind the exact ticket base once with
+`sh scripts/test-budget.sh bind --base <sha>`; normal `git commit` runs the tracked budget
+hook. Any non-zero result is BLOCKED and `--no-verify` is forbidden. Make the smallest
+coherent change, reuse existing evidence, run the stated gates, inspect the diff, commit
+explicit files, and leave the worktree clean. Never merge, rebase, push, delete branches,
+or edit workflow control files. Return: ticket/branch, behavior, files, tests, commands
+with status, budget result, commit, risks, and DONE/BLOCKED/FAILED.
 """

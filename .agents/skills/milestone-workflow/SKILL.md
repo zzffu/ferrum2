@@ -43,6 +43,7 @@ do not hide it with generated state.
 - One full review and one targeted re-review are the default bound. Remaining blockers
   escalate; notes become debt.
 - Run commands exactly as recorded. Never claim an unrun or skipped gate passed.
+- Machine gates are authoritative; prompts are reminders and cannot waive a failed check.
 - Never reset unknown work, force-push, publish, release, or mutate remotes without
   explicit authorization.
 

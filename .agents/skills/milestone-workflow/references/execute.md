@@ -45,3 +45,16 @@ Use stable IDs and `blocker`, `major`, `minor`, or `note` severity.
 
 With `strategy: drain`, repeat until ready to close or a stop condition occurs. With
 `wave`, return after one frontier.
+
+## Test budget
+
+The repository gate, not the prompt, is authoritative. Bind the exact ticket base before
+implementation:
+
+```sh
+sh scripts/test-budget.sh bind --base <ticket-base-sha>
+```
+
+A normal `git commit` checks the staged tree. Any non-zero result is `BLOCKED`; never use
+`--no-verify`. The primary thread independently checks the exact candidate and integration
+commits. Only an accepted milestone may advance `ci/test-budget-baseline.txt`.
