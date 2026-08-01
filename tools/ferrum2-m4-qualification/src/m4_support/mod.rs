@@ -156,11 +156,23 @@ impl HostedIdentity {
             github_sha: env("GITHUB_SHA")?,
         };
         validate_environment(requested_sha, &environment)?;
-        let head = probe_text("git", ["rev-parse", "HEAD"], Duration::from_secs(5))?;
+        let head = probe_text(
+            "checkout HEAD probe",
+            "git",
+            ["rev-parse", "HEAD"],
+            Duration::from_secs(5),
+        )?;
         if head.trim() != requested_sha {
             return Err("checkout HEAD does not match requested SHA".to_owned());
         }
-        if !probe_text("git", ["status", "--porcelain=v1"], Duration::from_secs(5))?.is_empty() {
+        if !probe_text(
+            "checkout status probe",
+            "git",
+            ["status", "--porcelain=v1"],
+            Duration::from_secs(5),
+        )?
+        .is_empty()
+        {
             return Err("checkout is dirty before generated writes".to_owned());
         }
         validate_output_path(output)?;
@@ -173,7 +185,12 @@ impl HostedIdentity {
             return Err("host capacity is below M4-GHA-01".to_owned());
         }
         let nofile_soft = validate_nofile()?;
-        let rustc = first_line(&probe_text("rustc", ["--version"], Duration::from_secs(5))?);
+        let rustc = first_line(&probe_text(
+            "Rust version probe",
+            "rustc",
+            ["--version"],
+            Duration::from_secs(5),
+        )?);
         if !rustc.starts_with("rustc 1.97.1 ") {
             return Err("Rust toolchain is not 1.97.1".to_owned());
         }
@@ -192,15 +209,30 @@ impl HostedIdentity {
             run_attempt,
             event,
             image_version: env("ImageVersion")?,
-            kernel: first_line(&probe_text("uname", ["-srvmo"], Duration::from_secs(5))?),
+            kernel: first_line(&probe_text(
+                "kernel identity probe",
+                "uname",
+                ["-srvmo"],
+                Duration::from_secs(5),
+            )?),
             cpu_model,
             cpu_count,
             memory_kib,
             runner_temp_free_kib,
             nofile_soft,
             rustc,
-            cc: first_line(&probe_text("cc", ["--version"], Duration::from_secs(5))?),
-            linker: first_line(&probe_text("ld", ["--version"], Duration::from_secs(5))?),
+            cc: first_line(&probe_text(
+                "C compiler identity probe",
+                "cc",
+                ["--version"],
+                Duration::from_secs(5),
+            )?),
+            linker: first_line(&probe_text(
+                "linker identity probe",
+                "ld",
+                ["--version"],
+                Duration::from_secs(5),
+            )?),
         })
     }
 
@@ -281,6 +313,7 @@ fn validate_output_path(output: &Path) -> Result<(), String> {
 fn validate_temp_free(output: &Path) -> Result<u64, String> {
     let parent = output.parent().expect("validated output parent");
     let result = probe_text(
+        "runner-temp capacity probe",
         "df",
         [OsString::from("-Pk"), parent.as_os_str().to_owned()],
         Duration::from_secs(5),
@@ -440,8 +473,8 @@ fn throughput_trial(
     };
     fs::write(&client_config, client_text).map_err(clean_io)?;
     fs::write(&server_config, server_text).map_err(clean_io)?;
-    let client_hash = sha256(&client_config)?;
-    let server_hash = sha256(&server_config)?;
+    let client_hash = sha256("throughput client config SHA-256 probe", &client_config)?;
+    let server_hash = sha256("throughput server config SHA-256 probe", &server_config)?;
     let target_worker = TargetWorker::echo(target_listener, STREAMS)?;
     server_reservation.release();
     let mut server_process = spawn_proxy(topology, "server", &server_binary, &server_config)?;
@@ -584,12 +617,15 @@ fn verify_reference(sslocal: &Path, ssserver: &Path, output: &Path) -> Result<()
     }
     let archive = work.join("shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz");
     if fs::metadata(&archive).map_err(clean_io)?.len() != 11_635_096
-        || sha256(&archive)? != REFERENCE_SHA256
+        || sha256("reference archive SHA-256 probe", &archive)? != REFERENCE_SHA256
     {
         return Err("reference archive identity mismatch".to_owned());
     }
-    for binary in [&local, &server] {
-        let version = probe_text(binary, ["--version"], Duration::from_secs(5))?;
+    for (identity, binary) in [
+        ("reference sslocal version probe", &local),
+        ("reference ssserver version probe", &server),
+    ] {
+        let version = probe_text(identity, binary, ["--version"], Duration::from_secs(5))?;
         validate_reference_identity(&version, REFERENCE_SHA256)?;
     }
     Ok(())
@@ -628,8 +664,8 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
         ferrum_server_config(server, Some(server_metrics)),
     )
     .map_err(clean_io)?;
-    let client_hash = sha256(&client_config)?;
-    let server_hash = sha256(&server_config)?;
+    let client_hash = sha256("resource client config SHA-256 probe", &client_config)?;
+    let server_hash = sha256("resource server config SHA-256 probe", &server_config)?;
     output.line(format!(
         "{{\"kind\":\"resource_profile\",\"sessions\":10000,\"setup_concurrency\":256,\
          \"stabilization_samples\":30,\"samples\":180,\"interval_seconds\":10,\
@@ -1046,6 +1082,18 @@ fn run_self_check() -> Result<String, String> {
     let admission_now = past_slot + Duration::from_nanos(1);
     if sample_slot_delay(admission_now, past_slot, admission_now + SAMPLE_INTERVAL).is_ok() {
         return Err("past resource sample slot was admitted".to_owned());
+    }
+    let executable = std::env::current_exe().map_err(clean_io)?;
+    let probe_error = probe_text(
+        "self-check nonzero probe",
+        &executable,
+        ["self-check-probe-nonzero"],
+        Duration::from_secs(5),
+    )
+    .expect_err("self-check probe must exit nonzero");
+    ensure_redacted(&probe_error)?;
+    if probe_error != "self-check nonzero probe exited nonzero" {
+        return Err(format!("probe diagnostic mismatch: {probe_error}"));
     }
     expect_rejected("wrong SHA", || {
         validate_environment("1123456789abcdef0123456789abcdef01234567", &good)
@@ -1740,7 +1788,7 @@ impl ProcessGuard {
         if self.child.try_wait().map_err(clean_io)?.is_none() {
             self.child.kill().map_err(clean_io)?;
         }
-        let _status = wait_child(&mut self.child, Instant::now() + REAP_TIMEOUT)?;
+        let _exit = wait_child(&mut self.child, Instant::now() + REAP_TIMEOUT)?;
         self.reap()
     }
 
@@ -1817,20 +1865,25 @@ fn join_capture(worker: JoinHandle<Capture>) -> Result<Capture, String> {
         .map_err(|_| "capture worker panicked".to_owned())
 }
 
-fn wait_child(child: &mut Child, deadline: Instant) -> Result<ExitStatus, String> {
+fn wait_child(child: &mut Child, deadline: Instant) -> Result<(ExitStatus, bool), String> {
     loop {
         if let Some(status) = child.try_wait().map_err(clean_io)? {
-            return Ok(status);
+            return Ok((status, false));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            return child.wait().map_err(clean_io);
+            return child.wait().map(|status| (status, true)).map_err(clean_io);
         }
         thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn probe_text<P, I, S>(program: P, arguments: I, timeout: Duration) -> Result<String, String>
+fn probe_text<P, I, S>(
+    identity: &'static str,
+    program: P,
+    arguments: I,
+    timeout: Duration,
+) -> Result<String, String>
 where
     P: AsRef<OsStr>,
     I: IntoIterator<Item = S>,
@@ -1838,26 +1891,46 @@ where
 {
     let mut command = Command::new(program);
     command.args(arguments);
-    let mut process = ProcessGuard::spawn("identity probe", &mut command)?;
-    let status = wait_child(&mut process.child, Instant::now() + timeout)?;
-    let stdout = join_capture(process.stdout.take().expect("probe stdout"))?;
-    let stderr = join_capture(process.stderr.take().expect("probe stderr"))?;
+    let mut process = ProcessGuard::spawn(identity, &mut command)?;
+    let (status, timed_out) = wait_child(&mut process.child, Instant::now() + timeout)
+        .map_err(|_| format!("{identity} wait failed"))?;
+    let stdout = join_capture(process.stdout.take().expect("probe stdout"))
+        .map_err(|_| format!("{identity} stdout capture failed"))?;
+    let stderr = join_capture(process.stderr.take().expect("probe stderr"))
+        .map_err(|_| format!("{identity} stderr capture failed"))?;
     process.reaped = true;
     ACTIVE_PROCESSES.fetch_sub(1, Ordering::SeqCst);
-    if !status.success() || stdout.truncated || stderr.truncated || stdout.secret || stderr.secret {
-        return Err("bounded identity probe failed".to_owned());
+    if timed_out {
+        return Err(format!("{identity} timed out"));
     }
-    String::from_utf8(stdout.bytes).map_err(|_| "identity probe output is not UTF-8".to_owned())
+    if stdout.truncated || stderr.truncated {
+        return Err(format!("{identity} output exceeded bound"));
+    }
+    if stdout.secret || stderr.secret {
+        return Err(format!("{identity} emitted secret-bearing output"));
+    }
+    if !status.success() {
+        return Err(format!("{identity} exited nonzero"));
+    }
+    let output =
+        String::from_utf8(stdout.bytes).map_err(|_| format!("{identity} stdout is not UTF-8"))?;
+    String::from_utf8(stderr.bytes).map_err(|_| format!("{identity} stderr is not UTF-8"))?;
+    Ok(output)
 }
 
-fn sha256(path: &Path) -> Result<String, String> {
-    let output = probe_text("sha256sum", [path.as_os_str()], Duration::from_secs(5))?;
+fn sha256(identity: &'static str, path: &Path) -> Result<String, String> {
+    let output = probe_text(
+        identity,
+        "sha256sum",
+        [path.as_os_str()],
+        Duration::from_secs(5),
+    )?;
     let digest = output
         .split_whitespace()
         .next()
-        .ok_or_else(|| "config SHA-256 output is empty".to_owned())?;
+        .ok_or_else(|| format!("{identity} output is empty"))?;
     if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("config SHA-256 output is malformed".to_owned());
+        return Err(format!("{identity} output is malformed"));
     }
     Ok(digest.to_ascii_lowercase())
 }
