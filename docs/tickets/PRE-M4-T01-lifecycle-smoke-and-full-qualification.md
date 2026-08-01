@@ -1,7 +1,7 @@
 ---
 id: PRE-M4-T01
 milestone: pre-M4
-status: blocked
+status: done
 depends_on: []
 owns:
   - tests/m0-harness/src/local_support/mod.rs
@@ -33,7 +33,7 @@ or edit an Accepted ADR.
   ignored exact-name full qualification runs 20 per category.
 - [x] Full qualification guarantees at least 100 real client and 100 real server
   starts while preserving signal, exit, reap, cleanup, and immediate-rebind assertions.
-- [ ] Authoritative full validation and CI explicitly execute the full test on the same
+- [x] Authoritative full validation and CI explicitly execute the full test on the same
   SHA; quick/default workspace tests execute only smoke.
 - [x] No dependency, production code, new harness, or hidden environment-variable
   control is added.
@@ -51,9 +51,10 @@ cargo test --workspace --locked
 
 ## Result
 
-- Commit: `68f94c3` (test implementation, test plans, and authoritative local gate)
-- Review: `PRE-M4-T01-REVIEW-001` PASS with no findings
-- Notes: The exact CI command is present as an uncommitted one-line change. The normal
-  commit hook rejects `.github/workflows/m0.yml` with `control_plane_changed`; the
-  current workflow defines no sanctioned control-maintenance commit path, so the hook
-  was not bypassed.
+- Commits: `68f94c3` (tests, test plans, local full gate) and `809b1e9` (CI)
+- Reviews: `PRE-M4-T01-REVIEW-001` full PASS and
+  `PRE-M4-T01-REVIEW-002` targeted PASS, both without findings
+- Notes: After the normal hook correctly rejected the CI control path, the user
+  explicitly authorized one `.github/workflows/m0.yml`-only exception. Scope guard,
+  exact-command mapping, diff check, milestone budget, focused tests, and authoritative
+  quick/full gates passed. No remote action was performed.
