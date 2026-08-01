@@ -97,8 +97,9 @@
   red-capable parser regression, retain the existing gate, and report all six existing
   `VmRSS` medians beside an accurate `smaps_rollup` trajectory. That distinguishes a
   counter artifact, a step then plateau, and continued growth without weakening 10k,
-  timing, six-window 105%, or drain contracts. No rerun or further remote mutation is
-  authorized.
+  timing, six-window 105%, or drain contracts. Local scope `M4-LOCAL-RSS-PAIR-001` is
+  active for this driver-only diagnostic, review, Full/budgets, and native ext4 WSL2
+  resource run. No rerun or further remote mutation is authorized.
 
 ## 当前 M3 closed 状态
 

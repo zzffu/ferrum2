@@ -34,7 +34,7 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
-| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | blocked |
+| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | active |
 
 ## Next action
 
@@ -44,7 +44,8 @@ and throughput recorded `9035229 / 547376332`, difference `-98.349357020%`, rati
 `0.016506430`. Resource completed exact 10k plus 180 stable active/fd/task samples, but
 server RSS median-twice rose from `2182832` to `2389976` KiB in window 2 (`+9.4897%`)
 while client RSS remained `1907336`; drain was not reached. The driver currently gates
-on Linux's potentially imprecise `/proc/<pid>/status` `VmRSS`. Establish a fast parser
-regression and add bounded all-six existing/accurate RSS trajectories before changing
-the gate or product. WSL2 remains diagnostic, and its complete pass does not close the
-hosted blocker. No rerun or new push is currently authorized.
+on Linux's potentially imprecise `/proc/<pid>/status` `VmRSS`. Under local scope
+`M4-LOCAL-RSS-PAIR-001`, retain that gate, establish a fast parser regression, and add
+bounded all-six `VmRSS` plus parallel `smaps_rollup` trajectories. Then complete review,
+Full, budgets, and the native ext4 WSL2 resource profile. WSL2 remains diagnostic and
+cannot close the hosted blocker. No rerun or new push is currently authorized.

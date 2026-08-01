@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: blocked
+status: active
 depends_on: [M4-T01]
 owns:
   - Cargo.lock
@@ -127,6 +127,14 @@ git status --short
   then failed window 2. Client median-twice stayed `1907336/1907336` KiB; server moved
   `2182832` to `2389976` KiB (`+103572` KiB actual, `+9.4897%`). Cleanup succeeded;
   drain was not reached and final qualification failed closed.
+- Paired-RSS diagnostic authorization: local scope `M4-LOCAL-RSS-PAIR-001` permits one
+  writer to modify only the non-shipping qualification driver, using its existing
+  `self-check` seam for RED→GREEN coverage of strict `smaps_rollup` parsing and bounded
+  all-six-window paired trajectories. The current `VmRSS` 105% gate, 10k load, timing,
+  drain, product binaries, workflow, SPEC, and TEST profile remain unchanged. The scope
+  includes Architect/QA review, local Full/budgets, and a complete native ext4 WSL2
+  resource diagnostic. It authorizes no push, workflow run/dispatch, PR, release, or
+  publication.
 
 ## Blocker
 
@@ -149,8 +157,9 @@ git status --short
   potentially imprecise; accurate `smaps_rollup` is available in WSL2, but the exact WSL
   profile passed and is not a hosted reproduction. Preserve the existing gate and first
   add one fast red-capable parser check plus bounded all-six median trajectories for the
-  existing and accurate signals. No local repair, rerun, second push, dispatch, PR,
-  release, publication, or other remote mutation is currently authorized.
+  existing and accurate signals. Local scope `M4-LOCAL-RSS-PAIR-001` is active for that
+  work; no push, rerun, dispatch, PR, release, publication, or other remote mutation is
+  authorized.
 - `LOCAL-M4-T02-004`: exact `d28ed0a` reproduced `target did not accept 10000
   streams` in two native WSL2 runs. Both product active gauges reached exact `10000`,
   while the qualification driver retained fewer target-side streams and Linux
