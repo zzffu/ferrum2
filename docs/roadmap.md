@@ -21,7 +21,8 @@ docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
 M4-T01已在exact `7730ec7`集成到独立non-shipping tools package；M4-T02 exact
 `2f4190c`的run `30700273019/1`通过六项独立gate与throughput，但RSS window 2
-超过105%；`M4-LOCAL-RSS-DIAG-001`已消费撤销，T02现为bounded本地诊断`active`。
+超过105%；exact `7b63bd5`已完成bounded诊断修复与双审，T02因没有新的remote
+授权而`blocked`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -43,8 +44,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
 完成三目标 native qualification。M4-T01已把non-test driver迁到独立tools
 package并在exact `7730ec7`通过双审与authoritative ticket budget；下一入口是
-为M4-T02的RSS失败增加bounded binary/median诊断并定位根因；run
-`30700273019/1`的remote scope已消费撤销，不授权rerun或新push。
+在最终local integration SHA完成Full后，取得新的单次remote授权，以exact
+`7b63bd5`已增加的bounded RSS values定位根因；旧scope已消费撤销。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -608,8 +609,9 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
   - M4-T02：exact `56aadd4`修复pre-load lazy metric wait后，exact `2f4190c`
     run `30700273019/1`通过quality/MSRV/interop/三平台与throughput，并完成10k及
     180个stable owner/task samples；RSS window 2超过105%。当前因失败错误缺少
-    binary/first/current medians而`blocked`；先补bounded诊断并定位根因，之后仍须
-    新授权的一个push run/attempt完成全部qualification及close summary。
+    binary/first/current medians而失败。Exact `7b63bd5`已补齐bounded诊断并通过
+    TDD及Architect/QA双审；当前因无新remote授权而`blocked`，之后仍须一个新授权
+    push run/attempt完成root diagnosis、全部qualification及close summary。
 
   Dependency graph：
 
@@ -623,6 +625,7 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
 - **Integrated commit:** M4-T01 exact `7730ec730258971652270cc6ef41be9457abc2a7`；
   local M4-T02 resource repair exact `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`；
   remote M4-T02 diagnostic candidate exact `2f4190c272f79c5d90ebb2d70cdade0378e44e02`；
+  local M4-T02 RSS diagnostic repair exact `7b63bd588e1be600beb417636ed0d37ac3b0fb44`；
   M4 accepted hosted qualification commit尚待T02。
 - **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
   driver迁到独立tools package解除；authoritative allowance、classifier、baseline
@@ -729,3 +732,4 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
 | 2026-08-01 | M4 local resource-readiness repair | exact `56aadd4`只在HTTP 200、唯一终止`# EOF`及稳定eager replay identity/sample完整时把缺失lazy active series解释为zero；其余状态、重复/畸形/未知exposition仍fail closed，post-load exact `10000`不变 | exact `57d317d` WSL resource `2/2`失败及独立scrape定位lazy family circular wait；修复后同path通过25秒readiness观察并cleanup | Architect/QA `PASS`；self-check `mutations=11`；Full `6/6`；code/tests/ratio `13879/20740/1.494344`；等待新的单次exact-SHA remote授权 |
 | 2026-08-01 | M4 third hosted qualification | exact `2f4190c` run `30700273019/1`通过quality、MSRV、TCP/UDP `12/12`、三平台及throughput，记录ferrum/reference `9013384/480717482`、ratio `0.018749857`；resource完成readiness、10k与180 samples后以RSS window 2超过105%失败 | validate顺序证明全部active/fd/task tuples稳定；runner-temp raw samples按合同删除，但error未保留binary与first/current medians，无法区分测量扰动、早期baseline、真实增长或runner噪声 | `M4-REMOTE-2f4190c-A1` 1/1消费撤销；cleanup success；`HOSTED-M4-T02-002` resolved、`HOSTED-M4-T02-003` blocked；无rerun/第二push/release/publication |
 | 2026-08-01 | M4 RSS diagnostic authorization | M4-T02从`blocked`恢复为`active`，只允许资格driver单文件为RSS threshold failure增加bounded client/server first/current medians及exact self-check | 现有error丢弃已计算数值，无法从已删除raw evidence定位真实根因；105%门限、profile、product和remote边界不变 | `M4-LOCAL-RSS-DIAG-001`消费撤销；允许TDD、双审、Full、budget；不授权push/rerun/dispatch/release/publication |
+| 2026-08-01 | M4 local RSS diagnostic repair | exact `7b63bd5`在共享`validate_samples` threshold error中加入window及client/server first/current median-twice KiB，并把既有RSS mutation强化为exact diagnostic assertion；mutation count仍为11 | 同一release self-check先以旧generic error RED、再GREEN；105% u128 comparison、10k、5分钟/180 samples/六窗/2分钟drain及product均不变 | Architect/QA `PASS`无finding；focused checks与ticket/milestone budget `PASS_ADVANCE`，code/tests/ratio `13897/20740/1.492408`；等待Full及新remote授权 |

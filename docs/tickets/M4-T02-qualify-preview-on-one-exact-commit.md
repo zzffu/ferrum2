@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: active
+status: blocked
 depends_on: [M4-T01]
 owns:
   - tools/ferrum2-m4-qualification/src/m4_support/mod.rs
@@ -55,7 +55,8 @@ git status --short
 
 - Probe repair candidate: `57d317ddb554bbbbc5cc324046277a514ce54324`
 - Resource-readiness repair: `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`
-- Review: Architect `PASS`; QA `PASS`; no findings on the resource repair
+- RSS diagnostic repair: `7b63bd588e1be600beb417636ed0d37ac3b0fb44`
+- Review: Architect `PASS`; QA `PASS`; no findings on either local resource repair
 - Notes: the probe repair keeps every external probe bounded, assigns a static redacted
   identity and distinct failure class, and raises only the identity/reference/hash
   probe limit from five to thirty seconds. `IO_TIMEOUT` and `REAP_TIMEOUT` remain five
@@ -65,6 +66,13 @@ git status --short
   unchanged. Release self-check passed with `mutations=11`; authoritative Full passed
   `6/6`; ticket and milestone budgets passed at code `13879`, tests `20740`, ratio
   `1.494344`.
+- RSS diagnostic TDD used the same release self-check command: RED exit `1` reported
+  the old generic window-only error, then GREEN exit `0` reported `mutations=11`.
+  The repair adds only the already-computed client/server first/current median-twice
+  integers to the bounded error; the 105% comparison and complete resource profile are
+  unchanged. Architect and QA returned `PASS` with no findings. Focused checks and both
+  budgets passed at code `13897`, tests `20740`, ratio `1.492408`; final Full evidence
+  is recorded on the integration docs descendant.
 - WSL2 diagnosis: the original five-second candidate completed the full hosted identity
   path `50/50` on a native Linux checkout. Mounted-worktree `git status` samples ranged
   from `0.775` to `3.297` seconds; a controlled six-second `git status` delay produced
@@ -115,7 +123,8 @@ git status --short
   but the failure text omits which binary and both first/current medians, so the run
   cannot separate scrape-induced allocation, an early baseline, actual idle growth, or
   runner RSS noise. Preserve the threshold and profile; add a bounded redacted failure
-  diagnostic before further root-cause testing. Local scope
-  `M4-LOCAL-RSS-DIAG-001` is consumed and revoked for that one-file TDD repair,
-  self-check, reviews, Full, and budget only. No rerun, second push, dispatch, PR,
-  release, publication, or other remote mutation is authorized.
+  diagnostic before further root-cause testing. Exact `7b63bd5` implements the
+  one-file diagnostic and passed TDD plus both reviews without changing the gate.
+  Local scope `M4-LOCAL-RSS-DIAG-001` is consumed and revoked. Hosted observation is
+  blocked pending a new exact single-use push authorization. No rerun, second push,
+  dispatch, PR, release, publication, or other remote mutation is authorized.

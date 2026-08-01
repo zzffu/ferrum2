@@ -58,9 +58,11 @@
   correctly deleted, while the bounded error omits which binary and both first/current
   medians; this run therefore cannot distinguish measurement-induced allocation, an
   early baseline, actual idle growth, or runner RSS noise. Preserve the 105% gate and
-  add only bounded redacted failure values before another hosted request. Local scope
-  `M4-LOCAL-RSS-DIAG-001` is consumed and revoked for that one-file repair and local
-  gates; no new remote action is authorized.
+  add only bounded redacted failure values before another hosted request. Exact
+  `7b63bd5` implements that one-file repair; behavioral TDD, Architect/QA reviews,
+  focused checks, and both budgets pass with no findings. The 105% gate and profile are
+  unchanged. Local scope `M4-LOCAL-RSS-DIAG-001` is consumed and revoked; hosted
+  observation is blocked pending a new exact single-use authorization.
 
 ## 当前 M3 closed 状态
 
@@ -692,7 +694,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | exact `2f4190c` run `30700273019/1` readiness、10k与180 samples完成，active/fd/task稳定，但RSS window 2超过首窗105%；失败文本缺binary及medians，`HOSTED-M4-T02-003`待诊断修复 | M4 |
+| Performance/10k idle | BLOCKED | exact `2f4190c` run `30700273019/1` readiness、10k与180 samples完成，active/fd/task稳定，但RSS window 2超过首窗105%；exact `7b63bd5`已补bounded binary medians并通过双审/本地门禁，待新授权hosted观察 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 

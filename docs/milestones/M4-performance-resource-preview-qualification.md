@@ -34,7 +34,7 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
-| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | active |
+| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | blocked |
 
 ## Next action
 
@@ -44,7 +44,9 @@ and throughput recorded `9013384 / 480717482`, ratio `0.018749857`. Resource pas
 readiness, exact 10k load, and 180 stable active/fd/task samples, then failed because
 RSS window 2 exceeded 105%; cleanup succeeded and drain was not reached. Raw samples
 were correctly deleted, but the bounded error omits the binary and first/current
-medians. Local scope `M4-LOCAL-RSS-DIAG-001` is consumed and revoked to add only that
-bounded redacted diagnostic, preserving the 105% threshold, sample profile, and drain
-contract, then run self-check, reviews, Full, and budget. Diagnose before requesting
-any new remote scope; no rerun or new push is authorized.
+medians. Exact `7b63bd5` adds only that bounded redacted diagnostic while preserving
+the 105% threshold, sample profile, and drain contract; TDD, Architect/QA reviews,
+focused checks, and both budgets pass. Local scope `M4-LOCAL-RSS-DIAG-001` is consumed
+and revoked. Finish Full on the integration docs descendant, then obtain a new exact
+single-use remote authorization to observe attributable RSS values. No rerun or new
+push is currently authorized.
