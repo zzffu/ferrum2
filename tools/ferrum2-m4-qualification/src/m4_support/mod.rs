@@ -464,15 +464,12 @@ fn throughput_trial(
             }
         }
     }
-    let started = match gate.start_when_ready(STREAMS, Instant::now() + STARTUP_TIMEOUT) {
-        Ok(started) => started,
-        Err(error) => {
-            for worker in workers {
-                let _ = join_worker(worker);
-            }
-            return Err(error);
+    if let Err(error) = gate.start_when_ready(STREAMS, Instant::now() + STARTUP_TIMEOUT) {
+        for worker in workers {
+            let _ = join_worker(worker);
         }
-    };
+        return Err(error);
+    }
     let mut bytes = 0_u64;
     let mut worker_error = None;
     for worker in workers {
@@ -490,7 +487,7 @@ fn throughput_trial(
     if let Some(error) = worker_error {
         return Err(error);
     }
-    let elapsed = Instant::now().duration_since(started + WARMUP);
+    let elapsed = MEASURE;
     target_worker.finish()?;
     client_process.ensure_running()?;
     server_process.ensure_running()?;
@@ -534,18 +531,28 @@ fn load_stream(
     let measure_end = warm_end + MEASURE;
     let mut measured = 0_u64;
     while Instant::now() < measure_end {
+        let transfer_start = Instant::now();
         stream.write_all(&payload).map_err(clean_io)?;
         stream.read_exact(&mut echoed).map_err(clean_io)?;
         if echoed != payload {
             return Err("echo payload mismatch".to_owned());
         }
-        let now = Instant::now();
-        if now >= warm_end && now <= measure_end {
+        let completion = Instant::now();
+        if transfer_is_measured(transfer_start, completion, warm_end, measure_end) {
             measured += PAYLOAD_BYTES as u64;
         }
     }
     stream.shutdown(Shutdown::Both).map_err(clean_io)?;
     Ok(measured)
+}
+
+fn transfer_is_measured(
+    transfer_start: Instant,
+    completion: Instant,
+    warm_end: Instant,
+    measure_end: Instant,
+) -> bool {
+    transfer_start >= warm_end && completion <= measure_end
 }
 
 fn median(values: impl Iterator<Item = u64>) -> Result<u64, String> {
@@ -654,6 +661,7 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
         &mut server_process,
         client_metrics,
         server_metrics,
+        Instant::now() + SAMPLE_INTERVAL,
     )?;
     if pre_load.client.active != 0 || pre_load.server.active != 0 {
         return Err("pre-load active gauges are not zero".to_owned());
@@ -666,13 +674,18 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
         client_metrics,
         server_metrics,
     )?;
+    let stabilization_started = Instant::now();
     for index in 1..=STABILIZATION_SAMPLES {
-        sleep_until(Instant::now() + SAMPLE_INTERVAL);
+        let slot =
+            stabilization_started + SAMPLE_INTERVAL * u32::try_from(index).expect("sample index");
+        let next_slot = slot + SAMPLE_INTERVAL;
+        wait_for_sample_slot(slot, next_slot)?;
         let sample = sample_pair(
             &mut client_process,
             &mut server_process,
             client_metrics,
             server_metrics,
+            next_slot,
         )?;
         validate_owner_tuple(&sample, &first_stable, RESOURCE_SESSIONS as u64)
             .map_err(|error| format!("stabilization sample {index}: {error}"))?;
@@ -680,12 +693,15 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
     let mut samples = Vec::with_capacity(RESOURCE_SAMPLES);
     let started = Instant::now();
     for index in 0..RESOURCE_SAMPLES {
-        sleep_until(started + SAMPLE_INTERVAL * u32::try_from(index + 1).expect("sample index"));
+        let slot = started + SAMPLE_INTERVAL * u32::try_from(index + 1).expect("sample index");
+        let next_slot = slot + SAMPLE_INTERVAL;
+        wait_for_sample_slot(slot, next_slot)?;
         let sample = sample_pair(
             &mut client_process,
             &mut server_process,
             client_metrics,
             server_metrics,
+            next_slot,
         )?;
         validate_owner_tuple(&sample, &first_stable, RESOURCE_SESSIONS as u64)?;
         output.line(sample.json(index + 1))?;
@@ -709,14 +725,15 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
             &mut server_process,
             client_metrics,
             server_metrics,
+            drain_deadline,
         )?;
-        if validate_drain(&drained, &pre_load).is_ok() {
-            break;
-        }
         if Instant::now() >= drain_deadline {
             return Err("resource drain did not return to exact baseline".to_owned());
         }
-        thread::sleep(Duration::from_millis(100));
+        if validate_drain(&drained, &pre_load).is_ok() {
+            break;
+        }
+        thread::sleep(remaining(drain_deadline)?.min(Duration::from_millis(100)));
     }
     client_process.ensure_running()?;
     server_process.ensure_running()?;
@@ -831,14 +848,15 @@ fn sample_pair(
     server: &mut ProcessGuard,
     client_metrics: SocketAddrV4,
     server_metrics: SocketAddrV4,
+    deadline: Instant,
 ) -> Result<PairSample, String> {
     client.ensure_running()?;
     server.ensure_running()?;
     let client_proc = proc_sample(client.id())?;
     let server_proc = proc_sample(server.id())?;
-    let client_active = active_metric(client_metrics)?;
-    let server_active = active_metric(server_metrics)?;
-    Ok(PairSample {
+    let client_active = active_metric(client_metrics, deadline)?;
+    let server_active = active_metric(server_metrics, deadline)?;
+    let sample = PairSample {
         client: ProcessSample {
             active: client_active,
             ..client_proc
@@ -847,7 +865,9 @@ fn sample_pair(
             active: server_active,
             ..server_proc
         },
-    })
+    };
+    remaining(deadline)?;
+    Ok(sample)
 }
 
 fn proc_sample(pid: u32) -> Result<ProcessSample, String> {
@@ -881,16 +901,13 @@ fn wait_for_sessions(
 ) -> Result<PairSample, String> {
     let deadline = Instant::now() + DRAIN_TIMEOUT;
     loop {
-        let sample = sample_pair(client, server, client_metrics, server_metrics)?;
+        let sample = sample_pair(client, server, client_metrics, server_metrics, deadline)?;
         if sample.client.active == RESOURCE_SESSIONS as u64
             && sample.server.active == RESOURCE_SESSIONS as u64
         {
             return Ok(sample);
         }
-        if Instant::now() >= deadline {
-            return Err("active gauges did not reach 10000".to_owned());
-        }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(remaining(deadline)?.min(Duration::from_millis(100)));
     }
 }
 
@@ -1006,6 +1023,25 @@ fn run_self_check() -> Result<String, String> {
         github_sha: sha.to_owned(),
     };
     validate_environment(sha, &good)?;
+    let transfer_start = Instant::now();
+    let warm_end = transfer_start + WARMUP;
+    let measure_end = warm_end + MEASURE;
+    if !transfer_is_measured(warm_end, measure_end, warm_end, measure_end)
+        || transfer_is_measured(
+            warm_end - Duration::from_nanos(1),
+            measure_end,
+            warm_end,
+            measure_end,
+        )
+        || transfer_is_measured(
+            warm_end,
+            measure_end + Duration::from_nanos(1),
+            warm_end,
+            measure_end,
+        )
+    {
+        return Err("throughput measurement boundary is invalid".to_owned());
+    }
     expect_rejected("wrong SHA", || {
         validate_environment("1123456789abcdef0123456789abcdef01234567", &good)
     })?;
@@ -1283,25 +1319,22 @@ fn wait_for_metrics(child: &mut ProcessGuard, address: SocketAddrV4) -> Result<(
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         child.ensure_running()?;
-        if active_metric(address).is_ok() {
+        if active_metric(address, deadline).is_ok() {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err("metrics readiness timed out".to_owned());
         }
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(remaining(deadline)?.min(Duration::from_millis(20)));
     }
 }
 
-fn active_metric(address: SocketAddrV4) -> Result<u64, String> {
-    let deadline = Instant::now() + IO_TIMEOUT;
-    let mut stream = TcpStream::connect_timeout(&SocketAddr::V4(address), IO_TIMEOUT)
+fn active_metric(address: SocketAddrV4, deadline: Instant) -> Result<u64, String> {
+    let timeout = remaining(deadline)?.min(IO_TIMEOUT);
+    let mut stream = TcpStream::connect_timeout(&SocketAddr::V4(address), timeout)
         .map_err(|_| "metrics connection failed".to_owned())?;
     stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .map_err(clean_io)?;
-    stream
-        .set_write_timeout(Some(IO_TIMEOUT))
+        .set_write_timeout(Some(remaining(deadline)?.min(IO_TIMEOUT)))
         .map_err(clean_io)?;
     stream
         .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -1309,9 +1342,12 @@ fn active_metric(address: SocketAddrV4) -> Result<u64, String> {
     let mut response = Vec::with_capacity(4096);
     let mut chunk = [0_u8; 4096];
     loop {
-        if response.len() >= 256 * 1024 || Instant::now() >= deadline {
+        if response.len() >= 256 * 1024 {
             return Err("metrics response exceeded bound".to_owned());
         }
+        stream
+            .set_read_timeout(Some(remaining(deadline)?.min(IO_TIMEOUT)))
+            .map_err(clean_io)?;
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => response.extend_from_slice(&chunk[..read]),
@@ -1324,14 +1360,17 @@ fn active_metric(address: SocketAddrV4) -> Result<u64, String> {
         .map(|index| &response[index + 4..])
         .ok_or_else(|| "metrics response is malformed".to_owned())?;
     let body = std::str::from_utf8(body).map_err(|_| "metrics body is not UTF-8".to_owned())?;
-    body.lines()
+    let active = body
+        .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(' ')?;
             (name.starts_with("ferrum2_tcp_connections_active{"))
                 .then(|| value.parse().ok())
                 .flatten()
         })
-        .ok_or_else(|| "active metric is missing or malformed".to_owned())
+        .ok_or_else(|| "active metric is missing or malformed".to_owned())?;
+    remaining(deadline)?;
+    Ok(active)
 }
 
 fn socks_connect(
@@ -1450,56 +1489,61 @@ impl TargetWorker {
         let worker_cancel = Arc::clone(&cancel);
         let worker = spawn_worker(move || {
             let mut workers = Vec::with_capacity(streams);
-            for _ in 0..streams {
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if worker_cancel.load(Ordering::SeqCst) {
-                                return Ok(());
-                            }
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(error) => return Err(clean_io(error)),
-                    }
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_millis(200)))
-                    .map_err(clean_io)?;
-                let stream_cancel = Arc::clone(&worker_cancel);
-                let worker = spawn_worker(move || {
-                    let mut buffer = [0_u8; PAYLOAD_BYTES];
-                    loop {
-                        match stream.read(&mut buffer) {
-                            Ok(0) => break,
-                            Ok(read) => stream.write_all(&buffer[..read]).map_err(clean_io)?,
-                            Err(error)
-                                if error.kind() == io::ErrorKind::WouldBlock
-                                    || error.kind() == io::ErrorKind::TimedOut =>
-                            {
-                                if stream_cancel.load(Ordering::SeqCst) {
-                                    break;
+            let accepted = (|| {
+                for _ in 0..streams {
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                if worker_cancel.load(Ordering::SeqCst) {
+                                    return Err("target accept cancelled".to_owned());
                                 }
-                            }
-                            Err(error)
-                                if error.kind() == io::ErrorKind::ConnectionReset
-                                    || error.kind() == io::ErrorKind::ConnectionAborted =>
-                            {
-                                break;
+                                thread::sleep(Duration::from_millis(10));
                             }
                             Err(error) => return Err(clean_io(error)),
                         }
-                    }
-                    Ok(())
-                });
-                match worker {
-                    Ok(worker) => workers.push(worker),
-                    Err(error) => {
-                        worker_cancel.store(true, Ordering::SeqCst);
-                        let _ = join_unit_workers(workers);
-                        return Err(error);
-                    }
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(200)))
+                        .map_err(clean_io)?;
+                    stream
+                        .set_write_timeout(Some(Duration::from_millis(200)))
+                        .map_err(clean_io)?;
+                    let stream_cancel = Arc::clone(&worker_cancel);
+                    workers.push(spawn_worker(move || {
+                        let mut buffer = [0_u8; PAYLOAD_BYTES];
+                        loop {
+                            match stream.read(&mut buffer) {
+                                Ok(0) => break,
+                                Ok(read) => stream.write_all(&buffer[..read]).map_err(clean_io)?,
+                                Err(error)
+                                    if error.kind() == io::ErrorKind::WouldBlock
+                                        || error.kind() == io::ErrorKind::TimedOut =>
+                                {
+                                    if stream_cancel.load(Ordering::SeqCst) {
+                                        break;
+                                    }
+                                }
+                                Err(error)
+                                    if error.kind() == io::ErrorKind::ConnectionReset
+                                        || error.kind() == io::ErrorKind::ConnectionAborted =>
+                                {
+                                    break;
+                                }
+                                Err(error) => return Err(clean_io(error)),
+                            }
+                        }
+                        Ok(())
+                    })?);
                 }
+                Ok::<(), String>(())
+            })();
+            if let Err(error) = accepted {
+                worker_cancel.store(true, Ordering::SeqCst);
+                return match join_unit_workers(workers) {
+                    Ok(()) => Err(error),
+                    Err(_) => Err(format!("{error}; target worker cleanup failed")),
+                };
             }
             join_unit_workers(workers)
         })?;
@@ -1852,10 +1896,14 @@ fn join_unit_workers(workers: Vec<JoinHandle<Result<(), String>>>) -> Result<(),
     first_error.map_or(Ok(()), Err)
 }
 
-fn sleep_until(deadline: Instant) {
-    if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-        thread::sleep(remaining);
+fn wait_for_sample_slot(slot: Instant, next_slot: Instant) -> Result<(), String> {
+    if Instant::now() >= next_slot {
+        return Err("resource sample slot was missed".to_owned());
     }
+    if let Some(delay) = slot.checked_duration_since(Instant::now()) {
+        thread::sleep(delay);
+    }
+    remaining(next_slot).map(|_| ())
 }
 
 fn repository_root() -> Result<PathBuf, String> {
