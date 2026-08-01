@@ -17,7 +17,7 @@ conversion、认证前 resolution/dial/replay mutation、deadline 被每个 cand
 - Shadowsocks 使用一个 shared-flow method table；
 - address path 使用 recording resolver/dialer/replay table；
 - process/lifecycle 只增加能证明跨 ticket interaction 的小 method/address matrix；
-- qualification 复用既有 fail-closed state/driver，固定 12 rows。
+- qualification 复用既有 fail-closed state/driver，固定 case_id-keyed 12-row set。
 
 不按 method × layer 复制 test file，不测试 private helper，也不为 CI YAML 建第二套
 parser。
@@ -32,7 +32,7 @@ parser。
 | M1-AC-04 address/order | core→SOCKS5→SIP022→recording resolver/dialer/replay address table | product | real OS domain/IPv6 由 AC-06 小型 process rows证明 |
 | M1-AC-05 deadline/reply | paused-time scripted resolution/candidates + actual endpoint/reply observer | product | Windows/Linux mapping 由 hosted platform regression证明 |
 | M1-AC-06 lifecycle/observability | 既有 local process/lifecycle suite 的小 method/address matrix与 sentinel scans | integration | post-FIN semantics 不交给 external reference |
-| M1-AC-07 12-cell interop | hosted non-test qualification 的固定 12-line report；12/12+cleanup 才 exit 0 | release | setup failure continuation 由 pure aggregation state test证明 |
+| M1-AC-07 12-cell interop | hosted non-test qualification 的 case_id-keyed 12-row set；12/12+cleanup 才 exit 0 | release | setup failure continuation 由 pure aggregation state test证明 |
 | M1-AC-08 regression/scope | locked metadata/tree/policy、authoritative full、MSRV、三平台 same-SHA results | integration/release | remote unavailable 是 BLOCKED，不伪造 local替代 |
 
 ## Fixture and harness contract
@@ -139,6 +139,10 @@ integration review 还检查：
 | M1-INT-010 | ChaCha20-Poly1305 | shadowsocks-rust server | ferrum2 client |
 | M1-INT-011 | ChaCha20-Poly1305 | sing-box client | ferrum2 server |
 | M1-INT-012 | ChaCha20-Poly1305 | shadowsocks-rust client | ferrum2 server |
+
+该表冻结唯一的case_id→transport/method/reference/direction mapping，而不冻结表格
+呈现、case执行或summary行顺序。providers ready时12案各执行恰好一次；测试按
+case_id集合验证完整性和唯一性。
 
 每案：
 

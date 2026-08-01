@@ -17,7 +17,7 @@
 - protocol：packet、replay、session三张table；
 - runtime：一个generic datagram reservation/lifecycle table；
 - process：一个小型UDP composition matrix；
-- qualification：固定12 rows和既有fail-closed aggregator。
+- qualification：固定case_id-keyed 12-row set和既有fail-closed aggregator。
 
 不按method × direction × layer复制test，不测试private helper，不测试test
 harness本身，也不为CI YAML建第二套parser。
@@ -32,7 +32,7 @@ harness本身，也不为CI YAML建第二套parser。
 | M2-AC-04 resources/lifecycle | generic runtime reservation/queue/expiry/cancel/owner snapshot table | product T03 | one stalled real socket row由AC-06 |
 | M2-AC-05 config/server/obs | config defaults/ranges/no-resource + dual-bind rollback + telemetry series/sentinel tables | integration T04 | platform socket smoke属AC-08 |
 | M2-AC-06 local product | bounded three-method UDP echo + focused IPv6/domain/failure/backpressure/shutdown process matrix | integration T04 | 不复制codec/resource tables |
-| M2-AC-07 external | fixed hosted 12-line report；12/12+cleanup/exact SHA/run/attempt | release T05 | pure aggregator只证明false-PASS防护 |
+| M2-AC-07 external | hosted case_id-keyed 12-row set；12/12+cleanup/exact SHA/run/attempt | release T05 | pure aggregator只证明false-PASS防护 |
 | M2-AC-08 regression | exact candidate authoritative full + ratchet + same-run MSRV/platform jobs | integration/release | hosted unavailable为BLOCKED |
 
 每条MUST只有一个primary evidence；第二层只覆盖primary seam无法观察的命名failure
@@ -137,6 +137,10 @@ process或打开qualification sockets。
 | M2-UDP-INT-010 | ChaCha | ferrum example → shadowsocks-rust server |
 | M2-UDP-INT-011 | ChaCha | sing-box client → ferrum server |
 | M2-UDP-INT-012 | ChaCha | shadowsocks-rust client → ferrum server |
+
+该表冻结唯一的case_id→transport/method/reference/direction mapping，而不冻结表格
+呈现、case执行或summary行顺序。providers ready时12案各执行恰好一次；测试按
+case_id集合验证完整性和唯一性。
 
 每案：
 

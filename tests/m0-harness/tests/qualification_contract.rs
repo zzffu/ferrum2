@@ -7,6 +7,7 @@ use qualification::{
     TcpExchangeState, TcpTargetGate, Transport, UDP_CASES, execute_hosted, execute_with_setup,
     tcp_shutdown_gate, validate_hosted,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::thread;
 use std::time::Duration;
 
@@ -38,7 +39,7 @@ fn valid_context() -> HostedContext<'static> {
     }
 }
 
-fn case_ids_for(reference: Reference) -> Vec<&'static str> {
+fn case_ids_for(reference: Reference) -> BTreeSet<&'static str> {
     TCP_CASES
         .iter()
         .chain(UDP_CASES.iter())
@@ -47,23 +48,44 @@ fn case_ids_for(reference: Reference) -> Vec<&'static str> {
         .collect()
 }
 
+fn assert_attempted_once(
+    attempted: &[&'static str],
+    expected: impl IntoIterator<Item = &'static str>,
+) {
+    let actual: BTreeSet<_> = attempted.iter().copied().collect();
+    let expected: BTreeSet<_> = expected.into_iter().collect();
+    assert_eq!(actual.len(), attempted.len(), "duplicate case execution");
+    assert_eq!(actual, expected);
+}
+
+fn summary_line_set(
+    report: &qualification::QualificationReport,
+    transport: Transport,
+) -> BTreeSet<String> {
+    let lines = report.summary_lines(transport);
+    let unique = BTreeSet::from(lines);
+    assert_eq!(unique.len(), 12, "duplicate summary row");
+    unique
+}
+
 fn assert_setup_root(report: &qualification::QualificationReport, failed: Reference, root: &str) {
     for (transport, cases) in [(Transport::Tcp, TCP_CASES), (Transport::Udp, UDP_CASES)] {
-        for (case, line) in cases.iter().zip(report.summary_lines(transport)) {
-            let suffix = if case.reference == failed {
-                format!("FAIL canonical_root={root}")
-            } else {
-                "PASS".to_owned()
-            };
-            assert_eq!(
-                line,
+        let expected = cases
+            .into_iter()
+            .map(|case| {
+                let suffix = if case.reference == failed {
+                    format!("FAIL canonical_root={root}")
+                } else {
+                    "PASS".to_owned()
+                };
                 format!(
                     "transport={} case_id={} status={suffix}",
                     transport.label(),
                     case.id
                 )
-            );
-        }
+            })
+            .collect();
+        assert_eq!(summary_line_set(report, transport), expected);
     }
 }
 
@@ -98,55 +120,50 @@ impl QualificationOps for FakeOps {
 }
 
 #[test]
-fn both_active_transport_plans_are_frozen_twelve_tuple_matrices() {
+fn both_active_transport_plans_have_complete_unique_case_id_mappings() {
     use Direction::{FerrumClient as Ferrum, ReferenceClient as Client};
     use Method::{Aes128Gcm as Aes128, Aes256Gcm as Aes256, ChaCha20Poly1305 as ChaCha};
     use Reference::{ShadowsocksRust, SingBox};
     use Transport::{Tcp, Udp};
 
-    let tuple = |case: CaseSpec| {
-        (
-            case.id,
-            case.method,
-            case.reference,
-            case.direction,
-            case.transport,
-        )
-    };
-    assert_eq!(
-        TCP_CASES.map(tuple),
-        [
-            ("M1-INT-001", Aes128, SingBox, Ferrum, Tcp),
-            ("M1-INT-002", Aes128, ShadowsocksRust, Ferrum, Tcp),
-            ("M1-INT-003", Aes128, SingBox, Client, Tcp),
-            ("M1-INT-004", Aes128, ShadowsocksRust, Client, Tcp),
-            ("M1-INT-005", Aes256, SingBox, Ferrum, Tcp),
-            ("M1-INT-006", Aes256, ShadowsocksRust, Ferrum, Tcp),
-            ("M1-INT-007", Aes256, SingBox, Client, Tcp),
-            ("M1-INT-008", Aes256, ShadowsocksRust, Client, Tcp),
-            ("M1-INT-009", ChaCha, SingBox, Ferrum, Tcp),
-            ("M1-INT-010", ChaCha, ShadowsocksRust, Ferrum, Tcp),
-            ("M1-INT-011", ChaCha, SingBox, Client, Tcp),
-            ("M1-INT-012", ChaCha, ShadowsocksRust, Client, Tcp),
-        ]
-    );
-    assert_eq!(
-        UDP_CASES.map(tuple),
-        [
-            ("M2-UDP-INT-001", Aes128, SingBox, Ferrum, Udp),
-            ("M2-UDP-INT-002", Aes128, ShadowsocksRust, Ferrum, Udp),
-            ("M2-UDP-INT-003", Aes128, SingBox, Client, Udp),
-            ("M2-UDP-INT-004", Aes128, ShadowsocksRust, Client, Udp),
-            ("M2-UDP-INT-005", Aes256, SingBox, Ferrum, Udp),
-            ("M2-UDP-INT-006", Aes256, ShadowsocksRust, Ferrum, Udp),
-            ("M2-UDP-INT-007", Aes256, SingBox, Client, Udp),
-            ("M2-UDP-INT-008", Aes256, ShadowsocksRust, Client, Udp),
-            ("M2-UDP-INT-009", ChaCha, SingBox, Ferrum, Udp),
-            ("M2-UDP-INT-010", ChaCha, ShadowsocksRust, Ferrum, Udp),
-            ("M2-UDP-INT-011", ChaCha, SingBox, Client, Udp),
-            ("M2-UDP-INT-012", ChaCha, ShadowsocksRust, Client, Udp),
-        ]
-    );
+    let actual: BTreeMap<_, _> = TCP_CASES
+        .into_iter()
+        .chain(UDP_CASES)
+        .map(|case| {
+            (
+                case.id,
+                (case.transport, case.method, case.reference, case.direction),
+            )
+        })
+        .collect();
+    let expected = BTreeMap::from([
+        ("M1-INT-001", (Tcp, Aes128, SingBox, Ferrum)),
+        ("M1-INT-002", (Tcp, Aes128, ShadowsocksRust, Ferrum)),
+        ("M1-INT-003", (Tcp, Aes128, SingBox, Client)),
+        ("M1-INT-004", (Tcp, Aes128, ShadowsocksRust, Client)),
+        ("M1-INT-005", (Tcp, Aes256, SingBox, Ferrum)),
+        ("M1-INT-006", (Tcp, Aes256, ShadowsocksRust, Ferrum)),
+        ("M1-INT-007", (Tcp, Aes256, SingBox, Client)),
+        ("M1-INT-008", (Tcp, Aes256, ShadowsocksRust, Client)),
+        ("M1-INT-009", (Tcp, ChaCha, SingBox, Ferrum)),
+        ("M1-INT-010", (Tcp, ChaCha, ShadowsocksRust, Ferrum)),
+        ("M1-INT-011", (Tcp, ChaCha, SingBox, Client)),
+        ("M1-INT-012", (Tcp, ChaCha, ShadowsocksRust, Client)),
+        ("M2-UDP-INT-001", (Udp, Aes128, SingBox, Ferrum)),
+        ("M2-UDP-INT-002", (Udp, Aes128, ShadowsocksRust, Ferrum)),
+        ("M2-UDP-INT-003", (Udp, Aes128, SingBox, Client)),
+        ("M2-UDP-INT-004", (Udp, Aes128, ShadowsocksRust, Client)),
+        ("M2-UDP-INT-005", (Udp, Aes256, SingBox, Ferrum)),
+        ("M2-UDP-INT-006", (Udp, Aes256, ShadowsocksRust, Ferrum)),
+        ("M2-UDP-INT-007", (Udp, Aes256, SingBox, Client)),
+        ("M2-UDP-INT-008", (Udp, Aes256, ShadowsocksRust, Client)),
+        ("M2-UDP-INT-009", (Udp, ChaCha, SingBox, Ferrum)),
+        ("M2-UDP-INT-010", (Udp, ChaCha, ShadowsocksRust, Ferrum)),
+        ("M2-UDP-INT-011", (Udp, ChaCha, SingBox, Client)),
+        ("M2-UDP-INT-012", (Udp, ChaCha, ShadowsocksRust, Client)),
+    ]);
+    assert_eq!(actual.len(), TCP_CASES.len() + UDP_CASES.len());
+    assert_eq!(actual, expected);
     for (method, name, psk) in [
         (
             Aes128,
@@ -272,7 +289,7 @@ fn unavailable_setup_skips_that_reference_and_continues_the_ready_reference() {
     let report = execute_with_setup(availability, &mut ops);
 
     assert_eq!(ops.provisioned, [Reference::ShadowsocksRust]);
-    assert_eq!(ops.attempted, case_ids_for(Reference::ShadowsocksRust));
+    assert_attempted_once(&ops.attempted, case_ids_for(Reference::ShadowsocksRust));
     assert_setup_root(&report, Reference::SingBox, "provision-sing-box");
     assert!(!report.success());
 }
@@ -290,13 +307,13 @@ fn provision_failure_marks_only_that_reference_and_does_not_mask_the_other() {
         ops.provisioned,
         [Reference::SingBox, Reference::ShadowsocksRust]
     );
-    assert_eq!(ops.attempted, case_ids_for(Reference::ShadowsocksRust));
+    assert_attempted_once(&ops.attempted, case_ids_for(Reference::ShadowsocksRust));
     assert_setup_root(&report, Reference::SingBox, "provision-sing-box");
     assert!(!report.success());
 }
 
 #[test]
-fn one_case_failure_does_not_prevent_later_cases() {
+fn one_case_failure_does_not_prevent_other_cases() {
     let mut ops = FakeOps {
         fail_case: Some("M1-INT-001"),
         ..FakeOps::default()
@@ -304,20 +321,22 @@ fn one_case_failure_does_not_prevent_later_cases() {
 
     let report = execute_with_setup(all_ready(), &mut ops);
 
-    let expected = TCP_CASES.into_iter().chain(UDP_CASES).map(|case| case.id);
-    assert!(ops.attempted.iter().copied().eq(expected));
-    let lines = report.summary_lines(Transport::Tcp);
-    assert_eq!(
-        lines[0],
-        "transport=tcp case_id=M1-INT-001 status=FAIL canonical_root=case-M1-INT-001"
+    assert_attempted_once(
+        &ops.attempted,
+        TCP_CASES.into_iter().chain(UDP_CASES).map(|case| case.id),
     );
-    assert_eq!(lines[11], "transport=tcp case_id=M1-INT-012 status=PASS");
+    assert!(
+        summary_line_set(&report, Transport::Tcp).contains(
+            "transport=tcp case_id=M1-INT-001 status=FAIL canonical_root=case-M1-INT-001"
+        )
+    );
+    assert_eq!(report.pass_count(Transport::Tcp), 11);
     assert!(report.transport_success(Transport::Udp));
     assert!(!report.success());
 }
 
 #[test]
-fn case_panic_fails_that_row_and_does_not_prevent_later_cases() {
+fn case_panic_fails_that_row_and_does_not_prevent_other_cases() {
     let mut ops = FakeOps {
         panic_case: Some("M2-UDP-INT-006"),
         ..FakeOps::default()
@@ -325,31 +344,41 @@ fn case_panic_fails_that_row_and_does_not_prevent_later_cases() {
 
     let report = execute_with_setup(all_ready(), &mut ops);
 
-    assert_eq!(
-        report.summary_lines(Transport::Udp)[5],
+    assert_attempted_once(
+        &ops.attempted,
+        TCP_CASES.into_iter().chain(UDP_CASES).map(|case| case.id),
+    );
+    assert!(summary_line_set(&report, Transport::Udp).contains(
         "transport=udp case_id=M2-UDP-INT-006 status=FAIL \
          canonical_root=case-M2-UDP-INT-006"
-    );
-    assert_eq!(
-        report.summary_lines(Transport::Udp)[11],
-        "transport=udp case_id=M2-UDP-INT-012 status=PASS"
-    );
+    ));
+    assert_eq!(report.pass_count(Transport::Udp), 11);
     assert!(!report.success());
 }
 
 #[test]
-fn both_twelve_row_gates_are_required_and_have_transport_specific_summaries() {
+fn both_twelve_case_sets_execute_once_and_have_transport_specific_summaries() {
     let mut ops = FakeOps::default();
     let report = execute_with_setup(all_ready(), &mut ops);
 
     assert!(report.success());
-    assert_eq!(
-        report.summary_lines(Transport::Tcp),
-        TCP_CASES.map(|case| format!("transport=tcp case_id={} status=PASS", case.id))
+    assert_attempted_once(
+        &ops.attempted,
+        TCP_CASES.into_iter().chain(UDP_CASES).map(|case| case.id),
     );
     assert_eq!(
-        report.summary_lines(Transport::Udp),
-        UDP_CASES.map(|case| format!("transport=udp case_id={} status=PASS", case.id))
+        summary_line_set(&report, Transport::Tcp),
+        TCP_CASES
+            .map(|case| format!("transport=tcp case_id={} status=PASS", case.id))
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        summary_line_set(&report, Transport::Udp),
+        UDP_CASES
+            .map(|case| format!("transport=udp case_id={} status=PASS", case.id))
+            .into_iter()
+            .collect()
     );
     assert!(report.cleanup_success());
     assert_eq!(ops.cleanup_calls, 1);
@@ -378,10 +407,7 @@ fn cleanup_failure_can_never_produce_success() {
 
     let report = execute_with_setup(all_ready(), &mut ops);
 
-    assert_eq!(
-        report.summary_lines(Transport::Udp)[11],
-        "transport=udp case_id=M2-UDP-INT-012 status=PASS"
-    );
+    assert!(report.transport_success(Transport::Udp));
     assert!(!report.cleanup_success());
     assert!(!report.success());
     assert_eq!(ops.cleanup_calls, 1);
@@ -417,12 +443,15 @@ fn tcp_exchange_accepts_hosted_sing_box_reference_client_observation_order() {
     use TcpExchangeEvent as E;
 
     let bounded = Duration::from_millis(100);
-    let affected: Vec<_> = TCP_CASES
+    let affected: BTreeSet<_> = TCP_CASES
         .into_iter()
         .filter(|case| case.reference == Reference::SingBox && case.direction == ReferenceClient)
         .map(|case| case.id)
         .collect();
-    assert_eq!(affected, ["M1-INT-003", "M1-INT-007", "M1-INT-011"]);
+    assert_eq!(
+        affected,
+        BTreeSet::from(["M1-INT-003", "M1-INT-007", "M1-INT-011"])
+    );
     let mut raw_exchange = TcpExchangeState::default();
     for event in TCP_EXCHANGE_ORDER[..3].iter().copied() {
         raw_exchange.record(event).expect("ordered exchange prefix");

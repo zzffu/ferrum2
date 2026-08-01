@@ -207,13 +207,18 @@ Local product evidence：
 - one stalled/saturated row证明real socket adapter传播backpressure；
 - bind rollback、UDP disabled、expiry、shutdown/rebind和TCP regression通过。
 
-Hosted matrix固定：
+Hosted case mapping固定：
 
-| IDs | Method | Four-case order |
+| IDs | Method | case_id→direction/reference mapping |
 |---|---|---|
-| `M2-UDP-INT-001..004` | AES-128 | ferrum→sing；ferrum→ss-rust；sing→ferrum；ss-rust→ferrum |
-| `M2-UDP-INT-005..008` | AES-256 | 同上 |
-| `M2-UDP-INT-009..012` | ChaCha | 同上 |
+| `M2-UDP-INT-001..004` | AES-128 | `001` ferrum→sing；`002` ferrum→ss-rust；`003` sing→ferrum；`004` ss-rust→ferrum |
+| `M2-UDP-INT-005..008` | AES-256 | `005` ferrum→sing；`006` ferrum→ss-rust；`007` sing→ferrum；`008` ss-rust→ferrum |
+| `M2-UDP-INT-009..012` | ChaCha | `009` ferrum→sing；`010` ferrum→ss-rust；`011` sing→ferrum；`012` ss-rust→ferrum |
+
+这12案冻结唯一的case_id→transport/method/reference/direction mapping；providers
+ready时每案恰执行一次。各案彼此独立，表格呈现、执行及summary行顺序均不是合同，
+runner的确定性顺序只是实现细节。这不改变单flow内协议规定的framing、nonce、
+handshake、payload与lifecycle顺序。
 
 Ferrum-client方向launch `ferrum2-shadowsocks` Cargo example作为black-box
 protocol-API adapter；`ferrum2-m0-harness`不得新增ferrum library dependency。
@@ -224,7 +229,7 @@ Reference-client方向使用reference提供的UDP ingress连接composed ferrum2-
 并在一个session内验证三条distinct echo payload及observed source address。
 Reference setup failure使其六rows在一个canonical root下FAIL，另一reference继续；
 panic/timeout/missing/skipped/payload/source/cleanup/nonzero都不能PASS。只有同一
-exact SHA/run/attempt的explicit 12-line 12/12 + cleanup summary exit 0。
+exact SHA/run/attempt的case_id-keyed 12-row set、12/12 + cleanup summary exit 0。
 
 ## Acceptance criteria
 

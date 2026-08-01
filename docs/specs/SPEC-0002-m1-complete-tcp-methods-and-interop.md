@@ -110,8 +110,11 @@ SOCKS5 no-auth CONNECT: IPv4 | IPv6 | ASCII domain
 
 - reference pins、asset hashes、license/black-box policy 继续由
   `tests/interop/versions.toml` 与 ADR-0006 管理。
-- `M1-INT-001`～`M1-INT-012` 对每个 method/reference/direction tuple 恰好一案；
-  exact mapping 在 TEST-0002 冻结。
+- `M1-INT-001`～`M1-INT-012` 冻结唯一的
+  case_id→transport/method/reference/direction mapping；exact mapping 在 TEST-0002
+  冻结。providers ready 时每案恰执行一次；各案彼此独立，执行顺序和 summary
+  行顺序不是合同，runner 的确定性顺序只是实现细节。这不改变单 flow 内协议规定的
+  framing、nonce、handshake、payload 与 lifecycle/ordered EOF 顺序。
 - 每案验证 distinct bidirectional payload bytes 和 ADR-0014 approved ordered
   clean-EOF convergence；ferrum-owned local tests 独立证明更强 post-FIN lifecycle。
 - reference setup failure 使该 reference 的六案以同一 canonical root FAIL，同时
