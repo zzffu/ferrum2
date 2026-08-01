@@ -20,10 +20,10 @@ native lifecycle/linkage/hash 和关闭审查证据关闭；local closeout sourc
 docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
 M4-T01已在exact `7730ec7`集成到独立non-shipping tools package；M4-T02 exact
-`2f4190c`的run `30700273019/1`通过六项独立gate与throughput，但RSS window 2
-超过105%；exact `7b63bd5`已完成bounded诊断修复，exact `7c19e80`已完成WSL
-synthetic-target backlog修复、双审、本地Full及完整资源diagnostic，T02因没有
-新的remote授权而`blocked`。
+`4468f75`的run `30704646072/1`通过六项独立gate与throughput，完成10k/180 stable
+samples后server RSS window 2增长`9.4897%`而失败；client RSS不变。现有gate读取
+Linux可能不精确的`VmRSS`，下一步须以all-six及accurate RSS并行轨迹区分测量与
+产品原因；T02因没有新的local/remote授权而`blocked`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -607,14 +607,13 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
   - M4-T01：在独立non-shipping `ferrum2-m4-qualification` package内增加唯一
     Cargo-managed、non-default throughput/resource driver与短self-check，并在
     既有workflow增加唯一hosted `performance` job；exact `7730ec7`已`done`；
-  - M4-T02：exact `56aadd4`修复pre-load lazy metric wait后，exact `2f4190c`
-    run `30700273019/1`通过quality/MSRV/interop/三平台与throughput，并完成10k及
-    180个stable owner/task samples；RSS window 2超过105%。当前因失败错误缺少
-    binary/first/current medians而失败。Exact `7b63bd5`已补齐bounded诊断；exact
-    `7c19e80`修复仅在WSL暴露的synthetic resource target默认backlog，并通过双审、
-    Full、budgets及完整本地10k/180 samples/6 RSS windows/exact drain。WSL结果仅作
-    diagnostic；当前因无新remote授权而`blocked`，之后仍须一个新授权push
-    run/attempt完成hosted root diagnosis、全部qualification及close summary。
+  - M4-T02：exact `4468f75` run `30704646072/1`通过quality/MSRV/interop/三平台
+    与throughput，并完成10k及180个stable owner/task samples；window 2的client
+    median-twice保持`1907336` KiB，server由`2182832`增至`2389976` KiB而失败。
+    Exact `7c19e80`已在WSL通过完整资源profile，但WSL仅作diagnostic。现有采样读取
+    Linux可能不精确的`VmRSS`；当前因无local/remote授权而`blocked`，下一步先增加
+    fast parser regression及all-six existing/accurate RSS轨迹，再以新授权run完成
+    hosted root diagnosis、全部qualification及close summary。
 
   Dependency graph：
 
@@ -738,3 +737,4 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
 | 2026-08-01 | M4 third hosted qualification | exact `2f4190c` run `30700273019/1`通过quality、MSRV、TCP/UDP `12/12`、三平台及throughput，记录ferrum/reference `9013384/480717482`、ratio `0.018749857`；resource完成readiness、10k与180 samples后以RSS window 2超过105%失败 | validate顺序证明全部active/fd/task tuples稳定；runner-temp raw samples按合同删除，但error未保留binary与first/current medians，无法区分测量扰动、早期baseline、真实增长或runner噪声 | `M4-REMOTE-2f4190c-A1` 1/1消费撤销；cleanup success；`HOSTED-M4-T02-002` resolved、`HOSTED-M4-T02-003` blocked；无rerun/第二push/release/publication |
 | 2026-08-01 | M4 RSS diagnostic authorization | M4-T02从`blocked`恢复为`active`，只允许资格driver单文件为RSS threshold failure增加bounded client/server first/current medians及exact self-check | 现有error丢弃已计算数值，无法从已删除raw evidence定位真实根因；105%门限、profile、product和remote边界不变 | `M4-LOCAL-RSS-DIAG-001`消费撤销；允许TDD、双审、Full、budget；不授权push/rerun/dispatch/release/publication |
 | 2026-08-01 | M4 local RSS diagnostic repair | exact `7b63bd5`在共享`validate_samples` threshold error中加入window及client/server first/current median-twice KiB，并把既有RSS mutation强化为exact diagnostic assertion；mutation count仍为11 | 同一release self-check先以旧generic error RED、再GREEN；105% u128 comparison、10k、5分钟/180 samples/六窗/2分钟drain及product均不变 | Architect/QA `PASS`无finding；focused checks与ticket/milestone budget `PASS_ADVANCE`，code/tests/ratio `13897/20740/1.492408`；等待Full及新remote授权 |
+| 2026-08-01 | M4 fourth hosted qualification | exact `4468f75` run `30704646072/1`通过quality、MSRV、TCP/UDP `12/12`、三平台及throughput，记录ferrum/reference `9035229/547376332`、difference `-98.349357020%`、ratio `0.016506430`；resource完成10k与180 stable samples后server RSS window 2增长`9.4897%`，client不变 | bounded medians排除client及owner-count增长，但当前`VmRSS`信号不足以区分产品leak、延迟驻留、plateau或Linux异步RSS计账；WSL完整pass不替代hosted | `M4-REMOTE-4468f75-A1` 1/1消费撤销；performance/final qualification failure、cleanup success；无rerun/第二push/release/publication |

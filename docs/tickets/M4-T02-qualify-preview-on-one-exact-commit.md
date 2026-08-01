@@ -60,6 +60,7 @@ git status --short
 - Resource-readiness repair: `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`
 - RSS diagnostic repair: `7b63bd588e1be600beb417636ed0d37ac3b0fb44`
 - WSL target-backlog repair: `7c19e80f7c7fcb68e3c6b3e562c6d01a379ebf47`
+- Hosted diagnostic source: `4468f75ecc055531f554d218fb89b6b079dc432d`
 - Review: Architect `PASS`; QA `PASS`; no findings on the local resource repairs
 - Notes: the probe repair keeps every external probe bounded, assigns a static redacted
   identity and distinct failure class, and raises only the identity/reference/hash
@@ -116,6 +117,16 @@ git status --short
   median `480717482`, and ratio `0.018749857`. Resource passed readiness, established
   exact `10000`, collected all 180 samples with stable active/fd/task tuples, then
   rejected RSS window 2 above 105%. Cleanup succeeded; drain was not reached.
+- Current hosted result: scope `M4-REMOTE-4468f75-A1` was consumed and auto-revoked
+  before one non-force push of exact `4468f75`. GitHub Actions
+  [`30704646072`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30704646072)
+  completed `failure`: quality, MSRV, TCP/UDP `12/12` interop, and all three native
+  platforms succeeded. Throughput passed with ferrum2 median `9035229`, reference
+  median `547376332`, signed difference `-98.349357020%`, and ratio `0.016506430`.
+  Resource established exact `10000`, collected all 180 stable active/fd/task samples,
+  then failed window 2. Client median-twice stayed `1907336/1907336` KiB; server moved
+  `2182832` to `2389976` KiB (`+103572` KiB actual, `+9.4897%`). Cleanup succeeded;
+  drain was not reached and final qualification failed closed.
 
 ## Blocker
 
@@ -130,16 +141,16 @@ git status --short
   `10000` checks. Exact `56aadd4` implements that repair; both reviews and all local
   gates passed, and run `30700273019/1` proceeded through exact 10k load and all 180
   samples.
-- `HOSTED-M4-T02-003`: RSS window 2 exceeded the fixed 105% limit after every
-  active/fd/task tuple remained stable. Runner-temp raw evidence was correctly deleted,
-  but the failure text omits which binary and both first/current medians, so the run
-  cannot separate scrape-induced allocation, an early baseline, actual idle growth, or
-  runner RSS noise. Preserve the threshold and profile; add a bounded redacted failure
-  diagnostic before further root-cause testing. Exact `7b63bd5` implements the
-  one-file diagnostic and passed TDD plus both reviews without changing the gate.
-  Local scope `M4-LOCAL-RSS-DIAG-001` is consumed and revoked. Hosted observation is
-  blocked pending a new exact single-use push authorization. No rerun, second push,
-  dispatch, PR, release, publication, or other remote mutation is authorized.
+- `HOSTED-M4-T02-003`: exact `4468f75` confirms a server-only window-2 RSS rise after
+  all active/fd/task tuples remained stable; client RSS did not move. This rules out
+  growing task/socket/session ownership but does not distinguish a product leak,
+  delayed page residency, a step then plateau, or Linux RSS-accounting behavior. The
+  driver reads `/proc/<pid>/status` `VmRSS`, which Linux documents as asynchronous and
+  potentially imprecise; accurate `smaps_rollup` is available in WSL2, but the exact WSL
+  profile passed and is not a hosted reproduction. Preserve the existing gate and first
+  add one fast red-capable parser check plus bounded all-six median trajectories for the
+  existing and accurate signals. No local repair, rerun, second push, dispatch, PR,
+  release, publication, or other remote mutation is currently authorized.
 - `LOCAL-M4-T02-004`: exact `d28ed0a` reproduced `target did not accept 10000
   streams` in two native WSL2 runs. Both product active gauges reached exact `10000`,
   while the qualification driver retained fewer target-side streams and Linux

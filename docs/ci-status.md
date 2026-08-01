@@ -3,10 +3,10 @@
 ## 当前 M4 executing 状态
 
 - **Remote candidate and authorization:** exact
-  `2f4190c272f79c5d90ebb2d70cdade0378e44e02` passed local Full `6/6`, release
+  `4468f75ecc055531f554d218fb89b6b079dc432d` passed local Full `6/6`, release
   self-check, and ticket/milestone budgets. Single-use scope
-  `M4-REMOTE-2f4190c-A1` was consumed and auto-revoked before one non-force push;
-  the remote branch now resolves to that exact SHA.
+  `M4-REMOTE-4468f75-A1` was consumed and auto-revoked before one non-force push;
+  `origin/codex/integration/m4` now resolves to that exact SHA.
 - **Local resource repair:** exact
   `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8` admits a complete identified initial
   exposition with no lazy active-flow sample as zero, while malformed or unidentified
@@ -41,19 +41,19 @@
   Ferrum2 median was `7977915` bytes/s, reference median `478773248` bytes/s, ratio
   `0.016663243`. Resource then failed before load with `metrics readiness timed out`;
   cleanup succeeded. No resource sample, RSS window, or drain result may be credited.
-- **Latest hosted result:** push run
+- **Third hosted result:** push run
   [`30700273019`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30700273019)
   completed `failure` on exact `2f4190c`. Quality `91369961765`, MSRV `91369961748`,
   interop `91369961726`, Linux GNU `91369961746`, Linux musl `91369961738`, and
   Windows MSVC `91369961745` succeeded; interop recorded TCP/UDP `12/12` with both
   cleanup results PASS. Performance `91369961766` and qualification `91373764205`
   failed; the always-run performance cleanup succeeded.
-- **Latest performance evidence:** all probes, the release build, and ten throughput
+- **Third-run performance evidence:** all probes, the release build, and ten throughput
   trials passed. Ferrum2 median was `9013384` bytes/s, reference median `480717482`
   bytes/s, ratio `0.018749857`. Resource passed readiness, established exact `10000`,
   and collected all 180 samples with stable active/fd/task tuples, then rejected RSS
   window 2 above 105%. Drain was not reached and no RSS window may be credited.
-- **Open root:** `HOSTED-M4-T02-001` and `HOSTED-M4-T02-002` are resolved.
+- **Third-run open-root diagnosis:** `HOSTED-M4-T02-001` and `HOSTED-M4-T02-002` are resolved.
   `HOSTED-M4-T02-003` is the RSS-window failure above. The runner-temp raw samples were
   correctly deleted, while the bounded error omits which binary and both first/current
   medians; this run therefore cannot distinguish measurement-induced allocation, an
@@ -73,7 +73,31 @@
   target accepts `10000`, samples `180/180`, RSS windows `6/6`, exact drain, zero
   listen overflow/drop, and zero remaining processes. All six client/server
   median-twice values were `1909544/1966728` KiB. This is diagnostic only. Scope
-  `M4-LOCAL-WSL-TARGET-BACKLOG-001` is consumed and revoked; no remote mutation is
+  `M4-LOCAL-WSL-TARGET-BACKLOG-001` is consumed and revoked.
+- **Current hosted result:** push run
+  [`30704646072`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30704646072)
+  completed `failure` on exact `4468f75`. Quality `91381542687`, MSRV
+  `91381542662`, interop `91381542701`, Linux GNU `91381542683`, Linux musl
+  `91381542715`, and Windows MSVC `91381542685` succeeded. Performance
+  `91381542664` failed, so final qualification `91385637817` failed closed; both
+  always-run cleanup steps succeeded.
+- **Current performance evidence:** all probes, the release build, and ten throughput
+  trials passed. Ferrum2 median was `9035229` bytes/s, reference median `547376332`
+  bytes/s, signed difference `-98.349357020%`, and ratio `0.016506430`. Resource
+  established exact `10000` and collected all 180 samples with stable active/fd/task
+  tuples, then rejected RSS window 2: client median-twice remained
+  `1907336/1907336` KiB while server moved from `2182832` to `2389976` KiB
+  (`+103572` KiB actual RSS, `+9.4897%`). Drain was not reached.
+- **Current open root:** the bounded diagnostic rules out client growth and identifies
+  only the server RSS signal, but it does not prove a product leak. The gate samples
+  `VmRSS` from `/proc/<pid>/status`; Linux documents that value as asynchronous and
+  potentially imprecise, while `smaps`/`smaps_rollup` provide a precise snapshot. A
+  WSL2 availability probe read `Rss:` from `smaps_rollup` successfully, but WSL2 cannot
+  reproduce or satisfy the hosted gate. The next diagnostic must first establish a fast
+  red-capable parser regression, retain the existing gate, and report all six existing
+  `VmRSS` medians beside an accurate `smaps_rollup` trajectory. That distinguishes a
+  counter artifact, a step then plateau, and continued growth without weakening 10k,
+  timing, six-window 105%, or drain contracts. No rerun or further remote mutation is
   authorized.
 
 ## 当前 M3 closed 状态
@@ -706,7 +730,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | exact `2f4190c` run `30700273019/1` readiness、10k与180 samples完成，active/fd/task稳定，但RSS window 2超过首窗105%；exact `7b63bd5`补bounded medians，exact `7c19e80`修复WSL synthetic-target backlog并在本地完整通过180 samples/6 RSS windows/drain；待新授权hosted观察 | M4 |
+| Performance/10k idle | BLOCKED | exact `4468f75` run `30704646072/1` throughput PASS；resource完成10k与180个stable samples，但server RSS median-twice在window 2由`2182832`升至`2389976` KiB（`+9.4897%`）而client不变；须用all-six及accurate RSS并行轨迹区分测量与产品原因 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 

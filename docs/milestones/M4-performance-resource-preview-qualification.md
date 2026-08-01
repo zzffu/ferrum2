@@ -38,13 +38,13 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 
 ## Next action
 
-Preserve failed run `30700273019/1` on exact `2f4190c`: all six independent
+Preserve failed run `30704646072/1` on exact `4468f75`: all six independent
 quality/MSRV/interop/platform jobs succeeded, TCP/UDP recorded `12/12` with cleanup,
-throughput recorded `9013384 / 480717482`, ratio `0.018749857`, and resource completed
-10k plus 180 stable active/fd/task samples before RSS window 2 exceeded 105%. Exact
-`7b63bd5` adds bounded binary/first/current medians. Exact `7c19e80` additionally
-repairs only the WSL-exposed default backlog of the synthetic resource target; both
-reviews, Full `6/6`, both budgets, and a complete native ext4 WSL2 run of 10k,
-180 samples, six RSS windows, and exact drain pass. WSL2 remains diagnostic. Obtain a
-new exact single-use remote authorization before any push/run that observes hosted RSS
-values on the current integrated source. No rerun or new push is currently authorized.
+and throughput recorded `9035229 / 547376332`, difference `-98.349357020%`, ratio
+`0.016506430`. Resource completed exact 10k plus 180 stable active/fd/task samples, but
+server RSS median-twice rose from `2182832` to `2389976` KiB in window 2 (`+9.4897%`)
+while client RSS remained `1907336`; drain was not reached. The driver currently gates
+on Linux's potentially imprecise `/proc/<pid>/status` `VmRSS`. Establish a fast parser
+regression and add bounded all-six existing/accurate RSS trajectories before changing
+the gate or product. WSL2 remains diagnostic, and its complete pass does not close the
+hosted blocker. No rerun or new push is currently authorized.
