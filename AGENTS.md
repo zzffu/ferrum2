@@ -193,11 +193,13 @@ and command definitions in their authoritative build/config files where possible
 - Active planned changes:
   - M4 — executing — M4-T01 is integrated at exact `7730ec7` with the dedicated
     non-shipping qualification package and the existing workflow's `performance`
-    job. M4-T02 is active under local scope `M4-LOCAL-RSS-PAIR-001`: retain the
-    existing `VmRSS` gate, add bounded all-six-window and parallel `smaps_rollup`
-    diagnostics in the qualification driver, then run local reviews, Full, budgets,
-    and the complete WSL2 resource diagnostic. Push, hosted execution, packaging,
-    release, and publication remain separately unauthorized.
+    job. M4-T02's paired-RSS diagnostic is integrated locally at exact `1d3c117`:
+    the existing `VmRSS` gate is unchanged, while the qualification driver records
+    bounded all-six-window `VmRSS` and `smaps_rollup` trajectories. Reviews, Full,
+    budgets, and the complete native-ext4 WSL2 resource diagnostic passed. Local scope
+    `M4-LOCAL-RSS-PAIR-001` is consumed and revoked; M4-T02 is blocked pending a new
+    exact single-use remote authorization. Push, hosted execution, packaging, release,
+    and publication remain separately unauthorized.
 
 
 ## Project validation

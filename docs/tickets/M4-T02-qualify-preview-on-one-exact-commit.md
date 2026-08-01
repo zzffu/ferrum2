@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: active
+status: blocked
 depends_on: [M4-T01]
 owns:
   - Cargo.lock
@@ -28,7 +28,7 @@ the bounded summary needed for M4 close.
       the measured ratio is reported and never used as a pass threshold.
 - [ ] The bounded 10k-idle run passes all 180 owner/task/RSS samples, six per-binary RSS
       window comparisons, and exact two-minute drain with both binaries alive.
-- [ ] Local Full validation and milestone test-budget checks pass as diagnostic
+- [x] Local Full validation and milestone test-budget checks pass as diagnostic
       integration gates on the candidate SHA.
 - [ ] After separate explicit authorization, one `push` run/attempt for that SHA passes
       performance, quality, MSRV, TCP/UDP `24/24`, all three native targets, and final
@@ -60,6 +60,7 @@ git status --short
 - Resource-readiness repair: `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`
 - RSS diagnostic repair: `7b63bd588e1be600beb417636ed0d37ac3b0fb44`
 - WSL target-backlog repair: `7c19e80f7c7fcb68e3c6b3e562c6d01a379ebf47`
+- Paired-RSS diagnostic: `1d3c117231bf5b99641d02b43b6579359c938644`
 - Hosted diagnostic source: `4468f75ecc055531f554d218fb89b6b079dc432d`
 - Review: Architect `PASS`; QA `PASS`; no findings on the local resource repairs
 - Notes: the probe repair keeps every external probe bounded, assigns a static redacted
@@ -135,6 +136,18 @@ git status --short
   includes Architect/QA review, local Full/budgets, and a complete native ext4 WSL2
   resource diagnostic. It authorizes no push, workflow run/dispatch, PR, release, or
   publication.
+- Paired-RSS local result: the first candidate was rejected because the strict parser
+  fixtures lacked implementation-before RED evidence. The accepted rebuild recorded
+  nine public-CLI RED/GREEN slices and kept the formal exact-integer `VmRSS` gate
+  unchanged. Architect returned `PASS_WITH_NOTES`, QA returned `PASS`, Full passed
+  `6/6`, and ticket/milestone budgets returned `PASS_ADVANCE` at code `14131`, tests
+  `20756`, ratio `1.468827`. A native-ext4 WSL2 1 GiB probe measured 20 rollup reads at
+  `12146` us average and `12992` us maximum. The complete profile exited `0` after
+  `2103.6` seconds with exact 10k, `180/180`, `6/6`, drain, and zero remaining
+  processes. All six client/server median-twice values were `1908928/1966960` KiB for
+  both `VmRSS` and precise `Rss`, `1900872/1958128` KiB for `Anonymous`, and zero for
+  `AnonHugePages`. WSL2 proves the diagnostic seam and a local plateau only; it is not
+  hosted qualification. The local scope is consumed and revoked.
 
 ## Blocker
 
@@ -155,11 +168,13 @@ git status --short
   delayed page residency, a step then plateau, or Linux RSS-accounting behavior. The
   driver reads `/proc/<pid>/status` `VmRSS`, which Linux documents as asynchronous and
   potentially imprecise; accurate `smaps_rollup` is available in WSL2, but the exact WSL
-  profile passed and is not a hosted reproduction. Preserve the existing gate and first
-  add one fast red-capable parser check plus bounded all-six median trajectories for the
-  existing and accurate signals. Local scope `M4-LOCAL-RSS-PAIR-001` is active for that
-  work; no push, rerun, dispatch, PR, release, publication, or other remote mutation is
-  authorized.
+  profile passed and is not a hosted reproduction. Local exact `1d3c117` now supplies
+  the strict parser and bounded all-six paired
+  trajectories without changing the formal gate, and its full WSL2 profile passed with
+  both signals flat. WSL2 cannot classify the hosted-only rise. Scope
+  `M4-LOCAL-RSS-PAIR-001` is consumed and revoked; T02 is blocked pending a new exact
+  single-use remote authorization. No push, rerun, dispatch, PR, release, publication,
+  or other remote mutation is authorized.
 - `LOCAL-M4-T02-004`: exact `d28ed0a` reproduced `target did not accept 10000
   streams` in two native WSL2 runs. Both product active gauges reached exact `10000`,
   while the qualification driver retained fewer target-side streams and Linux

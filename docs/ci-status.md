@@ -88,18 +88,22 @@
   tuples, then rejected RSS window 2: client median-twice remained
   `1907336/1907336` KiB while server moved from `2182832` to `2389976` KiB
   (`+103572` KiB actual RSS, `+9.4897%`). Drain was not reached.
-- **Current open root:** the bounded diagnostic rules out client growth and identifies
-  only the server RSS signal, but it does not prove a product leak. The gate samples
-  `VmRSS` from `/proc/<pid>/status`; Linux documents that value as asynchronous and
-  potentially imprecise, while `smaps`/`smaps_rollup` provide a precise snapshot. A
-  WSL2 availability probe read `Rss:` from `smaps_rollup` successfully, but WSL2 cannot
-  reproduce or satisfy the hosted gate. The next diagnostic must first establish a fast
-  red-capable parser regression, retain the existing gate, and report all six existing
-  `VmRSS` medians beside an accurate `smaps_rollup` trajectory. That distinguishes a
-  counter artifact, a step then plateau, and continued growth without weakening 10k,
-  timing, six-window 105%, or drain contracts. Local scope `M4-LOCAL-RSS-PAIR-001` is
-  active for this driver-only diagnostic, review, Full/budgets, and native ext4 WSL2
-  resource run. No rerun or further remote mutation is authorized.
+- **Current open root:** exact local source `1d3c117` keeps the formal `VmRSS` 105%
+  gate unchanged and adds strict, bounded `smaps_rollup` parsing plus all-six paired
+  trajectories. The first candidate was rejected because its parser fixtures lacked
+  implementation-before RED evidence; the accepted rebuild records nine public-CLI
+  RED/GREEN slices. Architect returned `PASS_WITH_NOTES`, QA returned `PASS`, Full
+  passed `6/6`, and ticket/milestone budgets returned `PASS_ADVANCE` at code `14131`,
+  tests `20756`, ratio `1.468827`. A native-ext4 WSL2 1 GiB probe measured 20 rollup
+  reads at `12146` us average and `12992` us maximum versus the 10-second sample slot.
+  The complete WSL2 profile exited `0` after `2103.6` seconds with exact 10k, `180/180`
+  samples, `6/6` windows, drain, and zero remaining processes. All six client/server
+  median-twice values were `1908928/1966960` KiB for both `VmRSS` and precise `Rss`,
+  `1900872/1958128` KiB for `Anonymous`, and zero for `AnonHugePages`. This proves the
+  instrument and local plateau only; it does not reproduce or satisfy the hosted gate.
+  Scope `M4-LOCAL-RSS-PAIR-001` is consumed and revoked. M4-T02 is blocked pending a
+  new exact single-use remote authorization; no rerun or other remote mutation is
+  authorized.
 
 ## 当前 M3 closed 状态
 
@@ -731,7 +735,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | exact `4468f75` run `30704646072/1` throughput PASS；resource完成10k与180个stable samples，但server RSS median-twice在window 2由`2182832`升至`2389976` KiB（`+9.4897%`）而client不变；须用all-six及accurate RSS并行轨迹区分测量与产品原因 | M4 |
+| Performance/10k idle | BLOCKED | exact `4468f75` run `30704646072/1` throughput PASS；resource完成10k与180个stable samples，但server RSS window 2增长`9.4897%`。Local exact `1d3c117`已增加不改变正式gate的all-six paired诊断，双审、Full、budgets及native-ext4 WSL完整profile通过；仍须新授权的同SHA hosted run取得根因证据并收敛全部资格 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 

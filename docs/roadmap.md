@@ -21,9 +21,10 @@ docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
 M4-T01已在exact `7730ec7`集成到独立non-shipping tools package；M4-T02 exact
 `4468f75`的run `30704646072/1`通过六项独立gate与throughput，完成10k/180 stable
-samples后server RSS window 2增长`9.4897%`而失败；client RSS不变。现有gate读取
-Linux可能不精确的`VmRSS`；`M4-LOCAL-RSS-PAIR-001`已授权保留原gate并增加all-six
-及`smaps_rollup`并行轨迹，T02恢复`active`，但没有remote授权。
+samples后server RSS window 2增长`9.4897%`而失败；client RSS不变。Local exact
+`1d3c117`保留原gate并增加all-six及`smaps_rollup`并行轨迹，双审、Full、budgets和
+native-ext4 WSL完整profile通过；本地scope已消费撤销，T02因没有remote授权而
+`blocked`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -610,11 +611,11 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
   - M4-T02：exact `4468f75` run `30704646072/1`通过quality/MSRV/interop/三平台
     与throughput，并完成10k及180个stable owner/task samples；window 2的client
     median-twice保持`1907336` KiB，server由`2182832`增至`2389976` KiB而失败。
-    Exact `7c19e80`已在WSL通过完整资源profile，但WSL仅作diagnostic。现有采样读取
-    Linux可能不精确的`VmRSS`；`M4-LOCAL-RSS-PAIR-001`授权先增加fast parser
-    regression及all-six `VmRSS`/`smaps_rollup`轨迹，再完成review、Full、budgets与
-    native ext4 WSL2 resource diagnostic。之后仍须新授权run完成hosted root
-    diagnosis、全部qualification及close summary。
+    Exact `7c19e80`已在WSL通过完整资源profile，但WSL仅作diagnostic。Local exact
+    `1d3c117`保留正式`VmRSS` gate并增加fast parser regression及all-six
+    `VmRSS`/`smaps_rollup`轨迹；双审、Full、budgets与native-ext4 WSL2完整resource
+    diagnostic均通过。之后仍须新授权run完成hosted root diagnosis、全部
+    qualification及close summary。
 
   Dependency graph：
 
@@ -631,6 +632,8 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
   local M4-T02 RSS diagnostic repair exact `7b63bd588e1be600beb417636ed0d37ac3b0fb44`；
   local M4-T02 WSL target-backlog repair exact
   `7c19e80f7c7fcb68e3c6b3e562c6d01a379ebf47`；
+  local M4-T02 paired-RSS diagnostic exact
+  `1d3c117231bf5b99641d02b43b6579359c938644`；
   M4 accepted hosted qualification commit尚待T02。
 - **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
   driver迁到独立tools package解除；authoritative allowance、classifier、baseline
@@ -740,3 +743,4 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
 | 2026-08-01 | M4 local RSS diagnostic repair | exact `7b63bd5`在共享`validate_samples` threshold error中加入window及client/server first/current median-twice KiB，并把既有RSS mutation强化为exact diagnostic assertion；mutation count仍为11 | 同一release self-check先以旧generic error RED、再GREEN；105% u128 comparison、10k、5分钟/180 samples/六窗/2分钟drain及product均不变 | Architect/QA `PASS`无finding；focused checks与ticket/milestone budget `PASS_ADVANCE`，code/tests/ratio `13897/20740/1.492408`；等待Full及新remote授权 |
 | 2026-08-01 | M4 fourth hosted qualification | exact `4468f75` run `30704646072/1`通过quality、MSRV、TCP/UDP `12/12`、三平台及throughput，记录ferrum/reference `9035229/547376332`、difference `-98.349357020%`、ratio `0.016506430`；resource完成10k与180 stable samples后server RSS window 2增长`9.4897%`，client不变 | bounded medians排除client及owner-count增长，但当前`VmRSS`信号不足以区分产品leak、延迟驻留、plateau或Linux异步RSS计账；WSL完整pass不替代hosted | `M4-REMOTE-4468f75-A1` 1/1消费撤销；performance/final qualification failure、cleanup success；无rerun/第二push/release/publication |
 | 2026-08-02 | M4 paired-RSS diagnostic authorization | M4-T02恢复`active`；保留现有`VmRSS` 105% gate，只在non-shipping driver增加strict `smaps_rollup`解析、all-six paired trajectories及self-check RED→GREEN | 配对信号可区分异步计账、一次性驻留与持续增长，不改变10k、时序、drain、product、workflow或正式profile | `M4-LOCAL-RSS-PAIR-001`授权one writer、双审、Full、budgets及完整native ext4 WSL2 resource diagnostic；无push/rerun/dispatch/PR/release/publication |
+| 2026-08-02 | M4 local paired-RSS diagnostic | exact `1d3c117`保留正式`VmRSS` 105% gate并加入64 KiB strict `smaps_rollup` parser、paired samples和all-six bounded trajectories；初版因parser缺少历史RED被QA阻塞，唯一重做以九个public-CLI slices关闭 | native-ext4 WSL 20次1 GiB rollup读取平均/最大`12146/12992` us；完整run `2103.6`秒通过10k、180/180、6/6、drain，六窗VmRSS与precise Rss均为client/server `1908928/1966960` median-twice KiB，THP为0 | Architect `PASS_WITH_NOTES`、QA `PASS`；Full `6/6`、ticket/milestone budget `PASS_ADVANCE`；scope消费撤销，T02 remote-blocked；无push/rerun/dispatch/PR/release/publication |
