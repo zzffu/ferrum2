@@ -1,9 +1,10 @@
 ---
 id: M4-T02
 milestone: M4
-status: blocked
+status: active
 depends_on: [M4-T01]
 owns:
+  - tools/ferrum2-m4-qualification/src/m4_support/mod.rs
   - docs/ci-status.md
   - docs/tickets/M4-T02-qualify-preview-on-one-exact-commit.md
 ---
@@ -32,6 +33,11 @@ the bounded summary needed for M4 close.
 - [ ] P0/P1 blockers and blocking review findings are zero; runner-temp evidence is
       summarized then deleted, nothing raw is committed or uploaded, and no release or
       publication action occurs.
+- [ ] Every bounded subprocess probe reports a static, redacted identity and distinct
+      timeout, nonzero-exit, output-bound, secret-output, or UTF-8 failure class; the
+      probe remains fail-closed and emits no command arguments, paths, or captured text.
+- [ ] The five-second probe boundary is diagnosed under WSL2 before the final bounded
+      timeout is selected; WSL2 remains diagnostic and cannot satisfy hosted acceptance.
 
 ## Validation
 
@@ -65,4 +71,5 @@ git status --short
 - Unblock by making probe identity/failure class observable without emitting captured
   output or secrets, validating the narrow repair locally, and obtaining a new exact,
   single-use authorization for one fresh push-triggered run. No rerun or second push
-  is authorized.
+  is authorized. The user authorized the local repair and WSL2 diagnostic on
+  2026-08-01; that authorization does not include any remote mutation.
