@@ -43,7 +43,8 @@ the formal `VmRSS` gate and complete profile unchanged while adding strict bound
 `smaps_rollup` parsing and all-six paired trajectories. Architect/QA review, Full,
 ticket/milestone budgets, and a native-ext4 WSL2 resource profile all passed. The WSL2
 run completed exact 10k, `180/180` samples, `6/6` identical paired windows, exact drain,
-and zero remaining processes; it is diagnostic and cannot close the hosted blocker.
-Request a new exact single-use remote authorization for the final clean integration SHA,
-then run one non-force push qualification and classify the hosted paired trajectories.
-No rerun or new push is currently authorized.
+and zero remaining processes. Its raw JSONL and failed-start directory were summarized
+then deleted; nothing was committed or uploaded. WSL2 is diagnostic and cannot close
+the hosted blocker. Request a new exact single-use remote authorization for the final
+clean integration SHA, then run one non-force push qualification and classify the hosted
+paired trajectories. No rerun or new push is currently authorized.

@@ -147,7 +147,9 @@ git status --short
   processes. All six client/server median-twice values were `1908928/1966960` KiB for
   both `VmRSS` and precise `Rss`, `1900872/1958128` KiB for `Anonymous`, and zero for
   `AnonHugePages`. WSL2 proves the diagnostic seam and a local plateau only; it is not
-  hosted qualification. The local scope is consumed and revoked.
+  hosted qualification. The 189-line, 73224-byte raw JSONL and the failed-start
+  directory were deleted after this bounded summary; nothing was committed or uploaded.
+  The local scope is consumed and revoked.
 
 ## Blocker
 

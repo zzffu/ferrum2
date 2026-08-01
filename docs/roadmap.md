@@ -45,9 +45,10 @@ method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
 same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
 完成三目标 native qualification。M4-T01已把non-test driver迁到独立tools
-package并在exact `7730ec7`通过双审与authoritative ticket budget；下一入口是
-在最终local integration SHA完成Full后，取得新的单次remote授权，以exact
-`7b63bd5`已增加的bounded RSS values定位根因；旧scope已消费撤销。
+package并在exact `7730ec7`通过双审与authoritative ticket budget；M4-T02 local
+exact `1d3c117`已加入paired trajectories并通过Full与WSL diagnostic。下一入口是
+取得绑定最终clean integration SHA的单次remote授权，以hosted paired trajectories
+定位根因；旧scope已消费撤销。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -743,4 +744,4 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
 | 2026-08-01 | M4 local RSS diagnostic repair | exact `7b63bd5`在共享`validate_samples` threshold error中加入window及client/server first/current median-twice KiB，并把既有RSS mutation强化为exact diagnostic assertion；mutation count仍为11 | 同一release self-check先以旧generic error RED、再GREEN；105% u128 comparison、10k、5分钟/180 samples/六窗/2分钟drain及product均不变 | Architect/QA `PASS`无finding；focused checks与ticket/milestone budget `PASS_ADVANCE`，code/tests/ratio `13897/20740/1.492408`；等待Full及新remote授权 |
 | 2026-08-01 | M4 fourth hosted qualification | exact `4468f75` run `30704646072/1`通过quality、MSRV、TCP/UDP `12/12`、三平台及throughput，记录ferrum/reference `9035229/547376332`、difference `-98.349357020%`、ratio `0.016506430`；resource完成10k与180 stable samples后server RSS window 2增长`9.4897%`，client不变 | bounded medians排除client及owner-count增长，但当前`VmRSS`信号不足以区分产品leak、延迟驻留、plateau或Linux异步RSS计账；WSL完整pass不替代hosted | `M4-REMOTE-4468f75-A1` 1/1消费撤销；performance/final qualification failure、cleanup success；无rerun/第二push/release/publication |
 | 2026-08-02 | M4 paired-RSS diagnostic authorization | M4-T02恢复`active`；保留现有`VmRSS` 105% gate，只在non-shipping driver增加strict `smaps_rollup`解析、all-six paired trajectories及self-check RED→GREEN | 配对信号可区分异步计账、一次性驻留与持续增长，不改变10k、时序、drain、product、workflow或正式profile | `M4-LOCAL-RSS-PAIR-001`授权one writer、双审、Full、budgets及完整native ext4 WSL2 resource diagnostic；无push/rerun/dispatch/PR/release/publication |
-| 2026-08-02 | M4 local paired-RSS diagnostic | exact `1d3c117`保留正式`VmRSS` 105% gate并加入64 KiB strict `smaps_rollup` parser、paired samples和all-six bounded trajectories；初版因parser缺少历史RED被QA阻塞，唯一重做以九个public-CLI slices关闭 | native-ext4 WSL 20次1 GiB rollup读取平均/最大`12146/12992` us；完整run `2103.6`秒通过10k、180/180、6/6、drain，六窗VmRSS与precise Rss均为client/server `1908928/1966960` median-twice KiB，THP为0 | Architect `PASS_WITH_NOTES`、QA `PASS`；Full `6/6`、ticket/milestone budget `PASS_ADVANCE`；scope消费撤销，T02 remote-blocked；无push/rerun/dispatch/PR/release/publication |
+| 2026-08-02 | M4 local paired-RSS diagnostic | exact `1d3c117`保留正式`VmRSS` 105% gate并加入64 KiB strict `smaps_rollup` parser、paired samples和all-six bounded trajectories；初版因parser缺少历史RED被QA阻塞，唯一重做以九个public-CLI slices关闭 | native-ext4 WSL 20次1 GiB rollup读取平均/最大`12146/12992` us；完整run `2103.6`秒通过10k、180/180、6/6、drain，六窗VmRSS与precise Rss均为client/server `1908928/1966960` median-twice KiB，THP为0；189行/73224-byte raw JSONL及failed-start目录摘要后删除，未commit/upload | Architect `PASS_WITH_NOTES`、QA `PASS`；Full `6/6`、ticket/milestone budget `PASS_ADVANCE`；scope消费撤销，T02 remote-blocked；无push/rerun/dispatch/PR/release/publication |

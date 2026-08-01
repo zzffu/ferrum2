@@ -101,9 +101,10 @@
   median-twice values were `1908928/1966960` KiB for both `VmRSS` and precise `Rss`,
   `1900872/1958128` KiB for `Anonymous`, and zero for `AnonHugePages`. This proves the
   instrument and local plateau only; it does not reproduce or satisfy the hosted gate.
-  Scope `M4-LOCAL-RSS-PAIR-001` is consumed and revoked. M4-T02 is blocked pending a
-  new exact single-use remote authorization; no rerun or other remote mutation is
-  authorized.
+  The 189-line, 73224-byte raw JSONL and the failed-start directory were deleted after
+  the bounded summary; nothing was committed or uploaded. Scope
+  `M4-LOCAL-RSS-PAIR-001` is consumed and revoked. M4-T02 is blocked pending a new
+  exact single-use remote authorization; no rerun or other remote mutation is authorized.
 
 ## 当前 M3 closed 状态
 
