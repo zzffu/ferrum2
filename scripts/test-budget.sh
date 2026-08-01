@@ -159,21 +159,35 @@ parse_csv_total() {
         name = tolower(clean($i))
         column[name] = i
       }
+      if (!("label" in column) || !("code" in column) ||
+          !("tests" in column) || !("examples" in column)) {
+        invalid = 1
+      }
       next
     }
+    invalid { next }
     {
-      label = clean($1)
+      label = clean($(column["label"]))
       if (toupper(label) ~ /^TOTAL([[:space:]]*\(|$)/) {
-        if (!("code" in column) || !("tests" in column) || !("examples" in column)) exit 3
+        if (found) {
+          invalid = 1
+          next
+        }
         code = clean($(column["code"]))
         tests = clean($(column["tests"]))
         examples = clean($(column["examples"]))
-        if (code !~ /^[0-9]+$/ || tests !~ /^[0-9]+$/ || examples !~ /^[0-9]+$/) exit 4
-        print code, tests, examples
+        if (code !~ /^[0-9]+$/ || tests !~ /^[0-9]+$/ || examples !~ /^[0-9]+$/) {
+          invalid = 1
+          next
+        }
+        result = code " " tests " " examples
         found = 1
       }
     }
-    END { if (!found) exit 2 }
+    END {
+      if (invalid || !found) exit 2
+      print result
+    }
   ' "$file"
 }
 
