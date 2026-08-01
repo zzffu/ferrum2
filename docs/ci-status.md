@@ -3,10 +3,10 @@
 ## 当前 M4 executing 状态
 
 - **Remote candidate and authorization:** exact
-  `4468f75ecc055531f554d218fb89b6b079dc432d` passed local Full `6/6`, release
+  `a53a5d7cf8c2506527d3dfa8f74e64898604154d` passed local Full `6/6`, release
   self-check, and ticket/milestone budgets. Single-use scope
-  `M4-REMOTE-4468f75-A1` was consumed and auto-revoked before one non-force push;
-  `origin/codex/integration/m4` now resolves to that exact SHA.
+  `M4-REMOTE-a53a5d7-A1` was consumed and auto-revoked before its one permitted
+  non-force push; `origin/codex/integration/m4` now resolves to that exact SHA.
 - **Local resource repair:** exact
   `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8` admits a complete identified initial
   exposition with no lazy active-flow sample as zero, while malformed or unidentified
@@ -74,21 +74,21 @@
   listen overflow/drop, and zero remaining processes. All six client/server
   median-twice values were `1909544/1966728` KiB. This is diagnostic only. Scope
   `M4-LOCAL-WSL-TARGET-BACKLOG-001` is consumed and revoked.
-- **Current hosted result:** push run
+- **Fourth hosted result:** push run
   [`30704646072`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30704646072)
   completed `failure` on exact `4468f75`. Quality `91381542687`, MSRV
   `91381542662`, interop `91381542701`, Linux GNU `91381542683`, Linux musl
   `91381542715`, and Windows MSVC `91381542685` succeeded. Performance
   `91381542664` failed, so final qualification `91385637817` failed closed; both
   always-run cleanup steps succeeded.
-- **Current performance evidence:** all probes, the release build, and ten throughput
+- **Fourth-run performance evidence:** all probes, the release build, and ten throughput
   trials passed. Ferrum2 median was `9035229` bytes/s, reference median `547376332`
   bytes/s, signed difference `-98.349357020%`, and ratio `0.016506430`. Resource
   established exact `10000` and collected all 180 samples with stable active/fd/task
   tuples, then rejected RSS window 2: client median-twice remained
   `1907336/1907336` KiB while server moved from `2182832` to `2389976` KiB
   (`+103572` KiB actual RSS, `+9.4897%`). Drain was not reached.
-- **Current open root:** exact local source `1d3c117` keeps the formal `VmRSS` 105%
+- **Paired diagnostic source:** exact local source `1d3c117` keeps the formal `VmRSS` 105%
   gate unchanged and adds strict, bounded `smaps_rollup` parsing plus all-six paired
   trajectories. The first candidate was rejected because its parser fixtures lacked
   implementation-before RED evidence; the accepted rebuild records nine public-CLI
@@ -103,8 +103,37 @@
   instrument and local plateau only; it does not reproduce or satisfy the hosted gate.
   The 189-line, 73224-byte raw JSONL and the failed-start directory were deleted after
   the bounded summary; nothing was committed or uploaded. Scope
-  `M4-LOCAL-RSS-PAIR-001` is consumed and revoked. M4-T02 is blocked pending a new
-  exact single-use remote authorization; no rerun or other remote mutation is authorized.
+  `M4-LOCAL-RSS-PAIR-001` is consumed and revoked. At that checkpoint M4-T02 was
+  blocked pending the subsequently consumed exact remote authorization.
+- **Paired hosted result:** push run
+  [`30710439015`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30710439015)
+  completed `failure` on exact `a53a5d7`. Quality `91396837397`, MSRV
+  `91396837448`, interop `91396837406`, Linux GNU `91396837379`, Linux musl
+  `91396837383`, and Windows MSVC `91396837385` succeeded. Performance
+  `91396837357` failed, final qualification `91400971821` failed closed, and the
+  always-run performance cleanup succeeded.
+- **Paired performance evidence:** throughput passed with ferrum2 median `9651268`
+  bytes/s, reference median `476676096` bytes/s, ratio `0.020247015`, and signed
+  difference `-97.975298514%`. Resource
+  established exact `10000`, retained stable active/fd/task tuples for all `180`
+  samples, then failed the unchanged 105% gate at window 2. Client `VmRSS`/precise
+  `Rss` median-twice trajectories were
+  `[1907184,1907184,2042444,2254648,2444520,2444520]`; server trajectories were
+  `[2217840,2435656,2511632,2511632,2511632,2511632]`. Every paired `VmRSS` and
+  `Rss` value is equal. RSS minus `Anonymous` remains constant for each binary, while
+  final client/server `AnonHugePages` reach `2387968/2437120` median-twice KiB.
+  Both binaries plateau. The observation is consistent with delayed THP backing, not
+  a `/proc/status` accounting-only false positive; stable ownership and the plateau
+  contradict owner-count growth but do not establish the hosted allocator/kernel
+  causal path. Drain was not reached because the gate failed.
+- **Mechanism check and authorization boundary:** WSL2 reports THP `madvise`. A
+  temporary 256 MiB anonymous mapping, sparsely touched before `MADV_HUGEPAGE`, moved
+  from `Rss/Anonymous/AnonHugePages=10888/4576/0` KiB to
+  `109136/102696/98304` KiB over 60 seconds in 16 MiB steps without changing the
+  mapping, demonstrating one compatible delayed THP-residency mechanism but not the
+  hosted product run. The remote scope is consumed and revoked. M4-T02 is blocked
+  pending separately authorized local repair; no rerun, second push, or other remote
+  mutation is authorized.
 
 ## 当前 M3 closed 状态
 
@@ -736,7 +765,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | exact `4468f75` run `30704646072/1` throughput PASS；resource完成10k与180个stable samples，但server RSS window 2增长`9.4897%`。Local exact `1d3c117`已增加不改变正式gate的all-six paired诊断，双审、Full、budgets及native-ext4 WSL完整profile通过；仍须新授权的同SHA hosted run取得根因证据并收敛全部资格 | M4 |
+| Performance/10k idle | BLOCKED | exact `a53a5d7` run `30710439015/1` throughput PASS；resource完成10k与180个stable owner samples后window 2失败。六窗`VmRSS == precise Rss`、增长全为Anonymous，伴随THP阶梯增长并最终平台；RSS-accounting-only与owner-count growth被反证，但hosted allocator/kernel因果未证实。Remote scope已消费撤销；等待另行授权的本地修复 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 

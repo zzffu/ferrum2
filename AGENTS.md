@@ -193,13 +193,15 @@ and command definitions in their authoritative build/config files where possible
 - Active planned changes:
   - M4 — executing — M4-T01 is integrated at exact `7730ec7` with the dedicated
     non-shipping qualification package and the existing workflow's `performance`
-    job. M4-T02's paired-RSS diagnostic is integrated locally at exact `1d3c117`:
-    the existing `VmRSS` gate is unchanged, while the qualification driver records
-    bounded all-six-window `VmRSS` and `smaps_rollup` trajectories. Reviews, Full,
-    budgets, and the complete native-ext4 WSL2 resource diagnostic passed. Local scope
-    `M4-LOCAL-RSS-PAIR-001` is consumed and revoked; M4-T02 is blocked pending a new
-    exact single-use remote authorization. Push, hosted execution, packaging, release,
-    and publication remain separately unauthorized.
+    job. Exact `a53a5d7` run `30710439015/1` passed quality, MSRV, interoperability,
+    all three native-platform jobs, and diagnostic throughput, then failed the
+    unchanged 105% resource gate at RSS window 2. Paired `VmRSS`/`smaps_rollup`
+    evidence shows real anonymous growth, large associated THP growth, and a bounded
+    plateau, consistent with delayed THP backing; stable active/fd/task tuples
+    contradict owner-count growth. Remote scope
+    `M4-REMOTE-a53a5d7-A1` is consumed and revoked. M4-T02 remains blocked pending a
+    separately authorized local repair; no rerun, second push, packaging, release, or
+    publication is authorized.
 
 
 ## Project validation

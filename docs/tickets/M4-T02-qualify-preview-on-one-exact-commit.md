@@ -61,7 +61,7 @@ git status --short
 - RSS diagnostic repair: `7b63bd588e1be600beb417636ed0d37ac3b0fb44`
 - WSL target-backlog repair: `7c19e80f7c7fcb68e3c6b3e562c6d01a379ebf47`
 - Paired-RSS diagnostic: `1d3c117231bf5b99641d02b43b6579359c938644`
-- Hosted diagnostic source: `4468f75ecc055531f554d218fb89b6b079dc432d`
+- Paired hosted diagnostic source: `a53a5d7cf8c2506527d3dfa8f74e64898604154d`
 - Review: Architect `PASS`; QA `PASS`; no findings on the local resource repairs
 - Notes: the probe repair keeps every external probe bounded, assigns a static redacted
   identity and distinct failure class, and raises only the identity/reference/hash
@@ -118,7 +118,7 @@ git status --short
   median `480717482`, and ratio `0.018749857`. Resource passed readiness, established
   exact `10000`, collected all 180 samples with stable active/fd/task tuples, then
   rejected RSS window 2 above 105%. Cleanup succeeded; drain was not reached.
-- Current hosted result: scope `M4-REMOTE-4468f75-A1` was consumed and auto-revoked
+- Fourth hosted result: scope `M4-REMOTE-4468f75-A1` was consumed and auto-revoked
   before one non-force push of exact `4468f75`. GitHub Actions
   [`30704646072`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30704646072)
   completed `failure`: quality, MSRV, TCP/UDP `12/12` interop, and all three native
@@ -150,6 +150,21 @@ git status --short
   hosted qualification. The 189-line, 73224-byte raw JSONL and the failed-start
   directory were deleted after this bounded summary; nothing was committed or uploaded.
   The local scope is consumed and revoked.
+- Paired hosted result: scope `M4-REMOTE-a53a5d7-A1` was consumed and auto-revoked
+  before one non-force push of exact `a53a5d7`. GitHub Actions
+  [`30710439015`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30710439015)
+  passed quality, MSRV, TCP/UDP interop, all three native platforms, and diagnostic
+  throughput. Ferrum2/reference medians were `9651268/476676096` bytes/s with ratio
+  `0.020247015` and signed difference `-97.975298514%`. Resource established exact
+  `10000`, collected all `180` stable
+  active/fd/task samples, then failed the unchanged 105% gate at window 2. Client
+  `VmRSS`/precise `Rss` median-twice trajectories were
+  `[1907184,1907184,2042444,2254648,2444520,2444520]`; server trajectories were
+  `[2217840,2435656,2511632,2511632,2511632,2511632]`. Anonymous trajectories
+  account for all growth, while client/server `AnonHugePages` reached final
+  `2387968/2437120` median-twice KiB and both RSS trajectories plateaued. Performance
+  and final qualification failed closed; always-run cleanup succeeded and drain was
+  not reached.
 
 ## Blocker
 
@@ -164,19 +179,23 @@ git status --short
   `10000` checks. Exact `56aadd4` implements that repair; both reviews and all local
   gates passed, and run `30700273019/1` proceeded through exact 10k load and all 180
   samples.
-- `HOSTED-M4-T02-003`: exact `4468f75` confirms a server-only window-2 RSS rise after
-  all active/fd/task tuples remained stable; client RSS did not move. This rules out
-  growing task/socket/session ownership but does not distinguish a product leak,
-  delayed page residency, a step then plateau, or Linux RSS-accounting behavior. The
-  driver reads `/proc/<pid>/status` `VmRSS`, which Linux documents as asynchronous and
-  potentially imprecise; accurate `smaps_rollup` is available in WSL2, but the exact WSL
-  profile passed and is not a hosted reproduction. Local exact `1d3c117` now supplies
-  the strict parser and bounded all-six paired
-  trajectories without changing the formal gate, and its full WSL2 profile passed with
-  both signals flat. WSL2 cannot classify the hosted-only rise. Scope
-  `M4-LOCAL-RSS-PAIR-001` is consumed and revoked; T02 is blocked pending a new exact
-  single-use remote authorization. No push, rerun, dispatch, PR, release, publication,
-  or other remote mutation is authorized.
+- `HOSTED-M4-T02-003` is resolved: exact `a53a5d7` shows `VmRSS == smaps_rollup Rss`
+  for both binaries in every window, so the hosted failure is not an
+  RSS-accounting-only false positive. RSS minus `Anonymous` stays constant, proving
+  that all growth is anonymous. Large stair-step `AnonHugePages` growth accompanies
+  the RSS rise and both binaries reach a final plateau while active/fd/task tuples stay
+  fixed. A temporary WSL2 `MADV_HUGEPAGE` mapping demonstrated one compatible delayed
+  anonymous RSS/THP mechanism without changing its mapping; it is mechanism evidence,
+  not hosted qualification.
+- `HOSTED-M4-T02-004`: the fixed 5-minute stabilization ends before the observed
+  anonymous/THP-associated RSS reaches its plateau, so the unchanged 30-minute 105%
+  window gate correctly fails at window 2. The paired evidence contradicts
+  owner-count growth and is consistent in scale with the retained protocol and Tokio
+  relay buffers, but it does not establish the hosted allocator/kernel causal path and
+  no product or profile repair is yet authorized. Scope `M4-REMOTE-a53a5d7-A1` is
+  consumed and revoked; T02 is blocked
+  pending a separately authorized local repair. No push, rerun, dispatch, PR, release,
+  publication, or other remote mutation is authorized.
 - `LOCAL-M4-T02-004`: exact `d28ed0a` reproduced `target did not accept 10000
   streams` in two native WSL2 runs. Both product active gauges reached exact `10000`,
   while the qualification driver retained fewer target-side streams and Linux

@@ -38,13 +38,12 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 
 ## Next action
 
-Preserve failed run `30704646072/1` on exact `4468f75`. Local exact `1d3c117` now keeps
-the formal `VmRSS` gate and complete profile unchanged while adding strict bounded
-`smaps_rollup` parsing and all-six paired trajectories. Architect/QA review, Full,
-ticket/milestone budgets, and a native-ext4 WSL2 resource profile all passed. The WSL2
-run completed exact 10k, `180/180` samples, `6/6` identical paired windows, exact drain,
-and zero remaining processes. Its raw JSONL and failed-start directory were summarized
-then deleted; nothing was committed or uploaded. WSL2 is diagnostic and cannot close
-the hosted blocker. Request a new exact single-use remote authorization for the final
-clean integration SHA, then run one non-force push qualification and classify the hosted
-paired trajectories. No rerun or new push is currently authorized.
+Preserve failed run `30710439015/1` on exact `a53a5d7`. Quality, MSRV,
+interoperability, all three native-platform jobs, and diagnostic throughput passed;
+performance failed the unchanged 105% resource gate at window 2 and final
+qualification failed closed. The paired trajectories show exact `VmRSS == Rss`,
+anonymous-only growth, large `AnonHugePages` growth, and a final plateau while all
+active/fd/task tuples remain stable. This rules out the former RSS-accounting-only
+hypothesis and contradicts an owner-count leak. Remote scope `M4-REMOTE-a53a5d7-A1`
+is consumed and revoked. Request a separately authorized local repair decision before
+changing the fixed profile or product; no rerun or new push is currently authorized.

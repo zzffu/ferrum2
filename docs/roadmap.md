@@ -20,11 +20,10 @@ native lifecycle/linkage/hash 和关闭审查证据关闭；local closeout sourc
 docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
 M4-T01已在exact `7730ec7`集成到独立non-shipping tools package；M4-T02 exact
-`4468f75`的run `30704646072/1`通过六项独立gate与throughput，完成10k/180 stable
-samples后server RSS window 2增长`9.4897%`而失败；client RSS不变。Local exact
-`1d3c117`保留原gate并增加all-six及`smaps_rollup`并行轨迹，双审、Full、budgets和
-native-ext4 WSL完整profile通过；本地scope已消费撤销，T02因没有remote授权而
-`blocked`。
+`a53a5d7`的run `30710439015/1`通过六项独立gate与throughput，完成10k/180 stable
+owner samples后在RSS window 2失败。配对轨迹显示`VmRSS == Rss`、增长全为匿名内存、
+`AnonHugePages`大幅阶梯增长且最终平台；这排除单纯异步RSS计账并反对owner-count
+泄漏。单次remote scope已消费撤销，T02等待另行授权的本地修复而`blocked`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -45,10 +44,10 @@ method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
 same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
 完成三目标 native qualification。M4-T01已把non-test driver迁到独立tools
-package并在exact `7730ec7`通过双审与authoritative ticket budget；M4-T02 local
-exact `1d3c117`已加入paired trajectories并通过Full与WSL diagnostic。下一入口是
-取得绑定最终clean integration SHA的单次remote授权，以hosted paired trajectories
-定位根因；旧scope已消费撤销。
+package并在exact `7730ec7`通过双审与authoritative ticket budget；M4-T02 exact
+`a53a5d7`的hosted paired trajectories已证明真实匿名增长、伴随THP增长及最终平台，
+与延迟THP backing一致但未建立hosted allocator/kernel因果。下一入口是先取得本地
+修复授权，收敛不削弱30分钟测量和105%门槛的最小方案；remote scope已消费撤销。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -609,14 +608,12 @@ exact `1d3c117`已加入paired trajectories并通过Full与WSL diagnostic。下�
   - M4-T01：在独立non-shipping `ferrum2-m4-qualification` package内增加唯一
     Cargo-managed、non-default throughput/resource driver与短self-check，并在
     既有workflow增加唯一hosted `performance` job；exact `7730ec7`已`done`；
-  - M4-T02：exact `4468f75` run `30704646072/1`通过quality/MSRV/interop/三平台
-    与throughput，并完成10k及180个stable owner/task samples；window 2的client
-    median-twice保持`1907336` KiB，server由`2182832`增至`2389976` KiB而失败。
-    Exact `7c19e80`已在WSL通过完整资源profile，但WSL仅作diagnostic。Local exact
-    `1d3c117`保留正式`VmRSS` gate并增加fast parser regression及all-six
-    `VmRSS`/`smaps_rollup`轨迹；双审、Full、budgets与native-ext4 WSL2完整resource
-    diagnostic均通过。之后仍须新授权run完成hosted root diagnosis、全部
-    qualification及close summary。
+  - M4-T02：exact `a53a5d7` run `30710439015/1`通过quality/MSRV/interop/三平台
+    与throughput，并完成10k及180个stable owner/task samples；paired RSS在window 2
+    失败。六窗`VmRSS == precise Rss`、增长全为Anonymous，伴随`AnonHugePages`
+    阶梯增长并最终平台，排除RSS-accounting-only并反对owner-count growth，但不证明
+    hosted allocator/kernel因果。Remote scope已消费撤销；之后须另行授权本地修复，
+    再取得新的exact-SHA remote scope完成全部qualification及close summary。
 
   Dependency graph：
 
@@ -635,11 +632,12 @@ exact `1d3c117`已加入paired trajectories并通过Full与WSL diagnostic。下�
   `7c19e80f7c7fcb68e3c6b3e562c6d01a379ebf47`；
   local M4-T02 paired-RSS diagnostic exact
   `1d3c117231bf5b99641d02b43b6579359c938644`；
-  M4 accepted hosted qualification commit尚待T02。
+  paired hosted diagnostic exact `a53a5d7cf8c2506527d3dfa8f74e64898604154d`；
+  M4 accepted hosted qualification commit尚待T02修复后重验。
 - **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
   driver迁到独立tools package解除；authoritative allowance、classifier、baseline
-  和evidence均不变。T02仍必须先取得一次exact integration push/run scope；未授权
-  或provider unavailable为BLOCKED，runner
+  和evidence均不变。T02必须先取得本地修复授权；修复、本地审查和门禁通过后，仍须
+  另行取得一次exact integration push/run scope。未授权或provider unavailable为BLOCKED，runner
   class不足、missing sample或cleanup失败为FAIL。GitHub-hosted image/hardware会
   滚动，因此记录实际profile并在同一VM交错比较；吞吐比不作preview门槛，性能
   压力不得绕过`unsafe` policy、安全或backpressure。
@@ -745,3 +743,4 @@ exact `1d3c117`已加入paired trajectories并通过Full与WSL diagnostic。下�
 | 2026-08-01 | M4 fourth hosted qualification | exact `4468f75` run `30704646072/1`通过quality、MSRV、TCP/UDP `12/12`、三平台及throughput，记录ferrum/reference `9035229/547376332`、difference `-98.349357020%`、ratio `0.016506430`；resource完成10k与180 stable samples后server RSS window 2增长`9.4897%`，client不变 | bounded medians排除client及owner-count增长，但当前`VmRSS`信号不足以区分产品leak、延迟驻留、plateau或Linux异步RSS计账；WSL完整pass不替代hosted | `M4-REMOTE-4468f75-A1` 1/1消费撤销；performance/final qualification failure、cleanup success；无rerun/第二push/release/publication |
 | 2026-08-02 | M4 paired-RSS diagnostic authorization | M4-T02恢复`active`；保留现有`VmRSS` 105% gate，只在non-shipping driver增加strict `smaps_rollup`解析、all-six paired trajectories及self-check RED→GREEN | 配对信号可区分异步计账、一次性驻留与持续增长，不改变10k、时序、drain、product、workflow或正式profile | `M4-LOCAL-RSS-PAIR-001`授权one writer、双审、Full、budgets及完整native ext4 WSL2 resource diagnostic；无push/rerun/dispatch/PR/release/publication |
 | 2026-08-02 | M4 local paired-RSS diagnostic | exact `1d3c117`保留正式`VmRSS` 105% gate并加入64 KiB strict `smaps_rollup` parser、paired samples和all-six bounded trajectories；初版因parser缺少历史RED被QA阻塞，唯一重做以九个public-CLI slices关闭 | native-ext4 WSL 20次1 GiB rollup读取平均/最大`12146/12992` us；完整run `2103.6`秒通过10k、180/180、6/6、drain，六窗VmRSS与precise Rss均为client/server `1908928/1966960` median-twice KiB，THP为0；189行/73224-byte raw JSONL及failed-start目录摘要后删除，未commit/upload | Architect `PASS_WITH_NOTES`、QA `PASS`；Full `6/6`、ticket/milestone budget `PASS_ADVANCE`；scope消费撤销，T02 remote-blocked；无push/rerun/dispatch/PR/release/publication |
+| 2026-08-02 | M4 paired-RSS hosted qualification | exact `a53a5d7` run `30710439015/1`通过quality、MSRV、interop、三平台和throughput，记录ferrum/reference `9651268/476676096`、ratio `0.020247015`、difference `-97.975298514%`；resource完成10k与180 stable owner samples后window 2失败 | 六窗`VmRSS`与precise `Rss`逐项相等，增长全为Anonymous；client/server `AnonHugePages`最终达到`2387968/2437120` median-twice KiB并与RSS最终平台同步，排除RSS-accounting-only并反对owner-count growth；hosted allocator/kernel因果仍未证实 | `M4-REMOTE-a53a5d7-A1` 1/1消费撤销；performance/final qualification failure、cleanup success；等待另行授权的本地修复，无rerun/第二push/release/publication |
