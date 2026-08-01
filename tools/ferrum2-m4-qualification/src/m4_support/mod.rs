@@ -1014,7 +1014,14 @@ fn validate_samples(
         if u128::from(client) * 100 > u128::from(first_client) * 105
             || u128::from(server) * 100 > u128::from(first_server) * 105
         {
-            return Err(format!("RSS window {} exceeds 105 percent", index + 1));
+            return Err(format!(
+                "RSS window {} exceeds 105 percent: \
+                 client_first_median_twice_kib={first_client} \
+                 client_current_median_twice_kib={client} \
+                 server_first_median_twice_kib={first_server} \
+                 server_current_median_twice_kib={server}",
+                index + 1
+            ));
         }
         verdicts.push(RssVerdict {
             window: index + 1,
@@ -1140,7 +1147,18 @@ ferrum2_tcp_replay_entries 0\n\
     let mut rss = samples.clone();
     rss[10].client.rss_kib = 106;
     rss[11].client.rss_kib = 106;
-    expect_rejected("RSS regression", || validate_samples(&rss, 12, 2, 4))?;
+    let rss_error = match validate_samples(&rss, 12, 2, 4) {
+        Ok(_) => return Err("self-check mutation survived: RSS regression".to_owned()),
+        Err(error) => error,
+    };
+    let expected_rss_error = "RSS window 6 exceeds 105 percent: \
+                              client_first_median_twice_kib=200 \
+                              client_current_median_twice_kib=212 \
+                              server_first_median_twice_kib=200 \
+                              server_current_median_twice_kib=200";
+    if rss_error != expected_rss_error {
+        return Err(format!("RSS diagnostic mismatch: {rss_error}"));
+    }
     let baseline = PairSample {
         client: ProcessSample {
             active: 0,
