@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: blocked
+status: active
 depends_on: [M4-T01]
 owns:
   - tools/ferrum2-m4-qualification/src/m4_support/mod.rs
@@ -115,5 +115,7 @@ git status --short
   but the failure text omits which binary and both first/current medians, so the run
   cannot separate scrape-induced allocation, an early baseline, actual idle growth, or
   runner RSS noise. Preserve the threshold and profile; add a bounded redacted failure
-  diagnostic before further root-cause testing. No rerun, second push, dispatch, PR,
-  release, publication, or other remote mutation is currently authorized.
+  diagnostic before further root-cause testing. Local scope
+  `M4-LOCAL-RSS-DIAG-001` is consumed and revoked for that one-file TDD repair,
+  self-check, reviews, Full, and budget only. No rerun, second push, dispatch, PR,
+  release, publication, or other remote mutation is authorized.

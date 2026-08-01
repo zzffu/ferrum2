@@ -21,7 +21,7 @@ docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
 M4-T01已在exact `7730ec7`集成到独立non-shipping tools package；M4-T02 exact
 `2f4190c`的run `30700273019/1`通过六项独立gate与throughput，但RSS window 2
-超过105%，当前因`HOSTED-M4-T02-003`诊断证据不足而`blocked`。
+超过105%；`M4-LOCAL-RSS-DIAG-001`已消费撤销，T02现为bounded本地诊断`active`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -728,3 +728,4 @@ package并在exact `7730ec7`通过双审与authoritative ticket budget；下一�
 | 2026-08-01 | M4 second hosted qualification | exact `57d317d` run `30698815475/1`通过quality、MSRV、interop、三平台与throughput，记录ferrum/reference `7977915/478773248`、ratio `0.016663243`；resource在pre-load以`metrics readiness timed out`失败，final failure | driver在创建首个flow前要求active series，但Prometheus labelled family只在首个flow时实例化；WSL2 exact resource `2/2`复现，独立scrape证明HTTP/OpenMetrics有效而series缺失 | `M4-REMOTE-57d317d-A1` 1/1消费撤销；cleanup success；`HOSTED-M4-T02-001` resolved、`HOSTED-M4-T02-002` active；无rerun/第二push/release/publication |
 | 2026-08-01 | M4 local resource-readiness repair | exact `56aadd4`只在HTTP 200、唯一终止`# EOF`及稳定eager replay identity/sample完整时把缺失lazy active series解释为zero；其余状态、重复/畸形/未知exposition仍fail closed，post-load exact `10000`不变 | exact `57d317d` WSL resource `2/2`失败及独立scrape定位lazy family circular wait；修复后同path通过25秒readiness观察并cleanup | Architect/QA `PASS`；self-check `mutations=11`；Full `6/6`；code/tests/ratio `13879/20740/1.494344`；等待新的单次exact-SHA remote授权 |
 | 2026-08-01 | M4 third hosted qualification | exact `2f4190c` run `30700273019/1`通过quality、MSRV、TCP/UDP `12/12`、三平台及throughput，记录ferrum/reference `9013384/480717482`、ratio `0.018749857`；resource完成readiness、10k与180 samples后以RSS window 2超过105%失败 | validate顺序证明全部active/fd/task tuples稳定；runner-temp raw samples按合同删除，但error未保留binary与first/current medians，无法区分测量扰动、早期baseline、真实增长或runner噪声 | `M4-REMOTE-2f4190c-A1` 1/1消费撤销；cleanup success；`HOSTED-M4-T02-002` resolved、`HOSTED-M4-T02-003` blocked；无rerun/第二push/release/publication |
+| 2026-08-01 | M4 RSS diagnostic authorization | M4-T02从`blocked`恢复为`active`，只允许资格driver单文件为RSS threshold failure增加bounded client/server first/current medians及exact self-check | 现有error丢弃已计算数值，无法从已删除raw evidence定位真实根因；105%门限、profile、product和remote边界不变 | `M4-LOCAL-RSS-DIAG-001`消费撤销；允许TDD、双审、Full、budget；不授权push/rerun/dispatch/release/publication |

@@ -58,8 +58,9 @@
   correctly deleted, while the bounded error omits which binary and both first/current
   medians; this run therefore cannot distinguish measurement-induced allocation, an
   early baseline, actual idle growth, or runner RSS noise. Preserve the 105% gate and
-  add only bounded redacted failure values before another hosted request. No new remote
-  action is authorized.
+  add only bounded redacted failure values before another hosted request. Local scope
+  `M4-LOCAL-RSS-DIAG-001` is consumed and revoked for that one-file repair and local
+  gates; no new remote action is authorized.
 
 ## 当前 M3 closed 状态
 
