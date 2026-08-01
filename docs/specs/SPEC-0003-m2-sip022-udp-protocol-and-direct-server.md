@@ -32,7 +32,7 @@ bounded ferrum2 SIP022 UDP client protocol API
   chaining、management API、hot reload；
 - SIP023、多用户、多PSK product behavior、method negotiation/fallback；
 - ChaCha12/ChaCha8 或其他reduced-round methods；
-- M3 native packaging/full lifecycle/soak 和 M4 benchmark/performance claim；
+- M3 native packaging/full lifecycle/soak 和 M4 benchmark baseline/resource gate；
 - push、hosted run/rerun、PR、tag、release或publish；这些另需明确授权。
 
 ## Public protocol behavior

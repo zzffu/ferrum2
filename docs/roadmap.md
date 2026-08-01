@@ -541,7 +541,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
   写成实现依赖，避免late-repair deadlock。
 - **Deferred/out of scope:** multi-inbound/outbound、routing、DNS、Linux
   transparent inbound、Windows TUN、public UDP inbound、SIP023/multi-user、
-  hot reload、management API；M4 performance/RSS/tasks/10k idle/long soak；
+  hot reload、management API；M4 performance baseline和bounded 10k-idle
+  resource qualification；
   archive/installer/signing/upload/publication。
 - **Integrated commit:** wave 1 `da8fa58e0f50dda1637e3a2b205e6f34332a5bec`
   integrates M3-T01～T03；exact `ed615cbcd373d882eaa236ee4556d20eb4e16e48`
@@ -563,25 +564,33 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
   mutation；durable roadmap/context/handoff state is now `closed`。Close Product
   Manager/Architect/QA verdicts are `PASS_WITH_NOTES`、`PASS_WITH_NOTES`、
   `PASS` with no blocker/major；`ARCH-M3-CLOSE-N01` was a mechanically corrected
-  SHA transcription note。M4 performance/RSS/tasks/10k-idle/soak and
+  SHA transcription note。M4 performance baseline/bounded 10k-idle resource
+  qualification and
   packaging/signing/publication remain deferred by scope。
 
-## M4 — 性能、资源与 v0 资格确认
+## M4 — 性能基线、资源与 v0 preview 资格确认
 
 - **Status:** proposed
-- **Objective:** 在功能和平台 contract 冻结后建立可复现基线，并证明同一
-  integrated commit 满足全部 v0 release gates；本里程碑不执行发布。
-- **Entry conditions:** M3 closed；benchmark hardware、toolchain、reference
-  version/config、load profile、warm-up/repetitions/statistics 和 resource
-  stability threshold 已在 spec/test plan 中固定。
+- **Objective:** 在功能和平台 contract 冻结后建立可复现性能基线，并证明同一
+  integrated commit 满足全部 v0 preview gates；本里程碑不执行发布。
+- **Entry conditions:** M3 closed；唯一 Linux x86_64 glibc performance host 的
+  hardware/kernel、toolchain/C backend、reference version/config、load profile、
+  warm-up/repetitions/statistics 已在 spec/test plan 中固定。
 - **Exit criteria:**
-  1. 同机可比配置下，ferrum2 loopback aggregate TCP throughput 至少为
-     shadowsocks-rust 基线的 90%，原始结果和复现说明被保存为不提交仓库的
-     generated artifact。
-  2. 10,000 idle TCP sessions 在预先约定的 soak/采样窗口内，task count
-     和 memory 不持续增长并满足预定稳定阈值。
+  1. 同机可比配置下，记录 ferrum2 与 shadowsocks-rust 的 loopback aggregate
+     TCP throughput、比值和差距；不设阻塞 v0 preview 的最低比值。原始结果和
+     复现说明保存为不提交仓库的 generated artifact。
+  2. 唯一固定的 Linux x86_64 glibc performance host 使用 release client/server
+     建立并保持 10,000 个 end-to-end idle TCP sessions；稳定 5 分钟后每 10 秒
+     采样一次 active owner/task snapshot 与两个进程的 RSS，共观察 30 分钟。
+     每次 active-owner sample 必须与首个稳定 sample 相同；六个 5 分钟 RSS
+     窗口中，每个 binary 的各窗口中位数不得超过首窗口中位数的 105%。关闭全部
+     sessions 后 2 分钟内 active owners 必须精确回到加载前、进程仍存活的
+     baseline。这是唯一 required resource qualification；不另跑 24 小时、
+     多平台或开放时长的 long soak。
   3. 全部 24 个 required interop cases、security/resource suite、三目标
-     build/artifact smoke 和 `workflow.toml` full gate 在同一 commit 通过。
+     build/artifact smoke，以及 `docs/agents/milestone-workflow.md` 的全部
+     Full validation 命令在同一 integrated commit 通过。
   4. v0 未决 P0/P1 blocker 为零；已知 debt、deferred scope 和 evidence
      可供 `mode: close` 审核及 handoff。
 - **In-scope tickets:** none yet；由 M4 `plan` 创建。
@@ -590,8 +599,9 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
   proxy chaining、Linux transparent inbound、Windows TUN、hot reload、
   management API、reduced-round ChaCha、custom executor 和 `io_uring`。
 - **Integrated commit:** not yet
-- **Open blockers and risks:** benchmark 等价性、runner 噪声、稳定阈值和
-  结果归档尚未决；性能压力不得绕过 `unsafe` policy、安全或 backpressure。
+- **Open blockers and risks:** exact performance-host identity、benchmark 等价性、
+  runner 噪声和结果归档尚未决；吞吐差距只记录为后续优化输入，性能压力不得
+  绕过 `unsafe` policy、安全或 backpressure。
 
 ## 决策登记
 
@@ -606,7 +616,7 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | DEC-007 | resolved in M0 plan | sing-box 1.13.14、shadowsocks-rust 1.24.0、asset hashes、unavailable=FAIL/BLOCK、three exact targets | `ADR-0006`、upstream baseline |
 | DEC-008 | resolved in M2 plan | bounded UDP protocol API；8,129-value window；client current+old；session 4,096、16 MiB allocated bytes、depth-4 queues、65,507 wire、300s idle；expired-oldest-or-reject eviction | `ADR-0020`～`ADR-0022`、SPEC/TEST-0003 |
 | DEC-009 | resolved in M3 plan | 保留M0 fixed triples/provider；M3增加native release-artifact config/lifecycle/linkage/hash，不要求archive/installer/publication format | `ADR-0006`、`SPEC/TEST-0004`、M3-T05 |
-| DEC-010 | open；M4 plan | benchmark hardware/config/statistics 与 10k-idle stability threshold | M0 不设性能声明 |
+| DEC-010 | partial；M4 plan | v0 preview只要求记录可复现吞吐基线与比值，不设最低吞吐门；resource gate合并为单个Linux glibc host上的5分钟稳定+30分钟10k-idle observation，10秒采样、active-owner恒定、RSS窗口中位数≤首窗口105%、2分钟owner drain；exact host/config/statistics仍待固定 | 用户确认preview与bounded-soak边界；M0不设性能声明 |
 | DEC-011 | resolved in M0 CI amendment | GitHub Actions required provider；`.github/workflows/m0.yml`；fixed hosted runners/jobs/security/evidence；本机 WSL2仅作诊断 | `ADR-0007`、`SPEC-0001`、`TEST-0001`、M0-T08 |
 | DEC-012 | resolved in M0 narrow amendment | fixed `aes 0.9.1`/`ghash 0.6.0` no-default `zeroize` direct feature anchors，使 `aes`/`ghash`/`polyval` keyed state drop-zeroize；exact resolved feature/package-ID 与 110-tuple lock identity evidence；无版本/wire/API/scope变化 | `ADR-0009`、`ADR-0002`、M0-T01/M0-T02 |
 | DEC-013 | resolved in M0 narrow amendment | opaque unsplit SIP022 flow、configured-server/application-target separation、core `Session.initial_payload` ownership、executor-neutral polling、direction-local normal close、single fatal arbitration与binary-local Tokio adapters；无wire/product/core/runtime/manifest变化 | `ADR-0010`、`SPEC-0001`、`TEST-0001`、M0-T03/M0-T07 |
@@ -637,7 +647,7 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | AEAD expanded key/GHASH state 未启用上游 drop-zeroize | P0 | M0 | ADR-0009 exact feature anchors、metadata/package-ID/lock-identity policy、Cargo tree、T01/T02与integration双 gate |
 | 认证前 connect/allocate/mutate | P0 | M0 | explicit connector/allocation/state test seams |
 | secret 泄漏、destination 成为 metric label 或 cardinality 爆炸 | P0 | M0 | secret types、redaction tests、fixed labels |
-| task/session leak、unbounded queue 或错误 half-close | P0 | M0 | owner/termination contract、bounded lifecycle tests；long soak留M4 |
+| task/session leak、unbounded queue 或错误 half-close | P0 | M0 | owner/termination contract、bounded lifecycle tests；单主机bounded 10k-idle qualification留M4 |
 | 外部实现/fixture/version/license 漂移 | P1 | M0 | pin/checksum/provenance 和 required-job policy |
 | musl/Windows 差异发现过晚 | P1 | M0 | early build smoke，M3 full qualification |
 | GitHub-hosted image weekly drift 或 provider outage | P1 | M0 | fixed OS labels、ImageOS/ImageVersion与toolchain版本用于追溯、unavailable=FAIL/BLOCK；不把Included Software URL形状当控制，也不宣称M3资格 |

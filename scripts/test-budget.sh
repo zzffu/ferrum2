@@ -336,6 +336,78 @@ range_control_changed() {
   done
 }
 
+only_control_and_docs() {
+  allowed_saw_control=false
+  while IFS= read -r allowed_path; do
+    [ -n "$allowed_path" ] || continue
+    if control_paths "$allowed_path"; then
+      allowed_saw_control=true
+    else
+      case "$allowed_path" in
+        *.md) ;;
+        *) return 1 ;;
+      esac
+    fi
+  done
+  [ "$allowed_saw_control" = true ]
+}
+
+validate_staged_control() {
+  validation_controls=$(staged_control_changed)
+  [ -n "$validation_controls" ] || return 0
+  printf '%s\n' "$validation_controls" | grep -Fqx "$BASELINE_FILE" \
+    && blocked ratchet_commit_not_baseline_only
+  git rev-parse --verify -q MERGE_HEAD >/dev/null 2>&1 \
+    && blocked control_commit_must_be_single_parent
+  validation_paths=$(git diff --cached --name-only)
+  printf '%s\n' "$validation_paths" | only_control_and_docs \
+    || blocked control_plane_changed
+  printf 'test_budget control=PASS mode=ticket-staged\n'
+}
+
+path_blob_at() {
+  git rev-parse --verify "$1:$2" 2>/dev/null || printf '%s\n' missing
+}
+
+merge_inherits_control_paths() {
+  validation_merge=$1
+  set -- $(git rev-list --parents -n 1 "$validation_merge")
+  shift
+  for validation_path in scripts/test-budget.sh ci/test-budget-baseline.txt \
+    .githooks/pre-commit .github/workflows/m0.yml .gitattributes; do
+    validation_blob=$(path_blob_at "$validation_merge" "$validation_path")
+    validation_inherited=false
+    for validation_parent in "$@"; do
+      if [ "$validation_blob" = "$(path_blob_at "$validation_parent" "$validation_path")" ]; then
+        validation_inherited=true
+        break
+      fi
+    done
+    [ "$validation_inherited" = true ] || return 1
+  done
+}
+
+validate_control_range() {
+  validation_base=$1
+  validation_candidate=$2
+  for validation_commit in $(git rev-list --reverse --ancestry-path \
+    "$validation_base..$validation_candidate"); do
+    validation_parent_count=$(count_parents "$validation_commit")
+    if [ "$validation_parent_count" -ne 1 ]; then
+      merge_inherits_control_paths "$validation_commit" \
+        || blocked control_merge_resolution
+      continue
+    fi
+    validation_parent=$(first_parent "$validation_commit")
+    validation_controls=$(range_control_changed "$validation_parent" "$validation_commit")
+    [ -n "$validation_controls" ] || continue
+    validation_paths=$(git diff --name-only "$validation_parent" "$validation_commit")
+    printf '%s\n' "$validation_paths" | only_control_and_docs \
+      || blocked control_plane_changed
+    printf 'test_budget control=PASS mode=commit commit=%s\n' "$validation_commit"
+  done
+}
+
 baseline_from_commit() {
   commit=$1
   dest=$2
@@ -348,6 +420,10 @@ baseline_exists_at() {
 
 rust_changed() {
   git diff --name-only "$1" "$2" -- '*.rs' | grep -q .
+}
+
+range_rust_changed() {
+  git log --format= --name-only "$1..$2" -- '*.rs' | grep -q .
 }
 
 only_path_changed() {
@@ -405,6 +481,24 @@ content_parent() {
   done
   [ -n "$match" ] || error content_parent_not_found
   printf '%s\n' "$match"
+}
+
+find_adoption_commit() {
+  adoption_base=$1
+  adoption_candidate=$2
+  adoption_source=$3
+  adoption_match=
+  for adoption_item in $(git rev-list --reverse --ancestry-path \
+    "$adoption_base..$adoption_candidate"); do
+    [ "$(count_parents "$adoption_item")" -eq 1 ] || continue
+    [ "$(first_parent "$adoption_item")" = "$adoption_source" ] || continue
+    baseline_exists_at "$adoption_item" || continue
+    baseline_exists_at "$adoption_source" && continue
+    [ -z "$adoption_match" ] || error ambiguous_adoption_commit
+    adoption_match=$adoption_item
+  done
+  [ -n "$adoption_match" ] || blocked adoption_commit_not_found
+  printf '%s\n' "$adoption_match"
 }
 
 require_only_baseline_dirty() {
@@ -529,15 +623,13 @@ case "$command" in
     base_tests=$count_tests
 
     if $staged || [ -z "$candidate" ]; then
-      changed=$(staged_control_changed)
-      [ -z "$changed" ] || blocked control_plane_changed
+      validate_staged_control
       count_staged
       mode=ticket-staged
     else
       candidate=$(resolve_commit "$candidate")
       git merge-base --is-ancestor "$base" "$candidate" 2>/dev/null || error ticket_base_not_ancestor
-      changed=$(range_control_changed "$base" "$candidate")
-      [ -z "$changed" ] || blocked control_plane_changed
+      validate_control_range "$base" "$candidate"
       count_object "$candidate" ticket_candidate
       mode=ticket-commit
     fi
@@ -647,33 +739,31 @@ case "$command" in
       baseline_changed_in_range=true
     fi
 
-    # Initial adoption: one non-Rust migration commit whose baseline points at
-    # its parent. For a pull request merge SHA, locate that migration commit by
-    # the baseline blob inherited by the merge tree.
+    # Initial adoption may be an intermediate commit in a push range. Its
+    # baseline still points at its exact non-Rust parent; later Rust commits are
+    # measured normally against that accepted anchor.
     if ! baseline_exists_at "$base"; then
-      if [ "$parent_count" -eq 1 ]; then
-        adoption_commit=$candidate
-      else
-        adoption_commit=$(content_parent "$candidate" "$BASELINE_FILE")
-      fi
+      git merge-base --is-ancestor "$base" "$b_commit" 2>/dev/null \
+        || blocked adoption_source_outside_range
+      adoption_commit=$(find_adoption_commit "$base" "$candidate" "$b_commit")
       [ "$(count_parents "$adoption_commit")" -eq 1 ] \
         || blocked adoption_commit_must_be_single_parent
       adoption_source=$(first_parent "$adoption_commit")
-      [ "$adoption_source" = "$base" ] || blocked adoption_parent_mismatch
       [ "$b_commit" = "$adoption_source" ] || blocked adoption_baseline_mismatch
-      if rust_changed "$adoption_source" "$adoption_commit"; then blocked adoption_changes_rust; fi
+      if range_rust_changed "$base" "$adoption_commit"; then blocked adoption_changes_rust; fi
+      validate_control_range "$adoption_commit" "$candidate"
       verify_baseline "$candidate"
       count_object "$candidate" adoption_candidate
       candidate_code=$count_code
       candidate_tests=$count_tests
       candidate_examples=$count_examples
-      [ "$candidate_code" -eq "$b_code" ] || blocked adoption_code_changed
-      [ "$candidate_tests" -eq "$b_tests" ] || blocked adoption_tests_changed
-      printf 'test_budget status=PASS_ADOPT mode=ci commit=%s code=%s tests=%s examples=%s ratio=%s\n' \
-        "$candidate" "$candidate_code" "$candidate_tests" "$candidate_examples" \
-        "$(ratio "$candidate_tests" "$candidate_code")"
+      printf 'test_budget adoption=PASS mode=ci commit=%s source=%s\n' \
+        "$adoption_commit" "$adoption_source"
+      compare_budget ci-adopt "$b_code" "$b_tests" "$candidate_code" "$candidate_tests"
       exit 0
     fi
+
+    validate_control_range "$base" "$candidate"
 
     # Ratchet commits are baseline-only and point to their exact parent. For a
     # pull request merge SHA, inspect the parent that supplied the new baseline.
@@ -714,9 +804,6 @@ case "$command" in
         "$candidate" "$closeout_commit" "$b_commit"
       exit 0
     fi
-
-    changed=$(range_control_changed "$base" "$candidate")
-    [ -z "$changed" ] || blocked control_plane_changed
 
     git merge-base --is-ancestor "$b_commit" "$base" 2>/dev/null \
       || error ci_base_before_baseline

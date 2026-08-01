@@ -25,6 +25,9 @@ and command definitions in their authoritative build/config files where possible
   - Both client and server use typed TOML configuration, structured `tracing`
     logs, and bounded-cardinality Prometheus metrics. Each binary must be able
     to validate configuration without starting listeners.
+  - V0 is a preview, not a performance-certified production release. M4 records
+    a reproducible comparison baseline, but no minimum throughput ratio blocks
+    the preview.
   - M3 establishes the accepted `schema_version = 1` operator surface plus its
     CLI, diagnostic, trace, and metric identities as compatibility contracts.
     The current client and server release binaries are qualified on Windows
@@ -147,9 +150,12 @@ and command definitions in their authoritative build/config files where possible
     servers, and their clients against ferrum2 server. UDP coverage may use the
     protocol API until a public UDP inbound exists.
   - Establish reproducible, pinned benchmark configurations before making
-    performance claims. The initial target is at least 90% of the comparable
-    shadowsocks-rust loopback aggregate TCP throughput on the same host, plus
-    stable task and memory usage with 10,000 idle TCP sessions.
+    performance claims. M4 must record ferrum2 and comparable shadowsocks-rust
+    loopback aggregate TCP throughput on the same host plus their ratio; the
+    measured ratio is diagnostic and does not block the v0 preview. Stable task
+    and memory usage with 10,000 idle TCP sessions remains required under M4's
+    single-host bounded qualification; no separate long or all-platform soak is
+    required.
 
 - Generated files:
   - Cargo build output under `target/`, coverage/profiling output, benchmark

@@ -26,7 +26,8 @@ M3-T04 在唯一 full/repair/targeted review lifecycle 后保持 `deferred`；
 M3-T06 导入其未集成产品 lineage，修复 terminal UDP circular wait 与 forced-root
 bound，并通过 fresh bounded reviews。因此 T04 的诚实 deferral 不留下未交付的
 M3 lifecycle outcome。当前 `done=7`、`deferred=1`、active phases/open roots
-均为空；性能、RSS/task、10,000 idle sessions 和 long soak 仍属于 proposed M4。
+均为空；性能基线与单主机bounded 10k-idle resource qualification仍属于
+proposed M4。
 
 ## Planning 证据基线（历史）
 
@@ -101,7 +102,8 @@ QA 在 planning baseline 上运行：
   UDP inbound；
 - SIP023/multi-user、多PSK product behavior、hot reload、management API；
 - schema v2或actual IPv6 operator endpoint widening（只保留兼容路径）；
-- M4 throughput ≥90%、RSS/task thresholds、10,000 idle sessions、long soak；
+- M4 可复现 throughput 基线（比值非 preview 硬门）与单主机bounded 10k-idle
+  resource qualification；
 - archives、installers、signing、upload或publication。
 
 ## 风险与控制点

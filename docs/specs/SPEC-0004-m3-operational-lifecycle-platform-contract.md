@@ -20,8 +20,8 @@ M3 使当前 v0 产品可稳定运维和资格复现：
 
 M3 明确不实现 multi-inbound/outbound、routing、DNS proxy/resolver、Linux
 transparent inbound、Windows TUN、SOCKS5 UDP ASSOCIATE、SIP023/multi-user、
-hot reload、management API、archives/installers/publication。M4 才拥有 throughput、
-RSS/task stability、10,000 idle sessions 和 long soak。
+hot reload、management API、archives/installers/publication。M4 才拥有 throughput
+baseline和单主机bounded 10,000-idle resource qualification。
 
 ## User/operator-visible behavior
 
@@ -197,7 +197,8 @@ optional metrics and OS signal with MUST-06/07。A deterministic local process m
 executes at least 100 bounded startup/failure/shutdown/restart cycles per binary path,
 including partial bind/metrics failure、root fatal、TCP half-close、UDP enabled/disabled、
 graceful and forced shutdown。Each cycle proves termination and immediate rebind with
-no product owner growth；it is bounded lifecycle evidence, not M4 long soak。
+no product owner growth；it is bounded lifecycle evidence, not M4's bounded
+10,000-idle resource qualification。
 
 ### M3-MUST-09 — three-target native release qualification
 

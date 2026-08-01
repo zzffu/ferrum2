@@ -1,4 +1,4 @@
-# ferrum2 v0 产品愿景
+# ferrum2 v0 preview 产品愿景
 
 ## 问题与目标用户
 
@@ -27,9 +27,10 @@ v0 只有在以下结果都有直接证据时才算完成：
    Prometheus 兼容指标。
 5. Linux x86_64 glibc、Linux x86_64 musl 和 Windows 的 locked
    构建及约定的 artifact smoke test 均通过。
-6. 在固定、同机、可复现的配置下，loopback aggregate TCP throughput
-   至少达到可比 shadowsocks-rust 基线的 90%；10,000 个空闲 TCP
-   session 的任务数与内存不存在持续增长。
+6. 在固定、同机、可复现的配置下记录 ferrum2 与可比 shadowsocks-rust 的
+   loopback aggregate TCP throughput、比值和差距；该比值不阻塞 v0 preview。
+   10,000 个空闲 TCP session 通过 M4 定义的单主机、有界资源资格；不另设
+   多平台或开放时长的 long soak。
 7. 安全、重放防护、边界检查、背压、取消、半关闭和优雅关闭的负向测试通过；
    skipped 或缺失的 required gate 不算通过。
 
@@ -103,8 +104,8 @@ operator endpoint、两个 binary roots 和 workspace member 数量是现状而�
   runtime implementation。
 - crypto crate 不拥有 socket 或 policy；protocol crate 不拥有 routing policy、
   process-global runtime state 或 CLI concerns。
-- host-local quick/full 命令以 `workflow.toml` 为准；外部互操作、target matrix、
-  security 和 performance gates 是其补充而不是替代。
+- host-local quick/full 命令以 `docs/agents/milestone-workflow.md` 为准；外部
+  互操作、target matrix、security 和 performance gates 是其补充而不是替代。
 - 许可证为 `GPL-3.0-only`；examples、tests 和 fixtures 只能使用明确的 synthetic
   secrets。
 - M0 规划前仓库基线
@@ -120,7 +121,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是现状而�
 | M1 | 三种方法的完整 TCP 行为和完整 TCP 互操作矩阵 | closed |
 | M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | closed |
 | M3 | 稳定运维契约、生命周期证明和三目标平台资格 | closed |
-| M4 | 可复现性能/资源门与 v0 integrated qualification | proposed |
+| M4 | 可复现性能基线、资源门与 v0 preview integrated qualification | proposed |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、

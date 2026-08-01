@@ -68,6 +68,14 @@ The hook counts the staged Git tree. A non-zero result is `BLOCKED`; do not use
 `--no-verify`. `PASS_HOLD` permits a bounded test-only fix, code deletion, or small
 refactor but does not permit a baseline advance.
 
+A control-plane repair must be a single-parent commit containing only the protected
+control paths named by `scripts/test-budget.sh` and Markdown evidence. Rust or another
+implementation/configuration file cannot share that commit. CI validates every control
+commit in the complete event range and rejects merge-only control resolutions. During
+initial adoption the baseline commit may appear inside a multi-commit range: its exact
+source and non-Rust migration prefix are verified first, then the final candidate runs
+the normal allowance and ratio comparison. None of these rules is a budget waiver.
+
 The primary thread independently checks exact commits:
 
 ```sh

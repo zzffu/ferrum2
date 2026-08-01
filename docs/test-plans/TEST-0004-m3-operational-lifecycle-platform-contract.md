@@ -294,5 +294,6 @@ Accepted gaps/debt：
 - 兼容窗口的时间与 release-count 条件是后续 release obligation；M3 只证明
   policy/cohort guard。
 - QA-M3-PLAN-N01～N06 是 planning constraints，不是额外 test layers。
-- M4 throughput、RSS/tasks、10k idle 和 long soak；future topology features；
+- M4 throughput baseline和单主机bounded 10k-idle resource qualification；
+  future topology features；
   archives/installers/publication 均不属于 M3。

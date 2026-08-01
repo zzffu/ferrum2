@@ -33,7 +33,7 @@ SOCKS5 no-auth CONNECT: IPv4 | IPv6 | ASCII domain
   management API、hot reload；
 - configured listener 或 configured Shadowsocks server endpoint 的 IPv6/domain；
 - M3 最终 native packaging/lifecycle qualification；
-- M4 benchmark、90% throughput claim 或 10,000-idle gate；
+- M4 可复现 throughput baseline 或 10,000-idle gate；
 - push、PR、rerun、tag、release 或 artifact publication；hosted run 另需授权。
 
 ## User/operator-visible behavior

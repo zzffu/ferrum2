@@ -24,3 +24,19 @@ _Avoid_: Waiver, skip, test relaxation
 The non-normative spelling or platform plumbing of an approved conformance profile,
 such as line-ending handling, exact test selection, or linker discovery.
 _Avoid_: Product contract, architectural decision
+
+**v0 preview**:
+The first externally evaluable v0 artifact. Protocol correctness, security, resource
+stability, interoperability, and platform qualification remain blocking, but no
+minimum throughput ratio or production-readiness claim is implied.
+_Avoid_: Production release, performance-certified release
+
+**Performance baseline**:
+A reproducible ferrum2/reference measurement and comparison ratio recorded for
+diagnosis and later optimization; its value does not block the v0 preview.
+_Avoid_: Performance gate, performance guarantee
+
+**Bounded 10k-idle qualification**:
+The single M4 preview resource gate for owner, task, and RSS stability while 10,000
+TCP sessions remain established on the pinned performance host.
+_Avoid_: Long soak, all-platform soak, open-ended soak
