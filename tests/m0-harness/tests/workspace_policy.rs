@@ -1586,3 +1586,117 @@ fn harness_has_no_concrete_ferrum2_cargo_dependency() {
         "the black-box harness must not link a concrete ferrum2 package"
     );
 }
+
+#[test]
+fn m4_thp_profile_is_applied_and_restored_around_resource_qualification() {
+    let workflow =
+        fs::read_to_string(workspace_root().join(".github/workflows/m0.yml")).expect("M4 workflow");
+    let workflow = normalize_line_endings(&workflow).expect("M4 workflow line endings");
+    let main_start = workflow
+        .find("      - name: Run M4 throughput and resource qualification\n")
+        .expect("M4 performance main step");
+    let cleanup_start = workflow[main_start..]
+        .find("      - name: Reap M4 processes and delete generated evidence\n")
+        .map(|offset| main_start + offset)
+        .expect("M4 performance cleanup step");
+    let cleanup_end = workflow[cleanup_start..]
+        .find("\n  qualification:\n")
+        .map(|offset| cleanup_start + offset)
+        .expect("M4 qualification job");
+    let main = &workflow[main_start..cleanup_start];
+    let cleanup = &workflow[cleanup_start..cleanup_end];
+
+    let mut offset = 0;
+    for marker in [
+        "grep -Eq '^-?[0-9]+\\.[0-9]{9}$' <<<\"$signed_difference\"",
+        "thp_knob=/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none",
+        "thp_original_file=\"$work/thp-max-ptes-none.original\"",
+        "restore_thp() {",
+        "finish_thp() {",
+        "thp_original=\"$(cat \"$thp_knob\")\"",
+        "grep -Eq '^(0|[1-9][0-9]*)$' <<<\"$thp_original\"",
+        "printf '%s\\n' \"$thp_original\" >\"$thp_original_file\"",
+        "trap 'finish_thp \"$?\"' EXIT",
+        "trap 'finish_thp 143' TERM",
+        "printf '0\\n' | sudo -n tee \"$thp_knob\" >/dev/null",
+        "test \"$(cat \"$thp_knob\")\" = 0",
+        "printf '%s\\n' 'm4_thp_profile status=APPLIED max_ptes_none=0'",
+        "resource_output=\"$(target/release/m4-qualification resource \\",
+        "test \"$resource_output\" = \"$expected_resource\"",
+        "restore_thp",
+        "trap - EXIT TERM",
+        "printf '%s\\n' 'm4_thp_profile status=RESTORED readback=PASS'",
+        "printf 'm4_performance_completion status=PASS ",
+    ] {
+        let relative = main[offset..]
+            .find(marker)
+            .unwrap_or_else(|| panic!("M4 main step missing ordered marker: {marker}"));
+        offset += relative + marker.len();
+    }
+    let restore_start = main.find("restore_thp() {").expect("M4 restore function");
+    let finish_start = main.find("finish_thp() {").expect("M4 finish function");
+    let original_start = main
+        .find("thp_original=\"$(cat \"$thp_knob\")\"")
+        .expect("M4 original profile read");
+    let restore = &main[restore_start..finish_start];
+    assert_eq!(
+        restore.lines().nth(1).map(str::trim),
+        Some("trap - EXIT TERM"),
+        "M4 restoration must disarm EXIT and TERM before any fallible action"
+    );
+    let mut offset = 0;
+    for marker in [
+        "printf '%s\\n' \"$thp_original\" | sudo -n tee \"$thp_knob\" >/dev/null",
+        "test \"$(cat \"$thp_knob\")\" = \"$thp_original\"",
+    ] {
+        let relative = restore[offset..]
+            .find(marker)
+            .unwrap_or_else(|| panic!("M4 restore function missing ordered marker: {marker}"));
+        offset += relative + marker.len();
+    }
+    let finish = &main[finish_start..original_start];
+    let mut offset = 0;
+    for marker in [
+        "primary=\"$1\"",
+        "restore_status=0",
+        "restore_thp || restore_status=$?",
+        "if [ \"$primary\" -ne 0 ]; then",
+        "exit \"$primary\"",
+        "fi",
+        "exit \"$restore_status\"",
+    ] {
+        let relative = finish[offset..]
+            .find(marker)
+            .unwrap_or_else(|| panic!("M4 finish function missing ordered marker: {marker}"));
+        offset += relative + marker.len();
+    }
+
+    let mut offset = 0;
+    for marker in [
+        "if: ${{ always() }}",
+        "set -u",
+        "pkill \"-$signal\" -x \"$process\" 2>/dev/null || signal_status=$?",
+        "thp_knob=/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none",
+        "thp_original_file=\"$RUNNER_TEMP/m4/thp-max-ptes-none.original\"",
+        "thp_original=\"$(cat \"$thp_original_file\")\"",
+        "grep -Eq '^(0|[1-9][0-9]*)$' <<<\"$thp_original\"",
+        "printf '%s\\n' \"$thp_original\" | sudo -n tee \"$thp_knob\" >/dev/null || cleanup_status=1",
+        "test \"$(cat \"$thp_knob\")\" = \"$thp_original\" || cleanup_status=1",
+        "rm -rf -- \"$RUNNER_TEMP/m4\" || cleanup_status=1",
+        "test \"$cleanup_status\" -eq 0",
+    ] {
+        let relative = cleanup[offset..]
+            .find(marker)
+            .unwrap_or_else(|| panic!("M4 cleanup step missing ordered marker: {marker}"));
+        offset += relative + marker.len();
+    }
+    for line in main
+        .lines()
+        .filter(|line| line.contains("m4_thp_profile status="))
+    {
+        assert!(
+            !line.contains("$thp_original") && !line.contains("original="),
+            "M4 THP status evidence must not emit the observed original value"
+        );
+    }
+}
