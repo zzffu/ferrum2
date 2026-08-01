@@ -665,12 +665,53 @@ jobs:
           grep -Eq '^[0-9]+\.[0-9]{9}$' <<<"$ratio"
           grep -Eq '^-?[0-9]+\.[0-9]{9}$' <<<"$signed_difference"
 
+          thp_knob=/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none
+          thp_original_file="$work/thp-max-ptes-none.original"
+          restore_thp() {
+            trap - EXIT TERM
+            restore_status=0
+            thp_original=
+            if ! thp_original="$(cat "$thp_original_file")"; then
+              restore_status=1
+            elif ! grep -Eq '^(0|[1-9][0-9]*)$' <<<"$thp_original"; then
+              restore_status=1
+            else
+              printf '%s\n' "$thp_original" | sudo -n tee "$thp_knob" >/dev/null || restore_status=1
+              test "$(cat "$thp_knob")" = "$thp_original" || restore_status=1
+            fi
+            if [ "$restore_status" -ne 0 ]; then
+              printf '%s\n' 'm4_thp_profile status=ERROR phase=restore' >&2
+            fi
+            return "$restore_status"
+          }
+          finish_thp() {
+            primary="$1"
+            restore_status=0
+            restore_thp || restore_status=$?
+            if [ "$primary" -ne 0 ]; then
+              exit "$primary"
+            fi
+            exit "$restore_status"
+          }
+          thp_original="$(cat "$thp_knob")"
+          grep -Eq '^(0|[1-9][0-9]*)$' <<<"$thp_original"
+          printf '%s\n' "$thp_original" >"$thp_original_file"
+          test "$(cat "$thp_original_file")" = "$thp_original"
+          trap 'finish_thp "$?"' EXIT
+          trap 'finish_thp 143' TERM
+          printf '0\n' | sudo -n tee "$thp_knob" >/dev/null
+          test "$(cat "$thp_knob")" = 0
+          printf '%s\n' 'm4_thp_profile status=APPLIED max_ptes_none=0'
+
           resource_output="$(target/release/m4-qualification resource \
             --sha "$GITHUB_SHA" \
             --output "$work/resource.jsonl")"
           printf '%s\n' "$resource_output"
           expected_resource="m4_resource_completion status=PASS sessions=10000 samples=180 rss_windows=6/6 drain=PASS sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT"
           test "$resource_output" = "$expected_resource"
+          restore_thp
+          trap - EXIT TERM
+          printf '%s\n' 'm4_thp_profile status=RESTORED readback=PASS'
           printf 'm4_performance_completion status=PASS ferrum_median=%s reference_median=%s ratio=%s signed_difference_percent=%s sessions=10000 samples=180 rss_windows=6/6 drain=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$ferrum_median" "$reference_median" "$ratio" "$signed_difference" \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
@@ -695,6 +736,19 @@ jobs:
               cleanup_status=1
             fi
           done
+          thp_knob=/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none
+          thp_original_file="$RUNNER_TEMP/m4/thp-max-ptes-none.original"
+          if [ -e "$thp_original_file" ]; then
+            thp_original=
+            if ! thp_original="$(cat "$thp_original_file")"; then
+              cleanup_status=1
+            elif ! grep -Eq '^(0|[1-9][0-9]*)$' <<<"$thp_original"; then
+              cleanup_status=1
+            else
+              printf '%s\n' "$thp_original" | sudo -n tee "$thp_knob" >/dev/null || cleanup_status=1
+              test "$(cat "$thp_knob")" = "$thp_original" || cleanup_status=1
+            fi
+          fi
           if [ -e "$RUNNER_TEMP/m4" ]; then
             rm -rf -- "$RUNNER_TEMP/m4" || cleanup_status=1
           fi
