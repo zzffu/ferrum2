@@ -40,6 +40,7 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const RSS_WINDOW: usize = 30;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_OUTPUT_CAP: usize = 64 * 1024;
+const SMAPS_ROLLUP_CAP: usize = 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -862,6 +863,9 @@ struct ProcessSample {
     fds: u64,
     tasks: u64,
     rss_kib: u64,
+    smaps_rss_kib: u64,
+    anonymous_kib: u64,
+    anon_huge_pages_kib: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -876,7 +880,10 @@ impl PairSample {
             "{{\"kind\":\"resource_sample\",\"sample\":{index},\
              \"client_active\":{},\"server_active\":{},\"client_fds\":{},\
              \"server_fds\":{},\"client_tasks\":{},\"server_tasks\":{},\
-             \"client_rss_kib\":{},\"server_rss_kib\":{}}}",
+             \"client_rss_kib\":{},\"server_rss_kib\":{},\
+             \"client_smaps_rss_kib\":{},\"server_smaps_rss_kib\":{},\
+             \"client_anonymous_kib\":{},\"server_anonymous_kib\":{},\
+             \"client_anon_huge_pages_kib\":{},\"server_anon_huge_pages_kib\":{}}}",
             self.client.active,
             self.server.active,
             self.client.fds,
@@ -885,6 +892,12 @@ impl PairSample {
             self.server.tasks,
             self.client.rss_kib,
             self.server.rss_kib,
+            self.client.smaps_rss_kib,
+            self.server.smaps_rss_kib,
+            self.client.anonymous_kib,
+            self.server.anonymous_kib,
+            self.client.anon_huge_pages_kib,
+            self.server.anon_huge_pages_kib,
         )
     }
 }
@@ -931,11 +944,71 @@ fn proc_sample(pid: u32) -> Result<ProcessSample, String> {
         .find_map(|line| line.strip_prefix("VmRSS:")?.split_whitespace().next())
         .and_then(|value| value.parse().ok())
         .ok_or_else(|| "process RSS state is malformed".to_owned())?;
+    let precise = read_smaps_rollup(&root.join("smaps_rollup"))?;
     Ok(ProcessSample {
         active: 0,
         fds,
         tasks,
         rss_kib,
+        smaps_rss_kib: precise.rss_kib,
+        anonymous_kib: precise.anonymous_kib,
+        anon_huge_pages_kib: precise.anon_huge_pages_kib,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreciseRss {
+    rss_kib: u64,
+    anonymous_kib: u64,
+    anon_huge_pages_kib: u64,
+}
+
+fn read_smaps_rollup(path: &Path) -> Result<PreciseRss, String> {
+    let file =
+        File::open(path).map_err(|_| "process precise RSS state is unavailable".to_owned())?;
+    let mut bytes = Vec::with_capacity(SMAPS_ROLLUP_CAP + 1);
+    file.take((SMAPS_ROLLUP_CAP + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "process precise RSS state could not be read".to_owned())?;
+    if bytes.len() > SMAPS_ROLLUP_CAP {
+        return Err("process precise RSS state exceeds bound".to_owned());
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| "process precise RSS state is not UTF-8".to_owned())?;
+    parse_smaps_rollup(text)
+}
+
+fn parse_smaps_rollup(text: &str) -> Result<PreciseRss, String> {
+    let value = |label, name| {
+        let mut matches = text.lines().filter_map(|line| line.strip_prefix(label));
+        let Some(line) = matches.next() else {
+            return Err(format!("process precise RSS state is missing {name}"));
+        };
+        if matches.next().is_some() {
+            return Err(format!("process precise RSS state duplicates {name}"));
+        }
+        let mut fields = line.split_whitespace();
+        let value = fields.next().unwrap_or_default();
+        let unit = fields.next().unwrap_or_default();
+        if value.is_empty() || unit.is_empty() || fields.next().is_some() {
+            return Err(format!("process precise RSS state has malformed {name}"));
+        }
+        if unit != "kB" {
+            return Err(format!(
+                "process precise RSS state has wrong unit for {name}"
+            ));
+        }
+        if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!("process precise RSS state has malformed {name}"));
+        }
+        value
+            .parse()
+            .map_err(|_| format!("process precise RSS state overflows {name}"))
+    };
+    Ok(PreciseRss {
+        rss_kib: value("Rss:", "Rss")?,
+        anonymous_kib: value("Anonymous:", "Anonymous")?,
+        anon_huge_pages_kib: value("AnonHugePages:", "AnonHugePages")?,
     })
 }
 
@@ -985,14 +1058,34 @@ struct RssVerdict {
     window: usize,
     client_median_twice: u64,
     server_median_twice: u64,
+    client_smaps_rss_median_twice: u64,
+    server_smaps_rss_median_twice: u64,
+    client_anonymous_median_twice: u64,
+    server_anonymous_median_twice: u64,
+    client_anon_huge_pages_median_twice: u64,
+    server_anon_huge_pages_median_twice: u64,
 }
 
 impl RssVerdict {
     fn json(&self) -> String {
         format!(
             "{{\"kind\":\"rss_window\",\"window\":{},\"client_median_twice_kib\":{},\
-             \"server_median_twice_kib\":{},\"limit_percent\":105,\"status\":\"PASS\"}}",
-            self.window, self.client_median_twice, self.server_median_twice
+             \"server_median_twice_kib\":{},\"client_smaps_rss_median_twice_kib\":{},\
+             \"server_smaps_rss_median_twice_kib\":{},\
+             \"client_anonymous_median_twice_kib\":{},\
+             \"server_anonymous_median_twice_kib\":{},\
+             \"client_anon_huge_pages_median_twice_kib\":{},\
+             \"server_anon_huge_pages_median_twice_kib\":{},\
+             \"limit_percent\":105,\"status\":\"PASS\"}}",
+            self.window,
+            self.client_median_twice,
+            self.server_median_twice,
+            self.client_smaps_rss_median_twice,
+            self.server_smaps_rss_median_twice,
+            self.client_anonymous_median_twice,
+            self.server_anonymous_median_twice,
+            self.client_anon_huge_pages_median_twice,
+            self.server_anon_huge_pages_median_twice,
         )
     }
 }
@@ -1003,42 +1096,74 @@ fn validate_samples(
     window_size: usize,
     sessions: u64,
 ) -> Result<Vec<RssVerdict>, String> {
-    if samples.len() != expected || expected != window_size * 6 {
+    if samples.len() != expected || window_size == 0 || expected != window_size * 6 {
         return Err("sample set is incomplete".to_owned());
     }
     let first = samples[0];
     for sample in samples {
         validate_owner_tuple(sample, &first, sessions)?;
     }
-    let mut verdicts = Vec::with_capacity(6);
-    let mut first_client = 0;
-    let mut first_server = 0;
+    let mut client_vmrss = [0; 6];
+    let mut server_vmrss = [0; 6];
+    let mut client_smaps_rss = [0; 6];
+    let mut server_smaps_rss = [0; 6];
+    let mut client_anonymous = [0; 6];
+    let mut server_anonymous = [0; 6];
+    let mut client_anon_huge_pages = [0; 6];
+    let mut server_anon_huge_pages = [0; 6];
     for (index, window) in samples.chunks_exact(window_size).enumerate() {
-        let client = median_twice(window.iter().map(|sample| sample.client.rss_kib))?;
-        let server = median_twice(window.iter().map(|sample| sample.server.rss_kib))?;
-        if index == 0 {
-            first_client = client;
-            first_server = server;
-        }
-        if u128::from(client) * 100 > u128::from(first_client) * 105
-            || u128::from(server) * 100 > u128::from(first_server) * 105
-        {
-            return Err(format!(
-                "RSS window {} exceeds 105 percent: \
-                 client_first_median_twice_kib={first_client} \
-                 client_current_median_twice_kib={client} \
-                 server_first_median_twice_kib={first_server} \
-                 server_current_median_twice_kib={server}",
-                index + 1
-            ));
-        }
-        verdicts.push(RssVerdict {
-            window: index + 1,
-            client_median_twice: client,
-            server_median_twice: server,
-        });
+        client_vmrss[index] = median_twice(window.iter().map(|sample| sample.client.rss_kib))?;
+        server_vmrss[index] = median_twice(window.iter().map(|sample| sample.server.rss_kib))?;
+        client_smaps_rss[index] =
+            median_twice(window.iter().map(|sample| sample.client.smaps_rss_kib))?;
+        server_smaps_rss[index] =
+            median_twice(window.iter().map(|sample| sample.server.smaps_rss_kib))?;
+        client_anonymous[index] =
+            median_twice(window.iter().map(|sample| sample.client.anonymous_kib))?;
+        server_anonymous[index] =
+            median_twice(window.iter().map(|sample| sample.server.anonymous_kib))?;
+        client_anon_huge_pages[index] = median_twice(
+            window
+                .iter()
+                .map(|sample| sample.client.anon_huge_pages_kib),
+        )?;
+        server_anon_huge_pages[index] = median_twice(
+            window
+                .iter()
+                .map(|sample| sample.server.anon_huge_pages_kib),
+        )?;
     }
-    Ok(verdicts)
+    if let Some(index) = (0..6).find(|&index| {
+        u128::from(client_vmrss[index]) * 100 > u128::from(client_vmrss[0]) * 105
+            || u128::from(server_vmrss[index]) * 100 > u128::from(server_vmrss[0]) * 105
+    }) {
+        return Err(format!(
+            "RSS window {} exceeds 105 percent: first_failing_window={} \
+             client_vmrss_median_twice_kib={client_vmrss:?} \
+             server_vmrss_median_twice_kib={server_vmrss:?} \
+             client_smaps_rss_median_twice_kib={client_smaps_rss:?} \
+             server_smaps_rss_median_twice_kib={server_smaps_rss:?} \
+             client_anonymous_median_twice_kib={client_anonymous:?} \
+             server_anonymous_median_twice_kib={server_anonymous:?} \
+             client_anon_huge_pages_median_twice_kib={client_anon_huge_pages:?} \
+             server_anon_huge_pages_median_twice_kib={server_anon_huge_pages:?}",
+            index + 1,
+            index + 1,
+        ));
+    }
+    Ok((0..6)
+        .map(|index| RssVerdict {
+            window: index + 1,
+            client_median_twice: client_vmrss[index],
+            server_median_twice: server_vmrss[index],
+            client_smaps_rss_median_twice: client_smaps_rss[index],
+            server_smaps_rss_median_twice: server_smaps_rss[index],
+            client_anonymous_median_twice: client_anonymous[index],
+            server_anonymous_median_twice: server_anonymous[index],
+            client_anon_huge_pages_median_twice: client_anon_huge_pages[index],
+            server_anon_huge_pages_median_twice: server_anon_huge_pages[index],
+        })
+        .collect())
 }
 
 fn median_twice(values: impl Iterator<Item = u64>) -> Result<u64, String> {
@@ -1133,18 +1258,79 @@ ferrum2_tcp_replay_entries 0\n\
     expect_rejected("wrong reference", || {
         validate_reference_identity("shadowsocks 1.23.0", REFERENCE_SHA256)
     })?;
+    let precise_fixture = "Rss: 123 kB\nPss: 99 kB\nAnonymous: 77 kB\nAnonHugePages: 4 kB\n";
+    if parse_smaps_rollup(precise_fixture)
+        != Ok(PreciseRss {
+            rss_kib: 123,
+            anonymous_kib: 77,
+            anon_huge_pages_kib: 4,
+        })
+    {
+        return Err("valid smaps_rollup fixture was rejected".to_owned());
+    }
+    if parse_smaps_rollup("Rss: 123 kB\nAnonHugePages: 4 kB\n")
+        != Err("process precise RSS state is missing Anonymous".to_owned())
+    {
+        return Err("missing smaps_rollup field was admitted".to_owned());
+    }
+    if parse_smaps_rollup("Rss: 123 kB\nAnonymous: 77 kB\nRss: 124 kB\nAnonHugePages: 4 kB\n")
+        != Err("process precise RSS state duplicates Rss".to_owned())
+    {
+        return Err("duplicate smaps_rollup field was admitted".to_owned());
+    }
+    if parse_smaps_rollup("Rss: many kB\nAnonymous: 77 kB\nAnonHugePages: 4 kB\n")
+        != Err("process precise RSS state has malformed Rss".to_owned())
+    {
+        return Err("malformed smaps_rollup number was admitted".to_owned());
+    }
+    if parse_smaps_rollup("Rss: 123 MB\nAnonymous: 77 kB\nAnonHugePages: 4 kB\n")
+        != Err("process precise RSS state has wrong unit for Rss".to_owned())
+    {
+        return Err("wrong smaps_rollup unit was admitted".to_owned());
+    }
+    if parse_smaps_rollup("Rss: 18446744073709551616 kB\nAnonymous: 77 kB\nAnonHugePages: 4 kB\n")
+        != Err("process precise RSS state overflows Rss".to_owned())
+    {
+        return Err("overflowing smaps_rollup number had wrong failure".to_owned());
+    }
     let process = ProcessSample {
         active: 4,
         fds: 20,
         tasks: 3,
         rss_kib: 100,
+        smaps_rss_kib: 100,
+        anonymous_kib: 70,
+        anon_huge_pages_kib: 0,
     };
     let sample = PairSample {
         client: process,
         server: process,
     };
+    if sample.json(1)
+        != "{\"kind\":\"resource_sample\",\"sample\":1,\"client_active\":4,\
+            \"server_active\":4,\"client_fds\":20,\"server_fds\":20,\
+            \"client_tasks\":3,\"server_tasks\":3,\"client_rss_kib\":100,\
+            \"server_rss_kib\":100,\"client_smaps_rss_kib\":100,\
+            \"server_smaps_rss_kib\":100,\"client_anonymous_kib\":70,\
+            \"server_anonymous_kib\":70,\"client_anon_huge_pages_kib\":0,\
+            \"server_anon_huge_pages_kib\":0}"
+    {
+        return Err("paired resource sample JSON is incomplete".to_owned());
+    }
     let samples = vec![sample; 12];
-    validate_samples(&samples, 12, 2, 4)?;
+    let verdicts = validate_samples(&samples, 12, 2, 4)?;
+    if verdicts[0].json()
+        != "{\"kind\":\"rss_window\",\"window\":1,\"client_median_twice_kib\":200,\
+            \"server_median_twice_kib\":200,\"client_smaps_rss_median_twice_kib\":200,\
+            \"server_smaps_rss_median_twice_kib\":200,\
+            \"client_anonymous_median_twice_kib\":140,\
+            \"server_anonymous_median_twice_kib\":140,\
+            \"client_anon_huge_pages_median_twice_kib\":0,\
+            \"server_anon_huge_pages_median_twice_kib\":0,\
+            \"limit_percent\":105,\"status\":\"PASS\"}"
+    {
+        return Err("paired RSS window JSON is incomplete".to_owned());
+    }
     expect_rejected("missing sample", || {
         validate_samples(&samples[..11], 12, 2, 4)
     })?;
@@ -1153,18 +1339,62 @@ ferrum2_tcp_replay_entries 0\n\
     expect_rejected("changing owner tuple", || {
         validate_samples(&changing, 12, 2, 4)
     })?;
+    let mut boundary = samples.clone();
+    boundary[10].client.rss_kib = 105;
+    boundary[11].client.rss_kib = 105;
+    validate_samples(&boundary, 12, 2, 4)?;
+    let mut plateau = samples.clone();
+    for sample in &mut plateau[2..] {
+        sample.client.rss_kib = 106;
+    }
+    let plateau_error = match validate_samples(&plateau, 12, 2, 4) {
+        Ok(_) => return Err("self-check mutation survived: RSS plateau".to_owned()),
+        Err(error) => error,
+    };
+    let expected_plateau_error = "RSS window 2 exceeds 105 percent: first_failing_window=2 \
+                                  client_vmrss_median_twice_kib=[200, 212, 212, 212, 212, 212] \
+                                  server_vmrss_median_twice_kib=[200, 200, 200, 200, 200, 200] \
+                                  client_smaps_rss_median_twice_kib=[200, 200, 200, 200, 200, 200] \
+                                  server_smaps_rss_median_twice_kib=[200, 200, 200, 200, 200, 200] \
+                                  client_anonymous_median_twice_kib=[140, 140, 140, 140, 140, 140] \
+                                  server_anonymous_median_twice_kib=[140, 140, 140, 140, 140, 140] \
+                                  client_anon_huge_pages_median_twice_kib=[0, 0, 0, 0, 0, 0] \
+                                  server_anon_huge_pages_median_twice_kib=[0, 0, 0, 0, 0, 0]";
+    if plateau_error != expected_plateau_error {
+        return Err(format!("RSS plateau diagnostic mismatch: {plateau_error}"));
+    }
     let mut rss = samples.clone();
-    rss[10].client.rss_kib = 106;
-    rss[11].client.rss_kib = 106;
+    for (window, (vmrss, smaps_rss, anonymous, huge)) in [
+        (100, 100, 70, 0),
+        (101, 103, 71, 1),
+        (102, 106, 72, 2),
+        (103, 109, 73, 3),
+        (105, 112, 74, 4),
+        (106, 115, 75, 5),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for sample in &mut rss[window * 2..window * 2 + 2] {
+            sample.client.rss_kib = vmrss;
+            sample.client.smaps_rss_kib = smaps_rss;
+            sample.client.anonymous_kib = anonymous;
+            sample.client.anon_huge_pages_kib = huge;
+        }
+    }
     let rss_error = match validate_samples(&rss, 12, 2, 4) {
         Ok(_) => return Err("self-check mutation survived: RSS regression".to_owned()),
         Err(error) => error,
     };
-    let expected_rss_error = "RSS window 6 exceeds 105 percent: \
-                              client_first_median_twice_kib=200 \
-                              client_current_median_twice_kib=212 \
-                              server_first_median_twice_kib=200 \
-                              server_current_median_twice_kib=200";
+    let expected_rss_error = "RSS window 6 exceeds 105 percent: first_failing_window=6 \
+                              client_vmrss_median_twice_kib=[200, 202, 204, 206, 210, 212] \
+                              server_vmrss_median_twice_kib=[200, 200, 200, 200, 200, 200] \
+                              client_smaps_rss_median_twice_kib=[200, 206, 212, 218, 224, 230] \
+                              server_smaps_rss_median_twice_kib=[200, 200, 200, 200, 200, 200] \
+                              client_anonymous_median_twice_kib=[140, 142, 144, 146, 148, 150] \
+                              server_anonymous_median_twice_kib=[140, 140, 140, 140, 140, 140] \
+                              client_anon_huge_pages_median_twice_kib=[0, 2, 4, 6, 8, 10] \
+                              server_anon_huge_pages_median_twice_kib=[0, 0, 0, 0, 0, 0]";
     if rss_error != expected_rss_error {
         return Err(format!("RSS diagnostic mismatch: {rss_error}"));
     }
@@ -1174,12 +1404,18 @@ ferrum2_tcp_replay_entries 0\n\
             fds: 7,
             tasks: 2,
             rss_kib: 80,
+            smaps_rss_kib: 80,
+            anonymous_kib: 60,
+            anon_huge_pages_kib: 0,
         },
         server: ProcessSample {
             active: 0,
             fds: 8,
             tasks: 2,
             rss_kib: 80,
+            smaps_rss_kib: 80,
+            anonymous_kib: 60,
+            anon_huge_pages_kib: 0,
         },
     };
     let mut incomplete = baseline;
@@ -1193,12 +1429,12 @@ ferrum2_tcp_replay_entries 0\n\
     fs::create_dir_all(&root).map_err(clean_io)?;
     let path = root.join("self-check.jsonl");
     let mut file = BufWriter::new(File::create(&path).map_err(clean_io)?);
-    let line = "{\"kind\":\"self_check\",\"mutations\":11,\"status\":\"PASS\"}\n";
+    let line = "{\"kind\":\"self_check\",\"mutations\":17,\"status\":\"PASS\"}\n";
     ensure_redacted(line)?;
     file.write_all(line.as_bytes()).map_err(clean_io)?;
     file.flush().map_err(clean_io)?;
     assert_no_owners()?;
-    Ok("m4_self_check status=PASS mutations=11".to_owned())
+    Ok("m4_self_check status=PASS mutations=17".to_owned())
 }
 
 fn expect_rejected<T>(
