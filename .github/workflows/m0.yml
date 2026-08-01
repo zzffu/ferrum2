@@ -577,6 +577,132 @@ jobs:
           fi
           exit 1
 
+  performance:
+    name: performance
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify M4 hosted profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_ACTIONS" = "true"
+          test "$RUNNER_OS" = "Linux"
+          test "$RUNNER_ARCH" = "X64"
+          test "$ImageOS" = "ubuntu24"
+          test "$GITHUB_EVENT_NAME" = "push" || test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test ! -e "$RUNNER_TEMP/m4"
+          for process in ferrum2-client ferrum2-server sslocal ssserver; do
+            ! pgrep -x "$process" >/dev/null
+          done
+
+          ulimit -S -n 65536
+          test "$(ulimit -S -n)" = "65536"
+          cpu_count="$(getconf _NPROCESSORS_ONLN)"
+          memory_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+          runner_temp_free_kib="$(df -Pk "$RUNNER_TEMP" | awk 'END { print $4 }')"
+          test "$cpu_count" -ge 4
+          test "$memory_kib" -ge 15000000
+          test "$runner_temp_free_kib" -ge 6000000
+
+          rustup toolchain install 1.97.1 --profile minimal
+          rustc +1.97.1 --version | grep -Fx 'rustc 1.97.1 (8bab26f4f 2026-07-14)'
+          cargo +1.97.1 -V
+          cc --version
+          ld --version
+          uname -a
+          printf 'm4_profile status=PASS cpu_count=%s memory_kib=%s runner_temp_free_kib=%s nofile=65536 image_os=%s image_version=%s sha=%s run_id=%s run_attempt=%s\n' \
+            "$cpu_count" "$memory_kib" "$runner_temp_free_kib" "$ImageOS" "$ImageVersion" \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+      - name: Run M4 throughput and resource qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -S -n 65536
+          work="$RUNNER_TEMP/m4"
+          archive="$work/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz"
+          reference="$work/reference"
+          mkdir -p "$reference"
+          curl --fail --location --retry 3 --output "$archive" \
+            https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.24.0/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz
+          test "$(stat --format='%s' "$archive")" = "11635096"
+          echo "5f528efb4e51e732352f5c69538dcc76e8cf8f6d1a240dfb5b748a67f0b05f65  $archive" | sha256sum -c -
+          diff -u <(printf '%s\n' sslocal ssserver ssurl ssmanager ssservice) <(tar -tJf "$archive")
+          tar -xJf "$archive" -C "$reference"
+          test -x "$reference/sslocal"
+          test -x "$reference/ssserver"
+          "$reference/sslocal" --version | grep -Fx 'shadowsocks 1.24.0'
+          "$reference/ssserver" --version | grep -Fx 'shadowsocks 1.24.0'
+          grep -F 'source_commit = "7ee1aa9223ed8f4d34734aac919036c8ad4502c2"' tests/interop/versions.toml
+          grep -F 'license_review = "MIT; execute only as an independent test process; do not redistribute"' tests/interop/versions.toml
+
+          cargo +1.97.1 build --workspace --bins --release --locked
+          throughput_output="$(target/release/m4-qualification throughput \
+            --sha "$GITHUB_SHA" \
+            --sslocal "$reference/sslocal" \
+            --ssserver "$reference/ssserver" \
+            --output "$work/throughput.jsonl")"
+          printf '%s\n' "$throughput_output"
+          test "$(grep -Ec '^m4_throughput_completion status=PASS ' <<<"$throughput_output" || true)" -eq 1
+          test "$(grep -c '^' <<<"$throughput_output")" -eq 1
+          grep -Fq " trials=10 sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT" <<<"$throughput_output"
+          ferrum_median="$(sed -n 's/^m4_throughput_completion status=PASS ferrum_median=\([0-9][0-9]*\) .*/\1/p' <<<"$throughput_output")"
+          reference_median="$(sed -n 's/.* reference_median=\([0-9][0-9]*\) .*/\1/p' <<<"$throughput_output")"
+          ratio="$(sed -n 's/.* ratio=\([0-9][0-9]*\.[0-9][0-9]*\) .*/\1/p' <<<"$throughput_output")"
+          signed_difference="$(sed -n 's/.*"signed_difference_percent":\(-\{0,1\}[0-9][0-9]*\.[0-9][0-9]*\),.*/\1/p' "$work/throughput.jsonl")"
+          grep -Eq '^[1-9][0-9]*$' <<<"$ferrum_median"
+          grep -Eq '^[1-9][0-9]*$' <<<"$reference_median"
+          grep -Eq '^[0-9]+\.[0-9]{9}$' <<<"$ratio"
+          grep -Eq '^-?[0-9]+\.[0-9]{9}$' <<<"$signed_difference"
+
+          resource_output="$(target/release/m4-qualification resource \
+            --sha "$GITHUB_SHA" \
+            --output "$work/resource.jsonl")"
+          printf '%s\n' "$resource_output"
+          expected_resource="m4_resource_completion status=PASS sessions=10000 samples=180 rss_windows=6/6 drain=PASS sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT"
+          test "$resource_output" = "$expected_resource"
+          printf 'm4_performance_completion status=PASS ferrum_median=%s reference_median=%s ratio=%s signed_difference_percent=%s sessions=10000 samples=180 rss_windows=6/6 drain=PASS sha=%s run_id=%s run_attempt=%s\n' \
+            "$ferrum_median" "$reference_median" "$ratio" "$signed_difference" \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+      - name: Reap M4 processes and delete generated evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -u
+          cleanup_status=0
+          for signal in TERM KILL; do
+            for process in ferrum2-client ferrum2-server sslocal ssserver; do
+              signal_status=0
+              pkill "-$signal" -x "$process" 2>/dev/null || signal_status=$?
+              if [ "$signal_status" -gt 1 ]; then
+                cleanup_status=1
+              fi
+            done
+            sleep 1
+          done
+          for process in ferrum2-client ferrum2-server sslocal ssserver; do
+            if pgrep -x "$process" >/dev/null; then
+              cleanup_status=1
+            fi
+          done
+          if [ -e "$RUNNER_TEMP/m4" ]; then
+            rm -rf -- "$RUNNER_TEMP/m4" || cleanup_status=1
+          fi
+          if [ -e "$RUNNER_TEMP/m4" ]; then
+            cleanup_status=1
+          fi
+          test "$cleanup_status" -eq 0
+
   qualification:
     name: qualification
     if: ${{ always() }}
@@ -585,6 +711,7 @@ jobs:
       - msrv
       - platform
       - interop
+      - performance
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -602,6 +729,7 @@ jobs:
           MSRV_RESULT: ${{ needs.msrv.result }}
           PLATFORM_RESULT: ${{ needs.platform.result }}
           INTEROP_RESULT: ${{ needs.interop.result }}
+          PERFORMANCE_RESULT: ${{ needs.performance.result }}
         run: |
           set -euo pipefail
           test "$(git status --porcelain)" = ""
@@ -610,5 +738,14 @@ jobs:
           test "$MSRV_RESULT" = "success"
           test "$PLATFORM_RESULT" = "success"
           test "$INTEROP_RESULT" = "success"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            test "$PERFORMANCE_RESULT" = "skipped"
+            performance=SKIPPED
+          else
+            test "$PERFORMANCE_RESULT" = "success"
+            performance=PASS
+          fi
           printf 'm3_qualification_completion status=PASS full=PASS security=PASS process=PASS msrv=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS platforms=3/3 test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          printf 'm4_qualification_completion status=PASS performance=%s full=PASS security=PASS process=PASS msrv=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS platforms=3/3 test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
+            "$performance" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
