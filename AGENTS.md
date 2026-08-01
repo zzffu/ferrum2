@@ -191,11 +191,10 @@ and command definitions in their authoritative build/config files where possible
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
 - Active planned changes:
-  - M4 — executing — M4-T01 resumes by moving the non-test qualification binary
-    from the parked `tests/m0-harness` draft into the dedicated non-shipping
-    `tools/ferrum2-m4-qualification` workspace package. This preserves the approved
-    test-budget policy and CLI/profile contracts. No push, hosted run, packaging,
-    release, or publication is authorized.
+  - M4 — executing — M4-T01 is integrated at exact `7730ec7` with the dedicated
+    non-shipping qualification package and the existing workflow's `performance`
+    job. M4-T02 may run local full/budget diagnostics, but push, hosted execution,
+    packaging, release, and publication remain separately unauthorized.
 
 
 ## Project validation

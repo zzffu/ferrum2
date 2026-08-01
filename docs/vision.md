@@ -145,5 +145,5 @@ M3 handoff。M4 planning baseline 是
 `701925681df78ad83076ed67863bf4fecf46f77c`；SPEC/TEST-0005和M4-T01/T02固定
 一个Cargo driver、既有GitHub Actions workflow中的单个Linux x64 hosted job、
 diagnostic throughput与bounded 10k-idle profile。M4现为executing；已批准把
-non-test driver移到独立`tools/ferrum2-m4-qualification` package，保持test-budget
-policy及profile不变并恢复T01。没有push、hosted run或发布。
+non-test driver移到独立`tools/ferrum2-m4-qualification` package；T01已在exact
+`7730ec7`集成并通过双审与ticket budget。T02尚无push、hosted run或发布授权。

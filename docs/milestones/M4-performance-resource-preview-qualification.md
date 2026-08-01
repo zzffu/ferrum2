@@ -33,15 +33,13 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | ready |
-| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | todo |
+| M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
+| M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | ready |
 
-## Recovery / next action
+## Next action
 
-`M4-BUDGET-001` was caused by placing a non-test binary below `tests/m0-harness`,
-where pinned `rustloc 0.19.1` correctly classifies every Rust line as test growth.
-The approved recovery moves that unchanged responsibility into the dedicated,
-non-published `tools/ferrum2-m4-qualification` workspace package and leaves the
-120-line ticket allowance, classifier, baseline, evidence, and CLI/profile contracts
-unchanged. Resume the parked `.worktrees/m4-t01` implementation there, then run the
-authoritative ticket gate. T02's push/run remains separately unauthorized.
+M4-T01 is integrated at `7730ec730258971652270cc6ef41be9457abc2a7`; the exact
+ticket gate returned `PASS_ADVANCE`, and final Architect/QA reviews returned `PASS`.
+Run T02's local Full and milestone-budget diagnostics on the resulting documentation
+descendant, then stop before push or hosted execution until the user grants a separate
+exact remote scope.

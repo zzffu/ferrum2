@@ -27,9 +27,9 @@ M3-T06 导入其未集成产品 lineage，修复 terminal UDP circular wait 与 
 bound，并通过 fresh bounded reviews。因此 T04 的诚实 deferral 不留下未交付的
 M3 lifecycle outcome。当前 `done=7`、`deferred=1`、active phases/open roots
 均为空；性能基线与单个GitHub-hosted runner上的bounded 10k-idle resource
-qualification现由executing M4的SPEC/TEST-0005及M4-T01/T02拥有；T01已按批准
-方案恢复到独立non-shipping tools package，尚无accepted candidate或hosted执行
-证据；本机WSL2仅作test-code diagnostic。
+qualification现由executing M4的SPEC/TEST-0005及M4-T01/T02拥有；T01已在exact
+`7730ec7`集成到独立non-shipping tools package并通过双审，尚无hosted执行证据；
+本机WSL2仅作test-code diagnostic。
 
 ## Planning 证据基线（历史）
 
@@ -142,6 +142,6 @@ Execute 不隐含 remote authority。M3 实际执行中只使用了 exact、sing
 non-force fast-forward 到 `refs/heads/codex/integration/m3`；所有授权均已
 耗尽并撤销。Close mode 没有 push、rerun、dispatch、PR、tag、release、
 publication 或 ref deletion。M4 planning baseline是
-`701925681df78ad83076ed67863bf4fecf46f77c`；M4-T01已获准把required non-test
-driver从`tests/m0-harness`迁移到独立tools package，预算政策和baseline不变。
-下一入口是完成recovered candidate；remote scope仍未授权。
+`701925681df78ad83076ed67863bf4fecf46f77c`；M4-T01 exact `7730ec7`已集成，预算
+政策和baseline不变。下一入口是T02 local Full/milestone diagnostics；remote scope
+仍未授权。

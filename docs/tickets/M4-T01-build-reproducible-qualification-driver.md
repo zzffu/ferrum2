@@ -1,7 +1,7 @@
 ---
 id: M4-T01
 milestone: M4
-status: ready
+status: done
 depends_on: []
 owns:
   - .github/workflows/m0.yml
@@ -55,10 +55,14 @@ git diff --check 701925681df78ad83076ed67863bf4fecf46f77c..<candidate-sha>
 
 ## Result
 
-- Commit: —
-- Review: Pending recovered candidate.
-- Notes: The earlier parked draft passed focused checks but was not committed because
-  its location under `tests/m0-harness` made 1,802 non-test driver lines count as test
-  growth. The approved recovery relocates that responsibility to the dedicated tools
-  package without changing the budget policy, baseline, CLI, hosted profile, or remote
-  authority. The old harness paths are owned only for recovery cleanup.
+- Commit: `7730ec730258971652270cc6ef41be9457abc2a7` (implementation `fc3efba`,
+  protected control commit `94671d4`, boundary repairs `8205944` and `7730ec7`).
+- Review: Architect `PASS`; QA `PASS`; zero blocker/major/minor findings on the exact
+  final candidate.
+- Notes: The recovered driver now lives in the dedicated non-shipping tools package;
+  the old harness draft is absent. Format, focused check, strict Clippy, Rust 1.85
+  check, release self-check (`mutations=9`), workspace quick gate, harness tests
+  (`57 passed`, `2 ignored`), diff-check, and control-commit structure passed. The
+  exact ticket budget returned `PASS_ADVANCE`: code `+1854`, tests `+48`, ticket debt
+  `-1806`, ratio `1.509022`. Formal throughput/resource modes remain unrun; they belong
+  to separately authorized T02 hosted execution.

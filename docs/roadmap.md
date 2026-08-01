@@ -19,7 +19,7 @@ Actions run `30494736004` attempt 1 的七项成功、TCP/UDP 各 12/12、三目
 native lifecycle/linkage/hash 和关闭审查证据关闭；local closeout source 是
 docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
-M4-T01已按批准方案恢复到独立non-shipping tools package。
+M4-T01已在exact `7730ec7`集成到独立non-shipping tools package。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -39,9 +39,9 @@ M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验�
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
 same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
-完成三目标 native qualification。M4-T01已获准把non-test driver从test harness
-迁到独立tools package，保持authoritative budget policy不变；下一入口是完成并
-review recovered candidate。M4-T02继续等待T01 integrated。
+完成三目标 native qualification。M4-T01已把non-test driver迁到独立tools
+package并在exact `7730ec7`通过双审与authoritative ticket budget；下一入口是
+M4-T02 local Full/milestone diagnostics，remote仍需单独授权。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -601,10 +601,10 @@ review recovered candidate。M4-T02继续等待T01 integrated。
 - **In-scope tickets:**
   - M4-T01：在独立non-shipping `ferrum2-m4-qualification` package内增加唯一
     Cargo-managed、non-default throughput/resource driver与短self-check，并在
-    既有workflow增加唯一hosted `performance` job；当前`ready`；
+    既有workflow增加唯一hosted `performance` job；exact `7730ec7`已`done`；
   - M4-T02：在T01 accepted integration上以一次授权push运行同SHA hosted
     performance/resource、full、test-budget、24-case/three-target qualification并
-    记录close summary，`todo`且remote step仍需另行明确授权。
+    记录close summary，当前`ready`且remote step仍需另行明确授权。
 
   Dependency graph：
 
@@ -615,7 +615,8 @@ review recovered candidate。M4-T02继续等待T01 integrated。
   multi-inbound/outbound、routing、DNS proxy、multi-upstream、load balancing、
   proxy chaining、Linux transparent inbound、Windows TUN、hot reload、
   management API、reduced-round ChaCha、custom executor 和 `io_uring`。
-- **Integrated commit:** not yet
+- **Integrated commit:** M4-T01 exact `7730ec730258971652270cc6ef41be9457abc2a7`；
+  M4 accepted qualification commit尚待T02。
 - **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
   driver迁到独立tools package解除；authoritative allowance、classifier、baseline
   和evidence均不变。T02仍必须先取得一次exact integration push/run scope；未授权
@@ -713,3 +714,4 @@ review recovered candidate。M4-T02继续等待T01 integrated。
 | 2026-08-01 | M4 plan | M4改为`planned`；SPEC/TEST-0005固定GitHub-hosted `M4-GHA-01`、diagnostic throughput profile、唯一bounded 10k-idle gate及两票drain DAG；本机WSL2仅作test-code diagnostic | M3已关闭且pre-M4 lifecycle/control repairs已在exact `7019256`集成；复用既有harness、active metric、reference pin与workflow，仅新增一个hosted job，不新增workflow、产品surface、dependency、ADR或optimization ticket | baseline `701925681df78ad83076ed67863bf4fecf46f77c`；M4 milestone、SPEC/TEST-0005、M4-T01/T02；plan-only，无remote/release/publication |
 | 2026-08-01 | M4 execute blocker | M4改为`executing`，M4-T01因`M4-BUDGET-001`在candidate commit前blocked；保留isolated working tree，不绕过hook | required driver在ticket-owned `tests/m0-harness`下被pinned rustloc计为1,802行test growth，超过allowance 120；无合法in-scope缩减 | focused local gates PASS；alternate-index machine gate `BLOCKED reason=ticket_allowance_exceeded`；Architect `ESCALATE`；无push/hosted run/publication |
 | 2026-08-01 | M4 budget recovery | 批准把non-test driver移入独立non-shipping `tools/ferrum2-m4-qualification` package并恢复T01；CLI/profile、baseline和remote边界不变 | rustloc按路径正确分类；把资格工具放在tests树外符合其职责，不需要修改120行allowance、classifier或独立evidence | 用户采用推荐方案；M4-T01 `ready`；无push/hosted run/publication |
+| 2026-08-01 | M4-T01 integration | exact `7730ec7`集成non-shipping Cargo driver和既有workflow的单一`performance` job；T01 `done`、T02 `ready` | 独立tools seam保持产品依赖单向；双审修复fixed throughput window、worker join、absolute drain与sample-slot fail-closed；预算政策不变 | Architect/QA final `PASS`；quick、MSRV、Clippy、self-check、harness及ticket budget `PASS_ADVANCE`；无push/hosted run/publication |

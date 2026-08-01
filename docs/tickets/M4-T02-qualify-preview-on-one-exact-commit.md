@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: todo
+status: ready
 depends_on: [M4-T01]
 owns:
   - docs/ci-status.md
@@ -46,5 +46,6 @@ git status --short
 
 - Commit: —
 - Review: —
-- Notes: All formal M4 evidence is remote; push/run remains unauthorized until the user
-  grants exact scope.
+- Notes: M4-T01 is integrated at exact `7730ec7`. Local Full and milestone-budget
+  diagnostics may proceed; all formal M4 evidence is remote, and push/run remains
+  unauthorized until the user grants exact scope.
