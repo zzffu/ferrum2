@@ -121,7 +121,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是现状而�
 | M1 | 三种方法的完整 TCP 行为和完整 TCP 互操作矩阵 | closed |
 | M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | closed |
 | M3 | 稳定运维契约、生命周期证明和三目标平台资格 | closed |
-| M4 | 可复现性能基线、资源门与 v0 preview integrated qualification | executing (blocked) |
+| M4 | 可复现性能基线、资源门与 v0 preview integrated qualification | executing |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -144,6 +144,6 @@ T05～T08 为 `done`，T04 保持诚实 `deferred` 并由 fresh-review T06 repla
 M3 handoff。M4 planning baseline 是
 `701925681df78ad83076ed67863bf4fecf46f77c`；SPEC/TEST-0005和M4-T01/T02固定
 一个Cargo driver、既有GitHub Actions workflow中的单个Linux x64 hosted job、
-diagnostic throughput与bounded 10k-idle profile。M4现为executing，但T01因
-`M4-BUDGET-001`在commit前blocked；恢复需要先授权独立plan/control-policy
-amendment。没有push、hosted run或发布。
+diagnostic throughput与bounded 10k-idle profile。M4现为executing；已批准把
+non-test driver移到独立`tools/ferrum2-m4-qualification` package，保持test-budget
+policy及profile不变并恢复T01。没有push、hosted run或发布。

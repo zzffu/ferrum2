@@ -9,7 +9,8 @@
 
 ## Scope
 
-M4 adds one reproducible qualification driver around the existing release binaries.
+M4 adds one reproducible qualification driver around the existing release binaries in
+the dedicated non-published `tools/ferrum2-m4-qualification` workspace package.
 It measures a diagnostic TCP baseline against the already-pinned shadowsocks-rust
 release, proves bounded 10k-idle resource stability, and reuses the existing full,
 interop, and native-platform gates for same-commit preview qualification.
@@ -19,8 +20,8 @@ Current seams already cover the required path:
 - `crates/ferrum2-config/src/lib.rs` accepts up to 65,535 TCP connections and a
   24-hour idle timeout;
 - `ferrum2_tcp_connections_active` exposes the production active-flow count;
-- `tests/m0-harness/src/local_support/mod.rs` already owns bounded child, SOCKS,
-  metrics, and cleanup mechanics;
+- `tests/m0-harness/src/local_support/mod.rs` provides the established bounded child,
+  SOCKS, metrics, and cleanup patterns used by repository qualification code;
 - `tests/interop/versions.toml` pins shadowsocks-rust `1.24.0` and its GNU asset hash;
 - `.github/workflows/m0.yml` already converges full validation, TCP/UDP `24/24`, and
   three native targets on one SHA and is the only hosted workflow M4 extends.
@@ -152,8 +153,9 @@ publication.
 
 ## Implementation freedom
 
-The driver may organize helpers and output fields differently if one bounded Cargo
-binary and the single hosted `performance` job prove the same claims. Equivalent
+The driver may organize private helpers and output fields differently inside the
+dedicated tools package if one bounded Cargo binary and the single hosted
+`performance` job prove the same claims. Equivalent
 evidence substitution follows ADR-0016 and must be approved before execution; it
 cannot weaken the hosted-only boundary, sample counts, timing, exact drain, same-SHA,
 or fail-closed outcomes.

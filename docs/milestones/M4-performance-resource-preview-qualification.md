@@ -33,16 +33,15 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | blocked |
+| M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | ready |
 | M4-T02 | Run and record all M4 gates on one exact commit | M4-T01 | todo |
 
-## Blocker / next action
+## Recovery / next action
 
-`M4-BUDGET-001` blocks M4-T01 before a candidate commit: pinned `rustloc 0.19.1`
-classifies the required non-test Cargo driver's 1,802 new Rust lines below
-`tests/m0-harness` as test growth, while `scripts/test-budget.sh` permits 120. The
-alternate-index ticket gate returned `BLOCKED reason=ticket_allowance_exceeded`.
-The validated working tree is parked at `.worktrees/m4-t01`; no hook bypass,
-classifier gaming, baseline advance, or deletion of independent evidence is allowed.
-Resume requires explicit authorization for a separately planned control-policy
-amendment. T02's push/run remains separately unauthorized.
+`M4-BUDGET-001` was caused by placing a non-test binary below `tests/m0-harness`,
+where pinned `rustloc 0.19.1` correctly classifies every Rust line as test growth.
+The approved recovery moves that unchanged responsibility into the dedicated,
+non-published `tools/ferrum2-m4-qualification` workspace package and leaves the
+120-line ticket allowance, classifier, baseline, evidence, and CLI/profile contracts
+unchanged. Resume the parked `.worktrees/m4-t01` implementation there, then run the
+authoritative ticket gate. T02's push/run remains separately unauthorized.

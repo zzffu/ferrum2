@@ -76,6 +76,9 @@ and command definitions in their authoritative build/config files where possible
       validation before runtime resources are created.
     - `crates/ferrum2-observability`: log/metric initialization and stable,
       low-cardinality instrumentation.
+    - `tools/ferrum2-m4-qualification`: non-shipping Cargo binary for the fixed
+      M4 throughput/resource qualification profiles; it depends on release
+      binaries and operator surfaces rather than product crates.
   - `Inbound` accepts application-facing traffic and produces a normalized
     `Session`; `Outbound` handles that session; `Connector` establishes the
     required stream or datagram path. Protocol crates must not own routing
@@ -188,11 +191,11 @@ and command definitions in their authoritative build/config files where possible
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
 - Active planned changes:
-  - M4 — executing/blocked — M4-T01's required driver is parked in its isolated
-    worktree, but pinned `rustloc 0.19.1` classifies its 1,802 Rust lines as test growth
-    and the authoritative 120-line ticket allowance rejects it (`M4-BUDGET-001`). A
-    plan/control-policy amendment requires explicit authorization before execution can
-    resume. No push, hosted run, packaging, release, or publication is authorized.
+  - M4 — executing — M4-T01 resumes by moving the non-test qualification binary
+    from the parked `tests/m0-harness` draft into the dedicated non-shipping
+    `tools/ferrum2-m4-qualification` workspace package. This preserves the approved
+    test-budget policy and CLI/profile contracts. No push, hosted run, packaging,
+    release, or publication is authorized.
 
 
 ## Project validation

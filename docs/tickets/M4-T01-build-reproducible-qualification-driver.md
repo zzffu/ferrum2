@@ -1,21 +1,26 @@
 ---
 id: M4-T01
 milestone: M4
-status: blocked
+status: ready
 depends_on: []
 owns:
   - .github/workflows/m0.yml
+  - Cargo.toml
+  - Cargo.lock
+  - tools/ferrum2-m4-qualification/**
   - tests/m0-harness/Cargo.toml
   - tests/m0-harness/src/bin/m4_qualification.rs
   - tests/m0-harness/src/m4_support/**
+  - tests/m0-harness/tests/workspace_policy.rs
 ---
 
 # M4-T01 — Build the reproducible qualification driver
 
 ## Outcome
 
-Add one Cargo-managed, non-default driver that reuses the shipped release binaries to
-run the fixed throughput and 10k-idle profiles, then wire it into one `performance` job
+Add one Cargo-managed, non-default driver in the dedicated non-shipping
+`tools/ferrum2-m4-qualification` package. It reuses the shipped release binaries to run
+the fixed throughput and 10k-idle profiles, then wires them into one `performance` job
 in the existing hosted workflow. It emits bounded generated JSONL evidence and fails
 closed on identity, sample, resource, or cleanup defects.
 
@@ -41,8 +46,8 @@ closed on identity, sample, resource, or cleanup defects.
 
 ```sh
 cargo fmt --all -- --check
-cargo check -p ferrum2-m0-harness --all-targets --locked
-cargo run --release -p ferrum2-m0-harness --bin m4-qualification --locked -- self-check
+cargo check -p ferrum2-m4-qualification --all-targets --locked
+cargo run --release -p ferrum2-m4-qualification --bin m4-qualification --locked -- self-check
 cargo test -p ferrum2-m0-harness --locked
 sh scripts/test-budget.sh ticket --base 701925681df78ad83076ed67863bf4fecf46f77c --candidate <candidate-sha>
 git diff --check 701925681df78ad83076ed67863bf4fecf46f77c..<candidate-sha>
@@ -51,13 +56,9 @@ git diff --check 701925681df78ad83076ed67863bf4fecf46f77c..<candidate-sha>
 ## Result
 
 - Commit: —
-- Review: Architect `ESCALATE` (`M4-BUDGET-001`); no candidate correctness review.
-- Notes: The isolated worktree contains only the manifest entry and driver/support
-  paths, unstaged and uncommitted. `fmt`, harness `check`, release `self-check`
-  (`mutations=9`), workspace binary build, UDP example build, harness tests (57 passed,
-  2 ignored), and diff-check passed. Hosted modes were not run. An alternate temporary
-  index left the real index untouched and produced
-  `BLOCKED reason=ticket_allowance_exceeded`: exact-base code growth is zero and the
-  new driver contributes 1,802 test-classified lines against the 120-line allowance.
-  Resume requires an explicitly authorized plan/control-policy amendment; no
-  performance threshold, hook bypass, baseline advance, or remote action occurred.
+- Review: Pending recovered candidate.
+- Notes: The earlier parked draft passed focused checks but was not committed because
+  its location under `tests/m0-harness` made 1,802 non-test driver lines count as test
+  growth. The approved recovery relocates that responsibility to the dedicated tools
+  package without changing the budget policy, baseline, CLI, hosted profile, or remote
+  authority. The old harness paths are owned only for recovery cleanup.

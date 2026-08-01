@@ -630,7 +630,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | `M4-BUDGET-001`：required harness driver被pinned rustloc计为1,802行test growth，ticket allowance 120 fail closed；尚无candidate、hosted run或baseline | M4 |
+| Performance/10k idle | IN PROGRESS | `M4-BUDGET-001`已通过把non-test driver迁到独立non-shipping tools package解除，预算政策不变；尚无accepted candidate、hosted run或baseline | M4 |
 
 ## 已实现并通过的 M0 CI profile
 

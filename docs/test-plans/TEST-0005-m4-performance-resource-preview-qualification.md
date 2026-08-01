@@ -15,8 +15,9 @@
 | M4-MUST-04 evidence boundary | runner-temp path, redaction, bounded-capture, deletion, and Git-status checks | self-check plus hosted job |
 | M4-MUST-05 same-SHA convergence | one authorized GitHub Actions `push` run/attempt | T02 exact-SHA gate |
 
-The new execution seams are the Cargo-managed M4 driver and one `performance` job in
-the existing workflow. They reuse the release binaries, SOCKS/metrics mechanics,
+The new execution seams are the Cargo-managed M4 driver in
+`tools/ferrum2-m4-qualification` and one `performance` job in the existing workflow.
+They reuse the release binaries, SOCKS/metrics mechanics,
 stable active gauge, `/proc`, and reference pin. A new workflow, product endpoint,
 benchmark dependency, or separate soak harness would duplicate existing evidence
 without a distinct failure mode.
@@ -25,8 +26,8 @@ without a distinct failure mode.
 
 ```sh
 cargo fmt --all -- --check
-cargo check -p ferrum2-m0-harness --all-targets --locked
-cargo run --release -p ferrum2-m0-harness --bin m4-qualification --locked -- self-check
+cargo check -p ferrum2-m4-qualification --all-targets --locked
+cargo run --release -p ferrum2-m4-qualification --bin m4-qualification --locked -- self-check
 cargo test -p ferrum2-m0-harness --locked
 sh scripts/test-budget.sh ticket --base 701925681df78ad83076ed67863bf4fecf46f77c --candidate <candidate-sha>
 git diff --check 701925681df78ad83076ed67863bf4fecf46f77c..<candidate-sha>
@@ -48,7 +49,7 @@ wsl.exe -d Debian -- bash -lc '
   set -euo pipefail
   cd /mnt/c/project/ferrum2
   rustc +1.97.1 --version | grep -Fx "rustc 1.97.1 (8bab26f4f 2026-07-14)"
-  cargo +1.97.1 run --release -p ferrum2-m0-harness \
+  cargo +1.97.1 run --release -p ferrum2-m4-qualification \
     --bin m4-qualification --locked -- self-check
 '
 ```
