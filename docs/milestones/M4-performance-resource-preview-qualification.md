@@ -38,13 +38,12 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 
 ## Next action
 
-Preserve failed run `30698815475/1` on exact `57d317d`: all six independent
-quality/MSRV/interop/platform jobs succeeded and throughput recorded
-`7977915 / 478773248`, ratio `0.016663243`, but
-resource failed before load with `metrics readiness timed out`; cleanup succeeded.
-WSL2 reproduces the exact failure `2/2`. Local repair exact `56aadd4` admits only a
-complete identified zero-flow exposition, retains fail-closed parsing and exact
-post-load `10000` checks, and passes the WSL readiness diagnostic, both reviews, Full
-`6/6`, and both budgets. The consumed remote scope is revoked. Obtain a new exact
-single-use authorization before one non-force push and observe only its run/attempt;
-no rerun or new push is currently authorized.
+Preserve failed run `30700273019/1` on exact `2f4190c`: all six independent
+quality/MSRV/interop/platform jobs succeeded, TCP/UDP recorded `12/12` with cleanup,
+and throughput recorded `9013384 / 480717482`, ratio `0.018749857`. Resource passed
+readiness, exact 10k load, and 180 stable active/fd/task samples, then failed because
+RSS window 2 exceeded 105%; cleanup succeeded and drain was not reached. Raw samples
+were correctly deleted, but the bounded error omits the binary and first/current
+medians. Add only that bounded redacted diagnostic, preserving the 105% threshold,
+sample profile, and drain contract; diagnose before requesting any new remote scope.
+The consumed authorization is revoked and no rerun or new push is authorized.

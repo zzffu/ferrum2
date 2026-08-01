@@ -19,9 +19,9 @@ Actions run `30494736004` attempt 1 的七项成功、TCP/UDP 各 12/12、三目
 native lifecycle/linkage/hash 和关闭审查证据关闭；local closeout source 是
 docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
-M4-T01已在exact `7730ec7`集成到独立non-shipping tools package；M4-T02的
-local resource-readiness repair是exact `56aadd4`，双审、Full与budget已通过，
-当前因没有新的exact-SHA remote授权而`blocked`。
+M4-T01已在exact `7730ec7`集成到独立non-shipping tools package；M4-T02 exact
+`2f4190c`的run `30700273019/1`通过六项独立gate与throughput，但RSS window 2
+超过105%，当前因`HOSTED-M4-T02-003`诊断证据不足而`blocked`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -43,8 +43,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
 完成三目标 native qualification。M4-T01已把non-test driver迁到独立tools
 package并在exact `7730ec7`通过双审与authoritative ticket budget；下一入口是
-为M4-T02 exact `56aadd4`取得新的单次remote授权，验证本地已修复的pre-load lazy
-active metric circular wait；旧remote scope已消费撤销。
+为M4-T02的RSS失败增加bounded binary/median诊断并定位根因；run
+`30700273019/1`的remote scope已消费撤销，不授权rerun或新push。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -605,12 +605,11 @@ active metric circular wait；旧remote scope已消费撤销。
   - M4-T01：在独立non-shipping `ferrum2-m4-qualification` package内增加唯一
     Cargo-managed、non-default throughput/resource driver与短self-check，并在
     既有workflow增加唯一hosted `performance` job；exact `7730ec7`已`done`；
-  - M4-T02：exact `57d317d`已修复probe诊断并通过首轮本地门禁；run
-    `30698815475/1`进一步暴露pre-load lazy active metric circular wait。Exact
-    `56aadd4`已完成窄修复、双审、Full `6/6`与milestone budget，当前因没有新的
-    exact-SHA remote授权而`blocked`；取得授权后仍须在一个push run/attempt上运行
-    hosted performance/resource、full、test-budget、24-case/three-target
-    qualification并记录close summary。
+  - M4-T02：exact `56aadd4`修复pre-load lazy metric wait后，exact `2f4190c`
+    run `30700273019/1`通过quality/MSRV/interop/三平台与throughput，并完成10k及
+    180个stable owner/task samples；RSS window 2超过105%。当前因失败错误缺少
+    binary/first/current medians而`blocked`；先补bounded诊断并定位根因，之后仍须
+    新授权的一个push run/attempt完成全部qualification及close summary。
 
   Dependency graph：
 
@@ -623,6 +622,7 @@ active metric circular wait；旧remote scope已消费撤销。
   management API、reduced-round ChaCha、custom executor 和 `io_uring`。
 - **Integrated commit:** M4-T01 exact `7730ec730258971652270cc6ef41be9457abc2a7`；
   local M4-T02 resource repair exact `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`；
+  remote M4-T02 diagnostic candidate exact `2f4190c272f79c5d90ebb2d70cdade0378e44e02`；
   M4 accepted hosted qualification commit尚待T02。
 - **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
   driver迁到独立tools package解除；authoritative allowance、classifier、baseline
@@ -727,3 +727,4 @@ active metric circular wait；旧remote scope已消费撤销。
 | 2026-08-01 | M4 local probe repair | exact `57d317d`以static probe identity、distinct redacted failure class和shared 30秒probe limit关闭本地诊断缺陷；`IO_TIMEOUT`/`REAP_TIMEOUT`仍为5秒，双审、Full `6/6`、budget通过，T02转为remote-blocked | WSL2 native checkout在旧5秒边界50/50通过；受控6秒`git status`准确命中timeout class，旧hosted具体命令因历史日志折叠不可恢复 | Architect/QA `PASS`；code `13812`、tests `20740`、ratio `1.501593`；等待fresh exact-SHA单次remote授权 |
 | 2026-08-01 | M4 second hosted qualification | exact `57d317d` run `30698815475/1`通过quality、MSRV、interop、三平台与throughput，记录ferrum/reference `7977915/478773248`、ratio `0.016663243`；resource在pre-load以`metrics readiness timed out`失败，final failure | driver在创建首个flow前要求active series，但Prometheus labelled family只在首个flow时实例化；WSL2 exact resource `2/2`复现，独立scrape证明HTTP/OpenMetrics有效而series缺失 | `M4-REMOTE-57d317d-A1` 1/1消费撤销；cleanup success；`HOSTED-M4-T02-001` resolved、`HOSTED-M4-T02-002` active；无rerun/第二push/release/publication |
 | 2026-08-01 | M4 local resource-readiness repair | exact `56aadd4`只在HTTP 200、唯一终止`# EOF`及稳定eager replay identity/sample完整时把缺失lazy active series解释为zero；其余状态、重复/畸形/未知exposition仍fail closed，post-load exact `10000`不变 | exact `57d317d` WSL resource `2/2`失败及独立scrape定位lazy family circular wait；修复后同path通过25秒readiness观察并cleanup | Architect/QA `PASS`；self-check `mutations=11`；Full `6/6`；code/tests/ratio `13879/20740/1.494344`；等待新的单次exact-SHA remote授权 |
+| 2026-08-01 | M4 third hosted qualification | exact `2f4190c` run `30700273019/1`通过quality、MSRV、TCP/UDP `12/12`、三平台及throughput，记录ferrum/reference `9013384/480717482`、ratio `0.018749857`；resource完成readiness、10k与180 samples后以RSS window 2超过105%失败 | validate顺序证明全部active/fd/task tuples稳定；runner-temp raw samples按合同删除，但error未保留binary与first/current medians，无法区分测量扰动、早期baseline、真实增长或runner噪声 | `M4-REMOTE-2f4190c-A1` 1/1消费撤销；cleanup success；`HOSTED-M4-T02-002` resolved、`HOSTED-M4-T02-003` blocked；无rerun/第二push/release/publication |

@@ -88,18 +88,32 @@ git status --short
   median `7977915`, reference median `478773248`, and ratio `0.016663243`; resource
   then failed before load with `metrics readiness timed out`. Cleanup succeeded and
   final qualification failed. No resource sample, RSS window, or drain is credited.
+- Latest hosted result: scope `M4-REMOTE-2f4190c-A1` was consumed and auto-revoked
+  before one non-force push of exact `2f4190c`. GitHub Actions
+  [`30700273019`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30700273019)
+  completed `failure`: quality, MSRV, TCP/UDP `12/12` interop, and all three native
+  platforms succeeded. Throughput completed with ferrum2 median `9013384`, reference
+  median `480717482`, and ratio `0.018749857`. Resource passed readiness, established
+  exact `10000`, collected all 180 samples with stable active/fd/task tuples, then
+  rejected RSS window 2 above 105%. Cleanup succeeded; drain was not reached.
 
 ## Blocker
 
 - `HOSTED-M4-T02-001` is resolved: run `30698815475/1` passed every bounded identity,
   reference, and hash probe and completed throughput.
-- `HOSTED-M4-T02-002`: the resource driver waits for an active-flow sample before it
-  creates any flow, while the Prometheus `Family` creates that labelled series only on
-  the first flow. Exact `57d317d` reproduces the circular wait `2/2` in WSL2 within
+- `HOSTED-M4-T02-002` is resolved: the resource driver previously waited for an
+  active-flow sample before it created any flow, while the Prometheus `Family` creates
+  that labelled series only on the first flow. Exact `57d317d` reproduces the circular
+  wait `2/2` in WSL2 within
   `15.5` seconds; an independent server scrape returns valid HTTP/OpenMetrics with the
   active sample absent. Repair only this pre-load evidence seam, preserve exact post-load
   `10000` checks. Exact `56aadd4` implements that repair; both reviews and all local
-  gates passed, and the WSL resource path then survived the 25-second readiness window
-  with no readiness error and cleaned up. Hosted acceptance remains blocked pending a
-  new exact single-use push authorization. No rerun, second push, dispatch, PR, release,
-  publication, or other remote mutation is currently authorized.
+  gates passed, and run `30700273019/1` proceeded through exact 10k load and all 180
+  samples.
+- `HOSTED-M4-T02-003`: RSS window 2 exceeded the fixed 105% limit after every
+  active/fd/task tuple remained stable. Runner-temp raw evidence was correctly deleted,
+  but the failure text omits which binary and both first/current medians, so the run
+  cannot separate scrape-induced allocation, an early baseline, actual idle growth, or
+  runner RSS noise. Preserve the threshold and profile; add a bounded redacted failure
+  diagnostic before further root-cause testing. No rerun, second push, dispatch, PR,
+  release, publication, or other remote mutation is currently authorized.

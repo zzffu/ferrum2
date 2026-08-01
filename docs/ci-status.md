@@ -3,9 +3,10 @@
 ## 当前 M4 executing 状态
 
 - **Remote candidate and authorization:** exact
-  `57d317ddb554bbbbc5cc324046277a514ce54324` passed its local gates. Single-use
-  scope `M4-REMOTE-57d317d-A1` was consumed and auto-revoked before one non-force
-  push; the remote branch remains at that exact SHA.
+  `2f4190c272f79c5d90ebb2d70cdade0378e44e02` passed local Full `6/6`, release
+  self-check, and ticket/milestone budgets. Single-use scope
+  `M4-REMOTE-2f4190c-A1` was consumed and auto-revoked before one non-force push;
+  the remote branch now resolves to that exact SHA.
 - **Local resource repair:** exact
   `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8` admits a complete identified initial
   exposition with no lazy active-flow sample as zero, while malformed or unidentified
@@ -40,15 +41,25 @@
   Ferrum2 median was `7977915` bytes/s, reference median `478773248` bytes/s, ratio
   `0.016663243`. Resource then failed before load with `metrics readiness timed out`;
   cleanup succeeded. No resource sample, RSS window, or drain result may be credited.
-- **Open root:** `HOSTED-M4-T02-001` is resolved by the fresh run.
-  `HOSTED-M4-T02-002` was a deterministic pre-load circular wait: the driver required
-  an active-flow series before creating a flow, while the production Prometheus family
-  creates that labelled series on the first flow. WSL2 reproduces it `2/2`; an isolated
-  scrape proves valid HTTP/OpenMetrics with that series absent. Exact `56aadd4` repairs
-  the evidence seam; the same WSL resource path then survived the readiness window for
-  25 seconds with no readiness error and cleaned up. Hosted acceptance remains blocked
-  until a new exact single-use push authorization is granted; no remote action is
-  currently authorized.
+- **Latest hosted result:** push run
+  [`30700273019`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30700273019)
+  completed `failure` on exact `2f4190c`. Quality `91369961765`, MSRV `91369961748`,
+  interop `91369961726`, Linux GNU `91369961746`, Linux musl `91369961738`, and
+  Windows MSVC `91369961745` succeeded; interop recorded TCP/UDP `12/12` with both
+  cleanup results PASS. Performance `91369961766` and qualification `91373764205`
+  failed; the always-run performance cleanup succeeded.
+- **Latest performance evidence:** all probes, the release build, and ten throughput
+  trials passed. Ferrum2 median was `9013384` bytes/s, reference median `480717482`
+  bytes/s, ratio `0.018749857`. Resource passed readiness, established exact `10000`,
+  and collected all 180 samples with stable active/fd/task tuples, then rejected RSS
+  window 2 above 105%. Drain was not reached and no RSS window may be credited.
+- **Open root:** `HOSTED-M4-T02-001` and `HOSTED-M4-T02-002` are resolved.
+  `HOSTED-M4-T02-003` is the RSS-window failure above. The runner-temp raw samples were
+  correctly deleted, while the bounded error omits which binary and both first/current
+  medians; this run therefore cannot distinguish measurement-induced allocation, an
+  early baseline, actual idle growth, or runner RSS noise. Preserve the 105% gate and
+  add only bounded redacted failure values before another hosted request. No new remote
+  action is authorized.
 
 ## 当前 M3 closed 状态
 
@@ -680,7 +691,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | exact `57d317d` run `30698815475/1` throughput通过并记录ratio，但resource在pre-load lazy active metric circular wait失败；exact `56aadd4`本地修复与门禁PASS，尚缺新的exact-SHA remote授权/hosted结果 | M4 |
+| Performance/10k idle | BLOCKED | exact `2f4190c` run `30700273019/1` readiness、10k与180 samples完成，active/fd/task稳定，但RSS window 2超过首窗105%；失败文本缺binary及medians，`HOSTED-M4-T02-003`待诊断修复 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 
