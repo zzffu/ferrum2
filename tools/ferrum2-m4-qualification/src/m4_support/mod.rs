@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use socket2::{Domain, Protocol, Socket, Type};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
@@ -643,7 +644,15 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
         .prefix("resource-")
         .tempdir_in(output.parent())
         .map_err(clean_io)?;
-    let target_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
+    let target_socket =
+        Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(clean_io)?;
+    target_socket
+        .bind(&SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).into())
+        .map_err(clean_io)?;
+    target_socket
+        .listen(i32::try_from(RESOURCE_SESSIONS).expect("resource backlog fits i32"))
+        .map_err(clean_io)?;
+    let target_listener: TcpListener = target_socket.into();
     let target = v4(target_listener.local_addr().map_err(clean_io)?)?;
     let server_reservation = PortReservation::new()?;
     let proxy_reservation = PortReservation::new()?;

@@ -1199,18 +1199,32 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
         .expect("M4 qualification package");
     assert_eq!(
         m4["dependencies"],
-        serde_json::json!([{
-            "name": "tempfile",
-            "source": "registry+https://github.com/rust-lang/crates.io-index",
-            "req": "=3.27.0",
-            "kind": null,
-            "rename": null,
-            "optional": false,
-            "uses_default_features": true,
-            "features": [],
-            "target": null,
-            "registry": null
-        }])
+        serde_json::json!([
+            {
+                "name": "socket2",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
+                "req": "=0.6.5",
+                "kind": null,
+                "rename": null,
+                "optional": false,
+                "uses_default_features": true,
+                "features": [],
+                "target": null,
+                "registry": null
+            },
+            {
+                "name": "tempfile",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
+                "req": "=3.27.0",
+                "kind": null,
+                "rename": null,
+                "optional": false,
+                "uses_default_features": true,
+                "features": [],
+                "target": null,
+                "registry": null
+            }
+        ])
     );
     let targets = m4["targets"].as_array().expect("M4 targets");
     assert_eq!(targets.len(), 1);
@@ -1231,12 +1245,15 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
         .expect("M4 qualification manifest");
     assert_eq!(
         dependency_table(&manifest, "[dependencies]").expect("M4 dependencies"),
-        BTreeMap::from([("tempfile.workspace".to_owned(), "true".to_owned())])
+        BTreeMap::from([
+            ("socket2.workspace".to_owned(), "true".to_owned()),
+            ("tempfile.workspace".to_owned(), "true".to_owned()),
+        ])
     );
     let lock = fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock");
     assert_eq!(
         lock_package_dependencies(&lock, "ferrum2-m4-qualification").expect("M4 lock dependencies"),
-        BTreeSet::from(["tempfile".to_owned()])
+        BTreeSet::from(["socket2".to_owned(), "tempfile".to_owned()])
     );
 }
 
