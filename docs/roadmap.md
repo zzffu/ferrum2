@@ -32,7 +32,7 @@ GitHub Actions run [`30765897553/1`](https://github.com/zzffu/ferrum2/actions/ru
 定义为M6 hosted成功；未等待或声称performance及其dependent aggregate通过。
 M7已在`master@302fd777f4da62a8c1d4d52d81502056f02089c8`规划为additive
 schema v1 tagged static composition，并从exact ticket base `96a088e227dcfe415985c3deb081c807fb5e7d90`
-进入`executing`；M7-T01已集成，M7-T02 ready，尚无M7资格或remote证据。
+进入`executing`；M7-T01已集成，M7-T02 active，尚无M7资格或remote证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -766,7 +766,7 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
      cleanup、test budget和blocking review；缺失/失败/未授权即blocked。
 - **In-scope tickets:**
   - M7-T01：legacy/tagged config graph与preflight reference validation，`done`；
-  - M7-T02：server shared-state TCP/UDP/direct multi-root transaction，依赖T01，`ready`；
+  - M7-T02：server shared-state TCP/UDP/direct multi-root transaction，依赖T01，`active`；
   - M7-T03：client SOCKS/Shadowsocks static multi-root composition，依赖T02，`todo`；
   - M7-T04：real-process、三平台、interop与exact-SHA qualification，依赖T03，`todo`。
 
@@ -910,3 +910,4 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 | 2026-08-03 | M7 execute start | M7改为`executing`，唯一ready frontier M7-T01改为`active`并绑定独立ticket worktree | `master@96a088e227dcfe415985c3deb081c807fb5e7d90`干净且未移动；M6 closed，M7 contracts approved | exact ticket base `96a088e227dcfe415985c3deb081c807fb5e7d90`；test-budget verify PASS；无push/hosted run/release/publication |
 | 2026-08-03 | M7-T01 fail-closed scope repair | T01临时拥有两个binary `run.rs`，multi-inbound run在任何subscriber/runtime/listener副作用前返回既有`startup.protocol`；T02/T03只在完整消费graph时分别移除guard | config loader无法区分`--check-config`与run，原config-only ownership会让已接受的multi-entry graph被单实例binary静默截断 | Engineer pre-edit BLOCKED证据；T01/T02/T03与TEST-0008同步；不新增error、dependency、surface或remote action |
 | 2026-08-03 | M7-T01 integration | exact `f6ee43f`集成legacy/tagged完整graph、resolved concrete collections和两个临时fail-closed guards；T01 done，T02 ready | QA full evidence blocker由一次test-only repair关闭；Architect targeted redaction blocker触发用户指定的双独立xhigh分析，两者一致推荐单helper修复，final双审PASS | config `6/6`、CLI `5/5`、Clippy/fmt、Quick、ticket budget `PASS_HOLD` debt `108/120`与diff-check PASS；无push/hosted/release/publication |
+| 2026-08-03 | M7-T02 CLI ownership repair | T02改为active；serialized T02/T03共同拥有`config_cli`过渡行，分别移除server/client临时guard并更新该角色的closed startup结果 | T02 focused PASS后Quick只失败于T01刻意保留的server `startup.protocol`断言；产品已正确组合并到达被占端点的`startup.bind`，原T02 ownership无法更新依赖测试 | exact base `44eeedf736c62db185cc032d9e23e2af5bc7c3c3`；首次Quick失败证据保留；不扩展产品范围、dependency或remote action |

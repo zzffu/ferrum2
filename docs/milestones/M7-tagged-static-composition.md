@@ -61,7 +61,7 @@
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M7-T01 | Normalize legacy/tagged config and reject every invalid graph before side effects | — | done |
-| M7-T02 | Compose server multi-listener TCP/UDP/direct roots with shared state and atomic rollback | M7-T01 | ready |
+| M7-T02 | Compose server multi-listener TCP/UDP/direct roots with shared state and atomic rollback | M7-T01 | active |
 | M7-T03 | Compose client multi-listener SOCKS/Shadowsocks roots with shared bounds and static mapping | M7-T02 | todo |
 | M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | todo |
 
@@ -78,6 +78,8 @@ integrate。No concurrent writer owns overlapping product paths。
 
 ## Blocker / next action
 
-No execution blocker。M7-T01 is integrated at `f6ee43fa766dd326d33ba140a273b7df201749c1`；
-M7-T02 is the only ready frontier and removes only the server fail-closed guard after consuming the
-complete graph。Remote push/run、PR、tag、release and publication remain unauthorized。
+No execution blocker。M7-T02 is active from exact base
+`44eeedf736c62db185cc032d9e23e2af5bc7c3c3`。Its Quick gate exposed one control-plane omission：
+the serialized T02/T03 writers now share ownership of the CLI transition row so each can remove
+only its role's temporary guard。Remote push/run、PR、tag、release and publication remain
+unauthorized。

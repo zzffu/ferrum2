@@ -1,7 +1,7 @@
 ---
 id: M7-T02
 milestone: M7
-status: ready
+status: active
 depends_on: [M7-T01]
 owns:
   - crates/ferrum2-runtime/src/supervisor.rs
@@ -10,6 +10,7 @@ owns:
   - crates/ferrum2-runtime/tests/shutdown.rs
   - crates/ferrum2-runtime/tests/udp_runtime.rs
   - bins/ferrum2-server/src/run.rs
+  - tests/m0-harness/tests/config_cli.rs
 ---
 
 # M7-T02 — Compose tagged server roots
@@ -26,6 +27,9 @@ back all listeners atomically。
       one `ProcessSupervisor` transaction；no root polls before all roots prepare。
 - [ ] The server removes T01's fail-closed multi-inbound run guard only when every validated
       inbound/outbound is consumed by this transaction。
+- [ ] The shared CLI transition row expects the composed server to reach its occupied endpoint and
+      fail closed as `startup.bind`，while the uncomposed client still fails as `startup.protocol`；
+      `--check-config` and pre-existing endpoint ownership remain unchanged。
 - [ ] `runtime.max_connections`、TCP replay、UDP sessions and allocated bytes are aggregate process
       owners rather than per-listener multipliers；backlog remains per listener。
 - [ ] Static inbound→direct mapping has no selector/fallback。TCP replays across listeners fail

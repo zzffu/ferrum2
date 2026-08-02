@@ -5,6 +5,7 @@ status: todo
 depends_on: [M7-T02]
 owns:
   - bins/ferrum2-client/src/run.rs
+  - tests/m0-harness/tests/config_cli.rs
 ---
 
 # M7-T03 — Compose tagged client roots
@@ -20,6 +21,8 @@ under the same process transaction，with aggregate TCP/UDP bounds and no runtim
       process connection admission owner established by T02。
 - [ ] The client removes T01's fail-closed multi-inbound run guard only when every validated
       inbound/outbound is consumed by this transaction。
+- [ ] The shared CLI transition row then expects both composed roles to reach occupied endpoints
+      and fail closed as `startup.bind` without disturbing those endpoints。
 - [ ] Every CONNECT/UDP ASSOCIATE captures only its inbound's resolved server context；a failed
       referenced server never falls back to a live sibling outbound，while shared-outbound mappings
       work from multiple listeners。

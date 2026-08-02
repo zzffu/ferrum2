@@ -32,9 +32,9 @@
   all tag/endpoint sentinels and PSK。The table pins the seven approved non-indexed tagged field
   identities。`--check-config` positive/negative rows prove no listener、connector、session
   table、buffer or task side effect。
-- Before T02/T03 consume the collections，a multi-inbound run must fail with the existing
-  `startup.protocol` error before observability/runtime/listener creation；a one-entry tagged run
-  remains behavior-equivalent to legacy。
+- Before each role's T02/T03 composition ticket consumes its collections，that role's
+  multi-inbound run must fail with the existing `startup.protocol` error before observability、
+  runtime or listener creation；a one-entry tagged run remains behavior-equivalent to legacy。
 
 ```powershell
 cargo test -p ferrum2-config --locked
@@ -64,6 +64,7 @@ git diff --check
 ```powershell
 cargo test -p ferrum2-runtime --test lifecycle --test shutdown --test udp_runtime --locked
 cargo test -p ferrum2-server --locked
+cargo test -p ferrum2-m0-harness --test config_cli --locked
 cargo clippy -p ferrum2-runtime -p ferrum2-server --all-targets --all-features --locked -- -D warnings
 cargo fmt --all -- --check
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base <exact-ticket-base-sha> --candidate HEAD
@@ -86,6 +87,7 @@ git diff --check
 ```powershell
 cargo test -p ferrum2-client --locked
 cargo test -p ferrum2-socks5 -p ferrum2-shadowsocks -p ferrum2-runtime --locked
+cargo test -p ferrum2-m0-harness --test config_cli --locked
 cargo clippy -p ferrum2-client -p ferrum2-socks5 -p ferrum2-shadowsocks -p ferrum2-runtime --all-targets --all-features --locked -- -D warnings
 cargo fmt --all -- --check
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base <exact-ticket-base-sha> --candidate HEAD
