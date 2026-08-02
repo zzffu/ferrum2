@@ -203,10 +203,13 @@ fn crypto_profiles_keep_cipher_dispatch_inside_one_deep_module() {
         "pub type TcpMethodProfile = MethodProfile",
         "pub struct MethodPsk",
         "pub trait MethodKeyProvider",
-        "enum TcpCipher",
+        "ShadowsocksTcpCipher::try_new",
+        "ShadowsocksTcpCipher::try_from_subkey",
         "pub struct TcpSealer",
         "pub struct TcpOpener",
         "enum UdpCryptoInner",
+        "ShadowsocksUdpCipher::try_new",
+        "ShadowsocksAesHeaderCipher::try_new",
         "pub struct UdpCrypto",
         "pub struct UdpSessionId",
         "pub struct UdpOutboundSession",
@@ -239,6 +242,24 @@ fn crypto_profiles_keep_cipher_dispatch_inside_one_deep_module() {
         assert!(
             !crypto.contains(duplicated_owner),
             "method-specific public flow owner is forbidden: {duplicated_owner}"
+        );
+    }
+    for replaced_implementation in [
+        "enum TcpCipher",
+        "enum AesUdpBodyCipher",
+        "fn cipher_from_subkey",
+        "fn derive_subkey_16",
+        "fn derive_subkey_32",
+        "fn derive_udp_subkey_16",
+        "fn derive_udp_subkey_32",
+        "SIP022_KDF_CONTEXT",
+        "Aes128Gcm::new_from_slice",
+        "Aes256Gcm::new_from_slice",
+        "XChaCha20Poly1305::new_from_slice",
+    ] {
+        assert!(
+            !crypto.contains(replaced_implementation),
+            "replaced local crypto implementation is forbidden: {replaced_implementation}"
         );
     }
 

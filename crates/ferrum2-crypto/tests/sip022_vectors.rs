@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use ferrum2_crypto::{
     KeySelector, MethodKeyProvider, MethodProfile, MethodPsk, MethodSinglePskProvider,
     MethodTcpSalt, NonceCounter, RandomError, SecureRandom, TcpMethodProfile, TcpOpener, TcpSealer,
-    UdpCryptoError,
+    TcpSubkey, UdpCryptoError,
 };
 use serde_json::Value;
 
@@ -97,6 +97,24 @@ fn sip022_kdf_aead_nonce_and_authentication_table_covers_every_profile() {
             .expect("default key exists")
             .expect("profile-bound salt");
         assert_eq!(subkey.profile(), profile);
+
+        if profile == MethodProfile::Blake3Aes128Gcm2022 {
+            let selected =
+                decode_array::<16>(case["selected_subkey"].as_str().expect("selected subkey"));
+            let mut raw = BytesMut::from(plaintext.as_slice());
+            TcpSealer::new(TcpSubkey::from_bytes(selected))
+                .seal_in_place(&mut raw)
+                .expect("already-derived public subkey seals");
+            assert_eq!(
+                raw.as_ref(),
+                hex::decode(
+                    case["nonce_0_ciphertext_and_tag"]
+                        .as_str()
+                        .expect("nonce zero output")
+                )
+                .expect("nonce zero output")
+            );
+        }
 
         let mut sealer = TcpSealer::new(subkey);
         for field in ["nonce_0_ciphertext_and_tag", "nonce_1_ciphertext_and_tag"] {

@@ -1,15 +1,20 @@
 #![forbid(unsafe_code)]
 
+use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aes::cipher::{Array, BlockCipherDecrypt, BlockCipherEncrypt};
-use aes::{Aes128, Aes256};
-use aes_gcm::{AeadInOut, Aes128Gcm, Aes256Gcm, KeyInit, Nonce, Tag};
 use bytes::BytesMut;
-use chacha20poly1305::{ChaCha20Poly1305, Tag as ChaChaTag, XChaCha20Poly1305, XNonce};
+use shadowsocks_crypto::{
+    CipherKind,
+    v2::{
+        CryptoError as ShadowsocksCryptoError,
+        tcp::TcpCipher as ShadowsocksTcpCipher,
+        udp::{AesHeaderCipher as ShadowsocksAesHeaderCipher, UdpCipher as ShadowsocksUdpCipher},
+    },
+};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const AES_128_KEY_BYTES: usize = 16;
@@ -21,7 +26,6 @@ const UDP_SESSION_ID_BYTES: usize = 8;
 const UDP_PACKET_ID_BYTES: usize = 8;
 const UDP_IDENTITY_BYTES: usize = UDP_SESSION_ID_BYTES + UDP_PACKET_ID_BYTES;
 const XCHACHA_NONCE_BYTES: usize = 24;
-const SIP022_KDF_CONTEXT: &str = "shadowsocks 2022 session subkey";
 const RESPONSE_SALT_ATTEMPTS: usize = 8;
 const UDP_SESSION_ID_ATTEMPTS: usize = 8;
 
@@ -157,6 +161,14 @@ impl MethodProfile {
             }
         }
     }
+
+    const fn cipher_kind(self) -> CipherKind {
+        match self {
+            Self::Blake3Aes128Gcm2022 => CipherKind::AEAD2022_BLAKE3_AES_128_GCM,
+            Self::Blake3Aes256Gcm2022 => CipherKind::AEAD2022_BLAKE3_AES_256_GCM,
+            Self::Blake3ChaCha20Poly13052022 => CipherKind::AEAD2022_BLAKE3_CHACHA20_POLY1305,
+        }
+    }
 }
 
 /// Source-compatible M1 name for the canonical transport-neutral profile.
@@ -174,6 +186,23 @@ enum MethodPskBytes {
     Aes128(Zeroizing<[u8; AES_128_KEY_BYTES]>),
     Aes256(Zeroizing<[u8; WIDE_KEY_BYTES]>),
     ChaCha20Poly1305(Zeroizing<[u8; WIDE_KEY_BYTES]>),
+}
+
+impl MethodPskBytes {
+    const fn profile(&self) -> MethodProfile {
+        match self {
+            Self::Aes128(_) => MethodProfile::Blake3Aes128Gcm2022,
+            Self::Aes256(_) => MethodProfile::Blake3Aes256Gcm2022,
+            Self::ChaCha20Poly1305(_) => MethodProfile::Blake3ChaCha20Poly13052022,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Aes128(bytes) => bytes.as_ref(),
+            Self::Aes256(bytes) | Self::ChaCha20Poly1305(bytes) => bytes.as_ref(),
+        }
+    }
 }
 
 impl MethodPsk {
@@ -221,11 +250,7 @@ impl MethodPsk {
 
     /// Returns the immutable profile bound to this PSK.
     pub const fn profile(&self) -> MethodProfile {
-        match self.bytes {
-            MethodPskBytes::Aes128(_) => MethodProfile::Blake3Aes128Gcm2022,
-            MethodPskBytes::Aes256(_) => MethodProfile::Blake3Aes256Gcm2022,
-            MethodPskBytes::ChaCha20Poly1305(_) => MethodProfile::Blake3ChaCha20Poly13052022,
-        }
+        self.bytes.profile()
     }
 
     /// Explicitly clears the owned PSK without changing its bound profile.
@@ -418,18 +443,15 @@ impl MethodSecretKeyRef<'_> {
         self,
         salt: &MethodTcpSalt,
     ) -> Result<TcpSubkey, MethodProfileMismatchError> {
-        match (self.psk, &salt.bytes) {
-            (MethodPskBytes::Aes128(psk), MethodSaltBytes::Aes128(salt)) => {
-                Ok(TcpSubkey::from_bytes(derive_subkey_16(psk, salt)))
-            }
-            (MethodPskBytes::Aes256(psk), MethodSaltBytes::Aes256(salt)) => {
-                Ok(TcpSubkey::aes256(derive_subkey_32(psk, salt)))
-            }
-            (MethodPskBytes::ChaCha20Poly1305(psk), MethodSaltBytes::ChaCha20Poly1305(salt)) => {
-                Ok(TcpSubkey::chacha20_poly1305(derive_subkey_32(psk, salt)))
-            }
-            _ => Err(MethodProfileMismatchError),
+        let profile = salt.profile();
+        if self.psk.profile() != profile {
+            return Err(MethodProfileMismatchError);
         }
+        Ok(TcpSubkey::derive(
+            profile,
+            self.psk.as_slice(),
+            salt.as_bytes(),
+        ))
     }
 
     /// Creates an opaque method-bound SIP022 UDP cryptographic capability.
@@ -439,19 +461,31 @@ impl MethodSecretKeyRef<'_> {
     /// read or substitute the underlying PSK.
     pub fn udp_crypto(self) -> UdpCrypto {
         let inner = match self.psk {
-            MethodPskBytes::Aes128(psk) => UdpCryptoInner::Aes128 {
-                psk: Zeroizing::new(**psk),
-                header: Aes128::new_from_slice(psk.as_ref())
-                    .unwrap_or_else(|_| unreachable!("AES-128 PSKs have a fixed width")),
+            MethodPskBytes::Aes128(psk) => UdpCryptoInner::Aes {
+                profile: MethodProfile::Blake3Aes128Gcm2022,
+                psk: Zeroizing::new(psk.to_vec()),
+                header: ShadowsocksAesHeaderCipher::try_new(
+                    MethodProfile::Blake3Aes128Gcm2022.cipher_kind(),
+                    psk.as_ref(),
+                )
+                .unwrap_or_else(|_| unreachable!("AES-128 PSKs have a fixed width")),
             },
-            MethodPskBytes::Aes256(psk) => UdpCryptoInner::Aes256 {
-                psk: Zeroizing::new(**psk),
-                header: Aes256::new_from_slice(psk.as_ref())
-                    .unwrap_or_else(|_| unreachable!("AES-256 PSKs have a fixed width")),
+            MethodPskBytes::Aes256(psk) => UdpCryptoInner::Aes {
+                profile: MethodProfile::Blake3Aes256Gcm2022,
+                psk: Zeroizing::new(psk.to_vec()),
+                header: ShadowsocksAesHeaderCipher::try_new(
+                    MethodProfile::Blake3Aes256Gcm2022.cipher_kind(),
+                    psk.as_ref(),
+                )
+                .unwrap_or_else(|_| unreachable!("AES-256 PSKs have a fixed width")),
             },
             MethodPskBytes::ChaCha20Poly1305(psk) => UdpCryptoInner::ChaCha20Poly1305(
-                XChaCha20Poly1305::new_from_slice(psk.as_ref())
-                    .unwrap_or_else(|_| unreachable!("XChaCha20 PSKs have a fixed width")),
+                ShadowsocksUdpCipher::try_new(
+                    MethodProfile::Blake3ChaCha20Poly13052022.cipher_kind(),
+                    psk.as_ref(),
+                    None,
+                )
+                .unwrap_or_else(|_| unreachable!("XChaCha20 PSKs have a fixed width")),
             ),
         };
         UdpCrypto { inner }
@@ -465,12 +499,14 @@ impl MethodSecretKeyRef<'_> {
 #[derive(Clone, Eq, PartialEq)]
 pub struct UdpSessionId {
     bytes: [u8; UDP_SESSION_ID_BYTES],
-    lookup_hash: [u8; 32],
+    lookup_hash: u64,
 }
 
 impl UdpSessionId {
     fn from_bytes(bytes: [u8; UDP_SESSION_ID_BYTES]) -> Self {
-        let lookup_hash = *blake3::hash(&bytes).as_bytes();
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        let lookup_hash = hasher.finish();
         Self { bytes, lookup_hash }
     }
 
@@ -501,7 +537,7 @@ impl UdpSessionId {
 
 impl Hash for UdpSessionId {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write(&self.lookup_hash);
+        state.write_u64(self.lookup_hash);
     }
 }
 
@@ -644,52 +680,12 @@ impl ZeroizeOnDrop for UdpOutboundSession {}
 // the long-lived method capability and all per-packet operations.
 #[allow(clippy::large_enum_variant)]
 enum UdpCryptoInner {
-    Aes128 {
-        psk: Zeroizing<[u8; AES_128_KEY_BYTES]>,
-        header: Aes128,
+    Aes {
+        profile: MethodProfile,
+        psk: Zeroizing<Vec<u8>>,
+        header: ShadowsocksAesHeaderCipher,
     },
-    Aes256 {
-        psk: Zeroizing<[u8; WIDE_KEY_BYTES]>,
-        header: Aes256,
-    },
-    ChaCha20Poly1305(XChaCha20Poly1305),
-}
-
-#[allow(clippy::large_enum_variant)]
-enum AesUdpBodyCipher {
-    Aes128(Aes128Gcm),
-    Aes256(Aes256Gcm),
-}
-
-impl AesUdpBodyCipher {
-    fn seal(&self, nonce: [u8; AEAD_NONCE_BYTES], body: &mut [u8]) -> Result<Tag, UdpCryptoError> {
-        match self {
-            Self::Aes128(cipher) => {
-                cipher.encrypt_inout_detached(&Nonce::from(nonce), &[], body.into())
-            }
-            Self::Aes256(cipher) => {
-                cipher.encrypt_inout_detached(&Nonce::from(nonce), &[], body.into())
-            }
-        }
-        .map_err(|_| UdpCryptoError::OperationFailed)
-    }
-
-    fn open(
-        &self,
-        nonce: [u8; AEAD_NONCE_BYTES],
-        body: &mut [u8],
-        tag: &Tag,
-    ) -> Result<(), UdpCryptoError> {
-        match self {
-            Self::Aes128(cipher) => {
-                cipher.decrypt_inout_detached(&Nonce::from(nonce), &[], body.into(), tag)
-            }
-            Self::Aes256(cipher) => {
-                cipher.decrypt_inout_detached(&Nonce::from(nonce), &[], body.into(), tag)
-            }
-        }
-        .map_err(|_| UdpCryptoError::AuthenticationFailed)
-    }
+    ChaCha20Poly1305(ShadowsocksUdpCipher),
 }
 
 /// An opaque method-bound SIP022 UDP crypto envelope owner.
@@ -712,8 +708,7 @@ impl UdpCrypto {
     /// Returns the immutable method profile bound to this owner.
     pub const fn profile(&self) -> MethodProfile {
         match self.inner {
-            UdpCryptoInner::Aes128 { .. } => MethodProfile::Blake3Aes128Gcm2022,
-            UdpCryptoInner::Aes256 { .. } => MethodProfile::Blake3Aes256Gcm2022,
+            UdpCryptoInner::Aes { profile, .. } => profile,
             UdpCryptoInner::ChaCha20Poly1305(_) => MethodProfile::Blake3ChaCha20Poly13052022,
         }
     }
@@ -746,44 +741,23 @@ impl UdpCrypto {
     }
 
     fn crypt_aes_header(&self, header: &mut [u8; UDP_IDENTITY_BYTES], encrypt: bool) {
-        let mut block = Array::from(*header);
         match (&self.inner, encrypt) {
-            (UdpCryptoInner::Aes128 { header, .. }, true) => {
-                header.encrypt_block(&mut block);
-            }
-            (UdpCryptoInner::Aes128 { header, .. }, false) => {
-                header.decrypt_block(&mut block);
-            }
-            (UdpCryptoInner::Aes256 { header, .. }, true) => {
-                header.encrypt_block(&mut block);
-            }
-            (UdpCryptoInner::Aes256 { header, .. }, false) => {
-                header.decrypt_block(&mut block);
-            }
+            (UdpCryptoInner::Aes { header: cipher, .. }, true) => cipher.encrypt(header),
+            (UdpCryptoInner::Aes { header: cipher, .. }, false) => cipher.decrypt(header),
             (UdpCryptoInner::ChaCha20Poly1305(_), _) => {
                 unreachable!("AES header operation requires an AES method")
             }
         }
-        header.copy_from_slice(&block);
-        block.as_mut_slice().zeroize();
     }
 
-    fn aes_body_cipher(&self, session_id: &UdpSessionId) -> AesUdpBodyCipher {
+    fn aes_body_cipher(&self, session_id: &UdpSessionId) -> ShadowsocksUdpCipher {
         match &self.inner {
-            UdpCryptoInner::Aes128 { psk, .. } => {
-                let mut subkey = Zeroizing::new(derive_udp_subkey_16(psk, &session_id.bytes));
-                let cipher = Aes128Gcm::new_from_slice(subkey.as_ref())
-                    .unwrap_or_else(|_| unreachable!("AES-128 UDP subkeys have a fixed width"));
-                subkey.zeroize();
-                AesUdpBodyCipher::Aes128(cipher)
-            }
-            UdpCryptoInner::Aes256 { psk, .. } => {
-                let mut subkey = Zeroizing::new(derive_udp_subkey_32(psk, &session_id.bytes));
-                let cipher = Aes256Gcm::new_from_slice(subkey.as_ref())
-                    .unwrap_or_else(|_| unreachable!("AES-256 UDP subkeys have a fixed width"));
-                subkey.zeroize();
-                AesUdpBodyCipher::Aes256(cipher)
-            }
+            UdpCryptoInner::Aes { profile, psk, .. } => ShadowsocksUdpCipher::try_new(
+                profile.cipher_kind(),
+                psk.as_ref(),
+                Some(&session_id.bytes),
+            )
+            .unwrap_or_else(|_| unreachable!("AES UDP inputs have validated fixed widths")),
             UdpCryptoInner::ChaCha20Poly1305(_) => {
                 unreachable!("AES body operation requires an AES method")
             }
@@ -815,7 +789,7 @@ impl UdpCrypto {
         }
 
         let result = match &self.inner {
-            UdpCryptoInner::Aes128 { .. } | UdpCryptoInner::Aes256 { .. } => seal_aes_udp(
+            UdpCryptoInner::Aes { .. } => seal_aes_udp(
                 self,
                 &outbound.session_id,
                 packet_id,
@@ -854,9 +828,7 @@ impl UdpCrypto {
         plaintext_output: &mut [u8],
     ) -> Result<UdpOpenResult, UdpCryptoError> {
         match &self.inner {
-            UdpCryptoInner::Aes128 { .. } | UdpCryptoInner::Aes256 { .. } => {
-                open_aes_udp(self, wire, plaintext_output)
-            }
+            UdpCryptoInner::Aes { .. } => open_aes_udp(self, wire, plaintext_output),
             UdpCryptoInner::ChaCha20Poly1305(cipher) => {
                 open_xchacha_udp(cipher, wire, plaintext_output)
             }
@@ -1029,68 +1001,10 @@ impl SecretKeyRef<'_> {
     pub fn derive_tcp_subkey(self, method: TcpMethod, salt: &TcpSalt) -> TcpSubkey {
         match method {
             TcpMethod::Blake3Aes128Gcm2022 => {
-                TcpSubkey::from_bytes(derive_subkey_16(self.psk, &salt.bytes))
+                TcpSubkey::derive(MethodProfile::Blake3Aes128Gcm2022, self.psk, &salt.bytes)
             }
         }
     }
-}
-
-fn derive_subkey_16(
-    psk: &[u8; AES_128_KEY_BYTES],
-    salt: &[u8; AES_128_KEY_BYTES],
-) -> [u8; AES_128_KEY_BYTES] {
-    let mut material = Zeroizing::new([0_u8; AES_128_KEY_BYTES * 2]);
-    material[..AES_128_KEY_BYTES].copy_from_slice(psk);
-    material[AES_128_KEY_BYTES..].copy_from_slice(salt);
-    let mut derived = Zeroizing::new(blake3::derive_key(SIP022_KDF_CONTEXT, material.as_ref()));
-    let mut selected = [0_u8; AES_128_KEY_BYTES];
-    selected.copy_from_slice(&derived[..AES_128_KEY_BYTES]);
-    derived.zeroize();
-    material.zeroize();
-    selected
-}
-
-fn derive_subkey_32(
-    psk: &[u8; WIDE_KEY_BYTES],
-    salt: &[u8; WIDE_KEY_BYTES],
-) -> [u8; WIDE_KEY_BYTES] {
-    let mut material = Zeroizing::new([0_u8; WIDE_KEY_BYTES * 2]);
-    material[..WIDE_KEY_BYTES].copy_from_slice(psk);
-    material[WIDE_KEY_BYTES..].copy_from_slice(salt);
-    let mut selected = Zeroizing::new(blake3::derive_key(SIP022_KDF_CONTEXT, material.as_ref()));
-    material.zeroize();
-    let output = *selected;
-    selected.zeroize();
-    output
-}
-
-fn derive_udp_subkey_16(
-    psk: &[u8; AES_128_KEY_BYTES],
-    session_id: &[u8; UDP_SESSION_ID_BYTES],
-) -> [u8; AES_128_KEY_BYTES] {
-    let mut material = Zeroizing::new([0_u8; AES_128_KEY_BYTES + UDP_SESSION_ID_BYTES]);
-    material[..AES_128_KEY_BYTES].copy_from_slice(psk);
-    material[AES_128_KEY_BYTES..].copy_from_slice(session_id);
-    let mut derived = Zeroizing::new(blake3::derive_key(SIP022_KDF_CONTEXT, material.as_ref()));
-    let mut selected = [0_u8; AES_128_KEY_BYTES];
-    selected.copy_from_slice(&derived[..AES_128_KEY_BYTES]);
-    derived.zeroize();
-    material.zeroize();
-    selected
-}
-
-fn derive_udp_subkey_32(
-    psk: &[u8; WIDE_KEY_BYTES],
-    session_id: &[u8; UDP_SESSION_ID_BYTES],
-) -> [u8; WIDE_KEY_BYTES] {
-    let mut material = Zeroizing::new([0_u8; WIDE_KEY_BYTES + UDP_SESSION_ID_BYTES]);
-    material[..WIDE_KEY_BYTES].copy_from_slice(psk);
-    material[WIDE_KEY_BYTES..].copy_from_slice(session_id);
-    let mut selected = Zeroizing::new(blake3::derive_key(SIP022_KDF_CONTEXT, material.as_ref()));
-    material.zeroize();
-    let output = *selected;
-    selected.zeroize();
-    output
 }
 
 fn udp_identity(session_id: &UdpSessionId, packet_id: u64) -> [u8; UDP_IDENTITY_BYTES] {
@@ -1117,7 +1031,9 @@ fn seal_aes_udp(
     let cipher = crypto.aes_body_cipher(session_id);
     let body_end = UDP_IDENTITY_BYTES + plaintext_body.len();
     output[UDP_IDENTITY_BYTES..body_end].copy_from_slice(plaintext_body);
-    let tag = cipher.seal(*nonce, &mut output[UDP_IDENTITY_BYTES..body_end])?;
+    let tag = cipher
+        .encrypt_packet(nonce.as_ref(), &mut output[UDP_IDENTITY_BYTES..body_end])
+        .map_err(map_udp_operation_error)?;
     output[body_end..body_end + AEAD_TAG_BYTES].copy_from_slice(&tag);
 
     protected_header.zeroize();
@@ -1127,7 +1043,7 @@ fn seal_aes_udp(
 }
 
 fn seal_xchacha_udp(
-    cipher: &XChaCha20Poly1305,
+    cipher: &ShadowsocksUdpCipher,
     random: &(impl SecureRandom + ?Sized),
     session_id: &UdpSessionId,
     packet_id: u64,
@@ -1147,12 +1063,8 @@ fn seal_xchacha_udp(
     output[body_start + UDP_IDENTITY_BYTES..body_end].copy_from_slice(plaintext_body);
 
     let tag = cipher
-        .encrypt_inout_detached(
-            &XNonce::from(*nonce),
-            &[],
-            (&mut output[body_start..body_end]).into(),
-        )
-        .map_err(|_| UdpCryptoError::OperationFailed)?;
+        .encrypt_packet(nonce.as_ref(), &mut output[body_start..body_end])
+        .map_err(map_udp_operation_error)?;
     output[..XCHACHA_NONCE_BYTES].copy_from_slice(nonce.as_ref());
     output[body_end..body_end + AEAD_TAG_BYTES].copy_from_slice(&tag);
     nonce.zeroize();
@@ -1187,10 +1099,10 @@ fn open_aes_udp(
     let tag_bytes: [u8; AEAD_TAG_BYTES] = wire[tag_start..]
         .try_into()
         .unwrap_or_else(|_| unreachable!("validated UDP tag width"));
-    let result = cipher.open(
-        *nonce,
+    let result = cipher.decrypt_packet(
+        nonce.as_ref(),
         &mut plaintext_output[..body_len],
-        &Tag::from(tag_bytes),
+        &tag_bytes,
     );
 
     identity.zeroize();
@@ -1218,7 +1130,7 @@ fn aes_udp_body_len(wire: &[u8], plaintext_output: &[u8]) -> Result<usize, UdpCr
 }
 
 fn open_xchacha_udp(
-    cipher: &XChaCha20Poly1305,
+    cipher: &ShadowsocksUdpCipher,
     wire: &[u8],
     plaintext_output: &mut [u8],
 ) -> Result<UdpOpenResult, UdpCryptoError> {
@@ -1239,11 +1151,10 @@ fn open_xchacha_udp(
     let tag_bytes: [u8; AEAD_TAG_BYTES] = wire[tag_start..]
         .try_into()
         .unwrap_or_else(|_| unreachable!("validated UDP tag width"));
-    let result = cipher.decrypt_inout_detached(
-        &XNonce::from(*nonce),
-        &[],
-        (&mut plaintext_output[..encrypted_len]).into(),
-        &ChaChaTag::from(tag_bytes),
+    let result = cipher.decrypt_packet(
+        nonce.as_ref(),
+        &mut plaintext_output[..encrypted_len],
+        &tag_bytes,
     );
     nonce.zeroize();
     if result.is_err() {
@@ -1266,6 +1177,10 @@ fn open_xchacha_udp(
         packet_id,
         plaintext_len: body_len,
     })
+}
+
+fn map_udp_operation_error(_: ShadowsocksCryptoError) -> UdpCryptoError {
+    UdpCryptoError::OperationFailed
 }
 
 /// The only TCP cipher method implemented by M0.
@@ -1550,80 +1465,63 @@ impl Error for RandomError {}
 ///
 /// The owner is intentionally neither `Clone` nor printable.
 pub struct TcpSubkey {
-    bytes: TcpSubkeyBytes,
-}
-
-enum TcpSubkeyBytes {
-    Aes128(Zeroizing<[u8; AES_128_KEY_BYTES]>),
-    Aes256(Zeroizing<[u8; WIDE_KEY_BYTES]>),
-    ChaCha20Poly1305(Zeroizing<[u8; WIDE_KEY_BYTES]>),
+    profile: MethodProfile,
+    cipher: ShadowsocksTcpCipher,
 }
 
 impl TcpSubkey {
     /// Takes ownership of an AES-128 primitive key.
     pub fn from_bytes(bytes: [u8; AES_128_KEY_BYTES]) -> Self {
-        Self {
-            bytes: TcpSubkeyBytes::Aes128(Zeroizing::new(bytes)),
-        }
+        Self::from_subkey(MethodProfile::Blake3Aes128Gcm2022, bytes)
     }
 
-    fn aes256(bytes: [u8; WIDE_KEY_BYTES]) -> Self {
-        Self {
-            bytes: TcpSubkeyBytes::Aes256(Zeroizing::new(bytes)),
-        }
+    fn from_subkey<const N: usize>(profile: MethodProfile, bytes: [u8; N]) -> Self {
+        let mut bytes = Zeroizing::new(bytes);
+        let cipher = ShadowsocksTcpCipher::try_from_subkey(profile.cipher_kind(), bytes.as_ref())
+            .unwrap_or_else(|_| unreachable!("TCP subkeys have a profile-fixed width"));
+        bytes.zeroize();
+        Self { profile, cipher }
     }
 
-    fn chacha20_poly1305(bytes: [u8; WIDE_KEY_BYTES]) -> Self {
-        Self {
-            bytes: TcpSubkeyBytes::ChaCha20Poly1305(Zeroizing::new(bytes)),
-        }
+    fn derive(profile: MethodProfile, psk: &[u8], salt: &[u8]) -> Self {
+        let cipher = ShadowsocksTcpCipher::try_new(profile.cipher_kind(), psk, salt)
+            .unwrap_or_else(|_| unreachable!("TCP KDF inputs have profile-fixed widths"));
+        Self { profile, cipher }
     }
 
     /// Returns the immutable profile bound during KDF selection.
     pub const fn profile(&self) -> MethodProfile {
-        match self.bytes {
-            TcpSubkeyBytes::Aes128(_) => MethodProfile::Blake3Aes128Gcm2022,
-            TcpSubkeyBytes::Aes256(_) => MethodProfile::Blake3Aes256Gcm2022,
-            TcpSubkeyBytes::ChaCha20Poly1305(_) => MethodProfile::Blake3ChaCha20Poly13052022,
-        }
+        self.profile
     }
 }
 
 impl Zeroize for TcpSubkey {
     fn zeroize(&mut self) {
-        match &mut self.bytes {
-            TcpSubkeyBytes::Aes128(bytes) => bytes.zeroize(),
-            TcpSubkeyBytes::Aes256(bytes) | TcpSubkeyBytes::ChaCha20Poly1305(bytes) => {
-                bytes.zeroize();
-            }
-        }
+        let zero_subkey = Zeroizing::new([0_u8; WIDE_KEY_BYTES]);
+        self.cipher = ShadowsocksTcpCipher::try_from_subkey(
+            self.profile.cipher_kind(),
+            &zero_subkey[..self.profile.key_bytes()],
+        )
+        .unwrap_or_else(|_| unreachable!("zero TCP subkeys have a profile-fixed width"));
     }
 }
 
 impl ZeroizeOnDrop for TcpSubkey {}
 
-// Keeping the fixed-size primitive state inline avoids a heap allocation for
-// every directional owner; the enum is constructed once and reused per frame.
-#[allow(clippy::large_enum_variant)]
-enum TcpCipher {
-    Aes128(Aes128Gcm),
-    Aes256(Aes256Gcm),
-    ChaCha20Poly1305(ChaCha20Poly1305),
-}
-
 /// A method-bound AEAD owner for one outbound TCP direction.
 ///
 /// Construction always initializes its private nonce counter to zero.
 pub struct TcpSealer {
-    cipher: TcpCipher,
+    cipher: ShadowsocksTcpCipher,
     nonce: NonceCounter,
 }
 
 impl TcpSealer {
     /// Consumes a session subkey and creates a zero-nonce sealer.
     pub fn new(subkey: TcpSubkey) -> Self {
+        let TcpSubkey { cipher, .. } = subkey;
         Self {
-            cipher: cipher_from_subkey(&subkey),
+            cipher,
             nonce: NonceCounter::new(),
         }
     }
@@ -1631,14 +1529,12 @@ impl TcpSealer {
     /// Encrypts and appends the tag in place with empty associated data.
     pub fn seal_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
         let (nonce, next) = self.nonce.reserve()?;
-        match &self.cipher {
-            TcpCipher::Aes128(cipher) => cipher.encrypt_in_place(&Nonce::from(nonce), &[], buffer),
-            TcpCipher::Aes256(cipher) => cipher.encrypt_in_place(&Nonce::from(nonce), &[], buffer),
-            TcpCipher::ChaCha20Poly1305(cipher) => {
-                cipher.encrypt_in_place(&Nonce::from(nonce), &[], buffer)
-            }
-        }
-        .map_err(|_| AeadError::OperationFailed)?;
+        buffer.reserve(AEAD_TAG_BYTES);
+        let tag = self
+            .cipher
+            .encrypt_packet(&nonce, buffer.as_mut())
+            .map_err(|_| AeadError::OperationFailed)?;
+        buffer.extend_from_slice(&tag);
         self.nonce = next;
         Ok(())
     }
@@ -1648,15 +1544,16 @@ impl TcpSealer {
 ///
 /// Construction always initializes its private nonce counter to zero.
 pub struct TcpOpener {
-    cipher: TcpCipher,
+    cipher: ShadowsocksTcpCipher,
     nonce: NonceCounter,
 }
 
 impl TcpOpener {
     /// Consumes a session subkey and creates a zero-nonce opener.
     pub fn new(subkey: TcpSubkey) -> Self {
+        let TcpSubkey { cipher, .. } = subkey;
         Self {
-            cipher: cipher_from_subkey(&subkey),
+            cipher,
             nonce: NonceCounter::new(),
         }
     }
@@ -1664,33 +1561,21 @@ impl TcpOpener {
     /// Authenticates and decrypts in place with empty associated data.
     pub fn open_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
         let (nonce, next) = self.nonce.reserve()?;
-        match &self.cipher {
-            TcpCipher::Aes128(cipher) => cipher.decrypt_in_place(&Nonce::from(nonce), &[], buffer),
-            TcpCipher::Aes256(cipher) => cipher.decrypt_in_place(&Nonce::from(nonce), &[], buffer),
-            TcpCipher::ChaCha20Poly1305(cipher) => {
-                cipher.decrypt_in_place(&Nonce::from(nonce), &[], buffer)
-            }
-        }
-        .map_err(|_| AeadError::AuthenticationFailed)?;
+        let tag_start = buffer
+            .len()
+            .checked_sub(AEAD_TAG_BYTES)
+            .ok_or(AeadError::AuthenticationFailed)?;
+        let tag: [u8; AEAD_TAG_BYTES] = buffer[tag_start..]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("validated TCP tag width"));
+        let mut plaintext = Zeroizing::new(buffer[..tag_start].to_vec());
+        self.cipher
+            .decrypt_packet(&nonce, plaintext.as_mut(), &tag)
+            .map_err(|_| AeadError::AuthenticationFailed)?;
+        buffer.truncate(tag_start);
+        buffer.copy_from_slice(plaintext.as_ref());
         self.nonce = next;
         Ok(())
-    }
-}
-
-fn cipher_from_subkey(subkey: &TcpSubkey) -> TcpCipher {
-    match &subkey.bytes {
-        TcpSubkeyBytes::Aes128(bytes) => TcpCipher::Aes128(
-            Aes128Gcm::new_from_slice(bytes.as_ref())
-                .unwrap_or_else(|_| unreachable!("AES-128 subkeys have a fixed width")),
-        ),
-        TcpSubkeyBytes::Aes256(bytes) => TcpCipher::Aes256(
-            Aes256Gcm::new_from_slice(bytes.as_ref())
-                .unwrap_or_else(|_| unreachable!("AES-256 subkeys have a fixed width")),
-        ),
-        TcpSubkeyBytes::ChaCha20Poly1305(bytes) => TcpCipher::ChaCha20Poly1305(
-            ChaCha20Poly1305::new_from_slice(bytes.as_ref())
-                .unwrap_or_else(|_| unreachable!("ChaCha20 subkeys have a fixed width")),
-        ),
     }
 }
 
@@ -1787,8 +1672,11 @@ mod tests {
     fn tcp_owner_nonce_exhaustion_sealer_fails_closed() {
         for subkey in [
             TcpSubkey::from_bytes([0x11; AES_128_KEY_BYTES]),
-            TcpSubkey::aes256([0x22; WIDE_KEY_BYTES]),
-            TcpSubkey::chacha20_poly1305([0x33; WIDE_KEY_BYTES]),
+            TcpSubkey::from_subkey(MethodProfile::Blake3Aes256Gcm2022, [0x22; WIDE_KEY_BYTES]),
+            TcpSubkey::from_subkey(
+                MethodProfile::Blake3ChaCha20Poly13052022,
+                [0x33; WIDE_KEY_BYTES],
+            ),
         ] {
             let mut sealer = TcpSealer::new(subkey);
             sealer.nonce = NonceCounter::from_le_bytes(EXHAUSTED_NONCE);
@@ -1815,8 +1703,11 @@ mod tests {
     fn tcp_owner_nonce_exhaustion_opener_fails_closed() {
         for subkey in [
             TcpSubkey::from_bytes([0x44; AES_128_KEY_BYTES]),
-            TcpSubkey::aes256([0x55; WIDE_KEY_BYTES]),
-            TcpSubkey::chacha20_poly1305([0x66; WIDE_KEY_BYTES]),
+            TcpSubkey::from_subkey(MethodProfile::Blake3Aes256Gcm2022, [0x55; WIDE_KEY_BYTES]),
+            TcpSubkey::from_subkey(
+                MethodProfile::Blake3ChaCha20Poly13052022,
+                [0x66; WIDE_KEY_BYTES],
+            ),
         ] {
             let mut opener = TcpOpener::new(subkey);
             opener.nonce = NonceCounter::from_le_bytes(EXHAUSTED_NONCE);

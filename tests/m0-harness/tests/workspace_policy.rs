@@ -494,7 +494,6 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "shadowsocks-crypto = { version = \"=0.7.0\", default-features = false, features = [\"v2\"] }",
         "aes-gcm = { version = \"=0.11.0\", default-features = false, features = [\"aes\", \"bytes\", \"zeroize\"] }",
         "chacha20poly1305 = { version = \"=0.11.0\", default-features = false, features = [\"bytes\", \"zeroize\"] }",
-        "ghash = { version = \"=0.6.0\", default-features = false, features = [\"zeroize\"] }",
         "blake3 = { version = \"=1.8.5\", default-features = false, features = [\"std\", \"zeroize\"] }",
         "base64 = { version = \"=0.23.0\", default-features = false, features = [\"std\"] }",
         "zeroize = { version = \"=1.9.0\", default-features = false, features = [\"alloc\", \"derive\"] }",
@@ -519,10 +518,6 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         dependency_table.get("aes").map(String::as_str),
         Some(r#"{ version = "=0.9.1", default-features = false, features = ["zeroize"] }"#)
     );
-    assert_eq!(
-        dependency_table.get("ghash").map(String::as_str),
-        Some(r#"{ version = "=0.6.0", default-features = false, features = ["zeroize"] }"#)
-    );
     let actual_names: BTreeSet<_> = dependency_table.keys().map(String::as_str).collect();
     let expected_names = BTreeSet::from([
         "aes",
@@ -540,7 +535,6 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "ferrum2-shadowsocks",
         "ferrum2-socks5",
         "getrandom",
-        "ghash",
         "hex",
         "prometheus-client",
         "serde",
@@ -579,7 +573,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
 }
 
 #[test]
-fn crypto_manifest_declares_exact_primitive_edges_and_zeroize_anchors() {
+fn crypto_manifest_has_one_normal_backend_and_dev_only_oracles() {
     let manifest = fs::read_to_string(
         workspace_root()
             .join("crates")
@@ -587,36 +581,29 @@ fn crypto_manifest_declares_exact_primitive_edges_and_zeroize_anchors() {
             .join("Cargo.toml"),
     )
     .expect("crypto manifest");
-    let dependencies = dependency_table(&manifest, "[dependencies]").expect("crypto dependencies");
-
     assert_eq!(
-        dependencies.get("aes.workspace").map(String::as_str),
-        Some("true"),
-        "aes must be inherited from the workspace without member overrides"
-    );
-    assert_eq!(
-        dependencies.get("ghash.workspace").map(String::as_str),
-        Some("true"),
-        "ghash must be inherited from the workspace without member overrides"
+        dependency_table(&manifest, "[dependencies]").expect("crypto dependencies"),
+        BTreeMap::from([
+            ("bytes.workspace".to_owned(), "true".to_owned()),
+            ("getrandom.workspace".to_owned(), "true".to_owned()),
+            ("shadowsocks-crypto.workspace".to_owned(), "true".to_owned()),
+            ("zeroize.workspace".to_owned(), "true".to_owned()),
+        ])
     );
     assert_eq!(
-        dependencies
-            .get("chacha20poly1305.workspace")
-            .map(String::as_str),
-        Some("true"),
-        "ChaCha20-Poly1305 must be inherited without a member feature override"
+        dependency_table(&manifest, "[dev-dependencies]").expect("crypto dev dependencies"),
+        BTreeMap::from([
+            ("aes.workspace".to_owned(), "true".to_owned()),
+            ("aes-gcm.workspace".to_owned(), "true".to_owned()),
+            ("blake3.workspace".to_owned(), "true".to_owned()),
+            ("chacha20poly1305.workspace".to_owned(), "true".to_owned()),
+            ("hex.workspace".to_owned(), "true".to_owned()),
+            ("serde_json.workspace".to_owned(), "true".to_owned()),
+        ])
     );
     assert!(
-        !dependencies.contains_key("aes"),
-        "aes must use the exact dotted workspace declaration"
-    );
-    assert!(
-        !dependencies.contains_key("ghash"),
-        "ghash must use the exact dotted workspace declaration"
-    );
-    assert!(
-        !dependencies.contains_key("chacha20poly1305"),
-        "ChaCha20-Poly1305 must use the exact dotted workspace declaration"
+        !manifest.contains("[features]"),
+        "crypto backend selection features are forbidden"
     );
 }
 
@@ -1373,7 +1360,7 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
 }
 
 #[test]
-fn metadata_proves_exact_zeroize_feature_anchor_edges() {
+fn metadata_and_lock_prove_one_normal_backend_and_dev_only_oracles() {
     let metadata = metadata();
     let packages = metadata["packages"].as_array().expect("packages");
     let crypto = packages
@@ -1383,104 +1370,68 @@ fn metadata_proves_exact_zeroize_feature_anchor_edges() {
     let crypto_dependencies = crypto["dependencies"]
         .as_array()
         .expect("crypto dependencies");
-
-    for (name, version) in [("aes", "0.9.1"), ("ghash", "0.6.0")] {
-        let dependencies: Vec<_> = crypto_dependencies
-            .iter()
-            .filter(|dependency| dependency["name"] == name)
-            .collect();
-        assert_eq!(
-            dependencies.len(),
-            1,
-            "crypto must have one direct {name} feature anchor"
-        );
-        let dependency = dependencies[0];
-        assert_eq!(
-            dependency["source"],
-            "registry+https://github.com/rust-lang/crates.io-index"
-        );
-        assert_eq!(dependency["req"], format!("={version}"));
-        assert!(dependency["kind"].is_null(), "{name} must be normal");
-        assert!(dependency["rename"].is_null(), "{name} must be unrenamed");
-        assert_eq!(dependency["optional"], false);
-        assert_eq!(dependency["uses_default_features"], false);
-        assert_eq!(dependency["features"], serde_json::json!(["zeroize"]));
-        assert!(
-            dependency["target"].is_null(),
-            "{name} must be unconditional"
-        );
-    }
-
-    let crypto_node = resolve_node(&metadata, crypto["id"].as_str().expect("crypto package ID"));
-    let chacha_dependencies: Vec<_> = crypto_dependencies
+    assert_eq!(crypto["features"], serde_json::json!({}));
+    let declared: BTreeSet<_> = crypto_dependencies
         .iter()
-        .filter(|dependency| dependency["name"] == "chacha20poly1305")
+        .map(|dependency| {
+            (
+                dependency["name"].as_str().expect("dependency name"),
+                dependency["kind"].as_str().unwrap_or("normal"),
+            )
+        })
         .collect();
     assert_eq!(
-        chacha_dependencies.len(),
-        1,
-        "crypto must have one direct ChaCha20-Poly1305 edge"
+        declared,
+        BTreeSet::from([
+            ("aes", "dev"),
+            ("aes-gcm", "dev"),
+            ("blake3", "dev"),
+            ("bytes", "normal"),
+            ("chacha20poly1305", "dev"),
+            ("getrandom", "normal"),
+            ("hex", "dev"),
+            ("serde_json", "dev"),
+            ("shadowsocks-crypto", "normal"),
+            ("zeroize", "normal"),
+        ])
     );
-    let chacha_dependency = chacha_dependencies[0];
-    assert_eq!(
-        chacha_dependency["source"],
-        "registry+https://github.com/rust-lang/crates.io-index"
-    );
-    assert_eq!(chacha_dependency["req"], "=0.11.0");
-    assert!(chacha_dependency["kind"].is_null());
-    assert!(chacha_dependency["rename"].is_null());
-    assert_eq!(chacha_dependency["optional"], false);
-    assert_eq!(chacha_dependency["uses_default_features"], false);
-    assert_eq!(
-        chacha_dependency["features"],
-        serde_json::json!(["bytes", "zeroize"])
-    );
-    assert!(chacha_dependency["target"].is_null());
-    let chacha_id = unique_registry_package_id(&metadata, "chacha20poly1305", "0.11.0");
-    let chacha_package = packages
+
+    let normal_crypto_backends: Vec<_> = crypto_dependencies
         .iter()
-        .find(|package| package["id"].as_str() == Some(chacha_id.as_str()))
-        .expect("resolved ChaCha20-Poly1305 package");
-    assert_eq!(chacha_package["rust_version"], "1.85");
-    assert_eq!(chacha_package["license"], "Apache-2.0 OR MIT");
-    let chacha_edge = crypto_node["deps"]
-        .as_array()
-        .expect("crypto resolve dependencies")
-        .iter()
-        .find(|dependency| dependency["name"] == "chacha20poly1305")
-        .expect("direct ChaCha20-Poly1305 edge");
-    assert_eq!(chacha_edge["pkg"], chacha_id);
+        .filter(|dependency| {
+            dependency["kind"].is_null()
+                && matches!(
+                    dependency["name"].as_str(),
+                    Some(
+                        "aes"
+                            | "aes-gcm"
+                            | "blake3"
+                            | "chacha20poly1305"
+                            | "ghash"
+                            | "shadowsocks-crypto"
+                    )
+                )
+        })
+        .collect();
+    assert_eq!(normal_crypto_backends.len(), 1);
+    assert_eq!(normal_crypto_backends[0]["name"], "shadowsocks-crypto");
+
+    let lock = fs::read_to_string(workspace_root().join("Cargo.lock")).expect("Cargo.lock");
     assert_eq!(
-        chacha_edge["dep_kinds"],
-        serde_json::json!([{"kind": null, "target": null}])
+        lock_package_dependencies(&lock, "ferrum2-crypto").expect("crypto lock dependencies"),
+        BTreeSet::from([
+            "aes".to_owned(),
+            "aes-gcm".to_owned(),
+            "blake3".to_owned(),
+            "bytes".to_owned(),
+            "chacha20poly1305".to_owned(),
+            "getrandom".to_owned(),
+            "hex".to_owned(),
+            "serde_json".to_owned(),
+            "shadowsocks-crypto".to_owned(),
+            "zeroize".to_owned(),
+        ])
     );
-
-    let aes_gcm_id = unique_registry_package_id(&metadata, "aes-gcm", "0.11.0");
-    let aes_gcm_node = resolve_node(&metadata, &aes_gcm_id);
-
-    for (name, version) in [("aes", "0.9.1"), ("ghash", "0.6.0")] {
-        let package_id = unique_registry_package_id(&metadata, name, version);
-        let direct_edge = crypto_node["deps"]
-            .as_array()
-            .expect("crypto resolve dependencies")
-            .iter()
-            .find(|dependency| dependency["name"] == name)
-            .expect("direct feature anchor edge");
-        let transitive_edge = aes_gcm_node["deps"]
-            .as_array()
-            .expect("aes-gcm resolve dependencies")
-            .iter()
-            .find(|dependency| dependency["name"] == name)
-            .expect("aes-gcm transitive edge");
-
-        assert_eq!(direct_edge["pkg"], package_id);
-        assert_eq!(transitive_edge["pkg"], package_id);
-        assert_eq!(
-            direct_edge["dep_kinds"],
-            serde_json::json!([{"kind": null, "target": null}]),
-            "{name} direct resolve edge must be normal and unconditional"
-        );
-    }
 }
 
 #[test]

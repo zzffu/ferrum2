@@ -313,7 +313,7 @@ fn udp_session_ids_retry_live_collisions_without_exposing_partial_state() {
         .expect("client session");
     let mut hasher = RecordingHasher::default();
     client.session_id().hash(&mut hasher);
-    assert_eq!(hasher.0.len(), 32);
+    assert_eq!(hasher.0.len(), 8);
     assert!(!hasher.0.windows(8).any(|window| window == [0x51; 8]));
     let server_random = ScriptedRandom::new([Ok([0x51; 8]), Ok([0x52; 8])]);
     let server = crypto
