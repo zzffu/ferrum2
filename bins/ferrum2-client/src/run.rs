@@ -75,6 +75,9 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
+    if config.inbounds.len() != 1 {
+        return Err(RunError::StartupProtocol);
+    }
     let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|_| RunError::StartupObservability)?;

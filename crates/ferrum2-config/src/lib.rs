@@ -34,11 +34,26 @@ const DEFAULT_UDP_IDLE_TIMEOUT_MS: u64 = 300_000;
 pub struct ValidatedClientConfig {
     pub listen: SocketAddrV4,
     pub server: SocketAddrV4,
+    pub inbounds: Vec<ClientInboundConfig>,
+    pub outbounds: Vec<ClientOutboundConfig>,
     pub psk: MethodPsk,
     pub runtime: RuntimeConfig,
     pub udp: Option<UdpConfig>,
     pub logging: LoggingConfig,
     pub metrics: Option<MetricsConfig>,
+}
+
+/// One validated SOCKS5 listener with its resolved Shadowsocks server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientInboundConfig {
+    pub listen: SocketAddrV4,
+    pub outbound: ClientOutboundConfig,
+}
+
+/// One validated Shadowsocks client destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientOutboundConfig {
+    pub server: SocketAddrV4,
 }
 
 impl ValidatedClientConfig {
@@ -51,6 +66,8 @@ impl ValidatedClientConfig {
 /// A validated server configuration with no retained source text.
 pub struct ValidatedServerConfig {
     pub listen: SocketAddrV4,
+    pub inbounds: Vec<ServerInboundConfig>,
+    pub outbounds: Vec<ServerOutboundConfig>,
     pub psk: MethodPsk,
     pub runtime: RuntimeConfig,
     pub replay: ReplayConfig,
@@ -58,6 +75,17 @@ pub struct ValidatedServerConfig {
     pub logging: LoggingConfig,
     pub metrics: Option<MetricsConfig>,
 }
+
+/// One validated Shadowsocks listener with its resolved direct outbound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServerInboundConfig {
+    pub listen: SocketAddrV4,
+    pub outbound: usize,
+}
+
+/// One validated direct server outbound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServerOutboundConfig;
 
 /// Validated bounded UDP server settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,6 +185,13 @@ pub enum ConfigField {
     UdpIdleTimeout,
     LoggingLevel,
     MetricsListen,
+    Inbounds,
+    Outbounds,
+    InboundsTag,
+    InboundsListen,
+    InboundsOutbound,
+    OutboundsTag,
+    OutboundsServer,
 }
 
 impl ConfigField {
@@ -181,6 +216,13 @@ impl ConfigField {
             Self::UdpIdleTimeout => "udp.idle_timeout_ms",
             Self::LoggingLevel => "logging.level",
             Self::MetricsListen => "metrics.listen",
+            Self::Inbounds => "inbounds",
+            Self::Outbounds => "outbounds",
+            Self::InboundsTag => "inbounds.tag",
+            Self::InboundsListen => "inbounds.listen",
+            Self::InboundsOutbound => "inbounds.outbound",
+            Self::OutboundsTag => "outbounds.tag",
+            Self::OutboundsServer => "outbounds.server",
         }
     }
 }
@@ -283,20 +325,20 @@ fn parse_toml<'a, T: Deserialize<'a>>(source: &'a str) -> Result<T, ConfigError>
 
 fn validate_client(raw: RawClientRoot) -> Result<ValidatedClientConfig, ConfigError> {
     validate_schema(raw.schema_version)?;
-    let listen = parse_endpoint(&raw.client.listen, ConfigField::ClientListen)?;
-    let server = parse_endpoint(&raw.client.server, ConfigField::ClientServer)?;
-    if listen == server {
-        return Err(ConfigError::semantic(ConfigField::ClientServer));
-    }
+    let (listen, server, inbounds, outbounds) =
+        validate_client_graph(raw.client, raw.inbounds, raw.outbounds)?;
     let method = parse_method(&raw.shadowsocks.method)?;
     let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
     let udp = raw.udp.map(validate_udp).transpose()?;
     let logging = validate_logging(raw.logging)?;
-    let metrics = validate_metrics(raw.metrics, listen)?;
+    let listens: Vec<_> = inbounds.iter().map(|inbound| inbound.listen).collect();
+    let metrics = validate_metrics(raw.metrics, &listens)?;
     Ok(ValidatedClientConfig {
         listen,
         server,
+        inbounds,
+        outbounds,
         psk,
         runtime,
         udp,
@@ -307,16 +349,20 @@ fn validate_client(raw: RawClientRoot) -> Result<ValidatedClientConfig, ConfigEr
 
 fn validate_server(raw: RawServerRoot) -> Result<ValidatedServerConfig, ConfigError> {
     validate_schema(raw.schema_version)?;
-    let listen = parse_endpoint(&raw.server.listen, ConfigField::ServerListen)?;
+    let (listen, inbounds, outbounds) =
+        validate_server_graph(raw.server, raw.inbounds, raw.outbounds)?;
     let method = parse_method(&raw.shadowsocks.method)?;
     let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
     let replay = validate_replay(raw.replay)?;
     let udp = validate_udp(raw.udp)?;
     let logging = validate_logging(raw.logging)?;
-    let metrics = validate_metrics(raw.metrics, listen)?;
+    let listens: Vec<_> = inbounds.iter().map(|inbound| inbound.listen).collect();
+    let metrics = validate_metrics(raw.metrics, &listens)?;
     Ok(ValidatedServerConfig {
         listen,
+        inbounds,
+        outbounds,
         psk,
         runtime,
         replay,
@@ -324,6 +370,218 @@ fn validate_server(raw: RawServerRoot) -> Result<ValidatedServerConfig, ConfigEr
         logging,
         metrics,
     })
+}
+
+fn validate_client_graph(
+    legacy: Option<RawClient>,
+    tagged_inbounds: Option<Vec<RawClientInbound>>,
+    tagged_outbounds: Option<Vec<RawClientOutbound>>,
+) -> Result<
+    (
+        SocketAddrV4,
+        SocketAddrV4,
+        Vec<ClientInboundConfig>,
+        Vec<ClientOutboundConfig>,
+    ),
+    ConfigError,
+> {
+    match (legacy, tagged_inbounds, tagged_outbounds) {
+        (Some(legacy), None, None) => {
+            let listen = parse_endpoint(&legacy.listen, ConfigField::ClientListen)?;
+            let server = parse_endpoint(&legacy.server, ConfigField::ClientServer)?;
+            if listen == server {
+                return Err(ConfigError::semantic(ConfigField::ClientServer));
+            }
+            let outbound = ClientOutboundConfig { server };
+            Ok((
+                listen,
+                server,
+                vec![ClientInboundConfig { listen, outbound }],
+                vec![outbound],
+            ))
+        }
+        (None, Some(inbounds), Some(outbounds)) => {
+            validate_count(inbounds.len(), ConfigField::Inbounds)?;
+            validate_count(outbounds.len(), ConfigField::Outbounds)?;
+
+            let mut listens = Vec::with_capacity(inbounds.len());
+            for (index, inbound) in inbounds.iter().enumerate() {
+                validate_tag(&inbound.tag, ConfigField::InboundsTag)?;
+                if inbounds[..index]
+                    .iter()
+                    .any(|other| other.tag == inbound.tag)
+                {
+                    return Err(ConfigError::semantic(ConfigField::InboundsTag));
+                }
+                let listen = parse_endpoint(&inbound.listen, ConfigField::InboundsListen)?;
+                if listens.contains(&listen) {
+                    return Err(ConfigError::semantic(ConfigField::InboundsListen));
+                }
+                listens.push(listen);
+            }
+
+            let mut validated_outbounds = Vec::with_capacity(outbounds.len());
+            for (index, outbound) in outbounds.iter().enumerate() {
+                validate_tag(&outbound.tag, ConfigField::OutboundsTag)?;
+                if inbounds.iter().any(|inbound| inbound.tag == outbound.tag)
+                    || outbounds[..index]
+                        .iter()
+                        .any(|other| other.tag == outbound.tag)
+                {
+                    return Err(ConfigError::semantic(ConfigField::OutboundsTag));
+                }
+                let server = parse_endpoint(&outbound.server, ConfigField::OutboundsServer)?;
+                if listens.contains(&server) {
+                    return Err(ConfigError::semantic(ConfigField::OutboundsServer));
+                }
+                validated_outbounds.push(ClientOutboundConfig { server });
+            }
+
+            let mut referenced = vec![false; outbounds.len()];
+            let mut validated_inbounds = Vec::with_capacity(inbounds.len());
+            for (inbound, listen) in inbounds.iter().zip(listens) {
+                validate_tag(&inbound.outbound, ConfigField::InboundsOutbound)?;
+                let index = outbounds
+                    .iter()
+                    .position(|outbound| outbound.tag == inbound.outbound)
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::InboundsOutbound))?;
+                referenced[index] = true;
+                validated_inbounds.push(ClientInboundConfig {
+                    listen,
+                    outbound: validated_outbounds[index],
+                });
+            }
+            if referenced.contains(&false) {
+                return Err(ConfigError::semantic(ConfigField::OutboundsTag));
+            }
+            Ok((
+                validated_inbounds[0].listen,
+                validated_inbounds[0].outbound.server,
+                validated_inbounds,
+                validated_outbounds,
+            ))
+        }
+        (None, None, None) => Err(ConfigError::new(
+            ConfigErrorKind::Syntax,
+            ConfigField::Config,
+        )),
+        (Some(_), Some(_), _) | (None, None, Some(_)) => {
+            Err(ConfigError::semantic(ConfigField::Inbounds))
+        }
+        (Some(_), None, Some(_)) | (None, Some(_), None) => {
+            Err(ConfigError::semantic(ConfigField::Outbounds))
+        }
+    }
+}
+
+fn validate_server_graph(
+    legacy: Option<RawServer>,
+    tagged_inbounds: Option<Vec<RawServerInbound>>,
+    tagged_outbounds: Option<Vec<RawServerOutbound>>,
+) -> Result<
+    (
+        SocketAddrV4,
+        Vec<ServerInboundConfig>,
+        Vec<ServerOutboundConfig>,
+    ),
+    ConfigError,
+> {
+    match (legacy, tagged_inbounds, tagged_outbounds) {
+        (Some(legacy), None, None) => {
+            let listen = parse_endpoint(&legacy.listen, ConfigField::ServerListen)?;
+            Ok((
+                listen,
+                vec![ServerInboundConfig {
+                    listen,
+                    outbound: 0,
+                }],
+                vec![ServerOutboundConfig],
+            ))
+        }
+        (None, Some(inbounds), Some(outbounds)) => {
+            validate_count(inbounds.len(), ConfigField::Inbounds)?;
+            validate_count(outbounds.len(), ConfigField::Outbounds)?;
+
+            let mut listens = Vec::with_capacity(inbounds.len());
+            for (index, inbound) in inbounds.iter().enumerate() {
+                validate_tag(&inbound.tag, ConfigField::InboundsTag)?;
+                if inbounds[..index]
+                    .iter()
+                    .any(|other| other.tag == inbound.tag)
+                {
+                    return Err(ConfigError::semantic(ConfigField::InboundsTag));
+                }
+                let listen = parse_endpoint(&inbound.listen, ConfigField::InboundsListen)?;
+                if listens.contains(&listen) {
+                    return Err(ConfigError::semantic(ConfigField::InboundsListen));
+                }
+                listens.push(listen);
+            }
+            for (index, outbound) in outbounds.iter().enumerate() {
+                validate_tag(&outbound.tag, ConfigField::OutboundsTag)?;
+                if inbounds.iter().any(|inbound| inbound.tag == outbound.tag)
+                    || outbounds[..index]
+                        .iter()
+                        .any(|other| other.tag == outbound.tag)
+                {
+                    return Err(ConfigError::semantic(ConfigField::OutboundsTag));
+                }
+            }
+
+            let mut referenced = vec![false; outbounds.len()];
+            let mut validated_inbounds = Vec::with_capacity(inbounds.len());
+            for (inbound, listen) in inbounds.iter().zip(listens) {
+                validate_tag(&inbound.outbound, ConfigField::InboundsOutbound)?;
+                let index = outbounds
+                    .iter()
+                    .position(|outbound| outbound.tag == inbound.outbound)
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::InboundsOutbound))?;
+                referenced[index] = true;
+                validated_inbounds.push(ServerInboundConfig {
+                    listen,
+                    outbound: index,
+                });
+            }
+            if referenced.contains(&false) {
+                return Err(ConfigError::semantic(ConfigField::OutboundsTag));
+            }
+            Ok((
+                validated_inbounds[0].listen,
+                validated_inbounds,
+                vec![ServerOutboundConfig; outbounds.len()],
+            ))
+        }
+        (None, None, None) => Err(ConfigError::new(
+            ConfigErrorKind::Syntax,
+            ConfigField::Config,
+        )),
+        (Some(_), Some(_), _) | (None, None, Some(_)) => {
+            Err(ConfigError::semantic(ConfigField::Inbounds))
+        }
+        (Some(_), None, Some(_)) | (None, Some(_), None) => {
+            Err(ConfigError::semantic(ConfigField::Outbounds))
+        }
+    }
+}
+
+fn validate_count(count: usize, field: ConfigField) -> Result<(), ConfigError> {
+    if (1..=64).contains(&count) {
+        Ok(())
+    } else {
+        Err(ConfigError::semantic(field))
+    }
+}
+
+fn validate_tag(tag: &str, field: ConfigField) -> Result<(), ConfigError> {
+    if (1..=64).contains(&tag.len())
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(ConfigError::semantic(field))
+    }
 }
 
 fn validate_schema(version: u32) -> Result<(), ConfigError> {
@@ -484,13 +742,13 @@ fn validate_logging(raw: RawLogging) -> Result<LoggingConfig, ConfigError> {
 
 fn validate_metrics(
     raw: Option<RawMetrics>,
-    proxy_listen: SocketAddrV4,
+    proxy_listens: &[SocketAddrV4],
 ) -> Result<Option<MetricsConfig>, ConfigError> {
     let Some(raw) = raw else {
         return Ok(None);
     };
     let listen = parse_endpoint(&raw.listen, ConfigField::MetricsListen)?;
-    if !listen.ip().is_loopback() || listen == proxy_listen {
+    if !listen.ip().is_loopback() || proxy_listens.contains(&listen) {
         return Err(ConfigError::semantic(ConfigField::MetricsListen));
     }
     Ok(Some(MetricsConfig { listen }))
@@ -500,7 +758,9 @@ fn validate_metrics(
 #[serde(deny_unknown_fields)]
 struct RawClientRoot {
     schema_version: u32,
-    client: RawClient,
+    client: Option<RawClient>,
+    inbounds: Option<Vec<RawClientInbound>>,
+    outbounds: Option<Vec<RawClientOutbound>>,
     shadowsocks: RawShadowsocks,
     #[serde(default)]
     runtime: RawRuntime,
@@ -514,7 +774,9 @@ struct RawClientRoot {
 #[serde(deny_unknown_fields)]
 struct RawServerRoot {
     schema_version: u32,
-    server: RawServer,
+    server: Option<RawServer>,
+    inbounds: Option<Vec<RawServerInbound>>,
+    outbounds: Option<Vec<RawServerOutbound>>,
     shadowsocks: RawShadowsocks,
     #[serde(default)]
     runtime: RawRuntime,
@@ -562,6 +824,35 @@ struct RawClient {
 #[serde(deny_unknown_fields)]
 struct RawServer {
     listen: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClientInbound {
+    tag: String,
+    listen: String,
+    outbound: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClientOutbound {
+    tag: String,
+    server: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServerInbound {
+    tag: String,
+    listen: String,
+    outbound: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServerOutbound {
+    tag: String,
 }
 
 #[derive(Deserialize)]

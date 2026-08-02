@@ -15,6 +15,33 @@ const SERVER_BASE: &str = "schema_version = 1\n[server]\nlisten = \"127.0.0.1:83
 
 const PAIRED_PORT_ATTEMPTS: usize = 256;
 
+fn tagged_client(inbounds: &[SocketAddrV4], servers: &[SocketAddrV4]) -> String {
+    let mut source = "schema_version = 1\n".to_owned();
+    for (index, listen) in inbounds.iter().enumerate() {
+        source.push_str(&format!(
+            "[[inbounds]]\ntag = \"i{index}\"\nlisten = \"{listen}\"\noutbound = \"o{index}\"\n"
+        ));
+    }
+    for (index, server) in servers.iter().enumerate() {
+        source.push_str(&format!(
+            "[[outbounds]]\ntag = \"o{index}\"\nserver = \"{server}\"\n"
+        ));
+    }
+    source.push_str(
+        "[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
+    );
+    source
+}
+
+fn tagged_server(inbounds: &[SocketAddrV4]) -> String {
+    tagged_client(inbounds, inbounds)
+        .lines()
+        .filter(|line| !line.starts_with("server = "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
 fn reserve_server_tcp_udp() -> (TcpListener, UdpSocket, SocketAddrV4) {
     let mut last_retry = None;
     for _ in 0..PAIRED_PORT_ATTEMPTS {
@@ -186,6 +213,130 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
         "error[config.io] config: unable to read configuration\n",
         sentinel,
     );
+}
+
+#[test]
+fn tagged_check_is_offline_and_multi_run_fails_before_touching_endpoints() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let (client_a, client_address_a) = reserve_loopback();
+    let (client_b, client_address_b) = reserve_loopback();
+    let (server_a, server_udp_a, server_address_a) = reserve_server_tcp_udp();
+    let (server_b, server_udp_b, server_address_b) = reserve_server_tcp_udp();
+    let client_path = directory.path().join("client-tagged.toml");
+    let server_path = directory.path().join("server-tagged.toml");
+    std::fs::write(
+        &client_path,
+        tagged_client(
+            &[client_address_a, client_address_b],
+            &[server_address_a, server_address_b],
+        ),
+    )
+    .expect("client tagged config");
+    std::fs::write(
+        &server_path,
+        tagged_server(&[server_address_a, server_address_b]),
+    )
+    .expect("server tagged config");
+
+    for (binary, path) in [
+        ("ferrum2-client", &client_path),
+        ("ferrum2-server", &server_path),
+    ] {
+        let checked = run_binary(
+            binary,
+            &[
+                "--config",
+                path.to_str().expect("UTF-8 path"),
+                "--check-config",
+            ],
+        );
+        assert_eq!(checked.status.code(), Some(0), "{binary}");
+        assert_eq!(checked.stdout, b"configuration valid\n", "{binary}");
+        assert!(checked.stderr.is_empty(), "{binary}");
+
+        let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
+        assert_eq!(run.status.code(), Some(1), "{binary}");
+        assert!(run.stdout.is_empty(), "{binary}");
+        assert_eq!(
+            run.stderr, b"error[startup.protocol] process: unable to prepare protocol resources\n",
+            "{binary}"
+        );
+    }
+
+    let invalid = directory.path().join("client-tagged-invalid.toml");
+    std::fs::write(
+        &invalid,
+        tagged_client(&[client_address_a], &[server_address_a]).replacen(
+            "outbound = \"o0\"",
+            "outbound = \"dangling\"",
+            1,
+        ),
+    )
+    .expect("invalid tagged config");
+    assert_invalid(
+        "ferrum2-client",
+        &invalid,
+        "error[config.semantic] inbounds.outbound: configuration value is invalid\n",
+        "dangling",
+    );
+
+    for listener in [client_a, client_b, server_a, server_b] {
+        let address = listener.local_addr().expect("listener address");
+        assert!(
+            TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1)).is_ok(),
+            "pre-existing listener was disturbed: {address}"
+        );
+    }
+    assert_eq!(
+        server_udp_a.local_addr().expect("UDP A"),
+        server_address_a.into()
+    );
+    assert_eq!(
+        server_udp_b.local_addr().expect("UDP B"),
+        server_address_b.into()
+    );
+}
+
+#[test]
+fn one_entry_tagged_run_matches_legacy_startup_behavior() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let (_client_listener, client_address) = reserve_loopback();
+    let (_server_listener, _server_udp, server_address) = reserve_server_tcp_udp();
+    let cases = [
+        (
+            "ferrum2-client",
+            CLIENT_BASE
+                .replace("127.0.0.1:1080", &client_address.to_string())
+                .replace("127.0.0.1:8388", &server_address.to_string()),
+            tagged_client(&[client_address], &[server_address]),
+        ),
+        (
+            "ferrum2-server",
+            SERVER_BASE.replace("127.0.0.1:8388", &server_address.to_string()),
+            tagged_server(&[server_address]),
+        ),
+    ];
+    for (binary, legacy, tagged) in cases {
+        let legacy_path = directory.path().join(format!("{binary}-legacy.toml"));
+        let tagged_path = directory.path().join(format!("{binary}-tagged.toml"));
+        std::fs::write(&legacy_path, legacy).expect("legacy config");
+        std::fs::write(&tagged_path, tagged).expect("tagged config");
+        let legacy = run_binary(
+            binary,
+            &["--config", legacy_path.to_str().expect("UTF-8 path")],
+        );
+        let tagged = run_binary(
+            binary,
+            &["--config", tagged_path.to_str().expect("UTF-8 path")],
+        );
+        assert_eq!(tagged.status.code(), legacy.status.code(), "{binary}");
+        assert_eq!(tagged.stdout, legacy.stdout, "{binary}");
+        assert_eq!(tagged.stderr, legacy.stderr, "{binary}");
+        assert_eq!(
+            tagged.stderr,
+            b"error[startup.bind] process: unable to prepare required endpoint\n"
+        );
+    }
 }
 
 fn assert_invalid(binary: &str, path: &std::path::Path, expected_stderr: &str, sentinel: &str) {

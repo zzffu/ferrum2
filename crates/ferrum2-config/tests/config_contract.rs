@@ -21,6 +21,36 @@ const CLIENT_BASE: &str = "schema_version = 1\n[client]\nlisten = \"127.0.0.1:10
 
 const SERVER_BASE: &str = "schema_version = 1\n[server]\nlisten = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
+fn tagged_client(inbound_count: usize, outbound_count: usize) -> String {
+    let mut source = "schema_version = 1\n".to_owned();
+    for index in 0..inbound_count {
+        source.push_str(&format!(
+            "[[inbounds]]\ntag = \"i{index}\"\nlisten = \"127.0.0.1:{}\"\noutbound = \"o{}\"\n",
+            10_000 + index,
+            index.min(outbound_count.saturating_sub(1))
+        ));
+    }
+    for index in 0..outbound_count {
+        source.push_str(&format!(
+            "[[outbounds]]\ntag = \"o{index}\"\nserver = \"127.0.0.1:{}\"\n",
+            20_000 + index
+        ));
+    }
+    source.push_str(
+        "[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
+    );
+    source
+}
+
+fn tagged_server(inbound_count: usize, outbound_count: usize) -> String {
+    tagged_client(inbound_count, outbound_count)
+        .lines()
+        .filter(|line| !line.starts_with("server = "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 struct TempConfig(PathBuf);
@@ -138,6 +168,14 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
                 assert_runtime(config.runtime, case.runtime, case.name);
                 assert!(case.replay_capacity.is_none());
                 assert!(case.udp.is_none());
+                assert_eq!(config.inbounds.len(), 1, "{}", case.name);
+                assert_eq!(config.outbounds.len(), 1, "{}", case.name);
+                assert_eq!(config.inbounds[0].listen, config.listen, "{}", case.name);
+                assert_eq!(
+                    config.inbounds[0].outbound.server, config.server,
+                    "{}",
+                    case.name
+                );
             }
             ConfigRole::Server => {
                 let config = load_server(&path).expect(case.name);
@@ -148,6 +186,9 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
                 let expected = (SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388), case.method, "MethodPsk([REDACTED])".to_owned(), case.replay_capacity, expected_udp.0, expected_udp.1, expected_udp.2, expected_udp.3, case.logging, case.metrics_port);
                 assert_eq!(actual, expected, "{}", case.name);
                 assert_runtime(config.runtime, case.runtime, case.name);
+                assert_eq!(config.inbounds.len(), 1, "{}", case.name);
+                assert_eq!(config.outbounds.len(), 1, "{}", case.name);
+                assert_eq!(config.inbounds[0].listen, config.listen, "{}", case.name);
             }
         }
         assert_eq!(
@@ -168,6 +209,120 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
     exact_limit.push(b'\n');
     let file = TempConfig::bytes(&exact_limit);
     load_client(file.path()).expect("the documented maximum size remains accepted");
+}
+
+#[test]
+fn tagged_graph_normalizes_complete_resolved_collections() {
+    for (method, psk) in [
+        ("2022-blake3-aes-128-gcm", "AAECAwQFBgcICQoLDA0ODw=="),
+        (
+            "2022-blake3-aes-256-gcm",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        ),
+        (
+            "2022-blake3-chacha20-poly1305",
+            "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        ),
+    ] {
+        let source = tagged_client(2, 2)
+            .replacen("2022-blake3-aes-128-gcm", method, 1)
+            .replacen("AAECAwQFBgcICQoLDA0ODw==", psk, 1);
+        let config = load_client(TempConfig::text(&source).path()).expect(method);
+        assert_eq!(config.inbounds.len(), 2, "{method}");
+        assert_eq!(config.outbounds.len(), 2, "{method}");
+        assert_eq!(config.inbounds[1].outbound, config.outbounds[1], "{method}");
+    }
+
+    let shared = tagged_client(2, 1);
+    let config = load_client(TempConfig::text(&shared).path()).expect("shared outbound");
+    assert_eq!(config.inbounds[0].outbound, config.inbounds[1].outbound);
+    let exact_case = tagged_client(1, 1)
+        .replacen("outbound = \"o0\"", "outbound = \"O0\"", 1)
+        .replacen("tag = \"o0\"", "tag = \"O0\"", 1);
+    load_client(TempConfig::text(&exact_case).path()).expect("exact case-sensitive match");
+    let shared_server =
+        load_server(TempConfig::text(&tagged_server(2, 1)).path()).expect("shared direct");
+    assert_eq!(shared_server.inbounds[0].outbound, 0);
+    assert_eq!(shared_server.inbounds[1].outbound, 0);
+
+    let client = load_client(TempConfig::text(&tagged_client(64, 64)).path()).expect("64 client");
+    assert_eq!((client.inbounds.len(), client.outbounds.len()), (64, 64));
+    let server = load_server(TempConfig::text(&tagged_server(64, 64)).path()).expect("64 server");
+    assert_eq!((server.inbounds.len(), server.outbounds.len()), (64, 64));
+    assert_eq!(server.inbounds[63].outbound, 63);
+}
+
+#[test]
+fn tagged_graph_rejects_invalid_counts_tags_references_and_collisions_redacted() {
+    let valid = tagged_client(2, 2);
+    let server = tagged_server(2, 2);
+    let mut cases = vec![
+        ("empty inbounds", tagged_client(0, 1), ConfigField::Inbounds, ConfigRole::Client),
+        ("empty outbounds", tagged_client(1, 0), ConfigField::Outbounds, ConfigRole::Client),
+        ("65 inbounds", tagged_client(65, 1), ConfigField::Inbounds, ConfigRole::Client),
+        ("65 outbounds", tagged_client(1, 65), ConfigField::Outbounds, ConfigRole::Client),
+        ("empty tag", valid.replacen("tag = \"i0\"", "tag = \"\"", 1), ConfigField::InboundsTag, ConfigRole::Client),
+        ("long tag", valid.replacen("tag = \"i0\"", &format!("tag = \"{}\"", "a".repeat(65)), 1), ConfigField::InboundsTag, ConfigRole::Client),
+        ("non ASCII tag", valid.replacen("tag = \"i0\"", "tag = \"é\"", 1), ConfigField::InboundsTag, ConfigRole::Client),
+        ("whitespace tag", valid.replacen("tag = \"i0\"", "tag = \"bad tag\"", 1), ConfigField::InboundsTag, ConfigRole::Client),
+        ("invalid tag", valid.replacen("tag = \"i0\"", "tag = \"bad/tag\"", 1), ConfigField::InboundsTag, ConfigRole::Client),
+        ("invalid outbound tag", valid.replacen("tag = \"o0\"", "tag = \"bad/tag\"", 1), ConfigField::OutboundsTag, ConfigRole::Client),
+        ("duplicate inbound", valid.replacen("tag = \"i1\"", "tag = \"i0\"", 1), ConfigField::InboundsTag, ConfigRole::Client),
+        ("duplicate outbound", valid.replacen("tag = \"o1\"", "tag = \"o0\"", 1), ConfigField::OutboundsTag, ConfigRole::Client),
+        ("global collision", valid.replacen("tag = \"o0\"", "tag = \"i0\"", 1), ConfigField::OutboundsTag, ConfigRole::Client),
+        ("invalid reference", valid.replacen("outbound = \"o0\"", "outbound = \"bad ref\"", 1), ConfigField::InboundsOutbound, ConfigRole::Client),
+        ("dangling reference", valid.replacen("outbound = \"o0\"", "outbound = \"missing\"", 1), ConfigField::InboundsOutbound, ConfigRole::Client),
+        ("wrong namespace", valid.replacen("outbound = \"o0\"", "outbound = \"i0\"", 1), ConfigField::InboundsOutbound, ConfigRole::Client),
+        ("case sensitive", valid.replacen("outbound = \"o0\"", "outbound = \"O0\"", 1), ConfigField::InboundsOutbound, ConfigRole::Client),
+        ("unreferenced", tagged_client(1, 2), ConfigField::OutboundsTag, ConfigRole::Client),
+        ("duplicate listen", valid.replacen("127.0.0.1:10001", "127.0.0.1:10000", 1), ConfigField::InboundsListen, ConfigRole::Client),
+        ("client server collision", valid.replacen("127.0.0.1:20000", "127.0.0.1:10000", 1), ConfigField::OutboundsServer, ConfigRole::Client),
+        ("client metrics collision", format!("{valid}[metrics]\nlisten = \"127.0.0.1:10001\"\n"), ConfigField::MetricsListen, ConfigRole::Client),
+        ("server metrics collision", format!("{server}[metrics]\nlisten = \"127.0.0.1:10001\"\n"), ConfigField::MetricsListen, ConfigRole::Server),
+        ("server duplicate inbound", server.replacen("tag = \"i1\"", "tag = \"i0\"", 1), ConfigField::InboundsTag, ConfigRole::Server),
+        ("server duplicate outbound", server.replacen("tag = \"o1\"", "tag = \"o0\"", 1), ConfigField::OutboundsTag, ConfigRole::Server),
+        ("server global collision", server.replacen("tag = \"o0\"", "tag = \"i0\"", 1), ConfigField::OutboundsTag, ConfigRole::Server),
+        ("server dangling", server.replacen("outbound = \"o0\"", "outbound = \"missing\"", 1), ConfigField::InboundsOutbound, ConfigRole::Server),
+        ("server unreferenced", tagged_server(1, 2), ConfigField::OutboundsTag, ConfigRole::Server),
+        ("server duplicate listen", server.replacen("127.0.0.1:10001", "127.0.0.1:10000", 1), ConfigField::InboundsListen, ConfigRole::Server),
+        ("missing inbounds", "schema_version = 1\n[[outbounds]]\ntag = \"o0\"\nserver = \"127.0.0.1:20000\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Inbounds, ConfigRole::Client),
+        ("missing outbounds", "schema_version = 1\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Outbounds, ConfigRole::Client),
+    ];
+    cases.push((
+        "legacy tagged mixing",
+        format!("{CLIENT_BASE}[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[[outbounds]]\ntag = \"o0\"\nserver = \"127.0.0.1:20000\"\n"),
+        ConfigField::Inbounds,
+        ConfigRole::Client,
+    ));
+
+    for (name, source, field, role) in cases {
+        let file = TempConfig::text(&source);
+        let error = match role {
+            ConfigRole::Client => load_client(file.path()).err(),
+            ConfigRole::Server => load_server(file.path()).err(),
+        }
+        .expect(name);
+        assert_eq!(
+            (error.kind(), error.field()),
+            (ConfigErrorKind::Semantic, field),
+            "{name}"
+        );
+        let rendered = format!("{error}\n{error:?}");
+        for secret in [
+            "i0",
+            "o0",
+            "127.0.0.1:10000",
+            "127.0.0.1:20000",
+            "AAECAwQFBgcICQoLDA0ODw==",
+        ] {
+            assert!(!rendered.contains(secret), "{name}: {secret}");
+        }
+    }
+
+    #[rustfmt::skip]
+    let fields = [ConfigField::Inbounds, ConfigField::Outbounds, ConfigField::InboundsTag, ConfigField::InboundsListen, ConfigField::InboundsOutbound, ConfigField::OutboundsTag, ConfigField::OutboundsServer];
+    #[rustfmt::skip]
+    assert_eq!(fields.map(ConfigField::as_str), ["inbounds", "outbounds", "inbounds.tag", "inbounds.listen", "inbounds.outbound", "outbounds.tag", "outbounds.server"]);
 }
 
 #[test]
