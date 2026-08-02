@@ -40,8 +40,9 @@ Run `TEST-0007` T03, integration and hosted commands exactly as recorded。
   `xhigh` escalations and bounded evidence repairs `3cade85`/`27365c9`。The review bound is
   exhausted；the final one-character deadline repair passed its focused and regression gates。
 - Notes: local T03、Full、Rust 1.85、100-cycle and docs pass。The user authorized
-  `--no-verify` for T02/T03；budget remains unpassed for a future T04。Same-SHA hosted UDP
-  `12/12`、native targets and final qualification remain unauthorized and unrun。
+  `--no-verify` for T02/T03；M6-T04 now passes the exact-ceiling ticket、milestone and CI
+  budget gates。Same-SHA hosted UDP `12/12`、native targets and final qualification remain
+  unauthorized and unrun。
 
 ## Rollback / risk
 

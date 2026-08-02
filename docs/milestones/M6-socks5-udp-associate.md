@@ -43,7 +43,7 @@ buffers、queues、idle、tasks 和 shutdown 全部有界且可证明，不加�
 | M6-T01 | Add the SOCKS5 command/control and standalone UDP wire interface | — | done |
 | M6-T02 | Compose the bounded opt-in client association and prove local lifecycle | M6-T01 | done |
 | M6-T03 | Move FerrumClient external rows to the public binary and qualify exact SHA | M6-T02 | blocked |
-| M6-T04 | Cap the test-budget ratio without deleting independent evidence | M6-T03 | validating |
+| M6-T04 | Cap the test-budget ratio without deleting independent evidence | M6-T03 | done |
 
 The tickets serialize because T02 consumes T01's interface、T03 changes the evidence
 adapter after product integration, and T04 binds its exact ceiling to the resulting Rust
@@ -54,7 +54,8 @@ tree. Owned product/evidence paths do not overlap across concurrent writers。
 M6-T03 is locally integrated at exact SHA `27365c9e2cd864441dcd0f839fa311194b1c3098`；
 its focused、Full、MSRV、100-cycle and documentation gates pass。The six FerrumClient UDP
 rows now use the public client binary while the six reference-client rows remain unchanged。
-M6-T04 is validating an exact permanent budget ceiling without compressing independent test
-evidence。M6 close also remains independently blocked by separately authorized same-SHA hosted
-platforms plus external UDP `12/12` and cleanup。No push、hosted run、rerun、dispatch、release
-or publication is authorized or performed。
+M6-T04 control commit `edbd86dbaaed844740de61616e5137442d7f61fe` establishes the
+exact permanent ceiling without compressing independent test evidence；ticket、milestone and CI
+budget gates pass。M6 close remains blocked by separately authorized same-SHA hosted platforms、
+external UDP `12/12` and cleanup、then final qualification。No push、hosted run、rerun、dispatch、
+release or publication is authorized or performed。

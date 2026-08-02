@@ -1,12 +1,13 @@
 ---
 id: M6-T04
 milestone: M6
-status: validating
+status: done
 depends_on: [M6-T03]
 owns:
   - scripts/test-budget.sh
   - docs/agents/milestone-workflow.md
   - docs/milestones/M6-socks5-udp-associate.md
+  - docs/tickets/M6-T03-qualify-public-udp-associate.md
   - docs/tickets/M6-T04-cap-test-budget-ratio.md
 ---
 
@@ -21,15 +22,15 @@ product code to change the count。
 
 ## Acceptance
 
-- [ ] Every ticket、milestone、ratchet and CI admission path rejects an exact ratio above
+- [x] Every ticket、milestone、ratchet and CI admission path rejects an exact ratio above
       `22853 / 15032`, including a rounded-equal counterexample。
-- [ ] The current M6 Rust tree passes at ceiling equality as `PASS_HOLD`；a candidate equal to
+- [x] The current M6 Rust tree passes at ceiling equality as `PASS_HOLD`；a candidate equal to
       or better than the accepted anchor remains `PASS_ADVANCE` and baseline-eligible。
-- [ ] A `PASS_HOLD` candidate cannot advance the baseline；baseline provenance、control-only
+- [x] A `PASS_HOLD` candidate cannot advance the baseline；baseline provenance、control-only
       commits、merge handling and exact-count verification remain unchanged。
-- [ ] The change is one single-parent control commit containing only the protected script and
+- [x] The change is one single-parent control commit containing only the protected script and
       Markdown evidence；Rust counts remain exactly `code=15032`、`tests=22853`、`examples=132`。
-- [ ] Focused and repository validation pass。
+- [x] Focused and repository validation pass。
 
 ## Validation
 
@@ -50,7 +51,12 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: three independent T04 design explorations completed；final exact-diff review —
-- Notes: hosted UDP `12/12`、three native targets and final qualification remain separately
-  authorized M6 close evidence and are not part of this control repair。
+- Commit: control repair `edbd86dbaaed844740de61616e5137442d7f61fe`。
+- Review: three independent `gpt-5.6-sol/max` explorations rejected risky pure compression and
+  the higher-cost hybrid；primary exact-diff and invariant review PASS。
+- Notes: exact ticket、milestone and short/full-range CI gates returned `PASS_HOLD`；the
+  `+1 test` ticket/milestone/CI and rounded-equal exact-overflow controls returned
+  `ratio_ceiling_exceeded`；ratchet write returned `baseline_not_eligible` without changing the
+  baseline。Format、Clippy、build、Full、100-cycle、Rust 1.85、docs and diff checks passed。
+  Hosted UDP `12/12`、three native targets and final qualification remain separately authorized
+  M6 close evidence and are not part of this control repair。
