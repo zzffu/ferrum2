@@ -30,6 +30,9 @@ M6已以exact `7f1e45c174e749d3dddd32d187365722cce94dbe`、本地Full/MSRV/budge
 GitHub Actions run [`30765897553/1`](https://github.com/zzffu/ferrum2/actions/runs/30765897553)
 的quality、MSRV、三平台和TCP/UDP各`12/12`+cleanup证据关闭。用户明确将这四组
 定义为M6 hosted成功；未等待或声称performance及其dependent aggregate通过。
+M7已在`master@302fd777f4da62a8c1d4d52d81502056f02089c8`规划为additive
+schema v1 tagged static composition；当前仅contract/tickets为`planned`，尚无M7
+产品实现、资格或remote证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -49,6 +52,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M4 | M3 closed | 性能/资源门及同一 commit 上的 v0 资格证明 |
 | M5 | M4 closed | `shadowsocks-crypto`成为三种SIP022方法的唯一内部密码实现 |
 | M6 | M5 closed | 显式opt-in、有界且可关闭的SOCKS5 UDP ASSOCIATE |
+| M7 | M6 closed | 具名多inbound/outbound的静态tag绑定与原子启动 |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -58,7 +62,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 10,000 idle sessions资源资格、Full、interop和三平台收敛；v0 preview已获得
 资格但未打包、发布或公开。M5已完成单实现迁移、安全patch与同SHA关闭资格，
 公开crypto seam、协议状态机、wire和schema v1保持不变。M6已复用现有SIP022
-UDP和runtime交付public client UDP path，未加入routing。
+UDP和runtime交付public client UDP path，未加入routing。M7计划复用config与
+`ProcessSupervisor` deep modules，增加静态tag graph而不创建`Endpoint` interface。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -738,6 +743,44 @@ UDP和runtime交付public client UDP path，未加入routing。
   不声称PASS。Single push scope已消费；不授权rerun、dispatch、second push、PR、
   package、release或publication。
 
+## M7 — 具名多 inbound/outbound 静态组合
+
+- **Status:** planned
+- **Objective:** additive schema v1接受多个有界、具名concrete inbound/outbound；每个
+  inbound在离线验证期exact解析一个outbound tag，两个binary复用同一个
+  `ProcessSupervisor` transaction原子prepare/rollback，legacy单实例行为不变。
+- **Entry conditions:** 已满足。M6 closed；planning baseline为
+  `302fd777f4da62a8c1d4d52d81502056f02089c8`；现有config loader、client/server
+  composition、shared TCP/UDP state和process transaction已清点；ADR-0027、
+  SPEC/TEST-0008已Accepted/Approved。
+- **Exit criteria:**
+  1. Legacy v1 cohort原样有效；tagged/legacy shape互斥，tag/count/reference/listen graph
+     完整离线验证且错误脱敏、zero-resource。
+  2. 两个binary支持至少两个inbounds/outbounds、shared outbound和static no-fallback
+     mapping；仍是一份process-wide method/PSK，不加入routing。
+  3. TCP admission/replay与UDP ID/session/bytes/replay在全部inbounds间保持aggregate
+     ownership；server UDP session绑定local inbound并从同一listener回复。
+  4. First/middle/last TCP/UDP/metrics failure全部prepare-before-poll并逆序rollback；
+     root fatal、signal、forced和restart/rebind返回owner baseline。
+  5. 一个exact SHA通过Full、Rust 1.85、三native targets、TCP/UDP各`12/12`+
+     cleanup、test budget和blocking review；缺失/失败/未授权即blocked。
+- **In-scope tickets:**
+  - M7-T01：legacy/tagged config graph与preflight reference validation，`ready`；
+  - M7-T02：server shared-state TCP/UDP/direct multi-root transaction，依赖T01，`todo`；
+  - M7-T03：client SOCKS/Shadowsocks static multi-root composition，依赖T02，`todo`；
+  - M7-T04：real-process、三平台、interop与exact-SHA qualification，依赖T03，`todo`。
+
+  ```text
+  M7-T01 config -> M7-T02 server risk -> M7-T03 client -> M7-T04 qualification
+  ```
+- **Deferred/out of scope:** dynamic routing、DNS、multi-upstream groups/load balancing/
+  fallback/chaining、per-entry PSK/method、SIP023/multi-user、新adapter kind、Tailscale
+  Endpoint、transparent/TUN、hot reload、management API、new dependency、performance
+  threshold、package/release/publication。
+- **Integrated commit:** none；M7尚未执行。
+- **Open blockers and risks:** plan blocker为零；首个frontier只有M7-T01。Remote push/run、
+  PR、tag、release或publication均未授权。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -776,6 +819,7 @@ UDP和runtime交付public client UDP path，未加入routing。
 | DEC-032 | resolved in M5 plan | 精确vendor并受控patch `shadowsocks-crypto 0.7.0`；产品仅启用`v2`，保留公开crypto seam和protocol state machines；patch只承载checked nonce、zeroization、AES-UDP header与selected-v2收敛；完成后删除旧实现且不留fallback | `ADR-0025`、M5 research、SPEC/TEST-0006、M5-T01/T02/T03 |
 | DEC-033 | resolved in M6 plan | client `[udp]`为schema v1显式opt-in；每个TCP control拥有两个per-association UDP sockets；TCP peer IP权威，非零hint port固定、零port首个valid datagram锁定，地址hint仅advisory；response使用borrowed-authenticate→reserve→materialize/commit；runtime只公开既有per-handle idle/cancel操作；不实现fragment/routing/shared listener | `ADR-0026`、M6 research、SPEC/TEST-0007、M6-T01/T02 |
 | DEC-034 | resolved in M6 plan | 按ADR-0016等强替换既有M2证据adapter：保留12个ID/method/reference和six reference-client rows，仅把six FerrumClient rows从protocol example换成显式UDP client binary；不新增provider/matrix/workflow job | `ADR-0016`、`TEST-0007`、M6-T03 |
+| DEC-035 | resolved in M7 plan | additive v1 tagged/legacy互斥shape；inbound/outbound全局唯一且有界tag、静态inbound→outbound引用、全部outbound被引用；保留process-wide method/PSK及aggregate TCP/UDP owners；复用`ProcessSupervisor` transaction且不创建`Endpoint` interface | `ADR-0027`、SPEC/TEST-0008、M7-T01～T04 |
 
 ## 风险登记
 
@@ -807,6 +851,9 @@ UDP和runtime交付public client UDP path，未加入routing。
 | dependency feature漂移、reduced-round或旧backend形成双实现 | P0 | M5 | exact no-default `v2` edge、metadata/workspace-policy guard、删除旧实现/依赖、license/MSRV review与single-backend source guard |
 | SOCKS UDP变成open/spoofable relay，或invalid/fragment/wrong-source datagram抢占endpoint state | P0 | M6 | control TCP peer IP authority、per-association relay socket、fixed/first-valid port pin、connected upstream、silent-drop/no-mutation tables |
 | client UDP session-ID collision、buffer/queue/task/socket泄漏或shutdown假完成 | P0 | M6 | live-ID registry、existing bounded manager、supervised lexical ownership、capacity-before-commit与control/idle/cancel/forced/rebind snapshots |
+| duplicate/dangling tag、runtime lookup或silent fallback把配置错误变成partial service | P0 | M7 | config module离线解析完整graph；unique/count/reference/unreferenced negatives；binary只消费resolved concrete context |
+| 多listener把TCP/UDP限额乘倍、跨listener replay/session迁移或response从错误listener发出 | P0 | M7 | aggregate admission/replay/session/byte owners；server UDP local-inbound binding；cross-listener negative与owner snapshot |
+| 任一后置listener失败时早期root已服务或资源未rollback | P0 | M7 | existing `ProcessSupervisor` prepare-all transaction；first/middle/last TCP/UDP/metrics failure和exact rebind table |
 
 ## 决策与范围变更日志
 
@@ -859,3 +906,4 @@ UDP和runtime交付public client UDP path，未加入routing。
 | 2026-08-02 | M5 close | exact `6ca0434` run `30743888837/1`通过Full/security/process、MSRV、TCP与UDP各`12/12`、三平台、performance/resource、test budget与final qualification；M5 closed | performance记录ferrum/reference `138726604/484138461` B/s、ratio `0.286543242`、difference `-71.345675840%`；10k、180/180、6/6、drain、cleanup全部PASS，ratio仍仅诊断 | Final Architect/QA均`PASS`，`QA-T03-001`关闭；单次non-force push scope消费撤销；未rerun/dispatch/PR/package/release/publish，本地closeout不再push |
 | 2026-08-02 | M6 plan | M6改为`planned`；接受显式opt-in、control-owned per-association sockets、TCP-peer-IP/fixed-or-learned-port authorization和existing-runtime reuse；批准SPEC/TEST-0007及T01→T02→T03 DAG | M5已关闭且SIP022 UDP/runtime完整可复用；最小public path无需routing、shared listener、新trait或新provider，sing-box zero-port hint由advisory-address profile兼容 | baseline `35354f274847d2608a2009e04aaa3b17fb4fa8f4`；M6 research、ADR-0026、SPEC/TEST-0007；plan-only，无产品修改、push、hosted run、release或publication |
 | 2026-08-03 | M6 close | 关闭M6；quality、MSRV、三平台和interop四组same-SHA success即为用户授权的hosted完成条件；performance及其dependent aggregate不要求、不计入且不声称PASS | M6不新增performance threshold/claim；public UDP产品、安全、生命周期、budget和interop证据已由本地门禁及四个hosted组覆盖 | exact `7f1e45c174e749d3dddd32d187365722cce94dbe`；run `30765897553/1`；single push consumed |
+| 2026-08-03 | M7 plan | M7改为`planned`；接受additive tagged static graph、global unique tags、preflight references、aggregate state/budgets和existing process transaction；明确不建`Endpoint` interface | M6已关闭；config与process deep modules足以承载多个concrete roots，当前没有第二个真实Endpoint adapter或routing requirement | baseline `302fd777f4da62a8c1d4d52d81502056f02089c8`；ADR-0027、SPEC/TEST-0008及四票；plan-only，无产品修改、push、hosted run、release或publication |

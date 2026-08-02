@@ -124,6 +124,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是现状而�
 | M4 | 可复现性能基线、资源门与 v0 preview integrated qualification | closed |
 | M5 | `shadowsocks-crypto`作为三种SIP022方法的唯一内部密码实现 | closed |
 | M6 | 显式opt-in、有界且可关闭的SOCKS5 UDP ASSOCIATE，不加入routing | closed |
+| M7 | 具名多inbound/outbound、静态tag引用和原子prepare/rollback，不建Endpoint interface | planned |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -166,3 +167,11 @@ public SOCKS5 UDP association。Automatic push run `30765897553/1`的quality、M
 三平台和interop在同一SHA成功；用户明确以这四组关闭M6，未等待或声称performance
 及其dependent aggregate通过。Remote push scope已消费；package、release和
 publication仍未授权。
+
+M7同样是v0 preview关闭后的additive milestone，不改写历史v0范围。它以
+`302fd777f4da62a8c1d4d52d81502056f02089c8`为planning baseline，计划让schema v1
+additive接受多个有界、具名inbound/outbound，并在listener创建前验证全局唯一tag和
+static inbound→outbound引用。Legacy单实例配置、process-wide method/PSK、TCP/UDP
+安全与资源语义保持；全部roots复用现有`ProcessSupervisor` transaction。Routing、
+per-entry PSK/method和`Endpoint` interface仍延期；规划不授权remote、release或
+publication。

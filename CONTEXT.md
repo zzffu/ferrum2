@@ -55,3 +55,21 @@ _Avoid_: Target, destination, Shadowsocks server
 One Shadowsocks wire identity with its outbound packet lineage and inbound response
 association/replay state.
 _Avoid_: SOCKS UDP association, public UDP listener
+
+**Configuration tag**:
+An operator-chosen name that uniquely identifies one configured inbound or outbound
+inside a process configuration.
+_Avoid_: AEAD tag, metric label, endpoint
+
+**Inbound**:
+A named traffic-entry identity whose accepted work follows one static outbound binding.
+_Avoid_: Listener, route, endpoint
+
+**Outbound**:
+A named egress identity selected by an inbound's static outbound binding.
+_Avoid_: Route, upstream group, endpoint
+
+**Static outbound binding**:
+The validated configuration relation from one inbound to exactly one outbound; it does
+not vary by flow or datagram while the process runs.
+_Avoid_: Routing rule, fallback, load balancing
