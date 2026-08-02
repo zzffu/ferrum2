@@ -16,7 +16,7 @@
   `M4C-QA-001..003`. This record-only repair closes the two documentation findings
   `M4C-QA-001/002`; `M4C-QA-003` is discharged only by verified post-commit removal
   of the clean integration worktree after its branch and commit are preserved.
-  Targeted staged-record verdict: `PASS`; `M4C-QA-001/002` are closed, with only post-commit worktree cleanup `M4C-QA-003` remaining.
+  Final QA close verdict: `PASS`; `M4C-QA-001/002` were closed by the reviewed record delta, and `M4C-QA-003` was closed by verified removal of the clean integration worktree. No findings remain.
 - **Narrow optimization and authorization:** `M4-TCP-NODELAY-001` is done at
   exact `c0de9bd`. The shared accepted-stream and post-connect product seams enable
   TCP_NODELAY for both client and server without a config or dependency change.
