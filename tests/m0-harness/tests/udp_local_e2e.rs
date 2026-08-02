@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,8 @@ use local_support::{
 
 const STARTUP_BIND_DIAGNOSTIC: &[u8] =
     b"error[startup.bind] process: unable to prepare required endpoint\n";
+// ponytail: file-wide lock; use socket inheritance if these tests need parallel throughput.
+static UDP_LOCAL_E2E_TEST_LOCK: Mutex<()> = Mutex::new(());
 use socket2::{Domain, Protocol, Socket, Type};
 
 fn disable_udp(path: &std::path::Path) {
@@ -43,6 +46,7 @@ fn udp_protocol_example_path() -> std::path::PathBuf {
 
 #[test]
 fn portable_ipv4_live_udp_signal_exits_cleanly_and_rebinds() {
+    let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
     let directory = tempfile::tempdir().expect("temporary directory");
     let server_address = unused_tcp_udp_loopback();
     let config =
@@ -96,6 +100,7 @@ fn portable_ipv4_live_udp_signal_exits_cleanly_and_rebinds() {
 #[test]
 #[ignore = "requires a Linux release host with IPv6-only loopback UDP enabled"]
 fn ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps() {
+    let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
     let baseline_children = active_child_count();
     let directory = tempfile::tempdir().expect("temporary directory");
     let server_address = unused_tcp_udp_loopback();
@@ -198,6 +203,7 @@ fn ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps() {
 
 #[test]
 fn default_startup_owns_same_tcp_udp_port_and_shutdown_rebinds_both() {
+    let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
     let directory = tempfile::tempdir().expect("temporary directory");
     let address = unused_tcp_udp_loopback();
     let config = write_server_config(directory.path(), address, None).expect("server config");
@@ -218,6 +224,7 @@ fn default_startup_owns_same_tcp_udp_port_and_shutdown_rebinds_both() {
 
 #[test]
 fn either_bind_failure_rolls_back_the_other_before_any_loop_runs() {
+    let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
     let directory = tempfile::tempdir().expect("temporary directory");
 
     let udp_address = unused_tcp_udp_loopback();
@@ -253,6 +260,7 @@ fn either_bind_failure_rolls_back_the_other_before_any_loop_runs() {
 
 #[test]
 fn disabled_udp_creates_no_udp_owner_and_preserves_tcp_only_restart() {
+    let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
     let directory = tempfile::tempdir().expect("temporary directory");
     let address = unused_tcp_udp_loopback();
     let config = write_server_config(directory.path(), address, None).expect("server config");
