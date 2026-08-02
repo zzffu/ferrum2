@@ -58,5 +58,5 @@ git diff --check
   `+1 test` ticket/milestone/CI and rounded-equal exact-overflow controls returned
   `ratio_ceiling_exceeded`；ratchet write returned `baseline_not_eligible` without changing the
   baseline。Format、Clippy、build、Full、100-cycle、Rust 1.85、docs and diff checks passed。
-  Hosted UDP `12/12`、three native targets and final qualification remain separately authorized
-  M6 close evidence and are not part of this control repair。
+  The later authorized same-SHA run passed quality、MSRV、three native targets and external UDP
+  `12/12`+cleanup；that hosted evidence is owned by T03, not this control repair。

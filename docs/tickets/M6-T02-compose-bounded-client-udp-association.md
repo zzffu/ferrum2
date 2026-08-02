@@ -46,7 +46,8 @@ connection into a complete local public UDP path。
       process/runtime/socket owner to baseline within the configured bound。
 - [x] Existing UDP families record only closed client-role values and no secret、endpoint、
       server or target cardinality；TCP CONNECT/server UDP behavior remains unchanged。
-- [ ] Exact T02 commands, Full, MSRV, ticket budget and blocking Architect/QA review pass。
+- [x] Exact T02 product commands、Full、MSRV and blocking Architect/QA review pass；the
+      user-deferred per-ticket budget is superseded by M6-T04's final exact-SHA gate。
 
 ## Validation
 
@@ -58,8 +59,8 @@ Run `TEST-0007` T02 commands, then repository Full commands before integration�
 - Review: initial and targeted Architect/QA reviews blocked；two independent `xhigh`
   escalations agreed on the final bounded repair, which was implemented and revalidated。
 - Notes: exact product、T02、Full、MSRV and 100-cycle gates pass。The user explicitly
-  authorized `--no-verify` for T02/T03；ticket budget is deferred to a future T04 and remains
-  unpassed, so the final acceptance checkbox and M6 close stay open。
+  authorized `--no-verify` for T02/T03；M6-T04 replaced that deferred gate with the permanent
+  exact ceiling, and final integration ticket/milestone/CI budget checks pass。
 
 ## Rollback / risk
 

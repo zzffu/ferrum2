@@ -1,5 +1,28 @@
 # CI 与验证状态
 
+## M6 closed 状态
+
+- **Accepted exact-SHA qualification:** exact
+  `7f1e45c174e749d3dddd32d187365722cce94dbe`, tree
+  `fc2052de743ae5447617b59b06e331f468efd7a3`. Automatic push run
+  [`30765897553/1`](https://github.com/zzffu/ferrum2/actions/runs/30765897553) used
+  that exact SHA for every credited job。
+- **Local qualification:** serial format、Clippy、workspace binaries、Full、ignored
+  100-cycle `1/1`、Rust 1.85、docs and diff checks passed。The final exact-ceiling budget
+  returned `PASS_HOLD` in ticket、milestone and CI modes at code `15032`, tests `22853`,
+  examples `132`, ratio `1.520290`; the accepted baseline remained unchanged。
+- **Hosted qualification:** quality `91544432681`, MSRV `91544432690`, Windows MSVC
+  `91544432726`, Linux musl `91544432739`, Linux GNU `91544432748` and interop
+  `91544432703` completed `success` in the same run/attempt。The interop job's exact marker
+  checks require TCP `12/12`, UDP `12/12` and both cleanup results before success。
+- **Explicit M6 close boundary:** the user defined quality、MSRV、platform `3/3` and
+  interop as sufficient hosted success。The existing long-running performance job and its
+  dependent repository aggregate were not awaited, are not credited, and are not claimed as
+  PASS。M6 adds no throughput/resource claim。
+- **Authorization boundary:** the one authorized non-force push is consumed。No rerun、
+  dispatch、second push、PR、tag、release or publication occurred or is authorized；this
+  local documentation-only closeout is not hosted evidence。
+
 ## M5 closed 状态
 
 - **Accepted exact-SHA qualification:** exact

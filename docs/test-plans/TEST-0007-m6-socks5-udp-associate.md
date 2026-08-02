@@ -115,6 +115,13 @@ quality/Full/security/process、Rust 1.85、Windows MSVC、Linux GNU/musl、TCP 
 UDP `12/12`+cleanup and the repository final qualification summary。Existing performance
 output may run as repository regression but M6 adds no throughput/resource threshold。
 
+Close record: for exact `7f1e45c174e749d3dddd32d187365722cce94dbe`, automatic push run
+[`30765897553/1`](https://github.com/zzffu/ferrum2/actions/runs/30765897553) passed the
+quality、MSRV、platform `3/3` and interop groups。The user explicitly accepted those four
+groups as M6 hosted success and waived waiting for the existing performance job and its
+dependent aggregate。No performance or aggregate PASS is claimed；all credited evidence remains
+bound to that one SHA/run/attempt。
+
 ## Stop rules
 
 - Any source-pinning/open-relay、wire/auth/replay、unbounded allocation/queue、owner leak、
