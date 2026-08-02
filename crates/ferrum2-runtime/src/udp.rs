@@ -661,7 +661,8 @@ impl UdpSessionManager {
         Ok(())
     }
 
-    fn cancellation(
+    /// Subscribes to cancellation for one exact live generation.
+    pub fn cancellation(
         &self,
         handle: UdpSessionHandle,
     ) -> Result<watch::Receiver<bool>, UdpRuntimeError> {
@@ -683,7 +684,8 @@ impl UdpSessionManager {
         Ok(Arc::clone(&matching_entry(&state, handle)?.notify))
     }
 
-    fn idle_deadline(&self, handle: UdpSessionHandle) -> Result<Instant, UdpRuntimeError> {
+    /// Returns the manager-owned idle deadline for one exact live generation.
+    pub fn idle_deadline(&self, handle: UdpSessionHandle) -> Result<Instant, UdpRuntimeError> {
         let state = self
             .inner
             .state

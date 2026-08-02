@@ -36,6 +36,7 @@ pub struct ValidatedClientConfig {
     pub server: SocketAddrV4,
     pub psk: MethodPsk,
     pub runtime: RuntimeConfig,
+    pub udp: Option<UdpConfig>,
     pub logging: LoggingConfig,
     pub metrics: Option<MetricsConfig>,
 }
@@ -290,6 +291,7 @@ fn validate_client(raw: RawClientRoot) -> Result<ValidatedClientConfig, ConfigEr
     let method = parse_method(&raw.shadowsocks.method)?;
     let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
+    let udp = raw.udp.map(validate_udp).transpose()?;
     let logging = validate_logging(raw.logging)?;
     let metrics = validate_metrics(raw.metrics, listen)?;
     Ok(ValidatedClientConfig {
@@ -297,6 +299,7 @@ fn validate_client(raw: RawClientRoot) -> Result<ValidatedClientConfig, ConfigEr
         server,
         psk,
         runtime,
+        udp,
         logging,
         metrics,
     })
@@ -501,6 +504,7 @@ struct RawClientRoot {
     shadowsocks: RawShadowsocks,
     #[serde(default)]
     runtime: RawRuntime,
+    udp: Option<RawUdp>,
     #[serde(default)]
     logging: RawLogging,
     metrics: Option<RawMetrics>,

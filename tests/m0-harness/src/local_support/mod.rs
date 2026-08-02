@@ -602,6 +602,17 @@ fn fetch_ferrum_metrics(address: SocketAddrV4, deadline: Instant) -> Option<Vec<
     .then(|| body.to_vec())
 }
 
+pub fn wait_for_metrics(address: SocketAddrV4) -> Vec<u8> {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    loop {
+        if let Some(body) = fetch_ferrum_metrics(address, deadline) {
+            return body;
+        }
+        assert!(Instant::now() < deadline, "metrics readiness timed out");
+        thread::sleep(READINESS_POLL);
+    }
+}
+
 fn write_before_deadline(
     stream: &mut TcpStream,
     mut bytes: &[u8],
@@ -739,6 +750,19 @@ pub fn write_client_config(
     metrics: Option<SocketAddrV4>,
 ) -> io::Result<PathBuf> {
     write_client_config_with_psk(directory, listen, server, metrics, SYNTHETIC_PSK)
+}
+
+pub fn write_udp_client_config(
+    directory: &Path,
+    listen: SocketAddrV4,
+    server: SocketAddrV4,
+    metrics: Option<SocketAddrV4>,
+) -> io::Result<PathBuf> {
+    let path = write_client_config(directory, listen, server, metrics)?;
+    let mut config = fs::read_to_string(&path)?;
+    config.push_str("\n[udp]\n");
+    fs::write(&path, config)?;
+    Ok(path)
 }
 
 pub fn write_client_config_with_psk(

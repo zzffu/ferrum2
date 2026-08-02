@@ -5,10 +5,11 @@
 mod udp;
 
 pub use udp::{
-    AcceptedUdpRequest, ClientAssociationSnapshot, EncodedUdpResponse, MAX_UDP_WIRE_LEN,
-    PendingUdpRequest, PendingUdpResponse, ServerResponseCapability, ServerSessionSnapshot,
-    UDP_ASSOCIATION_RETENTION, UDP_REPLAY_LAG, UdpClientSession, UdpPacketError, UdpPacketScratch,
-    UdpReplayWindow, UdpRequestCommit, UdpResponseCommit, UdpServer, max_udp_payload_len,
+    AcceptedUdpRequest, BorrowedPendingUdpResponse, ClientAssociationSnapshot, EncodedUdpResponse,
+    MAX_UDP_WIRE_LEN, PendingUdpRequest, PendingUdpResponse, ServerResponseCapability,
+    ServerSessionSnapshot, UDP_ASSOCIATION_RETENTION, UDP_REPLAY_LAG, UdpClientSession,
+    UdpPacketError, UdpPacketScratch, UdpReplayWindow, UdpRequestCommit, UdpResponseCommit,
+    UdpServer, max_udp_payload_len, max_udp_payload_len_for_encoded_target,
 };
 
 use std::collections::{HashMap, VecDeque};

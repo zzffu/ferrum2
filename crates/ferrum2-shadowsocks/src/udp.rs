@@ -292,6 +292,11 @@ impl UdpClientSession {
         })
     }
 
+    /// Returns the opaque live ID for collision-safe process-local registration.
+    pub const fn session_id(&self) -> &UdpSessionId {
+        self.outbound.session_id()
+    }
+
     /// Encodes one request into caller-owned bounded output.
     pub fn encode_request(
         &mut self,
@@ -324,7 +329,18 @@ impl UdpClientSession {
         wire: &[u8],
         scratch: &mut UdpPacketScratch,
     ) -> Result<PendingUdpResponse, UdpPacketError> {
-        let opened = open_packet(
+        self.prepare_response_borrowed(clock, wire, scratch)
+            .map(BorrowedPendingUdpResponse::materialize)
+    }
+
+    /// Authenticates and validates a response without materializing its target or payload.
+    pub fn prepare_response_borrowed<'a>(
+        &self,
+        clock: &(impl Clock + ?Sized),
+        wire: &[u8],
+        scratch: &'a mut UdpPacketScratch,
+    ) -> Result<BorrowedPendingUdpResponse<'a>, UdpPacketError> {
+        let opened = open_packet_borrowed(
             &self.crypto,
             clock,
             wire,
@@ -332,10 +348,11 @@ impl UdpClientSession {
             RESPONSE_TYPE,
             Some(self.outbound.session_id()),
         )?;
-        Ok(PendingUdpResponse {
+        Ok(BorrowedPendingUdpResponse {
             session_id: opened.session_id,
             packet_id: opened.packet_id,
-            datagram: opened.datagram,
+            target: opened.target,
+            payload: opened.payload,
         })
     }
 
@@ -444,7 +461,14 @@ struct OpenedPacket {
     datagram: Datagram,
 }
 
-/// Fully authenticated and semantically validated response awaiting reservation.
+struct BorrowedOpenedPacket<'a> {
+    session_id: UdpSessionId,
+    packet_id: u64,
+    target: super::ValidatedTarget<'a>,
+    payload: &'a [u8],
+}
+
+/// Fully authenticated response awaiting its runtime-state commit.
 pub struct PendingUdpResponse {
     session_id: UdpSessionId,
     packet_id: u64,
@@ -452,12 +476,12 @@ pub struct PendingUdpResponse {
 }
 
 impl PendingUdpResponse {
-    /// Borrows the validated datagram for bounded capacity planning only.
+    /// Returns the authenticated datagram without exposing commit state.
     pub const fn datagram(&self) -> &Datagram {
         &self.datagram
     }
 
-    /// Separates reserved ownership from the opaque serialized commit token.
+    /// Separates the authenticated datagram and opaque commit token.
     pub fn into_parts(self) -> (Datagram, UdpResponseCommit) {
         (
             self.datagram,
@@ -473,7 +497,61 @@ impl fmt::Debug for PendingUdpResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PendingUdpResponse")
-            .field("datagram", &self.datagram)
+            .field("payload_len", &self.datagram.payload().len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Fully authenticated borrowed response awaiting exact runtime reservation.
+pub struct BorrowedPendingUdpResponse<'a> {
+    session_id: UdpSessionId,
+    packet_id: u64,
+    target: super::ValidatedTarget<'a>,
+    payload: &'a [u8],
+}
+
+impl BorrowedPendingUdpResponse<'_> {
+    /// Returns the authenticated payload borrowed from charged scratch.
+    pub const fn payload(&self) -> &[u8] {
+        self.payload
+    }
+
+    /// Returns the exact capacity required by the sole owned materialization.
+    pub const fn allocated_capacity(&self) -> usize {
+        self.payload.len()
+    }
+
+    /// Returns the validated SIP022 target field width without materializing it.
+    pub fn encoded_target_len(&self) -> usize {
+        match &self.target {
+            super::ValidatedTarget::Ip(SocketAddr::V4(_)) => 7,
+            super::ValidatedTarget::Ip(SocketAddr::V6(_)) => 19,
+            super::ValidatedTarget::Domain(host, _) => 4 + host.len(),
+        }
+    }
+
+    /// Materializes once after reservation and separates the opaque commit token.
+    pub fn materialize(self) -> PendingUdpResponse {
+        let target = self
+            .target
+            .into_owned()
+            .expect("authenticated response target was already validated");
+        let payload_len = self.payload.len();
+        let datagram = Datagram::new(target, BytesMut::from(self.payload), payload_len)
+            .expect("authenticated response payload was already bounded");
+        PendingUdpResponse {
+            datagram,
+            session_id: self.session_id,
+            packet_id: self.packet_id,
+        }
+    }
+}
+
+impl fmt::Debug for BorrowedPendingUdpResponse<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BorrowedPendingUdpResponse")
+            .field("payload_len", &self.payload.len())
             .finish_non_exhaustive()
     }
 }
@@ -872,10 +950,20 @@ pub fn max_udp_payload_len(
     padding_len: usize,
 ) -> Result<usize, UdpPacketError> {
     let address_len = encoded_target_len(target).map_err(map_frame)?;
+    max_udp_payload_len_for_encoded_target(profile, response, address_len, padding_len)
+}
+
+/// Computes the largest payload from an already validated encoded target width.
+pub fn max_udp_payload_len_for_encoded_target(
+    profile: MethodProfile,
+    response: bool,
+    encoded_target_len: usize,
+    padding_len: usize,
+) -> Result<usize, UdpPacketError> {
     let semantic_overhead = COMMON_HEADER_LEN
         .checked_add(if response { RESPONSE_BINDING_LEN } else { 0 })
         .and_then(|length| length.checked_add(padding_len))
-        .and_then(|length| length.checked_add(address_len))
+        .and_then(|length| length.checked_add(encoded_target_len))
         .ok_or(UdpPacketError::Bounds)?;
     if padding_len > usize::from(u16::MAX) {
         return Err(UdpPacketError::Bounds);
@@ -956,6 +1044,26 @@ fn open_packet(
     expected_type: u8,
     binding: Option<&UdpSessionId>,
 ) -> Result<OpenedPacket, UdpPacketError> {
+    let opened = open_packet_borrowed(crypto, clock, wire, scratch, expected_type, binding)?;
+    let target = opened.target.into_owned().map_err(map_target)?;
+    let payload_len = opened.payload.len();
+    let datagram = Datagram::new(target, BytesMut::from(opened.payload), payload_len)
+        .map_err(|_| UdpPacketError::Bounds)?;
+    Ok(OpenedPacket {
+        session_id: opened.session_id,
+        packet_id: opened.packet_id,
+        datagram,
+    })
+}
+
+fn open_packet_borrowed<'a>(
+    crypto: &UdpCrypto,
+    clock: &(impl Clock + ?Sized),
+    wire: &[u8],
+    scratch: &'a mut UdpPacketScratch,
+    expected_type: u8,
+    binding: Option<&UdpSessionId>,
+) -> Result<BorrowedOpenedPacket<'a>, UdpPacketError> {
     if wire.len() > MAX_UDP_WIRE_LEN {
         return Err(UdpPacketError::Bounds);
     }
@@ -964,24 +1072,20 @@ fn open_packet(
     let opened = crypto.open(wire, &mut scratch.body).map_err(map_crypto)?;
     scratch.body.truncate(opened.plaintext_len());
     let (target, payload_start) = parse_body(&scratch.body, clock, expected_type, binding)?;
-    let payload = &scratch.body[payload_start..];
-    let mut owned = BytesMut::with_capacity(payload.len());
-    owned.extend_from_slice(payload);
-    let datagram =
-        Datagram::new(target, owned, payload.len()).map_err(|_| UdpPacketError::Bounds)?;
-    Ok(OpenedPacket {
+    Ok(BorrowedOpenedPacket {
         session_id: opened.session_id().clone(),
         packet_id: opened.packet_id(),
-        datagram,
+        target,
+        payload: &scratch.body[payload_start..],
     })
 }
 
-fn parse_body(
-    body: &[u8],
+fn parse_body<'a>(
+    body: &'a [u8],
     clock: &(impl Clock + ?Sized),
     expected_type: u8,
     binding: Option<&UdpSessionId>,
-) -> Result<(TargetAddr, usize), UdpPacketError> {
+) -> Result<(super::ValidatedTarget<'a>, usize), UdpPacketError> {
     let message_type = *body.first().ok_or(UdpPacketError::Bounds)?;
     if message_type != expected_type {
         return Err(UdpPacketError::Type);
@@ -1025,7 +1129,6 @@ fn parse_body(
     let payload_start = address_start
         .checked_add(address_len)
         .ok_or(UdpPacketError::Bounds)?;
-    let target = target.into_owned().map_err(map_target)?;
     Ok((target, payload_start))
 }
 

@@ -17,6 +17,8 @@ fn round_trip_empty_maximum_domain_boundary_and_ipv6_erratum() {
         let packet = decode(&wire).unwrap(); let header = wire.len() - payload.len();
         assert_eq!(packet.to_target_addr(), target, "{case} target"); assert_eq!(packet.payload(), payload, "{case} payload");
         assert_eq!(packet.payload().as_ptr(), wire[header..].as_ptr(), "{case} borrowed");
+        let target_len = match case { "ipv4-empty" => 7, "ipv6" => 19, "domain" => 16, _ => unreachable!() };
+        assert_eq!(packet.encoded_target_len(), target_len, "{case} target width");
     }
     for (case, target, header) in [
         ("max-ipv4", ip("192.0.2.1:53"), 10),

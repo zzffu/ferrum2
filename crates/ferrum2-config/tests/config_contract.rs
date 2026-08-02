@@ -17,22 +17,9 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-const CLIENT_BASE: &str = r#"schema_version = 1
-[client]
-listen = "127.0.0.1:1080"
-server = "127.0.0.1:8388"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
-"#;
+const CLIENT_BASE: &str = "schema_version = 1\n[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
-const SERVER_BASE: &str = r#"schema_version = 1
-[server]
-listen = "127.0.0.1:8388"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
-"#;
+const SERVER_BASE: &str = "schema_version = 1\n[server]\nlisten = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
@@ -99,95 +86,41 @@ const SCHEMA_V1_COMPATIBILITY_POLICY: SchemaV1CompatibilityPolicy = SchemaV1Comp
 };
 
 fn assert_runtime(actual: RuntimeConfig, expected: [u64; 6], name: &str) {
-    assert_eq!(
-        u64::from(actual.max_connections.get()),
-        expected[0],
-        "{name}"
-    );
-    assert_eq!(
-        u64::from(actual.listen_backlog.get()),
-        expected[1],
-        "{name}"
-    );
-    assert_eq!(
-        actual.handshake_timeout,
-        Duration::from_millis(expected[2]),
-        "{name}"
-    );
-    assert_eq!(
-        actual.connect_timeout,
-        Duration::from_millis(expected[3]),
-        "{name}"
-    );
-    assert_eq!(
-        actual.idle_timeout,
-        Duration::from_millis(expected[4]),
-        "{name}"
-    );
-    assert_eq!(
-        actual.shutdown_grace,
-        Duration::from_millis(expected[5]),
-        "{name}"
-    );
+    #[rustfmt::skip]
+    let actual = (u64::from(actual.max_connections.get()), u64::from(actual.listen_backlog.get()), actual.handshake_timeout, actual.connect_timeout, actual.idle_timeout, actual.shutdown_grace);
+    #[rustfmt::skip]
+    let expected = (expected[0], expected[1], Duration::from_millis(expected[2]), Duration::from_millis(expected[3]), Duration::from_millis(expected[4]), Duration::from_millis(expected[5]));
+    assert_eq!(actual, expected, "{name}");
 }
 
 #[test]
 fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
+    #[rustfmt::skip]
     let cases = [
         CohortCase {
-            name: "client defaults",
-            fixture: "client-valid.toml",
-            role: ConfigRole::Client,
-            method: TcpMethodProfile::Blake3Aes128Gcm2022,
-            runtime: [4_096, 1_024, 5_000, 10_000, 300_000, 30_000],
-            replay_capacity: None,
-            udp: None,
-            logging: LoggingLevel::Info,
-            metrics_port: None,
+            name: "client defaults", fixture: "client-valid.toml", role: ConfigRole::Client,
+            method: TcpMethodProfile::Blake3Aes128Gcm2022, runtime: [4_096, 1_024, 5_000, 10_000, 300_000, 30_000],
+            replay_capacity: None, udp: None, logging: LoggingLevel::Info, metrics_port: None,
         },
         CohortCase {
-            name: "client minimum boundaries",
-            fixture: "client-preserved-minimum.toml",
-            role: ConfigRole::Client,
-            method: TcpMethodProfile::Blake3Aes256Gcm2022,
-            runtime: [1, 1, 100, 100, 1_000, 0],
-            replay_capacity: None,
-            udp: None,
-            logging: LoggingLevel::Error,
-            metrics_port: Some(9_090),
+            name: "client minimum boundaries", fixture: "client-preserved-minimum.toml", role: ConfigRole::Client,
+            method: TcpMethodProfile::Blake3Aes256Gcm2022, runtime: [1, 1, 100, 100, 1_000, 0],
+            replay_capacity: None, udp: None, logging: LoggingLevel::Error, metrics_port: Some(9_090),
         },
         CohortCase {
-            name: "server defaults",
-            fixture: "server-valid.toml",
-            role: ConfigRole::Server,
-            method: TcpMethodProfile::Blake3Aes128Gcm2022,
-            runtime: [4_096, 1_024, 5_000, 10_000, 300_000, 30_000],
-            replay_capacity: Some(65_536),
-            udp: Some((true, 4_096, 16_777_216, 300_000)),
-            logging: LoggingLevel::Info,
-            metrics_port: None,
+            name: "server defaults", fixture: "server-valid.toml", role: ConfigRole::Server,
+            method: TcpMethodProfile::Blake3Aes128Gcm2022, runtime: [4_096, 1_024, 5_000, 10_000, 300_000, 30_000],
+            replay_capacity: Some(65_536), udp: Some((true, 4_096, 16_777_216, 300_000)), logging: LoggingLevel::Info, metrics_port: None,
         },
         CohortCase {
-            name: "server minimum boundaries",
-            fixture: "server-preserved-minimum.toml",
-            role: ConfigRole::Server,
-            method: TcpMethodProfile::Blake3Aes256Gcm2022,
-            runtime: [1, 1, 100, 100, 1_000, 0],
-            replay_capacity: Some(1_024),
-            udp: Some((false, 1, 1_048_576, 60_000)),
-            logging: LoggingLevel::Warn,
-            metrics_port: None,
+            name: "server minimum boundaries", fixture: "server-preserved-minimum.toml", role: ConfigRole::Server,
+            method: TcpMethodProfile::Blake3Aes256Gcm2022, runtime: [1, 1, 100, 100, 1_000, 0],
+            replay_capacity: Some(1_024), udp: Some((false, 1, 1_048_576, 60_000)), logging: LoggingLevel::Warn, metrics_port: None,
         },
         CohortCase {
-            name: "server maximum boundaries",
-            fixture: "server-preserved-maximum.toml",
-            role: ConfigRole::Server,
-            method: TcpMethodProfile::Blake3ChaCha20Poly13052022,
-            runtime: [65_535, 65_535, 60_000, 120_000, 86_400_000, 300_000],
-            replay_capacity: Some(1_048_576),
-            udp: Some((true, 65_535, 268_435_456, 86_400_000)),
-            logging: LoggingLevel::Trace,
-            metrics_port: Some(9_091),
+            name: "server maximum boundaries", fixture: "server-preserved-maximum.toml", role: ConfigRole::Server,
+            method: TcpMethodProfile::Blake3ChaCha20Poly13052022, runtime: [65_535, 65_535, 60_000, 120_000, 86_400_000, 300_000],
+            replay_capacity: Some(1_048_576), udp: Some((true, 65_535, 268_435_456, 86_400_000)), logging: LoggingLevel::Trace, metrics_port: Some(9_091),
         },
     ];
 
@@ -197,67 +130,24 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
         match case.role {
             ConfigRole::Client => {
                 let config = load_client(&path).expect(case.name);
-                assert_eq!(
-                    config.listen,
-                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1_080),
-                    "{}",
-                    case.name
-                );
-                assert_eq!(
-                    config.server,
-                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388),
-                    "{}",
-                    case.name
-                );
-                assert_eq!(config.method(), case.method, "{}", case.name);
-                assert_eq!(format!("{:?}", config.psk), "MethodPsk([REDACTED])");
+                #[rustfmt::skip]
+                let actual = (config.listen, config.server, config.method(), format!("{:?}", config.psk), config.logging.level, config.metrics.map(|metrics| metrics.listen.port()));
+                #[rustfmt::skip]
+                let expected = (SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1_080), SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388), case.method, "MethodPsk([REDACTED])".to_owned(), case.logging, case.metrics_port);
+                assert_eq!(actual, expected, "{}", case.name);
                 assert_runtime(config.runtime, case.runtime, case.name);
-                assert_eq!(config.logging.level, case.logging, "{}", case.name);
-                assert_eq!(
-                    config.metrics.map(|metrics| metrics.listen.port()),
-                    case.metrics_port,
-                    "{}",
-                    case.name
-                );
                 assert!(case.replay_capacity.is_none());
                 assert!(case.udp.is_none());
             }
             ConfigRole::Server => {
                 let config = load_server(&path).expect(case.name);
-                assert_eq!(
-                    config.listen,
-                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388),
-                    "{}",
-                    case.name
-                );
-                assert_eq!(config.method(), case.method, "{}", case.name);
-                assert_eq!(format!("{:?}", config.psk), "MethodPsk([REDACTED])");
-                assert_runtime(config.runtime, case.runtime, case.name);
-                assert_eq!(
-                    Some(config.replay.capacity),
-                    case.replay_capacity,
-                    "{}",
-                    case.name
-                );
                 let expected_udp = case.udp.expect("server UDP expectation");
-                assert_eq!(
-                    (
-                        config.udp.enabled,
-                        config.udp.max_sessions,
-                        config.udp.max_buffered_bytes,
-                        config.udp.idle_timeout.as_millis() as u64,
-                    ),
-                    expected_udp,
-                    "{}",
-                    case.name
-                );
-                assert_eq!(config.logging.level, case.logging, "{}", case.name);
-                assert_eq!(
-                    config.metrics.map(|metrics| metrics.listen.port()),
-                    case.metrics_port,
-                    "{}",
-                    case.name
-                );
+                #[rustfmt::skip]
+                let actual = (config.listen, config.method(), format!("{:?}", config.psk), Some(config.replay.capacity), config.udp.enabled, config.udp.max_sessions, config.udp.max_buffered_bytes, config.udp.idle_timeout.as_millis() as u64, config.logging.level, config.metrics.map(|metrics| metrics.listen.port()));
+                #[rustfmt::skip]
+                let expected = (SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388), case.method, "MethodPsk([REDACTED])".to_owned(), case.replay_capacity, expected_udp.0, expected_udp.1, expected_udp.2, expected_udp.3, case.logging, case.metrics_port);
+                assert_eq!(actual, expected, "{}", case.name);
+                assert_runtime(config.runtime, case.runtime, case.name);
             }
         }
         assert_eq!(
@@ -269,11 +159,9 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
     }
 
     let policy = SCHEMA_V1_COMPATIBILITY_POLICY;
-    assert!(policy.all_v0_releases);
-    assert_eq!(policy.successor_minimum_months, 12);
-    assert_eq!(policy.successor_minimum_stable_minors, 2);
-    assert!(policy.prior_stable_release_notice);
-    assert!(!policy.elapsed_time_proven_at_m3_close);
+    #[rustfmt::skip]
+    let policy = (policy.all_v0_releases, policy.successor_minimum_months, policy.successor_minimum_stable_minors, policy.prior_stable_release_notice, policy.elapsed_time_proven_at_m3_close);
+    assert_eq!(policy, (true, 12, 2, true, false));
 
     let mut exact_limit = format!("{CLIENT_BASE}\n#").into_bytes();
     exact_limit.resize(MAX_CONFIG_BYTES - 1, b'a');
@@ -283,38 +171,47 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
 }
 
 #[test]
-fn endpoint_method_key_and_cross_field_rules_are_enforced() {
+fn client_udp_is_explicit_and_reuses_server_defaults_boundaries_and_errors() {
+    #[rustfmt::skip]
     let cases = [
-        (
-            "client endpoints equal",
-            CLIENT_BASE.replacen("127.0.0.1:1080", "127.0.0.1:8388", 1),
-            ConfigField::ClientServer,
-        ),
-        (
-            "unknown method",
-            CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "future-method", 1),
-            ConfigField::ShadowsocksMethod,
-        ),
-        (
-            "reduced-round method",
-            CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "2022-blake3-chacha8-poly1305", 1),
-            ConfigField::ShadowsocksMethod,
-        ),
-        (
-            "unpadded base64",
-            CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "AAECAwQFBgcICQoLDA0ODw", 1),
-            ConfigField::ShadowsocksPsk,
-        ),
-        (
-            "whitespace base64",
-            CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "AAECAwQFBgcICQoL DA0ODw==", 1),
-            ConfigField::ShadowsocksPsk,
-        ),
-        (
-            "url safe base64",
-            CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "_____________________w==", 1),
-            ConfigField::ShadowsocksPsk,
-        ),
+        ("empty", "", (true, 4_096, 16_777_216, 300_000)),
+        ("enabled", "enabled = true\n", (true, 4_096, 16_777_216, 300_000)),
+        ("disabled", "enabled = false\n", (false, 4_096, 16_777_216, 300_000)),
+        ("minimum", "max_sessions = 1\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n", (true, 1, 1_048_576, 60_000)),
+        ("maximum", "max_sessions = 65535\nmax_buffered_bytes = 268435456\nidle_timeout_ms = 86400000\n", (true, 65_535, 268_435_456, 86_400_000)),
+    ];
+    for (name, section, expected) in cases {
+        let file = TempConfig::text(&format!("{CLIENT_BASE}\n[udp]\n{section}"));
+        let udp = load_client(file.path()).expect(name).udp.expect(name);
+        #[rustfmt::skip]
+        let actual = (udp.enabled, udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout.as_millis() as u64);
+        assert_eq!(actual, expected, "{name}");
+    }
+
+    #[rustfmt::skip]
+    let invalid = [
+        ("sessions", "max_sessions", 0, ConfigField::UdpMaxSessions),
+        ("buffer", "max_buffered_bytes", 1_048_575, ConfigField::UdpMaxBufferedBytes),
+        ("idle", "idle_timeout_ms", 59_999, ConfigField::UdpIdleTimeout),
+    ];
+    for (name, field, value, expected) in invalid {
+        let file = TempConfig::text(&format!("{CLIENT_BASE}\n[udp]\n{field} = {value}\n"));
+        let error = load_client(file.path()).err().expect(name);
+        assert_eq!(error.kind(), ConfigErrorKind::Semantic, "{name}");
+        assert_eq!(error.field(), expected, "{name}");
+    }
+}
+
+#[test]
+fn endpoint_method_key_and_cross_field_rules_are_enforced() {
+    #[rustfmt::skip]
+    let cases = [
+        ("client endpoints equal", CLIENT_BASE.replacen("127.0.0.1:1080", "127.0.0.1:8388", 1), ConfigField::ClientServer),
+        ("unknown method", CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "future-method", 1), ConfigField::ShadowsocksMethod),
+        ("reduced-round method", CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "2022-blake3-chacha8-poly1305", 1), ConfigField::ShadowsocksMethod),
+        ("unpadded base64", CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "AAECAwQFBgcICQoLDA0ODw", 1), ConfigField::ShadowsocksPsk),
+        ("whitespace base64", CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "AAECAwQFBgcICQoL DA0ODw==", 1), ConfigField::ShadowsocksPsk),
+        ("url safe base64", CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "_____________________w==", 1), ConfigField::ShadowsocksPsk),
     ];
     for (name, source, expected_field) in cases {
         let file = TempConfig::text(&source);
@@ -325,13 +222,9 @@ fn endpoint_method_key_and_cross_field_rules_are_enforced() {
 
     for level in ["fatal", "INFO", "client=debug"] {
         let file = TempConfig::text(&format!("{CLIENT_BASE}\n[logging]\nlevel = \"{level}\"\n"));
-        assert_eq!(
-            load_client(file.path())
-                .err()
-                .expect("logging level")
-                .field(),
-            ConfigField::LoggingLevel
-        );
+        #[rustfmt::skip]
+        let actual = load_client(file.path()).err().expect("logging level").field();
+        assert_eq!(actual, ConfigField::LoggingLevel);
     }
     for level in ["error", "warn", "info", "debug", "trace"] {
         let file = TempConfig::text(&format!("{CLIENT_BASE}\n[logging]\nlevel = \"{level}\"\n"));
@@ -344,32 +237,22 @@ fn endpoint_method_key_and_cross_field_rules_are_enforced() {
         ("zero port", "127.0.0.1:0"),
     ];
     for (name, endpoint) in metrics_cases {
-        let file = TempConfig::text(&format!(
-            "{CLIENT_BASE}\n[metrics]\nlisten = \"{endpoint}\"\n"
-        ));
+        #[rustfmt::skip]
+        let file = TempConfig::text(&format!("{CLIENT_BASE}\n[metrics]\nlisten = \"{endpoint}\"\n"));
         let error = load_client(file.path()).err().expect(name);
         assert_eq!(error.field(), ConfigField::MetricsListen, "{name}");
     }
 
     let missing_metrics_listen = TempConfig::text(&format!("{CLIENT_BASE}\n[metrics]\n"));
-    assert_eq!(
-        load_client(missing_metrics_listen.path())
-            .err()
-            .expect("metrics listen required")
-            .kind(),
-        ConfigErrorKind::Syntax
-    );
+    #[rustfmt::skip]
+    let actual = load_client(missing_metrics_listen.path()).err().expect("metrics listen required").kind();
+    assert_eq!(actual, ConfigErrorKind::Syntax);
 
-    let server_metrics_collision = TempConfig::text(&format!(
-        "{SERVER_BASE}\n[metrics]\nlisten = \"127.0.0.1:8388\"\n"
-    ));
-    assert_eq!(
-        load_server(server_metrics_collision.path())
-            .err()
-            .expect("server metrics collision")
-            .field(),
-        ConfigField::MetricsListen
-    );
+    #[rustfmt::skip]
+    let server_metrics_collision = TempConfig::text(&format!("{SERVER_BASE}\n[metrics]\nlisten = \"127.0.0.1:8388\"\n"));
+    #[rustfmt::skip]
+    let actual = load_server(server_metrics_collision.path()).err().expect("server metrics collision").field();
+    assert_eq!(actual, ConfigField::MetricsListen);
 }
 
 #[test]
@@ -377,88 +260,18 @@ fn invalid_cohort_rows_keep_stable_redacted_categories_and_fields() {
     const SOURCE_SENTINEL: &str = "M3_RAW_CONFIG_SOURCE_SENTINEL";
     let mut oversized = CLIENT_BASE.as_bytes().to_vec();
     oversized.resize(MAX_CONFIG_BYTES + 1, b' ');
+    #[rustfmt::skip]
     let cases = [
-        (
-            "missing required section",
-            ConfigRole::Client,
-            CLIENT_BASE
-                .replace(
-                    "[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n",
-                    "",
-                )
-                .into_bytes(),
-            ConfigErrorKind::Syntax,
-            ConfigField::Config,
-        ),
-        (
-            "current reader rejects a later optional field",
-            ConfigRole::Client,
-            fs::read(fixture("client-invalid-unknown-field.toml")).expect("unknown fixture"),
-            ConfigErrorKind::Syntax,
-            ConfigField::Config,
-        ),
-        (
-            "oversized",
-            ConfigRole::Client,
-            oversized,
-            ConfigErrorKind::TooLarge,
-            ConfigField::Config,
-        ),
-        (
-            "malformed",
-            ConfigRole::Client,
-            format!("schema_version = [\n# {SOURCE_SENTINEL}").into_bytes(),
-            ConfigErrorKind::Syntax,
-            ConfigField::Config,
-        ),
-        (
-            "wrong declared version",
-            ConfigRole::Client,
-            CLIENT_BASE
-                .replacen("schema_version = 1", "schema_version = 2", 1)
-                .into_bytes(),
-            ConfigErrorKind::Semantic,
-            ConfigField::SchemaVersion,
-        ),
-        (
-            "zero-port endpoint",
-            ConfigRole::Client,
-            CLIENT_BASE
-                .replacen("127.0.0.1:1080", "127.0.0.1:0", 1)
-                .into_bytes(),
-            ConfigErrorKind::Semantic,
-            ConfigField::ClientListen,
-        ),
-        (
-            "invalid range",
-            ConfigRole::Client,
-            format!("{CLIENT_BASE}\n[runtime]\nmax_connections = 0\n").into_bytes(),
-            ConfigErrorKind::Semantic,
-            ConfigField::RuntimeMaxConnections,
-        ),
-        (
-            "noncanonical psk",
-            ConfigRole::Client,
-            CLIENT_BASE
-                .replacen("AAECAwQFBgcICQoLDA0ODw==", "AAECAwQFBgcICQoLDA0ODx==", 1)
-                .into_bytes(),
-            ConfigErrorKind::Semantic,
-            ConfigField::ShadowsocksPsk,
-        ),
-        (
-            "client wrong-length psk fixture",
-            ConfigRole::Client,
-            fs::read(fixture("client-invalid-key-length.toml")).expect("client key fixture"),
-            ConfigErrorKind::Semantic,
-            ConfigField::ShadowsocksPsk,
-        ),
-        (
-            "server wrong-length psk fixture",
-            ConfigRole::Server,
-            fs::read(fixture("server-invalid-key-length.toml")).expect("server key fixture"),
-            ConfigErrorKind::Semantic,
-            ConfigField::ShadowsocksPsk,
-        ),
+        ("missing required section", ConfigRole::Client, CLIENT_BASE.replace("[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n", "").into_bytes(), ConfigErrorKind::Syntax, ConfigField::Config),
+        ("current reader rejects a later optional field", ConfigRole::Client, fs::read(fixture("client-invalid-unknown-field.toml")).expect("unknown fixture"), ConfigErrorKind::Syntax, ConfigField::Config),
+        ("oversized", ConfigRole::Client, oversized, ConfigErrorKind::TooLarge, ConfigField::Config),
+        ("malformed", ConfigRole::Client, format!("schema_version = [\n# {SOURCE_SENTINEL}").into_bytes(), ConfigErrorKind::Syntax, ConfigField::Config),
+        ("wrong declared version", ConfigRole::Client, CLIENT_BASE.replacen("schema_version = 1", "schema_version = 2", 1).into_bytes(), ConfigErrorKind::Semantic, ConfigField::SchemaVersion),
+        ("zero-port endpoint", ConfigRole::Client, CLIENT_BASE.replacen("127.0.0.1:1080", "127.0.0.1:0", 1).into_bytes(), ConfigErrorKind::Semantic, ConfigField::ClientListen),
+        ("invalid range", ConfigRole::Client, format!("{CLIENT_BASE}\n[runtime]\nmax_connections = 0\n").into_bytes(), ConfigErrorKind::Semantic, ConfigField::RuntimeMaxConnections),
+        ("noncanonical psk", ConfigRole::Client, CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", "AAECAwQFBgcICQoLDA0ODx==", 1).into_bytes(), ConfigErrorKind::Semantic, ConfigField::ShadowsocksPsk),
+        ("client wrong-length psk fixture", ConfigRole::Client, fs::read(fixture("client-invalid-key-length.toml")).expect("client key fixture"), ConfigErrorKind::Semantic, ConfigField::ShadowsocksPsk),
+        ("server wrong-length psk fixture", ConfigRole::Server, fs::read(fixture("server-invalid-key-length.toml")).expect("server key fixture"), ConfigErrorKind::Semantic, ConfigField::ShadowsocksPsk),
     ];
 
     for (name, role, source, expected_kind, expected_field) in cases {

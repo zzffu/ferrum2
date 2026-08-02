@@ -6,23 +6,12 @@ use std::net::{SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 
 use local_support::{
     TCP_METHOD_CONFIGS, reserve_loopback, rewrite_config_method, run_binary, unused_loopback,
-    write_client_config, write_server_config,
+    write_client_config, write_server_config, write_udp_client_config,
 };
 
-const CLIENT_BASE: &str = "schema_version = 1\n\
-    [client]\n\
-    listen = \"127.0.0.1:1080\"\n\
-    server = \"127.0.0.1:8388\"\n\
-    [shadowsocks]\n\
-    method = \"2022-blake3-aes-128-gcm\"\n\
-    psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+const CLIENT_BASE: &str = "schema_version = 1\n[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
-const SERVER_BASE: &str = "schema_version = 1\n\
-    [server]\n\
-    listen = \"127.0.0.1:8388\"\n\
-    [shadowsocks]\n\
-    method = \"2022-blake3-aes-128-gcm\"\n\
-    psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+const SERVER_BASE: &str = "schema_version = 1\n[server]\nlisten = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
 const PAIRED_PORT_ATTEMPTS: usize = 256;
 
@@ -88,7 +77,7 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
     let (server_listener, server_udp, server_address) = reserve_server_tcp_udp();
     let (client_metrics, client_metrics_address) = reserve_loopback();
     let (server_metrics, server_metrics_address) = reserve_loopback();
-    let client = write_client_config(
+    let client = write_udp_client_config(
         directory.path(),
         client_address,
         server_address,
@@ -138,101 +127,38 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
 fn invalid_matrix_is_redacted_and_uses_exit_two() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let sentinel = "M0_PROCESS_SECRET_SENTINEL";
+    #[rustfmt::skip]
     let cases = [
-        (
-            "client-missing-schema",
-            "ferrum2-client",
-            CLIENT_BASE.replacen("schema_version = 1\n", "", 1),
-            "error[config.syntax] config: configuration is not valid schema version 1 TOML\n",
-        ),
-        (
-            "client-unknown-field",
-            "ferrum2-client",
-            CLIENT_BASE.replacen(
-                "server = \"127.0.0.1:8388\"\n",
-                "server = \"127.0.0.1:8388\"\nunexpected = 1\n",
-                1,
-            ),
-            "error[config.syntax] config: configuration is not valid schema version 1 TOML\n",
-        ),
-        (
-            "client-runtime-range",
-            "ferrum2-client",
-            format!("{CLIENT_BASE}[runtime]\nmax_connections = 0\n"),
-            "error[config.semantic] runtime.max_connections: configuration value is invalid\n",
-        ),
-        (
-            "client-endpoint-collision",
-            "ferrum2-client",
-            CLIENT_BASE.replacen("127.0.0.1:1080", "127.0.0.1:8388", 1),
-            "error[config.semantic] client.server: configuration value is invalid\n",
-        ),
-        (
-            "client-unknown-method",
-            "ferrum2-client",
-            CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "future-method", 1),
-            "error[config.semantic] shadowsocks.method: configuration value is invalid\n",
-        ),
-        (
-            "client-aes256-short-psk",
-            "ferrum2-client",
-            CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", 1),
-            "error[config.semantic] shadowsocks.psk: configuration value is invalid\n",
-        ),
-        (
-            "client-secret",
-            "ferrum2-client",
-            CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", sentinel, 1),
-            "error[config.semantic] shadowsocks.psk: configuration value is invalid\n",
-        ),
-        (
-            "client-metrics-non-loopback",
-            "ferrum2-client",
-            format!("{CLIENT_BASE}[metrics]\nlisten = \"192.0.2.1:9090\"\n"),
-            "error[config.semantic] metrics.listen: configuration value is invalid\n",
-        ),
-        (
-            "server-wrong-role",
-            "ferrum2-server",
-            SERVER_BASE.replacen("[server]", "[client]", 1),
-            "error[config.syntax] config: configuration is not valid schema version 1 TOML\n",
-        ),
-        (
-            "server-replay-range",
-            "ferrum2-server",
-            format!("{SERVER_BASE}[replay]\ncapacity = 1023\n"),
-            "error[config.semantic] replay.capacity: configuration value is invalid\n",
-        ),
-        (
-            "server-metrics-collision",
-            "ferrum2-server",
-            format!("{SERVER_BASE}[metrics]\nlisten = \"127.0.0.1:8388\"\n"),
-            "error[config.semantic] metrics.listen: configuration value is invalid\n",
-        ),
-        (
-            "server-udp-session-range",
-            "ferrum2-server",
-            format!("{SERVER_BASE}[udp]\nmax_sessions = 0\n"),
-            "error[config.semantic] udp.max_sessions: configuration value is invalid\n",
-        ),
-        (
-            "server-udp-buffer-range",
-            "ferrum2-server",
-            format!("{SERVER_BASE}[udp]\nmax_buffered_bytes = 1048575\n"),
-            "error[config.semantic] udp.max_buffered_bytes: configuration value is invalid\n",
-        ),
-        (
-            "server-udp-idle-range",
-            "ferrum2-server",
-            format!("{SERVER_BASE}[udp]\nidle_timeout_ms = 59999\n"),
-            "error[config.semantic] udp.idle_timeout_ms: configuration value is invalid\n",
-        ),
+        ("client missing schema", "ferrum2-client", CLIENT_BASE.replacen("schema_version = 1\n", "", 1), None),
+        ("client unknown field", "ferrum2-client", CLIENT_BASE.replacen("server = \"127.0.0.1:8388\"\n", "server = \"127.0.0.1:8388\"\nunexpected = 1\n", 1), None),
+        ("client runtime range", "ferrum2-client", format!("{CLIENT_BASE}[runtime]\nmax_connections = 0\n"), Some("runtime.max_connections")),
+        ("client endpoint collision", "ferrum2-client", CLIENT_BASE.replacen("127.0.0.1:1080", "127.0.0.1:8388", 1), Some("client.server")),
+        ("client unknown method", "ferrum2-client", CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "future-method", 1), Some("shadowsocks.method")),
+        ("client AES256 short PSK", "ferrum2-client", CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", 1), Some("shadowsocks.psk")),
+        ("client secret", "ferrum2-client", CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", sentinel, 1), Some("shadowsocks.psk")),
+        ("client metrics non-loopback", "ferrum2-client", format!("{CLIENT_BASE}[metrics]\nlisten = \"192.0.2.1:9090\"\n"), Some("metrics.listen")),
+        ("client UDP session range", "ferrum2-client", format!("{CLIENT_BASE}[udp]\nmax_sessions = 0\n"), Some("udp.max_sessions")),
+        ("server wrong role", "ferrum2-server", SERVER_BASE.replacen("[server]", "[client]", 1), None),
+        ("server replay range", "ferrum2-server", format!("{SERVER_BASE}[replay]\ncapacity = 1023\n"), Some("replay.capacity")),
+        ("server metrics collision", "ferrum2-server", format!("{SERVER_BASE}[metrics]\nlisten = \"127.0.0.1:8388\"\n"), Some("metrics.listen")),
+        ("server UDP session range", "ferrum2-server", format!("{SERVER_BASE}[udp]\nmax_sessions = 0\n"), Some("udp.max_sessions")),
+        ("server UDP buffer range", "ferrum2-server", format!("{SERVER_BASE}[udp]\nmax_buffered_bytes = 1048575\n"), Some("udp.max_buffered_bytes")),
+        ("server UDP idle range", "ferrum2-server", format!("{SERVER_BASE}[udp]\nidle_timeout_ms = 59999\n"), Some("udp.idle_timeout_ms")),
     ];
 
-    for (name, binary, source, expected_stderr) in cases {
-        let path = directory.path().join(format!("{name}.toml"));
+    for (label, binary, source, semantic_field) in cases {
+        let path = directory
+            .path()
+            .join(format!("{}.toml", label.replace(' ', "-")));
         std::fs::write(&path, source).expect("invalid config");
-        assert_invalid(binary, &path, expected_stderr, sentinel);
+        let expected = semantic_field.map_or_else(
+            || {
+                "error[config.syntax] config: configuration is not valid schema version 1 TOML\n"
+                    .to_owned()
+            },
+            |field| format!("error[config.semantic] {field}: configuration value is invalid\n"),
+        );
+        assert_invalid(binary, &path, &expected, sentinel);
     }
 
     let syntax_path = directory.path().join("invalid-utf8.toml");

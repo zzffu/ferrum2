@@ -134,6 +134,15 @@ pub struct SocksUdpDatagram<'a> {
 }
 
 impl SocksUdpDatagram<'_> {
+    /// Returns the validated target field width without materializing the target.
+    pub fn encoded_target_len(&self) -> usize {
+        match self.host {
+            TargetHostRef::Ip(IpAddr::V4(_)) => 7,
+            TargetHostRef::Ip(IpAddr::V6(_)) => 19,
+            TargetHostRef::Domain(host) => 4 + host.len(),
+        }
+    }
+
     /// Materializes the validated target after the caller reserves capacity.
     pub fn to_target_addr(&self) -> TargetAddr {
         match self.host {

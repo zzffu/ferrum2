@@ -1,6 +1,6 @@
 mod common;
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -11,7 +11,7 @@ use ferrum2_crypto::{
 };
 use ferrum2_shadowsocks::{
     MAX_UDP_WIRE_LEN, MethodKeyAdapter, UdpClientSession, UdpPacketError, UdpPacketScratch,
-    UdpServer, max_udp_payload_len,
+    UdpServer, max_udp_payload_len, max_udp_payload_len_for_encoded_target,
 };
 
 use serde_json::Value;
@@ -46,6 +46,13 @@ fn raw_request_body(message_type: u8, timestamp: u64, padding_len: u16) -> Vec<u
     body
 }
 
+fn semantic_body(padding_len: u16, suffix: &[u8]) -> Vec<u8> {
+    let mut body = raw_request_body(0, NOW, padding_len);
+    body.truncate(11);
+    body.extend_from_slice(suffix);
+    body
+}
+
 fn fixture_profile(method: &str) -> MethodProfile {
     MethodProfile::ALL
         .into_iter()
@@ -76,98 +83,186 @@ fn accept_response(
 
 #[test]
 fn three_method_request_response_table_round_trips_every_address_kind() {
-    let cases = [
-        (
-            MethodProfile::Blake3Aes128Gcm2022,
-            TargetAddr::ip(SocketAddr::new(Ipv4Addr::new(192, 0, 2, 1).into(), 53))
-                .expect("IPv4 target"),
-        ),
-        (
-            MethodProfile::Blake3Aes256Gcm2022,
-            TargetAddr::ip(SocketAddr::new(
-                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).into(),
-                5353,
-            ))
-            .expect("IPv6 target"),
-        ),
-        (
-            MethodProfile::Blake3ChaCha20Poly13052022,
-            TargetAddr::domain("example.test", 8443).expect("domain target"),
-        ),
-        (
-            MethodProfile::Blake3Aes128Gcm2022,
+    for profile in MethodProfile::ALL {
+        for target in [
+            fixture_target("ipv4"),
+            fixture_target("ipv6"),
+            fixture_target("domain"),
             TargetAddr::domain("a", 443).expect("one-byte domain"),
-        ),
-        (
-            MethodProfile::Blake3ChaCha20Poly13052022,
             TargetAddr::domain(&"x".repeat(255), 443).expect("255-byte domain"),
-        ),
-    ];
+        ] {
+            let keys = MethodKeyAdapter::new(udp_provider(profile));
+            let client_random = FillRandom::new(0x10);
+            let server_random = FillRandom::new(0x80);
+            let clock = FakeClock::new(1_700_000_000, 0);
+            let mut client =
+                UdpClientSession::new(&keys, &client_random, |_| false).expect("client session");
+            let server = UdpServer::new(&keys).expect("server protocol");
+            let request = datagram(target.clone(), b"request payload");
+            let mut request_scratch = UdpPacketScratch::new();
+            let mut request_wire = vec![0_u8; 65_507];
 
-    for (profile, target) in cases {
-        let keys = MethodKeyAdapter::new(udp_provider(profile));
-        let client_random = FillRandom::new(0x10);
-        let server_random = FillRandom::new(0x80);
-        let clock = FakeClock::new(1_700_000_000, 0);
-        let mut client =
-            UdpClientSession::new(&keys, &client_random, |_| false).expect("client session");
-        let server = UdpServer::new(&keys).expect("server protocol");
-        let request = datagram(target.clone(), b"request payload");
-        let mut request_scratch = UdpPacketScratch::new();
-        let mut request_wire = vec![0_u8; 65_507];
+            let request_len = client
+                .encode_request(
+                    &clock,
+                    &client_random,
+                    &request,
+                    7,
+                    &mut request_wire,
+                    &mut request_scratch,
+                )
+                .expect("request encodes");
+            let pending = server
+                .prepare_request(&clock, &request_wire[..request_len], &mut request_scratch)
+                .expect("request authenticates and validates");
+            assert_eq!(pending.datagram().target(), &target);
+            assert_eq!(pending.datagram().payload(), b"request payload");
+            let (opened_request, commit) = pending.into_parts();
+            let peer = "127.0.0.1:49152".parse().expect("peer");
+            let accepted = server
+                .commit_request(
+                    commit,
+                    peer,
+                    MonotonicInstant::from_duration(Duration::ZERO),
+                    &server_random,
+                )
+                .expect("reserved request commits");
+            assert_eq!(opened_request.target(), &target);
 
-        let request_len = client
-            .encode_request(
-                &clock,
-                &client_random,
-                &request,
-                7,
-                &mut request_wire,
-                &mut request_scratch,
-            )
-            .expect("request encodes");
-        let pending = server
-            .prepare_request(&clock, &request_wire[..request_len], &mut request_scratch)
-            .expect("request authenticates and validates");
-        assert_eq!(pending.datagram().target(), &target);
-        assert_eq!(pending.datagram().payload(), b"request payload");
-        let (opened_request, commit) = pending.into_parts();
-        let peer = "127.0.0.1:49152".parse().expect("peer");
-        let accepted = server
-            .commit_request(
-                commit,
-                peer,
-                MonotonicInstant::from_duration(Duration::ZERO),
-                &server_random,
-            )
-            .expect("reserved request commits");
-        assert_eq!(opened_request.target(), &target);
+            let response = datagram(target.clone(), b"response payload");
+            let mut response_scratch = UdpPacketScratch::new();
+            let mut response_wire = vec![0_u8; 65_507];
+            let encoded = server
+                .encode_response(
+                    accepted.capability(),
+                    &clock,
+                    &server_random,
+                    &response,
+                    5,
+                    &mut response_wire,
+                    &mut response_scratch,
+                )
+                .expect("response encodes");
+            assert_eq!(encoded.peer(), peer);
+            let scratch_identity = response_scratch.storage_identity();
+            let pending = client
+                .prepare_response_borrowed(
+                    &clock,
+                    &response_wire[..encoded.wire_len()],
+                    &mut response_scratch,
+                )
+                .expect("response authenticates and binds");
+            let payload_pointer = pending.payload().as_ptr() as usize;
+            assert!(
+                (scratch_identity..scratch_identity + MAX_UDP_WIRE_LEN).contains(&payload_pointer),
+                "prepared response must borrow charged scratch"
+            );
+            assert_eq!(pending.allocated_capacity(), b"response payload".len());
+            let (opened_response, commit) = pending.materialize().into_parts();
+            client
+                .commit_response(commit, MonotonicInstant::ZERO)
+                .expect("reserved response commits");
+            assert_eq!(opened_response.target(), &target);
+            assert_eq!(opened_response.payload(), b"response payload");
 
-        let response = datagram(target.clone(), b"response payload");
-        let mut response_scratch = UdpPacketScratch::new();
-        let mut response_wire = vec![0_u8; 65_507];
-        let encoded = server
-            .encode_response(
-                accepted.capability(),
-                &clock,
-                &server_random,
-                &response,
-                5,
-                &mut response_wire,
-                &mut response_scratch,
-            )
-            .expect("response encodes");
-        assert_eq!(encoded.peer(), peer);
-        let opened_response = accept_response(
-            &client,
-            &clock,
-            &response_wire[..encoded.wire_len()],
-            &mut response_scratch,
-        )
-        .expect("response authenticates, binds, and commits");
-        assert_eq!(opened_response.target(), &target);
-        assert_eq!(opened_response.payload(), b"response payload");
+            let before = client.association_snapshot().expect("snapshot");
+            let maximum = max_udp_payload_len(profile, true, &target, 0).expect("response maximum");
+            assert_eq!(
+                server.encode_response(
+                    accepted.capability(),
+                    &clock,
+                    &server_random,
+                    &datagram(target.clone(), &vec![0xa5; maximum + 1]),
+                    0,
+                    &mut response_wire,
+                    &mut response_scratch,
+                ),
+                Err(UdpPacketError::Bounds)
+            );
+            assert_eq!(client.association_snapshot().expect("snapshot"), before);
+            let encoded = server
+                .encode_response(
+                    accepted.capability(),
+                    &clock,
+                    &server_random,
+                    &datagram(target.clone(), &vec![0x5a; maximum]),
+                    0,
+                    &mut response_wire,
+                    &mut response_scratch,
+                )
+                .expect("exact response");
+            assert_eq!(encoded.wire_len(), MAX_UDP_WIRE_LEN);
+            let pending = client
+                .prepare_response_borrowed(
+                    &clock,
+                    &response_wire[..encoded.wire_len()],
+                    &mut response_scratch,
+                )
+                .expect("exact response prepares");
+            assert_eq!(
+                (pending.payload().len(), pending.allocated_capacity()),
+                (maximum, maximum)
+            );
+            let (_, commit) = pending.materialize().into_parts();
+            client
+                .commit_response(commit, MonotonicInstant::ZERO)
+                .expect("exact commit");
+        }
     }
+}
+
+#[test]
+fn borrowed_response_plans_domain_capacity_before_single_materialization() {
+    let profile = MethodProfile::ALL[0];
+    let keys = udp_provider(profile);
+    let random = FillRandom::new(0x31);
+    let clock = FakeClock::new(NOW, 0);
+    let mut client = UdpClientSession::new(&keys, &random, |_| false).expect("client");
+    let server = UdpServer::new(&keys).expect("server");
+    let target = TargetAddr::domain("opaque.example", 8443).expect("target");
+    let request = datagram(target.clone(), b"request");
+    let mut wire = vec![0; MAX_UDP_WIRE_LEN];
+    let mut scratch = UdpPacketScratch::new();
+    let request_len = client
+        .encode_request(&clock, &random, &request, 0, &mut wire, &mut scratch)
+        .expect("request");
+    let (_, commit) = server
+        .prepare_request(&clock, &wire[..request_len], &mut scratch)
+        .expect("prepare request")
+        .into_parts();
+    let accepted = server
+        .commit_request(
+            commit,
+            "127.0.0.1:40000".parse().expect("peer"),
+            MonotonicInstant::ZERO,
+            &random,
+        )
+        .expect("commit request");
+    let response = datagram(target.clone(), b"response");
+    let encoded = server
+        .encode_response(
+            accepted.capability(),
+            &clock,
+            &random,
+            &response,
+            0,
+            &mut wire,
+            &mut scratch,
+        )
+        .expect("encode response");
+    let pending = client
+        .prepare_response_borrowed(&clock, &wire[..encoded.wire_len()], &mut scratch)
+        .expect("borrowed response");
+    assert_eq!(pending.payload(), b"response");
+    assert_eq!(pending.encoded_target_len(), 4 + "opaque.example".len());
+    assert_eq!(pending.allocated_capacity(), b"response".len());
+    assert_eq!(
+        max_udp_payload_len_for_encoded_target(profile, true, pending.encoded_target_len(), 0,),
+        max_udp_payload_len(profile, true, &target, 0)
+    );
+    let owning = pending.materialize();
+    assert_eq!(owning.datagram().target(), &target);
+    assert_eq!(owning.datagram().payload(), b"response");
 }
 
 #[test]
@@ -250,68 +345,31 @@ fn authenticated_semantic_negative_table_has_zero_server_mutation() {
     let server = UdpServer::new(&keys).expect("server");
     let clock = FakeClock::new(NOW, 0);
     let packet_random = FillRandom::new(0x30);
-    let mut invalid_padding = vec![0];
-    invalid_padding.extend_from_slice(&NOW.to_be_bytes());
-    invalid_padding.extend_from_slice(&2_u16.to_be_bytes());
-    invalid_padding.push(0xa1);
-    let mut invalid_address = vec![0];
-    invalid_address.extend_from_slice(&NOW.to_be_bytes());
-    invalid_address.extend_from_slice(&0_u16.to_be_bytes());
-    invalid_address.extend_from_slice(&[0xff, 1, 2, 3]);
-    let mut zero_port = vec![0];
-    zero_port.extend_from_slice(&NOW.to_be_bytes());
-    zero_port.extend_from_slice(&0_u16.to_be_bytes());
-    zero_port.extend_from_slice(&[1, 192, 0, 2, 1, 0, 0]);
-    let mut empty_domain = vec![0];
-    empty_domain.extend_from_slice(&NOW.to_be_bytes());
-    empty_domain.extend_from_slice(&0_u16.to_be_bytes());
-    empty_domain.extend_from_slice(&[3, 0, 0, 53]);
-    let mut non_ascii_domain = vec![0];
-    non_ascii_domain.extend_from_slice(&NOW.to_be_bytes());
-    non_ascii_domain.extend_from_slice(&0_u16.to_be_bytes());
-    non_ascii_domain.extend_from_slice(&[3, 1, 0xff, 0, 53]);
+    let invalid_padding = semantic_body(2, &[0xa1]);
+    let invalid_address = semantic_body(0, &[0xff, 1, 2, 3]);
+    let zero_port = semantic_body(0, &[1, 192, 0, 2, 1, 0, 0]);
+    let empty_domain = semantic_body(0, &[3, 0, 0, 53]);
+    let non_ascii_domain = semantic_body(0, &[3, 1, 0xff, 0, 53]);
+    #[rustfmt::skip]
     let cases = [
-        (
-            raw_packet(&crypto, 0x40, &raw_request_body(1, NOW, 0), &packet_random),
-            UdpPacketError::Type,
-        ),
-        (
-            raw_packet(
-                &crypto,
-                0x41,
-                &raw_request_body(0, NOW - 31, 0),
-                &packet_random,
-            ),
-            UdpPacketError::Timestamp,
-        ),
-        (
-            raw_packet(&crypto, 0x42, &invalid_padding, &packet_random),
-            UdpPacketError::Padding,
-        ),
-        (
-            raw_packet(&crypto, 0x43, &invalid_address, &packet_random),
-            UdpPacketError::Address,
-        ),
-        (
-            raw_packet(&crypto, 0x44, &zero_port, &packet_random),
-            UdpPacketError::Address,
-        ),
-        (
-            raw_packet(&crypto, 0x45, &empty_domain, &packet_random),
-            UdpPacketError::Address,
-        ),
-        (
-            raw_packet(&crypto, 0x46, &non_ascii_domain, &packet_random),
-            UdpPacketError::Address,
-        ),
+        ("type", raw_packet(&crypto, 0x40, &raw_request_body(1, NOW, 0), &packet_random), UdpPacketError::Type),
+        ("timestamp", raw_packet(&crypto, 0x41, &raw_request_body(0, NOW - 31, 0), &packet_random), UdpPacketError::Timestamp),
+        ("padding", raw_packet(&crypto, 0x42, &invalid_padding, &packet_random), UdpPacketError::Padding),
+        ("address type", raw_packet(&crypto, 0x43, &invalid_address, &packet_random), UdpPacketError::Address),
+        ("zero port", raw_packet(&crypto, 0x44, &zero_port, &packet_random), UdpPacketError::Address),
+        ("empty domain", raw_packet(&crypto, 0x45, &empty_domain, &packet_random), UdpPacketError::Address),
+        ("non-ASCII domain", raw_packet(&crypto, 0x46, &non_ascii_domain, &packet_random), UdpPacketError::Address),
     ];
     let mut scratch = UdpPacketScratch::new();
-    for (wire, expected) in cases {
-        assert!(matches!(
-            server.prepare_request(&clock, &wire, &mut scratch),
-            Err(error) if error == expected
-        ));
-        assert_eq!(server.session_count().expect("state"), 0);
+    for (label, wire, expected) in cases {
+        assert!(
+            matches!(
+                server.prepare_request(&clock, &wire, &mut scratch),
+                Err(error) if error == expected
+            ),
+            "{label}"
+        );
+        assert_eq!(server.session_count().expect("state"), 0, "{label}");
     }
 
     let mut tampered = raw_packet(&crypto, 0x47, &raw_request_body(0, NOW, 0), &packet_random);

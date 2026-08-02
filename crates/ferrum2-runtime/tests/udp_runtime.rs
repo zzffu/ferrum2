@@ -75,47 +75,30 @@ fn committed_session(
 #[test]
 fn validated_limits_freeze_defaults_and_inclusive_ranges() {
     let defaults = UdpRuntimeLimits::default();
-    assert_eq!(defaults.max_sessions(), DEFAULT_UDP_MAX_SESSIONS);
-    assert_eq!(
-        defaults.max_buffered_bytes(),
-        DEFAULT_UDP_MAX_BUFFERED_BYTES
-    );
-    assert_eq!(defaults.idle_timeout(), DEFAULT_UDP_IDLE_TIMEOUT);
+    #[rustfmt::skip]
+    let actual = (defaults.max_sessions(), defaults.max_buffered_bytes(), defaults.idle_timeout());
+    #[rustfmt::skip]
+    let expected = (DEFAULT_UDP_MAX_SESSIONS, DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_IDLE_TIMEOUT);
+    assert_eq!(actual, expected);
 
-    for (sessions, bytes, idle) in [
-        (
-            MIN_UDP_MAX_SESSIONS,
-            MIN_UDP_MAX_BUFFERED_BYTES,
-            MIN_UDP_IDLE_TIMEOUT,
-        ),
-        (
-            MAX_UDP_MAX_SESSIONS,
-            MAX_UDP_MAX_BUFFERED_BYTES,
-            MAX_UDP_IDLE_TIMEOUT,
-        ),
-    ] {
+    #[rustfmt::skip]
+    let valid = [
+        (MIN_UDP_MAX_SESSIONS, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT),
+        (MAX_UDP_MAX_SESSIONS, MAX_UDP_MAX_BUFFERED_BYTES, MAX_UDP_IDLE_TIMEOUT),
+    ];
+    for (sessions, bytes, idle) in valid {
         assert!(UdpRuntimeLimits::new(sessions, bytes, idle).is_ok());
     }
-    assert_eq!(
-        UdpRuntimeLimits::new(0, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT),
-        Err(UdpLimitError::Sessions)
-    );
-    assert_eq!(
-        UdpRuntimeLimits::new(
-            MIN_UDP_MAX_SESSIONS,
-            MIN_UDP_MAX_BUFFERED_BYTES - 1,
-            MIN_UDP_IDLE_TIMEOUT
-        ),
-        Err(UdpLimitError::BufferedBytes)
-    );
-    assert_eq!(
-        UdpRuntimeLimits::new(
-            MIN_UDP_MAX_SESSIONS,
-            MIN_UDP_MAX_BUFFERED_BYTES,
-            MIN_UDP_IDLE_TIMEOUT - Duration::from_millis(1)
-        ),
-        Err(UdpLimitError::IdleTimeout)
-    );
+    #[rustfmt::skip]
+    let invalid = [
+        ("sessions", 0, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT, UdpLimitError::Sessions),
+        ("bytes", MIN_UDP_MAX_SESSIONS, MIN_UDP_MAX_BUFFERED_BYTES - 1, MIN_UDP_IDLE_TIMEOUT, UdpLimitError::BufferedBytes),
+        ("idle", MIN_UDP_MAX_SESSIONS, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT - Duration::from_millis(1), UdpLimitError::IdleTimeout),
+    ];
+    for (label, sessions, bytes, idle, expected) in invalid {
+        let actual = UdpRuntimeLimits::new(sessions, bytes, idle);
+        assert_eq!(actual, Err(expected), "{label}");
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -124,6 +107,12 @@ async fn reservation_queue_and_generation_table_is_single_charge_and_fail_closed
     let manager = UdpSessionManager::new(limits(1), registry.clone());
     let now = Instant::now();
     let handle = committed_session(&manager, now, b"one");
+    let mut cancellation = manager.cancellation(handle).expect("live cancellation");
+    assert_eq!(
+        manager.idle_deadline(handle),
+        Ok(now + MIN_UDP_IDLE_TIMEOUT)
+    );
+    assert!(!*cancellation.borrow());
 
     let rejected = manager
         .reserve_datagram(handle, UdpDirection::ToTarget, 16)
@@ -190,6 +179,12 @@ async fn reservation_queue_and_generation_table_is_single_charge_and_fail_closed
     assert_eq!(registry.snapshot().udp_buffered_bytes, 16 * 3 + 4 * 4);
 
     assert!(manager.remove(handle));
+    cancellation.changed().await.expect("generation wake");
+    assert!(*cancellation.borrow());
+    assert_eq!(
+        manager.idle_deadline(handle),
+        Err(UdpRuntimeError::Cancelled)
+    );
     assert_eq!(registry.snapshot().udp_sessions, 0);
     assert_eq!(registry.snapshot().udp_queued_datagrams, 0);
     assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
@@ -457,6 +452,40 @@ fn socket_fixture(
     )
 }
 
+fn recording_runtime(
+    registry: &OwnerRegistry,
+    resolver: ScriptedResolver,
+    socket: ScriptedSocket,
+    send_timeout: Duration,
+    block: bool,
+) -> (ScriptedRuntime, Arc<Notify>) {
+    let entered = Arc::new(Notify::new());
+    let runtime = DirectUdpRuntime::with_adapters(
+        limits(1),
+        send_timeout,
+        resolver,
+        ScriptedFactory {
+            socket,
+            opens: Arc::new(AtomicUsize::new(0)),
+        },
+        RecordingHandler {
+            responses: Arc::new(Mutex::new(Vec::new())),
+            entered: Arc::clone(&entered),
+            block,
+        },
+        registry.clone(),
+    );
+    (runtime, entered)
+}
+
+fn empty_resolver() -> ScriptedResolver {
+    ScriptedResolver {
+        delay: Duration::ZERO,
+        candidates: Vec::new(),
+        calls: Arc::new(AtomicUsize::new(0)),
+    }
+}
+
 async fn wait_for_zero_udp_owners(registry: &OwnerRegistry) {
     for _ in 0..200 {
         let snapshot = registry.snapshot();
@@ -487,23 +516,8 @@ async fn domain_resolution_and_candidate_sends_share_one_absolute_deadline() {
         calls: Arc::clone(&resolver_calls),
     };
     let (socket, sends) = socket_fixture(Duration::from_secs(3), [true, true, true]);
-    let factory = ScriptedFactory {
-        socket,
-        opens: Arc::new(AtomicUsize::new(0)),
-    };
-    let handler = RecordingHandler {
-        responses: Arc::new(Mutex::new(Vec::new())),
-        entered: Arc::new(Notify::new()),
-        block: false,
-    };
-    let mut runtime = DirectUdpRuntime::with_adapters(
-        limits(1),
-        Duration::from_secs(7),
-        resolver,
-        factory,
-        handler,
-        registry.clone(),
-    );
+    let (mut runtime, _) =
+        recording_runtime(&registry, resolver, socket, Duration::from_secs(7), false);
     let rejected = runtime
         .reserve_session(Instant::now(), 7)
         .await
@@ -553,23 +567,8 @@ async fn resolver_consumes_zero_one_sixteen_and_at_most_sixteen_candidates() {
         };
         let (socket, sends) =
             socket_fixture(Duration::ZERO, std::iter::repeat_n(true, candidate_count));
-        let factory = ScriptedFactory {
-            socket,
-            opens: Arc::new(AtomicUsize::new(0)),
-        };
-        let handler = RecordingHandler {
-            responses: Arc::new(Mutex::new(Vec::new())),
-            entered: Arc::new(Notify::new()),
-            block: false,
-        };
-        let mut runtime = DirectUdpRuntime::with_adapters(
-            limits(1),
-            Duration::from_secs(10),
-            resolver,
-            factory,
-            handler,
-            registry.clone(),
-        );
+        let (mut runtime, _) =
+            recording_runtime(&registry, resolver, socket, Duration::from_secs(10), false);
         let admission = runtime
             .reserve_session(Instant::now(), 7)
             .await
@@ -587,27 +586,12 @@ async fn resolver_consumes_zero_one_sixteen_and_at_most_sixteen_candidates() {
 async fn direct_session_idle_expiry_reaps_socket_task_queue_scratch_and_bytes() {
     let registry = OwnerRegistry::new();
     let (socket, sends) = socket_fixture(Duration::ZERO, []);
-    let factory = ScriptedFactory {
+    let (mut runtime, _) = recording_runtime(
+        &registry,
+        empty_resolver(),
         socket,
-        opens: Arc::new(AtomicUsize::new(0)),
-    };
-    let resolver = ScriptedResolver {
-        delay: Duration::ZERO,
-        candidates: Vec::new(),
-        calls: Arc::new(AtomicUsize::new(0)),
-    };
-    let handler = RecordingHandler {
-        responses: Arc::new(Mutex::new(Vec::new())),
-        entered: Arc::new(Notify::new()),
-        block: false,
-    };
-    let mut runtime = DirectUdpRuntime::with_adapters(
-        limits(1),
         Duration::from_secs(10),
-        resolver,
-        factory,
-        handler,
-        registry.clone(),
+        false,
     );
     let admission = runtime
         .reserve_session(Instant::now(), 7)
@@ -628,27 +612,12 @@ async fn direct_session_idle_expiry_reaps_socket_task_queue_scratch_and_bytes() 
 async fn expired_replacement_churn_never_exceeds_the_direct_owner_limit() {
     let registry = OwnerRegistry::new();
     let (socket, _) = socket_fixture(Duration::ZERO, []);
-    let factory = ScriptedFactory {
+    let (mut runtime, _) = recording_runtime(
+        &registry,
+        empty_resolver(),
         socket,
-        opens: Arc::new(AtomicUsize::new(0)),
-    };
-    let resolver = ScriptedResolver {
-        delay: Duration::ZERO,
-        candidates: Vec::new(),
-        calls: Arc::new(AtomicUsize::new(0)),
-    };
-    let handler = RecordingHandler {
-        responses: Arc::new(Mutex::new(Vec::new())),
-        entered: Arc::new(Notify::new()),
-        block: false,
-    };
-    let mut runtime = DirectUdpRuntime::with_adapters(
-        limits(1),
         Duration::from_secs(10),
-        resolver,
-        factory,
-        handler,
-        registry.clone(),
+        false,
     );
     let mut activity = Instant::now();
     let initial = runtime
@@ -704,15 +673,10 @@ async fn handler_failure_does_not_refresh_activity_before_final_generation_reche
         entered: Arc::clone(&entered),
         release: Arc::clone(&release),
     };
-    let resolver = ScriptedResolver {
-        delay: Duration::ZERO,
-        candidates: Vec::new(),
-        calls: Arc::new(AtomicUsize::new(0)),
-    };
     let mut runtime = DirectUdpRuntime::with_adapters(
         limits(1),
         Duration::from_secs(10),
-        resolver,
+        empty_resolver(),
         factory,
         handler,
         registry.clone(),
@@ -759,27 +723,12 @@ async fn handler_failure_does_not_refresh_activity_before_final_generation_reche
 async fn graceful_shutdown_drains_admitted_queue_before_reaping() {
     let registry = OwnerRegistry::new();
     let (socket, sends) = socket_fixture(Duration::ZERO, []);
-    let factory = ScriptedFactory {
+    let (mut runtime, _) = recording_runtime(
+        &registry,
+        empty_resolver(),
         socket,
-        opens: Arc::new(AtomicUsize::new(0)),
-    };
-    let resolver = ScriptedResolver {
-        delay: Duration::ZERO,
-        candidates: Vec::new(),
-        calls: Arc::new(AtomicUsize::new(0)),
-    };
-    let handler = RecordingHandler {
-        responses: Arc::new(Mutex::new(Vec::new())),
-        entered: Arc::new(Notify::new()),
-        block: false,
-    };
-    let mut runtime = DirectUdpRuntime::with_adapters(
-        limits(1),
         Duration::from_secs(10),
-        resolver,
-        factory,
-        handler,
-        registry.clone(),
+        false,
     );
     let admission = runtime
         .reserve_session(Instant::now(), 7)
@@ -805,28 +754,12 @@ async fn process_deadline_forces_response_handler_and_reaps_every_udp_owner() {
         .expect("response lock")
         .push_back((b"reply".to_vec(), SocketAddr::from(([127, 0, 0, 1], 9000))));
     socket.response_ready.notify_one();
-    let factory = ScriptedFactory {
+    let (mut runtime, entered) = recording_runtime(
+        &registry,
+        empty_resolver(),
         socket,
-        opens: Arc::new(AtomicUsize::new(0)),
-    };
-    let entered = Arc::new(Notify::new());
-    let handler = RecordingHandler {
-        responses: Arc::new(Mutex::new(Vec::new())),
-        entered: Arc::clone(&entered),
-        block: true,
-    };
-    let resolver = ScriptedResolver {
-        delay: Duration::ZERO,
-        candidates: Vec::new(),
-        calls: Arc::new(AtomicUsize::new(0)),
-    };
-    let mut runtime = DirectUdpRuntime::with_adapters(
-        limits(1),
         Duration::from_secs(10),
-        resolver,
-        factory,
-        handler,
-        registry.clone(),
+        true,
     );
     let admission = runtime
         .reserve_session(Instant::now(), 7)
