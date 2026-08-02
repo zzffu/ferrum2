@@ -794,7 +794,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | PASS, M4 STILL BLOCKED | exact `35fb3f8` run `30725843401/1` performance完成throughput、THP apply/restore、10k、180/180、6/6及drain；quality race已由local exact `5f4fed7`修复，尚待未来新的exact-SHA授权run | M4 |
+| Performance/10k idle | PASS, M4 CLOSED | exact `9b379a4` run `30730883667/1`完成throughput、THP apply/restore、10k、180/180、6/6、drain及cleanup；同run final qualification通过，吞吐比仍仅作诊断 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 
