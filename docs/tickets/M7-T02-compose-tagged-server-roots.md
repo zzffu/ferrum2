@@ -1,7 +1,7 @@
 ---
 id: M7-T02
 milestone: M7
-status: todo
+status: ready
 depends_on: [M7-T01]
 owns:
   - crates/ferrum2-runtime/src/supervisor.rs

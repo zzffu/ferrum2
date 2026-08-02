@@ -60,8 +60,8 @@
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M7-T01 | Normalize legacy/tagged config and reject every invalid graph before side effects | — | active |
-| M7-T02 | Compose server multi-listener TCP/UDP/direct roots with shared state and atomic rollback | M7-T01 | todo |
+| M7-T01 | Normalize legacy/tagged config and reject every invalid graph before side effects | — | done |
+| M7-T02 | Compose server multi-listener TCP/UDP/direct roots with shared state and atomic rollback | M7-T01 | ready |
 | M7-T03 | Compose client multi-listener SOCKS/Shadowsocks roots with shared bounds and static mapping | M7-T02 | todo |
 | M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | todo |
 
@@ -78,6 +78,6 @@ integrate。No concurrent writer owns overlapping product paths。
 
 ## Blocker / next action
 
-No execution blocker。M7-T01 starts from exact ticket base `96a088e227dcfe415985c3deb081c807fb5e7d90`；
-its two binary-local fail-closed run guards prevent inert multi-entry execution until T02/T03
-consume the graph。Remote push/run、PR、tag、release and publication remain unauthorized。
+No execution blocker。M7-T01 is integrated at `f6ee43fa766dd326d33ba140a273b7df201749c1`；
+M7-T02 is the only ready frontier and removes only the server fail-closed guard after consuming the
+complete graph。Remote push/run、PR、tag、release and publication remain unauthorized。
