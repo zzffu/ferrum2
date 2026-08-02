@@ -34,7 +34,7 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
-| M4-THP-PROFILE-001 | Bind and restore the hosted `max_ptes_none=0` profile | M4-T01 | active |
+| M4-THP-PROFILE-001 | Bind and restore the hosted `max_ptes_none=0` profile | M4-T01 | done |
 | M4-T02 | Run and record all M4 gates on one exact commit | M4-THP-PROFILE-001 | blocked |
 
 ## Next action
@@ -46,8 +46,9 @@ qualification failed closed. The paired trajectories show exact `VmRSS == Rss`,
 anonymous-only growth, large `AnonHugePages` growth, and a final plateau while all
 active/fd/task tuples remain stable. This rules out the former RSS-accounting-only
 hypothesis and contradicts an owner-count leak, while remaining only consistent with
-delayed THP backing rather than proving the hosted allocator/kernel causal path. Execute
-the authorized local `M4-THP-PROFILE-001` repair from exact `d9aa968`; it binds only the
-selected hosted conformance profile and leaves product behavior and all resource
-quantities, thresholds, and timing unchanged. Remote scope `M4-REMOTE-a53a5d7-A1` is
-consumed and revoked; no rerun or new push is currently authorized.
+delayed THP backing rather than proving the hosted allocator/kernel causal path. Local
+`M4-THP-PROFILE-001` is complete at exact `2305945`: all reviews, Full, both budgets,
+and the complete native-ext4 WSL2 diagnostic passed with the unchanged 10k, 180-sample,
+six-window, 105%, owner, and drain contract. The next authorized action is one
+non-force push of the final closeout integration SHA and its automatic push run. No
+rerun, dispatch, PR, release, publication, or second push is authorized.
