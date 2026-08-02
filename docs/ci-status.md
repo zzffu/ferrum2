@@ -1,5 +1,32 @@
 # CI 与验证状态
 
+## M5 validating / close BLOCKED 状态
+
+- **Local-only candidate:** exact
+  `816fa7b9a19a7c0f805280063dce837caa751c3a`, tree
+  `5d4040e0d213e3fbaf08503a714ad0b44f7482ce`, product parent
+  `db4f100c35a2fc6615828b9aa176e8ede62eb855`, baseline
+  `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`。该提交只在产品parent后增加
+  三份M5 control文档；worktree、diff与exact object检查通过。
+- **Local qualification:** authoritative Full串行通过；workspace all-features
+  `261 passed / 0 failed / 2 expected ignored`，exact ignored lifecycle `1/1`
+  （libtest `127.09s`），Rust 1.85 workspace all-target和architecture/workspace
+  policy `26/26`通过。单一path `shadowsocks-crypto 0.7.0`只解析`v2`，正常产品
+  graph只有该backend，primitive/KDF oracle仅为dev edge；provenance、MIT license、
+  unsafe/旧实现absence与协议source边界复核通过。
+- **Budget/review:** milestone budget为`PASS_HOLD`：code `14066`、tests `20985`、
+  examples `132`、ratio `1.491895`、debt `107`。不得ratchet baseline。Architect
+  local review `PASS`且零finding；QA local verdict `PASS`，但
+  `QA-T03-001`为closing blocker。
+- **Hosted qualification:** `NOT RUN / UNAUTHORIZED`；run、attempt及job IDs均为
+  `—`。缺少同一exact SHA/run/attempt的quality/security/process、hosted MSRV、
+  Windows MSVC/Linux GNU/Linux musl、TCP `12/12`、UDP `12/12`、performance、
+  resource、drain、cleanup和final summary。因此`816fa7b`不是accepted/closed SHA。
+- **Authorization boundary:** 未发生push、rerun、dispatch、PR、tag、release或
+  publication，也未拼接历史run。本blocked记录形成docs-only descendant；未来若
+  获独立授权，必须以当时clean integration HEAD重新执行完整local与hosted
+  same-SHA资格。
+
 ## M4 closed 状态
 
 - **Accepted exact-SHA qualification:** exact

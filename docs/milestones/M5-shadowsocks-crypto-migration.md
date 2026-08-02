@@ -1,6 +1,7 @@
 # M5 — `shadowsocks-crypto` 单一密码实现迁移
 
-- **Status:** executing
+- **Status:** validating
+- **Qualification:** BLOCKED on `QA-T03-001` (hosted evidence unauthorized/not run)
 - **Baseline:** `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`
 - **Owner:** primary thread
 
@@ -37,7 +38,7 @@ SIP022 wire 和 schema v1 config 不变的前提下，把三个标准方法的�
 | M5-T01 | Pin exact upstream source and apply the bounded security patch | — | done |
 | M5-T01R | Add the missing checked raw TCP subkey owner | M5-T01 | done |
 | M5-T02 | Atomically switch TCP/UDP and delete native cipher/KDF | M5-T01R | done |
-| M5-T03 | Qualify one exact commit across all closing gates | M5-T02 | active |
+| M5-T03 | Qualify one exact commit across all closing gates | M5-T02 | blocked |
 
 T01/T02 intentionally serialize overlapping manifests/policy paths. T02 is the only
 product switch and must integrate atomically; T03 is evidence-only unless a failed gate
@@ -45,6 +46,9 @@ identifies a concrete owning-ticket defect.
 
 ## Blocker / next action
 
-Qualify the current integration candidate locally under M5-T03. Hosted evidence still
-requires separate explicit push authorization; no remote, rerun, PR, tag, release or
-publication action is currently authorized.
+Local-only exact candidate `816fa7b9a19a7c0f805280063dce837caa751c3a` passed Full,
+Rust 1.85, dependency/security review and milestone budget, but it did not run hosted
+qualification. T03 and M5 close remain blocked on `QA-T03-001`: no explicit push
+authorization, run ID or attempt exists. No remote action or evidence splice occurred.
+After future authorization, use the then-current clean integration HEAD and rerun the
+complete local and hosted same-SHA gates; do not treat `816fa7b` as a closed SHA.

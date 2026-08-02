@@ -21,9 +21,10 @@ docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4已以exact
 `9b379a426853d86a184464f6fd8c73081b464535`、GitHub Actions run
 `30730883667/1`的performance、Full/security/process、MSRV、TCP/UDP `24/24`、
 三平台、test budget和final qualification证据关闭；local closeout source是
-docs-only descendant `a38a1e84c90a7e03c047eaa4e275fc7ed3410cdb`。M5已在
- `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`完成plan contract，状态为`planned`；
- 尚未执行产品迁移或任何remote动作。
+docs-only descendant `a38a1e84c90a7e03c047eaa4e275fc7ed3410cdb`。M5当前为
+`validating`且close `BLOCKED`：T01、T01R和T02已完成，local-only exact
+`816fa7b9a19a7c0f805280063dce837caa751c3a`通过Full、review与budget；T03因
+`QA-T03-001`及未授权/未运行hosted资格而`blocked`。未执行任何remote动作。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -645,7 +646,7 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 
 ## M5 — `shadowsocks-crypto` 单一密码实现迁移
 
-- **Status:** planned
+- **Status:** validating（qualification `BLOCKED` on `QA-T03-001`）
 - **Objective:** 保留`ferrum2-crypto`公开seam、`ferrum2-shadowsocks`状态机、wire和
   schema v1行为，把三种标准SIP022方法完整切换到受控patched
   `shadowsocks-crypto 0.7.0`，并删除本地cipher/KDF实现、无用依赖和任何双实现路径。
@@ -663,23 +664,28 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
   4. Ticket/milestone budget与Architect/QA blocking review通过；任一required gate
      缺失或失败即M5 `blocked`，不得恢复旧backend。
 - **In-scope tickets:**
-  - M5-T01：固定并最小加固vendored `shadowsocks-crypto`，`ready`；
-  - M5-T02：原子切换TCP/UDP adapter并删除本地实现，依赖T01，`todo`；
+  - M5-T01：固定并最小加固vendored `shadowsocks-crypto`，`done`；
+  - M5-T01R：补齐checked raw TCP subkey owner，依赖T01，`done`；
+  - M5-T02：原子切换TCP/UDP adapter并删除本地实现，依赖T01R，`done`；
   - M5-T03：在一个accepted exact SHA上完成本地与hosted资格及关闭证据，依赖T02，
-    `todo`。
+    `blocked`。
 
   Dependency graph：
 
   ```text
-  M5-T01 pin/harden ── M5-T02 switch/delete ── M5-T03 qualify/close
+  M5-T01 pin/harden ── M5-T01R raw owner ── M5-T02 switch/delete ── M5-T03 blocked
   ```
 - **Deferred/out of scope:** protocol state machine替换、SIP023/EIH、多用户、多PSK、
   public UDP inbound、新method、schema/config变化、runtime crypto selection、上游发布、
   新benchmark框架或性能优化。
-- **Integrated commit:** none；本轮仅建立plan contract。
-- **Open blockers and risks:** plan blocking finding为零。执行必须完成vendor delta、
-  zeroization/nonce、dependency/license、MSRV、KAT/negative、interop和performance审查。
-  T03所需push/hosted run尚未授权；未授权时按TEST-0006标记`blocked`，不得拼接旧证据。
+- **Integrated commit:** local-only qualification candidate
+  `816fa7b9a19a7c0f805280063dce837caa751c3a`，tree
+  `5d4040e0d213e3fbaf08503a714ad0b44f7482ce`，product parent
+  `db4f100c35a2fc6615828b9aa176e8ede62eb855`；accepted hosted commit/run仍为`—`。
+- **Open blockers and risks:** local Full、Rust 1.85、dependency/security review与
+  milestone budget已通过；`QA-T03-001`因hosted push/run未授权且未运行而阻塞关闭。
+  不得把local evidence当作close或拼接旧run。未来获独立授权后，以当时clean
+  integration HEAD重跑完整local与hosted same-SHA gates；不恢复旧backend。
 
 ## 决策登记
 
@@ -794,3 +800,4 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | 2026-08-02 | M4 TCP_NODELAY final push scope | TCP_NODELAY candidate及首个docs-only descendant均通过Full `6/6`；最终exact tree进入pre-push复核 | 用户本轮明确要求完成后推送；保持一次non-force push与automatic run边界 | `M4-REMOTE-TCP-NODELAY-A1`为本次push消费撤销；run pending；无retry/rerun/dispatch/PR/release/publication/第二push |
 | 2026-08-02 | M4 close | exact `9b379a4` run `30730883667/1`通过performance、Full/security/process、MSRV、TCP/UDP `24/24`、三平台、test budget与final qualification；M4 closed | TCP_NODELAY后ferrum/reference medians为`50860305/476470749` B/s、ratio `0.106743814`、difference `-89.325618602%`；THP apply/restore、10k、180/180、6/6、drain、cleanup全部PASS，ratio仍仅诊断 | Formal close review及finding closure记录于`docs/ci-status.md`；单次non-force push scope消费撤销；未rerun/dispatch/PR/package/release/publish；本地closeout不再push |
 | 2026-08-02 | M5 plan | M5改为`planned`；接受exact vendored/controlled-patch单实现决策、SPEC/TEST-0006及T01→T02→T03串行DAG | 原包的TCP nonce、zeroization与AES-UDP header API不足以由纯wrapper同时满足安全语义和删除旧实现；最小patch限定于crypto primitive边界并复用既有KAT、interop、MSRV、三平台和performance harness | baseline `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`；M5 research、ADR-0025、SPEC/TEST-0006及三票；plan-only，无产品修改、push、hosted run、release或publication |
+| 2026-08-02 | M5 local qualification blocked | T01/T01R/T02完成；local-only exact `816fa7b`通过Full、Rust 1.85、review与milestone budget，T03改为`blocked`、M5为`validating`/close `BLOCKED` | required same-SHA hosted三平台、TCP `12/12`、UDP `12/12`、performance/resource/final summary未获push授权且未运行；`QA-T03-001`禁止local替代或旧run拼接 | Architect local `PASS`；QA local `PASS`/overall `BLOCK`；无remote、ratchet、release或publication；等待新的独立exact-SHA授权 |
