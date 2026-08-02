@@ -1,6 +1,6 @@
 # M7 — 具名多 inbound/outbound 静态组合
 
-- **Status:** planned
+- **Status:** executing
 - **Baseline:** `302fd777f4da62a8c1d4d52d81502056f02089c8`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -60,7 +60,7 @@
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M7-T01 | Normalize legacy/tagged config and reject every invalid graph before side effects | — | ready |
+| M7-T01 | Normalize legacy/tagged config and reject every invalid graph before side effects | — | active |
 | M7-T02 | Compose server multi-listener TCP/UDP/direct roots with shared state and atomic rollback | M7-T01 | todo |
 | M7-T03 | Compose client multi-listener SOCKS/Shadowsocks roots with shared bounds and static mapping | M7-T02 | todo |
 | M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | todo |
@@ -78,5 +78,5 @@ integrate。No concurrent writer owns overlapping product paths。
 
 ## Blocker / next action
 
-No plan blocker。Execute starts with M7-T01 from the exact baseline；remote push/run、PR、tag、
-release and publication remain unauthorized。
+No execution blocker。M7-T01 starts from exact ticket base `96a088e227dcfe415985c3deb081c807fb5e7d90`；
+remote push/run、PR、tag、release and publication remain unauthorized。

@@ -1,7 +1,7 @@
 ---
 id: M7-T01
 milestone: M7
-status: ready
+status: active
 depends_on: []
 owns:
   - crates/ferrum2-config/src/lib.rs
