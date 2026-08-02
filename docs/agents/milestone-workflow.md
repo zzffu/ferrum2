@@ -46,9 +46,11 @@ are reported for review but are not part of this first `tests / code` series.
 - Accepted anchor: `ci/test-budget-baseline.txt`, bound to one exact commit.
 - Permanent exact ceiling: `22853 / 15032`, measured at M6 integration commit
   `0ab207c365574ebb17b8d7c755039e70ea9d1ab4`.
+- Ticket surplus allowance: `ticket_debt <= 120` for staged/committed ticket checks and
+  ordinary CI event ranges；the exact ticket base, not Git author identity, owns the delta.
 - Anchor ratchet: a candidate worse than the accepted anchor returns `PASS_HOLD`；an
   equal or better candidate returns `PASS_ADVANCE` and may advance the anchor.
-- Growth and debt fields are diagnostics；they do not override the exact ceiling.
+- Anchor debt and material growth are diagnostics；no allowance overrides the exact ceiling.
 
 Install once and enable the tracked hook:
 
@@ -76,7 +78,8 @@ implementation/configuration file cannot share that commit. CI validates every c
 commit in the complete event range and rejects merge-only control resolutions. During
 initial adoption the baseline commit may appear inside a multi-commit range: its exact
 source and non-Rust migration prefix are verified first, then the final candidate runs
-the normal ceiling and anchor comparison. None of these rules is a budget waiver.
+the applicable ticket-debt、ceiling and anchor comparisons. None of these rules is a
+budget waiver.
 
 The primary thread independently checks exact commits:
 
@@ -107,11 +110,13 @@ admitted(Q) = tests_Q * 15032 <= 22853 * code_Q
 ```
 
 The gate requires positive `code_Q` and evaluates `admitted(Q)` with exact integer
-cross-products；rounded display values never decide acceptance. An admitted candidate
+cross-products；rounded display values never decide acceptance。`ticket-staged`、
+`ticket-commit` and ordinary `ci` additionally require `ticket_debt <= 120`。Milestone、
+ratchet、baseline-adoption and baseline-closeout modes do not reapply that per-ticket
+allowance；`anchor_debt` and material growth remain review diagnostics。An admitted candidate
 worse than anchor `A` returns `PASS_HOLD` with `baseline_eligible=no`；an equal or better
 candidate returns `PASS_ADVANCE` with `baseline_eligible=yes`. Therefore the accepted
 baseline never moves upward, and no mode can admit a ratio above the permanent ceiling.
-The two debt values and material growth remain review diagnostics only.
 
 Do not add inert product code or remove tests that cover an independent risk. Prefer
 merging duplicate cases, table-driven coverage, shared fixtures, public-seam tests, and

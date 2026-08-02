@@ -10,6 +10,7 @@ TOOL_VERSION=0.19.1
 SERIES=rustloc-0.19.1-tests-v1
 METRIC=tests
 BASELINE_FILE=ci/test-budget-baseline.txt
+TICKET_ALLOWANCE=120
 # M6-T04 accepted ceiling at 0ab207c365574ebb17b8d7c755039e70ea9d1ab4.
 RATIO_CEILING_NUM=22853
 RATIO_CEILING_DEN=15032
@@ -267,6 +268,12 @@ compare_budget() {
   elif [ $(( candidate_tests * b_code )) -lt $(( b_tests * candidate_code )) ]; then
     ratio_state=improved
   fi
+
+  case "$mode" in
+    ticket-staged|ticket-commit|ci)
+      [ "$ticket_debt" -le "$TICKET_ALLOWANCE" ] || blocked ticket_allowance_exceeded
+      ;;
+  esac
 
   baseline_eligible=no
   if [ "$ratio_state" = regressed ]; then
