@@ -116,7 +116,7 @@ separately authorized workflow run for one exact commit.
   were constant at `1909368/1967472` KiB; Anonymous was
   `1900992/1958544` KiB and `AnonHugePages` was zero. The 189-line generated JSONL was
   verified and deleted; WSL2 remains diagnostic only.
-- Scope: the local repair scope is consumed. Explicit scope `M4-REMOTE-FINAL-A1`
-  permits one next non-force GitHub push of the final closeout SHA and its automatic
-  push run; it does not permit rerun, dispatch, PR, release, publication, or a second
-  push.
+- Scope: the local repair scope is consumed. `M4-REMOTE-FINAL-A1` was consumed and
+  revoked by the one non-force push of exact `35fb3f8` and automatic run
+  `30725843401/1`; it did not and does not permit rerun, dispatch, PR, release,
+  publication, or a second push.

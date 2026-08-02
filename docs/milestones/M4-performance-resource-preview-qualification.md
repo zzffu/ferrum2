@@ -35,20 +35,17 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 |---|---|---|---|
 | M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
 | M4-THP-PROFILE-001 | Bind and restore the hosted `max_ptes_none=0` profile | M4-T01 | done |
-| M4-T02 | Run and record all M4 gates on one exact commit | M4-THP-PROFILE-001 | blocked |
+| M4-QUALITY-PORT-LOCK-001 | Serialize UDP local E2E port ownership | M4-THP-PROFILE-001 | active |
+| M4-T02 | Run and record all M4 gates on one exact commit | M4-QUALITY-PORT-LOCK-001 | blocked |
 
 ## Next action
 
-Preserve failed run `30710439015/1` on exact `a53a5d7`. Quality, MSRV,
-interoperability, all three native-platform jobs, and diagnostic throughput passed;
-performance failed the unchanged 105% resource gate at window 2 and final
-qualification failed closed. The paired trajectories show exact `VmRSS == Rss`,
-anonymous-only growth, large `AnonHugePages` growth, and a final plateau while all
-active/fd/task tuples remain stable. This rules out the former RSS-accounting-only
-hypothesis and contradicts an owner-count leak, while remaining only consistent with
-delayed THP backing rather than proving the hosted allocator/kernel causal path. Local
-`M4-THP-PROFILE-001` is complete at exact `2305945`: all reviews, Full, both budgets,
-and the complete native-ext4 WSL2 diagnostic passed with the unchanged 10k, 180-sample,
-six-window, 105%, owner, and drain contract. Scope `M4-REMOTE-FINAL-A1` authorizes one
-non-force push of the final closeout integration SHA and its automatic push run. No
-rerun, dispatch, PR, release, publication, or second push is authorized.
+Preserve failed run `30725843401/1` on exact `35fb3f8`. Performance passed throughput,
+the selected THP profile, exact 10k, all 180 samples, all six RSS windows, exact drain,
+restoration, and cleanup. MSRV, interoperability, and all three native-platform jobs
+also passed. Quality alone failed before product startup when parallel
+`udp_local_e2e` tests raced during a released-port handoff; final qualification then
+failed closed. Scope `M4-REMOTE-FINAL-A1` was consumed and revoked by that one push and
+automatic run. Complete local `M4-QUALITY-PORT-LOCK-001`, then request a new exact-SHA
+remote authorization. No rerun, dispatch, PR, release, publication, or second push is
+authorized.

@@ -191,17 +191,15 @@ and command definitions in their authoritative build/config files where possible
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
 - Active planned changes:
-  - M4 — executing — M4-T01 is integrated at exact `7730ec7`. Exact `a53a5d7` run
-    `30710439015/1` passed quality, MSRV, interoperability, all three native-platform
-    jobs, and diagnostic throughput, then failed the unchanged 105% resource gate at
-    RSS window 2. Local `M4-THP-PROFILE-001` is complete at exact `2305945`: the
-    selected hosted profile sets `max_ptes_none=0` with fail-closed verification and
-    restoration, while every load, timing, owner, drain, and threshold contract stays
-    unchanged. Full, both budgets, reviews, and a complete native-ext4 WSL2 diagnostic
-    passed; WSL2 remains diagnostic only. M4-T02 remains blocked only on one explicitly
-    authorized non-force push of the final closeout integration SHA and its automatic
-    push run. Scope `M4-REMOTE-FINAL-A1` is unconsumed; no rerun, dispatch, PR, second
-    push, packaging, release, or publication is authorized.
+  - M4 — executing — exact `35fb3f8` run `30725843401/1` passed performance,
+    MSRV, interoperability, and all three native-platform jobs. Performance proved
+    `max_ptes_none=0` apply/restore, exact 10k, `180/180`, `6/6`, drain, and cleanup.
+    Quality alone failed before product startup on a pre-existing parallel
+    `udp_local_e2e` released-port race, so final qualification failed closed.
+    `M4-QUALITY-PORT-LOCK-001` is the active one-file standard-library repair; M4-T02
+    remains blocked on that repair and a future separately authorized exact-SHA run.
+    `M4-REMOTE-FINAL-A1` is consumed and revoked; no rerun, dispatch, PR, push,
+    packaging, release, or publication is authorized.
 
 
 ## Project validation

@@ -19,12 +19,12 @@ Actions run `30494736004` attempt 1 的七项成功、TCP/UDP 各 12/12、三目
 native lifecycle/linkage/hash 和关闭审查证据关闭；local closeout source 是
 docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
 baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
-M4-T01已在exact `7730ec7`集成到独立non-shipping tools package。M4-T02 exact
-`a53a5d7`的run `30710439015/1`通过六项独立gate与throughput，完成10k/180 stable
-owner samples后在RSS window 2失败。Local `M4-THP-PROFILE-001`已在exact `2305945`
-完成；Full、budgets、reviews及native-ext4 WSL2 diagnostic均通过且正式profile数值
-不变。T02仅等待已授权的final closeout SHA单次non-force push及automatic push run而
-`blocked`；`M4-REMOTE-FINAL-A1`尚未消费，不授权rerun、dispatch或第二次push。
+M4-T01已在exact `7730ec7`集成到独立non-shipping tools package。Exact `35fb3f8`
+的run `30725843401/1`通过performance、MSRV、interop与三平台；performance完成
+throughput、THP apply/restore、10k、180/180、6/6及drain。Quality在产品启动前因
+既有`udp_local_e2e`并行端口竞争失败，final qualification因此fail closed。
+`M4-QUALITY-PORT-LOCK-001`为active，T02继续`blocked`；`M4-REMOTE-FINAL-A1`已消费
+并撤销，不授权rerun、dispatch、第二次push或其他remote动作。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -48,8 +48,9 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 package并在exact `7730ec7`通过双审与authoritative ticket budget；M4-T02 exact
 `a53a5d7`的hosted paired trajectories已证明真实匿名增长、伴随THP增长及最终平台，
 与延迟THP backing一致但未建立hosted allocator/kernel因果。Exact `2305945`的本地
-selected-profile修复已通过全部local gate且不削弱30分钟测量和105%门槛。下一入口是
-在`M4-REMOTE-FINAL-A1`下将final closeout SHA单次non-force push并观察automatic run。
+selected-profile修复及run `30725843401/1`的performance均已通过且不削弱30分钟
+测量和105%门槛。下一入口是完成`M4-QUALITY-PORT-LOCK-001`本地修复、Full和
+budgets；未来remote run需新的授权。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -610,11 +611,11 @@ selected-profile修复已通过全部local gate且不削弱30分钟测量和105%
   - M4-T01：在独立non-shipping `ferrum2-m4-qualification` package内增加唯一
     Cargo-managed、non-default throughput/resource driver与短self-check，并在
     既有workflow增加唯一hosted `performance` job；exact `7730ec7`已`done`；
-  - M4-T02：exact `a53a5d7` run `30710439015/1`通过quality/MSRV/interop/三平台
-    与throughput，并完成10k及180个stable owner/task samples；paired RSS在window 2
-    失败。Local `M4-THP-PROFILE-001` exact `2305945`已完成并通过reviews、Full、
-    budgets和native-ext4 WSL2 diagnostic，且不改变正式profile。T02仅等待已授权的
-    final closeout SHA单次non-force push、automatic push run及同run qualification。
+  - M4-QUALITY-PORT-LOCK-001：修复run `30725843401/1`暴露的既有UDP local E2E
+    released-port并行竞争；只串行该文件五个真实端口/进程测试，active；
+  - M4-T02：exact `35fb3f8` run `30725843401/1`的performance、MSRV、interop与
+    三平台通过，但quality因上述test-harness race失败。等待本地修复及未来新的
+    exact-SHA remote授权。
 
   Dependency graph：
 
@@ -635,12 +636,12 @@ selected-profile修复已通过全部local gate且不削弱30分钟测量和105%
   `1d3c117231bf5b99641d02b43b6579359c938644`；
   paired hosted diagnostic exact `a53a5d7cf8c2506527d3dfa8f74e64898604154d`；
   local selected-profile repair exact `230594544e88ab555e1718ba92721745705b572b`；
-  M4 accepted hosted qualification commit尚待已授权final closeout SHA的automatic
-  push run重验。
+  final hosted attempt exact `35fb3f85633ee32ba5909ecbf5d74c4ad4a89f11`；
+  M4 accepted hosted qualification commit尚待本地quality repair和未来新的授权run。
 - **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
   driver迁到独立tools package解除；authoritative allowance、classifier、baseline
-  和evidence均不变。本地修复、审查和门禁已通过；`M4-REMOTE-FINAL-A1`授权一次final
-  closeout integration SHA的non-force push及automatic push run，尚未消费。Provider
+  和evidence均不变。`M4-REMOTE-FINAL-A1`已由exact `35fb3f8`的一次non-force push
+  和automatic run消费并撤销；新的remote动作尚未授权。Provider
   unavailable为BLOCKED，runner class不足、missing sample或cleanup失败为FAIL。GitHub-hosted image/hardware会
   滚动，因此记录实际profile并在同一VM交错比较；吞吐比不作preview门槛，性能
   压力不得绕过`unsafe` policy、安全或backpressure。
@@ -748,3 +749,4 @@ selected-profile修复已通过全部local gate且不削弱30分钟测量和105%
 | 2026-08-02 | M4 local paired-RSS diagnostic | exact `1d3c117`保留正式`VmRSS` 105% gate并加入64 KiB strict `smaps_rollup` parser、paired samples和all-six bounded trajectories；初版因parser缺少历史RED被QA阻塞，唯一重做以九个public-CLI slices关闭 | native-ext4 WSL 20次1 GiB rollup读取平均/最大`12146/12992` us；完整run `2103.6`秒通过10k、180/180、6/6、drain，六窗VmRSS与precise Rss均为client/server `1908928/1966960` median-twice KiB，THP为0；189行/73224-byte raw JSONL及failed-start目录摘要后删除，未commit/upload | Architect `PASS_WITH_NOTES`、QA `PASS`；Full `6/6`、ticket/milestone budget `PASS_ADVANCE`；scope消费撤销，T02 remote-blocked；无push/rerun/dispatch/PR/release/publication |
 | 2026-08-02 | M4 paired-RSS hosted qualification | exact `a53a5d7` run `30710439015/1`通过quality、MSRV、interop、三平台和throughput，记录ferrum/reference `9651268/476676096`、ratio `0.020247015`、difference `-97.975298514%`；resource完成10k与180 stable owner samples后window 2失败 | 六窗`VmRSS`与precise `Rss`逐项相等，增长全为Anonymous；client/server `AnonHugePages`最终达到`2387968/2437120` median-twice KiB并与RSS最终平台同步，排除RSS-accounting-only并反对owner-count growth；hosted allocator/kernel因果仍未证实 | 当时`M4-REMOTE-a53a5d7-A1` 1/1消费撤销；performance/final qualification failure、cleanup success；后续修复与授权见下一行 |
 | 2026-08-02 | M4 selected THP profile repair and remote authorization | exact `2305945`以hosted `max_ptes_none=0`、双重driver验证及workflow exact restore/readback完成本地修复；正式10k、180 samples、六窗、105%、owner和drain contract不变 | Reviews、Full `6/6`、ticket/milestone budgets及native-ext4 WSL2 diagnostic通过；WSL2完成10k、180/180、6/6、drain及`0`→`511` restore但仅作diagnostic | local scope消费；`M4-REMOTE-FINAL-A1`授权final closeout SHA一次non-force push及automatic push run，尚未消费；无rerun/dispatch/PR/release/publication/第二push |
+| 2026-08-02 | M4 final hosted attempt and quality repair authorization | exact `35fb3f8` run `30725843401/1`通过performance、MSRV、interop和三平台；performance完成`8580846/481626248`、ratio `0.017816400`、THP apply/restore、10k、180/180、6/6及drain，quality在`udp_local_e2e.rs:224`因并行released-port竞争失败 | 产品尚未启动；native-ext4 WSL pre-fix默认并行第4次复现相同`occupy UDP`/`EADDRINUSE`。选择复用现有文件级stdlib Mutex串行五个测试 | `M4-REMOTE-FINAL-A1`消费撤销；`M4-QUALITY-PORT-LOCK-001` active，仅授权本地修复/验证；无push/rerun/dispatch/PR/release/publication |

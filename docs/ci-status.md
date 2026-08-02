@@ -2,19 +2,22 @@
 
 ## 当前 M4 executing 状态
 
-- **Remote candidate and authorization:** exact
-  `a53a5d7cf8c2506527d3dfa8f74e64898604154d` passed local Full `6/6`, release
-  self-check, and ticket/milestone budgets. Single-use scope
-  `M4-REMOTE-a53a5d7-A1` was consumed and auto-revoked before its one permitted
-  non-force push; `origin/codex/integration/m4` now resolves to that exact SHA.
-- **Current local profile repair and authorization:** local `M4-THP-PROFILE-001` is
-  complete at exact `2305945`. Reviews, Full `6/6`, both budgets, and a complete
-  native-ext4 WSL2 diagnostic passed with `max_ptes_none=0`; exact 10k, `180/180`,
-  `6/6`, drain, process cleanup, and restoration to original `511` all passed. WSL2
-  remains diagnostic only. M4-T02 is blocked only on scope `M4-REMOTE-FINAL-A1`, which
-  permits one next non-force push of the final closeout integration SHA and its
-  automatic push run. The scope is unconsumed; no rerun, dispatch, PR, release,
+- **Final hosted attempt and authorization:** exact
+  `35fb3f85633ee32ba5909ecbf5d74c4ad4a89f11` was pushed once under
+  `M4-REMOTE-FINAL-A1`; that scope is consumed and revoked. Automatic run
+  [`30725843401`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30725843401)
+  passed performance, MSRV, interoperability, and all three native platforms. Quality
+  alone failed before product startup on a pre-existing parallel UDP local E2E port
+  race, and final qualification failed closed. No rerun, dispatch, PR, push, release,
   publication, or second push is authorized.
+- **Performance evidence:** ferrum2/reference medians were `8580846/481626248`
+  bytes/s, ratio `0.017816400`, and signed difference `-98.218359976%`. The selected
+  THP profile applied and restored successfully; resource completed exact 10k,
+  `180/180`, `6/6`, drain, and cleanup. Throughput has no minimum preview threshold.
+- **Current local quality repair:** `M4-QUALITY-PORT-LOCK-001` owns only
+  `udp_local_e2e.rs`. Native-ext4 WSL reproduced the exact line-224 `occupy UDP` /
+  `EADDRINUSE` failure on pre-fix iteration 4. The planned repair reuses the existing
+  file-level standard-library mutex pattern; WSL remains diagnostic only.
 - **Local resource repair:** exact
   `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8` admits a complete identified initial
   exposition with no lazy active-flow sample as zero, while malformed or unidentified
@@ -772,7 +775,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | exact `a53a5d7` run `30710439015/1` throughput PASS；resource完成10k与180个stable owner samples后window 2失败。Local `M4-THP-PROFILE-001` exact `2305945`已完成并通过local gates；`M4-REMOTE-FINAL-A1`授权final closeout SHA一次non-force push及automatic run，尚未消费 | M4 |
+| Performance/10k idle | PASS, M4 STILL BLOCKED | exact `35fb3f8` run `30725843401/1` performance完成throughput、THP apply/restore、10k、180/180、6/6及drain；同run quality因既有UDP E2E并行端口竞争失败，需本地修复和未来新的exact-SHA授权 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 

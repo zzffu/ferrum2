@@ -2,7 +2,7 @@
 id: M4-T02
 milestone: M4
 status: blocked
-depends_on: [M4-T01, M4-THP-PROFILE-001]
+depends_on: [M4-T01, M4-THP-PROFILE-001, M4-QUALITY-PORT-LOCK-001]
 owns:
   - Cargo.lock
   - tools/ferrum2-m4-qualification/Cargo.toml
@@ -175,9 +175,16 @@ git status --short
   Architect, and QA reviews passed; Full and both budgets passed. Native-ext4 WSL2
   completed exact 10k, `180/180`, `6/6`, drain, process cleanup, and restoration from
   `0` to original `511`; its six client/server RSS median-twice values were constant at
-  `1909368/1967472` KiB. WSL2 remains diagnostic. Scope `M4-REMOTE-FINAL-A1` authorizes
-  one next non-force push of the final closeout SHA and its automatic push run; rerun,
-  dispatch, PR, release, publication, or a second push is not.
+  `1909368/1967472` KiB. WSL2 remains diagnostic.
+- Final hosted attempt: scope `M4-REMOTE-FINAL-A1` was consumed and revoked before one
+  non-force push of exact `35fb3f85633ee32ba5909ecbf5d74c4ad4a89f11`. GitHub
+  Actions run [`30725843401`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30725843401)
+  passed performance, MSRV, interoperability, and all three native platforms.
+  Performance recorded ferrum2/reference medians `8580846/481626248` bytes/s, ratio
+  `0.017816400`, signed difference `-98.218359976%`, selected THP apply/restore PASS,
+  exact 10k, `180/180`, `6/6`, drain, and cleanup. Quality failed only at
+  `udp_local_e2e.rs:224` with `occupy UDP` / Linux `EADDRINUSE`; final qualification
+  failed closed. No rerun or second push is authorized.
 
 ## Blocker
 
@@ -200,16 +207,22 @@ git status --short
   fixed. A temporary WSL2 `MADV_HUGEPAGE` mapping demonstrated one compatible delayed
   anonymous RSS/THP mechanism without changing its mapping; it is mechanism evidence,
   not hosted qualification.
-- `HOSTED-M4-T02-004`: the fixed 5-minute stabilization ends before the observed
+- `HOSTED-M4-T02-004` is resolved: the fixed 5-minute stabilization previously ended before the observed
   anonymous/THP-associated RSS reaches its plateau, so the unchanged 30-minute 105%
   window gate correctly fails at window 2. The paired evidence contradicts
   owner-count growth and is consistent in scale with the retained protocol and Tokio
   relay buffers, but it does not establish the hosted allocator/kernel causal path.
-  The reviewed local `M4-THP-PROFILE-001` selected-profile repair is complete. T02
-  remains blocked only on the newly authorized one-push exact-SHA hosted attempt and
-  its same-run final qualification. Historical scope `M4-REMOTE-a53a5d7-A1` is consumed
-  and revoked; current scope `M4-REMOTE-FINAL-A1` is unconsumed. Rerun, dispatch, PR,
-  release, publication, or a second push is unauthorized.
+  Run `30725843401/1` proves the reviewed `M4-THP-PROFILE-001` selected profile passes
+  the unchanged resource gate and exact drain.
+- `HOSTED-M4-T02-005`: quality exposed a pre-existing parallel test-harness race before
+  product startup. `unused_tcp_udp_loopback` binds TCP and UDP before consulting the
+  process-local issued-port registry, so a sibling test may temporarily rebind an
+  already returned bare port. Native-ext4 WSL reproduced the exact line-224 failure;
+  the isolated test and serial file remain green. Local ticket
+  `M4-QUALITY-PORT-LOCK-001` owns the one-file standard-library serialization repair.
+  `M4-REMOTE-FINAL-A1` is consumed and revoked; any future push requires a new exact-SHA
+  authorization. Rerun, dispatch, PR, release, publication, or a second push is
+  unauthorized.
 - `LOCAL-M4-T02-004`: exact `d28ed0a` reproduced `target did not accept 10000
   streams` in two native WSL2 runs. Both product active gauges reached exact `10000`,
   while the qualification driver retained fewer target-side streams and Linux
