@@ -21,7 +21,7 @@ docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4已以exact
 `9b379a426853d86a184464f6fd8c73081b464535`、GitHub Actions run
 `30730883667/1`的performance、Full/security/process、MSRV、TCP/UDP `24/24`、
 三平台、test budget和final qualification证据关闭；local closeout source是
-docs-only descendant `9e788c8900ebfb031057c0d01941b823d8b11252`。
+docs-only descendant `a38a1e84c90a7e03c047eaa4e275fc7ed3410cdb`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -634,7 +634,7 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
   final hosted attempt exact `35fb3f85633ee32ba5909ecbf5d74c4ad4a89f11`；
   local quality repair exact `5f4fed7e0835298fee820ece7b858db45ea34044`；
   accepted hosted qualification exact `9b379a426853d86a184464f6fd8c73081b464535`；
-  local closeout descendant exact `9e788c8900ebfb031057c0d01941b823d8b11252`。
+  local closeout descendant exact `a38a1e84c90a7e03c047eaa4e275fc7ed3410cdb`。
 - **Open blockers and risks:** blocking P0/P1 issues和blocking review findings为零。
   GitHub-hosted image/hardware会滚动，因此保留实际profile并在同一VM交错比较；
   吞吐比仍仅作诊断。不授权新的remote、package、release或publish动作。
