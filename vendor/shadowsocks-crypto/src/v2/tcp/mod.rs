@@ -65,6 +65,11 @@ pub struct TcpCipher {
 }
 
 impl TcpCipher {
+    /// Owns an already-derived directional subkey after validating the method and width.
+    pub fn try_from_subkey(kind: CipherKind, subkey: &[u8]) -> Result<Self, CryptoError> {
+        CipherVariant::try_new(kind, subkey).map(|cipher| Self { cipher })
+    }
+
     /// Derives one directional cipher after validating the method and widths.
     pub fn try_new(kind: CipherKind, key: &[u8], salt: &[u8]) -> Result<Self, CryptoError> {
         if !matches!(
@@ -87,10 +92,10 @@ impl TcpCipher {
         material.extend_from_slice(key);
         material.extend_from_slice(salt);
         let mut derived = Zeroizing::new(blake3_v2::derive_key(BLAKE3_KEY_DERIVE_CONTEXT, material.as_slice()));
-        let cipher = CipherVariant::try_new(kind, &derived[..key_len])?;
+        let cipher = Self::try_from_subkey(kind, &derived[..key_len]);
         derived.zeroize();
         material.zeroize();
-        Ok(Self { cipher })
+        cipher
     }
 
     /// Cipher's kind.
@@ -127,3 +132,53 @@ impl TcpCipher {
 }
 
 impl ZeroizeOnDrop for TcpCipher {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_subkey_matches_psk_salt_and_rejects_invalid_inputs() {
+        let methods = [
+            CipherKind::AEAD2022_BLAKE3_AES_128_GCM,
+            CipherKind::AEAD2022_BLAKE3_AES_256_GCM,
+            CipherKind::AEAD2022_BLAKE3_CHACHA20_POLY1305,
+        ];
+        let key = [0x11; 32];
+        let salt = [0x22; 32];
+        let oversized = [0x44; 33];
+        let nonce = [0x33; 12];
+
+        for kind in methods {
+            let key_len = kind.key_len();
+            let mut material = Vec::with_capacity(key_len * 2);
+            material.extend_from_slice(&key[..key_len]);
+            material.extend_from_slice(&salt[..key_len]);
+            let derived = blake3_v2::derive_key(BLAKE3_KEY_DERIVE_CONTEXT, &material);
+
+            let derived_cipher = TcpCipher::try_new(kind, &key[..key_len], &salt[..key_len]).unwrap();
+            let raw_cipher = TcpCipher::try_from_subkey(kind, &derived[..key_len]).unwrap();
+            let mut derived_plaintext = b"same plaintext".to_vec();
+            let mut raw_plaintext = derived_plaintext.clone();
+
+            let derived_tag = derived_cipher.encrypt_packet(&nonce, &mut derived_plaintext).unwrap();
+            let raw_tag = raw_cipher.encrypt_packet(&nonce, &mut raw_plaintext).unwrap();
+            assert_eq!(derived_plaintext, raw_plaintext);
+            assert_eq!(derived_tag, raw_tag);
+
+            assert!(matches!(
+                TcpCipher::try_from_subkey(kind, &derived[..key_len - 1]),
+                Err(CryptoError::InvalidKeyLength)
+            ));
+            assert!(matches!(
+                TcpCipher::try_from_subkey(kind, &oversized[..key_len + 1]),
+                Err(CryptoError::InvalidKeyLength)
+            ));
+        }
+
+        assert!(matches!(
+            TcpCipher::try_from_subkey(CipherKind::NONE, &[]),
+            Err(CryptoError::InvalidMethod)
+        ));
+    }
+}

@@ -11,8 +11,9 @@ The committed tree is the exact crates.io archive with this bounded delta:
   RustCrypto versions, enable zeroization anchors, and remove `rand` from that graph.
 - `src/lib.rs` and `src/utils.rs`: compile the random helper only for v1 and remove
   its unsafe all-zero check.
-- `src/v2/**`: add checked explicit-nonce TCP/UDP operations, AES-UDP header
-  protection, zeroized KDF temporaries, and compile-time `ZeroizeOnDrop` bounds.
+- `src/v2/**`: add checked explicit-nonce TCP/UDP operations, a checked no-KDF owner
+  for exact-width pre-derived TCP subkeys, AES-UDP header protection, zeroized KDF
+  temporaries, and compile-time `ZeroizeOnDrop` bounds.
 
 The patch adds no framing, replay, timestamp, binding, session, routing, config, or
 runtime behavior. To audit it, verify the archive hash, extract it, and run
