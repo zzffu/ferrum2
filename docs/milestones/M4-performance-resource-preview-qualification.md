@@ -49,6 +49,6 @@ hypothesis and contradicts an owner-count leak, while remaining only consistent 
 delayed THP backing rather than proving the hosted allocator/kernel causal path. Local
 `M4-THP-PROFILE-001` is complete at exact `2305945`: all reviews, Full, both budgets,
 and the complete native-ext4 WSL2 diagnostic passed with the unchanged 10k, 180-sample,
-six-window, 105%, owner, and drain contract. The next authorized action is one
+six-window, 105%, owner, and drain contract. Scope `M4-REMOTE-FINAL-A1` authorizes one
 non-force push of the final closeout integration SHA and its automatic push run. No
 rerun, dispatch, PR, release, publication, or second push is authorized.

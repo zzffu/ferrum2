@@ -7,6 +7,14 @@
   self-check, and ticket/milestone budgets. Single-use scope
   `M4-REMOTE-a53a5d7-A1` was consumed and auto-revoked before its one permitted
   non-force push; `origin/codex/integration/m4` now resolves to that exact SHA.
+- **Current local profile repair and authorization:** local `M4-THP-PROFILE-001` is
+  complete at exact `2305945`. Reviews, Full `6/6`, both budgets, and a complete
+  native-ext4 WSL2 diagnostic passed with `max_ptes_none=0`; exact 10k, `180/180`,
+  `6/6`, drain, process cleanup, and restoration to original `511` all passed. WSL2
+  remains diagnostic only. M4-T02 is blocked only on scope `M4-REMOTE-FINAL-A1`, which
+  permits one next non-force push of the final closeout integration SHA and its
+  automatic push run. The scope is unconsumed; no rerun, dispatch, PR, release,
+  publication, or second push is authorized.
 - **Local resource repair:** exact
   `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8` admits a complete identified initial
   exposition with no lazy active-flow sample as zero, while malformed or unidentified
@@ -126,14 +134,13 @@
   a `/proc/status` accounting-only false positive; stable ownership and the plateau
   contradict owner-count growth but do not establish the hosted allocator/kernel
   causal path. Drain was not reached because the gate failed.
-- **Mechanism check and authorization boundary:** WSL2 reports THP `madvise`. A
+- **Mechanism check and historical authorization boundary:** WSL2 reports THP `madvise`. A
   temporary 256 MiB anonymous mapping, sparsely touched before `MADV_HUGEPAGE`, moved
   from `Rss/Anonymous/AnonHugePages=10888/4576/0` KiB to
   `109136/102696/98304` KiB over 60 seconds in 16 MiB steps without changing the
   mapping, demonstrating one compatible delayed THP-residency mechanism but not the
-  hosted product run. The remote scope is consumed and revoked. M4-T02 is blocked
-  pending separately authorized local repair; no rerun, second push, or other remote
-  mutation is authorized.
+  hosted product run. Historical scope `M4-REMOTE-a53a5d7-A1` is consumed and revoked;
+  the current repair and authorization are recorded above.
 
 ## 当前 M3 closed 状态
 
@@ -765,7 +772,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | BLOCKED | exact `a53a5d7` run `30710439015/1` throughput PASS；resource完成10k与180个stable owner samples后window 2失败。六窗`VmRSS == precise Rss`、增长全为Anonymous，伴随THP阶梯增长并最终平台；RSS-accounting-only与owner-count growth被反证，但hosted allocator/kernel因果未证实。Remote scope已消费撤销；等待另行授权的本地修复 | M4 |
+| Performance/10k idle | BLOCKED | exact `a53a5d7` run `30710439015/1` throughput PASS；resource完成10k与180个stable owner samples后window 2失败。Local `M4-THP-PROFILE-001` exact `2305945`已完成并通过local gates；`M4-REMOTE-FINAL-A1`授权final closeout SHA一次non-force push及automatic run，尚未消费 | M4 |
 
 ## 已实现并通过的 M0 CI profile
 

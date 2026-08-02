@@ -175,9 +175,9 @@ git status --short
   Architect, and QA reviews passed; Full and both budgets passed. Native-ext4 WSL2
   completed exact 10k, `180/180`, `6/6`, drain, process cleanup, and restoration from
   `0` to original `511`; its six client/server RSS median-twice values were constant at
-  `1909368/1967472` KiB. WSL2 remains diagnostic. One next non-force push of the final
-  closeout SHA and its automatic push run is authorized; rerun, dispatch, PR, release,
-  publication, or a second push is not.
+  `1909368/1967472` KiB. WSL2 remains diagnostic. Scope `M4-REMOTE-FINAL-A1` authorizes
+  one next non-force push of the final closeout SHA and its automatic push run; rerun,
+  dispatch, PR, release, publication, or a second push is not.
 
 ## Blocker
 
@@ -207,8 +207,9 @@ git status --short
   relay buffers, but it does not establish the hosted allocator/kernel causal path.
   The reviewed local `M4-THP-PROFILE-001` selected-profile repair is complete. T02
   remains blocked only on the newly authorized one-push exact-SHA hosted attempt and
-  its same-run final qualification. Scope `M4-REMOTE-a53a5d7-A1` is consumed and
-  revoked; rerun, dispatch, PR, release, publication, or a second push is unauthorized.
+  its same-run final qualification. Historical scope `M4-REMOTE-a53a5d7-A1` is consumed
+  and revoked; current scope `M4-REMOTE-FINAL-A1` is unconsumed. Rerun, dispatch, PR,
+  release, publication, or a second push is unauthorized.
 - `LOCAL-M4-T02-004`: exact `d28ed0a` reproduced `target did not accept 10000
   streams` in two native WSL2 runs. Both product active gauges reached exact `10000`,
   while the qualification driver retained fewer target-side streams and Linux

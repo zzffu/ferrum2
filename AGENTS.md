@@ -191,17 +191,17 @@ and command definitions in their authoritative build/config files where possible
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
 - Active planned changes:
-  - M4 — executing — M4-T01 is integrated at exact `7730ec7` with the dedicated
-    non-shipping qualification package and the existing workflow's `performance`
-    job. Exact `a53a5d7` run `30710439015/1` passed quality, MSRV, interoperability,
-    all three native-platform jobs, and diagnostic throughput, then failed the
-    unchanged 105% resource gate at RSS window 2. Paired `VmRSS`/`smaps_rollup`
-    evidence shows real anonymous growth, large associated THP growth, and a bounded
-    plateau, consistent with delayed THP backing; stable active/fd/task tuples
-    contradict owner-count growth. Remote scope
-    `M4-REMOTE-a53a5d7-A1` is consumed and revoked. M4-T02 remains blocked pending a
-    separately authorized local repair; no rerun, second push, packaging, release, or
-    publication is authorized.
+  - M4 — executing — M4-T01 is integrated at exact `7730ec7`. Exact `a53a5d7` run
+    `30710439015/1` passed quality, MSRV, interoperability, all three native-platform
+    jobs, and diagnostic throughput, then failed the unchanged 105% resource gate at
+    RSS window 2. Local `M4-THP-PROFILE-001` is complete at exact `2305945`: the
+    selected hosted profile sets `max_ptes_none=0` with fail-closed verification and
+    restoration, while every load, timing, owner, drain, and threshold contract stays
+    unchanged. Full, both budgets, reviews, and a complete native-ext4 WSL2 diagnostic
+    passed; WSL2 remains diagnostic only. M4-T02 remains blocked only on one explicitly
+    authorized non-force push of the final closeout integration SHA and its automatic
+    push run. Scope `M4-REMOTE-FINAL-A1` is unconsumed; no rerun, dispatch, PR, second
+    push, packaging, release, or publication is authorized.
 
 
 ## Project validation
