@@ -1,7 +1,7 @@
 ---
 id: POST-M6-T01
 milestone: post-M6
-status: validating
+status: done
 depends_on: []
 owns:
   - scripts/test-budget.sh
@@ -19,15 +19,15 @@ machine rule to exact base/candidate trees rather than mutable author identity�
 
 ## Acceptance
 
-- [ ] `ticket-staged`、`ticket-commit` and ordinary `ci` block `ticket_debt > 120` with
+- [x] `ticket-staged`、`ticket-commit` and ordinary `ci` block `ticket_debt > 120` with
       `ticket_allowance_exceeded` and admit equality at `120` when the hard ceiling also holds。
-- [ ] Milestone、ratchet、baseline-adoption and baseline-closeout modes do not reapply
+- [x] Milestone、ratchet、baseline-adoption and baseline-closeout modes do not reapply
       per-ticket debt；the old cumulative `anchor_debt` and forced `-0.05` ratchet stay absent。
-- [ ] Every mode still blocks an exact ratio above `22853 / 15032`, including rounded-equal
+- [x] Every mode still blocks an exact ratio above `22853 / 15032`, including rounded-equal
       overflow；`PASS_HOLD` remains baseline-ineligible。
-- [ ] The repair is one single-parent control commit containing only the protected script and
+- [x] The repair is one single-parent control commit containing only the protected script and
       Markdown evidence；no Rust、classifier、dependency or baseline change is included。
-- [ ] Focused validation and repository formatting pass。
+- [x] Focused validation and repository formatting pass。
 
 ## Validation
 
@@ -42,6 +42,9 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: primary exact-mode and invariant review —
-- Notes: temporary numeric controls are validation-only and are not committed。
+- Commit: `e20133c65a8f56418ed874b3bbaba2641180bd66`
+- Review: primary exact-mode and invariant review — PASS。
+- Notes: debt `120` passed and debt `121` blocked in all three ordinary modes；the same
+  debt `121` passed milestone mode；a one-line hard-ceiling overflow blocked；anchor equality
+  remained `PASS_ADVANCE`；an ineligible ratchet left the baseline blob unchanged。Temporary
+  numeric controls were validation-only and were not committed。
