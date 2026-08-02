@@ -21,7 +21,7 @@ SIP022 wire 和 schema v1 config 不变的前提下，把三个标准方法的�
 
 - [x] Exact vendored 0.7.0 provenance/license 和最小 patch delta 通过审查；产品图只
       启用 `v2`，forbidden features/backend/unsafe absent。
-- [ ] TCP/UDP 三方法全部经现有公开 seam 使用唯一上游实现；旧 cipher/KDF 与无用
+- [x] TCP/UDP 三方法全部经现有公开 seam 使用唯一上游实现；旧 cipher/KDF 与无用
       product dependencies 已删除，secret zeroization 与显式 exhaustion 保持。
 - [ ] KAT、composite wire、全部 negative/regression 和 Full/budget/review gates
       在一个 accepted integration commit 上通过。
@@ -36,8 +36,8 @@ SIP022 wire 和 schema v1 config 不变的前提下，把三个标准方法的�
 |---|---|---|---|
 | M5-T01 | Pin exact upstream source and apply the bounded security patch | — | done |
 | M5-T01R | Add the missing checked raw TCP subkey owner | M5-T01 | done |
-| M5-T02 | Atomically switch TCP/UDP and delete native cipher/KDF | M5-T01R | active |
-| M5-T03 | Qualify one exact commit across all closing gates | M5-T02 | todo |
+| M5-T02 | Atomically switch TCP/UDP and delete native cipher/KDF | M5-T01R | done |
+| M5-T03 | Qualify one exact commit across all closing gates | M5-T02 | active |
 
 T01/T02 intentionally serialize overlapping manifests/policy paths. T02 is the only
 product switch and must integrate atomically; T03 is evidence-only unless a failed gate
@@ -45,7 +45,6 @@ identifies a concrete owning-ticket defect.
 
 ## Blocker / next action
 
-Resume and accept M5-T02 on accepted repair commit
-`831388a3801cdec734e68ecc461c4c3f23ede8db`. M5-T03 hosted evidence requires separate
-explicit push authorization; no remote, rerun, PR, tag, release or publication action
-is currently authorized.
+Qualify the current integration candidate locally under M5-T03. Hosted evidence still
+requires separate explicit push authorization; no remote, rerun, PR, tag, release or
+publication action is currently authorized.

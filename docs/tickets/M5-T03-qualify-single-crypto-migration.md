@@ -1,7 +1,7 @@
 ---
 id: M5-T03
 milestone: M5
-status: todo
+status: active
 depends_on: [M5-T02]
 owns:
   - docs/ci-status.md

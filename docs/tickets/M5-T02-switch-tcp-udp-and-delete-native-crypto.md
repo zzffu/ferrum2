@@ -1,7 +1,7 @@
 ---
 id: M5-T02
 milestone: M5
-status: active
+status: done
 depends_on: [M5-T01, M5-T01R]
 owns:
   - Cargo.toml
@@ -23,17 +23,17 @@ local cipher/KDF implementation and unused product dependencies in the same tick
 
 ## Acceptance
 
-- [ ] Existing public types/traits/methods/error text and all downstream callers compile;
+- [x] Existing public types/traits/methods/error text and all downstream callers compile;
       `crates/ferrum2-shadowsocks/src/**` and schema/config behavior are unchanged.
-- [ ] TCP and UDP KAT/composite fixtures are byte-exact for three methods; all existing
+- [x] TCP and UDP KAT/composite fixtures are byte-exact for three methods; all existing
       negative, replay, binding and mutation-order tests pass.
-- [ ] TCP u96le and UDP u64 exhaustion, commit-on-success, authentication failure,
+- [x] TCP u96le and UDP u64 exhaustion, commit-on-success, authentication failure,
       caller-buffer and zeroization semantics satisfy SPEC-0006.
-- [ ] Product normal graph has one cipher/KDF backend. Old KDF/cipher code, direct
+- [x] Product normal graph has one cipher/KDF backend. Old KDF/cipher code, direct
       primitive implementation edges, fallback and switches are absent.
-- [ ] Only genuinely independent KAT oracle dependencies remain dev-only; lock and
+- [x] Only genuinely independent KAT oracle dependencies remain dev-only; lock and
       dependency/license policy describe the exact final graph.
-- [ ] Focused commands, Quick/Full, ticket budget and blocking Architect/QA review pass.
+- [x] Focused commands, Quick/Full, ticket budget and blocking Architect/QA review pass.
 
 ## Validation
 
@@ -42,9 +42,12 @@ then the repository Full commands before integration.
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `db4f100c35a2fc6615828b9aa176e8ede62eb855` (fast-forwarded unchanged to
+  integration).
+- Review: Architect `PASS`; QA `PASS`; zero findings on the exact commit.
+- Notes: Focused, Quick and Full passed, including independent lifecycle qualification
+  runs (`127.09s` and `127.37s`). Ticket and milestone budgets returned `PASS_HOLD`:
+  code `14066`, tests `20985`, ratio `1.491895`, anchor debt `107`.
 
 ## Rollback / blocker
 
@@ -52,6 +55,5 @@ Do not integrate a partial transport switch. If the atomic candidate cannot pres
 the contract, keep M5 blocked on its pre-T02 integration base; do not add a dual backend
 or runtime/feature fallback.
 
-Execution resumed after accepted M5-T01R commit
-`831388a3801cdec734e68ecc461c4c3f23ede8db` added the checked owner constructor for
-the existing public raw TCP subkey seam.
+M5-T01R commit `831388a3801cdec734e68ecc461c4c3f23ede8db` closed the raw-subkey interface
+blocker before this atomic switch; no partial or fallback implementation was integrated.
