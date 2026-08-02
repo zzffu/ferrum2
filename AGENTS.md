@@ -205,10 +205,10 @@ and command definitions in their authoritative build/config files where possible
     now enable TCP_NODELAY without a configuration or dependency change. Windows
     RED/GREEN, Quick, Full, both budgets, and native-ext4 WSL focused/runtime tests
     passed. M4-T02 is active for the final exact-SHA run. Scope
-    `M4-REMOTE-TCP-NODELAY-A1` permits exactly one next non-force push of the final
-    validated integration SHA to `codex/integration/m4` and its automatic push run;
-    no rerun, dispatch, PR, packaging, release, publication, or second push is
-    authorized.
+    `M4-REMOTE-TCP-NODELAY-A1` is consumed and revoked for one non-force push of this
+    exact integration tree to `codex/integration/m4` and its automatic push run. The
+    run is pending; no retry, rerun, dispatch, PR, packaging, release, publication, or
+    second push is authorized.
 
 
 ## Project validation

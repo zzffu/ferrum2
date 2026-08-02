@@ -53,5 +53,5 @@ release, publication, or second push.
   milestone budgets returned `PASS_ADVANCE` at code `14173`, tests `20878`, examples
   `132`, ratio `1.473083`, with ticket debt `4` and milestone debt `-2052`.
 - Review: primary exact-diff review `PASS`; no blocker, major, minor, or note finding.
-  Scope `M4-REMOTE-TCP-NODELAY-A1` remains unconsumed pending final exact-SHA
-  validation.
+  Scope `M4-REMOTE-TCP-NODELAY-A1` is consumed and revoked for one non-force push of
+  the final exact integration tree and its automatic push run.

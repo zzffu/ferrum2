@@ -52,8 +52,8 @@ failed closed. Scope `M4-REMOTE-FINAL-A1` was consumed and revoked by that one p
 automatic run. Local `M4-QUALITY-PORT-LOCK-001` is complete at exact `5f4fed7`: both
 WSL 200-run loops, the native-ext4 harness, Full `6/6`, and both budgets passed.
 `M4-TCP-NODELAY-001` is complete at exact `c0de9bd`: Windows RED/GREEN, Quick, Full,
-both budgets, and native-ext4 WSL focused/runtime tests passed. Finish the docs-only
-evidence commit, revalidate the final exact integration SHA, then consume
-`M4-REMOTE-TCP-NODELAY-A1` for exactly one non-force push to `codex/integration/m4`
-and its automatic push run. No rerun, dispatch, PR, release, publication, or second
-push is authorized.
+both budgets, and native-ext4 WSL focused/runtime tests passed. The first docs-only
+descendant also passed Full `6/6`. Scope `M4-REMOTE-TCP-NODELAY-A1` is consumed and
+revoked for one non-force push of this exact integration tree to
+`codex/integration/m4` and its automatic push run. Observe that pending run without a
+retry, rerun, dispatch, PR, release, publication, or second push.

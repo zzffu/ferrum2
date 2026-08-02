@@ -60,10 +60,10 @@ git status --short
   Windows public-seam RED/GREEN, Quick, serial Full `6/6`, both budgets, and
   native-ext4 WSL focused/runtime tests passed. The final docs descendant remains to
   be validated before the authorized push.
-- Current authorization: after `M4-TCP-NODELAY-001` passes local gates, scope
-  `M4-REMOTE-TCP-NODELAY-A1` permits exactly one next non-force push of the final exact
-  integration SHA to `codex/integration/m4` and its automatic push run. It permits no
-  rerun, dispatch, PR, release, publication, or second push.
+- Push scope consumption: `M4-REMOTE-TCP-NODELAY-A1` is consumed and revoked for one
+  non-force push of this exact integration tree to `codex/integration/m4` and its
+  automatic push run. The run is pending; no retry, rerun, dispatch, PR, release,
+  publication, or second push is authorized.
 
 - Probe repair candidate: `57d317ddb554bbbbc5cc324046277a514ce54324`
 - Resource-readiness repair: `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`

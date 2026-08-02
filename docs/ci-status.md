@@ -6,10 +6,11 @@
   exact `c0de9bd`. The shared accepted-stream and post-connect product seams enable
   TCP_NODELAY for both client and server without a config or dependency change.
   Windows RED/GREEN, Quick, serial Full `6/6`, both budgets, and native-ext4 WSL
-  focused/runtime tests passed. Scope
-  `M4-REMOTE-TCP-NODELAY-A1` permits one next non-force push of the final validated
-  integration SHA to `codex/integration/m4` and its automatic push run; no rerun,
-  dispatch, PR, release, publication, or second push is authorized.
+  focused/runtime tests passed. The first docs-only descendant also passed Full `6/6`.
+  Scope `M4-REMOTE-TCP-NODELAY-A1` is consumed and revoked for one non-force push of
+  this exact integration tree to `codex/integration/m4` and its automatic push run.
+  The run is pending; no retry, rerun, dispatch, PR, release, publication, or second
+  push is authorized.
 - **Final hosted attempt and authorization:** exact
   `35fb3f85633ee32ba5909ecbf5d74c4ad4a89f11` was pushed once under
   `M4-REMOTE-FINAL-A1`; that scope is consumed and revoked. Automatic run
