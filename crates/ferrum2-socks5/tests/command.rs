@@ -1,7 +1,13 @@
 use ferrum2_core::{ConnectErrorKind, Inbound, Session, SessionReply, TargetAddr};
 use ferrum2_socks5::{Socks5Inbound, SocksCommand, SocksError, SocksReplyPending, SocksStream};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+use std::{
+    io,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 
 const METHOD: &[u8] = &[5, 0];
 const GENERAL: &[u8] = &[5, 1, 0, 1, 0, 0, 0, 0, 0, 0];
@@ -146,6 +152,29 @@ async fn command_failure_rows_and_one_shot_write_failure_are_exact() {
     let SocksCommand::UdpAssociate(association) = command else { panic!("write-failure variant") };
     drop(client);
     assert_eq!(association.reply.failed(ConnectErrorKind::Other).await, Err(SocksError::Io), "write-failure terminal");
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let result = Socks5Inbound::new().accept_command(RequestReadFailure { offset: 0, output: Arc::clone(&output) }).await;
+    assert!(result.is_err(), "request-read-reset error");
+    assert_eq!(*output.lock().unwrap(), [5, 0], "request-read-reset no request reply");
+}
+
+struct RequestReadFailure {
+    offset: usize,
+    output: Arc<Mutex<Vec<u8>>>,
+}
+const REQUEST_READ_FAILURE: &[u8] = &[5, 1, 0, 5, 3, 0, 1];
+#[rustfmt::skip]
+impl AsyncRead for RequestReadFailure {
+    fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, buffer: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        if self.offset == REQUEST_READ_FAILURE.len() { return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset))); }
+        let len = buffer.remaining().min(REQUEST_READ_FAILURE.len() - self.offset); buffer.put_slice(&REQUEST_READ_FAILURE[self.offset..self.offset + len]); self.offset += len; Poll::Ready(Ok(()))
+    }
+}
+#[rustfmt::skip]
+impl AsyncWrite for RequestReadFailure {
+    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> { self.output.lock().unwrap().extend_from_slice(bytes); Poll::Ready(Ok(bytes.len())) }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
 }
 
 #[rustfmt::skip]

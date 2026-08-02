@@ -7,14 +7,14 @@ use ferrum2_socks5::{
 #[test]
 #[rustfmt::skip]
 fn round_trip_empty_maximum_domain_boundary_and_ipv6_erratum() {
-    for (case, target, payload, header) in [
-        ("ipv4-empty", ip("192.0.2.1:53"), &b""[..], 10),
-        ("ipv6", ip("[2001:db8::7]:5353"), &b"ipv6"[..], 22),
-        ("domain", TargetAddr::domain("example.test", 443).unwrap(), &b"domain payload"[..], 19),
+    for (case, target, payload, wire) in [
+        ("ipv4-empty", ip("192.0.2.1:53"), &b""[..], vec![0, 0, 0, 1, 0xc0, 0, 2, 1, 0, 0x35]),
+        ("ipv6", ip("[2001:db8::7]:5353"), &b"ipv6"[..], vec![0, 0, 0, 4, 0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0x14, 0xe9, 0x69, 0x70, 0x76, 0x36]),
+        ("domain", TargetAddr::domain("example.test", 443).unwrap(), &b"domain payload"[..], vec![0, 0, 0, 3, 0x0c, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x74, 0x65, 0x73, 0x74, 1, 0xbb, 0x64, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x20, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64]),
     ] {
-        let mut wire = [0xa5; 64]; let len = encode(&target, payload, &mut wire).unwrap();
-        assert_eq!(len, header + payload.len(), "{case} length"); assert_eq!(&wire[..3], &[0, 0, 0], "{case} prefix");
-        let packet = decode(&wire[..len]).unwrap();
+        let mut encoded = [0xa5; 64]; let len = encode(&target, payload, &mut encoded).unwrap();
+        assert_eq!(&encoded[..len], wire, "{case} exact wire");
+        let packet = decode(&wire).unwrap(); let header = wire.len() - payload.len();
         assert_eq!(packet.to_target_addr(), target, "{case} target"); assert_eq!(packet.payload(), payload, "{case} payload");
         assert_eq!(packet.payload().as_ptr(), wire[header..].as_ptr(), "{case} borrowed");
     }
