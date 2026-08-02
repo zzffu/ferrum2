@@ -198,22 +198,94 @@ fn ferrum_udp_rows_use_the_bounded_composed_client_and_socks_exerciser() {
         .split_once("fn run_udp_reference_client_case")
         .expect("reference UDP client adapter")
         .0;
+    let config = adapter
+        .split_once("let ferrum_config = format!(")
+        .expect("Ferrum UDP client config")
+        .1
+        .split_once("let ferrum_path")
+        .expect("Ferrum UDP client config path")
+        .0;
 
     for required in [
+        r#"[client]\nlisten = \"{proxy}\"\nserver = \"{shadowsocks}\"\n\n\"#,
+        r#"[shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n\n\"#,
+        r#"[udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = 1048576\n\"#,
+        r#"idle_timeout_ms = 60000\n","#,
+        "case.method.canonical_name(),\n        case.method.synthetic_psk()",
+    ] {
+        assert!(
+            config.contains(required),
+            "missing client config contract: {required}"
+        );
+    }
+    assert!(
+        config.find(r#"[client]\n"#) < config.find(r#"[shadowsocks]\n"#)
+            && config.find(r#"[shadowsocks]\n"#) < config.find(r#"[udp]\n"#)
+    );
+    for required in [
+        "write_config(directory, \"ferrum-client.toml\", &ferrum_config);",
         "ferrum_binary(\"ferrum2-client\")",
-        "[udp]\\nenabled = true\\nmax_sessions = 16\\nmax_buffered_bytes = 1048576",
-        "idle_timeout_ms = 60000",
+        "ferrum_command.args([\"--config\", path_text(&ferrum_path)]);",
         "ProcessGuard::spawn(\"ferrum composed UDP client\", &mut ferrum_command, deadline)",
         "wait_for_tcp_listener(&mut ferrum, proxy, deadline, \"ferrum composed client\")",
-        "exercise_socks_udp(&mut ferrum, proxy, target, case.method, deadline)",
-        "ferrum.terminate(deadline)",
-        "reference.terminate(deadline)",
+        "exercise_socks_udp(&mut ferrum, proxy, target, case.method, deadline);",
+        "ferrum.terminate(deadline);",
+        "reference.terminate(deadline);",
     ] {
         assert!(
             adapter.contains(required),
             "missing adapter contract: {required}"
         );
     }
+
+    let reference_adapter = support
+        .split_once("fn run_udp_reference_client_case")
+        .expect("reference UDP client adapter")
+        .1
+        .split_once("fn wait_for_stable_child")
+        .expect("UDP readiness helper")
+        .0;
+    for required in [
+        "exercise_socks_udp(&mut reference, proxy, target, case.method, deadline);",
+        "reference.terminate(deadline);",
+        "ferrum.terminate(deadline);",
+    ] {
+        assert!(
+            reference_adapter.contains(required),
+            "missing reference adapter contract: {required}"
+        );
+    }
+
+    let deadline = support
+        .split_once("impl CaseDeadline")
+        .expect("case deadline implementation")
+        .1
+        .split_once("struct Capture")
+        .expect("capture owner")
+        .0;
+    assert!(deadline.contains("end: Instant::now() + CASE_TIMEOUT"));
+    let run_case = support
+        .split_once("fn run_case(case: CaseSpec)")
+        .expect("hosted case runner")
+        .1
+        .split_once("fn run_tcp_transport")
+        .expect("TCP transport adapter")
+        .0;
+    assert!(run_case.contains("let deadline = CaseDeadline::start();"));
+    let udp_dispatch = run_case
+        .split_once("Transport::Udp => run_udp_transport(")
+        .expect("UDP transport dispatch")
+        .1;
+    assert!(udp_dispatch.contains("target,\n            deadline,\n        ),"));
+
+    let exerciser = support
+        .split_once("fn exercise_socks_udp")
+        .expect("SOCKS UDP exerciser")
+        .1
+        .split_once("fn open_socks_udp_association")
+        .expect("SOCKS UDP association helper")
+        .0;
+    assert!(exerciser.contains("for sequence in 0..SESSION_DATAGRAMS"));
     assert!(support.contains("const CASE_TIMEOUT: Duration = Duration::from_secs(60);"));
     assert!(support.contains("const SESSION_DATAGRAMS: usize = 3;"));
     assert!(!support.contains("udp_protocol_client"));
