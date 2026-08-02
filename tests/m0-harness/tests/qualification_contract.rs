@@ -263,7 +263,7 @@ fn ferrum_udp_rows_use_the_bounded_composed_client_and_socks_exerciser() {
         .split_once("struct Capture")
         .expect("capture owner")
         .0;
-    assert!(deadline.contains("end: Instant::now() + CASE_TIMEOUT"));
+    assert!(deadline.contains("end: Instant::now() + CASE_TIMEOUT,"));
     let run_case = support
         .split_once("fn run_case(case: CaseSpec)")
         .expect("hosted case runner")
