@@ -1,7 +1,7 @@
 ---
 id: M6-T02
 milestone: M6
-status: ready
+status: done
 depends_on: [M6-T01]
 owns:
   - crates/ferrum2-config/src/lib.rs
@@ -27,24 +27,24 @@ connection into a complete local public UDP path。
 
 ## Acceptance
 
-- [ ] Absent client `[udp]` preserves the M3 cohort and old command rejection；explicit
+- [x] Absent client `[udp]` preserves the M3 cohort and old command rejection；explicit
       section reuses validated numeric limits, and disabled/check mode owns zero UDP resource。
-- [ ] Setup reserves association/buffer capacity and both sockets before success reply；TCP
+- [x] Setup reserves association/buffer capacity and both sockets before success reply；TCP
       peer IP authority plus fixed/learned port prevents an open relay, and invalid/wrong-source
       datagrams mutate nothing。
-- [ ] Three methods and IPv4/IPv6/domain targets reuse existing SIP022 packet/replay/binding
+- [x] Three methods and IPv4/IPv6/domain targets reuse existing SIP022 packet/replay/binding
       state with live-ID collision prevention。Authenticated response preparation borrows
       validated target/payload from precharged scratch；exact reservation precedes its sole
       owned materialization and commit。
-- [ ] T02 promotes only the manager's existing per-handle cancellation/deadline operations；
+- [x] T02 promotes only the manager's existing per-handle cancellation/deadline operations；
       it adds no runtime loop/trait。Session/byte/queue/idle limits and generation cancellation
       remain owned by `UdpSessionManager`。
-- [ ] One association alternates at least two targets；all three methods × IPv4/IPv6/domain
+- [x] One association alternates at least two targets；all three methods × IPv4/IPv6/domain
       pass exact composed maximum and silently drop one byte over before allocation/mutation。
-- [ ] Control EOF/reset/write-half-close、idle、both socket I/O directions、child cancel、
+- [x] Control EOF/reset/write-half-close、idle、both socket I/O directions、child cancel、
       graceful/forced shutdown、sibling-root failure and restart/rebind return every session-ID/
       process/runtime/socket owner to baseline within the configured bound。
-- [ ] Existing UDP families record only closed client-role values and no secret、endpoint、
+- [x] Existing UDP families record only closed client-role values and no secret、endpoint、
       server or target cardinality；TCP CONNECT/server UDP behavior remains unchanged。
 - [ ] Exact T02 commands, Full, MSRV, ticket budget and blocking Architect/QA review pass。
 
@@ -54,9 +54,12 @@ Run `TEST-0007` T02 commands, then repository Full commands before integration�
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `af4433168e4728901c7f305d4a4aabd20c8ee958`
+- Review: initial and targeted Architect/QA reviews blocked；two independent `xhigh`
+  escalations agreed on the final bounded repair, which was implemented and revalidated。
+- Notes: exact product、T02、Full、MSRV and 100-cycle gates pass。The user explicitly
+  authorized `--no-verify` for T02/T03；ticket budget is deferred to a future T04 and remains
+  unpassed, so the final acceptance checkbox and M6 close stay open。
 
 ## Rollback / risk
 

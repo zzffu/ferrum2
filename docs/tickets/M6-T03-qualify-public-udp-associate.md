@@ -1,7 +1,7 @@
 ---
 id: M6-T03
 milestone: M6
-status: todo
+status: ready
 depends_on: [M6-T02]
 owns:
   - tests/m0-harness/src/external_support/mod.rs
