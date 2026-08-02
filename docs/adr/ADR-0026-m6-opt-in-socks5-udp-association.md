@@ -43,9 +43,16 @@ RFC 1928 fragmentation 是 optional，M6 不实现 reassembly，所有 `FRAG!=0`
 每个 SOCKS UDP association 拥有一个现有 `UdpClientSession`；所有 live outbound
 session IDs 在一个有界、serialized set 内执行既有八次 collision check。Datagram
 仍使用 `core::Datagram`，SIP022 packet/auth/replay/binding 仍由
-`ferrum2-shadowsocks` 拥有。Association capacity、allocated bytes、depth-four queues、
-idle state 和 generation 复用 `UdpSessionManager`；TCP child ownership、cancellation
-和 awaited shutdown 复用 `BoundedSupervisor`/`ProcessSupervisor`。
+`ferrum2-shadowsocks` 拥有。现有 owning response preparation 内部复用一个新增的
+borrowed authenticated view：它只借用已计费 scratch 并暴露 bounded target、payload
+offset/slice/length 和 opaque commit；composition 先预留 exact queue/byte capacity，再唯一一次
+materialize `Datagram` 并 commit。不存在第二套 parser 或 protocol owner。
+
+Association capacity、allocated bytes、depth-four queues、idle state 和 generation 复用
+`UdpSessionManager`。T02 只把 manager 现有 per-handle `idle_deadline` 和
+`cancellation` 操作提升为 association 可用的 public interface；不新增 trait、owner 或
+direct loop。TCP child ownership、process cancellation 和 awaited shutdown 继续复用
+`BoundedSupervisor`/`ProcessSupervisor`。
 
 `ferrum2-socks5` 的 interface 只增加 command result 和 SOCKS UDP header decode/
 encode；它不拥有 socket、runtime、upstream 或 config policy。Client binary 是唯一
@@ -72,6 +79,9 @@ composition adapter。不存在第二个 adapter，因此不新增 generic UDP r
   TCP peer IP remains the authority；rejected。
 - **Generalize `DirectUdpRuntime`:** its direct-target socket semantics do not match a
   SOCKS-to-SIP022 client association；a one-adapter trait would be shallow；rejected。
+- **Duplicate idle/cancellation state in the client:** splits one session generation across
+  two clocks/owners；promoting the manager's two existing per-handle operations is smaller；
+  rejected。
 
 ## Sources
 

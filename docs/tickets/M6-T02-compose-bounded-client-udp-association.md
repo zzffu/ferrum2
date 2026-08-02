@@ -7,6 +7,9 @@ owns:
   - crates/ferrum2-config/src/lib.rs
   - crates/ferrum2-config/tests/config_contract.rs
   - crates/ferrum2-shadowsocks/src/udp.rs
+  - crates/ferrum2-shadowsocks/tests/**
+  - crates/ferrum2-runtime/src/udp.rs
+  - crates/ferrum2-runtime/tests/udp_runtime.rs
   - bins/ferrum2-client/**
   - tests/fixtures/config/client-*.toml
   - tests/m0-harness/src/local_support/mod.rs
@@ -30,9 +33,17 @@ connection into a complete local public UDP path。
       peer IP authority plus fixed/learned port prevents an open relay, and invalid/wrong-source
       datagrams mutate nothing。
 - [ ] Three methods and IPv4/IPv6/domain targets reuse existing SIP022 packet/replay/binding
-      state with live-ID collision prevention and reservation-before-commit ordering。
-- [ ] Session/byte/queue/idle limits, control EOF, I/O, cancel, graceful/forced shutdown and
-      restart/rebind return every process/runtime/socket owner to baseline。
+      state with live-ID collision prevention。Authenticated response preparation borrows
+      validated target/payload from precharged scratch；exact reservation precedes its sole
+      owned materialization and commit。
+- [ ] T02 promotes only the manager's existing per-handle cancellation/deadline operations；
+      it adds no runtime loop/trait。Session/byte/queue/idle limits and generation cancellation
+      remain owned by `UdpSessionManager`。
+- [ ] One association alternates at least two targets；all three methods × IPv4/IPv6/domain
+      pass exact composed maximum and silently drop one byte over before allocation/mutation。
+- [ ] Control EOF/reset/write-half-close、idle、both socket I/O directions、child cancel、
+      graceful/forced shutdown、sibling-root failure and restart/rebind return every session-ID/
+      process/runtime/socket owner to baseline within the configured bound。
 - [ ] Existing UDP families record only closed client-role values and no secret、endpoint、
       server or target cardinality；TCP CONNECT/server UDP behavior remains unchanged。
 - [ ] Exact T02 commands, Full, MSRV, ticket budget and blocking Architect/QA review pass。

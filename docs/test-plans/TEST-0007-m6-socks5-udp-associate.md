@@ -9,11 +9,11 @@
 | Requirement | Primary evidence | Gate |
 |---|---|---|
 | M6-MUST-01 config compatibility | preserved client fixture/value/side-effect table plus explicit/disabled/range negatives | T02 product |
-| M6-MUST-02 control lifetime | public SOCKS command interface tests and paused-time client setup/control-close table | T01/T02 |
+| M6-MUST-02 control lifetime | exact failure-to-REP table, one-shot reply owner and paused-time setup/control-close table | T01/T02 |
 | M6-MUST-03 UDP wire | borrowed decode/encode IPv4/IPv6/domain table, exact truncation/RSV/FRAG/erratum bounds | T01 protocol |
 | M6-MUST-04 endpoint authorization | request-hint table plus same-IP/different-port/wrong-IP/invalid-first race snapshots | T02 security |
-| M6-MUST-05 SIP022 ordering | live-ID collision table and existing packet/replay/binding tests composed inside runtime reservation | T02 security |
-| M6-MUST-06 resources/shutdown | session/permit/queue/allocated-byte owner snapshots and control/idle/cancel/forced/rebind table | T02 runtime |
+| M6-MUST-05 SIP022 ordering | borrowed authenticated view, reserve-before-materialize, live-ID collision and replay/binding commit table | T02 security |
+| M6-MUST-06 resources/shutdown | session/permit/queue/byte/task/socket snapshots across every specified terminal cause | T02 runtime |
 | M6-MUST-07 observability | existing family identity with client-role deltas and secret/endpoint/target sentinels | T02 operator |
 | M6-MUST-08 product/interop | three-method local process matrix and same-SHA external UDP `12/12` with FerrumClient binary rows | T02/T03 release |
 
@@ -24,6 +24,10 @@
 - Through the new command interface, prove fragmented TCP request reads, zero/nonzero ports
   across valid address encodings, malformed hints, single success/failure reply ownership
   and retained control stream。
+- Table-drive the exact control mapping：absent/disabled and `BIND` → `REP=07`；unsupported
+  `ATYP` → `REP=08`；complete invalid hint/setup failure → `REP=01`；truncated/I/O/deadline
+  → no request reply；complete setup → one `REP=00`。Every reply-write failure closes and
+  rolls back without a second write。
 - Table-drive standalone UDP IPv4/IPv6/domain encode/decode, empty/max payload, each header
   truncation, nonzero RSV, every nonzero FRAG class, bad ATYP/domain/port and erratum-3198
   IPv6 overhead。Errors expose no packet/address value。
@@ -40,9 +44,22 @@ git diff --check
 
 - Preserved config fixtures prove absent `[udp]` remains disabled；explicit empty/enabled/
   disabled/min/max/invalid sections prove role-specific defaults and zero-resource check mode。
-- Public-interface and paused-time tables prove setup rollback、advisory address/port pin、first-invalid
-  non-pin、concurrent endpoint race、live session-ID collision 0..8、buffer/queue/session
-  pressure、response commit ordering、idle/control EOF/cancel/forced cleanup and metrics。
+- Public-interface and paused-time tables prove setup/reply-write rollback、advisory
+  address/port pin、first-invalid non-pin、concurrent endpoint race、live session-ID collision
+  0..8 and buffer/queue/session pressure。
+- A response preparation test proves authenticated target/payload remain borrowed offsets/slices
+  in the precharged scratch；forced queue/byte reservation failure performs no materialization、
+  replay/activity/endpoint commit or emission。Success reserves exact capacity, materializes
+  once, and uses the manager `commit_with` order。Runtime tests expose only the existing
+  per-handle cancellation/deadline operations and prove generation invalidation wakes the child。
+- On one association, alternate at least two targets and verify each response source header and
+  payload。At the composed seam, table all three methods × IPv4/IPv6/domain targets：the exact
+  smaller SOCKS/SIP022 maximum succeeds and one byte over silently drops before allocation、
+  encode、send or mutation；the IPv6 row uses 22-byte SOCKS overhead。
+- The lifecycle table activates a real association before control EOF、reset、write-half-close、
+  idle、application-facing/upstream I/O failure、child cancellation、graceful shutdown、forced
+  shutdown and sibling-root failure。Every row has a bounded completion and exact session-ID/
+  manager/permit/queue/byte/task/socket baseline plus endpoint rebind where observable。
 - Real processes send three datagrams for every method through
   application SOCKS UDP → ferrum2-client → SIP022 UDP → ferrum2-server → direct echo；focused
   rows cover IPv6/domain target, wrong source, FRAG drop, disabled command, control close,
@@ -53,7 +70,7 @@ git diff --check
 cargo test -p ferrum2-config -p ferrum2-shadowsocks -p ferrum2-runtime -p ferrum2-client --locked
 cargo test -p ferrum2-socks5 --locked
 cargo test -p ferrum2-m0-harness --test config_cli --test socks_udp_local_e2e --locked
-cargo clippy -p ferrum2-config -p ferrum2-shadowsocks -p ferrum2-client --all-targets --all-features --locked -- -D warnings
+cargo clippy -p ferrum2-config -p ferrum2-shadowsocks -p ferrum2-runtime -p ferrum2-client --all-targets --all-features --locked -- -D warnings
 cargo +1.85.0 check --workspace --all-targets --locked
 cargo fmt --all -- --check
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base <exact-ticket-base-sha> --candidate HEAD

@@ -24,7 +24,8 @@ buffers、queues、idle、tasks 和 shutdown 全部有界且可证明，不加�
 - [ ] Old client v1 documents keep UDP disabled and existing TCP behavior；explicit
       `[udp]` validates offline and enables only the new command path。
 - [ ] RFC 1928 control reply/lifetime、standalone UDP header、IPv4/IPv6/domain targets、
-      source-IP/port pin and silent drop behavior pass positive/negative tests。
+      exact failure mapping、source-IP/port pin、multi-target and silent drop behavior pass
+      positive/negative tests。
 - [ ] Every association uses one collision-safe SIP022 UDP client session and the existing
       runtime session/byte/queue/idle limits；no peer-sized allocation or accepted mutation
       precedes validation and reservation。

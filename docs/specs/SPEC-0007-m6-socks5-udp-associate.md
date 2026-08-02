@@ -31,8 +31,19 @@ schema v1 cohort、TCP `CONNECT`、three methods、wire/security 和 operator id
 - The client composition MUST recognize `CMD=03`, parse its request source hint, bind
   both association sockets and reserve bounded state before returning one success reply
   containing the actual application-facing IPv4 endpoint。
-- Disabled、malformed hint、capacity、bind/setup or reply failure MUST send the exact
-  applicable closed SOCKS failure then close within the existing handshake deadline。
+- Before reply commitment, the command path MUST use this exact closed mapping and send at
+  most one request reply：
+
+  | Condition | Observable action |
+  |---|---|
+  | UDP absent/disabled, or `BIND` | `REP=07` |
+  | Parsed request has unsupported `ATYP` | `REP=08` |
+  | Complete `CMD=03` has an invalid hint, or session/byte/random/key/socket setup fails | `REP=01` |
+  | Request is truncated, control I/O fails, or handshake deadline expires before a complete request | close without a request reply |
+  | Complete setup | exactly one `REP=00` with the actual relay endpoint |
+
+  Failure while writing the selected reply MUST roll back setup and close without attempting
+  a second reply。No UDP resource or success state survives a failed success-reply write。
 - The association MUST terminate when its TCP control connection terminates；idle、I/O、
   cancellation and process shutdown MAY terminate it earlier and MUST close the control。
 
@@ -64,8 +75,13 @@ schema v1 cohort、TCP `CONNECT`、three methods、wire/security 和 operator id
   method/PSK；all live client session IDs MUST use the existing bounded eight-draw collision
   check under one serialized registry and be removed on every terminal path。
 - Requests MUST reuse `core::Datagram` and existing SIP022 encode/counter semantics；
-  responses MUST authenticate、validate timestamp/type/address/binding and reserve runtime
-  capacity before atomic replay/association commit and SOCKS response emission。
+  borrowed SOCKS decode MUST reserve runtime capacity before payload ownership and encode。
+- Response preparation MUST authenticate and validate timestamp/type/address/binding into
+  already charged reusable scratch, returning one opaque borrowed view over validated target/
+  payload offsets without target/payload ownership allocation or replay/association mutation。
+  The caller MUST reserve the exact queue/byte capacity before materializing one `Datagram`；
+  materialization, atomic protocol commit, activity and enqueue MUST preserve that order before
+  SOCKS response emission。
 - Invalid、tampered、stale、duplicate、too-old、unbound or third-association responses
   MUST be silently dropped without plaintext、activity or client-endpoint mutation。
 - The connected upstream UDP socket MUST accept responses only from configured server。
@@ -75,14 +91,18 @@ schema v1 cohort、TCP `CONNECT`、three methods、wire/security 和 operator id
 
 - Active associations MUST consume both the existing bounded TCP child permit and one
   `udp.max_sessions` permit；active state MUST NOT be evicted to admit another association。
+- The association MUST obtain idle deadlines and manager removal/cancellation through the
+  existing per-handle `UdpSessionManager` state。Only those existing operations MAY become
+  public；the client MUST NOT duplicate an idle registry or generalize `DirectUdpRuntime`。
 - All receive/protocol/output/queued backing capacities MUST be charged once to the existing
   global allocated-capacity budget；per-direction queues remain fixed depth four。Kernel
   buffers remain OS-bounded and are not reported as user-space accounting。
 - Capacity/queue pressure MUST reject setup or silently drop only the affected datagram,
   release reservations and leave replay/endpoint/activity unchanged。
-- Each association owns exactly two UDP sockets inside its supervised TCP child。Control
-  close、idle、target/upstream I/O、cancel、graceful/forced shutdown and root failure MUST
-  have a bounded awaited path and return sessions、permits、queues、bytes and sockets to
+- Each association owns exactly two UDP sockets inside its supervised TCP child。Control EOF、
+  reset、write-half-close、idle、application-facing/upstream socket I/O failure、child cancel、
+  graceful/forced process shutdown and sibling-root failure MUST each have a bounded awaited
+  path and return session ID/manager entry、permits、queues、bytes、tasks and sockets to
   baseline with immediate endpoint rebind where observable。
 
 ### M6-MUST-07 — observability and secrecy
@@ -97,7 +117,11 @@ schema v1 cohort、TCP `CONNECT`、three methods、wire/security 和 operator id
 ### M6-MUST-08 — acceptance and qualification
 
 - Focused unit/public-interface tests MUST cover command bytes、codec bounds/negative rows、
-  source pin races、collision、capacity、idle/control/shutdown and secret-free telemetry。
+  failure replies、source pin races、collision、capacity、borrow-reserve-materialize ordering、
+  one-association/multi-target behavior、idle/control/I/O/root/shutdown and secret-free telemetry。
+- A composed all-method × IPv4/IPv6/domain table MUST prove the exact smaller of SOCKS and
+  SIP022 payload maxima succeeds and one byte over drops before allocation、encode、send or
+  accepted-state mutation；IPv6 MUST use the 22-byte corrected header。
 - A bounded real-process matrix MUST cover all three methods plus focused IPv6/domain target、
   wrong-source、fragment、disabled、control-close、saturation and restart/rebind rows。
 - Existing external UDP `M2-UDP-INT-001..012` MUST rerun unchanged IDs；six FerrumClient

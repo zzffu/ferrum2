@@ -90,10 +90,14 @@ fully-valid datagram 固定 port。该宽容不会允许第三方 IP，也不会
   SIP022 UDP。domain 保持为 domain 交给现有 server direct resolver；client 不解析
   DNS，也不选择 route。
 - upstream → client：upstream socket 连接到配置中的固定 Shadowsocks server endpoint，
-  只接收该 peer；`UdpClientSession::prepare_response` 完成 authentication、timestamp、
-  type、request/response binding 和 replay precheck。取得 response queue/byte capacity
-  后调用 `commit_response`，再编码 `RSV=0000, FRAG=00, source ATYP/address/port,
-  payload` 发给已锁定 client endpoint。
+  只接收该 peer；`UdpClientSession` 把现有 owning preparation 内部重构为一个借用
+  precharged scratch 的 authenticated view，完成 authentication、timestamp、type、
+  request/response binding 和 replay precheck，并保留 validated target/payload offsets，
+  但不分配 target/payload owner 或 mutation。
+  Composition 由 view 得到 exact bounded payload length，取得 response queue/byte capacity
+  后唯一一次 materialize `Datagram`，再以 manager `commit_with` 原子调用
+  `commit_response`，最后编码 `RSV=0000, FRAG=00, source ATYP/address/port, payload`
+  发给已锁定 client endpoint。Existing owning API 可复用该 view，不复制 parser。
 - 一个 UDP association 可向多个 target 发包；TCP request hint 不是 target。IPv4、
   IPv6 和 bounded ASCII domain target 都沿用现有 `TargetAddr` 规则，target port zero
   静默丢弃。零长度 UDP DATA 不因 SOCKS 层单独拒绝。
@@ -112,11 +116,12 @@ fully-valid datagram 固定 port。该宽容不会允许第三方 IP，也不会
   admission 复用 `UdpRuntimeLimits`、`UdpSessionManager`、`UdpBufferBudget`、固定
   per-direction queue depth 4、opaque generation 和 `OwnerRegistry`。server-only
   `DirectUdpRuntime` 的 plaintext direct-send loop 不可原样复用于 client upstream；只
-  复用其 capacity/commit/cancellation primitives 和 shutdown pattern。
+  复用其 capacity/commit/cancellation primitives 和 shutdown pattern。T02 只把 manager
+  已有 per-handle cancellation 与 idle deadline 操作提升为 public；不新增 loop 或 trait。
 - 每个实际 allocation 按 backing capacity 计入同一 global UDP budget，包括 receive
   wire、encode output、`UdpPacketScratch` 和 queued `Datagram`。reservation 必须先于
-  allocation/accepted-state mutation；等待 budget 的 future 必须同时可被 control 和
-  process cancellation 终止。
+  allocation/accepted-state mutation；capacity failure 静默 drop 且不能 materialize owned
+  payload。任何实际等待同时受 per-handle、control 和 process cancellation 终止。
 - TCP EOF/reset/half-close 是立即终止条件。idle expiry 是额外有界 profile：它关闭
   control TCP 与两个 UDP sockets，使 client 不会留下看似存活但已失效的 control。
   process graceful shutdown 通过既有 `ProcessSupervisor` deadline drain，然后对剩余
@@ -183,8 +188,8 @@ fully-valid datagram 固定 port。该宽容不会允许第三方 IP，也不会
 |---|---|---|
 | SOCKS greeting/request/reply/address codec | extend in place; preserve CONNECT tests and failure bytes | `crates/ferrum2-socks5/src/lib.rs::{Socks5Inbound::accept,read_target,SocksReplyPending}`; `crates/ferrum2-socks5/tests/{connect,negative}.rs` |
 | Runtime-neutral target/datagram | use only UDP header target, not request endpoint hint | `crates/ferrum2-core/src/lib.rs::{TargetAddr,Datagram}`; `TargetAddr` correctly rejects target port zero while UDP request hint must allow zero |
-| SIP022 UDP client protocol | one `UdpClientSession` per association; reuse encode, authenticated prepare/commit, replay/binding, three method profiles and payload calculation | `crates/ferrum2-shadowsocks/src/udp.rs::{UdpClientSession,UdpPacketScratch,max_udp_payload_len}` and `crates/ferrum2-shadowsocks/tests/{udp_packets,udp_replay,udp_sessions}.rs` |
-| Bounded UDP state | reuse limits, byte reservations, queue depth, provisional commit, generation invalidation and owner counters | `crates/ferrum2-runtime/src/udp.rs::{UdpRuntimeLimits,UdpBufferBudget,UdpSessionManager,PendingUdpSession,PendingUdpDatagram}`; do not reuse `DirectUdpRuntime`'s direct-target send semantics |
+| SIP022 UDP client protocol | one `UdpClientSession` per association; refactor owning prepare around one non-allocating borrowed authenticated view, then reuse encode/commit, replay/binding, three method profiles and payload calculation | `crates/ferrum2-shadowsocks/src/udp.rs::{UdpClientSession,UdpPacketScratch,max_udp_payload_len}` and `crates/ferrum2-shadowsocks/tests/{udp_packets,udp_replay,udp_sessions}.rs` |
+| Bounded UDP state | reuse limits, byte reservations, queue depth, provisional commit, generation invalidation and owner counters; promote only existing per-handle cancellation/idle-deadline operations | `crates/ferrum2-runtime/src/udp.rs::{UdpRuntimeLimits,UdpBufferBudget,UdpSessionManager,PendingUdpSession,PendingUdpDatagram}`; do not reuse `DirectUdpRuntime`'s direct-target send semantics |
 | Process lifecycle | keep TCP association under existing bounded child and add UDP owners to the same cancellation lineage | `bins/ferrum2-client/src/run.rs::{run_with_registry,ClientTcpRoot,client_connection}`; `ferrum2_runtime::{ProcessRoot,ProcessSupervisor,BoundedSupervisor}` |
 | Typed config | add existing validated `UdpConfig` to client root; preserve `schema_version = 1` and validate before bind | `crates/ferrum2-config/src/lib.rs::{ValidatedClientConfig,UdpConfig,validate_client,validate_udp}`; currently only `ValidatedServerConfig` consumes it |
 | External providers | reuse exact download/hash/version/license/safe-extraction and UDP echo fixtures | `tests/interop/versions.toml`, `tests/m0-harness/src/external_support/mod.rs`, existing M2 UDP qualification code |
@@ -193,14 +198,14 @@ fully-valid datagram 固定 port。该宽容不会允许第三方 IP，也不会
 
 | ID | Risk | Primary evidence that must fail on regression |
 |---|---|---|
-| M6-R01 | command/config refactor changes existing CONNECT/BIND/no-auth bytes or silently enables UDP for old client configs | existing SOCKS package suite plus table-driven UDP request success/disabled/unsupported/malformed exact replies；config tests prove omitted `[udp]` and `enabled=false` yield `REP 07`, explicit enabled table is required |
+| M6-R01 | command/config refactor changes existing CONNECT/BIND/no-auth bytes or silently enables UDP for old client configs | exact table：disabled/`BIND`→`REP 07`、unsupported `ATYP`→`REP 08`、complete invalid/setup→`REP 01`、incomplete→no reply、complete setup→one `REP 00`；reply-write failure never retries；config proves omitted/disabled behavior |
 | M6-R02 | request address is trusted, wrong process steals response, compatible zero-port form regresses, or malformed first packet pins endpoint | deterministic source-address seam tests: wrong IP drop, nonzero hinted-port mismatch drop, all-zero and nonzero-address/zero-port first-valid lock, later wrong-port drop, no state/forwarding before lock |
 | M6-R03 | parser accepts nonzero RSV/FRAG, truncated/unknown ATYP, empty/non-ASCII/oversize domain, target port zero, or allocates from peer length | one bounded negative table asserts silent drop, zero upstream sends, unchanged protocol/runtime state and unchanged allocated-capacity counters |
 | M6-R04 | one association is incorrectly bound to one target | one control/UDP endpoint alternates at least two target addresses and receives correctly attributed response headers |
 | M6-R05 | SOCKS and SIP022 overhead composition truncates or exceeds 65,507 | per method and ATYP: exact maximum succeeds, one-byte-over drops; include verified 22-byte IPv6 header and `max_udp_payload_len` cross-check |
-| M6-R06 | unauthenticated/spoofed/replayed upstream response reaches client or advances state out of order | connected upstream peer test plus existing SIP022 negative vectors; public-path mutation test reserves queue/bytes before `commit_response` and sends nothing on failed prepare/reservation |
-| M6-R07 | TCP close, half-close, idle expiry or process shutdown leaks association | paused-time owner test and real sockets: admitted UDP signal, control close, immediate no-forward, awaited return to baseline for sessions/sockets/tasks/queues/bytes; process graceful and forced paths |
-| M6-R08 | session/buffer/queue saturation evicts active flow, overcommits memory, or blocks shutdown | exact configured limits with one-over admission/drop, queue depth 4, backing-capacity accounting including fixed scratch, cancellation while waiting for budget, deterministic expired-only replacement |
+| M6-R06 | unauthenticated/spoofed/replayed upstream response reaches client, allocates outside budget or advances state out of order | connected upstream peer plus existing SIP022 negatives；borrowed-view pointer remains in precharged scratch，forced reservation failure has no owned payload/commit/activity/emission，success reserves then materializes once |
+| M6-R07 | a terminal cause leaks association | after a live UDP signal, table control EOF/reset/write-half-close、idle、application/upstream I/O、child cancel、graceful/forced shutdown and sibling-root failure；each returns session ID/manager/permit/queue/byte/task/socket baselines and rebinds |
+| M6-R08 | session/buffer/queue saturation evicts active flow, overcommits memory, or blocks shutdown | exact configured limits with one-over admission/drop, queue depth 4, fixed-scratch accounting, capacity rejection before materialization and deterministic expired-only replacement |
 | M6-R09 | public client path only works against ferrum server or one method | the existing six FerrumClient method-major rows use the public SOCKS UDP driver against sing-box and shadowsocks-rust for each standard method; each case sends three distinct request/reply datagrams and verifies payload + source address + cleanup |
 | M6-R10 | external cases merely replay M2's socket-free example | the substituted FerrumClient adapter must negotiate public TCP `UDP ASSOCIATE`, use returned BND endpoint, retain then close control TCP, and observe association teardown; reuse provider provisioning, not old PASS claims |
 | M6-R11 | IPv4-only public listener accidentally expands to dual stack/DNS/routing | config and real-process tests keep configured TCP listen/upstream as IPv4 while UDP headers independently cover IPv4/IPv6/domain targets; no route decision or client DNS call exists |

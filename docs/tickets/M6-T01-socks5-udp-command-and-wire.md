@@ -23,6 +23,9 @@ or runtime policy。
 - [ ] The command interface retains the control stream and one-shot reply owner, parses a
       bounded RFC address plus zero/nonzero source port, and lets composition reply only
       after socket setup。
+- [ ] Exact failures are fixed：disabled/`BIND` `REP=07`、unsupported `ATYP` `REP=08`、
+      complete invalid/setup `REP=01`、incomplete request no reply；a failed reply write
+      rolls back and never attempts a second reply。
 - [ ] UDP decode/encode supports IPv4/IPv6/ASCII-domain targets and exact payload while
       rejecting truncation、RSV、FRAG、ATYP、domain and zero-port failures before allocation。
 - [ ] Fragmentation errors are distinguishable only as a closed category so the caller can
