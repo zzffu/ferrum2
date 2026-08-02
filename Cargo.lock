@@ -333,6 +333,7 @@ dependencies = [
  "ghash",
  "hex",
  "serde_json",
+ "shadowsocks-crypto",
  "thiserror",
  "zeroize",
 ]
@@ -748,6 +749,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "shadowsocks-crypto"
+version = "0.7.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "blake3",
+ "chacha20poly1305",
+ "ghash",
+ "zeroize",
 ]
 
 [[package]]

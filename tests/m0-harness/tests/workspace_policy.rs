@@ -86,6 +86,7 @@ serde_core|1.0.229|registry+https://github.com/rust-lang/crates.io-index|67dca2c
 serde_derive|1.0.229|registry+https://github.com/rust-lang/crates.io-index|e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348
 serde_json|1.0.151|registry+https://github.com/rust-lang/crates.io-index|c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14
 serde_spanned|1.1.1|registry+https://github.com/rust-lang/crates.io-index|6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26
+shadowsocks-crypto|0.7.0||
 sharded-slab|0.1.7|registry+https://github.com/rust-lang/crates.io-index|f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6
 shlex|2.0.1|registry+https://github.com/rust-lang/crates.io-index|f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba
 signal-hook-registry|1.4.8|registry+https://github.com/rust-lang/crates.io-index|c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b
@@ -273,8 +274,8 @@ fn approved_lock_identities() -> Vec<LockIdentity> {
         .collect();
     assert_eq!(
         identities.len(),
-        114,
-        "the approved workspace baseline must contain 114 identities"
+        115,
+        "the approved workspace baseline must contain 115 identities"
     );
     let mut sorted = identities.clone();
     sorted.sort();
@@ -490,6 +491,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "tracing = { version = \"=0.1.44\", default-features = false, features = [\"std\"] }",
         "tracing-subscriber = { version = \"=0.3.23\", default-features = false, features = [\"fmt\", \"json\", \"env-filter\"] }",
         "prometheus-client = { version = \"=0.25.0\", default-features = false }",
+        "shadowsocks-crypto = { version = \"=0.7.0\", default-features = false, features = [\"v2\"] }",
         "aes-gcm = { version = \"=0.11.0\", default-features = false, features = [\"aes\", \"bytes\", \"zeroize\"] }",
         "chacha20poly1305 = { version = \"=0.11.0\", default-features = false, features = [\"bytes\", \"zeroize\"] }",
         "ghash = { version = \"=0.6.0\", default-features = false, features = [\"zeroize\"] }",
@@ -543,6 +545,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "prometheus-client",
         "serde",
         "serde_json",
+        "shadowsocks-crypto",
         "socket2",
         "tempfile",
         "thiserror",
@@ -614,6 +617,118 @@ fn crypto_manifest_declares_exact_primitive_edges_and_zeroize_anchors() {
     assert!(
         !dependencies.contains_key("chacha20poly1305"),
         "ChaCha20-Poly1305 must use the exact dotted workspace declaration"
+    );
+}
+
+#[test]
+fn controlled_shadowsocks_crypto_source_and_v2_graph_are_exact() {
+    let root = workspace_root();
+    let root_manifest = normalize_line_endings(
+        &fs::read_to_string(root.join("Cargo.toml")).expect("root manifest"),
+    )
+    .expect("root manifest line endings");
+    assert!(root_manifest.contains("exclude = [\"vendor/shadowsocks-crypto\"]"));
+    assert!(root_manifest.contains(
+        "shadowsocks-crypto = { version = \"=0.7.0\", default-features = false, features = [\"v2\"] }"
+    ));
+    assert!(root_manifest.contains(
+        "[patch.crates-io]\nshadowsocks-crypto = { path = \"vendor/shadowsocks-crypto\" }"
+    ));
+
+    let crypto_manifest =
+        fs::read_to_string(root.join("crates/ferrum2-crypto/Cargo.toml")).expect("crypto manifest");
+    assert!(crypto_manifest.contains("shadowsocks-crypto.workspace = true"));
+
+    let vendor = root.join("vendor/shadowsocks-crypto");
+    let provenance = fs::read_to_string(vendor.join("FERRUM_PATCH.md")).expect("provenance");
+    for exact in [
+        "shadowsocks-crypto 0.7.0",
+        "9339588f8aee0810546fd7e4dcc219fc4bda2cfd0066dd277b7104d5113fd0c0",
+        "2affa6c39b30f7626137a1792c533610cf133ade",
+        "Upstream license: MIT",
+    ] {
+        assert!(provenance.contains(exact), "missing provenance: {exact}");
+    }
+    let vcs = fs::read_to_string(vendor.join(".cargo_vcs_info.json")).expect("VCS info");
+    assert!(vcs.contains("2affa6c39b30f7626137a1792c533610cf133ade"));
+    let license = fs::read_to_string(vendor.join("LICENSE")).expect("vendor LICENSE");
+    assert!(license.starts_with("MIT License"));
+
+    let mut directories = vec![vendor.join("src")];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory).expect("vendor source directory") {
+            let path = entry.expect("vendor source entry").path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+                let source = fs::read_to_string(&path).expect("vendor Rust source");
+                assert!(
+                    !source.contains("unsafe"),
+                    "selected vendor source must remain safe: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    let metadata = metadata();
+    let packages = metadata["packages"].as_array().expect("packages");
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "shadowsocks-crypto")
+        .expect("patched package");
+    assert_eq!(package["version"], "0.7.0");
+    assert!(package["source"].is_null());
+    assert_eq!(package["license"], "MIT");
+    assert_eq!(package["rust_version"], "1.71");
+    assert!(
+        package["manifest_path"]
+            .as_str()
+            .expect("vendor manifest path")
+            .replace('\\', "/")
+            .ends_with("vendor/shadowsocks-crypto/Cargo.toml")
+    );
+
+    let crypto = packages
+        .iter()
+        .find(|package| package["name"] == "ferrum2-crypto")
+        .expect("crypto package");
+    let edge = crypto["dependencies"]
+        .as_array()
+        .expect("crypto dependencies")
+        .iter()
+        .find(|dependency| dependency["name"] == "shadowsocks-crypto")
+        .expect("controlled dependency edge");
+    assert_eq!(
+        edge["source"],
+        "registry+https://github.com/rust-lang/crates.io-index"
+    );
+    assert_eq!(edge["req"], "=0.7.0");
+    assert!(edge["kind"].is_null());
+    assert_eq!(edge["uses_default_features"], false);
+    assert_eq!(edge["features"], serde_json::json!(["v2"]));
+
+    let node = resolve_node(
+        &metadata,
+        package["id"].as_str().expect("patched package ID"),
+    );
+    assert_eq!(node["features"], serde_json::json!(["v2"]));
+    let dependencies: BTreeSet<_> = node["deps"]
+        .as_array()
+        .expect("patched package dependencies")
+        .iter()
+        .map(|dependency| dependency["name"].as_str().expect("dependency name"))
+        .collect();
+    assert_eq!(
+        dependencies,
+        BTreeSet::from([
+            "aes_gcm_v2",
+            "aes_v2",
+            "blake3_v2",
+            "chacha20poly1305_v2",
+            "ghash_v2",
+            "zeroize",
+        ])
     );
 }
 
@@ -1409,8 +1524,8 @@ fn lock_package_identities_exactly_match_the_approved_workspace_baseline() {
 
     assert_eq!(
         actual.len(),
-        114,
-        "candidate lock must contain 114 packages"
+        115,
+        "candidate lock must contain 115 packages"
     );
     assert_eq!(
         actual, expected,
