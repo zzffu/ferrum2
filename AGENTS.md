@@ -24,6 +24,9 @@ and command definitions in their authoritative build/config files where possible
     `ferrum2-runtime` owns bounded I/O and process lifecycle;
     `ferrum2-config` and `ferrum2-observability` own operator surfaces.
     Binaries are composition roots.
+  - `ferrum2-crypto` preserves the public crypto seam and uses one exact, patched,
+    vendored `shadowsocks-crypto 0.7.0` `v2` backend. Protocol state machines remain
+    owned by `ferrum2-shadowsocks`.
   - Keep `core` free of concrete protocols, config formats, and async runtimes.
     Protocol modules do not own routing, process-global state, or CLI policy.
     Reuse `ProcessRoot`/`ProcessSupervisor` for independently managed runtime
@@ -75,7 +78,7 @@ and command definitions in their authoritative build/config files where possible
 - Repository hygiene:
   - Commit `Cargo.lock`; do not commit build output, local evidence, real PSKs,
     or production endpoints. Reviewed non-secret protocol fixtures are source.
-  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M4 are
+  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M5 are
     closed; historical evidence belongs in milestone/history documents, not in
     this context summary.
 

@@ -1,31 +1,36 @@
 # CI 与验证状态
 
-## M5 validating / close BLOCKED 状态
+## M5 closed 状态
 
-- **Local-only candidate:** exact
-  `816fa7b9a19a7c0f805280063dce837caa751c3a`, tree
-  `5d4040e0d213e3fbaf08503a714ad0b44f7482ce`, product parent
+- **Accepted exact-SHA qualification:** exact
+  `6ca043460f0a5233a0b39c9931b4f3f3a22f1cba`, tree
+  `3474c7896bb8e3042e323991616418c2a93c76b4`, product commit
   `db4f100c35a2fc6615828b9aa176e8ede62eb855`, baseline
-  `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`。该提交只在产品parent后增加
-  三份M5 control文档；worktree、diff与exact object检查通过。
-- **Local qualification:** authoritative Full串行通过；workspace all-features
-  `261 passed / 0 failed / 2 expected ignored`，exact ignored lifecycle `1/1`
-  （libtest `127.09s`），Rust 1.85 workspace all-target和architecture/workspace
-  policy `26/26`通过。单一path `shadowsocks-crypto 0.7.0`只解析`v2`，正常产品
-  graph只有该backend，primitive/KDF oracle仅为dev edge；provenance、MIT license、
-  unsafe/旧实现absence与协议source边界复核通过。
-- **Budget/review:** milestone budget为`PASS_HOLD`：code `14066`、tests `20985`、
-  examples `132`、ratio `1.491895`、debt `107`。不得ratchet baseline。Architect
-  local review `PASS`且零finding；QA local verdict `PASS`，但
-  `QA-T03-001`为closing blocker。
-- **Hosted qualification:** `NOT RUN / UNAUTHORIZED`；run、attempt及job IDs均为
-  `—`。缺少同一exact SHA/run/attempt的quality/security/process、hosted MSRV、
-  Windows MSVC/Linux GNU/Linux musl、TCP `12/12`、UDP `12/12`、performance、
-  resource、drain、cleanup和final summary。因此`816fa7b`不是accepted/closed SHA。
-- **Authorization boundary:** 未发生push、rerun、dispatch、PR、tag、release或
-  publication，也未拼接历史run。本blocked记录形成docs-only descendant；未来若
-  获独立授权，必须以当时clean integration HEAD重新执行完整local与hosted
-  same-SHA资格。
+  `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`. Automatic push run
+  [`30743888837/1`](https://github.com/zzffu/ferrum2/actions/runs/30743888837)
+  completed `success`; all eight jobs passed.
+- **Local qualification:** serial Full passed; workspace all-features reported
+  `261 passed / 0 failed / 2 expected ignored`, exact lifecycle `1/1` (libtest
+  `127.49s`), Rust 1.85 and architecture/workspace policy `26/26` passed. The normal
+  product graph contains only patched `shadowsocks-crypto 0.7.0` with exact `v2`;
+  provenance, MIT license, unsafe/old-backend absence and protocol-source boundary
+  checks passed.
+- **Hosted qualification:** quality/security/process, MSRV, Windows MSVC, Linux GNU,
+  Linux musl and final aggregation passed. Interop recorded TCP `12/12` and UDP
+  `12/12`, both with cleanup. Performance recorded ferrum/reference medians
+  `138726604/484138461`, ratio `0.286543242`, signed difference `-71.345675840%`,
+  sessions `10000`, samples `180`, RSS windows `6/6`, drain and cleanup `PASS`.
+- **Hosted jobs:** quality `91486022727`, MSRV `91486022717`, Windows MSVC
+  `91486022736`, Linux GNU `91486022730`, Linux musl `91486022743`, interop
+  `91486022695`, performance `91486022764` and qualification `91489792739` all
+  completed `success` in the accepted run/attempt.
+- **Budget/review:** milestone budget `PASS_HOLD`: code `14066`, tests `20985`,
+  examples `132`, ratio `1.491895`, debt `107`; baseline unchanged. Final Architect
+  and QA verdicts were `PASS`; `QA-T03-001` closed and no blocking finding remains.
+  `QA-T03-N01` records the nonblocking anonymous raw-log download limitation.
+- **Authorization boundary:** one authorized non-force push was consumed and revoked.
+  No rerun, dispatch, second push, PR, tag, release or publication occurred or is
+  authorized; this local docs-only closeout is not hosted evidence.
 
 ## M4 closed 状态
 

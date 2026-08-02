@@ -21,15 +21,17 @@ docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4已以exact
 `9b379a426853d86a184464f6fd8c73081b464535`、GitHub Actions run
 `30730883667/1`的performance、Full/security/process、MSRV、TCP/UDP `24/24`、
 三平台、test budget和final qualification证据关闭；local closeout source是
-docs-only descendant `a38a1e84c90a7e03c047eaa4e275fc7ed3410cdb`。M5当前为
-`validating`且close `BLOCKED`：T01、T01R和T02已完成，local-only exact
-`816fa7b9a19a7c0f805280063dce837caa751c3a`通过Full、review与budget；T03因
-`QA-T03-001`及未授权/未运行hosted资格而`blocked`。未执行任何remote动作。
+docs-only descendant `a38a1e84c90a7e03c047eaa4e275fc7ed3410cdb`。M5已以exact
+`6ca043460f0a5233a0b39c9931b4f3f3a22f1cba`、GitHub Actions run
+`30743888837/1`的Full/security/process、MSRV、TCP与UDP各`12/12`、三平台、
+performance/resource、test budget和final qualification证据关闭；本地closeout
+source是该qualified SHA之后的专用docs-only提交。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
-`docs/handoffs/HANDOFF-M3-2026-07-30.md`，M4 handoff 位于
-`docs/handoffs/HANDOFF-M4-2026-08-02.md`。
+`docs/handoffs/HANDOFF-M3-2026-07-30.md`，M4/M5 handoff 位于
+`docs/handoffs/HANDOFF-M4-2026-08-02.md`和
+`docs/handoffs/HANDOFF-M5-2026-08-02.md`。
 
 ## 依赖顺序
 
@@ -48,8 +50,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
 完成三目标 native qualification。M4已在同exact SHA上完成可复现吞吐基线、
 10,000 idle sessions资源资格、Full、interop和三平台收敛；v0 preview已获得
-资格但未打包、发布或公开。M5已冻结单实现迁移、安全patch边界与关闭证据，
-执行按T01→T02→T03串行推进。
+资格但未打包、发布或公开。M5已完成单实现迁移、安全patch与同SHA关闭资格，
+公开crypto seam、协议状态机、wire和schema v1保持不变。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -646,7 +648,7 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 
 ## M5 — `shadowsocks-crypto` 单一密码实现迁移
 
-- **Status:** validating（qualification `BLOCKED` on `QA-T03-001`）
+- **Status:** closed
 - **Objective:** 保留`ferrum2-crypto`公开seam、`ferrum2-shadowsocks`状态机、wire和
   schema v1行为，把三种标准SIP022方法完整切换到受控patched
   `shadowsocks-crypto 0.7.0`，并删除本地cipher/KDF实现、无用依赖和任何双实现路径。
@@ -668,24 +670,25 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
   - M5-T01R：补齐checked raw TCP subkey owner，依赖T01，`done`；
   - M5-T02：原子切换TCP/UDP adapter并删除本地实现，依赖T01R，`done`；
   - M5-T03：在一个accepted exact SHA上完成本地与hosted资格及关闭证据，依赖T02，
-    `blocked`。
+    `done`。
 
   Dependency graph：
 
   ```text
-  M5-T01 pin/harden ── M5-T01R raw owner ── M5-T02 switch/delete ── M5-T03 blocked
+  M5-T01 pin/harden ── M5-T01R raw owner ── M5-T02 switch/delete ── M5-T03 done
   ```
 - **Deferred/out of scope:** protocol state machine替换、SIP023/EIH、多用户、多PSK、
   public UDP inbound、新method、schema/config变化、runtime crypto selection、上游发布、
   新benchmark框架或性能优化。
-- **Integrated commit:** local-only qualification candidate
-  `816fa7b9a19a7c0f805280063dce837caa751c3a`，tree
-  `5d4040e0d213e3fbaf08503a714ad0b44f7482ce`，product parent
-  `db4f100c35a2fc6615828b9aa176e8ede62eb855`；accepted hosted commit/run仍为`—`。
-- **Open blockers and risks:** local Full、Rust 1.85、dependency/security review与
-  milestone budget已通过；`QA-T03-001`因hosted push/run未授权且未运行而阻塞关闭。
-  不得把local evidence当作close或拼接旧run。未来获独立授权后，以当时clean
-  integration HEAD重跑完整local与hosted same-SHA gates；不恢复旧backend。
+- **Integrated commit:** accepted exact qualification
+  `6ca043460f0a5233a0b39c9931b4f3f3a22f1cba`，tree
+  `3474c7896bb8e3042e323991616418c2a93c76b4`，product commit
+  `db4f100c35a2fc6615828b9aa176e8ede62eb855`；automatic push run
+  [`30743888837/1`](https://github.com/zzffu/ferrum2/actions/runs/30743888837)成功。
+- **Open blockers and risks:** blocking findings为零；`QA-T03-001`已关闭。
+  Performance ratio仍仅作诊断；TCP auth scratch、UDP opaque prehash与zeroize owner
+  经Architect接受为非阻断残余风险。单次push scope已消费撤销；不授权rerun、
+  dispatch、second push、PR、package、release或publication。
 
 ## 决策登记
 
@@ -801,3 +804,4 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | 2026-08-02 | M4 close | exact `9b379a4` run `30730883667/1`通过performance、Full/security/process、MSRV、TCP/UDP `24/24`、三平台、test budget与final qualification；M4 closed | TCP_NODELAY后ferrum/reference medians为`50860305/476470749` B/s、ratio `0.106743814`、difference `-89.325618602%`；THP apply/restore、10k、180/180、6/6、drain、cleanup全部PASS，ratio仍仅诊断 | Formal close review及finding closure记录于`docs/ci-status.md`；单次non-force push scope消费撤销；未rerun/dispatch/PR/package/release/publish；本地closeout不再push |
 | 2026-08-02 | M5 plan | M5改为`planned`；接受exact vendored/controlled-patch单实现决策、SPEC/TEST-0006及T01→T02→T03串行DAG | 原包的TCP nonce、zeroization与AES-UDP header API不足以由纯wrapper同时满足安全语义和删除旧实现；最小patch限定于crypto primitive边界并复用既有KAT、interop、MSRV、三平台和performance harness | baseline `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`；M5 research、ADR-0025、SPEC/TEST-0006及三票；plan-only，无产品修改、push、hosted run、release或publication |
 | 2026-08-02 | M5 local qualification blocked | T01/T01R/T02完成；local-only exact `816fa7b`通过Full、Rust 1.85、review与milestone budget，T03改为`blocked`、M5为`validating`/close `BLOCKED` | required same-SHA hosted三平台、TCP `12/12`、UDP `12/12`、performance/resource/final summary未获push授权且未运行；`QA-T03-001`禁止local替代或旧run拼接 | Architect local `PASS`；QA local `PASS`/overall `BLOCK`；无remote、ratchet、release或publication；等待新的独立exact-SHA授权 |
+| 2026-08-02 | M5 close | exact `6ca0434` run `30743888837/1`通过Full/security/process、MSRV、TCP与UDP各`12/12`、三平台、performance/resource、test budget与final qualification；M5 closed | performance记录ferrum/reference `138726604/484138461` B/s、ratio `0.286543242`、difference `-71.345675840%`；10k、180/180、6/6、drain、cleanup全部PASS，ratio仍仅诊断 | Final Architect/QA均`PASS`，`QA-T03-001`关闭；单次non-force push scope消费撤销；未rerun/dispatch/PR/package/release/publish，本地closeout不再push |

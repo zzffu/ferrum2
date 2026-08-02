@@ -82,3 +82,19 @@ roadmap、CI status、handoff and the accepted budget baseline。Those mechanica
 close actions are resolved by the closeout commit。ADR-0023's elapsed
 compatibility window and proposed M4 performance/resource qualification remain
 future contract obligations, not open M3 blockers。
+
+## M5 close review notes
+
+### QA-T03-N01 — Anonymous raw-log download limitation
+
+- **Milestone/ticket:** M5；M5-T03。
+- **Reviewer/verdict:** QA `PASS`。
+- **Reviewed candidate/run:** `6ca043460f0a5233a0b39c9931b4f3f3a22f1cba`；
+  `30743888837/1`。
+- **Impact:** anonymous GitHub raw-log download returned HTTP 403/rate-limit
+  responses. Public run/job metadata, the logged-in job pages, exact completion
+  markers and the fail-closed final job consistently proved every required gate;
+  no M5 evidence is missing or spliced.
+- **Follow-up trigger:** only if a future qualification cannot be audited through
+  public metadata and visible job evidence, add a separately authorized read-only log
+  retrieval capability. Do not reopen M5 for this access limitation alone.

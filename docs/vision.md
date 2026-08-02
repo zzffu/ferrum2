@@ -122,7 +122,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是现状而�
 | M2 | 三种方法的 UDP 协议 API、bounded session/replay state 和完整 UDP 互操作矩阵 | closed |
 | M3 | 稳定运维契约、生命周期证明和三目标平台资格 | closed |
 | M4 | 可复现性能基线、资源门与 v0 preview integrated qualification | closed |
-| M5 | `shadowsocks-crypto`作为三种SIP022方法的唯一内部密码实现 | planned |
+| M5 | `shadowsocks-crypto`作为三种SIP022方法的唯一内部密码实现 | closed |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -150,5 +150,9 @@ MSRV、TCP/UDP `24/24`、三平台、test budget 与 final qualification 在同�
 `6/6`、drain 与 cleanup 通过。M4 qualified but did not package or publish the v0
 preview；remote scope 已消费撤销。
 
-M5 planning baseline为`ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`；当前仅冻结
-single-backend迁移、安全patch边界和关闭证据，尚未修改产品或取得资格。
+M5 由 exact `6ca043460f0a5233a0b39c9931b4f3f3a22f1cba` automatic push run
+`30743888837/1` 关闭：patched vendored `shadowsocks-crypto 0.7.0` 成为三种
+SIP022方法唯一正常产品cipher/KDF backend，公开crypto seam、协议状态机、wire和
+schema v1保持不变。Local Full、Rust 1.85、dependency/security review、TCP/UDP
+各`12/12`、三平台、performance/resource与final qualification全部通过；单次push
+scope已消费撤销，未package、release或publish。
