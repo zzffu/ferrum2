@@ -17,19 +17,16 @@ IPv6 UDP real-process 证据关闭。M3 已由 exact qualified product
 `d9e59d787c3fe78dfca778ee8a36668a45387368`、本地 full gate 与 GitHub
 Actions run `30494736004` attempt 1 的七项成功、TCP/UDP 各 12/12、三目标
 native lifecycle/linkage/hash 和关闭审查证据关闭；local closeout source 是
-docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4 planning
-baseline是`701925681df78ad83076ed67863bf4fecf46f77c`，状态为`executing`；
-M4-T01已在exact `7730ec7`集成到独立non-shipping tools package。Exact `35fb3f8`
-的run `30725843401/1`通过performance、MSRV、interop与三平台；performance完成
-throughput、THP apply/restore、10k、180/180、6/6及drain。Quality在产品启动前因
-既有`udp_local_e2e`并行端口竞争失败，final qualification因此fail closed。
-`M4-QUALITY-PORT-LOCK-001`已在exact `5f4fed7`完成并通过WSL repeated regression、
-native-ext4 harness、Full及budgets；T02继续`blocked`。`M4-REMOTE-FINAL-A1`已消费
-并撤销，不授权rerun、dispatch、push或其他remote动作。
+docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4已以exact
+`9b379a426853d86a184464f6fd8c73081b464535`、GitHub Actions run
+`30730883667/1`的performance、Full/security/process、MSRV、TCP/UDP `24/24`、
+三平台、test budget和final qualification证据关闭；local closeout source是
+docs-only descendant `9e788c8900ebfb031057c0d01941b823d8b11252`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
-`docs/handoffs/HANDOFF-M3-2026-07-30.md`。
+`docs/handoffs/HANDOFF-M3-2026-07-30.md`，M4 handoff 位于
+`docs/handoffs/HANDOFF-M4-2026-08-02.md`。
 
 ## 依赖顺序
 
@@ -45,13 +42,9 @@ M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验�
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
 same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
-完成三目标 native qualification。M4-T01已把non-test driver迁到独立tools
-package并在exact `7730ec7`通过双审与authoritative ticket budget；M4-T02 exact
-`a53a5d7`的hosted paired trajectories已证明真实匿名增长、伴随THP增长及最终平台，
-与延迟THP backing一致但未建立hosted allocator/kernel因果。Exact `2305945`的本地
-selected-profile修复及run `30725843401/1`的performance均已通过且不削弱30分钟
-测量和105%门槛。`M4-QUALITY-PORT-LOCK-001`本地修复、Full和budgets已通过；
-下一入口是取得绑定最终exact SHA的新remote run授权。
+完成三目标 native qualification。M4已在同exact SHA上完成可复现吞吐基线、
+10,000 idle sessions资源资格、Full、interop和三平台收敛；v0 preview已获得
+资格但未打包、发布或公开。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -582,7 +575,7 @@ selected-profile修复及run `30725843401/1`的performance均已通过且不削�
 
 ## M4 — 性能基线、资源与 v0 preview 资格确认
 
-- **Status:** executing
+- **Status:** closed
 - **Objective:** 在功能和平台 contract 冻结后建立可复现性能基线，并证明同一
   integrated commit 满足全部 v0 preview gates；本里程碑不执行发布。
 - **Entry conditions:** 已满足。M3 closed；SPEC/TEST-0005在planning baseline
@@ -615,9 +608,9 @@ selected-profile修复及run `30725843401/1`的performance均已通过且不削�
   - M4-QUALITY-PORT-LOCK-001：只串行该文件五个真实端口/进程测试，关闭run
     `30725843401/1`暴露的既有UDP local E2E released-port并行竞争；exact
     `5f4fed7`已通过WSL、Full和budgets，done；
-  - M4-T02：exact `35fb3f8` run `30725843401/1`的performance、MSRV、interop与
-    三平台通过，但quality因上述test-harness race失败；本地修复已完成，等待未来
-    新的exact-SHA remote授权。
+  - M4-TCP-NODELAY-001：共享accepted-stream与post-connect seam默认启用
+    TCP_NODELAY；exact `c0de9bd`已通过focused、Quick、Full和budgets，done；
+  - M4-T02：exact `9b379a4` run `30730883667/1`通过全部M4 gates，done。
 
   Dependency graph：
 
@@ -640,14 +633,11 @@ selected-profile修复及run `30725843401/1`的performance均已通过且不削�
   local selected-profile repair exact `230594544e88ab555e1718ba92721745705b572b`；
   final hosted attempt exact `35fb3f85633ee32ba5909ecbf5d74c4ad4a89f11`；
   local quality repair exact `5f4fed7e0835298fee820ece7b858db45ea34044`；
-  M4 accepted hosted qualification commit尚待未来新的授权run。
-- **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
-  driver迁到独立tools package解除；authoritative allowance、classifier、baseline
-  和evidence均不变。`M4-REMOTE-FINAL-A1`已由exact `35fb3f8`的一次non-force push
-  和automatic run消费并撤销；新的remote动作尚未授权。Provider
-  unavailable为BLOCKED，runner class不足、missing sample或cleanup失败为FAIL。GitHub-hosted image/hardware会
-  滚动，因此记录实际profile并在同一VM交错比较；吞吐比不作preview门槛，性能
-  压力不得绕过`unsafe` policy、安全或backpressure。
+  accepted hosted qualification exact `9b379a426853d86a184464f6fd8c73081b464535`；
+  local closeout descendant exact `9e788c8900ebfb031057c0d01941b823d8b11252`。
+- **Open blockers and risks:** blocking P0/P1 issues和blocking review findings为零。
+  GitHub-hosted image/hardware会滚动，因此保留实际profile并在同一VM交错比较；
+  吞吐比仍仅作诊断。不授权新的remote、package、release或publish动作。
 
 ## 决策登记
 
