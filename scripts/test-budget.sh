@@ -10,12 +10,9 @@ TOOL_VERSION=0.19.1
 SERIES=rustloc-0.19.1-tests-v1
 METRIC=tests
 BASELINE_FILE=ci/test-budget-baseline.txt
-TICKET_ALLOWANCE=120
-RATCHET_STEP_NUM=1
-RATCHET_STEP_DEN=20
-TARGET_RATIO_NUM=1
-TARGET_RATIO_DEN=1
-MIN_GROWTH=200
+# M6-T04 accepted ceiling at 0ab207c365574ebb17b8d7c755039e70ea9d1ab4.
+RATIO_CEILING_NUM=22853
+RATIO_CEILING_DEN=15032
 
 usage() {
   cat <<'USAGE'
@@ -251,6 +248,9 @@ compare_budget() {
   candidate_tests=$5
 
   [ "$candidate_code" -gt 0 ] || blocked candidate_code_zero
+  [ $(( candidate_tests * RATIO_CEILING_DEN )) \
+      -le $(( RATIO_CEILING_NUM * candidate_code )) ] \
+    || blocked ratio_ceiling_exceeded
 
   ticket_code_growth=$(positive_growth "$candidate_code" "$base_code")
   ticket_test_growth=$(positive_growth "$candidate_tests" "$base_tests")
@@ -268,40 +268,21 @@ compare_budget() {
     ratio_state=improved
   fi
 
-  [ "$ticket_debt" -le "$TICKET_ALLOWANCE" ] || blocked ticket_allowance_exceeded
-  [ "$anchor_debt" -le "$TICKET_ALLOWANCE" ] || blocked anchor_allowance_exceeded
-
-  required_num=$b_tests
-  required_den=$b_code
   baseline_eligible=no
-
-  if [ "$material_growth" -ge "$MIN_GROWTH" ]; then
-    step_num=$(( RATCHET_STEP_DEN * b_tests - RATCHET_STEP_NUM * b_code ))
-    step_den=$(( RATCHET_STEP_DEN * b_code ))
-    if [ $(( step_num * TARGET_RATIO_DEN )) -le $(( TARGET_RATIO_NUM * step_den )) ]; then
-      required_num=$TARGET_RATIO_NUM
-      required_den=$TARGET_RATIO_DEN
-    else
-      required_num=$step_num
-      required_den=$step_den
-    fi
-    [ $(( candidate_tests * required_den )) -le $(( required_num * candidate_code )) ] \
-      || blocked milestone_ratchet_missed
-    baseline_eligible=yes
-    status=PASS_ADVANCE
-  elif [ "$ratio_state" = regressed ]; then
+  if [ "$ratio_state" = regressed ]; then
     status=PASS_HOLD
   else
     status=PASS_ADVANCE
     baseline_eligible=yes
   fi
 
-  printf 'test_budget status=%s mode=%s code=%s tests=%s examples=%s ratio=%s ratio_state=%s ticket_code_growth=%s ticket_test_growth=%s ticket_debt=%s anchor_code_growth=%s anchor_test_growth=%s anchor_debt=%s material_growth=%s required=%s/%s required_ratio=%s baseline_eligible=%s\n' \
+  printf 'test_budget status=%s mode=%s code=%s tests=%s examples=%s ratio=%s ratio_state=%s ticket_code_growth=%s ticket_test_growth=%s ticket_debt=%s anchor_code_growth=%s anchor_test_growth=%s anchor_debt=%s material_growth=%s ceiling=%s/%s ceiling_ratio=%s baseline_eligible=%s\n' \
     "$status" "$mode" "$candidate_code" "$candidate_tests" "$candidate_examples" \
     "$(ratio "$candidate_tests" "$candidate_code")" "$ratio_state" \
     "$ticket_code_growth" "$ticket_test_growth" "$ticket_debt" \
     "$anchor_code_growth" "$anchor_test_growth" "$anchor_debt" "$material_growth" \
-    "$required_num" "$required_den" "$(ratio "$required_num" "$required_den")" \
+    "$RATIO_CEILING_NUM" "$RATIO_CEILING_DEN" \
+    "$(ratio "$RATIO_CEILING_NUM" "$RATIO_CEILING_DEN")" \
     "$baseline_eligible"
 }
 

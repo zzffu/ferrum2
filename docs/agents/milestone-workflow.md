@@ -44,9 +44,11 @@ are reported for review but are not part of this first `tests / code` series.
 - Tool: `rustloc 0.19.1`, Rust backend, CSV total row.
 - Metric: `tests / code`.
 - Accepted anchor: `ci/test-budget-baseline.txt`, bound to one exact commit.
-- Ticket and cumulative allowance: `120` test lines after positive code growth.
-- Milestone threshold: positive code growth plus positive test growth of `200` lines.
-- Ratchet: `required = max(1.0, baseline_ratio - 0.05)`.
+- Permanent exact ceiling: `22853 / 15032`, measured at M6 integration commit
+  `0ab207c365574ebb17b8d7c755039e70ea9d1ab4`.
+- Anchor ratchet: a candidate worse than the accepted anchor returns `PASS_HOLD`；an
+  equal or better candidate returns `PASS_ADVANCE` and may advance the anchor.
+- Growth and debt fields are diagnostics；they do not override the exact ceiling.
 
 Install once and enable the tracked hook:
 
@@ -74,7 +76,7 @@ implementation/configuration file cannot share that commit. CI validates every c
 commit in the complete event range and rejects merge-only control resolutions. During
 initial adoption the baseline commit may appear inside a multi-commit range: its exact
 source and non-Rust migration prefix are verified first, then the final candidate runs
-the normal allowance and ratio comparison. None of these rules is a budget waiver.
+the normal ceiling and anchor comparison. None of these rules is a budget waiver.
 
 The primary thread independently checks exact commits:
 
@@ -101,12 +103,15 @@ Definitions for anchor `A`, ticket base `B`, and candidate `Q`:
 growth(x, y) = max(0, x - y)
 ticket_debt = growth(tests_Q, tests_B) - growth(code_Q, code_B)
 anchor_debt = growth(tests_Q, tests_A) - growth(code_Q, code_A)
+admitted(Q) = tests_Q * 15032 <= 22853 * code_Q
 ```
 
-Both debts must be `<= 120`. For positive anchor growth
-`growth(code_Q, code_A) + growth(tests_Q, tests_A) >= 200`, the exact integer ratio
-comparison must satisfy the ratchet target. Smaller ratio regressions may return
-`PASS_HOLD`, but the accepted baseline never moves upward.
+The gate requires positive `code_Q` and evaluates `admitted(Q)` with exact integer
+cross-products；rounded display values never decide acceptance. An admitted candidate
+worse than anchor `A` returns `PASS_HOLD` with `baseline_eligible=no`；an equal or better
+candidate returns `PASS_ADVANCE` with `baseline_eligible=yes`. Therefore the accepted
+baseline never moves upward, and no mode can admit a ratio above the permanent ceiling.
+The two debt values and material growth remain review diagnostics only.
 
 Do not add inert product code or remove tests that cover an independent risk. Prefer
 merging duplicate cases, table-driven coverage, shared fixtures, public-seam tests, and
