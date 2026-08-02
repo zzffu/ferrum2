@@ -24,6 +24,8 @@ back all listeners atomically。
 
 - [ ] Multiple ordered TCP listeners、enabled same-address UDP listeners and optional metrics join
       one `ProcessSupervisor` transaction；no root polls before all roots prepare。
+- [ ] The server removes T01's fail-closed multi-inbound run guard only when every validated
+      inbound/outbound is consumed by this transaction。
 - [ ] `runtime.max_connections`、TCP replay、UDP sessions and allocated bytes are aggregate process
       owners rather than per-listener multipliers；backlog remains per listener。
 - [ ] Static inbound→direct mapping has no selector/fallback。TCP replays across listeners fail

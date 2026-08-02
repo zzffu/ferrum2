@@ -18,6 +18,8 @@ under the same process transaction，with aggregate TCP/UDP bounds and no runtim
 
 - [ ] Multiple SOCKS TCP listeners plus optional metrics prepare atomically and use the shared
       process connection admission owner established by T02。
+- [ ] The client removes T01's fail-closed multi-inbound run guard only when every validated
+      inbound/outbound is consumed by this transaction。
 - [ ] Every CONNECT/UDP ASSOCIATE captures only its inbound's resolved server context；a failed
       referenced server never falls back to a live sibling outbound，while shared-outbound mappings
       work from multiple listeners。

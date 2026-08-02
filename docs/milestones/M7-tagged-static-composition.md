@@ -79,4 +79,5 @@ integrate。No concurrent writer owns overlapping product paths。
 ## Blocker / next action
 
 No execution blocker。M7-T01 starts from exact ticket base `96a088e227dcfe415985c3deb081c807fb5e7d90`；
-remote push/run、PR、tag、release and publication remain unauthorized。
+its two binary-local fail-closed run guards prevent inert multi-entry execution until T02/T03
+consume the graph。Remote push/run、PR、tag、release and publication remain unauthorized。

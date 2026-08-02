@@ -8,6 +8,8 @@ owns:
   - crates/ferrum2-config/tests/config_contract.rs
   - tests/fixtures/config/*tagged*.toml
   - tests/m0-harness/tests/config_cli.rs
+  - bins/ferrum2-client/src/run.rs
+  - bins/ferrum2-server/src/run.rs
 ---
 
 # M7-T01 — Validate and normalize the tagged config graph
@@ -29,6 +31,9 @@ inbound/outbound，and return only complete static references before any runtime
       parse strings or perform fallible reference lookup after `load_*` succeeds。
 - [ ] `--check-config` covers legacy/tagged positives and graph negatives with zero runtime
       resource；no new dependency、protocol kind field or `Endpoint` interface is added。
+- [ ] Until T02/T03 consume the full graph，each binary rejects a multi-inbound run with the
+      existing `startup.protocol` error before observability、runtime or listener side effects；
+      one-entry legacy/tagged execution remains unchanged。
 - [ ] `TEST-0008` T01 commands、repository Quick、ticket budget and blocking Architect/QA review
       pass on one exact candidate。
 
@@ -45,6 +50,6 @@ Run `TEST-0008` T01 commands, then repository Quick commands from
 
 ## Rollback / risk
 
-One config-only revert restores legacy-only parsing。Do not leave an accepted tagged document that
-the binaries silently ignore；do not include tag/endpoint values in diagnostics to improve
-operator specificity。
+One config/guard revert restores legacy-only parsing。T02/T03 remove only their corresponding
+fail-closed guard when they consume the full graph。Do not include tag/endpoint values in
+diagnostics to improve operator specificity。

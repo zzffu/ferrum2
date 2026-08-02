@@ -32,6 +32,9 @@
   all tag/endpoint sentinels and PSK。The table pins the seven approved non-indexed tagged field
   identities。`--check-config` positive/negative rows prove no listener、connector、session
   table、buffer or task side effect。
+- Before T02/T03 consume the collections，a multi-inbound run must fail with the existing
+  `startup.protocol` error before observability/runtime/listener creation；a one-entry tagged run
+  remains behavior-equivalent to legacy。
 
 ```powershell
 cargo test -p ferrum2-config --locked
