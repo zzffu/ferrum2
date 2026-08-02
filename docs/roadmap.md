@@ -21,7 +21,9 @@ docs-only descendant `d784b06171723bb93fd467cea1a799f58f7d60b0`。M4已以exact
 `9b379a426853d86a184464f6fd8c73081b464535`、GitHub Actions run
 `30730883667/1`的performance、Full/security/process、MSRV、TCP/UDP `24/24`、
 三平台、test budget和final qualification证据关闭；local closeout source是
-docs-only descendant `a38a1e84c90a7e03c047eaa4e275fc7ed3410cdb`。
+docs-only descendant `a38a1e84c90a7e03c047eaa4e275fc7ed3410cdb`。M5已在
+ `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`完成plan contract，状态为`planned`；
+ 尚未执行产品迁移或任何remote动作。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -37,6 +39,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M2 | M1 closed | 三种方法的 UDP 协议 path 与 12 项 UDP 互操作矩阵 |
 | M3 | M1、M2 closed | 运维契约、生命周期和三目标平台资格 |
 | M4 | M3 closed | 性能/资源门及同一 commit 上的 v0 资格证明 |
+| M5 | M4 closed | `shadowsocks-crypto`成为三种SIP022方法的唯一内部密码实现 |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -44,7 +47,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 证据；M3 已冻结 operator/observability contract、统一 process lifecycle 并
 完成三目标 native qualification。M4已在同exact SHA上完成可复现吞吐基线、
 10,000 idle sessions资源资格、Full、interop和三平台收敛；v0 preview已获得
-资格但未打包、发布或公开。
+资格但未打包、发布或公开。M5已冻结单实现迁移、安全patch边界与关闭证据，
+执行按T01→T02→T03串行推进。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -639,6 +643,44 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
   GitHub-hosted image/hardware会滚动，因此保留实际profile并在同一VM交错比较；
   吞吐比仍仅作诊断。不授权新的remote、package、release或publish动作。
 
+## M5 — `shadowsocks-crypto` 单一密码实现迁移
+
+- **Status:** planned
+- **Objective:** 保留`ferrum2-crypto`公开seam、`ferrum2-shadowsocks`状态机、wire和
+  schema v1行为，把三种标准SIP022方法完整切换到受控patched
+  `shadowsocks-crypto 0.7.0`，并删除本地cipher/KDF实现、无用依赖和任何双实现路径。
+- **Entry conditions:** 已满足。M4 closed；planning baseline为
+  `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`；上游来源、现有实现边界和可复用
+  KAT/negative/interop/performance/MSRV evidence已清点；ADR-0025、SPEC/TEST-0006
+  已Accepted/Approved。
+- **Exit criteria:**
+  1. 产品正常依赖图中仅patched `shadowsocks-crypto`提供SIP022 cipher/KDF；只启用
+     `v2`，且没有旧实现、fallback、selector、`v2-extra`或reduced-round。
+  2. 显式nonce exhaustion、secret zeroization、既有错误语义与三方法TCP/UDP
+     KAT/negative测试全部通过，public seam和protocol sources不变。
+  3. 同一exact SHA/run/attempt通过Full、Rust 1.85、许可证/依赖审查、三平台、
+     TCP/UDP `24/24`外部互操作及既有M4 performance/resource profile。
+  4. Ticket/milestone budget与Architect/QA blocking review通过；任一required gate
+     缺失或失败即M5 `blocked`，不得恢复旧backend。
+- **In-scope tickets:**
+  - M5-T01：固定并最小加固vendored `shadowsocks-crypto`，`ready`；
+  - M5-T02：原子切换TCP/UDP adapter并删除本地实现，依赖T01，`todo`；
+  - M5-T03：在一个accepted exact SHA上完成本地与hosted资格及关闭证据，依赖T02，
+    `todo`。
+
+  Dependency graph：
+
+  ```text
+  M5-T01 pin/harden ── M5-T02 switch/delete ── M5-T03 qualify/close
+  ```
+- **Deferred/out of scope:** protocol state machine替换、SIP023/EIH、多用户、多PSK、
+  public UDP inbound、新method、schema/config变化、runtime crypto selection、上游发布、
+  新benchmark框架或性能优化。
+- **Integrated commit:** none；本轮仅建立plan contract。
+- **Open blockers and risks:** plan blocking finding为零。执行必须完成vendor delta、
+  zeroization/nonce、dependency/license、MSRV、KAT/negative、interop和performance审查。
+  T03所需push/hosted run尚未授权；未授权时按TEST-0006标记`blocked`，不得拼接旧证据。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -674,6 +716,7 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | DEC-029 | resolved in M3 plan | topology-neutral Validated→Prepare→Active→Quiesce/Drain→Stop outcome；all-root prepare、rollback、single transitive ownership、monotonic cancel/deadline、grace/force/reap | `ADR-0024`、SPEC/TEST-0004、M3-T03/T04/T06 |
 | DEC-030 | resolved in M3 plan | 同一exact SHA的Windows MSVC/Linux GNU/Linux musl release binaries native config/lifecycle、SHA-256及PE/ELF/GLIBC/musl linkage；unavailable=BLOCKED；无packaging/publication | `SPEC/TEST-0004`、M3-T05 |
 | DEC-031 | resolved in M3 execute escalation | terminal UDP root先immediate local force/join/reap再返回original fatal；operator仍使用一个configured absolute grace；`Forced`后固定5秒cleanup watchdog，触发即explicit `shutdown.cleanup`且不覆盖primary cause；internal claims用production-used direct composition，OS/process claims用black-box，无product injection surface | User-confirmed solution A、`AUTH-M3-T06-001`、`ADR-0016/0024`、SPEC/TEST-0004、M3-T06 |
+| DEC-032 | resolved in M5 plan | 精确vendor并受控patch `shadowsocks-crypto 0.7.0`；产品仅启用`v2`，保留公开crypto seam和protocol state machines；patch只承载checked nonce、zeroization、AES-UDP header与selected-v2收敛；完成后删除旧实现且不留fallback | `ADR-0025`、M5 research、SPEC/TEST-0006、M5-T01/T02/T03 |
 
 ## 风险登记
 
@@ -701,6 +744,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | native artifact未执行、linkage/hash缺失或不同SHA evidence拼接 | P0 | M3 | direct native release observations、PE/ELF/GLIBC/musl records、one exact-SHA summary、unavailable=BLOCKED |
 | M3 test-only增长超过ratchet | P1 | M3 | reuse existing tables/harness；ticket delta allowance 120；milestone budget gate |
 | benchmark 不等价或噪声驱动错误优化 | P1 | M4 | SPEC/TEST-0005 fixed hosted job/config、同runner交错五次median、记录image/hardware且ratio不阻塞preview |
+| 上游TCP nonce wrap、secret-bearing KDF临时值或AES-UDP header边界破坏既有安全语义 | P0 | M5 | exact vendored delta、checked operation/zeroize/header patch、三方法KAT/negative与双向interop；任一失败即blocked |
+| dependency feature漂移、reduced-round或旧backend形成双实现 | P0 | M5 | exact no-default `v2` edge、metadata/workspace-policy guard、删除旧实现/依赖、license/MSRV review与single-backend source guard |
 
 ## 决策与范围变更日志
 
@@ -748,3 +793,4 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | 2026-08-02 | M4 local TCP_NODELAY optimization | exact `c0de9bd`在共享post-connect与accepted-stream seam设置TCP_NODELAY；不新增配置、依赖或重复binary call sites | Windows两次public-seam RED分别证明outbound/accepted默认false，修复后focused 9/9；native-ext4 WSL focused/runtime及Windows Quick/Full通过 | Full `6/6`；ticket/milestone budget `PASS_ADVANCE`为code/tests/ratio `14173/20878/1.473083`；remote scope尚未消费 |
 | 2026-08-02 | M4 TCP_NODELAY final push scope | TCP_NODELAY candidate及首个docs-only descendant均通过Full `6/6`；最终exact tree进入pre-push复核 | 用户本轮明确要求完成后推送；保持一次non-force push与automatic run边界 | `M4-REMOTE-TCP-NODELAY-A1`为本次push消费撤销；run pending；无retry/rerun/dispatch/PR/release/publication/第二push |
 | 2026-08-02 | M4 close | exact `9b379a4` run `30730883667/1`通过performance、Full/security/process、MSRV、TCP/UDP `24/24`、三平台、test budget与final qualification；M4 closed | TCP_NODELAY后ferrum/reference medians为`50860305/476470749` B/s、ratio `0.106743814`、difference `-89.325618602%`；THP apply/restore、10k、180/180、6/6、drain、cleanup全部PASS，ratio仍仅诊断 | Formal close review及finding closure记录于`docs/ci-status.md`；单次non-force push scope消费撤销；未rerun/dispatch/PR/package/release/publish；本地closeout不再push |
+| 2026-08-02 | M5 plan | M5改为`planned`；接受exact vendored/controlled-patch单实现决策、SPEC/TEST-0006及T01→T02→T03串行DAG | 原包的TCP nonce、zeroization与AES-UDP header API不足以由纯wrapper同时满足安全语义和删除旧实现；最小patch限定于crypto primitive边界并复用既有KAT、interop、MSRV、三平台和performance harness | baseline `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`；M5 research、ADR-0025、SPEC/TEST-0006及三票；plan-only，无产品修改、push、hosted run、release或publication |
