@@ -216,7 +216,7 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
 }
 
 #[test]
-fn tagged_check_is_offline_and_multi_run_fails_before_touching_endpoints() {
+fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (client_a, client_address_a) = reserve_loopback();
     let (client_b, client_address_b) = reserve_loopback();
@@ -257,10 +257,12 @@ fn tagged_check_is_offline_and_multi_run_fails_before_touching_endpoints() {
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
         assert_eq!(run.status.code(), Some(1), "{binary}");
         assert!(run.stdout.is_empty(), "{binary}");
-        assert_eq!(
-            run.stderr, b"error[startup.protocol] process: unable to prepare protocol resources\n",
-            "{binary}"
-        );
+        let expected = if binary == "ferrum2-client" {
+            b"error[startup.protocol] process: unable to prepare protocol resources\n".as_slice()
+        } else {
+            b"error[startup.bind] process: unable to prepare required endpoint\n".as_slice()
+        };
+        assert_eq!(run.stderr, expected, "{binary}");
     }
 
     let invalid = directory.path().join("client-tagged-invalid.toml");

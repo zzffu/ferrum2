@@ -202,6 +202,7 @@ fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
     let registry = OwnerRegistry::new();
     let manager = UdpSessionManager::new(limits(1), registry.clone());
     let budget = manager.buffer_budget();
+    let shared_budget = manager.clone().buffer_budget();
     let mut reservations = Vec::new();
     for _ in 0..16 {
         reservations.push(budget.reserve(65_507).expect("within one MiB budget"));
@@ -209,7 +210,7 @@ fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
     assert_eq!(budget.reserved_bytes(), 1_048_112);
     assert_eq!(registry.snapshot().udp_buffered_bytes, 1_048_112);
     assert!(matches!(
-        budget.reserve(465),
+        shared_budget.reserve(465),
         Err(UdpRuntimeError::BufferLimit)
     ));
 
@@ -217,6 +218,7 @@ fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
     assert_eq!(budget.reserved_bytes(), 1_048_112);
     drop(moved);
     assert_eq!(budget.reserved_bytes(), 982_605);
+    drop(shared_budget.reserve(465).expect("shared bytes returned"));
     drop(reservations);
     assert_eq!(budget.reserved_bytes(), 0);
     assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
@@ -484,6 +486,58 @@ fn empty_resolver() -> ScriptedResolver {
         candidates: Vec::new(),
         calls: Arc::new(AtomicUsize::new(0)),
     }
+}
+
+#[tokio::test]
+async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(limits(1), registry.clone());
+    let (first_socket, _) = socket_fixture(Duration::ZERO, []);
+    let (second_socket, _) = socket_fixture(Duration::ZERO, []);
+    let runtime = |manager, socket| {
+        DirectUdpRuntime::with_shared_adapters(
+            manager,
+            Duration::from_secs(1),
+            empty_resolver(),
+            ScriptedFactory {
+                socket,
+                opens: Arc::new(AtomicUsize::new(0)),
+            },
+            RecordingHandler {
+                responses: Arc::new(Mutex::new(Vec::new())),
+                entered: Arc::new(Notify::new()),
+                block: false,
+            },
+            registry.clone(),
+        )
+    };
+    let mut first = runtime(manager.clone(), first_socket);
+    let mut second = runtime(manager, second_socket);
+
+    let admission = first
+        .reserve_session(Instant::now(), 7)
+        .await
+        .expect("first shared admission");
+    let handle = first
+        .commit_session(admission, ip_datagram(b"request"), Instant::now())
+        .expect("first shared commit");
+    tokio::task::yield_now().await;
+    assert!(first.remove_session(handle));
+    assert_eq!(
+        second.reserve_session(Instant::now(), 7).await.unwrap_err(),
+        UdpRuntimeError::SessionLimit,
+        "removed generation cannot outlive the inseparable direct-owner bound"
+    );
+    wait_for_zero_udp_owners(&registry).await;
+    drop(
+        second
+            .reserve_session(Instant::now(), 7)
+            .await
+            .expect("shared owner slot returned"),
+    );
+    first.shutdown(Duration::ZERO).await;
+    second.shutdown(Duration::ZERO).await;
+    wait_for_zero_udp_owners(&registry).await;
 }
 
 async fn wait_for_zero_udp_owners(registry: &OwnerRegistry) {

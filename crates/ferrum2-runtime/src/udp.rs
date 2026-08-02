@@ -436,6 +436,7 @@ struct SessionState {
 struct UdpSessionManagerInner {
     limits: UdpRuntimeLimits,
     budget: UdpBufferBudget,
+    owner_slots: Arc<Semaphore>,
     state: Mutex<SessionState>,
     registry: OwnerRegistry,
 }
@@ -454,6 +455,7 @@ impl UdpSessionManager {
             inner: Arc::new(UdpSessionManagerInner {
                 limits,
                 budget,
+                owner_slots: Arc::new(Semaphore::new(limits.max_sessions())),
                 state: Mutex::new(SessionState::default()),
                 registry,
             }),
@@ -463,6 +465,10 @@ impl UdpSessionManager {
     /// Returns the global allocated-capacity reservation owner.
     pub fn buffer_budget(&self) -> UdpBufferBudget {
         self.inner.budget.clone()
+    }
+
+    fn owner_slots(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.inner.owner_slots)
     }
 
     /// Returns the number of live committed and provisional session owners.
@@ -879,8 +885,25 @@ where
         handler: H,
         registry: OwnerRegistry,
     ) -> Self {
-        Self::with_adapters(
-            limits,
+        Self::with_shared_adapters(
+            UdpSessionManager::new(limits, registry.clone()),
+            connect_timeout,
+            SystemUdpResolver,
+            SystemDirectUdpSocketFactory,
+            handler,
+            registry,
+        )
+    }
+
+    /// Creates one production runtime sharing aggregate process UDP capacity.
+    pub fn with_shared_capacity(
+        manager: UdpSessionManager,
+        connect_timeout: Duration,
+        handler: H,
+        registry: OwnerRegistry,
+    ) -> Self {
+        Self::with_shared_adapters(
+            manager,
             connect_timeout,
             SystemUdpResolver,
             SystemDirectUdpSocketFactory,
@@ -906,15 +929,35 @@ where
         handler: H,
         registry: OwnerRegistry,
     ) -> Self {
+        Self::with_shared_adapters(
+            UdpSessionManager::new(limits, registry.clone()),
+            connect_timeout,
+            resolver,
+            socket_factory,
+            handler,
+            registry,
+        )
+    }
+
+    /// Creates one runtime sharing aggregate session, byte, and owner capacity.
+    pub fn with_shared_adapters(
+        manager: UdpSessionManager,
+        connect_timeout: Duration,
+        resolver: R,
+        socket_factory: F,
+        handler: H,
+        registry: OwnerRegistry,
+    ) -> Self {
+        let owner_slots = manager.owner_slots();
         Self {
-            manager: UdpSessionManager::new(limits, registry.clone()),
+            manager,
             resolver: Arc::new(resolver),
             socket_factory,
             handler: Arc::new(handler),
             connect_timeout,
             registry,
             tasks: JoinSet::new(),
-            owner_slots: Arc::new(Semaphore::new(limits.max_sessions())),
+            owner_slots,
         }
     }
 
