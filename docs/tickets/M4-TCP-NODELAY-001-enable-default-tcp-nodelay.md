@@ -1,7 +1,7 @@
 ---
 id: M4-TCP-NODELAY-001
 milestone: M4
-status: active
+status: done
 depends_on: [M4-QUALITY-PORT-LOCK-001]
 owns:
   - crates/ferrum2-runtime/src/connector.rs
@@ -19,13 +19,13 @@ and outbound data paths receive the same default.
 
 ## Acceptance
 
-- [ ] Client SOCKS and server Shadowsocks accepted TCP streams have TCP_NODELAY enabled.
-- [ ] Client-to-server and server-to-target streams returned by `TcpConnector` have
+- [x] Client SOCKS and server Shadowsocks accepted TCP streams have TCP_NODELAY enabled.
+- [x] Client-to-server and server-to-target streams returned by `TcpConnector` have
       TCP_NODELAY enabled.
-- [ ] Existing socket-option errors remain closed errors; no config, dependency, wire,
+- [x] Existing socket-option errors remain closed errors; no config, dependency, wire,
       diagnostic identity, metric identity, or workflow change is introduced.
-- [ ] Public-seam loopback tests record RED before implementation and GREEN afterward.
-- [ ] Focused, Quick, Full, ticket-budget, milestone-budget, diff, and cleanliness
+- [x] Public-seam loopback tests record RED before implementation and GREEN afterward.
+- [x] Focused, Quick, Full, ticket-budget, milestone-budget, diff, and cleanliness
       checks pass.
 
 ## Validation
@@ -43,4 +43,15 @@ release, publication, or second push.
 
 ## Result
 
-- Pending.
+- Commit: `c0de9bd87821b0de1c864f06acbe78a86accd60b`.
+- TDD: the existing public loopback seam first failed on the connector socket's false
+  TCP_NODELAY state, then passed after the post-connect change; its accepted socket
+  assertion independently failed before the accept-seam change. Final focused result
+  was `9/9`.
+- Validation: Windows Quick and serial Full `6/6` passed. Native-ext4 WSL ran the same
+  exact commit and passed focused `9/9` plus all `ferrum2-runtime` tests. Ticket and
+  milestone budgets returned `PASS_ADVANCE` at code `14173`, tests `20878`, examples
+  `132`, ratio `1.473083`, with ticket debt `4` and milestone debt `-2052`.
+- Review: primary exact-diff review `PASS`; no blocker, major, minor, or note finding.
+  Scope `M4-REMOTE-TCP-NODELAY-A1` remains unconsumed pending final exact-SHA
+  validation.

@@ -2,9 +2,11 @@
 
 ## 当前 M4 executing 状态
 
-- **Current narrow optimization and authorization:** `M4-TCP-NODELAY-001` is active
-  to enable TCP_NODELAY at the shared accepted-stream and post-connect product seams,
-  covering both client and server without a config or dependency change. Scope
+- **Current narrow optimization and authorization:** `M4-TCP-NODELAY-001` is done at
+  exact `c0de9bd`. The shared accepted-stream and post-connect product seams enable
+  TCP_NODELAY for both client and server without a config or dependency change.
+  Windows RED/GREEN, Quick, serial Full `6/6`, both budgets, and native-ext4 WSL
+  focused/runtime tests passed. Scope
   `M4-REMOTE-TCP-NODELAY-A1` permits one next non-force push of the final validated
   integration SHA to `codex/integration/m4` and its automatic push run; no rerun,
   dispatch, PR, release, publication, or second push is authorized.

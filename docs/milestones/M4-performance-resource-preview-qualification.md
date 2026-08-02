@@ -38,8 +38,8 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 | M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
 | M4-THP-PROFILE-001 | Bind and restore the hosted `max_ptes_none=0` profile | M4-T01 | done |
 | M4-QUALITY-PORT-LOCK-001 | Serialize UDP local E2E port ownership | M4-THP-PROFILE-001 | done |
-| M4-TCP-NODELAY-001 | Default product TCP sockets to TCP_NODELAY | M4-QUALITY-PORT-LOCK-001 | active |
-| M4-T02 | Run and record all M4 gates on one exact commit | M4-TCP-NODELAY-001 | blocked |
+| M4-TCP-NODELAY-001 | Default product TCP sockets to TCP_NODELAY | M4-QUALITY-PORT-LOCK-001 | done |
+| M4-T02 | Run and record all M4 gates on one exact commit | M4-TCP-NODELAY-001 | active |
 
 ## Next action
 
@@ -50,8 +50,10 @@ also passed. Quality alone failed before product startup when parallel
 `udp_local_e2e` tests raced during a released-port handoff; final qualification then
 failed closed. Scope `M4-REMOTE-FINAL-A1` was consumed and revoked by that one push and
 automatic run. Local `M4-QUALITY-PORT-LOCK-001` is complete at exact `5f4fed7`: both
-WSL 200-run loops, the native-ext4 harness, Full `6/6`, and both budgets passed. Execute
-the user-authorized `M4-TCP-NODELAY-001`, then validate the final exact integration SHA.
-Scope `M4-REMOTE-TCP-NODELAY-A1` permits exactly one next non-force push to
-`codex/integration/m4` and its automatic push run. It permits no rerun, dispatch, PR,
-release, publication, or second push.
+WSL 200-run loops, the native-ext4 harness, Full `6/6`, and both budgets passed.
+`M4-TCP-NODELAY-001` is complete at exact `c0de9bd`: Windows RED/GREEN, Quick, Full,
+both budgets, and native-ext4 WSL focused/runtime tests passed. Finish the docs-only
+evidence commit, revalidate the final exact integration SHA, then consume
+`M4-REMOTE-TCP-NODELAY-A1` for exactly one non-force push to `codex/integration/m4`
+and its automatic push run. No rerun, dispatch, PR, release, publication, or second
+push is authorized.

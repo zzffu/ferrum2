@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: blocked
+status: active
 depends_on: [M4-T01, M4-THP-PROFILE-001, M4-QUALITY-PORT-LOCK-001, M4-TCP-NODELAY-001]
 owns:
   - Cargo.lock
@@ -56,6 +56,10 @@ git status --short
 
 ## Result
 
+- Local TCP_NODELAY candidate: `c0de9bd87821b0de1c864f06acbe78a86accd60b`.
+  Windows public-seam RED/GREEN, Quick, serial Full `6/6`, both budgets, and
+  native-ext4 WSL focused/runtime tests passed. The final docs descendant remains to
+  be validated before the authorized push.
 - Current authorization: after `M4-TCP-NODELAY-001` passes local gates, scope
   `M4-REMOTE-TCP-NODELAY-A1` permits exactly one next non-force push of the final exact
   integration SHA to `codex/integration/m4` and its automatic push run. It permits no
