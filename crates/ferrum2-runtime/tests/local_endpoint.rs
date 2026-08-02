@@ -12,8 +12,8 @@ use ferrum2_core::{
     ConnectError, ConnectErrorKind, Connector, LocalEndpoint, Outbound, TargetAddr,
 };
 use ferrum2_runtime::{
-    DEFAULT_CONNECT_TIMEOUT, DirectOutbound, MAX_RESOLVED_CANDIDATES, RuntimeTcpStream,
-    SocketInspector, SystemSocketInspector, TcpConnector, TcpDialer, TcpResolver,
+    AcceptListener, DEFAULT_CONNECT_TIMEOUT, DirectOutbound, MAX_RESOLVED_CANDIDATES,
+    RuntimeTcpStream, SocketInspector, SystemSocketInspector, TcpConnector, TcpDialer, TcpResolver,
 };
 use tokio::net::{TcpListener, TcpStream};
 
@@ -146,18 +146,23 @@ async fn tcp_connector_returns_the_actual_ipv4_local_endpoint() {
     let target = TargetAddr::ipv4(address).expect("IPv4 target");
     let connector = TcpConnector::new(DEFAULT_CONNECT_TIMEOUT);
 
-    let (opened, accepted) = tokio::join!(connector.connect(&target), listener.accept());
+    let (opened, accepted) = tokio::join!(
+        connector.connect(&target),
+        AcceptListener::accept(&listener)
+    );
     let stream = match opened {
         Ok(stream) => stream,
         Err(error) => panic!("connect failed: {error}"),
     };
-    let (accepted, _) = accepted.expect("accept connection");
+    let accepted = accepted.expect("accept connection");
     let peer = match accepted.peer_addr().expect("accepted peer address") {
         SocketAddr::V4(address) => address,
         SocketAddr::V6(_) => panic!("IPv4 peer returned IPv6"),
     };
 
     assert_eq!(stream.local_socket_addr(), SocketAddr::V4(peer));
+    assert!(stream.as_ref().nodelay().expect("TCP_NODELAY state"));
+    assert!(accepted.nodelay().expect("accepted TCP_NODELAY state"));
 }
 
 struct PendingDialer {

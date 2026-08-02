@@ -93,6 +93,7 @@ impl RuntimeTcpStream {
     where
         I: SocketInspector + ?Sized,
     {
+        stream.set_nodelay(true)?;
         let local_endpoint = inspector.local_addr(&stream)?;
         Ok(Self {
             stream,

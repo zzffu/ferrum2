@@ -25,9 +25,9 @@ impl AcceptListener for TcpListener {
     type Stream = TcpStream;
 
     async fn accept(&self) -> io::Result<Self::Stream> {
-        TcpListener::accept(self)
-            .await
-            .map(|(stream, _peer)| stream)
+        let (stream, _peer) = TcpListener::accept(self).await?;
+        stream.set_nodelay(true)?;
+        Ok(stream)
     }
 }
 
