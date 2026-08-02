@@ -10,6 +10,13 @@
   `-89.325618602%`, selected THP apply/restore, exact 10k, `180/180`, `6/6`, drain,
   and cleanup. Final qualification passed performance, Full/security/process, MSRV,
   TCP/UDP `12/12` each with cleanup, all three platforms, and test budget.
+- **Formal close review:** full review of exact local candidate `f14b2f9` returned
+  Product `PASS_WITH_NOTES` (`M4-CLOSE-PROD-N01..N04`), Architect
+  `PASS_WITH_NOTES` (`M4-CLOSE-ARCH-N001..N003`), and QA `BLOCK` on
+  `M4C-QA-001..003`. This record-only repair closes the two documentation findings
+  `M4C-QA-001/002`; `M4C-QA-003` is discharged only by verified post-commit removal
+  of the clean integration worktree after its branch and commit are preserved.
+  Targeted staged-record verdict: `PASS`; `M4C-QA-001/002` are closed, with only post-commit worktree cleanup `M4C-QA-003` remaining.
 - **Narrow optimization and authorization:** `M4-TCP-NODELAY-001` is done at
   exact `c0de9bd`. The shared accepted-stream and post-connect product seams enable
   TCP_NODELAY for both client and server without a config or dependency change.
@@ -838,9 +845,9 @@ coverage/profiling output 和 rendered docs 属于 generated artifacts，不提�
 - `origin/codex/integration/m0`现精确指向`8318ef1`；一次性push授权已耗尽。
   master remote、PR、tag、release、branch protection、rerun、第二次push及其他
   remote mutation仍未授权。
-- SPEC/TEST-0005已固定M4 GitHub-hosted execution profile、bounded 10k-idle
-  threshold和comparison statistics；driver、workflow job与实际run尚未实现，
-  本机/WSL2结果不能宣称M4 PASS。
+- SPEC/TEST-0005固定的driver、workflow job、bounded 10k-idle threshold和
+  comparison statistics已由exact `9b379a4` run `30730883667/1`全部通过；本机/
+  WSL2仍仅作diagnostic，不能替代该hosted PASS。
 - M0 closeout已重新执行workflow doctor/validate、release dependency checks、
   exact-SHA full gate和`git diff --check`；最终里程碑状态与恢复入口记录在
   `docs/handoffs/HANDOFF-M0-2026-07-28.md`。

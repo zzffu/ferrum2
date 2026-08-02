@@ -26,21 +26,21 @@ closed on identity, sample, resource, or cleanup defects.
 
 ## Acceptance
 
-- [ ] `throughput`, `resource`, and short `self-check` modes implement the exact
+- [x] `throughput`, `resource`, and short `self-check` modes implement the exact
       SPEC-0005 profiles without a new dependency, product API, metric, or workflow.
-- [ ] The driver verifies SHA/hosted-profile/reference identity, owns and reaps every
+- [x] The driver verifies SHA/hosted-profile/reference identity, owns and reaps every
       child and worker, bounds logs/deadlines/setup concurrency, and writes only below
       the requested ignored output path.
-- [ ] Throughput produces all ten trials and exact medians/ratio/difference; resource
+- [x] Throughput produces all ten trials and exact medians/ratio/difference; resource
       produces 10,000 established flows, 180 samples, six RSS verdicts, and exact drain.
-- [ ] Negative self-checks reject wrong identity, incomplete/changing samples, RSS
+- [x] Negative self-checks reject wrong identity, incomplete/changing samples, RSS
       regression, incomplete drain, leaked owners, and secret-bearing output.
-- [ ] `.github/workflows/m0.yml` adds one `performance` job on `ubuntu-24.04`, runs it
+- [x] `.github/workflows/m0.yml` adds one `performance` job on `ubuntu-24.04`, runs it
       only outside pull requests, uses one 90-minute bound, runs throughput before
       resource, emits one bounded same-SHA/run summary, and deletes `$RUNNER_TEMP/m4`.
-- [ ] The protected workflow edit is a separate single-parent control commit containing
+- [x] The protected workflow edit is a separate single-parent control commit containing
       no Rust or other implementation/configuration change.
-- [ ] Focused and repository validation pass.
+- [x] Focused and repository validation pass.
 
 ## Validation
 
