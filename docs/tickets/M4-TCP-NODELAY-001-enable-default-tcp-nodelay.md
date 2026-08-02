@@ -36,10 +36,10 @@ sh scripts/test-budget.sh ticket --base 6822945a0488591a30ab12c42ecffd02d82d220a
 ```
 
 Run Quick, serial Full, and milestone-budget commands from
-`docs/agents/milestone-workflow.md`. Scope `M4-REMOTE-TCP-NODELAY-A1` permits exactly
-one next non-force push of the final validated integration SHA to
-`codex/integration/m4` and its automatic push run. It permits no rerun, dispatch, PR,
-release, publication, or second push.
+`docs/agents/milestone-workflow.md`. Scope `M4-REMOTE-TCP-NODELAY-A1` was consumed and
+revoked by the one non-force push of exact `9b379a4` to `codex/integration/m4` and its
+successful automatic run. It permits no rerun, dispatch, PR, release, publication, or
+second push.
 
 ## Result
 

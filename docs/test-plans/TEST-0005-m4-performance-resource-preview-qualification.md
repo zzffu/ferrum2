@@ -1,6 +1,6 @@
 # TEST-0005 — M4 performance, resource, and v0 preview qualification
 
-- Status: executing
+- Status: approved
 - Milestone: M4
 - Spec: `docs/specs/SPEC-0005-m4-performance-resource-preview-qualification.md`
 - Baseline: `701925681df78ad83076ed67863bf4fecf46f77c`

@@ -1,15 +1,23 @@
 # CI 与验证状态
 
-## 当前 M4 executing 状态
+## M4 closed 状态
 
-- **Current narrow optimization and authorization:** `M4-TCP-NODELAY-001` is done at
+- **Accepted exact-SHA qualification:** exact
+  `9b379a426853d86a184464f6fd8c73081b464535` automatic push run
+  [`30730883667`, attempt `1`](https://github.com/zzffu/ferrum2/actions/runs/30730883667)
+  completed `success`. Performance recorded ferrum2/reference medians
+  `50860305/476470749` bytes/s, ratio `0.106743814`, signed difference
+  `-89.325618602%`, selected THP apply/restore, exact 10k, `180/180`, `6/6`, drain,
+  and cleanup. Final qualification passed performance, Full/security/process, MSRV,
+  TCP/UDP `12/12` each with cleanup, all three platforms, and test budget.
+- **Narrow optimization and authorization:** `M4-TCP-NODELAY-001` is done at
   exact `c0de9bd`. The shared accepted-stream and post-connect product seams enable
   TCP_NODELAY for both client and server without a config or dependency change.
   Windows RED/GREEN, Quick, serial Full `6/6`, both budgets, and native-ext4 WSL
   focused/runtime tests passed. The first docs-only descendant also passed Full `6/6`.
   Scope `M4-REMOTE-TCP-NODELAY-A1` is consumed and revoked for one non-force push of
   this exact integration tree to `codex/integration/m4` and its automatic push run.
-  The run is pending; no retry, rerun, dispatch, PR, release, publication, or second
+  The run succeeded; no retry, rerun, dispatch, PR, release, publication, or second
   push is authorized.
 - **Final hosted attempt and authorization:** exact
   `35fb3f85633ee32ba5909ecbf5d74c4ad4a89f11` was pushed once under

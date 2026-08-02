@@ -1,11 +1,12 @@
 # SPEC-0005 — M4 performance, resource, and v0 preview qualification
 
-- Status: executing
+- Status: approved
 - Milestone: M4
 - Baseline: `701925681df78ad83076ed67863bf4fecf46f77c`
 - Related contracts: ADR-0016, ADR-0017, ADR-0024, SPEC-0002, SPEC-0004
 - Test plan: `docs/test-plans/TEST-0005-m4-performance-resource-preview-qualification.md`
-- Tickets: M4-T01, M4-THP-PROFILE-001, M4-T02
+- Tickets: M4-T01, M4-THP-PROFILE-001, M4-QUALITY-PORT-LOCK-001,
+  M4-TCP-NODELAY-001, M4-T02
 
 ## Scope
 

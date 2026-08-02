@@ -191,24 +191,15 @@ and command definitions in their authoritative build/config files where possible
   - Never commit real PSKs or production endpoints. Examples and tests use
     clearly synthetic keys generated specifically for the repository.
 - Active planned changes:
-  - M4 — executing — exact `35fb3f8` run `30725843401/1` passed performance,
-    MSRV, interoperability, and all three native-platform jobs. Performance proved
-    `max_ptes_none=0` apply/restore, exact 10k, `180/180`, `6/6`, drain, and cleanup.
-    Quality alone failed before product startup on a pre-existing parallel
-    `udp_local_e2e` released-port race, so final qualification failed closed.
-    `M4-QUALITY-PORT-LOCK-001` completed the one-file standard-library repair at exact
-    `5f4fed7`; WSL repeated regression, the complete native-ext4 harness, Full, and both
-    budgets passed. M4-T02 remains blocked only on a future separately authorized
-    exact-SHA run.
-    `M4-REMOTE-FINAL-A1` is consumed and revoked. User-authorized
-    `M4-TCP-NODELAY-001` is done at exact `c0de9bd`: the two shared product TCP seams
-    now enable TCP_NODELAY without a configuration or dependency change. Windows
-    RED/GREEN, Quick, Full, both budgets, and native-ext4 WSL focused/runtime tests
-    passed. M4-T02 is active for the final exact-SHA run. Scope
-    `M4-REMOTE-TCP-NODELAY-A1` is consumed and revoked for one non-force push of this
-    exact integration tree to `codex/integration/m4` and its automatic push run. The
-    run is pending; no retry, rerun, dispatch, PR, packaging, release, publication, or
-    second push is authorized.
+  - M4 — closed — exact `9b379a426853d86a184464f6fd8c73081b464535`
+    automatic push run `30730883667/1` passed performance, Full/security/process,
+    MSRV, TCP/UDP `24/24`, all three native platforms, test budget, and final
+    qualification. Performance recorded ferrum2/reference medians
+    `50860305/476470749` bytes/s, ratio `0.106743814`, signed difference
+    `-89.325618602%`, selected THP apply/restore, exact 10k, `180/180`, `6/6`, drain,
+    and cleanup. `M4-TCP-NODELAY-001` is done at exact `c0de9bd` without config or
+    dependency changes. `M4-REMOTE-TCP-NODELAY-A1` is consumed and revoked; no retry,
+    rerun, dispatch, PR, packaging, release, publication, or second push is authorized.
 
 
 ## Project validation

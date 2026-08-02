@@ -1,7 +1,7 @@
 ---
 id: M4-T02
 milestone: M4
-status: active
+status: done
 depends_on: [M4-T01, M4-THP-PROFILE-001, M4-QUALITY-PORT-LOCK-001, M4-TCP-NODELAY-001]
 owns:
   - Cargo.lock
@@ -22,26 +22,26 @@ the bounded summary needed for M4 close.
 
 ## Acceptance
 
-- [ ] The hosted `performance` job passes `M4-GHA-01` preflight and reference SHA-256
+- [x] The hosted `performance` job passes `M4-GHA-01` preflight and reference SHA-256
       verification before measurement; no WSL2 result is accepted as qualification.
-- [ ] Throughput records five trials per topology, both medians, ratio, and difference;
+- [x] Throughput records five trials per topology, both medians, ratio, and difference;
       the measured ratio is reported and never used as a pass threshold.
-- [ ] The bounded 10k-idle run passes all 180 owner/task/RSS samples, six per-binary RSS
+- [x] The bounded 10k-idle run passes all 180 owner/task/RSS samples, six per-binary RSS
       window comparisons, and exact two-minute drain with both binaries alive.
 - [x] Local Full validation and milestone test-budget checks pass as diagnostic
       integration gates on the candidate SHA.
-- [ ] After separate explicit authorization, one `push` run/attempt for that SHA passes
+- [x] After separate explicit authorization, one `push` run/attempt for that SHA passes
       performance, quality, MSRV, TCP/UDP `24/24`, all three native targets, and final
       qualification.
-- [ ] P0/P1 blockers and blocking review findings are zero; runner-temp evidence is
+- [x] P0/P1 blockers and blocking review findings are zero; runner-temp evidence is
       summarized then deleted, nothing raw is committed or uploaded, and no release or
       publication action occurs.
-- [ ] Every bounded subprocess probe reports a static, redacted identity and distinct
+- [x] Every bounded subprocess probe reports a static, redacted identity and distinct
       timeout, nonzero-exit, output-bound, secret-output, or UTF-8 failure class; the
       probe remains fail-closed and emits no command arguments, paths, or captured text.
-- [ ] The five-second probe boundary is diagnosed under WSL2 before the final bounded
+- [x] The five-second probe boundary is diagnosed under WSL2 before the final bounded
       timeout is selected; WSL2 remains diagnostic and cannot satisfy hosted acceptance.
-- [ ] A valid initial ferrum2 metrics exposition with no lazily-created active-flow
+- [x] A valid initial ferrum2 metrics exposition with no lazily-created active-flow
       series is admitted as the zero pre-load baseline; malformed/unidentified metrics
       remain fail-closed, and post-load samples still require exact `10000` gauges.
 
@@ -56,13 +56,22 @@ git status --short
 
 ## Result
 
+- Accepted hosted result: exact `9b379a426853d86a184464f6fd8c73081b464535`
+  automatic push run
+  [`30730883667/1`](https://github.com/zzffu/ferrum2/actions/runs/30730883667)
+  completed `success`. Performance recorded ferrum2/reference medians
+  `50860305/476470749` bytes/s, ratio `0.106743814`, signed difference
+  `-89.325618602%`, selected THP apply/restore, exact 10k, `180/180`, `6/6`, drain,
+  and cleanup. Final qualification recorded performance, Full, security, process,
+  MSRV, TCP/UDP `12/12` each with cleanup, all three platforms, and test budget PASS.
+  No raw evidence was committed or uploaded, and no release or publication occurred.
 - Local TCP_NODELAY candidate: `c0de9bd87821b0de1c864f06acbe78a86accd60b`.
   Windows public-seam RED/GREEN, Quick, serial Full `6/6`, both budgets, and
-  native-ext4 WSL focused/runtime tests passed. The final docs descendant remains to
-  be validated before the authorized push.
+  native-ext4 WSL focused/runtime tests passed. The final pushed exact SHA also passed
+  serial Full `6/6` and both budgets before the hosted run.
 - Push scope consumption: `M4-REMOTE-TCP-NODELAY-A1` is consumed and revoked for one
   non-force push of this exact integration tree to `codex/integration/m4` and its
-  automatic push run. The run is pending; no retry, rerun, dispatch, PR, release,
+  automatic push run. That run succeeded; no retry, rerun, dispatch, PR, release,
   publication, or second push is authorized.
 
 - Probe repair candidate: `57d317ddb554bbbbc5cc324046277a514ce54324`
@@ -223,7 +232,7 @@ git status --short
   relay buffers, but it does not establish the hosted allocator/kernel causal path.
   Run `30725843401/1` proves the reviewed `M4-THP-PROFILE-001` selected profile passes
   the unchanged resource gate and exact drain.
-- `HOSTED-M4-T02-005` is locally resolved: quality exposed a pre-existing parallel
+- `HOSTED-M4-T02-005` is resolved: quality exposed a pre-existing parallel
   test-harness race before product startup. `unused_tcp_udp_loopback` binds TCP and UDP
   before consulting the
   process-local issued-port registry, so a sibling test may temporarily rebind an
@@ -231,10 +240,9 @@ git status --short
   the isolated test and serial file remain green. Local ticket
   `M4-QUALITY-PORT-LOCK-001` completed the one-file standard-library serialization
   repair at exact `5f4fed7`; both WSL 200-run loops, the complete native-ext4 harness,
-  Full, and both budgets passed. Hosted same-run acceptance remains open.
-  `M4-REMOTE-FINAL-A1` is consumed and revoked; any future push requires a new exact-SHA
-  authorization. Rerun, dispatch, PR, release, publication, or a second push is
-  unauthorized.
+  Full, and both budgets passed. Exact `9b379a4` run `30730883667/1` passed quality and
+  final same-run qualification. Both remote scopes are consumed and revoked. Retry,
+  rerun, dispatch, PR, release, publication, or a second push is unauthorized.
 - `LOCAL-M4-T02-004`: exact `d28ed0a` reproduced `target did not accept 10000
   streams` in two native WSL2 runs. Both product active gauges reached exact `10000`,
   while the qualification driver retained fewer target-side streams and Linux
