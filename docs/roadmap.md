@@ -635,7 +635,8 @@ selected-profile修复已通过全部local gate且不削弱30分钟测量和105%
   `1d3c117231bf5b99641d02b43b6579359c938644`；
   paired hosted diagnostic exact `a53a5d7cf8c2506527d3dfa8f74e64898604154d`；
   local selected-profile repair exact `230594544e88ab555e1718ba92721745705b572b`；
-  M4 accepted hosted qualification commit尚待授权的final closeout SHA重验。
+  M4 accepted hosted qualification commit尚待已授权final closeout SHA的automatic
+  push run重验。
 - **Open blockers and risks:** `M4-BUDGET-001`已通过把required non-test Cargo
   driver迁到独立tools package解除；authoritative allowance、classifier、baseline
   和evidence均不变。本地修复、审查和门禁已通过；`M4-REMOTE-FINAL-A1`授权一次final
