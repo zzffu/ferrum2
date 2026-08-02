@@ -51,6 +51,51 @@ fn tagged_server(inbound_count: usize, outbound_count: usize) -> String {
         + "\n"
 }
 
+fn assert_tagged_error(
+    name: &str,
+    role: ConfigRole,
+    mut source: String,
+    expected: (ConfigErrorKind, ConfigField),
+    index: usize,
+) {
+    let raw = format!("raw_sentinel_{index}");
+    if !source.contains("[metrics]") {
+        source.push_str(&format!(
+            "[metrics]\nlisten = \"127.0.0.1:{}\"\n",
+            30_003 + index * 4
+        ));
+    }
+    let tag = format!("r{index}{}", if source.contains("i0") { "i" } else { "o" });
+    source = source
+        .replace("i0", &format!("r{index}i"))
+        .replace("o0", &format!("r{index}o"));
+    let endpoints = [30_000 + index * 4, 30_001 + index * 4, 30_002 + index * 4];
+    source = source
+        .replace("127.0.0.1:10000", &format!("127.0.0.1:{}", endpoints[0]))
+        .replace("127.0.0.1:10001", &format!("127.0.0.1:{}", endpoints[1]))
+        .replace("127.0.0.1:20000", &format!("127.0.0.1:{}", endpoints[2]));
+    let endpoint = (30_000 + index * 4..=30_003 + index * 4)
+        .map(|port| format!("127.0.0.1:{port}"))
+        .find(|value| source.contains(value))
+        .expect("unique endpoint sentinel");
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let psk = format!("{}AECAwQFBgcICQoLDA0ODw==", char::from(alphabet[index]));
+    source = source.replace("AAECAwQFBgcICQoLDA0ODw==", &psk);
+    source.push_str(&format!("# {raw}\n"));
+
+    let file = TempConfig::text(&source);
+    let error = match role {
+        ConfigRole::Client => load_client(file.path()).err(),
+        ConfigRole::Server => load_server(file.path()).err(),
+    }
+    .expect(name);
+    assert_eq!((error.kind(), error.field()), expected, "{name}");
+    let rendered = format!("{error}\n{error:?}");
+    for sentinel in [&raw, &tag, &endpoint, &psk] {
+        assert!(!rendered.contains(sentinel), "{name}: {sentinel}");
+    }
+}
+
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 struct TempConfig(PathBuf);
@@ -231,6 +276,11 @@ fn tagged_graph_normalizes_complete_resolved_collections() {
         assert_eq!(config.inbounds.len(), 2, "{method}");
         assert_eq!(config.outbounds.len(), 2, "{method}");
         assert_eq!(config.inbounds[1].outbound, config.outbounds[1], "{method}");
+        let source = tagged_server(2, 2)
+            .replacen("2022-blake3-aes-128-gcm", method, 1)
+            .replacen("AAECAwQFBgcICQoLDA0ODw==", psk, 1);
+        let config = load_server(TempConfig::text(&source).path()).expect(method);
+        assert_eq!(config.inbounds[1].outbound, 1, "{method}");
     }
 
     let shared = tagged_client(2, 1);
@@ -256,6 +306,7 @@ fn tagged_graph_normalizes_complete_resolved_collections() {
 fn tagged_graph_rejects_invalid_counts_tags_references_and_collisions_redacted() {
     let valid = tagged_client(2, 2);
     let server = tagged_server(2, 2);
+    let server_three = tagged_server(3, 3);
     let mut cases = vec![
         ("empty inbounds", tagged_client(0, 1), ConfigField::Inbounds, ConfigRole::Client),
         ("empty outbounds", tagged_client(1, 0), ConfigField::Outbounds, ConfigRole::Client),
@@ -279,14 +330,28 @@ fn tagged_graph_rejects_invalid_counts_tags_references_and_collisions_redacted()
         ("client server collision", valid.replacen("127.0.0.1:20000", "127.0.0.1:10000", 1), ConfigField::OutboundsServer, ConfigRole::Client),
         ("client metrics collision", format!("{valid}[metrics]\nlisten = \"127.0.0.1:10001\"\n"), ConfigField::MetricsListen, ConfigRole::Client),
         ("server metrics collision", format!("{server}[metrics]\nlisten = \"127.0.0.1:10001\"\n"), ConfigField::MetricsListen, ConfigRole::Server),
+        ("server empty inbounds", tagged_server(0, 1), ConfigField::Inbounds, ConfigRole::Server),
+        ("server empty outbounds", tagged_server(1, 0), ConfigField::Outbounds, ConfigRole::Server),
+        ("server 65 inbounds", tagged_server(65, 1), ConfigField::Inbounds, ConfigRole::Server),
+        ("server 65 outbounds", tagged_server(1, 65), ConfigField::Outbounds, ConfigRole::Server),
+        ("server invalid inbound tag", server.replacen("tag = \"i0\"", "tag = \"bad/tag\"", 1), ConfigField::InboundsTag, ConfigRole::Server),
+        ("server invalid outbound tag", server.replacen("tag = \"o0\"", "tag = \"bad/tag\"", 1), ConfigField::OutboundsTag, ConfigRole::Server),
         ("server duplicate inbound", server.replacen("tag = \"i1\"", "tag = \"i0\"", 1), ConfigField::InboundsTag, ConfigRole::Server),
         ("server duplicate outbound", server.replacen("tag = \"o1\"", "tag = \"o0\"", 1), ConfigField::OutboundsTag, ConfigRole::Server),
         ("server global collision", server.replacen("tag = \"o0\"", "tag = \"i0\"", 1), ConfigField::OutboundsTag, ConfigRole::Server),
         ("server dangling", server.replacen("outbound = \"o0\"", "outbound = \"missing\"", 1), ConfigField::InboundsOutbound, ConfigRole::Server),
+        ("server wrong namespace", server.replacen("outbound = \"o0\"", "outbound = \"i0\"", 1), ConfigField::InboundsOutbound, ConfigRole::Server),
+        ("server case sensitive", server.replacen("outbound = \"o0\"", "outbound = \"O0\"", 1), ConfigField::InboundsOutbound, ConfigRole::Server),
         ("server unreferenced", tagged_server(1, 2), ConfigField::OutboundsTag, ConfigRole::Server),
         ("server duplicate listen", server.replacen("127.0.0.1:10001", "127.0.0.1:10000", 1), ConfigField::InboundsListen, ConfigRole::Server),
+        ("server first last duplicate", server_three.replacen("127.0.0.1:10002", "127.0.0.1:10000", 1), ConfigField::InboundsListen, ConfigRole::Server),
+        ("server metrics first", format!("{server_three}[metrics]\nlisten = \"127.0.0.1:10000\"\n"), ConfigField::MetricsListen, ConfigRole::Server),
+        ("server metrics last", format!("{server_three}[metrics]\nlisten = \"127.0.0.1:10002\"\n"), ConfigField::MetricsListen, ConfigRole::Server),
+        ("client server last collision", tagged_client(3, 3).replacen("127.0.0.1:20000", "127.0.0.1:10002", 1), ConfigField::OutboundsServer, ConfigRole::Client),
         ("missing inbounds", "schema_version = 1\n[[outbounds]]\ntag = \"o0\"\nserver = \"127.0.0.1:20000\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Inbounds, ConfigRole::Client),
         ("missing outbounds", "schema_version = 1\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Outbounds, ConfigRole::Client),
+        ("server missing inbounds", "schema_version = 1\n[[outbounds]]\ntag = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Inbounds, ConfigRole::Server),
+        ("server missing outbounds", "schema_version = 1\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Outbounds, ConfigRole::Server),
     ];
     cases.push((
         "legacy tagged mixing",
@@ -294,30 +359,43 @@ fn tagged_graph_rejects_invalid_counts_tags_references_and_collisions_redacted()
         ConfigField::Inbounds,
         ConfigRole::Client,
     ));
+    cases.push((
+        "server legacy tagged mixing",
+        format!("{SERVER_BASE}[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[[outbounds]]\ntag = \"o0\"\n"),
+        ConfigField::Inbounds,
+        ConfigRole::Server,
+    ));
 
-    for (name, source, field, role) in cases {
-        let file = TempConfig::text(&source);
-        let error = match role {
-            ConfigRole::Client => load_client(file.path()).err(),
-            ConfigRole::Server => load_server(file.path()).err(),
-        }
-        .expect(name);
-        assert_eq!(
-            (error.kind(), error.field()),
+    for (index, (name, source, field, role)) in cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            role,
+            source,
             (ConfigErrorKind::Semantic, field),
-            "{name}"
+            index,
         );
-        let rendered = format!("{error}\n{error:?}");
-        for secret in [
-            "i0",
-            "o0",
-            "127.0.0.1:10000",
-            "127.0.0.1:20000",
-            "AAECAwQFBgcICQoLDA0ODw==",
-        ] {
-            assert!(!rendered.contains(secret), "{name}: {secret}");
-        }
     }
+
+    let client_unknown = valid.replacen(
+        "server = \"127.0.0.1:20000\"",
+        "server = \"127.0.0.1:20000\"\nunexpected = true",
+        1,
+    );
+    assert_tagged_error(
+        "client nested unknown",
+        ConfigRole::Client,
+        client_unknown,
+        (ConfigErrorKind::Syntax, ConfigField::Config),
+        50,
+    );
+    let server_unknown = server.replacen("tag = \"o0\"", "tag = \"o0\"\nunexpected = true", 1);
+    assert_tagged_error(
+        "server nested unknown",
+        ConfigRole::Server,
+        server_unknown,
+        (ConfigErrorKind::Syntax, ConfigField::Config),
+        51,
+    );
 
     #[rustfmt::skip]
     let fields = [ConfigField::Inbounds, ConfigField::Outbounds, ConfigField::InboundsTag, ConfigField::InboundsListen, ConfigField::InboundsOutbound, ConfigField::OutboundsTag, ConfigField::OutboundsServer];

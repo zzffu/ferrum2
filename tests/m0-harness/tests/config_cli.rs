@@ -279,6 +279,26 @@ fn tagged_check_is_offline_and_multi_run_fails_before_touching_endpoints() {
         "error[config.semantic] inbounds.outbound: configuration value is invalid\n",
         "dangling",
     );
+    let server_sentinel = "server_cli_tag_sentinel";
+    let invalid = directory.path().join("server-tagged-invalid.toml");
+    std::fs::write(
+        &invalid,
+        format!(
+            "{}# {server_sentinel}\n",
+            tagged_server(&[server_address_a]).replacen(
+                "outbound = \"o0\"",
+                &format!("outbound = \"{server_sentinel}\""),
+                1,
+            )
+        ),
+    )
+    .expect("invalid server tagged config");
+    assert_invalid(
+        "ferrum2-server",
+        &invalid,
+        "error[config.semantic] inbounds.outbound: configuration value is invalid\n",
+        server_sentinel,
+    );
 
     for listener in [client_a, client_b, server_a, server_b] {
         let address = listener.local_addr().expect("listener address");
