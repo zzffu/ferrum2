@@ -26,6 +26,8 @@ docs-only descendant `a38a1e84c90a7e03c047eaa4e275fc7ed3410cdb`。M5已以exact
 `30743888837/1`的Full/security/process、MSRV、TCP与UDP各`12/12`、三平台、
 performance/resource、test budget和final qualification证据关闭；本地closeout
 source是该qualified SHA之后的专用docs-only提交。
+M6以`35354f274847d2608a2009e04aaa3b17fb4fa8f4`为planning baseline，状态为
+`planned`；当前只有contract、research和tickets，尚无M6产品实现或资格证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -43,6 +45,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M3 | M1、M2 closed | 运维契约、生命周期和三目标平台资格 |
 | M4 | M3 closed | 性能/资源门及同一 commit 上的 v0 资格证明 |
 | M5 | M4 closed | `shadowsocks-crypto`成为三种SIP022方法的唯一内部密码实现 |
+| M6 | M5 closed | 显式opt-in、有界且可关闭的SOCKS5 UDP ASSOCIATE |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -51,7 +54,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 完成三目标 native qualification。M4已在同exact SHA上完成可复现吞吐基线、
 10,000 idle sessions资源资格、Full、interop和三平台收敛；v0 preview已获得
 资格但未打包、发布或公开。M5已完成单实现迁移、安全patch与同SHA关闭资格，
-公开crypto seam、协议状态机、wire和schema v1保持不变。
+公开crypto seam、协议状态机、wire和schema v1保持不变。M6计划复用现有SIP022
+UDP和runtime交付public client UDP path，不加入routing。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -690,6 +694,43 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
   经Architect接受为非阻断残余风险。单次push scope已消费撤销；不授权rerun、
   dispatch、second push、PR、package、release或publication。
 
+## M6 — 有界 SOCKS5 UDP ASSOCIATE
+
+- **Status:** planned
+- **Objective:** 仅在client显式`[udp]` opt-in时，把SOCKS5 `UDP ASSOCIATE`
+  通过现有三方法SIP022 UDP和server direct outbound转发；association、endpoint、
+  buffers、queues、idle、tasks和shutdown全部有界，不加入routing。
+- **Entry conditions:** 已满足。M5 closed；planning baseline为
+  `35354f274847d2608a2009e04aaa3b17fb4fa8f4`；RFC 1928、pinned sing-box与
+  shadowsocks-rust行为及现有SOCKS/SIP022/runtime/harness seam已清点；ADR-0026、
+  SPEC/TEST-0007已Accepted/Approved。
+- **Exit criteria:**
+  1. Existing client v1 documents保持UDP disabled和原TCP行为；显式section离线完整
+     校验，`enabled=false`拥有zero UDP resources。
+  2. Control-owned association、TCP-peer-IP authority、fixed/learned source port、
+     `FRAG!=0` silent drop和IPv4/IPv6/domain target通过positive/negative evidence。
+  3. 每个association复用一个collision-safe `UdpClientSession`及现有session/byte/
+     queue/idle limits；所有close/cancel/shutdown路径返回owner和socket到baseline。
+  4. 既有`M2-UDP-INT-001..012`保持ID和矩阵；六个FerrumClient案改用public client
+     binary，六个reference-client案继续独立cross-validation。
+  5. 一个exact SHA通过Full、Rust 1.85、三native targets、budget、external UDP
+     `12/12`+cleanup和blocking review；缺失、失败或未授权即blocked。
+- **In-scope tickets:**
+  - M6-T01：SOCKS5 command/control与standalone UDP wire interface，`ready`；
+  - M6-T02：显式opt-in并组合bounded client association，依赖T01，`todo`；
+  - M6-T03：替换六个FerrumClient evidence adapter并完成资格，依赖T02，`todo`。
+
+  ```text
+  M6-T01 SOCKS interface ── M6-T02 client composition ── M6-T03 qualification
+  ```
+- **Deferred/out of scope:** fragment reassembly、shared UDP listener、source roaming、
+  routing、DNS proxy、multi-upstream/chaining、UDP-over-TCP、SIP023/multi-user、new
+  dependency、throughput claim、package/release/publication。
+- **Integrated commit:** none；plan-only baseline如上。
+- **Open blockers and risks:** 当前无planning blocker。执行期P0是open/spoofable relay、
+  first-packet port race、SIP022 session-ID collision、capacity-before-mutation错误以及
+  control/shutdown资源泄漏；由ADR-0026和TEST-0007的focused gates控制。未授权remote。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -726,6 +767,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | DEC-030 | resolved in M3 plan | 同一exact SHA的Windows MSVC/Linux GNU/Linux musl release binaries native config/lifecycle、SHA-256及PE/ELF/GLIBC/musl linkage；unavailable=BLOCKED；无packaging/publication | `SPEC/TEST-0004`、M3-T05 |
 | DEC-031 | resolved in M3 execute escalation | terminal UDP root先immediate local force/join/reap再返回original fatal；operator仍使用一个configured absolute grace；`Forced`后固定5秒cleanup watchdog，触发即explicit `shutdown.cleanup`且不覆盖primary cause；internal claims用production-used direct composition，OS/process claims用black-box，无product injection surface | User-confirmed solution A、`AUTH-M3-T06-001`、`ADR-0016/0024`、SPEC/TEST-0004、M3-T06 |
 | DEC-032 | resolved in M5 plan | 精确vendor并受控patch `shadowsocks-crypto 0.7.0`；产品仅启用`v2`，保留公开crypto seam和protocol state machines；patch只承载checked nonce、zeroization、AES-UDP header与selected-v2收敛；完成后删除旧实现且不留fallback | `ADR-0025`、M5 research、SPEC/TEST-0006、M5-T01/T02/T03 |
+| DEC-033 | resolved in M6 plan | client `[udp]`为schema v1显式opt-in；每个TCP control拥有两个per-association UDP sockets；TCP peer IP权威，非零hint port固定、零port首个valid datagram锁定，地址hint仅advisory；不实现fragment/routing/shared listener | `ADR-0026`、M6 research、SPEC/TEST-0007、M6-T01/T02 |
+| DEC-034 | resolved in M6 plan | 按ADR-0016等强替换既有M2证据adapter：保留12个ID/method/reference和six reference-client rows，仅把six FerrumClient rows从protocol example换成显式UDP client binary；不新增provider/matrix/workflow job | `ADR-0016`、`TEST-0007`、M6-T03 |
 
 ## 风险登记
 
@@ -755,6 +798,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | benchmark 不等价或噪声驱动错误优化 | P1 | M4 | SPEC/TEST-0005 fixed hosted job/config、同runner交错五次median、记录image/hardware且ratio不阻塞preview |
 | 上游TCP nonce wrap、secret-bearing KDF临时值或AES-UDP header边界破坏既有安全语义 | P0 | M5 | exact vendored delta、checked operation/zeroize/header patch、三方法KAT/negative与双向interop；任一失败即blocked |
 | dependency feature漂移、reduced-round或旧backend形成双实现 | P0 | M5 | exact no-default `v2` edge、metadata/workspace-policy guard、删除旧实现/依赖、license/MSRV review与single-backend source guard |
+| SOCKS UDP变成open/spoofable relay，或invalid/fragment/wrong-source datagram抢占endpoint state | P0 | M6 | control TCP peer IP authority、per-association relay socket、fixed/first-valid port pin、connected upstream、silent-drop/no-mutation tables |
+| client UDP session-ID collision、buffer/queue/task/socket泄漏或shutdown假完成 | P0 | M6 | live-ID registry、existing bounded manager、supervised lexical ownership、capacity-before-commit与control/idle/cancel/forced/rebind snapshots |
 
 ## 决策与范围变更日志
 
@@ -805,3 +850,4 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 | 2026-08-02 | M5 plan | M5改为`planned`；接受exact vendored/controlled-patch单实现决策、SPEC/TEST-0006及T01→T02→T03串行DAG | 原包的TCP nonce、zeroization与AES-UDP header API不足以由纯wrapper同时满足安全语义和删除旧实现；最小patch限定于crypto primitive边界并复用既有KAT、interop、MSRV、三平台和performance harness | baseline `ccb1ec5edf2637fd1e35b5f4dd68eb5421ac3498`；M5 research、ADR-0025、SPEC/TEST-0006及三票；plan-only，无产品修改、push、hosted run、release或publication |
 | 2026-08-02 | M5 local qualification blocked | T01/T01R/T02完成；local-only exact `816fa7b`通过Full、Rust 1.85、review与milestone budget，T03改为`blocked`、M5为`validating`/close `BLOCKED` | required same-SHA hosted三平台、TCP `12/12`、UDP `12/12`、performance/resource/final summary未获push授权且未运行；`QA-T03-001`禁止local替代或旧run拼接 | Architect local `PASS`；QA local `PASS`/overall `BLOCK`；无remote、ratchet、release或publication；等待新的独立exact-SHA授权 |
 | 2026-08-02 | M5 close | exact `6ca0434` run `30743888837/1`通过Full/security/process、MSRV、TCP与UDP各`12/12`、三平台、performance/resource、test budget与final qualification；M5 closed | performance记录ferrum/reference `138726604/484138461` B/s、ratio `0.286543242`、difference `-71.345675840%`；10k、180/180、6/6、drain、cleanup全部PASS，ratio仍仅诊断 | Final Architect/QA均`PASS`，`QA-T03-001`关闭；单次non-force push scope消费撤销；未rerun/dispatch/PR/package/release/publish，本地closeout不再push |
+| 2026-08-02 | M6 plan | M6改为`planned`；接受显式opt-in、control-owned per-association sockets、TCP-peer-IP/fixed-or-learned-port authorization和existing-runtime reuse；批准SPEC/TEST-0007及T01→T02→T03 DAG | M5已关闭且SIP022 UDP/runtime完整可复用；最小public path无需routing、shared listener、新trait或新provider，sing-box zero-port hint由advisory-address profile兼容 | baseline `35354f274847d2608a2009e04aaa3b17fb4fa8f4`；M6 research、ADR-0026、SPEC/TEST-0007；plan-only，无产品修改、push、hosted run、release或publication |

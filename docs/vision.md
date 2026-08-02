@@ -123,6 +123,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是现状而�
 | M3 | 稳定运维契约、生命周期证明和三目标平台资格 | closed |
 | M4 | 可复现性能基线、资源门与 v0 preview integrated qualification | closed |
 | M5 | `shadowsocks-crypto`作为三种SIP022方法的唯一内部密码实现 | closed |
+| M6 | 显式opt-in、有界且可关闭的SOCKS5 UDP ASSOCIATE，不加入routing | planned |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -156,3 +157,9 @@ SIP022方法唯一正常产品cipher/KDF backend，公开crypto seam、协议状
 schema v1保持不变。Local Full、Rust 1.85、dependency/security review、TCP/UDP
 各`12/12`、三平台、performance/resource与final qualification全部通过；单次push
 scope已消费撤销，未package、release或publish。
+
+M6是v0 preview关闭后的additive milestone，不改写上面的历史v0范围或non-goals。
+它以exact `35354f274847d2608a2009e04aaa3b17fb4fa8f4`为planning baseline，计划在
+缺失client `[udp]`时保持原行为，仅显式opt-in复用现有SIP022 UDP、bounded runtime
+和process lifecycle交付public SOCKS5 UDP association。当前只有plan/research，尚无
+M6产品、interop或hosted资格证据，也未授权remote、package、release或publication。

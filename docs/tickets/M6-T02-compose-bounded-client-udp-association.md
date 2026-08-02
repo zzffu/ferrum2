@@ -1,0 +1,54 @@
+---
+id: M6-T02
+milestone: M6
+status: todo
+depends_on: [M6-T01]
+owns:
+  - crates/ferrum2-config/src/lib.rs
+  - crates/ferrum2-config/tests/config_contract.rs
+  - crates/ferrum2-shadowsocks/src/udp.rs
+  - bins/ferrum2-client/**
+  - tests/fixtures/config/client-*.toml
+  - tests/m0-harness/src/local_support/mod.rs
+  - tests/m0-harness/tests/config_cli.rs
+  - tests/m0-harness/tests/socks_udp_local_e2e.rs
+---
+
+# M6-T02 — Compose the bounded client UDP association
+
+## Outcome
+
+Add explicit client `[udp]` opt-in and compose the T01 interface with one collision-safe
+SIP022 client session, the existing runtime manager/budget/queues and supervised control
+connection into a complete local public UDP path。
+
+## Acceptance
+
+- [ ] Absent client `[udp]` preserves the M3 cohort and old command rejection；explicit
+      section reuses validated numeric limits, and disabled/check mode owns zero UDP resource。
+- [ ] Setup reserves association/buffer capacity and both sockets before success reply；TCP
+      peer IP authority plus fixed/learned port prevents an open relay, and invalid/wrong-source
+      datagrams mutate nothing。
+- [ ] Three methods and IPv4/IPv6/domain targets reuse existing SIP022 packet/replay/binding
+      state with live-ID collision prevention and reservation-before-commit ordering。
+- [ ] Session/byte/queue/idle limits, control EOF, I/O, cancel, graceful/forced shutdown and
+      restart/rebind return every process/runtime/socket owner to baseline。
+- [ ] Existing UDP families record only closed client-role values and no secret、endpoint、
+      server or target cardinality；TCP CONNECT/server UDP behavior remains unchanged。
+- [ ] Exact T02 commands, Full, MSRV, ticket budget and blocking Architect/QA review pass。
+
+## Validation
+
+Run `TEST-0007` T02 commands, then repository Full commands before integration。
+
+## Result
+
+- Commit: —
+- Review: —
+- Notes: —
+
+## Rollback / risk
+
+Rollback removes the optional section and client adapter as one vertical slice；server UDP and
+protocol APIs remain。Do not add a shared listener、routing abstraction or new dependency to
+solve the single configured-upstream path。

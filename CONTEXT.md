@@ -40,3 +40,18 @@ _Avoid_: Performance gate, performance guarantee
 The single M4 preview resource gate for owner, task, and RSS stability while 10,000
 TCP sessions remain established on the pinned performance host.
 _Avoid_: Long soak, all-platform soak, open-ended soak
+
+**SOCKS UDP association**:
+The public client-side UDP relay lifetime established by one SOCKS5 `UDP ASSOCIATE`
+control connection.
+_Avoid_: SIP022 UDP session, route
+
+**Client UDP endpoint**:
+The application-side source address authorized to send datagrams for one SOCKS UDP
+association.
+_Avoid_: Target, destination, Shadowsocks server
+
+**SIP022 UDP client session**:
+One Shadowsocks wire identity with its outbound packet lineage and inbound response
+association/replay state.
+_Avoid_: SOCKS UDP association, public UDP listener
