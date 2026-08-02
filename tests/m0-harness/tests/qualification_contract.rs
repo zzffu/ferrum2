@@ -189,6 +189,37 @@ fn both_active_transport_plans_have_complete_unique_case_id_mappings() {
 }
 
 #[test]
+fn ferrum_udp_rows_use_the_bounded_composed_client_and_socks_exerciser() {
+    let support = include_str!("../src/external_support/mod.rs");
+    let adapter = support
+        .split_once("fn run_udp_ferrum_client_case")
+        .expect("Ferrum UDP client adapter")
+        .1
+        .split_once("fn run_udp_reference_client_case")
+        .expect("reference UDP client adapter")
+        .0;
+
+    for required in [
+        "ferrum_binary(\"ferrum2-client\")",
+        "[udp]\\nenabled = true\\nmax_sessions = 16\\nmax_buffered_bytes = 1048576",
+        "idle_timeout_ms = 60000",
+        "ProcessGuard::spawn(\"ferrum composed UDP client\", &mut ferrum_command, deadline)",
+        "wait_for_tcp_listener(&mut ferrum, proxy, deadline, \"ferrum composed client\")",
+        "exercise_socks_udp(&mut ferrum, proxy, target, case.method, deadline)",
+        "ferrum.terminate(deadline)",
+        "reference.terminate(deadline)",
+    ] {
+        assert!(
+            adapter.contains(required),
+            "missing adapter contract: {required}"
+        );
+    }
+    assert!(support.contains("const CASE_TIMEOUT: Duration = Duration::from_secs(60);"));
+    assert!(support.contains("const SESSION_DATAGRAMS: usize = 3;"));
+    assert!(!support.contains("udp_protocol_client"));
+}
+
+#[test]
 fn hosted_guard_rejects_every_unqualified_context() {
     let valid = valid_context();
     assert!(validate_hosted(&valid).is_ok());

@@ -1004,6 +1004,7 @@ fn run_udp_transport(
             directory,
             ports,
             shadowsocks,
+            proxy,
             target,
             deadline,
         ),
@@ -1029,6 +1030,7 @@ fn run_udp_ferrum_client_case(
     directory: &Path,
     ports: &mut ReservedPorts,
     shadowsocks: SocketAddrV4,
+    proxy: SocketAddrV4,
     target: SocketAddrV4,
     deadline: CaseDeadline,
 ) -> (String, String) {
@@ -1040,31 +1042,27 @@ fn run_udp_ferrum_client_case(
         ProcessGuard::spawn("reference Shadowsocks UDP server", &mut command, deadline);
     wait_for_stable_child(&mut reference, deadline, "reference Shadowsocks UDP server");
 
-    let mut example = Command::new(ferrum_example_binary());
-    example.args([
+    let ferrum_config = format!(
+        "schema_version = 1\n\n[client]\nlisten = \"{proxy}\"\nserver = \"{shadowsocks}\"\n\n\
+         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n\n\
+         [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = 1048576\n\
+         idle_timeout_ms = 60000\n",
         case.method.canonical_name(),
-        &shadowsocks.to_string(),
-        &target.to_string(),
-    ]);
-    let mut ferrum = ProcessGuard::spawn("ferrum UDP protocol example", &mut example, deadline);
-    let status = ferrum.wait_for_exit(deadline, "ferrum UDP protocol example");
-    let (stdout, stderr) = ferrum.finish_captures(deadline);
-    assert!(
-        status.success()
-            && !stdout.truncated
-            && !stderr.truncated
-            && stderr.bytes.is_empty()
-            && String::from_utf8_lossy(&stdout.bytes)
-                .lines()
-                .any(|line| line == "udp_protocol_client status=PASS datagrams=3"),
-        "ferrum UDP protocol example failed: status={status}, stdout={}, stderr={}",
-        sanitize_capture(stdout),
-        sanitize_capture(stderr)
+        case.method.synthetic_psk()
     );
+    let ferrum_path = write_config(directory, "ferrum-client.toml", &ferrum_config);
+    ports.release_proxy();
+    let mut ferrum_command = Command::new(ferrum_binary("ferrum2-client"));
+    ferrum_command.args(["--config", path_text(&ferrum_path)]);
+    let mut ferrum =
+        ProcessGuard::spawn("ferrum composed UDP client", &mut ferrum_command, deadline);
+    wait_for_tcp_listener(&mut ferrum, proxy, deadline, "ferrum composed client");
+    exercise_socks_udp(&mut ferrum, proxy, target, case.method, deadline);
+    let ferrum_evidence = ferrum.terminate(deadline);
     let reference_evidence = reference.terminate(deadline);
     (
         sha256_bytes(config.as_bytes()),
-        format!("example=exit-0, reference=[{reference_evidence}]"),
+        format!("reference=[{reference_evidence}], ferrum=[{ferrum_evidence}]"),
     )
 }
 
@@ -1585,18 +1583,6 @@ fn ferrum_binary(name: &str) -> PathBuf {
     assert!(
         path.is_file(),
         "required current-worktree ferrum binary is missing"
-    );
-    path
-}
-
-fn ferrum_example_binary() -> PathBuf {
-    let path = target_profile_directory().join("examples").join(format!(
-        "udp_protocol_client{}",
-        std::env::consts::EXE_SUFFIX
-    ));
-    assert!(
-        path.is_file(),
-        "required current-worktree UDP protocol example is missing"
     );
     path
 }
