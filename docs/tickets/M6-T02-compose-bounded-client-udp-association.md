@@ -1,7 +1,7 @@
 ---
 id: M6-T02
 milestone: M6
-status: todo
+status: ready
 depends_on: [M6-T01]
 owns:
   - crates/ferrum2-config/src/lib.rs
