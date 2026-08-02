@@ -200,8 +200,13 @@ and command definitions in their authoritative build/config files where possible
     `5f4fed7`; WSL repeated regression, the complete native-ext4 harness, Full, and both
     budgets passed. M4-T02 remains blocked only on a future separately authorized
     exact-SHA run.
-    `M4-REMOTE-FINAL-A1` is consumed and revoked; no rerun, dispatch, PR, push,
-    packaging, release, or publication is authorized.
+    `M4-REMOTE-FINAL-A1` is consumed and revoked. User-authorized
+    `M4-TCP-NODELAY-001` is active: enable TCP_NODELAY at the two shared product TCP
+    seams without a configuration or dependency change. Scope
+    `M4-REMOTE-TCP-NODELAY-A1` permits exactly one next non-force push of the final
+    validated integration SHA to `codex/integration/m4` and its automatic push run;
+    no rerun, dispatch, PR, packaging, release, publication, or second push is
+    authorized.
 
 
 ## Project validation

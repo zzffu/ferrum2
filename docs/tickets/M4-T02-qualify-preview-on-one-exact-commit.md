@@ -2,7 +2,7 @@
 id: M4-T02
 milestone: M4
 status: blocked
-depends_on: [M4-T01, M4-THP-PROFILE-001, M4-QUALITY-PORT-LOCK-001]
+depends_on: [M4-T01, M4-THP-PROFILE-001, M4-QUALITY-PORT-LOCK-001, M4-TCP-NODELAY-001]
 owns:
   - Cargo.lock
   - tools/ferrum2-m4-qualification/Cargo.toml
@@ -55,6 +55,11 @@ git status --short
 ```
 
 ## Result
+
+- Current authorization: after `M4-TCP-NODELAY-001` passes local gates, scope
+  `M4-REMOTE-TCP-NODELAY-A1` permits exactly one next non-force push of the final exact
+  integration SHA to `codex/integration/m4` and its automatic push run. It permits no
+  rerun, dispatch, PR, release, publication, or second push.
 
 - Probe repair candidate: `57d317ddb554bbbbc5cc324046277a514ce54324`
 - Resource-readiness repair: `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8`
