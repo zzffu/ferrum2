@@ -65,7 +65,6 @@ fn assert_tagged_error(
             30_003 + index * 4
         ));
     }
-    let tag = format!("r{index}{}", if source.contains("i0") { "i" } else { "o" });
     source = source
         .replace("i0", &format!("r{index}i"))
         .replace("o0", &format!("r{index}o"));
@@ -74,10 +73,6 @@ fn assert_tagged_error(
         .replace("127.0.0.1:10000", &format!("127.0.0.1:{}", endpoints[0]))
         .replace("127.0.0.1:10001", &format!("127.0.0.1:{}", endpoints[1]))
         .replace("127.0.0.1:20000", &format!("127.0.0.1:{}", endpoints[2]));
-    let endpoint = (30_000 + index * 4..=30_003 + index * 4)
-        .map(|port| format!("127.0.0.1:{port}"))
-        .find(|value| source.contains(value))
-        .expect("unique endpoint sentinel");
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let psk = format!("{}AECAwQFBgcICQoLDA0ODw==", char::from(alphabet[index]));
     source = source.replace("AAECAwQFBgcICQoLDA0ODw==", &psk);
@@ -91,7 +86,9 @@ fn assert_tagged_error(
     .expect(name);
     assert_eq!((error.kind(), error.field()), expected, "{name}");
     let rendered = format!("{error}\n{error:?}");
-    for sentinel in [&raw, &tag, &endpoint, &psk] {
+    #[rustfmt::skip]
+    let values = source.lines().filter_map(|line| { let (field, value) = line.split_once(" = ")?; matches!(field, "tag" | "outbound" | "listen" | "server" | "psk").then(|| value.strip_prefix('"')?.strip_suffix('"'))?.filter(|value| !value.is_empty()) });
+    for sentinel in std::iter::once(raw.as_str()).chain(values) {
         assert!(!rendered.contains(sentinel), "{name}: {sentinel}");
     }
 }
