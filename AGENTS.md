@@ -196,8 +196,10 @@ and command definitions in their authoritative build/config files where possible
     `max_ptes_none=0` apply/restore, exact 10k, `180/180`, `6/6`, drain, and cleanup.
     Quality alone failed before product startup on a pre-existing parallel
     `udp_local_e2e` released-port race, so final qualification failed closed.
-    `M4-QUALITY-PORT-LOCK-001` is the active one-file standard-library repair; M4-T02
-    remains blocked on that repair and a future separately authorized exact-SHA run.
+    `M4-QUALITY-PORT-LOCK-001` completed the one-file standard-library repair at exact
+    `5f4fed7`; WSL repeated regression, the complete native-ext4 harness, Full, and both
+    budgets passed. M4-T02 remains blocked only on a future separately authorized
+    exact-SHA run.
     `M4-REMOTE-FINAL-A1` is consumed and revoked; no rerun, dispatch, PR, push,
     packaging, release, or publication is authorized.
 

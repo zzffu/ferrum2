@@ -35,7 +35,7 @@ for one exact commit. M4 qualifies a v0 preview; it does not publish one.
 |---|---|---|---|
 | M4-T01 | Add the Cargo driver and existing-workflow M4 qualification job | — | done |
 | M4-THP-PROFILE-001 | Bind and restore the hosted `max_ptes_none=0` profile | M4-T01 | done |
-| M4-QUALITY-PORT-LOCK-001 | Serialize UDP local E2E port ownership | M4-THP-PROFILE-001 | active |
+| M4-QUALITY-PORT-LOCK-001 | Serialize UDP local E2E port ownership | M4-THP-PROFILE-001 | done |
 | M4-T02 | Run and record all M4 gates on one exact commit | M4-QUALITY-PORT-LOCK-001 | blocked |
 
 ## Next action
@@ -46,6 +46,7 @@ restoration, and cleanup. MSRV, interoperability, and all three native-platform 
 also passed. Quality alone failed before product startup when parallel
 `udp_local_e2e` tests raced during a released-port handoff; final qualification then
 failed closed. Scope `M4-REMOTE-FINAL-A1` was consumed and revoked by that one push and
-automatic run. Complete local `M4-QUALITY-PORT-LOCK-001`, then request a new exact-SHA
-remote authorization. No rerun, dispatch, PR, release, publication, or second push is
-authorized.
+automatic run. Local `M4-QUALITY-PORT-LOCK-001` is complete at exact `5f4fed7`: both
+WSL 200-run loops, the native-ext4 harness, Full `6/6`, and both budgets passed. M4-T02
+is blocked only on a future separately authorized exact-SHA push run. No rerun,
+dispatch, PR, push, release, publication, or second push is authorized.

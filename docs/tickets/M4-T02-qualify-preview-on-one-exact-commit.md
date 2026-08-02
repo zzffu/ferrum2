@@ -214,12 +214,15 @@ git status --short
   relay buffers, but it does not establish the hosted allocator/kernel causal path.
   Run `30725843401/1` proves the reviewed `M4-THP-PROFILE-001` selected profile passes
   the unchanged resource gate and exact drain.
-- `HOSTED-M4-T02-005`: quality exposed a pre-existing parallel test-harness race before
-  product startup. `unused_tcp_udp_loopback` binds TCP and UDP before consulting the
+- `HOSTED-M4-T02-005` is locally resolved: quality exposed a pre-existing parallel
+  test-harness race before product startup. `unused_tcp_udp_loopback` binds TCP and UDP
+  before consulting the
   process-local issued-port registry, so a sibling test may temporarily rebind an
   already returned bare port. Native-ext4 WSL reproduced the exact line-224 failure;
   the isolated test and serial file remain green. Local ticket
-  `M4-QUALITY-PORT-LOCK-001` owns the one-file standard-library serialization repair.
+  `M4-QUALITY-PORT-LOCK-001` completed the one-file standard-library serialization
+  repair at exact `5f4fed7`; both WSL 200-run loops, the complete native-ext4 harness,
+  Full, and both budgets passed. Hosted same-run acceptance remains open.
   `M4-REMOTE-FINAL-A1` is consumed and revoked; any future push requires a new exact-SHA
   authorization. Rerun, dispatch, PR, release, publication, or a second push is
   unauthorized.

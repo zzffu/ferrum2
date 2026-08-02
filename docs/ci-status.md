@@ -14,10 +14,12 @@
   bytes/s, ratio `0.017816400`, and signed difference `-98.218359976%`. The selected
   THP profile applied and restored successfully; resource completed exact 10k,
   `180/180`, `6/6`, drain, and cleanup. Throughput has no minimum preview threshold.
-- **Current local quality repair:** `M4-QUALITY-PORT-LOCK-001` owns only
-  `udp_local_e2e.rs`. Native-ext4 WSL reproduced the exact line-224 `occupy UDP` /
-  `EADDRINUSE` failure on pre-fix iteration 4. The planned repair reuses the existing
-  file-level standard-library mutex pattern; WSL remains diagnostic only.
+- **Current local quality repair:** exact `5f4fed7` changes only `udp_local_e2e.rs` and
+  reuses the existing file-level standard-library mutex pattern. Native-ext4 WSL
+  reproduced the exact line-224 `occupy UDP` / `EADDRINUSE` failure on pre-fix
+  iteration 4; after repair, default parallel and the minimized pair each passed
+  `200/200`, the ignored IPv6 case and complete native-ext4 harness passed, Full passed
+  `6/6`, and both budgets returned `PASS_ADVANCE`. WSL remains diagnostic only.
 - **Local resource repair:** exact
   `56aadd4b25baacb6972ed9bf65ae5052a0d4c6a8` admits a complete identified initial
   exposition with no lazy active-flow sample as zero, while malformed or unidentified
@@ -775,7 +777,7 @@ commands 未运行，因为与 quick commands 具有同一个缺失 workspace �
 | Lifecycle/backpressure | PASS | exact `8318ef1`本地full及同SHA hosted `quality` success | M0 |
 | External interop | PASS | 同一run/attempt的`interop` success；reviewed fail-closed aggregation要求两个setup成功、qualification exit 0及4/4 | M0 |
 | Linux GNU/musl + Windows | PASS | 同一run/attempt三个explicit platform matrix cells全部success | M0 |
-| Performance/10k idle | PASS, M4 STILL BLOCKED | exact `35fb3f8` run `30725843401/1` performance完成throughput、THP apply/restore、10k、180/180、6/6及drain；同run quality因既有UDP E2E并行端口竞争失败，需本地修复和未来新的exact-SHA授权 | M4 |
+| Performance/10k idle | PASS, M4 STILL BLOCKED | exact `35fb3f8` run `30725843401/1` performance完成throughput、THP apply/restore、10k、180/180、6/6及drain；quality race已由local exact `5f4fed7`修复，尚待未来新的exact-SHA授权run | M4 |
 
 ## 已实现并通过的 M0 CI profile
 
