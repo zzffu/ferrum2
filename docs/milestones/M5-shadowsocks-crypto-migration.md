@@ -35,8 +35,8 @@ SIP022 wire 和 schema v1 config 不变的前提下，把三个标准方法的�
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M5-T01 | Pin exact upstream source and apply the bounded security patch | — | done |
-| M5-T01R | Add the missing checked raw TCP subkey owner | M5-T01 | active |
-| M5-T02 | Atomically switch TCP/UDP and delete native cipher/KDF | M5-T01R | blocked |
+| M5-T01R | Add the missing checked raw TCP subkey owner | M5-T01 | done |
+| M5-T02 | Atomically switch TCP/UDP and delete native cipher/KDF | M5-T01R | active |
 | M5-T03 | Qualify one exact commit across all closing gates | M5-T02 | todo |
 
 T01/T02 intentionally serialize overlapping manifests/policy paths. T02 is the only
@@ -45,7 +45,7 @@ identifies a concrete owning-ticket defect.
 
 ## Blocker / next action
 
-Complete and independently accept bounded M5-T01R, then resume the paused M5-T02
-worktree on that exact repair SHA. M5-T03 hosted evidence requires separate explicit
-push authorization; no remote, rerun, PR, tag, release or publication action is
-currently authorized.
+Resume and accept M5-T02 on accepted repair commit
+`831388a3801cdec734e68ecc461c4c3f23ede8db`. M5-T03 hosted evidence requires separate
+explicit push authorization; no remote, rerun, PR, tag, release or publication action
+is currently authorized.

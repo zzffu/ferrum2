@@ -1,7 +1,7 @@
 ---
 id: M5-T02
 milestone: M5
-status: blocked
+status: active
 depends_on: [M5-T01, M5-T01R]
 owns:
   - Cargo.toml
@@ -52,5 +52,6 @@ Do not integrate a partial transport switch. If the atomic candidate cannot pres
 the contract, keep M5 blocked on its pre-T02 integration base; do not add a dual backend
 or runtime/feature fallback.
 
-Execution is paused on M5-T01R because the accepted vendor interface lacks a checked
-owner constructor for the existing public raw TCP subkey seam.
+Execution resumed after accepted M5-T01R commit
+`831388a3801cdec734e68ecc461c4c3f23ede8db` added the checked owner constructor for
+the existing public raw TCP subkey seam.
