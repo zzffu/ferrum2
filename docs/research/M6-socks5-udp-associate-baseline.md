@@ -201,13 +201,15 @@ fully-valid datagram 固定 port。该宽容不会允许第三方 IP，也不会
 | M6-R06 | unauthenticated/spoofed/replayed upstream response reaches client or advances state out of order | connected upstream peer test plus existing SIP022 negative vectors; public-path mutation test reserves queue/bytes before `commit_response` and sends nothing on failed prepare/reservation |
 | M6-R07 | TCP close, half-close, idle expiry or process shutdown leaks association | paused-time owner test and real sockets: admitted UDP signal, control close, immediate no-forward, awaited return to baseline for sessions/sockets/tasks/queues/bytes; process graceful and forced paths |
 | M6-R08 | session/buffer/queue saturation evicts active flow, overcommits memory, or blocks shutdown | exact configured limits with one-over admission/drop, queue depth 4, backing-capacity accounting including fixed scratch, cancellation while waiting for budget, deterministic expired-only replacement |
-| M6-R09 | public client path only works against ferrum server or one method | six new method-major cases: ferrum client SOCKS UDP driver → sing-box server and → shadowsocks-rust server for each standard method; each case sends three distinct request/reply datagrams and verifies payload + source address + cleanup |
-| M6-R10 | external cases merely replay M2's socket-free example | new driver must negotiate public TCP `UDP ASSOCIATE`, use returned BND endpoint, retain then close control TCP, and observe association teardown; reuse provider provisioning, not old PASS claims |
+| M6-R09 | public client path only works against ferrum server or one method | the existing six FerrumClient method-major rows use the public SOCKS UDP driver against sing-box and shadowsocks-rust for each standard method; each case sends three distinct request/reply datagrams and verifies payload + source address + cleanup |
+| M6-R10 | external cases merely replay M2's socket-free example | the substituted FerrumClient adapter must negotiate public TCP `UDP ASSOCIATE`, use returned BND endpoint, retain then close control TCP, and observe association teardown; reuse provider provisioning, not old PASS claims |
 | M6-R11 | IPv4-only public listener accidentally expands to dual stack/DNS/routing | config and real-process tests keep configured TCP listen/upstream as IPv4 while UDP headers independently cover IPv4/IPv6/domain targets; no route decision or client DNS call exists |
 
-The six external cases complement rather than replace the existing same-SHA SIP022 UDP matrix.
-Release qualification must retain the full existing TCP/UDP gates and add the six public-path rows on
-one exact SHA/run/attempt; no result may be spliced from M2/M5 runs.
+Under ADR-0016, the six public FerrumClient rows replace only their socket-free example adapter；
+the six reference-client rows、fixed IDs、methods、providers and failure-continuation remain。
+Together they retain the existing same-SHA UDP `12/12` matrix without a new provider、matrix or
+workflow job。Release qualification must retain the full existing TCP/UDP gates on one exact
+SHA/run/attempt；no result may be spliced from M2/M5 runs。
 
 ## Explicit non-goals
 
