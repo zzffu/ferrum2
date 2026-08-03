@@ -77,6 +77,14 @@ impl ChildGuard {
         Self::spawn_with_context(name, config, "unclassified")
     }
 
+    pub fn spawn_while_holding(
+        name: &str,
+        config: &Path,
+        _spawn_guard: &std::sync::MutexGuard<'static, ()>,
+    ) -> Self {
+        Self::spawn_configured(name, config, "unclassified", false)
+    }
+
     pub fn spawn_with_context(name: &str, config: &Path, context: impl Into<String>) -> Self {
         Self::spawn_with_context_and_signal_group(name, config, context, false)
     }
@@ -86,6 +94,16 @@ impl ChildGuard {
     }
 
     fn spawn_with_context_and_signal_group(
+        name: &str,
+        config: &Path,
+        context: impl Into<String>,
+        signal_group: bool,
+    ) -> Self {
+        let _spawn_guard = hold_process_spawns();
+        Self::spawn_configured(name, config, context, signal_group)
+    }
+
+    fn spawn_configured(
         name: &str,
         config: &Path,
         context: impl Into<String>,
@@ -105,10 +123,7 @@ impl ChildGuard {
         }
         #[cfg(not(windows))]
         let _ = signal_group;
-        let mut child = {
-            let _spawn_guard = hold_process_spawns();
-            command.spawn().expect("spawn child process")
-        };
+        let mut child = command.spawn().expect("spawn child process");
         let stdout = child.stdout.take().expect("child stdout pipe");
         let stderr = child.stderr.take().expect("child stderr pipe");
         ACTIVE_CHILDREN.fetch_add(1, Ordering::SeqCst);

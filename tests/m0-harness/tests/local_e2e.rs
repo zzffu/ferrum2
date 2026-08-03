@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use local_support::{
     ChildGuard, TCP_METHOD_CONFIGS, bind_loopback_listener, rewrite_config_method, unused_loopback,
-    wait_for_listener, wait_for_tcp_udp_bound, write_client_config, write_client_config_with_psk,
-    write_tagged_client_config, write_tagged_server_config, write_tcp_only_server_config,
-    write_tcp_only_server_config_with_psk,
+    unused_tcp_udp_loopback, wait_for_listener, wait_for_tcp_udp_bound, write_client_config,
+    write_client_config_with_psk, write_tagged_client_config, write_tagged_server_config,
+    write_tcp_only_server_config, write_tcp_only_server_config_with_psk,
 };
 
 struct EchoWorker {
@@ -190,6 +190,7 @@ fn socks_connect_wire(client: SocketAddrV4, target: &[u8]) -> (TcpStream, [u8; 1
 
 #[test]
 fn echo_worker_drop_joins_and_releases_listener() {
+    let _spawn_guard = local_support::hold_process_spawns();
     let (address, worker) = start_echo();
     drop(worker);
     drop(TcpListener::bind(address).expect("dropped echo listener rebind"));
@@ -529,38 +530,56 @@ fn tagged_tcp_shared_outbound_no_fallback_and_aggregate_admission_are_process_vi
 fn tagged_partial_bind_signal_shutdown_and_restart_release_every_listener() {
     let directory = tempfile::tempdir().expect("tagged lifecycle tempdir");
 
-    let clients = [unused_loopback(), unused_loopback()];
-    let client_config = write_tagged_client_config(
-        directory.path(),
-        clients,
-        [unused_loopback(), unused_loopback()],
-        [0, 1],
-        false,
-    )
-    .expect("tagged client lifecycle config");
-    let occupied = bind_loopback_listener(clients[1]).expect("occupy middle client listener");
-    let mut failed = ChildGuard::spawn("ferrum2-client", &client_config);
-    let exit = failed.wait_for_exit(Duration::from_secs(5));
-    assert_eq!(exit.status.code(), Some(1), "{exit}");
-    drop(bind_loopback_listener(clients[0]).expect("client partial rollback"));
-    drop(occupied);
-    for address in clients {
-        drop(bind_loopback_listener(address).expect("client rollback exact rebind"));
+    let (clients, upstreams) = {
+        let _spawn_guard = local_support::hold_process_spawns();
+        (
+            [unused_loopback(), unused_loopback()],
+            [unused_loopback(), unused_loopback()],
+        )
+    };
+    let client_config =
+        write_tagged_client_config(directory.path(), clients, upstreams, [0, 1], false)
+            .expect("tagged client lifecycle config");
+    {
+        let spawn_guard = local_support::hold_process_spawns();
+        let occupied = bind_loopback_listener(clients[1]).expect("occupy middle client listener");
+        let mut failed =
+            ChildGuard::spawn_while_holding("ferrum2-client", &client_config, &spawn_guard);
+        let exit = failed.wait_for_exit(Duration::from_secs(5));
+        assert_eq!(exit.status.code(), Some(1), "{exit}");
+        let released = bind_loopback_listener(clients[0]).expect("client partial rollback");
+        drop(occupied);
+        let previously_occupied =
+            bind_loopback_listener(clients[1]).expect("client rollback exact rebind");
+        drop((released, previously_occupied));
     }
 
-    let servers = [unused_loopback(), unused_loopback()];
+    let servers = {
+        let _spawn_guard = local_support::hold_process_spawns();
+        [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()]
+    };
     let server_config = write_tagged_server_config(directory.path(), servers, [0, 1], true)
         .expect("tagged server lifecycle config");
-    let occupied = bind_loopback_listener(servers[1]).expect("occupy middle server listener");
-    let mut failed = ChildGuard::spawn("ferrum2-server", &server_config);
-    let exit = failed.wait_for_exit(Duration::from_secs(5));
-    assert_eq!(exit.status.code(), Some(1), "{exit}");
-    drop(bind_loopback_listener(servers[0]).expect("server TCP partial rollback"));
-    drop(UdpSocket::bind(servers[0]).expect("server UDP partial rollback"));
-    drop(occupied);
-    for address in servers {
-        drop(bind_loopback_listener(address).expect("server rollback TCP rebind"));
-        drop(UdpSocket::bind(address).expect("server rollback UDP rebind"));
+    {
+        let spawn_guard = local_support::hold_process_spawns();
+        let occupied = bind_loopback_listener(servers[1]).expect("occupy middle server listener");
+        let mut failed =
+            ChildGuard::spawn_while_holding("ferrum2-server", &server_config, &spawn_guard);
+        let exit = failed.wait_for_exit(Duration::from_secs(5));
+        assert_eq!(exit.status.code(), Some(1), "{exit}");
+        let released_tcp = bind_loopback_listener(servers[0]).expect("server TCP partial rollback");
+        let released_udp = UdpSocket::bind(servers[0]).expect("server UDP partial rollback");
+        drop(occupied);
+        let previously_occupied_tcp =
+            bind_loopback_listener(servers[1]).expect("server rollback TCP rebind");
+        let previously_occupied_udp =
+            UdpSocket::bind(servers[1]).expect("server rollback UDP rebind");
+        drop((
+            released_tcp,
+            released_udp,
+            previously_occupied_tcp,
+            previously_occupied_udp,
+        ));
     }
 
     let mut server = ChildGuard::spawn_signallable(
