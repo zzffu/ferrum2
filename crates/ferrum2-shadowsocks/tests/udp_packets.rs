@@ -350,15 +350,47 @@ fn authenticated_semantic_negative_table_has_zero_server_mutation() {
     let zero_port = semantic_body(0, &[1, 192, 0, 2, 1, 0, 0]);
     let empty_domain = semantic_body(0, &[3, 0, 0, 53]);
     let non_ascii_domain = semantic_body(0, &[3, 1, 0xff, 0, 53]);
-    #[rustfmt::skip]
     let cases = [
-        ("type", raw_packet(&crypto, 0x40, &raw_request_body(1, NOW, 0), &packet_random), UdpPacketError::Type),
-        ("timestamp", raw_packet(&crypto, 0x41, &raw_request_body(0, NOW - 31, 0), &packet_random), UdpPacketError::Timestamp),
-        ("padding", raw_packet(&crypto, 0x42, &invalid_padding, &packet_random), UdpPacketError::Padding),
-        ("address type", raw_packet(&crypto, 0x43, &invalid_address, &packet_random), UdpPacketError::Address),
-        ("zero port", raw_packet(&crypto, 0x44, &zero_port, &packet_random), UdpPacketError::Address),
-        ("empty domain", raw_packet(&crypto, 0x45, &empty_domain, &packet_random), UdpPacketError::Address),
-        ("non-ASCII domain", raw_packet(&crypto, 0x46, &non_ascii_domain, &packet_random), UdpPacketError::Address),
+        (
+            "type",
+            raw_packet(&crypto, 0x40, &raw_request_body(1, NOW, 0), &packet_random),
+            UdpPacketError::Type,
+        ),
+        (
+            "timestamp",
+            raw_packet(
+                &crypto,
+                0x41,
+                &raw_request_body(0, NOW - 31, 0),
+                &packet_random,
+            ),
+            UdpPacketError::Timestamp,
+        ),
+        (
+            "padding",
+            raw_packet(&crypto, 0x42, &invalid_padding, &packet_random),
+            UdpPacketError::Padding,
+        ),
+        (
+            "address type",
+            raw_packet(&crypto, 0x43, &invalid_address, &packet_random),
+            UdpPacketError::Address,
+        ),
+        (
+            "zero port",
+            raw_packet(&crypto, 0x44, &zero_port, &packet_random),
+            UdpPacketError::Address,
+        ),
+        (
+            "empty domain",
+            raw_packet(&crypto, 0x45, &empty_domain, &packet_random),
+            UdpPacketError::Address,
+        ),
+        (
+            "non-ASCII domain",
+            raw_packet(&crypto, 0x46, &non_ascii_domain, &packet_random),
+            UdpPacketError::Address,
+        ),
     ];
     let mut scratch = UdpPacketScratch::new();
     for (label, wire, expected) in cases {

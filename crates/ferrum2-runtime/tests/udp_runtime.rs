@@ -75,25 +75,55 @@ fn committed_session(
 #[test]
 fn validated_limits_freeze_defaults_and_inclusive_ranges() {
     let defaults = UdpRuntimeLimits::default();
-    #[rustfmt::skip]
-    let actual = (defaults.max_sessions(), defaults.max_buffered_bytes(), defaults.idle_timeout());
-    #[rustfmt::skip]
-    let expected = (DEFAULT_UDP_MAX_SESSIONS, DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_IDLE_TIMEOUT);
+    let actual = (
+        defaults.max_sessions(),
+        defaults.max_buffered_bytes(),
+        defaults.idle_timeout(),
+    );
+    let expected = (
+        DEFAULT_UDP_MAX_SESSIONS,
+        DEFAULT_UDP_MAX_BUFFERED_BYTES,
+        DEFAULT_UDP_IDLE_TIMEOUT,
+    );
     assert_eq!(actual, expected);
 
-    #[rustfmt::skip]
     let valid = [
-        (MIN_UDP_MAX_SESSIONS, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT),
-        (MAX_UDP_MAX_SESSIONS, MAX_UDP_MAX_BUFFERED_BYTES, MAX_UDP_IDLE_TIMEOUT),
+        (
+            MIN_UDP_MAX_SESSIONS,
+            MIN_UDP_MAX_BUFFERED_BYTES,
+            MIN_UDP_IDLE_TIMEOUT,
+        ),
+        (
+            MAX_UDP_MAX_SESSIONS,
+            MAX_UDP_MAX_BUFFERED_BYTES,
+            MAX_UDP_IDLE_TIMEOUT,
+        ),
     ];
     for (sessions, bytes, idle) in valid {
         assert!(UdpRuntimeLimits::new(sessions, bytes, idle).is_ok());
     }
-    #[rustfmt::skip]
     let invalid = [
-        ("sessions", 0, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT, UdpLimitError::Sessions),
-        ("bytes", MIN_UDP_MAX_SESSIONS, MIN_UDP_MAX_BUFFERED_BYTES - 1, MIN_UDP_IDLE_TIMEOUT, UdpLimitError::BufferedBytes),
-        ("idle", MIN_UDP_MAX_SESSIONS, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT - Duration::from_millis(1), UdpLimitError::IdleTimeout),
+        (
+            "sessions",
+            0,
+            MIN_UDP_MAX_BUFFERED_BYTES,
+            MIN_UDP_IDLE_TIMEOUT,
+            UdpLimitError::Sessions,
+        ),
+        (
+            "bytes",
+            MIN_UDP_MAX_SESSIONS,
+            MIN_UDP_MAX_BUFFERED_BYTES - 1,
+            MIN_UDP_IDLE_TIMEOUT,
+            UdpLimitError::BufferedBytes,
+        ),
+        (
+            "idle",
+            MIN_UDP_MAX_SESSIONS,
+            MIN_UDP_MAX_BUFFERED_BYTES,
+            MIN_UDP_IDLE_TIMEOUT - Duration::from_millis(1),
+            UdpLimitError::IdleTimeout,
+        ),
     ];
     for (label, sessions, bytes, idle, expected) in invalid {
         let actual = UdpRuntimeLimits::new(sessions, bytes, idle);

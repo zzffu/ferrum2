@@ -2925,21 +2925,57 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn phase_deadline_contract_table_preserves_defaults_overrides_and_first_write() {
-        #[rustfmt::skip]
-        let defaults = RuntimeConfig { max_connections: std::num::NonZeroU16::new(4_096).expect("non-zero"), listen_backlog: std::num::NonZeroU16::new(1_024).expect("non-zero"), handshake_timeout: Duration::from_secs(5), connect_timeout: Duration::from_secs(10), idle_timeout: Duration::from_secs(300), shutdown_grace: Duration::from_secs(30) };
-        #[rustfmt::skip]
-        let custom = RuntimeConfig { connect_timeout: Duration::from_millis(2_300), handshake_timeout: Duration::from_millis(3_700), ..defaults };
-        #[rustfmt::skip]
-        let actual = [(defaults.connect_timeout, defaults.handshake_timeout), (custom.connect_timeout, custom.handshake_timeout)];
-        #[rustfmt::skip]
-        let expected = [(Duration::from_secs(10), Duration::from_secs(5)), (Duration::from_millis(2_300), Duration::from_millis(3_700))];
+        let defaults = RuntimeConfig {
+            max_connections: std::num::NonZeroU16::new(4_096).expect("non-zero"),
+            listen_backlog: std::num::NonZeroU16::new(1_024).expect("non-zero"),
+            handshake_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(10),
+            idle_timeout: Duration::from_secs(300),
+            shutdown_grace: Duration::from_secs(30),
+        };
+        let custom = RuntimeConfig {
+            connect_timeout: Duration::from_millis(2_300),
+            handshake_timeout: Duration::from_millis(3_700),
+            ..defaults
+        };
+        let actual = [
+            (defaults.connect_timeout, defaults.handshake_timeout),
+            (custom.connect_timeout, custom.handshake_timeout),
+        ];
+        let expected = [
+            (Duration::from_secs(10), Duration::from_secs(5)),
+            (Duration::from_millis(2_300), Duration::from_millis(3_700)),
+        ];
         assert_eq!(actual, expected);
-        #[rustfmt::skip]
         let cases = [
-            ("default connect", defaults, defaults.connect_timeout + Duration::from_secs(1), false, 0x11),
-            ("fresh handshake", defaults, Duration::from_secs(9), true, 0x12),
-            ("custom connect", custom, custom.connect_timeout + Duration::from_secs(1), false, 0x13),
-            ("custom handshake", custom, Duration::from_secs(2), true, 0x14),
+            (
+                "default connect",
+                defaults,
+                defaults.connect_timeout + Duration::from_secs(1),
+                false,
+                0x11,
+            ),
+            (
+                "fresh handshake",
+                defaults,
+                Duration::from_secs(9),
+                true,
+                0x12,
+            ),
+            (
+                "custom connect",
+                custom,
+                custom.connect_timeout + Duration::from_secs(1),
+                false,
+                0x13,
+            ),
+            (
+                "custom handshake",
+                custom,
+                Duration::from_secs(2),
+                true,
+                0x14,
+            ),
         ];
         for (label, runtime, delay, handshake, key) in cases {
             run_timeout_case(label, runtime, delay, handshake, key).await;
@@ -3097,26 +3133,37 @@ mod tests {
 
     #[test]
     fn adapter_contract_observability_mapping_is_closed_and_call_site_specific() {
-        #[rustfmt::skip]
         let connect_cases = [
-            (ConnectErrorKind::NetworkUnreachable, Reason::NetworkUnreachable),
+            (
+                ConnectErrorKind::NetworkUnreachable,
+                Reason::NetworkUnreachable,
+            ),
             (ConnectErrorKind::HostUnreachable, Reason::HostUnreachable),
-            (ConnectErrorKind::ConnectionRefused, Reason::ConnectionRefused),
+            (
+                ConnectErrorKind::ConnectionRefused,
+                Reason::ConnectionRefused,
+            ),
             (ConnectErrorKind::Timeout, Reason::ConnectTimeout),
             (ConnectErrorKind::Other, Reason::RelayIo),
         ];
         for (kind, expected) in connect_cases {
-            #[rustfmt::skip]
-            let oracle = (observation_for_error(ShadowsocksError::Connect(kind)), (Stage::Shadowsocks, Outcome::Failed, expected));
+            let oracle = (
+                observation_for_error(ShadowsocksError::Connect(kind)),
+                (Stage::Shadowsocks, Outcome::Failed, expected),
+            );
             assert_eq!(oracle.0, oracle.1);
         }
-        #[rustfmt::skip]
-        let oracle = (observation_for_terminal(FlowTerminal::Normal), (Stage::Relay, Outcome::Completed, None));
+        let oracle = (
+            observation_for_terminal(FlowTerminal::Normal),
+            (Stage::Relay, Outcome::Completed, None),
+        );
         assert_eq!(oracle.0, oracle.1);
         for (reason, expected) in detection_cases() {
             assert_eq!(reason_for_detection(reason), expected);
-            #[rustfmt::skip]
-            let oracle = (observation_for_terminal(FlowTerminal::Detection(reason)), (Stage::Shadowsocks, Outcome::Rejected, Some(expected)));
+            let oracle = (
+                observation_for_terminal(FlowTerminal::Detection(reason)),
+                (Stage::Shadowsocks, Outcome::Rejected, Some(expected)),
+            );
             assert_eq!(oracle.0, oracle.1);
         }
         for (reason, expected) in [
@@ -3125,8 +3172,10 @@ mod tests {
             (ProtocolReason::NonceExhausted, Reason::NonceExhausted),
         ] {
             assert_eq!(reason_for_protocol(reason), expected);
-            #[rustfmt::skip]
-            let oracle = (observation_for_terminal(FlowTerminal::Protocol(reason)), (Stage::Shadowsocks, Outcome::Rejected, Some(expected)));
+            let oracle = (
+                observation_for_terminal(FlowTerminal::Protocol(reason)),
+                (Stage::Shadowsocks, Outcome::Rejected, Some(expected)),
+            );
             assert_eq!(oracle.0, oracle.1);
         }
         for phase in [
@@ -3136,13 +3185,14 @@ mod tests {
             TransportPhase::Flush,
             TransportPhase::Shutdown,
         ] {
-            #[rustfmt::skip]
-            let oracle = (observation_for_terminal(FlowTerminal::Transport(phase)), (Stage::Relay, Outcome::Failed, Some(Reason::RelayIo)));
+            let oracle = (
+                observation_for_terminal(FlowTerminal::Transport(phase)),
+                (Stage::Relay, Outcome::Failed, Some(Reason::RelayIo)),
+            );
             assert_eq!(oracle.0, oracle.1);
         }
     }
 
-    #[rustfmt::skip]
     fn detection_cases() -> [(DetectionReason, Reason); 18] {
         [
             (DetectionReason::ShortRead, Reason::Authentication),
@@ -3157,7 +3207,10 @@ mod tests {
             (DetectionReason::ResponseBinding, Reason::ResponseBinding),
             (DetectionReason::KeyUnavailable, Reason::Authentication),
             (DetectionReason::ClockUnavailable, Reason::ClockUnavailable),
-            (DetectionReason::RandomUnavailable, Reason::RandomUnavailable),
+            (
+                DetectionReason::RandomUnavailable,
+                Reason::RandomUnavailable,
+            ),
             (DetectionReason::Replay, Reason::Replay),
             (DetectionReason::ReplayCapacity, Reason::ReplayCapacity),
             (DetectionReason::ReplayUnavailable, Reason::RelayIo),
@@ -3238,8 +3291,9 @@ mod tests {
             std::process::id(),
             CONFIG_ID.fetch_add(1, Ordering::SeqCst)
         ));
-        #[rustfmt::skip]
-        let source = format!("schema_version = 1\n[client]\nlisten = \"{listen}\"\nserver = \"{server}\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n[runtime]\nshutdown_grace_ms = 0\n");
+        let source = format!(
+            "schema_version = 1\n[client]\nlisten = \"{listen}\"\nserver = \"{server}\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n[runtime]\nshutdown_grace_ms = 0\n"
+        );
         std::fs::write(&path, source).expect("client test config");
         let config = ferrum2_config::load_client(&path).expect("validated client test config");
         (path, config)
@@ -3257,48 +3311,85 @@ mod tests {
         (path, config)
     }
 
-    #[rustfmt::skip]
-    fn tagged_client_test_config(mappings: &[(SocketAddrV4, SocketAddrV4)], udp: bool) -> (PathBuf, ValidatedClientConfig) {
-        let (path, mut config) = if udp { client_udp_test_config(mappings[0].0, mappings[0].1) } else { client_test_config(mappings[0].0, mappings[0].1) };
-        config.inbounds = mappings.iter().map(|(listen, server)| ferrum2_config::ClientInboundConfig {
-            listen: *listen, outbound: ferrum2_config::ClientOutboundConfig { server: *server },
-        }).collect();
-        config.outbounds = mappings.iter().map(|(_, server)| ferrum2_config::ClientOutboundConfig { server: *server }).collect();
+    fn tagged_client_test_config(
+        mappings: &[(SocketAddrV4, SocketAddrV4)],
+        udp: bool,
+    ) -> (PathBuf, ValidatedClientConfig) {
+        let (path, mut config) = if udp {
+            client_udp_test_config(mappings[0].0, mappings[0].1)
+        } else {
+            client_test_config(mappings[0].0, mappings[0].1)
+        };
+        config.inbounds = mappings
+            .iter()
+            .map(|(listen, server)| ferrum2_config::ClientInboundConfig {
+                listen: *listen,
+                outbound: ferrum2_config::ClientOutboundConfig { server: *server },
+            })
+            .collect();
+        config.outbounds = mappings
+            .iter()
+            .map(|(_, server)| ferrum2_config::ClientOutboundConfig { server: *server })
+            .collect();
         (path, config)
     }
 
-    #[rustfmt::skip]
     fn active(mut snapshot: OwnerSnapshot) -> OwnerSnapshot {
-        snapshot.process_root_reaps = 0; snapshot.process_root_rollbacks = 0;
-        snapshot.process_forced_roots = 0; snapshot.forced_shutdowns = 0; snapshot.udp_forced_shutdowns = 0;
+        snapshot.process_root_reaps = 0;
+        snapshot.process_root_rollbacks = 0;
+        snapshot.process_forced_roots = 0;
+        snapshot.forced_shutdowns = 0;
+        snapshot.udp_forced_shutdowns = 0;
         snapshot
     }
 
     type TestClientTask = tokio::task::JoinHandle<Result<(), RunError>>;
 
-    #[rustfmt::skip]
-    fn spawn_test_client(config: ValidatedClientConfig, registry: &OwnerRegistry) -> (tokio::sync::oneshot::Sender<()>, TestClientTask) {
+    fn spawn_test_client(
+        config: ValidatedClientConfig,
+        registry: &OwnerRegistry,
+    ) -> (tokio::sync::oneshot::Sender<()>, TestClientTask) {
         let (stop, stopped) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(run_with_registry(config, registry.clone(), async move { let _ = stopped.await; }));
+        let task = tokio::spawn(run_with_registry(config, registry.clone(), async move {
+            let _ = stopped.await;
+        }));
         (stop, task)
     }
 
-    #[rustfmt::skip]
-    fn spawn_test_client_with_random(config: ValidatedClientConfig, registry: &OwnerRegistry, random: Arc<dyn SecureRandom>) -> (tokio::sync::oneshot::Sender<()>, TestClientTask) {
+    fn spawn_test_client_with_random(
+        config: ValidatedClientConfig,
+        registry: &OwnerRegistry,
+        random: Arc<dyn SecureRandom>,
+    ) -> (tokio::sync::oneshot::Sender<()>, TestClientTask) {
         let (stop, stopped) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(run_with_registry_and_metrics_inner(config, registry.clone(), async move { let _ = stopped.await; }, Arc::new(Metrics::new()), Some(random)));
+        let task = tokio::spawn(run_with_registry_and_metrics_inner(
+            config,
+            registry.clone(),
+            async move {
+                let _ = stopped.await;
+            },
+            Arc::new(Metrics::new()),
+            Some(random),
+        ));
         (stop, task)
     }
 
-    #[rustfmt::skip]
     async fn socks_command(listen: SocketAddrV4, command: u8) -> (tokio::net::TcpStream, [u8; 10]) {
-        let mut stream = tokio::net::TcpStream::connect(listen).await.expect("SOCKS connect");
+        let mut stream = tokio::net::TcpStream::connect(listen)
+            .await
+            .expect("SOCKS connect");
         stream.write_all(&[5, 1, 0]).await.expect("greeting");
-        let mut method = [0; 2]; stream.read_exact(&mut method).await.expect("method");
+        let mut method = [0; 2];
+        stream.read_exact(&mut method).await.expect("method");
         assert_eq!(method, [5, 0]);
-        let request = if command == 3 { [5, 3, 0, 1, 0, 0, 0, 0, 0, 0] } else { [5, command, 0, 1, 127, 0, 0, 1, 0, 80] };
+        let request = if command == 3 {
+            [5, 3, 0, 1, 0, 0, 0, 0, 0, 0]
+        } else {
+            [5, command, 0, 1, 127, 0, 0, 1, 0, 80]
+        };
         stream.write_all(&request).await.expect("command");
-        let mut reply = [0; 10]; stream.read_exact(&mut reply).await.expect("reply");
+        let mut reply = [0; 10];
+        stream.read_exact(&mut reply).await.expect("reply");
         (stream, reply)
     }
 
@@ -3318,16 +3409,23 @@ mod tests {
     }
 
     #[tokio::test]
-    #[rustfmt::skip]
     async fn tagged_tcp_uses_static_outbounds_one_process_permit_and_no_fallback() {
         let listens = [reserve_address(), reserve_address()];
         let upstreams = [
-            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("upstream A"),
-            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("upstream B"),
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("upstream A"),
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("upstream B"),
         ];
-        let servers: [SocketAddrV4; 2] = std::array::from_fn(|index| match upstreams[index].local_addr().expect("upstream") {
-            SocketAddr::V4(address) => address, SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
-        });
+        let servers: [SocketAddrV4; 2] =
+            std::array::from_fn(
+                |index| match upstreams[index].local_addr().expect("upstream") {
+                    SocketAddr::V4(address) => address,
+                    SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
+                },
+            );
         let (path, mut config) =
             tagged_client_test_config(&[(listens[0], servers[0]), (listens[1], servers[1])], false);
         config.runtime.max_connections = 1.try_into().expect("one connection");
@@ -3356,10 +3454,8 @@ mod tests {
         assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
 
         let shared_listens = [reserve_address(), reserve_address()];
-        let (shared_path, config) = tagged_client_test_config(
-            &shared_listens.map(|listen| (listen, servers[0])),
-            false,
-        );
+        let (shared_path, config) =
+            tagged_client_test_config(&shared_listens.map(|listen| (listen, servers[0])), false);
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);
         for listen in shared_listens {
@@ -3607,19 +3703,30 @@ mod tests {
     }
 
     #[tokio::test]
-    #[rustfmt::skip]
     async fn tagged_prepare_failures_restore_full_baseline_and_exact_rebind() {
         for blocked in 0..3 {
             let listens = [reserve_address(), reserve_address(), reserve_address()];
             let metrics = reserve_address();
-            let (path, mut config) = tagged_client_test_config(&listens.map(|listen| (listen, reserve_address())), false);
+            let (path, mut config) = tagged_client_test_config(
+                &listens.map(|listen| (listen, reserve_address())),
+                false,
+            );
             config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
-            let address = if blocked < 2 { listens[blocked] } else { metrics };
+            let address = if blocked < 2 {
+                listens[blocked]
+            } else {
+                metrics
+            };
             let incumbent = std::net::TcpListener::bind(address).expect("occupy prepare position");
             let registry = OwnerRegistry::new();
-            assert_eq!(run_with_registry(config, registry.clone(), std::future::pending()).await, Err(RunError::StartupBind));
+            assert_eq!(
+                run_with_registry(config, registry.clone(), std::future::pending()).await,
+                Err(RunError::StartupBind)
+            );
             drop(incumbent);
-            for address in listens.into_iter().chain([metrics]) { drop(std::net::TcpListener::bind(address).expect("exact rollback rebind")); }
+            for address in listens.into_iter().chain([metrics]) {
+                drop(std::net::TcpListener::bind(address).expect("exact rollback rebind"));
+            }
             assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
             std::fs::remove_file(path).expect("remove prepare config");
         }
@@ -3929,9 +4036,13 @@ mod tests {
                 .expect("committed request timeout")
                 .expect("committed request");
             let live = registry.snapshot();
-            #[rustfmt::skip]
-            let actual = (live.udp_sessions, live.udp_buffered_bytes, live.udp_queued_datagrams, live.active_supervisor_children, live.connection_tasks);
-            #[rustfmt::skip]
+            let actual = (
+                live.udp_sessions,
+                live.udp_buffered_bytes,
+                live.udp_queued_datagrams,
+                live.active_supervisor_children,
+                live.connection_tasks,
+            );
             let expected = (1, 3 * MAX_UDP_WIRE_LEN, 0, 1, 1);
             assert_eq!(actual, expected, "{terminal}");
             if terminal == "idle" {
@@ -4076,10 +4187,30 @@ mod tests {
         );
         assert_eq!(run_task.await.expect("run task"), Ok(()));
         let closed = registry.snapshot();
-        #[rustfmt::skip]
-        let actual = (closed.process_supervisors, closed.prepared_process_roots, closed.active_process_roots, closed.active_supervisor_children, closed.connection_tasks, closed.owned_permits, closed.listeners, closed.udp_sessions, closed.udp_queued_datagrams, closed.udp_buffered_bytes);
-        #[rustfmt::skip]
-        let expected = (baseline.process_supervisors, baseline.prepared_process_roots, baseline.active_process_roots, baseline.active_supervisor_children, baseline.connection_tasks, baseline.owned_permits, baseline.listeners, baseline.udp_sessions, baseline.udp_queued_datagrams, baseline.udp_buffered_bytes);
+        let actual = (
+            closed.process_supervisors,
+            closed.prepared_process_roots,
+            closed.active_process_roots,
+            closed.active_supervisor_children,
+            closed.connection_tasks,
+            closed.owned_permits,
+            closed.listeners,
+            closed.udp_sessions,
+            closed.udp_queued_datagrams,
+            closed.udp_buffered_bytes,
+        );
+        let expected = (
+            baseline.process_supervisors,
+            baseline.prepared_process_roots,
+            baseline.active_process_roots,
+            baseline.active_supervisor_children,
+            baseline.connection_tasks,
+            baseline.owned_permits,
+            baseline.listeners,
+            baseline.udp_sessions,
+            baseline.udp_queued_datagrams,
+            baseline.udp_buffered_bytes,
+        );
         assert_eq!(actual, expected);
         assert!(
             !metrics
@@ -4212,10 +4343,30 @@ mod tests {
                 .contains("ferrum2_udp_forced_shutdown_total{role=\"client\"} 2")
         );
         let closed = registry.snapshot();
-        #[rustfmt::skip]
-        let actual = (closed.process_supervisors, closed.prepared_process_roots, closed.active_process_roots, closed.active_supervisor_children, closed.connection_tasks, closed.owned_permits, closed.listeners, closed.udp_sessions, closed.udp_queued_datagrams, closed.udp_buffered_bytes);
-        #[rustfmt::skip]
-        let expected = (baseline.process_supervisors, baseline.prepared_process_roots, baseline.active_process_roots, baseline.active_supervisor_children, baseline.connection_tasks, baseline.owned_permits, baseline.listeners, baseline.udp_sessions, baseline.udp_queued_datagrams, baseline.udp_buffered_bytes);
+        let actual = (
+            closed.process_supervisors,
+            closed.prepared_process_roots,
+            closed.active_process_roots,
+            closed.active_supervisor_children,
+            closed.connection_tasks,
+            closed.owned_permits,
+            closed.listeners,
+            closed.udp_sessions,
+            closed.udp_queued_datagrams,
+            closed.udp_buffered_bytes,
+        );
+        let expected = (
+            baseline.process_supervisors,
+            baseline.prepared_process_roots,
+            baseline.active_process_roots,
+            baseline.active_supervisor_children,
+            baseline.connection_tasks,
+            baseline.owned_permits,
+            baseline.listeners,
+            baseline.udp_sessions,
+            baseline.udp_queued_datagrams,
+            baseline.udp_buffered_bytes,
+        );
         assert_eq!(actual, expected);
         drop(controls);
         drop(applications);
@@ -4461,10 +4612,24 @@ mod tests {
         drop(socks);
         drop(shadowsocks_stream);
         let final_snapshot = registry.snapshot();
-        #[rustfmt::skip]
-        let actual = (final_snapshot.active_supervisor_children, final_snapshot.connection_tasks, final_snapshot.owned_buffers, final_snapshot.owned_permits, final_snapshot.listeners, final_snapshot.process_forced_roots, final_snapshot.forced_shutdowns);
-        #[rustfmt::skip]
-        let expected = (baseline.active_supervisor_children, baseline.connection_tasks, baseline.owned_buffers, baseline.owned_permits, baseline.listeners, baseline.process_forced_roots + 1, baseline.forced_shutdowns + 1);
+        let actual = (
+            final_snapshot.active_supervisor_children,
+            final_snapshot.connection_tasks,
+            final_snapshot.owned_buffers,
+            final_snapshot.owned_permits,
+            final_snapshot.listeners,
+            final_snapshot.process_forced_roots,
+            final_snapshot.forced_shutdowns,
+        );
+        let expected = (
+            baseline.active_supervisor_children,
+            baseline.connection_tasks,
+            baseline.owned_buffers,
+            baseline.owned_permits,
+            baseline.listeners,
+            baseline.process_forced_roots + 1,
+            baseline.forced_shutdowns + 1,
+        );
         assert_eq!(actual, expected, "TCP root cleanup");
         std::fs::remove_file(config_path).expect("remove client test config");
     }

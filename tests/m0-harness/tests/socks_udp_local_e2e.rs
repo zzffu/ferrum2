@@ -290,7 +290,6 @@ fn three_methods_cover_ipv4_with_three_public_datagrams() {
         ] {
             assert!(metrics.contains(family), "{}: {family}", method.0);
         }
-        #[rustfmt::skip]
         let samples = [
             "ferrum2_udp_sessions_active{role=\"client\"} 1",
             "ferrum2_udp_buffered_bytes{role=\"client\"} 196521",
@@ -715,7 +714,6 @@ fn fragment_does_not_pin_first_valid_source_wins_and_control_close_rebinds() {
     echo_worker.join().expect("echo worker");
     let metrics =
         String::from_utf8(wait_for_metrics(stack.metrics_address)).expect("metrics UTF-8");
-    #[rustfmt::skip]
     let rejected = [
         "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"rejected\"} 5",
         "ferrum2_udp_failures_total{role=\"client\",stage=\"shadowsocks\",reason=\"bounds\"} 1",
