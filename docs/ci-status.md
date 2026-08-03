@@ -1,5 +1,33 @@
 # CI 与验证状态
 
+## M7 validating 状态
+
+- **Qualified exact SHA:** `953689ad2c9984a317f617e26444db7aa173513a`，tree
+  `01594ef4efbd8e5bd242da6a5bda671989600c10`。Automatic push run
+  [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478) used that SHA
+  for every credited hosted result。
+- **Local/review evidence:** Linux Rust 1.85 default-parallel `local_e2e` passed
+  `100/100` on 16 CPUs；Windows passed `8/8`。TEST-0008、workspace Full/MSRV、ignored
+  100+ lifecycle、Clippy、format and diff checks passed。After one targeted QA block and the
+  required two independent xhigh analyses，final Architect and QA both returned
+  `PASS_WITH_NOTES` with no blocker、major or minor finding。
+- **Hosted evidence:** MSRV `91626060716`、Windows `91626060729`、Linux GNU
+  `91626060709`、Linux musl `91626060703` and interop `91626060685` completed
+  `success`。Interop emitted exact `tcp=12/12 tcp_cleanup=PASS udp=12/12
+  udp_cleanup=PASS` with the same SHA/run/attempt。Quality job `91626060741` ran its
+  authoritative Full step successfully，then failed only in the test-budget step；the focused
+  IPv6 and completion-marker steps were consequently skipped。
+- **Budget truth:** exact Rust counts are code `15529`、tests `24619`、examples `132`、ratio
+  `1.585356`。The job recorded baseline PASS at `14173/20878/1.473083` and then
+  `BLOCKED reason=ratio_ceiling_exceeded`。The explicit T03/T04 waiver makes this nonblocking
+  for the credited M7-T04 outcome but does not make it a budget PASS or close evidence。
+- **Boundary:** performance was not awaited、credited or claimed。The authorized single
+  non-force push is consumed；no rerun、second push、PR、tag、release or publication occurred or
+  is authorized。Per user direction M7 remains `validating` and is not closed while the recurring
+  M6/M7 budget policy is resolved at proposal level in
+  [`M7-test-budget-gate-analysis.md`](research/M7-test-budget-gate-analysis.md)；no budget、baseline
+  or workflow mutation is authorized。
+
 ## M6 closed 状态
 
 - **Accepted exact-SHA qualification:** exact

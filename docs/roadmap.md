@@ -745,7 +745,7 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 
 ## M7 — 具名多 inbound/outbound 静态组合
 
-- **Status:** executing
+- **Status:** validating
 - **Objective:** additive schema v1接受多个有界、具名concrete inbound/outbound；每个
   inbound在离线验证期exact解析一个outbound tag，两个binary复用同一个
   `ProcessSupervisor` transaction原子prepare/rollback，legacy单实例行为不变。
@@ -768,7 +768,7 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   - M7-T01：legacy/tagged config graph与preflight reference validation，`done`；
   - M7-T02：server shared-state TCP/UDP/direct multi-root transaction，依赖T01，`done`；
   - M7-T03：client SOCKS/Shadowsocks static multi-root composition，依赖T02，`done`；
-  - M7-T04：real-process、三平台、interop与exact-SHA qualification，依赖T03，`active`。
+  - M7-T04：real-process、三平台、interop与exact-SHA qualification，依赖T03，`done`。
 
   ```text
   M7-T01 config -> M7-T02 server risk -> M7-T03 client -> M7-T04 qualification
@@ -779,12 +779,15 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   threshold、package/release/publication。
 - **Integrated commit:** M7-T01 exact `f6ee43fa766dd326d33ba140a273b7df201749c1`；M7-T02 exact
   `b864a40a5ada975c09c5b95a1373bd3c15373bdf`；M7-T03 exact
-  `b3f7ff8e6dad22d37f8fb95bc42c7e83c6834c72`。
-- **Open blockers and risks:** 当前frontier只有M7-T04。Initial candidate `564e11e`的本地
-  gates通过，但初审阻塞native driver readiness、direct negative-process evidence和failure
-  cleanup；一次bounded repair active。用户明确将T03/T04 budget失败改为recorded/
-  nonblocking，最终记录不得声称budget PASS。Remote push/run、PR、tag、release或
-  publication均未授权。
+  `b3f7ff8e6dad22d37f8fb95bc42c7e83c6834c72`；M7-T04/final qualification exact
+  `953689ad2c9984a317f617e26444db7aa173513a`。
+- **Open blockers and risks:** run
+  [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)在同一exact
+  SHA通过Full、MSRV、三平台和interop TCP/UDP各`12/12`+cleanup。Quality仅在Full成功后
+  被`ratio_ceiling_exceeded`置为failure；Budget按用户waiver记录且不得称PASS，performance
+  不等待、不计入。M7按用户指示保持`validating`，暂不close；M6/M7预算门禁根因与schema v2
+  milestone-envelope提案已记录，未授权修改budget/baseline/workflow。Single non-force push已消费；不授权rerun、
+  second push、PR、tag、release或publication。
 
 ## 决策登记
 
@@ -919,3 +922,4 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 | 2026-08-03 | M7-T02 integration | exact `b864a40`集成server tagged TCP/UDP/direct roots、aggregate replay/admission/UDP owners和七位置原子rollback；T02 done，T03 active | 初审发现per-root shutdown可提前清理shared UDP state；一次bounded repair把signal/cancel提升到shared runtime owner，并补齐two-root drain/fatal、byte和owner evidence；双定向复审PASS | candidate `d1b3dbe`；focused、Quick、Full、MSRV、ignored lifecycle、budget `PASS_HOLD` debt `99/120`与integration复验PASS；stale-bin首次CLI失败由required bin build关闭；无push/hosted/release/publication |
 | 2026-08-03 | M7-T03 integration | exact `b3f7ff8`集成client tagged SOCKS TCP/UDP roots、static captured outbound和process-wide admission/session/byte/live-ID owners；T03 done，T04 active | 初审发现accept error被折叠及composed UDP、独立byte、live-ID、listener-fatal证据缺口；一次bounded repair全部关闭，定向Architect/QA均PASS | client `27/27`、CLI `5/5`、focused、Full `6/6`、ignored lifecycle、MSRV、Clippy/fmt/diff与integration复验PASS；首次MSRV Windows UDP bind竞态由isolated及unchanged rerun关闭；budget `ratio_ceiling_exceeded`按用户T03/T04 waiver仅记录；无push/hosted/release/publication |
 | 2026-08-03 | M7-T04 native ownership repair | T04 ownership增加现有`tests/platform/qualify_native.py`，供唯一bounded repair在既有三平台driver内加入tagged offline与multi-listener rollback/rebind | 初始T04 ownership只列`m0_qualification.rs`，但native jobs直接调用Python driver；不扩权会允许legacy-only平台结果误记为M7 evidence | candidate `564e11e`初审Architect/QA均BLOCK；只扩一个现有文件，不加provider/job/workflow/dependency，remote仍未授权 |
+| 2026-08-03 | M7-T04 qualification / M7 hold | exact `953689a`以per-test-process spawn lock关闭hosted MSRV fork/exec fd继承竞态；run `30794873478/1`通过Full、MSRV、三平台和TCP/UDP各`12/12`+cleanup | final Architect/QA `PASS_WITH_NOTES`且无blocker/major/minor；quality仅Budget step `ratio_ceiling_exceeded`失败，performance按用户指示不等待、不计入 | T04 done，M7保持`validating`且暂不close；single push消费，未rerun/second push/PR/tag/release/publication；budget根治仅待方案/授权 |

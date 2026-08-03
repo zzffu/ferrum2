@@ -1,6 +1,6 @@
 # M7 — 具名多 inbound/outbound 静态组合
 
-- **Status:** executing
+- **Status:** validating
 - **Baseline:** `302fd777f4da62a8c1d4d52d81502056f02089c8`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -43,15 +43,15 @@
 
 ## Exit criteria
 
-- [ ] Legacy client/server v1 cohort继续原样接受；tagged/legacy normalization和所有
+- [x] Legacy client/server v1 cohort继续原样接受；tagged/legacy normalization和所有
       tag/reference/count/collision negatives在zero-resource check中fail closed且脱敏。
-- [ ] 两个binary支持至少两个inbounds/outbounds、shared outbound和无fallback的static
+- [x] 两个binary支持至少两个inbounds/outbounds、shared outbound和无fallback的static
       mapping；global method/PSK及wire不变。
-- [ ] TCP admissions、TCP replay、UDP IDs/sessions/bytes/replay在全部inbounds间保持
+- [x] TCP admissions、TCP replay、UDP IDs/sessions/bytes/replay在全部inbounds间保持
       aggregate ownership；server UDP session绑定local inbound并从同一inbound回复。
-- [ ] First/middle/last TCP/UDP/metrics prepare或activation失败不poll service，逆序
+- [x] First/middle/last TCP/UDP/metrics prepare或activation失败不poll service，逆序
       rollback全部资源；root fatal、signal、forced和restart/rebind回baseline。
-- [ ] Existing legacy TCP/UDP/local lifecycle回归和bounded tagged real-process matrix通过；
+- [x] Existing legacy TCP/UDP/local lifecycle回归和bounded tagged real-process matrix通过；
       tags不进入existing trace/metric identity。
 - [ ] One exact SHA passes Full、Rust 1.85、three native targets、TCP/UDP各`12/12`+
       cleanup、test budget和blocking review；missing/failed evidence blocks close。
@@ -63,7 +63,7 @@
 | M7-T01 | Normalize legacy/tagged config and reject every invalid graph before side effects | — | done |
 | M7-T02 | Compose server multi-listener TCP/UDP/direct roots with shared state and atomic rollback | M7-T01 | done |
 | M7-T03 | Compose client multi-listener SOCKS/Shadowsocks roots with shared bounds and static mapping | M7-T02 | done |
-| M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | active |
+| M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | done |
 
 ```text
 M7-T01 config graph
@@ -78,10 +78,13 @@ integrate。No concurrent writer owns overlapping product paths。
 
 ## Blocker / next action
 
-M7-T04 is the only active frontier。Initial candidate
-`564e11e9e9a8484b1daefcd0dcb8bcc2ebe0ba3c` passed local gates but Architect/QA blocked native
-readiness and direct negative-process evidence。One bounded repair is active；ownership now includes
-the existing `tests/platform/qualify_native.py` driver invoked by all three native jobs。T03/T04
-budget failures remain recorded but nonblocking under the explicit user waiver；the milestone exit
-record must not claim a budget PASS。Remote push/run、PR、tag、release and publication remain
-unauthorized。
+Product、review and hosted qualification are complete on exact
+`953689ad2c9984a317f617e26444db7aa173513a` / run
+[`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)：Full、Rust
+1.85、Windows/GNU/musl and TCP/UDP `12/12`+cleanup succeeded。The quality job failed only at
+`ratio_ceiling_exceeded` after Full succeeded；this remains a recorded waiver，not PASS。
+Performance was not awaited or credited。Per explicit user direction M7 remains `validating` and
+must not close；the recurring M6/M7 budget-gate analysis and proposed schema v2 milestone envelope
+are recorded in [`M7-test-budget-gate-analysis.md`](../research/M7-test-budget-gate-analysis.md)。
+No budget、baseline or workflow change is authorized yet。The one non-force push is consumed；no rerun、second push、PR、
+tag、release or publication is authorized。
