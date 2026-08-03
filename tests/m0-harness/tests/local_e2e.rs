@@ -2,14 +2,15 @@
 mod local_support;
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use local_support::{
-    ChildGuard, TCP_METHOD_CONFIGS, rewrite_config_method, unused_loopback, wait_for_listener,
-    write_client_config, write_client_config_with_psk, write_tcp_only_server_config,
+    ChildGuard, TCP_METHOD_CONFIGS, bind_loopback_listener, rewrite_config_method, unused_loopback,
+    wait_for_listener, wait_for_tcp_udp_bound, write_client_config, write_client_config_with_psk,
+    write_tagged_client_config, write_tagged_server_config, write_tcp_only_server_config,
     write_tcp_only_server_config_with_psk,
 };
 
@@ -339,5 +340,234 @@ fn failures_pre_success_connect_and_post_success_target_refusal() {
     match socks.read(&mut tail) {
         Ok(0) | Err(_) => {}
         Ok(read) => panic!("unexpected second SOCKS reply/application byte count: {read}"),
+    }
+}
+
+#[test]
+fn tagged_two_by_two_tcp_matrix_covers_all_methods_and_exact_rebind() {
+    for method in TCP_METHOD_CONFIGS {
+        let directory = tempfile::tempdir().expect("tagged TCP tempdir");
+        let servers = [unused_loopback(), unused_loopback()];
+        let clients = [unused_loopback(), unused_loopback()];
+        let server_config = write_tagged_server_config(directory.path(), servers, [0, 1], false)
+            .expect("tagged server config");
+        let client_config =
+            write_tagged_client_config(directory.path(), clients, servers, [0, 1], false)
+                .expect("tagged client config");
+        rewrite_config_method(&server_config, method).expect("tagged server method");
+        rewrite_config_method(&client_config, method).expect("tagged client method");
+
+        let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+        for address in servers {
+            wait_for_listener(&mut server, address);
+        }
+        let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+        for address in clients {
+            wait_for_listener(&mut client, address);
+        }
+
+        for (mapping, client_address) in clients.into_iter().enumerate() {
+            let (target, echo) = start_echo();
+            let (mut socks, reply) = socks_connect(client_address, target);
+            assert_eq!(&reply[..4], &[5, 0, 0, 1], "{} mapping {mapping}", method.0);
+            let payload = format!("{}-mapping-{mapping}", method.0);
+            socks.write_all(payload.as_bytes()).expect("tagged payload");
+            socks.shutdown(Shutdown::Write).expect("tagged half close");
+            let mut echoed = Vec::new();
+            socks.read_to_end(&mut echoed).expect("tagged echo");
+            assert_eq!(echoed, payload.as_bytes());
+            assert_eq!(echo.join().expect("tagged echo thread"), payload.as_bytes());
+        }
+
+        client.terminate_and_reap(Duration::from_secs(5));
+        server.terminate_and_reap(Duration::from_secs(5));
+        for address in clients.into_iter().chain(servers) {
+            drop(bind_loopback_listener(address).expect("tagged exact rebind"));
+        }
+    }
+}
+
+#[test]
+fn tagged_tcp_shared_outbound_no_fallback_and_aggregate_admission_are_process_visible() {
+    let directory = tempfile::tempdir().expect("tagged focused tempdir");
+    let servers = [unused_loopback(), unused_loopback()];
+    let clients = [unused_loopback(), unused_loopback()];
+    let server_config = write_tagged_server_config(directory.path(), servers, [0, 0], false)
+        .expect("shared server config");
+    let client_config =
+        write_tagged_client_config(directory.path(), clients, servers, [0, 0], false)
+            .expect("shared client config");
+    let mut source = std::fs::read_to_string(&client_config).expect("read shared client config");
+    source.push_str("\n[runtime]\nmax_connections = 1\n");
+    std::fs::write(&client_config, source).expect("write aggregate limit");
+
+    let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+    for address in servers {
+        wait_for_listener(&mut server, address);
+    }
+    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+    for address in clients {
+        wait_for_listener(&mut client, address);
+    }
+
+    for client_address in clients {
+        let (target, echo) = start_echo();
+        let (mut socks, reply) = socks_connect(client_address, target);
+        assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+        socks.write_all(b"shared").expect("shared payload");
+        socks.shutdown(Shutdown::Write).expect("shared half close");
+        let mut echoed = Vec::new();
+        socks.read_to_end(&mut echoed).expect("shared echo");
+        assert_eq!(echoed, b"shared");
+        assert_eq!(echo.join().expect("shared echo thread"), b"shared");
+    }
+
+    let held = TcpStream::connect(clients[0]).expect("held aggregate flow");
+    let mut contender = TcpStream::connect(clients[1]).expect("aggregate contender");
+    contender
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("aggregate contender timeout");
+    contender
+        .write_all(&[5, 1, 0])
+        .expect("aggregate contender greeting");
+    let mut method = [0_u8; 2];
+    assert!(matches!(
+        contender.read_exact(&mut method),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    ));
+    drop(held);
+    contender
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("restore contender timeout");
+    contender
+        .read_exact(&mut method)
+        .expect("aggregate permit release");
+    assert_eq!(method, [5, 0]);
+    drop(contender);
+
+    client.terminate_and_reap(Duration::from_secs(5));
+    server.terminate_and_reap(Duration::from_secs(5));
+    for address in clients.into_iter().chain(servers) {
+        drop(bind_loopback_listener(address).expect("shared exact rebind"));
+    }
+
+    let live_server = unused_loopback();
+    let dead_server = unused_loopback();
+    let clients = [unused_loopback(), unused_loopback()];
+    let server_config =
+        write_tcp_only_server_config(directory.path(), live_server, None).expect("live server");
+    let client_config = write_tagged_client_config(
+        directory.path(),
+        clients,
+        [live_server, dead_server],
+        [0, 1],
+        false,
+    )
+    .expect("no-fallback client");
+    let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+    wait_for_listener(&mut server, live_server);
+    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+    for address in clients {
+        wait_for_listener(&mut client, address);
+    }
+    let (_socks, reply) = socks_connect(clients[1], unused_loopback());
+    assert_eq!(reply, [5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
+    let (target, echo) = start_echo();
+    let (mut socks, reply) = socks_connect(clients[0], target);
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    socks.write_all(b"live-only").expect("live payload");
+    socks.shutdown(Shutdown::Write).expect("live half close");
+    let mut echoed = Vec::new();
+    socks.read_to_end(&mut echoed).expect("live echo");
+    assert_eq!(echoed, b"live-only");
+    assert_eq!(echo.join().expect("live echo thread"), b"live-only");
+    client.terminate_and_reap(Duration::from_secs(5));
+    server.terminate_and_reap(Duration::from_secs(5));
+    for address in clients.into_iter().chain([live_server]) {
+        drop(bind_loopback_listener(address).expect("no-fallback exact rebind"));
+    }
+}
+
+#[test]
+fn tagged_partial_bind_signal_shutdown_and_restart_release_every_listener() {
+    let directory = tempfile::tempdir().expect("tagged lifecycle tempdir");
+
+    let clients = [unused_loopback(), unused_loopback()];
+    let client_config = write_tagged_client_config(
+        directory.path(),
+        clients,
+        [unused_loopback(), unused_loopback()],
+        [0, 1],
+        false,
+    )
+    .expect("tagged client lifecycle config");
+    let occupied = bind_loopback_listener(clients[1]).expect("occupy middle client listener");
+    let mut failed = ChildGuard::spawn("ferrum2-client", &client_config);
+    let exit = failed.wait_for_exit(Duration::from_secs(5));
+    assert_eq!(exit.status.code(), Some(1), "{exit}");
+    drop(bind_loopback_listener(clients[0]).expect("client partial rollback"));
+    drop(occupied);
+    for address in clients {
+        drop(bind_loopback_listener(address).expect("client rollback exact rebind"));
+    }
+
+    let servers = [unused_loopback(), unused_loopback()];
+    let server_config = write_tagged_server_config(directory.path(), servers, [0, 1], true)
+        .expect("tagged server lifecycle config");
+    let occupied = bind_loopback_listener(servers[1]).expect("occupy middle server listener");
+    let mut failed = ChildGuard::spawn("ferrum2-server", &server_config);
+    let exit = failed.wait_for_exit(Duration::from_secs(5));
+    assert_eq!(exit.status.code(), Some(1), "{exit}");
+    drop(bind_loopback_listener(servers[0]).expect("server TCP partial rollback"));
+    drop(UdpSocket::bind(servers[0]).expect("server UDP partial rollback"));
+    drop(occupied);
+    for address in servers {
+        drop(bind_loopback_listener(address).expect("server rollback TCP rebind"));
+        drop(UdpSocket::bind(address).expect("server rollback UDP rebind"));
+    }
+
+    let mut server = ChildGuard::spawn_signallable(
+        "ferrum2-server",
+        &server_config,
+        "tagged server signal shutdown",
+    );
+    for address in servers {
+        wait_for_tcp_udp_bound(&mut server, address);
+    }
+    server.request_graceful_shutdown();
+    let exit = server.wait_for_exit(Duration::from_secs(5));
+    assert_eq!(exit.status.code(), Some(0), "{exit}");
+    let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+    for address in servers {
+        wait_for_tcp_udp_bound(&mut server, address);
+    }
+    server.terminate_and_reap(Duration::from_secs(5));
+    for address in servers {
+        drop(bind_loopback_listener(address).expect("server restart TCP rebind"));
+        drop(UdpSocket::bind(address).expect("server restart UDP rebind"));
+    }
+
+    let mut client = ChildGuard::spawn_signallable(
+        "ferrum2-client",
+        &client_config,
+        "tagged client signal shutdown",
+    );
+    for address in clients {
+        wait_for_listener(&mut client, address);
+    }
+    client.request_graceful_shutdown();
+    let exit = client.wait_for_exit(Duration::from_secs(5));
+    assert_eq!(exit.status.code(), Some(0), "{exit}");
+    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+    for address in clients {
+        wait_for_listener(&mut client, address);
+    }
+    client.terminate_and_reap(Duration::from_secs(5));
+    for address in clients {
+        drop(bind_loopback_listener(address).expect("client restart exact rebind"));
     }
 }

@@ -8,8 +8,18 @@ use qualification::{
     tcp_shutdown_gate, validate_hosted,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("harness must be two levels below workspace root")
+        .to_path_buf()
+}
 
 #[derive(Default)]
 struct FakeOps {
@@ -605,4 +615,57 @@ fn tcp_exchange_accepts_hosted_sing_box_reference_client_observation_order() {
     let (target_shutdown, application_gate) = tcp_shutdown_gate();
     drop(target_shutdown);
     assert!(application_gate.wait(bounded).is_err());
+}
+
+#[test]
+fn m7_local_and_product_evidence_contract_is_pinned_without_running_hosted_cases() {
+    let root = workspace_root();
+    for (path, required) in [
+        (
+            "tests/m0-harness/tests/local_e2e.rs",
+            &[
+                "tagged_two_by_two_tcp_matrix_covers_all_methods_and_exact_rebind",
+                "tagged_tcp_shared_outbound_no_fallback_and_aggregate_admission_are_process_visible",
+                "tagged_partial_bind_signal_shutdown_and_restart_release_every_listener",
+            ][..],
+        ),
+        (
+            "tests/m0-harness/tests/socks_udp_local_e2e.rs",
+            &["tagged_two_by_two_udp_matrix_covers_all_methods_and_exact_rebind"][..],
+        ),
+        (
+            "bins/ferrum2-server/src/run.rs",
+            &[
+                "tagged_udp_is_process_bounded_and_bound_to_its_local_inbound",
+                "tagged_tcp_shares_static_direct_mapping_and_one_replay_store",
+                "tagged_prepare_failure_positions_rollback_every_bound_address",
+                "udp_shared_roots_drain_external_and_force_fatal_without_early_cleanup",
+            ][..],
+        ),
+        (
+            "bins/ferrum2-client/src/run.rs",
+            &[
+                "tagged_tcp_uses_static_outbounds_one_process_permit_and_no_fallback",
+                "tagged_udp_uses_static_outbounds_and_no_fallback",
+                "tagged_udp_shares_byte_budget_across_listeners",
+                "tagged_udp_shares_live_id_collisions_across_listeners",
+                "tagged_prepare_failures_restore_full_baseline_and_exact_rebind",
+                "listener_fatal_cancels_udp_without_forced_shutdown",
+            ][..],
+        ),
+        (
+            "tests/m0-harness/tests/lifecycle_cycles.rs",
+            &["full_qualification_runs_twenty_cycles_per_category_and_at_least_100_per_binary"][..],
+        ),
+    ] {
+        let source = fs::read_to_string(root.join(path)).expect("M7 evidence source");
+        for name in required {
+            assert!(
+                source.contains(name),
+                "missing M7 evidence `{name}` in {path}"
+            );
+        }
+    }
+    assert_eq!(TCP_CASES.len(), 12);
+    assert_eq!(UDP_CASES.len(), 12);
 }

@@ -10,9 +10,10 @@ use std::thread;
 use std::time::Duration;
 
 use local_support::{
-    ChildGuard, TCP_METHOD_CONFIGS, rewrite_config_method, unused_loopback,
+    ChildGuard, TCP_METHOD_CONFIGS, bind_loopback_listener, rewrite_config_method, unused_loopback,
     unused_tcp_udp_loopback, wait_for_listener, wait_for_metrics, wait_for_tcp_udp_bound,
-    write_client_config, write_server_config, write_udp_client_config,
+    write_client_config, write_server_config, write_tagged_client_config,
+    write_tagged_server_config, write_udp_client_config,
 };
 use socket2::SockRef;
 
@@ -268,6 +269,60 @@ fn three_methods_cover_ipv4_with_three_public_datagrams() {
             "raw_error=",
         ] {
             assert!(!metrics.contains(forbidden), "{}: {forbidden}", method.0);
+        }
+    }
+}
+
+#[test]
+fn tagged_two_by_two_udp_matrix_covers_all_methods_and_exact_rebind() {
+    for method in TCP_METHOD_CONFIGS {
+        let directory = tempfile::tempdir().expect("tagged UDP tempdir");
+        let servers = [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()];
+        let clients = [unused_loopback(), unused_loopback()];
+        let server_config = write_tagged_server_config(directory.path(), servers, [0, 1], true)
+            .expect("tagged UDP server config");
+        let client_config =
+            write_tagged_client_config(directory.path(), clients, servers, [0, 1], true)
+                .expect("tagged UDP client config");
+        rewrite_config_method(&server_config, method).expect("tagged UDP server method");
+        rewrite_config_method(&client_config, method).expect("tagged UDP client method");
+
+        let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+        for address in servers {
+            wait_for_tcp_udp_bound(&mut server, address);
+        }
+        let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+        for address in clients {
+            wait_for_listener(&mut client, address);
+        }
+
+        let mut relays = Vec::new();
+        for (mapping, client_address) in clients.into_iter().enumerate() {
+            let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("tagged echo bind");
+            echo.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("tagged echo timeout");
+            let target = target_wire(echo.local_addr().expect("tagged echo address"));
+            let (control, application, relay) = udp_associate(client_address, true);
+            let echo_worker = echo_datagrams(echo, 1);
+            let payload = format!("{}-mapping-{mapping}", method.0);
+            round_trip(&application, relay, &target, &target, payload.as_bytes());
+            echo_worker.join().expect("tagged echo worker");
+            drop((control, application));
+            relays.push(relay);
+        }
+
+        client.terminate_and_reap(Duration::from_secs(5));
+        server.terminate_and_reap(Duration::from_secs(5));
+        for relay in relays {
+            wait_udp_rebind(relay, "tagged relay exact rebind");
+        }
+        for address in clients {
+            drop(bind_loopback_listener(address).expect("tagged client exact rebind"));
+        }
+        for address in servers {
+            let tcp = bind_loopback_listener(address).expect("tagged server TCP exact rebind");
+            let udp = UdpSocket::bind(address).expect("tagged server UDP exact rebind");
+            drop((tcp, udp));
         }
     }
 }

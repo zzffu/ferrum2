@@ -765,6 +765,100 @@ pub fn write_udp_client_config(
     Ok(path)
 }
 
+pub fn write_tagged_client_config(
+    directory: &Path,
+    listens: [SocketAddrV4; 2],
+    servers: [SocketAddrV4; 2],
+    outbound_for_inbound: [usize; 2],
+    udp: bool,
+) -> io::Result<PathBuf> {
+    let udp = if udp { "\n[udp]\n" } else { "" };
+    let outbound_one = if outbound_for_inbound.contains(&1) {
+        format!(
+            "\n[[outbounds]]\ntag = \"out-1\"\nserver = \"{}\"\n",
+            servers[1]
+        )
+    } else {
+        String::new()
+    };
+    let config = format!(
+        "schema_version = 1\n\
+         \n\
+         [[inbounds]]\n\
+         tag = \"in-a\"\n\
+         listen = \"{}\"\n\
+         outbound = \"out-{}\"\n\
+         \n\
+         [[inbounds]]\n\
+         tag = \"in-b\"\n\
+         listen = \"{}\"\n\
+         outbound = \"out-{}\"\n\
+         \n\
+         [[outbounds]]\n\
+         tag = \"out-0\"\n\
+         server = \"{}\"\n\
+         {}\n\
+         \n\
+         [shadowsocks]\n\
+         method = \"2022-blake3-aes-128-gcm\"\n\
+         psk = \"{SYNTHETIC_PSK}\"\n\
+         {udp}",
+        listens[0],
+        outbound_for_inbound[0],
+        listens[1],
+        outbound_for_inbound[1],
+        servers[0],
+        outbound_one,
+    );
+    let path = directory.join("tagged-client.toml");
+    fs::write(&path, config)?;
+    Ok(path)
+}
+
+pub fn write_tagged_server_config(
+    directory: &Path,
+    listens: [SocketAddrV4; 2],
+    outbound_for_inbound: [usize; 2],
+    udp: bool,
+) -> io::Result<PathBuf> {
+    let udp = if udp {
+        ""
+    } else {
+        "\n[udp]\nenabled = false\n"
+    };
+    let outbound_one = if outbound_for_inbound.contains(&1) {
+        "\n[[outbounds]]\ntag = \"out-1\"\n"
+    } else {
+        ""
+    };
+    let config = format!(
+        "schema_version = 1\n\
+         \n\
+         [[inbounds]]\n\
+         tag = \"in-a\"\n\
+         listen = \"{}\"\n\
+         outbound = \"out-{}\"\n\
+         \n\
+         [[inbounds]]\n\
+         tag = \"in-b\"\n\
+         listen = \"{}\"\n\
+         outbound = \"out-{}\"\n\
+         \n\
+         [[outbounds]]\n\
+         tag = \"out-0\"\n\
+         {}\n\
+         \n\
+         [shadowsocks]\n\
+         method = \"2022-blake3-aes-128-gcm\"\n\
+         psk = \"{SYNTHETIC_PSK}\"\n\
+         {udp}",
+        listens[0], outbound_for_inbound[0], listens[1], outbound_for_inbound[1], outbound_one,
+    );
+    let path = directory.join("tagged-server.toml");
+    fs::write(&path, config)?;
+    Ok(path)
+}
+
 pub fn write_client_config_with_psk(
     directory: &Path,
     listen: SocketAddrV4,

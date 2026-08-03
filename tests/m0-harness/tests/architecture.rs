@@ -336,3 +336,36 @@ fn current_target_declaration_matching_accepts_crlf() {
 
     assert!(contains_explicit_target_declaration(manifest, declaration));
 }
+
+#[test]
+fn tagged_composition_stays_out_of_core_and_protocol_modules() {
+    let root = workspace_root();
+    for member in [
+        "crates/ferrum2-core",
+        "crates/ferrum2-shadowsocks",
+        "crates/ferrum2-socks5",
+    ] {
+        let manifest =
+            fs::read_to_string(root.join(member).join("Cargo.toml")).expect("deep-module manifest");
+        for forbidden in ["ferrum2-config", "ferrum2-runtime"] {
+            assert!(
+                !manifest.contains(forbidden),
+                "{member} must not depend on {forbidden}"
+            );
+        }
+        let source =
+            fs::read_to_string(root.join(member).join("src/lib.rs")).expect("deep-module source");
+        for forbidden in [
+            "pub trait Endpoint",
+            "AdapterRegistry",
+            "ServiceRegistry",
+            "adapter_registry",
+            "endpoint_registry",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{member} contains forbidden generic composition seam `{forbidden}`"
+            );
+        }
+    }
+}
