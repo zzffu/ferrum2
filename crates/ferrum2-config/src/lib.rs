@@ -295,14 +295,14 @@ impl Error for ConfigError {}
 pub fn load_client(path: impl AsRef<Path>) -> Result<ValidatedClientConfig, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
     let raw: RawClientRoot = parse_toml(&source)?;
-    validate_client(raw)
+    validate_client(raw, &source)
 }
 
 /// Reads and fully validates a server configuration without creating runtime resources.
 pub fn load_server(path: impl AsRef<Path>) -> Result<ValidatedServerConfig, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
     let raw: RawServerRoot = parse_toml(&source)?;
-    validate_server(raw)
+    validate_server(raw, &source)
 }
 
 fn read_bounded_utf8(path: &Path) -> Result<Zeroizing<String>, ConfigError> {
@@ -339,10 +339,10 @@ fn parse_toml<'a, T: Deserialize<'a>>(source: &'a str) -> Result<T, ConfigError>
         .map_err(|_| ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config))
 }
 
-fn validate_client(raw: RawClientRoot) -> Result<ValidatedClientConfig, ConfigError> {
+fn validate_client(raw: RawClientRoot, source: &str) -> Result<ValidatedClientConfig, ConfigError> {
     validate_schema(raw.schema_version)?;
     let (listen, server, inbounds, outbounds, route) =
-        validate_client_graph(raw.client, raw.inbounds, raw.outbounds, raw.route)?;
+        validate_client_graph(raw.client, raw.inbounds, raw.outbounds, raw.route, source)?;
     let method = parse_method(&raw.shadowsocks.method)?;
     let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
@@ -364,10 +364,10 @@ fn validate_client(raw: RawClientRoot) -> Result<ValidatedClientConfig, ConfigEr
     })
 }
 
-fn validate_server(raw: RawServerRoot) -> Result<ValidatedServerConfig, ConfigError> {
+fn validate_server(raw: RawServerRoot, source: &str) -> Result<ValidatedServerConfig, ConfigError> {
     validate_schema(raw.schema_version)?;
     let (listen, inbounds, outbounds, route) =
-        validate_server_graph(raw.server, raw.inbounds, raw.outbounds, raw.route)?;
+        validate_server_graph(raw.server, raw.inbounds, raw.outbounds, raw.route, source)?;
     let method = parse_method(&raw.shadowsocks.method)?;
     let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
@@ -403,6 +403,7 @@ fn validate_client_graph(
     tagged_inbounds: Option<Vec<RawClientInbound>>,
     tagged_outbounds: Option<Vec<RawClientOutbound>>,
     route: Option<RawRoute>,
+    source: &str,
 ) -> Result<ValidatedClientGraph, ConfigError> {
     if route.is_some()
         && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())
@@ -472,6 +473,7 @@ fn validate_client_graph(
                     .iter()
                     .map(|outbound| outbound.tag.as_str())
                     .collect(),
+                source,
             )?;
             let validated_inbounds = listens
                 .into_iter()
@@ -503,6 +505,7 @@ fn validate_server_graph(
     tagged_inbounds: Option<Vec<RawServerInbound>>,
     tagged_outbounds: Option<Vec<RawServerOutbound>>,
     route: Option<RawRoute>,
+    source: &str,
 ) -> Result<
     (
         SocketAddrV4,
@@ -568,6 +571,7 @@ fn validate_server_graph(
                     .iter()
                     .map(|outbound| outbound.tag.as_str())
                     .collect(),
+                source,
             )?;
             let validated_inbounds = listens
                 .into_iter()
@@ -597,6 +601,7 @@ fn validate_route(
     route: Option<RawRoute>,
     inbounds: Vec<(&str, Option<&str>)>,
     outbounds: Vec<&str>,
+    source: &str,
 ) -> Result<RouteTable, ConfigError> {
     let Some(route) = route else {
         let mut referenced = vec![false; outbounds.len()];
@@ -662,7 +667,10 @@ fn validate_route(
                 _ => Err(ConfigError::semantic(ConfigField::RouteRulesNetwork)),
             })
             .transpose()?;
-        let target = rule.target.map(validate_route_target).transpose()?;
+        let target = rule
+            .target
+            .map(|target| validate_route_target(target, source))
+            .transpose()?;
         let outbound_tag = rule
             .outbound
             .as_deref()
@@ -682,7 +690,17 @@ fn validate_route(
         .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRules))
 }
 
-fn validate_route_target(raw: RawRouteTarget) -> Result<TargetAddr, ConfigError> {
+fn validate_route_target(
+    raw: toml::Spanned<RawRouteTarget>,
+    source: &str,
+) -> Result<TargetAddr, ConfigError> {
+    if !source
+        .get(raw.span())
+        .is_some_and(|value| value.trim_start().starts_with('{'))
+    {
+        return Err(ConfigError::semantic(ConfigField::RouteRulesTarget));
+    }
+    let raw = raw.into_inner();
     let host = raw
         .host
         .as_deref()
@@ -1005,7 +1023,7 @@ struct RawRoute {
 struct RawRouteRule {
     inbound: Option<String>,
     network: Option<String>,
-    target: Option<RawRouteTarget>,
+    target: Option<toml::Spanned<RawRouteTarget>>,
     outbound: Option<String>,
 }
 

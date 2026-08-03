@@ -551,6 +551,8 @@ mod tests {
         let domain = TargetAddr::domain("example.test", 443).expect("domain");
         let ipv4 =
             TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 9), 443)).expect("IPv4");
+        let different_ipv4 =
+            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 10), 443)).expect("IPv4");
         let ipv6 = TargetAddr::ip(SocketAddr::V6(SocketAddrV6::new(
             Ipv6Addr::LOCALHOST,
             443,
@@ -562,10 +564,11 @@ mod tests {
             vec![
                 RouteRule::new(Some(0), Some(Network::Tcp), Some(domain.clone()), 1),
                 RouteRule::new(Some(0), None, None, 2),
-                RouteRule::new(None, Some(Network::Udp), Some(ipv4.clone()), 3),
-                RouteRule::new(None, None, Some(ipv6.clone()), 4),
+                RouteRule::new(None, Some(Network::Udp), None, 3),
+                RouteRule::new(None, None, Some(ipv4.clone()), 4),
+                RouteRule::new(None, None, Some(ipv6.clone()), 5),
             ],
-            5,
+            6,
         )
         .expect("bounded route");
         #[rustfmt::skip]
@@ -573,10 +576,12 @@ mod tests {
             (0, Network::Tcp, domain.clone(), 1),
             (0, Network::Tcp, TargetAddr::domain("EXAMPLE.TEST", 443).expect("case"), 1),
             (0, Network::Udp, domain.clone(), 2),
-            (1, Network::Udp, ipv4, 3),
-            (1, Network::Tcp, ipv6, 4),
-            (1, Network::Tcp, TargetAddr::domain("example.test.", 443).expect("dot"), 5),
-            (1, Network::Tcp, TargetAddr::domain("example.test", 80).expect("port"), 5),
+            (1, Network::Udp, domain.clone(), 3),
+            (1, Network::Tcp, ipv4, 4),
+            (1, Network::Tcp, different_ipv4, 6),
+            (1, Network::Tcp, ipv6, 5),
+            (1, Network::Tcp, TargetAddr::domain("example.test.", 443).expect("dot"), 6),
+            (1, Network::Tcp, TargetAddr::domain("example.test", 80).expect("port"), 6),
         ];
         assert!(route.is_routed());
         for (inbound, network, target, expected) in cases {

@@ -79,6 +79,7 @@ fn assert_tagged_error(
     index: usize,
 ) {
     let raw = format!("raw_sentinel_{index}");
+    let target_host = format!("route_target_sentinel_{index}.test");
     if !source.contains("[metrics]") {
         source.push_str(&format!(
             "[metrics]\nlisten = \"127.0.0.1:{}\"\n",
@@ -93,6 +94,13 @@ fn assert_tagged_error(
         .replace("127.0.0.1:10000", &format!("127.0.0.1:{}", endpoints[0]))
         .replace("127.0.0.1:10001", &format!("127.0.0.1:{}", endpoints[1]))
         .replace("127.0.0.1:20000", &format!("127.0.0.1:{}", endpoints[2]));
+    let target_host = source.contains("host = \"example.test\"").then(|| {
+        source = source.replace(
+            "host = \"example.test\"",
+            &format!("host = \"{target_host}\""),
+        );
+        target_host
+    });
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let psk = format!(
         "{}AECAwQFBgcICQoLDA0ODw==",
@@ -118,7 +126,10 @@ fn assert_tagged_error(
         .then(|| value.strip_prefix('"')?.strip_suffix('"'))?
         .filter(|value| !value.is_empty())
     });
-    for sentinel in std::iter::once(raw.as_str()).chain(values) {
+    for sentinel in std::iter::once(raw.as_str())
+        .chain(target_host.as_deref())
+        .chain(values)
+    {
         assert!(!rendered.contains(sentinel), "{name}: {sentinel}");
     }
 }
@@ -454,6 +465,9 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
         ("missing outbound", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\""), ConfigField::RouteRulesOutbound),
         ("wrong outbound namespace", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"i0\""), ConfigField::RouteRulesOutbound),
         ("unreferenced outbound", routed(base.clone(), "[route]\nfinal = \"o0\""), ConfigField::RouteRulesOutbound),
+        ("ordinary target subtable", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\noutbound = \"o1\"\n[route.rules.target]\nhost = \"example.test\"\nport = 53"), ConfigField::RouteRulesTarget),
+        ("missing target host", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { port = 53 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
+        ("missing target port", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\" }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
         ("empty target", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"\", port = 53 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
         ("non ASCII target", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"é.test\", port = 53 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
         ("zero target port", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\", port = 0 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
@@ -478,6 +492,29 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
         (ConfigErrorKind::Semantic, ConfigField::RouteRules),
         80,
     );
+    let server_base = tagged_server(1, 2);
+    let server_routed = |route| routed(server_base.clone(), route);
+    #[rustfmt::skip]
+    let server_cases = [
+        ("server static mixing", format!("{server_base}[route]\nfinal = \"o0\"\n"), ConfigField::Route),
+        ("server legacy mixing", format!("{SERVER_BASE}[route]\nfinal = \"o0\"\n"), ConfigField::Route),
+        ("server partial static binding", server_base.replacen("outbound = \"o0\"\n", "", 1), ConfigField::InboundsOutbound),
+        ("server 65 rules", server_routed(&format!("[route]\nfinal = \"o0\"\n{}", "[[route.rules]]\ninbound = \"i0\"\noutbound = \"o1\"\n".repeat(65))), ConfigField::RouteRules),
+        ("server wrong inbound namespace", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"o0\"\noutbound = \"o1\""), ConfigField::RouteRulesInbound),
+        ("server wrong outbound namespace", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"i0\""), ConfigField::RouteRulesOutbound),
+        ("server wrong final namespace", server_routed("[route]\nfinal = \"i0\""), ConfigField::RouteFinal),
+        ("server invalid target", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\", port = 0 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
+        ("server unreferenced outbound", server_routed("[route]\nfinal = \"o0\""), ConfigField::RouteRulesOutbound),
+    ];
+    for (index, (name, source, field)) in server_cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            ConfigRole::Server,
+            source,
+            (ConfigErrorKind::Semantic, field),
+            90 + index,
+        );
+    }
     let fields = [
         ConfigField::Route,
         ConfigField::RouteRules,
