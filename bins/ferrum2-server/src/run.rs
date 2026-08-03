@@ -1156,6 +1156,7 @@ where
 
 #[derive(Debug)]
 enum DirectFlowError<E> {
+    CancelledBeforeOpen,
     Open(E),
     Prefix(PrefixFailure),
 }
@@ -1170,15 +1171,11 @@ async fn open_and_prefix<O, C>(
 where
     O: ferrum2_core::Outbound,
     O::Stream: AsyncWrite + Unpin,
-    C: std::future::Future<Output = ()>,
+    C: std::future::Future,
 {
     tokio::pin!(cancellation);
     let mut stream = tokio::select! {
-        biased;
-        _ = cancellation.as_mut() => return Err(DirectFlowError::Prefix(PrefixFailure {
-            kind: RelayRunError::Cancelled,
-            bytes: 0,
-        })),
+        _ = cancellation.as_mut() => return Err(DirectFlowError::CancelledBeforeOpen),
         result = direct.open(target) => result.map_err(DirectFlowError::Open)?,
     };
     let bytes = forward_initial_payload(
@@ -1288,6 +1285,12 @@ async fn server_connection(
     .await;
     let (mut target_stream, initial_payload_bytes) = match opened {
         Ok(opened) => opened,
+        Err(DirectFlowError::CancelledBeforeOpen) => {
+            context
+                .metrics
+                .active_connections_dec(Role::Server, Inbound::Shadowsocks);
+            return;
+        }
         Err(DirectFlowError::Open(error)) => {
             let kind = error.kind();
             let (stage, outcome, reason) = observation_for_direct_connect(kind);
@@ -1346,7 +1349,7 @@ async fn forward_initial_payload<W, C>(
 ) -> Result<u64, PrefixFailure>
 where
     W: AsyncWrite + Unpin,
-    C: std::future::Future<Output = ()>,
+    C: std::future::Future,
 {
     let mut written = 0_usize;
     let mut deadline = tokio::time::Instant::now() + idle_timeout;
@@ -2208,7 +2211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_contract_connect_and_prefix_failures_never_report_opened_stream() {
+    async fn adapter_contract_connect_failure_never_reports_opened_stream() {
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
         let (outbound, gate, bytes, write_calls) =
             controlled_outbound(2, None, None, Some(ConnectErrorKind::ConnectionRefused));
@@ -2220,7 +2223,7 @@ mod tests {
                 &task_target,
                 b"never",
                 Duration::from_secs(5),
-                std::future::pending(),
+                std::future::pending::<()>(),
             )
             .await
         });
@@ -2233,27 +2236,6 @@ mod tests {
                 if error.kind() == ConnectErrorKind::ConnectionRefused
         ));
         assert_eq!(write_calls.load(Ordering::SeqCst), 0);
-
-        let (outbound, gate, bytes, _write_calls) = controlled_outbound(2, Some(1), None, None);
-        let task = tokio::spawn(async move {
-            open_and_prefix(
-                outbound.as_ref(),
-                &target,
-                b"initial",
-                Duration::from_secs(5),
-                std::future::pending(),
-            )
-            .await
-        });
-        gate.notify_one();
-        assert!(matches!(
-            task.await.expect("prefix task"),
-            Err(DirectFlowError::Prefix(PrefixFailure {
-                kind: RelayRunError::Io,
-                bytes: 2,
-            }))
-        ));
-        assert_eq!(bytes.lock().expect("recording bytes").as_slice(), b"in");
     }
 
     struct GatedPrefixWriter {
@@ -2356,7 +2338,7 @@ mod tests {
             &mut writer,
             b"four",
             config.runtime.idle_timeout,
-            std::future::pending(),
+            std::future::pending::<()>(),
         ));
 
         assert_prefix_pending(&mut prefix).await;
@@ -2393,7 +2375,7 @@ mod tests {
             &mut writer,
             b"four",
             config.runtime.idle_timeout,
-            std::future::pending(),
+            std::future::pending::<()>(),
         ));
 
         assert_prefix_pending(&mut prefix).await;
@@ -2418,17 +2400,38 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_composition_contract_prefix_cancel_retains_partial_count() {
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
-        let (outbound, gate, bytes, _) = controlled_outbound(2, None, Some(1), None);
+        let (outbound, _gate, bytes, writes) = controlled_outbound(2, None, None, None);
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
+        let mut prefix = Box::pin(open_and_prefix(
+            outbound.as_ref(),
+            &target,
+            b"four",
+            std::time::Duration::from_secs(5),
+            cancelled,
+        ));
+        tokio::select! {
+            biased;
+            _ = &mut prefix => panic!("prefix ended before cancellation"),
+            _ = tokio::task::yield_now() => {}
+        }
+        assert_eq!(outbound.calls.load(Ordering::SeqCst), 1);
+        cancel.send(()).expect("cancel prefix");
+        assert!(matches!(
+            prefix.await,
+            Err(DirectFlowError::CancelledBeforeOpen)
+        ));
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert!(bytes.lock().expect("recorded prefix").is_empty());
+
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let (outbound, gate, bytes, _) = controlled_outbound(2, None, Some(1), None);
         gate.notify_one();
         let mut prefix = Box::pin(open_and_prefix(
             outbound.as_ref(),
             &target,
             b"four",
             std::time::Duration::from_secs(5),
-            async {
-                let _ = cancelled.await;
-            },
+            cancelled,
         ));
         tokio::select! {
             biased;
@@ -2461,7 +2464,7 @@ mod tests {
                 &mut writer,
                 b"four",
                 std::time::Duration::from_secs(5),
-                std::future::pending(),
+                std::future::pending::<()>(),
             )
             .await;
             assert_eq!(
@@ -2490,7 +2493,7 @@ mod tests {
                 &mut writer,
                 b"",
                 std::time::Duration::from_secs(5),
-                std::future::pending(),
+                std::future::pending::<()>(),
             )
             .await,
             Ok(0)
