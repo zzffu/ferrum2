@@ -62,8 +62,8 @@
 |---|---|---|---|
 | M7-T01 | Normalize legacy/tagged config and reject every invalid graph before side effects | — | done |
 | M7-T02 | Compose server multi-listener TCP/UDP/direct roots with shared state and atomic rollback | M7-T01 | done |
-| M7-T03 | Compose client multi-listener SOCKS/Shadowsocks roots with shared bounds and static mapping | M7-T02 | active |
-| M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | todo |
+| M7-T03 | Compose client multi-listener SOCKS/Shadowsocks roots with shared bounds and static mapping | M7-T02 | done |
+| M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | active |
 
 ```text
 M7-T01 config graph
@@ -78,7 +78,7 @@ integrate。No concurrent writer owns overlapping product paths。
 
 ## Blocker / next action
 
-No execution blocker。M7-T02 is integrated at exact
-`b864a40a5ada975c09c5b95a1373bd3c15373bdf`；M7-T03 is the only active frontier。The serialized
-T02/T03 CLI transition remains role-local：T03 removes only the client guard and changes only the
-client row to `startup.bind`。Remote push/run、PR、tag、release and publication remain unauthorized。
+No local execution blocker。M7-T03 is integrated and reviewed at exact
+`b3f7ff8e6dad22d37f8fb95bc42c7e83c6834c72`；M7-T04 is the only active frontier。T03/T04 budget
+failures remain recorded but nonblocking under the explicit user waiver；the milestone exit record
+must not claim a budget PASS。Remote push/run、PR、tag、release and publication remain unauthorized。

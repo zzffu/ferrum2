@@ -1,7 +1,7 @@
 ---
 id: M7-T04
 milestone: M7
-status: todo
+status: active
 depends_on: [M7-T03]
 owns:
   - tests/m0-harness/src/local_support/mod.rs
