@@ -3,7 +3,8 @@ mod local_support;
 
 use std::io::{Read, Write};
 use std::net::{
-    Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket,
+    Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, ToSocketAddrs,
+    UdpSocket,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
@@ -16,7 +17,7 @@ use local_support::{
     wait_for_metrics, wait_for_tcp_udp_bound, write_client_config, write_server_config,
     write_tagged_client_config, write_tagged_server_config, write_udp_client_config,
 };
-use socket2::SockRef;
+use socket2::{Domain, Protocol, SockRef, Socket, Type};
 
 fn udp_associate(client: SocketAddrV4, hinted: bool) -> (TcpStream, UdpSocket, SocketAddrV4) {
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("application UDP socket");
@@ -598,15 +599,27 @@ fn one_association_alternates_two_targets_and_preserves_response_sources() {
     let servers = [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()];
     let clients = [unused_loopback(), unused_loopback()];
     let first_echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("first echo bind");
-    let second_echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("second echo bind");
+    let second_echo =
+        Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).expect("second echo socket");
+    second_echo.set_only_v6(false).expect("dual stack");
+    second_echo
+        .bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)).into())
+        .expect("second echo bind");
+    let second_echo = UdpSocket::from(second_echo);
     for echo in [&first_echo, &second_echo] {
         echo.set_read_timeout(Some(Duration::from_secs(5)))
             .expect("echo timeout");
     }
     let first_target = target_wire(first_echo.local_addr().expect("first echo address"));
-    let second_address = second_echo.local_addr().expect("second echo address");
-    let second_target = domain_target_wire("localhost", second_address.port());
-    let second_response = target_wire(second_address);
+    let second_port = second_echo.local_addr().expect("echo address").port();
+    let second_target = domain_target_wire("localhost", second_port);
+    let second_response = target_wire(
+        ("localhost", second_port)
+            .to_socket_addrs()
+            .expect("second echo resolve")
+            .next()
+            .expect("second echo candidate"),
+    );
     let first_worker = echo_datagrams(first_echo, 2);
     let second_worker = echo_datagrams(second_echo, 1);
     let configs = [0, 1].map(|index| {
@@ -622,7 +635,7 @@ fn one_association_alternates_two_targets_and_preserves_response_sources() {
     }
     route_tagged_config(&client_config, &format!(
         "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-a\"\nnetwork = \"udp\"\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-1\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"out-0\"\n[[route.rules]]\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-0\"\n",
-        second_address.port(), second_address.port()
+        second_port, second_port
     )).expect("routed client rules");
     let mut server_a = ChildGuard::spawn("ferrum2-server", &configs[0]);
     wait_for_tcp_udp_bound(&mut server_a, servers[0]);
