@@ -437,6 +437,8 @@ struct UdpSessionManagerInner {
     limits: UdpRuntimeLimits,
     budget: UdpBufferBudget,
     owner_slots: Arc<Semaphore>,
+    runtime_owners: AtomicUsize,
+    running_runtimes: AtomicUsize,
     state: Mutex<SessionState>,
     registry: OwnerRegistry,
 }
@@ -456,6 +458,8 @@ impl UdpSessionManager {
                 limits,
                 budget,
                 owner_slots: Arc::new(Semaphore::new(limits.max_sessions())),
+                runtime_owners: AtomicUsize::new(0),
+                running_runtimes: AtomicUsize::new(0),
                 state: Mutex::new(SessionState::default()),
                 registry,
             }),
@@ -469,6 +473,15 @@ impl UdpSessionManager {
 
     fn owner_slots(&self) -> Arc<Semaphore> {
         Arc::clone(&self.inner.owner_slots)
+    }
+
+    fn runtime_owner(&self) -> UdpRuntimeOwner {
+        self.inner.runtime_owners.fetch_add(1, Ordering::Relaxed);
+        self.inner.running_runtimes.fetch_add(1, Ordering::Relaxed);
+        UdpRuntimeOwner {
+            manager: self.clone(),
+            shutdown_started: false,
+        }
     }
 
     /// Returns the number of live committed and provisional session owners.
@@ -701,6 +714,43 @@ impl UdpSessionManager {
     }
 }
 
+struct UdpRuntimeOwner {
+    manager: UdpSessionManager,
+    shutdown_started: bool,
+}
+
+impl UdpRuntimeOwner {
+    fn begin_shutdown(&mut self) {
+        if !self.shutdown_started {
+            self.shutdown_started = true;
+            if self
+                .manager
+                .inner
+                .running_runtimes
+                .fetch_sub(1, Ordering::AcqRel)
+                == 1
+            {
+                self.manager.signal_all();
+            }
+        }
+    }
+}
+
+impl Drop for UdpRuntimeOwner {
+    fn drop(&mut self) {
+        self.begin_shutdown();
+        if self
+            .manager
+            .inner
+            .runtime_owners
+            .fetch_sub(1, Ordering::AcqRel)
+            == 1
+        {
+            self.manager.cancel_all();
+        }
+    }
+}
+
 /// Resolves a bounded ordered sequence of UDP target candidates.
 pub trait UdpResolver: Send + Sync + 'static {
     /// Candidate storage or iterator returned by this resolver.
@@ -872,6 +922,7 @@ where
     registry: OwnerRegistry,
     tasks: JoinSet<()>,
     owner_slots: Arc<Semaphore>,
+    _runtime_owner: UdpRuntimeOwner,
 }
 
 impl<H> DirectUdpRuntime<SystemUdpResolver, SystemDirectUdpSocketFactory, H>
@@ -949,6 +1000,7 @@ where
         registry: OwnerRegistry,
     ) -> Self {
         let owner_slots = manager.owner_slots();
+        let runtime_owner = manager.runtime_owner();
         Self {
             manager,
             resolver: Arc::new(resolver),
@@ -958,6 +1010,7 @@ where
             registry,
             tasks: JoinSet::new(),
             owner_slots,
+            _runtime_owner: runtime_owner,
         }
     }
 
@@ -1071,40 +1124,39 @@ where
     }
 
     /// Cancels, joins, and if necessary aborts every owned task by one deadline.
-    pub async fn shutdown(self, grace: Duration) {
+    pub async fn shutdown(self, grace: Duration) -> usize {
         self.shutdown_with_control(UdpShutdownControl::Relative(Instant::now() + grace))
-            .await;
+            .await
     }
 
     /// Drains until the process lineage forces shutdown, then cancels and reaps
     /// every owned task without starting another relative grace interval.
-    pub async fn shutdown_with_cancellation(self, cancellation: ProcessCancellation) {
+    pub async fn shutdown_with_cancellation(self, cancellation: ProcessCancellation) -> usize {
         self.shutdown_with_control(UdpShutdownControl::Process(cancellation))
-            .await;
+            .await
     }
 
-    async fn shutdown_with_control(mut self, mut control: UdpShutdownControl) {
-        self.manager.signal_all();
+    async fn shutdown_with_control(mut self, mut control: UdpShutdownControl) -> usize {
+        self._runtime_owner.begin_shutdown();
         if self.tasks.is_empty() {
-            self.manager.cancel_all();
-            return;
+            return 0;
         }
         loop {
             tokio::select! {
                 biased;
                 result = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     if result.is_none() || self.tasks.is_empty() {
-                        self.manager.cancel_all();
-                        return;
+                        return 0;
                     }
                 }
                 () = control.forced() => break,
             }
         }
-        self.registry.record_udp_forced_shutdowns(self.tasks.len());
+        let forced = self.tasks.len();
+        self.registry.record_udp_forced_shutdowns(forced);
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
-        self.manager.cancel_all();
+        forced
     }
 }
 

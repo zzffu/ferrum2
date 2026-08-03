@@ -197,31 +197,46 @@ async fn reservation_queue_and_generation_table_is_single_charge_and_fail_closed
     manager.remove(recreated);
 }
 
-#[test]
-fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
+#[tokio::test]
+async fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
     let registry = OwnerRegistry::new();
-    let manager = UdpSessionManager::new(limits(1), registry.clone());
-    let budget = manager.buffer_budget();
-    let shared_budget = manager.clone().buffer_budget();
+    let manager = UdpSessionManager::new(limits(2), registry.clone());
+    let (first_socket, _) = socket_fixture(Duration::ZERO, []);
+    let (second_socket, _) = socket_fixture(Duration::ZERO, []);
+    let first = shared_runtime(manager.clone(), &registry, first_socket);
+    let mut second = shared_runtime(manager, &registry, second_socket);
+    let budget = first.sessions().buffer_budget();
     let mut reservations = Vec::new();
     for _ in 0..16 {
         reservations.push(budget.reserve(65_507).expect("within one MiB budget"));
     }
     assert_eq!(budget.reserved_bytes(), 1_048_112);
     assert_eq!(registry.snapshot().udp_buffered_bytes, 1_048_112);
-    assert!(matches!(
-        shared_budget.reserve(465),
-        Err(UdpRuntimeError::BufferLimit)
-    ));
+    let before_failure = registry.snapshot();
+    assert_eq!(
+        second
+            .reserve_session(Instant::now(), 465)
+            .await
+            .unwrap_err(),
+        UdpRuntimeError::BufferLimit
+    );
+    assert_eq!(registry.snapshot(), before_failure);
 
     let moved = reservations.pop().expect("reservation");
     assert_eq!(budget.reserved_bytes(), 1_048_112);
     drop(moved);
     assert_eq!(budget.reserved_bytes(), 982_605);
-    drop(shared_budget.reserve(465).expect("shared bytes returned"));
+    drop(
+        second
+            .reserve_session(Instant::now(), 465)
+            .await
+            .expect("shared bytes returned"),
+    );
     drop(reservations);
     assert_eq!(budget.reserved_bytes(), 0);
     assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    first.shutdown(Duration::ZERO).await;
+    second.shutdown(Duration::ZERO).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -362,7 +377,7 @@ impl DirectUdpSocketFactory for ScriptedFactory {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct RecordingHandler {
     responses: Arc<Mutex<Vec<Vec<u8>>>>,
     entered: Arc<Notify>,
@@ -466,10 +481,7 @@ fn recording_runtime(
         limits(1),
         send_timeout,
         resolver,
-        ScriptedFactory {
-            socket,
-            opens: Arc::new(AtomicUsize::new(0)),
-        },
+        scripted_factory(socket),
         RecordingHandler {
             responses: Arc::new(Mutex::new(Vec::new())),
             entered: Arc::clone(&entered),
@@ -488,31 +500,38 @@ fn empty_resolver() -> ScriptedResolver {
     }
 }
 
+fn scripted_factory(socket: ScriptedSocket) -> ScriptedFactory {
+    ScriptedFactory {
+        socket,
+        opens: Arc::new(AtomicUsize::new(0)),
+    }
+}
+
+fn shared_runtime(
+    manager: UdpSessionManager,
+    registry: &OwnerRegistry,
+    socket: ScriptedSocket,
+) -> ScriptedRuntime {
+    DirectUdpRuntime::with_shared_adapters(
+        manager,
+        Duration::from_secs(1),
+        empty_resolver(),
+        scripted_factory(socket),
+        RecordingHandler::default(),
+        registry.clone(),
+    )
+}
+
 #[tokio::test]
 async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
     let registry = OwnerRegistry::new();
     let manager = UdpSessionManager::new(limits(1), registry.clone());
-    let (first_socket, _) = socket_fixture(Duration::ZERO, []);
+    let (first_socket, sends) = socket_fixture(Duration::ZERO, []);
     let (second_socket, _) = socket_fixture(Duration::ZERO, []);
-    let runtime = |manager, socket| {
-        DirectUdpRuntime::with_shared_adapters(
-            manager,
-            Duration::from_secs(1),
-            empty_resolver(),
-            ScriptedFactory {
-                socket,
-                opens: Arc::new(AtomicUsize::new(0)),
-            },
-            RecordingHandler {
-                responses: Arc::new(Mutex::new(Vec::new())),
-                entered: Arc::new(Notify::new()),
-                block: false,
-            },
-            registry.clone(),
-        )
-    };
-    let mut first = runtime(manager.clone(), first_socket);
-    let mut second = runtime(manager, second_socket);
+    let (empty_socket, _) = socket_fixture(Duration::ZERO, []);
+    let mut first = shared_runtime(manager.clone(), &registry, first_socket);
+    let mut second = shared_runtime(manager.clone(), &registry, second_socket);
+    let empty = shared_runtime(manager, &registry, empty_socket);
 
     let admission = first
         .reserve_session(Instant::now(), 7)
@@ -521,7 +540,14 @@ async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
     let handle = first
         .commit_session(admission, ip_datagram(b"request"), Instant::now())
         .expect("first shared commit");
-    tokio::task::yield_now().await;
+    empty.shutdown(Duration::ZERO).await;
+    for _ in 0..200 {
+        if !sends.lock().expect("send lock").is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(sends.lock().expect("send lock").len(), 1);
     assert!(first.remove_session(handle));
     assert_eq!(
         second.reserve_session(Instant::now(), 7).await.unwrap_err(),
@@ -717,10 +743,7 @@ async fn handler_failure_does_not_refresh_activity_before_final_generation_reche
     let (socket, _) = socket_fixture(Duration::ZERO, []);
     let responses = Arc::clone(&socket.responses);
     let response_ready = Arc::clone(&socket.response_ready);
-    let factory = ScriptedFactory {
-        socket,
-        opens: Arc::new(AtomicUsize::new(0)),
-    };
+    let factory = scripted_factory(socket);
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let handler = FailingGateHandler {

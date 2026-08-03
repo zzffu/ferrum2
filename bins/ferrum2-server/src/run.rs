@@ -44,6 +44,15 @@ pub(crate) enum RunError {
     ShutdownCleanup,
 }
 
+fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntimeLimits> {
+    UdpRuntimeLimits::new(
+        config.max_sessions,
+        config.max_buffered_bytes,
+        config.idle_timeout,
+    )
+    .ok()
+}
+
 impl std::fmt::Display for RunError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
@@ -164,12 +173,7 @@ where
         })
     }));
     if let Some(protocol) = udp_protocol {
-        let limits = UdpRuntimeLimits::new(
-            udp_config.max_sessions,
-            udp_config.max_buffered_bytes,
-            udp_config.idle_timeout,
-        )
-        .map_err(|_| RunError::StartupProtocol)?;
+        let limits = udp_runtime_limits(&udp_config).ok_or(RunError::StartupProtocol)?;
         let sessions = UdpSessionManager::new(limits, registry.clone());
         let mappings = Arc::new(UdpMappings::new(udp_config.max_sessions));
         let admission = Arc::new(tokio::sync::Mutex::new(()));
@@ -469,15 +473,6 @@ impl UdpMappings {
         self.published.notify_waiters();
     }
 
-    fn clear(&self) {
-        let mut state = self.state.lock().expect("UDP mapping lock poisoned");
-        state.by_capability.clear();
-        state.by_handle.clear();
-        state.orphaned.clear();
-        state.retired.clear();
-        self.published.notify_waiters();
-    }
-
     fn reconcile_runtime(&self, mut is_live: impl FnMut(UdpSessionHandle) -> bool) {
         let handles: Vec<_> = self
             .state
@@ -757,7 +752,7 @@ where
     where
         S: std::future::Future<Output = ()>,
         C: FnOnce(ProductionUdpRuntime<L>) -> F,
-        F: std::future::Future<Output = ()>,
+        F: std::future::Future<Output = usize>,
     {
         let Self {
             inbound,
@@ -941,19 +936,14 @@ where
             update_udp_resource_metrics(&metrics, &registry);
         };
 
-        let before = registry.snapshot().udp_forced_shutdowns;
-        if terminal.is_err() {
-            runtime.shutdown(std::time::Duration::ZERO).await;
+        let forced = if terminal.is_err() {
+            runtime.shutdown(std::time::Duration::ZERO).await
         } else {
-            shutdown_runtime(runtime).await;
-        }
-        let after = registry.snapshot().udp_forced_shutdowns;
-        for _ in before..after {
+            shutdown_runtime(runtime).await
+        };
+        for _ in 0..forced {
             metrics.udp_forced_shutdown(Role::Server);
         }
-        mappings.reconcile_runtime(|_| false);
-        mappings.prune_protocol(&protocol, clock.monotonic_now());
-        mappings.clear();
         update_udp_resource_metrics(&metrics, &registry);
         terminal
     }
@@ -1660,7 +1650,7 @@ mod tests {
         Aes128Psk, MethodProfile, MethodPsk, MethodSinglePskProvider, MethodTcpSalt,
         SinglePskProvider,
     };
-    use ferrum2_runtime::{UdpDirection, UdpSessionManager};
+    use ferrum2_runtime::{OwnerSnapshot, UdpDirection, UdpSessionManager};
     use ferrum2_shadowsocks::TransportPhase;
     use ferrum2_shadowsocks::{ClientTcpOutbound, UdpClientSession, encode_request_first_write};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -2484,6 +2474,13 @@ mod tests {
             .expect("UDP receive")
     }
 
+    fn aes_keys() -> MethodKeyAdapter<MethodSinglePskProvider> {
+        MethodKeyAdapter::new(MethodSinglePskProvider::new(
+            MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
+                .expect("AES-128 key"),
+        ))
+    }
+
     fn server_test_config(listen: SocketAddrV4) -> (PathBuf, ValidatedServerConfig) {
         server_test_config_for_method(
             listen,
@@ -2518,18 +2515,28 @@ mod tests {
         (path, config)
     }
 
-    fn tagged_server_test_config(
-        first: SocketAddrV4,
-        second: SocketAddrV4,
+    fn tagged_server_test_config<const N: usize>(
+        listens: [SocketAddrV4; N],
     ) -> (PathBuf, ValidatedServerConfig) {
-        let (path, mut config) = server_test_config(first);
-        config.inbounds.push(ferrum2_config::ServerInboundConfig {
-            listen: second,
-            outbound: 0,
-        });
+        let (path, mut config) = server_test_config(listens[0]);
+        config.inbounds.extend(listens[1..].iter().map(|listen| {
+            ferrum2_config::ServerInboundConfig {
+                listen: *listen,
+                outbound: 0,
+            }
+        }));
         config.runtime.max_connections = 1.try_into().expect("one connection");
         config.udp.max_sessions = 1;
         (path, config)
+    }
+
+    fn active(mut snapshot: OwnerSnapshot) -> OwnerSnapshot {
+        snapshot.process_root_reaps = 0;
+        snapshot.process_root_rollbacks = 0;
+        snapshot.process_forced_roots = 0;
+        snapshot.forced_shutdowns = 0;
+        snapshot.udp_forced_shutdowns = 0;
+        snapshot
     }
 
     type TestServerTask = tokio::task::JoinHandle<Result<(), RunError>>;
@@ -2694,12 +2701,7 @@ mod tests {
             assert_eq!(server.await.expect("server task"), Ok(()), "{method}");
             manager.cancel_all();
             assert_eq!(client_registry.snapshot().udp_sessions, 0);
-            let final_snapshot = registry.snapshot();
-            assert_eq!(final_snapshot.udp_sessions, 0);
-            assert_eq!(final_snapshot.udp_sockets, 0);
-            assert_eq!(final_snapshot.udp_tasks, 0);
-            assert_eq!(final_snapshot.udp_queued_datagrams, 0);
-            assert_eq!(final_snapshot.udp_buffered_bytes, 0);
+            assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
             std::fs::remove_file(path).expect("remove UDP config");
         }
     }
@@ -2722,10 +2724,7 @@ mod tests {
         let stalled_address = stalled_target.local_addr().expect("stalled address");
         let forbidden_target = udp_loopback().await;
         let forbidden_address = forbidden_target.local_addr().expect("forbidden address");
-        let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
-                .expect("method key"),
-        ));
+        let keys = aes_keys();
         let clock = SystemClock::new();
         let mut first =
             UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("first client");
@@ -2769,11 +2768,7 @@ mod tests {
 
         stop.send(()).expect("stop server");
         assert_eq!(server.await.expect("server task"), Ok(()));
-        let snapshot = registry.snapshot();
-        assert_eq!(snapshot.udp_sessions, 0);
-        assert_eq!(snapshot.udp_sockets, 0);
-        assert_eq!(snapshot.udp_tasks, 0);
-        assert_eq!(snapshot.udp_buffered_bytes, 0);
+        assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
         std::fs::remove_file(path).expect("remove saturation config");
     }
 
@@ -2781,7 +2776,7 @@ mod tests {
     async fn tagged_udp_is_process_bounded_and_bound_to_its_local_inbound() {
         let first_listen = reserve_address();
         let second_listen = reserve_address();
-        let (path, config) = tagged_server_test_config(first_listen, second_listen);
+        let (path, config) = tagged_server_test_config([first_listen, second_listen]);
         let registry = OwnerRegistry::new();
         let (stop, mut server) = spawn_test_server(config, &registry);
         wait_until_bound(&mut server, first_listen).await;
@@ -2789,10 +2784,7 @@ mod tests {
 
         let target = udp_loopback().await;
         let target_address = target.local_addr().expect("target address");
-        let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
-                .expect("method key"),
-        ));
+        let keys = aes_keys();
         let clock = SystemClock::new();
         let mut client =
             UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client protocol");
@@ -2850,7 +2842,6 @@ mod tests {
             .expect("roaming target response");
         let (_, response_source) = recv_udp(&roaming_peer, &mut payload).await;
         assert_eq!(response_source, SocketAddr::V4(first_listen));
-
         let mut second =
             UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second client");
         let second_wire = encoded_udp_request(
@@ -2869,11 +2860,9 @@ mod tests {
                 .is_err(),
             "second inbound multiplied the process session cap"
         );
-
         stop.send(()).expect("stop tagged server");
         assert_eq!(server.await.expect("tagged server owner"), Ok(()));
-        assert_eq!(registry.snapshot().udp_sessions, 0);
-        assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+        assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
         std::fs::remove_file(path).expect("remove tagged config");
     }
 
@@ -2881,7 +2870,7 @@ mod tests {
     async fn tagged_tcp_shares_static_direct_mapping_and_one_replay_store() {
         let first_listen = reserve_address();
         let second_listen = reserve_address();
-        let (path, config) = tagged_server_test_config(first_listen, second_listen);
+        let (path, config) = tagged_server_test_config([first_listen, second_listen]);
         let registry = OwnerRegistry::new();
         let (stop, mut server) = spawn_test_server(config, &registry);
         wait_until_bound(&mut server, first_listen).await;
@@ -2892,10 +2881,7 @@ mod tests {
             .expect("target bind");
         let target_address = target.local_addr().expect("target address");
         let target_address = TargetAddr::ip(target_address).expect("target");
-        let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
-                .expect("method key"),
-        ));
+        let keys = aes_keys();
         let timestamp = SystemClock::new().unix_seconds().expect("wall clock");
         let request = |salt_byte, payload: &[u8]| {
             let salt =
@@ -2956,23 +2942,24 @@ mod tests {
 
     #[tokio::test]
     async fn tagged_prepare_failure_positions_rollback_every_bound_address() {
-        for block in 0..5 {
-            let listens = [reserve_address(), reserve_address()];
+        for block in 0..7 {
+            let listens = [reserve_address(), reserve_address(), reserve_address()];
             let metrics = reserve_address();
-            let (path, mut config) = tagged_server_test_config(listens[0], listens[1]);
+            let (path, mut config) = tagged_server_test_config(listens);
             config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
             let incumbent: Box<dyn Send> = match block {
-                0 | 1 => Box::new(
+                0..=2 => Box::new(
                     std::net::TcpListener::bind(listens[block]).expect("occupy TCP position"),
                 ),
-                2 | 3 => Box::new(
-                    std::net::UdpSocket::bind(listens[block - 2]).expect("occupy UDP position"),
+                3..=5 => Box::new(
+                    std::net::UdpSocket::bind(listens[block - 3]).expect("occupy UDP position"),
                 ),
                 _ => {
                     Box::new(std::net::TcpListener::bind(metrics).expect("occupy metrics position"))
                 }
             };
             let registry = OwnerRegistry::new();
+            let baseline = active(registry.snapshot());
             assert_eq!(
                 run_with_registry(config, registry.clone(), std::future::pending()).await,
                 Err(RunError::StartupBind)
@@ -2984,145 +2971,168 @@ mod tests {
                 drop((tcp, udp));
             }
             drop(std::net::TcpListener::bind(metrics).expect("metrics rollback rebind"));
-            let stopped = registry.snapshot();
-            assert_eq!(stopped.process_supervisors, 0);
-            assert_eq!(stopped.prepared_process_roots, 0);
-            assert_eq!(stopped.active_process_roots, 0);
-            assert_eq!(stopped.listeners, 0);
-            assert_eq!(stopped.udp_buffered_bytes, 0);
+            assert_eq!(active(registry.snapshot()), baseline);
             std::fs::remove_file(path).expect("remove tagged failure config");
         }
     }
 
     struct ScriptedUdpListener {
         request: Mutex<Option<(Vec<u8>, SocketAddr)>>,
+        terminal_gate: Arc<Notify>,
         handler_entered: Arc<Notify>,
         response_gate: Arc<Notify>,
+        sent: Arc<Mutex<Vec<SocketAddr>>>,
     }
 
     impl ServerUdpListener for ScriptedUdpListener {
         async fn recv_from(&self, destination: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
             let request = self.request.lock().expect("scripted UDP request").take();
             let Some((wire, peer)) = request else {
-                self.handler_entered.notified().await;
+                self.terminal_gate.notified().await;
                 return Err(io::Error::other("listener terminal"));
             };
             destination[..wire.len()].copy_from_slice(&wire);
             Ok((wire.len(), peer))
         }
 
-        async fn send_to(&self, source: &[u8], _peer: SocketAddr) -> io::Result<usize> {
+        async fn send_to(&self, source: &[u8], peer: SocketAddr) -> io::Result<usize> {
             self.handler_entered.notify_one();
             self.response_gate.notified().await;
+            self.sent.lock().expect("scripted sends").push(peer);
             Ok(source.len())
         }
     }
 
     #[tokio::test]
-    async fn udp_terminal_error_with_live_session_notifies_process_and_reaps() {
-        let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
-        let (path, config) = server_test_config(listen);
-        let stalled_target = udp_loopback().await;
-        let target = stalled_target.local_addr().expect("stalled target address");
-        let client_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
-                .expect("client key"),
-        ));
-        let client_clock = SystemClock::new();
-        let mut client =
-            UdpClientSession::new(&client_keys, &SystemRandom, |_| false).expect("client");
-        let wire = encoded_udp_request(
-            &mut client,
-            &client_clock,
-            TargetAddr::ip(target).expect("target"),
-            b"listener-failure",
-        );
-        let handler_entered = Arc::new(Notify::new());
-        let listener = Arc::new(ScriptedUdpListener {
-            request: Mutex::new(Some((
-                wire,
-                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_089)),
-            ))),
-            handler_entered,
-            response_gate: Arc::new(Notify::new()),
-        });
-        let server_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk));
-        let protocol = Arc::new(UdpServer::new(&server_keys).expect("server protocol"));
-        let registry = OwnerRegistry::new();
-        let metrics = Arc::new(Metrics::new());
-        let shutdown_grace = config.runtime.shutdown_grace;
-        let limits = UdpRuntimeLimits::new(
-            config.udp.max_sessions,
-            config.udp.max_buffered_bytes,
-            config.udp.idle_timeout,
-        )
-        .expect("validated UDP limits");
-        let sessions = UdpSessionManager::new(limits, registry.clone());
-        let mappings = Arc::new(UdpMappings::new(config.udp.max_sessions));
-        let admission = Arc::new(tokio::sync::Mutex::new(()));
-        let shared = ServerUdpShared {
-            protocol,
-            clock: Arc::new(SystemClock::new()),
-            config: config.udp,
-            sessions,
-            mappings,
-            admission,
-            connect_timeout: config.runtime.connect_timeout,
-            registry: registry.clone(),
-            metrics: Arc::clone(&metrics),
-        };
-        let root = ProcessRoot::new(move || async move { prepare_udp_server(0, listener, shared) });
-        let supervisor = ProcessSupervisor::new(vec![root], shutdown_grace, registry.clone())
-            .expect("one required UDP root");
-        let mut process = tokio::spawn(supervisor.run_until(std::future::pending()));
+    async fn udp_shared_roots_drain_external_and_force_fatal_without_early_cleanup() {
+        for fatal in [false, true] {
+            let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+            let (path, mut config) = server_test_config(listen);
+            config.runtime.shutdown_grace = Duration::from_secs(u64::from(!fatal));
+            let stalled_target = udp_loopback().await;
+            let target = stalled_target.local_addr().expect("stalled target address");
+            let keys = aes_keys();
+            let mut c = UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client");
+            let wire = encoded_udp_request(
+                &mut c,
+                &SystemClock::new(),
+                TargetAddr::ip(target).expect("target"),
+                b"listener-failure",
+            );
+            let handler_entered = Arc::new(Notify::new());
+            let response_gate = Arc::new(Notify::new());
+            let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_089));
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            let listener = Arc::new(ScriptedUdpListener {
+                request: Mutex::new(Some((wire, peer))),
+                terminal_gate: Arc::new(Notify::new()),
+                handler_entered: Arc::clone(&handler_entered),
+                response_gate: Arc::clone(&response_gate),
+                sent: Arc::clone(&sent),
+            });
+            let fatal_gate = Arc::new(Notify::new());
+            let fatal_listener = Arc::new(ScriptedUdpListener {
+                request: Mutex::new(None),
+                terminal_gate: Arc::clone(&fatal_gate),
+                handler_entered: Arc::clone(&handler_entered),
+                response_gate: Arc::clone(&response_gate),
+                sent: Arc::clone(&sent),
+            });
+            let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+            let registry = OwnerRegistry::new();
+            let baseline = active(registry.snapshot());
+            let metrics = Arc::new(Metrics::new());
+            let shutdown_grace = config.runtime.shutdown_grace;
+            let limits = udp_runtime_limits(&config.udp).expect("validated UDP limits");
+            let sessions = UdpSessionManager::new(limits, registry.clone());
+            let mappings = Arc::new(UdpMappings::new(config.udp.max_sessions));
+            let observed_mappings = Arc::clone(&mappings);
+            let shared = ServerUdpShared {
+                protocol,
+                clock: Arc::new(SystemClock::new()),
+                config: config.udp,
+                sessions,
+                mappings,
+                admission: Arc::new(tokio::sync::Mutex::new(())),
+                connect_timeout: config.runtime.connect_timeout,
+                registry: registry.clone(),
+                metrics: Arc::clone(&metrics),
+            };
+            let fatal_shared = shared.clone();
+            let active_root =
+                ProcessRoot::new(move || async move { prepare_udp_server(0, listener, shared) });
+            let failed = ProcessRoot::new(move || async move {
+                prepare_udp_server(1, fatal_listener, fatal_shared)
+            });
+            let supervisor =
+                ProcessSupervisor::new(vec![active_root, failed], shutdown_grace, registry.clone())
+                    .expect("two required UDP roots");
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let mut process = tokio::spawn(supervisor.run_until(async {
+                let _ = stopped.await;
+            }));
 
-        let mut target_buffer = [0_u8; 32];
-        let (received, source) = tokio::time::timeout(
-            Duration::from_secs(1),
-            stalled_target.recv_from(&mut target_buffer),
-        )
-        .await
-        .expect("stalled target receive deadline")
-        .expect("stalled target request");
-        assert_eq!(&target_buffer[..received], b"listener-failure");
-        let live = registry.snapshot();
-        assert_eq!(live.active_process_roots, 1);
-        assert_eq!(live.udp_sessions, 1);
-        assert_eq!(live.udp_tasks, 1);
-        stalled_target
-            .send_to(b"blocked-response", source)
-            .await
-            .expect("target response");
-
-        let report = match tokio::time::timeout(Duration::from_millis(500), &mut process).await {
-            Ok(Ok(report)) => report,
-            Ok(Err(error)) => panic!("process owner failed: {error}"),
-            Err(_) => {
-                process.abort();
-                let _ = process.await;
-                panic!("terminal UDP root waited for process Forced before returning");
+            let mut target_buffer = [0_u8; 32];
+            let (received, source) = recv_udp(&stalled_target, &mut target_buffer).await;
+            assert_eq!(&target_buffer[..received], b"listener-failure");
+            let live = registry.snapshot();
+            assert_eq!(
+                (live.active_process_roots, live.udp_sessions, live.udp_tasks),
+                (2, 1, 1)
+            );
+            stalled_target
+                .send_to(b"blocked-response", source)
+                .await
+                .expect("target response");
+            handler_entered.notified().await;
+            if fatal {
+                fatal_gate.notify_one();
+            } else {
+                stop.send(()).expect("external stop");
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while registry.snapshot().active_process_roots != 1 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("empty UDP root reap");
+                let state = observed_mappings.state.lock().expect("mapping lock");
+                assert_eq!(state.by_capability.len(), 1);
+                assert_eq!(state.by_capability.values().next().unwrap().inbound, 0);
+                drop(state);
+                response_gate.notify_one();
             }
-        };
-        assert!(matches!(
-            report.cause(),
-            ProcessCause::RootStopped {
-                root,
-                exit: ProcessRootExit::Failed(RunError::RuntimeListener),
-            } if root.get() == 0
-        ));
-        assert_eq!(report.cleanup_failure(), None);
-        assert_eq!(report.forced_roots(), 0);
-        assert_eq!(registry.snapshot().active_process_roots, 0);
-        assert_eq!(registry.snapshot().process_root_reaps, 1);
-        assert_eq!(registry.snapshot().udp_sessions, 0);
-        assert_eq!(registry.snapshot().udp_forced_shutdowns, 1);
-        assert!(
-            metrics
-                .encode_text()
-                .expect("metrics exposition")
-                .contains("ferrum2_udp_forced_shutdown_total{role=\"server\"} 1")
-        );
-        std::fs::remove_file(path).expect("remove terminal UDP config");
+
+            let report = match tokio::time::timeout(Duration::from_secs(2), &mut process).await {
+                Ok(Ok(report)) => report,
+                Ok(Err(error)) => panic!("process owner failed: {error}"),
+                Err(_) => {
+                    process.abort();
+                    let _ = process.await;
+                    panic!("terminal UDP root waited for process Forced before returning");
+                }
+            };
+            assert_eq!(report.cleanup_failure(), None);
+            assert_eq!(active(registry.snapshot()), baseline);
+            assert_eq!(report.forced_roots(), usize::from(fatal));
+            assert_eq!(registry.snapshot().udp_forced_shutdowns, usize::from(fatal));
+            if fatal {
+                assert!(matches!(
+                    report.cause(),
+                    ProcessCause::RootStopped {
+                        root,
+                        exit: ProcessRootExit::Failed(RunError::RuntimeListener),
+                    } if root.get() == 1
+                ));
+                assert!(sent.lock().expect("scripted sends").is_empty());
+                let encoded = metrics.encode_text().expect("metrics");
+                assert!(encoded.contains("ferrum2_udp_forced_shutdown_total{role=\"server\"} 1"));
+            } else {
+                assert!(matches!(report.cause(), ProcessCause::ExternalShutdown));
+                assert_eq!(&*sent.lock().expect("scripted sends"), &[peer]);
+            }
+            std::fs::remove_file(path).expect("remove terminal UDP config");
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3182,10 +3192,7 @@ mod tests {
     async fn udp_generation_termination_retention_and_replacement_cleanup() {
         let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9));
         let client_clock = SystemClock::new();
-        let lifecycle_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            MethodPsk::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &PSK_BYTES)
-                .expect("lifecycle key"),
-        ));
+        let lifecycle_keys = aes_keys();
         let lifecycle_protocol =
             UdpServer::new(&lifecycle_keys).expect("lifecycle server protocol");
         let manager_registry = OwnerRegistry::new();
@@ -3314,7 +3321,6 @@ mod tests {
             &lifecycle_protocol,
             ferrum2_crypto::MonotonicInstant::from_duration(Duration::from_secs(120)),
         );
-        mappings.clear();
         assert_eq!(
             lifecycle_protocol.session_count().expect("retired B count"),
             0
