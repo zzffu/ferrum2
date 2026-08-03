@@ -3,6 +3,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use ferrum2_config::{LoggingLevel, RuntimeConfig, ValidatedClientConfig};
@@ -19,12 +20,12 @@ use ferrum2_observability::{
     json_subscriber,
 };
 use ferrum2_runtime::{
-    BoundedSupervisor, CancellationToken, MetricsEndpoint, MetricsEndpointError, OwnerRegistry,
-    PendingUdpDatagram, PendingUdpSession, PreparedProcessRoot, ProcessCancellation, ProcessCause,
-    ProcessFuture, ProcessReport, ProcessRoot, ProcessRootExit, ProcessSupervisor, RelayFailure,
-    RelayRunError, SupervisorError, TcpConnector, UdpBufferReservation, UdpCommitError,
-    UdpDirection, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
-    relay_lifecycle,
+    AcceptListener, BoundedSupervisor, CancellationToken, MetricsEndpoint, MetricsEndpointError,
+    OwnerRegistry, PendingUdpDatagram, PendingUdpSession, PreparedProcessRoot, ProcessCancellation,
+    ProcessCause, ProcessFuture, ProcessReport, ProcessRoot, ProcessRootExit, ProcessSupervisor,
+    RelayFailure, RelayRunError, SupervisorError, TcpConnector, UdpBufferReservation,
+    UdpCommitError, UdpDirection, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
+    UdpSessionManager, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
     ClientFlow, ClientTcpOutbound, DetectionReason, FlowTerminal, MAX_UDP_WIRE_LEN,
@@ -75,9 +76,6 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
-    if config.inbounds.len() != 1 {
-        return Err(RunError::StartupProtocol);
-    }
     let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|_| RunError::StartupObservability)?;
@@ -114,9 +112,7 @@ where
 {
     metrics.set_udp_sessions_active(Role::Client, 0);
     metrics.set_udp_buffered_bytes(Role::Client, 0);
-    let server = TargetAddr::ipv4(config.server).map_err(|_| RunError::StartupProtocol)?;
     let shutdown_grace = config.runtime.shutdown_grace;
-    let listen = config.listen;
     let listen_backlog = u32::from(config.runtime.listen_backlog.get());
     let max_connections = usize::from(config.runtime.max_connections.get());
     let udp = match config.udp.filter(|udp| udp.enabled) {
@@ -127,7 +123,6 @@ where
                 registry.clone(),
             ),
             live_ids: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            server: config.server,
             method: config.method(),
         }),
         None => None,
@@ -138,22 +133,44 @@ where
         keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
         clock: SystemClock::new(),
         random: SystemRandom,
-        server,
         runtime: config.runtime,
         udp,
         registry: registry.clone(),
         metrics: Arc::clone(&metrics),
+        #[cfg(test)]
+        test_udp_server: config.server,
     });
+    let mut listens = Vec::with_capacity(config.inbounds.len());
+    let mut outbounds = Vec::with_capacity(config.inbounds.len());
+    for inbound in &config.inbounds {
+        listens.push(inbound.listen);
+        outbounds.push(ClientOutboundContext {
+            tcp_server: TargetAddr::ipv4(inbound.outbound.server)
+                .map_err(|_| RunError::StartupProtocol)?,
+            udp_server: inbound.outbound.server,
+        });
+    }
     let tcp_registry = registry.clone();
     let tcp_context = Arc::clone(&context);
     let mut roots = vec![ProcessRoot::new(move || async move {
-        let listener = bind_listener(listen, listen_backlog)?;
-        let supervisor =
-            BoundedSupervisor::new(listener, max_connections, shutdown_grace, tcp_registry)
-                .map_err(|_| RunError::StartupProtocol)?;
+        let mut listeners = Vec::with_capacity(listens.len());
+        for listen in listens {
+            listeners.push(bind_listener(listen, listen_backlog)?);
+        }
+        let supervisor = BoundedSupervisor::new(
+            ClientTcpListeners {
+                listeners,
+                next: AtomicUsize::new(0),
+            },
+            max_connections,
+            shutdown_grace,
+            tcp_registry,
+        )
+        .map_err(|_| RunError::StartupProtocol)?;
         Ok(ClientTcpRoot {
             supervisor: Some(supervisor),
             context: tcp_context,
+            outbounds: Arc::new(outbounds),
         })
     })];
     if let Some(metrics_config) = config.metrics {
@@ -229,9 +246,48 @@ fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
     }
 }
 
+struct ClientTcpListeners {
+    listeners: Vec<TcpListener>,
+    next: AtomicUsize,
+}
+
+impl AcceptListener for ClientTcpListeners {
+    type Stream = (usize, tokio::net::TcpStream);
+
+    async fn accept(&self) -> io::Result<Self::Stream> {
+        let start = self.next.fetch_add(1, Ordering::Relaxed) % self.listeners.len();
+        std::future::poll_fn(|task| {
+            for offset in 0..self.listeners.len() {
+                let inbound = (start + offset) % self.listeners.len();
+                match self.listeners[inbound].poll_accept(task) {
+                    Poll::Ready(Ok((stream, _))) => {
+                        if stream.set_nodelay(true).is_err() {
+                            return Poll::Ready(Err(io::Error::from(io::ErrorKind::Other)));
+                        }
+                        return Poll::Ready(Ok((inbound, stream)));
+                    }
+                    Poll::Ready(Err(_)) => {
+                        return Poll::Ready(Err(io::Error::from(io::ErrorKind::Other)));
+                    }
+                    Poll::Pending => {}
+                }
+            }
+            Poll::Pending
+        })
+        .await
+    }
+}
+
+#[derive(Clone)]
+struct ClientOutboundContext {
+    tcp_server: TargetAddr,
+    udp_server: SocketAddrV4,
+}
+
 struct ClientTcpRoot {
-    supervisor: Option<BoundedSupervisor<TcpListener>>,
+    supervisor: Option<BoundedSupervisor<ClientTcpListeners>>,
     context: Arc<ClientContext>,
+    outbounds: Arc<Vec<ClientOutboundContext>>,
 }
 
 impl PreparedProcessRoot<RunError> for ClientTcpRoot {
@@ -245,15 +301,20 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
     ) -> ProcessFuture<Result<(), RunError>> {
         let supervisor = self.supervisor.take().expect("prepared TCP root");
         let context = Arc::clone(&self.context);
+        let outbounds = Arc::clone(&self.outbounds);
         let handler_context = Arc::clone(&context);
         let mut quiescing = cancellation.clone();
         let mut forced = cancellation.clone();
         Box::pin(async move {
             let running = supervisor.run_with_cancellation(
-                move |stream, cancellation| {
+                move |(inbound, stream), cancellation| {
                     let context = Arc::clone(&handler_context);
+                    let outbounds = Arc::clone(&outbounds);
                     async move {
-                        client_connection(stream, cancellation, context).await;
+                        if let Some(outbound) = outbounds.get(inbound) {
+                            client_connection(stream, cancellation, context, outbound.clone())
+                                .await;
+                        }
                     }
                 },
                 cancellation,
@@ -358,17 +419,17 @@ struct ClientContext {
     keys: MethodKeyAdapter<MethodSinglePskProvider>,
     clock: SystemClock,
     random: SystemRandom,
-    server: TargetAddr,
     runtime: RuntimeConfig,
     udp: Option<ClientUdpContext>,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
+    #[cfg(test)]
+    test_udp_server: SocketAddrV4,
 }
 
 struct ClientUdpContext {
     manager: UdpSessionManager,
     live_ids: Arc<std::sync::Mutex<HashSet<UdpSessionId>>>,
-    server: SocketAddrV4,
     method: MethodProfile,
 }
 
@@ -376,6 +437,7 @@ async fn client_connection(
     stream: tokio::net::TcpStream,
     mut cancellation: CancellationToken,
     context: Arc<ClientContext>,
+    outbound: ClientOutboundContext,
 ) {
     let peer_ip = stream.peer_addr().ok().map(|peer| peer.ip());
     let local_ip = match stream.local_addr() {
@@ -429,6 +491,7 @@ async fn client_connection(
                 local_ip,
                 &mut cancellation,
                 Arc::clone(&context),
+                outbound.udp_server,
                 UdpSocket::bind,
             )
             .await;
@@ -442,7 +505,7 @@ async fn client_connection(
         reply,
     } = session;
     let outbound = ClientTcpOutbound::new(
-        context.server.clone(),
+        outbound.tcp_server,
         &context.keys,
         &context.outbound_connector,
         &context.clock,
@@ -580,6 +643,7 @@ async fn run_udp_association<IO, F, Fut>(
     local_ip: Ipv4Addr,
     cancellation: &mut CancellationToken,
     context: Arc<ClientContext>,
+    server: SocketAddrV4,
     bind: F,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send,
@@ -592,7 +656,7 @@ async fn run_udp_association<IO, F, Fut>(
     } = association;
     let prepared = tokio::select! {
         _ = cancellation.cancelled() => return,
-        prepared = prepare_udp_association_with_bind(&context, local_ip, bind) => prepared,
+        prepared = prepare_udp_association_with_bind(&context, local_ip, server, bind) => prepared,
     };
     let mut prepared = match prepared {
         Ok(prepared) => prepared,
@@ -626,6 +690,7 @@ async fn run_udp_association<IO, F, Fut>(
 async fn prepare_udp_association_with_bind<F, Fut>(
     context: &ClientContext,
     local_ip: Ipv4Addr,
+    server: SocketAddrV4,
     mut bind: F,
 ) -> Result<PreparedClientUdp, ()>
 where
@@ -651,7 +716,7 @@ where
         .await
         .map_err(|_| ())?;
     upstream
-        .connect(SocketAddr::V4(udp.server))
+        .connect(SocketAddr::V4(server))
         .await
         .map_err(|_| ())?;
 
@@ -1552,6 +1617,7 @@ mod tests {
         Aes128Psk, KeySelector, MethodKeyProvider, MethodSecretKeyRef, RandomError,
         SinglePskProvider,
     };
+    use ferrum2_runtime::OwnerSnapshot;
     use ferrum2_shadowsocks::{
         TransportPhase, UDP_REPLAY_LAG, UdpReplayWindow, UdpServer, max_udp_payload_len,
     };
@@ -2341,10 +2407,14 @@ mod tests {
                 SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
             };
             let (path, context) = udp_test_context_for_server(registry.clone(), server_address);
-            let mut prepared =
-                prepare_udp_association_with_bind(&context, Ipv4Addr::LOCALHOST, UdpSocket::bind)
-                    .await
-                    .expect("prepared concrete relay");
+            let mut prepared = prepare_udp_association_with_bind(
+                &context,
+                Ipv4Addr::LOCALHOST,
+                server_address,
+                UdpSocket::bind,
+            )
+            .await
+            .expect("prepared concrete relay");
             let relay = prepared.application.local_addr().expect("relay address");
             let upstream_client = prepared.upstream.local_addr().expect("upstream client");
             prepared.io_fault = Some(Arc::new(UdpIoFaultPlan::new(operation, fail_at)));
@@ -2493,6 +2563,7 @@ mod tests {
                 let prepared = prepare_udp_association_with_bind(
                     &context,
                     Ipv4Addr::LOCALHOST,
+                    server_address,
                     UdpSocket::bind,
                 )
                 .await
@@ -3180,6 +3251,125 @@ mod tests {
         (path, config)
     }
 
+    #[rustfmt::skip]
+    fn tagged_client_test_config(mappings: &[(SocketAddrV4, SocketAddrV4)], udp: bool) -> (PathBuf, ValidatedClientConfig) {
+        let (path, mut config) = if udp { client_udp_test_config(mappings[0].0, mappings[0].1) } else { client_test_config(mappings[0].0, mappings[0].1) };
+        config.inbounds = mappings.iter().map(|(listen, server)| ferrum2_config::ClientInboundConfig {
+            listen: *listen, outbound: ferrum2_config::ClientOutboundConfig { server: *server },
+        }).collect();
+        config.outbounds = mappings.iter().map(|(_, server)| ferrum2_config::ClientOutboundConfig { server: *server }).collect();
+        (path, config)
+    }
+
+    #[rustfmt::skip]
+    fn active(mut snapshot: OwnerSnapshot) -> OwnerSnapshot {
+        snapshot.process_root_reaps = 0; snapshot.process_root_rollbacks = 0;
+        snapshot.process_forced_roots = 0; snapshot.forced_shutdowns = 0; snapshot.udp_forced_shutdowns = 0;
+        snapshot
+    }
+
+    type TestClientTask = tokio::task::JoinHandle<Result<(), RunError>>;
+
+    #[rustfmt::skip]
+    fn spawn_test_client(config: ValidatedClientConfig, registry: &OwnerRegistry) -> (tokio::sync::oneshot::Sender<()>, TestClientTask) {
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_with_registry(config, registry.clone(), async move { let _ = stopped.await; }));
+        (stop, task)
+    }
+
+    #[rustfmt::skip]
+    async fn socks_command(listen: SocketAddrV4, command: u8) -> (tokio::net::TcpStream, [u8; 10]) {
+        let mut stream = tokio::net::TcpStream::connect(listen).await.expect("SOCKS connect");
+        stream.write_all(&[5, 1, 0]).await.expect("greeting");
+        let mut method = [0; 2]; stream.read_exact(&mut method).await.expect("method");
+        assert_eq!(method, [5, 0]);
+        let request = if command == 3 { [5, 3, 0, 1, 0, 0, 0, 0, 0, 0] } else { [5, command, 0, 1, 127, 0, 0, 1, 0, 80] };
+        stream.write_all(&request).await.expect("command");
+        let mut reply = [0; 10]; stream.read_exact(&mut reply).await.expect("reply");
+        (stream, reply)
+    }
+
+    #[tokio::test]
+    #[rustfmt::skip]
+    async fn tagged_tcp_uses_static_outbounds_one_process_permit_and_no_fallback() {
+        let listens = [reserve_address(), reserve_address()];
+        let upstreams = [
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("upstream A"),
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("upstream B"),
+        ];
+        let servers: [SocketAddrV4; 2] = std::array::from_fn(|index| match upstreams[index].local_addr().expect("upstream") {
+            SocketAddr::V4(address) => address, SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
+        });
+        let (path, mut config) =
+            tagged_client_test_config(&[(listens[0], servers[0]), (listens[1], servers[1])], false);
+        config.runtime.max_connections = 1.try_into().expect("one connection");
+        let registry = OwnerRegistry::new();
+        let (stop, task) = spawn_test_client(config, &registry);
+        wait_until_bound(listens[0]).await;
+        wait_until_bound(listens[1]).await;
+
+        let (first, reply) = socks_command(listens[0], 1).await;
+        assert_eq!(&reply[..2], &[5, 0]);
+        let (first_upstream, _) = upstreams[0].accept().await.expect("mapped upstream A");
+        let second = tokio::spawn(socks_command(listens[1], 1));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), upstreams[1].accept())
+                .await
+                .is_err(),
+            "second listener multiplied the process permit"
+        );
+        drop((first, first_upstream));
+        let (second, reply) = second.await.expect("second SOCKS task");
+        assert_eq!(&reply[..2], &[5, 0]);
+        let (second_upstream, _) = upstreams[1].accept().await.expect("mapped upstream B");
+        stop.send(()).expect("stop mapped client");
+        assert_eq!(task.await.expect("mapped client"), Ok(()));
+        drop((second, second_upstream));
+        assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+
+        let dead = reserve_address();
+        let (dead_path, config) = tagged_client_test_config(
+            &[(reserve_address(), servers[0]), (reserve_address(), dead)],
+            false,
+        );
+        let dead_listen = config.inbounds[1].listen;
+        let registry = OwnerRegistry::new();
+        let (stop, task) = spawn_test_client(config, &registry);
+        wait_until_bound(dead_listen).await;
+        let (_, reply) = socks_command(dead_listen, 1).await;
+        assert_eq!(reply[0], 5);
+        assert_ne!(reply[1], 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), upstreams[0].accept())
+                .await
+                .is_err(),
+            "dead referenced server fell back to live sibling"
+        );
+        stop.send(()).expect("stop no-fallback client");
+        assert_eq!(task.await.expect("no-fallback client"), Ok(()));
+        std::fs::remove_file(path).expect("remove mapped config");
+        std::fs::remove_file(dead_path).expect("remove no-fallback config");
+    }
+
+    #[tokio::test]
+    #[rustfmt::skip]
+    async fn tagged_prepare_failures_restore_full_baseline_and_exact_rebind() {
+        for blocked in 0..3 {
+            let listens = [reserve_address(), reserve_address(), reserve_address()];
+            let metrics = reserve_address();
+            let (path, mut config) = tagged_client_test_config(&listens.map(|listen| (listen, reserve_address())), false);
+            config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
+            let address = if blocked < 2 { listens[blocked] } else { metrics };
+            let incumbent = std::net::TcpListener::bind(address).expect("occupy prepare position");
+            let registry = OwnerRegistry::new();
+            assert_eq!(run_with_registry(config, registry.clone(), std::future::pending()).await, Err(RunError::StartupBind));
+            drop(incumbent);
+            for address in listens.into_iter().chain([metrics]) { drop(std::net::TcpListener::bind(address).expect("exact rollback rebind")); }
+            assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+            std::fs::remove_file(path).expect("remove prepare config");
+        }
+    }
+
     fn udp_test_context(registry: OwnerRegistry) -> (PathBuf, Arc<ClientContext>) {
         udp_test_context_for_server(registry, reserve_address())
     }
@@ -3210,7 +3400,6 @@ mod tests {
             keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
             clock: SystemClock::new(),
             random: SystemRandom,
-            server: TargetAddr::ipv4(server).expect("server target"),
             runtime,
             udp: Some(ClientUdpContext {
                 manager: UdpSessionManager::new(
@@ -3223,11 +3412,11 @@ mod tests {
                     registry.clone(),
                 ),
                 live_ids: Arc::new(Mutex::new(HashSet::new())),
-                server,
                 method,
             }),
             registry,
             metrics: Arc::new(Metrics::new()),
+            test_udp_server: server,
         };
         (path, Arc::new(context))
     }
@@ -3291,6 +3480,7 @@ mod tests {
                     .expect("one handler");
                 let bind = bind.lock().expect("bind").take().expect("one binder");
                 let context = Arc::clone(&context);
+                let server = context.test_udp_server;
                 let done_sender = Arc::clone(&done_sender);
                 async move {
                     run_udp_association(
@@ -3299,6 +3489,7 @@ mod tests {
                         Ipv4Addr::LOCALHOST,
                         &mut cancellation,
                         context,
+                        server,
                         bind,
                     )
                     .await;
@@ -3385,10 +3576,14 @@ mod tests {
         assert!(udp.live_ids.lock().expect("live IDs").is_empty());
         assert_eq!(registry.snapshot(), baseline);
 
-        let prepared =
-            prepare_udp_association_with_bind(&context, Ipv4Addr::LOCALHOST, UdpSocket::bind)
-                .await
-                .expect("next setup");
+        let prepared = prepare_udp_association_with_bind(
+            &context,
+            Ipv4Addr::LOCALHOST,
+            context.test_udp_server,
+            UdpSocket::bind,
+        )
+        .await
+        .expect("next setup");
         let application = prepared
             .application
             .local_addr()
@@ -3415,6 +3610,7 @@ mod tests {
         let prepared = prepare_udp_association_with_bind(
             &context,
             Ipv4Addr::new(127, 0, 0, 2),
+            context.test_udp_server,
             move |address| {
                 observed.lock().expect("bind calls").push(address);
                 UdpSocket::bind(address)
@@ -3444,11 +3640,9 @@ mod tests {
             let registry = OwnerRegistry::new();
             let baseline = registry.snapshot();
             let (path, context) = udp_test_context(registry.clone());
-            let upstream = UdpSocket::bind(SocketAddr::V4(
-                context.udp.as_ref().expect("UDP context").server,
-            ))
-            .await
-            .expect("upstream receiver");
+            let upstream = UdpSocket::bind(SocketAddr::V4(context.test_udp_server))
+                .await
+                .expect("upstream receiver");
             let (association, mut peer) = parsed_udp_association().await;
             let task = tokio::spawn(execute_test_udp_association(
                 association,
@@ -3530,7 +3724,7 @@ mod tests {
 
     #[tokio::test]
     async fn udp_process_shutdown_drains_an_active_association_without_forcing() {
-        let listen = reserve_address();
+        let listens = [reserve_address(), reserve_address()];
         let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("upstream receiver");
@@ -3538,7 +3732,8 @@ mod tests {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
         };
-        let (config_path, mut config) = client_udp_test_config(listen, server);
+        let (config_path, mut config) =
+            tagged_client_test_config(&listens.map(|listen| (listen, server)), true);
         config.runtime.shutdown_grace = Duration::from_secs(1);
         let registry = OwnerRegistry::new();
         let baseline = registry.snapshot();
@@ -3557,9 +3752,11 @@ mod tests {
             )
             .await
         });
-        wait_until_bound(listen).await;
+        for listen in listens {
+            wait_until_bound(listen).await;
+        }
 
-        let mut control = tokio::net::TcpStream::connect(listen)
+        let mut control = tokio::net::TcpStream::connect(listens[0])
             .await
             .expect("SOCKS control");
         control.write_all(&[5, 1, 0]).await.expect("greeting");
@@ -3606,6 +3803,9 @@ mod tests {
             baseline.active_supervisor_children + 1
         );
         assert_eq!(live.connection_tasks, baseline.connection_tasks + 1);
+        let (_, saturated) = socks_command(listens[1], 3).await;
+        assert_eq!(&saturated[..2], &[5, 1]);
+        assert_eq!(registry.snapshot().udp_sessions, baseline.udp_sessions + 1);
 
         shutdown_sender
             .send(())
@@ -3639,11 +3839,14 @@ mod tests {
                 .await
                 .expect("upstream client rebind"),
         );
+        for listen in listens {
+            drop(TcpListener::bind(listen).await.expect("listener rebind"));
+        }
         std::fs::remove_file(config_path).expect("remove client UDP test config");
     }
     #[tokio::test]
     async fn zero_grace_counts_each_of_two_forced_udp_associations_once() {
-        let listen = reserve_address();
+        let listens = [reserve_address(), reserve_address()];
         let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("upstream receiver");
@@ -3651,7 +3854,8 @@ mod tests {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
         };
-        let (config_path, mut config) = client_udp_test_config(listen, server);
+        let (config_path, mut config) =
+            tagged_client_test_config(&listens.map(|listen| (listen, server)), true);
         config.runtime.shutdown_grace = Duration::ZERO;
         config.udp.as_mut().expect("UDP config").max_sessions = 2;
         let registry = OwnerRegistry::new();
@@ -3671,13 +3875,18 @@ mod tests {
             )
             .await
         });
-        wait_until_bound(listen).await;
+        for listen in listens {
+            wait_until_bound(listen).await;
+        }
 
         let mut controls = Vec::new();
         let mut relays = Vec::new();
         let mut applications = Vec::new();
         let mut upstream_clients = Vec::new();
-        for payload in [b"active-one".as_slice(), b"active-two".as_slice()] {
+        for (listen, payload) in listens
+            .into_iter()
+            .zip([b"active-one".as_slice(), b"active-two".as_slice()])
+        {
             let mut control = tokio::net::TcpStream::connect(listen)
                 .await
                 .expect("SOCKS control");
@@ -3765,11 +3974,14 @@ mod tests {
                     .expect("upstream client rebind"),
             );
         }
+        for listen in listens {
+            drop(TcpListener::bind(listen).await.expect("listener rebind"));
+        }
         std::fs::remove_file(config_path).expect("remove config");
     }
     #[tokio::test]
     async fn active_sibling_root_failure_cancels_udp_without_forced_shutdown() {
-        let listen = reserve_address();
+        let listens = [reserve_address(), reserve_address()];
         let registry = OwnerRegistry::new();
         let baseline = registry.snapshot();
         let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -3788,13 +4000,31 @@ mod tests {
         let tcp_registry = registry.clone();
         let tcp_context = Arc::clone(&context);
         let tcp_root = ProcessRoot::new(move || async move {
-            let listener = bind_listener(listen, 16)?;
-            let supervisor =
-                BoundedSupervisor::new(listener, 4, Duration::from_secs(1), tcp_registry)
-                    .map_err(|_| RunError::StartupProtocol)?;
+            let listeners = listens
+                .into_iter()
+                .map(|listen| bind_listener(listen, 16))
+                .collect::<Result<Vec<_>, _>>()?;
+            let supervisor = BoundedSupervisor::new(
+                ClientTcpListeners {
+                    listeners,
+                    next: AtomicUsize::new(0),
+                },
+                4,
+                Duration::from_secs(1),
+                tcp_registry,
+            )
+            .map_err(|_| RunError::StartupProtocol)?;
             Ok(ClientTcpRoot {
                 supervisor: Some(supervisor),
                 context: tcp_context,
+                outbounds: Arc::new(
+                    listens
+                        .map(|_| ClientOutboundContext {
+                            tcp_server: TargetAddr::ipv4(server).expect("server target"),
+                            udp_server: server,
+                        })
+                        .into(),
+                ),
             })
         });
         let (failure_sender, failure_receiver) = tokio::sync::oneshot::channel();
@@ -3810,9 +4040,11 @@ mod tests {
         )
         .expect("process supervisor");
         let run_task = tokio::spawn(supervisor.run_until(std::future::pending::<()>()));
-        wait_until_bound(listen).await;
+        for listen in listens {
+            wait_until_bound(listen).await;
+        }
 
-        let mut control = tokio::net::TcpStream::connect(listen)
+        let mut control = tokio::net::TcpStream::connect(listens[0])
             .await
             .expect("SOCKS control");
         control.write_all(&[5, 1, 0]).await.expect("greeting");
@@ -3899,7 +4131,9 @@ mod tests {
                 .await
                 .expect("upstream client rebind"),
         );
-        drop(TcpListener::bind(listen).await.expect("listener rebind"));
+        for listen in listens {
+            drop(TcpListener::bind(listen).await.expect("listener rebind"));
+        }
         std::fs::remove_file(path).expect("remove config");
     }
 

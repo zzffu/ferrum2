@@ -257,12 +257,10 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
         assert_eq!(run.status.code(), Some(1), "{binary}");
         assert!(run.stdout.is_empty(), "{binary}");
-        let expected = if binary == "ferrum2-client" {
-            b"error[startup.protocol] process: unable to prepare protocol resources\n".as_slice()
-        } else {
-            b"error[startup.bind] process: unable to prepare required endpoint\n".as_slice()
-        };
-        assert_eq!(run.stderr, expected, "{binary}");
+        assert_eq!(
+            run.stderr, b"error[startup.bind] process: unable to prepare required endpoint\n",
+            "{binary}"
+        );
     }
 
     let invalid = directory.path().join("client-tagged-invalid.toml");
