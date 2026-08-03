@@ -178,6 +178,7 @@ fn echo_datagrams(socket: UdpSocket, count: usize) -> DatagramEcho {
 
 #[test]
 fn datagram_echo_drop_joins_and_releases_socket() {
+    let _spawn_guard = local_support::hold_process_spawns();
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("drop-test echo socket");
     let address = socket.local_addr().expect("drop-test echo address");
     drop(echo_datagrams(socket, 2));

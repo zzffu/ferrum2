@@ -30,6 +30,12 @@ const READINESS_POLL: Duration = Duration::from_millis(20);
 const READINESS_CONFIRMATIONS: usize = 3;
 static ACTIVE_CHILDREN: AtomicUsize = AtomicUsize::new(0);
 static ISSUED_PORTS: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+// A concurrent fork inherits CLOEXEC sockets until exec; exact rebind probes hold this lock.
+static PROCESS_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn hold_process_spawns() -> std::sync::MutexGuard<'static, ()> {
+    PROCESS_SPAWN_LOCK.lock().expect("process spawn lock")
+}
 
 pub fn binary_path(name: &str) -> PathBuf {
     let executable = std::env::current_exe().expect("test executable path");
@@ -48,6 +54,7 @@ pub fn binary_path(name: &str) -> PathBuf {
 }
 
 pub fn run_binary(name: &str, arguments: &[&str]) -> Output {
+    let _spawn_guard = hold_process_spawns();
     Command::new(binary_path(name))
         .args(arguments)
         .output()
@@ -98,7 +105,10 @@ impl ChildGuard {
         }
         #[cfg(not(windows))]
         let _ = signal_group;
-        let mut child = command.spawn().expect("spawn child process");
+        let mut child = {
+            let _spawn_guard = hold_process_spawns();
+            command.spawn().expect("spawn child process")
+        };
         let stdout = child.stdout.take().expect("child stdout pipe");
         let stderr = child.stderr.take().expect("child stderr pipe");
         ACTIVE_CHILDREN.fetch_add(1, Ordering::SeqCst);
@@ -284,6 +294,7 @@ impl fmt::Display for ChildExit {
 
 #[cfg(unix)]
 fn send_shutdown_signal(process_id: u32) {
+    let _spawn_guard = hold_process_spawns();
     let status = Command::new("kill")
         .args(["-INT", &process_id.to_string()])
         .status()
@@ -296,6 +307,7 @@ fn send_shutdown_signal(process_id: u32) {
     let script = format!(
         r#"Add-Type -Namespace Ferrum2 -Name ConsoleSignal -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool FreeConsole(); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint processId); [System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(System.IntPtr handler, bool add); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint signal, uint processGroup);'; [void][Ferrum2.ConsoleSignal]::FreeConsole(); if (-not [Ferrum2.ConsoleSignal]::AttachConsole({process_id})) {{ exit 1 }}; [void][Ferrum2.ConsoleSignal]::SetConsoleCtrlHandler([System.IntPtr]::Zero, $true); $sent = [Ferrum2.ConsoleSignal]::GenerateConsoleCtrlEvent(1, {process_id}); [void][Ferrum2.ConsoleSignal]::FreeConsole(); if (-not $sent) {{ exit 1 }}"#
     );
+    let _spawn_guard = hold_process_spawns();
     let status = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdin(Stdio::null())
