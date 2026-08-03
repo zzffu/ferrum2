@@ -2,50 +2,28 @@
 
 ## M7 validating 状态
 
-- **Qualified exact SHA:** `953689ad2c9984a317f617e26444db7aa173513a`，tree
-  `01594ef4efbd8e5bd242da6a5bda671989600c10`。Automatic push run
-  [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478) used that SHA
-  for every credited hosted result。
-- **Local/review evidence:** Linux Rust 1.85 default-parallel `local_e2e` passed
-  `100/100` on 16 CPUs；Windows passed `8/8`。TEST-0008、workspace Full/MSRV、ignored
-  100+ lifecycle、Clippy、format and diff checks passed。After one targeted QA block and the
-  required two independent xhigh analyses，final Architect and QA both returned
-  `PASS_WITH_NOTES` with no blocker、major or minor finding。
-- **Hosted evidence:** MSRV `91626060716`、Windows `91626060729`、Linux GNU
-  `91626060709`、Linux musl `91626060703` and interop `91626060685` completed
-  `success`。Interop emitted exact `tcp=12/12 tcp_cleanup=PASS udp=12/12
-  udp_cleanup=PASS` with the same SHA/run/attempt。Quality job `91626060741` ran its
-  authoritative Full step successfully，then failed only in the test-budget step；the focused
-  IPv6 and completion-marker steps were consequently skipped。
-- **Budget truth:** hosted exact `953689a` remains historical
-  `BLOCKED reason=ratio_ceiling_exceeded` and is not rewritten as PASS。T05 exact `9baba260`
-  replaced that broken permanent ratio with schema 2：base code/tests `15529/24619`，M7 envelope
-  `864`。T06 exact `92d849e` reaches code/tests/examples `15529/25483/132` and passes at equality；
-  T07 candidate `ffcbccd` is net zero and also passes with remaining `0`。
-- **Boundary:** performance was not awaited、credited or claimed。The authorized single
-  non-force push is consumed；no rerun、second push、PR、tag、release or publication occurred or
-  is authorized。Per user direction M7 is not closed。The M6/M7 policy solution in
-  [`M7-test-budget-gate-analysis.md`](research/M7-test-budget-gate-analysis.md) is implemented。
-  T06 exact `92d849e` removed 76 M6/M7 rustfmt skips、kept the one M1 skip and passed Architect/QA。
-  A first Full run then exposed a zero-timeout test race；T07 candidate `ffcbccd` changed one test
-  file `4+/4-` and moved the stress signal from `14/2000` failures to `0/2000`。Architect passed；
-  after two independent xhigh analyses，control/integration exact `cb69992` recorded the ticket and
-  frontier，and targeted QA closed `QA-M7T07-001`。That exact integration passed serial format、
-  Clippy、bin build、workspace Full、100+ lifecycle、docs、Rust 1.85、ticket/milestone Budget、
-  `0/2000` stress and diff checks。M7 remains validating。The user authorizes one non-force
-  `master:master` push of exact `a2b6951f0e6c398e4d7c8e7d47414f86cc24a333` was consumed。
-  Automatic run [`30808225939/1`](https://github.com/zzffu/ferrum2/actions/runs/30808225939)
-  passed MSRV、Windows/GNU/musl、interop and schema 2 Budget。Quality job `91668470588` alone
-  failed in Full at `udp_runtime.rs:613` because the Linux UDP owner-reap test did not return to
-  baseline；the exact Windows stress passed `2000/2000` while Linux/WSL failed `20/20`。M7-T08
-  exact `56b37d885174aa628703c5623c58b5775d857e24` adds one test-only completion `Notify` and
-  deletes the 200-yield send observation；Linux passed `2000/2000`，Windows/runtime/Full/Clippy/
-  build/100+ lifecycle/docs/Rust 1.85 passed，and Architect/QA returned `PASS_WITH_NOTES` without
-  blocker、major or minor finding。Exact Budget passes at tests `25482`、growth `863/864`、
-  remaining `1`、ticket growth `0`。All tickets are done；M7 remains validating and is not closed。
-  The user authorizes one subsequent non-force `master:master` push of the final validated
-  authorization-record descendant and read-only monitoring；performance remains excluded。No rerun、
-  further push or other publication is authorized。
+- **Qualified exact SHA:** `b3b99a15aa99f8393f99f4c72c85f451a48c6749`，tree
+  `018a6ed1d6547771cd9921e51d2bc8668305b6b2`。Automatic push run
+  [`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038) binds every credited
+  result to that SHA。
+- **Local/review evidence:** format、Clippy、workspace binaries、all-features Full、ignored 100+
+  lifecycle `1/1` in `129.42s`、docs、Rust 1.85、Windows focused、Linux focused and exact Linux
+  executable stress `2000/2000` passed。M7-T08 Architect and QA both returned `PASS_WITH_NOTES`
+  with no blocker、major or minor finding。
+- **Hosted evidence:** quality `91681978507`、MSRV `91681978524`、Windows MSVC `91681978550`、
+  Linux GNU `91681978495`、Linux musl `91681978557`、interop `91681978493` and Budget
+  `91681978503` completed `success`。Exact markers record Full/security/process `PASS`、focused
+  IPv6 UDP `PASS`、platform native/artifact/linkage `2/2` plus cleanup、and interop
+  `tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS`。
+- **Budget truth:** T05 exact `9baba260` replaced the historical permanent-ratio failure with schema
+  2。The exact local ticket/milestone and hosted CI gates all return `PASS` at code/tests/examples
+  `15529/25482/132`，test growth `863/864`，remaining `1`；the hosted completion marker binds schema
+  `2` to the exact SHA/run/attempt。
+- **Boundary:** both authorized non-force pushes are consumed。Performance is not awaited、credited
+  or claimed；no rerun、further push、PR、tag、release or publication is authorized。All tickets and
+  technical exit criteria are complete，but per user direction M7 remains `validating` and is not
+  closed。The implemented budget analysis remains
+  [`M7-test-budget-gate-analysis.md`](research/M7-test-budget-gate-analysis.md)。
 
 ## M6 closed 状态
 

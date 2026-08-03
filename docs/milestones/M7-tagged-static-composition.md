@@ -53,7 +53,7 @@
       rollback全部资源；root fatal、signal、forced和restart/rebind回baseline。
 - [x] Existing legacy TCP/UDP/local lifecycle回归和bounded tagged real-process matrix通过；
       tags不进入existing trace/metric identity。
-- [ ] One exact SHA passes Full、Rust 1.85、three native targets、TCP/UDP各`12/12`+
+- [x] One exact SHA passes Full、Rust 1.85、three native targets、TCP/UDP各`12/12`+
       cleanup、test budget和blocking review；missing/failed evidence blocks close。
 
 ## Tickets
@@ -107,7 +107,10 @@ test owners at `udp_runtime.rs:613`。The exact test passes Windows stress `2000
 Linux/WSL executable `20/20`。T08 exact `56b37d8` replaces the mock's 200-yield send observation
 with one completion `Notify`；Linux became `2000/2000` green，all local gates passed，Architect and
 QA both returned `PASS_WITH_NOTES` without blocker/major/minor，and Budget passes at growth
-`863/864` with remaining `1`。All tickets are done but M7 stays validating。The user authorizes one
-subsequent non-force `master:master` push of the final validated authorization-record descendant and
-read-only automatic-run monitoring；performance remains excluded。No rerun、further push、PR、tag、
-release or publication is authorized。
+`863/864` with remaining `1`。Final exact descendant
+`b3b99a15aa99f8393f99f4c72c85f451a48c6749` passed local serial Full and automatic run
+[`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)：quality、MSRV、all
+three native cells、interop TCP/UDP each `12/12` plus cleanup、and schema 2 Budget all succeeded。
+The authorized subsequent push is consumed。All tickets and technical exit criteria are done，but
+M7 stays `validating` and is not closed per user direction。Performance remains excluded；no rerun、
+further push、PR、tag、release or publication is authorized。

@@ -791,7 +791,8 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   `92d849ecd9c21bc4a3fdaf37aa826a32470f4504`；M7-T07 candidate exact
   `ffcbccd16cbc6f643471040405cc89e04d728f0a` and accepted control/integration exact
   `cb69992e49580e9f090c940554f129348d12c302`；M7-T08 exact
-  `56b37d885174aa628703c5623c58b5775d857e24`。
+  `56b37d885174aa628703c5623c58b5775d857e24`；accepted hosted exact
+  `b3b99a15aa99f8393f99f4c72c85f451a48c6749`。
 - **Open blockers and risks:** run
   [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)在同一exact
   SHA通过Full、MSRV、三平台和interop TCP/UDP各`12/12`+cleanup。Quality仅在Full成功后
@@ -807,10 +808,11 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   Windows stress为`2000/2000`，Linux/WSL executable为`0/20`。T08 exact `56b37d8`以一个
   test-only completion `Notify`替换200-yield观察；Linux变为`2000/2000`，本地Full、100+
   lifecycle、MSRV、Clippy、build、docs和Budget均PASS，Architect/QA均`PASS_WITH_NOTES`且无
-  blocker/major/minor。Budget为growth `863/864`、remaining `1`。所有tickets done；M7仍保持
-  `validating`且不close，performance不计入。用户授权最终validated authorization-record
-  descendant一次后续non-force `master:master` push及只读automatic-run监控；未授权rerun、
-  further push、PR、tag、release或publication。
+  blocker/major/minor。Budget为growth `863/864`、remaining `1`。Final exact `b3b99a15`的
+  本地serial Full及run [`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)
+  已通过quality、MSRV、三平台、interop TCP/UDP各`12/12`+cleanup和Budget；后续push授权已
+  消费。所有tickets和技术exit criteria done，但按用户指示M7仍保持`validating`且不close；
+  performance不等待、不计入。未授权rerun、further push、PR、tag、release或publication。
 
 ## 决策登记
 
@@ -947,3 +949,4 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 | 2026-08-03 | M7-T04 native ownership repair | T04 ownership增加现有`tests/platform/qualify_native.py`，供唯一bounded repair在既有三平台driver内加入tagged offline与multi-listener rollback/rebind | 初始T04 ownership只列`m0_qualification.rs`，但native jobs直接调用Python driver；不扩权会允许legacy-only平台结果误记为M7 evidence | candidate `564e11e`初审Architect/QA均BLOCK；只扩一个现有文件，不加provider/job/workflow/dependency，remote仍未授权 |
 | 2026-08-03 | M7-T04 qualification / M7 hold | exact `953689a`以per-test-process spawn lock关闭hosted MSRV fork/exec fd继承竞态；run `30794873478/1`通过Full、MSRV、三平台和TCP/UDP各`12/12`+cleanup | final Architect/QA `PASS_WITH_NOTES`且无blocker/major/minor；quality仅Budget step `ratio_ceiling_exceeded`失败，performance按用户指示不等待、不计入 | T04 done，M7保持`validating`且暂不close；single push消费，未rerun/second push/PR/tag/release/publication；budget根治仅待方案/授权 |
 | 2026-08-03 | M7-T08 local integration / push authorization | exact `56b37d8`用test-only completion `Notify`关闭Linux UDP owner-reap调度假设；不改production、deadline、limit、shutdown或dependency | hosted red残留socket/task/7-byte owners；Linux `0/20`→`2000/2000`，Windows与全门禁PASS；Architect/QA无blocking finding | Budget growth `863/864`、remaining `1`；授权一个最终descendant后续non-force push及automatic monitoring；performance excluded，M7不close |
+| 2026-08-03 | M7-T08 hosted qualification hold | exact `b3b99a15` run `30812399038/1`的quality、MSRV、Windows/GNU/musl、interop和Budget全部success | quality marker为Full/security/process PASS；interop为TCP/UDP各`12/12`+cleanup；schema 2 CI Budget growth `863/864`、remaining `1` | 后续push授权已消费；performance不等待、不计入；所有技术exit criteria完成但遵用户指示M7保持`validating`、不close，且无rerun/further push/publication授权 |
