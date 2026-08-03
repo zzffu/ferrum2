@@ -587,7 +587,7 @@ fn tcp_exchange_accepts_hosted_sing_box_reference_client_observation_order() {
         let target = start_target(owner, target_result.map_err(str::to_owned), timeout);
         let application = application_gate.wait(bounded);
         assert_eq!(application.is_err(), target_failed);
-        if let (Ok(application), Some(result)) = (application, acknowledgement) {
+        if let (Ok(application), Some(result)) = (&application, acknowledgement) {
             let _ = application.send(result.map_err(str::to_owned));
         }
         let error = target.join().unwrap().unwrap_err();
@@ -595,12 +595,12 @@ fn tcp_exchange_accepts_hosted_sing_box_reference_client_observation_order() {
     };
     assert_failed(Err("target probe failed"), None, bounded, "target probe");
     assert_failed(Ok(()), Some(Err("app failed")), bounded, "app failed");
-    assert_failed(Ok(()), None, bounded, "closed");
-    assert_failed(Ok(()), Some(Ok(())), Duration::ZERO, "timed out");
+    assert_failed(Ok(()), None, Duration::ZERO, "timed out");
 
     let (target_shutdown, application_gate) = tcp_shutdown_gate();
     drop(application_gate);
-    assert!(target_shutdown.finish(Ok(()), bounded).is_err());
+    let error = target_shutdown.finish(Ok(()), bounded).unwrap_err();
+    assert!(error.contains("closed"));
 
     let (target_shutdown, application_gate) = tcp_shutdown_gate();
     drop(target_shutdown);
