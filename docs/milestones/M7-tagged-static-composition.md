@@ -97,6 +97,7 @@ review。After two independent xhigh analyses，control exact `cb69992` supplied
 truthful frontier；targeted QA returned `PASS / CLOSED`。The accepted integration exact `cb69992`
 then passed serial format、Clippy、bin build、workspace Full、100+ lifecycle、docs、Rust 1.85、
 schema 2 ticket/milestone Budget、`0/2000` stress and diff checks。All local tickets are done，but M7
-remains validating and must not close until a separately authorized same-SHA hosted run supplies the
-required four credited groups。The prior single push is consumed；no new push、rerun、PR、tag、
-release or publication is authorized。
+remains validating and must not close until a same-SHA hosted run supplies the required four credited
+groups。The user now authorizes one non-force `master:master` push of the exact authorization-record
+descendant and read-only monitoring of its automatic run；performance remains excluded。No rerun、
+second push、PR、tag、release or publication is authorized。

@@ -32,7 +32,9 @@
   after two independent xhigh analyses，control/integration exact `cb69992` recorded the ticket and
   frontier，and targeted QA closed `QA-M7T07-001`。That exact integration passed serial format、
   Clippy、bin build、workspace Full、100+ lifecycle、docs、Rust 1.85、ticket/milestone Budget、
-  `0/2000` stress and diff checks。M7 remains validating；no new remote action is authorized。
+  `0/2000` stress and diff checks。M7 remains validating。The user authorizes one non-force
+  `master:master` push of the exact authorization-record descendant and read-only monitoring of the
+  automatic run；performance is excluded。No rerun、second push or other publication is authorized。
 
 ## M6 closed 状态
 

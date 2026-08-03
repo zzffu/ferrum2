@@ -797,9 +797,10 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   skip。T07 candidate以`4+/4-`关闭Full发现的zero-timeout测试竞态，base/candidate stress为
   `14/2000`与`0/2000`；两份独立xhigh分析支持control-only补票，targeted QA已关闭
   `QA-M7T07-001`。Accepted integration `cb69992`的serial Full、100+ lifecycle、MSRV、Clippy、
-  build、docs、schema 2 Budget、stress和diff均PASS。M7保持`validating`且不close；same-SHA
-  hosted四组仍待新的明确push授权。Single non-force push已消费；尚未授权new push、rerun、
-  PR、tag、release或publication。
+  build、docs、schema 2 Budget、stress和diff均PASS。M7保持`validating`且不close。用户现授权
+  将包含本授权记录的exact descendant以一次non-force `master:master` push触发same-SHA hosted
+  四组，并只读监控automatic run；performance仍不计入。未授权rerun、second push、PR、tag、
+  release或publication。
 
 ## 决策登记
 
