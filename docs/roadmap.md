@@ -34,6 +34,9 @@ M7已由exact `b3b99a15aa99f8393f99f4c72c85f451a48c6749`、本地serial Full和G
 Actions run [`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)
 的quality、MSRV、三平台、TCP/UDP各`12/12`+cleanup及schema 2 Budget证据关闭；
 performance按用户关闭合同排除且不计入。
+M8现为`planned`，planning baseline为
+`404b62758a191fe879243c755c75bcf8b300040d`；尚无产品commit、review或qualification
+证据，且未授权任何remote action。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -55,6 +58,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M5 | M4 closed | `shadowsocks-crypto`成为三种SIP022方法的唯一内部密码实现 |
 | M6 | M5 closed | 显式opt-in、有界且可关闭的SOCKS5 UDP ASSOCIATE |
 | M7 | M6 closed | 具名多inbound/outbound的静态tag绑定与原子启动 |
+| M8 | M7 closed | 共享最小TCP/UDP first-match routing |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -66,6 +70,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 公开crypto seam、协议状态机、wire和schema v1保持不变。M6已复用现有SIP022
 UDP和runtime交付public client UDP path，未加入routing。M7已复用config与
 `ProcessSupervisor` deep modules交付静态tag graph，未创建`Endpoint` interface。
+M8计划复用`TargetAddr`、tag graph和composition roots交付有界exact-target
+first-match route module；advanced matcher和outbound policy继续延期。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -801,6 +807,51 @@ UDP和runtime交付public client UDP path，未加入routing。M7已复用config
   Budget为growth `863/864`、remaining `1`。Performance按用户关闭合同排除且不声明PASS。
   两次授权push均已消费；未授权rerun、further push、PR、tag、release或publication。
 
+## M8 — 共享最小 TCP/UDP first-match routing
+
+- **Status:** planned
+- **Objective:** additive routed tagged schema v1使用一个shared bounded route module，按
+  inbound tag、`tcp|udp`和pre-resolution exact target做ordered first-match并以
+  mandatory `route.final`收敛；TCP per-flow、UDP per-datagram选择outbound，legacy/M7
+  static行为和既有security/resource/lifecycle保持。
+- **Entry conditions:** 已满足。M7 closed；planning baseline为
+  `404b62758a191fe879243c755c75bcf8b300040d`；current config/client/server/core flow
+  已以symbol evidence清点；ADR-0028、SPEC/TEST-0009已Accepted/Approved；schema 2 M8
+  Budget绑定code/tests `15529/25482`和`840`-line envelope。
+- **Exit criteria:**
+  1. Legacy和M7 static v1 cohort原样有效；routed/static/legacy mode互斥、全部rule/tag/
+     network/target/final semantics离线完整验证且zero-resource/redacted。
+  2. Shared route interface在两个binary的TCP/UDP path执行ordered first-match、AND/
+     wildcard、exact target和total final；不存在runtime string lookup或failure fallback。
+  3. Client TCP和同一SOCKS UDP association内不同targets选择不同SS servers，exact
+     response source+protocol leg binding及aggregate owner/byte/ID/lifecycle有界。
+  4. Server authenticated TCP/UDP在outbound mutation前选择direct identity，preserve
+     replay、cross-inbound UDP binding、same-inbound roaming和response egress。
+  5. 一个exact SHA通过Full、Rust 1.85、三native targets、existing TCP/UDP各
+     `12/12`+cleanup、M8 Budget和blocking review；缺失/失败/未授权即blocked。
+- **In-scope tickets:**
+  - M8-T01：shared core route interface、routed config compilation和temporary run guards，
+    `ready`；
+  - M8-T02：client TCP/UDP per-target route、lazy UDP protocol legs和no-fallback，依赖T01，
+    `todo`；
+  - M8-T03：server authenticated TCP/UDP direct-identity route，依赖T02，`todo`；
+  - M8-T04：real-process、三平台、existing interop和exact-SHA qualification，依赖T03，
+    `todo`。
+
+  ```text
+  M8-T01 core/config -> M8-T02 client TCP/UDP -> M8-T03 server TCP/UDP
+    -> M8-T04 qualification
+  ```
+- **Deferred/out of scope:** GeoIP/Geosite、DNS、sniffing/user rules、CIDR/range、domain
+  suffix/keyword/regex、port range/list、negation、fallback/health/load balancing/chaining、
+  per-entry PSK/method、SIP023/multi-user、新adapter kind/`Endpoint`、transparent/TUN、
+  hot reload、management API、new dependency、performance threshold、package/release/
+  publication。
+- **Integrated commit:** —；plan-only。
+- **Open blockers and risks:** plan gate无blocker。M8-T01是唯一ready frontier；product
+  work必须使用独立ticket branch/worktree并先绑定exact base。Push、hosted run、PR、tag、
+  release和publication均未授权。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -840,6 +891,7 @@ UDP和runtime交付public client UDP path，未加入routing。M7已复用config
 | DEC-033 | resolved in M6 plan | client `[udp]`为schema v1显式opt-in；每个TCP control拥有两个per-association UDP sockets；TCP peer IP权威，非零hint port固定、零port首个valid datagram锁定，地址hint仅advisory；response使用borrowed-authenticate→reserve→materialize/commit；runtime只公开既有per-handle idle/cancel操作；不实现fragment/routing/shared listener | `ADR-0026`、M6 research、SPEC/TEST-0007、M6-T01/T02 |
 | DEC-034 | resolved in M6 plan | 按ADR-0016等强替换既有M2证据adapter：保留12个ID/method/reference和six reference-client rows，仅把six FerrumClient rows从protocol example换成显式UDP client binary；不新增provider/matrix/workflow job | `ADR-0016`、`TEST-0007`、M6-T03 |
 | DEC-035 | resolved in M7 plan | additive v1 tagged/legacy互斥shape；inbound/outbound全局唯一且有界tag、静态inbound→outbound引用、全部outbound被引用；保留process-wide method/PSK及aggregate TCP/UDP owners；复用`ProcessSupervisor` transaction且不创建`Endpoint` interface | `ADR-0027`、SPEC/TEST-0008、M7-T01～T04 |
+| DEC-036 | resolved in M8 plan | additive tagged-only route/static互斥shape；最多64条ordered AND/wildcard rules，以inbound/network/pre-resolution exact target首命中并由mandatory final收敛；shared core route interface；TCP per-flow、UDP per-datagram且selected failure不fallback；routed client UDP one-socket/lazy endpoint legs | `ADR-0028`、SPEC/TEST-0009、M8-T01～T04 |
 
 ## 风险登记
 
@@ -938,3 +990,4 @@ UDP和runtime交付public client UDP path，未加入routing。M7已复用config
 | 2026-08-03 | M7-T08 local integration / push authorization | exact `56b37d8`用test-only completion `Notify`关闭Linux UDP owner-reap调度假设；不改production、deadline、limit、shutdown或dependency | hosted red残留socket/task/7-byte owners；Linux `0/20`→`2000/2000`，Windows与全门禁PASS；Architect/QA无blocking finding | Budget growth `863/864`、remaining `1`；授权一个最终descendant后续non-force push及automatic monitoring；performance excluded，M7不close |
 | 2026-08-03 | M7-T08 hosted qualification hold | exact `b3b99a15` run `30812399038/1`的quality、MSRV、Windows/GNU/musl、interop和Budget全部success | quality marker为Full/security/process PASS；interop为TCP/UDP各`12/12`+cleanup；schema 2 CI Budget growth `863/864`、remaining `1` | 后续push授权已消费；performance不等待、不计入；所有技术exit criteria完成但遵用户指示M7保持`validating`、不close，且无rerun/further push/publication授权 |
 | 2026-08-03 | M7 close | M7改为`closed`；八票及六项exit criteria完成，blocking findings为零 | 用户在同一证据边界上授权close；performance继续排除，不改变已通过的quality/MSRV/platform/interop/Budget结论 | exact `b3b99a15`；run `30812399038/1`；M7 handoff；两次push已消费，closeout仅本地docs commit |
+| 2026-08-03 | M8 plan | M8改为`planned`；接受tagged-only exact-target first-match、mandatory final、shared core route interface、TCP per-flow和UDP per-datagram语义 | M7已关闭；existing `TargetAddr`、resolved tag graph及binary composition seams足够，exact target无需Geo/DNS/sniffing/user abstraction | baseline `404b62758a191fe879243c755c75bcf8b300040d`；ADR-0028、SPEC/TEST-0009、四票及M8 `840`-line Budget；plan-only，无product/push/hosted/release/publication |

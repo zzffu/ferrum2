@@ -125,6 +125,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是历史现�
 | M5 | `shadowsocks-crypto`作为三种SIP022方法的唯一内部密码实现 | closed |
 | M6 | 显式opt-in、有界且可关闭的SOCKS5 UDP ASSOCIATE，不加入routing | closed |
 | M7 | 具名多inbound/outbound、静态tag引用和原子prepare/rollback，不建Endpoint interface | closed |
+| M8 | 共享、有界的TCP/UDP first-match routing；只匹配inbound tag、network和exact target | planned |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -176,3 +177,10 @@ multi-inbound/outbound。Legacy单实例配置、process-wide method/PSK、TCP/U
 `30812399038/1`的quality、MSRV、三平台、interop和Budget均成功；performance按关闭合同
 排除。Routing、per-entry PSK/method和`Endpoint` interface仍延期，未授权release或
 publication。
+
+M8以`404b62758a191fe879243c755c75bcf8b300040d`为planning baseline，计划在
+tagged-only additive `[route]` mode中交付共享TCP/UDP first-match routing。规则只匹配
+inbound tag、`tcp|udp`和pre-resolution exact target，未命中走mandatory final；
+legacy/M7 static behavior不变。GeoIP、Geosite、DNS policy、sniffing、user rules、
+CIDR/domain pattern、fallback/load balancing/chaining、per-entry credential和new
+`Endpoint` kind仍排除；M8尚未执行或获得remote/release/publication授权。

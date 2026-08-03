@@ -52,8 +52,8 @@ association.
 _Avoid_: Target, destination, Shadowsocks server
 
 **SIP022 UDP client session**:
-One Shadowsocks wire identity with its outbound packet lineage and inbound response
-association/replay state.
+A Shadowsocks wire identity for one selected server endpoint, with its outbound
+packet lineage and inbound response association/replay state.
 _Avoid_: SOCKS UDP association, public UDP listener
 
 **Configuration tag**:
@@ -62,14 +62,33 @@ inside a process configuration.
 _Avoid_: AEAD tag, metric label, endpoint
 
 **Inbound**:
-A named traffic-entry identity whose accepted work follows one static outbound binding.
+A named traffic-entry identity supplied to static binding or route selection.
 _Avoid_: Listener, route, endpoint
 
 **Outbound**:
-A named egress identity selected by an inbound's static outbound binding.
+A named egress identity returned by static binding or route selection.
 _Avoid_: Route, upstream group, endpoint
 
 **Static outbound binding**:
-The validated configuration relation from one inbound to exactly one outbound; it does
-not vary by flow or datagram while the process runs.
+The M7-compatible configuration relation used when no route table exists; one inbound
+always selects one outbound and cannot vary by flow or datagram.
 _Avoid_: Routing rule, fallback, load balancing
+
+**Route rule**:
+One ordered conjunction of optional inbound, network, and exact-target matchers whose
+action is one outbound; the first matching rule decides the request.
+_Avoid_: Fallback, load-balancing policy, static outbound binding
+
+**Final outbound**:
+The mandatory route-mode outbound selected when no route rule matches.
+_Avoid_: Failure fallback, default retry
+
+**Route network**:
+The `tcp` or `udp` traffic class evaluated by a route rule; UDP means each validated
+datagram, not its SOCKS TCP control connection.
+_Avoid_: Protocol implementation, transport adapter
+
+**Exact route target**:
+The validated pre-resolution host and non-zero port matched by a route rule; it is not a
+DNS answer, sniffed name, CIDR, or domain pattern.
+_Avoid_: Destination label, resolved target
