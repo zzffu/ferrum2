@@ -14,7 +14,27 @@ use local_support::{
     write_tcp_only_server_config_with_psk,
 };
 
-fn start_echo() -> (SocketAddrV4, thread::JoinHandle<Vec<u8>>) {
+struct EchoWorker {
+    address: SocketAddr,
+    task: Option<thread::JoinHandle<Vec<u8>>>,
+}
+
+impl EchoWorker {
+    fn join(mut self) -> thread::Result<Vec<u8>> {
+        self.task.take().expect("echo worker").join()
+    }
+}
+
+impl Drop for EchoWorker {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            let _ = TcpStream::connect(self.address);
+            let _ = task.join();
+        }
+    }
+}
+
+fn start_echo() -> (SocketAddrV4, EchoWorker) {
     let (address, handle) =
         start_echo_at(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)));
     let address = match address {
@@ -24,7 +44,7 @@ fn start_echo() -> (SocketAddrV4, thread::JoinHandle<Vec<u8>>) {
     (address, handle)
 }
 
-fn start_echo_at(bind: SocketAddr) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) {
+fn start_echo_at(bind: SocketAddr) -> (SocketAddr, EchoWorker) {
     let listener = TcpListener::bind(bind).expect("echo listener");
     let address = listener.local_addr().expect("echo address");
     listener
@@ -55,7 +75,13 @@ fn start_echo_at(bind: SocketAddr) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) 
         stream.shutdown(Shutdown::Write).expect("echo half close");
         received
     });
-    (address, handle)
+    (
+        address,
+        EchoWorker {
+            address,
+            task: Some(handle),
+        },
+    )
 }
 
 fn start_recording_bridge(
@@ -160,6 +186,13 @@ fn socks_connect_wire(client: SocketAddrV4, target: &[u8]) -> (TcpStream, [u8; 1
     let mut reply = [0_u8; 10];
     stream.read_exact(&mut reply).expect("SOCKS reply");
     (stream, reply)
+}
+
+#[test]
+fn echo_worker_drop_joins_and_releases_listener() {
+    let (address, worker) = start_echo();
+    drop(worker);
+    drop(TcpListener::bind(address).expect("dropped echo listener rebind"));
 }
 
 #[test]

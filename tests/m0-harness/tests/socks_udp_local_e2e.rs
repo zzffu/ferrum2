@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{
     Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
@@ -123,17 +124,64 @@ fn round_trip(
     );
 }
 
-fn echo_datagrams(socket: UdpSocket, count: usize) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+struct DatagramEcho {
+    address: SocketAddr,
+    stop: Arc<AtomicBool>,
+    task: Option<thread::JoinHandle<()>>,
+}
+
+impl DatagramEcho {
+    fn join(mut self) -> thread::Result<()> {
+        self.task.take().expect("datagram echo worker").join()
+    }
+}
+
+impl Drop for DatagramEcho {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            self.stop.store(true, Ordering::SeqCst);
+            let wake = match self.address {
+                SocketAddr::V4(_) => UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)),
+                SocketAddr::V6(_) => UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)),
+            };
+            if let Ok(wake) = wake {
+                let _ = wake.send_to(&[], self.address);
+            }
+            let _ = task.join();
+        }
+    }
+}
+
+fn echo_datagrams(socket: UdpSocket, count: usize) -> DatagramEcho {
+    let address = socket.local_addr().expect("echo address");
+    let stop = Arc::new(AtomicBool::new(false));
+    let task_stop = Arc::clone(&stop);
+    let task = thread::spawn(move || {
         let mut buffer = [0_u8; 65_507];
         for _ in 0..count {
             let (length, peer) = socket.recv_from(&mut buffer).expect("echo receive");
+            if task_stop.load(Ordering::SeqCst) {
+                return;
+            }
             assert_eq!(
                 socket.send_to(&buffer[..length], peer).expect("echo send"),
                 length
             );
         }
-    })
+    });
+    DatagramEcho {
+        address,
+        stop,
+        task: Some(task),
+    }
+}
+
+#[test]
+fn datagram_echo_drop_joins_and_releases_socket() {
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("drop-test echo socket");
+    let address = socket.local_addr().expect("drop-test echo address");
+    drop(echo_datagrams(socket, 2));
+    drop(UdpSocket::bind(address).expect("dropped datagram echo rebind"));
 }
 
 fn assert_no_datagram(socket: &UdpSocket) {
@@ -324,6 +372,124 @@ fn tagged_two_by_two_udp_matrix_covers_all_methods_and_exact_rebind() {
             let udp = UdpSocket::bind(address).expect("tagged server UDP exact rebind");
             drop((tcp, udp));
         }
+    }
+}
+
+#[test]
+fn tagged_udp_shared_outbound_and_dead_reference_have_no_fallback() {
+    let directory = tempfile::tempdir().expect("tagged focused UDP tempdir");
+    let servers = [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()];
+    let clients = [unused_loopback(), unused_loopback()];
+    let server_config = write_tagged_server_config(directory.path(), servers, [0, 0], true)
+        .expect("shared UDP server config");
+    let client_config = write_tagged_client_config(
+        directory.path(),
+        clients,
+        [servers[0], unused_tcp_udp_loopback()],
+        [0, 0],
+        true,
+    )
+    .expect("shared UDP client config");
+    let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+    for address in servers {
+        wait_for_tcp_udp_bound(&mut server, address);
+    }
+    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+    for address in clients {
+        wait_for_listener(&mut client, address);
+    }
+    let mut relays = Vec::new();
+    for (mapping, client_address) in clients.into_iter().enumerate() {
+        let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("shared UDP echo");
+        let target = target_wire(echo.local_addr().expect("shared UDP echo address"));
+        let (control, application, relay) = udp_associate(client_address, true);
+        let worker = echo_datagrams(echo, 1);
+        let payload = format!("shared-mapping-{mapping}");
+        round_trip(&application, relay, &target, &target, payload.as_bytes());
+        worker.join().expect("shared UDP echo worker");
+        drop((control, application));
+        relays.push(relay);
+    }
+    client.terminate_and_reap(Duration::from_secs(5));
+    server.terminate_and_reap(Duration::from_secs(5));
+    for relay in relays {
+        wait_udp_rebind(relay, "shared UDP relay rebind");
+    }
+    for address in clients {
+        drop(bind_loopback_listener(address).expect("shared UDP client rebind"));
+    }
+    for address in servers {
+        drop(bind_loopback_listener(address).expect("shared UDP server TCP rebind"));
+        drop(UdpSocket::bind(address).expect("shared UDP server UDP rebind"));
+    }
+
+    let live_servers = [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()];
+    let dead_server = unused_tcp_udp_loopback();
+    let clients = [unused_loopback(), unused_loopback()];
+    let server_config = write_tagged_server_config(directory.path(), live_servers, [0, 1], true)
+        .expect("no-fallback UDP server config");
+    let client_config = write_tagged_client_config(
+        directory.path(),
+        clients,
+        [live_servers[0], dead_server],
+        [0, 1],
+        true,
+    )
+    .expect("no-fallback UDP client config");
+    let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+    for address in live_servers {
+        wait_for_tcp_udp_bound(&mut server, address);
+    }
+    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+    for address in clients {
+        wait_for_listener(&mut client, address);
+    }
+
+    let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("no-fallback UDP target");
+    let target_address = match target.local_addr().expect("no-fallback target address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 target"),
+    };
+    let (dead_control, dead_application, dead_relay) = udp_associate(clients[1], true);
+    let request = socks_datagram(target_address, b"dead-reference");
+    assert_eq!(
+        dead_application
+            .send_to(&request, dead_relay)
+            .expect("dead-reference send"),
+        request.len()
+    );
+    assert_no_datagram(&target);
+    client.assert_running();
+    server.assert_running();
+
+    let (live_control, live_application, live_relay) = udp_associate(clients[0], true);
+    let target_wire = target_wire(SocketAddr::V4(target_address));
+    let worker = echo_datagrams(target, 1);
+    round_trip(
+        &live_application,
+        live_relay,
+        &target_wire,
+        &target_wire,
+        b"live-reference",
+    );
+    worker.join().expect("live-reference echo worker");
+    drop((
+        dead_control,
+        dead_application,
+        live_control,
+        live_application,
+    ));
+    client.terminate_and_reap(Duration::from_secs(5));
+    server.terminate_and_reap(Duration::from_secs(5));
+    for relay in [dead_relay, live_relay] {
+        wait_udp_rebind(relay, "no-fallback UDP relay rebind");
+    }
+    for address in clients {
+        drop(bind_loopback_listener(address).expect("no-fallback client rebind"));
+    }
+    for address in live_servers {
+        drop(bind_loopback_listener(address).expect("no-fallback server TCP rebind"));
+        drop(UdpSocket::bind(address).expect("no-fallback server UDP rebind"));
     }
 }
 

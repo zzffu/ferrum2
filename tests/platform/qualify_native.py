@@ -290,6 +290,70 @@ def assert_cli_contract(spec: BinarySpec) -> None:
             trap.close()
 
 
+def write_tagged_config(
+    path: Path,
+    spec: BinarySpec,
+    listens: tuple[int, int],
+    servers: tuple[int, int] | None,
+) -> None:
+    require((spec.role == "client") == (servers is not None), "tagged-config-role")
+    inbounds = "\n\n".join(
+        f'''[[inbounds]]
+tag = "in-{index}"
+listen = "127.0.0.1:{listen}"
+outbound = "out-{index}"'''
+        for index, listen in enumerate(listens)
+    )
+    outbounds = "\n\n".join(
+        f'''[[outbounds]]
+tag = "out-{index}"'''
+        + (f'\nserver = "127.0.0.1:{servers[index]}"' if servers else "")
+        for index in range(2)
+    )
+    path.write_text(
+        f'''schema_version = 1
+
+{inbounds}
+
+{outbounds}
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "{SYNTHETIC_PSK}"
+''',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def assert_tagged_offline_config(spec: BinarySpec, directory: Path) -> None:
+    traps = tcp_listeners(4 if spec.role == "client" else 2)
+    for trap in traps:
+        trap.setblocking(False)
+    listens = tuple(int(trap.getsockname()[1]) for trap in traps[:2])
+    servers = (
+        tuple(int(trap.getsockname()[1]) for trap in traps[2:])
+        if spec.role == "client"
+        else None
+    )
+    try:
+        config = directory / f"{spec.name}-tagged-offline.toml"
+        write_tagged_config(config, spec, listens, servers)
+        result = bounded_run(
+            [str(spec.path), "--config", str(config), "--check-config"]
+        )
+        require(
+            result.returncode == 0
+            and result.stdout == b"configuration valid\n"
+            and result.stderr == b"",
+            "tagged-offline-config",
+        )
+        assert_no_connections(traps)
+    finally:
+        for trap in traps:
+            trap.close()
+
+
 def bind_traps(spec: BinarySpec) -> list[socket.socket]:
     ports = [8388, 9090] if spec.role == "server" else [1080, 8388, 9090]
     traps = []
@@ -326,8 +390,20 @@ def tcp_listener(port: int) -> socket.socket:
     return listener
 
 
+def tcp_listeners(count: int) -> list[socket.socket]:
+    listeners = []
+    try:
+        for _ in range(count):
+            listeners.append(tcp_listener(0))
+        return listeners
+    except BaseException:
+        for listener in listeners:
+            listener.close()
+        raise
+
+
 def reserve_ports(count: int) -> tuple[int, ...]:
-    reservations = [tcp_listener(0) for _ in range(count)]
+    reservations = tcp_listeners(count)
     try:
         return tuple(int(reservation.getsockname()[1]) for reservation in reservations)
     finally:
@@ -402,6 +478,54 @@ def assert_startup_rollback(spec: BinarySpec, directory: Path) -> None:
     finally:
         occupied_metrics.close()
     assert_rebindable(spec, listen, metrics)
+
+
+def assert_tagged_startup_rollback(spec: BinarySpec, directory: Path) -> None:
+    last_collision: OSError | None = None
+    for _ in range(3):
+        try:
+            assert_tagged_startup_rollback_once(spec, directory)
+            return
+        except OSError as error:
+            last_collision = error
+    raise QualificationError("tagged-port-setup-collision") from last_collision
+
+
+def assert_tagged_startup_rollback_once(spec: BinarySpec, directory: Path) -> None:
+    listeners = tcp_listeners(2)
+    listens = tuple(int(listener.getsockname()[1]) for listener in listeners)
+    try:
+        server_traps = tcp_listeners(2) if spec.role == "client" else []
+    except BaseException:
+        for listener in listeners:
+            listener.close()
+        raise
+    for trap in server_traps:
+        trap.setblocking(False)
+    servers = (
+        tuple(int(trap.getsockname()[1]) for trap in server_traps)
+        if server_traps
+        else None
+    )
+    config = directory / f"{spec.name}-tagged-second-listener.toml"
+    try:
+        write_tagged_config(config, spec, listens, servers)
+        listeners[0].close()
+        result = bounded_run([str(spec.path), "--config", str(config)])
+        require(
+            result.returncode == 1
+            and result.stdout == b""
+            and result.stderr == STARTUP_BIND_STDERR,
+            "tagged-second-listener-rollback",
+        )
+        assert_no_connections(server_traps)
+        assert_tagged_rebindable(spec, (listens[0],))
+    finally:
+        for listener in listeners:
+            listener.close()
+        for trap in server_traps:
+            trap.close()
+    assert_tagged_rebindable(spec, listens)
 
 
 def spawn_live(spec: BinarySpec, config: Path) -> tuple[subprocess.Popen[bytes], Capture]:
@@ -495,6 +619,18 @@ def assert_rebindable(spec: BinarySpec, listen: int, metrics: int | None) -> Non
             probe.close()
 
 
+def assert_tagged_rebindable(spec: BinarySpec, listens: tuple[int, ...]) -> None:
+    for listen in listens:
+        tcp = tcp_listener(listen)
+        tcp.close()
+        if spec.role == "server":
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                udp.bind(("127.0.0.1", listen))
+            finally:
+                udp.close()
+
+
 def assert_signal_lifecycle(spec: BinarySpec, directory: Path, forced: bool) -> None:
     listen, metrics = reserve_ports(2)
     config = directory / f"{spec.name}-{'forced' if forced else 'graceful'}.toml"
@@ -523,7 +659,8 @@ def lifecycle_line(context: HostedContext, spec: BinarySpec) -> str:
         "m3_native_lifecycle_completion status=PASS "
         f"profile={context.profile} target={context.target} binary={spec.name} "
         "help=PASS version=PASS valid_config=PASS invalid_config=PASS "
-        "startup_rollback=PASS graceful_signal=PASS forced_signal=PASS "
+        "tagged_config=PASS startup_rollback=PASS tagged_second_bind_rollback=PASS "
+        "tagged_rebind=PASS graceful_signal=PASS forced_signal=PASS "
         "bounded_exit=PASS rebind=PASS cleanup=PASS "
         f"sha={context.sha} run_id={context.run_id} run_attempt={context.run_attempt}"
     )
@@ -549,7 +686,9 @@ def main() -> int:
             directory = Path(temporary)
             for spec in specs:
                 assert_cli_contract(spec)
+                assert_tagged_offline_config(spec, directory)
                 assert_startup_rollback(spec, directory)
+                assert_tagged_startup_rollback(spec, directory)
                 assert_signal_lifecycle(spec, directory, forced=False)
                 assert_signal_lifecycle(spec, directory, forced=True)
                 lines.extend((artifact_line(context, spec), lifecycle_line(context, spec)))

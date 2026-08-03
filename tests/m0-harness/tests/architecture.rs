@@ -58,6 +58,23 @@ fn contains_explicit_target_declaration(manifest: &str, declaration: &str) -> bo
     manifest.replace("\r\n", "\n").contains(declaration)
 }
 
+fn rust_sources(directory: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![directory.to_path_buf()];
+    let mut sources = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).expect("source directory") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+                sources.push(path);
+            }
+        }
+    }
+    sources.sort();
+    sources
+}
+
 #[test]
 fn workspace_contains_current_compatibility_members_without_exhausting_future_topology() {
     let metadata = metadata();
@@ -353,19 +370,38 @@ fn tagged_composition_stays_out_of_core_and_protocol_modules() {
                 "{member} must not depend on {forbidden}"
             );
         }
-        let source =
-            fs::read_to_string(root.join(member).join("src/lib.rs")).expect("deep-module source");
-        for forbidden in [
-            "pub trait Endpoint",
-            "AdapterRegistry",
-            "ServiceRegistry",
-            "adapter_registry",
-            "endpoint_registry",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{member} contains forbidden generic composition seam `{forbidden}`"
-            );
+        let sources = rust_sources(&root.join(member));
+        assert!(!sources.is_empty(), "{member} must contain Rust source");
+        for path in sources {
+            let source = fs::read_to_string(&path).expect("deep-module source");
+            for forbidden in [
+                "pub trait Endpoint",
+                "AdapterRegistry",
+                "ServiceRegistry",
+                "adapter_registry",
+                "endpoint_registry",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{} contains forbidden generic composition seam `{forbidden}`",
+                    path.display()
+                );
+            }
         }
     }
+}
+
+#[test]
+fn recursive_rust_source_discovery_excludes_non_rust_files() {
+    let directory = tempfile::tempdir().expect("source discovery tempdir");
+    let nested = directory.path().join("nested");
+    fs::create_dir(&nested).expect("nested source directory");
+    fs::write(directory.path().join("root.rs"), "root").expect("root source");
+    fs::write(nested.join("nested.rs"), "nested").expect("nested source");
+    fs::write(nested.join("ignored.txt"), "ignored").expect("non-source");
+
+    let sources = rust_sources(directory.path());
+    assert_eq!(sources.len(), 2);
+    assert!(sources.iter().any(|path| path.ends_with("nested.rs")));
+    assert!(sources.iter().any(|path| path.ends_with("root.rs")));
 }
