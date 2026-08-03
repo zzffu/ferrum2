@@ -79,9 +79,6 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedServerConfig) -> Result<(), RunError> {
-    if config.route.is_routed() {
-        return Err(RunError::StartupProtocol);
-    }
     let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|_| RunError::StartupObservability)?;
@@ -124,11 +121,14 @@ where
     let connect_timeout = config.runtime.connect_timeout;
     let udp_config = config.udp;
     let clock = Arc::new(SystemClock::new());
-    let direct = config
-        .outbounds
-        .iter()
-        .map(|_| Arc::new(DirectOutbound::new(TcpConnector::new(connect_timeout))))
-        .collect::<Vec<_>>();
+    let routing = Arc::new(ServerRouting {
+        route: config.route,
+        direct: config
+            .outbounds
+            .iter()
+            .map(|_| DirectOutbound::new(TcpConnector::new(connect_timeout)))
+            .collect(),
+    });
     let mut roots = Vec::with_capacity(
         config.inbounds.len() * usize::from(config.udp.enabled)
             + 1
@@ -136,21 +136,12 @@ where
     );
     let mut tcp_listens = Vec::with_capacity(config.inbounds.len());
     let mut tcp_contexts = Vec::with_capacity(config.inbounds.len());
-    let static_target = TargetAddr::ipv4(config.listen).map_err(|_| RunError::StartupProtocol)?;
     for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
         let listen = inbound.listen;
         tcp_listens.push(listen);
-        let direct = Arc::clone(
-            direct
-                .get(
-                    config
-                        .route
-                        .select(inbound_id, Network::Tcp, &static_target),
-                )
-                .ok_or(RunError::StartupProtocol)?,
-        );
         let context = Arc::new(ServerContext {
-            direct,
+            inbound: inbound_id,
+            routing: Arc::clone(&routing),
             keys: Arc::clone(&keys),
             clock: Arc::clone(&clock),
             random: SystemRandom,
@@ -188,6 +179,7 @@ where
         let mappings = Arc::new(UdpMappings::new(udp_config.max_sessions));
         let admission = Arc::new(tokio::sync::Mutex::new(()));
         let shared = ServerUdpShared {
+            routing: Arc::clone(&routing),
             protocol,
             clock: Arc::clone(&clock),
             config: udp_config,
@@ -633,6 +625,7 @@ where
     L: ServerUdpListener,
 {
     inbound: usize,
+    routing: Arc<ServerRouting>,
     listener: Arc<L>,
     protocol: Arc<UdpServer>,
     clock: Arc<SystemClock>,
@@ -651,6 +644,7 @@ where
 
 #[derive(Clone)]
 struct ServerUdpShared {
+    routing: Arc<ServerRouting>,
     protocol: Arc<UdpServer>,
     clock: Arc<SystemClock>,
     config: UdpConfig,
@@ -671,6 +665,7 @@ where
     L: ServerUdpListener,
 {
     let ServerUdpShared {
+        routing,
         protocol,
         clock,
         config,
@@ -721,6 +716,7 @@ where
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     Ok(PreparedUdpServer {
         inbound,
+        routing,
         listener,
         protocol,
         clock,
@@ -766,6 +762,7 @@ where
     {
         let Self {
             inbound,
+            routing,
             listener,
             protocol,
             clock,
@@ -838,7 +835,14 @@ where
                     continue;
                 }
                 let handle = binding.handle;
-                match runtime.reserve_datagram(handle, pending.datagram().allocated_capacity()) {
+                let Some(reserved) =
+                    routing.with_direct(inbound, Network::Udp, pending.datagram().target(), |_| {
+                        runtime.reserve_datagram(handle, pending.datagram().allocated_capacity())
+                    })
+                else {
+                    break Err(RunError::RuntimeRoot);
+                };
+                match reserved {
                     Ok(reservation) => {
                         let (datagram, commit) = pending.into_parts();
                         let committed =
@@ -894,13 +898,17 @@ where
                 }
             }
 
-            let admission = match runtime
-                .reserve_session(
-                    tokio::time::Instant::now(),
-                    pending.datagram().allocated_capacity(),
-                )
-                .await
-            {
+            let Some(admission) =
+                routing.with_direct(inbound, Network::Udp, pending.datagram().target(), |_| {
+                    runtime.reserve_session(
+                        tokio::time::Instant::now(),
+                        pending.datagram().allocated_capacity(),
+                    )
+                })
+            else {
+                break Err(RunError::RuntimeRoot);
+            };
+            let admission = match admission.await {
                 Ok(admission) => admission,
                 Err(error) => {
                     record_udp_runtime_failure(&metrics, error);
@@ -1112,8 +1120,63 @@ async fn shutdown_signal() {
     }
 }
 
+struct ServerRouting {
+    route: ferrum2_core::route::RouteTable,
+    direct: Vec<DirectOutbound<TcpConnector>>,
+}
+
+impl ServerRouting {
+    fn direct(
+        &self,
+        inbound: usize,
+        network: Network,
+        target: &TargetAddr,
+    ) -> Option<&DirectOutbound<TcpConnector>> {
+        select_direct(&self.route, &self.direct, inbound, network, target)
+    }
+
+    fn with_direct<R>(
+        &self,
+        inbound: usize,
+        network: Network,
+        target: &TargetAddr,
+        operation: impl FnOnce(&DirectOutbound<TcpConnector>) -> R,
+    ) -> Option<R> {
+        with_selected_direct(
+            &self.route,
+            &self.direct,
+            inbound,
+            network,
+            target,
+            operation,
+        )
+    }
+}
+
+fn select_direct<'a, T>(
+    route: &ferrum2_core::route::RouteTable,
+    direct: &'a [T],
+    inbound: usize,
+    network: Network,
+    target: &TargetAddr,
+) -> Option<&'a T> {
+    direct.get(route.select(inbound, network, target))
+}
+
+fn with_selected_direct<T, R>(
+    route: &ferrum2_core::route::RouteTable,
+    direct: &[T],
+    inbound: usize,
+    network: Network,
+    target: &TargetAddr,
+    operation: impl FnOnce(&T) -> R,
+) -> Option<R> {
+    select_direct(route, direct, inbound, network, target).map(operation)
+}
+
 struct ServerContext {
-    direct: Arc<DirectOutbound<TcpConnector>>,
+    inbound: usize,
+    routing: Arc<ServerRouting>,
     keys: Arc<MethodKeyAdapter<MethodSinglePskProvider>>,
     clock: Arc<SystemClock>,
     random: SystemRandom,
@@ -1187,12 +1250,21 @@ async fn server_connection(
         initial_payload,
         reply,
     } = session;
+    let Some(direct) = context
+        .routing
+        .direct(context.inbound, Network::Tcp, &target)
+    else {
+        context
+            .metrics
+            .active_connections_dec(Role::Server, Inbound::Shadowsocks);
+        return;
+    };
     let opened = tokio::select! {
         _ = cancellation.cancelled() => {
             context.metrics.active_connections_dec(Role::Server, Inbound::Shadowsocks);
             return;
         }
-        result = context.direct.open(&target) => result,
+        result = direct.open(&target) => result,
     };
     let mut target_stream = match opened {
         Ok(stream) => stream,
@@ -2120,6 +2192,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routed_direct_selection_is_first_match_per_network_and_failure_has_no_retry() {
+        let target = TargetAddr::ipv4("192.0.2.1:80".parse().expect("target")).expect("target");
+        let other = TargetAddr::ipv4("192.0.2.1:81".parse().expect("target")).expect("target");
+        let failed = TargetAddr::ipv4("192.0.2.1:82".parse().expect("target")).expect("target");
+        let (a, _, _, _) = controlled_outbound(1, None, None);
+        let (b, _, _, _) = controlled_outbound(1, None, None);
+        let (dead, gate, _, _) =
+            controlled_outbound(1, None, Some(ConnectErrorKind::ConnectionRefused));
+        let direct = [Arc::clone(&a), Arc::clone(&b), Arc::clone(&dead)];
+        let route = ferrum2_core::route::RouteTable::routed(
+            vec![
+                ferrum2_core::route::RouteRule::new(Some(1), None, None, 1),
+                ferrum2_core::route::RouteRule::new(None, None, Some(target.clone()), 1),
+                ferrum2_core::route::RouteRule::new(None, None, Some(target.clone()), 0),
+                ferrum2_core::route::RouteRule::new(None, None, Some(failed.clone()), 2),
+            ],
+            0,
+        )
+        .expect("route");
+        for (inbound, request, expected) in [(1, &other, &b), (0, &target, &b), (0, &other, &a)] {
+            let selected = select_direct(&route, &direct, inbound, Network::Tcp, request)
+                .expect("selected direct");
+            assert!(Arc::ptr_eq(selected, expected));
+        }
+        let selected = Arc::clone(
+            select_direct(&route, &direct, 0, Network::Tcp, &failed).expect("failed direct"),
+        );
+        let task = tokio::spawn(async move { selected.open(&failed).await });
+        tokio::task::yield_now().await;
+        gate.notify_one();
+        assert!(
+            matches!(task.await.expect("open"), Err(error) if error.kind() == ConnectErrorKind::ConnectionRefused)
+        );
+        assert_eq!(dead.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(a.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(b.calls.load(Ordering::SeqCst), 0);
+
+        let udp_route = ferrum2_core::route::RouteTable::routed(
+            vec![
+                ferrum2_core::route::RouteRule::new(
+                    None,
+                    Some(Network::Udp),
+                    Some(target.clone()),
+                    1,
+                ),
+                ferrum2_core::route::RouteRule::new(
+                    None,
+                    Some(Network::Udp),
+                    Some(other.clone()),
+                    2,
+                ),
+            ],
+            0,
+        )
+        .expect("UDP route");
+        for (network, request, expected) in [
+            (Network::Udp, &target, 1),
+            (Network::Udp, &other, 2),
+            (Network::Tcp, &target, 0),
+        ] {
+            assert_eq!(
+                with_selected_direct(&udp_route, &[0, 1, 2], 0, network, request, |id| *id),
+                Some(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn adapter_contract_direct_connect_precedes_exact_partial_initial_payload_forward() {
         let (outbound, gate, bytes, write_calls) = controlled_outbound(2, None, None);
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
@@ -2785,14 +2925,29 @@ mod tests {
     async fn tagged_udp_is_process_bounded_and_bound_to_its_local_inbound() {
         let first_listen = reserve_address();
         let second_listen = reserve_address();
-        let (path, config) = tagged_server_test_config([first_listen, second_listen]);
+        let target = udp_loopback().await;
+        let target_address = target.local_addr().expect("target address");
+        let routed_target = udp_loopback().await;
+        let routed_address = routed_target.local_addr().expect("routed target address");
+        let routed_domain =
+            TargetAddr::domain("127.0.0.1", routed_address.port()).expect("domain target");
+        let (path, mut config) = tagged_server_test_config([first_listen, second_listen]);
+        config.outbounds.push(ferrum2_config::ServerOutboundConfig);
+        config.route = ferrum2_core::route::RouteTable::routed(
+            vec![ferrum2_core::route::RouteRule::new(
+                Some(0),
+                Some(Network::Udp),
+                Some(routed_domain.clone()),
+                1,
+            )],
+            0,
+        )
+        .expect("routed UDP");
         let registry = OwnerRegistry::new();
         let (stop, mut server) = spawn_test_server(config, &registry);
         wait_until_bound(&mut server, first_listen).await;
         wait_until_bound(&mut server, second_listen).await;
 
-        let target = udp_loopback().await;
-        let target_address = target.local_addr().expect("target address");
         let keys = aes_keys();
         let clock = SystemClock::new();
         let mut client =
@@ -2819,12 +2974,7 @@ mod tests {
             .expect("first target response");
         let (_, response_source) = recv_udp(&first_peer, &mut payload).await;
         assert_eq!(response_source, SocketAddr::V4(first_listen));
-        let cross_wire = encoded_udp_request(
-            &mut client,
-            &clock,
-            TargetAddr::ip(target_address).expect("target"),
-            b"cross-fresh",
-        );
+        let cross_wire = encoded_udp_request(&mut client, &clock, routed_domain, b"cross-fresh");
         let before_cross = registry.snapshot();
 
         cross_peer
@@ -2832,9 +2982,12 @@ mod tests {
             .await
             .expect("cross-inbound send");
         assert!(
-            tokio::time::timeout(Duration::from_millis(200), target.recv_from(&mut payload))
-                .await
-                .is_err(),
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                routed_target.recv_from(&mut payload),
+            )
+            .await
+            .is_err(),
             "cross-inbound session reached the target"
         );
         let after_cross = registry.snapshot();
@@ -2843,9 +2996,9 @@ mod tests {
             .send_to(&cross_wire, first_listen)
             .await
             .expect("same-inbound roaming send");
-        let (received, direct_peer) = recv_udp(&target, &mut payload).await;
+        let (received, direct_peer) = recv_udp(&routed_target, &mut payload).await;
         assert_eq!(&payload[..received], b"cross-fresh");
-        target
+        routed_target
             .send_to(b"roaming-response", direct_peer)
             .await
             .expect("roaming target response");
@@ -3057,6 +3210,16 @@ mod tests {
             let mappings = Arc::new(UdpMappings::new(config.udp.max_sessions));
             let observed_mappings = Arc::clone(&mappings);
             let shared = ServerUdpShared {
+                routing: Arc::new(ServerRouting {
+                    route: config.route,
+                    direct: config
+                        .outbounds
+                        .iter()
+                        .map(|_| {
+                            DirectOutbound::new(TcpConnector::new(config.runtime.connect_timeout))
+                        })
+                        .collect(),
+                }),
                 protocol,
                 clock: Arc::new(SystemClock::new()),
                 config: config.udp,
