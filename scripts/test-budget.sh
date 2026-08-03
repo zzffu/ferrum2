@@ -298,7 +298,7 @@ control_paths() {
 }
 
 staged_control_changed() {
-  git diff --cached --name-only | while IFS= read -r path; do
+  git diff --cached --name-only --no-renames | while IFS= read -r path; do
     if control_paths "$path"; then
       printf '%s\n' "$path"
     fi
@@ -308,7 +308,7 @@ staged_control_changed() {
 range_control_changed() {
   from=$1
   to=$2
-  git diff --name-only "$from" "$to" | while IFS= read -r path; do
+  git diff --name-only --no-renames "$from" "$to" | while IFS= read -r path; do
     if control_paths "$path"; then
       printf '%s\n' "$path"
     fi
@@ -336,7 +336,7 @@ validate_staged_control() {
   [ -n "$validation_controls" ] || return 0
   git rev-parse --verify -q MERGE_HEAD >/dev/null 2>&1 \
     && blocked control_commit_must_be_single_parent
-  validation_paths=$(git diff --cached --name-only)
+  validation_paths=$(git diff --cached --name-only --no-renames)
   printf '%s\n' "$validation_paths" | only_control_and_docs \
     || blocked control_plane_changed
   if printf '%s\n' "$validation_controls" | grep -Fqx "$BASELINE_FILE"; then
@@ -387,7 +387,7 @@ validate_control_range() {
     validation_parent=$(first_parent "$validation_commit")
     validation_controls=$(range_control_changed "$validation_parent" "$validation_commit")
     [ -n "$validation_controls" ] || continue
-    validation_paths=$(git diff --name-only "$validation_parent" "$validation_commit")
+    validation_paths=$(git diff --name-only --no-renames "$validation_parent" "$validation_commit")
     printf '%s\n' "$validation_paths" | only_control_and_docs \
       || blocked control_plane_changed
     if ! git diff --quiet "$validation_parent" "$validation_commit" -- "$BASELINE_FILE"; then
@@ -409,7 +409,7 @@ baseline_from_commit() {
 }
 
 range_rust_changed() {
-  git log --format= --name-only "$1..$2" -- '*.rs' | grep -q .
+  git log --no-renames --format= --name-only "$1..$2" -- '*.rs' | grep -q .
 }
 
 validate_policy_transition() {
