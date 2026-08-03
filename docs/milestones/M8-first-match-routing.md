@@ -70,8 +70,8 @@ static tagged 行为、SIP022 wire/security、aggregate owners 和 process lifec
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M8-T01 | Add the shared route module and validate/compile routed tagged config before side effects | — | done |
-| M8-T02 | Route client TCP flows and UDP datagrams across configured Shadowsocks outbounds | M8-T01 | ready |
-| M8-T03 | Route authenticated server TCP/UDP requests to configured direct identities | M8-T02 | todo |
+| M8-T02 | Route client TCP flows and UDP datagrams across configured Shadowsocks outbounds | M8-T01 | done |
+| M8-T03 | Route authenticated server TCP/UDP requests to configured direct identities | M8-T02 | ready |
 | M8-T04 | Prove routed real-process behavior and qualify one exact SHA | M8-T03 | todo |
 
 ```text
@@ -95,6 +95,7 @@ during M8 execution。
 ## Blocker / next action
 
 No execution blocker。M8-T01 is integrated at
-`876da7e13c37aaf4e316848b13cf0a8f7cb8673b`；M8-T02 is the only ready frontier and removes
-only the client routed-run guard after consuming the complete route table。Push、hosted run、PR、
-tag、release and publication remain unauthorized。
+`876da7e13c37aaf4e316848b13cf0a8f7cb8673b` and M8-T02 at
+`ff9070c427bf456edbe3051d4f8781bb65c136c0`；M8-T03 is the only ready frontier。The M8
+Budget is `659/840` with `181` lines remaining，so T03/T04 must reuse compact existing evidence。
+Push、hosted run、PR、tag、release and publication remain unauthorized。

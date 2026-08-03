@@ -35,7 +35,7 @@ Actions run [`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/3081
 的quality、MSRV、三平台、TCP/UDP各`12/12`+cleanup及schema 2 Budget证据关闭；
 performance按用户关闭合同排除且不计入。
 M8现为`executing`，planning baseline为
-`404b62758a191fe879243c755c75bcf8b300040d`；M8-T01已集成，M8-T02 ready，尚无
+`404b62758a191fe879243c755c75bcf8b300040d`；M8-T01/T02已集成，M8-T03 ready，尚无
 qualification证据，且未授权任何remote action。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
@@ -833,8 +833,8 @@ first-match route module；advanced matcher和outbound policy继续延期。
   - M8-T01：shared core route interface、routed config compilation和temporary run guards，
     `done`；
   - M8-T02：client TCP/UDP per-target route、lazy UDP protocol legs和no-fallback，依赖T01，
-    `ready`；
-  - M8-T03：server authenticated TCP/UDP direct-identity route，依赖T02，`todo`；
+    `done`；
+  - M8-T03：server authenticated TCP/UDP direct-identity route，依赖T02，`ready`；
   - M8-T04：real-process、三平台、existing interop和exact-SHA qualification，依赖T03，
     `todo`。
 
@@ -847,8 +847,10 @@ first-match route module；advanced matcher和outbound policy继续延期。
   per-entry PSK/method、SIP023/multi-user、新adapter kind/`Endpoint`、transparent/TUN、
   hot reload、management API、new dependency、performance threshold、package/release/
   publication。
-- **Integrated commit:** M8-T01 exact `876da7e13c37aaf4e316848b13cf0a8f7cb8673b`。
-- **Open blockers and risks:** execution blocker为零；当前frontier只有M8-T02。Push、
+- **Integrated commit:** M8-T01 exact `876da7e13c37aaf4e316848b13cf0a8f7cb8673b`；M8-T02
+  exact `ff9070c427bf456edbe3051d4f8781bb65c136c0`。
+- **Open blockers and risks:** execution blocker为零；当前frontier只有M8-T03；M8 Budget
+  growth为`659/840`、remaining `181`，T03/T04必须复用紧凑既有证据。Push、
   hosted run、PR、tag、release和publication均未授权。
 
 ## 决策登记
@@ -991,3 +993,4 @@ first-match route module；advanced matcher和outbound policy继续延期。
 | 2026-08-03 | M7 close | M7改为`closed`；八票及六项exit criteria完成，blocking findings为零 | 用户在同一证据边界上授权close；performance继续排除，不改变已通过的quality/MSRV/platform/interop/Budget结论 | exact `b3b99a15`；run `30812399038/1`；M7 handoff；两次push已消费，closeout仅本地docs commit |
 | 2026-08-03 | M8 plan | M8改为`planned`；接受tagged-only exact-target first-match、mandatory final、shared core route interface、TCP per-flow和UDP per-datagram语义 | M7已关闭；existing `TargetAddr`、resolved tag graph及binary composition seams足够，exact target无需Geo/DNS/sniffing/user abstraction | baseline `404b62758a191fe879243c755c75bcf8b300040d`；ADR-0028、SPEC/TEST-0009、四票及M8 `840`-line Budget；plan-only，无product/push/hosted/release/publication |
 | 2026-08-03 | M8-T01 integration | exact `876da7e`集成shared bounded route table、static/routed resolved config和两端临时fail-closed guard；T01 done，T02 ready | full Architect/QA发现inline target grammar和四组evidence缺口；一次bounded三文件repair全部关闭，定向复审无新blocker | focused `14/14`、CLI `5/5`、Clippy/fmt、Quick、diff和Budget PASS；growth `273`使用批准的repair contingency，remaining `567`；无push/hosted/release/publication |
+| 2026-08-03 | M8-T02 integration | exact `ff9070c`集成client TCP per-flow route和one-socket lazy endpoint-keyed UDP legs；T02 done，T03 ready | full Architect/QA发现reserve-before-materialize排序及routed UDP mutation evidence缺口；一次bounded单文件repair全部关闭，定向复审无新blocker | client `29/29`、related `141`、CLI `5/5`、Full、MSRV、lifecycle `1/1`、Clippy/fmt/diff和Budget PASS；growth `659/840`、remaining `181`；首次lifecycle wrapper timeout后same command以足够deadline通过；无push/hosted/release/publication |
