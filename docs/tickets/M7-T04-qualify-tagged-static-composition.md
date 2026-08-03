@@ -12,6 +12,7 @@ owns:
   - tests/m0-harness/tests/udp_local_e2e.rs
   - tests/m0-harness/tests/socks_udp_local_e2e.rs
   - tests/m0-harness/tests/qualification_contract.rs
+  - tests/platform/qualify_native.py
 ---
 
 # M7-T04 — Qualify tagged static composition

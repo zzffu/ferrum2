@@ -780,9 +780,11 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 - **Integrated commit:** M7-T01 exact `f6ee43fa766dd326d33ba140a273b7df201749c1`；M7-T02 exact
   `b864a40a5ada975c09c5b95a1373bd3c15373bdf`；M7-T03 exact
   `b3f7ff8e6dad22d37f8fb95bc42c7e83c6834c72`。
-- **Open blockers and risks:** local execution blocker为零；当前frontier只有M7-T04。用户明确
-  将T03/T04 budget失败改为recorded/nonblocking，最终记录不得声称budget PASS。Remote
-  push/run、PR、tag、release或publication均未授权。
+- **Open blockers and risks:** 当前frontier只有M7-T04。Initial candidate `564e11e`的本地
+  gates通过，但初审阻塞native driver readiness、direct negative-process evidence和failure
+  cleanup；一次bounded repair active。用户明确将T03/T04 budget失败改为recorded/
+  nonblocking，最终记录不得声称budget PASS。Remote push/run、PR、tag、release或
+  publication均未授权。
 
 ## 决策登记
 
@@ -916,3 +918,4 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 | 2026-08-03 | M7-T02 CLI ownership repair | T02改为active；serialized T02/T03共同拥有`config_cli`过渡行，分别移除server/client临时guard并更新该角色的closed startup结果 | T02 focused PASS后Quick只失败于T01刻意保留的server `startup.protocol`断言；产品已正确组合并到达被占端点的`startup.bind`，原T02 ownership无法更新依赖测试 | exact base `44eeedf736c62db185cc032d9e23e2af5bc7c3c3`；首次Quick失败证据保留；不扩展产品范围、dependency或remote action |
 | 2026-08-03 | M7-T02 integration | exact `b864a40`集成server tagged TCP/UDP/direct roots、aggregate replay/admission/UDP owners和七位置原子rollback；T02 done，T03 active | 初审发现per-root shutdown可提前清理shared UDP state；一次bounded repair把signal/cancel提升到shared runtime owner，并补齐two-root drain/fatal、byte和owner evidence；双定向复审PASS | candidate `d1b3dbe`；focused、Quick、Full、MSRV、ignored lifecycle、budget `PASS_HOLD` debt `99/120`与integration复验PASS；stale-bin首次CLI失败由required bin build关闭；无push/hosted/release/publication |
 | 2026-08-03 | M7-T03 integration | exact `b3f7ff8`集成client tagged SOCKS TCP/UDP roots、static captured outbound和process-wide admission/session/byte/live-ID owners；T03 done，T04 active | 初审发现accept error被折叠及composed UDP、独立byte、live-ID、listener-fatal证据缺口；一次bounded repair全部关闭，定向Architect/QA均PASS | client `27/27`、CLI `5/5`、focused、Full `6/6`、ignored lifecycle、MSRV、Clippy/fmt/diff与integration复验PASS；首次MSRV Windows UDP bind竞态由isolated及unchanged rerun关闭；budget `ratio_ceiling_exceeded`按用户T03/T04 waiver仅记录；无push/hosted/release/publication |
+| 2026-08-03 | M7-T04 native ownership repair | T04 ownership增加现有`tests/platform/qualify_native.py`，供唯一bounded repair在既有三平台driver内加入tagged offline与multi-listener rollback/rebind | 初始T04 ownership只列`m0_qualification.rs`，但native jobs直接调用Python driver；不扩权会允许legacy-only平台结果误记为M7 evidence | candidate `564e11e`初审Architect/QA均BLOCK；只扩一个现有文件，不加provider/job/workflow/dependency，remote仍未授权 |

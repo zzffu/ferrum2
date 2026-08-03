@@ -78,7 +78,10 @@ integrate。No concurrent writer owns overlapping product paths。
 
 ## Blocker / next action
 
-No local execution blocker。M7-T03 is integrated and reviewed at exact
-`b3f7ff8e6dad22d37f8fb95bc42c7e83c6834c72`；M7-T04 is the only active frontier。T03/T04 budget
-failures remain recorded but nonblocking under the explicit user waiver；the milestone exit record
-must not claim a budget PASS。Remote push/run、PR、tag、release and publication remain unauthorized。
+M7-T04 is the only active frontier。Initial candidate
+`564e11e9e9a8484b1daefcd0dcb8bcc2ebe0ba3c` passed local gates but Architect/QA blocked native
+readiness and direct negative-process evidence。One bounded repair is active；ownership now includes
+the existing `tests/platform/qualify_native.py` driver invoked by all three native jobs。T03/T04
+budget failures remain recorded but nonblocking under the explicit user waiver；the milestone exit
+record must not claim a budget PASS。Remote push/run、PR、tag、release and publication remain
+unauthorized。
