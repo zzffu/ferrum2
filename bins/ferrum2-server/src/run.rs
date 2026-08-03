@@ -9,8 +9,7 @@ use std::task::{Context, Poll};
 use ferrum2_config::{LoggingLevel, RuntimeConfig, UdpConfig, ValidatedServerConfig};
 use ferrum2_core::route::Network;
 use ferrum2_core::{
-    AbortiveClose, ConnectErrorKind, Inbound as _, LocalEndpoint, Outbound as _, SessionReply as _,
-    TargetAddr,
+    AbortiveClose, ConnectErrorKind, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr,
 };
 use ferrum2_crypto::{Clock as _, MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
@@ -126,7 +125,7 @@ where
         direct: config
             .outbounds
             .iter()
-            .map(|_| DirectOutbound::new(TcpConnector::new(connect_timeout)))
+            .map(|_| Arc::new(DirectOutbound::new(TcpConnector::new(connect_timeout))))
             .collect(),
     });
     let mut roots = Vec::with_capacity(
@@ -835,14 +834,27 @@ where
                     continue;
                 }
                 let handle = binding.handle;
-                let Some(reserved) =
-                    routing.with_direct(inbound, Network::Udp, pending.datagram().target(), |_| {
-                        runtime.reserve_datagram(handle, pending.datagram().allocated_capacity())
-                    })
+                let Some(reserved) = reserve_udp_direct(
+                    &routing.route,
+                    &routing.direct,
+                    inbound,
+                    pending.datagram().target(),
+                    || {
+                        std::future::ready(
+                            runtime
+                                .reserve_datagram(handle, pending.datagram().allocated_capacity()),
+                        )
+                    },
+                )
+                .await
                 else {
                     break Err(RunError::RuntimeRoot);
                 };
-                match reserved {
+                let RoutedReserve { direct, value } = reserved;
+                if routing.direct.get(direct).is_none() {
+                    break Err(RunError::RuntimeRoot);
+                }
+                match value {
                     Ok(reservation) => {
                         let (datagram, commit) = pending.into_parts();
                         let committed =
@@ -898,23 +910,33 @@ where
                 }
             }
 
-            let Some(admission) =
-                routing.with_direct(inbound, Network::Udp, pending.datagram().target(), |_| {
+            let Some(admission) = reserve_udp_direct(
+                &routing.route,
+                &routing.direct,
+                inbound,
+                pending.datagram().target(),
+                || {
                     runtime.reserve_session(
                         tokio::time::Instant::now(),
                         pending.datagram().allocated_capacity(),
                     )
-                })
+                },
+            )
+            .await
             else {
                 break Err(RunError::RuntimeRoot);
             };
-            let admission = match admission.await {
+            let RoutedReserve { direct, value } = admission;
+            let admission = match value {
                 Ok(admission) => admission,
                 Err(error) => {
                     record_udp_runtime_failure(&metrics, error);
                     continue;
                 }
             };
+            if routing.direct.get(direct).is_none() {
+                break Err(RunError::RuntimeRoot);
+            }
             let (datagram, commit) = pending.into_parts();
             let mut committed_capability = None;
             let committed = runtime.commit_session_with(
@@ -1122,56 +1144,64 @@ async fn shutdown_signal() {
 
 struct ServerRouting {
     route: ferrum2_core::route::RouteTable,
-    direct: Vec<DirectOutbound<TcpConnector>>,
+    direct: Vec<Arc<DirectOutbound<TcpConnector>>>,
 }
 
-impl ServerRouting {
-    fn direct(
-        &self,
-        inbound: usize,
-        network: Network,
-        target: &TargetAddr,
-    ) -> Option<&DirectOutbound<TcpConnector>> {
-        select_direct(&self.route, &self.direct, inbound, network, target)
-    }
-
-    fn with_direct<R>(
-        &self,
-        inbound: usize,
-        network: Network,
-        target: &TargetAddr,
-        operation: impl FnOnce(&DirectOutbound<TcpConnector>) -> R,
-    ) -> Option<R> {
-        with_selected_direct(
-            &self.route,
-            &self.direct,
-            inbound,
-            network,
-            target,
-            operation,
-        )
-    }
+struct RoutedReserve<R> {
+    direct: usize,
+    value: R,
 }
 
-fn select_direct<'a, T>(
-    route: &ferrum2_core::route::RouteTable,
-    direct: &'a [T],
-    inbound: usize,
-    network: Network,
-    target: &TargetAddr,
-) -> Option<&'a T> {
-    direct.get(route.select(inbound, network, target))
-}
-
-fn with_selected_direct<T, R>(
+async fn reserve_udp_direct<T, R, F>(
     route: &ferrum2_core::route::RouteTable,
     direct: &[T],
     inbound: usize,
-    network: Network,
     target: &TargetAddr,
-    operation: impl FnOnce(&T) -> R,
-) -> Option<R> {
-    select_direct(route, direct, inbound, network, target).map(operation)
+    reserve: impl FnOnce() -> F,
+) -> Option<RoutedReserve<R>>
+where
+    F: std::future::Future<Output = R>,
+{
+    let selected = route.select(inbound, Network::Udp, target);
+    direct.get(selected)?;
+    Some(RoutedReserve {
+        direct: selected,
+        value: reserve().await,
+    })
+}
+
+#[derive(Debug)]
+enum DirectOpenError<E> {
+    Route,
+    Open(E),
+    Prefix(PrefixFailure),
+}
+
+async fn open_direct<O>(
+    route: &ferrum2_core::route::RouteTable,
+    direct: &[Arc<O>],
+    inbound: usize,
+    target: &TargetAddr,
+    initial_payload: &[u8],
+    idle_timeout: std::time::Duration,
+) -> Result<(O::Stream, u64), DirectOpenError<O::Error>>
+where
+    O: ferrum2_core::Outbound,
+    O::Stream: AsyncWrite + Unpin,
+{
+    let direct = direct
+        .get(route.select(inbound, Network::Tcp, target))
+        .ok_or(DirectOpenError::Route)?;
+    let mut stream = direct.open(target).await.map_err(DirectOpenError::Open)?;
+    let bytes = forward_initial_payload(
+        &mut stream,
+        initial_payload,
+        idle_timeout,
+        std::future::pending(),
+    )
+    .await
+    .map_err(DirectOpenError::Prefix)?;
+    Ok((stream, bytes))
 }
 
 struct ServerContext {
@@ -1250,25 +1280,23 @@ async fn server_connection(
         initial_payload,
         reply,
     } = session;
-    let Some(direct) = context
-        .routing
-        .direct(context.inbound, Network::Tcp, &target)
-    else {
-        context
-            .metrics
-            .active_connections_dec(Role::Server, Inbound::Shadowsocks);
-        return;
-    };
     let opened = tokio::select! {
         _ = cancellation.cancelled() => {
             context.metrics.active_connections_dec(Role::Server, Inbound::Shadowsocks);
             return;
         }
-        result = direct.open(&target) => result,
+        result = open_direct(
+            &context.routing.route,
+            &context.routing.direct,
+            context.inbound,
+            &target,
+            &initial_payload,
+            context.runtime.idle_timeout,
+        ) => result,
     };
-    let mut target_stream = match opened {
-        Ok(stream) => stream,
-        Err(error) => {
+    let (mut target_stream, initial_payload_bytes) = match opened {
+        Ok(opened) => opened,
+        Err(DirectOpenError::Open(error)) => {
             let kind = error.kind();
             let (stage, outcome, reason) = observation_for_direct_connect(kind);
             record_failure(&context, stage, reason, outcome);
@@ -1278,17 +1306,7 @@ async fn server_connection(
                 .active_connections_dec(Role::Server, Inbound::Shadowsocks);
             return;
         }
-    };
-    let initial_payload_bytes = match forward_initial_payload(
-        &mut target_stream,
-        &initial_payload,
-        context.runtime.idle_timeout,
-        cancellation.cancelled(),
-    )
-    .await
-    {
-        Ok(bytes) => bytes,
-        Err(failure) => {
+        Err(DirectOpenError::Prefix(failure)) => {
             context
                 .metrics
                 .add_bytes(Role::Server, Direction::InboundToOutbound, failure.bytes);
@@ -1298,6 +1316,12 @@ async fn server_connection(
                 RelayRunError::Cancelled => (Reason::Cancelled, Outcome::Cancelled),
             };
             record_failure(&context, Stage::Direct, reason, outcome);
+            context
+                .metrics
+                .active_connections_dec(Role::Server, Inbound::Shadowsocks);
+            return;
+        }
+        Err(DirectOpenError::Route) => {
             context
                 .metrics
                 .active_connections_dec(Role::Server, Inbound::Shadowsocks);
@@ -1727,6 +1751,7 @@ mod tests {
     use std::task::Waker;
     use std::time::Duration;
 
+    use ferrum2_core::route::RouteRule;
     use ferrum2_core::{ConnectError, Connector, Datagram, LocalEndpoint, Outbound, TargetAddr};
     use ferrum2_crypto::{
         Aes128Psk, MethodProfile, MethodPsk, MethodSinglePskProvider, MethodTcpSalt,
@@ -2192,71 +2217,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routed_direct_selection_is_first_match_per_network_and_failure_has_no_retry() {
-        let target = TargetAddr::ipv4("192.0.2.1:80".parse().expect("target")).expect("target");
-        let other = TargetAddr::ipv4("192.0.2.1:81".parse().expect("target")).expect("target");
-        let failed = TargetAddr::ipv4("192.0.2.1:82".parse().expect("target")).expect("target");
-        let (a, _, _, _) = controlled_outbound(1, None, None);
-        let (b, _, _, _) = controlled_outbound(1, None, None);
-        let (dead, gate, _, _) =
-            controlled_outbound(1, None, Some(ConnectErrorKind::ConnectionRefused));
-        let direct = [Arc::clone(&a), Arc::clone(&b), Arc::clone(&dead)];
+    async fn routed_production_seams_select_before_tcp_open_prefix_and_udp_reserve() {
+        let target = |port| TargetAddr::domain("example.test", port).expect("target");
+        let (exact, final_target, failed, domain) =
+            (target(80), target(81), target(82), target(53));
+        let rule = |i, n, t, o| RouteRule::new(i, Some(n), t, o);
         let route = ferrum2_core::route::RouteTable::routed(
             vec![
-                ferrum2_core::route::RouteRule::new(Some(1), None, None, 1),
-                ferrum2_core::route::RouteRule::new(None, None, Some(target.clone()), 1),
-                ferrum2_core::route::RouteRule::new(None, None, Some(target.clone()), 0),
-                ferrum2_core::route::RouteRule::new(None, None, Some(failed.clone()), 2),
+                rule(Some(1), Network::Tcp, None, 1),
+                rule(None, Network::Tcp, Some(exact.clone()), 1),
+                rule(None, Network::Tcp, Some(exact.clone()), 0),
+                rule(None, Network::Tcp, Some(failed.clone()), 2),
+                rule(Some(0), Network::Udp, Some(domain.clone()), 2),
+                rule(Some(0), Network::Udp, Some(exact.clone()), 1),
             ],
             0,
         )
         .expect("route");
-        for (inbound, request, expected) in [(1, &other, &b), (0, &target, &b), (0, &other, &a)] {
-            let selected = select_direct(&route, &direct, inbound, Network::Tcp, request)
-                .expect("selected direct");
-            assert!(Arc::ptr_eq(selected, expected));
-        }
-        let selected = Arc::clone(
-            select_direct(&route, &direct, 0, Network::Tcp, &failed).expect("failed direct"),
-        );
-        let task = tokio::spawn(async move { selected.open(&failed).await });
-        tokio::task::yield_now().await;
-        gate.notify_one();
-        assert!(
-            matches!(task.await.expect("open"), Err(error) if error.kind() == ConnectErrorKind::ConnectionRefused)
-        );
-        assert_eq!(dead.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(a.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(b.calls.load(Ordering::SeqCst), 0);
 
-        let udp_route = ferrum2_core::route::RouteTable::routed(
-            vec![
-                ferrum2_core::route::RouteRule::new(
-                    None,
-                    Some(Network::Udp),
-                    Some(target.clone()),
-                    1,
-                ),
-                ferrum2_core::route::RouteRule::new(
-                    None,
-                    Some(Network::Udp),
-                    Some(other.clone()),
-                    2,
-                ),
-            ],
-            0,
-        )
-        .expect("UDP route");
-        for (network, request, expected) in [
-            (Network::Udp, &target, 1),
-            (Network::Udp, &other, 2),
-            (Network::Tcp, &target, 0),
-        ] {
+        for (inbound, target, expected) in
+            [(1, &final_target, 1), (0, &exact, 1), (0, &final_target, 0)]
+        {
+            let make = || controlled_outbound(8, None, None);
+            let parts = [make(), make()];
+            let direct = [Arc::clone(&parts[0].0), Arc::clone(&parts[1].0)];
+            parts[expected].1.notify_one();
+            let _ = open_direct(
+                &route,
+                &direct,
+                inbound,
+                target,
+                b"prefix",
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("selected open and prefix");
             assert_eq!(
-                with_selected_direct(&udp_route, &[0, 1, 2], 0, network, request, |id| *id),
-                Some(expected)
+                parts[expected].2.lock().expect("bytes").as_slice(),
+                b"prefix"
             );
+            assert_eq!(parts[1 - expected].0.calls.load(Ordering::SeqCst), 0);
         }
+
+        let (a, _, _, _) = controlled_outbound(1, None, None);
+        let (b, _, _, _) = controlled_outbound(1, None, None);
+        let (dead, gate, _, _) =
+            controlled_outbound(1, None, Some(ConnectErrorKind::ConnectionRefused));
+        gate.notify_one();
+        assert!(matches!(
+            open_direct(&route, &[Arc::clone(&a), Arc::clone(&b), Arc::clone(&dead)], 0, &failed, b"never", Duration::from_secs(1)).await,
+            Err(DirectOpenError::Open(error)) if error.kind() == ConnectErrorKind::ConnectionRefused
+        ));
+        assert_eq!(
+            (
+                a.calls.load(Ordering::SeqCst),
+                b.calls.load(Ordering::SeqCst),
+                dead.calls.load(Ordering::SeqCst)
+            ),
+            (0, 0, 1)
+        );
+
+        for (inbound, target, expected) in [(0, &exact, 1), (0, &domain, 2), (1, &domain, 0)] {
+            let reserved = AtomicUsize::new(0);
+            let routed = reserve_udp_direct(&route, &[(), (), ()], inbound, target, || {
+                std::future::ready(reserved.fetch_add(1, Ordering::SeqCst))
+            })
+            .await
+            .expect("UDP reserve route");
+            assert_eq!(routed.direct, expected);
+            assert_eq!(routed.value, 0);
+        }
+        let reserved = AtomicUsize::new(0);
+        assert!(
+            reserve_udp_direct(&route, &[] as &[()], 0, &domain, || std::future::ready(
+                reserved.fetch_add(1, Ordering::SeqCst)
+            ))
+            .await
+            .is_none()
+        );
+        assert_eq!(reserved.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -3216,7 +3255,9 @@ mod tests {
                         .outbounds
                         .iter()
                         .map(|_| {
-                            DirectOutbound::new(TcpConnector::new(config.runtime.connect_timeout))
+                            Arc::new(DirectOutbound::new(TcpConnector::new(
+                                config.runtime.connect_timeout,
+                            )))
                         })
                         .collect(),
                 }),
