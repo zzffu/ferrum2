@@ -13,8 +13,9 @@ and command definitions in their authoritative build/config files where possible
     and explicit opt-in UDP ASSOCIATE.
   - Current composition keeps one process-wide PSK/method and supports either
     the legacy single instance or bounded tagged multi-inbound/multi-outbound
-    graphs with static bindings. Server outbounds remain direct; configuration
-    is typed TOML with `tracing` and low-cardinality metrics.
+    graphs with static bindings or shared exact-target TCP/UDP first-match
+    routing. Server outbounds remain direct; configuration is typed TOML with
+    `tracing` and low-cardinality metrics.
   - Release targets are Linux x86_64 GNU/musl and Windows. License:
     `GPL-3.0-only`.
 
@@ -63,7 +64,7 @@ and command definitions in their authoritative build/config files where possible
   - SIP023 and multi-user support are not planned; do not add preparatory
     abstractions without a concrete requirement.
   - Preferred dependency order, adjustable by validated need:
-    TCP/UDP routing; multi-upstream, load balancing and chaining; DNS; Tailscale
+    multi-upstream, load balancing and chaining; DNS; Tailscale
     Endpoint; Linux transparent inbound; Windows TUN; hot reload; management API.
   - A future Tailscale Endpoint may expose inbound, outbound, and datagram
     adapters under one tag. Prefer external `tailscaled`/OS routing for simple
@@ -79,7 +80,7 @@ and command definitions in their authoritative build/config files where possible
 - Repository hygiene:
   - Commit `Cargo.lock`; do not commit build output, local evidence, real PSKs,
     or production endpoints. Reviewed non-secret protocol fixtures are source.
-  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M7 are
+  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M8 are
     closed; historical evidence belongs in milestone/history documents, not in
     this context summary.
 

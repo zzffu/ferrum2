@@ -112,8 +112,8 @@ QA 在 planning baseline 上运行：
 - archives、installers、signing、upload或publication。
 
 M6随后交付显式opt-in SOCKS5 UDP ASSOCIATE；M7随后交付bounded tagged static
-multi-inbound/outbound。M8已计划tagged-only exact-target TCP/UDP first-match routing，
-但尚未交付。GeoIP/Geosite、DNS、sniffing/user rules、CIDR/domain pattern、
+multi-inbound/outbound；M8随后交付tagged-only exact-target TCP/UDP first-match routing。
+GeoIP/Geosite、DNS、sniffing/user rules、CIDR/domain pattern、
 multi-upstream groups/chaining、per-entry PSK/method、transparent/TUN、hot reload、
 management API和publication仍未交付。
 

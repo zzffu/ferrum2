@@ -105,3 +105,10 @@ No M7 review debt remains。M7-T08 Architect and QA both returned `PASS_WITH_NOT
 blocker、major or minor finding；the exact candidate and hosted descendant passed the contracted
 local、review、platform、interop and schema 2 Budget gates。Performance exclusion is an explicit
 scope boundary, not review debt。
+
+## M8 close audit
+
+No M8 review debt remains。The resolver-order repair preserved the domain route contract and passed
+Windows/WSL repeats plus same-SHA hosted quality and MSRV。Final Architect returned
+`PASS_WITH_NOTES` and terminal QA returned `PASS` with zero blocker、major or minor finding。
+Performance regression without an M8 threshold or claim is an explicit scope boundary, not debt。

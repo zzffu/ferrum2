@@ -157,6 +157,12 @@ quality/Full/security/process、Rust 1.85、Windows MSVC、Linux GNU/musl、exis
 `12/12`+cleanup、UDP `12/12`+cleanup、Budget and final qualification。Performance may run
 as regression but M8 adds no threshold/claim。
 
+M8 closed on exact `926843d61fcfac094765b5d1032b7239e3d9370c` and automatic run
+[`30848182146/1`](https://github.com/zzffu/ferrum2/actions/runs/30848182146)。The serial local gate、
+quality/Full/security/process、Rust 1.85、Windows/GNU/musl、TCP/UDP each `12/12` plus cleanup、
+Budget and final qualification passed；blocking findings were zero。Performance completed only as
+regression and aggregate-dependency evidence；M8 makes no performance threshold or claim。
+
 ## Stop rules
 
 - Any legacy/static incompatibility、inert/unresolved route、wrong order/final、post-resolution

@@ -1,7 +1,7 @@
 ---
 id: M8-T04
 milestone: M8
-status: ready
+status: done
 depends_on: [M8-T03]
 owns:
   - tests/m0-harness/src/local_support/mod.rs
@@ -24,17 +24,17 @@ qualify one exact integration SHA without a new provider、workflow job or perfo
 
 ## Acceptance
 
-- [ ] A bounded real-process matrix proves ordered rule、AND/wildcard、final、two inbounds/
+- [x] A bounded real-process matrix proves ordered rule、AND/wildcard、final、two inbounds/
       outbounds and one UDP association routing two targets to two servers without a cross product。
-- [ ] Focused rows prove no failure fallback、response source binding、aggregate bounds、partial
+- [x] Focused rows prove no failure fallback、response source binding、aggregate bounds、partial
       bind、root fatal、signal、100+ cycles and exact restart/rebind。
-- [ ] Existing legacy/M7 static config/CLI、TCP、server UDP、SOCKS UDP and architecture gates
+- [x] Existing legacy/M7 static config/CLI、TCP、server UDP、SOCKS UDP and architecture gates
       remain；one core route module exists and protocol/runtime crates own no routing policy。
-- [ ] Existing external TCP/UDP IDs/methods/references/deadlines/cleanup remain unchanged and pass
+- [x] Existing external TCP/UDP IDs/methods/references/deadlines/cleanup remain unchanged and pass
       `12/12` each on the accepted SHA。
-- [ ] Windows/GNU/musl native rows run routed offline validation and bounded route smoke；
+- [x] Windows/GNU/musl native rows run routed offline validation and bounded route smoke；
       missing/setup/skipped is BLOCKED。
-- [ ] Exact integration passes Full、Rust 1.85、M8 Budget and final blocking review。After separate
+- [x] Exact integration passes Full、Rust 1.85、M8 Budget and final blocking review。After separate
       explicit authorization only，one same-SHA run/attempt may supply hosted evidence；no result
       splicing、rerun、second push、PR、tag、release or publication。
 
@@ -44,9 +44,12 @@ Run `TEST-0009` T04、integration and hosted commands exactly as recorded。
 
 ## Result
 
-- Commit/run: —
-- Review: —
-- Notes: —
+- Commit/run: exact `926843d61fcfac094765b5d1032b7239e3d9370c`；automatic run
+  [`30848182146/1`](https://github.com/zzffu/ferrum2/actions/runs/30848182146) completed success。
+- Review: final Architect `PASS_WITH_NOTES`；terminal QA `PASS`；blocking findings zero。
+- Notes: local Full/MSRV/lifecycle/docs/focused gates and Budget `837/840` passed。Hosted quality、
+  MSRV、Windows/GNU/musl、interop `24/24`+cleanup、Budget、performance regression and final
+  qualification passed。Performance adds no M8 threshold or claim；push authorization is consumed。
 
 ## Rollback / risk
 

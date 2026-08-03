@@ -1,7 +1,8 @@
 # M8 — 共享最小 TCP/UDP first-match routing
 
-- **Status:** executing
+- **Status:** closed
 - **Baseline:** `404b62758a191fe879243c755c75bcf8b300040d`
+- **Qualified exact:** `926843d61fcfac094765b5d1032b7239e3d9370c`
 - **Strategy:** drain
 - **Owner:** primary thread
 
@@ -49,19 +50,19 @@ static tagged 行为、SIP022 wire/security、aggregate owners 和 process lifec
 
 ## Exit criteria
 
-- [ ] Legacy和M7 static v1 cohort继续原样有效；routed tagged shape、rule bounds、all tag/
+- [x] Legacy和M7 static v1 cohort继续原样有效；routed tagged shape、rule bounds、all tag/
       target/network/final negatives在zero-resource check中fail closed且脱敏。
-- [ ] 一个shared route interface证明ordered first-match、AND/wildcard、exact target和total
+- [x] 一个shared route interface证明ordered first-match、AND/wildcard、exact target和total
       final；两个binary的TCP/UDP path只消费resolved IDs，不做runtime string lookup。
-- [ ] Client TCP和同一SOCKS UDP association内的不同targets可选择不同Shadowsocks
+- [x] Client TCP和同一SOCKS UDP association内的不同targets可选择不同Shadowsocks
       outbounds；response source/session binding、ID collision、bytes、idle和shutdown有界，
       selected failure无fallback。
-- [ ] Server TCP/UDP在authentication/bounds之后、connect/reserve/commit/send之前逐请求
+- [x] Server TCP/UDP在authentication/bounds之后、connect/reserve/commit/send之前逐请求
       选择configured direct identity；cross-inbound UDP binding、replay和response ingress
       ownership保持。
-- [ ] Existing static/legacy local TCP/UDP/lifecycle回归和bounded routed real-process matrix
+- [x] Existing static/legacy local TCP/UDP/lifecycle回归和bounded routed real-process matrix
       通过；wire、CLI、trace和metric identities不变。
-- [ ] One exact SHA passes Full、Rust 1.85、three native targets、existing TCP/UDP各
+- [x] One exact SHA passes Full、Rust 1.85、three native targets、existing TCP/UDP各
       `12/12`+cleanup、M8 test envelope和blocking review；missing/failed evidence blocks
       close。
 
@@ -72,7 +73,7 @@ static tagged 行为、SIP022 wire/security、aggregate owners 和 process lifec
 | M8-T01 | Add the shared route module and validate/compile routed tagged config before side effects | — | done |
 | M8-T02 | Route client TCP flows and UDP datagrams across configured Shadowsocks outbounds | M8-T01 | done |
 | M8-T03 | Route authenticated server TCP/UDP requests to configured direct identities | M8-T02 | done |
-| M8-T04 | Prove routed real-process behavior and qualify one exact SHA | M8-T03 | ready |
+| M8-T04 | Prove routed real-process behavior and qualify one exact SHA | M8-T03 | done |
 
 ```text
 M8-T01 core/config route contract
@@ -92,11 +93,18 @@ code/tests `15529/25482` with `max_test_growth=840` and `ticket_warning=240`。`
 derives 760 lines from its evidence map plus one 80-line contingency；the envelope cannot increase
 during M8 execution。
 
-## Blocker / next action
+## Close evidence
 
-No execution blocker。M8-T01 is integrated at
-`876da7e13c37aaf4e316848b13cf0a8f7cb8673b`，M8-T02 at
-`ff9070c427bf456edbe3051d4f8781bb65c136c0`，and M8-T03 at
-`4a1de3a3183d1235ac3808ae97caebc851f4c2b5`；M8-T04 is the only ready frontier。The M8
-Budget is `749/840` with `91` lines remaining，so qualification must reuse compact existing
-evidence。Push、hosted run、PR、tag、release and publication remain unauthorized。
+- Exact `926843d61fcfac094765b5d1032b7239e3d9370c` passed the serial local gate and automatic
+  run [`30848182146/1`](https://github.com/zzffu/ferrum2/actions/runs/30848182146)：quality、MSRV、
+  Windows/GNU/musl、interop TCP/UDP each `12/12` plus cleanup、Budget、performance regression
+  and final qualification all completed successfully。
+- A test-only dual-stack echo repair removed Ubuntu resolver-order dependence while preserving the
+  `localhost` domain target、case-insensitive `LOCALHOST` matcher and pre-resolution route contract。
+  Windows and WSL strict association repeats each passed `10/10`。
+- Architect returned `PASS_WITH_NOTES` and terminal QA returned `PASS`；blocking findings are zero。
+  Budget passed at growth `837/840` with remaining `3`。Performance supplied only regression and
+  aggregate-dependency evidence；M8 makes no performance threshold or claim。
+- All four tickets and all six exit criteria are complete。The authorized non-force pushes are
+  consumed；no rerun、further push、PR、tag、release or publication is authorized。See the
+  [M8 handoff](../handoffs/HANDOFF-M8-2026-08-04.md)。

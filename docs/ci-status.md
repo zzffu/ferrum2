@@ -1,5 +1,25 @@
 # CI 与验证状态
 
+## M8 closed 状态
+
+- **Qualified exact SHA:** `926843d61fcfac094765b5d1032b7239e3d9370c`，tree
+  `6511246f4e3d9be8f3e6e0730d2f6b2da41cb3bf`。Automatic push run
+  [`30848182146/1`](https://github.com/zzffu/ferrum2/actions/runs/30848182146) completed success and
+  binds every credited result to that SHA。
+- **Local/review evidence:** format、Clippy、workspace binaries、all-features Full、ignored 100+
+  lifecycle `1/1`、docs、Rust 1.85、focused `38 passed / 5 ignored`、qualification contract
+  `14/14` and Windows/WSL strict association `10/10` each passed。Final Architect returned
+  `PASS_WITH_NOTES`，terminal QA returned `PASS`，and blocking findings are zero。
+- **Hosted evidence:** quality `91801505867`、MSRV `91801505801`、Windows MSVC `91801505774`、
+  Linux GNU `91801505935`、Linux musl `91801505772`、interop `91801505757`、Budget
+  `91801505833`、performance `91801505733` and qualification `91812085869` completed `success`。
+  Interop requires TCP/UDP each `12/12` plus cleanup；the final aggregate binds the exact
+  SHA/run/attempt。
+- **Budget/boundary:** code/tests/examples `15996/26319/132`，test growth `837/840`，remaining
+  `3`，warning `no`。Performance is credited only as regression and aggregate-dependency evidence；
+  M8 makes no threshold or performance claim。Authorized pushes are consumed；no rerun、further
+  push、PR、tag、release or publication is authorized。
+
 ## M7 closed 状态
 
 - **Qualified exact SHA:** `b3b99a15aa99f8393f99f4c72c85f451a48c6749`，tree
