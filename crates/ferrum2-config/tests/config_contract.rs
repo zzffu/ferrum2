@@ -9,12 +9,22 @@ use ferrum2_config::{
     ConfigErrorKind, ConfigField, LoggingLevel, MAX_CONFIG_BYTES, RuntimeConfig, load_client,
     load_server,
 };
+use ferrum2_core::TargetAddr;
+use ferrum2_core::route::{Network, RouteTable};
 use ferrum2_crypto::TcpMethodProfile;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/config")
         .join(name)
+}
+
+fn selected(route: &RouteTable, inbound: usize) -> usize {
+    route.select(
+        inbound,
+        Network::Tcp,
+        &TargetAddr::domain("selection.test", 443).expect("test target"),
+    )
 }
 
 const CLIENT_BASE: &str = "schema_version = 1\n[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
@@ -51,6 +61,16 @@ fn tagged_server(inbound_count: usize, outbound_count: usize) -> String {
         + "\n"
 }
 
+fn routed(source: String, route: &str) -> String {
+    source
+        .lines()
+        .filter(|line| !line.starts_with("outbound = "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replacen("[shadowsocks]", &format!("{route}\n[shadowsocks]"), 1)
+        + "\n"
+}
+
 fn assert_tagged_error(
     name: &str,
     role: ConfigRole,
@@ -74,7 +94,10 @@ fn assert_tagged_error(
         .replace("127.0.0.1:10001", &format!("127.0.0.1:{}", endpoints[1]))
         .replace("127.0.0.1:20000", &format!("127.0.0.1:{}", endpoints[2]));
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let psk = format!("{}AECAwQFBgcICQoLDA0ODw==", char::from(alphabet[index]));
+    let psk = format!(
+        "{}AECAwQFBgcICQoLDA0ODw==",
+        char::from(alphabet[index % alphabet.len()])
+    );
     source = source.replace("AAECAwQFBgcICQoLDA0ODw==", &psk);
     source.push_str(&format!("# {raw}\n"));
 
@@ -88,9 +111,12 @@ fn assert_tagged_error(
     let rendered = format!("{error}\n{error:?}");
     let values = source.lines().filter_map(|line| {
         let (field, value) = line.split_once(" = ")?;
-        matches!(field, "tag" | "outbound" | "listen" | "server" | "psk")
-            .then(|| value.strip_prefix('"')?.strip_suffix('"'))?
-            .filter(|value| !value.is_empty())
+        matches!(
+            field,
+            "tag" | "outbound" | "listen" | "server" | "psk" | "final" | "network" | "target"
+        )
+        .then(|| value.strip_prefix('"')?.strip_suffix('"'))?
+        .filter(|value| !value.is_empty())
     });
     for sentinel in std::iter::once(raw.as_str()).chain(values) {
         assert!(!rendered.contains(sentinel), "{name}: {sentinel}");
@@ -271,9 +297,8 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
                 assert_eq!(config.outbounds.len(), 1, "{}", case.name);
                 assert_eq!(config.inbounds[0].listen, config.listen, "{}", case.name);
                 assert_eq!(
-                    config.inbounds[0].outbound.server, config.server,
-                    "{}",
-                    case.name
+                    config.outbounds[selected(&config.route, 0)].server,
+                    config.server
                 );
             }
             ConfigRole::Server => {
@@ -354,31 +379,126 @@ fn tagged_graph_normalizes_complete_resolved_collections() {
         let config = load_client(TempConfig::text(&source).path()).expect(method);
         assert_eq!(config.inbounds.len(), 2, "{method}");
         assert_eq!(config.outbounds.len(), 2, "{method}");
-        assert_eq!(config.inbounds[1].outbound, config.outbounds[1], "{method}");
+        assert_eq!(selected(&config.route, 1), 1, "{method}");
         let source = tagged_server(2, 2)
             .replacen("2022-blake3-aes-128-gcm", method, 1)
             .replacen("AAECAwQFBgcICQoLDA0ODw==", psk, 1);
         let config = load_server(TempConfig::text(&source).path()).expect(method);
-        assert_eq!(config.inbounds[1].outbound, 1, "{method}");
+        assert_eq!(selected(&config.route, 1), 1, "{method}");
     }
 
     let shared = tagged_client(2, 1);
     let config = load_client(TempConfig::text(&shared).path()).expect("shared outbound");
-    assert_eq!(config.inbounds[0].outbound, config.inbounds[1].outbound);
+    assert_eq!(selected(&config.route, 0), selected(&config.route, 1));
     let exact_case = tagged_client(1, 1)
         .replacen("outbound = \"o0\"", "outbound = \"O0\"", 1)
         .replacen("tag = \"o0\"", "tag = \"O0\"", 1);
     load_client(TempConfig::text(&exact_case).path()).expect("exact case-sensitive match");
     let shared_server =
         load_server(TempConfig::text(&tagged_server(2, 1)).path()).expect("shared direct");
-    assert_eq!(shared_server.inbounds[0].outbound, 0);
-    assert_eq!(shared_server.inbounds[1].outbound, 0);
+    assert_eq!(selected(&shared_server.route, 0), 0);
+    assert_eq!(selected(&shared_server.route, 1), 0);
 
     let client = load_client(TempConfig::text(&tagged_client(64, 64)).path()).expect("64 client");
     assert_eq!((client.inbounds.len(), client.outbounds.len()), (64, 64));
     let server = load_server(TempConfig::text(&tagged_server(64, 64)).path()).expect("64 server");
     assert_eq!((server.inbounds.len(), server.outbounds.len()), (64, 64));
-    assert_eq!(server.inbounds[63].outbound, 63);
+    assert_eq!(selected(&server.route, 63), 63);
+}
+
+#[test]
+fn routed_graph_compiles_resolved_first_match_tables_for_both_roles() {
+    let client = load_client(fixture("client-route-valid.toml")).expect("routed client");
+    let domain = TargetAddr::domain("EXAMPLE.TEST", 443).expect("domain");
+    let ipv4 = TargetAddr::ip("192.0.2.1:53".parse().expect("IPv4")).expect("target");
+    let other_port = TargetAddr::domain("example.test", 80).expect("other port");
+    #[rustfmt::skip]
+    let client_actual = (client.route.is_routed(), client.route.select(0, Network::Tcp, &domain), client.route.select(1, Network::Tcp, &domain), client.route.select(0, Network::Udp, &ipv4), client.route.select(0, Network::Tcp, &other_port));
+    assert_eq!(client_actual, (true, 1, 0, 2, 0));
+    let server = load_server(fixture("server-route-valid.toml")).expect("routed server");
+    let ipv6 = TargetAddr::ip("[2001:db8::1]:53".parse().expect("IPv6")).expect("target");
+    assert_eq!(
+        (
+            server.route.is_routed(),
+            server.route.select(1, Network::Tcp, &domain),
+            server.route.select(0, Network::Udp, &ipv6)
+        ),
+        (true, 1, 2)
+    );
+    for count in [0, 64] {
+        let rules = "[[route.rules]]\ninbound = \"i0\"\noutbound = \"o0\"\n".repeat(count);
+        let source = routed(
+            tagged_client(1, 1),
+            &format!("[route]\nfinal = \"o0\"\n{rules}"),
+        );
+        load_client(TempConfig::text(&source).path()).expect("bounded routed rules");
+    }
+}
+
+#[test]
+fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
+    let base = tagged_client(1, 2);
+    #[rustfmt::skip]
+    let cases = [
+        ("static mixing", format!("{}[route]\nfinal = \"o0\"\n", base), ConfigField::Route),
+        ("legacy mixing", format!("{CLIENT_BASE}[route]\nfinal = \"o0\"\n"), ConfigField::Route),
+        ("partial static binding", base.replacen("outbound = \"o0\"\n", "", 1), ConfigField::InboundsOutbound),
+        ("missing final", routed(base.clone(), "[route]"), ConfigField::RouteFinal),
+        ("dangling final", routed(base.clone(), "[route]\nfinal = \"missing\""), ConfigField::RouteFinal),
+        ("wrong final namespace", routed(base.clone(), "[route]\nfinal = \"i0\""), ConfigField::RouteFinal),
+        ("empty predicate", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\noutbound = \"o1\""), ConfigField::RouteRules),
+        ("unknown network", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"quic\"\noutbound = \"o1\""), ConfigField::RouteRulesNetwork),
+        ("dangling inbound", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"missing\"\noutbound = \"o1\""), ConfigField::RouteRulesInbound),
+        ("wrong inbound namespace", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"o0\"\noutbound = \"o1\""), ConfigField::RouteRulesInbound),
+        ("dangling outbound", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"missing\""), ConfigField::RouteRulesOutbound),
+        ("missing outbound", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\""), ConfigField::RouteRulesOutbound),
+        ("wrong outbound namespace", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"i0\""), ConfigField::RouteRulesOutbound),
+        ("unreferenced outbound", routed(base.clone(), "[route]\nfinal = \"o0\""), ConfigField::RouteRulesOutbound),
+        ("empty target", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"\", port = 53 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
+        ("non ASCII target", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"é.test\", port = 53 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
+        ("zero target port", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\", port = 0 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
+        ("high target port", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\", port = 65536 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
+        ("long target", routed(base.clone(), &format!("[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = {{ host = \"{}\", port = 53 }}\noutbound = \"o1\"", "a".repeat(256))), ConfigField::RouteRulesTarget),
+    ];
+    for (index, (name, source, field)) in cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            ConfigRole::Client,
+            source,
+            (ConfigErrorKind::Semantic, field),
+            60 + index,
+        );
+    }
+
+    let too_many = "[[route.rules]]\ninbound = \"i0\"\noutbound = \"o1\"\n".repeat(65);
+    assert_tagged_error(
+        "65 rules",
+        ConfigRole::Client,
+        routed(base, &format!("[route]\nfinal = \"o0\"\n{too_many}")),
+        (ConfigErrorKind::Semantic, ConfigField::RouteRules),
+        80,
+    );
+    let fields = [
+        ConfigField::Route,
+        ConfigField::RouteRules,
+        ConfigField::RouteRulesInbound,
+        ConfigField::RouteRulesNetwork,
+        ConfigField::RouteRulesTarget,
+        ConfigField::RouteRulesOutbound,
+        ConfigField::RouteFinal,
+    ];
+    assert_eq!(
+        fields.map(ConfigField::as_str),
+        [
+            "route",
+            "route.rules",
+            "route.rules.inbound",
+            "route.rules.network",
+            "route.rules.target",
+            "route.rules.outbound",
+            "route.final"
+        ]
+    );
 }
 
 #[test]

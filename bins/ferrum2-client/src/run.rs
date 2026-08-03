@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use ferrum2_config::{LoggingLevel, RuntimeConfig, ValidatedClientConfig};
+use ferrum2_core::route::Network;
 use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, Datagram, Inbound as _,
     LocalEndpoint, SessionReply as _, TargetAddr,
@@ -76,6 +77,9 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
+    if config.route.is_routed() {
+        return Err(RunError::StartupProtocol);
+    }
     let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|_| RunError::StartupObservability)?;
@@ -157,12 +161,20 @@ where
     });
     let mut listens = Vec::with_capacity(config.inbounds.len());
     let mut outbounds = Vec::with_capacity(config.inbounds.len());
-    for inbound in &config.inbounds {
+    let static_target = TargetAddr::ipv4(config.server).map_err(|_| RunError::StartupProtocol)?;
+    for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
+        let outbound = config
+            .outbounds
+            .get(
+                config
+                    .route
+                    .select(inbound_id, Network::Tcp, &static_target),
+            )
+            .ok_or(RunError::StartupProtocol)?;
         listens.push(inbound.listen);
         outbounds.push(ClientOutboundContext {
-            tcp_server: TargetAddr::ipv4(inbound.outbound.server)
-                .map_err(|_| RunError::StartupProtocol)?,
-            udp_server: inbound.outbound.server,
+            tcp_server: TargetAddr::ipv4(outbound.server).map_err(|_| RunError::StartupProtocol)?,
+            udp_server: outbound.server,
         });
     }
     let tcp_registry = registry.clone();
@@ -3322,15 +3334,15 @@ mod tests {
         };
         config.inbounds = mappings
             .iter()
-            .map(|(listen, server)| ferrum2_config::ClientInboundConfig {
-                listen: *listen,
-                outbound: ferrum2_config::ClientOutboundConfig { server: *server },
-            })
+            .map(|(listen, _)| ferrum2_config::ClientInboundConfig { listen: *listen })
             .collect();
         config.outbounds = mappings
             .iter()
             .map(|(_, server)| ferrum2_config::ClientOutboundConfig { server: *server })
             .collect();
+        config.route =
+            ferrum2_core::route::RouteTable::static_bindings((0..mappings.len()).collect())
+                .expect("bounded test mappings");
         (path, config)
     }
 

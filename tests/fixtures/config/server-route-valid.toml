@@ -1,0 +1,34 @@
+schema_version = 1
+
+[[inbounds]]
+tag = "i0"
+listen = "127.0.0.1:10000"
+
+[[inbounds]]
+tag = "i1"
+listen = "127.0.0.1:10001"
+
+[[outbounds]]
+tag = "o0"
+
+[[outbounds]]
+tag = "o1"
+
+[[outbounds]]
+tag = "o2"
+
+[route]
+final = "o0"
+
+[[route.rules]]
+inbound = "i1"
+outbound = "o1"
+
+[[route.rules]]
+network = "udp"
+target = { host = "2001:db8::1", port = 53 }
+outbound = "o2"
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="

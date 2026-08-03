@@ -42,6 +42,20 @@ fn tagged_server(inbounds: &[SocketAddrV4]) -> String {
         + "\n"
 }
 
+fn routed_tagged(source: String) -> String {
+    source
+        .lines()
+        .filter(|line| !line.starts_with("outbound = "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replacen(
+            "[shadowsocks]",
+            "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\ntarget = { host = \"example.test\", port = 443 }\noutbound = \"o1\"\n[shadowsocks]",
+            1,
+        )
+        + "\n"
+}
+
 fn reserve_server_tcp_udp() -> (TcpListener, UdpSocket, SocketAddrV4) {
     let mut last_retry = None;
     for _ in 0..PAIRED_PORT_ATTEMPTS {
@@ -302,6 +316,8 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
     let (server_b, server_udp_b, server_address_b) = reserve_server_tcp_udp();
     let client_path = directory.path().join("client-tagged.toml");
     let server_path = directory.path().join("server-tagged.toml");
+    let client_route_path = directory.path().join("client-route.toml");
+    let server_route_path = directory.path().join("server-route.toml");
     std::fs::write(
         &client_path,
         tagged_client(
@@ -315,6 +331,19 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         tagged_server(&[server_address_a, server_address_b]),
     )
     .expect("server tagged config");
+    std::fs::write(
+        &client_route_path,
+        routed_tagged(tagged_client(
+            &[client_address_a, client_address_b],
+            &[server_address_a, server_address_b],
+        )),
+    )
+    .expect("client routed config");
+    std::fs::write(
+        &server_route_path,
+        routed_tagged(tagged_server(&[server_address_a, server_address_b])),
+    )
+    .expect("server routed config");
 
     for (binary, path) in [
         ("ferrum2-client", &client_path),
@@ -337,6 +366,31 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         assert!(run.stdout.is_empty(), "{binary}");
         assert_eq!(
             run.stderr, b"error[startup.bind] process: unable to prepare required endpoint\n",
+            "{binary}"
+        );
+    }
+
+    for (binary, path) in [
+        ("ferrum2-client", &client_route_path),
+        ("ferrum2-server", &server_route_path),
+    ] {
+        let checked = run_binary(
+            binary,
+            &[
+                "--config",
+                path.to_str().expect("UTF-8 path"),
+                "--check-config",
+            ],
+        );
+        assert_eq!(checked.status.code(), Some(0), "{binary}");
+        assert_eq!(checked.stdout, b"configuration valid\n", "{binary}");
+        assert!(checked.stderr.is_empty(), "{binary}");
+
+        let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
+        assert_eq!(run.status.code(), Some(1), "{binary}");
+        assert!(run.stdout.is_empty(), "{binary}");
+        assert_eq!(
+            run.stderr, b"error[startup.protocol] process: unable to prepare protocol resources\n",
             "{binary}"
         );
     }
@@ -376,6 +430,27 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         &invalid,
         "error[config.semantic] inbounds.outbound: configuration value is invalid\n",
         server_sentinel,
+    );
+    let route_sentinel = "route_cli_tag_sentinel";
+    let invalid = directory.path().join("client-route-invalid.toml");
+    std::fs::write(
+        &invalid,
+        routed_tagged(tagged_client(
+            &[client_address_a, client_address_b],
+            &[server_address_a, server_address_b],
+        ))
+        .replacen(
+            "outbound = \"o1\"",
+            &format!("outbound = \"{route_sentinel}\""),
+            1,
+        ),
+    )
+    .expect("invalid routed config");
+    assert_invalid(
+        "ferrum2-client",
+        &invalid,
+        "error[config.semantic] route.rules.outbound: configuration value is invalid\n",
+        route_sentinel,
     );
 
     for listener in [client_a, client_b, server_a, server_b] {

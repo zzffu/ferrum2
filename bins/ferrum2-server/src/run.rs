@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
 use ferrum2_config::{LoggingLevel, RuntimeConfig, UdpConfig, ValidatedServerConfig};
+use ferrum2_core::route::Network;
 use ferrum2_core::{
     AbortiveClose, ConnectErrorKind, Inbound as _, LocalEndpoint, Outbound as _, SessionReply as _,
+    TargetAddr,
 };
 use ferrum2_crypto::{Clock as _, MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
@@ -77,6 +79,9 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedServerConfig) -> Result<(), RunError> {
+    if config.route.is_routed() {
+        return Err(RunError::StartupProtocol);
+    }
     let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|_| RunError::StartupObservability)?;
@@ -131,12 +136,17 @@ where
     );
     let mut tcp_listens = Vec::with_capacity(config.inbounds.len());
     let mut tcp_contexts = Vec::with_capacity(config.inbounds.len());
-    for inbound in &config.inbounds {
+    let static_target = TargetAddr::ipv4(config.listen).map_err(|_| RunError::StartupProtocol)?;
+    for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
         let listen = inbound.listen;
         tcp_listens.push(listen);
         let direct = Arc::clone(
             direct
-                .get(inbound.outbound)
+                .get(
+                    config
+                        .route
+                        .select(inbound_id, Network::Tcp, &static_target),
+                )
                 .ok_or(RunError::StartupProtocol)?,
         );
         let context = Arc::new(ServerContext {
@@ -2519,12 +2529,11 @@ mod tests {
         listens: [SocketAddrV4; N],
     ) -> (PathBuf, ValidatedServerConfig) {
         let (path, mut config) = server_test_config(listens[0]);
-        config.inbounds.extend(listens[1..].iter().map(|listen| {
-            ferrum2_config::ServerInboundConfig {
-                listen: *listen,
-                outbound: 0,
-            }
-        }));
+        config.inbounds.extend(
+            listens[1..]
+                .iter()
+                .map(|listen| ferrum2_config::ServerInboundConfig { listen: *listen }),
+        );
         config.runtime.max_connections = 1.try_into().expect("one connection");
         config.udp.max_sessions = 1;
         (path, config)

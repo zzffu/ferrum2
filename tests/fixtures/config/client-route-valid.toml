@@ -1,0 +1,39 @@
+schema_version = 1
+
+[[inbounds]]
+tag = "i0"
+listen = "127.0.0.1:10000"
+
+[[inbounds]]
+tag = "i1"
+listen = "127.0.0.1:10001"
+
+[[outbounds]]
+tag = "o0"
+server = "127.0.0.1:20000"
+
+[[outbounds]]
+tag = "o1"
+server = "127.0.0.1:20001"
+
+[[outbounds]]
+tag = "o2"
+server = "127.0.0.1:20002"
+
+[route]
+final = "o0"
+
+[[route.rules]]
+inbound = "i0"
+network = "tcp"
+target = { host = "example.test", port = 443 }
+outbound = "o1"
+
+[[route.rules]]
+network = "udp"
+target = { host = "192.0.2.1", port = 53 }
+outbound = "o2"
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="

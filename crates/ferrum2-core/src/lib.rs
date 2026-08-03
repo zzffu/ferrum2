@@ -164,6 +164,122 @@ impl fmt::Display for TargetAddrError {
 
 impl Error for TargetAddrError {}
 
+/// Runtime-neutral, total first-match routing.
+pub mod route {
+    use super::{TargetAddr, TargetHost};
+
+    /// Maximum number of rules retained by one route table.
+    pub const MAX_ROUTE_RULES: usize = 64;
+
+    /// Transport network presented to route selection.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Network {
+        Tcp,
+        Udp,
+    }
+
+    /// One compiled route rule with resolved inbound and outbound identities.
+    pub struct RouteRule {
+        inbound: Option<usize>,
+        network: Option<Network>,
+        target: Option<TargetAddr>,
+        outbound: usize,
+    }
+
+    impl RouteRule {
+        pub fn new(
+            inbound: Option<usize>,
+            network: Option<Network>,
+            target: Option<TargetAddr>,
+            outbound: usize,
+        ) -> Self {
+            Self {
+                inbound,
+                network,
+                target,
+                outbound,
+            }
+        }
+
+        fn matches(&self, inbound: usize, network: Network, target: &TargetAddr) -> bool {
+            self.inbound.is_none_or(|expected| expected == inbound)
+                && self.network.is_none_or(|expected| expected == network)
+                && self.target.as_ref().is_none_or(|expected| {
+                    expected.port == target.port
+                        && match (&expected.host, &target.host) {
+                            (TargetHost::Ip(expected), TargetHost::Ip(actual)) => {
+                                expected == actual
+                            }
+                            (TargetHost::Domain(expected), TargetHost::Domain(actual)) => {
+                                expected.as_str().eq_ignore_ascii_case(actual.as_str())
+                            }
+                            _ => false,
+                        }
+                })
+        }
+    }
+
+    /// A compiled route table whose selection always returns an outbound identity.
+    pub struct RouteTable {
+        rules: Vec<RouteRule>,
+        final_outbound: usize,
+        routed: bool,
+    }
+
+    impl RouteTable {
+        /// Compiles static inbound bindings into the shared selection path.
+        pub fn static_bindings(bindings: Vec<usize>) -> Option<Self> {
+            let final_outbound = bindings.first().copied()?;
+            if bindings.len() > MAX_ROUTE_RULES {
+                return None;
+            }
+            let rules = bindings
+                .into_iter()
+                .enumerate()
+                .map(|(inbound, outbound)| RouteRule::new(Some(inbound), None, None, outbound))
+                .collect();
+            Some(Self {
+                rules,
+                final_outbound,
+                routed: false,
+            })
+        }
+
+        /// Stores an already validated routed table and its mandatory final outbound.
+        pub fn routed(rules: Vec<RouteRule>, final_outbound: usize) -> Option<Self> {
+            (rules.len() <= MAX_ROUTE_RULES).then_some(Self {
+                rules,
+                final_outbound,
+                routed: true,
+            })
+        }
+
+        /// Returns whether this table came from an explicit routed document.
+        pub const fn is_routed(&self) -> bool {
+            self.routed
+        }
+
+        /// Returns the compiled no-match outbound identity.
+        pub const fn final_outbound(&self) -> usize {
+            self.final_outbound
+        }
+
+        /// Selects the first matching rule or the mandatory final outbound.
+        pub fn select(&self, inbound: usize, network: Network, target: &TargetAddr) -> usize {
+            self.rules
+                .iter()
+                .find(|rule| rule.matches(inbound, network, target))
+                .map_or(self.final_outbound, |rule| rule.outbound)
+        }
+    }
+
+    impl std::fmt::Debug for RouteTable {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("RouteTable([redacted])")
+        }
+    }
+}
+
 /// A runtime-neutral datagram with a validated target and owned payload.
 ///
 /// Construction applies the caller's complete payload bound before the value
@@ -426,6 +542,53 @@ mod tests {
         let rendered = format!("{target:?}");
         assert!(!rendered.contains("192.0.2.9"));
         assert!(!rendered.contains("443"));
+    }
+
+    #[test]
+    fn route_table_is_ordered_conjunctive_exact_and_total() {
+        use route::{MAX_ROUTE_RULES, Network, RouteRule, RouteTable};
+
+        let domain = TargetAddr::domain("example.test", 443).expect("domain");
+        let ipv4 =
+            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 9), 443)).expect("IPv4");
+        let ipv6 = TargetAddr::ip(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::LOCALHOST,
+            443,
+            0,
+            0,
+        )))
+        .expect("IPv6");
+        let route = RouteTable::routed(
+            vec![
+                RouteRule::new(Some(0), Some(Network::Tcp), Some(domain.clone()), 1),
+                RouteRule::new(Some(0), None, None, 2),
+                RouteRule::new(None, Some(Network::Udp), Some(ipv4.clone()), 3),
+                RouteRule::new(None, None, Some(ipv6.clone()), 4),
+            ],
+            5,
+        )
+        .expect("bounded route");
+        #[rustfmt::skip]
+        let cases = [
+            (0, Network::Tcp, domain.clone(), 1),
+            (0, Network::Tcp, TargetAddr::domain("EXAMPLE.TEST", 443).expect("case"), 1),
+            (0, Network::Udp, domain.clone(), 2),
+            (1, Network::Udp, ipv4, 3),
+            (1, Network::Tcp, ipv6, 4),
+            (1, Network::Tcp, TargetAddr::domain("example.test.", 443).expect("dot"), 5),
+            (1, Network::Tcp, TargetAddr::domain("example.test", 80).expect("port"), 5),
+        ];
+        assert!(route.is_routed());
+        for (inbound, network, target, expected) in cases {
+            assert_eq!(route.select(inbound, network, &target), expected);
+        }
+        let static_route = RouteTable::static_bindings(vec![7, 8]).expect("static route");
+        assert!(!static_route.is_routed());
+        assert_eq!(static_route.select(1, Network::Udp, &domain), 8);
+        assert_eq!(format!("{route:?}"), "RouteTable([redacted])");
+        #[rustfmt::skip]
+        let oversized = (0..=MAX_ROUTE_RULES).map(|_| RouteRule::new(Some(0), None, None, 0)).collect();
+        assert!(RouteTable::routed(oversized, 0).is_none());
     }
 
     #[test]
