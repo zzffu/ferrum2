@@ -1,6 +1,6 @@
 # M6/M7 test-budget 门禁根因与治理提案
 
-- **Status:** accepted；M7-T05 implements the approved control-plane change。
+- **Status:** implemented by M7-T05 exact `9baba260dde2adefb33a927787ba556299b81bcd`。
 - **Scope:** 解释 M6、M7 连续出现的 Budget 阻塞，并给出下一张 control-plane ticket 的最小契约。
 - **Non-goal:** 不把 M7 当前超限追认为 PASS，不删除/压缩独立测试，不用无意义产品代码换预算。
 

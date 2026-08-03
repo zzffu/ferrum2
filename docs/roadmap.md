@@ -769,8 +769,8 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   - M7-T02：server shared-state TCP/UDP/direct multi-root transaction，依赖T01，`done`；
   - M7-T03：client SOCKS/Shadowsocks static multi-root composition，依赖T02，`done`；
   - M7-T04：real-process、三平台、interop与exact-SHA qualification，依赖T03，`done`；
-  - M7-T05：schema 2 milestone test envelope与独立Budget job，依赖T04，`active`；
-  - M7-T06：删除M6/M7引入的rustfmt skips，依赖T05，`ready`。
+  - M7-T05：schema 2 milestone test envelope与独立Budget job，依赖T04，`done`；
+  - M7-T06：删除M6/M7引入的rustfmt skips，依赖T05，`active`。
 
   ```text
   M7-T01 config -> M7-T02 server risk -> M7-T03 client -> M7-T04 qualification
@@ -783,13 +783,14 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 - **Integrated commit:** M7-T01 exact `f6ee43fa766dd326d33ba140a273b7df201749c1`；M7-T02 exact
   `b864a40a5ada975c09c5b95a1373bd3c15373bdf`；M7-T03 exact
   `b3f7ff8e6dad22d37f8fb95bc42c7e83c6834c72`；M7-T04/final qualification exact
-  `953689ad2c9984a317f617e26444db7aa173513a`。
+  `953689ad2c9984a317f617e26444db7aa173513a`；M7-T05 control exact
+  `9baba260dde2adefb33a927787ba556299b81bcd`。
 - **Open blockers and risks:** run
   [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)在同一exact
   SHA通过Full、MSRV、三平台和interop TCP/UDP各`12/12`+cleanup。Quality仅在Full成功后
   被`ratio_ceiling_exceeded`置为failure；Budget按用户waiver记录且不得称PASS，performance
   不等待、不计入。用户已授权实施schema v2 milestone envelope、CI解耦和M6/M7 rustfmt-skip
-  清理；M7恢复`executing`且仍不close。Single non-force push已消费；尚未授权new push、rerun、
+  清理；T05完成且T06 active，M7仍为`executing`且不close。Single non-force push已消费；尚未授权new push、rerun、
   PR、tag、release或publication。
 
 ## 决策登记

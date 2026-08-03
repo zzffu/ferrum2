@@ -1,7 +1,7 @@
 ---
 id: M7-T05
 milestone: M7
-status: active
+status: done
 depends_on: [M7-T04]
 owns:
   - scripts/test-budget.sh
@@ -27,15 +27,15 @@ second policy file。
 
 ## Acceptance
 
-- [ ] The policy binds M7 to exact base `953689ad2c9984a317f617e26444db7aa173513a` at
+- [x] The policy binds M7 to exact base `953689ad2c9984a317f617e26444db7aa173513a` at
       code/tests `15529/24619` and admits exactly `864` planned test lines for T06。
-- [ ] Equality passes、`+1` blocks、code padding cannot change admission，and ticket growth over
+- [x] Equality passes、`+1` blocks、code padding cannot change admission，and ticket growth over
       `120` produces a nonblocking warning。
-- [ ] Wrong base counts、stale base、malformed schema、mixed control commits and same-milestone
+- [x] Wrong base counts、stale base、malformed schema、mixed control commits and same-milestone
       envelope increases fail closed；a new milestone policy requires a Rust-clean prefix from base。
-- [ ] Quality always reaches Full/focused markers independently；the separate Budget job emits its
+- [x] Quality always reaches Full/focused markers independently；the separate Budget job emits its
       own marker and remains required by final qualification。
-- [ ] The obsolete ratio、ratchet and `PASS_HOLD/PASS_ADVANCE` machinery is removed；focused and
+- [x] The obsolete ratio、ratchet and `PASS_HOLD/PASS_ADVANCE` machinery is removed；focused and
       repository validation pass。
 
 ## Validation
@@ -55,6 +55,10 @@ increase negatives；they are not retained。
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: initial control `839fb92380c44be1f8ff0f0d3bb99eae4a07249c`；bounded rename
+  repair/final exact `9baba260dde2adefb33a927787ba556299b81bcd`。
+- Review: initial QA `PASS_WITH_NOTES`；Architect blocked `ARCH-M7T05-001` because rename folding
+  could hide a removed Rust path。Targeted Architect and QA both returned PASS after the repair。
+- Notes: exact verify、ticket、milestone、CI、self-test、YAML isolation、format and diff gates PASS。
+  Six policy negatives passed；the rename RED incorrectly admitted R100 `rs→md` at `24543` tests，
+  while final staged/ticket/CI probes blocked `3/3` with `control_plane_changed`。

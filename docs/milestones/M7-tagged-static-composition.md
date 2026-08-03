@@ -64,8 +64,8 @@
 | M7-T02 | Compose server multi-listener TCP/UDP/direct roots with shared state and atomic rollback | M7-T01 | done |
 | M7-T03 | Compose client multi-listener SOCKS/Shadowsocks roots with shared bounds and static mapping | M7-T02 | done |
 | M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | done |
-| M7-T05 | Replace the broken permanent ratio with a schema 2 milestone test envelope | M7-T04 | active |
-| M7-T06 | Remove every M6/M7 rustfmt skip and accept standard formatting | M7-T05 | ready |
+| M7-T05 | Replace the broken permanent ratio with a schema 2 milestone test envelope | M7-T04 | done |
+| M7-T06 | Remove every M6/M7 rustfmt skip and accept standard formatting | M7-T05 | active |
 
 ```text
 M7-T01 config graph
@@ -88,6 +88,6 @@ Product、review and hosted qualification completed on exact
 1.85、Windows/GNU/musl and TCP/UDP `12/12`+cleanup succeeded。The quality job failed only at
 `ratio_ceiling_exceeded` after Full succeeded；this remains a recorded waiver，not PASS。
 Performance was not awaited or credited。The user authorized the recorded schema 2 envelope and
-removal of M6/M7 `rustfmt::skip` attributes；T05 is the active control-only frontier and T06 follows
-from its exact integration SHA。M7 is executing again and must not close；the prior single push is
+removal of M6/M7 `rustfmt::skip` attributes。T05 final exact `9baba260` passed targeted Architect/QA
+review after closing `ARCH-M7T05-001` and is integrated；T06 is the only active frontier。M7 must not close；the prior single push is
 consumed，and no new push、rerun、PR、tag、release or publication is authorized。

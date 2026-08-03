@@ -25,7 +25,8 @@
   non-force push is consumed；no rerun、second push、PR、tag、release or publication occurred or
   is authorized。Per user direction M7 is not closed。The M6/M7 policy solution in
   [`M7-test-budget-gate-analysis.md`](research/M7-test-budget-gate-analysis.md) is now authorized：
-  T05 implements schema 2 and CI isolation，then T06 removes the M6/M7 rustfmt skips。No new remote
+  T05 final exact `9baba260` implemented schema 2 and CI isolation after targeted Architect/QA PASS；
+  T06 is active to remove the M6/M7 rustfmt skips。No new remote
   action is authorized。
 
 ## M6 closed 状态
