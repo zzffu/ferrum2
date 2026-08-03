@@ -771,11 +771,13 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   - M7-T04：real-process、三平台、interop与exact-SHA qualification，依赖T03，`done`；
   - M7-T05：schema 2 milestone test envelope与独立Budget job，依赖T04，`done`；
   - M7-T06：删除M6/M7引入的rustfmt skips，依赖T05，`done`；
-  - M7-T07：消除zero-timeout qualification test竞态，依赖T06，`done`。
+  - M7-T07：消除zero-timeout qualification test竞态，依赖T06，`done`；
+  - M7-T08：消除Linux UDP owner-reap测试调度假设，依赖T07，`active`。
 
   ```text
   M7-T01 config -> M7-T02 server risk -> M7-T03 client -> M7-T04 qualification
     -> M7-T05 budget v2 -> M7-T06 standard formatting -> M7-T07 deterministic gate test
+    -> M7-T08 deterministic UDP owner reap
   ```
 - **Deferred/out of scope:** dynamic routing、DNS、multi-upstream groups/load balancing/
   fallback/chaining、per-entry PSK/method、SIP023/multi-user、新adapter kind、Tailscale
@@ -797,9 +799,12 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   skip。T07 candidate以`4+/4-`关闭Full发现的zero-timeout测试竞态，base/candidate stress为
   `14/2000`与`0/2000`；两份独立xhigh分析支持control-only补票，targeted QA已关闭
   `QA-M7T07-001`。Accepted integration `cb69992`的serial Full、100+ lifecycle、MSRV、Clippy、
-  build、docs、schema 2 Budget、stress和diff均PASS。M7保持`validating`且不close。用户现授权
-  将包含本授权记录的exact descendant以一次non-force `master:master` push触发same-SHA hosted
-  四组，并只读监控automatic run；performance仍不计入。未授权rerun、second push、PR、tag、
+  build、docs、schema 2 Budget、stress和diff均PASS。Exact descendant `a2b6951`的一次non-force
+  push已消费；run [`30808225939/1`](https://github.com/zzffu/ferrum2/actions/runs/30808225939)
+  的MSRV、三平台、interop和Budget均success，quality在Full内因Linux
+  `shared_manager_couples_session_byte_and_direct_owner_capacity`未回收owner而failure。Exact
+  Windows stress为`2000/2000`，Linux/WSL executable为`0/20`；T08是唯一active frontier。
+  M7保持`validating`且不close，performance仍不计入。未授权rerun、second push、PR、tag、
   release或publication。
 
 ## 决策登记

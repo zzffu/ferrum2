@@ -33,8 +33,13 @@
   frontier，and targeted QA closed `QA-M7T07-001`。That exact integration passed serial format、
   Clippy、bin build、workspace Full、100+ lifecycle、docs、Rust 1.85、ticket/milestone Budget、
   `0/2000` stress and diff checks。M7 remains validating。The user authorizes one non-force
-  `master:master` push of the exact authorization-record descendant and read-only monitoring of the
-  automatic run；performance is excluded。No rerun、second push or other publication is authorized。
+  `master:master` push of exact `a2b6951f0e6c398e4d7c8e7d47414f86cc24a333` was consumed。
+  Automatic run [`30808225939/1`](https://github.com/zzffu/ferrum2/actions/runs/30808225939)
+  passed MSRV、Windows/GNU/musl、interop and schema 2 Budget。Quality job `91668470588` alone
+  failed in Full at `udp_runtime.rs:613` because the Linux UDP owner-reap test did not return to
+  baseline；the exact Windows stress passed `2000/2000` while Linux/WSL failed `20/20`。M7-T08 is
+  the only active bounded repair。Performance is excluded；no rerun、second push or other
+  publication is authorized。
 
 ## M6 closed 状态
 

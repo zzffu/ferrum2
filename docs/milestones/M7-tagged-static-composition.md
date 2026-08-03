@@ -67,6 +67,7 @@
 | M7-T05 | Replace the broken permanent ratio with a schema 2 milestone test envelope | M7-T04 | done |
 | M7-T06 | Remove every M6/M7 rustfmt skip and accept standard formatting | M7-T05 | done |
 | M7-T07 | Make the zero-timeout qualification gate test deterministic | M7-T06 | done |
+| M7-T08 | Make the UDP owner-reap test deterministic on Linux | M7-T07 | active |
 
 ```text
 M7-T01 config graph
@@ -76,6 +77,7 @@ M7-T01 config graph
   -> M7-T05 budget control repair
   -> M7-T06 standard formatting
   -> M7-T07 deterministic qualification contract
+  -> M7-T08 deterministic UDP owner reap
 ```
 
 Tickets serialize because T02 establishes the concrete shared admission/runtime owner consumed by
@@ -96,8 +98,12 @@ candidate `ffcbccd` changed one test file `4+/4-` and passed `0/2000` stress、B
 review。After two independent xhigh analyses，control exact `cb69992` supplied the missing ticket and
 truthful frontier；targeted QA returned `PASS / CLOSED`。The accepted integration exact `cb69992`
 then passed serial format、Clippy、bin build、workspace Full、100+ lifecycle、docs、Rust 1.85、
-schema 2 ticket/milestone Budget、`0/2000` stress and diff checks。All local tickets are done，but M7
-remains validating and must not close until a same-SHA hosted run supplies the required four credited
-groups。The user now authorizes one non-force `master:master` push of the exact authorization-record
-descendant and read-only monitoring of its automatic run；performance remains excluded。No rerun、
-second push、PR、tag、release or publication is authorized。
+schema 2 ticket/milestone Budget、`0/2000` stress and diff checks。T01–T07 are done，but M7 remains
+validating and must not close until a same-SHA hosted run supplies the required four credited
+groups。The authorized exact descendant `a2b6951` was pushed once and automatic run
+[`30808225939/1`](https://github.com/zzffu/ferrum2/actions/runs/30808225939) passed MSRV、all three
+native cells、interop and Budget；quality alone failed in the Full step because Linux retained UDP
+test owners at `udp_runtime.rs:613`。The exact test passes Windows stress `2000/2000` but fails the
+Linux/WSL executable `20/20`，so M7-T08 is the only active drain frontier。Performance remains
+excluded。The push scope is consumed；no rerun、second push、PR、tag、release or publication is
+authorized。
