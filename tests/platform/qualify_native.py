@@ -295,13 +295,14 @@ def write_tagged_config(
     spec: BinarySpec,
     listens: tuple[int, int],
     servers: tuple[int, int] | None,
+    routed: bool = False,
 ) -> None:
     require((spec.role == "client") == (servers is not None), "tagged-config-role")
     inbounds = "\n\n".join(
         f'''[[inbounds]]
 tag = "in-{index}"
 listen = "127.0.0.1:{listen}"
-outbound = "out-{index}"'''
+''' + ("" if routed else f'outbound = "out-{index}"')
         for index, listen in enumerate(listens)
     )
     outbounds = "\n\n".join(
@@ -317,7 +318,20 @@ tag = "out-{index}"'''
 
 {outbounds}
 
-[shadowsocks]
+''' + ('''[route]
+final = "out-0"
+[[route.rules]]
+inbound = "in-0"
+network = "tcp"
+outbound = "out-0"
+[[route.rules]]
+network = "udp"
+outbound = "out-1"
+[[route.rules]]
+inbound = "in-0"
+outbound = "out-1"
+
+''' if routed else "") + f'''[shadowsocks]
 method = "2022-blake3-aes-128-gcm"
 psk = "{SYNTHETIC_PSK}"
 ''',
@@ -338,17 +352,18 @@ def assert_tagged_offline_config(spec: BinarySpec, directory: Path) -> None:
     )
     try:
         config = directory / f"{spec.name}-tagged-offline.toml"
-        write_tagged_config(config, spec, listens, servers)
-        result = bounded_run(
-            [str(spec.path), "--config", str(config), "--check-config"]
-        )
-        require(
-            result.returncode == 0
-            and result.stdout == b"configuration valid\n"
-            and result.stderr == b"",
-            "tagged-offline-config",
-        )
-        assert_no_connections(traps)
+        for routed in (False, True):
+            write_tagged_config(config, spec, listens, servers, routed)
+            result = bounded_run(
+                [str(spec.path), "--config", str(config), "--check-config"]
+            )
+            require(
+                result.returncode == 0
+                and result.stdout == b"configuration valid\n"
+                and result.stderr == b"",
+                "routed-offline-config" if routed else "tagged-offline-config",
+            )
+            assert_no_connections(traps)
     finally:
         for trap in traps:
             trap.close()
@@ -553,6 +568,43 @@ def wait_ready(process: subprocess.Popen[bytes], port: int) -> socket.socket:
     raise QualificationError("readiness-timeout")
 
 
+def assert_routed_smoke(specs: tuple[BinarySpec, BinarySpec], directory: Path) -> None:
+    client, server = specs
+    ports = reserve_ports(4); servers, clients = ports[:2], ports[2:]
+    configs = (directory / "route-client.toml", directory / "route-server.toml")
+    write_tagged_config(configs[0], client, clients, servers, True)
+    configs[0].write_text(configs[0].read_text() + "\n[udp]\n", encoding="utf-8")
+    write_tagged_config(configs[1], server, servers, None, True)
+    tcp = tcp_listener(0); udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0)); udp.settimeout(5); live = []
+    try:
+        for spec, config, listens in ((server, configs[1], servers), (client, configs[0], clients)):
+            process, capture = spawn_live(spec, config); live.append((process, capture))
+            for listen in listens: wait_ready(process, listen).close()
+        target = (127, 0, 0, 1, *int(tcp.getsockname()[1]).to_bytes(2, "big"))
+        socks = socket.create_connection(("127.0.0.1", clients[0]), timeout=5)
+        stream = socks.makefile("rwb"); stream.write(bytes((5, 1, 0))); stream.flush()
+        require(stream.read(2) == bytes((5, 0)), "route-tcp-method")
+        stream.write(bytes((5, 1, 0, 1, *target))); stream.flush()
+        require(stream.read(10)[:2] == bytes((5, 0)), "route-tcp-connect")
+        stream.write(b"route-tcp"); stream.flush(); peer, _ = tcp.accept()
+        require(peer.recv(9) == b"route-tcp", "route-tcp-forward")
+        peer.sendall(b"route-tcp"); require(stream.read(9) == b"route-tcp", "route-tcp-reverse")
+        peer.close(); stream.close(); socks.close()
+        control = socket.create_connection(("127.0.0.1", clients[0]), timeout=5)
+        stream = control.makefile("rwb"); stream.write(bytes((5, 1, 0, 5, 3, 0, 1, 0, 0, 0, 0, 0, 0))); stream.flush()
+        require(stream.read(2) == bytes((5, 0)), "route-udp-method"); reply = stream.read(10)
+        app = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); app.settimeout(5)
+        target = (127, 0, 0, 1, *int(udp.getsockname()[1]).to_bytes(2, "big")); packet = bytes((0, 0, 0, 1, *target)) + b"route-udp"
+        app.sendto(packet, ("127.0.0.1", int.from_bytes(reply[8:10], "big")))
+        payload, peer = udp.recvfrom(64); udp.sendto(payload, peer)
+        require(app.recv(64) == packet, "route-udp-round-trip"); app.close(); stream.close(); control.close()
+    finally:
+        tcp.close(); udp.close()
+        for process, capture in reversed(live): kill_and_reap(process); require(SYNTHETIC_PSK.encode() not in b"".join(finish_capture(capture)), "secret-in-process-output")
+    assert_tagged_rebindable(client, clients); assert_tagged_rebindable(server, servers)
+
+
 def send_genuine_signal(process: subprocess.Popen[bytes]) -> None:
     if sys.platform == "win32":
         process.send_signal(signal.CTRL_BREAK_EVENT)
@@ -659,7 +711,8 @@ def lifecycle_line(context: HostedContext, spec: BinarySpec) -> str:
         "m3_native_lifecycle_completion status=PASS "
         f"profile={context.profile} target={context.target} binary={spec.name} "
         "help=PASS version=PASS valid_config=PASS invalid_config=PASS "
-        "tagged_config=PASS startup_rollback=PASS tagged_second_bind_rollback=PASS "
+        "tagged_config=PASS routed_config=PASS route_tcp=PASS route_udp=PASS "
+        "startup_rollback=PASS tagged_second_bind_rollback=PASS "
         "tagged_rebind=PASS graceful_signal=PASS forced_signal=PASS "
         "bounded_exit=PASS rebind=PASS cleanup=PASS "
         f"sha={context.sha} run_id={context.run_id} run_attempt={context.run_attempt}"
@@ -692,6 +745,7 @@ def main() -> int:
                 assert_signal_lifecycle(spec, directory, forced=False)
                 assert_signal_lifecycle(spec, directory, forced=True)
                 lines.extend((artifact_line(context, spec), lifecycle_line(context, spec)))
+            assert_routed_smoke(specs, directory)
         require(len(lines) == 4 and len(set(lines)) == 4, "duplicate-platform-evidence")
         for line in lines:
             print(line, flush=True)

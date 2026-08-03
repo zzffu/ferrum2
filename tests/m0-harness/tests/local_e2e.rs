@@ -8,10 +8,11 @@ use std::thread;
 use std::time::Duration;
 
 use local_support::{
-    ChildGuard, TCP_METHOD_CONFIGS, bind_loopback_listener, rewrite_config_method, unused_loopback,
-    unused_tcp_udp_loopback, wait_for_listener, wait_for_tcp_udp_bound, write_client_config,
-    write_client_config_with_psk, write_tagged_client_config, write_tagged_server_config,
-    write_tcp_only_server_config, write_tcp_only_server_config_with_psk,
+    ChildGuard, TCP_METHOD_CONFIGS, bind_loopback_listener, rewrite_config_method,
+    route_tagged_config, unused_loopback, unused_tcp_udp_loopback, wait_for_listener,
+    wait_for_tcp_udp_bound, write_client_config, write_client_config_with_psk,
+    write_tagged_client_config, write_tagged_server_config, write_tcp_only_server_config,
+    write_tcp_only_server_config_with_psk,
 };
 
 struct EchoWorker {
@@ -502,6 +503,11 @@ fn tagged_tcp_shared_outbound_no_fallback_and_aggregate_admission_are_process_vi
         false,
     )
     .expect("no-fallback client");
+    route_tagged_config(
+        &client_config,
+        "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-b\"\nnetwork = \"tcp\"\noutbound = \"out-1\"\n[[route.rules]]\ninbound = \"in-b\"\noutbound = \"out-0\"\n[[route.rules]]\nnetwork = \"udp\"\noutbound = \"out-0\"\n",
+    )
+    .expect("routed no-fallback client");
     let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
     wait_for_listener(&mut server, live_server);
     let mut client = ChildGuard::spawn("ferrum2-client", &client_config);

@@ -11,10 +11,10 @@ use std::thread;
 use std::time::Duration;
 
 use local_support::{
-    ChildGuard, TCP_METHOD_CONFIGS, bind_loopback_listener, rewrite_config_method, unused_loopback,
-    unused_tcp_udp_loopback, wait_for_listener, wait_for_metrics, wait_for_tcp_udp_bound,
-    write_client_config, write_server_config, write_tagged_client_config,
-    write_tagged_server_config, write_udp_client_config,
+    ChildGuard, TCP_METHOD_CONFIGS, bind_loopback_listener, rewrite_config_method,
+    route_tagged_config, unused_loopback, unused_tcp_udp_loopback, wait_for_listener,
+    wait_for_metrics, wait_for_tcp_udp_bound, write_client_config, write_server_config,
+    write_tagged_client_config, write_tagged_server_config, write_udp_client_config,
 };
 use socket2::SockRef;
 
@@ -594,7 +594,9 @@ fn three_methods_compose_ipv4_ipv6_and_domain_through_the_real_relays() {
 
 #[test]
 fn one_association_alternates_two_targets_and_preserves_response_sources() {
-    let stack = Stack::start(TCP_METHOD_CONFIGS[0]);
+    let directory = tempfile::tempdir().expect("routed association tempdir");
+    let servers = [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()];
+    let clients = [unused_loopback(), unused_loopback()];
     let first_echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("first echo bind");
     let second_echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("second echo bind");
     for echo in [&first_echo, &second_echo] {
@@ -603,20 +605,57 @@ fn one_association_alternates_two_targets_and_preserves_response_sources() {
     }
     let first_target = target_wire(first_echo.local_addr().expect("first echo address"));
     let second_address = second_echo.local_addr().expect("second echo address");
-    let second_target = domain_target_wire("127.0.0.1", second_address.port());
+    let second_target = domain_target_wire("localhost", second_address.port());
     let second_response = target_wire(second_address);
     let first_worker = echo_datagrams(first_echo, 2);
     let second_worker = echo_datagrams(second_echo, 1);
-
-    let (_control, application, relay) = udp_associate(stack.client_address, false);
-
-    for (request, response, payload) in [
-        (&first_target, &first_target, b"first-a".as_slice()),
-        (&second_target, &second_response, b"second".as_slice()),
-        (&first_target, &first_target, b"first-b".as_slice()),
-    ] {
-        round_trip(&application, relay, request, response, payload);
+    let configs = [0, 1].map(|index| {
+        let path = directory.path().join(index.to_string());
+        std::fs::create_dir(&path).expect("routed server directory");
+        write_server_config(&path, servers[index], None).expect("routed server config")
+    });
+    let client_config =
+        write_tagged_client_config(directory.path(), clients, servers, [0, 1], true)
+            .expect("routed client config");
+    route_tagged_config(&client_config, &format!(
+        "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-a\"\nnetwork = \"udp\"\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-1\"\n[[route.rules]]\nnetwork = \"udp\"\noutbound = \"out-0\"\n[[route.rules]]\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-0\"\n",
+        second_address.port(), second_address.port()
+    )).expect("routed client rules");
+    let mut server_a = ChildGuard::spawn("ferrum2-server", &configs[0]);
+    let mut server_b = ChildGuard::spawn("ferrum2-server", &configs[1]);
+    wait_for_tcp_udp_bound(&mut server_a, servers[0]);
+    wait_for_tcp_udp_bound(&mut server_b, servers[1]);
+    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+    for address in clients {
+        wait_for_listener(&mut client, address);
     }
+
+    let (_control, application, relay) = udp_associate(clients[0], false);
+
+    round_trip(
+        &application,
+        relay,
+        &first_target,
+        &first_target,
+        b"first-a",
+    );
+    server_a.terminate_and_reap(Duration::from_secs(5));
+    round_trip(
+        &application,
+        relay,
+        &second_target,
+        &second_response,
+        b"second",
+    );
+    server_a = ChildGuard::spawn("ferrum2-server", &configs[0]);
+    wait_for_tcp_udp_bound(&mut server_a, servers[0]);
+    round_trip(
+        &application,
+        relay,
+        &first_target,
+        &first_target,
+        b"first-b",
+    );
     first_worker.join().expect("first echo worker");
     second_worker.join().expect("second echo worker");
 }

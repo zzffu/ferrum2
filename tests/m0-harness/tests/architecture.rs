@@ -357,6 +357,37 @@ fn current_target_declaration_matching_accepts_crlf() {
 #[test]
 fn tagged_composition_stays_out_of_core_and_protocol_modules() {
     let root = workspace_root();
+    let core =
+        fs::read_to_string(root.join("crates/ferrum2-core/src/lib.rs")).expect("core source");
+    assert_eq!(
+        core.matches("pub mod route").count(),
+        1,
+        "one core route module"
+    );
+    for member in ["ferrum2-shadowsocks", "ferrum2-socks5", "ferrum2-runtime"] {
+        for path in rust_sources(&root.join("crates").join(member)) {
+            let source = fs::read_to_string(path).expect("policy-free source");
+            for forbidden in ["RouteRule", "RouteTable", "route::", "pub trait Route"] {
+                assert!(!source.contains(forbidden), "{member} owns routing policy");
+            }
+        }
+    }
+    for member in [
+        "bins/ferrum2-client",
+        "bins/ferrum2-server",
+        "crates/ferrum2-observability",
+    ] {
+        for path in rust_sources(&root.join(member)) {
+            let source = fs::read_to_string(path).expect("observable source");
+            for field in ["tag", "target", "destination", "route"] {
+                assert!(
+                    !source.contains(&format!("{field} = %"))
+                        && !source.contains(&format!("{field} = ?")),
+                    "{member} exposes route identity"
+                );
+            }
+        }
+    }
     for member in [
         "crates/ferrum2-core",
         "crates/ferrum2-shadowsocks",
@@ -376,6 +407,8 @@ fn tagged_composition_stays_out_of_core_and_protocol_modules() {
             let source = fs::read_to_string(&path).expect("deep-module source");
             for forbidden in [
                 "pub trait Endpoint",
+                "RouteFactory",
+                "RouteRegistry",
                 "AdapterRegistry",
                 "ServiceRegistry",
                 "adapter_registry",

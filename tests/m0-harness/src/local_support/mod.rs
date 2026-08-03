@@ -886,6 +886,13 @@ pub fn write_tagged_server_config(
     Ok(path)
 }
 
+pub fn route_tagged_config(path: &Path, route: &str) -> io::Result<()> {
+    let config = fs::read_to_string(path)?
+        .replace("outbound = \"out-0\"\n", "")
+        .replace("outbound = \"out-1\"\n", "");
+    fs::write(path, config + route)
+}
+
 pub fn write_client_config_with_psk(
     directory: &Path,
     listen: SocketAddrV4,
