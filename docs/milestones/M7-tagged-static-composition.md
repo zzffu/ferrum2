@@ -66,7 +66,7 @@
 | M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | done |
 | M7-T05 | Replace the broken permanent ratio with a schema 2 milestone test envelope | M7-T04 | done |
 | M7-T06 | Remove every M6/M7 rustfmt skip and accept standard formatting | M7-T05 | done |
-| M7-T07 | Make the zero-timeout qualification gate test deterministic | M7-T06 | active |
+| M7-T07 | Make the zero-timeout qualification gate test deterministic | M7-T06 | done |
 
 ```text
 M7-T01 config graph
@@ -93,7 +93,10 @@ Performance was not awaited or credited。T05 final exact `9baba260` is integrat
 `ARCH-M7T05-001`。T06 exact `92d849e` removed all 76 M6/M7 skips、kept the one M1 skip and passed
 Architect/QA review；it is integrated。Final local Full then exposed a zero-timeout test race；T07
 candidate `ffcbccd` changed one test file `4+/4-` and passed `0/2000` stress、Budget and Architect
-review。QA technical checks passed but raised `QA-M7T07-001` because the repository-native ticket
-was absent；this control-only change supplies that contract before targeted re-review and integration。
-M7 remains validating and must not close；the prior single push is consumed，and no new push、rerun、
-PR、tag、release or publication is authorized。
+review。After two independent xhigh analyses，control exact `cb69992` supplied the missing ticket and
+truthful frontier；targeted QA returned `PASS / CLOSED`。The accepted integration exact `cb69992`
+then passed serial format、Clippy、bin build、workspace Full、100+ lifecycle、docs、Rust 1.85、
+schema 2 ticket/milestone Budget、`0/2000` stress and diff checks。All local tickets are done，but M7
+remains validating and must not close until a separately authorized same-SHA hosted run supplies the
+required four credited groups。The prior single push is consumed；no new push、rerun、PR、tag、
+release or publication is authorized。

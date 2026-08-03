@@ -1,7 +1,7 @@
 ---
 id: M7-T06
 milestone: M7
-status: active
+status: done
 depends_on: [M7-T05]
 owns:
   - bins/ferrum2-client/src/run.rs
@@ -25,12 +25,12 @@ rustfmt output without changing test behavior。Keep the one M1-owned skip in
 
 ## Acceptance
 
-- [ ] All 76 attributes introduced by M6/M7 commits are absent and the M1 attribute remains exact。
-- [ ] Only the eight owned Rust files receive formatting changes；no assertion、fixture value、test
+- [x] All 76 attributes introduced by M6/M7 commits are absent and the M1 attribute remains exact。
+- [x] Only the eight owned Rust files receive formatting changes；no assertion、fixture value、test
       selection or product behavior changes。
-- [ ] Pinned rustloc reports code/tests `15529/25483`，exact schema 2 envelope equality PASS and a
+- [x] Pinned rustloc reports code/tests `15529/25483`，exact schema 2 envelope equality PASS and a
       nonblocking ticket warning。
-- [ ] Focused suites、Full、Rust 1.85、Clippy、rustfmt and diff checks pass。
+- [x] Focused suites、Full、Rust 1.85、Clippy、rustfmt and diff checks pass。
 
 ## Validation
 
@@ -46,6 +46,9 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `92d849ecd9c21bc4a3fdaf37aa826a32470f4504`，parent `dc08f1c`。
+- Review: Architect `PASS`；QA `PASS_WITH_NOTES` with no blocker、major or minor finding。
+- Notes: exactly eight files、`76` removals and one retained M1 skip (`2d4cb763`)。Reformatting was
+  independently reconstructed from every parent blob and matched `8/8`。Focused、format、Clippy、
+  build、Full rerun、100+ lifecycle、docs、MSRV、Budget and diff gates passed。The first Full run
+  exposed an unrelated zero-timeout assertion race，which M7-T07 repaired without changing counts。
