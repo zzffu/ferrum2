@@ -922,11 +922,6 @@ async fn relay_udp_association<IO>(
                 else {
                     return;
                 };
-                let payload = decoded.payload().into();
-                if activate_udp_leg(prepared, context, server).is_err() {
-                    record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
-                    return;
-                }
                 let reservation = match reserve_application_datagram(prepared, payload_len) {
                     Ok(reservation) => reservation,
                     Err(error) => {
@@ -936,6 +931,11 @@ async fn relay_udp_association<IO>(
                         return;
                     }
                 };
+                let payload = decoded.payload().into();
+                if activate_udp_leg(prepared, context, server).is_err() {
+                    record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
+                    return;
+                }
                 let datagram = Datagram::new(target, payload, payload_len)
                     .expect("validated borrowed SOCKS payload");
                 let first = prepared.pending_session.is_some();
@@ -2380,6 +2380,7 @@ mod tests {
         control: SocksStream<tokio::io::DuplexStream>,
         context: Arc<ClientContext>,
         routing: Arc<ClientRouting>,
+        inbound: usize,
     ) -> RunningUdpRelay {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -2420,7 +2421,7 @@ mod tests {
                         0,
                         &mut cancellation,
                         &context,
-                        (0, &routing),
+                        (inbound, &routing),
                     )
                     .await;
                     let _ = done_sender
@@ -2461,8 +2462,8 @@ mod tests {
         scratch: &mut UdpPacketScratch,
         payload: &[u8],
     ) -> SocketAddr {
-        let (peer, wire) =
-            receive_request_and_encode_response(socket, server, scratch, payload).await;
+        let (peer, wire, _) =
+            receive_request_and_encode_response(socket, server, scratch, payload, 0).await;
         socket
             .send_to(&wire, peer)
             .await
@@ -2475,7 +2476,8 @@ mod tests {
         server: &UdpServer,
         scratch: &mut UdpPacketScratch,
         payload: &[u8],
-    ) -> (SocketAddr, Vec<u8>) {
+        advance: u64,
+    ) -> (SocketAddr, Vec<u8>, Vec<u8>) {
         let mut wire = [0; MAX_UDP_WIRE_LEN];
         let (length, peer) =
             tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut wire))
@@ -2493,18 +2495,28 @@ mod tests {
             .commit_request(commit, peer, clock.monotonic_now(), &random)
             .expect("request commit");
         let response = test_datagram(target, payload);
-        let encoded = server
-            .encode_response(
-                accepted.capability(),
-                &clock,
-                &random,
-                &response,
-                0,
-                &mut wire,
-                scratch,
-            )
-            .expect("response encode");
-        (encoded.peer(), wire[..encoded.wire_len()].to_vec())
+        let mut first = Vec::new();
+        let mut last = Vec::new();
+        for index in 0..=advance {
+            let encoded = server
+                .encode_response(
+                    accepted.capability(),
+                    &clock,
+                    &random,
+                    &response,
+                    0,
+                    &mut wire,
+                    scratch,
+                )
+                .expect("response encode");
+            if index == 0 {
+                first = wire[..encoded.wire_len()].to_vec();
+            }
+            if index == advance {
+                last = wire[..encoded.wire_len()].to_vec();
+            }
+        }
+        (peer, first, last)
     }
 
     #[tokio::test]
@@ -2535,7 +2547,7 @@ mod tests {
             .collect();
         let rule = |index: usize| {
             ferrum2_core::route::RouteRule::new(
-                None,
+                Some(1),
                 Some(Network::Udp),
                 Some(targets[index].clone()),
                 index,
@@ -2548,7 +2560,7 @@ mod tests {
         let routing = Arc::new(ClientRouting {
             route: ferrum2_core::route::RouteTable::routed(
                 vec![rule(0), rule(1), rule(2), rule(3), rule(4)],
-                0,
+                5,
             )
             .expect("routes"),
             outbounds: vec![
@@ -2557,6 +2569,7 @@ mod tests {
                 outbound(servers[2]),
                 outbound(servers[0]),
                 outbound(servers[4]),
+                outbound(servers[3]),
             ],
         });
         let prepared =
@@ -2567,41 +2580,107 @@ mod tests {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 relay"),
         };
-        let upstream_client = SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::LOCALHOST,
-            prepared
-                .upstream
-                .local_addr()
-                .expect("upstream client")
-                .port(),
-        ));
         let handle = prepared.handle;
-        assert!(
-            context
-                .udp
-                .as_ref()
-                .expect("UDP")
-                .live_ids
-                .lock()
-                .expect("IDs")
-                .is_empty()
-        );
         let (association, peer) = parsed_udp_association().await;
         let running = start_udp_relay(
             prepared,
             association.control,
             Arc::clone(&context),
             Arc::clone(&routing),
+            1,
         )
         .await;
         drop(association.reply);
         let application = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("application");
+        while registry.snapshot().active_supervisor_children != 1 {
+            tokio::task::yield_now().await;
+        }
         let protocol_servers: Vec<UdpServer> = (0..5)
             .map(|_| UdpServer::new(&context.keys).expect("server protocol"))
             .collect();
-        let mut socks = [0; 128];
+        let udp = context.udp.as_ref().expect("UDP");
+        let state = || {
+            (
+                udp.manager.idle_deadline(handle).expect("deadline"),
+                udp.live_ids.lock().expect("IDs").len(),
+                registry.snapshot(),
+            )
+        };
+        macro_rules! reject {
+            ($direction:literal, $source:expr, $wire:expr, $peer:expr, $count:expr, $label:expr) => {{
+                let before = state();
+                $source.send_to($wire, $peer).await.expect($label);
+                wait_for_metric(&context.metrics, &format!(
+                    "ferrum2_udp_datagrams_total{{role=\"client\",direction=\"{}\",outcome=\"rejected\"}} {}",
+                    $direction, $count,
+                )).await;
+                assert_eq!(state(), before, "{} mutated state", $label);
+                for socket in [&application, &upstreams[4], &upstreams[3]] {
+                    let mut byte = [0];
+                    assert_eq!(socket.try_recv(&mut byte).expect_err($label).kind(), io::ErrorKind::WouldBlock);
+                }
+            }};
+        }
+        let application_wrong = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, 2), 0))
+            .await
+            .expect("wrong source");
+        let mut socks = vec![0; MAX_SOCKS_UDP_DATAGRAM_BYTES];
+        let valid = encode_udp_datagram(&targets[4], b"invalid", &mut socks).expect("request");
+
+        let request_limit =
+            composed_udp_request_limit(context.udp.as_ref().expect("UDP").method, 7);
+        for (index, label) in [
+            "wrong-source request",
+            "fragment request",
+            "over-bound request",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            socks[2] = u8::from(index == 1);
+            let length = if index == 2 {
+                encode_udp_datagram(&targets[4], &vec![0; request_limit + 1], &mut socks)
+                    .expect("SOCKS-valid over-bound request")
+            } else {
+                valid
+            };
+            let source = if index == 0 {
+                &application_wrong
+            } else {
+                &application
+            };
+            reject!(
+                "client_to_target",
+                source,
+                &socks[..length],
+                relay,
+                index + 1,
+                label
+            );
+        }
+        socks[2] = 0;
+
+        let budget = udp.manager.buffer_budget();
+        let mut saturation = Vec::new();
+        let mut available = ferrum2_runtime::MIN_UDP_MAX_BUFFERED_BYTES - budget.reserved_bytes();
+        while available != 0 {
+            let capacity = available.min(MAX_UDP_WIRE_LEN);
+            saturation.push(budget.reserve(capacity).expect("saturate byte budget"));
+            available -= capacity;
+        }
+        let valid = encode_udp_datagram(&targets[4], b"saturated", &mut socks).expect("request");
+        reject!(
+            "client_to_target",
+            &application,
+            &socks[..valid],
+            relay,
+            4,
+            "capacity rejection"
+        );
+        drop(saturation);
+
         let mut scratch: Vec<UdpPacketScratch> = (0..5).map(|_| UdpPacketScratch::new()).collect();
         for (index, target) in targets.iter().take(4).enumerate() {
             let length = encode_udp_datagram(target, &[index as u8], &mut socks).expect("request");
@@ -2629,72 +2708,63 @@ mod tests {
                 &[index as u8]
             );
         }
-        let udp = context.udp.as_ref().expect("UDP");
         assert_eq!(
             udp.live_ids.lock().expect("IDs").len(),
             3,
             "duplicate endpoint must share a leg"
         );
 
-        upstreams[4]
-            .send_to(b"inactive", upstream_client)
-            .await
-            .expect("inactive source");
-        upstreams[0]
-            .send_to(b"tampered", upstream_client)
-            .await
-            .expect("tampered source");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), application.recv(&mut socks))
+        for (count, (target, source, advance, pre_accept, restore, tamper, label)) in [
+            (0, 4, 0, false, true, false, "inactive response"),
+            (0, 0, 0, false, true, true, "tampered response"),
+            (1, 0, 0, false, true, false, "wrong-leg response"),
+            (1, 1, 0, true, false, false, "duplicate response"),
+            (2, 2, UDP_REPLAY_LAG + 1, true, false, false, "stale"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let length = encode_udp_datagram(&targets[target], label.as_bytes(), &mut socks)
+                .expect("request");
+            application
+                .send_to(&socks[..length], relay)
                 .await
-                .is_err()
-        );
-        assert_eq!(
-            udp.live_ids.lock().expect("IDs").len(),
-            3,
-            "unused endpoint activated"
-        );
-
-        let length = encode_udp_datagram(&targets[1], b"cross-leg", &mut socks).expect("request");
-        application
-            .send_to(&socks[..length], relay)
-            .await
-            .expect("send");
-        let (response_peer, response) = receive_request_and_encode_response(
-            &upstreams[1],
-            &protocol_servers[1],
-            &mut scratch[1],
-            b"bound",
-        )
-        .await;
-        let deadline = udp.manager.idle_deadline(handle).ok();
-        upstreams[0]
-            .send_to(&response, response_peer)
-            .await
-            .expect("wrong leg");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), application.recv(&mut socks))
-                .await
-                .is_err()
-        );
-        assert_eq!(udp.manager.idle_deadline(handle).ok(), deadline);
-        upstreams[1]
-            .send_to(&response, response_peer)
-            .await
-            .expect("correct leg");
-        application.recv(&mut socks).await.expect("bound response");
-        let committed_deadline = udp.manager.idle_deadline(handle).ok();
-        upstreams[1]
-            .send_to(&response, response_peer)
-            .await
-            .expect("duplicate");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), application.recv(&mut socks))
-                .await
-                .is_err()
-        );
-        assert_eq!(udp.manager.idle_deadline(handle).ok(), committed_deadline);
-        assert_eq!(registry.snapshot().udp_queued_datagrams, 0);
+                .expect("send");
+            let (peer, mut rejected, newest) = receive_request_and_encode_response(
+                &upstreams[target],
+                &protocol_servers[target],
+                &mut scratch[target],
+                label.as_bytes(),
+                advance,
+            )
+            .await;
+            if tamper {
+                rejected[0] ^= 1;
+            }
+            if pre_accept {
+                let accepted = if advance == 0 { &rejected } else { &newest };
+                upstreams[target]
+                    .send_to(accepted, peer)
+                    .await
+                    .expect("response");
+                application.recv(&mut socks).await.expect("response");
+            }
+            reject!(
+                "target_to_client",
+                &upstreams[source],
+                &rejected,
+                peer,
+                count + 1,
+                label
+            );
+            if restore {
+                upstreams[target]
+                    .send_to(&newest, peer)
+                    .await
+                    .expect("response");
+                application.recv(&mut socks).await.expect("response");
+            }
+        }
 
         drop(peer);
         finish_udp_relay(running).await;
@@ -2740,6 +2810,7 @@ mod tests {
                 association.control,
                 Arc::clone(&context),
                 Arc::new(test_routing(server_address)),
+                0,
             )
             .await;
             drop(association.reply);
@@ -2897,6 +2968,7 @@ mod tests {
                     association.control,
                     Arc::clone(&context),
                     Arc::new(test_routing(server_address)),
+                    0,
                 )
                 .await;
                 drop(association.reply);
