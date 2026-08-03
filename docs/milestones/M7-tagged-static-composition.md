@@ -1,6 +1,6 @@
 # M7 — 具名多 inbound/outbound 静态组合
 
-- **Status:** executing
+- **Status:** validating
 - **Baseline:** `302fd777f4da62a8c1d4d52d81502056f02089c8`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -65,7 +65,8 @@
 | M7-T03 | Compose client multi-listener SOCKS/Shadowsocks roots with shared bounds and static mapping | M7-T02 | done |
 | M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | done |
 | M7-T05 | Replace the broken permanent ratio with a schema 2 milestone test envelope | M7-T04 | done |
-| M7-T06 | Remove every M6/M7 rustfmt skip and accept standard formatting | M7-T05 | active |
+| M7-T06 | Remove every M6/M7 rustfmt skip and accept standard formatting | M7-T05 | done |
+| M7-T07 | Make the zero-timeout qualification gate test deterministic | M7-T06 | active |
 
 ```text
 M7-T01 config graph
@@ -74,6 +75,7 @@ M7-T01 config graph
   -> M7-T04 exact-SHA qualification
   -> M7-T05 budget control repair
   -> M7-T06 standard formatting
+  -> M7-T07 deterministic qualification contract
 ```
 
 Tickets serialize because T02 establishes the concrete shared admission/runtime owner consumed by
@@ -87,7 +89,11 @@ Product、review and hosted qualification completed on exact
 [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)：Full、Rust
 1.85、Windows/GNU/musl and TCP/UDP `12/12`+cleanup succeeded。The quality job failed only at
 `ratio_ceiling_exceeded` after Full succeeded；this remains a recorded waiver，not PASS。
-Performance was not awaited or credited。The user authorized the recorded schema 2 envelope and
-removal of M6/M7 `rustfmt::skip` attributes。T05 final exact `9baba260` passed targeted Architect/QA
-review after closing `ARCH-M7T05-001` and is integrated；T06 is the only active frontier。M7 must not close；the prior single push is
-consumed，and no new push、rerun、PR、tag、release or publication is authorized。
+Performance was not awaited or credited。T05 final exact `9baba260` is integrated after closing
+`ARCH-M7T05-001`。T06 exact `92d849e` removed all 76 M6/M7 skips、kept the one M1 skip and passed
+Architect/QA review；it is integrated。Final local Full then exposed a zero-timeout test race；T07
+candidate `ffcbccd` changed one test file `4+/4-` and passed `0/2000` stress、Budget and Architect
+review。QA technical checks passed but raised `QA-M7T07-001` because the repository-native ticket
+was absent；this control-only change supplies that contract before targeted re-review and integration。
+M7 remains validating and must not close；the prior single push is consumed，and no new push、rerun、
+PR、tag、release or publication is authorized。

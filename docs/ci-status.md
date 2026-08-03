@@ -1,6 +1,6 @@
 # CI 与验证状态
 
-## M7 executing 状态
+## M7 validating 状态
 
 - **Qualified exact SHA:** `953689ad2c9984a317f617e26444db7aa173513a`，tree
   `01594ef4efbd8e5bd242da6a5bda671989600c10`。Automatic push run
@@ -17,17 +17,20 @@
   udp_cleanup=PASS` with the same SHA/run/attempt。Quality job `91626060741` ran its
   authoritative Full step successfully，then failed only in the test-budget step；the focused
   IPv6 and completion-marker steps were consequently skipped。
-- **Budget truth:** exact Rust counts are code `15529`、tests `24619`、examples `132`、ratio
-  `1.585356`。The job recorded baseline PASS at `14173/20878/1.473083` and then
-  `BLOCKED reason=ratio_ceiling_exceeded`。The explicit T03/T04 waiver makes this nonblocking
-  for the credited M7-T04 outcome but does not make it a budget PASS or close evidence。
+- **Budget truth:** hosted exact `953689a` remains historical
+  `BLOCKED reason=ratio_ceiling_exceeded` and is not rewritten as PASS。T05 exact `9baba260`
+  replaced that broken permanent ratio with schema 2：base code/tests `15529/24619`，M7 envelope
+  `864`。T06 exact `92d849e` reaches code/tests/examples `15529/25483/132` and passes at equality；
+  T07 candidate `ffcbccd` is net zero and also passes with remaining `0`。
 - **Boundary:** performance was not awaited、credited or claimed。The authorized single
   non-force push is consumed；no rerun、second push、PR、tag、release or publication occurred or
   is authorized。Per user direction M7 is not closed。The M6/M7 policy solution in
-  [`M7-test-budget-gate-analysis.md`](research/M7-test-budget-gate-analysis.md) is now authorized：
-  T05 final exact `9baba260` implemented schema 2 and CI isolation after targeted Architect/QA PASS；
-  T06 is active to remove the M6/M7 rustfmt skips。No new remote
-  action is authorized。
+  [`M7-test-budget-gate-analysis.md`](research/M7-test-budget-gate-analysis.md) is implemented。
+  T06 exact `92d849e` removed 76 M6/M7 rustfmt skips、kept the one M1 skip and passed Architect/QA。
+  A first Full run then exposed a zero-timeout test race；T07 candidate `ffcbccd` changed one test
+  file `4+/4-` and moved the stress signal from `14/2000` failures to `0/2000`。Architect passed；
+  QA technical checks passed but `QA-M7T07-001` blocks until the T07 ticket/frontier is recorded
+  and targeted review closes it。No new remote action is authorized。
 
 ## M6 closed 状态
 

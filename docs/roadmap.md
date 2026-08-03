@@ -32,7 +32,7 @@ GitHub Actions run [`30765897553/1`](https://github.com/zzffu/ferrum2/actions/ru
 定义为M6 hosted成功；未等待或声称performance及其dependent aggregate通过。
 M7已在`master@302fd777f4da62a8c1d4d52d81502056f02089c8`规划为additive
 schema v1 tagged static composition，并从exact ticket base `96a088e227dcfe415985c3deb081c807fb5e7d90`
-进入`executing`；M7-T01～T03已集成，M7-T04 active，尚无M7资格或remote证据。
+进入`validating`；M7-T01～T06已集成，M7-T07为Full发现的单文件确定性修复，M7暂不关闭。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -745,7 +745,7 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 
 ## M7 — 具名多 inbound/outbound 静态组合
 
-- **Status:** executing
+- **Status:** validating
 - **Objective:** additive schema v1接受多个有界、具名concrete inbound/outbound；每个
   inbound在离线验证期exact解析一个outbound tag，两个binary复用同一个
   `ProcessSupervisor` transaction原子prepare/rollback，legacy单实例行为不变。
@@ -770,11 +770,12 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   - M7-T03：client SOCKS/Shadowsocks static multi-root composition，依赖T02，`done`；
   - M7-T04：real-process、三平台、interop与exact-SHA qualification，依赖T03，`done`；
   - M7-T05：schema 2 milestone test envelope与独立Budget job，依赖T04，`done`；
-  - M7-T06：删除M6/M7引入的rustfmt skips，依赖T05，`active`。
+  - M7-T06：删除M6/M7引入的rustfmt skips，依赖T05，`done`；
+  - M7-T07：消除zero-timeout qualification test竞态，依赖T06，`active`。
 
   ```text
   M7-T01 config -> M7-T02 server risk -> M7-T03 client -> M7-T04 qualification
-    -> M7-T05 budget v2 -> M7-T06 standard formatting
+    -> M7-T05 budget v2 -> M7-T06 standard formatting -> M7-T07 deterministic gate test
   ```
 - **Deferred/out of scope:** dynamic routing、DNS、multi-upstream groups/load balancing/
   fallback/chaining、per-entry PSK/method、SIP023/multi-user、新adapter kind、Tailscale
@@ -784,14 +785,18 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   `b864a40a5ada975c09c5b95a1373bd3c15373bdf`；M7-T03 exact
   `b3f7ff8e6dad22d37f8fb95bc42c7e83c6834c72`；M7-T04/final qualification exact
   `953689ad2c9984a317f617e26444db7aa173513a`；M7-T05 control exact
-  `9baba260dde2adefb33a927787ba556299b81bcd`。
+  `9baba260dde2adefb33a927787ba556299b81bcd`；M7-T06 exact
+  `92d849ecd9c21bc4a3fdaf37aa826a32470f4504`。M7-T07 candidate exact is
+  `ffcbccd16cbc6f643471040405cc89e04d728f0a`，awaiting targeted QA closure and integration。
 - **Open blockers and risks:** run
   [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)在同一exact
   SHA通过Full、MSRV、三平台和interop TCP/UDP各`12/12`+cleanup。Quality仅在Full成功后
   被`ratio_ceiling_exceeded`置为failure；Budget按用户waiver记录且不得称PASS，performance
-  不等待、不计入。用户已授权实施schema v2 milestone envelope、CI解耦和M6/M7 rustfmt-skip
-  清理；T05完成且T06 active，M7仍为`executing`且不close。Single non-force push已消费；尚未授权new push、rerun、
-  PR、tag、release或publication。
+  不等待、不计入。T05 schema v2与CI解耦已完成；T06已删除76个M6/M7 skips并保持一个M1
+  skip。T07 candidate以`4+/4-`关闭Full发现的zero-timeout测试竞态，base/candidate stress为
+  `14/2000`与`0/2000`，但QA-M7T07-001要求先补repository-native ticket并定向复审。
+  M7保持`validating`且不close。Single non-force push已消费；尚未授权new push、rerun、PR、
+  tag、release或publication。
 
 ## 决策登记
 
