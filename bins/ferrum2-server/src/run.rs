@@ -839,7 +839,7 @@ where
                     &routing.direct,
                     inbound,
                     pending.datagram().target(),
-                    || {
+                    |_| {
                         std::future::ready(
                             runtime
                                 .reserve_datagram(handle, pending.datagram().allocated_capacity()),
@@ -848,13 +848,9 @@ where
                 )
                 .await
                 else {
-                    break Err(RunError::RuntimeRoot);
+                    continue;
                 };
-                let RoutedReserve { direct, value } = reserved;
-                if routing.direct.get(direct).is_none() {
-                    break Err(RunError::RuntimeRoot);
-                }
-                match value {
+                match reserved {
                     Ok(reservation) => {
                         let (datagram, commit) = pending.into_parts();
                         let committed =
@@ -915,7 +911,7 @@ where
                 &routing.direct,
                 inbound,
                 pending.datagram().target(),
-                || {
+                |_| {
                     runtime.reserve_session(
                         tokio::time::Instant::now(),
                         pending.datagram().allocated_capacity(),
@@ -924,19 +920,15 @@ where
             )
             .await
             else {
-                break Err(RunError::RuntimeRoot);
+                continue;
             };
-            let RoutedReserve { direct, value } = admission;
-            let admission = match value {
+            let admission = match admission {
                 Ok(admission) => admission,
                 Err(error) => {
                     record_udp_runtime_failure(&metrics, error);
                     continue;
                 }
             };
-            if routing.direct.get(direct).is_none() {
-                break Err(RunError::RuntimeRoot);
-            }
             let (datagram, commit) = pending.into_parts();
             let mut committed_capability = None;
             let committed = runtime.commit_session_with(
@@ -1147,60 +1139,56 @@ struct ServerRouting {
     direct: Vec<Arc<DirectOutbound<TcpConnector>>>,
 }
 
-struct RoutedReserve<R> {
-    direct: usize,
-    value: R,
-}
-
 async fn reserve_udp_direct<T, R, F>(
     route: &ferrum2_core::route::RouteTable,
     direct: &[T],
     inbound: usize,
     target: &TargetAddr,
-    reserve: impl FnOnce() -> F,
-) -> Option<RoutedReserve<R>>
+    reserve: impl FnOnce(&T) -> F,
+) -> Option<R>
 where
     F: std::future::Future<Output = R>,
 {
     let selected = route.select(inbound, Network::Udp, target);
-    direct.get(selected)?;
-    Some(RoutedReserve {
-        direct: selected,
-        value: reserve().await,
-    })
+    let direct = direct.get(selected)?;
+    Some(reserve(direct).await)
 }
 
 #[derive(Debug)]
-enum DirectOpenError<E> {
-    Route,
+enum DirectFlowError<E> {
     Open(E),
     Prefix(PrefixFailure),
 }
 
-async fn open_direct<O>(
-    route: &ferrum2_core::route::RouteTable,
-    direct: &[Arc<O>],
-    inbound: usize,
+async fn open_and_prefix<O, C>(
+    direct: &O,
     target: &TargetAddr,
     initial_payload: &[u8],
     idle_timeout: std::time::Duration,
-) -> Result<(O::Stream, u64), DirectOpenError<O::Error>>
+    cancellation: C,
+) -> Result<(O::Stream, u64), DirectFlowError<O::Error>>
 where
     O: ferrum2_core::Outbound,
     O::Stream: AsyncWrite + Unpin,
+    C: std::future::Future<Output = ()>,
 {
-    let direct = direct
-        .get(route.select(inbound, Network::Tcp, target))
-        .ok_or(DirectOpenError::Route)?;
-    let mut stream = direct.open(target).await.map_err(DirectOpenError::Open)?;
+    tokio::pin!(cancellation);
+    let mut stream = tokio::select! {
+        biased;
+        _ = cancellation.as_mut() => return Err(DirectFlowError::Prefix(PrefixFailure {
+            kind: RelayRunError::Cancelled,
+            bytes: 0,
+        })),
+        result = direct.open(target) => result.map_err(DirectFlowError::Open)?,
+    };
     let bytes = forward_initial_payload(
         &mut stream,
         initial_payload,
         idle_timeout,
-        std::future::pending(),
+        cancellation.as_mut(),
     )
     .await
-    .map_err(DirectOpenError::Prefix)?;
+    .map_err(DirectFlowError::Prefix)?;
     Ok((stream, bytes))
 }
 
@@ -1280,23 +1268,27 @@ async fn server_connection(
         initial_payload,
         reply,
     } = session;
-    let opened = tokio::select! {
-        _ = cancellation.cancelled() => {
-            context.metrics.active_connections_dec(Role::Server, Inbound::Shadowsocks);
-            return;
-        }
-        result = open_direct(
-            &context.routing.route,
-            &context.routing.direct,
-            context.inbound,
-            &target,
-            &initial_payload,
-            context.runtime.idle_timeout,
-        ) => result,
+    let Some(direct) = context.routing.direct.get(context.routing.route.select(
+        context.inbound,
+        Network::Tcp,
+        &target,
+    )) else {
+        context
+            .metrics
+            .active_connections_dec(Role::Server, Inbound::Shadowsocks);
+        return;
     };
+    let opened = open_and_prefix(
+        direct.as_ref(),
+        &target,
+        &initial_payload,
+        context.runtime.idle_timeout,
+        cancellation.cancelled(),
+    )
+    .await;
     let (mut target_stream, initial_payload_bytes) = match opened {
         Ok(opened) => opened,
-        Err(DirectOpenError::Open(error)) => {
+        Err(DirectFlowError::Open(error)) => {
             let kind = error.kind();
             let (stage, outcome, reason) = observation_for_direct_connect(kind);
             record_failure(&context, stage, reason, outcome);
@@ -1306,7 +1298,7 @@ async fn server_connection(
                 .active_connections_dec(Role::Server, Inbound::Shadowsocks);
             return;
         }
-        Err(DirectOpenError::Prefix(failure)) => {
+        Err(DirectFlowError::Prefix(failure)) => {
             context
                 .metrics
                 .add_bytes(Role::Server, Direction::InboundToOutbound, failure.bytes);
@@ -1316,12 +1308,6 @@ async fn server_connection(
                 RelayRunError::Cancelled => (Reason::Cancelled, Outcome::Cancelled),
             };
             record_failure(&context, Stage::Direct, reason, outcome);
-            context
-                .metrics
-                .active_connections_dec(Role::Server, Inbound::Shadowsocks);
-            return;
-        }
-        Err(DirectOpenError::Route) => {
             context
                 .metrics
                 .active_connections_dec(Role::Server, Inbound::Shadowsocks);
@@ -1751,7 +1737,6 @@ mod tests {
     use std::task::Waker;
     use std::time::Duration;
 
-    use ferrum2_core::route::RouteRule;
     use ferrum2_core::{ConnectError, Connector, Datagram, LocalEndpoint, Outbound, TargetAddr};
     use ferrum2_crypto::{
         Aes128Psk, MethodProfile, MethodPsk, MethodSinglePskProvider, MethodTcpSalt,
@@ -2124,6 +2109,7 @@ mod tests {
         write_calls: Arc<AtomicUsize>,
         max_write: usize,
         fail_after: Option<usize>,
+        stall_after: Option<usize>,
         endpoint: SocketAddrV4,
     }
 
@@ -2136,6 +2122,9 @@ mod tests {
             let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_after == Some(call) {
                 return Poll::Ready(Err(io::Error::other("sentinel write failure")));
+            }
+            if self.stall_after.is_some_and(|after| call >= after) {
+                return Poll::Pending;
             }
             let written = source.len().min(self.max_write);
             self.bytes
@@ -2196,6 +2185,7 @@ mod tests {
     fn controlled_outbound(
         max_write: usize,
         fail_after: Option<usize>,
+        stall_after: Option<usize>,
         failure: Option<ConnectErrorKind>,
     ) -> ControlledParts {
         let gate = Arc::new(Notify::new());
@@ -2208,6 +2198,7 @@ mod tests {
                 write_calls: Arc::clone(&write_calls),
                 max_write,
                 fail_after,
+                stall_after,
                 endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_003),
             })),
             failure,
@@ -2217,151 +2208,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routed_production_seams_select_before_tcp_open_prefix_and_udp_reserve() {
-        let target = |port| TargetAddr::domain("example.test", port).expect("target");
-        let (exact, final_target, failed, domain) =
-            (target(80), target(81), target(82), target(53));
-        let rule = |i, n, t, o| RouteRule::new(i, Some(n), t, o);
-        let route = ferrum2_core::route::RouteTable::routed(
-            vec![
-                rule(Some(1), Network::Tcp, None, 1),
-                rule(None, Network::Tcp, Some(exact.clone()), 1),
-                rule(None, Network::Tcp, Some(exact.clone()), 0),
-                rule(None, Network::Tcp, Some(failed.clone()), 2),
-                rule(Some(0), Network::Udp, Some(domain.clone()), 2),
-                rule(Some(0), Network::Udp, Some(exact.clone()), 1),
-            ],
-            0,
-        )
-        .expect("route");
-
-        for (inbound, target, expected) in
-            [(1, &final_target, 1), (0, &exact, 1), (0, &final_target, 0)]
-        {
-            let make = || controlled_outbound(8, None, None);
-            let parts = [make(), make()];
-            let direct = [Arc::clone(&parts[0].0), Arc::clone(&parts[1].0)];
-            parts[expected].1.notify_one();
-            let _ = open_direct(
-                &route,
-                &direct,
-                inbound,
-                target,
-                b"prefix",
-                Duration::from_secs(1),
-            )
-            .await
-            .expect("selected open and prefix");
-            assert_eq!(
-                parts[expected].2.lock().expect("bytes").as_slice(),
-                b"prefix"
-            );
-            assert_eq!(parts[1 - expected].0.calls.load(Ordering::SeqCst), 0);
-        }
-
-        let (a, _, _, _) = controlled_outbound(1, None, None);
-        let (b, _, _, _) = controlled_outbound(1, None, None);
-        let (dead, gate, _, _) =
-            controlled_outbound(1, None, Some(ConnectErrorKind::ConnectionRefused));
-        gate.notify_one();
-        assert!(matches!(
-            open_direct(&route, &[Arc::clone(&a), Arc::clone(&b), Arc::clone(&dead)], 0, &failed, b"never", Duration::from_secs(1)).await,
-            Err(DirectOpenError::Open(error)) if error.kind() == ConnectErrorKind::ConnectionRefused
-        ));
-        assert_eq!(
-            (
-                a.calls.load(Ordering::SeqCst),
-                b.calls.load(Ordering::SeqCst),
-                dead.calls.load(Ordering::SeqCst)
-            ),
-            (0, 0, 1)
-        );
-
-        for (inbound, target, expected) in [(0, &exact, 1), (0, &domain, 2), (1, &domain, 0)] {
-            let reserved = AtomicUsize::new(0);
-            let routed = reserve_udp_direct(&route, &[(), (), ()], inbound, target, || {
-                std::future::ready(reserved.fetch_add(1, Ordering::SeqCst))
-            })
-            .await
-            .expect("UDP reserve route");
-            assert_eq!(routed.direct, expected);
-            assert_eq!(routed.value, 0);
-        }
-        let reserved = AtomicUsize::new(0);
-        assert!(
-            reserve_udp_direct(&route, &[] as &[()], 0, &domain, || std::future::ready(
-                reserved.fetch_add(1, Ordering::SeqCst)
-            ))
-            .await
-            .is_none()
-        );
-        assert_eq!(reserved.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn adapter_contract_direct_connect_precedes_exact_partial_initial_payload_forward() {
-        let (outbound, gate, bytes, write_calls) = controlled_outbound(2, None, None);
-        let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
-        let task_outbound = Arc::clone(&outbound);
-        let task = tokio::spawn(async move {
-            let mut stream = task_outbound.open(&target).await?;
-            let bytes = forward_initial_payload(
-                &mut stream,
-                b"initial",
-                std::time::Duration::from_secs(5),
-                std::future::pending(),
-            )
-            .await
-            .expect("prefix");
-            Ok::<_, ConnectError>((stream, bytes))
-        });
-
-        tokio::task::yield_now().await;
-        assert_eq!(outbound.calls.load(Ordering::SeqCst), 1);
-        assert!(bytes.lock().expect("recording bytes").is_empty());
-        assert_eq!(write_calls.load(Ordering::SeqCst), 0);
-
-        gate.notify_one();
-        let (opened, initial_payload_bytes) = task
-            .await
-            .expect("open task")
-            .expect("connect and initial payload");
-        assert_eq!(
-            bytes.lock().expect("recording bytes").as_slice(),
-            b"initial"
-        );
-        assert!(write_calls.load(Ordering::SeqCst) > 1);
-        assert_eq!(initial_payload_bytes, 7);
-        assert_eq!(
-            opened.local_endpoint(),
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_003)
-        );
-    }
-
-    #[tokio::test]
     async fn adapter_contract_connect_and_prefix_failures_never_report_opened_stream() {
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
         let (outbound, gate, bytes, write_calls) =
-            controlled_outbound(2, None, Some(ConnectErrorKind::ConnectionRefused));
+            controlled_outbound(2, None, None, Some(ConnectErrorKind::ConnectionRefused));
         let task_outbound = Arc::clone(&outbound);
         let task_target = target.clone();
-        let task = tokio::spawn(async move { task_outbound.open(&task_target).await });
+        let task = tokio::spawn(async move {
+            open_and_prefix(
+                task_outbound.as_ref(),
+                &task_target,
+                b"never",
+                Duration::from_secs(5),
+                std::future::pending(),
+            )
+            .await
+        });
         tokio::task::yield_now().await;
         assert!(bytes.lock().expect("recording bytes").is_empty());
         gate.notify_one();
         assert!(matches!(
             task.await.expect("connect task"),
-            Err(error) if error.kind() == ConnectErrorKind::ConnectionRefused
+            Err(DirectFlowError::Open(error))
+                if error.kind() == ConnectErrorKind::ConnectionRefused
         ));
         assert_eq!(write_calls.load(Ordering::SeqCst), 0);
 
-        let (outbound, gate, bytes, _write_calls) = controlled_outbound(2, Some(1), None);
+        let (outbound, gate, bytes, _write_calls) = controlled_outbound(2, Some(1), None, None);
         let task = tokio::spawn(async move {
-            let mut stream = outbound.open(&target).await.expect("connected");
-            forward_initial_payload(
-                &mut stream,
+            open_and_prefix(
+                outbound.as_ref(),
+                &target,
                 b"initial",
-                std::time::Duration::from_secs(5),
+                Duration::from_secs(5),
                 std::future::pending(),
             )
             .await
@@ -2369,10 +2248,10 @@ mod tests {
         gate.notify_one();
         assert!(matches!(
             task.await.expect("prefix task"),
-            Err(PrefixFailure {
+            Err(DirectFlowError::Prefix(PrefixFailure {
                 kind: RelayRunError::Io,
                 bytes: 2,
-            })
+            }))
         ));
         assert_eq!(bytes.lock().expect("recording bytes").as_slice(), b"in");
     }
@@ -2539,19 +2418,12 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_composition_contract_prefix_cancel_retains_partial_count() {
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
-        let ready = Arc::new(AtomicBool::new(true));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let waker = Arc::new(Mutex::new(None));
-        let mut writer = GatedPrefixWriter {
-            ready,
-            calls,
-            waker,
-            max_write: 2,
-            fail_after: None,
-            zero_after: None,
-        };
-        let mut prefix = Box::pin(forward_initial_payload(
-            &mut writer,
+        let (outbound, gate, bytes, _) = controlled_outbound(2, None, Some(1), None);
+        let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
+        gate.notify_one();
+        let mut prefix = Box::pin(open_and_prefix(
+            outbound.as_ref(),
+            &target,
             b"four",
             std::time::Duration::from_secs(5),
             async {
@@ -2560,17 +2432,18 @@ mod tests {
         ));
         tokio::select! {
             biased;
-            result = &mut prefix => panic!("prefix ended before cancellation: {result:?}"),
+            _ = &mut prefix => panic!("prefix ended before cancellation"),
             _ = tokio::task::yield_now() => {}
         }
         cancel.send(()).expect("cancel prefix");
-        assert_eq!(
+        assert!(matches!(
             prefix.await,
-            Err(PrefixFailure {
+            Err(DirectFlowError::Prefix(PrefixFailure {
                 kind: RelayRunError::Cancelled,
                 bytes: 2,
-            })
-        );
+            }))
+        ));
+        assert_eq!(bytes.lock().expect("recorded prefix").as_slice(), b"fo");
     }
 
     #[tokio::test]
@@ -2661,6 +2534,15 @@ mod tests {
             .await
             .expect("UDP receive deadline")
             .expect("UDP receive")
+    }
+
+    async fn assert_pending<F: std::future::Future>(future: F, message: &str) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), future)
+                .await
+                .is_err(),
+            "{message}"
+        );
     }
 
     fn aes_keys() -> MethodKeyAdapter<MethodSinglePskProvider> {
@@ -2970,15 +2852,31 @@ mod tests {
         let routed_address = routed_target.local_addr().expect("routed target address");
         let routed_domain =
             TargetAddr::domain("127.0.0.1", routed_address.port()).expect("domain target");
+        let poison_new = udp_loopback().await;
+        let poison_new_address =
+            TargetAddr::ip(poison_new.local_addr().expect("new poison address"))
+                .expect("new poison target");
+        let poison_existing = udp_loopback().await;
+        let poison_existing_address = TargetAddr::domain(
+            "127.0.0.1",
+            poison_existing
+                .local_addr()
+                .expect("existing poison address")
+                .port(),
+        )
+        .expect("existing poison target");
         let (path, mut config) = tagged_server_test_config([first_listen, second_listen]);
         config.outbounds.push(ferrum2_config::ServerOutboundConfig);
+        let poison = config.outbounds.len();
+        let rule = |target, outbound| {
+            ferrum2_core::route::RouteRule::new(Some(1), Some(Network::Udp), Some(target), outbound)
+        };
         config.route = ferrum2_core::route::RouteTable::routed(
-            vec![ferrum2_core::route::RouteRule::new(
-                Some(0),
-                Some(Network::Udp),
-                Some(routed_domain.clone()),
-                1,
-            )],
+            vec![
+                rule(routed_domain.clone(), 1),
+                rule(poison_new_address.clone(), poison),
+                rule(poison_existing_address.clone(), poison),
+            ],
             0,
         )
         .expect("routed UDP");
@@ -2994,6 +2892,22 @@ mod tests {
         let first_peer = udp_loopback().await;
         let roaming_peer = udp_loopback().await;
         let cross_peer = udp_loopback().await;
+        let mut second =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second client");
+        let poison_wire =
+            encoded_udp_request(&mut second, &clock, poison_new_address, b"new-poison");
+        let baseline = registry.snapshot();
+        cross_peer
+            .send_to(&poison_wire, second_listen)
+            .await
+            .expect("new poison send");
+        let mut payload = [0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+        assert_pending(
+            poison_new.recv_from(&mut payload),
+            "new poison reached target",
+        )
+        .await;
+        assert_eq!(registry.snapshot(), baseline);
         let first_wire = encoded_udp_request(
             &mut client,
             &clock,
@@ -3001,10 +2915,9 @@ mod tests {
             b"first",
         );
         first_peer
-            .send_to(&first_wire, first_listen)
+            .send_to(&first_wire, second_listen)
             .await
             .expect("first send");
-        let mut payload = [0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
         let (received, direct_peer) = recv_udp(&target, &mut payload).await;
         assert_eq!(&payload[..received], b"first");
         target
@@ -3012,27 +2925,40 @@ mod tests {
             .await
             .expect("first target response");
         let (_, response_source) = recv_udp(&first_peer, &mut payload).await;
-        assert_eq!(response_source, SocketAddr::V4(first_listen));
+        assert_eq!(response_source, SocketAddr::V4(second_listen));
+        let poison_wire = encoded_udp_request(
+            &mut client,
+            &clock,
+            poison_existing_address,
+            b"existing-poison",
+        );
+        let before_poison = registry.snapshot();
+        first_peer
+            .send_to(&poison_wire, second_listen)
+            .await
+            .expect("existing poison send");
+        assert_pending(
+            poison_existing.recv_from(&mut payload),
+            "existing poison reached target",
+        )
+        .await;
+        assert_eq!(registry.snapshot(), before_poison);
         let cross_wire = encoded_udp_request(&mut client, &clock, routed_domain, b"cross-fresh");
         let before_cross = registry.snapshot();
 
         cross_peer
-            .send_to(&cross_wire, second_listen)
+            .send_to(&cross_wire, first_listen)
             .await
             .expect("cross-inbound send");
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(200),
-                routed_target.recv_from(&mut payload),
-            )
-            .await
-            .is_err(),
-            "cross-inbound session reached the target"
-        );
+        assert_pending(
+            routed_target.recv_from(&mut payload),
+            "cross-inbound session reached target",
+        )
+        .await;
         let after_cross = registry.snapshot();
         assert_eq!(after_cross, before_cross);
         roaming_peer
-            .send_to(&cross_wire, first_listen)
+            .send_to(&cross_wire, second_listen)
             .await
             .expect("same-inbound roaming send");
         let (received, direct_peer) = recv_udp(&routed_target, &mut payload).await;
@@ -3042,9 +2968,7 @@ mod tests {
             .await
             .expect("roaming target response");
         let (_, response_source) = recv_udp(&roaming_peer, &mut payload).await;
-        assert_eq!(response_source, SocketAddr::V4(first_listen));
-        let mut second =
-            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second client");
+        assert_eq!(response_source, SocketAddr::V4(second_listen));
         let second_wire = encoded_udp_request(
             &mut second,
             &clock,
@@ -3055,12 +2979,11 @@ mod tests {
             .send_to(&second_wire, second_listen)
             .await
             .expect("second inbound capacity send");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), target.recv_from(&mut payload))
-                .await
-                .is_err(),
-            "second inbound multiplied the process session cap"
-        );
+        assert_pending(
+            target.recv_from(&mut payload),
+            "second inbound multiplied process session cap",
+        )
+        .await;
         stop.send(()).expect("stop tagged server");
         assert_eq!(server.await.expect("tagged server owner"), Ok(()));
         assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
@@ -3071,37 +2994,71 @@ mod tests {
     async fn tagged_tcp_shares_static_direct_mapping_and_one_replay_store() {
         let first_listen = reserve_address();
         let second_listen = reserve_address();
-        let (path, config) = tagged_server_test_config([first_listen, second_listen]);
+        let first_target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("first target bind");
+        let second_target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("second target bind");
+        let first_address =
+            TargetAddr::ip(first_target.local_addr().expect("first target address"))
+                .expect("first target");
+        let second_address =
+            TargetAddr::ip(second_target.local_addr().expect("second target address"))
+                .expect("second target");
+        let (path, mut config) = tagged_server_test_config([first_listen, second_listen]);
+        let poison = config.outbounds.len();
+        let rule = |inbound, outbound| {
+            ferrum2_core::route::RouteRule::new(
+                inbound,
+                Some(Network::Tcp),
+                Some(first_address.clone()),
+                outbound,
+            )
+        };
+        config.route = ferrum2_core::route::RouteTable::routed(
+            vec![rule(Some(1), poison), rule(None, 0)],
+            poison,
+        )
+        .expect("routed TCP");
         let registry = OwnerRegistry::new();
         let (stop, mut server) = spawn_test_server(config, &registry);
         wait_until_bound(&mut server, first_listen).await;
         wait_until_bound(&mut server, second_listen).await;
 
-        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("target bind");
-        let target_address = target.local_addr().expect("target address");
-        let target_address = TargetAddr::ip(target_address).expect("target");
         let keys = aes_keys();
         let timestamp = SystemClock::new().unix_seconds().expect("wall clock");
-        let request = |salt_byte, payload: &[u8]| {
+        let request = |salt_byte, target: &TargetAddr, payload: &[u8]| {
             let salt =
                 MethodTcpSalt::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &[salt_byte; 16])
                     .expect("request salt");
-            encode_request_first_write(&keys, &salt, timestamp, &target_address, &[0xa1], payload)
+            encode_request_first_write(&keys, &salt, timestamp, target, &[0xa1], payload)
                 .expect("request wire")
         };
-        let replayed = request(0x51, b"first");
+        let mut invalid = tokio::net::TcpStream::connect(second_listen)
+            .await
+            .expect("invalid inbound connect");
+        invalid
+            .write_all(b"invalid")
+            .await
+            .expect("invalid request");
+        invalid.shutdown().await.expect("invalid shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(5), invalid.read(&mut [0_u8; 1]))
+            .await
+            .expect("invalid close deadline");
+        assert_pending(first_target.accept(), "invalid request reached target").await;
+
+        let replayed = request(0x51, &first_address, b"first");
         let mut first = tokio::net::TcpStream::connect(first_listen)
             .await
             .expect("first inbound connect");
         first.write_all(&replayed).await.expect("first request");
-        let (mut first_target, _) = tokio::time::timeout(Duration::from_secs(5), target.accept())
+        let (mut accepted, _) = tokio::time::timeout(Duration::from_secs(5), first_target.accept())
             .await
             .expect("first direct deadline")
             .expect("first direct accept");
         let mut payload = [0_u8; 5];
-        first_target
+        accepted
             .read_exact(&mut payload)
             .await
             .expect("first initial payload");
@@ -3111,29 +3068,41 @@ mod tests {
             .await
             .expect("replay inbound connect");
         replay.write_all(&replayed).await.expect("replayed request");
-        let fresh = request(0x52, b"fresh");
+        let poison = request(0x52, &first_address, b"poison");
         let mut second = tokio::net::TcpStream::connect(second_listen)
             .await
             .expect("second inbound connect");
-        second.write_all(&fresh).await.expect("fresh request");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), target.accept())
-                .await
-                .is_err(),
-            "second listener admitted while the first held the process permit"
-        );
+        second.write_all(&poison).await.expect("poison request");
+        assert_pending(
+            first_target.accept(),
+            "second listener bypassed process permit",
+        )
+        .await;
         assert_eq!(registry.snapshot().connection_tasks, 1);
 
-        drop((first, first_target));
-        let (mut second_target, _) = tokio::time::timeout(Duration::from_secs(5), target.accept())
+        drop((first, accepted));
+        for rejected in [&mut replay, &mut second] {
+            let _ = tokio::time::timeout(Duration::from_secs(5), rejected.read(&mut payload))
+                .await
+                .expect("rejected deadline");
+        }
+        let final_poison = request(0x53, &second_address, b"final");
+        let mut final_flow = tokio::net::TcpStream::connect(first_listen)
             .await
-            .expect("second direct deadline")
-            .expect("second direct accept");
-        second_target
-            .read_exact(&mut payload)
+            .expect("final-route connect");
+        final_flow
+            .write_all(&final_poison)
             .await
-            .expect("second initial payload");
-        assert_eq!(&payload, b"fresh");
+            .expect("final request");
+        let _ = tokio::time::timeout(Duration::from_secs(5), final_flow.read(&mut payload))
+            .await
+            .expect("final close deadline");
+        assert_pending(second_target.accept(), "final poison reached target").await;
+        assert_pending(
+            first_target.accept(),
+            "replay or inbound poison reached target",
+        )
+        .await;
 
         stop.send(()).expect("stop tagged server");
         assert_eq!(server.await.expect("tagged server owner"), Ok(()));
