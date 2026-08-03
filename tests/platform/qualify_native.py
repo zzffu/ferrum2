@@ -579,9 +579,17 @@ def bounded_accept(listener: socket.socket, size: int, timeout: float = READINES
         raise QualificationError("routed-smoke-timeout") from error
 
 
-def finish_live(live: list[tuple[subprocess.Popen[bytes], Capture]]) -> None:
-    process, capture = live.pop(); kill_and_reap(process)
-    require(SYNTHETIC_PSK.encode() not in b"".join(finish_capture(capture)), "secret-in-process-output")
+def finish_live(live: list[tuple[subprocess.Popen[bytes], Capture]], first_error: BaseException | None = None) -> BaseException | None:
+    process, capture = live.pop()
+    try:
+        kill_and_reap(process)
+    except BaseException as error:
+        if first_error is None: first_error = error
+    try:
+        require(SYNTHETIC_PSK.encode() not in b"".join(finish_capture(capture)), "secret-in-process-output")
+    except BaseException as error:
+        if first_error is None: first_error = error
+    return first_error
 
 
 def assert_routed_smoke(specs: tuple[BinarySpec, BinarySpec], directory: Path) -> None:
@@ -595,7 +603,7 @@ def assert_routed_smoke(specs: tuple[BinarySpec, BinarySpec], directory: Path) -
     write_tagged_config(configs[1], client, tcp_clients, (servers[0], int(tcp_dead.getsockname()[1])), True)
     write_tagged_config(configs[2], client, udp_clients, (int(udp_dead.getsockname()[1]), servers[1]), True)
     configs[2].write_text(configs[2].read_text() + "\n[udp]\n", encoding="utf-8")
-    live: list[tuple[subprocess.Popen[bytes], Capture]] = []; sockets = [tcp, tcp_dead, udp, udp_dead]; streams = []
+    live: list[tuple[subprocess.Popen[bytes], Capture]] = []; sockets = [tcp, tcp_dead, udp, udp_dead]; streams = []; first_error = None
     try:
         for spec, config, listens in ((server, configs[0], servers), (client, configs[1], tcp_clients)):
             process, capture = spawn_live(spec, config); live.append((process, capture))
@@ -609,7 +617,8 @@ def assert_routed_smoke(specs: tuple[BinarySpec, BinarySpec], directory: Path) -
         stream.write(b"route-tcp"); stream.flush(); peer, payload = bounded_accept(tcp, 9); sockets.append(peer)
         require(payload == b"route-tcp", "route-tcp-forward")
         peer.sendall(b"route-tcp"); require(stream.read(9) == b"route-tcp", "route-tcp-reverse")
-        finish_live(live)
+        first_error = finish_live(live, first_error)
+        if first_error is not None: raise first_error
         process, capture = spawn_live(client, configs[2]); live.append((process, capture))
         for listen in udp_clients: wait_ready(process, listen).close()
         control = socket.create_connection(("127.0.0.1", udp_clients[0]), timeout=5); sockets.append(control)
@@ -620,10 +629,15 @@ def assert_routed_smoke(specs: tuple[BinarySpec, BinarySpec], directory: Path) -
         app.sendto(packet, ("127.0.0.1", int.from_bytes(reply[8:10], "big")))
         payload, peer = udp.recvfrom(64); udp.sendto(payload, peer)
         require(app.recv(64) == packet, "route-udp-round-trip")
+    except BaseException as error:
+        if first_error is None: first_error = error
     finally:
-        for stream in streams: stream.close()
-        for owned in sockets: owned.close()
-        while live: finish_live(live)
+        while live: first_error = finish_live(live, first_error)
+        for owned in [*streams, *sockets]:
+            try: owned.close()
+            except BaseException as error:
+                if first_error is None: first_error = error
+    if first_error is not None: raise first_error
     assert_tagged_rebindable(client, tcp_clients + udp_clients); assert_tagged_rebindable(server, servers)
 
 
