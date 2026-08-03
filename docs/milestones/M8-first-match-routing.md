@@ -71,8 +71,8 @@ static tagged 行为、SIP022 wire/security、aggregate owners 和 process lifec
 |---|---|---|---|
 | M8-T01 | Add the shared route module and validate/compile routed tagged config before side effects | — | done |
 | M8-T02 | Route client TCP flows and UDP datagrams across configured Shadowsocks outbounds | M8-T01 | done |
-| M8-T03 | Route authenticated server TCP/UDP requests to configured direct identities | M8-T02 | ready |
-| M8-T04 | Prove routed real-process behavior and qualify one exact SHA | M8-T03 | todo |
+| M8-T03 | Route authenticated server TCP/UDP requests to configured direct identities | M8-T02 | done |
+| M8-T04 | Prove routed real-process behavior and qualify one exact SHA | M8-T03 | ready |
 
 ```text
 M8-T01 core/config route contract
@@ -95,7 +95,8 @@ during M8 execution。
 ## Blocker / next action
 
 No execution blocker。M8-T01 is integrated at
-`876da7e13c37aaf4e316848b13cf0a8f7cb8673b` and M8-T02 at
-`ff9070c427bf456edbe3051d4f8781bb65c136c0`；M8-T03 is the only ready frontier。The M8
-Budget is `659/840` with `181` lines remaining，so T03/T04 must reuse compact existing evidence。
-Push、hosted run、PR、tag、release and publication remain unauthorized。
+`876da7e13c37aaf4e316848b13cf0a8f7cb8673b`，M8-T02 at
+`ff9070c427bf456edbe3051d4f8781bb65c136c0`，and M8-T03 at
+`4a1de3a3183d1235ac3808ae97caebc851f4c2b5`；M8-T04 is the only ready frontier。The M8
+Budget is `749/840` with `91` lines remaining，so qualification must reuse compact existing
+evidence。Push、hosted run、PR、tag、release and publication remain unauthorized。

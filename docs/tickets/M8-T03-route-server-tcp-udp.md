@@ -1,7 +1,7 @@
 ---
 id: M8-T03
 milestone: M8
-status: ready
+status: done
 depends_on: [M8-T02]
 owns:
   - bins/ferrum2-server/src/run.rs
@@ -18,17 +18,17 @@ duplicating direct runtime owners。
 
 ## Acceptance
 
-- [ ] Server removes T01's routed-run guard only after every TCP/UDP request path consumes its
+- [x] Server removes T01's routed-run guard only after every TCP/UDP request path consumes its
       listener inbound ID、network、validated target and selected outbound ID。
-- [ ] TCP selection occurs after authenticated request/replay admission and before direct connect/
+- [x] TCP selection occurs after authenticated request/replay admission and before direct connect/
       prefix forwarding；overlap/final/failure rows prove no retry。
-- [ ] UDP selection occurs after borrowed authentication/bounds and before replay/activity/session/
+- [x] UDP selection occurs after borrowed authentication/bounds and before replay/activity/session/
       queue/target commit；one session can choose different direct identities per datagram。
-- [ ] Existing cross-inbound binding、same-inbound roaming、generation/replay、response listener、
+- [x] Existing cross-inbound binding、same-inbound roaming、generation/replay、response listener、
       aggregate owners and direct DNS-after-route behavior remain exact。
-- [ ] Equivalent direct tags create no duplicate eager socket/runtime/root；no generic outbound
+- [x] Equivalent direct tags create no duplicate eager socket/runtime/root；no generic outbound
       trait、Endpoint/factory/registry、new dependency or fallback is added。
-- [ ] `TEST-0009` T03、repository Full、MSRV、ticket Budget and blocking Architect/QA review pass
+- [x] `TEST-0009` T03、repository Full、MSRV、ticket Budget and blocking Architect/QA review pass
       on one exact candidate。
 
 ## Validation
@@ -37,9 +37,12 @@ Run `TEST-0009` T03 commands，then repository Full commands before integration�
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `4a1de3a3183d1235ac3808ae97caebc851f4c2b5`
+- Review: Architect `PASS`；QA `PASS`，所有 full/targeted findings closed。
+- Notes: Server `18/18`、runtime `17/17 + 5/5 + 13/13`、CLI `5/5`、Full、Rust
+  `1.85`、ignored lifecycle `1/1`、Clippy/fmt/diff and Budget PASS；growth `749/840`，
+  remaining `91`。Final repairs preserve pre-open versus prefix cancellation observability and use
+  authenticated production-path poison rows without adding per-tag owners or telemetry。
 
 ## Rollback / risk
 

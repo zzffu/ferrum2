@@ -1,7 +1,7 @@
 ---
 id: M8-T04
 milestone: M8
-status: todo
+status: ready
 depends_on: [M8-T03]
 owns:
   - tests/m0-harness/src/local_support/mod.rs
