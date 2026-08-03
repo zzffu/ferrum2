@@ -356,6 +356,7 @@ struct ScriptedSocket {
     send_delay: Duration,
     send_failures: Arc<Mutex<VecDeque<bool>>>,
     sends: Arc<Mutex<Vec<SocketAddr>>>,
+    send_completed: Arc<Notify>,
     responses: SharedResponses,
     response_ready: Arc<Notify>,
 }
@@ -366,6 +367,7 @@ impl DirectUdpSocket for ScriptedSocket {
     async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
         self.sends.lock().expect("send lock").push(target);
         tokio::time::sleep(self.send_delay).await;
+        self.send_completed.notify_one();
         if self
             .send_failures
             .lock()
@@ -492,6 +494,7 @@ fn socket_fixture(
             send_delay: delay,
             send_failures: Arc::new(Mutex::new(failures.into_iter().collect())),
             sends: Arc::clone(&sends),
+            send_completed: Arc::new(Notify::new()),
             responses: Arc::new(Mutex::new(VecDeque::new())),
             response_ready: Arc::new(Notify::new()),
         },
@@ -557,6 +560,7 @@ async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
     let registry = OwnerRegistry::new();
     let manager = UdpSessionManager::new(limits(1), registry.clone());
     let (first_socket, sends) = socket_fixture(Duration::ZERO, []);
+    let send_completed = Arc::clone(&first_socket.send_completed);
     let (second_socket, _) = socket_fixture(Duration::ZERO, []);
     let (empty_socket, _) = socket_fixture(Duration::ZERO, []);
     let mut first = shared_runtime(manager.clone(), &registry, first_socket);
@@ -571,12 +575,7 @@ async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
         .commit_session(admission, ip_datagram(b"request"), Instant::now())
         .expect("first shared commit");
     empty.shutdown(Duration::ZERO).await;
-    for _ in 0..200 {
-        if !sends.lock().expect("send lock").is_empty() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    send_completed.notified().await;
     assert_eq!(sends.lock().expect("send lock").len(), 1);
     assert!(first.remove_session(handle));
     assert_eq!(
