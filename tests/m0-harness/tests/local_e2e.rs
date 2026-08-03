@@ -380,15 +380,28 @@ fn failures_pre_success_connect_and_post_success_target_refusal() {
 
 #[test]
 fn tagged_two_by_two_tcp_matrix_covers_all_methods_and_exact_rebind() {
-    for method in TCP_METHOD_CONFIGS {
+    for (method, routed) in [
+        (TCP_METHOD_CONFIGS[0], false),
+        (TCP_METHOD_CONFIGS[1], false),
+        (TCP_METHOD_CONFIGS[2], false),
+        (TCP_METHOD_CONFIGS[1], true),
+    ] {
         let directory = tempfile::tempdir().expect("tagged TCP tempdir");
         let servers = [unused_loopback(), unused_loopback()];
         let clients = [unused_loopback(), unused_loopback()];
+        let (bridge_a, peer_a, task_a) = start_recording_bridge(servers[0]);
+        let (bridge_b, peer_b, task_b) = start_recording_bridge(servers[1]);
+        let bridges = [bridge_a, bridge_b];
+        let peers = [peer_a, peer_b];
         let server_config = write_tagged_server_config(directory.path(), servers, [0, 1], false)
             .expect("tagged server config");
         let client_config =
-            write_tagged_client_config(directory.path(), clients, servers, [0, 1], false)
+            write_tagged_client_config(directory.path(), clients, bridges, [0, 1], false)
                 .expect("tagged client config");
+        if routed {
+            route_tagged_config(&client_config, "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-a\"\nnetwork = \"tcp\"\noutbound = \"out-1\"\n[[route.rules]]\ninbound = \"in-a\"\noutbound = \"out-0\"\n").expect("routed client matrix");
+            route_tagged_config(&server_config, "\n[route]\nfinal = \"out-1\"\n[[route.rules]]\ninbound = \"in-b\"\nnetwork = \"tcp\"\noutbound = \"out-0\"\n[[route.rules]]\ninbound = \"in-b\"\noutbound = \"out-1\"\n").expect("routed server matrix");
+        }
         rewrite_config_method(&server_config, method).expect("tagged server method");
         rewrite_config_method(&client_config, method).expect("tagged client method");
 
@@ -405,6 +418,9 @@ fn tagged_two_by_two_tcp_matrix_covers_all_methods_and_exact_rebind() {
             let (target, echo) = start_echo();
             let (mut socks, reply) = socks_connect(client_address, target);
             assert_eq!(&reply[..4], &[5, 0, 0, 1], "{} mapping {mapping}", method.0);
+            peers[if routed { 1 - mapping } else { mapping }]
+                .recv_timeout(Duration::from_secs(5))
+                .expect("selected recording bridge");
             let payload = format!("{}-mapping-{mapping}", method.0);
             socks.write_all(payload.as_bytes()).expect("tagged payload");
             socks.shutdown(Shutdown::Write).expect("tagged half close");
@@ -413,10 +429,13 @@ fn tagged_two_by_two_tcp_matrix_covers_all_methods_and_exact_rebind() {
             assert_eq!(echoed, payload.as_bytes());
             assert_eq!(echo.join().expect("tagged echo thread"), payload.as_bytes());
         }
+        for task in [task_a, task_b] {
+            task.join().expect("recording bridge");
+        }
 
         client.terminate_and_reap(Duration::from_secs(5));
         server.terminate_and_reap(Duration::from_secs(5));
-        for address in clients.into_iter().chain(servers) {
+        for address in clients.into_iter().chain(servers).chain(bridges) {
             drop(bind_loopback_listener(address).expect("tagged exact rebind"));
         }
     }

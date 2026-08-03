@@ -327,9 +327,6 @@ outbound = "out-0"
 [[route.rules]]
 network = "udp"
 outbound = "out-1"
-[[route.rules]]
-inbound = "in-0"
-outbound = "out-1"
 
 ''' if routed else "") + f'''[shadowsocks]
 method = "2022-blake3-aes-128-gcm"
@@ -568,41 +565,66 @@ def wait_ready(process: subprocess.Popen[bytes], port: int) -> socket.socket:
     raise QualificationError("readiness-timeout")
 
 
+def bounded_accept(listener: socket.socket, size: int, timeout: float = READINESS_TIMEOUT_SECONDS) -> tuple[socket.socket, bytes]:
+    peer = None
+    try:
+        listener.settimeout(timeout)
+        peer, _ = listener.accept(); peer.settimeout(timeout)
+        payload = b""
+        while len(payload) < size:
+            chunk = peer.recv(size - len(payload)); require(chunk != b"", "routed-smoke-closed"); payload += chunk
+        return peer, payload
+    except (TimeoutError, OSError) as error:
+        if peer is not None: peer.close()
+        raise QualificationError("routed-smoke-timeout") from error
+
+
+def finish_live(live: list[tuple[subprocess.Popen[bytes], Capture]]) -> None:
+    process, capture = live.pop(); kill_and_reap(process)
+    require(SYNTHETIC_PSK.encode() not in b"".join(finish_capture(capture)), "secret-in-process-output")
+
+
 def assert_routed_smoke(specs: tuple[BinarySpec, BinarySpec], directory: Path) -> None:
     client, server = specs
-    ports = reserve_ports(4); servers, clients = ports[:2], ports[2:]
-    configs = (directory / "route-client.toml", directory / "route-server.toml")
-    write_tagged_config(configs[0], client, clients, servers, True)
-    configs[0].write_text(configs[0].read_text() + "\n[udp]\n", encoding="utf-8")
-    write_tagged_config(configs[1], server, servers, None, True)
-    tcp = tcp_listener(0); udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp.bind(("127.0.0.1", 0)); udp.settimeout(5); live = []
+    ports = reserve_ports(6); servers, tcp_clients, udp_clients = ports[:2], ports[2:4], ports[4:]
+    configs = tuple(directory / f"route-{name}.toml" for name in ("server", "tcp", "udp"))
+    tcp = tcp_listener(0); tcp_dead = tcp_listener(0)
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); udp.bind(("127.0.0.1", 0)); udp.settimeout(READINESS_TIMEOUT_SECONDS)
+    udp_dead = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); udp_dead.bind(("127.0.0.1", 0))
+    write_tagged_config(configs[0], server, servers, None, True)
+    write_tagged_config(configs[1], client, tcp_clients, (servers[0], int(tcp_dead.getsockname()[1])), True)
+    write_tagged_config(configs[2], client, udp_clients, (int(udp_dead.getsockname()[1]), servers[1]), True)
+    configs[2].write_text(configs[2].read_text() + "\n[udp]\n", encoding="utf-8")
+    live: list[tuple[subprocess.Popen[bytes], Capture]] = []; sockets = [tcp, tcp_dead, udp, udp_dead]; streams = []
     try:
-        for spec, config, listens in ((server, configs[1], servers), (client, configs[0], clients)):
+        for spec, config, listens in ((server, configs[0], servers), (client, configs[1], tcp_clients)):
             process, capture = spawn_live(spec, config); live.append((process, capture))
             for listen in listens: wait_ready(process, listen).close()
         target = (127, 0, 0, 1, *int(tcp.getsockname()[1]).to_bytes(2, "big"))
-        socks = socket.create_connection(("127.0.0.1", clients[0]), timeout=5)
-        stream = socks.makefile("rwb"); stream.write(bytes((5, 1, 0))); stream.flush()
+        socks = socket.create_connection(("127.0.0.1", tcp_clients[1]), timeout=5); sockets.append(socks)
+        stream = socks.makefile("rwb"); streams.append(stream); stream.write(bytes((5, 1, 0))); stream.flush()
         require(stream.read(2) == bytes((5, 0)), "route-tcp-method")
         stream.write(bytes((5, 1, 0, 1, *target))); stream.flush()
         require(stream.read(10)[:2] == bytes((5, 0)), "route-tcp-connect")
-        stream.write(b"route-tcp"); stream.flush(); peer, _ = tcp.accept()
-        require(peer.recv(9) == b"route-tcp", "route-tcp-forward")
+        stream.write(b"route-tcp"); stream.flush(); peer, payload = bounded_accept(tcp, 9); sockets.append(peer)
+        require(payload == b"route-tcp", "route-tcp-forward")
         peer.sendall(b"route-tcp"); require(stream.read(9) == b"route-tcp", "route-tcp-reverse")
-        peer.close(); stream.close(); socks.close()
-        control = socket.create_connection(("127.0.0.1", clients[0]), timeout=5)
-        stream = control.makefile("rwb"); stream.write(bytes((5, 1, 0, 5, 3, 0, 1, 0, 0, 0, 0, 0, 0))); stream.flush()
+        finish_live(live)
+        process, capture = spawn_live(client, configs[2]); live.append((process, capture))
+        for listen in udp_clients: wait_ready(process, listen).close()
+        control = socket.create_connection(("127.0.0.1", udp_clients[0]), timeout=5); sockets.append(control)
+        stream = control.makefile("rwb"); streams.append(stream); stream.write(bytes((5, 1, 0, 5, 3, 0, 1, 0, 0, 0, 0, 0, 0))); stream.flush()
         require(stream.read(2) == bytes((5, 0)), "route-udp-method"); reply = stream.read(10)
-        app = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); app.settimeout(5)
+        app = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); app.settimeout(5); sockets.append(app)
         target = (127, 0, 0, 1, *int(udp.getsockname()[1]).to_bytes(2, "big")); packet = bytes((0, 0, 0, 1, *target)) + b"route-udp"
         app.sendto(packet, ("127.0.0.1", int.from_bytes(reply[8:10], "big")))
         payload, peer = udp.recvfrom(64); udp.sendto(payload, peer)
-        require(app.recv(64) == packet, "route-udp-round-trip"); app.close(); stream.close(); control.close()
+        require(app.recv(64) == packet, "route-udp-round-trip")
     finally:
-        tcp.close(); udp.close()
-        for process, capture in reversed(live): kill_and_reap(process); require(SYNTHETIC_PSK.encode() not in b"".join(finish_capture(capture)), "secret-in-process-output")
-    assert_tagged_rebindable(client, clients); assert_tagged_rebindable(server, servers)
+        for stream in streams: stream.close()
+        for owned in sockets: owned.close()
+        while live: finish_live(live)
+    assert_tagged_rebindable(client, tcp_clients + udp_clients); assert_tagged_rebindable(server, servers)
 
 
 def send_genuine_signal(process: subprocess.Popen[bytes]) -> None:

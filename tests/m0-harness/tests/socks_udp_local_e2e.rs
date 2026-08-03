@@ -323,7 +323,12 @@ fn three_methods_cover_ipv4_with_three_public_datagrams() {
 
 #[test]
 fn tagged_two_by_two_udp_matrix_covers_all_methods_and_exact_rebind() {
-    for method in TCP_METHOD_CONFIGS {
+    for (method, routed) in [
+        (TCP_METHOD_CONFIGS[0], false),
+        (TCP_METHOD_CONFIGS[1], false),
+        (TCP_METHOD_CONFIGS[2], false),
+        (TCP_METHOD_CONFIGS[2], true),
+    ] {
         let directory = tempfile::tempdir().expect("tagged UDP tempdir");
         let servers = [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()];
         let clients = [unused_loopback(), unused_loopback()];
@@ -332,6 +337,10 @@ fn tagged_two_by_two_udp_matrix_covers_all_methods_and_exact_rebind() {
         let client_config =
             write_tagged_client_config(directory.path(), clients, servers, [0, 1], true)
                 .expect("tagged UDP client config");
+        if routed {
+            route_tagged_config(&client_config, "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-a\"\nnetwork = \"udp\"\noutbound = \"out-1\"\n[[route.rules]]\ninbound = \"in-a\"\noutbound = \"out-0\"\n").expect("routed UDP client matrix");
+            route_tagged_config(&server_config, "\n[route]\nfinal = \"out-1\"\n[[route.rules]]\ninbound = \"in-b\"\nnetwork = \"udp\"\noutbound = \"out-0\"\n[[route.rules]]\ninbound = \"in-b\"\noutbound = \"out-1\"\n").expect("routed UDP server matrix");
+        }
         rewrite_config_method(&server_config, method).expect("tagged UDP server method");
         rewrite_config_method(&client_config, method).expect("tagged UDP client method");
 
@@ -618,13 +627,11 @@ fn one_association_alternates_two_targets_and_preserves_response_sources() {
         write_tagged_client_config(directory.path(), clients, servers, [0, 1], true)
             .expect("routed client config");
     route_tagged_config(&client_config, &format!(
-        "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-a\"\nnetwork = \"udp\"\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-1\"\n[[route.rules]]\nnetwork = \"udp\"\noutbound = \"out-0\"\n[[route.rules]]\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-0\"\n",
+        "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-a\"\nnetwork = \"udp\"\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-1\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"out-0\"\n[[route.rules]]\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-0\"\n",
         second_address.port(), second_address.port()
     )).expect("routed client rules");
     let mut server_a = ChildGuard::spawn("ferrum2-server", &configs[0]);
-    let mut server_b = ChildGuard::spawn("ferrum2-server", &configs[1]);
     wait_for_tcp_udp_bound(&mut server_a, servers[0]);
-    wait_for_tcp_udp_bound(&mut server_b, servers[1]);
     let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
     for address in clients {
         wait_for_listener(&mut client, address);
@@ -632,30 +639,15 @@ fn one_association_alternates_two_targets_and_preserves_response_sources() {
 
     let (_control, application, relay) = udp_associate(clients[0], false);
 
-    round_trip(
-        &application,
-        relay,
-        &first_target,
-        &first_target,
-        b"first-a",
-    );
+    round_trip(&application, relay, &first_target, &first_target, b"a");
     server_a.terminate_and_reap(Duration::from_secs(5));
-    round_trip(
-        &application,
-        relay,
-        &second_target,
-        &second_response,
-        b"second",
-    );
+    let mut server_b = ChildGuard::spawn("ferrum2-server", &configs[1]);
+    wait_for_tcp_udp_bound(&mut server_b, servers[1]);
+    round_trip(&application, relay, &second_target, &second_response, b"b");
+    server_b.terminate_and_reap(Duration::from_secs(5));
     server_a = ChildGuard::spawn("ferrum2-server", &configs[0]);
     wait_for_tcp_udp_bound(&mut server_a, servers[0]);
-    round_trip(
-        &application,
-        relay,
-        &first_target,
-        &first_target,
-        b"first-b",
-    );
+    round_trip(&application, relay, &first_target, &first_target, b"c");
     first_worker.join().expect("first echo worker");
     second_worker.join().expect("second echo worker");
 }

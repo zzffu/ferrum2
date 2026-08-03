@@ -357,42 +357,50 @@ fn current_target_declaration_matching_accepts_crlf() {
 #[test]
 fn tagged_composition_stays_out_of_core_and_protocol_modules() {
     let root = workspace_root();
-    let core =
-        fs::read_to_string(root.join("crates/ferrum2-core/src/lib.rs")).expect("core source");
-    assert_eq!(
-        core.matches("pub mod route").count(),
-        1,
-        "one core route module"
-    );
-    for member in ["ferrum2-shadowsocks", "ferrum2-socks5", "ferrum2-runtime"] {
-        for path in rust_sources(&root.join("crates").join(member)) {
-            let source = fs::read_to_string(path).expect("policy-free source");
-            for forbidden in ["RouteRule", "RouteTable", "route::", "pub trait Route"] {
-                assert!(!source.contains(forbidden), "{member} owns routing policy");
-            }
-        }
+    let core = fs::read_to_string(root.join("crates/ferrum2-core/src/lib.rs")).expect("core");
+    assert_eq!(core.matches("pub mod route").count(), 1);
+    let native = fs::read_to_string(root.join("tests/platform/qualify_native.py")).expect("native");
+    for required in "def bounded_accept(|listener.settimeout(timeout)|peer.settimeout(timeout)|except (TimeoutError, OSError)|bounded_accept(tcp, 9)".split('|') {
+        assert!(native.contains(required), "native lacks {required}");
     }
-    for member in [
-        "bins/ferrum2-client",
-        "bins/ferrum2-server",
-        "crates/ferrum2-observability",
+    for (members, forbidden) in [
+        (
+            "crates/ferrum2-shadowsocks,crates/ferrum2-socks5,crates/ferrum2-runtime",
+            "RouteRule,RouteTable,route::,pub trait Route",
+        ),
+        (
+            "crates/ferrum2-core,crates/ferrum2-shadowsocks,crates/ferrum2-socks5",
+            "pub trait Endpoint,RouteFactory,RouteRegistry,AdapterRegistry,ServiceRegistry,adapter_registry,endpoint_registry",
+        ),
     ] {
-        for path in rust_sources(&root.join(member)) {
-            let source = fs::read_to_string(path).expect("observable source");
-            for field in ["tag", "target", "destination", "route"] {
+        for member in members.split(',') {
+            let sources = rust_sources(&root.join(member));
+            assert!(!sources.is_empty(), "{member} has no sources");
+            for path in sources {
+                let source = fs::read_to_string(&path).expect("source");
                 assert!(
-                    !source.contains(&format!("{field} = %"))
-                        && !source.contains(&format!("{field} = ?")),
-                    "{member} exposes route identity"
+                    forbidden.split(',').all(|item| !source.contains(item)),
+                    "{} violates architecture",
+                    path.display()
                 );
             }
         }
     }
-    for member in [
-        "crates/ferrum2-core",
-        "crates/ferrum2-shadowsocks",
-        "crates/ferrum2-socks5",
-    ] {
+    for member in "bins/ferrum2-client,bins/ferrum2-server,crates/ferrum2-observability".split(',')
+    {
+        for path in rust_sources(&root.join(member)) {
+            let source = fs::read_to_string(path).expect("observable source");
+            assert!(
+                "tag,target,destination,route"
+                    .split(',')
+                    .all(|field| !source.contains(&format!("{field} = %"))
+                        && !source.contains(&format!("{field} = ?"))),
+                "{member} exposes route identity"
+            );
+        }
+    }
+    for member in "crates/ferrum2-core,crates/ferrum2-shadowsocks,crates/ferrum2-socks5".split(',')
+    {
         let manifest =
             fs::read_to_string(root.join(member).join("Cargo.toml")).expect("deep-module manifest");
         for forbidden in ["ferrum2-config", "ferrum2-runtime"] {
@@ -400,26 +408,6 @@ fn tagged_composition_stays_out_of_core_and_protocol_modules() {
                 !manifest.contains(forbidden),
                 "{member} must not depend on {forbidden}"
             );
-        }
-        let sources = rust_sources(&root.join(member));
-        assert!(!sources.is_empty(), "{member} must contain Rust source");
-        for path in sources {
-            let source = fs::read_to_string(&path).expect("deep-module source");
-            for forbidden in [
-                "pub trait Endpoint",
-                "RouteFactory",
-                "RouteRegistry",
-                "AdapterRegistry",
-                "ServiceRegistry",
-                "adapter_registry",
-                "endpoint_registry",
-            ] {
-                assert!(
-                    !source.contains(forbidden),
-                    "{} contains forbidden generic composition seam `{forbidden}`",
-                    path.display()
-                );
-            }
         }
     }
 }
