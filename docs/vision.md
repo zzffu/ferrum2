@@ -8,10 +8,10 @@ Shadowsocks 2022 的部署者需要一个高性能、可审计、可运维的 Ru
 
 v0 面向两类用户：
 
-- 通过 SOCKS5 TCP `CONNECT` 使用自托管代理的运维者；
+- 通过 SOCKS5 TCP `CONNECT` 和显式 opt-in UDP `ASSOCIATE` 使用自托管代理的运维者；
 - 需要嵌入、互操作验证或继续扩展 Shadowsocks 2022 TCP/UDP 协议层的维护者。
 
-## 期望结果与成功度量
+## v0 preview 初始成功度量（历史）
 
 v0 只有在以下结果都有直接证据时才算完成：
 
@@ -50,7 +50,7 @@ v0 只有在以下结果都有直接证据时才算完成：
 - **声明必须可复现。** 互操作版本、fixture 来源、toolchain、target、benchmark
   配置和验证命令均需固定并留存证据。
 
-## v0 范围
+## v0 preview 初始范围（历史）
 
 - SIP022 TCP 与 UDP framing、codec、认证、重放防护和 transport state machine；
 - 三个指定密码套件及其精确 key 长度、key derivation 和 audited AEAD boundary；
@@ -64,7 +64,7 @@ v0 只有在以下结果都有直接证据时才算完成：
 - Linux x86_64 glibc、Linux x86_64 musl、Windows 构建；
 - 可复现吞吐、任务数和内存基线。
 
-## 明确非目标
+## v0 preview 初始明确非目标（历史）
 
 - SOCKS5 `UDP ASSOCIATE` 或其他公开 UDP inbound；
 - SIP023 Extensible Identity Headers、多用户或多 PSK 产品行为；
@@ -89,9 +89,9 @@ cohort：它们在全部 v0.x 中继续有效；successor schema stable 发布�
 stable release 发出 deprecation notice。后续 v1 可以添加 optional sections/
 fields或安全放宽 endpoint domain，但省略新增项时必须保留 cohort 的 effective
 behavior；breaking change 使用显式新 schema version，不使用 heuristic
-fallback、静默 reinterpret 或自动重写。当前单 listen、单 server、IPv4
-operator endpoint、两个 binary roots 和 workspace member 数量是现状而非永久
-拓扑。
+fallback、静默 reinterpret 或自动重写。M3 close 时的单 listen、单 server、IPv4
+operator endpoint、两个 binary roots 和 workspace member 数量是历史现状而非永久
+拓扑；M7 已以 additive schema v1 交付 tagged static multi-inbound/outbound。
 
 ## 约束
 
@@ -124,7 +124,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是现状而�
 | M4 | 可复现性能基线、资源门与 v0 preview integrated qualification | closed |
 | M5 | `shadowsocks-crypto`作为三种SIP022方法的唯一内部密码实现 | closed |
 | M6 | 显式opt-in、有界且可关闭的SOCKS5 UDP ASSOCIATE，不加入routing | closed |
-| M7 | 具名多inbound/outbound、静态tag引用和原子prepare/rollback，不建Endpoint interface | planned |
+| M7 | 具名多inbound/outbound、静态tag引用和原子prepare/rollback，不建Endpoint interface | closed |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -169,9 +169,10 @@ public SOCKS5 UDP association。Automatic push run `30765897553/1`的quality、M
 publication仍未授权。
 
 M7同样是v0 preview关闭后的additive milestone，不改写历史v0范围。它以
-`302fd777f4da62a8c1d4d52d81502056f02089c8`为planning baseline，计划让schema v1
-additive接受多个有界、具名inbound/outbound，并在listener创建前验证全局唯一tag和
-static inbound→outbound引用。Legacy单实例配置、process-wide method/PSK、TCP/UDP
-安全与资源语义保持；全部roots复用现有`ProcessSupervisor` transaction。Routing、
-per-entry PSK/method和`Endpoint` interface仍延期；规划不授权remote、release或
+`302fd777f4da62a8c1d4d52d81502056f02089c8`为planning baseline，并由exact
+`b3b99a15aa99f8393f99f4c72c85f451a48c6749`交付schema v1 bounded tagged static
+multi-inbound/outbound。Legacy单实例配置、process-wide method/PSK、TCP/UDP安全与资源
+语义保持；全部roots复用现有`ProcessSupervisor` transaction。Automatic run
+`30812399038/1`的quality、MSRV、三平台、interop和Budget均成功；performance按关闭合同
+排除。Routing、per-entry PSK/method和`Endpoint` interface仍延期，未授权release或
 publication。

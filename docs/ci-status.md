@@ -1,6 +1,6 @@
 # CI 与验证状态
 
-## M7 validating 状态
+## M7 closed 状态
 
 - **Qualified exact SHA:** `b3b99a15aa99f8393f99f4c72c85f451a48c6749`，tree
   `018a6ed1d6547771cd9921e51d2bc8668305b6b2`。Automatic push run
@@ -19,10 +19,9 @@
   2。The exact local ticket/milestone and hosted CI gates all return `PASS` at code/tests/examples
   `15529/25482/132`，test growth `863/864`，remaining `1`；the hosted completion marker binds schema
   `2` to the exact SHA/run/attempt。
-- **Boundary:** both authorized non-force pushes are consumed。Performance is not awaited、credited
-  or claimed；no rerun、further push、PR、tag、release or publication is authorized。All tickets and
-  technical exit criteria are complete，but per user direction M7 remains `validating` and is not
-  closed。The implemented budget analysis remains
+- **Boundary:** M7 is `closed` with zero blocking findings。Both authorized non-force pushes are
+  consumed。Performance is excluded and is not awaited、credited or claimed；no rerun、further
+  push、PR、tag、release or publication is authorized。The implemented budget analysis remains
   [`M7-test-budget-gate-analysis.md`](research/M7-test-budget-gate-analysis.md)。
 
 ## M6 closed 状态

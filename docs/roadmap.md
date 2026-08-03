@@ -30,16 +30,18 @@ M6已以exact `7f1e45c174e749d3dddd32d187365722cce94dbe`、本地Full/MSRV/budge
 GitHub Actions run [`30765897553/1`](https://github.com/zzffu/ferrum2/actions/runs/30765897553)
 的quality、MSRV、三平台和TCP/UDP各`12/12`+cleanup证据关闭。用户明确将这四组
 定义为M6 hosted成功；未等待或声称performance及其dependent aggregate通过。
-M7已在`master@302fd777f4da62a8c1d4d52d81502056f02089c8`规划为additive
-schema v1 tagged static composition，并从exact ticket base `96a088e227dcfe415985c3deb081c807fb5e7d90`
-进入`validating`；M7-T01～T07已集成且本地非性能门禁通过，M7暂不关闭。
+M7已由exact `b3b99a15aa99f8393f99f4c72c85f451a48c6749`、本地serial Full和GitHub
+Actions run [`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)
+的quality、MSRV、三平台、TCP/UDP各`12/12`+cleanup及schema 2 Budget证据关闭；
+performance按用户关闭合同排除且不计入。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
 `docs/handoffs/HANDOFF-M3-2026-07-30.md`，M4/M5/M6 handoff 位于
 `docs/handoffs/HANDOFF-M4-2026-08-02.md`、
-`docs/handoffs/HANDOFF-M5-2026-08-02.md`和
-`docs/handoffs/HANDOFF-M6-2026-08-03.md`。
+`docs/handoffs/HANDOFF-M5-2026-08-02.md`、
+`docs/handoffs/HANDOFF-M6-2026-08-03.md`和
+`docs/handoffs/HANDOFF-M7-2026-08-03.md`。
 
 ## 依赖顺序
 
@@ -62,8 +64,8 @@ same-port composition、12 项 UDP interop 与 focused IPv6 direct-target
 10,000 idle sessions资源资格、Full、interop和三平台收敛；v0 preview已获得
 资格但未打包、发布或公开。M5已完成单实现迁移、安全patch与同SHA关闭资格，
 公开crypto seam、协议状态机、wire和schema v1保持不变。M6已复用现有SIP022
-UDP和runtime交付public client UDP path，未加入routing。M7计划复用config与
-`ProcessSupervisor` deep modules，增加静态tag graph而不创建`Endpoint` interface。
+UDP和runtime交付public client UDP path，未加入routing。M7已复用config与
+`ProcessSupervisor` deep modules交付静态tag graph，未创建`Endpoint` interface。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -745,7 +747,7 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 
 ## M7 — 具名多 inbound/outbound 静态组合
 
-- **Status:** validating
+- **Status:** closed
 - **Objective:** additive schema v1接受多个有界、具名concrete inbound/outbound；每个
   inbound在离线验证期exact解析一个outbound tag，两个binary复用同一个
   `ProcessSupervisor` transaction原子prepare/rollback，legacy单实例行为不变。
@@ -793,26 +795,11 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   `cb69992e49580e9f090c940554f129348d12c302`；M7-T08 exact
   `56b37d885174aa628703c5623c58b5775d857e24`；accepted hosted exact
   `b3b99a15aa99f8393f99f4c72c85f451a48c6749`。
-- **Open blockers and risks:** run
-  [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)在同一exact
-  SHA通过Full、MSRV、三平台和interop TCP/UDP各`12/12`+cleanup。Quality仅在Full成功后
-  被`ratio_ceiling_exceeded`置为failure；Budget按用户waiver记录且不得称PASS，performance
-  不等待、不计入。T05 schema v2与CI解耦已完成；T06已删除76个M6/M7 skips并保持一个M1
-  skip。T07 candidate以`4+/4-`关闭Full发现的zero-timeout测试竞态，base/candidate stress为
-  `14/2000`与`0/2000`；两份独立xhigh分析支持control-only补票，targeted QA已关闭
-  `QA-M7T07-001`。Accepted integration `cb69992`的serial Full、100+ lifecycle、MSRV、Clippy、
-  build、docs、schema 2 Budget、stress和diff均PASS。Exact descendant `a2b6951`的一次non-force
-  push已消费；run [`30808225939/1`](https://github.com/zzffu/ferrum2/actions/runs/30808225939)
-  的MSRV、三平台、interop和Budget均success，quality在Full内因Linux
-  `shared_manager_couples_session_byte_and_direct_owner_capacity`未回收owner而failure。Exact
-  Windows stress为`2000/2000`，Linux/WSL executable为`0/20`。T08 exact `56b37d8`以一个
-  test-only completion `Notify`替换200-yield观察；Linux变为`2000/2000`，本地Full、100+
-  lifecycle、MSRV、Clippy、build、docs和Budget均PASS，Architect/QA均`PASS_WITH_NOTES`且无
-  blocker/major/minor。Budget为growth `863/864`、remaining `1`。Final exact `b3b99a15`的
-  本地serial Full及run [`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)
-  已通过quality、MSRV、三平台、interop TCP/UDP各`12/12`+cleanup和Budget；后续push授权已
-  消费。所有tickets和技术exit criteria done，但按用户指示M7仍保持`validating`且不close；
-  performance不等待、不计入。未授权rerun、further push、PR、tag、release或publication。
+- **Open blockers and risks:** blocking findings为零。Final exact `b3b99a15`的本地serial
+  Full及run [`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)
+  已通过quality、MSRV、三平台、interop TCP/UDP各`12/12`+cleanup和schema 2 Budget；
+  Budget为growth `863/864`、remaining `1`。Performance按用户关闭合同排除且不声明PASS。
+  两次授权push均已消费；未授权rerun、further push、PR、tag、release或publication。
 
 ## 决策登记
 
@@ -950,3 +937,4 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 | 2026-08-03 | M7-T04 qualification / M7 hold | exact `953689a`以per-test-process spawn lock关闭hosted MSRV fork/exec fd继承竞态；run `30794873478/1`通过Full、MSRV、三平台和TCP/UDP各`12/12`+cleanup | final Architect/QA `PASS_WITH_NOTES`且无blocker/major/minor；quality仅Budget step `ratio_ceiling_exceeded`失败，performance按用户指示不等待、不计入 | T04 done，M7保持`validating`且暂不close；single push消费，未rerun/second push/PR/tag/release/publication；budget根治仅待方案/授权 |
 | 2026-08-03 | M7-T08 local integration / push authorization | exact `56b37d8`用test-only completion `Notify`关闭Linux UDP owner-reap调度假设；不改production、deadline、limit、shutdown或dependency | hosted red残留socket/task/7-byte owners；Linux `0/20`→`2000/2000`，Windows与全门禁PASS；Architect/QA无blocking finding | Budget growth `863/864`、remaining `1`；授权一个最终descendant后续non-force push及automatic monitoring；performance excluded，M7不close |
 | 2026-08-03 | M7-T08 hosted qualification hold | exact `b3b99a15` run `30812399038/1`的quality、MSRV、Windows/GNU/musl、interop和Budget全部success | quality marker为Full/security/process PASS；interop为TCP/UDP各`12/12`+cleanup；schema 2 CI Budget growth `863/864`、remaining `1` | 后续push授权已消费；performance不等待、不计入；所有技术exit criteria完成但遵用户指示M7保持`validating`、不close，且无rerun/further push/publication授权 |
+| 2026-08-03 | M7 close | M7改为`closed`；八票及六项exit criteria完成，blocking findings为零 | 用户在同一证据边界上授权close；performance继续排除，不改变已通过的quality/MSRV/platform/interop/Budget结论 | exact `b3b99a15`；run `30812399038/1`；M7 handoff；两次push已消费，closeout仅本地docs commit |

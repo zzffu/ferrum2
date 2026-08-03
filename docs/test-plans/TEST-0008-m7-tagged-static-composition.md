@@ -15,7 +15,7 @@
 | M7-MUST-05 process transaction | first/middle/last TCP/UDP/metrics prepare failure、root fatal、signal、owner baseline and exact rebind table | T02/T03 lifecycle |
 | M7-MUST-06 wire/operator regression | existing legacy config、CLI、observability、TCP/UDP protocol/local suites unchanged | T01～T04 regression |
 | M7-MUST-07 multi-instance path | bounded real-process two-client/two-server TCP+UDP table plus focused sharing/no-fallback/failure rows | T04 product |
-| M7-MUST-08 qualification | Full、MSRV、three native targets、TCP/UDP `24/24`、schema 2 budget and exact-commit reviews | T04～T07 release/control |
+| M7-MUST-08 qualification | Full、MSRV、three native targets、TCP/UDP `24/24`、schema 2 budget and exact-commit reviews | T04～T08 release/control |
 
 ## T01 config graph evidence
 
@@ -126,6 +126,9 @@ and must land at exact code/tests `15529/25483` without semantic edits。Envelop
 T07 replaces the scheduling-dependent zero-timeout ACK row found by Full with deterministic timeout
 and explicit closed-peer rows；the exact base/candidate 2,000-run stress must move from reproducible
 failure to zero failures without changing rustloc counts or product code。
+T08 replaces the Linux-only 200-yield UDP send-completion assumption with a test-only `Notify`；the
+direct Linux executable must move from `0/20` to `2000/2000` while production code、deadlines、
+limits、shutdown behavior and rustloc counts remain unchanged。
 
 Run serially on one accepted integration SHA：
 
@@ -144,6 +147,11 @@ After separate explicit authorization, one automatic push run/attempt for that e
 pass quality/Full/security/process、Rust 1.85、Windows MSVC、Linux GNU/musl、TCP
 `12/12`+cleanup、UDP `12/12`+cleanup and the repository final qualification summary。Existing
 performance may run as regression but M7 adds no performance/resource threshold。
+
+M7 closed on exact `b3b99a15aa99f8393f99f4c72c85f451a48c6749` and automatic run
+[`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)。The serial local gate、
+quality/Full/security/process、Rust 1.85、Windows/GNU/musl、TCP/UDP each `12/12` plus cleanup and
+schema 2 Budget passed；blocking findings were zero。Performance was excluded by the close contract。
 
 ## Stop rules
 

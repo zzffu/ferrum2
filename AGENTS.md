@@ -9,9 +9,12 @@ and command definitions in their authoritative build/config files where possible
 - Product:
   - `ferrum2` is a Rust proxy with separate client and server binaries. The
     current release implements SIP022 TCP/UDP for the three standard
-    Shadowsocks 2022 methods; the public client inbound is SOCKS5 TCP CONNECT.
-  - Current composition is intentionally small: one PSK, one listen/upstream,
-    direct server outbound, typed TOML, `tracing`, and low-cardinality metrics.
+    Shadowsocks 2022 methods; public client inbounds expose SOCKS5 TCP CONNECT
+    and explicit opt-in UDP ASSOCIATE.
+  - Current composition keeps one process-wide PSK/method and supports either
+    the legacy single instance or bounded tagged multi-inbound/multi-outbound
+    graphs with static bindings. Server outbounds remain direct; configuration
+    is typed TOML with `tracing` and low-cardinality metrics.
   - Release targets are Linux x86_64 GNU/musl and Windows. License:
     `GPL-3.0-only`.
 
@@ -60,10 +63,8 @@ and command definitions in their authoritative build/config files where possible
   - SIP023 and multi-user support are not planned; do not add preparatory
     abstractions without a concrete requirement.
   - Preferred dependency order, adjustable by validated need:
-    crypto implementation decision; public UDP inbound; tagged multi-inbound /
-    multi-outbound; TCP/UDP routing; multi-upstream, load balancing and chaining;
-    DNS; Tailscale Endpoint; Linux transparent inbound; Windows TUN; hot reload;
-    management API.
+    TCP/UDP routing; multi-upstream, load balancing and chaining; DNS; Tailscale
+    Endpoint; Linux transparent inbound; Windows TUN; hot reload; management API.
   - A future Tailscale Endpoint may expose inbound, outbound, and datagram
     adapters under one tag. Prefer external `tailscaled`/OS routing for simple
     Tailnet access; add an embedded endpoint interface only with a concrete,
@@ -78,7 +79,7 @@ and command definitions in their authoritative build/config files where possible
 - Repository hygiene:
   - Commit `Cargo.lock`; do not commit build output, local evidence, real PSKs,
     or production endpoints. Reviewed non-secret protocol fixtures are source.
-  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M5 are
+  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M7 are
     closed; historical evidence belongs in milestone/history documents, not in
     this context summary.
 

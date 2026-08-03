@@ -98,3 +98,10 @@ future contract obligations, not open M3 blockers。
 - **Follow-up trigger:** only if a future qualification cannot be audited through
   public metadata and visible job evidence, add a separately authorized read-only log
   retrieval capability. Do not reopen M5 for this access limitation alone.
+
+## M7 close audit
+
+No M7 review debt remains。M7-T08 Architect and QA both returned `PASS_WITH_NOTES` with no
+blocker、major or minor finding；the exact candidate and hosted descendant passed the contracted
+local、review、platform、interop and schema 2 Budget gates。Performance exclusion is an explicit
+scope boundary, not review debt。

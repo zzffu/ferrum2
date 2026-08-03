@@ -43,7 +43,7 @@ run `30425476328` attempt 1 在同一 SHA 完成 local/full、Rust 1.85、
 Windows/Linux GNU/Linux musl、TCP 12/12、UDP 12/12 和 focused IPv6 direct
 target evidence。完整证据见 roadmap、CI status与M2 handoff。
 
-当前 shipped facts：
+M3 planning baseline shipped facts（历史）：
 
 - 两个 binary 在进入 `run::run` 前加载 typed v1 config；`--check-config` 在
   listener 前完成，CLI 具有0/1/2 exit classes和四类stable config errors。
@@ -97,7 +97,7 @@ QA 在 planning baseline 上运行：
 5. **平台：**固定三个existing targets；native release binaries、hash、linkage、
    bounded lifecycle是primary evidence，不要求archive/installer/publication。
 
-## 明确延期或非差距
+## M3 planning 明确延期或非差距（历史）
 
 以下不是M3缺陷，也不得在execute中静默加入：
 
@@ -110,6 +110,10 @@ QA 在 planning baseline 上运行：
 - M4 可复现 throughput 基线（比值非 preview 硬门）与单主机bounded 10k-idle
   resource qualification；
 - archives、installers、signing、upload或publication。
+
+M6随后交付显式opt-in SOCKS5 UDP ASSOCIATE；M7随后交付bounded tagged static
+multi-inbound/outbound。Dynamic routing、DNS、multi-upstream groups/chaining、per-entry
+PSK/method、transparent/TUN、hot reload、management API和publication仍未交付。
 
 ## 风险与控制点
 

@@ -1,7 +1,8 @@
 # M7 — 具名多 inbound/outbound 静态组合
 
-- **Status:** validating
+- **Status:** closed
 - **Baseline:** `302fd777f4da62a8c1d4d52d81502056f02089c8`
+- **Qualified exact:** `b3b99a15aa99f8393f99f4c72c85f451a48c6749`
 - **Strategy:** drain
 - **Owner:** primary thread
 
@@ -84,33 +85,14 @@ Tickets serialize because T02 establishes the concrete shared admission/runtime 
 T03，and T04 intentionally reuses product-owned harness paths only after both binary changes
 integrate。No concurrent writer owns overlapping product paths。
 
-## Blocker / next action
+## Close evidence
 
-Product、review and hosted qualification completed on exact
-`953689ad2c9984a317f617e26444db7aa173513a` / run
-[`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)：Full、Rust
-1.85、Windows/GNU/musl and TCP/UDP `12/12`+cleanup succeeded。The quality job failed only at
-`ratio_ceiling_exceeded` after Full succeeded；this remains a recorded waiver，not PASS。
-Performance was not awaited or credited。T05 final exact `9baba260` is integrated after closing
-`ARCH-M7T05-001`。T06 exact `92d849e` removed all 76 M6/M7 skips、kept the one M1 skip and passed
-Architect/QA review；it is integrated。Final local Full then exposed a zero-timeout test race；T07
-candidate `ffcbccd` changed one test file `4+/4-` and passed `0/2000` stress、Budget and Architect
-review。After two independent xhigh analyses，control exact `cb69992` supplied the missing ticket and
-truthful frontier；targeted QA returned `PASS / CLOSED`。The accepted integration exact `cb69992`
-then passed serial format、Clippy、bin build、workspace Full、100+ lifecycle、docs、Rust 1.85、
-schema 2 ticket/milestone Budget、`0/2000` stress and diff checks。M7 remains validating and must
-not close until a same-SHA hosted run supplies the required four credited
-groups。The authorized exact descendant `a2b6951` was pushed once and automatic run
-[`30808225939/1`](https://github.com/zzffu/ferrum2/actions/runs/30808225939) passed MSRV、all three
-native cells、interop and Budget；quality alone failed in the Full step because Linux retained UDP
-test owners at `udp_runtime.rs:613`。The exact test passes Windows stress `2000/2000` but fails the
-Linux/WSL executable `20/20`。T08 exact `56b37d8` replaces the mock's 200-yield send observation
-with one completion `Notify`；Linux became `2000/2000` green，all local gates passed，Architect and
-QA both returned `PASS_WITH_NOTES` without blocker/major/minor，and Budget passes at growth
-`863/864` with remaining `1`。Final exact descendant
-`b3b99a15aa99f8393f99f4c72c85f451a48c6749` passed local serial Full and automatic run
-[`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)：quality、MSRV、all
-three native cells、interop TCP/UDP each `12/12` plus cleanup、and schema 2 Budget all succeeded。
-The authorized subsequent push is consumed。All tickets and technical exit criteria are done，but
-M7 stays `validating` and is not closed per user direction。Performance remains excluded；no rerun、
-further push、PR、tag、release or publication is authorized。
+- Exact `b3b99a15aa99f8393f99f4c72c85f451a48c6749` passed the serial local gate and automatic
+  run [`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)：quality、MSRV、
+  Windows/GNU/musl、interop TCP/UDP each `12/12` plus cleanup、and schema 2 Budget all succeeded。
+- M7-T08 exact `56b37d8` closed the Linux UDP owner-reap test race with a test-only completion
+  `Notify`；Linux stress passed `2000/2000`，Architect and QA returned `PASS_WITH_NOTES` with no
+  blocker、major or minor finding，and Budget passed at growth `863/864` with remaining `1`。
+- All eight tickets and all six exit criteria are complete。Performance remains excluded；both
+  authorized pushes are consumed，and no rerun、further push、PR、tag、release or publication is
+  authorized。See the [M7 handoff](../handoffs/HANDOFF-M7-2026-08-03.md)。
