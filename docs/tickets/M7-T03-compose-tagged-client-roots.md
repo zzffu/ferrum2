@@ -1,7 +1,7 @@
 ---
 id: M7-T03
 milestone: M7
-status: todo
+status: active
 depends_on: [M7-T02]
 owns:
   - bins/ferrum2-client/src/run.rs
