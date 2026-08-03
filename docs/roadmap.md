@@ -34,9 +34,9 @@ M7已由exact `b3b99a15aa99f8393f99f4c72c85f451a48c6749`、本地serial Full和G
 Actions run [`30812399038/1`](https://github.com/zzffu/ferrum2/actions/runs/30812399038)
 的quality、MSRV、三平台、TCP/UDP各`12/12`+cleanup及schema 2 Budget证据关闭；
 performance按用户关闭合同排除且不计入。
-M8现为`planned`，planning baseline为
-`404b62758a191fe879243c755c75bcf8b300040d`；尚无产品commit、review或qualification
-证据，且未授权任何remote action。
+M8现为`executing`，planning baseline为
+`404b62758a191fe879243c755c75bcf8b300040d`；M8-T01已集成，M8-T02 ready，尚无
+qualification证据，且未授权任何remote action。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -809,7 +809,7 @@ first-match route module；advanced matcher和outbound policy继续延期。
 
 ## M8 — 共享最小 TCP/UDP first-match routing
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** additive routed tagged schema v1使用一个shared bounded route module，按
   inbound tag、`tcp|udp`和pre-resolution exact target做ordered first-match并以
   mandatory `route.final`收敛；TCP per-flow、UDP per-datagram选择outbound，legacy/M7
@@ -831,9 +831,9 @@ first-match route module；advanced matcher和outbound policy继续延期。
      `12/12`+cleanup、M8 Budget和blocking review；缺失/失败/未授权即blocked。
 - **In-scope tickets:**
   - M8-T01：shared core route interface、routed config compilation和temporary run guards，
-    `ready`；
+    `done`；
   - M8-T02：client TCP/UDP per-target route、lazy UDP protocol legs和no-fallback，依赖T01，
-    `todo`；
+    `ready`；
   - M8-T03：server authenticated TCP/UDP direct-identity route，依赖T02，`todo`；
   - M8-T04：real-process、三平台、existing interop和exact-SHA qualification，依赖T03，
     `todo`。
@@ -847,10 +847,9 @@ first-match route module；advanced matcher和outbound policy继续延期。
   per-entry PSK/method、SIP023/multi-user、新adapter kind/`Endpoint`、transparent/TUN、
   hot reload、management API、new dependency、performance threshold、package/release/
   publication。
-- **Integrated commit:** —；plan-only。
-- **Open blockers and risks:** plan gate无blocker。M8-T01是唯一ready frontier；product
-  work必须使用独立ticket branch/worktree并先绑定exact base。Push、hosted run、PR、tag、
-  release和publication均未授权。
+- **Integrated commit:** M8-T01 exact `876da7e13c37aaf4e316848b13cf0a8f7cb8673b`。
+- **Open blockers and risks:** execution blocker为零；当前frontier只有M8-T02。Push、
+  hosted run、PR、tag、release和publication均未授权。
 
 ## 决策登记
 
@@ -991,3 +990,4 @@ first-match route module；advanced matcher和outbound policy继续延期。
 | 2026-08-03 | M7-T08 hosted qualification hold | exact `b3b99a15` run `30812399038/1`的quality、MSRV、Windows/GNU/musl、interop和Budget全部success | quality marker为Full/security/process PASS；interop为TCP/UDP各`12/12`+cleanup；schema 2 CI Budget growth `863/864`、remaining `1` | 后续push授权已消费；performance不等待、不计入；所有技术exit criteria完成但遵用户指示M7保持`validating`、不close，且无rerun/further push/publication授权 |
 | 2026-08-03 | M7 close | M7改为`closed`；八票及六项exit criteria完成，blocking findings为零 | 用户在同一证据边界上授权close；performance继续排除，不改变已通过的quality/MSRV/platform/interop/Budget结论 | exact `b3b99a15`；run `30812399038/1`；M7 handoff；两次push已消费，closeout仅本地docs commit |
 | 2026-08-03 | M8 plan | M8改为`planned`；接受tagged-only exact-target first-match、mandatory final、shared core route interface、TCP per-flow和UDP per-datagram语义 | M7已关闭；existing `TargetAddr`、resolved tag graph及binary composition seams足够，exact target无需Geo/DNS/sniffing/user abstraction | baseline `404b62758a191fe879243c755c75bcf8b300040d`；ADR-0028、SPEC/TEST-0009、四票及M8 `840`-line Budget；plan-only，无product/push/hosted/release/publication |
+| 2026-08-03 | M8-T01 integration | exact `876da7e`集成shared bounded route table、static/routed resolved config和两端临时fail-closed guard；T01 done，T02 ready | full Architect/QA发现inline target grammar和四组evidence缺口；一次bounded三文件repair全部关闭，定向复审无新blocker | focused `14/14`、CLI `5/5`、Clippy/fmt、Quick、diff和Budget PASS；growth `273`使用批准的repair contingency，remaining `567`；无push/hosted/release/publication |

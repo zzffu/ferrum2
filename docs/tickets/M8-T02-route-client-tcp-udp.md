@@ -1,7 +1,7 @@
 ---
 id: M8-T02
 milestone: M8
-status: todo
+status: ready
 depends_on: [M8-T01]
 owns:
   - bins/ferrum2-client/src/run.rs

@@ -1,7 +1,7 @@
 ---
 id: M8-T01
 milestone: M8
-status: ready
+status: done
 depends_on: []
 owns:
   - crates/ferrum2-core/src/lib.rs
@@ -23,16 +23,16 @@ legacy/M7 static document。
 
 ## Acceptance
 
-- [ ] The shared interface proves ordered first-match、AND/wildcards、exact IP/domain+port and
+- [x] The shared interface proves ordered first-match、AND/wildcards、exact IP/domain+port and
       mandatory final for `tcp|udp` without a trait、new crate or dependency。
-- [ ] Routed mode is tagged-only，mutually exclusive with `inbounds[].outbound`，bounded to 64
+- [x] Routed mode is tagged-only，mutually exclusive with `inbounds[].outbound`，bounded to 64
       rules and fully resolves inbound/outbound/final tags；static mode remains exact。
-- [ ] All matcher/target/count/reference/unreferenced/mixing negatives fail with the approved
+- [x] All matcher/target/count/reference/unreferenced/mixing negatives fail with the approved
       non-indexed redacted fields before subscriber/runtime/listener/buffer/task creation。
-- [ ] Validated configs own only compiled IDs/table；binary callers never parse operator strings。
-- [ ] `--check-config` accepts routed positives。Normal routed run remains temporarily fail-closed
+- [x] Validated configs own only compiled IDs/table；binary callers never parse operator strings。
+- [x] `--check-config` accepts routed positives。Normal routed run remains temporarily fail-closed
       as existing `startup.protocol` for each uncomposed role，while static/legacy run is unchanged。
-- [ ] `TEST-0009` T01、repository Quick、ticket Budget and blocking Architect/QA review pass on one
+- [x] `TEST-0009` T01、repository Quick、ticket Budget and blocking Architect/QA review pass on one
       exact candidate。
 
 ## Validation
@@ -42,9 +42,12 @@ Run `TEST-0009` T01 commands，then repository Quick commands from
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `876da7e13c37aaf4e316848b13cf0a8f7cb8673b`
+- Review: full Architect/QA `BLOCK` closed by one bounded repair；targeted Architect
+  `PASS_WITH_NOTES` and QA `PASS`，with no unresolved finding。
+- Notes: focused、Quick、Clippy/fmt、diff and exact integration Budget passed。Test growth `273`
+  exceeds warning `240` but remains within the approved `220 + 80` T01/repair allowance；M8
+  remaining is `567` and no independent evidence was deleted。
 
 ## Rollback / risk
 
