@@ -745,7 +745,7 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 
 ## M7 — 具名多 inbound/outbound 静态组合
 
-- **Status:** validating
+- **Status:** executing
 - **Objective:** additive schema v1接受多个有界、具名concrete inbound/outbound；每个
   inbound在离线验证期exact解析一个outbound tag，两个binary复用同一个
   `ProcessSupervisor` transaction原子prepare/rollback，legacy单实例行为不变。
@@ -768,10 +768,13 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   - M7-T01：legacy/tagged config graph与preflight reference validation，`done`；
   - M7-T02：server shared-state TCP/UDP/direct multi-root transaction，依赖T01，`done`；
   - M7-T03：client SOCKS/Shadowsocks static multi-root composition，依赖T02，`done`；
-  - M7-T04：real-process、三平台、interop与exact-SHA qualification，依赖T03，`done`。
+  - M7-T04：real-process、三平台、interop与exact-SHA qualification，依赖T03，`done`；
+  - M7-T05：schema 2 milestone test envelope与独立Budget job，依赖T04，`active`；
+  - M7-T06：删除M6/M7引入的rustfmt skips，依赖T05，`ready`。
 
   ```text
   M7-T01 config -> M7-T02 server risk -> M7-T03 client -> M7-T04 qualification
+    -> M7-T05 budget v2 -> M7-T06 standard formatting
   ```
 - **Deferred/out of scope:** dynamic routing、DNS、multi-upstream groups/load balancing/
   fallback/chaining、per-entry PSK/method、SIP023/multi-user、新adapter kind、Tailscale
@@ -785,9 +788,9 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)在同一exact
   SHA通过Full、MSRV、三平台和interop TCP/UDP各`12/12`+cleanup。Quality仅在Full成功后
   被`ratio_ceiling_exceeded`置为failure；Budget按用户waiver记录且不得称PASS，performance
-  不等待、不计入。M7按用户指示保持`validating`，暂不close；M6/M7预算门禁根因与schema v2
-  milestone-envelope提案已记录，未授权修改budget/baseline/workflow。Single non-force push已消费；不授权rerun、
-  second push、PR、tag、release或publication。
+  不等待、不计入。用户已授权实施schema v2 milestone envelope、CI解耦和M6/M7 rustfmt-skip
+  清理；M7恢复`executing`且仍不close。Single non-force push已消费；尚未授权new push、rerun、
+  PR、tag、release或publication。
 
 ## 决策登记
 

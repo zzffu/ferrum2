@@ -1,8 +1,11 @@
-schema=1
+schema=2
 series=rustloc-0.19.1-tests-v1
 tool=rustloc
 tool_version=0.19.1
 metric=tests
-commit=48383be93be648243fc8eff7bc4bb5ac1c1e143e
-code=14173
-tests=20878
+milestone=M7
+commit=953689ad2c9984a317f617e26444db7aa173513a
+code=15529
+tests=24619
+max_test_growth=864
+ticket_warning=120

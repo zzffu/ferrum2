@@ -15,7 +15,7 @@
 | M7-MUST-05 process transaction | first/middle/last TCP/UDP/metrics prepare failure、root fatal、signal、owner baseline and exact rebind table | T02/T03 lifecycle |
 | M7-MUST-06 wire/operator regression | existing legacy config、CLI、observability、TCP/UDP protocol/local suites unchanged | T01～T04 regression |
 | M7-MUST-07 multi-instance path | bounded real-process two-client/two-server TCP+UDP table plus focused sharing/no-fallback/failure rows | T04 product |
-| M7-MUST-08 qualification | Full、MSRV、three native targets、TCP/UDP `24/24`、budget and exact-commit reviews | T04 release |
+| M7-MUST-08 qualification | Full、MSRV、three native targets、TCP/UDP `24/24`、schema 2 budget and exact-commit reviews | T04～T06 release/control |
 
 ## T01 config graph evidence
 
@@ -118,6 +118,11 @@ git diff --check
 ```
 
 ## Integration gate
+
+T05 replaces the M6 ratio with an exact-base `864`-line M7 test envelope and separates quality from
+the Budget job。T06 then removes all 76 M6/M7 `rustfmt::skip` attributes，keeps the one M1 attribute，
+and must land at exact code/tests `15529/25483` without semantic edits。Envelope equality is PASS；
+`+1` remains BLOCKED and the `864 > 120` ticket warning is review evidence，not a hard failure。
 
 Run serially on one accepted integration SHA：
 

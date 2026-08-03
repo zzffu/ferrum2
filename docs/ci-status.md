@@ -1,6 +1,6 @@
 # CI 与验证状态
 
-## M7 validating 状态
+## M7 executing 状态
 
 - **Qualified exact SHA:** `953689ad2c9984a317f617e26444db7aa173513a`，tree
   `01594ef4efbd8e5bd242da6a5bda671989600c10`。Automatic push run
@@ -23,10 +23,10 @@
   for the credited M7-T04 outcome but does not make it a budget PASS or close evidence。
 - **Boundary:** performance was not awaited、credited or claimed。The authorized single
   non-force push is consumed；no rerun、second push、PR、tag、release or publication occurred or
-  is authorized。Per user direction M7 remains `validating` and is not closed while the recurring
-  M6/M7 budget policy is resolved at proposal level in
-  [`M7-test-budget-gate-analysis.md`](research/M7-test-budget-gate-analysis.md)；no budget、baseline
-  or workflow mutation is authorized。
+  is authorized。Per user direction M7 is not closed。The M6/M7 policy solution in
+  [`M7-test-budget-gate-analysis.md`](research/M7-test-budget-gate-analysis.md) is now authorized：
+  T05 implements schema 2 and CI isolation，then T06 removes the M6/M7 rustfmt skips。No new remote
+  action is authorized。
 
 ## M6 closed 状态
 

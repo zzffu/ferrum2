@@ -1,6 +1,6 @@
 # M6/M7 test-budget 门禁根因与治理提案
 
-- **Status:** proposed；尚未授权修改 `scripts/test-budget.sh`、baseline 或 workflow。
+- **Status:** accepted；M7-T05 implements the approved control-plane change。
 - **Scope:** 解释 M6、M7 连续出现的 Budget 阻塞，并给出下一张 control-plane ticket 的最小契约。
 - **Non-goal:** 不把 M7 当前超限追认为 PASS，不删除/压缩独立测试，不用无意义产品代码换预算。
 
@@ -67,14 +67,13 @@ PASS iff test_growth <= max_test_growth
 
 这不增加 provider、产品代码或测试框架，只移动现有 step 并收窄 marker 语义。
 
-## 迁移边界
+## Accepted activation
 
-1. 当前 M7 保持 `validating`；`953689a` 的 Budget 只记录为 waived `BLOCKED`，不得用
-   retroactive envelope 改写成 PASS。
-2. 获得单独授权后，创建一张 control-plane ticket 实现 schema v2 和 CI 解耦。优先从下一
-   milestone planning base 启用；若在 M7 close 前改动 control SHA，则必须重新取得 push 授权，
-   并在新 exact SHA 上重新跑所需 hosted evidence。
-3. 不采用单纯抬高 ceiling、删除/压缩测试、补 inert code 或路径重分类；这些只移动数字，保留
+1. `953689a` 的历史 Budget 仍只记录为 waived `BLOCKED`，不得改写成 PASS。
+2. M7-T05以该exact product SHA和counts `15529/24619`为新policy base；在首张后续Rust票
+   T06之前分配其标准rustfmt输出的精确`max_test_growth=864`，无额外余量。
+3. T05与T06改变新的exact SHA；M7保持open，任何新push和hosted qualification仍需另行授权。
+4. 不采用单纯抬高 ceiling、删除/压缩测试、补 inert code 或路径重分类；这些只移动数字，保留
    同一激励缺陷。
 
 ## 实现验收

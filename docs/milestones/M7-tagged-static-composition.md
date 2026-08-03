@@ -1,6 +1,6 @@
 # M7 — 具名多 inbound/outbound 静态组合
 
-- **Status:** validating
+- **Status:** executing
 - **Baseline:** `302fd777f4da62a8c1d4d52d81502056f02089c8`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -64,12 +64,16 @@
 | M7-T02 | Compose server multi-listener TCP/UDP/direct roots with shared state and atomic rollback | M7-T01 | done |
 | M7-T03 | Compose client multi-listener SOCKS/Shadowsocks roots with shared bounds and static mapping | M7-T02 | done |
 | M7-T04 | Prove multi-instance real-process behavior and qualify one exact SHA | M7-T03 | done |
+| M7-T05 | Replace the broken permanent ratio with a schema 2 milestone test envelope | M7-T04 | active |
+| M7-T06 | Remove every M6/M7 rustfmt skip and accept standard formatting | M7-T05 | ready |
 
 ```text
 M7-T01 config graph
   -> M7-T02 highest-risk server TCP/UDP transaction
   -> M7-T03 client static composition
   -> M7-T04 exact-SHA qualification
+  -> M7-T05 budget control repair
+  -> M7-T06 standard formatting
 ```
 
 Tickets serialize because T02 establishes the concrete shared admission/runtime owner consumed by
@@ -78,13 +82,12 @@ integrate。No concurrent writer owns overlapping product paths。
 
 ## Blocker / next action
 
-Product、review and hosted qualification are complete on exact
+Product、review and hosted qualification completed on exact
 `953689ad2c9984a317f617e26444db7aa173513a` / run
 [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)：Full、Rust
 1.85、Windows/GNU/musl and TCP/UDP `12/12`+cleanup succeeded。The quality job failed only at
 `ratio_ceiling_exceeded` after Full succeeded；this remains a recorded waiver，not PASS。
-Performance was not awaited or credited。Per explicit user direction M7 remains `validating` and
-must not close；the recurring M6/M7 budget-gate analysis and proposed schema v2 milestone envelope
-are recorded in [`M7-test-budget-gate-analysis.md`](../research/M7-test-budget-gate-analysis.md)。
-No budget、baseline or workflow change is authorized yet。The one non-force push is consumed；no rerun、second push、PR、
-tag、release or publication is authorized。
+Performance was not awaited or credited。The user authorized the recorded schema 2 envelope and
+removal of M6/M7 `rustfmt::skip` attributes；T05 is the active control-only frontier and T06 follows
+from its exact integration SHA。M7 is executing again and must not close；the prior single push is
+consumed，and no new push、rerun、PR、tag、release or publication is authorized。

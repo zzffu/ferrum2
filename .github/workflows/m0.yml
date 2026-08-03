@@ -60,38 +60,11 @@ jobs:
           cargo test --workspace --all-features --locked
           cargo test -p ferrum2-m0-harness --test lifecycle_cycles full_qualification_runs_twenty_cycles_per_category_and_at_least_100_per_binary --locked -- --ignored --exact --nocapture
           cargo doc --workspace --all-features --no-deps --locked
-      - name: Enforce test budget on the exact SHA
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PUSH_BASE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          cargo install --locked rustloc --version '=0.19.1' --root "$RUNNER_TEMP/rustloc"
-          rustloc_bin="$RUNNER_TEMP/rustloc/bin/rustloc"
-          test "$("$rustloc_bin" --version)" = "rustloc 0.19.1"
-
-          base=""
-          case "$EVENT_NAME" in
-            pull_request) base="$PR_BASE_SHA" ;;
-            push) base="$PUSH_BASE_SHA" ;;
-          esac
-          case "$base" in
-            ""|0000000000000000000000000000000000000000)
-              RUSTLOC="$rustloc_bin" sh scripts/test-budget.sh ci \
-                --candidate "$GITHUB_SHA"
-              ;;
-            *)
-              RUSTLOC="$rustloc_bin" sh scripts/test-budget.sh ci \
-                --base "$base" --candidate "$GITHUB_SHA"
-              ;;
-          esac
       - name: Record authoritative full-gate completion
         shell: bash
         run: |
           set -euo pipefail
-          printf 'm3_full_completion status=PASS full=PASS security=PASS process=PASS test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
+          printf 'm3_full_completion status=PASS full=PASS security=PASS process=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
       - name: Prove focused IPv6 UDP real-process path
         shell: bash
@@ -130,6 +103,54 @@ jobs:
             exit 1
           fi
           printf 'm2_ipv6_udp_real_process_completion status=PASS sha=%s run_id=%s run_attempt=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+
+  budget:
+    name: test-budget
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Enforce milestone test envelope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          cargo install --locked rustloc --version '=0.19.1' --root "$RUNNER_TEMP/rustloc"
+          rustloc_bin="$RUNNER_TEMP/rustloc/bin/rustloc"
+          test "$("$rustloc_bin" --version)" = "rustloc 0.19.1"
+
+          base=""
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA" ;;
+            push) base="$PUSH_BASE_SHA" ;;
+          esac
+          case "$base" in
+            ""|0000000000000000000000000000000000000000)
+              RUSTLOC="$rustloc_bin" sh scripts/test-budget.sh ci \
+                --candidate "$GITHUB_SHA"
+              ;;
+            *)
+              RUSTLOC="$rustloc_bin" sh scripts/test-budget.sh ci \
+                --base "$base" --candidate "$GITHUB_SHA"
+              ;;
+          esac
+          printf 'test_budget_completion status=PASS schema=2 sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
   msrv:
@@ -762,6 +783,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - quality
+      - budget
       - msrv
       - platform
       - interop
@@ -780,6 +802,7 @@ jobs:
         shell: bash
         env:
           QUALITY_RESULT: ${{ needs.quality.result }}
+          BUDGET_RESULT: ${{ needs.budget.result }}
           MSRV_RESULT: ${{ needs.msrv.result }}
           PLATFORM_RESULT: ${{ needs.platform.result }}
           INTEROP_RESULT: ${{ needs.interop.result }}
@@ -789,6 +812,7 @@ jobs:
           test "$(git status --porcelain)" = ""
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$QUALITY_RESULT" = "success"
+          test "$BUDGET_RESULT" = "success"
           test "$MSRV_RESULT" = "success"
           test "$PLATFORM_RESULT" = "success"
           test "$INTEROP_RESULT" = "success"
