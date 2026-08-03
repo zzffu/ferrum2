@@ -772,7 +772,7 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   - M7-T05：schema 2 milestone test envelope与独立Budget job，依赖T04，`done`；
   - M7-T06：删除M6/M7引入的rustfmt skips，依赖T05，`done`；
   - M7-T07：消除zero-timeout qualification test竞态，依赖T06，`done`；
-  - M7-T08：消除Linux UDP owner-reap测试调度假设，依赖T07，`active`。
+  - M7-T08：消除Linux UDP owner-reap测试调度假设，依赖T07，`done`。
 
   ```text
   M7-T01 config -> M7-T02 server risk -> M7-T03 client -> M7-T04 qualification
@@ -790,7 +790,8 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   `9baba260dde2adefb33a927787ba556299b81bcd`；M7-T06 exact
   `92d849ecd9c21bc4a3fdaf37aa826a32470f4504`；M7-T07 candidate exact
   `ffcbccd16cbc6f643471040405cc89e04d728f0a` and accepted control/integration exact
-  `cb69992e49580e9f090c940554f129348d12c302`。
+  `cb69992e49580e9f090c940554f129348d12c302`；M7-T08 exact
+  `56b37d885174aa628703c5623c58b5775d857e24`。
 - **Open blockers and risks:** run
   [`30794873478/1`](https://github.com/zzffu/ferrum2/actions/runs/30794873478)在同一exact
   SHA通过Full、MSRV、三平台和interop TCP/UDP各`12/12`+cleanup。Quality仅在Full成功后
@@ -803,9 +804,13 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
   push已消费；run [`30808225939/1`](https://github.com/zzffu/ferrum2/actions/runs/30808225939)
   的MSRV、三平台、interop和Budget均success，quality在Full内因Linux
   `shared_manager_couples_session_byte_and_direct_owner_capacity`未回收owner而failure。Exact
-  Windows stress为`2000/2000`，Linux/WSL executable为`0/20`；T08是唯一active frontier。
-  M7保持`validating`且不close，performance仍不计入。未授权rerun、second push、PR、tag、
-  release或publication。
+  Windows stress为`2000/2000`，Linux/WSL executable为`0/20`。T08 exact `56b37d8`以一个
+  test-only completion `Notify`替换200-yield观察；Linux变为`2000/2000`，本地Full、100+
+  lifecycle、MSRV、Clippy、build、docs和Budget均PASS，Architect/QA均`PASS_WITH_NOTES`且无
+  blocker/major/minor。Budget为growth `863/864`、remaining `1`。所有tickets done；M7仍保持
+  `validating`且不close，performance不计入。用户授权最终validated authorization-record
+  descendant一次后续non-force `master:master` push及只读automatic-run监控；未授权rerun、
+  further push、PR、tag、release或publication。
 
 ## 决策登记
 
@@ -941,3 +946,4 @@ UDP和runtime交付public client UDP path，未加入routing。M7计划复用con
 | 2026-08-03 | M7-T03 integration | exact `b3f7ff8`集成client tagged SOCKS TCP/UDP roots、static captured outbound和process-wide admission/session/byte/live-ID owners；T03 done，T04 active | 初审发现accept error被折叠及composed UDP、独立byte、live-ID、listener-fatal证据缺口；一次bounded repair全部关闭，定向Architect/QA均PASS | client `27/27`、CLI `5/5`、focused、Full `6/6`、ignored lifecycle、MSRV、Clippy/fmt/diff与integration复验PASS；首次MSRV Windows UDP bind竞态由isolated及unchanged rerun关闭；budget `ratio_ceiling_exceeded`按用户T03/T04 waiver仅记录；无push/hosted/release/publication |
 | 2026-08-03 | M7-T04 native ownership repair | T04 ownership增加现有`tests/platform/qualify_native.py`，供唯一bounded repair在既有三平台driver内加入tagged offline与multi-listener rollback/rebind | 初始T04 ownership只列`m0_qualification.rs`，但native jobs直接调用Python driver；不扩权会允许legacy-only平台结果误记为M7 evidence | candidate `564e11e`初审Architect/QA均BLOCK；只扩一个现有文件，不加provider/job/workflow/dependency，remote仍未授权 |
 | 2026-08-03 | M7-T04 qualification / M7 hold | exact `953689a`以per-test-process spawn lock关闭hosted MSRV fork/exec fd继承竞态；run `30794873478/1`通过Full、MSRV、三平台和TCP/UDP各`12/12`+cleanup | final Architect/QA `PASS_WITH_NOTES`且无blocker/major/minor；quality仅Budget step `ratio_ceiling_exceeded`失败，performance按用户指示不等待、不计入 | T04 done，M7保持`validating`且暂不close；single push消费，未rerun/second push/PR/tag/release/publication；budget根治仅待方案/授权 |
+| 2026-08-03 | M7-T08 local integration / push authorization | exact `56b37d8`用test-only completion `Notify`关闭Linux UDP owner-reap调度假设；不改production、deadline、limit、shutdown或dependency | hosted red残留socket/task/7-byte owners；Linux `0/20`→`2000/2000`，Windows与全门禁PASS；Architect/QA无blocking finding | Budget growth `863/864`、remaining `1`；授权一个最终descendant后续non-force push及automatic monitoring；performance excluded，M7不close |

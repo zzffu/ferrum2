@@ -1,7 +1,7 @@
 ---
 id: M7-T08
 milestone: M7
-status: active
+status: done
 depends_on: [M7-T07]
 owns:
   - crates/ferrum2-runtime/tests/udp_runtime.rs
@@ -28,13 +28,13 @@ capacity and shutdown contracts unchanged；this is one bounded test-only repair
 
 ## Acceptance
 
-- [ ] Identify the exact retained owner(s) on the Linux red path and prove the causal scheduling
+- [x] Identify the exact retained owner(s) on the Linux red path and prove the causal scheduling
       edge；do not diagnose by elapsed-time guesswork。
-- [ ] Make the existing send/removal/owner-slot assertions deterministic without changing product
+- [x] Make the existing send/removal/owner-slot assertions deterministic without changing product
       code、production deadlines、owner limits or shutdown behavior。
-- [ ] Keep the candidate to the one owned test file and preserve the exhausted M7 envelope with
+- [x] Keep the candidate to the one owned test file and preserve the exhausted M7 envelope with
       zero or negative test growth；add no dependency、retry loop or wall-clock delay widening。
-- [ ] The exact Linux/WSL test changes from deterministic red to at least `2000/2000` green；the
+- [x] The exact Linux/WSL test changes from deterministic red to at least `2000/2000` green；the
       Windows focused test、runtime test target、workspace Full、Clippy、format、Rust 1.85、Budget
       and diff checks pass。
 
@@ -47,8 +47,8 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 cargo +1.85.0 check --workspace --all-targets --locked
-& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base <ticket-base-sha> --candidate <candidate-sha>
-git diff --check <ticket-base-sha>..<candidate-sha>
+& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base 9299b8dea4a19d5a9de70ac056fa483b233771b6 --candidate 56b37d885174aa628703c5623c58b5775d857e24
+git diff --check 9299b8dea4a19d5a9de70ac056fa483b233771b6..56b37d885174aa628703c5623c58b5775d857e24
 ```
 
 The Linux stress command must run the exact built test executable from an isolated WSL target
@@ -56,6 +56,12 @@ directory and fail on any non-zero exit。
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `56b37d885174aa628703c5623c58b5775d857e24`，parent exact
+  `9299b8dea4a19d5a9de70ac056fa483b233771b6`，tree
+  `3571e13339f4a779adef5002d20e42941908f1b6`；one test file `5+/6-`。
+- Review: Architect and QA both `PASS_WITH_NOTES`，with no blocker、major or minor finding。
+- Notes: The first Linux wait retained socket/task/7-byte owners while session/queue/scratch were
+  zero。A test-only completion `Notify` replaced the scheduling-dependent 200-yield observation；
+  WSL exact stress passed `2000/2000`，Windows and runtime `13/13` passed，and Full、Clippy、build、
+  100+ lifecycle、docs、Rust 1.85、Budget and diff checks passed。Exact Budget is tests `25482`，
+  growth `863/864`，remaining `1`，ticket growth `0`。

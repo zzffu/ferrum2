@@ -37,9 +37,15 @@
   Automatic run [`30808225939/1`](https://github.com/zzffu/ferrum2/actions/runs/30808225939)
   passed MSRV、Windows/GNU/musl、interop and schema 2 Budget。Quality job `91668470588` alone
   failed in Full at `udp_runtime.rs:613` because the Linux UDP owner-reap test did not return to
-  baseline；the exact Windows stress passed `2000/2000` while Linux/WSL failed `20/20`。M7-T08 is
-  the only active bounded repair。Performance is excluded；no rerun、second push or other
-  publication is authorized。
+  baseline；the exact Windows stress passed `2000/2000` while Linux/WSL failed `20/20`。M7-T08
+  exact `56b37d885174aa628703c5623c58b5775d857e24` adds one test-only completion `Notify` and
+  deletes the 200-yield send observation；Linux passed `2000/2000`，Windows/runtime/Full/Clippy/
+  build/100+ lifecycle/docs/Rust 1.85 passed，and Architect/QA returned `PASS_WITH_NOTES` without
+  blocker、major or minor finding。Exact Budget passes at tests `25482`、growth `863/864`、
+  remaining `1`、ticket growth `0`。All tickets are done；M7 remains validating and is not closed。
+  The user authorizes one subsequent non-force `master:master` push of the final validated
+  authorization-record descendant and read-only monitoring；performance remains excluded。No rerun、
+  further push or other publication is authorized。
 
 ## M6 closed 状态
 

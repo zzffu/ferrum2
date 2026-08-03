@@ -67,7 +67,7 @@
 | M7-T05 | Replace the broken permanent ratio with a schema 2 milestone test envelope | M7-T04 | done |
 | M7-T06 | Remove every M6/M7 rustfmt skip and accept standard formatting | M7-T05 | done |
 | M7-T07 | Make the zero-timeout qualification gate test deterministic | M7-T06 | done |
-| M7-T08 | Make the UDP owner-reap test deterministic on Linux | M7-T07 | active |
+| M7-T08 | Make the UDP owner-reap test deterministic on Linux | M7-T07 | done |
 
 ```text
 M7-T01 config graph
@@ -98,12 +98,16 @@ candidate `ffcbccd` changed one test file `4+/4-` and passed `0/2000` stress、B
 review。After two independent xhigh analyses，control exact `cb69992` supplied the missing ticket and
 truthful frontier；targeted QA returned `PASS / CLOSED`。The accepted integration exact `cb69992`
 then passed serial format、Clippy、bin build、workspace Full、100+ lifecycle、docs、Rust 1.85、
-schema 2 ticket/milestone Budget、`0/2000` stress and diff checks。T01–T07 are done，but M7 remains
-validating and must not close until a same-SHA hosted run supplies the required four credited
+schema 2 ticket/milestone Budget、`0/2000` stress and diff checks。M7 remains validating and must
+not close until a same-SHA hosted run supplies the required four credited
 groups。The authorized exact descendant `a2b6951` was pushed once and automatic run
 [`30808225939/1`](https://github.com/zzffu/ferrum2/actions/runs/30808225939) passed MSRV、all three
 native cells、interop and Budget；quality alone failed in the Full step because Linux retained UDP
 test owners at `udp_runtime.rs:613`。The exact test passes Windows stress `2000/2000` but fails the
-Linux/WSL executable `20/20`，so M7-T08 is the only active drain frontier。Performance remains
-excluded。The push scope is consumed；no rerun、second push、PR、tag、release or publication is
-authorized。
+Linux/WSL executable `20/20`。T08 exact `56b37d8` replaces the mock's 200-yield send observation
+with one completion `Notify`；Linux became `2000/2000` green，all local gates passed，Architect and
+QA both returned `PASS_WITH_NOTES` without blocker/major/minor，and Budget passes at growth
+`863/864` with remaining `1`。All tickets are done but M7 stays validating。The user authorizes one
+subsequent non-force `master:master` push of the final validated authorization-record descendant and
+read-only automatic-run monitoring；performance remains excluded。No rerun、further push、PR、tag、
+release or publication is authorized。
