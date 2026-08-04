@@ -1,10 +1,10 @@
 # CI 与验证状态
 
-## M11 validating — automatic qualification PASS，manual performance blocked
+## M11 closed — automatic qualification and independent manual performance complete
 
 - **Exact identity:** product `6d975c1e45eb0e614c54961e35fdc19fa2478d98`，tree
   `2d022daccf06c31b0e7106bb1427559c9999c79b`。Remote `codex/integration/m11` points exactly to
-  that product；local docs checkpoint `b2e658aecb20c6f58158bcd86ca548e1ad5371d3` is a descendant
+  that product；pre-close local docs checkpoint `01e498e9e9ed0179caec1d79afec0ba73dd10c17` is a descendant
   and is not claimed as hosted-qualified。
 - **Local exact gate:** public selector `3/3`、config `14/14`、CLI `5/5`；four T02/T03 composition
   rows and both T04 real-process rows `1/1` each；architecture `9/9`、Rust 1.85、format、strict
@@ -16,18 +16,33 @@
   `92108479373`、Windows MSVC `92108479405`、Linux GNU `92108479413`、Linux musl
   `92108479435`、interop `92108479334` and qualification `92109254228` all succeeded。Performance
   `92108480457` was correctly skipped because this was a push event。
-- **Decisive markers:** attempt 1 binds exact SHA/run/attempt and reports TCP `12/12` with cleanup、
-  UDP `12/12` with cleanup、platforms `3/3` and final aggregate `PASS`。Final hosted Architect
-  returned `PASS_WITH_NOTES` and QA `PASS`；no blocker、major or minor finding remains。
+- **Decisive automatic markers:** attempt 1 binds exact SHA/run/attempt and reports TCP `12/12` with
+  cleanup、UDP `12/12` with cleanup、platforms `3/3` and final aggregate `PASS`。
+- **Independent manual performance:** workflow-dispatch run
+  [`30945447936/1`](https://github.com/zzffu/ferrum2/actions/runs/30945447936/attempts/1) completed
+  overall `failure`，but performance job `92114171793` succeeded in `42m50s` and is the only credited
+  result from that run。Its exact markers report throughput trials `10`、medians
+  `136531148/499539421`、ratio `0.273314061`、THP `APPLIED` and `RESTORED readback=PASS`、resources
+  `sessions=10000 samples=180 rss_windows=6/6 drain=PASS`、post-job cleanup and `Complete job`，all
+  bound to SHA/run/attempt
+  `6d975c1e45eb0e614c54961e35fdc19fa2478d98/30945447936/1`。The ratio is diagnostic only；M11
+  adds no performance threshold or claim。
 - **Footprint:** schema 3 integrity/change passed。Milestone numeric result is the reviewed
   `REVIEW_REQUIRED` signal：ratio `2.025588`、case/support/fixture growth `4993/121/0`、five file
   `WARN` and one client `run.rs` `REVIEW_REQUIRED`；no fixture、dependency、crate、third harness or
   duplicate encoder was added。
-- **Boundary / blocker:** the authorized one non-force push is consumed。The provider later created
-  attempt 2 without a primary rerun request or authorization；it is uncredited and does not replace
-  immutable attempt 1。Required exact-SHA manual performance remains separately unauthorized/unrun，
-  so M11 stays `validating` and M11-T05 stays `blocked`。No second push、PR、tag、package、release or
-  publication is authorized。
+- **Evidence partition / failures:** automatic qualification is credited only from `30943770483/1`；
+  manual performance/resource is credited only from `92114171793` in `30945447936/1`。Duplicate manual
+  MSRV `92114171828` failed at a real-process child-running assertion；interop `92114171762` failed
+  `M1-INT-011` with TCP `11/12`、a poisoned trace lock and cleanup `FAIL`；qualification
+  `92114925410` consequently failed。They remain uncredited failures and the manual run is not called
+  PASS。This predeclared event/job partition is not SHA/run/attempt splicing because performance is
+  independent and not an input to qualification。
+- **Closure / boundary:** final Architect and QA both returned `PASS_WITH_NOTES`。No blocker or major
+  finding remains；`M11-T05-CLOSE-QA-001` retains the duplicate failures as residual harness-flake debt。
+  M11-T05 is `done` and M11 is `closed`。Both remote authorizations are consumed；provider-created
+  automatic attempt 2 remains uncredited。No rerun、second push/dispatch、PR、tag、package、release or
+  publication was performed or is authorized。
 
 ## M10 closed
 

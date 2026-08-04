@@ -1,6 +1,6 @@
 # M11 — 固定 client proxy chaining 与 per-outbound credentials
 
-- **Status:** validating
+- **Status:** closed
 - **Baseline:** `7a3c876681255b88492b3608af4fa52497435efc`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -65,7 +65,7 @@ seam、SIP022 state machines 与 process lifecycle 保持兼容。
       tamper/replay错误、exact nested maximum/+1和invalid-inner no-partial-mutation通过。
 - [x] Success/failure lifecycle、aggregate limits、zero owners、exact TCP/UDP rebind与global/outbound
       secret redaction通过；无unbounded/eager per-hop socket/buffer/task。
-- [ ] 一个exact SHA通过Full、Rust 1.85、100+ lifecycle、three native targets、existing TCP/UDP各
+- [x] 一个exact SHA通过Full、Rust 1.85、100+ lifecycle、three native targets、existing TCP/UDP各
       `12/12`+cleanup、schema 3 footprint、blocking reviews及另行授权的manual performance/resource job。
 
 ## Tickets
@@ -76,7 +76,7 @@ seam、SIP022 state machines 与 process lifecycle 保持兼容。
 | M11-T02 | Compose ordered fixed TCP chains with existing SIP022 flows | M11-T01 | done |
 | M11-T03 | Compose bounded ordered UDP chains with atomic validation/binding | M11-T02 | done |
 | M11-T04 | Prove mixed-credential two-hop TCP/UDP in existing real-process harness | M11-T03 | done |
-| M11-T05 | Qualify one exact integration SHA locally、hosted and with manual performance | M11-T04 | blocked |
+| M11-T05 | Qualify one exact integration SHA locally、hosted and with manual performance | M11-T04 | done |
 
 ```text
 M11-T01 config/plan contract
@@ -98,7 +98,7 @@ disposition but does not weaken correctness evidence。No fixture、new harness 
 is planned。Known growing-file signals：config/local-support/UDP process files `WARN`，client `run.rs`
 `REVIEW_REQUIRED`。
 
-## Validation evidence / blocker
+## Validation evidence / closure
 
 Exact product `6d975c1e45eb0e614c54961e35fdc19fa2478d98`、tree
 `2d022daccf06c31b0e7106bb1427559c9999c79b` passed the focused config/plan、four composition、two
@@ -106,7 +106,7 @@ real-process、architecture and Rust 1.85 commands。Serial format、strict Clip
 all-features tests、100+ lifecycle `1/1` in `131.07s`、docs、diff and schema 3 integrity passed。
 Numeric footprint remains reviewed `REVIEW_REQUIRED` at ratio `2.025588`、case/support/fixture growth
 `4993/121/0`、five file `WARN` and one client `run.rs` `REVIEW_REQUIRED`；final Architect
-`PASS_WITH_NOTES` and QA `PASS` report no blocker、major or minor finding。
+`PASS_WITH_NOTES` and QA `PASS` reported no blocker、major or minor finding before the manual dispatch。
 
 The authorized one non-force push fixed remote `codex/integration/m11` at that exact product。Automatic
 push run [`30943770483/1`](https://github.com/zzffu/ferrum2/actions/runs/30943770483/attempts/1)
@@ -116,9 +116,24 @@ Windows MSVC `92108479405`、Linux GNU `92108479413`、Linux musl `92108479435`�
 platforms `3/3`、TCP/UDP each `12/12` plus cleanup and aggregate `PASS`。Performance `92108480457`
 was correctly skipped for the push event。
 
-The one push authorization is consumed。A later provider-created attempt 2 was neither requested nor
-authorized by the primary and is uncredited；it does not invalidate immutable attempt 1。The only
-remaining exit criterion is a separately authorized exact-SHA `workflow_dispatch` whose `performance`
-job passes。Until that authorization and result exist，M11 stays `validating` and T05 stays `blocked`。
-No second push、rerun、PR、tag、release or publication is authorized；the local docs-only checkpoint is
-not a separately qualified product SHA。
+Separately authorized workflow-dispatch run
+[`30945447936/1`](https://github.com/zzffu/ferrum2/actions/runs/30945447936/attempts/1) completed overall
+`failure`，but its independent exact-SHA performance job `92114171793` succeeded in `42m50s`。The job
+recorded throughput trials `10`、medians `136531148/499539421`、ratio `0.273314061`、THP apply and
+restore/readback PASS、`10000` sessions、`180` samples、RSS windows `6/6`、drain PASS、post-job cleanup
+and final completion，all bound to
+`6d975c1e45eb0e614c54961e35fdc19fa2478d98/30945447936/1`。The ratio is diagnostic regression evidence；
+M11 defines no throughput threshold or claim。
+
+Only performance job `92114171793` is credited from that manual run。Duplicate MSRV `92114171828`、
+interop `92114171762`（TCP `11/12`、poisoned trace lock、cleanup `FAIL`）and qualification
+`92114925410` failed and remain explicitly uncredited。Automatic non-performance qualification is
+credited only from `30943770483/1`；the manual job supplies only the contract-independent performance
+result，so this is not SHA/run/attempt splicing。Final Architect and QA both returned `PASS_WITH_NOTES`；
+`M11-T05-CLOSE-QA-001` preserves those duplicate failures as residual harness-flake debt，not a milestone
+blocker。
+
+Both remote authorizations are consumed。The provider-created automatic attempt 2 remains uncredited；
+no rerun、second push/dispatch、PR、tag、package、release or publication was performed or is authorized。
+T05 is `done` and M11 is `closed`；the local docs-only descendant is not a separately qualified product
+SHA。

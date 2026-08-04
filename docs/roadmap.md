@@ -48,12 +48,11 @@ run [`30906020944/1`](https://github.com/zzffu/ferrum2/actions/runs/30906020944)
 `PASS_WITH_NOTES`、QA `PASS`，blocking findings为零。Performance只作current-workflow
 regression/aggregate evidence，M10不新增threshold或claim；一次non-force push授权已消费，
 未rerun、second push、dispatch、PR、tag、release或publish。
-M11以clean `master@7a3c876681255b88492b3608af4fa52497435efc`为baseline，
-并从exact ticket base `81469722101bcbb4e71a41e39dfd98e99043d34a`进入`validating`：
-M11-T01/T02/T03/T04已集成；exact product `6d975c1e45eb0e614c54961e35fdc19fa2478d98`
-通过local qualification与automatic push run `30943770483/1`，M11-T05仅因required manual
-performance尚未单独授权/运行而`blocked`。一次push授权已消费；provider-created attempt 2不计入，
-且尚无release证据。
+M11已由exact product `6d975c1e45eb0e614c54961e35fdc19fa2478d98`、local qualification、automatic
+push run `30943770483/1`及manual run `30945447936/1`的独立performance job `92114171793`关闭。
+Manual run整体为`failure`；其重复MSRV、interop和qualification失败保持uncredited，不改写为PASS。
+Final Architect/QA均`PASS_WITH_NOTES`；两次remote授权均已消费，provider-created automatic attempt 2
+不计入，且没有rerun、second push/dispatch或release证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -944,7 +943,7 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 
 ## M11 — 固定 client proxy chaining 与 per-outbound credentials
 
-- **Status:** validating
+- **Status:** closed
 - **Objective:** tagged client的每个concrete Shadowsocks outbound可同时声明method/PSK或完整继承
   global `[shadowsocks]`；client-only `[[chains]]`把`2..=8`个concrete hops编译为immutable ordered
   plan，供static binding、route rule/final和selector选择。TCP/UDP逐层使用对应凭据；任一失败
@@ -956,7 +955,7 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
   per-layer tamper/wrong credential、nested UDP exact bound/+1、no partial mutation；owner cleanup/rebind；
   Full/MSRV/lifecycle/platform/interop/footprint/reviews及manual performance/resource exact-SHA evidence。
 - **Tickets:** M11-T01 config/plan `done`；M11-T02 TCP依赖T01 `done`；M11-T03 UDP依赖T02
-  `done`；M11-T04 real-process依赖T03 `done`；M11-T05 exact qualification依赖T04 `blocked`。
+  `done`；M11-T04 real-process依赖T03 `done`；M11-T05 exact qualification依赖T04 `done`。
   Decision/spec/test为ADR-0030、SPEC/TEST-0012。
 - **Forecast:** test case/support/fixture `640/80/0`，预计milestone numeric `REVIEW_REQUIRED`但每票
   `<=240`；不新增fixture、harness、third helper、crate或dependency。Performance为required regression/
@@ -967,8 +966,13 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 - **Execution / remote boundary:** T01～T04已集成于exact product
   `6d975c1e45eb0e614c54961e35fdc19fa2478d98`；T05 local qualification及automatic push run
   [`30943770483/1`](https://github.com/zzffu/ferrum2/actions/runs/30943770483/attempts/1)已PASS。
-  一次non-force push授权已消费；provider-created attempt 2未请求且不计入。Required manual
-  performance仍需单独exact-SHA dispatch授权；无second push、PR、tag、release或publication授权。
+  Manual run [`30945447936/1`](https://github.com/zzffu/ferrum2/actions/runs/30945447936/attempts/1)
+  整体`failure`，但独立performance job `92114171793`在同一exact product上PASS：10 trials、
+  10k sessions、180 samples、RSS `6/6`、drain及THP restore均PASS。重复MSRV `92114171828`、
+  interop `92114171762`和qualification `92114925410`失败保持uncredited；automatic run只负责
+  non-performance gates，manual job只负责contract独立performance，不构成evidence splicing。
+  Final Architect/QA均`PASS_WITH_NOTES`，T05/M11已关闭。两次remote授权均已消费；provider-created
+  attempt 2不计入；无rerun、second push/dispatch、PR、tag、package、release或publication授权。
 
 ## 决策登记
 
