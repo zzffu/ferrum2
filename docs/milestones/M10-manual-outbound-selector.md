@@ -75,8 +75,8 @@ ownership 与 process lifecycle 不变。
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M10-T01 | Add the bounded selector graph, additive config, and public atomic control interface | — | done |
-| M10-T02 | Prove all existing client/server TCP/UDP selection points consume selector snapshots | M10-T01 | active |
-| M10-T03 | Reuse process/platform/interop evidence and qualify one exact integration SHA | M10-T02 | todo |
+| M10-T02 | Prove all existing client/server TCP/UDP selection points consume selector snapshots | M10-T01 | done |
+| M10-T03 | Reuse process/platform/interop evidence and qualify one exact integration SHA | M10-T02 | active |
 
 ```text
 M10-T01 core/config/control contract
@@ -100,10 +100,11 @@ splitting private binary composition into a duplicate harness is rejected。
 
 ## Integrated evidence / next action
 
-M10-T01 integrated product exact `e6ede87ae314fe201bc6412bacd360bc0505cf4c` after Architect
-`PASS_WITH_NOTES` and QA `PASS`；`QA-M10T01-001` was closed by one test-only repair selected from two
-independent xhigh read-only analyses。Focused `2/2`、`10/10`、`5/5`、Quick、Clippy/fmt/diff and
-ticket footprint passed；case/support/fixture growth is `234/0/0` with only the planned
-`config_contract.rs` numeric `WARN`。M10-T02 is the sole active frontier and starts from the exact
-coordination commit containing this evidence。Push、hosted run、PR、tag、release and publication remain
-unauthorized。
+M10-T01 integrated product exact `e6ede87ae314fe201bc6412bacd360bc0505cf4c`。M10-T02 integrated
+product exact `93ed9d91929200a1786694ffd59e491b7188a5d1` after Architect/QA both
+`PASS_WITH_NOTES` and no blocking finding；four focused tests、packages `47/47`、Clippy/fmt/diff、
+integration Full、lifecycle `1/1` in `126.02s` and docs passed。Milestone footprint is
+`403/0/0` case/support/fixture with integrity/change `PASS`；both large `run.rs` file
+`REVIEW_REQUIRED` signals are explicitly accepted by `ARCH-M10T02-001` and `M10-T02-QA-N01`。
+M10-T03 is the sole active frontier and starts from the exact coordination commit containing this
+evidence。Push、hosted run、PR、tag、release and publication remain unauthorized。

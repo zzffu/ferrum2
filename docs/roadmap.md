@@ -43,8 +43,9 @@ M9已在baseline/accepted exact `5b0a8020e5dac1a915dc64c8229ddd129dd4da4a`确认
 Architect/QA review通过，新增product/test LOC为零。Upstream group/load balancing继续延期。
 M10已在baseline `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`规划manual outbound selector，
 并从exact ticket base `40af9b6c102d11782b71522f84e5953862a40cab`进入`executing`：
-M10-T01已在integrated product exact `e6ede87ae314fe201bc6412bacd360bc0505cf4c`完成，
-M10-T02 active；尚无remote action。
+M10-T01已在integrated product exact `e6ede87ae314fe201bc6412bacd360bc0505cf4c`完成；
+M10-T02已在exact `93ed9d91929200a1786694ffd59e491b7188a5d1`完成，M10-T03 active；
+尚无remote action。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -905,15 +906,16 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 - **Exit criteria:** legacy/M7/M8 exact compatibility；完整有界DAG与empty/unknown/duplicate/
   default/cycle fail-closed；public-only query/switch/concurrency/error integration tests；client/server
   TCP/UDP latest-selection/old-snapshot evidence；Full/MSRV/lifecycle/platform/interop/footprint与双审。
-- **Tickets:** M10-T01 core/config/control `done`；M10-T02 data-plane snapshots依赖T01 `active`；
-  M10-T03 exact qualification依赖T02 `todo`。Spec/Test为`SPEC/TEST-0011`，decision为ADR-0029。
+- **Tickets:** M10-T01 core/config/control `done`；M10-T02 data-plane snapshots依赖T01 `done`；
+  M10-T03 exact qualification依赖T02 `active`。Spec/Test为`SPEC/TEST-0011`，decision为ADR-0029。
 - **Forecast:** test case/support/fixture `230/0/0`；不新增helper、fixture、process switch harness、
   crate或dependency。Existing large binary test files的numeric `REVIEW_REQUIRED`必须显式审查。
 - **Deferred/out of scope:** HTTP/IPC/CLI、persistence/hot reload、auto-select/URL test、retry、
   fallback/health/load balancing/chaining、connection interruption、CAS/graph transaction、new adapter。
 - **Execution / remote boundary:** T01从exact base
   `40af9b6c102d11782b71522f84e5953862a40cab`执行并集成product exact
-  `e6ede87ae314fe201bc6412bacd360bc0505cf4c`；T02为唯一active frontier。无push、hosted run、
+  `e6ede87ae314fe201bc6412bacd360bc0505cf4c`；T02集成exact
+  `93ed9d91929200a1786694ffd59e491b7188a5d1`，T03为唯一active frontier。无push、hosted run、
   rerun、dispatch、PR、tag、release或publication授权/执行。
 
 ## 决策登记
@@ -1065,3 +1067,4 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 | 2026-08-04 | M10 plan | M10改为`planned`；接受separate tagged-only selector graph、explicit default、nested DAG、public Rust atomic query/switch及existing selection-call snapshot | M9 closed；existing `RouteTable`、resolved tag graph与four data-plane call sites足够，不需要new trait、crate、dependency或process control channel | baseline `99bd62e`；ADR-0029、SPEC/TEST-0011、T01→T02→T03；schema 3 forecast `230/0/0`；plan-only，无product/push/hosted/release/publication |
 | 2026-08-04 | M10 execute start | M10改为`executing`，唯一ready frontier M10-T01改为`active`并绑定独立ticket worktree | `master@40af9b6c102d11782b71522f84e5953862a40cab`干净且未移动；M9 closed，M10 contracts approved | exact ticket base `40af9b6c102d11782b71522f84e5953862a40cab`；test-budget verify PASS；无push/hosted run/release/publication |
 | 2026-08-04 | M10-T01 integration | exact `e6ede87a`集成bounded selector DAG、additive tagged config与public atomic control；T01 done，T02 active | QA initial `QA-M10T01-001`发现positive default均为member zero；用户指定的双独立xhigh只读分析一致选择最小test-only repair，targeted Architect/QA关闭finding | core `2/2`、config `10/10`、CLI `5/5`、Quick、Clippy/fmt/diff通过；workspace `308` passed、`5` ignored；footprint `234/0/0`，仅planned file WARN；无push/hosted/release/publication |
+| 2026-08-04 | M10-T02 integration | exact `93ed9d91`以test-only evidence确认既有client/server TCP、static/routed UDP selection seam的live-next/snapshot-current语义；T02 done，T03 active | Architect/QA均`PASS_WITH_NOTES`且无blocker/major/minor；`ARCH-M10T02-001`与`M10-T02-QA-N01`接受两份large `run.rs` REVIEW_REQUIRED，未新增helper/harness | four focused `1/1`、packages `47/47`、Full、lifecycle `1/1` `126.02s`、docs、Clippy/fmt/diff通过；ticket `169/0/0`，milestone cumulative `403/0/0`、integrity PASS；无push/hosted/release/publication |
