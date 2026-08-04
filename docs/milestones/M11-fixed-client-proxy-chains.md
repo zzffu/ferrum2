@@ -74,8 +74,8 @@ seam、SIP022 state machines 与 process lifecycle 保持兼容。
 |---|---|---|---|
 | M11-T01 | Compile additive per-outbound credentials and bounded direct/chain plans | — | done |
 | M11-T02 | Compose ordered fixed TCP chains with existing SIP022 flows | M11-T01 | done |
-| M11-T03 | Compose bounded ordered UDP chains with atomic validation/binding | M11-T02 | active |
-| M11-T04 | Prove mixed-credential two-hop TCP/UDP in existing real-process harness | M11-T03 | todo |
+| M11-T03 | Compose bounded ordered UDP chains with atomic validation/binding | M11-T02 | done |
+| M11-T04 | Prove mixed-credential two-hop TCP/UDP in existing real-process harness | M11-T03 | active |
 | M11-T05 | Qualify one exact integration SHA locally、hosted and with manual performance | M11-T04 | todo |
 
 ```text
@@ -100,8 +100,9 @@ is planned。Known growing-file signals：config/local-support/UDP process files
 
 ## Blocker / next action
 
-No execution blocker。M11-T02 ticket candidate
-`f1475d90fec87663c882d0ed877c92c1e5d4f6a1` is integrated at exact product
-`e0952534cdcb213d70ad8cb90d8f8913c2db5110`；M11-T03 starts from that exact ticket base in
-`codex/ticket/m11-t03-compose-bounded-udp-chains`。Push、workflow dispatch、hosted run、PR、tag、
-release and publication remain unauthorized。
+No execution blocker。M11-T03 ticket candidate
+`0bb938a8d0bedc9d6f3a384b3d55a56aaa6078b8` is integrated at exact product
+`4a82f59bec3b0e957530bef05e763b1ab2d6ffd6` after focused、Full、100+ lifecycle、docs and blocking
+Architect/QA review pass。Milestone footprint integrity and ratio `1.982775` pass；the numeric
+large-file signal is reviewed and accepted。M11-T04 starts from that exact integration product。
+Push、workflow dispatch、hosted run、PR、tag、release and publication remain unauthorized。
