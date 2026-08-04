@@ -72,8 +72,8 @@ seam、SIP022 state machines 与 process lifecycle 保持兼容。
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M11-T01 | Compile additive per-outbound credentials and bounded direct/chain plans | — | active |
-| M11-T02 | Compose ordered fixed TCP chains with existing SIP022 flows | M11-T01 | todo |
+| M11-T01 | Compile additive per-outbound credentials and bounded direct/chain plans | — | done |
+| M11-T02 | Compose ordered fixed TCP chains with existing SIP022 flows | M11-T01 | active |
 | M11-T03 | Compose bounded ordered UDP chains with atomic validation/binding | M11-T02 | todo |
 | M11-T04 | Prove mixed-credential two-hop TCP/UDP in existing real-process harness | M11-T03 | todo |
 | M11-T05 | Qualify one exact integration SHA locally、hosted and with manual performance | M11-T04 | todo |
@@ -100,6 +100,7 @@ is planned。Known growing-file signals：config/local-support/UDP process files
 
 ## Blocker / next action
 
-No execution blocker。M11-T01 starts from exact ticket base
-`81469722101bcbb4e71a41e39dfd98e99043d34a` in one isolated ticket worktree。Push、workflow
-dispatch、hosted run、PR、tag、release and publication remain unauthorized。
+No execution blocker。M11-T01 is integrated at exact product
+`173d1642a1d992b9fefa1bb381c15b826c64ac2d`；M11-T02 starts from that exact ticket base in
+`codex/ticket/m11-t02-compose-fixed-tcp-chains`。Push、workflow dispatch、hosted run、PR、tag、
+release and publication remain unauthorized。

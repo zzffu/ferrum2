@@ -50,7 +50,7 @@ regression/aggregate evidence，M10不新增threshold或claim；一次non-force 
 未rerun、second push、dispatch、PR、tag、release或publish。
 M11以clean `master@7a3c876681255b88492b3608af4fa52497435efc`为baseline，
 并从exact ticket base `81469722101bcbb4e71a41e39dfd98e99043d34a`进入`executing`：
-M11-T01 active，尚无product implementation、qualification、remote或release证据。
+M11-T01已集成，M11-T02 active；尚无qualification、remote或release证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -951,7 +951,7 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
   fail closed/redacted；static/route/selector full-plan snapshot；different-method/PSK real two-hop TCP/UDP；
   per-layer tamper/wrong credential、nested UDP exact bound/+1、no partial mutation；owner cleanup/rebind；
   Full/MSRV/lifecycle/platform/interop/footprint/reviews及manual performance/resource exact-SHA evidence。
-- **Tickets:** M11-T01 config/plan `active`；M11-T02 TCP依赖T01 `todo`；M11-T03 UDP依赖T02
+- **Tickets:** M11-T01 config/plan `done`；M11-T02 TCP依赖T01 `active`；M11-T03 UDP依赖T02
   `todo`；M11-T04 real-process依赖T03 `todo`；M11-T05 exact qualification依赖T04 `todo`。
   Decision/spec/test为ADR-0030、SPEC/TEST-0012。
 - **Forecast:** test case/support/fixture `640/80/0`，预计milestone numeric `REVIEW_REQUIRED`但每票
@@ -960,8 +960,8 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 - **Deferred/out of scope:** dynamic chain/hop、selector-in-hop、nested chain、health/auto-select/retry/
   fallback/failover/load balancing、SIP023/multi-user、server per-inbound credentials、DNS/Geo/sniff/user
   policy、new Endpoint、transparent/TUN、hot reload、management API、package/release/publication。
-- **Execution / remote boundary:** T01从exact base
-  `81469722101bcbb4e71a41e39dfd98e99043d34a`执行；无push、workflow dispatch、hosted run、PR、
+- **Execution / remote boundary:** T01已集成于exact product
+  `173d1642a1d992b9fefa1bb381c15b826c64ac2d`；T02从该exact base执行。无push、workflow dispatch、hosted run、PR、
   tag、release或publication授权/执行。T05需要分别取得exact-SHA non-force push和manual
   performance dispatch授权。
 
@@ -1124,3 +1124,4 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 | 2026-08-04 | M10 close | exact `2df141e7`由automatic push run `30906020944/1`同SHA通过九项result；T03 `done`，M10 `closed` | Full/security/process、schema 3 footprint、Rust 1.85、three platforms、TCP/UDP各`12/12`+cleanup、10k/180 samples/drain与final aggregate均PASS；final Architect `PASS_WITH_NOTES`、QA `PASS`，无新blocker/major/minor | Footprint `16646/27319`、ratio `1.641175`、cumulative `403/0/0`；large-file dispositions保留；performance `42m51s`、ratio `0.308719307`仅为regression evidence；一次push授权消费，未rerun/second push/dispatch/PR/tag/release/publish；closeout仅本地docs commit |
 | 2026-08-04 | M11 plan | M11改为`planned`；接受client outbound complete override/global inheritance、`2..=8` fixed concrete-hop chains、whole-plan static/route/selector selection及ordered existing-state-machine TCP/UDP composition | M10 closed；existing zero-resource loader、route/selector、split TCP open和UDP prepare/commit seams足够，不需要dynamic group、new protocol core、crate或dependency | baseline `7a3c876`；ADR-0030、SPEC/TEST-0012、T01→T02→T03→T04→T05；schema 3 forecast `640/80/0` and performance required；plan-only，无product/push/dispatch/hosted/release/publication |
 | 2026-08-04 | M11 execute start | M11改为`executing`，唯一ready frontier M11-T01改为`active`并绑定独立ticket worktree | `master@7a3c876681255b88492b3608af4fa52497435efc`干净且未移动；M10 closed，M11 contracts approved | exact ticket base `81469722101bcbb4e71a41e39dfd98e99043d34a`；test-budget verify PASS；无push/hosted run/release/publication |
+| 2026-08-04 | M11-T01 integration | exact `173d1642`集成per-outbound complete credential override/global inheritance、bounded immutable direct/chain plans及whole-plan static/route/selector selection；T01 done，T02 active | QA initial `M11-T01-QA-001`发现nine-hop负例同时含duplicate hops；用户指定的双独立xhigh只读分析一致选择one-row test-only repair，targeted Architect `PASS_WITH_NOTES`、QA `PASS`关闭finding | core `3/3`、config `14/14`、CLI `5/5`、Clippy/fmt、Quick及diff通过；workspace `311` passed、`5` ignored；footprint `239/0/0` integrity PASS，仅expected file WARN；fresh integration首次CLI缺bins，required build后unchanged rerun通过；无push/hosted/release/publication |
