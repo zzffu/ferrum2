@@ -735,7 +735,7 @@ fn fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps() {
         drop(socks);
 
         let client_metrics = wait_for_metrics_sample(metrics[0], ZERO_ACTIVE);
-        let a_metrics = wait_for_metrics(metrics[1]);
+        let a_metrics = wait_for_metrics_sample(metrics[1], SERVER_ACCEPTED);
         let b_metrics = wait_for_metrics_sample(metrics[2], SERVER_ACCEPTED);
         for body in [&client_metrics, &a_metrics, &b_metrics] {
             for sentinel in [inherited.1, explicit.1] {
@@ -812,39 +812,41 @@ fn fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps() {
             Some(metrics[0]),
         )
         .expect("client config");
-        let mut server_a = if matches!(failure, Failure::FirstUnavailable) {
-            None
+        let a_psk = if matches!(failure, Failure::FirstWrong) {
+            explicit.1
         } else {
-            let psk = if matches!(failure, Failure::FirstWrong) {
-                explicit.1
-            } else {
-                inherited.1
-            };
-            let config =
-                write_tcp_only_server_config_with_psk(&a_dir, servers[0], Some(metrics[1]), psk)
-                    .expect("server config");
-            rewrite_config_method(&config, (inherited.0, psk)).expect("server method");
-            let mut child = ChildGuard::spawn("ferrum2-server", &config);
-            wait_for_metrics(metrics[1]);
-            wait_for_bound(&mut child, servers[0]);
-            Some(child)
+            inherited.1
         };
-        let mut server_b = if matches!(failure, Failure::LaterUnavailable) {
-            None
+        let a_config =
+            write_tcp_only_server_config_with_psk(&a_dir, servers[0], Some(metrics[1]), a_psk)
+                .expect("server config");
+        rewrite_config_method(&a_config, (inherited.0, a_psk)).expect("server method");
+        let mut server_a = ChildGuard::spawn("ferrum2-server", &a_config);
+        let a_ready_metrics = wait_for_metrics(metrics[1]);
+        wait_for_bound(&mut server_a, servers[0]);
+        let mut server_a = Some(server_a);
+
+        let b_psk = if matches!(failure, Failure::LaterWrong) {
+            inherited.1
         } else {
-            let psk = if matches!(failure, Failure::LaterWrong) {
-                inherited.1
-            } else {
-                explicit.1
-            };
-            let config =
-                write_tcp_only_server_config_with_psk(&b_dir, servers[1], Some(metrics[2]), psk)
-                    .expect("server config");
-            rewrite_config_method(&config, (explicit.0, psk)).expect("server method");
-            let mut child = ChildGuard::spawn("ferrum2-server", &config);
-            wait_for_metrics(metrics[2]);
-            wait_for_bound(&mut child, servers[1]);
-            Some(child)
+            explicit.1
+        };
+        let b_config =
+            write_tcp_only_server_config_with_psk(&b_dir, servers[1], Some(metrics[2]), b_psk)
+                .expect("server config");
+        rewrite_config_method(&b_config, (explicit.0, b_psk)).expect("server method");
+        let mut server_b = ChildGuard::spawn("ferrum2-server", &b_config);
+        let b_ready_metrics = wait_for_metrics(metrics[2]);
+        wait_for_bound(&mut server_b, servers[1]);
+        let mut server_b = Some(server_b);
+        let unavailable_exit = if matches!(failure, Failure::FirstUnavailable) {
+            let mut child = server_a.take().expect("first server owner");
+            Some(child.terminate_and_reap_with_exit(Duration::from_secs(5)))
+        } else if matches!(failure, Failure::LaterUnavailable) {
+            let mut child = server_b.take().expect("later server owner");
+            Some(child.terminate_and_reap_with_exit(Duration::from_secs(5)))
+        } else {
+            None
         };
         let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
         wait_for_metrics(metrics[0]);
@@ -879,30 +881,36 @@ fn fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps() {
             }
             body
         };
-        let a_metrics = server_a.as_ref().map(|_| wait_for_metrics(metrics[1]));
-        let b_metrics = server_b.as_ref().map(|_| wait_for_metrics(metrics[2]));
+        let a_metrics = server_a
+            .as_ref()
+            .map(|_| wait_for_metrics(metrics[1]))
+            .unwrap_or(a_ready_metrics);
+        let b_metrics = server_b
+            .as_ref()
+            .map(|_| wait_for_metrics(metrics[2]))
+            .unwrap_or(b_ready_metrics);
         if matches!(failure, Failure::LaterUnavailable | Failure::LaterWrong) {
-            assert!(a_metrics.as_ref().is_some_and(|body| {
-                body.windows(SERVER_ACCEPTED.len())
+            assert!(
+                a_metrics
+                    .windows(SERVER_ACCEPTED.len())
                     .any(|part| part == SERVER_ACCEPTED.as_bytes())
-            }));
+            );
         }
         if matches!(failure, Failure::FirstWrong) {
-            assert!(a_metrics.as_ref().is_some_and(|body| {
-                body.windows(SERVER_AUTH_FAILED.len())
+            assert!(
+                a_metrics
+                    .windows(SERVER_AUTH_FAILED.len())
                     .any(|part| part == SERVER_AUTH_FAILED.as_bytes())
-            }));
+            );
         }
         if matches!(failure, Failure::LaterWrong) {
-            assert!(b_metrics.as_ref().is_some_and(|body| {
-                body.windows(SERVER_AUTH_FAILED.len())
+            assert!(
+                b_metrics
+                    .windows(SERVER_AUTH_FAILED.len())
                     .any(|part| part == SERVER_AUTH_FAILED.as_bytes())
-            }));
+            );
         }
-        for body in std::iter::once(&client_metrics)
-            .chain(a_metrics.iter())
-            .chain(b_metrics.iter())
-        {
+        for body in [&client_metrics, &a_metrics, &b_metrics] {
             for sentinel in [inherited.1, explicit.1] {
                 assert!(
                     !body
@@ -912,7 +920,8 @@ fn fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps() {
             }
         }
 
-        let mut exits = vec![client.terminate_and_reap_with_exit(Duration::from_secs(5))];
+        let mut exits: Vec<_> = unavailable_exit.into_iter().collect();
+        exits.push(client.terminate_and_reap_with_exit(Duration::from_secs(5)));
         if let Some(child) = server_a.as_mut() {
             exits.push(child.terminate_and_reap_with_exit(Duration::from_secs(5)));
         }
