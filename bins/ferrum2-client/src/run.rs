@@ -5454,10 +5454,14 @@ mod tests {
         for terminal in ["idle", "generation-cancel"] {
             let registry = OwnerRegistry::new();
             let baseline = registry.snapshot();
-            let (path, context) = udp_test_context(registry.clone());
-            let upstream = UdpSocket::bind(SocketAddr::V4(context.test_udp_server))
+            let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
                 .await
                 .expect("upstream receiver");
+            let server = match upstream.local_addr().expect("upstream address") {
+                SocketAddr::V4(server) => server,
+                SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
+            };
+            let (path, context) = udp_test_context_for_server(registry.clone(), server);
             let (association, mut peer) = parsed_udp_association().await;
             let task = tokio::spawn(execute_test_udp_association(
                 association,
