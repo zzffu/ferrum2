@@ -48,6 +48,9 @@ run [`30906020944/1`](https://github.com/zzffu/ferrum2/actions/runs/30906020944)
 `PASS_WITH_NOTES`、QA `PASS`，blocking findings为零。Performance只作current-workflow
 regression/aggregate evidence，M10不新增threshold或claim；一次non-force push授权已消费，
 未rerun、second push、dispatch、PR、tag、release或publish。
+M11现为`planned`，baseline为clean `master@7a3c876681255b88492b3608af4fa52497435efc`。
+它计划交付client固定有序proxy chain及per-concrete-outbound method/PSK；当前只有
+ADR/SPEC/TEST/tickets和schema 3 forecast，没有product、validation、remote或release证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -75,6 +78,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M8 | M7 closed | 共享最小TCP/UDP first-match routing |
 | M9 | M8 closed | 核验现有tagged multi-outbound已满足client multi-upstream |
 | M10 | M9 closed | tagged manual outbound selector与公开原子切换interface |
+| M11 | M10 closed | client固定有序proxy chain与per-concrete-outbound method/PSK |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -92,6 +96,8 @@ M9复用M7/M8资格证据并以零product/test code确认multi-upstream；只有
 选择或retry的可观察需求时才考虑upstream group。
 M10只规划手动selector：固定成员、显式default、公开Rust control和新selection观察current；
 自动选择、retry、health、load balancing与外部control入口继续延期。
+M11只规划immutable direct/chain plan：concrete outbound绑定effective credentials，selector可切换
+整条plan；dynamic chain、retry/fallback、health/load balancing与server credential selection继续延期。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -932,6 +938,31 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
   `0.308719307` is diagnostic regression evidence only；M10 adds no threshold/claim。The one authorized
   push is consumed；no rerun、second push、dispatch、PR、tag、release or publication is authorized。
 
+## M11 — 固定 client proxy chaining 与 per-outbound credentials
+
+- **Status:** planned
+- **Objective:** tagged client的每个concrete Shadowsocks outbound可同时声明method/PSK或完整继承
+  global `[shadowsocks]`；client-only `[[chains]]`把`2..=8`个concrete hops编译为immutable ordered
+  plan，供static binding、route rule/final和selector选择。TCP/UDP逐层使用对应凭据；任一失败
+  no retry/fallback。
+- **Baseline:** `7a3c876681255b88492b3608af4fa52497435efc`；M0～M10 closed，master clean，
+  code/tests `16646/27342`、ratio `1.642557`、case/support/fixture `22795/3950/597`。
+- **Exit criteria:** preserved schema v1/global credentials；partial pair与完整chain graph在side effect前
+  fail closed/redacted；static/route/selector full-plan snapshot；different-method/PSK real two-hop TCP/UDP；
+  per-layer tamper/wrong credential、nested UDP exact bound/+1、no partial mutation；owner cleanup/rebind；
+  Full/MSRV/lifecycle/platform/interop/footprint/reviews及manual performance/resource exact-SHA evidence。
+- **Tickets:** M11-T01 config/plan `ready`；M11-T02 TCP依赖T01 `todo`；M11-T03 UDP依赖T02
+  `todo`；M11-T04 real-process依赖T03 `todo`；M11-T05 exact qualification依赖T04 `todo`。
+  Decision/spec/test为ADR-0030、SPEC/TEST-0012。
+- **Forecast:** test case/support/fixture `640/80/0`，预计milestone numeric `REVIEW_REQUIRED`但每票
+  `<=240`；不新增fixture、harness、third helper、crate或dependency。Performance为required regression/
+  resource evidence，因为nested transport改变hot path与owner数量；无新threshold/claim。
+- **Deferred/out of scope:** dynamic chain/hop、selector-in-hop、nested chain、health/auto-select/retry/
+  fallback/failover/load balancing、SIP023/multi-user、server per-inbound credentials、DNS/Geo/sniff/user
+  policy、new Endpoint、transparent/TUN、hot reload、management API、package/release/publication。
+- **Remote boundary:** feature plan没有授权或执行push、workflow dispatch、hosted run、PR、tag、release
+  或publication。T05需要分别取得exact-SHA non-force push和manual performance dispatch授权。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -974,6 +1005,7 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 | DEC-036 | resolved in M8 plan | additive tagged-only route/static互斥shape；最多64条ordered AND/wildcard rules，以inbound/network/pre-resolution exact target首命中并由mandatory final收敛；shared core route interface；TCP per-flow、UDP per-datagram且selected failure不fallback；routed client UDP one-socket/lazy endpoint legs | `ADR-0028`、SPEC/TEST-0009、M8-T01～T04 |
 | DEC-037 | resolved in M9 close | multi-upstream指一个client process拥有多个可被static/routed selection独立选择的concrete Shadowsocks servers；不等同于自动成员选择、retry或health policy。M7/M8已满足前者，upstream group/load balancing继续延期 | `CONTEXT.md`、SPEC/TEST-0010、M9-T01 |
 | DEC-038 | resolved in M10 plan | additive tagged-only `[[selectors]]`、explicit default、bounded all-edge DAG；shared core selector state与公开`selected`/`switch` interface；RouteTable内部返回concrete identity并沿用现有TCP/UDP selection-call granularity；无external control、auto policy、retry/health/LB | `CONTEXT.md`、ADR-0029、SPEC/TEST-0011、M10-T01～T03 |
+| DEC-039 | resolved in M11 plan | global `[shadowsocks]`继续mandatory；client outbound credential fields both-or-neither并可完整override；client-only `[[chains]]`为`1..=64` entries、每条`2..=8` unique concrete hops；direct/chain编译为immutable plan供static/route/selector选择；TCP逐层nest existing flow，UDP inner→outer encode/outer→inner authenticated open；任一失败no retry/fallback，server credentials不变 | `CONTEXT.md`、ADR-0030、SPEC/TEST-0012、M11-T01～T05 |
 
 ## 风险登记
 
@@ -1008,6 +1040,10 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 | duplicate/dangling tag、runtime lookup或silent fallback把配置错误变成partial service | P0 | M7 | config module离线解析完整graph；unique/count/reference/unreferenced negatives；binary只消费resolved concrete context |
 | 多listener把TCP/UDP限额乘倍、跨listener replay/session迁移或response从错误listener发出 | P0 | M7 | aggregate admission/replay/session/byte owners；server UDP local-inbound binding；cross-listener negative与owner snapshot |
 | 任一后置listener失败时早期root已服务或资源未rollback | P0 | M7 | existing `ProcessSupervisor` prepare-all transaction；first/middle/last TCP/UDP/metrics failure和exact rebind table |
+| per-outbound method/PSK配错、partial pair被继承或secret进入错误/telemetry | P0 | M11 | both-or-neither loader table、每outbound method-width KAT path、distinct global/hop sentinels与process redaction |
+| chain被截成单hop、hop重排或失败触发selector/rule/final fallback | P0 | M11 | immutable whole-plan selection、ordered connector/wire witnesses、selector snapshot及first/later-hop no-retry mutations |
+| nested UDP overflow、cross-plan response或invalid inner在outer state先commit | P0 | M11 | pre-mutation recursive length bound、per-layer target/session binding、all-layer prepare then accepted commit、valid-after-invalid table |
+| per-hop TCP/UDP buffer/session/socket/task随配置eager或失败后泄漏 | P0 | M11 | `2..=8`/action ceilings、lazy owner inspection、aggregate limits、success/failure cycles、zero-owner and exact-rebind gates；manual performance/resource required |
 
 ## 决策与范围变更日志
 
@@ -1084,3 +1120,4 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 | 2026-08-04 | M10-T02 integration | exact `93ed9d91`以test-only evidence确认既有client/server TCP、static/routed UDP selection seam的live-next/snapshot-current语义；T02 done，T03 active | Architect/QA均`PASS_WITH_NOTES`且无blocker/major/minor；`ARCH-M10T02-001`与`M10-T02-QA-N01`接受两份large `run.rs` REVIEW_REQUIRED，未新增helper/harness | four focused `1/1`、packages `47/47`、Full、lifecycle `1/1` `126.02s`、docs、Clippy/fmt/diff通过；ticket `169/0/0`，milestone cumulative `403/0/0`、integrity PASS；无push/hosted/release/publication |
 | 2026-08-04 | M10 local validation / qualification blocked | product ancestor under qualification `93ed9d91`在local checkpoint `eb56b81b`通过focused、Full、MSRV、100+ lifecycle、docs与schema 3 footprint；M10改为`validating`，T03改为`blocked` | Workspace `308/5`、lifecycle `1/1` `126.57s`；footprint `16646/27319`、ratio `1.641175`、cumulative `403/0/0`；exact-product Architect `PASS_WITH_NOTES`。Initial docs `146e8d5` reviews blocked on `ARCH-M10T03-001` / `M10-T03-QA-001/002/003`；two mandated independent xhigh analyses selected five-doc repair `a274a7cd`，targeted Architect/QA both `PASS` and resolved all four findings；reviewed repair is integrated and post-fast-forward checks passed | One accepted exact SHA/run/attempt must complete `quality`、`test-footprint`、`msrv`、`platform / windows-msvc`、`platform / linux-gnu`、`platform / linux-musl`、`interop` (TCP/UDP `12/12` plus cleanup)、`performance` and `qualification`；performance仅为current-workflow regression/aggregate dependency，M10无threshold/claim；需另行明确授权一次non-force push，未执行remote action，M8 evidence不作M10 PASS；only final exact hosted-SHA review remains pending |
 | 2026-08-04 | M10 close | exact `2df141e7`由automatic push run `30906020944/1`同SHA通过九项result；T03 `done`，M10 `closed` | Full/security/process、schema 3 footprint、Rust 1.85、three platforms、TCP/UDP各`12/12`+cleanup、10k/180 samples/drain与final aggregate均PASS；final Architect `PASS_WITH_NOTES`、QA `PASS`，无新blocker/major/minor | Footprint `16646/27319`、ratio `1.641175`、cumulative `403/0/0`；large-file dispositions保留；performance `42m51s`、ratio `0.308719307`仅为regression evidence；一次push授权消费，未rerun/second push/dispatch/PR/tag/release/publish；closeout仅本地docs commit |
+| 2026-08-04 | M11 plan | M11改为`planned`；接受client outbound complete override/global inheritance、`2..=8` fixed concrete-hop chains、whole-plan static/route/selector selection及ordered existing-state-machine TCP/UDP composition | M10 closed；existing zero-resource loader、route/selector、split TCP open和UDP prepare/commit seams足够，不需要dynamic group、new protocol core、crate或dependency | baseline `7a3c876`；ADR-0030、SPEC/TEST-0012、T01→T02→T03→T04→T05；schema 3 forecast `640/80/0` and performance required；plan-only，无product/push/dispatch/hosted/release/publication |

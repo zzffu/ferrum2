@@ -66,8 +66,29 @@ A named traffic-entry identity supplied to static binding or route selection.
 _Avoid_: Listener, route, endpoint
 
 **Outbound**:
-A named egress identity returned by static binding or route selection.
-_Avoid_: Route, upstream group, endpoint
+A named egress action accepted by static binding or route selection. It resolves to one immutable
+direct or chained egress plan before network work.
+_Avoid_: Route, upstream group, endpoint, retry candidate
+
+**Concrete Shadowsocks outbound**:
+A tagged client `[[outbounds]]` entry with one server endpoint and one effective method/PSK pair. The
+pair is either declared together on that outbound or inherited together from global `[shadowsocks]`.
+_Avoid_: Chain, selector, server direct outbound, multi-user identity
+
+**Egress plan**:
+The immutable ordered concrete-outbound snapshot returned by one client selection call. A direct action
+has one hop; a proxy chain has two or more.
+_Avoid_: Route, selector current state, retry sequence
+
+**Fixed proxy chain**:
+A tagged client egress plan containing `2..=8` ordered, unique concrete Shadowsocks outbound hops. Its
+membership and order never change at runtime.
+_Avoid_: Upstream group, selector, dynamic chain, fallback list
+
+**Chain hop**:
+One concrete Shadowsocks outbound at one fixed position in a proxy chain, including that outbound's
+effective endpoint and credential.
+_Avoid_: Selector member, retry candidate, server inbound
 
 **Outbound selector**:
 A tagged logical outbound with a fixed non-empty member set and one manually chosen current
@@ -75,7 +96,7 @@ member. It never chooses, retries, checks, or balances members on its own.
 _Avoid_: Upstream group, load balancer, failover policy
 
 **Selector member**:
-One immediate outbound or outbound-selector tag admitted by an outbound selector.
+One immediate concrete-outbound、fixed-chain or outbound-selector tag admitted by an outbound selector.
 _Avoid_: Fallback, candidate retry, resolved leaf
 
 **Default selector member**:
@@ -94,7 +115,7 @@ _Avoid_: Upstream group, load balancing, failover
 
 **Upstream group**:
 A logical candidate set whose policy automatically chooses, balances, checks, retries, or
-chains member upstreams; ferrum2 does not currently provide this policy identity.
+fails over among member upstreams; ferrum2 does not currently provide this policy identity.
 _Avoid_: Multiple tagged outbounds, multi-upstream capability, outbound selector
 
 **Static outbound binding**:

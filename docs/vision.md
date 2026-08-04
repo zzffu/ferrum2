@@ -128,6 +128,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是历史现�
 | M8 | 共享、有界的TCP/UDP first-match routing；只匹配inbound tag、network和exact target | closed |
 | M9 | 核验M7/M8已交付client multi-upstream；零product/test code关闭 | closed |
 | M10 | 固定成员的tagged manual outbound selector与公开Rust原子切换interface | closed |
+| M11 | client固定有序proxy chain与per-concrete-outbound method/PSK | planned |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -203,3 +204,10 @@ run `30906020944/1`的九项结果、TCP/UDP各`12/12`+cleanup、三平台、sch
 Architect/QA review通过。Performance只作regression/aggregate evidence，不形成M10阈值或
 声明；自动选择、retry、health/load balancing、HTTP/IPC/CLI、persistence和connection
 interruption仍排除，未release或publish。
+
+M11以`7a3c876681255b88492b3608af4fa52497435efc`为planning baseline，计划在client tagged
+graph上为每个concrete Shadowsocks outbound加入完整override或global-inherited method/PSK，
+并以`2..=8`个固定concrete hops组成有序chain。Static、route与selector只选择一个immutable
+direct/chain plan；TCP/UDP按层复用现有SIP022 state machines，任一失败不retry/fallback。
+Dynamic chain、health/load balancing、SIP023/multi-user和server per-inbound credentials仍排除。
+该状态仅为planned；尚无product、validation、remote、release或publication证据。
