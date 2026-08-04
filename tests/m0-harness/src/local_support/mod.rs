@@ -37,6 +37,19 @@ pub fn hold_process_spawns() -> std::sync::MutexGuard<'static, ()> {
     PROCESS_SPAWN_LOCK.lock().expect("process spawn lock")
 }
 
+pub fn hold_process_spawns_at_or_below(baseline: usize) -> std::sync::MutexGuard<'static, ()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let guard = hold_process_spawns();
+        if active_child_count() <= baseline {
+            return guard;
+        }
+        drop(guard);
+        assert!(Instant::now() < deadline, "child baseline timed out");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 pub fn binary_path(name: &str) -> PathBuf {
     let executable = std::env::current_exe().expect("test executable path");
     let profile = executable
@@ -265,11 +278,21 @@ impl Drop for ChildGuard {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OutputSummary {
-    captured_bytes: usize,
+    bytes: Box<[u8]>,
     hash: u64,
     truncated: bool,
+}
+
+impl fmt::Debug for OutputSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutputSummary")
+            .field("len", &self.bytes.len())
+            .field("hash", &format_args!("{:016x}", self.hash))
+            .field("truncated", &self.truncated)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -297,13 +320,28 @@ impl fmt::Display for ChildExit {
             self.binary,
             self.context,
             self.status,
-            self.stdout.captured_bytes,
+            self.stdout.bytes.len(),
             self.stdout.hash,
             self.stdout.truncated,
-            self.stderr.captured_bytes,
+            self.stderr.bytes.len(),
             self.stderr.hash,
             self.stderr.truncated,
         )
+    }
+}
+
+impl ChildExit {
+    pub fn assert_stderr_excludes(&self, sentinels: &[&str]) {
+        assert!(
+            !self.stderr.truncated,
+            "stderr exclusion unavailable because capture was truncated"
+        );
+        for (index, sentinel) in sentinels.iter().enumerate() {
+            assert!(
+                !contains_bytes(&self.stderr.bytes, sentinel.as_bytes()),
+                "stderr contained forbidden sentinel at index {index}"
+            );
+        }
     }
 }
 
@@ -339,7 +377,7 @@ fn send_shutdown_signal(process_id: u32) {
 
 fn capture_output(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<OutputSummary> {
     thread::spawn(move || {
-        let mut captured_bytes = 0_usize;
+        let mut bytes = Vec::new();
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         let mut truncated = false;
         let mut chunk = [0_u8; 8 * 1024];
@@ -347,19 +385,19 @@ fn capture_output(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<
             match stream.read(&mut chunk) {
                 Ok(0) | Err(_) => {
                     return OutputSummary {
-                        captured_bytes,
+                        bytes: bytes.into_boxed_slice(),
                         hash,
                         truncated,
                     };
                 }
                 Ok(read) => {
-                    let remaining = CHILD_OUTPUT_CAP.saturating_sub(captured_bytes);
+                    let remaining = CHILD_OUTPUT_CAP.saturating_sub(bytes.len());
                     let captured = read.min(remaining);
                     for byte in &chunk[..captured] {
                         hash ^= u64::from(*byte);
                         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
                     }
-                    captured_bytes += captured;
+                    bytes.extend_from_slice(&chunk[..captured]);
                     truncated |= captured < read;
                 }
             }
@@ -640,6 +678,19 @@ pub fn wait_for_metrics(address: SocketAddrV4) -> Vec<u8> {
     }
 }
 
+pub fn wait_for_metrics_sample(address: SocketAddrV4, sample: &str) -> Vec<u8> {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    loop {
+        if let Some(body) = fetch_ferrum_metrics(address, deadline) {
+            if contains_bytes(&body, sample.as_bytes()) {
+                return body;
+            }
+        }
+        assert!(Instant::now() < deadline, "metrics sample timed out");
+        thread::sleep(READINESS_POLL);
+    }
+}
+
 fn write_before_deadline(
     stream: &mut TcpStream,
     mut bytes: &[u8],
@@ -768,6 +819,82 @@ pub fn unused_tcp_udp_loopback() -> SocketAddrV4 {
             return address;
         }
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum ChainRoot {
+    Static,
+    RouteRule {
+        target: SocketAddrV4,
+        fallback_hop: usize,
+    },
+    RouteFinal,
+    SelectorDefault,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_two_hop_client_config(
+    directory: &Path,
+    listen: SocketAddrV4,
+    servers: [SocketAddrV4; 2],
+    inherited: (&str, &str),
+    explicit: (&str, &str),
+    root: ChainRoot,
+    udp: bool,
+    metrics: Option<SocketAddrV4>,
+) -> io::Result<PathBuf> {
+    let network = if udp { "udp" } else { "tcp" };
+    let opposite_network = if udp { "tcp" } else { "udp" };
+    let (inbound_outbound, selection) = match root {
+        ChainRoot::Static => ("outbound = \"two-hop\"\n".to_owned(), String::new()),
+        ChainRoot::RouteRule {
+            target,
+            fallback_hop,
+        } => {
+            let fallback = ["hop-a", "hop-b"][fallback_hop];
+            (
+                String::new(),
+                format!(
+                    "[route]\nfinal = \"{fallback}\"\n\
+                     [[route.rules]]\nnetwork = \"{network}\"\ntarget = {{ host = \"{}\", port = {} }}\noutbound = \"two-hop\"\n\
+                     [[route.rules]]\nnetwork = \"{network}\"\ntarget = {{ host = \"{}\", port = {} }}\noutbound = \"{fallback}\"\n",
+                    target.ip(),
+                    target.port(),
+                    target.ip(),
+                    target.port(),
+                ),
+            )
+        }
+        ChainRoot::RouteFinal => (
+            String::new(),
+            format!(
+                "[route]\nfinal = \"two-hop\"\n\
+                 [[route.rules]]\nnetwork = \"{opposite_network}\"\noutbound = \"hop-a\"\n"
+            ),
+        ),
+        ChainRoot::SelectorDefault => (
+            "outbound = \"manual\"\n".to_owned(),
+            "[[selectors]]\ntag = \"manual\"\noutbounds = [\"two-hop\", \"hop-a\"]\ndefault = \"two-hop\"\n".to_owned(),
+        ),
+    };
+    let udp = if udp { "[udp]\n" } else { "" };
+    let metrics = metrics
+        .map(|address| format!("[metrics]\nlisten = \"{address}\"\n"))
+        .unwrap_or_default();
+    let config = format!(
+        "schema_version = 1\n\
+         [[inbounds]]\ntag = \"socks\"\nlisten = \"{listen}\"\n{inbound_outbound}\
+         [[outbounds]]\ntag = \"hop-a\"\nserver = \"{}\"\n\
+         [[outbounds]]\ntag = \"hop-b\"\nserver = \"{}\"\nmethod = \"{}\"\npsk = \"{}\"\n\
+         [[chains]]\ntag = \"two-hop\"\nhops = [\"hop-a\", \"hop-b\"]\n\
+         {selection}\
+         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n\
+         {udp}{metrics}",
+        servers[0], servers[1], explicit.0, explicit.1, inherited.0, inherited.1,
+    );
+    let path = directory.join("two-hop-client.toml");
+    fs::write(&path, config)?;
+    Ok(path)
 }
 
 pub fn write_client_config(

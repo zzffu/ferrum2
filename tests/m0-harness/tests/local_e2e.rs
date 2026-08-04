@@ -8,11 +8,12 @@ use std::thread;
 use std::time::Duration;
 
 use local_support::{
-    ChildGuard, TCP_METHOD_CONFIGS, bind_loopback_listener, rewrite_config_method,
-    route_tagged_config, unused_loopback, unused_tcp_udp_loopback, wait_for_listener,
+    ChainRoot, ChildGuard, TCP_METHOD_CONFIGS, active_child_count, bind_loopback_listener,
+    rewrite_config_method, route_tagged_config, unused_loopback, unused_tcp_udp_loopback,
+    wait_for_bound, wait_for_listener, wait_for_metrics, wait_for_metrics_sample,
     wait_for_tcp_udp_bound, write_client_config, write_client_config_with_psk,
     write_tagged_client_config, write_tagged_server_config, write_tcp_only_server_config,
-    write_tcp_only_server_config_with_psk,
+    write_tcp_only_server_config_with_psk, write_two_hop_client_config,
 };
 
 struct EchoWorker {
@@ -646,5 +647,289 @@ fn tagged_partial_bind_signal_shutdown_and_restart_release_every_listener() {
     client.terminate_and_reap(Duration::from_secs(5));
     for address in clients {
         drop(bind_loopback_listener(address).expect("client restart exact rebind"));
+    }
+}
+
+#[test]
+fn fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps() {
+    const ZERO_ACTIVE: &str =
+        "ferrum2_tcp_connections_active{role=\"client\",inbound=\"socks5\"} 0";
+    const ONE_ACTIVE: &str = "ferrum2_tcp_connections_active{role=\"client\",inbound=\"socks5\"} 1";
+    const CLIENT_ACCEPTED: &str =
+        "ferrum2_tcp_connections_total{role=\"client\",inbound=\"socks5\",outcome=\"accepted\"} 1";
+    const SERVER_ACCEPTED: &str = "ferrum2_tcp_connections_total{role=\"server\",inbound=\"shadowsocks\",outcome=\"accepted\"} 1";
+    const SERVER_AUTH_FAILED: &str = "ferrum2_tcp_failures_total{role=\"server\",stage=\"shadowsocks\",reason=\"authentication\"} 1";
+
+    for (index, (inherited, explicit)) in [
+        (TCP_METHOD_CONFIGS[0], TCP_METHOD_CONFIGS[1]),
+        (TCP_METHOD_CONFIGS[1], TCP_METHOD_CONFIGS[2]),
+        (TCP_METHOD_CONFIGS[1], TCP_METHOD_CONFIGS[2]),
+        (TCP_METHOD_CONFIGS[2], TCP_METHOD_CONFIGS[0]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let baseline = {
+            let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
+            active_child_count()
+        };
+        let directory = tempfile::tempdir().expect("two-hop TCP tempdir");
+        let a_dir = directory.path().join("a");
+        let b_dir = directory.path().join("b");
+        std::fs::create_dir_all(&a_dir).expect("server directory");
+        std::fs::create_dir_all(&b_dir).expect("server directory");
+        let servers = [unused_loopback(), unused_loopback()];
+        let client_address = unused_loopback();
+        let metrics = [unused_loopback(), unused_loopback(), unused_loopback()];
+        let (target, echo) = start_echo();
+        let root = match index {
+            0 => ChainRoot::Static,
+            1 => ChainRoot::RouteRule {
+                target,
+                fallback_hop: 0,
+            },
+            2 => ChainRoot::RouteFinal,
+            _ => ChainRoot::SelectorDefault,
+        };
+        let a_config = write_tcp_only_server_config(&a_dir, servers[0], Some(metrics[1]))
+            .expect("server config");
+        let b_config = write_tcp_only_server_config(&b_dir, servers[1], Some(metrics[2]))
+            .expect("server config");
+        rewrite_config_method(&a_config, inherited).expect("server method");
+        rewrite_config_method(&b_config, explicit).expect("server method");
+        let client_config = write_two_hop_client_config(
+            directory.path(),
+            client_address,
+            servers,
+            inherited,
+            explicit,
+            root,
+            false,
+            Some(metrics[0]),
+        )
+        .expect("client config");
+
+        let mut server_a = ChildGuard::spawn("ferrum2-server", &a_config);
+        wait_for_metrics(metrics[1]);
+        wait_for_bound(&mut server_a, servers[0]);
+        let mut server_b = ChildGuard::spawn("ferrum2-server", &b_config);
+        wait_for_metrics(metrics[2]);
+        wait_for_bound(&mut server_b, servers[1]);
+        let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+        wait_for_metrics(metrics[0]);
+        wait_for_bound(&mut client, client_address);
+
+        let (mut socks, reply) = socks_connect(client_address, target);
+        assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+        let first = b"two-hop-tcp";
+        let second = vec![0x5a; 16_385];
+        socks.write_all(first).expect("first payload");
+        socks.write_all(&second).expect("second payload");
+        socks.shutdown(Shutdown::Write).expect("client half close");
+        let mut echoed = Vec::new();
+        socks.read_to_end(&mut echoed).expect("reverse drain");
+        let mut expected = first.to_vec();
+        expected.extend_from_slice(&second);
+        assert_eq!(echoed, expected);
+        assert_eq!(echo.join().expect("echo thread"), expected);
+        drop(socks);
+
+        let client_metrics = wait_for_metrics_sample(metrics[0], ZERO_ACTIVE);
+        let a_metrics = wait_for_metrics(metrics[1]);
+        let b_metrics = wait_for_metrics_sample(metrics[2], SERVER_ACCEPTED);
+        for body in [&client_metrics, &a_metrics, &b_metrics] {
+            for sentinel in [inherited.1, explicit.1] {
+                assert!(
+                    !body
+                        .windows(sentinel.len())
+                        .any(|part| part == sentinel.as_bytes())
+                );
+            }
+        }
+
+        let exits = [
+            client.terminate_and_reap_with_exit(Duration::from_secs(5)),
+            server_a.terminate_and_reap_with_exit(Duration::from_secs(5)),
+            server_b.terminate_and_reap_with_exit(Duration::from_secs(5)),
+        ];
+        for exit in &exits {
+            exit.assert_stderr_excludes(&[inherited.1, explicit.1]);
+        }
+        let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline);
+        for address in [client_address, servers[0], servers[1], target]
+            .into_iter()
+            .chain(metrics)
+        {
+            drop(bind_loopback_listener(address).expect("two-hop TCP exact rebind"));
+        }
+        assert_eq!(active_child_count(), baseline);
+    }
+
+    enum Failure {
+        FirstUnavailable,
+        LaterUnavailable,
+        FirstWrong,
+        LaterWrong,
+    }
+    for failure in [
+        Failure::FirstUnavailable,
+        Failure::LaterUnavailable,
+        Failure::FirstWrong,
+        Failure::LaterWrong,
+    ] {
+        let baseline = {
+            let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
+            active_child_count()
+        };
+        let inherited = TCP_METHOD_CONFIGS[1];
+        let explicit = TCP_METHOD_CONFIGS[2];
+        let directory = tempfile::tempdir().expect("two-hop TCP failure tempdir");
+        let a_dir = directory.path().join("a");
+        let b_dir = directory.path().join("b");
+        std::fs::create_dir_all(&a_dir).expect("server directory");
+        std::fs::create_dir_all(&b_dir).expect("server directory");
+        let servers = [unused_loopback(), unused_loopback()];
+        let client_address = unused_loopback();
+        let metrics = [unused_loopback(), unused_loopback(), unused_loopback()];
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("recording target");
+        target.set_nonblocking(true).expect("nonblocking target");
+        let target_address = match target.local_addr().expect("target address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 target"),
+        };
+        let first_failure = matches!(failure, Failure::FirstUnavailable | Failure::FirstWrong);
+        let client_config = write_two_hop_client_config(
+            directory.path(),
+            client_address,
+            servers,
+            inherited,
+            explicit,
+            ChainRoot::RouteRule {
+                target: target_address,
+                fallback_hop: usize::from(first_failure),
+            },
+            false,
+            Some(metrics[0]),
+        )
+        .expect("client config");
+        let mut server_a = if matches!(failure, Failure::FirstUnavailable) {
+            None
+        } else {
+            let psk = if matches!(failure, Failure::FirstWrong) {
+                explicit.1
+            } else {
+                inherited.1
+            };
+            let config =
+                write_tcp_only_server_config_with_psk(&a_dir, servers[0], Some(metrics[1]), psk)
+                    .expect("server config");
+            rewrite_config_method(&config, (inherited.0, psk)).expect("server method");
+            let mut child = ChildGuard::spawn("ferrum2-server", &config);
+            wait_for_metrics(metrics[1]);
+            wait_for_bound(&mut child, servers[0]);
+            Some(child)
+        };
+        let mut server_b = if matches!(failure, Failure::LaterUnavailable) {
+            None
+        } else {
+            let psk = if matches!(failure, Failure::LaterWrong) {
+                inherited.1
+            } else {
+                explicit.1
+            };
+            let config =
+                write_tcp_only_server_config_with_psk(&b_dir, servers[1], Some(metrics[2]), psk)
+                    .expect("server config");
+            rewrite_config_method(&config, (explicit.0, psk)).expect("server method");
+            let mut child = ChildGuard::spawn("ferrum2-server", &config);
+            wait_for_metrics(metrics[2]);
+            wait_for_bound(&mut child, servers[1]);
+            Some(child)
+        };
+        let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+        wait_for_metrics(metrics[0]);
+        wait_for_bound(&mut client, client_address);
+
+        let (mut socks, reply) = socks_connect(client_address, target_address);
+        if matches!(failure, Failure::FirstUnavailable) {
+            assert_eq!(reply, [5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
+        } else if reply[1] == 0 {
+            socks.shutdown(Shutdown::Write).expect("failure half close");
+            let mut byte = [0_u8; 1];
+            assert!(matches!(socks.read(&mut byte), Ok(0) | Err(_)));
+        }
+        drop(socks);
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        let client_metrics = {
+            let body = wait_for_metrics(metrics[0]);
+            assert!(
+                !body
+                    .windows(ONE_ACTIVE.len())
+                    .any(|part| part == ONE_ACTIVE.as_bytes())
+            );
+            if matches!(failure, Failure::FirstUnavailable) {
+                assert!(
+                    !body
+                        .windows(CLIENT_ACCEPTED.len())
+                        .any(|part| part == CLIENT_ACCEPTED.as_bytes())
+                );
+            }
+            body
+        };
+        let a_metrics = server_a.as_ref().map(|_| wait_for_metrics(metrics[1]));
+        let b_metrics = server_b.as_ref().map(|_| wait_for_metrics(metrics[2]));
+        if matches!(failure, Failure::LaterUnavailable | Failure::LaterWrong) {
+            assert!(a_metrics.as_ref().is_some_and(|body| {
+                body.windows(SERVER_ACCEPTED.len())
+                    .any(|part| part == SERVER_ACCEPTED.as_bytes())
+            }));
+        }
+        if matches!(failure, Failure::FirstWrong) {
+            assert!(a_metrics.as_ref().is_some_and(|body| {
+                body.windows(SERVER_AUTH_FAILED.len())
+                    .any(|part| part == SERVER_AUTH_FAILED.as_bytes())
+            }));
+        }
+        if matches!(failure, Failure::LaterWrong) {
+            assert!(b_metrics.as_ref().is_some_and(|body| {
+                body.windows(SERVER_AUTH_FAILED.len())
+                    .any(|part| part == SERVER_AUTH_FAILED.as_bytes())
+            }));
+        }
+        for body in std::iter::once(&client_metrics)
+            .chain(a_metrics.iter())
+            .chain(b_metrics.iter())
+        {
+            for sentinel in [inherited.1, explicit.1] {
+                assert!(
+                    !body
+                        .windows(sentinel.len())
+                        .any(|part| part == sentinel.as_bytes())
+                );
+            }
+        }
+
+        let mut exits = vec![client.terminate_and_reap_with_exit(Duration::from_secs(5))];
+        if let Some(child) = server_a.as_mut() {
+            exits.push(child.terminate_and_reap_with_exit(Duration::from_secs(5)));
+        }
+        if let Some(child) = server_b.as_mut() {
+            exits.push(child.terminate_and_reap_with_exit(Duration::from_secs(5)));
+        }
+        for exit in &exits {
+            exit.assert_stderr_excludes(&[inherited.1, explicit.1]);
+        }
+        drop(target);
+        let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline);
+        for address in [client_address, servers[0], servers[1], target_address]
+            .into_iter()
+            .chain(metrics)
+        {
+            drop(bind_loopback_listener(address).expect("two-hop TCP failure exact rebind"));
+        }
+        assert_eq!(active_child_count(), baseline);
     }
 }

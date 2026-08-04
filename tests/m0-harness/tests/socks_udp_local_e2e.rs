@@ -12,10 +12,12 @@ use std::thread;
 use std::time::Duration;
 
 use local_support::{
-    ChildGuard, TCP_METHOD_CONFIGS, bind_loopback_listener, rewrite_config_method,
-    route_tagged_config, unused_loopback, unused_tcp_udp_loopback, wait_for_listener,
-    wait_for_metrics, wait_for_tcp_udp_bound, write_client_config, write_server_config,
-    write_tagged_client_config, write_tagged_server_config, write_udp_client_config,
+    ChainRoot, ChildGuard, TCP_METHOD_CONFIGS, active_child_count, bind_loopback_listener,
+    rewrite_config_method, route_tagged_config, unused_loopback, unused_tcp_udp_loopback,
+    wait_for_bound, wait_for_listener, wait_for_metrics, wait_for_metrics_sample,
+    wait_for_tcp_udp_bound, write_client_config, write_server_config, write_server_config_with_psk,
+    write_tagged_client_config, write_tagged_server_config, write_two_hop_client_config,
+    write_udp_client_config,
 };
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
 
@@ -870,4 +872,288 @@ fn absent_disabled_saturation_release_and_restart_rebind_are_exact() {
     wait_udp_rebind(relay, "released relay rebind");
     client.terminate_and_reap(Duration::from_secs(5));
     drop(TcpListener::bind(client_address).expect("client restart rebind"));
+}
+
+#[test]
+fn fixed_two_hop_udp_chain_uses_distinct_credentials_and_reaps() {
+    const ZERO_SESSIONS: &str = "ferrum2_udp_sessions_active{role=\"client\"} 0";
+    const ZERO_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 0";
+    const SERVER_ACCEPTED_THREE: &str = "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"accepted\"} 3";
+    const SERVER_ACCEPTED_ONE: &str = "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"accepted\"} 1";
+    const SERVER_AUTH_FAILED: &str = "ferrum2_udp_failures_total{role=\"server\",stage=\"shadowsocks\",reason=\"authentication\"} 1";
+
+    for (index, (inherited, explicit)) in [
+        (TCP_METHOD_CONFIGS[0], TCP_METHOD_CONFIGS[1]),
+        (TCP_METHOD_CONFIGS[1], TCP_METHOD_CONFIGS[2]),
+        (TCP_METHOD_CONFIGS[1], TCP_METHOD_CONFIGS[2]),
+        (TCP_METHOD_CONFIGS[2], TCP_METHOD_CONFIGS[0]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let baseline = {
+            let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
+            active_child_count()
+        };
+        let directory = tempfile::tempdir().expect("two-hop UDP tempdir");
+        let a_dir = directory.path().join("a");
+        let b_dir = directory.path().join("b");
+        std::fs::create_dir_all(&a_dir).expect("server directory");
+        std::fs::create_dir_all(&b_dir).expect("server directory");
+        let servers = [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()];
+        let client_address = unused_loopback();
+        let metrics = [unused_loopback(), unused_loopback(), unused_loopback()];
+        let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("datagram target");
+        let target_address = match target.local_addr().expect("target address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 target"),
+        };
+        let root = match index {
+            0 => ChainRoot::Static,
+            1 => ChainRoot::RouteRule {
+                target: target_address,
+                fallback_hop: 0,
+            },
+            2 => ChainRoot::RouteFinal,
+            _ => ChainRoot::SelectorDefault,
+        };
+        let a_config =
+            write_server_config(&a_dir, servers[0], Some(metrics[1])).expect("server config");
+        let b_config =
+            write_server_config(&b_dir, servers[1], Some(metrics[2])).expect("server config");
+        rewrite_config_method(&a_config, inherited).expect("server method");
+        rewrite_config_method(&b_config, explicit).expect("server method");
+        let client_config = write_two_hop_client_config(
+            directory.path(),
+            client_address,
+            servers,
+            inherited,
+            explicit,
+            root,
+            true,
+            Some(metrics[0]),
+        )
+        .expect("client config");
+
+        let mut server_a = ChildGuard::spawn("ferrum2-server", &a_config);
+        wait_for_metrics(metrics[1]);
+        wait_for_tcp_udp_bound(&mut server_a, servers[0]);
+        let mut server_b = ChildGuard::spawn("ferrum2-server", &b_config);
+        wait_for_metrics(metrics[2]);
+        wait_for_tcp_udp_bound(&mut server_b, servers[1]);
+        let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+        wait_for_metrics(metrics[0]);
+        wait_for_bound(&mut client, client_address);
+
+        let (control, application, relay) = udp_associate(client_address, true);
+        let target_wire = target_wire(SocketAddr::V4(target_address));
+        let worker = echo_datagrams(target, 3);
+        for datagram in [b"two-hop-a".as_slice(), b"two-hop-bb", b"two-hop-ccc"] {
+            round_trip(&application, relay, &target_wire, &target_wire, datagram);
+        }
+        worker.join().expect("datagram worker");
+        drop((control, application));
+        wait_udp_rebind(relay, "two-hop relay close");
+
+        let client_metrics = wait_for_metrics_sample(metrics[0], ZERO_SESSIONS);
+        let client_metrics = if client_metrics
+            .windows(ZERO_BUFFER.len())
+            .any(|part| part == ZERO_BUFFER.as_bytes())
+        {
+            client_metrics
+        } else {
+            wait_for_metrics_sample(metrics[0], ZERO_BUFFER)
+        };
+        let a_metrics = wait_for_metrics(metrics[1]);
+        let b_metrics = wait_for_metrics_sample(metrics[2], SERVER_ACCEPTED_THREE);
+        for body in [&client_metrics, &a_metrics, &b_metrics] {
+            for sentinel in [inherited.1, explicit.1] {
+                assert!(
+                    !body
+                        .windows(sentinel.len())
+                        .any(|part| part == sentinel.as_bytes())
+                );
+            }
+        }
+        let exits = [
+            client.terminate_and_reap_with_exit(Duration::from_secs(5)),
+            server_a.terminate_and_reap_with_exit(Duration::from_secs(5)),
+            server_b.terminate_and_reap_with_exit(Duration::from_secs(5)),
+        ];
+        for exit in &exits {
+            exit.assert_stderr_excludes(&[inherited.1, explicit.1]);
+        }
+        let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline);
+        drop(bind_loopback_listener(client_address).expect("two-hop UDP client rebind"));
+        for address in servers {
+            drop(bind_loopback_listener(address).expect("two-hop UDP server TCP rebind"));
+            drop(UdpSocket::bind(address).expect("two-hop UDP server UDP rebind"));
+        }
+        for address in [relay, target_address] {
+            drop(UdpSocket::bind(address).expect("two-hop UDP exact rebind"));
+        }
+        for address in metrics {
+            drop(bind_loopback_listener(address).expect("two-hop UDP metrics rebind"));
+        }
+        assert_eq!(active_child_count(), baseline);
+    }
+
+    enum Failure {
+        FirstUnavailable,
+        LaterUnavailable,
+        FirstWrong,
+        LaterWrong,
+    }
+    for failure in [
+        Failure::FirstUnavailable,
+        Failure::LaterUnavailable,
+        Failure::FirstWrong,
+        Failure::LaterWrong,
+    ] {
+        let baseline = {
+            let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
+            active_child_count()
+        };
+        let inherited = TCP_METHOD_CONFIGS[1];
+        let explicit = TCP_METHOD_CONFIGS[2];
+        let directory = tempfile::tempdir().expect("two-hop UDP failure tempdir");
+        let a_dir = directory.path().join("a");
+        let b_dir = directory.path().join("b");
+        std::fs::create_dir_all(&a_dir).expect("server directory");
+        std::fs::create_dir_all(&b_dir).expect("server directory");
+        let servers = [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()];
+        let client_address = unused_loopback();
+        let metrics = [unused_loopback(), unused_loopback(), unused_loopback()];
+        let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("recording target");
+        let target_address = match target.local_addr().expect("target address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 target"),
+        };
+        let first_failure = matches!(failure, Failure::FirstUnavailable | Failure::FirstWrong);
+        let client_config = write_two_hop_client_config(
+            directory.path(),
+            client_address,
+            servers,
+            inherited,
+            explicit,
+            ChainRoot::RouteRule {
+                target: target_address,
+                fallback_hop: usize::from(first_failure),
+            },
+            true,
+            Some(metrics[0]),
+        )
+        .expect("client config");
+        let mut server_a = if matches!(failure, Failure::FirstUnavailable) {
+            None
+        } else {
+            let psk = if matches!(failure, Failure::FirstWrong) {
+                explicit.1
+            } else {
+                inherited.1
+            };
+            let config = write_server_config_with_psk(&a_dir, servers[0], Some(metrics[1]), psk)
+                .expect("server config");
+            rewrite_config_method(&config, (inherited.0, psk)).expect("server method");
+            let mut child = ChildGuard::spawn("ferrum2-server", &config);
+            wait_for_metrics(metrics[1]);
+            wait_for_tcp_udp_bound(&mut child, servers[0]);
+            Some(child)
+        };
+        let mut server_b = if matches!(failure, Failure::LaterUnavailable) {
+            None
+        } else {
+            let psk = if matches!(failure, Failure::LaterWrong) {
+                inherited.1
+            } else {
+                explicit.1
+            };
+            let config = write_server_config_with_psk(&b_dir, servers[1], Some(metrics[2]), psk)
+                .expect("server config");
+            rewrite_config_method(&config, (explicit.0, psk)).expect("server method");
+            let mut child = ChildGuard::spawn("ferrum2-server", &config);
+            wait_for_metrics(metrics[2]);
+            wait_for_tcp_udp_bound(&mut child, servers[1]);
+            Some(child)
+        };
+        let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+        wait_for_metrics(metrics[0]);
+        wait_for_bound(&mut client, client_address);
+
+        let (control, application, relay) = udp_associate(client_address, true);
+        let request = socks_datagram(target_address, b"two-hop-failure");
+        assert_eq!(
+            application.send_to(&request, relay).expect("failure send"),
+            request.len()
+        );
+        assert_no_datagram(&target);
+        assert_no_datagram(&application);
+        drop((control, application));
+        wait_udp_rebind(relay, "two-hop failure relay close");
+        let client_metrics = wait_for_metrics_sample(metrics[0], ZERO_SESSIONS);
+        let client_metrics = if client_metrics
+            .windows(ZERO_BUFFER.len())
+            .any(|part| part == ZERO_BUFFER.as_bytes())
+        {
+            client_metrics
+        } else {
+            wait_for_metrics_sample(metrics[0], ZERO_BUFFER)
+        };
+        let a_metrics = server_a.as_ref().map(|_| wait_for_metrics(metrics[1]));
+        let b_metrics = server_b.as_ref().map(|_| wait_for_metrics(metrics[2]));
+        if matches!(failure, Failure::LaterUnavailable | Failure::LaterWrong) {
+            assert!(a_metrics.as_ref().is_some_and(|body| {
+                body.windows(SERVER_ACCEPTED_ONE.len())
+                    .any(|part| part == SERVER_ACCEPTED_ONE.as_bytes())
+            }));
+        }
+        if matches!(failure, Failure::FirstWrong) {
+            assert!(a_metrics.as_ref().is_some_and(|body| {
+                body.windows(SERVER_AUTH_FAILED.len())
+                    .any(|part| part == SERVER_AUTH_FAILED.as_bytes())
+            }));
+        }
+        if matches!(failure, Failure::LaterWrong) {
+            assert!(b_metrics.as_ref().is_some_and(|body| {
+                body.windows(SERVER_AUTH_FAILED.len())
+                    .any(|part| part == SERVER_AUTH_FAILED.as_bytes())
+            }));
+        }
+        for body in std::iter::once(&client_metrics)
+            .chain(a_metrics.iter())
+            .chain(b_metrics.iter())
+        {
+            for sentinel in [inherited.1, explicit.1] {
+                assert!(
+                    !body
+                        .windows(sentinel.len())
+                        .any(|part| part == sentinel.as_bytes())
+                );
+            }
+        }
+        let mut exits = vec![client.terminate_and_reap_with_exit(Duration::from_secs(5))];
+        if let Some(child) = server_a.as_mut() {
+            exits.push(child.terminate_and_reap_with_exit(Duration::from_secs(5)));
+        }
+        if let Some(child) = server_b.as_mut() {
+            exits.push(child.terminate_and_reap_with_exit(Duration::from_secs(5)));
+        }
+        for exit in &exits {
+            exit.assert_stderr_excludes(&[inherited.1, explicit.1]);
+        }
+        drop(target);
+        let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline);
+        drop(bind_loopback_listener(client_address).expect("two-hop UDP failure client rebind"));
+        for address in servers {
+            drop(bind_loopback_listener(address).expect("two-hop UDP failure TCP rebind"));
+            drop(UdpSocket::bind(address).expect("two-hop UDP failure UDP rebind"));
+        }
+        for address in [relay, target_address] {
+            drop(UdpSocket::bind(address).expect("two-hop UDP failure exact rebind"));
+        }
+        for address in metrics {
+            drop(bind_loopback_listener(address).expect("two-hop UDP failure metrics rebind"));
+        }
+        assert_eq!(active_child_count(), baseline);
+    }
 }
