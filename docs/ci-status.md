@@ -1,5 +1,29 @@
 # CI 与验证状态
 
+## M10 validating / remote qualification blocked
+
+- **Product/checkpoint:** qualified product ancestor
+  `93ed9d91929200a1786694ffd59e491b7188a5d1`；local qualification checkpoint
+  `eb56b81b709a8e18e4560fbad8cd3b3b27ced44a`。M10-T01 Architect
+  `PASS_WITH_NOTES` / final QA `PASS`；M10-T02 Architect and QA both `PASS_WITH_NOTES` with no
+  blocker、major or minor finding。
+- **Focused local qualification:** binary build `0` (`13.32s`)；public selector `2/2` (`0.52s`)；
+  client TCP/UDP and server TCP/UDP exact rows each `1/1` (`10.54/0.43/4.65/1.04s`)；real-process
+  TCP/UDP each `1/1` (`8.28/1.65s`)；architecture `9/9` (`1.04s`)；Rust 1.85 check `0`
+  (`9.92s`)；ticket footprint `PASS` (`7.48s`) and diff-check `0` (`0.04s`)。
+- **Serial Full:** format `0` (`0.56s`)；Clippy `0` (`6.85s`)；binary build `0` (`0.76s`)；
+  all-features workspace `308 passed / 5 ignored` (`43.88s`)；100+ lifecycle `1/1`
+  (`126.57s` test，`127.64s` command)；docs `0` (`5.57s`)；milestone footprint zero-exit
+  `REVIEW_REQUIRED` (`6.07s`)；diff-check `0` (`0.05s`)。
+- **Footprint:** code/tests `16646/27319`、ratio `1.641175`、cumulative case/support/fixture
+  `403/0/0`；T03 product/test and case/support/fixture deltas are `0/0` and `0/0/0`。Integrity and
+  change are `PASS`；`ARCH-M10T02-001` and `M10-T02-QA-N01` accept the two existing large
+  `run.rs` file `REVIEW_REQUIRED` signals。
+- **Blocker/boundary:** M10 remains `validating` and M10-T03 is `blocked`。Same-SHA Windows MSVC、
+  Linux GNU/musl and TCP/UDP `12/12`+cleanup evidence cannot run without separate explicit
+  authorization for one non-force push；final exact-SHA review remains pending。No remote action was
+  performed，and old M8 evidence is not credited as M10 PASS。
+
 ## M9 post-close test-footprint repair
 
 - GitHub Actions run [`30888202051/1`](https://github.com/zzffu/ferrum2/actions/runs/30888202051)

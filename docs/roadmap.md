@@ -42,10 +42,11 @@ M9已在baseline/accepted exact `5b0a8020e5dac1a915dc64c8229ddd129dd4da4a`确认
 已交付client multi-upstream；focused、Full、100+ lifecycle、docs、schema 3 footprint及
 Architect/QA review通过，新增product/test LOC为零。Upstream group/load balancing继续延期。
 M10已在baseline `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`规划manual outbound selector，
-并从exact ticket base `40af9b6c102d11782b71522f84e5953862a40cab`进入`executing`：
+并从exact ticket base `40af9b6c102d11782b71522f84e5953862a40cab`进入`validating`：
 M10-T01已在integrated product exact `e6ede87ae314fe201bc6412bacd360bc0505cf4c`完成；
-M10-T02已在exact `93ed9d91929200a1786694ffd59e491b7188a5d1`完成，M10-T03 active；
-尚无remote action。
+M10-T02已在product exact `93ed9d91929200a1786694ffd59e491b7188a5d1`完成；local checkpoint
+`eb56b81b709a8e18e4560fbad8cd3b3b27ced44a`通过focused、Full、MSRV、lifecycle及footprint，
+但M10-T03因未授权same-SHA三平台及TCP/UDP `12/12`+cleanup remote evidence而`blocked`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -55,7 +56,8 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M6-2026-08-03.md`、
 `docs/handoffs/HANDOFF-M7-2026-08-03.md`和
 `docs/handoffs/HANDOFF-M8-2026-08-04.md`、
-`docs/handoffs/HANDOFF-M9-2026-08-04.md`。
+`docs/handoffs/HANDOFF-M9-2026-08-04.md`和
+`docs/handoffs/HANDOFF-M10-2026-08-04.md`。
 
 ## 依赖顺序
 
@@ -897,7 +899,7 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 
 ## M10 — 手动 outbound selector 核心
 
-- **Status:** executing
+- **Status:** validating
 - **Objective:** additive tagged-only `[[selectors]]`把固定concrete/selector member graph接入
   static inbound binding与existing route actions；公开Rust interface查询并原子切换当前直接
   member，既有selection call已取得的concrete identity不被改写。
@@ -907,16 +909,19 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
   default/cycle fail-closed；public-only query/switch/concurrency/error integration tests；client/server
   TCP/UDP latest-selection/old-snapshot evidence；Full/MSRV/lifecycle/platform/interop/footprint与双审。
 - **Tickets:** M10-T01 core/config/control `done`；M10-T02 data-plane snapshots依赖T01 `done`；
-  M10-T03 exact qualification依赖T02 `active`。Spec/Test为`SPEC/TEST-0011`，decision为ADR-0029。
+  M10-T03 exact qualification依赖T02 `blocked`。Spec/Test为`SPEC/TEST-0011`，decision为ADR-0029。
 - **Forecast:** test case/support/fixture `230/0/0`；不新增helper、fixture、process switch harness、
   crate或dependency。Existing large binary test files的numeric `REVIEW_REQUIRED`必须显式审查。
 - **Deferred/out of scope:** HTTP/IPC/CLI、persistence/hot reload、auto-select/URL test、retry、
   fallback/health/load balancing/chaining、connection interruption、CAS/graph transaction、new adapter。
-- **Execution / remote boundary:** T01从exact base
+- **Validation / remote boundary:** T01从exact base
   `40af9b6c102d11782b71522f84e5953862a40cab`执行并集成product exact
   `e6ede87ae314fe201bc6412bacd360bc0505cf4c`；T02集成exact
-  `93ed9d91929200a1786694ffd59e491b7188a5d1`，T03为唯一active frontier。无push、hosted run、
-  rerun、dispatch、PR、tag、release或publication授权/执行。
+  `93ed9d91929200a1786694ffd59e491b7188a5d1`。Local checkpoint `eb56b81b`通过public selector
+  `2/2`、four data-plane `1/1` each、real-process TCP/UDP、architecture、MSRV、Full、lifecycle
+  `1/1`和footprint；code/tests `16646/27319`、ratio `1.641175`、cumulative `403/0/0`。
+  Same-SHA三平台及TCP/UDP `12/12`+cleanup需要另行明确授权一次non-force push；当前未执行
+  push、hosted run、rerun、dispatch、PR、tag、release或publication，M8 evidence不作M10 PASS。
 
 ## 决策登记
 
@@ -1068,3 +1073,4 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 | 2026-08-04 | M10 execute start | M10改为`executing`，唯一ready frontier M10-T01改为`active`并绑定独立ticket worktree | `master@40af9b6c102d11782b71522f84e5953862a40cab`干净且未移动；M9 closed，M10 contracts approved | exact ticket base `40af9b6c102d11782b71522f84e5953862a40cab`；test-budget verify PASS；无push/hosted run/release/publication |
 | 2026-08-04 | M10-T01 integration | exact `e6ede87a`集成bounded selector DAG、additive tagged config与public atomic control；T01 done，T02 active | QA initial `QA-M10T01-001`发现positive default均为member zero；用户指定的双独立xhigh只读分析一致选择最小test-only repair，targeted Architect/QA关闭finding | core `2/2`、config `10/10`、CLI `5/5`、Quick、Clippy/fmt/diff通过；workspace `308` passed、`5` ignored；footprint `234/0/0`，仅planned file WARN；无push/hosted/release/publication |
 | 2026-08-04 | M10-T02 integration | exact `93ed9d91`以test-only evidence确认既有client/server TCP、static/routed UDP selection seam的live-next/snapshot-current语义；T02 done，T03 active | Architect/QA均`PASS_WITH_NOTES`且无blocker/major/minor；`ARCH-M10T02-001`与`M10-T02-QA-N01`接受两份large `run.rs` REVIEW_REQUIRED，未新增helper/harness | four focused `1/1`、packages `47/47`、Full、lifecycle `1/1` `126.02s`、docs、Clippy/fmt/diff通过；ticket `169/0/0`，milestone cumulative `403/0/0`、integrity PASS；无push/hosted/release/publication |
+| 2026-08-04 | M10 local qualification blocked | product exact `93ed9d91`在local checkpoint `eb56b81b`通过focused、Full、MSRV、100+ lifecycle、docs与schema 3 footprint；M10改为`validating`，T03改为`blocked` | Workspace `308/5`、lifecycle `1/1` `126.57s`；footprint code/tests `16646/27319`、ratio `1.641175`、cumulative `403/0/0`，accepted file REVIEW_REQUIRED保持 | Same-SHA Windows/GNU/musl及TCP/UDP各`12/12`+cleanup需另行明确授权一次non-force push；未执行remote action，M8 evidence不作M10 PASS |

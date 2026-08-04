@@ -1,6 +1,6 @@
 # M10 — 手动 outbound selector 核心
 
-- **Status:** executing
+- **Status:** validating
 - **Baseline:** `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -57,15 +57,15 @@ ownership 与 process lifecycle 不变。
 
 ## Exit criteria
 
-- [ ] Legacy、M7 static与M8 routed schema v1 cohort保持；selector count/tag/member/default/
+- [x] Legacy、M7 static与M8 routed schema v1 cohort保持；selector count/tag/member/default/
       reachability/cycle negatives在任何 runtime side effect前以closed redacted errors失败。
-- [ ] Public Rust interface通过integration test证明default/current query、valid switch、nested
+- [x] Public Rust interface通过integration test证明default/current query、valid switch、nested
       resolution、unknown selector/member no-mutation与bounded concurrent readers/writers。
-- [ ] Static inbound binding、route rule与`route.final`均可指向selector；每个selection call只得到
+- [x] Static inbound binding、route rule与`route.final`均可指向selector；每个selection call只得到
       一个concrete outbound，selected failure不切换、不重试、不尝试 sibling。
-- [ ] Client/server TCP和UDP沿现有auth/bounds/mutation ordering使用最新尚未snapshot的选择；已经
+- [x] Client/server TCP和UDP沿现有auth/bounds/mutation ordering使用最新尚未snapshot的选择；已经
       snapshot的flow/datagram/leg/response不受switch影响。
-- [ ] 现有aggregate admission/replay/UDP session/bytes/IDs、source/inbound binding、shutdown/rebind、
+- [x] 现有aggregate admission/replay/UDP session/bytes/IDs、source/inbound binding、shutdown/rebind、
       trace与metric identities保持，selector/tag不进入telemetry。
 - [ ] 一个exact SHA通过Full、Rust 1.85、100+ lifecycle、three native targets、现有TCP/UDP各
       `12/12`+cleanup、schema 3 footprint与blocking review；缺失/失败/未授权不算通过。
@@ -76,7 +76,7 @@ ownership 与 process lifecycle 不变。
 |---|---|---|---|
 | M10-T01 | Add the bounded selector graph, additive config, and public atomic control interface | — | done |
 | M10-T02 | Prove all existing client/server TCP/UDP selection points consume selector snapshots | M10-T01 | done |
-| M10-T03 | Reuse process/platform/interop evidence and qualify one exact integration SHA | M10-T02 | active |
+| M10-T03 | Reuse process/platform/interop evidence and qualify one exact integration SHA | M10-T02 | blocked |
 
 ```text
 M10-T01 core/config/control contract
@@ -98,7 +98,7 @@ LOC；growing client/server `run.rs` is expected to report file `REVIEW_REQUIRED
 `3390/1777` test LOC。These are explicit Architect/QA maintenance decisions，not correctness waivers；
 splitting private binary composition into a duplicate harness is rejected。
 
-## Integrated evidence / next action
+## Validation evidence / blocker
 
 M10-T01 integrated product exact `e6ede87ae314fe201bc6412bacd360bc0505cf4c`。M10-T02 integrated
 product exact `93ed9d91929200a1786694ffd59e491b7188a5d1` after Architect/QA both
@@ -106,5 +106,14 @@ product exact `93ed9d91929200a1786694ffd59e491b7188a5d1` after Architect/QA both
 integration Full、lifecycle `1/1` in `126.02s` and docs passed。Milestone footprint is
 `403/0/0` case/support/fixture with integrity/change `PASS`；both large `run.rs` file
 `REVIEW_REQUIRED` signals are explicitly accepted by `ARCH-M10T02-001` and `M10-T02-QA-N01`。
-M10-T03 is the sole active frontier and starts from the exact coordination commit containing this
-evidence。Push、hosted run、PR、tag、release and publication remain unauthorized。
+M10-T03 qualified the product ancestor `93ed9d91929200a1786694ffd59e491b7188a5d1` locally at
+checkpoint `eb56b81b709a8e18e4560fbad8cd3b3b27ced44a`。Public selector `2/2`、four data-plane
+tests `1/1` each、real-process TCP/UDP `1/1` each、architecture `9/9`、Rust 1.85 and serial Full
+passed；workspace was `308 passed / 5 ignored` and lifecycle `1/1` in `126.57s`。Footprint remains
+code/tests `16646/27319`、ratio `1.641175`、cumulative `403/0/0` with integrity/change `PASS`；the
+zero-exit milestone `REVIEW_REQUIRED` is accepted by `ARCH-M10T02-001` and `M10-T02-QA-N01`。
+
+M10 is `validating` and M10-T03 is `blocked`：same-SHA Windows MSVC、Linux GNU/musl and TCP/UDP
+`12/12`+cleanup evidence requires separate explicit authorization for one non-force push。No push、
+hosted run、rerun、dispatch、PR、tag、release or publication was performed；old M8 evidence is not
+credited as M10 PASS。
