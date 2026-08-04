@@ -20,7 +20,8 @@ without inventing a child-process switch channel、new provider/job or performan
 
 ## Acceptance
 
-- [x] Public-interface and four data-plane focused tests pass on the qualified product exact SHA；query/switch/
+- [x] Public-interface and four data-plane focused tests pass on the locally validated product exact SHA
+      (not yet qualified)；query/switch/
       concurrency/error claims do not rely on private state or a process control backdoor。
 - [x] Existing real-process tagged/routed TCP and UDP rows prove configured default startup、no-fallback、
       response binding、100+ lifecycle and exact restart/rebind without a new harness/helper。
@@ -39,22 +40,35 @@ integration gate exactly as recorded。Remote commands remain unrun until separa
 
 ## Result
 
-- Product exact: `93ed9d91929200a1786694ffd59e491b7188a5d1`；local qualification checkpoint:
+- Product ancestor under qualification: `93ed9d91929200a1786694ffd59e491b7188a5d1`；local validation
+  checkpoint:
   `eb56b81b709a8e18e4560fbad8cd3b3b27ced44a`。T03 adds product/test LOC `0/0` and
   case/support/fixture LOC `0/0/0`。
 - Focused local evidence: public selector `2/2`；four data-plane commands `1/1` each；real-process
   TCP/UDP `1/1` each；architecture `9/9`；Rust 1.85 check passed。
 - Serial Full: format、Clippy、binary build、workspace `308 passed / 5 ignored`、lifecycle `1/1`
   (`126.57s`)、docs and diff checks passed。
-- Review: T01 Architect `PASS_WITH_NOTES` and final QA `PASS` closed `QA-M10T01-001`；T02 Architect/
+- Review: exact-product Architect inspection bound target
+  `93ed9d91929200a1786694ffd59e491b7188a5d1`、tree
+  `ded9f1e59da892250215f13a271b927579192592` and parent
+  `c55c6c8e737e419b5fa036bf5572183b90f56cd0`；verdict `PASS_WITH_NOTES` with no new blocker/major/
+  minor，and existing `ARCH-M10T02-001` / `M10-T02-QA-N01` remain accepted。This closes
+  `M10-T03-QA-002` as local architecture evidence only，not hosted qualification or closure。
+  T01 Architect `PASS_WITH_NOTES` and final QA `PASS` closed `QA-M10T01-001`；T02 Architect/
   QA both `PASS_WITH_NOTES` with no blocker/major/minor。`ARCH-M10T02-001` and
   `M10-T02-QA-N01` accept the two large `run.rs` file signals without a new helper/harness。
+- Initial full T03 Architect/QA reviews blocked docs candidate `146e8d5` on `ARCH-M10T03-001` and
+  `M10-T03-QA-001/002/003`。Two user-mandated independent xhigh analyses selected this five-doc
+  repair；targeted re-review remains pending。
 - Footprint: ticket `PASS` with `0/0/0` case/support/fixture delta；milestone zero-exit
   `REVIEW_REQUIRED` with integrity/change `PASS`、code/tests `16646/27319`、ratio `1.641175` and
   cumulative `403/0/0`。No remote action was performed。
-- Blocker: same-SHA Windows MSVC、Linux GNU/musl and TCP/UDP `12/12`+cleanup evidence cannot run
-  without separate explicit authorization for one non-force push。The final exact-SHA review and close
-  remain pending；old M8 evidence is not M10 PASS。
+- Blocker: one accepted exact SHA/run/attempt must complete `quality`、`test-footprint`、`msrv`、
+  `platform / windows-msvc`、`platform / linux-gnu`、`platform / linux-musl`、`interop`
+  (TCP/UDP `12/12` plus cleanup)、`performance` and `qualification`。Performance is required only as
+  current-workflow regression/aggregate-dependency evidence；M10 adds no performance threshold or claim。
+  These results cannot run without separate explicit authorization for one non-force push；targeted and
+  final exact-SHA reviews and close remain pending，and old M8 evidence is not M10 PASS。
 
 ## Rollback / risk
 

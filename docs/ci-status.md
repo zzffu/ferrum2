@@ -2,9 +2,12 @@
 
 ## M10 validating / remote qualification blocked
 
-- **Product/checkpoint:** qualified product ancestor
-  `93ed9d91929200a1786694ffd59e491b7188a5d1`；local qualification checkpoint
-  `eb56b81b709a8e18e4560fbad8cd3b3b27ced44a`。M10-T01 Architect
+- **Product/checkpoint:** locally validated product ancestor (not yet qualified)
+  `93ed9d91929200a1786694ffd59e491b7188a5d1`；local validation checkpoint
+  `eb56b81b709a8e18e4560fbad8cd3b3b27ced44a`。Exact-product Architect inspection bound target
+  `93ed9d9` / tree `ded9f1e` / parent `c55c6c8` and returned `PASS_WITH_NOTES` with no new
+  blocker、major or minor；existing `ARCH-M10T02-001` and `M10-T02-QA-N01` remain accepted。
+  M10-T01 Architect
   `PASS_WITH_NOTES` / final QA `PASS`；M10-T02 Architect and QA both `PASS_WITH_NOTES` with no
   blocker、major or minor finding。
 - **Focused local qualification:** binary build `0` (`13.32s`)；public selector `2/2` (`0.52s`)；
@@ -19,10 +22,13 @@
   `403/0/0`；T03 product/test and case/support/fixture deltas are `0/0` and `0/0/0`。Integrity and
   change are `PASS`；`ARCH-M10T02-001` and `M10-T02-QA-N01` accept the two existing large
   `run.rs` file `REVIEW_REQUIRED` signals。
-- **Blocker/boundary:** M10 remains `validating` and M10-T03 is `blocked`。Same-SHA Windows MSVC、
-  Linux GNU/musl and TCP/UDP `12/12`+cleanup evidence cannot run without separate explicit
-  authorization for one non-force push；final exact-SHA review remains pending。No remote action was
-  performed，and old M8 evidence is not credited as M10 PASS。
+- **Blocker/boundary:** M10 remains `validating` and M10-T03 is `blocked`。One accepted exact SHA/run/
+  attempt must complete `quality`、`test-footprint`、`msrv`、`platform / windows-msvc`、
+  `platform / linux-gnu`、`platform / linux-musl`、`interop` (TCP/UDP `12/12` plus cleanup)、
+  `performance` and `qualification`。Performance is required only as current-workflow regression/
+  aggregate-dependency evidence；M10 adds no performance threshold or claim。These results cannot run
+  without separate explicit authorization for one non-force push；targeted and final exact-SHA reviews
+  remain pending。No remote action was performed，and old M8 evidence is not credited as M10 PASS。
 
 ## M9 post-close test-footprint repair
 

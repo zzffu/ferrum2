@@ -106,14 +106,22 @@ product exact `93ed9d91929200a1786694ffd59e491b7188a5d1` after Architect/QA both
 integration Full、lifecycle `1/1` in `126.02s` and docs passed。Milestone footprint is
 `403/0/0` case/support/fixture with integrity/change `PASS`；both large `run.rs` file
 `REVIEW_REQUIRED` signals are explicitly accepted by `ARCH-M10T02-001` and `M10-T02-QA-N01`。
-M10-T03 qualified the product ancestor `93ed9d91929200a1786694ffd59e491b7188a5d1` locally at
-checkpoint `eb56b81b709a8e18e4560fbad8cd3b3b27ced44a`。Public selector `2/2`、four data-plane
+M10-T03 locally validated product ancestor `93ed9d91929200a1786694ffd59e491b7188a5d1`
+(not yet qualified) at checkpoint `eb56b81b709a8e18e4560fbad8cd3b3b27ced44a`。Public selector
+`2/2`、four data-plane
 tests `1/1` each、real-process TCP/UDP `1/1` each、architecture `9/9`、Rust 1.85 and serial Full
 passed；workspace was `308 passed / 5 ignored` and lifecycle `1/1` in `126.57s`。Footprint remains
 code/tests `16646/27319`、ratio `1.641175`、cumulative `403/0/0` with integrity/change `PASS`；the
 zero-exit milestone `REVIEW_REQUIRED` is accepted by `ARCH-M10T02-001` and `M10-T02-QA-N01`。
+Exact-product Architect inspection bound target `93ed9d91929200a1786694ffd59e491b7188a5d1`、tree
+`ded9f1e59da892250215f13a271b927579192592` and parent
+`c55c6c8e737e419b5fa036bf5572183b90f56cd0`；verdict was `PASS_WITH_NOTES` with no new
+blocker、major or minor，and it is local architecture evidence only。
 
-M10 is `validating` and M10-T03 is `blocked`：same-SHA Windows MSVC、Linux GNU/musl and TCP/UDP
-`12/12`+cleanup evidence requires separate explicit authorization for one non-force push。No push、
-hosted run、rerun、dispatch、PR、tag、release or publication was performed；old M8 evidence is not
-credited as M10 PASS。
+M10 is `validating` and M10-T03 is `blocked`：one accepted exact SHA/run/attempt must complete
+`quality`、`test-footprint`、`msrv`、`platform / windows-msvc`、`platform / linux-gnu`、
+`platform / linux-musl`、`interop` (TCP/UDP `12/12` plus cleanup)、`performance` and
+`qualification`。Performance is required only as current-workflow regression/aggregate-dependency
+evidence；M10 adds no performance threshold or claim。This requires separate explicit authorization
+for one non-force push；targeted and final exact-SHA reviews remain pending。No push、hosted run、
+rerun、dispatch、PR、tag、release or publication was performed；old M8 evidence is not M10 PASS。
