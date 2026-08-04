@@ -113,9 +113,10 @@ QA 在 planning baseline 上运行：
 
 M6随后交付显式opt-in SOCKS5 UDP ASSOCIATE；M7随后交付bounded tagged static
 multi-inbound/outbound；M8随后交付tagged-only exact-target TCP/UDP first-match routing。
-GeoIP/Geosite、DNS、sniffing/user rules、CIDR/domain pattern、
-multi-upstream groups/chaining、per-entry PSK/method、transparent/TUN、hot reload、
-management API和publication仍未交付。
+M9核验M7/M8已满足client multi-upstream并以零product/test code关闭。GeoIP/Geosite、
+DNS、sniffing/user rules、CIDR/domain pattern、upstream groups、load balancing、
+health/failover、chaining、per-entry PSK/method、transparent/TUN、hot reload、management
+API和publication仍未交付。
 
 ## 风险与控制点
 

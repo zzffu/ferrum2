@@ -69,6 +69,16 @@ _Avoid_: Listener, route, endpoint
 A named egress identity returned by static binding or route selection.
 _Avoid_: Route, upstream group, endpoint
 
+**Multi-upstream capability**:
+A client process with multiple concrete Shadowsocks-server outbounds that static binding
+or routing can select independently; selection never implies automatic retry.
+_Avoid_: Upstream group, load balancing, failover
+
+**Upstream group**:
+A logical candidate set whose policy automatically chooses, balances, checks, retries, or
+chains member upstreams; ferrum2 does not currently provide this policy identity.
+_Avoid_: Multiple tagged outbounds, multi-upstream capability
+
 **Static outbound binding**:
 The M7-compatible configuration relation used when no route table exists; one inbound
 always selects one outbound and cannot vary by flow or datagram.

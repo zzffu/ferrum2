@@ -112,3 +112,11 @@ No M8 review debt remains。The resolver-order repair preserved the domain route
 Windows/WSL repeats plus same-SHA hosted quality and MSRV。Final Architect returned
 `PASS_WITH_NOTES` and terminal QA returned `PASS` with zero blocker、major or minor finding。
 Performance regression without an M8 threshold or claim is an explicit scope boundary, not debt。
+
+## M9 close audit
+
+No M9 review debt remains。Architect and QA both returned `PASS`。The terminology finding
+`ARCH-M9-MU-001` is resolved in `CONTEXT.md`/`AGENTS.md`；QA's exact-filter finding
+`M9-QA-001` is resolved by recording and running the full `run::tests::...` names，and
+`M9-QA-002` is resolved by the tracked M9 contract/test map。Upstream-group deferral is an
+explicit scope boundary, not review debt。

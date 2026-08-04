@@ -38,6 +38,9 @@ M8已由exact `926843d61fcfac094765b5d1032b7239e3d9370c`、本地serial gate和G
 run [`30848182146/1`](https://github.com/zzffu/ferrum2/actions/runs/30848182146)的quality、MSRV、
 三平台、TCP/UDP各`12/12`+cleanup、Budget、performance regression及final qualification
 证据关闭；M8不声明performance阈值。
+M9已在baseline/accepted exact `5b0a8020e5dac1a915dc64c8229ddd129dd4da4a`确认M7/M8
+已交付client multi-upstream；focused、Full、100+ lifecycle、docs、schema 3 footprint及
+Architect/QA review通过，新增product/test LOC为零。Upstream group/load balancing继续延期。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -46,7 +49,8 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M5-2026-08-02.md`、
 `docs/handoffs/HANDOFF-M6-2026-08-03.md`、
 `docs/handoffs/HANDOFF-M7-2026-08-03.md`和
-`docs/handoffs/HANDOFF-M8-2026-08-04.md`。
+`docs/handoffs/HANDOFF-M8-2026-08-04.md`、
+`docs/handoffs/HANDOFF-M9-2026-08-04.md`。
 
 ## 依赖顺序
 
@@ -61,6 +65,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M6 | M5 closed | 显式opt-in、有界且可关闭的SOCKS5 UDP ASSOCIATE |
 | M7 | M6 closed | 具名多inbound/outbound的静态tag绑定与原子启动 |
 | M8 | M7 closed | 共享最小TCP/UDP first-match routing |
+| M9 | M8 closed | 核验现有tagged multi-outbound已满足client multi-upstream |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -74,6 +79,8 @@ UDP和runtime交付public client UDP path，未加入routing。M7已复用config
 `ProcessSupervisor` deep modules交付静态tag graph，未创建`Endpoint` interface。
 M8已复用`TargetAddr`、tag graph和composition roots交付有界exact-target
 first-match route module；advanced matcher和outbound policy继续延期。
+M9复用M7/M8资格证据并以零product/test code确认multi-upstream；只有出现自动成员
+选择或retry的可观察需求时才考虑upstream group。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -860,6 +867,26 @@ first-match route module；advanced matcher和outbound policy继续延期。
   不形成M8阈值或声明。两次授权push均已消费；未授权rerun、further push、PR、tag、release
   或publication。
 
+## M9 — multi-upstream 能力核验与零代码关闭
+
+- **Status:** closed
+- **Objective:** 确认M7 tagged multi-outbound与M8 first-match routing已经让一个client
+  process配置并选择多个concrete Shadowsocks upstream；若证据成立则不增加group或产品代码。
+- **Baseline / accepted exact:** `5b0a8020e5dac1a915dc64c8229ddd129dd4da4a`；qualified
+  product ancestor为`926843d61fcfac094765b5d1032b7239e3d9370c`，两者之间无product、
+  test、Cargo或toolchain差异。
+- **Exit criteria:** resolved multi-outbound config；真实双upstream TCP；同一SOCKS UDP
+  association跨两个upstream；no-fallback/cross-leg保持；serial Full、lifecycle、docs、
+  footprint与双审PASS。
+- **Ticket:** M9-T01 `done`。Spec/Test为`SPEC/TEST-0010`；没有ADR、product change、new
+  test、dependency或harness。
+- **Evidence:** 五条focused命令各`1/1`；Full exit `0`；ignored lifecycle `1/1` in
+  `130.03s`；schema 3 footprint `PASS` at code/tests `15996/26916`、ratio `1.682671`、
+  case/support/fixture delta `0/0/0`。Architect/QA均`PASS`，blocking findings为零。
+- **Deferred/out of scope:** upstream group、load balancing、health、fallback/failover、
+  chaining、per-upstream credentials/quotas。只有具体自动成员选择或retry需求可重开。
+- **Remote boundary:** 无push、run、rerun、dispatch、PR、tag、release或publication授权/执行。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -900,6 +927,7 @@ first-match route module；advanced matcher和outbound policy继续延期。
 | DEC-034 | resolved in M6 plan | 按ADR-0016等强替换既有M2证据adapter：保留12个ID/method/reference和six reference-client rows，仅把six FerrumClient rows从protocol example换成显式UDP client binary；不新增provider/matrix/workflow job | `ADR-0016`、`TEST-0007`、M6-T03 |
 | DEC-035 | resolved in M7 plan | additive v1 tagged/legacy互斥shape；inbound/outbound全局唯一且有界tag、静态inbound→outbound引用、全部outbound被引用；保留process-wide method/PSK及aggregate TCP/UDP owners；复用`ProcessSupervisor` transaction且不创建`Endpoint` interface | `ADR-0027`、SPEC/TEST-0008、M7-T01～T04 |
 | DEC-036 | resolved in M8 plan | additive tagged-only route/static互斥shape；最多64条ordered AND/wildcard rules，以inbound/network/pre-resolution exact target首命中并由mandatory final收敛；shared core route interface；TCP per-flow、UDP per-datagram且selected failure不fallback；routed client UDP one-socket/lazy endpoint legs | `ADR-0028`、SPEC/TEST-0009、M8-T01～T04 |
+| DEC-037 | resolved in M9 close | multi-upstream指一个client process拥有多个可被static/routed selection独立选择的concrete Shadowsocks servers；不等同于自动成员选择、retry或health policy。M7/M8已满足前者，upstream group/load balancing继续延期 | `CONTEXT.md`、SPEC/TEST-0010、M9-T01 |
 
 ## 风险登记
 
@@ -1003,3 +1031,4 @@ first-match route module；advanced matcher和outbound policy继续延期。
 | 2026-08-03 | M8-T02 integration | exact `ff9070c`集成client TCP per-flow route和one-socket lazy endpoint-keyed UDP legs；T02 done，T03 ready | full Architect/QA发现reserve-before-materialize排序及routed UDP mutation evidence缺口；一次bounded单文件repair全部关闭，定向复审无新blocker | client `29/29`、related `141`、CLI `5/5`、Full、MSRV、lifecycle `1/1`、Clippy/fmt/diff和Budget PASS；growth `659/840`、remaining `181`；首次lifecycle wrapper timeout后same command以足够deadline通过；无push/hosted/release/publication |
 | 2026-08-04 | M8-T03 integration | exact `4a1de3a3`集成server authenticated TCP/UDP per-request direct identity route；T03 done，T04 ready | full/targeted review暴露production mutation witness与两类cancellation observability回归；两轮用户指定的双独立xhigh只读分析分别选择最小production-path和pre-open取消修复，最终Architect/QA均PASS | server `18/18`、runtime `17+5+13`、CLI `5/5`、Full、MSRV、ignored lifecycle `1/1`、Clippy/fmt/diff与Budget PASS；growth `749/840`、remaining `91`；integration Quick首次client loopback配置flake后isolated `1/1`、client suite `20x29/29`及unchanged workspace rerun通过；无push/hosted/release/publication |
 | 2026-08-04 | M8 close | M8改为`closed`；四票及六项exit criteria完成，blocking findings为零 | exact `926843d6`以dual-stack echo关闭hosted localhost resolver-order假设；run `30848182146/1`全部jobs及final qualification success | Budget `837/840`、remaining `3`；performance仅作regression且无M8阈值/声明；两次push授权已消费，closeout仅本地docs commit |
+| 2026-08-04 | M9 zero-code close | M7 tagged multi-outbound与M8 first-match route已满足client multi-upstream；不增加upstream group | exact `5b0a802`上focused、Full、100+ lifecycle、docs、schema 3 footprint及Architect/QA review PASS；M8以来product/test diff为空 | M9-T01 done；新增product/test LOC `0/0`；无ADR、dependency、remote action或未解决finding |

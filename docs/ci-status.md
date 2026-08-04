@@ -1,5 +1,24 @@
 # CI 与验证状态
 
+## M9 closed 状态
+
+- **Accepted exact SHA:** `5b0a8020e5dac1a915dc64c8229ddd129dd4da4a`；M8 qualified
+  product `926843d61fcfac094765b5d1032b7239e3d9370c`是其ancestor，且两者间
+  `bins/`、`crates/`、`tests/`、Cargo和toolchain diff为空。
+- **Focused evidence:** routed config、client TCP selection、client UDP endpoint legs、真实
+  two-upstream TCP及同一SOCKS UDP association的two-upstream A/B/A各`1/1`通过。真实TCP
+  首次运行因缺少required binary artifact而setup failure；`cargo build --workspace --bins
+  --locked`通过后，unchanged exact command `1/1`通过，未改产品。
+- **Serial close gate:** format、strict Clippy、workspace binary build、all-features Full、docs
+  均exit `0`；ignored 100+ lifecycle `1/1` in `130.03s`。Architect与QA均`PASS`；
+  `ARCH-M9-MU-001`、`M9-QA-001`、`M9-QA-002`已由关闭文档解决，blocking findings为零。
+- **Footprint:** schema `3`、policy revision `2` milestone gate `PASS`；code/tests
+  `15996/26916`、ratio `1.682671`、test case/support/fixture `22369/3950/597`，三类delta
+  `0/0/0`，无numeric `WARN`或`REVIEW_REQUIRED`。
+- **Boundary:** M9核验并命名已存在的multi-upstream能力，不新增platform/interop/performance
+  claim。M8 run `30848182146/1`继续证明unchanged product tree；M9未授权或执行push、hosted
+  run、rerun、dispatch、PR、tag、release或publication。
+
 ## M8 closed 状态
 
 - **Qualified exact SHA:** `926843d61fcfac094765b5d1032b7239e3d9370c`，tree

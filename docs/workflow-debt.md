@@ -18,3 +18,9 @@ implemented schema 2 exact-base Budget envelope；local and hosted gates pass。
 
 No M8 workflow debt remains。The schema 2 exact-base Budget passed locally and hosted at growth
 `837/840`，and the existing automatic run supplied the required same-SHA final qualification。
+
+## M9 close audit
+
+No M9 workflow debt remains。The activated schema 3 policy passed at revision `2` with
+case/support/fixture deltas `0/0/0`，and the milestone reused existing tests without a new harness
+or control-plane change。

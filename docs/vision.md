@@ -126,6 +126,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是历史现�
 | M6 | 显式opt-in、有界且可关闭的SOCKS5 UDP ASSOCIATE，不加入routing | closed |
 | M7 | 具名多inbound/outbound、静态tag引用和原子prepare/rollback，不建Endpoint interface | closed |
 | M8 | 共享、有界的TCP/UDP first-match routing；只匹配inbound tag、network和exact target | closed |
+| M9 | 核验M7/M8已交付client multi-upstream；零product/test code关闭 | closed |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -186,3 +187,10 @@ target，未命中走mandatory final；legacy/M7 static behavior不变。Automat
 performance仅作regression，不形成M8阈值或声明。GeoIP、Geosite、DNS policy、sniffing、
 user rules、CIDR/domain pattern、fallback/load balancing/chaining、per-entry credential和new
 `Endpoint` kind仍排除；push授权已消费，未授权release或publication。
+
+M9在exact `5b0a8020e5dac1a915dc64c8229ddd129dd4da4a`核验：M7的多个concrete
+client Shadowsocks outbounds与M8的static/routed selection已构成multi-upstream。真实TCP
+矩阵使用两个upstream，同一SOCKS UDP association可按target在两个upstream间A/B/A选择；
+Full、100+ lifecycle、docs和schema 3 footprint通过，Architect/QA均PASS。M9未改product或
+test code。Upstream group、load balancing、health/failover和chaining仍是需要独立需求的
+未来策略能力；无remote action授权或执行。

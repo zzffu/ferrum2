@@ -8,8 +8,8 @@
 - **Baseline counts:** `code=15996`、`tests=26916`，来自 exact base 上用 pinned
   `rustloc 0.19.1` 分别扫描 Cargo workspace 与 `tests/fixtures/` 后去重合并；分类为
   `test_case_loc=22369`、`test_support_loc=3950`、`test_fixture_loc=597`。
-- **Assumption:** 仓库尚无 M9 计划文件，因此新策略暂命名为 `M9`；正式规划时可在首张产品票
-  之前用独立 control-only commit 改名或调整阈值。
+- **M9 disposition:** 正式 M9 以零 product/test code 核验并关闭 multi-upstream；policy
+  名称、exact base 和阈值无需变更。
 
 ## 目标
 

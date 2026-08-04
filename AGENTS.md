@@ -14,8 +14,10 @@ and command definitions in their authoritative build/config files where possible
   - Current composition keeps one process-wide PSK/method and supports either
     the legacy single instance or bounded tagged multi-inbound/multi-outbound
     graphs with static bindings or shared exact-target TCP/UDP first-match
-    routing. Server outbounds remain direct; configuration is typed TOML with
-    `tracing` and low-cardinality metrics.
+    routing. Client graphs therefore support multiple concrete Shadowsocks
+    upstreams without implying an upstream group or load balancing. Server
+    outbounds remain direct; configuration is typed TOML with `tracing` and
+    low-cardinality metrics.
   - Release targets are Linux x86_64 GNU/musl and Windows. License:
     `GPL-3.0-only`.
 
@@ -64,7 +66,7 @@ and command definitions in their authoritative build/config files where possible
   - SIP023 and multi-user support are not planned; do not add preparatory
     abstractions without a concrete requirement.
   - Preferred dependency order, adjustable by validated need:
-    multi-upstream, load balancing and chaining; DNS; Tailscale
+    upstream groups, load balancing, health/failover and chaining; DNS; Tailscale
     Endpoint; Linux transparent inbound; Windows TUN; hot reload; management API.
   - A future Tailscale Endpoint may expose inbound, outbound, and datagram
     adapters under one tag. Prefer external `tailscaled`/OS routing for simple
