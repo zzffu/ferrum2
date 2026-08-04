@@ -27,7 +27,7 @@ so later calls observe public selector switches and work that already captured a
       have one process-local state across all inbound/rule references。
 - [ ] Existing auth/replay/source/inbound binding、reserve/commit ordering、aggregate owners/bytes/IDs、
       idle/cancel/fatal/forced/rebind and observability contracts remain exact。
-- [ ] `TEST-0011` T02、repository Full、Rust 1.85、ticket footprint and blocking Architect/QA review
+- [ ] `TEST-0011` T02、repository Full、ticket footprint and blocking Architect/QA review
       pass on one exact candidate。
 
 ## Validation

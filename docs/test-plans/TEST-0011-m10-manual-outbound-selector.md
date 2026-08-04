@@ -10,7 +10,7 @@
 |---|---|---|
 | M10-MUST-01 compatible shape | preserved legacy/static/routed values plus selector/tagged/legacy exclusivity through public loaders and CLI | T01 config |
 | M10-MUST-02 bounded DAG | table for counts、members、defaults、unknowns、duplicates、reachability and latent cycles | T01 config/core |
-| M10-MUST-03 public control | external integration test for default/current query、nested query、switch and exact no-mutation errors | T01 public interface |
+| M10-MUST-03 public control | external integration test for public construction、default/current query、nested query、switch and exact redacted no-mutation errors | T01 public interface |
 | M10-MUST-04 concurrency | std-thread readers/writers observe only complete members and a deterministic post-join switch | T01 public interface |
 | M10-MUST-05 actions/snapshots | static/routed selector action table plus existing TCP/UDP call-site tests | T01/T02 product |
 | M10-MUST-06 both roles | client Shadowsocks and server direct selector identity tests across TCP/UDP | T02 product |
@@ -22,15 +22,19 @@
 - Add exactly one Rust integration-test file under `crates/ferrum2-core/tests/`。It imports only public
   selector/control types and uses only `std::thread`、`Arc` and `Barrier`；no dev dependency、private
   state、sleep or probabilistic “both values observed” assertion。
-- One table proves explicit defaults、immediate nested query versus concrete resolution、valid switch、
-  already-current no-op、case sensitivity and unknown selector/member no-mutation。Outer/inner changes
-  remain independent except during recursive resolution。
+- One table proves public construction、explicit defaults、immediate nested query versus concrete
+  resolution、valid switch and already-current no-op。Its error rows distinguish unknown and
+  concrete-as-selector、unknown/case-mismatched/non-member/descendant-only member，assert no mutation，
+  and verify tag/member/index sentinels are absent from both `Display` and `Debug`。Outer/inner changes
+  remain independent except during recursive resolution。A selector-valued final row proves live
+  `select()` changes while concrete `final_outbound()` stays on the configured-default leaf。
 - One bounded concurrency table starts readers/writers together。Every query/resolution is a configured
   complete member/leaf；writer winner is unspecified。After join，one deterministic switch/query proves
   final visibility。
 - Extend existing `config_contract.rs` helpers/tables，not a new helper。Both roles cover static binding、
   route rule/final、shared/nested selectors、concrete reachable only through a selector and selector
-  state shared by multiple action roots。
+  state shared by multiple action roots。The client final-selector row also proves public `server` is the
+  configured-default compatibility snapshot before and after switching through the public accessor。
 - Negative rows cover zero/65 selectors、zero/65 members、duplicate/global-collision tags、duplicate/
   dangling/inbound-as-member、missing/dangling/non-member default、unreachable nodes and self/two-node/
   longer latent cycles。Each asserts exact field/kind and redacts tag/member/default/endpoint/PSK sentinels。
@@ -83,8 +87,10 @@ git diff --check
 - Do not add a process-switch harness：M10 deliberately has no child-process control channel。Reuse the
   existing real-process tagged/routed TCP and one-association UDP regressions to prove default startup、
   protocol behavior、no-fallback、response source binding、100+ cycles and exact rebind。
-- Architecture evidence proves one runtime-neutral core selector module，no duplicate selector logic in
-  protocols/runtime，no new trait/dependency/control transport and no selector/tag telemetry。
+- The unchanged architecture test remains regression evidence；exact-SHA Architect inspection，not a new
+  selector-specific test amendment，proves one runtime-neutral core selector module，no duplicate
+  selector logic in protocols/runtime，no new trait/dependency/control transport and no selector/tag
+  telemetry。
 - Existing external case IDs、versions、payloads、deadlines and cleanup remain unchanged：TCP
   `M1-INT-001..012` and UDP `M2-UDP-INT-001..012` each require `12/12` on one exact SHA。
 - Existing Windows/GNU/musl jobs compile the atomic selector path and run the preserved artifact profile；
@@ -111,7 +117,7 @@ Schema 3 exact base is `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7` at code/tests
 | T01 config/CLI tables | 85 | 0 | 0 |
 | T02 client TCP/UDP additions | 45 | 0 | 0 |
 | T02 server TCP/UDP additions | 30 | 0 | 0 |
-| T03 reused process/platform evidence | 0 | 0 | 0 |
+| T03 reused tests plus review-only architecture evidence | 0 | 0 | 0 |
 | **Total** | **230** | **0** | **0** |
 
 The total stays below the default `>240` change-set warning。Growing `config_contract.rs` from

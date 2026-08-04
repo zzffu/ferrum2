@@ -18,6 +18,8 @@ identity remains unchanged。
 
 - `ferrum2-core::route::RouteTable` is the one total static/routed selection module and currently
   returns concrete `usize` identities。
+- Its public concrete-only constructors and `final_outbound()` expose concrete indexes；client config
+  also projects that final index into the public `ValidatedClientConfig.server` compatibility field。
 - `ferrum2-config::{validate_client_graph,validate_server_graph,validate_route}` validates every
   tag/action before returning，but accepts only role-specific concrete outbounds。
 - Client/server TCP select once after target authentication/validation；client routed and server UDP
@@ -32,6 +34,8 @@ identity remains unchanged。
 - Every legacy、M7 static and M8 routed document accepted at baseline MUST remain accepted without
   edits and retain exact normalized values、defaults、concrete route results、CLI behavior and resource
   choices when `selectors` is absent。
+- Existing public `RouteRule::new`、`RouteTable::static_bindings`、`RouteTable::routed`、`is_routed`
+  and selector-free `final_outbound` behavior MUST remain source-compatible and concrete-only。
 - `[[selectors]]` MUST be accepted only with tagged `[[inbounds]]` and concrete `[[outbounds]]`。
   Legacy/selector mixing、a present empty selector collection or partial tagged shapes MUST fail as
   redacted `config.semantic` before subscriber、runtime、socket、buffer、channel or task creation。
@@ -58,7 +62,12 @@ identity remains unchanged。
 ### M10-MUST-03 — public manual control interface
 
 - Both validated config roles MUST expose one cloneable `Send + Sync` public Rust control handle that
-  shares state with the route table consumed by composition。
+  shares state with the route table consumed by composition。This MUST be an additive accessor，not a
+  new public config field that duplicates selector state。
+- One public core compile entry MUST accept identity-safe tagged concrete、selector and action inputs，
+  validate every member/default/action，and return a route table plus control handle sharing one state or
+  return neither。Existing concrete-only constructors remain separate；no raw logical selector ID may be
+  supplied through them or returned as a concrete outbound ID。
 - `selected(selector_tag)` MUST return the current immediate member tag。For a nested selector it MUST
   return the selected selector tag，not the concrete leaf。
 - `switch(selector_tag, member_tag)` MUST atomically replace current state only when `member_tag` is an
@@ -87,6 +96,10 @@ identity remains unchanged。
 - One route/static query MUST resolve through current selector members to exactly one concrete index。
   Selected connect/resolve/send/protocol failure MUST NOT modify selection or try a sibling、later rule
   or final。
+- For selector-valued `route.final`，`select` MUST resolve the live current leaf，while public
+  `final_outbound()` MUST remain the concrete configured-default leaf captured at compilation and never
+  expose a logical selector identity。`ValidatedClientConfig.server` MUST remain that same immutable
+  configured-default compatibility snapshot；runtime composition MUST NOT use it for route selection。
 - Existing call-site granularity MUST remain：client/server TCP once per accepted/authenticated flow；
   client static UDP once at association setup；client routed UDP and server UDP once per validated/
   authenticated datagram before existing outbound mutation points。
@@ -119,7 +132,8 @@ identity remains unchanged。
 ### M10-MUST-08 — qualification
 
 - Public integration tests MUST verify query、switch、concurrency and control errors only through the
-  public Rust interface；they MUST NOT inspect atomics、private IDs or private state。
+  public Rust compile/control/route interfaces；they MUST NOT inspect atomics、private IDs or private
+  state。
 - Existing config tables MUST cover both roles、static/route selector roots、nested resolution and every
   required empty/unknown/duplicate/default/cycle/reachability negative with redaction。
 - Existing binary composition tests MUST drive switches only through the public handle and prove
@@ -138,8 +152,9 @@ identity remains unchanged。
 
 ## Implementation freedom
 
-- Core may store resolved logical/concrete newtypes or bounded indexes as long as binaries only receive
-  concrete identities and public errors expose no index/value。
+- Core may store resolved logical/concrete newtypes or bounded indexes privately as long as the public
+  selector-aware compile entry accepts distinct tagged identity domains，binaries only receive concrete
+  identities and public errors expose no index/value。
 - Core may use any standard-library atomic ordering that proves the required linearization/visibility；
   no exact ordering enum is a public contract。
 - Config may validate graph topology before or inside the core constructor as long as one shared

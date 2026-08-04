@@ -4,7 +4,6 @@ milestone: M10
 status: todo
 depends_on: [M10-T02]
 owns:
-  - tests/m0-harness/tests/architecture.rs
   - docs/ci-status.md
   - docs/handoffs/HANDOFF-M10-*.md
   - docs/milestones/M10-manual-outbound-selector.md
@@ -25,8 +24,9 @@ without inventing a child-process switch channel、new provider/job or performan
       concurrency/error claims do not rely on private state or a process control backdoor。
 - [ ] Existing real-process tagged/routed TCP and UDP rows prove configured default startup、no-fallback、
       response binding、100+ lifecycle and exact restart/rebind without a new harness/helper。
-- [ ] Architecture evidence proves one core selector module、no protocol/runtime policy duplicate、no new
-      trait/dependency/control transport and no tag/selection telemetry。
+- [ ] The unchanged architecture test plus exact-SHA Architect inspection prove one core selector
+      module、no protocol/runtime policy duplicate、no new trait/dependency/control transport and no
+      tag/selection telemetry；no selector-specific architecture test growth is claimed。
 - [ ] Exact integration passes Full、Rust 1.85、three native targets、existing TCP/UDP `12/12` each、
       schema 3 footprint and final blocking review。
 - [ ] Any hosted evidence uses one exact SHA/run/attempt only after separate explicit authorization；no

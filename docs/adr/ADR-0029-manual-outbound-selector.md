@@ -80,6 +80,14 @@ graph and one atomic current-member slot per selector；there is no trait、adap
 crate or dependency。Config constructs it only after validating the complete graph，and `RouteTable`
 shares the same process-local state。
 
+Existing public `RouteRule::new`、`RouteTable::static_bindings` and `RouteTable::routed` remain
+concrete-only constructors with their current `usize` meaning and selector-free numeric results。One new
+public selector-aware compile entry accepts tagged concrete identities、selector definitions and tagged
+static/routed actions instead of undifferentiated logical indexes。It validates every member、default and
+action before returning a `RouteTable` and control handle that share one state；failure returns neither。
+Logical selector identities remain private and can never cross `select` as a concrete outbound index。
+The external core integration test constructs selector state only through this entry point。
+
 The control interface is one cloneable `Send + Sync` handle with behavior equivalent to：
 
 ```rust
@@ -91,8 +99,8 @@ control.switch(selector_tag, member_tag) -> Result<(), SelectorError>
 `switch` accepts only an immediate configured member；selecting the already-current member succeeds as
 a no-op。Unknown/concrete-as-selector tags return `UnknownSelector`；unknown、case-mismatched、non-member
 or descendant-only tags return `UnknownMember`。Errors are closed/value-free and failed operations do
-not modify any selector。Both validated config roles expose a clone of this public handle while the
-route table used by the running composition shares its atomics。
+not modify any selector。Both validated config roles expose an additive accessor that clones this public
+handle from the route-owned state；no new public config field duplicates the state。
 
 Each query/switch is linearizable。A racing query observes a complete old or new member；a successful
 switch is visible to later synchronized queries。Concurrent valid switches are last-writer-wins。
@@ -104,10 +112,16 @@ CAS generation or lock is justified only by a later larger bound or measured con
 
 ### Selection and snapshot behavior
 
-`RouteTable` keeps its total interface：one static/routed selection returns one concrete outbound index。
-It resolves a selector chain internally after the existing route action is chosen；binaries do not look
-up tags or interpret selector graph nodes。Selected member failure never changes current state and never
-tries a sibling、later rule or final。
+`RouteTable::select` keeps its total interface：one static/routed selection returns one concrete outbound
+index。It resolves a selector chain internally after the existing route action is chosen；binaries do not
+look up tags or interpret selector graph nodes。Selected member failure never changes current state and
+never tries a sibling、later rule or final。
+
+Existing `is_routed()` and concrete-only construction behavior remain exact。`final_outbound()` remains
+the concrete configured-default no-match leaf captured during compilation，including when `route.final`
+names a selector；it never exposes a logical selector index and does not change after a switch。The public
+`ValidatedClientConfig.server` field remains that same configured-default compatibility snapshot。It is
+not live routing state，and composition MUST use `RouteTable::select` for every runtime choice。
 
 M10 preserves the existing call-site granularity instead of defining a second notion of UDP flow：
 

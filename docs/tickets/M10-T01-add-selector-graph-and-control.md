@@ -23,9 +23,14 @@ and expose a public atomic query/switch handle shared by the existing route tabl
 - [ ] Legacy/static/routed configs stay exact；tagged-only `[[selectors]]` validates count、global tags、
       explicit defaults、members、transitive reachability and all-edge cycles with closed redacted fields。
 - [ ] Static bindings、route rules and final resolve concrete/selector tags；one route query still returns
-      one concrete outbound index and no-selector numeric results remain exact。
+      one concrete outbound index and no-selector numeric results remain exact。The new public compile
+      entry validates tagged identity domains and returns shared route/control state atomically；existing
+      concrete-only constructors cannot accept or return logical selector IDs。
+- [ ] `final_outbound()` and `ValidatedClientConfig.server` remain immutable concrete configured-default
+      compatibility snapshots；live runtime choices use `select()` and observe current members。
 - [ ] The public handle proves immediate-member query、valid/no-op switch、nested resolution、exact
-      unknown-selector/member no-mutation and bounded linearizable concurrency using only public types。
+      unknown/concrete-as-selector and unknown/case/non-member/descendant-only member no-mutation、
+      Display/Debug redaction and bounded linearizable concurrency using only public types。
 - [ ] Core uses immutable bounded graph plus atomics，without trait、async lock、new crate/dependency、
       I/O、retry、persistence or test-only mutation surface。
 - [ ] Both public loaders and `--check-config` accept valid selector graphs and reject invalid/inert graphs
