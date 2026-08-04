@@ -10,8 +10,9 @@ use ferrum2_crypto::{
     MonotonicInstant, UdpCrypto,
 };
 use ferrum2_shadowsocks::{
-    MAX_UDP_WIRE_LEN, MethodKeyAdapter, UdpClientSession, UdpPacketError, UdpPacketScratch,
-    UdpServer, max_udp_payload_len, max_udp_payload_len_for_encoded_target,
+    MAX_UDP_WIRE_LEN, MethodKeyAdapter, ServerResponseCapability, UdpClientSession, UdpPacketError,
+    UdpPacketScratch, UdpResponseCommit, UdpServer, max_udp_payload_len,
+    max_udp_payload_len_for_encoded_target,
 };
 
 use serde_json::Value;
@@ -598,5 +599,251 @@ fn independent_three_method_composite_fixture_matches_exact_request_and_response
         .expect("fixture response opens");
         assert_eq!(opened.target(), &target);
         assert_eq!(opened.payload(), response_payload);
+    }
+}
+
+#[test]
+fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
+    #[allow(clippy::too_many_arguments)]
+    fn wrap(
+        server: &UdpServer,
+        capability: ServerResponseCapability,
+        clock: &FakeClock,
+        random: &FillRandom,
+        target: &TargetAddr,
+        inner: &[u8],
+        wire: &mut [u8],
+        scratch: &mut UdpPacketScratch,
+    ) -> Vec<u8> {
+        let encoded = server
+            .encode_response(
+                capability,
+                clock,
+                random,
+                &datagram(target.clone(), inner),
+                0,
+                wire,
+                scratch,
+            )
+            .expect("outer response");
+        wire[..encoded.wire_len()].to_vec()
+    }
+
+    fn open_commits(
+        clients: &[UdpClientSession; 2],
+        clock: &FakeClock,
+        next: &TargetAddr,
+        application: &TargetAddr,
+        outer_wire: &[u8],
+        scratch: &mut UdpPacketScratch,
+    ) -> [UdpResponseCommit; 2] {
+        let outer = clients[0]
+            .prepare_response_borrowed(clock, outer_wire, scratch)
+            .expect("open outer");
+        assert!(outer.target_matches(next));
+        let mut inner_wire = vec![0; outer.payload().len()];
+        outer.copy_payload_to(&mut inner_wire).expect("copy inner");
+        let outer_commit = outer.into_commit();
+        let inner = clients[1]
+            .prepare_response_borrowed(clock, &inner_wire, scratch)
+            .expect("open inner");
+        assert!(inner.target_matches(application));
+        [outer_commit, inner.into_commit()]
+    }
+
+    for profiles in [
+        [
+            MethodProfile::Blake3Aes128Gcm2022,
+            MethodProfile::Blake3Aes256Gcm2022,
+        ],
+        [
+            MethodProfile::Blake3Aes256Gcm2022,
+            MethodProfile::Blake3ChaCha20Poly13052022,
+        ],
+        [
+            MethodProfile::Blake3ChaCha20Poly13052022,
+            MethodProfile::Blake3Aes128Gcm2022,
+        ],
+    ] {
+        let keys = profiles.map(|profile| MethodKeyAdapter::new(udp_provider(profile)));
+        let client_random = [FillRandom::new(0x10), FillRandom::new(0x20)];
+        let server_random = [FillRandom::new(0x80), FillRandom::new(0x90)];
+        let mut clients: [UdpClientSession; 2] = std::array::from_fn(|hop| {
+            UdpClientSession::new(&keys[hop], &client_random[hop], |_| false).expect("client")
+        });
+        let servers = keys
+            .each_ref()
+            .map(|keys| UdpServer::new(keys).expect("server"));
+        let clock = FakeClock::new(NOW, 0);
+        let peer = "127.0.0.1:49152".parse().expect("peer");
+        let next = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8388)).expect("next");
+        let application = fixture_target("ipv4");
+        let mut scratch = UdpPacketScratch::new();
+        let scratch_identity = scratch.storage_identity();
+        let mut wire = vec![0; MAX_UDP_WIRE_LEN];
+        let inner_len = clients[1]
+            .encode_request(
+                &clock,
+                &client_random[1],
+                &datagram(application.clone(), b"request"),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("inner request");
+        let inner_wire = wire[..inner_len].to_vec();
+        let inner = servers[1]
+            .prepare_request(&clock, &inner_wire, &mut scratch)
+            .expect("open inner request");
+        assert_eq!(inner.datagram().target(), &application);
+        let (_, inner_commit) = inner.into_parts();
+        let inner_capability = servers[1]
+            .commit_request(
+                inner_commit,
+                peer,
+                MonotonicInstant::ZERO,
+                &server_random[1],
+            )
+            .expect("commit inner request")
+            .capability();
+        let outer_len = clients[0]
+            .encode_request_parts(
+                &clock,
+                &client_random[0],
+                &next,
+                &inner_wire,
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("outer request");
+        let outer = servers[0]
+            .prepare_request(&clock, &wire[..outer_len], &mut scratch)
+            .expect("open outer request");
+        assert_eq!(outer.datagram().target(), &next);
+        assert_eq!(outer.datagram().payload(), inner_wire);
+        let (_, outer_commit) = outer.into_parts();
+        let outer_capability = servers[0]
+            .commit_request(
+                outer_commit,
+                peer,
+                MonotonicInstant::ZERO,
+                &server_random[0],
+            )
+            .expect("commit outer request")
+            .capability();
+        let capabilities = [outer_capability, inner_capability];
+
+        let inner = servers[1]
+            .encode_response(
+                capabilities[1],
+                &clock,
+                &server_random[1],
+                &datagram(application.clone(), b"response"),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("inner response");
+        let replayed_inner = wire[..inner.wire_len()].to_vec();
+
+        let first_outer = wrap(
+            &servers[0],
+            capabilities[0],
+            &clock,
+            &server_random[0],
+            &next,
+            &replayed_inner,
+            &mut wire,
+            &mut scratch,
+        );
+        UdpClientSession::commit_responses(
+            &[&clients[0], &clients[1]],
+            open_commits(
+                &clients,
+                &clock,
+                &next,
+                &application,
+                &first_outer,
+                &mut scratch,
+            )
+            .into(),
+            MonotonicInstant::from_duration(Duration::from_millis(1)),
+        )
+        .expect("first batch");
+        let before = clients
+            .each_ref()
+            .map(|client| client.association_snapshot().expect("snapshot"));
+
+        let fresh_outer = wrap(
+            &servers[0],
+            capabilities[0],
+            &clock,
+            &server_random[0],
+            &next,
+            &replayed_inner,
+            &mut wire,
+            &mut scratch,
+        );
+        assert_eq!(
+            UdpClientSession::commit_responses(
+                &[&clients[0], &clients[1]],
+                open_commits(
+                    &clients,
+                    &clock,
+                    &next,
+                    &application,
+                    &fresh_outer,
+                    &mut scratch
+                )
+                .into(),
+                MonotonicInstant::from_duration(Duration::from_millis(2)),
+            ),
+            Err(UdpPacketError::Duplicate)
+        );
+        assert_eq!(
+            clients
+                .each_ref()
+                .map(|client| client.association_snapshot().expect("snapshot")),
+            before
+        );
+
+        let next_inner = servers[1]
+            .encode_response(
+                capabilities[1],
+                &clock,
+                &server_random[1],
+                &datagram(application.clone(), b"fresh"),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("fresh inner");
+        let next_inner = wire[..next_inner.wire_len()].to_vec();
+        let valid_outer = wrap(
+            &servers[0],
+            capabilities[0],
+            &clock,
+            &server_random[0],
+            &next,
+            &next_inner,
+            &mut wire,
+            &mut scratch,
+        );
+        UdpClientSession::commit_responses(
+            &[&clients[0], &clients[1]],
+            open_commits(
+                &clients,
+                &clock,
+                &next,
+                &application,
+                &valid_outer,
+                &mut scratch,
+            )
+            .into(),
+            MonotonicInstant::from_duration(Duration::from_millis(3)),
+        )
+        .expect("valid after duplicate");
+        assert_eq!(scratch.storage_identity(), scratch_identity);
     }
 }

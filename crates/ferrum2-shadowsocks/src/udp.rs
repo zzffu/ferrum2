@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use bytes::BytesMut;
-use ferrum2_core::{Datagram, TargetAddr};
+use ferrum2_core::{Datagram, TargetAddr, TargetHostRef};
 use ferrum2_crypto::{
     Clock, KeySelector, MethodKeyProvider, MethodProfile, MonotonicInstant, SecureRandom,
     UdpCrypto, UdpCryptoError, UdpOutboundSession, UdpSessionId,
@@ -124,6 +124,7 @@ pub enum UdpPacketError {
 }
 
 /// Exact sliding window representing the highest ID plus 8,128 earlier IDs.
+#[derive(Clone)]
 pub struct UdpReplayWindow {
     highest: Option<u64>,
     bits: [u64; REPLAY_WORDS],
@@ -230,13 +231,14 @@ impl fmt::Debug for UdpReplayWindow {
     }
 }
 
+#[derive(Clone)]
 struct ClientAssociation {
     session_id: UdpSessionId,
     replay: UdpReplayWindow,
     last_valid: MonotonicInstant,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ClientAssociations {
     current: Option<ClientAssociation>,
     old: Option<ClientAssociation>,
@@ -307,6 +309,29 @@ impl UdpClientSession {
         output: &mut [u8],
         scratch: &mut UdpPacketScratch,
     ) -> Result<usize, UdpPacketError> {
+        self.encode_request_parts(
+            clock,
+            random,
+            datagram.target(),
+            datagram.payload(),
+            padding_len,
+            output,
+            scratch,
+        )
+    }
+
+    /// Encodes one request from borrowed target/payload parts into caller-owned output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_request_parts(
+        &mut self,
+        clock: &(impl Clock + ?Sized),
+        random: &(impl SecureRandom + ?Sized),
+        target: &TargetAddr,
+        payload: &[u8],
+        padding_len: usize,
+        output: &mut [u8],
+        scratch: &mut UdpPacketScratch,
+    ) -> Result<usize, UdpPacketError> {
         encode_packet(
             &self.crypto,
             &mut self.outbound,
@@ -314,7 +339,8 @@ impl UdpClientSession {
             random,
             REQUEST_TYPE,
             None,
-            datagram,
+            target,
+            payload,
             padding_len,
             output,
             scratch,
@@ -349,6 +375,7 @@ impl UdpClientSession {
             Some(self.outbound.session_id()),
         )?;
         Ok(BorrowedPendingUdpResponse {
+            owner_id: self.outbound.session_id().clone(),
             session_id: opened.session_id,
             packet_id: opened.packet_id,
             target: opened.target,
@@ -365,11 +392,54 @@ impl UdpClientSession {
         commit: UdpResponseCommit,
         now: MonotonicInstant,
     ) -> Result<(), UdpPacketError> {
+        if commit.owner_id != *self.outbound.session_id() {
+            return Err(UdpPacketError::Binding);
+        }
         let mut associations = self
             .associations
             .lock()
             .map_err(|_| UdpPacketError::StateUnavailable)?;
         commit_client_association(&mut associations, commit.session_id, commit.packet_id, now)
+    }
+
+    /// Atomically commits one ordered response transition per distinct client session.
+    pub fn commit_responses(
+        sessions: &[&Self],
+        commits: Vec<UdpResponseCommit>,
+        now: MonotonicInstant,
+    ) -> Result<(), UdpPacketError> {
+        if sessions.is_empty() || sessions.len() > 8 || sessions.len() != commits.len() {
+            return Err(UdpPacketError::Bounds);
+        }
+        for (index, session) in sessions.iter().enumerate() {
+            if commits[index].owner_id != *session.outbound.session_id()
+                || sessions[..index]
+                    .iter()
+                    .any(|other| std::ptr::eq(*other, *session))
+            {
+                return Err(UdpPacketError::Binding);
+            }
+        }
+        let mut guards = sessions
+            .iter()
+            .map(|session| {
+                session
+                    .associations
+                    .lock()
+                    .map_err(|_| UdpPacketError::StateUnavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut updated = guards
+            .iter()
+            .map(|associations| (**associations).clone())
+            .collect::<Vec<_>>();
+        for (associations, commit) in updated.iter_mut().zip(commits) {
+            commit_client_association(associations, commit.session_id, commit.packet_id, now)?;
+        }
+        for (associations, replacement) in guards.iter_mut().zip(updated) {
+            **associations = replacement;
+        }
+        Ok(())
     }
 
     /// Returns a redacted snapshot of current+old association state.
@@ -470,6 +540,7 @@ struct BorrowedOpenedPacket<'a> {
 
 /// Fully authenticated response awaiting its runtime-state commit.
 pub struct PendingUdpResponse {
+    owner_id: UdpSessionId,
     session_id: UdpSessionId,
     packet_id: u64,
     datagram: Datagram,
@@ -486,6 +557,7 @@ impl PendingUdpResponse {
         (
             self.datagram,
             UdpResponseCommit {
+                owner_id: self.owner_id,
                 session_id: self.session_id,
                 packet_id: self.packet_id,
             },
@@ -504,6 +576,7 @@ impl fmt::Debug for PendingUdpResponse {
 
 /// Fully authenticated borrowed response awaiting exact runtime reservation.
 pub struct BorrowedPendingUdpResponse<'a> {
+    owner_id: UdpSessionId,
     session_id: UdpSessionId,
     packet_id: u64,
     target: super::ValidatedTarget<'a>,
@@ -530,6 +603,39 @@ impl BorrowedPendingUdpResponse<'_> {
         }
     }
 
+    /// Compares the authenticated target without allocating an owned address.
+    pub fn target_matches(&self, expected: &TargetAddr) -> bool {
+        match (&self.target, expected.host()) {
+            (super::ValidatedTarget::Ip(actual), TargetHostRef::Ip(expected_ip)) => {
+                actual.ip() == expected_ip && actual.port() == expected.port().get()
+            }
+            (
+                super::ValidatedTarget::Domain(actual, port),
+                TargetHostRef::Domain(expected_host),
+            ) => *actual == expected_host && *port == expected.port().get(),
+            (super::ValidatedTarget::Ip(_), TargetHostRef::Domain(_))
+            | (super::ValidatedTarget::Domain(_, _), TargetHostRef::Ip(_)) => false,
+        }
+    }
+
+    /// Copies the authenticated payload into caller-owned bounded storage.
+    pub fn copy_payload_to(&self, output: &mut [u8]) -> Result<usize, UdpPacketError> {
+        let destination = output
+            .get_mut(..self.payload.len())
+            .ok_or(UdpPacketError::Bounds)?;
+        destination.copy_from_slice(self.payload);
+        Ok(destination.len())
+    }
+
+    /// Extracts only the opaque commit transition after the caller copied nested wire.
+    pub fn into_commit(self) -> UdpResponseCommit {
+        UdpResponseCommit {
+            owner_id: self.owner_id,
+            session_id: self.session_id,
+            packet_id: self.packet_id,
+        }
+    }
+
     /// Materializes once after reservation and separates the opaque commit token.
     pub fn materialize(self) -> PendingUdpResponse {
         let target = self
@@ -541,6 +647,7 @@ impl BorrowedPendingUdpResponse<'_> {
             .expect("authenticated response payload was already bounded");
         PendingUdpResponse {
             datagram,
+            owner_id: self.owner_id,
             session_id: self.session_id,
             packet_id: self.packet_id,
         }
@@ -558,6 +665,7 @@ impl fmt::Debug for BorrowedPendingUdpResponse<'_> {
 
 /// Move-only authenticated response identity committed after reservation.
 pub struct UdpResponseCommit {
+    owner_id: UdpSessionId,
     session_id: UdpSessionId,
     packet_id: u64,
 }
@@ -835,7 +943,8 @@ impl UdpServer {
             random,
             RESPONSE_TYPE,
             Some(&binding),
-            datagram,
+            datagram.target(),
+            datagram.payload(),
             padding_len,
             output,
             scratch,
@@ -982,20 +1091,20 @@ fn encode_packet(
     random: &(impl SecureRandom + ?Sized),
     message_type: u8,
     binding: Option<&UdpSessionId>,
-    datagram: &Datagram,
+    target: &TargetAddr,
+    payload: &[u8],
     padding_len: usize,
     output: &mut [u8],
     scratch: &mut UdpPacketScratch,
 ) -> Result<usize, UdpPacketError> {
     let response = message_type == RESPONSE_TYPE;
-    let max_payload =
-        max_udp_payload_len(crypto.profile(), response, datagram.target(), padding_len)?;
-    if datagram.payload().len() > max_payload {
+    let max_payload = max_udp_payload_len(crypto.profile(), response, target, padding_len)?;
+    if payload.len() > max_payload {
         return Err(UdpPacketError::Bounds);
     }
     let body_len = MAX_UDP_WIRE_LEN
         - crypto.profile().udp_wire_overhead_bytes()
-        - (max_payload - datagram.payload().len());
+        - (max_payload - payload.len());
     let wire_len = body_len
         .checked_add(crypto.profile().udp_wire_overhead_bytes())
         .ok_or(UdpPacketError::Bounds)?;
@@ -1026,8 +1135,8 @@ fn encode_packet(
             .fill(&mut scratch.body[padding_start..])
             .map_err(|_| UdpPacketError::Random)?;
     }
-    encode_target_into(datagram.target(), &mut scratch.body).map_err(map_frame)?;
-    scratch.body.extend_from_slice(datagram.payload());
+    encode_target_into(target, &mut scratch.body).map_err(map_frame)?;
+    scratch.body.extend_from_slice(payload);
     debug_assert_eq!(scratch.body.len(), body_len);
 
     crypto
