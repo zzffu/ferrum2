@@ -29,10 +29,12 @@ use ferrum2_runtime::{
     UdpSessionManager, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
-    ClientFlow, ClientTcpOutbound, DetectionReason, FlowTerminal, MAX_UDP_WIRE_LEN,
-    MethodKeyAdapter, PlainDuplex, ProtocolReason, ShadowsocksError, TcpKeyProvider, TransportIo,
-    UdpClientSession, UdpPacketError, UdpPacketScratch, max_udp_payload_len_for_encoded_target,
+    BoxedClientFlow, ClientTcpOutbound, DetectionReason, FlowTerminal, MAX_UDP_WIRE_LEN,
+    MethodKeyAdapter, PlainDuplex, ProtocolReason, ShadowsocksError, TransportIo, UdpClientSession,
+    UdpPacketError, UdpPacketScratch, max_udp_payload_len_for_encoded_target,
 };
+#[cfg(test)]
+use ferrum2_shadowsocks::{ClientFlow, TcpKeyProvider};
 use ferrum2_socks5::{
     MAX_SOCKS_UDP_DATAGRAM_BYTES, Socks5Inbound, SocksCommand, SocksStream, SocksUdpAssociate,
     decode_udp_datagram, encode_udp_datagram,
@@ -126,6 +128,8 @@ where
 {
     metrics.set_udp_sessions_active(Role::Client, 0);
     metrics.set_udp_buffered_bytes(Role::Client, 0);
+    let method = config.method();
+    let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)?;
     let shutdown_grace = config.runtime.shutdown_grace;
     let listen_backlog = u32::from(config.runtime.listen_backlog.get());
     let max_connections = usize::from(config.runtime.max_connections.get());
@@ -137,7 +141,7 @@ where
                 registry.clone(),
             ),
             live_ids: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            method: config.method(),
+            method,
         }),
         None => None,
     };
@@ -157,13 +161,6 @@ where
         test_udp_server: config.server,
     });
     let mut listens = Vec::with_capacity(config.inbounds.len());
-    let mut outbounds = Vec::with_capacity(config.outbounds.len());
-    for outbound in &config.outbounds {
-        outbounds.push(ClientOutboundContext {
-            tcp_server: TargetAddr::ipv4(outbound.server).map_err(|_| RunError::StartupProtocol)?,
-            udp_server: outbound.server,
-        });
-    }
     let routing = Arc::new(ClientRouting {
         route: config.route,
         outbounds,
@@ -309,10 +306,31 @@ impl AcceptListener for ClientTcpListeners {
     }
 }
 
-#[derive(Clone)]
 struct ClientOutboundContext {
     tcp_server: TargetAddr,
     udp_server: SocketAddrV4,
+    keys: MethodKeyAdapter<MethodSinglePskProvider>,
+}
+
+fn prepare_client_outbounds(
+    outbounds: Vec<ferrum2_config::ClientOutboundConfig>,
+    psks: Vec<ferrum2_crypto::MethodPsk>,
+) -> Result<Vec<ClientOutboundContext>, RunError> {
+    if outbounds.len() != psks.len() {
+        return Err(RunError::StartupProtocol);
+    }
+    outbounds
+        .into_iter()
+        .zip(psks)
+        .map(|(outbound, psk)| {
+            Ok(ClientOutboundContext {
+                tcp_server: TargetAddr::ipv4(outbound.server)
+                    .map_err(|_| RunError::StartupProtocol)?,
+                udp_server: outbound.server,
+                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
+            })
+        })
+        .collect()
 }
 
 struct ClientRouting {
@@ -540,28 +558,20 @@ async fn client_connection(
         initial_payload: _,
         reply,
     } = session;
-    let Some(outbound) =
-        routing
-            .outbounds
-            .get(routing.route.select(inbound, Network::Tcp, &target))
-    else {
-        let _ = reply.failed(ConnectErrorKind::Other).await;
-        return;
-    };
-    let outbound = ClientTcpOutbound::new(
-        outbound.tcp_server.clone(),
-        &context.keys,
-        &context.outbound_connector,
-        &context.clock,
-        &context.random,
-    );
+    let plan = routing.route.select_plan(inbound, Network::Tcp, &target);
     let opened = tokio::select! {
         _ = cancellation.cancelled() => return,
-        result = open_with_deadlines(
-            &outbound,
+        result = open_chain_with_deadlines(
+            &routing.outbounds,
+            plan.hops(),
+            &context.outbound_connector,
+            &context.clock,
+            &context.random,
             &target,
-            context.runtime.connect_timeout,
-            context.runtime.handshake_timeout,
+            (
+                context.runtime.connect_timeout,
+                context.runtime.handshake_timeout,
+            ),
         ) => result,
     };
     let flow = match opened {
@@ -1419,6 +1429,67 @@ enum ClientOpenFailure {
     HandshakeTimeout,
 }
 
+async fn open_chain_with_deadlines<'a, C, T, R>(
+    outbounds: &'a [ClientOutboundContext],
+    plan: &[usize],
+    connector: &'a C,
+    clock: &'a T,
+    random: &'a R,
+    application_target: &TargetAddr,
+    deadlines: (std::time::Duration, std::time::Duration),
+) -> Result<BoxedClientFlow<'a>, ClientOpenFailure>
+where
+    C: Connector,
+    C::Stream: TransportIo + LocalEndpoint + 'a,
+    T: Clock + Sync,
+    R: SecureRandom,
+{
+    if plan.is_empty() || plan.iter().any(|index| *index >= outbounds.len()) {
+        return Err(ClientOpenFailure::Protocol(ShadowsocksError::Connect(
+            ConnectErrorKind::Other,
+        )));
+    }
+    let first = &outbounds[plan[0]];
+    let outbound = ClientTcpOutbound::new(
+        first.tcp_server.clone(),
+        &first.keys,
+        connector,
+        clock,
+        random,
+    );
+    let connected = tokio::time::timeout(deadlines.0, outbound.connect_server())
+        .await
+        .map_err(|_| {
+            ClientOpenFailure::Protocol(ShadowsocksError::Connect(ConnectErrorKind::Timeout))
+        })?
+        .map_err(ClientOpenFailure::Protocol)?;
+    tokio::time::timeout(deadlines.1, async {
+        let first_target = plan
+            .get(1)
+            .map_or(application_target, |next| &outbounds[*next].tcp_server);
+        let mut flow = connected.write_request(first_target).await?.into_boxed();
+        for (position, index) in plan.iter().copied().enumerate().skip(1) {
+            let hop = &outbounds[index];
+            let next_target = plan
+                .get(position + 1)
+                .map_or(application_target, |next| &outbounds[*next].tcp_server);
+            flow =
+                ClientTcpOutbound::new(hop.tcp_server.clone(), &hop.keys, connector, clock, random)
+                    .write_request_on(flow, next_target)
+                    .await?
+                    .into_boxed();
+        }
+        if plan.len() > 1 {
+            std::future::poll_fn(|cx| Pin::new(&mut flow).poll_flush_plain(cx)).await?;
+        }
+        Ok(flow)
+    })
+    .await
+    .map_err(|_| ClientOpenFailure::HandshakeTimeout)?
+    .map_err(ClientOpenFailure::Protocol)
+}
+
+#[cfg(test)]
 async fn open_with_deadlines<'a, K, C, T, R>(
     outbound: &ClientTcpOutbound<'a, K, C, T, R>,
     application_target: &TargetAddr,
@@ -1741,10 +1812,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use ferrum2_core::route::compile_selector_route;
+    use ferrum2_core::route::{compile_selector_plans, compile_selector_route};
     use ferrum2_core::selector::{
-        SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedRoute, TaggedRouteRule,
-        TaggedStaticBinding,
+        SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute,
+        TaggedRouteRule, TaggedStaticBinding,
     };
     use ferrum2_core::{ConnectError, Connector};
     use ferrum2_crypto::{
@@ -1800,6 +1871,10 @@ mod tests {
         Duplex(tokio::io::DuplexStream),
         Fail,
         Pending(Arc<AtomicUsize>),
+        StallAfter {
+            writes: usize,
+            drops: Arc<AtomicUsize>,
+        },
     }
 
     struct ScriptedIo {
@@ -1836,12 +1911,23 @@ mod tests {
                 aborts,
             }
         }
+
+        fn stall_after(writes: usize, drops: Arc<AtomicUsize>, aborts: Arc<AtomicUsize>) -> Self {
+            Self {
+                mode: ScriptedMode::StallAfter { writes, drops },
+                endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                aborts,
+            }
+        }
     }
 
     impl Drop for ScriptedIo {
         fn drop(&mut self) {
-            if let ScriptedMode::Pending(drops) = &self.mode {
-                drops.fetch_add(1, Ordering::SeqCst);
+            match &self.mode {
+                ScriptedMode::Pending(drops) | ScriptedMode::StallAfter { drops, .. } => {
+                    drops.fetch_add(1, Ordering::SeqCst);
+                }
+                ScriptedMode::Duplex(_) | ScriptedMode::Fail => {}
             }
         }
     }
@@ -1857,7 +1943,7 @@ mod tests {
                 ScriptedMode::Fail => {
                     Poll::Ready(Err(io::Error::other("transport source sentinel")))
                 }
-                ScriptedMode::Pending(_) => Poll::Pending,
+                ScriptedMode::Pending(_) | ScriptedMode::StallAfter { .. } => Poll::Pending,
             }
         }
     }
@@ -1874,6 +1960,11 @@ mod tests {
                     Poll::Ready(Err(io::Error::other("transport source sentinel")))
                 }
                 ScriptedMode::Pending(_) => Poll::Pending,
+                ScriptedMode::StallAfter { writes, .. } if *writes == 0 => Poll::Pending,
+                ScriptedMode::StallAfter { writes, .. } => {
+                    *writes -= 1;
+                    Poll::Ready(Ok(source.len()))
+                }
             }
         }
 
@@ -1883,7 +1974,7 @@ mod tests {
                 ScriptedMode::Fail => {
                     Poll::Ready(Err(io::Error::other("transport source sentinel")))
                 }
-                ScriptedMode::Pending(_) => Poll::Ready(Ok(())),
+                ScriptedMode::Pending(_) | ScriptedMode::StallAfter { .. } => Poll::Ready(Ok(())),
             }
         }
 
@@ -1893,7 +1984,7 @@ mod tests {
                 ScriptedMode::Fail => {
                     Poll::Ready(Err(io::Error::other("transport source sentinel")))
                 }
-                ScriptedMode::Pending(_) => Poll::Ready(Ok(())),
+                ScriptedMode::Pending(_) | ScriptedMode::StallAfter { .. } => Poll::Ready(Ok(())),
             }
         }
     }
@@ -2602,6 +2693,9 @@ mod tests {
         let outbound = |server| ClientOutboundContext {
             tcp_server: TargetAddr::ipv4(server).expect("server"),
             udp_server: server,
+            keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk_for_method(
+                MethodProfile::Blake3Aes128Gcm2022,
+            ))),
         };
         let tags = ["o0", "o1", "o2", "o3", "o4", "o5"];
         let outbounds: [_; 6] =
@@ -3524,6 +3618,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tcp_chain_opens_hops_in_order_with_distinct_credentials_and_no_fallback() {
+        let servers = [
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_001),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_002),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_003),
+        ];
+        let outbounds = prepare_client_outbounds(
+            servers
+                .map(|server| ferrum2_config::ClientOutboundConfig { server })
+                .into(),
+            vec![
+                psk_for_method(MethodProfile::Blake3Aes128Gcm2022),
+                psk_for_method(MethodProfile::Blake3Aes256Gcm2022),
+                psk_for_method(MethodProfile::Blake3ChaCha20Poly13052022),
+            ],
+        )
+        .expect("checked runtime outbounds");
+        let (route, selector) = compile_selector_plans(
+            &[TaggedInbound::new("entry", 0)],
+            &[
+                TaggedOutbound::new("a", 0),
+                TaggedOutbound::new("b", 1),
+                TaggedOutbound::new("c", 2),
+            ],
+            &[TaggedPlan::new("a-b", vec![0, 1])],
+            &[SelectorDefinition::new(
+                "manual",
+                vec!["a-b", "c"],
+                Some("a-b"),
+            )],
+            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "manual")]),
+        )
+        .expect("chain selector");
+        let application = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 443))
+            .expect("application target");
+        let snapshot = route.select_plan(0, Network::Tcp, &application);
+        assert_eq!(snapshot.hops(), &[0, 1]);
+        selector.switch("manual", "c").expect("switch next flow");
+        assert_eq!(snapshot.hops(), &[0, 1]);
+        assert_eq!(
+            route.select_plan(0, Network::Tcp, &application).hops(),
+            &[2]
+        );
+
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let (stream, mut peer) = tokio::io::duplex(65_536);
+        let connector = DeadlineConnector {
+            delay: Duration::ZERO,
+            targets: Mutex::new(Vec::new()),
+            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
+                stream,
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                Arc::clone(&aborts),
+            )))),
+        };
+        let clock = SystemClock::new();
+        let random = FixedRandom;
+        let flow = open_chain_with_deadlines(
+            &outbounds,
+            snapshot.hops(),
+            &connector,
+            &clock,
+            &random,
+            &application,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+        )
+        .await
+        .expect("captured chain");
+        assert_eq!(
+            connector.targets.lock().expect("dial targets").as_slice(),
+            &[outbounds[0].tcp_server.clone()]
+        );
+        let mut wire = [0_u8; 4_096];
+        assert!(peer.read(&mut wire).await.expect("nested request wire") > 0);
+        drop(flow);
+        assert_eq!(aborts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tcp_chain_failure_and_cancellation_drop_every_layer() {
+        let servers = [
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_011),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_012),
+        ];
+        let application = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 443))
+            .expect("application target");
+        for cancel in [false, true] {
+            let outbounds = prepare_client_outbounds(
+                servers
+                    .map(|server| ferrum2_config::ClientOutboundConfig { server })
+                    .into(),
+                vec![
+                    psk_for_method(MethodProfile::Blake3Aes256Gcm2022),
+                    psk_for_method(MethodProfile::Blake3ChaCha20Poly13052022),
+                ],
+            )
+            .expect("checked runtime outbounds");
+            let drops = Arc::new(AtomicUsize::new(0));
+            let aborts = Arc::new(AtomicUsize::new(0));
+            let connector = DeadlineConnector {
+                delay: Duration::ZERO,
+                targets: Mutex::new(Vec::new()),
+                stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::stall_after(
+                    1,
+                    Arc::clone(&drops),
+                    Arc::clone(&aborts),
+                )))),
+            };
+            let clock = SystemClock::new();
+            let random = FixedRandom;
+            let mut opened = Box::pin(open_chain_with_deadlines(
+                &outbounds,
+                &[0, 1],
+                &connector,
+                &clock,
+                &random,
+                &application,
+                (Duration::from_secs(1), Duration::from_millis(10)),
+            ));
+            assert_open_pending(&mut opened).await;
+            if cancel {
+                drop(opened);
+            } else {
+                tokio::time::advance(Duration::from_millis(10)).await;
+                assert!(matches!(
+                    opened.await,
+                    Err(ClientOpenFailure::HandshakeTimeout)
+                ));
+            }
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "cancel={cancel}");
+            assert_eq!(aborts.load(Ordering::SeqCst), 0, "cancel={cancel}");
+            assert_eq!(
+                connector.targets.lock().expect("dial targets").as_slice(),
+                &[outbounds[0].tcp_server.clone()],
+                "cancel={cancel}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn adapter_contract_connector_preserves_pending_target_and_endpoint() {
         let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_004);
         let requested = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388))
@@ -3831,6 +4065,9 @@ mod tests {
             .iter()
             .map(|(_, server)| ferrum2_config::ClientOutboundConfig { server: *server })
             .collect();
+        config.outbound_psks = (0..mappings.len())
+            .map(|_| psk_for_method(MethodProfile::Blake3Aes128Gcm2022))
+            .collect();
         config.route =
             ferrum2_core::route::RouteTable::static_bindings((0..mappings.len()).collect())
                 .expect("bounded test mappings");
@@ -3843,6 +4080,9 @@ mod tests {
             outbounds: vec![ClientOutboundContext {
                 tcp_server: TargetAddr::ipv4(server).expect("server target"),
                 udp_server: server,
+                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk_for_method(
+                    MethodProfile::Blake3Aes128Gcm2022,
+                ))),
             }],
         }
     }
@@ -3976,6 +4216,9 @@ mod tests {
         config
             .outbounds
             .push(ferrum2_config::ClientOutboundConfig { server: dead });
+        config
+            .outbound_psks
+            .push(psk_for_method(MethodProfile::Blake3Aes128Gcm2022));
         let rule = |inbound, target, outbound| {
             TaggedRouteRule::new(inbound, Some(Network::Tcp), target, Some(outbound))
         };
@@ -5085,6 +5328,9 @@ mod tests {
                         .map(|_| ClientOutboundContext {
                             tcp_server: TargetAddr::ipv4(server).expect("server target"),
                             udp_server: server,
+                            keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                                psk_for_method(MethodProfile::Blake3Aes128Gcm2022),
+                            )),
                         })
                         .into(),
                 }),

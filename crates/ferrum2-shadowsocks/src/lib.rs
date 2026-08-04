@@ -353,6 +353,11 @@ pub trait PlainDuplex: Send + Unpin {
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), ShadowsocksError>>;
 
+    /// Propagates an abortive close through a nested plaintext transport.
+    fn mark_abortive_plain(&mut self) -> Result<(), ShadowsocksError> {
+        Ok(())
+    }
+
     /// Returns the flow's sole immutable terminal latch.
     fn terminal(&self) -> Option<FlowTerminal>;
 }
@@ -577,6 +582,29 @@ impl<'a, K, C, T, R> ClientTcpOutbound<'a, K, C, T, R> {
     ) -> Self {
         self.observers = Observers { buffer, flow };
         self
+    }
+
+    /// Writes this hop's request over an already authenticated outer flow.
+    pub async fn write_request_on<S>(
+        &self,
+        io: S,
+        application_target: &TargetAddr,
+    ) -> Result<ClientFlow<'a, S, K, T>, ShadowsocksError>
+    where
+        S: TransportIo + LocalEndpoint,
+        K: TcpKeyProvider + Sync,
+        T: Clock + Sync,
+        R: SecureRandom,
+    {
+        ConnectedClientOpen {
+            io,
+            keys: self.keys,
+            clock: self.clock,
+            random: self.random,
+            observers: self.observers,
+        }
+        .write_request(application_target)
+        .await
     }
 }
 
@@ -1106,6 +1134,95 @@ pub struct ClientFlow<'a, S, K, T> {
     observers: Observers<'a>,
 }
 
+/// Type-erased owner used only to nest a bounded sequence of client flows.
+pub struct BoxedClientFlow<'a> {
+    inner: Box<dyn PlainDuplex + 'a>,
+    local_socket_addr: SocketAddr,
+}
+
+impl<'a> BoxedClientFlow<'a> {
+    fn new<F>(flow: F) -> Self
+    where
+        F: PlainDuplex + LocalEndpoint + 'a,
+    {
+        let local_socket_addr = flow.local_socket_addr();
+        Self {
+            inner: Box::new(flow),
+            local_socket_addr,
+        }
+    }
+}
+
+impl<'a, S, K, T> ClientFlow<'a, S, K, T>
+where
+    Self: PlainDuplex,
+    S: LocalEndpoint + 'a,
+    K: 'a,
+    T: 'a,
+{
+    /// Retains this flow as one transport layer for the next client hop.
+    pub fn into_boxed(self) -> BoxedClientFlow<'a> {
+        BoxedClientFlow::new(self)
+    }
+}
+
+impl LocalEndpoint for BoxedClientFlow<'_> {
+    fn local_endpoint(&self) -> std::net::SocketAddrV4 {
+        match self.local_socket_addr {
+            SocketAddr::V4(endpoint) => endpoint,
+            SocketAddr::V6(endpoint) => {
+                std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, endpoint.port())
+            }
+        }
+    }
+
+    fn local_socket_addr(&self) -> SocketAddr {
+        self.local_socket_addr
+    }
+}
+
+impl AbortiveClose for BoxedClientFlow<'_> {
+    type Error = ShadowsocksError;
+
+    fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+        self.inner.mark_abortive_plain()
+    }
+}
+
+impl TransportIo for BoxedClientFlow<'_> {
+    type IoError = ShadowsocksError;
+
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Pin::new(&mut *self.inner).poll_read_plain(cx, destination)
+    }
+
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Pin::new(&mut *self.inner).poll_write_plain(cx, source)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        Pin::new(&mut *self.inner).poll_flush_plain(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        Pin::new(&mut *self.inner).poll_shutdown_plain(cx)
+    }
+}
+
 impl<S: LocalEndpoint, K, T> LocalEndpoint for ClientFlow<'_, S, K, T> {
     fn local_endpoint(&self) -> std::net::SocketAddrV4 {
         self.io.local_endpoint()
@@ -1461,8 +1578,54 @@ where
         )
     }
 
+    fn mark_abortive_plain(&mut self) -> Result<(), ShadowsocksError> {
+        self.io
+            .mark_abortive()
+            .map_err(|_| ShadowsocksError::Transport(TransportPhase::Shutdown))
+    }
+
     fn terminal(&self) -> Option<FlowTerminal> {
         self.lifecycle.terminal
+    }
+}
+
+impl PlainDuplex for BoxedClientFlow<'_> {
+    fn poll_read_plain(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        Pin::new(&mut *self.inner).poll_read_plain(cx, destination)
+    }
+
+    fn poll_write_plain(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        Pin::new(&mut *self.inner).poll_write_plain(cx, source)
+    }
+
+    fn poll_flush_plain(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        Pin::new(&mut *self.inner).poll_flush_plain(cx)
+    }
+
+    fn poll_shutdown_plain(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        Pin::new(&mut *self.inner).poll_shutdown_plain(cx)
+    }
+
+    fn mark_abortive_plain(&mut self) -> Result<(), ShadowsocksError> {
+        self.inner.mark_abortive_plain()
+    }
+
+    fn terminal(&self) -> Option<FlowTerminal> {
+        self.inner.terminal()
     }
 }
 
