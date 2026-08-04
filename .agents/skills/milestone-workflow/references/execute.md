@@ -46,15 +46,32 @@ Use stable IDs and `blocker`, `major`, `minor`, or `note` severity.
 With `strategy: drain`, repeat until ready to close or a stop condition occurs. With
 `wave`, return after one frontier.
 
-## Test budget
+## Test footprint
 
-The repository gate, not the prompt, is authoritative. Bind the exact ticket base before
-implementation:
+Bind the exact ticket base before implementation:
 
 ```sh
 sh scripts/test-budget.sh bind --base <ticket-base-sha>
 ```
 
-A normal `git commit` checks the staged tree. Any non-zero result is `BLOCKED`; never use
-`--no-verify`. The primary thread independently checks the exact candidate and integration
-commits. Only an accepted milestone may advance `ci/test-budget-baseline.txt`.
+A normal `git commit` evaluates the staged Git tree. `PASS`, `WARN`, and
+`REVIEW_REQUIRED` are valid zero-exit results; report the numeric status and continue bounded
+implementation. A non-zero result means the tool, exact baseline, or protected control plane could
+not be trusted and is `BLOCKED`; never use `--no-verify`.
+
+Before adding test code, identify the unique contract/threat/regression proved, why existing
+evidence is insufficient, the cheapest sufficient test layer, and whether a table or existing
+helper can express the case. A third semantically equivalent helper is a human
+`REVIEW_REQUIRED` finding even when the LOC script cannot detect it.
+
+The primary thread independently checks the exact candidate and integration commits and records:
+
+- total `tests / code` status;
+- positive change-set test growth;
+- `test_case_loc`, `test_support_loc`, and `test_fixture_loc` deltas;
+- any new or expanded file over the file thresholds;
+- the disposition of every `REVIEW_REQUIRED` item.
+
+Engineers do not edit the policy. The primary thread may reforecast thresholds only in an isolated
+control-only commit with an incremented `policy_revision` and a new approved `reforecast_ref`; the
+exact milestone base and base counts do not move.

@@ -106,7 +106,7 @@ jobs:
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
   budget:
-    name: test-budget
+    name: test-footprint
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -123,7 +123,7 @@ jobs:
           set -euo pipefail
           test "$(git status --porcelain)" = ""
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-      - name: Enforce milestone test envelope
+      - name: Report test footprint and enforce policy integrity
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -150,7 +150,9 @@ jobs:
                 --base "$base" --candidate "$GITHUB_SHA"
               ;;
           esac
-          printf 'test_budget_completion status=PASS schema=2 sha=%s run_id=%s run_attempt=%s\n' \
+          printf 'test_footprint_completion status=PASS schema=3 numeric_status=reported sha=%s run_id=%s run_attempt=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          printf 'test_budget_completion status=PASS schema=3 semantics=test_footprint sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
   msrv:

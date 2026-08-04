@@ -24,6 +24,18 @@
 6. Prefer slices that expose integration risk early. Unknown ownership overlaps.
 7. Mark future behavior as planned until integrated and validated.
 
+## Test-footprint plan
+
+For each planned evidence item, identify the cheapest sufficient layer and the existing test file,
+table, fixture, or helper to extend. Estimate expected growth separately for test cases, support
+code, and fixtures; the estimate is a forecast, not a correctness cap. Explicitly call out any new
+harness or third helper implementation for Architect/QA review.
+
+Use the repository defaults unless the accepted evidence map justifies another threshold:
+`tests/code` warning/review at `2.0/2.5`, change-set test growth at `240/600`, and a growing test
+file at `800/1200`. A changed threshold requires an isolated policy revision with a durable
+`reforecast_ref`; do not hide additional evidence by compressing tests to fit an obsolete estimate.
+
 ## Plan gate
 
 A plan is ready when the baseline resolves, scope is bounded, dependencies are acyclic,

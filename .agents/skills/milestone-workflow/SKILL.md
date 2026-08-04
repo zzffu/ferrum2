@@ -43,7 +43,8 @@ do not hide it with generated state.
 - One full review and one targeted re-review are the default bound. Remaining blockers
   escalate; notes become debt.
 - Run commands exactly as recorded. Never claim an unrun or skipped gate passed.
-- Machine gates are authoritative; prompts are reminders and cannot waive a failed check.
+- Correctness, security, reproducibility, and control-integrity gates are authoritative; prompts
+  cannot waive them. Test-footprint numeric statuses are planning signals, not correctness failures.
 - Never reset unknown work, force-push, publish, release, or mutate remotes without
   explicit authorization.
 
@@ -66,7 +67,8 @@ inspect -> define outcome -> split dependency-ready tickets -> implement in work
 
 Use `strategy: drain` unless the user asks for one wave. Recompute readiness after each
 integration; stop on completion, a real blocker, a moved/dirty base, exhausted review
-bound, or missing authorization.
+bound, or missing authorization. A numeric test-footprint `WARN` or `REVIEW_REQUIRED` is not by
+itself a stop condition; carry it to an explicit integration or close decision.
 
 ## Repository files
 
@@ -97,5 +99,5 @@ Report:
 1. outcome and current milestone state;
 2. files, tickets, branches, worktrees, and commits changed;
 3. reviews and unresolved finding IDs;
-4. commands with exit status and any unrun gates;
+4. commands with exit status, test-footprint status/category deltas, and any unrun gates;
 5. next action, blocker, and remote-action status.

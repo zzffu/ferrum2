@@ -1,11 +1,20 @@
-schema=2
-series=rustloc-0.19.1-tests-v1
+# Schema 3 treats test LOC as a maintenance signal, not a correctness gate.
+# Thresholds use strict greater-than comparisons. ratio_* values are thousandths.
+schema=3
+series=rustloc-0.19.1-test-footprint-v1
 tool=rustloc
 tool_version=0.19.1
-metric=tests
-milestone=M8
-commit=404b62758a191fe879243c755c75bcf8b300040d
-code=15529
-tests=25482
-max_test_growth=840
+metric=test_footprint
+classification=path-v1
+milestone=M9
+commit=78cc5cee00cb976a1d46ef7aa9c990eaf1f647dd
+code=15996
+tests=26319
+ratio_warning_milli=2000
+ratio_review_milli=2500
 ticket_warning=240
+ticket_review=600
+file_warning=800
+file_review=1200
+policy_revision=1
+reforecast_ref=initial-post-M8
