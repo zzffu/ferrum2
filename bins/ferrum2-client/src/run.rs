@@ -1834,13 +1834,13 @@ mod tests {
     };
     use ferrum2_core::{ConnectError, Connector};
     use ferrum2_crypto::{
-        Aes128Psk, KeySelector, MethodKeyProvider, MethodSecretKeyRef, RandomError,
+        Aes128Psk, KeySelector, MethodKeyProvider, MethodSecretKeyRef, MethodTcpSalt, RandomError,
         SinglePskProvider,
     };
     use ferrum2_runtime::OwnerSnapshot;
     use ferrum2_shadowsocks::{
         ShadowsocksTcpInbound, TcpReplayStore, TransportPhase, UDP_REPLAY_LAG, UdpReplayWindow,
-        UdpServer, max_udp_payload_len,
+        UdpServer, encode_response_first_write, max_udp_payload_len,
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::Notify;
@@ -1891,8 +1891,11 @@ mod tests {
             writes: usize,
             drops: Arc<AtomicUsize>,
         },
-        WriteZeroAfter {
+        WriteLimitAfter {
             writes: usize,
+            limit: Option<usize>,
+            accepted: Arc<Mutex<Vec<u8>>>,
+            calls: Arc<AtomicUsize>,
             drops: Arc<AtomicUsize>,
         },
     }
@@ -1940,13 +1943,22 @@ mod tests {
             }
         }
 
-        fn write_zero_after(
+        fn write_limit_after(
             writes: usize,
+            limit: usize,
+            accepted: Arc<Mutex<Vec<u8>>>,
+            calls: Arc<AtomicUsize>,
             drops: Arc<AtomicUsize>,
             aborts: Arc<AtomicUsize>,
         ) -> Self {
             Self {
-                mode: ScriptedMode::WriteZeroAfter { writes, drops },
+                mode: ScriptedMode::WriteLimitAfter {
+                    writes,
+                    limit: Some(limit),
+                    accepted,
+                    calls,
+                    drops,
+                },
                 endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
                 aborts,
             }
@@ -1958,7 +1970,7 @@ mod tests {
             match &self.mode {
                 ScriptedMode::Pending(drops)
                 | ScriptedMode::StallAfter { drops, .. }
-                | ScriptedMode::WriteZeroAfter { drops, .. } => {
+                | ScriptedMode::WriteLimitAfter { drops, .. } => {
                     drops.fetch_add(1, Ordering::SeqCst);
                 }
                 ScriptedMode::Duplex(_) | ScriptedMode::Fail => {}
@@ -1979,7 +1991,7 @@ mod tests {
                 }
                 ScriptedMode::Pending(_)
                 | ScriptedMode::StallAfter { .. }
-                | ScriptedMode::WriteZeroAfter { .. } => Poll::Pending,
+                | ScriptedMode::WriteLimitAfter { .. } => Poll::Pending,
             }
         }
     }
@@ -2001,10 +2013,27 @@ mod tests {
                     *writes -= 1;
                     Poll::Ready(Ok(source.len()))
                 }
-                ScriptedMode::WriteZeroAfter { writes, .. } if *writes == 0 => Poll::Ready(Ok(0)),
-                ScriptedMode::WriteZeroAfter { writes, .. } => {
-                    *writes -= 1;
-                    Poll::Ready(Ok(source.len()))
+                ScriptedMode::WriteLimitAfter {
+                    writes,
+                    limit,
+                    accepted,
+                    calls,
+                    ..
+                } => {
+                    let written = if *writes == 0 {
+                        limit
+                            .take()
+                            .map_or(source.len(), |limit| limit.min(source.len()))
+                    } else {
+                        *writes -= 1;
+                        source.len()
+                    };
+                    accepted
+                        .lock()
+                        .expect("accepted raw wire")
+                        .extend_from_slice(&source[..written]);
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready(Ok(written))
                 }
             }
         }
@@ -2017,7 +2046,7 @@ mod tests {
                 }
                 ScriptedMode::Pending(_)
                 | ScriptedMode::StallAfter { .. }
-                | ScriptedMode::WriteZeroAfter { .. } => Poll::Ready(Ok(())),
+                | ScriptedMode::WriteLimitAfter { .. } => Poll::Ready(Ok(())),
             }
         }
 
@@ -2029,7 +2058,7 @@ mod tests {
                 }
                 ScriptedMode::Pending(_)
                 | ScriptedMode::StallAfter { .. }
-                | ScriptedMode::WriteZeroAfter { .. } => Poll::Ready(Ok(())),
+                | ScriptedMode::WriteLimitAfter { .. } => Poll::Ready(Ok(())),
             }
         }
     }
@@ -3789,116 +3818,122 @@ mod tests {
             assert_eq!(snapshot.hops(), &[0, 1], "rotation {case}");
             selector.switch("manual", "c-d").expect("switch next flow");
             assert_eq!(snapshot.hops(), &[0, 1], "captured rotation {case}");
-            assert_eq!(
-                route.select_plan(0, Network::Tcp, &application).hops(),
-                &[2, 3],
-                "next rotation {case}"
-            );
-
-            let aborts = Arc::new(AtomicUsize::new(0));
-            let (stream, mut peer) = tokio::io::duplex(65_536);
-            let connector = DeadlineConnector {
-                delay: Duration::ZERO,
-                targets: Mutex::new(Vec::new()),
-                stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
-                    stream,
-                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
-                    Arc::clone(&aborts),
-                )))),
-            };
+            let next_snapshot = route.select_plan(0, Network::Tcp, &application);
+            assert_eq!(next_snapshot.hops(), &[2, 3], "next rotation {case}");
             let clock = SystemClock::new();
             let random = FixedRandom;
-            let observer = ChainObserver::default();
-            let flow = open_chain_with_deadlines(
-                &outbounds,
-                snapshot.hops(),
-                &connector,
-                &clock,
-                &random,
-                &application,
-                (Duration::from_secs(1), Duration::from_secs(1)),
-                Some((&observer, &observer)),
-            )
-            .await
-            .expect("captured chain");
-            assert_eq!(
-                connector.targets.lock().expect("dial targets").as_slice(),
-                &[outbounds[0].tcp_server.clone()],
-                "one raw A dial: {case}"
-            );
-            assert_two_layer_buffers(&observer, format_args!("rotation {case}"));
-            drop(flow);
-            assert_eq!(observer.owner_drops.load(Ordering::SeqCst), 2);
-            let mut raw = Vec::new();
-            peer.read_to_end(&mut raw).await.expect("complete raw wire");
-            assert!(!raw.is_empty(), "raw request: {case}");
-
-            let outer_replay = TcpReplayStore::new(1024).expect("outer replay");
-            let outer_inbound =
-                ShadowsocksTcpInbound::new(&outbounds[0].keys, &clock, &random, &outer_replay);
-            let outer = outer_inbound
-                .accept_stream(scripted_input(&raw).await)
+            for (label, plan) in [("captured", &snapshot), ("next", &next_snapshot)] {
+                let [first, second] = *plan.hops() else {
+                    panic!("two-hop {label} plan")
+                };
+                let aborts = Arc::new(AtomicUsize::new(0));
+                let (stream, mut peer) = tokio::io::duplex(65_536);
+                let connector = DeadlineConnector {
+                    delay: Duration::ZERO,
+                    targets: Mutex::new(Vec::new()),
+                    stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
+                        stream,
+                        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                        Arc::clone(&aborts),
+                    )))),
+                };
+                let observer = ChainObserver::default();
+                let flow = open_chain_with_deadlines(
+                    &outbounds,
+                    plan.hops(),
+                    &connector,
+                    &clock,
+                    &random,
+                    &application,
+                    (Duration::from_secs(1), Duration::from_secs(1)),
+                    Some((&observer, &observer)),
+                )
                 .await
-                .expect("configured A credential");
-            assert_eq!(outer.target, outbounds[1].tcp_server, "A targets B: {case}");
-            assert!(
-                outer.initial_payload.is_empty(),
-                "no A initial payload: {case}"
-            );
-            let mut outer_stream = TokioFramed::new(outer.stream);
-            let mut inner_wire = [0_u8; 4_096];
-            let inner_len = outer_stream
-                .read(&mut inner_wire)
-                .await
-                .expect("authenticated inner wire");
-
-            let inner_replay = TcpReplayStore::new(1024).expect("inner replay");
-            let inner_inbound =
-                ShadowsocksTcpInbound::new(&outbounds[1].keys, &clock, &random, &inner_replay);
-            let inner = inner_inbound
-                .accept_stream(scripted_input(&inner_wire[..inner_len]).await)
-                .await
-                .expect("configured B credential");
-            assert_eq!(inner.target, application, "B targets application: {case}");
-            assert!(
-                inner.initial_payload.is_empty(),
-                "no premature application payload: {case}"
-            );
-
-            let wrong_psk = match first_method {
-                MethodProfile::Blake3Aes128Gcm2022 => ferrum2_crypto::MethodPsk::aes128([0x91; 16]),
-                MethodProfile::Blake3Aes256Gcm2022 => ferrum2_crypto::MethodPsk::aes256([0x92; 32]),
-                MethodProfile::Blake3ChaCha20Poly13052022 => {
-                    ferrum2_crypto::MethodPsk::chacha20_poly1305([0x93; 32])
-                }
-            };
-            let wrong_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(wrong_psk));
-            for keys in [&outbounds[1].keys, &wrong_keys] {
-                let replay = TcpReplayStore::new(1024).expect("invalid replay");
-                let inbound = ShadowsocksTcpInbound::new(keys, &clock, &random, &replay);
-                assert!(
-                    inbound
-                        .accept_stream(scripted_input(&raw).await)
-                        .await
-                        .is_err(),
-                    "swapped/wrong A credential: {case}"
+                .expect("selected chain");
+                assert_eq!(
+                    connector.targets.lock().expect("dial targets").as_slice(),
+                    &[outbounds[first].tcp_server.clone()],
+                    "sole {label} raw dial: rotation {case}"
                 );
-            }
+                assert_two_layer_buffers(&observer, format_args!("{label}: rotation {case}"));
+                drop(flow);
+                assert_eq!(observer.owner_drops.load(Ordering::SeqCst), 2);
+                let mut raw = Vec::new();
+                peer.read_to_end(&mut raw).await.expect("complete raw wire");
 
-            let mut truncated = raw.clone();
-            truncated.pop().expect("nonempty wire");
-            let replay = TcpReplayStore::new(1024).expect("truncated replay");
-            let inbound = ShadowsocksTcpInbound::new(&outbounds[0].keys, &clock, &random, &replay);
-            let truncated_outer = inbound
-                .accept_stream(scripted_input(&truncated).await)
-                .await
-                .expect("valid outer before truncated inner");
-            let mut truncated_stream = TokioFramed::new(truncated_outer.stream);
-            assert!(
-                truncated_stream.read(&mut inner_wire).await.is_err(),
-                "truncated/skipped inner cannot pass: {case}"
-            );
-            assert_eq!(aborts.load(Ordering::SeqCst), 0, "rotation {case}");
+                let outer_replay = TcpReplayStore::new(1024).expect("outer replay");
+                let outer_inbound = ShadowsocksTcpInbound::new(
+                    &outbounds[first].keys,
+                    &clock,
+                    &random,
+                    &outer_replay,
+                );
+                let outer = outer_inbound
+                    .accept_stream(scripted_input(&raw).await)
+                    .await
+                    .expect("configured outer credential");
+                assert_eq!(
+                    outer.target, outbounds[second].tcp_server,
+                    "{label} first targets second: rotation {case}"
+                );
+                assert!(outer.initial_payload.is_empty(), "{label}: rotation {case}");
+                let mut outer_stream = TokioFramed::new(outer.stream);
+                let mut inner_wire = [0_u8; 4_096];
+                let inner_len = outer_stream
+                    .read(&mut inner_wire)
+                    .await
+                    .expect("authenticated inner wire");
+
+                let inner_replay = TcpReplayStore::new(1024).expect("inner replay");
+                let inner_inbound = ShadowsocksTcpInbound::new(
+                    &outbounds[second].keys,
+                    &clock,
+                    &random,
+                    &inner_replay,
+                );
+                let inner = inner_inbound
+                    .accept_stream(scripted_input(&inner_wire[..inner_len]).await)
+                    .await
+                    .expect("configured inner credential");
+                assert_eq!(inner.target, application, "{label}: rotation {case}");
+                assert!(inner.initial_payload.is_empty(), "{label}: rotation {case}");
+
+                if case == 0 && label == "captured" {
+                    let wrong_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                        ferrum2_crypto::MethodPsk::aes128([0x91; 16]),
+                    ));
+                    for keys in [&outbounds[second].keys, &wrong_keys] {
+                        let replay = TcpReplayStore::new(1024).expect("invalid replay");
+                        let inbound = ShadowsocksTcpInbound::new(keys, &clock, &random, &replay);
+                        assert!(
+                            inbound
+                                .accept_stream(scripted_input(&raw).await)
+                                .await
+                                .is_err(),
+                            "swapped/wrong outer credential"
+                        );
+                    }
+                    let mut truncated = raw.clone();
+                    truncated.pop().expect("nonempty wire");
+                    let replay = TcpReplayStore::new(1024).expect("truncated replay");
+                    let inbound = ShadowsocksTcpInbound::new(
+                        &outbounds[first].keys,
+                        &clock,
+                        &random,
+                        &replay,
+                    );
+                    let truncated_outer = inbound
+                        .accept_stream(scripted_input(&truncated).await)
+                        .await
+                        .expect("valid outer before truncated inner");
+                    let mut truncated_stream = TokioFramed::new(truncated_outer.stream);
+                    assert!(truncated_stream.read(&mut inner_wire).await.is_err());
+                }
+                assert_eq!(aborts.load(Ordering::SeqCst), 0, "{label}: rotation {case}");
+            }
+            assert_eq!(selector.selected("manual"), Ok("c-d"));
+            assert_eq!(snapshot.hops(), &[0, 1], "captured rotation {case}");
+            assert_eq!(next_snapshot.hops(), &[2, 3], "next rotation {case}");
         }
     }
 
@@ -4007,12 +4042,17 @@ mod tests {
 
         let drops = Arc::new(AtomicUsize::new(0));
         let aborts = Arc::new(AtomicUsize::new(0));
+        let write_zero_wire = Arc::new(Mutex::new(Vec::new()));
+        let write_zero_calls = Arc::new(AtomicUsize::new(0));
         let write_zero_observer = ChainObserver::default();
         let write_zero = DeadlineConnector {
             delay: Duration::ZERO,
             targets: Mutex::new(Vec::new()),
-            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::write_zero_after(
+            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::write_limit_after(
                 1,
+                0,
+                Arc::clone(&write_zero_wire),
+                Arc::clone(&write_zero_calls),
                 Arc::clone(&drops),
                 Arc::clone(&aborts),
             )))),
@@ -4043,6 +4083,8 @@ mod tests {
         );
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(write_zero_calls.load(Ordering::SeqCst), 2);
+        assert!(!write_zero_wire.lock().expect("write-zero wire").is_empty());
         assert_eq!(
             write_zero
                 .targets
@@ -4052,6 +4094,83 @@ mod tests {
             &[outbounds[0].tcp_server.clone()]
         );
         assert_eq!(selector.selected("manual"), Ok("a-b"));
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let partial_wire = Arc::new(Mutex::new(Vec::new()));
+        let partial_calls = Arc::new(AtomicUsize::new(0));
+        let partial_observer = ChainObserver::default();
+        let partial = DeadlineConnector {
+            delay: Duration::ZERO,
+            targets: Mutex::new(Vec::new()),
+            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::write_limit_after(
+                1,
+                1,
+                Arc::clone(&partial_wire),
+                Arc::clone(&partial_calls),
+                Arc::clone(&drops),
+                Arc::clone(&aborts),
+            )))),
+        };
+        let partial_flow = open_chain_with_deadlines(
+            &outbounds,
+            snapshot.hops(),
+            &partial,
+            &clock,
+            &random,
+            &application,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some((&partial_observer, &partial_observer)),
+        )
+        .await
+        .expect("nonzero partial raw write resumes");
+        let mut partial_framed = TokioFramed::new(partial_flow);
+        partial_framed
+            .shutdown()
+            .await
+            .expect("partial recursive half-close");
+        drop(partial_framed);
+        assert_eq!(
+            partial_calls.load(Ordering::SeqCst),
+            3,
+            "full initial, one-byte partial, resumed remainder"
+        );
+        assert_eq!(partial_observer.owner_drops.load(Ordering::SeqCst), 2);
+        assert_two_layer_buffers(&partial_observer, "nonzero partial");
+        assert!(
+            partial_observer
+                .terminals
+                .lock()
+                .expect("partial terminals")
+                .is_empty()
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            partial.targets.lock().expect("partial targets").as_slice(),
+            &[outbounds[0].tcp_server.clone()]
+        );
+        assert_eq!(selector.selected("manual"), Ok("a-b"));
+        let raw = partial_wire.lock().expect("partial wire").clone();
+        let outer_replay = TcpReplayStore::new(1024).expect("partial outer replay");
+        let outer = ShadowsocksTcpInbound::new(&outbounds[0].keys, &clock, &random, &outer_replay)
+            .accept_stream(scripted_input(&raw).await)
+            .await
+            .expect("partial outer wire");
+        assert_eq!(outer.target, outbounds[1].tcp_server);
+        let mut outer_stream = TokioFramed::new(outer.stream);
+        let mut inner_wire = [0_u8; 4_096];
+        let inner_len = outer_stream
+            .read(&mut inner_wire)
+            .await
+            .expect("partial inner wire");
+        let inner_replay = TcpReplayStore::new(1024).expect("partial inner replay");
+        let inner = ShadowsocksTcpInbound::new(&outbounds[1].keys, &clock, &random, &inner_replay)
+            .accept_stream(scripted_input(&inner_wire[..inner_len]).await)
+            .await
+            .expect("partial complete inner wire");
+        assert_eq!(inner.target, application);
+        assert!(inner.initial_payload.is_empty());
 
         let aborts = Arc::new(AtomicUsize::new(0));
         let detection_observer = ChainObserver::default();
@@ -4077,10 +4196,41 @@ mod tests {
         )
         .await
         .expect("opened detection chain");
+        let request_salt =
+            MethodTcpSalt::try_from_slice(outbounds[0].keys.tcp_profile(), &[0x42; 32])
+                .expect("outer request salt");
+        let inner_request_salt =
+            MethodTcpSalt::try_from_slice(outbounds[1].keys.tcp_profile(), &[0x42; 32])
+                .expect("inner request salt");
+        let response_salt =
+            MethodTcpSalt::try_from_slice(outbounds[0].keys.tcp_profile(), &[0x43; 32])
+                .expect("outer response salt");
+        let inner_response_salt =
+            MethodTcpSalt::try_from_slice(outbounds[1].keys.tcp_profile(), &[0x44; 32])
+                .expect("inner response salt");
+        let wrong_inner_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+            ferrum2_crypto::MethodPsk::chacha20_poly1305([0x99; 32]),
+        ));
+        let invalid_inner = encode_response_first_write(
+            &wrong_inner_keys,
+            &inner_response_salt,
+            clock.unix_seconds().expect("response time"),
+            &inner_request_salt,
+            b"must not reach application",
+        )
+        .expect("wrong-key inner response");
+        let authenticated_outer = encode_response_first_write(
+            &outbounds[0].keys,
+            &response_salt,
+            clock.unix_seconds().expect("response time"),
+            &request_salt,
+            &invalid_inner,
+        )
+        .expect("authenticated outer response");
         detection_peer
-            .write_all(&[0_u8; 256])
+            .write_all(&authenticated_outer)
             .await
-            .expect("tampered response");
+            .expect("later-hop response");
         let mut detection_framed = TokioFramed::new(detection_flow);
         let mut application_output = [0x5a_u8; 1];
         assert!(
@@ -4098,10 +4248,18 @@ mod tests {
                 .terminals
                 .lock()
                 .expect("detection terminals")
-                .len(),
-            2
+                .as_slice(),
+            &[FlowTerminal::Detection(DetectionReason::Authentication)]
         );
-        assert_eq!(aborts.load(Ordering::SeqCst), 2);
+        assert_eq!(aborts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            detection_connector
+                .targets
+                .lock()
+                .expect("detection targets")
+                .as_slice(),
+            &[outbounds[0].tcp_server.clone()]
+        );
         assert_eq!(selector.selected("manual"), Ok("a-b"));
 
         let valid_observer = ChainObserver::default();
