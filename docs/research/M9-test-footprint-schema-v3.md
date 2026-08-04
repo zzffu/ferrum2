@@ -1,6 +1,9 @@
 # M9 test-footprint schema v3 升级说明
 
-- **Status:** active control-plane policy；revision 2 corrects standalone Rust fixture coverage。
+- **Status:** active control-plane policy。
+- **Activation history:** revision 1 activated at
+  `fa3c44c6dcbc8c41871dd3b5224ed1de808f0490`；current revision 2 activated at
+  `65de4fbd41238871a1085b97f294e3a243b06898`。
 - **Exact base:** `78cc5cee00cb976a1d46ef7aa9c990eaf1f647dd`（M8 close）。
 - **Baseline counts:** `code=15996`、`tests=26916`，来自 exact base 上用 pinned
   `rustloc 0.19.1` 分别扫描 Cargo workspace 与 `tests/fixtures/` 后去重合并；分类为
@@ -130,5 +133,4 @@ Ticket 返回中记录：总 footprint 状态、`test_case_loc` / `test_support_
 git diff --check
 ```
 
-`verify --candidate HEAD` 需要先把本升级作为 control-only commit 提交，因为 baseline schema v3
-必须存在于被验证的 Git tree 中。
+`verify --candidate HEAD` 从 candidate Git tree 读取已激活策略；未提交的工作树改动不参与验证。
