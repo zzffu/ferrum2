@@ -664,7 +664,7 @@ fn chains_reject_all_bounds_namespaces_references_and_inert_nodes_redacted() {
         ("missing hops", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Client),
         ("empty hops", chain("c", ""), ConfigField::ChainsHops, ConfigRole::Client),
         ("one hop", chain("c", "\"o0\""), ConfigField::ChainsHops, ConfigRole::Client),
-        ("nine hops", chain("c", "\"o0\", \"o1\", \"o0\", \"o1\", \"o0\", \"o1\", \"o0\", \"o1\", \"o0\""), ConfigField::ChainsHops, ConfigRole::Client),
+        ("nine hops", tagged_client(1, 9).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\", \"o2\", \"o3\", \"o4\", \"o5\", \"o6\", \"o7\", \"o8\"]\n[shadowsocks]", 1), ConfigField::ChainsHops, ConfigRole::Client),
         ("duplicate hop", chain("c", "\"o0\", \"o0\""), ConfigField::ChainsHops, ConfigRole::Client),
         ("unknown hop", chain("c", "\"o0\", \"missing\""), ConfigField::ChainsHops, ConfigRole::Client),
         ("case hop", chain("c", "\"o0\", \"O1\""), ConfigField::ChainsHops, ConfigRole::Client),
