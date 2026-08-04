@@ -117,11 +117,15 @@ Exact-product Architect inspection bound target `93ed9d91929200a1786694ffd59e491
 `ded9f1e59da892250215f13a271b927579192592` and parent
 `c55c6c8e737e419b5fa036bf5572183b90f56cd0`；verdict was `PASS_WITH_NOTES` with no new
 blocker、major or minor，and it is local architecture evidence only。
+Reviewed T03 repair `a274a7cdb71ad74af5b2b8bb36cd2f32d2b96396` received targeted Architect
+and QA `PASS`；`ARCH-M10T03-001` and `M10-T03-QA-001/002/003` are resolved。Current local
+integration descends from that repair，and post-fast-forward diff-check plus ticket/milestone footprints
+passed。
 
 M10 is `validating` and M10-T03 is `blocked`：one accepted exact SHA/run/attempt must complete
 `quality`、`test-footprint`、`msrv`、`platform / windows-msvc`、`platform / linux-gnu`、
 `platform / linux-musl`、`interop` (TCP/UDP `12/12` plus cleanup)、`performance` and
 `qualification`。Performance is required only as current-workflow regression/aggregate-dependency
 evidence；M10 adds no performance threshold or claim。This requires separate explicit authorization
-for one non-force push；targeted and final exact-SHA reviews remain pending。No push、hosted run、
+for one non-force push；only the final exact hosted-SHA review remains pending。No push、hosted run、
 rerun、dispatch、PR、tag、release or publication was performed；old M8 evidence is not M10 PASS。

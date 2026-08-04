@@ -9,7 +9,9 @@
   blocker、major or minor；existing `ARCH-M10T02-001` and `M10-T02-QA-N01` remain accepted。
   M10-T01 Architect
   `PASS_WITH_NOTES` / final QA `PASS`；M10-T02 Architect and QA both `PASS_WITH_NOTES` with no
-  blocker、major or minor finding。
+  blocker、major or minor finding。Reviewed T03 repair `a274a7cdb71ad74af5b2b8bb36cd2f32d2b96396`
+  received targeted Architect and QA `PASS`；`ARCH-M10T03-001` and
+  `M10-T03-QA-001/002/003` are resolved，and current local integration descends from that repair。
 - **Focused local qualification:** binary build `0` (`13.32s`)；public selector `2/2` (`0.52s`)；
   client TCP/UDP and server TCP/UDP exact rows each `1/1` (`10.54/0.43/4.65/1.04s`)；real-process
   TCP/UDP each `1/1` (`8.28/1.65s`)；architecture `9/9` (`1.04s`)；Rust 1.85 check `0`
@@ -27,8 +29,9 @@
   `platform / linux-gnu`、`platform / linux-musl`、`interop` (TCP/UDP `12/12` plus cleanup)、
   `performance` and `qualification`。Performance is required only as current-workflow regression/
   aggregate-dependency evidence；M10 adds no performance threshold or claim。These results cannot run
-  without separate explicit authorization for one non-force push；targeted and final exact-SHA reviews
-  remain pending。No remote action was performed，and old M8 evidence is not credited as M10 PASS。
+  without separate explicit authorization for one non-force push；only the final exact hosted-SHA
+  review remains pending。No remote action was performed，and old M8 evidence is not credited as M10
+  PASS。
 
 ## M9 post-close test-footprint repair
 

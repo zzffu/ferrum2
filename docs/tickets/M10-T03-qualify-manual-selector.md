@@ -59,7 +59,9 @@ integration gate exactly as recorded。Remote commands remain unrun until separa
   `M10-T02-QA-N01` accept the two large `run.rs` file signals without a new helper/harness。
 - Initial full T03 Architect/QA reviews blocked docs candidate `146e8d5` on `ARCH-M10T03-001` and
   `M10-T03-QA-001/002/003`。Two user-mandated independent xhigh analyses selected this five-doc
-  repair；targeted re-review remains pending。
+  repair。Reviewed repair `a274a7cdb71ad74af5b2b8bb36cd2f32d2b96396` received targeted
+  Architect and QA `PASS`；all four findings are resolved，and current local integration descends from
+  that repair。
 - Footprint: ticket `PASS` with `0/0/0` case/support/fixture delta；milestone zero-exit
   `REVIEW_REQUIRED` with integrity/change `PASS`、code/tests `16646/27319`、ratio `1.641175` and
   cumulative `403/0/0`。No remote action was performed。
@@ -67,8 +69,8 @@ integration gate exactly as recorded。Remote commands remain unrun until separa
   `platform / windows-msvc`、`platform / linux-gnu`、`platform / linux-musl`、`interop`
   (TCP/UDP `12/12` plus cleanup)、`performance` and `qualification`。Performance is required only as
   current-workflow regression/aggregate-dependency evidence；M10 adds no performance threshold or claim。
-  These results cannot run without separate explicit authorization for one non-force push；targeted and
-  final exact-SHA reviews and close remain pending，and old M8 evidence is not M10 PASS。
+  These results cannot run without separate explicit authorization for one non-force push；the final
+  exact hosted-SHA review and close remain pending，and old M8 evidence is not M10 PASS。
 
 ## Rollback / risk
 
