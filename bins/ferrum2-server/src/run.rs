@@ -1740,6 +1740,10 @@ mod tests {
     use std::task::Waker;
     use std::time::Duration;
 
+    use ferrum2_core::route::compile_selector_route;
+    use ferrum2_core::selector::{
+        SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedRoute, TaggedStaticBinding,
+    };
     use ferrum2_core::{ConnectError, Connector, Datagram, LocalEndpoint, Outbound, TargetAddr};
     use ferrum2_crypto::{
         Aes128Psk, MethodProfile, MethodPsk, MethodSinglePskProvider, MethodTcpSalt,
@@ -2591,6 +2595,7 @@ mod tests {
 
     fn tagged_server_test_config<const N: usize>(
         listens: [SocketAddrV4; N],
+        selector: bool,
     ) -> (PathBuf, ValidatedServerConfig) {
         let (path, mut config) = server_test_config(listens[0]);
         config.inbounds.extend(
@@ -2600,6 +2605,23 @@ mod tests {
         );
         config.runtime.max_connections = 1.try_into().expect("one connection");
         config.udp.max_sessions = 1;
+        if selector {
+            config.outbounds.push(ferrum2_config::ServerOutboundConfig);
+            let (route, _) = compile_selector_route(
+                &[TaggedInbound::new("i0", 0), TaggedInbound::new("i1", 1)],
+                &[TaggedOutbound::new("o0", 0), TaggedOutbound::new("o1", 1)],
+                &[
+                    SelectorDefinition::new("manual", vec!["o0", "o1"], Some("o0")),
+                    SelectorDefinition::new("nested", vec!["manual"], Some("manual")),
+                ],
+                TaggedRoute::Static(vec![
+                    TaggedStaticBinding::new("i0", "manual"),
+                    TaggedStaticBinding::new("i1", "nested"),
+                ]),
+            )
+            .expect("selector route");
+            config.route = route;
+        }
         (path, config)
     }
 
@@ -2868,21 +2890,9 @@ mod tests {
                 .port(),
         )
         .expect("existing poison target");
-        let (path, mut config) = tagged_server_test_config([first_listen, second_listen]);
-        config.outbounds.push(ferrum2_config::ServerOutboundConfig);
-        let poison = config.outbounds.len();
-        let rule = |target, outbound| {
-            ferrum2_core::route::RouteRule::new(Some(1), Some(Network::Udp), Some(target), outbound)
-        };
-        config.route = ferrum2_core::route::RouteTable::routed(
-            vec![
-                rule(routed_domain.clone(), 1),
-                rule(poison_new_address.clone(), poison),
-                rule(poison_existing_address.clone(), poison),
-            ],
-            0,
-        )
-        .expect("routed UDP");
+        let (path, mut config) = tagged_server_test_config([first_listen, second_listen], true);
+        let selector = config.selector_control();
+        config.outbounds.truncate(1);
         let registry = OwnerRegistry::new();
         let (stop, mut server) = spawn_test_server(config, &registry);
         wait_until_bound(&mut server, first_listen).await;
@@ -2900,6 +2910,7 @@ mod tests {
         let poison_wire =
             encoded_udp_request(&mut second, &clock, poison_new_address, b"new-poison");
         let baseline = registry.snapshot();
+        selector.switch("manual", "o1").expect("select missing B");
         cross_peer
             .send_to(&poison_wire, second_listen)
             .await
@@ -2911,6 +2922,8 @@ mod tests {
         )
         .await;
         assert_eq!(registry.snapshot(), baseline);
+        assert_eq!(selector.selected("manual"), Ok("o1"));
+        selector.switch("manual", "o0").expect("select direct A");
         let first_wire = encoded_udp_request(
             &mut client,
             &clock,
@@ -2923,6 +2936,7 @@ mod tests {
             .expect("first send");
         let (received, direct_peer) = recv_udp(&target, &mut payload).await;
         assert_eq!(&payload[..received], b"first");
+        selector.switch("manual", "o1").expect("switch in flight");
         target
             .send_to(b"first-response", direct_peer)
             .await
@@ -2946,6 +2960,7 @@ mod tests {
         )
         .await;
         assert_eq!(registry.snapshot(), before_poison);
+        selector.switch("manual", "o0").expect("restore direct A");
         let cross_wire = encoded_udp_request(&mut client, &clock, routed_domain, b"cross-fresh");
         let before_cross = registry.snapshot();
 
@@ -2966,12 +2981,16 @@ mod tests {
             .expect("same-inbound roaming send");
         let (received, direct_peer) = recv_udp(&routed_target, &mut payload).await;
         assert_eq!(&payload[..received], b"cross-fresh");
+        selector
+            .switch("manual", "o1")
+            .expect("switch routed response");
         routed_target
             .send_to(b"roaming-response", direct_peer)
             .await
             .expect("roaming target response");
         let (_, response_source) = recv_udp(&roaming_peer, &mut payload).await;
         assert_eq!(response_source, SocketAddr::V4(second_listen));
+        selector.switch("manual", "o0").expect("restore direct A");
         let second_wire = encoded_udp_request(
             &mut second,
             &clock,
@@ -3009,21 +3028,9 @@ mod tests {
         let second_address =
             TargetAddr::ip(second_target.local_addr().expect("second target address"))
                 .expect("second target");
-        let (path, mut config) = tagged_server_test_config([first_listen, second_listen]);
-        let poison = config.outbounds.len();
-        let rule = |inbound, outbound| {
-            ferrum2_core::route::RouteRule::new(
-                inbound,
-                Some(Network::Tcp),
-                Some(first_address.clone()),
-                outbound,
-            )
-        };
-        config.route = ferrum2_core::route::RouteTable::routed(
-            vec![rule(Some(1), poison), rule(None, 0)],
-            poison,
-        )
-        .expect("routed TCP");
+        let (path, mut config) = tagged_server_test_config([first_listen, second_listen], true);
+        let selector = config.selector_control();
+        config.outbounds.truncate(1);
         let registry = OwnerRegistry::new();
         let (stop, mut server) = spawn_test_server(config, &registry);
         wait_until_bound(&mut server, first_listen).await;
@@ -3066,6 +3073,12 @@ mod tests {
             .await
             .expect("first initial payload");
         assert_eq!(&payload, b"first");
+        selector.switch("manual", "o1").expect("switch to B");
+        accepted
+            .write_all(b"captured A")
+            .await
+            .expect("target write");
+        assert!(first.read(&mut [0; 64]).await.expect("captured A wire") > 0);
 
         let mut replay = tokio::net::TcpStream::connect(second_listen)
             .await
@@ -3089,6 +3102,7 @@ mod tests {
                 .await
                 .expect("rejected deadline");
         }
+        assert_eq!(selector.selected("manual"), Ok("o1"));
         let final_poison = request(0x53, &second_address, b"final");
         let mut final_flow = tokio::net::TcpStream::connect(first_listen)
             .await
@@ -3106,6 +3120,24 @@ mod tests {
             "replay or inbound poison reached target",
         )
         .await;
+        selector.switch("manual", "o0").expect("restore A");
+        let selected = request(0x54, &second_address, b"selected");
+        let mut later = tokio::net::TcpStream::connect(second_listen)
+            .await
+            .expect("later inbound connect");
+        later.write_all(&selected).await.expect("later request");
+        let (mut accepted, _) =
+            tokio::time::timeout(Duration::from_secs(5), second_target.accept())
+                .await
+                .expect("later direct deadline")
+                .expect("later direct accept");
+        let mut payload = [0; 8];
+        accepted
+            .read_exact(&mut payload)
+            .await
+            .expect("later initial payload");
+        assert_eq!(&payload, b"selected");
+        drop((later, accepted));
 
         stop.send(()).expect("stop tagged server");
         assert_eq!(server.await.expect("tagged server owner"), Ok(()));
@@ -3118,7 +3150,7 @@ mod tests {
         for block in 0..7 {
             let listens = [reserve_address(), reserve_address(), reserve_address()];
             let metrics = reserve_address();
-            let (path, mut config) = tagged_server_test_config(listens);
+            let (path, mut config) = tagged_server_test_config(listens, false);
             config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
             let incumbent: Box<dyn Send> = match block {
                 0..=2 => Box::new(

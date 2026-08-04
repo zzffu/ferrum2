@@ -1741,6 +1741,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use ferrum2_core::route::compile_selector_route;
+    use ferrum2_core::selector::{
+        SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedRoute, TaggedRouteRule,
+        TaggedStaticBinding,
+    };
     use ferrum2_core::{ConnectError, Connector};
     use ferrum2_crypto::{
         Aes128Psk, KeySelector, MethodKeyProvider, MethodSecretKeyRef, RandomError,
@@ -2538,6 +2543,55 @@ mod tests {
                 SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
             })
             .collect();
+        let static_listen = reserve_address();
+        let (static_path, mut static_config) = tagged_client_test_config(
+            &[(static_listen, servers[0]), (reserve_address(), servers[1])],
+            true,
+        );
+        static_config.inbounds.truncate(1);
+        static_config.udp.as_mut().expect("UDP config").max_sessions = 2;
+        let (route, _) = compile_selector_route(
+            &[TaggedInbound::new("i0", 0)],
+            &[TaggedOutbound::new("o0", 0), TaggedOutbound::new("o1", 1)],
+            &[SelectorDefinition::new(
+                "manual",
+                vec!["o0", "o1"],
+                Some("o0"),
+            )],
+            TaggedRoute::Static(vec![TaggedStaticBinding::new("i0", "manual")]),
+        )
+        .expect("static selector route");
+        static_config.route = route;
+        let selector = static_config.selector_control();
+        let static_registry = OwnerRegistry::new();
+        let (static_stop, static_task) = spawn_test_client(static_config, &static_registry);
+        wait_until_bound(static_listen).await;
+        let first = udp_association(static_listen).await;
+        selector.switch("manual", "o1").expect("switch to B");
+        let second = udp_association(static_listen).await;
+        let static_target =
+            TargetAddr::ipv4("192.0.2.1:53".parse().expect("target")).expect("target");
+        let mut static_wire = [0; 64];
+        let length = encode_udp_datagram(&static_target, b"snapshot", &mut static_wire)
+            .expect("static request");
+        let mut received = [0; MAX_UDP_WIRE_LEN];
+        for ((control, application, relay), upstream) in
+            [(first, &upstreams[0]), (second, &upstreams[1])]
+        {
+            application
+                .send_to(&static_wire[..length], relay)
+                .await
+                .expect("static association send");
+            tokio::time::timeout(Duration::from_secs(2), upstream.recv_from(&mut received))
+                .await
+                .expect("static association timeout")
+                .expect("static association snapshot");
+            drop(control);
+        }
+        static_stop.send(()).expect("stop static client");
+        assert_eq!(static_task.await.expect("static client"), Ok(()));
+        std::fs::remove_file(static_path).expect("remove static config");
+
         let (path, context) = udp_test_context_for_server(registry.clone(), servers[0]);
         let targets: Vec<TargetAddr> = (0..5)
             .map(|index| {
@@ -2545,24 +2599,43 @@ mod tests {
                     .expect("target")
             })
             .collect();
-        let rule = |index: usize| {
-            ferrum2_core::route::RouteRule::new(
-                Some(1),
-                Some(Network::Udp),
-                Some(targets[index].clone()),
-                index,
-            )
-        };
         let outbound = |server| ClientOutboundContext {
             tcp_server: TargetAddr::ipv4(server).expect("server"),
             udp_server: server,
         };
+        let tags = ["o0", "o1", "o2", "o3", "o4", "o5"];
+        let outbounds: [_; 6] =
+            std::array::from_fn(|index| TaggedOutbound::new(tags[index], index));
+        let (route, selector) = compile_selector_route(
+            &[TaggedInbound::new("i1", 1)],
+            &outbounds,
+            &[
+                SelectorDefinition::new("manual", vec!["o4", "o5"], Some("o4")),
+                SelectorDefinition::new("nested", vec!["manual"], Some("manual")),
+            ],
+            TaggedRoute::Routed {
+                rules: targets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, target)| {
+                        TaggedRouteRule::new(
+                            Some("i1"),
+                            Some(Network::Udp),
+                            Some(target.clone()),
+                            Some(if index == 4 {
+                                "nested"
+                            } else {
+                                ["o0", "o1", "o2", "o3"][index]
+                            }),
+                        )
+                    })
+                    .collect(),
+                final_outbound: Some("o5"),
+            },
+        )
+        .expect("routed selector route");
         let routing = Arc::new(ClientRouting {
-            route: ferrum2_core::route::RouteTable::routed(
-                vec![rule(0), rule(1), rule(2), rule(3), rule(4)],
-                5,
-            )
-            .expect("routes"),
+            route,
             outbounds: vec![
                 outbound(servers[0]),
                 outbound(servers[1]),
@@ -2765,6 +2838,45 @@ mod tests {
                 application.recv(&mut socks).await.expect("response");
             }
         }
+
+        let length = encode_udp_datagram(&targets[4], b"before-switch", &mut socks)
+            .expect("selector request");
+        application
+            .send_to(&socks[..length], relay)
+            .await
+            .expect("selector send A");
+        let (peer_a, delayed_a, _) = receive_request_and_encode_response(
+            &upstreams[4],
+            &protocol_servers[4],
+            &mut scratch[4],
+            b"before-switch",
+            0,
+        )
+        .await;
+        selector.switch("manual", "o5").expect("switch UDP leg");
+        let length = encode_udp_datagram(&targets[4], b"after-switch", &mut socks)
+            .expect("selector request");
+        application
+            .send_to(&socks[..length], relay)
+            .await
+            .expect("selector send B");
+        receive_request_and_send_response(
+            &upstreams[3],
+            &protocol_servers[3],
+            &mut scratch[3],
+            b"after-switch",
+        )
+        .await;
+        application.recv(&mut socks).await.expect("B response");
+        upstreams[4]
+            .send_to(&delayed_a, peer_a)
+            .await
+            .expect("delayed A response");
+        application
+            .recv(&mut socks)
+            .await
+            .expect("captured A response");
+        assert_eq!(udp.live_ids.lock().expect("IDs").len(), 5);
 
         drop(peer);
         finish_udp_relay(running).await;
@@ -3864,38 +3976,78 @@ mod tests {
         config
             .outbounds
             .push(ferrum2_config::ClientOutboundConfig { server: dead });
-        config.route = ferrum2_core::route::RouteTable::routed(
-            vec![
-                ferrum2_core::route::RouteRule::new(Some(1), None, None, 1),
-                ferrum2_core::route::RouteRule::new(None, None, Some(target.clone()), 1),
-                ferrum2_core::route::RouteRule::new(None, None, Some(target.clone()), 0),
-                ferrum2_core::route::RouteRule::new(
-                    None,
-                    None,
-                    Some(
-                        TargetAddr::ipv4("192.0.2.1:82".parse().expect("target")).expect("target"),
-                    ),
-                    2,
-                ),
-                ferrum2_core::route::RouteRule::new(None, Some(Network::Tcp), None, 1),
+        let rule = |inbound, target, outbound| {
+            TaggedRouteRule::new(inbound, Some(Network::Tcp), target, Some(outbound))
+        };
+        let (route, _) = compile_selector_route(
+            &[TaggedInbound::new("i0", 0), TaggedInbound::new("i1", 1)],
+            &[
+                TaggedOutbound::new("o0", 0),
+                TaggedOutbound::new("o1", 1),
+                TaggedOutbound::new("dead", 2),
             ],
-            0,
+            &[SelectorDefinition::new(
+                "manual",
+                vec!["o0", "o1", "dead"],
+                Some("o0"),
+            )],
+            TaggedRoute::Routed {
+                rules: vec![
+                    rule(Some("i1"), None, "manual"),
+                    rule(None, Some(target), "manual"),
+                ],
+                final_outbound: Some("manual"),
+            },
         )
-        .expect("route");
+        .expect("selector route");
+        config.route = route;
+        let selector = config.selector_control();
         drop(reservations);
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);
         for listen in listens {
             wait_until_bound(listen).await;
         }
+        let (mut first, reply) = socks_connect_port(listens[0], 80).await;
+        assert_eq!(&reply[..2], &[5, 0]);
+        let (mut first_upstream, _) = upstreams[0].accept().await.expect("selected A");
+        let mut wire = [0; 256];
+        assert!(
+            first_upstream
+                .read(&mut wire)
+                .await
+                .expect("initial A wire")
+                > 0
+        );
+        while first_upstream.try_read(&mut wire).is_ok() {}
+        selector.switch("manual", "o1").expect("switch to B");
+        first
+            .write_all(b"captured A")
+            .await
+            .expect("open flow write");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), first_upstream.read(&mut wire))
+                .await
+                .expect("captured A timeout")
+                .expect("captured A wire")
+                > 0
+        );
         for (inbound, port) in [(1, 81), (0, 80), (0, 81)] {
             let (control, reply) = socks_connect_port(listens[inbound], port).await;
             assert_eq!(&reply[..2], &[5, 0]);
-            let (selected, _) = upstreams[1].accept().await.expect("selected B");
+            let (selected, _) = tokio::time::timeout(Duration::from_secs(2), upstreams[1].accept())
+                .await
+                .expect("selected B timeout")
+                .expect("selected B");
             drop((control, selected));
         }
+        drop((first, first_upstream));
+        selector
+            .switch("manual", "dead")
+            .expect("switch to unavailable member");
         let (_, reply) = socks_connect_port(listens[0], 82).await;
         assert_ne!(reply[1], 0);
+        assert_eq!(selector.selected("manual"), Ok("dead"));
         let fallback = tokio::join!(
             tokio::time::timeout(Duration::from_millis(50), upstreams[0].accept()),
             tokio::time::timeout(Duration::from_millis(50), upstreams[1].accept()),
@@ -3903,21 +4055,7 @@ mod tests {
         assert!(fallback.0.is_err() && fallback.1.is_err());
         stop.send(()).expect("stop");
         assert_eq!(task.await.expect("client"), Ok(()));
-
-        let (final_path, mut config) = tagged_client_test_config(&mappings, false);
-        config.route = ferrum2_core::route::RouteTable::routed(vec![], 1).expect("final route");
-        let (stop, task) = spawn_test_client(config, &registry);
-        wait_until_bound(listens[0]).await;
-        let (control, reply) = socks_connect_port(listens[0], 81).await;
-        assert_eq!(&reply[..2], &[5, 0]);
-        let (selected, _) = upstreams[1].accept().await.expect("final B");
-        drop((control, selected));
-        stop.send(()).expect("stop");
-        assert_eq!(task.await.expect("client"), Ok(()));
-
-        for path in [path, final_path] {
-            std::fs::remove_file(path).expect("remove config");
-        }
+        std::fs::remove_file(path).expect("remove config");
     }
 
     #[tokio::test]
