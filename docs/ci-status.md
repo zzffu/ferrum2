@@ -1,5 +1,16 @@
 # CI 与验证状态
 
+## M9 post-close test-footprint repair
+
+- GitHub Actions run [`30888202051/1`](https://github.com/zzffu/ferrum2/actions/runs/30888202051)
+  的 `test-footprint` job 在 `5392ad6` 失败：push base `b3b99a1` 跨过三个已演进的 policy
+  版本，revision 2 parser 在回放 schema 2 baseline 时返回 `baseline_unknown_key`。其余已完成
+  jobs 均通过。
+- M9-T02 在 shared transition seam 复用历史 schema 2 与 schema 3 revision 1 的严格
+  grammar/measurement，保留完整逐提交隔离及 transition 检查。原始范围本地 `PASS`；
+  product/test、threshold 和 baseline count 均未变化。
+- Remote requalification 尚未执行；没有 push、rerun 或 dispatch 授权。
+
 ## M9 closed 状态
 
 - **Accepted exact SHA:** `5b0a8020e5dac1a915dc64c8229ddd129dd4da4a`；M8 qualified

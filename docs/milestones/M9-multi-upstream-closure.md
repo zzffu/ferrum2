@@ -38,6 +38,7 @@ upstream group。
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M9-T01 | 核验并记录现有 multi-upstream 能力，不增加产品代码 | M8 closed | done |
+| M9-T02 | 修复跨旧 policy 的 hosted test-footprint control-range 回放 | M9-T01 | done |
 
 ## Close evidence
 
@@ -54,3 +55,12 @@ upstream group。
 - M8 automatic run `30848182146/1` 的同产品树 MSRV、Windows/GNU/musl、TCP/UDP
   `12/12`+cleanup 证据继续有效；M9 不声明新的 platform、interop 或 performance 结果。
   未执行或授权 remote action。
+
+## Post-close control repair
+
+GitHub Actions run `30888202051/1` 的 `test-footprint` 因一次 push 从 `b3b99a1` 跨过
+schema 2、schema 3 revision 1 与 revision 2，而由当前 parser 回放已取代 policy，报
+`baseline_unknown_key`。M9-T02 在 shared transition seam 复用历史 schema 2 与 schema 3
+revision 1 的严格 grammar/measurement，保留完整逐提交隔离及 transition 检查；原始范围
+本地 `PASS`。未修改 product/test、threshold 或 baseline count；未授权 remote
+requalification。

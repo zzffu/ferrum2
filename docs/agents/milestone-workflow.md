@@ -139,6 +139,11 @@ Malformed, stale, wrong-count, mixed-control, and merge-only policy changes fail
 recorded rationale, reduced by a focused refactor, or covered by an approved policy reforecast.
 Independent evidence must never be deleted merely to improve a number.
 
+When a CI push range spans superseded policy versions, every commit still receives the normal
+single-parent/inherited-control, control-plus-Markdown isolation, and baseline-transition checks.
+The current script retains strict schema 2 and previous schema 3 measurement parsers only for that
+historical range validation; loading the candidate policy remains current-schema-only.
+
 The CI `quality` and `test-footprint` jobs remain independent, so a control-policy failure cannot
 suppress Full/focused evidence. The final aggregate requires both jobs to execute successfully;
 numeric footprint findings remain visible in the job log without turning size estimates into

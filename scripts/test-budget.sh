@@ -10,7 +10,9 @@ TOOL_VERSION=0.19.1
 SCHEMA=3
 SERIES=rustloc-0.19.1-test-footprint-v2
 PREVIOUS_SERIES=rustloc-0.19.1-test-footprint-v1
+LEGACY_SERIES=rustloc-0.19.1-tests-v1
 METRIC=test_footprint
+LEGACY_METRIC=tests
 CLASSIFICATION=path-v2
 PREVIOUS_CLASSIFICATION=path-v1
 BASELINE_FILE=ci/test-budget-baseline.txt
@@ -172,6 +174,59 @@ load_baseline() {
   [ "$b_tool_version" = "$TOOL_VERSION" ] || error baseline_tool_version_mismatch
   [ "$b_metric" = "$METRIC" ] || error baseline_metric_mismatch
   [ "$b_classification" = "$CLASSIFICATION" ] || error baseline_classification_mismatch
+}
+
+load_transition_baseline() {
+  parse_baseline "$1"
+  [ "$b_schema" = "$SCHEMA" ] || error baseline_schema_mismatch
+  [ "$b_tool" = "$TOOL_NAME" ] || error baseline_tool_mismatch
+  [ "$b_tool_version" = "$TOOL_VERSION" ] || error baseline_tool_version_mismatch
+  [ "$b_metric" = "$METRIC" ] || error baseline_metric_mismatch
+  case "$b_series:$b_classification" in
+    "$SERIES:$CLASSIFICATION"|"$PREVIOUS_SERIES:$PREVIOUS_CLASSIFICATION") ;;
+    "$SERIES:"*|"$PREVIOUS_SERIES:"*) error baseline_classification_mismatch ;;
+    *) error baseline_series_mismatch ;;
+  esac
+}
+
+load_schema2_baseline() {
+  file=$1
+  [ -f "$file" ] || error baseline_missing
+  unknown=$(awk -F= '
+    /^[[:space:]]*(#|$)/ { next }
+    $1 !~ /^(schema|series|tool|tool_version|metric|milestone|commit|code|tests|max_test_growth|ticket_warning)$/ {
+      print $1
+      exit
+    }
+  ' "$file")
+  [ -z "$unknown" ] || error baseline_unknown_key
+
+  b_schema=$(kv_get schema "$file") || error baseline_schema_missing
+  b_series=$(kv_get series "$file") || error baseline_series_missing
+  b_tool=$(kv_get tool "$file") || error baseline_tool_missing
+  b_tool_version=$(kv_get tool_version "$file") || error baseline_tool_version_missing
+  b_metric=$(kv_get metric "$file") || error baseline_metric_missing
+  b_milestone=$(kv_get milestone "$file") || error baseline_milestone_missing
+  b_commit=$(kv_get commit "$file") || error baseline_commit_missing
+  b_code=$(kv_get code "$file") || error baseline_code_missing
+  b_tests=$(kv_get tests "$file") || error baseline_tests_missing
+  b_max_test_growth=$(kv_get max_test_growth "$file") || error baseline_max_test_growth_missing
+  b_ticket_warning=$(kv_get ticket_warning "$file") || error baseline_ticket_warning_missing
+
+  [ "$b_schema" = 2 ] || error baseline_schema_mismatch
+  [ "$b_series" = "$LEGACY_SERIES" ] || error baseline_series_mismatch
+  [ "$b_tool" = "$TOOL_NAME" ] || error baseline_tool_mismatch
+  [ "$b_tool_version" = "$TOOL_VERSION" ] || error baseline_tool_version_mismatch
+  [ "$b_metric" = "$LEGACY_METRIC" ] || error baseline_metric_mismatch
+  printf '%s\n' "$b_milestone" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' \
+    || error baseline_milestone_invalid
+  printf '%s\n' "$b_commit" | grep -Eq '^[0-9a-f]{40}$' || error baseline_commit_invalid
+  is_uint "$b_code" || error baseline_code_invalid
+  is_uint "$b_tests" || error baseline_tests_invalid
+  is_uint "$b_max_test_growth" || error baseline_max_test_growth_invalid
+  is_uint "$b_ticket_warning" || error baseline_ticket_warning_invalid
+  [ "$b_code" -gt 0 ] || error baseline_code_zero
+  resolve_commit "$b_commit" >/dev/null
 }
 
 materialize_tree() {
@@ -417,7 +472,7 @@ load_count_report() {
   count_file_map=$map
 }
 
-count_dir() {
+count_workspace_dir() {
   dir=$1
   label=$2
   need_tmp
@@ -429,10 +484,16 @@ count_dir() {
     || error rustloc_count_failed
   parse_csv_report "$workspace_csv" "$dir" "$workspace_report" "$workspace_map" \
     || error rustloc_csv_invalid
+  load_count_report "$workspace_report" "$workspace_map"
+}
+
+count_dir() {
+  dir=$1
+  label=$2
+  count_workspace_dir "$dir" "$label"
 
   fixture_dir="$dir/tests/fixtures"
   if [ ! -d "$fixture_dir" ]; then
-    load_count_report "$workspace_report" "$workspace_map"
     return
   fi
 
@@ -455,9 +516,18 @@ count_object() {
   object=$1
   label=$2
   need_tmp
-  dir="$tmp_root/tree.$label"
+  dir="$tmp_root/tree.$label.${materialize_seq:-0}"
   materialize_tree "$object" "$dir"
   count_dir "$dir" "$label"
+}
+
+count_workspace_object() {
+  object=$1
+  label=$2
+  need_tmp
+  dir="$tmp_root/tree.$label.${materialize_seq:-0}"
+  materialize_tree "$object" "$dir"
+  count_workspace_dir "$dir" "$label"
 }
 
 count_staged() {
@@ -666,7 +736,11 @@ verify_baseline() {
   verify_candidate=$1
   git merge-base --is-ancestor "$b_commit" "$verify_candidate" 2>/dev/null \
     || error baseline_not_ancestor
-  count_object "$b_commit" baseline
+  if [ "$b_series:$b_classification" = "$PREVIOUS_SERIES:$PREVIOUS_CLASSIFICATION" ]; then
+    count_workspace_object "$b_commit" baseline
+  else
+    count_object "$b_commit" baseline
+  fi
   [ "$count_code" -eq "$b_code" ] || error baseline_code_mismatch
   [ "$count_tests" -eq "$b_tests" ] || error baseline_tests_mismatch
   baseline_ratio_level=$(ratio_level "$b_tests" "$b_code")
@@ -682,6 +756,18 @@ verify_baseline() {
     "$count_largest_test_file_category" "$(format_milli "$b_ratio_warning_milli")" \
     "$(format_milli "$b_ratio_review_milli")" "$b_ticket_warning" "$b_ticket_review" \
     "$b_file_warning" "$b_file_review" "$b_policy_revision" "$b_reforecast_ref"
+}
+
+verify_schema2_baseline() {
+  verify_candidate=$1
+  git merge-base --is-ancestor "$b_commit" "$verify_candidate" 2>/dev/null \
+    || error baseline_not_ancestor
+  count_workspace_object "$b_commit" baseline-schema2
+  [ "$count_code" -eq "$b_code" ] || error baseline_code_mismatch
+  [ "$count_tests" -eq "$b_tests" ] || error baseline_tests_mismatch
+  printf 'test_budget baseline=PASS policy=test_footprint schema=2 series=%s milestone=%s commit=%s code=%s tests=%s ratio=%s max_test_growth=%s ticket_warning=%s\n' \
+    "$b_series" "$b_milestone" "$b_commit" "$b_code" "$b_tests" \
+    "$(ratio "$b_tests" "$b_code")" "$b_max_test_growth" "$b_ticket_warning"
 }
 
 branch_base() {
@@ -774,12 +860,71 @@ policy_thresholds_changed() {
     [ "$new_file_review" != "$old_file_review" ]
 }
 
+validate_schema2_policy_transition() {
+  transition_old=$1
+  transition_new=$2
+  transition_end=$3
+
+  load_schema2_baseline "$transition_new"
+  new_milestone=$b_milestone
+  new_commit=$b_commit
+  new_code=$b_code
+  new_tests=$b_tests
+  new_max_test_growth=$b_max_test_growth
+  new_ticket_warning=$b_ticket_warning
+
+  old_schema=$(legacy_schema "$transition_old")
+  case "$old_schema" in
+    1)
+      range_rust_changed "$new_commit" "$transition_end" \
+        && blocked policy_activation_after_rust_change
+      ;;
+    2)
+      load_schema2_baseline "$transition_old"
+      old_milestone=$b_milestone
+      old_commit=$b_commit
+      old_code=$b_code
+      old_tests=$b_tests
+      old_max_test_growth=$b_max_test_growth
+      old_ticket_warning=$b_ticket_warning
+      if [ "$new_milestone" = "$old_milestone" ]; then
+        [ "$new_commit" = "$old_commit" ] || blocked policy_base_changed_within_milestone
+        [ "$new_code" -eq "$old_code" ] || blocked policy_base_code_changed_within_milestone
+        [ "$new_tests" -eq "$old_tests" ] || blocked policy_base_tests_changed_within_milestone
+        [ "$new_ticket_warning" -eq "$old_ticket_warning" ] \
+          || blocked policy_ticket_warning_changed_within_milestone
+        [ "$new_max_test_growth" -le "$old_max_test_growth" ] \
+          || blocked policy_envelope_increase
+      else
+        range_rust_changed "$new_commit" "$transition_end" \
+          && blocked policy_activation_after_rust_change
+      fi
+      ;;
+    *) error policy_transition_source_schema_mismatch ;;
+  esac
+
+  load_schema2_baseline "$transition_new"
+  verify_schema2_baseline "$transition_end"
+  printf 'test_budget policy_transition=PASS policy=test_footprint transition=legacy-schema2 milestone=%s base=%s max_test_growth=%s ticket_warning=%s\n' \
+    "$b_milestone" "$b_commit" "$b_max_test_growth" "$b_ticket_warning"
+}
+
 validate_policy_transition() {
   transition_old=$1
   transition_new=$2
   transition_end=$3
 
-  load_baseline "$transition_new"
+  transition_schema=$(legacy_schema "$transition_new")
+  case "$transition_schema" in
+    2)
+      validate_schema2_policy_transition "$transition_old" "$transition_new" "$transition_end"
+      return
+      ;;
+    3) ;;
+    *) error policy_transition_schema_mismatch ;;
+  esac
+
+  load_transition_baseline "$transition_new"
   new_series=$b_series
   new_classification=$b_classification
   new_milestone=$b_milestone
@@ -871,7 +1016,7 @@ validate_policy_transition() {
     *) error policy_transition_source_schema_mismatch ;;
   esac
 
-  load_baseline "$transition_new"
+  load_transition_baseline "$transition_new"
   verify_baseline "$transition_end"
   printf 'test_budget policy_transition=PASS policy=test_footprint transition=%s series=%s classification=%s milestone=%s base=%s policy_revision=%s reforecast_ref=%s ratio_warning=%s ratio_review=%s ticket_warning=%s ticket_review=%s file_warning=%s file_review=%s\n' \
     "$transition_kind" "$b_series" "$b_classification" "$b_milestone" "$b_commit" \
