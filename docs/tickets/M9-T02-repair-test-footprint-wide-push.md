@@ -34,9 +34,10 @@ history; normal candidate loading remains revision 2 only.
 ```powershell
 & 'C:\Program Files\Git\bin\bash.exe' -n scripts/test-budget.sh
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh self-test
-& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ci --base b3b99a15aa99f8393f99f4c72c85f451a48c6749 --candidate <candidate-sha>
-& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ci --base 5392ad674036b0c7e85dcb8aa0ed5a52746f6ac0 --candidate <candidate-sha>
-& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh milestone --candidate <candidate-sha>
+& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ci --base b3b99a15aa99f8393f99f4c72c85f451a48c6749 --candidate 7f6218426bedd23c324bbfe3091bc2be8b0dbdec
+& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ci --base 5392ad674036b0c7e85dcb8aa0ed5a52746f6ac0 --candidate 7f6218426bedd23c324bbfe3091bc2be8b0dbdec
+& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base 5392ad674036b0c7e85dcb8aa0ed5a52746f6ac0 --candidate 7f6218426bedd23c324bbfe3091bc2be8b0dbdec
+& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh milestone --candidate 7f6218426bedd23c324bbfe3091bc2be8b0dbdec
 git diff --check
 ```
 
@@ -44,7 +45,8 @@ git diff --check
 
 - Root cause: run `30888202051/1` used push base `b3b99a1`, so revision 2 tried to replay
   superseded schema 2 and revision 1 baselines with its current-only parser.
-- Commit: this ticket's isolated control-only commit; exact SHA is reported after creation.
+- Implementation commit: `7f6218426bedd23c324bbfe3091bc2be8b0dbdec` (isolated
+  control-only change).
 - The original wide CI range, a current short range, self-test, syntax, milestone footprint, and
   diff checks pass locally; the current measurement transition remains visible in the wide-range
   output.
