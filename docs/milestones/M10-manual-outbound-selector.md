@@ -74,8 +74,8 @@ ownership 与 process lifecycle 不变。
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M10-T01 | Add the bounded selector graph, additive config, and public atomic control interface | — | active |
-| M10-T02 | Prove all existing client/server TCP/UDP selection points consume selector snapshots | M10-T01 | todo |
+| M10-T01 | Add the bounded selector graph, additive config, and public atomic control interface | — | done |
+| M10-T02 | Prove all existing client/server TCP/UDP selection points consume selector snapshots | M10-T01 | active |
 | M10-T03 | Reuse process/platform/interop evidence and qualify one exact integration SHA | M10-T02 | todo |
 
 ```text
@@ -98,8 +98,12 @@ LOC；growing client/server `run.rs` is expected to report file `REVIEW_REQUIRED
 `3390/1777` test LOC。These are explicit Architect/QA maintenance decisions，not correctness waivers；
 splitting private binary composition into a duplicate harness is rejected。
 
-## Blocker / next action
+## Integrated evidence / next action
 
-No execution blocker。M10-T01 starts from exact ticket base
-`40af9b6c102d11782b71522f84e5953862a40cab` in one isolated ticket worktree。Push、hosted
-run、PR、tag、release and publication remain unauthorized。
+M10-T01 integrated product exact `e6ede87ae314fe201bc6412bacd360bc0505cf4c` after Architect
+`PASS_WITH_NOTES` and QA `PASS`；`QA-M10T01-001` was closed by one test-only repair selected from two
+independent xhigh read-only analyses。Focused `2/2`、`10/10`、`5/5`、Quick、Clippy/fmt/diff and
+ticket footprint passed；case/support/fixture growth is `234/0/0` with only the planned
+`config_contract.rs` numeric `WARN`。M10-T02 is the sole active frontier and starts from the exact
+coordination commit containing this evidence。Push、hosted run、PR、tag、release and publication remain
+unauthorized。

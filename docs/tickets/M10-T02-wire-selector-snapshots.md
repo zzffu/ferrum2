@@ -1,7 +1,7 @@
 ---
 id: M10-T02
 milestone: M10
-status: todo
+status: active
 depends_on: [M10-T01]
 owns:
   - bins/ferrum2-client/src/run.rs
