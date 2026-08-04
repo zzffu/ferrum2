@@ -41,9 +41,9 @@ run [`30848182146/1`](https://github.com/zzffu/ferrum2/actions/runs/30848182146)
 M9已在baseline/accepted exact `5b0a8020e5dac1a915dc64c8229ddd129dd4da4a`确认M7/M8
 已交付client multi-upstream；focused、Full、100+ lifecycle、docs、schema 3 footprint及
 Architect/QA review通过，新增product/test LOC为零。Upstream group/load balancing继续延期。
-M10已在baseline `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`规划manual outbound selector：
-additive tagged-only graph、公开Rust query/switch interface、per-selector atomic current member及
-existing selection-call snapshot；尚无product implementation、qualification或remote action。
+M10已在baseline `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`规划manual outbound selector，
+并从exact ticket base `40af9b6c102d11782b71522f84e5953862a40cab`进入`executing`：
+M10-T01 active，尚无product implementation、qualification或remote action。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -895,7 +895,7 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 
 ## M10 — 手动 outbound selector 核心
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** additive tagged-only `[[selectors]]`把固定concrete/selector member graph接入
   static inbound binding与existing route actions；公开Rust interface查询并原子切换当前直接
   member，既有selection call已取得的concrete identity不被改写。
@@ -904,14 +904,15 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 - **Exit criteria:** legacy/M7/M8 exact compatibility；完整有界DAG与empty/unknown/duplicate/
   default/cycle fail-closed；public-only query/switch/concurrency/error integration tests；client/server
   TCP/UDP latest-selection/old-snapshot evidence；Full/MSRV/lifecycle/platform/interop/footprint与双审。
-- **Tickets:** M10-T01 core/config/control `ready`；M10-T02 data-plane snapshots依赖T01 `todo`；
+- **Tickets:** M10-T01 core/config/control `active`；M10-T02 data-plane snapshots依赖T01 `todo`；
   M10-T03 exact qualification依赖T02 `todo`。Spec/Test为`SPEC/TEST-0011`，decision为ADR-0029。
 - **Forecast:** test case/support/fixture `230/0/0`；不新增helper、fixture、process switch harness、
   crate或dependency。Existing large binary test files的numeric `REVIEW_REQUIRED`必须显式审查。
 - **Deferred/out of scope:** HTTP/IPC/CLI、persistence/hot reload、auto-select/URL test、retry、
   fallback/health/load balancing/chaining、connection interruption、CAS/graph transaction、new adapter。
-- **Remote boundary:** plan-only；无push、hosted run、rerun、dispatch、PR、tag、release或publication
-  授权/执行。
+- **Execution / remote boundary:** T01从exact base
+  `40af9b6c102d11782b71522f84e5953862a40cab`执行；无push、hosted run、rerun、dispatch、PR、
+  tag、release或publication授权/执行。
 
 ## 决策登记
 
@@ -1060,3 +1061,4 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 | 2026-08-04 | M8 close | M8改为`closed`；四票及六项exit criteria完成，blocking findings为零 | exact `926843d6`以dual-stack echo关闭hosted localhost resolver-order假设；run `30848182146/1`全部jobs及final qualification success | Budget `837/840`、remaining `3`；performance仅作regression且无M8阈值/声明；两次push授权已消费，closeout仅本地docs commit |
 | 2026-08-04 | M9 zero-code close | M7 tagged multi-outbound与M8 first-match route已满足client multi-upstream；不增加upstream group | exact `5b0a802`上focused、Full、100+ lifecycle、docs、schema 3 footprint及Architect/QA review PASS；M8以来product/test diff为空 | M9-T01 done；新增product/test LOC `0/0`；无ADR、dependency、remote action或未解决finding |
 | 2026-08-04 | M10 plan | M10改为`planned`；接受separate tagged-only selector graph、explicit default、nested DAG、public Rust atomic query/switch及existing selection-call snapshot | M9 closed；existing `RouteTable`、resolved tag graph与four data-plane call sites足够，不需要new trait、crate、dependency或process control channel | baseline `99bd62e`；ADR-0029、SPEC/TEST-0011、T01→T02→T03；schema 3 forecast `230/0/0`；plan-only，无product/push/hosted/release/publication |
+| 2026-08-04 | M10 execute start | M10改为`executing`，唯一ready frontier M10-T01改为`active`并绑定独立ticket worktree | `master@40af9b6c102d11782b71522f84e5953862a40cab`干净且未移动；M9 closed，M10 contracts approved | exact ticket base `40af9b6c102d11782b71522f84e5953862a40cab`；test-budget verify PASS；无push/hosted run/release/publication |

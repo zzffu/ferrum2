@@ -1,6 +1,6 @@
 # M10 — 手动 outbound selector 核心
 
-- **Status:** planned
+- **Status:** executing
 - **Baseline:** `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -74,7 +74,7 @@ ownership 与 process lifecycle 不变。
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M10-T01 | Add the bounded selector graph, additive config, and public atomic control interface | — | ready |
+| M10-T01 | Add the bounded selector graph, additive config, and public atomic control interface | — | active |
 | M10-T02 | Prove all existing client/server TCP/UDP selection points consume selector snapshots | M10-T01 | todo |
 | M10-T03 | Reuse process/platform/interop evidence and qualify one exact integration SHA | M10-T02 | todo |
 
@@ -100,5 +100,6 @@ splitting private binary composition into a duplicate harness is rejected。
 
 ## Blocker / next action
 
-No plan blocker。Execute starts with M10-T01 from the exact integrated plan commit in one isolated
-ticket worktree。Push、hosted run、PR、tag、release and publication remain unauthorized。
+No execution blocker。M10-T01 starts from exact ticket base
+`40af9b6c102d11782b71522f84e5953862a40cab` in one isolated ticket worktree。Push、hosted
+run、PR、tag、release and publication remain unauthorized。
