@@ -418,7 +418,7 @@ fn tagged_graph_normalizes_complete_resolved_collections() {
 
 #[test]
 fn selector_graphs_compile_for_both_roles_and_share_live_route_state() {
-    let selectors = "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n[[selectors]]\ntag = \"nested\"\noutbounds = [\"manual\"]\ndefault = \"manual\"";
+    let selectors = "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o1\", \"o0\"]\ndefault = \"o0\"\n[[selectors]]\ntag = \"nested\"\noutbounds = [\"manual\"]\ndefault = \"manual\"";
     let static_source = |source: String| {
         with_selectors(
             source
@@ -448,13 +448,18 @@ fn selector_graphs_compile_for_both_roles_and_share_live_route_state() {
     let routed_source = |source| with_selectors(routed(source, route), selectors);
     let client = load_client(TempConfig::text(&routed_source(tagged_client(2, 2))).path())
         .expect("client route");
-    let snapshot = client.server;
+    let configured_default = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 20_000);
+    assert_eq!(client.selector_control().selected("manual"), Ok("o0"));
+    #[rustfmt::skip]
+    assert_eq!((selected(&client.route, 0), selected(&client.route, 1), client.route.final_outbound()), (0, 0, 0));
+    assert_eq!(client.server, configured_default);
     client.selector_control().switch("manual", "o1").unwrap();
     assert_eq!(
         (selected(&client.route, 0), selected(&client.route, 1)),
         (1, 1)
     );
-    assert_eq!(client.server, snapshot);
+    assert_eq!(client.route.final_outbound(), 0);
+    assert_eq!(client.server, configured_default);
     let server = load_server(TempConfig::text(&routed_source(tagged_server(2, 2))).path())
         .expect("server route");
     server.selector_control().switch("manual", "o1").unwrap();

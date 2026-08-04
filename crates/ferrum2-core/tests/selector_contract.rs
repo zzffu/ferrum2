@@ -16,7 +16,7 @@ fn nested_route() -> (ferrum2_core::route::RouteTable, SelectorControl) {
         ],
         &[
             SelectorDefinition::new("inner", vec!["leaf-a", "leaf-b"], Some("leaf-a")),
-            SelectorDefinition::new("outer", vec!["inner", "leaf-b"], Some("inner")),
+            SelectorDefinition::new("outer", vec!["leaf-b", "inner"], Some("inner")),
         ],
         TaggedRoute::Routed {
             rules: vec![],
