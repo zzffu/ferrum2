@@ -1,6 +1,6 @@
 # M11 — 固定 client proxy chaining 与 per-outbound credentials
 
-- **Status:** executing
+- **Status:** validating
 - **Baseline:** `7a3c876681255b88492b3608af4fa52497435efc`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -55,15 +55,15 @@ seam、SIP022 state machines 与 process lifecycle 保持兼容。
 
 ## Exit criteria
 
-- [ ] Baseline legacy/M7/M8/M10 schema v1 cohort保持exact；partial outbound credential、所有chain
+- [x] Baseline legacy/M7/M8/M10 schema v1 cohort保持exact；partial outbound credential、所有chain
       count/tag/hop/reference/reachability错误在任何网络副作用前closed/redacted fail。
-- [ ] Static binding、route rule/final与selector选择完整direct/chain plan；existing direct-only结果
+- [x] Static binding、route rule/final与selector选择完整direct/chain plan；existing direct-only结果
       exact，selector snapshot不被后续switch改写，失败不retry/fallback。
-- [ ] Mixed-method/distinct-PSK two-hop TCP按序完成真实echo；每层tamper、wrong credential、later-hop
+- [x] Mixed-method/distinct-PSK two-hop TCP按序完成真实echo；每层tamper、wrong credential、later-hop
       failure、half-close/cancel均fail closed并回收完整nested owner。
-- [ ] Mixed-method/distinct-PSK two-hop UDP按序完成真实datagram echo；cross-plan/intermediate-target/
+- [x] Mixed-method/distinct-PSK two-hop UDP按序完成真实datagram echo；cross-plan/intermediate-target/
       tamper/replay错误、exact nested maximum/+1和invalid-inner no-partial-mutation通过。
-- [ ] Success/failure lifecycle、aggregate limits、zero owners、exact TCP/UDP rebind与global/outbound
+- [x] Success/failure lifecycle、aggregate limits、zero owners、exact TCP/UDP rebind与global/outbound
       secret redaction通过；无unbounded/eager per-hop socket/buffer/task。
 - [ ] 一个exact SHA通过Full、Rust 1.85、100+ lifecycle、three native targets、existing TCP/UDP各
       `12/12`+cleanup、schema 3 footprint、blocking reviews及另行授权的manual performance/resource job。
@@ -76,7 +76,7 @@ seam、SIP022 state machines 与 process lifecycle 保持兼容。
 | M11-T02 | Compose ordered fixed TCP chains with existing SIP022 flows | M11-T01 | done |
 | M11-T03 | Compose bounded ordered UDP chains with atomic validation/binding | M11-T02 | done |
 | M11-T04 | Prove mixed-credential two-hop TCP/UDP in existing real-process harness | M11-T03 | done |
-| M11-T05 | Qualify one exact integration SHA locally、hosted and with manual performance | M11-T04 | active |
+| M11-T05 | Qualify one exact integration SHA locally、hosted and with manual performance | M11-T04 | blocked |
 
 ```text
 M11-T01 config/plan contract
@@ -98,13 +98,27 @@ disposition but does not weaken correctness evidence。No fixture、new harness 
 is planned。Known growing-file signals：config/local-support/UDP process files `WARN`，client `run.rs`
 `REVIEW_REQUIRED`。
 
-## Blocker / next action
+## Validation evidence / blocker
 
-No local execution blocker。M11-T04 ticket candidate
-`bf4f032bbe27f1a24bd75a935360e5a28e52dc15` is integrated at exact product
-`6d975c1e45eb0e614c54961e35fdc19fa2478d98` after both real-process exact rows、architecture、Rust
-1.85、repository Quick and blocking Architect/QA review pass。The two Architect witness gaps were
-closed by one direct test-only repair and targeted re-review。Ticket and milestone footprint integrity
-pass；ratio `2.025588` and numeric growth/large-file signals are reviewed and accepted。M11-T05 starts
-local exact-SHA qualification from that product。Push、workflow dispatch、hosted run、PR、tag、release
-and publication remain unauthorized。
+Exact product `6d975c1e45eb0e614c54961e35fdc19fa2478d98`、tree
+`2d022daccf06c31b0e7106bb1427559c9999c79b` passed the focused config/plan、four composition、two
+real-process、architecture and Rust 1.85 commands。Serial format、strict Clippy、workspace binaries、
+all-features tests、100+ lifecycle `1/1` in `131.07s`、docs、diff and schema 3 integrity passed。
+Numeric footprint remains reviewed `REVIEW_REQUIRED` at ratio `2.025588`、case/support/fixture growth
+`4993/121/0`、five file `WARN` and one client `run.rs` `REVIEW_REQUIRED`；final Architect
+`PASS_WITH_NOTES` and QA `PASS` report no blocker、major or minor finding。
+
+The authorized one non-force push fixed remote `codex/integration/m11` at that exact product。Automatic
+push run [`30943770483/1`](https://github.com/zzffu/ferrum2/actions/runs/30943770483/attempts/1)
+completed `success`：quality `92108479368`、test-footprint `92108479394`、MSRV `92108479373`、
+Windows MSVC `92108479405`、Linux GNU `92108479413`、Linux musl `92108479435`、interop
+`92108479334` and qualification `92109254228` all passed。Exact markers bind SHA/run/attempt and report
+platforms `3/3`、TCP/UDP each `12/12` plus cleanup and aggregate `PASS`。Performance `92108480457`
+was correctly skipped for the push event。
+
+The one push authorization is consumed。A later provider-created attempt 2 was neither requested nor
+authorized by the primary and is uncredited；it does not invalidate immutable attempt 1。The only
+remaining exit criterion is a separately authorized exact-SHA `workflow_dispatch` whose `performance`
+job passes。Until that authorization and result exist，M11 stays `validating` and T05 stays `blocked`。
+No second push、rerun、PR、tag、release or publication is authorized；the local docs-only checkpoint is
+not a separately qualified product SHA。

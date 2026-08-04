@@ -1,5 +1,34 @@
 # CI 与验证状态
 
+## M11 validating — automatic qualification PASS，manual performance blocked
+
+- **Exact identity:** product `6d975c1e45eb0e614c54961e35fdc19fa2478d98`，tree
+  `2d022daccf06c31b0e7106bb1427559c9999c79b`。Remote `codex/integration/m11` points exactly to
+  that product；local docs checkpoint `b2e658aecb20c6f58158bcd86ca548e1ad5371d3` is a descendant
+  and is not claimed as hosted-qualified。
+- **Local exact gate:** public selector `3/3`、config `14/14`、CLI `5/5`；four T02/T03 composition
+  rows and both T04 real-process rows `1/1` each；architecture `9/9`、Rust 1.85、format、strict
+  Clippy、workspace binary build/all-features tests、docs and diff passed。Ignored 100+ lifecycle
+  passed `1/1` in `131.07s`。
+- **Automatic hosted qualification:** immutable attempt-specific run
+  [`30943770483/1`](https://github.com/zzffu/ferrum2/actions/runs/30943770483/attempts/1) completed
+  `success` at the exact product SHA。Quality `92108479368`、test-footprint `92108479394`、MSRV
+  `92108479373`、Windows MSVC `92108479405`、Linux GNU `92108479413`、Linux musl
+  `92108479435`、interop `92108479334` and qualification `92109254228` all succeeded。Performance
+  `92108480457` was correctly skipped because this was a push event。
+- **Decisive markers:** attempt 1 binds exact SHA/run/attempt and reports TCP `12/12` with cleanup、
+  UDP `12/12` with cleanup、platforms `3/3` and final aggregate `PASS`。Final hosted Architect
+  returned `PASS_WITH_NOTES` and QA `PASS`；no blocker、major or minor finding remains。
+- **Footprint:** schema 3 integrity/change passed。Milestone numeric result is the reviewed
+  `REVIEW_REQUIRED` signal：ratio `2.025588`、case/support/fixture growth `4993/121/0`、five file
+  `WARN` and one client `run.rs` `REVIEW_REQUIRED`；no fixture、dependency、crate、third harness or
+  duplicate encoder was added。
+- **Boundary / blocker:** the authorized one non-force push is consumed。The provider later created
+  attempt 2 without a primary rerun request or authorization；it is uncredited and does not replace
+  immutable attempt 1。Required exact-SHA manual performance remains separately unauthorized/unrun，
+  so M11 stays `validating` and M11-T05 stays `blocked`。No second push、PR、tag、package、release or
+  publication is authorized。
+
 ## M10 closed
 
 - **Qualified exact identity:** `2df141e720580d2f8fe16bee6c9698f4e85a520a`，tree
