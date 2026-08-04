@@ -34,7 +34,7 @@ use ferrum2_shadowsocks::{
     UdpPacketError, UdpPacketScratch, max_udp_payload_len_for_encoded_target,
 };
 #[cfg(test)]
-use ferrum2_shadowsocks::{ClientFlow, TcpKeyProvider};
+use ferrum2_shadowsocks::{BufferObserver, BufferRole, ClientFlow, FlowObserver, TcpKeyProvider};
 use ferrum2_socks5::{
     MAX_SOCKS_UDP_DATAGRAM_BYTES, Socks5Inbound, SocksCommand, SocksStream, SocksUdpAssociate,
     decode_udp_datagram, encode_udp_datagram,
@@ -572,6 +572,8 @@ async fn client_connection(
                 context.runtime.connect_timeout,
                 context.runtime.handshake_timeout,
             ),
+            #[cfg(test)]
+            None,
         ) => result,
     };
     let flow = match opened {
@@ -1429,6 +1431,7 @@ enum ClientOpenFailure {
     HandshakeTimeout,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn open_chain_with_deadlines<'a, C, T, R>(
     outbounds: &'a [ClientOutboundContext],
     plan: &[usize],
@@ -1437,6 +1440,7 @@ async fn open_chain_with_deadlines<'a, C, T, R>(
     random: &'a R,
     application_target: &TargetAddr,
     deadlines: (std::time::Duration, std::time::Duration),
+    #[cfg(test)] observers: Option<(&'a dyn BufferObserver, &'a dyn FlowObserver)>,
 ) -> Result<BoxedClientFlow<'a>, ClientOpenFailure>
 where
     C: Connector,
@@ -1457,6 +1461,11 @@ where
         clock,
         random,
     );
+    #[cfg(test)]
+    let outbound = match observers {
+        Some((buffer, flow)) => outbound.with_observers(buffer, flow),
+        None => outbound,
+    };
     let connected = tokio::time::timeout(deadlines.0, outbound.connect_server())
         .await
         .map_err(|_| {
@@ -1473,11 +1482,17 @@ where
             let next_target = plan
                 .get(position + 1)
                 .map_or(application_target, |next| &outbounds[*next].tcp_server);
-            flow =
-                ClientTcpOutbound::new(hop.tcp_server.clone(), &hop.keys, connector, clock, random)
-                    .write_request_on(flow, next_target)
-                    .await?
-                    .into_boxed();
+            let outbound =
+                ClientTcpOutbound::new(hop.tcp_server.clone(), &hop.keys, connector, clock, random);
+            #[cfg(test)]
+            let outbound = match observers {
+                Some((buffer, flow)) => outbound.with_observers(buffer, flow),
+                None => outbound,
+            };
+            flow = outbound
+                .write_request_on(flow, next_target)
+                .await?
+                .into_boxed();
         }
         if plan.len() > 1 {
             std::future::poll_fn(|cx| Pin::new(&mut flow).poll_flush_plain(cx)).await?;
@@ -1824,7 +1839,8 @@ mod tests {
     };
     use ferrum2_runtime::OwnerSnapshot;
     use ferrum2_shadowsocks::{
-        TransportPhase, UDP_REPLAY_LAG, UdpReplayWindow, UdpServer, max_udp_payload_len,
+        ShadowsocksTcpInbound, TcpReplayStore, TransportPhase, UDP_REPLAY_LAG, UdpReplayWindow,
+        UdpServer, max_udp_payload_len,
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::Notify;
@@ -1875,6 +1891,10 @@ mod tests {
             writes: usize,
             drops: Arc<AtomicUsize>,
         },
+        WriteZeroAfter {
+            writes: usize,
+            drops: Arc<AtomicUsize>,
+        },
     }
 
     struct ScriptedIo {
@@ -1919,12 +1939,26 @@ mod tests {
                 aborts,
             }
         }
+
+        fn write_zero_after(
+            writes: usize,
+            drops: Arc<AtomicUsize>,
+            aborts: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                mode: ScriptedMode::WriteZeroAfter { writes, drops },
+                endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                aborts,
+            }
+        }
     }
 
     impl Drop for ScriptedIo {
         fn drop(&mut self) {
             match &self.mode {
-                ScriptedMode::Pending(drops) | ScriptedMode::StallAfter { drops, .. } => {
+                ScriptedMode::Pending(drops)
+                | ScriptedMode::StallAfter { drops, .. }
+                | ScriptedMode::WriteZeroAfter { drops, .. } => {
                     drops.fetch_add(1, Ordering::SeqCst);
                 }
                 ScriptedMode::Duplex(_) | ScriptedMode::Fail => {}
@@ -1943,7 +1977,9 @@ mod tests {
                 ScriptedMode::Fail => {
                     Poll::Ready(Err(io::Error::other("transport source sentinel")))
                 }
-                ScriptedMode::Pending(_) | ScriptedMode::StallAfter { .. } => Poll::Pending,
+                ScriptedMode::Pending(_)
+                | ScriptedMode::StallAfter { .. }
+                | ScriptedMode::WriteZeroAfter { .. } => Poll::Pending,
             }
         }
     }
@@ -1965,6 +2001,11 @@ mod tests {
                     *writes -= 1;
                     Poll::Ready(Ok(source.len()))
                 }
+                ScriptedMode::WriteZeroAfter { writes, .. } if *writes == 0 => Poll::Ready(Ok(0)),
+                ScriptedMode::WriteZeroAfter { writes, .. } => {
+                    *writes -= 1;
+                    Poll::Ready(Ok(source.len()))
+                }
             }
         }
 
@@ -1974,7 +2015,9 @@ mod tests {
                 ScriptedMode::Fail => {
                     Poll::Ready(Err(io::Error::other("transport source sentinel")))
                 }
-                ScriptedMode::Pending(_) | ScriptedMode::StallAfter { .. } => Poll::Ready(Ok(())),
+                ScriptedMode::Pending(_)
+                | ScriptedMode::StallAfter { .. }
+                | ScriptedMode::WriteZeroAfter { .. } => Poll::Ready(Ok(())),
             }
         }
 
@@ -1984,7 +2027,9 @@ mod tests {
                 ScriptedMode::Fail => {
                     Poll::Ready(Err(io::Error::other("transport source sentinel")))
                 }
-                ScriptedMode::Pending(_) | ScriptedMode::StallAfter { .. } => Poll::Ready(Ok(())),
+                ScriptedMode::Pending(_)
+                | ScriptedMode::StallAfter { .. }
+                | ScriptedMode::WriteZeroAfter { .. } => Poll::Ready(Ok(())),
             }
         }
     }
@@ -2110,6 +2155,101 @@ mod tests {
             destination.fill(0x42);
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct ChainObserver {
+        buffers: Mutex<Vec<(BufferRole, usize, usize)>>,
+        terminals: Mutex<Vec<FlowTerminal>>,
+        owner_drops: AtomicUsize,
+    }
+
+    impl BufferObserver for ChainObserver {
+        fn allocated(&self, role: BufferRole, limit: usize, identity: usize) {
+            self.buffers
+                .lock()
+                .expect("chain buffers")
+                .push((role, limit, identity));
+        }
+    }
+
+    impl FlowObserver for ChainObserver {
+        fn terminal_installed(&self, terminal: FlowTerminal) {
+            self.terminals
+                .lock()
+                .expect("chain terminals")
+                .push(terminal);
+        }
+
+        fn owner_dropped(&self) {
+            self.owner_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn chain_test_setup(
+        methods: [MethodProfile; 4],
+        first_port: u16,
+    ) -> (
+        Vec<ClientOutboundContext>,
+        ferrum2_core::route::RouteTable,
+        ferrum2_core::selector::SelectorControl,
+    ) {
+        let servers: [SocketAddrV4; 4] = std::array::from_fn(|hop| {
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, first_port + hop as u16)
+        });
+        let outbounds = prepare_client_outbounds(
+            servers
+                .map(|server| ferrum2_config::ClientOutboundConfig { server })
+                .into(),
+            methods.map(psk_for_method).into(),
+        )
+        .expect("checked runtime outbounds");
+        let (route, selector) = compile_selector_plans(
+            &[TaggedInbound::new("entry", 0)],
+            &[
+                TaggedOutbound::new("a", 0),
+                TaggedOutbound::new("b", 1),
+                TaggedOutbound::new("c", 2),
+                TaggedOutbound::new("d", 3),
+            ],
+            &[
+                TaggedPlan::new("a-b", vec![0, 1]),
+                TaggedPlan::new("c-d", vec![2, 3]),
+            ],
+            &[SelectorDefinition::new(
+                "manual",
+                vec!["a-b", "c-d"],
+                Some("a-b"),
+            )],
+            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "manual")]),
+        )
+        .expect("chain selector");
+        (outbounds, route, selector)
+    }
+
+    async fn scripted_input(bytes: &[u8]) -> TokioTransport<ScriptedIo> {
+        let (io, mut source) = tokio::io::duplex(65_536);
+        source.write_all(bytes).await.expect("scripted wire");
+        source.shutdown().await.expect("scripted EOF");
+        TokioTransport::new(ScriptedIo::duplex(
+            io,
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_153),
+            Arc::new(AtomicUsize::new(0)),
+        ))
+    }
+
+    fn assert_two_layer_buffers(observer: &ChainObserver, label: impl std::fmt::Display) {
+        let buffers = observer.buffers.lock().expect("chain buffers");
+        assert_eq!(buffers.len(), 4, "{label}");
+        assert_eq!(
+            buffers
+                .iter()
+                .map(|(_, _, identity)| identity)
+                .collect::<HashSet<_>>()
+                .len(),
+            4,
+            "{label}"
+        );
     }
 
     struct IdSequenceRandom(Mutex<VecDeque<u8>>);
@@ -3619,104 +3759,203 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_chain_opens_hops_in_order_with_distinct_credentials_and_no_fallback() {
-        let servers = [
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_001),
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_002),
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_003),
-        ];
-        let outbounds = prepare_client_outbounds(
-            servers
-                .map(|server| ferrum2_config::ClientOutboundConfig { server })
-                .into(),
-            vec![
-                psk_for_method(MethodProfile::Blake3Aes128Gcm2022),
-                psk_for_method(MethodProfile::Blake3Aes256Gcm2022),
-                psk_for_method(MethodProfile::Blake3ChaCha20Poly13052022),
-            ],
-        )
-        .expect("checked runtime outbounds");
-        let (route, selector) = compile_selector_plans(
-            &[TaggedInbound::new("entry", 0)],
-            &[
-                TaggedOutbound::new("a", 0),
-                TaggedOutbound::new("b", 1),
-                TaggedOutbound::new("c", 2),
-            ],
-            &[TaggedPlan::new("a-b", vec![0, 1])],
-            &[SelectorDefinition::new(
-                "manual",
-                vec!["a-b", "c"],
-                Some("a-b"),
-            )],
-            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "manual")]),
-        )
-        .expect("chain selector");
-        let application = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 443))
+        for (case, (first_method, second_method)) in [
+            (
+                MethodProfile::Blake3Aes128Gcm2022,
+                MethodProfile::Blake3Aes256Gcm2022,
+            ),
+            (
+                MethodProfile::Blake3Aes256Gcm2022,
+                MethodProfile::Blake3ChaCha20Poly13052022,
+            ),
+            (
+                MethodProfile::Blake3ChaCha20Poly13052022,
+                MethodProfile::Blake3Aes128Gcm2022,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (outbounds, route, selector) = chain_test_setup(
+                [first_method, second_method, second_method, first_method],
+                42_001 + case as u16 * 10,
+            );
+            let application = TargetAddr::ipv4(SocketAddrV4::new(
+                Ipv4Addr::new(192, 0, 2, 1),
+                443 + case as u16,
+            ))
             .expect("application target");
-        let snapshot = route.select_plan(0, Network::Tcp, &application);
-        assert_eq!(snapshot.hops(), &[0, 1]);
-        selector.switch("manual", "c").expect("switch next flow");
-        assert_eq!(snapshot.hops(), &[0, 1]);
-        assert_eq!(
-            route.select_plan(0, Network::Tcp, &application).hops(),
-            &[2]
-        );
+            let snapshot = route.select_plan(0, Network::Tcp, &application);
+            assert_eq!(snapshot.hops(), &[0, 1], "rotation {case}");
+            selector.switch("manual", "c-d").expect("switch next flow");
+            assert_eq!(snapshot.hops(), &[0, 1], "captured rotation {case}");
+            assert_eq!(
+                route.select_plan(0, Network::Tcp, &application).hops(),
+                &[2, 3],
+                "next rotation {case}"
+            );
 
-        let aborts = Arc::new(AtomicUsize::new(0));
-        let (stream, mut peer) = tokio::io::duplex(65_536);
-        let connector = DeadlineConnector {
-            delay: Duration::ZERO,
-            targets: Mutex::new(Vec::new()),
-            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
-                stream,
-                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
-                Arc::clone(&aborts),
-            )))),
-        };
-        let clock = SystemClock::new();
-        let random = FixedRandom;
-        let flow = open_chain_with_deadlines(
-            &outbounds,
-            snapshot.hops(),
-            &connector,
-            &clock,
-            &random,
-            &application,
-            (Duration::from_secs(1), Duration::from_secs(1)),
-        )
-        .await
-        .expect("captured chain");
-        assert_eq!(
-            connector.targets.lock().expect("dial targets").as_slice(),
-            &[outbounds[0].tcp_server.clone()]
-        );
-        let mut wire = [0_u8; 4_096];
-        assert!(peer.read(&mut wire).await.expect("nested request wire") > 0);
-        drop(flow);
-        assert_eq!(aborts.load(Ordering::SeqCst), 0);
+            let aborts = Arc::new(AtomicUsize::new(0));
+            let (stream, mut peer) = tokio::io::duplex(65_536);
+            let connector = DeadlineConnector {
+                delay: Duration::ZERO,
+                targets: Mutex::new(Vec::new()),
+                stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
+                    stream,
+                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                    Arc::clone(&aborts),
+                )))),
+            };
+            let clock = SystemClock::new();
+            let random = FixedRandom;
+            let observer = ChainObserver::default();
+            let flow = open_chain_with_deadlines(
+                &outbounds,
+                snapshot.hops(),
+                &connector,
+                &clock,
+                &random,
+                &application,
+                (Duration::from_secs(1), Duration::from_secs(1)),
+                Some((&observer, &observer)),
+            )
+            .await
+            .expect("captured chain");
+            assert_eq!(
+                connector.targets.lock().expect("dial targets").as_slice(),
+                &[outbounds[0].tcp_server.clone()],
+                "one raw A dial: {case}"
+            );
+            assert_two_layer_buffers(&observer, format_args!("rotation {case}"));
+            drop(flow);
+            assert_eq!(observer.owner_drops.load(Ordering::SeqCst), 2);
+            let mut raw = Vec::new();
+            peer.read_to_end(&mut raw).await.expect("complete raw wire");
+            assert!(!raw.is_empty(), "raw request: {case}");
+
+            let outer_replay = TcpReplayStore::new(1024).expect("outer replay");
+            let outer_inbound =
+                ShadowsocksTcpInbound::new(&outbounds[0].keys, &clock, &random, &outer_replay);
+            let outer = outer_inbound
+                .accept_stream(scripted_input(&raw).await)
+                .await
+                .expect("configured A credential");
+            assert_eq!(outer.target, outbounds[1].tcp_server, "A targets B: {case}");
+            assert!(
+                outer.initial_payload.is_empty(),
+                "no A initial payload: {case}"
+            );
+            let mut outer_stream = TokioFramed::new(outer.stream);
+            let mut inner_wire = [0_u8; 4_096];
+            let inner_len = outer_stream
+                .read(&mut inner_wire)
+                .await
+                .expect("authenticated inner wire");
+
+            let inner_replay = TcpReplayStore::new(1024).expect("inner replay");
+            let inner_inbound =
+                ShadowsocksTcpInbound::new(&outbounds[1].keys, &clock, &random, &inner_replay);
+            let inner = inner_inbound
+                .accept_stream(scripted_input(&inner_wire[..inner_len]).await)
+                .await
+                .expect("configured B credential");
+            assert_eq!(inner.target, application, "B targets application: {case}");
+            assert!(
+                inner.initial_payload.is_empty(),
+                "no premature application payload: {case}"
+            );
+
+            let wrong_psk = match first_method {
+                MethodProfile::Blake3Aes128Gcm2022 => ferrum2_crypto::MethodPsk::aes128([0x91; 16]),
+                MethodProfile::Blake3Aes256Gcm2022 => ferrum2_crypto::MethodPsk::aes256([0x92; 32]),
+                MethodProfile::Blake3ChaCha20Poly13052022 => {
+                    ferrum2_crypto::MethodPsk::chacha20_poly1305([0x93; 32])
+                }
+            };
+            let wrong_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(wrong_psk));
+            for keys in [&outbounds[1].keys, &wrong_keys] {
+                let replay = TcpReplayStore::new(1024).expect("invalid replay");
+                let inbound = ShadowsocksTcpInbound::new(keys, &clock, &random, &replay);
+                assert!(
+                    inbound
+                        .accept_stream(scripted_input(&raw).await)
+                        .await
+                        .is_err(),
+                    "swapped/wrong A credential: {case}"
+                );
+            }
+
+            let mut truncated = raw.clone();
+            truncated.pop().expect("nonempty wire");
+            let replay = TcpReplayStore::new(1024).expect("truncated replay");
+            let inbound = ShadowsocksTcpInbound::new(&outbounds[0].keys, &clock, &random, &replay);
+            let truncated_outer = inbound
+                .accept_stream(scripted_input(&truncated).await)
+                .await
+                .expect("valid outer before truncated inner");
+            let mut truncated_stream = TokioFramed::new(truncated_outer.stream);
+            assert!(
+                truncated_stream.read(&mut inner_wire).await.is_err(),
+                "truncated/skipped inner cannot pass: {case}"
+            );
+            assert_eq!(aborts.load(Ordering::SeqCst), 0, "rotation {case}");
+        }
     }
 
     #[tokio::test(start_paused = true)]
     async fn tcp_chain_failure_and_cancellation_drop_every_layer() {
-        let servers = [
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_011),
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42_012),
-        ];
+        let (outbounds, route, selector) = chain_test_setup(
+            [
+                MethodProfile::Blake3Aes256Gcm2022,
+                MethodProfile::Blake3ChaCha20Poly13052022,
+                MethodProfile::Blake3Aes128Gcm2022,
+                MethodProfile::Blake3Aes256Gcm2022,
+            ],
+            42_011,
+        );
         let application = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 443))
             .expect("application target");
-        for cancel in [false, true] {
-            let outbounds = prepare_client_outbounds(
-                servers
-                    .map(|server| ferrum2_config::ClientOutboundConfig { server })
-                    .into(),
-                vec![
-                    psk_for_method(MethodProfile::Blake3Aes256Gcm2022),
-                    psk_for_method(MethodProfile::Blake3ChaCha20Poly13052022),
-                ],
+        let snapshot = route.select_plan(0, Network::Tcp, &application);
+        assert_eq!(snapshot.hops(), &[0, 1]);
+        let clock = SystemClock::new();
+        let random = FixedRandom;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let unavailable = TokioConnector::new(FailingConnector {
+            calls: Arc::clone(&calls),
+        });
+        let unavailable_observer = ChainObserver::default();
+        assert!(matches!(
+            open_chain_with_deadlines(
+                &outbounds,
+                snapshot.hops(),
+                &unavailable,
+                &clock,
+                &random,
+                &application,
+                (Duration::from_secs(1), Duration::from_secs(1)),
+                Some((&unavailable_observer, &unavailable_observer)),
             )
-            .expect("checked runtime outbounds");
+            .await,
+            Err(ClientOpenFailure::Protocol(ShadowsocksError::Connect(
+                ConnectErrorKind::Other
+            )))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            unavailable_observer
+                .buffers
+                .lock()
+                .expect("unavailable buffers")
+                .is_empty()
+        );
+        assert_eq!(unavailable_observer.owner_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(selector.selected("manual"), Ok("a-b"));
+
+        for cancel in [false, true] {
             let drops = Arc::new(AtomicUsize::new(0));
             let aborts = Arc::new(AtomicUsize::new(0));
+            let observer = ChainObserver::default();
             let connector = DeadlineConnector {
                 delay: Duration::ZERO,
                 targets: Mutex::new(Vec::new()),
@@ -3726,18 +3965,19 @@ mod tests {
                     Arc::clone(&aborts),
                 )))),
             };
-            let clock = SystemClock::new();
-            let random = FixedRandom;
             let mut opened = Box::pin(open_chain_with_deadlines(
                 &outbounds,
-                &[0, 1],
+                snapshot.hops(),
                 &connector,
                 &clock,
                 &random,
                 &application,
                 (Duration::from_secs(1), Duration::from_millis(10)),
+                Some((&observer, &observer)),
             ));
             assert_open_pending(&mut opened).await;
+            assert_two_layer_buffers(&observer, format_args!("cancel={cancel}"));
+            assert_eq!(observer.owner_drops.load(Ordering::SeqCst), 0);
             if cancel {
                 drop(opened);
             } else {
@@ -3747,6 +3987,14 @@ mod tests {
                     Err(ClientOpenFailure::HandshakeTimeout)
                 ));
             }
+            assert_eq!(observer.owner_drops.load(Ordering::SeqCst), 2);
+            assert!(
+                observer
+                    .terminals
+                    .lock()
+                    .expect("pending terminals")
+                    .is_empty()
+            );
             assert_eq!(drops.load(Ordering::SeqCst), 1, "cancel={cancel}");
             assert_eq!(aborts.load(Ordering::SeqCst), 0, "cancel={cancel}");
             assert_eq!(
@@ -3754,7 +4002,151 @@ mod tests {
                 &[outbounds[0].tcp_server.clone()],
                 "cancel={cancel}"
             );
+            assert_eq!(selector.selected("manual"), Ok("a-b"));
         }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let write_zero_observer = ChainObserver::default();
+        let write_zero = DeadlineConnector {
+            delay: Duration::ZERO,
+            targets: Mutex::new(Vec::new()),
+            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::write_zero_after(
+                1,
+                Arc::clone(&drops),
+                Arc::clone(&aborts),
+            )))),
+        };
+        assert!(matches!(
+            open_chain_with_deadlines(
+                &outbounds,
+                snapshot.hops(),
+                &write_zero,
+                &clock,
+                &random,
+                &application,
+                (Duration::from_secs(1), Duration::from_secs(1)),
+                Some((&write_zero_observer, &write_zero_observer)),
+            )
+            .await,
+            Err(ClientOpenFailure::Protocol(ShadowsocksError::Transport(_)))
+        ));
+        assert_eq!(write_zero_observer.owner_drops.load(Ordering::SeqCst), 2);
+        assert_two_layer_buffers(&write_zero_observer, "write zero");
+        assert_eq!(
+            write_zero_observer
+                .terminals
+                .lock()
+                .expect("write-zero terminals")
+                .len(),
+            2
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            write_zero
+                .targets
+                .lock()
+                .expect("write-zero targets")
+                .as_slice(),
+            &[outbounds[0].tcp_server.clone()]
+        );
+        assert_eq!(selector.selected("manual"), Ok("a-b"));
+
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let detection_observer = ChainObserver::default();
+        let (detection_stream, mut detection_peer) = tokio::io::duplex(65_536);
+        let detection_connector = DeadlineConnector {
+            delay: Duration::ZERO,
+            targets: Mutex::new(Vec::new()),
+            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
+                detection_stream,
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                Arc::clone(&aborts),
+            )))),
+        };
+        let detection_flow = open_chain_with_deadlines(
+            &outbounds,
+            snapshot.hops(),
+            &detection_connector,
+            &clock,
+            &random,
+            &application,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some((&detection_observer, &detection_observer)),
+        )
+        .await
+        .expect("opened detection chain");
+        detection_peer
+            .write_all(&[0_u8; 256])
+            .await
+            .expect("tampered response");
+        let mut detection_framed = TokioFramed::new(detection_flow);
+        let mut application_output = [0x5a_u8; 1];
+        assert!(
+            detection_framed
+                .read(&mut application_output)
+                .await
+                .is_err()
+        );
+        assert_eq!(application_output, [0x5a]);
+        drop(detection_framed);
+        assert_eq!(detection_observer.owner_drops.load(Ordering::SeqCst), 2);
+        assert_two_layer_buffers(&detection_observer, "detection");
+        assert_eq!(
+            detection_observer
+                .terminals
+                .lock()
+                .expect("detection terminals")
+                .len(),
+            2
+        );
+        assert_eq!(aborts.load(Ordering::SeqCst), 2);
+        assert_eq!(selector.selected("manual"), Ok("a-b"));
+
+        let valid_observer = ChainObserver::default();
+        let (valid_stream, mut valid_peer) = tokio::io::duplex(65_536);
+        let valid_connector = DeadlineConnector {
+            delay: Duration::ZERO,
+            targets: Mutex::new(Vec::new()),
+            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
+                valid_stream,
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                Arc::new(AtomicUsize::new(0)),
+            )))),
+        };
+        let valid_flow = open_chain_with_deadlines(
+            &outbounds,
+            snapshot.hops(),
+            &valid_connector,
+            &clock,
+            &random,
+            &application,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some((&valid_observer, &valid_observer)),
+        )
+        .await
+        .expect("valid open after isolated failures");
+        let mut valid_framed = TokioFramed::new(valid_flow);
+        valid_framed.shutdown().await.expect("recursive half-close");
+        drop(valid_framed);
+        assert_eq!(valid_observer.owner_drops.load(Ordering::SeqCst), 2);
+        assert_two_layer_buffers(&valid_observer, "valid half-close");
+        let mut valid_wire = Vec::new();
+        valid_peer
+            .read_to_end(&mut valid_wire)
+            .await
+            .expect("recursive raw half-close");
+        assert!(!valid_wire.is_empty());
+        assert_eq!(
+            valid_connector
+                .targets
+                .lock()
+                .expect("valid targets")
+                .as_slice(),
+            &[outbounds[0].tcp_server.clone()]
+        );
+        assert_eq!(selector.selected("manual"), Ok("a-b"));
     }
 
     #[tokio::test]

@@ -384,6 +384,9 @@ pub trait BufferObserver: Send + Sync {
 pub trait FlowObserver: Send + Sync {
     /// Records installation of the sole terminal latch.
     fn terminal_installed(&self, terminal: FlowTerminal);
+
+    /// Records destruction of one opaque client flow owner.
+    fn owner_dropped(&self) {}
 }
 
 struct NoopObserver;
@@ -1132,6 +1135,12 @@ pub struct ClientFlow<'a, S, K, T> {
     staged: Option<StagedWrite>,
     lifecycle: Lifecycle,
     observers: Observers<'a>,
+}
+
+impl<S, K, T> Drop for ClientFlow<'_, S, K, T> {
+    fn drop(&mut self) {
+        self.observers.flow.owner_dropped();
+    }
 }
 
 /// Type-erased owner used only to nest a bounded sequence of client flows.
