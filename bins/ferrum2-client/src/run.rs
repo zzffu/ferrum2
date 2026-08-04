@@ -2226,11 +2226,19 @@ mod tests {
         let servers: [SocketAddrV4; 4] = std::array::from_fn(|hop| {
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, first_port + hop as u16)
         });
+        let psks: [ferrum2_crypto::MethodPsk; 4] = std::array::from_fn(|hop| {
+            let bytes = [0x41 + hop as u8; 32];
+            ferrum2_crypto::MethodPsk::try_from_slice(
+                methods[hop],
+                &bytes[..methods[hop].key_bytes()],
+            )
+            .expect("hop PSK")
+        });
         let outbounds = prepare_client_outbounds(
             servers
                 .map(|server| ferrum2_config::ClientOutboundConfig { server })
                 .into(),
-            methods.map(psk_for_method).into(),
+            psks.into(),
         )
         .expect("checked runtime outbounds");
         let (route, selector) = compile_selector_plans(
