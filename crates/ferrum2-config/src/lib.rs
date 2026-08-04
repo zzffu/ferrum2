@@ -12,7 +12,13 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use ferrum2_core::TargetAddr;
-use ferrum2_core::route::{MAX_ROUTE_RULES, Network, RouteRule, RouteTable};
+use ferrum2_core::route::{
+    MAX_ROUTE_RULES, Network, RouteRule, RouteTable, compile_selector_route,
+};
+use ferrum2_core::selector::{
+    SelectorCompileError, SelectorControl, SelectorDefinition, TaggedInbound, TaggedOutbound,
+    TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
+};
 use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
 use serde::Deserialize;
 use serde::de::{Deserializer, Visitor};
@@ -63,6 +69,11 @@ impl ValidatedClientConfig {
     pub const fn method(&self) -> TcpMethodProfile {
         self.psk.profile()
     }
+
+    /// Returns a control handle sharing the route table's selector state.
+    pub fn selector_control(&self) -> SelectorControl {
+        self.route.selector_control()
+    }
 }
 
 /// A validated server configuration with no retained source text.
@@ -102,6 +113,11 @@ impl ValidatedServerConfig {
     /// Returns the immutable TCP method bound to the validated PSK.
     pub const fn method(&self) -> TcpMethodProfile {
         self.psk.profile()
+    }
+
+    /// Returns a control handle sharing the route table's selector state.
+    pub fn selector_control(&self) -> SelectorControl {
+        self.route.selector_control()
     }
 }
 
@@ -194,6 +210,10 @@ pub enum ConfigField {
     InboundsOutbound,
     OutboundsTag,
     OutboundsServer,
+    Selectors,
+    SelectorsTag,
+    SelectorsOutbounds,
+    SelectorsDefault,
     Route,
     RouteRules,
     RouteRulesInbound,
@@ -232,6 +252,10 @@ impl ConfigField {
             Self::InboundsOutbound => "inbounds.outbound",
             Self::OutboundsTag => "outbounds.tag",
             Self::OutboundsServer => "outbounds.server",
+            Self::Selectors => "selectors",
+            Self::SelectorsTag => "selectors.tag",
+            Self::SelectorsOutbounds => "selectors.outbounds",
+            Self::SelectorsDefault => "selectors.default",
             Self::Route => "route",
             Self::RouteRules => "route.rules",
             Self::RouteRulesInbound => "route.rules.inbound",
@@ -341,8 +365,14 @@ fn parse_toml<'a, T: Deserialize<'a>>(source: &'a str) -> Result<T, ConfigError>
 
 fn validate_client(raw: RawClientRoot, source: &str) -> Result<ValidatedClientConfig, ConfigError> {
     validate_schema(raw.schema_version)?;
-    let (listen, server, inbounds, outbounds, route) =
-        validate_client_graph(raw.client, raw.inbounds, raw.outbounds, raw.route, source)?;
+    let (listen, server, inbounds, outbounds, route) = validate_client_graph(
+        raw.client,
+        raw.inbounds,
+        raw.outbounds,
+        raw.selectors,
+        raw.route,
+        source,
+    )?;
     let method = parse_method(&raw.shadowsocks.method)?;
     let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
@@ -366,8 +396,14 @@ fn validate_client(raw: RawClientRoot, source: &str) -> Result<ValidatedClientCo
 
 fn validate_server(raw: RawServerRoot, source: &str) -> Result<ValidatedServerConfig, ConfigError> {
     validate_schema(raw.schema_version)?;
-    let (listen, inbounds, outbounds, route) =
-        validate_server_graph(raw.server, raw.inbounds, raw.outbounds, raw.route, source)?;
+    let (listen, inbounds, outbounds, route) = validate_server_graph(
+        raw.server,
+        raw.inbounds,
+        raw.outbounds,
+        raw.selectors,
+        raw.route,
+        source,
+    )?;
     let method = parse_method(&raw.shadowsocks.method)?;
     let psk = parse_psk(method, &raw.shadowsocks.psk)?;
     let runtime = validate_runtime(raw.runtime)?;
@@ -402,9 +438,15 @@ fn validate_client_graph(
     legacy: Option<RawClient>,
     tagged_inbounds: Option<Vec<RawClientInbound>>,
     tagged_outbounds: Option<Vec<RawClientOutbound>>,
+    selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
     source: &str,
 ) -> Result<ValidatedClientGraph, ConfigError> {
+    if selectors.is_some()
+        && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())
+    {
+        return Err(ConfigError::semantic(ConfigField::Selectors));
+    }
     if route.is_some()
         && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())
     {
@@ -473,6 +515,7 @@ fn validate_client_graph(
                     .iter()
                     .map(|outbound| outbound.tag.as_str())
                     .collect(),
+                selectors.as_deref(),
                 source,
             )?;
             let validated_inbounds = listens
@@ -504,6 +547,7 @@ fn validate_server_graph(
     legacy: Option<RawServer>,
     tagged_inbounds: Option<Vec<RawServerInbound>>,
     tagged_outbounds: Option<Vec<RawServerOutbound>>,
+    selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
     source: &str,
 ) -> Result<
@@ -515,6 +559,11 @@ fn validate_server_graph(
     ),
     ConfigError,
 > {
+    if selectors.is_some()
+        && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())
+    {
+        return Err(ConfigError::semantic(ConfigField::Selectors));
+    }
     if route.is_some()
         && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())
     {
@@ -571,6 +620,7 @@ fn validate_server_graph(
                     .iter()
                     .map(|outbound| outbound.tag.as_str())
                     .collect(),
+                selectors.as_deref(),
                 source,
             )?;
             let validated_inbounds = listens
@@ -601,8 +651,12 @@ fn validate_route(
     route: Option<RawRoute>,
     inbounds: Vec<(&str, Option<&str>)>,
     outbounds: Vec<&str>,
+    selectors: Option<&[RawSelector]>,
     source: &str,
 ) -> Result<RouteTable, ConfigError> {
+    if let Some(selectors) = selectors {
+        return validate_selector_route(route, &inbounds, &outbounds, selectors, source);
+    }
     let Some(route) = route else {
         let mut referenced = vec![false; outbounds.len()];
         let mut bindings = Vec::with_capacity(inbounds.len());
@@ -669,6 +723,7 @@ fn validate_route(
             .transpose()?;
         let target = rule
             .target
+            .as_ref()
             .map(|target| validate_route_target(target, source))
             .transpose()?;
         let outbound_tag = rule
@@ -690,8 +745,118 @@ fn validate_route(
         .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRules))
 }
 
+fn validate_selector_route(
+    route: Option<RawRoute>,
+    inbounds: &[(&str, Option<&str>)],
+    outbounds: &[&str],
+    selectors: &[RawSelector],
+    source: &str,
+) -> Result<RouteTable, ConfigError> {
+    let tagged_inbounds = inbounds
+        .iter()
+        .enumerate()
+        .map(|(index, (tag, _))| TaggedInbound::new(tag, index))
+        .collect::<Vec<_>>();
+    let tagged_outbounds = outbounds
+        .iter()
+        .enumerate()
+        .map(|(index, tag)| TaggedOutbound::new(tag, index))
+        .collect::<Vec<_>>();
+    let definitions = selectors
+        .iter()
+        .map(|selector| {
+            SelectorDefinition::new(
+                &selector.tag,
+                selector.outbounds.iter().map(String::as_str).collect(),
+                selector.default.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let (tagged_route, routed) = match route.as_ref() {
+        None => {
+            let bindings = inbounds
+                .iter()
+                .map(|(inbound, outbound)| {
+                    outbound
+                        .map(|outbound| TaggedStaticBinding::new(inbound, outbound))
+                        .ok_or_else(|| ConfigError::semantic(ConfigField::InboundsOutbound))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (TaggedRoute::Static(bindings), false)
+        }
+        Some(route) => {
+            if inbounds.iter().any(|(_, outbound)| outbound.is_some()) {
+                return Err(ConfigError::semantic(ConfigField::Route));
+            }
+            if route.rules.len() > MAX_ROUTE_RULES {
+                return Err(ConfigError::semantic(ConfigField::RouteRules));
+            }
+            let mut rules = Vec::with_capacity(route.rules.len());
+            for rule in &route.rules {
+                let network = rule
+                    .network
+                    .as_deref()
+                    .map(|network| match network {
+                        "tcp" => Ok(Network::Tcp),
+                        "udp" => Ok(Network::Udp),
+                        _ => Err(ConfigError::semantic(ConfigField::RouteRulesNetwork)),
+                    })
+                    .transpose()?;
+                let target = rule
+                    .target
+                    .as_ref()
+                    .map(|target| validate_route_target(target, source))
+                    .transpose()?;
+                rules.push(TaggedRouteRule::new(
+                    rule.inbound.as_deref(),
+                    network,
+                    target,
+                    rule.outbound.as_deref(),
+                ));
+            }
+            (
+                TaggedRoute::Routed {
+                    rules,
+                    final_outbound: route.final_outbound.as_deref(),
+                },
+                true,
+            )
+        }
+    };
+
+    compile_selector_route(
+        &tagged_inbounds,
+        &tagged_outbounds,
+        &definitions,
+        tagged_route,
+    )
+    .map(|(route, _)| route)
+    .map_err(|error| ConfigError::semantic(selector_error_field(error, routed)))
+}
+
+const fn selector_error_field(error: SelectorCompileError, routed: bool) -> ConfigField {
+    match error {
+        SelectorCompileError::Inbounds => ConfigField::InboundsTag,
+        SelectorCompileError::Outbounds => ConfigField::OutboundsTag,
+        SelectorCompileError::Selectors => ConfigField::Selectors,
+        SelectorCompileError::SelectorTag | SelectorCompileError::UnreachableSelector => {
+            ConfigField::SelectorsTag
+        }
+        SelectorCompileError::SelectorOutbounds => ConfigField::SelectorsOutbounds,
+        SelectorCompileError::SelectorDefault => ConfigField::SelectorsDefault,
+        SelectorCompileError::StaticBinding => ConfigField::InboundsOutbound,
+        SelectorCompileError::RouteRules => ConfigField::RouteRules,
+        SelectorCompileError::RouteRuleInbound => ConfigField::RouteRulesInbound,
+        SelectorCompileError::RouteRuleOutbound => ConfigField::RouteRulesOutbound,
+        SelectorCompileError::RouteFinal => ConfigField::RouteFinal,
+        SelectorCompileError::UnreachableOutbound if routed => ConfigField::RouteRulesOutbound,
+        SelectorCompileError::UnreachableOutbound => ConfigField::OutboundsTag,
+    }
+}
+
 fn validate_route_target(
-    raw: toml::Spanned<RawRouteTarget>,
+    raw: &toml::Spanned<RawRouteTarget>,
     source: &str,
 ) -> Result<TargetAddr, ConfigError> {
     if !source
@@ -700,7 +865,7 @@ fn validate_route_target(
     {
         return Err(ConfigError::semantic(ConfigField::RouteRulesTarget));
     }
-    let raw = raw.into_inner();
+    let raw = raw.get_ref();
     let host = raw
         .host
         .as_deref()
@@ -913,6 +1078,7 @@ struct RawClientRoot {
     client: Option<RawClient>,
     inbounds: Option<Vec<RawClientInbound>>,
     outbounds: Option<Vec<RawClientOutbound>>,
+    selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
     shadowsocks: RawShadowsocks,
     #[serde(default)]
@@ -930,6 +1096,7 @@ struct RawServerRoot {
     server: Option<RawServer>,
     inbounds: Option<Vec<RawServerInbound>>,
     outbounds: Option<Vec<RawServerOutbound>>,
+    selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
     shadowsocks: RawShadowsocks,
     #[serde(default)]
@@ -1007,6 +1174,15 @@ struct RawServerInbound {
 #[serde(deny_unknown_fields)]
 struct RawServerOutbound {
     tag: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSelector {
+    tag: String,
+    #[serde(default)]
+    outbounds: Vec<String>,
+    default: Option<String>,
 }
 
 #[derive(Deserialize)]

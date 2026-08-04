@@ -71,6 +71,10 @@ fn routed(source: String, route: &str) -> String {
         + "\n"
 }
 
+fn with_selectors(source: String, selectors: &str) -> String {
+    source.replacen("[shadowsocks]", &format!("{selectors}\n[shadowsocks]"), 1)
+}
+
 fn assert_tagged_error(
     name: &str,
     role: ConfigRole,
@@ -117,15 +121,10 @@ fn assert_tagged_error(
     .expect(name);
     assert_eq!((error.kind(), error.field()), expected, "{name}");
     let rendered = format!("{error}\n{error:?}");
-    let values = source.lines().filter_map(|line| {
-        let (field, value) = line.split_once(" = ")?;
-        matches!(
-            field,
-            "tag" | "outbound" | "listen" | "server" | "psk" | "final" | "network" | "target"
-        )
-        .then(|| value.strip_prefix('"')?.strip_suffix('"'))?
-        .filter(|value| !value.is_empty())
-    });
+    let values = source
+        .lines()
+        .flat_map(|line| line.split('"').skip(1).step_by(2))
+        .filter(|value| value.len() >= 2);
     for sentinel in std::iter::once(raw.as_str())
         .chain(target_host.as_deref())
         .chain(values)
@@ -415,6 +414,113 @@ fn tagged_graph_normalizes_complete_resolved_collections() {
     let server = load_server(TempConfig::text(&tagged_server(64, 64)).path()).expect("64 server");
     assert_eq!((server.inbounds.len(), server.outbounds.len()), (64, 64));
     assert_eq!(selected(&server.route, 63), 63);
+}
+
+#[test]
+fn selector_graphs_compile_for_both_roles_and_share_live_route_state() {
+    let selectors = "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n[[selectors]]\ntag = \"nested\"\noutbounds = [\"manual\"]\ndefault = \"manual\"";
+    let static_source = |source: String| {
+        with_selectors(
+            source
+                .replacen("outbound = \"o0\"", "outbound = \"manual\"", 1)
+                .replacen("outbound = \"o1\"", "outbound = \"nested\"", 1),
+            selectors,
+        )
+    };
+    let client = load_client(TempConfig::text(&static_source(tagged_client(2, 2))).path())
+        .expect("client static");
+    let snapshot = client.server;
+    client.selector_control().switch("manual", "o1").unwrap();
+    assert_eq!(
+        (selected(&client.route, 0), selected(&client.route, 1)),
+        (1, 1)
+    );
+    assert_eq!(client.server, snapshot);
+    let server = load_server(TempConfig::text(&static_source(tagged_server(2, 2))).path())
+        .expect("server static");
+    server.selector_control().switch("manual", "o1").unwrap();
+    assert_eq!(
+        (selected(&server.route, 0), selected(&server.route, 1)),
+        (1, 1)
+    );
+
+    let route = "[route]\nfinal = \"nested\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\noutbound = \"manual\"";
+    let routed_source = |source| with_selectors(routed(source, route), selectors);
+    let client = load_client(TempConfig::text(&routed_source(tagged_client(2, 2))).path())
+        .expect("client route");
+    let snapshot = client.server;
+    client.selector_control().switch("manual", "o1").unwrap();
+    assert_eq!(
+        (selected(&client.route, 0), selected(&client.route, 1)),
+        (1, 1)
+    );
+    assert_eq!(client.server, snapshot);
+    let server = load_server(TempConfig::text(&routed_source(tagged_server(2, 2))).path())
+        .expect("server route");
+    server.selector_control().switch("manual", "o1").unwrap();
+    assert_eq!(
+        (selected(&server.route, 0), selected(&server.route, 1)),
+        (1, 1)
+    );
+}
+
+#[test]
+fn selector_graph_rejects_bounds_members_defaults_cycles_and_inert_nodes_redacted() {
+    let base = || tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"manual\"", 1);
+    let graph = |selectors: &str| with_selectors(base(), selectors);
+    let valid = "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"";
+    let selector_65 = (0..65)
+        .map(|index| {
+            format!("[[selectors]]\ntag = \"s{index}\"\noutbounds = [\"o0\"]\ndefault = \"o0\"\n")
+        })
+        .collect::<String>();
+    let members_65 = (0..65)
+        .map(|index| format!("\"m{index}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let empty = base().replacen(
+        "schema_version = 1",
+        "schema_version = 1\nselectors = []",
+        1,
+    );
+    let partial = "schema_version = 1\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"manual\"\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\"]\ndefault = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned();
+    #[rustfmt::skip]
+    let cases = [
+        ("legacy mixing", with_selectors(CLIENT_BASE.to_owned(), valid), ConfigField::Selectors, ConfigRole::Client),
+        ("partial tagged selector", partial, ConfigField::Selectors, ConfigRole::Client),
+        ("empty selectors", empty, ConfigField::Selectors, ConfigRole::Client),
+        ("65 selectors", graph(&selector_65).replacen("outbound = \"manual\"", "outbound = \"s0\"", 1), ConfigField::Selectors, ConfigRole::Client),
+        ("empty members", graph("[[selectors]]\ntag = \"manual\"\noutbounds = []\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("65 members", graph(&format!("[[selectors]]\ntag = \"manual\"\noutbounds = [{members_65}]\ndefault = \"m0\"")), ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("invalid selector tag", graph("[[selectors]]\ntag = \"bad/tag\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\""), ConfigField::SelectorsTag, ConfigRole::Client),
+        ("duplicate selector tag", graph(&format!("{valid}\n{valid}")), ConfigField::SelectorsTag, ConfigRole::Client),
+        ("global selector collision", graph("[[selectors]]\ntag = \"i0\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\""), ConfigField::SelectorsTag, ConfigRole::Client),
+        ("duplicate member", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o0\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("dangling member", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"missing\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("case mismatched member", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"O1\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("inbound member", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"i0\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("missing default", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]"), ConfigField::SelectorsDefault, ConfigRole::Client),
+        ("dangling default", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"missing\""), ConfigField::SelectorsDefault, ConfigRole::Client),
+        ("nonmember default", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\"]\ndefault = \"o1\""), ConfigField::SelectorsDefault, ConfigRole::Client),
+        ("unreachable selector", graph(&format!("{valid}\n[[selectors]]\ntag = \"unused\"\noutbounds = [\"o0\"]\ndefault = \"o0\"")), ConfigField::SelectorsTag, ConfigRole::Client),
+        ("unreachable concrete", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\"]\ndefault = \"o0\""), ConfigField::OutboundsTag, ConfigRole::Client),
+        ("self cycle", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"manual\", \"o0\", \"o1\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("two node cycle", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"other\", \"o0\", \"o1\"]\ndefault = \"o0\"\n[[selectors]]\ntag = \"other\"\noutbounds = [\"manual\"]\ndefault = \"manual\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("latent longer cycle", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\", \"a\"]\ndefault = \"o0\"\n[[selectors]]\ntag = \"a\"\noutbounds = [\"o0\", \"b\"]\ndefault = \"o0\"\n[[selectors]]\ntag = \"b\"\noutbounds = [\"o0\", \"a\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("server cycle", with_selectors(tagged_server(1, 1).replacen("outbound = \"o0\"", "outbound = \"manual\"", 1), "[[selectors]]\ntag = \"manual\"\noutbounds = [\"manual\", \"o0\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Server),
+    ];
+    for (index, (name, source, field, role)) in cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            role,
+            source,
+            (ConfigErrorKind::Semantic, field),
+            110 + index,
+        );
+    }
+
+    #[rustfmt::skip]
+    assert_eq!([ConfigField::Selectors, ConfigField::SelectorsTag, ConfigField::SelectorsOutbounds, ConfigField::SelectorsDefault].map(ConfigField::as_str), ["selectors", "selectors.tag", "selectors.outbounds", "selectors.default"]);
 }
 
 #[test]

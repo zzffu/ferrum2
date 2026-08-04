@@ -318,6 +318,8 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
     let server_path = directory.path().join("server-tagged.toml");
     let client_route_path = directory.path().join("client-route.toml");
     let server_route_path = directory.path().join("server-route.toml");
+    let client_selector_path = directory.path().join("client-selector.toml");
+    let server_selector_path = directory.path().join("server-selector.toml");
     std::fs::write(
         &client_path,
         tagged_client(
@@ -344,6 +346,27 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         routed_tagged(tagged_server(&[server_address_a, server_address_b])),
     )
     .expect("server routed config");
+    let selectors =
+        "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n";
+    let selector = |source: String| {
+        source
+            .replace("outbound = \"o0\"", "outbound = \"manual\"")
+            .replace("outbound = \"o1\"", "outbound = \"manual\"")
+            .replacen("[shadowsocks]", &format!("{selectors}[shadowsocks]"), 1)
+    };
+    std::fs::write(
+        &client_selector_path,
+        selector(tagged_client(
+            &[client_address_a, client_address_b],
+            &[server_address_a, server_address_b],
+        )),
+    )
+    .expect("selector config");
+    std::fs::write(
+        &server_selector_path,
+        selector(tagged_server(&[server_address_a, server_address_b])),
+    )
+    .expect("selector config");
 
     for (binary, path) in [
         ("ferrum2-client", &client_path),
@@ -373,6 +396,8 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
     for (binary, path) in [
         ("ferrum2-client", &client_route_path),
         ("ferrum2-server", &server_route_path),
+        ("ferrum2-client", &client_selector_path),
+        ("ferrum2-server", &server_selector_path),
     ] {
         let checked = run_binary(
             binary,
@@ -451,6 +476,21 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         &invalid,
         "error[config.semantic] route.rules.outbound: configuration value is invalid\n",
         route_sentinel,
+    );
+    let cycle_sentinel = "selector_cli_cycle_sentinel";
+    let invalid = directory.path().join("client-selector-cycle.toml");
+    let source = std::fs::read_to_string(&client_selector_path)
+        .expect("selector source")
+        .replace(
+            "outbounds = [\"o0\", \"o1\"]",
+            &format!("outbounds = [\"manual\", \"o0\", \"o1\"]\n# {cycle_sentinel}"),
+        );
+    std::fs::write(&invalid, source).expect("cycle config");
+    assert_invalid(
+        "ferrum2-client",
+        &invalid,
+        "error[config.semantic] selectors.outbounds: configuration value is invalid\n",
+        cycle_sentinel,
     );
 
     for listener in [client_a, client_b, server_a, server_b] {

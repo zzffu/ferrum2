@@ -164,9 +164,244 @@ impl fmt::Display for TargetAddrError {
 
 impl Error for TargetAddrError {}
 
+/// Runtime-neutral manual outbound selector state and public control.
+pub mod selector {
+    use super::TargetAddr;
+    use super::route::Network;
+    use std::error::Error;
+    use std::fmt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Maximum number of selectors retained by one route table.
+    pub const MAX_SELECTORS: usize = 64;
+    /// Maximum number of immediate members retained by one selector.
+    pub const MAX_SELECTOR_MEMBERS: usize = 64;
+
+    /// One tagged inbound identity supplied to selector-aware compilation.
+    #[derive(Clone, Copy)]
+    pub struct TaggedInbound<'a> {
+        pub(super) tag: &'a str,
+        pub(super) inbound: usize,
+    }
+
+    impl<'a> TaggedInbound<'a> {
+        pub const fn new(tag: &'a str, inbound: usize) -> Self {
+            Self { tag, inbound }
+        }
+    }
+
+    /// One tagged concrete outbound identity supplied to selector-aware compilation.
+    #[derive(Clone, Copy)]
+    pub struct TaggedOutbound<'a> {
+        pub(super) tag: &'a str,
+        pub(super) outbound: usize,
+    }
+
+    impl<'a> TaggedOutbound<'a> {
+        pub const fn new(tag: &'a str, outbound: usize) -> Self {
+            Self { tag, outbound }
+        }
+    }
+
+    /// One fixed-member selector definition supplied to selector-aware compilation.
+    pub struct SelectorDefinition<'a> {
+        pub(super) tag: &'a str,
+        pub(super) outbounds: Vec<&'a str>,
+        pub(super) default: Option<&'a str>,
+    }
+
+    impl<'a> SelectorDefinition<'a> {
+        pub fn new(tag: &'a str, outbounds: Vec<&'a str>, default: Option<&'a str>) -> Self {
+            Self {
+                tag,
+                outbounds,
+                default,
+            }
+        }
+    }
+
+    /// One tagged static binding supplied to selector-aware compilation.
+    pub struct TaggedStaticBinding<'a> {
+        pub(super) inbound: &'a str,
+        pub(super) outbound: &'a str,
+    }
+
+    impl<'a> TaggedStaticBinding<'a> {
+        pub const fn new(inbound: &'a str, outbound: &'a str) -> Self {
+            Self { inbound, outbound }
+        }
+    }
+
+    /// One tagged routed rule supplied to selector-aware compilation.
+    pub struct TaggedRouteRule<'a> {
+        pub(super) inbound: Option<&'a str>,
+        pub(super) network: Option<Network>,
+        pub(super) target: Option<TargetAddr>,
+        pub(super) outbound: Option<&'a str>,
+    }
+
+    impl<'a> TaggedRouteRule<'a> {
+        pub fn new(
+            inbound: Option<&'a str>,
+            network: Option<Network>,
+            target: Option<TargetAddr>,
+            outbound: Option<&'a str>,
+        ) -> Self {
+            Self {
+                inbound,
+                network,
+                target,
+                outbound,
+            }
+        }
+    }
+
+    /// Tagged static or routed actions supplied to selector-aware compilation.
+    pub enum TaggedRoute<'a> {
+        Static(Vec<TaggedStaticBinding<'a>>),
+        Routed {
+            rules: Vec<TaggedRouteRule<'a>>,
+            final_outbound: Option<&'a str>,
+        },
+    }
+
+    /// Closed selector compilation failures.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SelectorCompileError {
+        Inbounds,
+        Outbounds,
+        Selectors,
+        SelectorTag,
+        SelectorOutbounds,
+        SelectorDefault,
+        StaticBinding,
+        RouteRules,
+        RouteRuleInbound,
+        RouteRuleOutbound,
+        RouteFinal,
+        UnreachableOutbound,
+        UnreachableSelector,
+    }
+
+    impl fmt::Display for SelectorCompileError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("selector graph is invalid")
+        }
+    }
+
+    impl Error for SelectorCompileError {}
+
+    /// Closed selector control failures.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SelectorError {
+        UnknownSelector,
+        UnknownMember,
+    }
+
+    impl fmt::Display for SelectorError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::UnknownSelector => formatter.write_str("unknown selector"),
+                Self::UnknownMember => formatter.write_str("unknown selector member"),
+            }
+        }
+    }
+
+    impl Error for SelectorError {}
+
+    #[derive(Clone, Copy)]
+    pub(super) enum OutboundAction {
+        Concrete(usize),
+        Selector(usize),
+    }
+
+    pub(super) struct SelectorMember {
+        pub(super) tag: Box<str>,
+        pub(super) action: OutboundAction,
+    }
+
+    pub(super) struct Selector {
+        pub(super) tag: Box<str>,
+        pub(super) members: Vec<SelectorMember>,
+        pub(super) selected: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    pub(super) struct SelectorState {
+        pub(super) selectors: Vec<Selector>,
+    }
+
+    impl SelectorState {
+        pub(super) fn resolve(&self, mut action: OutboundAction) -> usize {
+            for _ in 0..=self.selectors.len() {
+                match action {
+                    OutboundAction::Concrete(outbound) => return outbound,
+                    OutboundAction::Selector(selector) => {
+                        let selector = &self.selectors[selector];
+                        action = selector.members[selector.selected.load(Ordering::SeqCst)].action;
+                    }
+                }
+            }
+            unreachable!("validated selector graph does not terminate")
+        }
+    }
+
+    /// Cloneable public control over one compiled selector graph.
+    #[derive(Clone)]
+    pub struct SelectorControl {
+        pub(super) state: Arc<SelectorState>,
+    }
+
+    impl SelectorControl {
+        /// Returns a selector's current immediate member tag.
+        pub fn selected<'a>(&'a self, selector_tag: &str) -> Result<&'a str, SelectorError> {
+            let selector = self
+                .state
+                .selectors
+                .iter()
+                .find(|selector| selector.tag.as_ref() == selector_tag)
+                .ok_or(SelectorError::UnknownSelector)?;
+            Ok(&selector.members[selector.selected.load(Ordering::SeqCst)].tag)
+        }
+
+        /// Atomically selects one configured immediate member.
+        pub fn switch(&self, selector_tag: &str, member_tag: &str) -> Result<(), SelectorError> {
+            let selector = self
+                .state
+                .selectors
+                .iter()
+                .find(|selector| selector.tag.as_ref() == selector_tag)
+                .ok_or(SelectorError::UnknownSelector)?;
+            let member = selector
+                .members
+                .iter()
+                .position(|member| member.tag.as_ref() == member_tag)
+                .ok_or(SelectorError::UnknownMember)?;
+            if selector.selected.load(Ordering::SeqCst) != member {
+                selector.selected.store(member, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    impl fmt::Debug for SelectorControl {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("SelectorControl([redacted])")
+        }
+    }
+}
+
 /// Runtime-neutral, total first-match routing.
 pub mod route {
+    use super::selector::{
+        MAX_SELECTOR_MEMBERS, MAX_SELECTORS, OutboundAction, Selector, SelectorCompileError,
+        SelectorControl, SelectorDefinition, SelectorMember, SelectorState, TaggedInbound,
+        TaggedOutbound, TaggedRoute,
+    };
     use super::{TargetAddr, TargetHost};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     /// Maximum number of rules retained by one route table.
     pub const MAX_ROUTE_RULES: usize = 64;
@@ -183,7 +418,7 @@ pub mod route {
         inbound: Option<usize>,
         network: Option<Network>,
         target: Option<TargetAddr>,
-        outbound: usize,
+        outbound: OutboundAction,
     }
 
     impl RouteRule {
@@ -197,7 +432,7 @@ pub mod route {
                 inbound,
                 network,
                 target,
-                outbound,
+                outbound: OutboundAction::Concrete(outbound),
             }
         }
 
@@ -222,8 +457,10 @@ pub mod route {
     /// A compiled route table whose selection always returns an outbound identity.
     pub struct RouteTable {
         rules: Vec<RouteRule>,
+        final_action: OutboundAction,
         final_outbound: usize,
         routed: bool,
+        selectors: Arc<SelectorState>,
     }
 
     impl RouteTable {
@@ -240,8 +477,10 @@ pub mod route {
                 .collect();
             Some(Self {
                 rules,
+                final_action: OutboundAction::Concrete(final_outbound),
                 final_outbound,
                 routed: false,
+                selectors: Arc::default(),
             })
         }
 
@@ -249,8 +488,10 @@ pub mod route {
         pub fn routed(rules: Vec<RouteRule>, final_outbound: usize) -> Option<Self> {
             (rules.len() <= MAX_ROUTE_RULES).then_some(Self {
                 rules,
+                final_action: OutboundAction::Concrete(final_outbound),
                 final_outbound,
                 routed: true,
+                selectors: Arc::default(),
             })
         }
 
@@ -264,18 +505,321 @@ pub mod route {
             self.final_outbound
         }
 
+        /// Returns a control handle sharing this route table's selector state.
+        pub fn selector_control(&self) -> SelectorControl {
+            SelectorControl {
+                state: Arc::clone(&self.selectors),
+            }
+        }
+
         /// Selects the first matching rule or the mandatory final outbound.
         pub fn select(&self, inbound: usize, network: Network, target: &TargetAddr) -> usize {
-            self.rules
+            let action = self
+                .rules
                 .iter()
                 .find(|rule| rule.matches(inbound, network, target))
-                .map_or(self.final_outbound, |rule| rule.outbound)
+                .map_or(self.final_action, |rule| rule.outbound);
+            self.selectors.resolve(action)
         }
     }
 
     impl std::fmt::Debug for RouteTable {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             formatter.write_str("RouteTable([redacted])")
+        }
+    }
+
+    /// Compiles a validated tagged selector graph and tagged route actions atomically.
+    pub fn compile_selector_route(
+        inbounds: &[TaggedInbound<'_>],
+        outbounds: &[TaggedOutbound<'_>],
+        definitions: &[SelectorDefinition<'_>],
+        route: TaggedRoute<'_>,
+    ) -> Result<(RouteTable, SelectorControl), SelectorCompileError> {
+        validate_identities(inbounds, outbounds, definitions)?;
+
+        let mut selectors = Vec::with_capacity(definitions.len());
+        for definition in definitions {
+            if !(1..=MAX_SELECTOR_MEMBERS).contains(&definition.outbounds.len()) {
+                return Err(SelectorCompileError::SelectorOutbounds);
+            }
+            let mut members = Vec::with_capacity(definition.outbounds.len());
+            for (index, tag) in definition.outbounds.iter().enumerate() {
+                if !valid_tag(tag) || definition.outbounds[..index].contains(tag) {
+                    return Err(SelectorCompileError::SelectorOutbounds);
+                }
+                let action = resolve_tag(tag, outbounds, definitions)
+                    .ok_or(SelectorCompileError::SelectorOutbounds)?;
+                members.push(SelectorMember {
+                    tag: (*tag).into(),
+                    action,
+                });
+            }
+            let default = definition
+                .default
+                .filter(|tag| valid_tag(tag))
+                .and_then(|default| definition.outbounds.iter().position(|tag| *tag == default))
+                .ok_or(SelectorCompileError::SelectorDefault)?;
+            selectors.push(Selector {
+                tag: definition.tag.into(),
+                members,
+                selected: AtomicUsize::new(default),
+            });
+        }
+        validate_acyclic(&selectors)?;
+
+        let (rules, final_action, routed, roots) =
+            compile_actions(inbounds, outbounds, definitions, route)?;
+        validate_reachability(&selectors, outbounds, &roots)?;
+        let state = Arc::new(SelectorState { selectors });
+        let final_outbound = state.resolve(final_action);
+        let control = SelectorControl {
+            state: Arc::clone(&state),
+        };
+        Ok((
+            RouteTable {
+                rules,
+                final_action,
+                final_outbound,
+                routed,
+                selectors: state,
+            },
+            control,
+        ))
+    }
+
+    fn validate_identities(
+        inbounds: &[TaggedInbound<'_>],
+        outbounds: &[TaggedOutbound<'_>],
+        definitions: &[SelectorDefinition<'_>],
+    ) -> Result<(), SelectorCompileError> {
+        if !(1..=MAX_ROUTE_RULES).contains(&inbounds.len())
+            || inbounds.iter().enumerate().any(|(index, inbound)| {
+                !valid_tag(inbound.tag)
+                    || inbounds[..index]
+                        .iter()
+                        .any(|other| other.tag == inbound.tag || other.inbound == inbound.inbound)
+            })
+        {
+            return Err(SelectorCompileError::Inbounds);
+        }
+        if !(1..=MAX_ROUTE_RULES).contains(&outbounds.len())
+            || outbounds.iter().enumerate().any(|(index, outbound)| {
+                !valid_tag(outbound.tag)
+                    || inbounds.iter().any(|inbound| inbound.tag == outbound.tag)
+                    || outbounds[..index].iter().any(|other| {
+                        other.tag == outbound.tag || other.outbound == outbound.outbound
+                    })
+            })
+        {
+            return Err(SelectorCompileError::Outbounds);
+        }
+        if !(1..=MAX_SELECTORS).contains(&definitions.len()) {
+            return Err(SelectorCompileError::Selectors);
+        }
+        if definitions.iter().enumerate().any(|(index, selector)| {
+            !valid_tag(selector.tag)
+                || inbounds.iter().any(|inbound| inbound.tag == selector.tag)
+                || outbounds
+                    .iter()
+                    .any(|outbound| outbound.tag == selector.tag)
+                || definitions[..index]
+                    .iter()
+                    .any(|other| other.tag == selector.tag)
+        }) {
+            return Err(SelectorCompileError::SelectorTag);
+        }
+        Ok(())
+    }
+
+    fn valid_tag(tag: &str) -> bool {
+        (1..=64).contains(&tag.len())
+            && tag
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    }
+
+    fn resolve_tag(
+        tag: &str,
+        outbounds: &[TaggedOutbound<'_>],
+        definitions: &[SelectorDefinition<'_>],
+    ) -> Option<OutboundAction> {
+        outbounds
+            .iter()
+            .find(|outbound| outbound.tag == tag)
+            .map(|outbound| OutboundAction::Concrete(outbound.outbound))
+            .or_else(|| {
+                definitions
+                    .iter()
+                    .position(|selector| selector.tag == tag)
+                    .map(OutboundAction::Selector)
+            })
+    }
+
+    fn validate_acyclic(selectors: &[Selector]) -> Result<(), SelectorCompileError> {
+        fn visit(
+            selector: usize,
+            selectors: &[Selector],
+            marks: &mut [u8],
+        ) -> Result<(), SelectorCompileError> {
+            if marks[selector] == 1 {
+                return Err(SelectorCompileError::SelectorOutbounds);
+            }
+            if marks[selector] == 2 {
+                return Ok(());
+            }
+            marks[selector] = 1;
+            for member in &selectors[selector].members {
+                if let OutboundAction::Selector(next) = member.action {
+                    visit(next, selectors, marks)?;
+                }
+            }
+            marks[selector] = 2;
+            Ok(())
+        }
+
+        let mut marks = vec![0; selectors.len()];
+        for selector in 0..selectors.len() {
+            visit(selector, selectors, &mut marks)?;
+        }
+        Ok(())
+    }
+
+    fn compile_actions(
+        inbounds: &[TaggedInbound<'_>],
+        outbounds: &[TaggedOutbound<'_>],
+        definitions: &[SelectorDefinition<'_>],
+        route: TaggedRoute<'_>,
+    ) -> Result<(Vec<RouteRule>, OutboundAction, bool, Vec<OutboundAction>), SelectorCompileError>
+    {
+        match route {
+            TaggedRoute::Static(bindings) => {
+                if bindings.len() != inbounds.len() {
+                    return Err(SelectorCompileError::StaticBinding);
+                }
+                let mut seen = vec![false; inbounds.len()];
+                let mut rules = Vec::with_capacity(bindings.len());
+                let mut roots = Vec::with_capacity(bindings.len());
+                for binding in bindings {
+                    let inbound = inbounds
+                        .iter()
+                        .position(|inbound| inbound.tag == binding.inbound)
+                        .ok_or(SelectorCompileError::StaticBinding)?;
+                    if seen[inbound] {
+                        return Err(SelectorCompileError::StaticBinding);
+                    }
+                    seen[inbound] = true;
+                    let action = resolve_tag(binding.outbound, outbounds, definitions)
+                        .ok_or(SelectorCompileError::StaticBinding)?;
+                    roots.push(action);
+                    rules.push(RouteRule {
+                        inbound: Some(inbounds[inbound].inbound),
+                        network: None,
+                        target: None,
+                        outbound: action,
+                    });
+                }
+                let final_action = roots[0];
+                Ok((rules, final_action, false, roots))
+            }
+            TaggedRoute::Routed {
+                rules: tagged_rules,
+                final_outbound,
+            } => {
+                if tagged_rules.len() > MAX_ROUTE_RULES {
+                    return Err(SelectorCompileError::RouteRules);
+                }
+                let final_action = final_outbound
+                    .filter(|tag| valid_tag(tag))
+                    .and_then(|tag| resolve_tag(tag, outbounds, definitions))
+                    .ok_or(SelectorCompileError::RouteFinal)?;
+                let mut roots = vec![final_action];
+                let mut rules = Vec::with_capacity(tagged_rules.len());
+                for rule in tagged_rules {
+                    if rule.inbound.is_none() && rule.network.is_none() && rule.target.is_none() {
+                        return Err(SelectorCompileError::RouteRules);
+                    }
+                    let inbound = rule
+                        .inbound
+                        .map(|tag| {
+                            inbounds
+                                .iter()
+                                .find(|inbound| inbound.tag == tag)
+                                .map(|inbound| inbound.inbound)
+                                .ok_or(SelectorCompileError::RouteRuleInbound)
+                        })
+                        .transpose()?;
+                    let action = rule
+                        .outbound
+                        .filter(|tag| valid_tag(tag))
+                        .and_then(|tag| resolve_tag(tag, outbounds, definitions))
+                        .ok_or(SelectorCompileError::RouteRuleOutbound)?;
+                    roots.push(action);
+                    rules.push(RouteRule {
+                        inbound,
+                        network: rule.network,
+                        target: rule.target,
+                        outbound: action,
+                    });
+                }
+                Ok((rules, final_action, true, roots))
+            }
+        }
+    }
+
+    fn validate_reachability(
+        selectors: &[Selector],
+        outbounds: &[TaggedOutbound<'_>],
+        roots: &[OutboundAction],
+    ) -> Result<(), SelectorCompileError> {
+        fn visit(
+            action: OutboundAction,
+            selectors: &[Selector],
+            outbounds: &[TaggedOutbound<'_>],
+            reached_selectors: &mut [bool],
+            reached_outbounds: &mut [bool],
+        ) {
+            match action {
+                OutboundAction::Concrete(outbound) => {
+                    let index = outbounds
+                        .iter()
+                        .position(|candidate| candidate.outbound == outbound)
+                        .expect("validated concrete identity");
+                    reached_outbounds[index] = true;
+                }
+                OutboundAction::Selector(selector) if !reached_selectors[selector] => {
+                    reached_selectors[selector] = true;
+                    for member in &selectors[selector].members {
+                        visit(
+                            member.action,
+                            selectors,
+                            outbounds,
+                            reached_selectors,
+                            reached_outbounds,
+                        );
+                    }
+                }
+                OutboundAction::Selector(_) => {}
+            }
+        }
+
+        let mut reached_selectors = vec![false; selectors.len()];
+        let mut reached_outbounds = vec![false; outbounds.len()];
+        for root in roots {
+            visit(
+                *root,
+                selectors,
+                outbounds,
+                &mut reached_selectors,
+                &mut reached_outbounds,
+            );
+        }
+        if reached_selectors.contains(&false) {
+            Err(SelectorCompileError::UnreachableSelector)
+        } else if reached_outbounds.contains(&false) {
+            Err(SelectorCompileError::UnreachableOutbound)
+        } else {
+            Ok(())
         }
     }
 }
