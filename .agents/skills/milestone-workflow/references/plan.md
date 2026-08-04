@@ -36,6 +36,18 @@ Use the repository defaults unless the accepted evidence map justifies another t
 file at `800/1200`. A changed threshold requires an isolated policy revision with a durable
 `reforecast_ref`; do not hide additional evidence by compressing tests to fit an obsolete estimate.
 
+## Hosted performance plan
+
+Record one explicit decision: `Performance: excluded — <rationale>` (the default) or
+`Performance: required — <reason>`. Require it only for a cryptography or transport hot-path
+change, resource/admission/lifecycle ownership change, benchmark/toolchain/runner/reference-profile
+change, release candidate, or performance/resource claim.
+
+An excluded performance run proves and claims nothing about performance; it never waives a
+correctness, security, reproducibility, or control-integrity gate. When performance is required,
+obtain explicit remote authorization, dispatch `.github/workflows/m0.yml` for the accepted exact
+SHA, and require the independent `performance` job to pass.
+
 ## Plan gate
 
 A plan is ready when the baseline resolves, scope is bounded, dependencies are acyclic,

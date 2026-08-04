@@ -602,7 +602,7 @@ jobs:
 
   performance:
     name: performance
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -623,7 +623,7 @@ jobs:
           test "$RUNNER_OS" = "Linux"
           test "$RUNNER_ARCH" = "X64"
           test "$ImageOS" = "ubuntu24"
-          test "$GITHUB_EVENT_NAME" = "push" || test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
           test ! -e "$RUNNER_TEMP/m4"
           for process in ferrum2-client ferrum2-server sslocal ssserver; do
             ! pgrep -x "$process" >/dev/null
@@ -789,7 +789,6 @@ jobs:
       - msrv
       - platform
       - interop
-      - performance
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -808,7 +807,6 @@ jobs:
           MSRV_RESULT: ${{ needs.msrv.result }}
           PLATFORM_RESULT: ${{ needs.platform.result }}
           INTEROP_RESULT: ${{ needs.interop.result }}
-          PERFORMANCE_RESULT: ${{ needs.performance.result }}
         run: |
           set -euo pipefail
           test "$(git status --porcelain)" = ""
@@ -818,14 +816,5 @@ jobs:
           test "$MSRV_RESULT" = "success"
           test "$PLATFORM_RESULT" = "success"
           test "$INTEROP_RESULT" = "success"
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            test "$PERFORMANCE_RESULT" = "skipped"
-            performance=SKIPPED
-          else
-            test "$PERFORMANCE_RESULT" = "success"
-            performance=PASS
-          fi
           printf 'm3_qualification_completion status=PASS full=PASS security=PASS process=PASS msrv=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS platforms=3/3 test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-          printf 'm4_qualification_completion status=PASS performance=%s full=PASS security=PASS process=PASS msrv=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS platforms=3/3 test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
-            "$performance" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"

@@ -36,6 +36,19 @@ cargo test -p ferrum2-m0-harness --test lifecycle_cycles full_qualification_runs
 cargo doc --workspace --all-features --no-deps --locked
 ```
 
+## Hosted performance
+
+Pull-request and configured push runs require `quality`, `test-footprint`, `msrv`, every
+`platform` row, `interop`, and the final `qualification` aggregate. The independent `performance`
+job runs only through `workflow_dispatch` and is not an input to `qualification`.
+
+Milestone plans default to `Performance: excluded` with a rationale and make no performance or
+resource claim. Mark it `required` only for a cryptography or transport hot-path change,
+resource/admission/lifecycle ownership change, benchmark/toolchain/runner/reference-profile
+change, release candidate, or performance/resource claim. After explicit remote authorization,
+dispatch the accepted exact SHA and require `performance` to pass. Performance exclusion never
+waives a correctness, security, reproducibility, or control-integrity gate.
+
 ## Test footprint
 
 The tracked control remains `scripts/test-budget.sh`, but schema 3 treats Rust test LOC as a
