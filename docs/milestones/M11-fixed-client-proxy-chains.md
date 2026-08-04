@@ -1,6 +1,6 @@
 # M11 — 固定 client proxy chaining 与 per-outbound credentials
 
-- **Status:** planned
+- **Status:** executing
 - **Baseline:** `7a3c876681255b88492b3608af4fa52497435efc`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -72,7 +72,7 @@ seam、SIP022 state machines 与 process lifecycle 保持兼容。
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M11-T01 | Compile additive per-outbound credentials and bounded direct/chain plans | — | ready |
+| M11-T01 | Compile additive per-outbound credentials and bounded direct/chain plans | — | active |
 | M11-T02 | Compose ordered fixed TCP chains with existing SIP022 flows | M11-T01 | todo |
 | M11-T03 | Compose bounded ordered UDP chains with atomic validation/binding | M11-T02 | todo |
 | M11-T04 | Prove mixed-credential two-hop TCP/UDP in existing real-process harness | M11-T03 | todo |
@@ -100,7 +100,6 @@ is planned。Known growing-file signals：config/local-support/UDP process files
 
 ## Blocker / next action
 
-Plan gate is ready：baseline resolves，scope is bounded，dependency DAG is acyclic，overlapping client
-ownership is serialized and validation is known。Next action is `mode: execute` for M11-T01 from this
-accepted plan commit in its own branch/worktree。No product change、push、workflow dispatch、hosted run、
-PR、tag、release or publication is authorized by feature planning。
+No execution blocker。M11-T01 starts from exact ticket base
+`81469722101bcbb4e71a41e39dfd98e99043d34a` in one isolated ticket worktree。Push、workflow
+dispatch、hosted run、PR、tag、release and publication remain unauthorized。

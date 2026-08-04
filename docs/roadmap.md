@@ -48,9 +48,9 @@ run [`30906020944/1`](https://github.com/zzffu/ferrum2/actions/runs/30906020944)
 `PASS_WITH_NOTES`、QA `PASS`，blocking findings为零。Performance只作current-workflow
 regression/aggregate evidence，M10不新增threshold或claim；一次non-force push授权已消费，
 未rerun、second push、dispatch、PR、tag、release或publish。
-M11现为`planned`，baseline为clean `master@7a3c876681255b88492b3608af4fa52497435efc`。
-它计划交付client固定有序proxy chain及per-concrete-outbound method/PSK；当前只有
-ADR/SPEC/TEST/tickets和schema 3 forecast，没有product、validation、remote或release证据。
+M11以clean `master@7a3c876681255b88492b3608af4fa52497435efc`为baseline，
+并从exact ticket base `81469722101bcbb4e71a41e39dfd98e99043d34a`进入`executing`：
+M11-T01 active，尚无product implementation、qualification、remote或release证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -940,7 +940,7 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 
 ## M11 — 固定 client proxy chaining 与 per-outbound credentials
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** tagged client的每个concrete Shadowsocks outbound可同时声明method/PSK或完整继承
   global `[shadowsocks]`；client-only `[[chains]]`把`2..=8`个concrete hops编译为immutable ordered
   plan，供static binding、route rule/final和selector选择。TCP/UDP逐层使用对应凭据；任一失败
@@ -951,7 +951,7 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
   fail closed/redacted；static/route/selector full-plan snapshot；different-method/PSK real two-hop TCP/UDP；
   per-layer tamper/wrong credential、nested UDP exact bound/+1、no partial mutation；owner cleanup/rebind；
   Full/MSRV/lifecycle/platform/interop/footprint/reviews及manual performance/resource exact-SHA evidence。
-- **Tickets:** M11-T01 config/plan `ready`；M11-T02 TCP依赖T01 `todo`；M11-T03 UDP依赖T02
+- **Tickets:** M11-T01 config/plan `active`；M11-T02 TCP依赖T01 `todo`；M11-T03 UDP依赖T02
   `todo`；M11-T04 real-process依赖T03 `todo`；M11-T05 exact qualification依赖T04 `todo`。
   Decision/spec/test为ADR-0030、SPEC/TEST-0012。
 - **Forecast:** test case/support/fixture `640/80/0`，预计milestone numeric `REVIEW_REQUIRED`但每票
@@ -960,8 +960,10 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 - **Deferred/out of scope:** dynamic chain/hop、selector-in-hop、nested chain、health/auto-select/retry/
   fallback/failover/load balancing、SIP023/multi-user、server per-inbound credentials、DNS/Geo/sniff/user
   policy、new Endpoint、transparent/TUN、hot reload、management API、package/release/publication。
-- **Remote boundary:** feature plan没有授权或执行push、workflow dispatch、hosted run、PR、tag、release
-  或publication。T05需要分别取得exact-SHA non-force push和manual performance dispatch授权。
+- **Execution / remote boundary:** T01从exact base
+  `81469722101bcbb4e71a41e39dfd98e99043d34a`执行；无push、workflow dispatch、hosted run、PR、
+  tag、release或publication授权/执行。T05需要分别取得exact-SHA non-force push和manual
+  performance dispatch授权。
 
 ## 决策登记
 
@@ -1121,3 +1123,4 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 | 2026-08-04 | M10 local validation / qualification blocked | product ancestor under qualification `93ed9d91`在local checkpoint `eb56b81b`通过focused、Full、MSRV、100+ lifecycle、docs与schema 3 footprint；M10改为`validating`，T03改为`blocked` | Workspace `308/5`、lifecycle `1/1` `126.57s`；footprint `16646/27319`、ratio `1.641175`、cumulative `403/0/0`；exact-product Architect `PASS_WITH_NOTES`。Initial docs `146e8d5` reviews blocked on `ARCH-M10T03-001` / `M10-T03-QA-001/002/003`；two mandated independent xhigh analyses selected five-doc repair `a274a7cd`，targeted Architect/QA both `PASS` and resolved all four findings；reviewed repair is integrated and post-fast-forward checks passed | One accepted exact SHA/run/attempt must complete `quality`、`test-footprint`、`msrv`、`platform / windows-msvc`、`platform / linux-gnu`、`platform / linux-musl`、`interop` (TCP/UDP `12/12` plus cleanup)、`performance` and `qualification`；performance仅为current-workflow regression/aggregate dependency，M10无threshold/claim；需另行明确授权一次non-force push，未执行remote action，M8 evidence不作M10 PASS；only final exact hosted-SHA review remains pending |
 | 2026-08-04 | M10 close | exact `2df141e7`由automatic push run `30906020944/1`同SHA通过九项result；T03 `done`，M10 `closed` | Full/security/process、schema 3 footprint、Rust 1.85、three platforms、TCP/UDP各`12/12`+cleanup、10k/180 samples/drain与final aggregate均PASS；final Architect `PASS_WITH_NOTES`、QA `PASS`，无新blocker/major/minor | Footprint `16646/27319`、ratio `1.641175`、cumulative `403/0/0`；large-file dispositions保留；performance `42m51s`、ratio `0.308719307`仅为regression evidence；一次push授权消费，未rerun/second push/dispatch/PR/tag/release/publish；closeout仅本地docs commit |
 | 2026-08-04 | M11 plan | M11改为`planned`；接受client outbound complete override/global inheritance、`2..=8` fixed concrete-hop chains、whole-plan static/route/selector selection及ordered existing-state-machine TCP/UDP composition | M10 closed；existing zero-resource loader、route/selector、split TCP open和UDP prepare/commit seams足够，不需要dynamic group、new protocol core、crate或dependency | baseline `7a3c876`；ADR-0030、SPEC/TEST-0012、T01→T02→T03→T04→T05；schema 3 forecast `640/80/0` and performance required；plan-only，无product/push/dispatch/hosted/release/publication |
+| 2026-08-04 | M11 execute start | M11改为`executing`，唯一ready frontier M11-T01改为`active`并绑定独立ticket worktree | `master@7a3c876681255b88492b3608af4fa52497435efc`干净且未移动；M10 closed，M11 contracts approved | exact ticket base `81469722101bcbb4e71a41e39dfd98e99043d34a`；test-budget verify PASS；无push/hosted run/release/publication |
