@@ -13,11 +13,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{
-    MAX_ROUTE_RULES, Network, RouteRule, RouteTable, compile_selector_route,
+    MAX_ROUTE_RULES, Network, RouteRule, RouteTable, compile_selector_plans,
 };
 use ferrum2_core::selector::{
     SelectorCompileError, SelectorControl, SelectorDefinition, TaggedInbound, TaggedOutbound,
-    TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
+    TaggedPlan, TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
 };
 use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
 use serde::Deserialize;
@@ -46,6 +46,7 @@ pub struct ValidatedClientConfig {
     pub outbounds: Vec<ClientOutboundConfig>,
     pub route: RouteTable,
     pub psk: MethodPsk,
+    pub outbound_psks: Vec<MethodPsk>,
     pub runtime: RuntimeConfig,
     pub udp: Option<UdpConfig>,
     pub logging: LoggingConfig,
@@ -210,6 +211,11 @@ pub enum ConfigField {
     InboundsOutbound,
     OutboundsTag,
     OutboundsServer,
+    OutboundsMethod,
+    OutboundsPsk,
+    Chains,
+    ChainsTag,
+    ChainsHops,
     Selectors,
     SelectorsTag,
     SelectorsOutbounds,
@@ -252,6 +258,11 @@ impl ConfigField {
             Self::InboundsOutbound => "inbounds.outbound",
             Self::OutboundsTag => "outbounds.tag",
             Self::OutboundsServer => "outbounds.server",
+            Self::OutboundsMethod => "outbounds.method",
+            Self::OutboundsPsk => "outbounds.psk",
+            Self::Chains => "chains",
+            Self::ChainsTag => "chains.tag",
+            Self::ChainsHops => "chains.hops",
             Self::Selectors => "selectors",
             Self::SelectorsTag => "selectors.tag",
             Self::SelectorsOutbounds => "selectors.outbounds",
@@ -363,18 +374,30 @@ fn parse_toml<'a, T: Deserialize<'a>>(source: &'a str) -> Result<T, ConfigError>
         .map_err(|_| ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config))
 }
 
-fn validate_client(raw: RawClientRoot, source: &str) -> Result<ValidatedClientConfig, ConfigError> {
+fn validate_client(
+    mut raw: RawClientRoot,
+    source: &str,
+) -> Result<ValidatedClientConfig, ConfigError> {
     validate_schema(raw.schema_version)?;
+    let outbound_credentials = raw.outbounds.as_mut().map(|outbounds| {
+        outbounds
+            .iter_mut()
+            .map(|outbound| (outbound.method.take(), outbound.psk.take()))
+            .collect::<Vec<_>>()
+    });
     let (listen, server, inbounds, outbounds, route) = validate_client_graph(
         raw.client,
         raw.inbounds,
         raw.outbounds,
+        raw.chains,
         raw.selectors,
         raw.route,
         source,
     )?;
-    let method = parse_method(&raw.shadowsocks.method)?;
-    let psk = parse_psk(method, &raw.shadowsocks.psk)?;
+    let method = parse_method(&raw.shadowsocks.method, ConfigField::ShadowsocksMethod)?;
+    let psk = parse_psk(method, &raw.shadowsocks.psk, ConfigField::ShadowsocksPsk)?;
+    let outbound_psks =
+        validate_client_credentials(outbound_credentials, &raw.shadowsocks, outbounds.len())?;
     let runtime = validate_runtime(raw.runtime)?;
     let udp = raw.udp.map(validate_udp).transpose()?;
     let logging = validate_logging(raw.logging)?;
@@ -387,6 +410,7 @@ fn validate_client(raw: RawClientRoot, source: &str) -> Result<ValidatedClientCo
         outbounds,
         route,
         psk,
+        outbound_psks,
         runtime,
         udp,
         logging,
@@ -396,6 +420,9 @@ fn validate_client(raw: RawClientRoot, source: &str) -> Result<ValidatedClientCo
 
 fn validate_server(raw: RawServerRoot, source: &str) -> Result<ValidatedServerConfig, ConfigError> {
     validate_schema(raw.schema_version)?;
+    if raw.chains.is_some() {
+        return Err(ConfigError::semantic(ConfigField::Chains));
+    }
     let (listen, inbounds, outbounds, route) = validate_server_graph(
         raw.server,
         raw.inbounds,
@@ -404,8 +431,8 @@ fn validate_server(raw: RawServerRoot, source: &str) -> Result<ValidatedServerCo
         raw.route,
         source,
     )?;
-    let method = parse_method(&raw.shadowsocks.method)?;
-    let psk = parse_psk(method, &raw.shadowsocks.psk)?;
+    let method = parse_method(&raw.shadowsocks.method, ConfigField::ShadowsocksMethod)?;
+    let psk = parse_psk(method, &raw.shadowsocks.psk, ConfigField::ShadowsocksPsk)?;
     let runtime = validate_runtime(raw.runtime)?;
     let replay = validate_replay(raw.replay)?;
     let udp = validate_udp(raw.udp)?;
@@ -438,10 +465,16 @@ fn validate_client_graph(
     legacy: Option<RawClient>,
     tagged_inbounds: Option<Vec<RawClientInbound>>,
     tagged_outbounds: Option<Vec<RawClientOutbound>>,
+    chains: Option<Vec<RawChain>>,
     selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
     source: &str,
 ) -> Result<ValidatedClientGraph, ConfigError> {
+    if chains.is_some()
+        && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())
+    {
+        return Err(ConfigError::semantic(ConfigField::Chains));
+    }
     if selectors.is_some()
         && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())
     {
@@ -505,6 +538,12 @@ fn validate_client_graph(
                 validated_outbounds.push(ClientOutboundConfig { server });
             }
 
+            let plans = validate_chains(
+                chains.as_deref(),
+                &inbounds,
+                &outbounds,
+                selectors.as_deref(),
+            )?;
             let route = validate_route(
                 route,
                 inbounds
@@ -516,6 +555,7 @@ fn validate_client_graph(
                     .map(|outbound| outbound.tag.as_str())
                     .collect(),
                 selectors.as_deref(),
+                &plans,
                 source,
             )?;
             let validated_inbounds = listens
@@ -541,6 +581,82 @@ fn validate_client_graph(
             Err(ConfigError::semantic(ConfigField::Outbounds))
         }
     }
+}
+
+fn validate_client_credentials(
+    credentials: Option<Vec<(Option<String>, Option<SecretString>)>>,
+    global: &RawShadowsocks,
+    outbound_count: usize,
+) -> Result<Vec<MethodPsk>, ConfigError> {
+    let credentials = credentials.unwrap_or_else(|| vec![(None, None)]);
+    debug_assert_eq!(credentials.len(), outbound_count);
+    credentials
+        .into_iter()
+        .map(|(method, psk)| match (method, psk) {
+            (None, None) => {
+                let method = parse_method(&global.method, ConfigField::ShadowsocksMethod)?;
+                parse_psk(method, &global.psk, ConfigField::ShadowsocksPsk)
+            }
+            (Some(_), None) => Err(ConfigError::semantic(ConfigField::OutboundsPsk)),
+            (None, Some(_)) => Err(ConfigError::semantic(ConfigField::OutboundsMethod)),
+            (Some(method), Some(psk)) => {
+                let method = parse_method(&method, ConfigField::OutboundsMethod)?;
+                parse_psk(method, &psk, ConfigField::OutboundsPsk)
+            }
+        })
+        .collect()
+}
+
+fn validate_chains<'a>(
+    chains: Option<&'a [RawChain]>,
+    inbounds: &[RawClientInbound],
+    outbounds: &[RawClientOutbound],
+    selectors: Option<&[RawSelector]>,
+) -> Result<Vec<TaggedPlan<'a>>, ConfigError> {
+    let Some(chains) = chains else {
+        return Ok(Vec::new());
+    };
+    validate_count(chains.len(), ConfigField::Chains)?;
+    let mut plans = Vec::with_capacity(chains.len());
+    for (index, chain) in chains.iter().enumerate() {
+        let tag = chain
+            .tag
+            .as_deref()
+            .ok_or_else(|| ConfigError::semantic(ConfigField::Chains))?;
+        let chain_hops = chain
+            .hops
+            .as_deref()
+            .ok_or_else(|| ConfigError::semantic(ConfigField::Chains))?;
+        validate_tag(tag, ConfigField::ChainsTag)?;
+        if inbounds.iter().any(|inbound| inbound.tag == tag)
+            || outbounds.iter().any(|outbound| outbound.tag == tag)
+            || chains[..index]
+                .iter()
+                .any(|other| other.tag.as_deref() == Some(tag))
+            || selectors
+                .is_some_and(|selectors| selectors.iter().any(|selector| selector.tag == tag))
+        {
+            return Err(ConfigError::semantic(ConfigField::ChainsTag));
+        }
+        if !(2..=8).contains(&chain_hops.len()) {
+            return Err(ConfigError::semantic(ConfigField::ChainsHops));
+        }
+        let mut hops = Vec::with_capacity(chain_hops.len());
+        for (hop, outbound_tag) in chain_hops.iter().enumerate() {
+            validate_tag(outbound_tag, ConfigField::ChainsHops)?;
+            if chain_hops[..hop].contains(outbound_tag) {
+                return Err(ConfigError::semantic(ConfigField::ChainsHops));
+            }
+            hops.push(
+                outbounds
+                    .iter()
+                    .position(|outbound| outbound.tag == *outbound_tag)
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::ChainsHops))?,
+            );
+        }
+        plans.push(TaggedPlan::new(tag, hops));
+    }
+    Ok(plans)
 }
 
 fn validate_server_graph(
@@ -621,6 +737,7 @@ fn validate_server_graph(
                     .map(|outbound| outbound.tag.as_str())
                     .collect(),
                 selectors.as_deref(),
+                &[],
                 source,
             )?;
             let validated_inbounds = listens
@@ -652,10 +769,21 @@ fn validate_route(
     inbounds: Vec<(&str, Option<&str>)>,
     outbounds: Vec<&str>,
     selectors: Option<&[RawSelector]>,
+    plans: &[TaggedPlan<'_>],
     source: &str,
 ) -> Result<RouteTable, ConfigError> {
-    if let Some(selectors) = selectors {
-        return validate_selector_route(route, &inbounds, &outbounds, selectors, source);
+    if selectors.is_some_and(<[RawSelector]>::is_empty) {
+        return Err(ConfigError::semantic(ConfigField::Selectors));
+    }
+    if selectors.is_some() || !plans.is_empty() {
+        return validate_selector_route(
+            route,
+            &inbounds,
+            &outbounds,
+            selectors.unwrap_or(&[]),
+            plans,
+            source,
+        );
     }
     let Some(route) = route else {
         let mut referenced = vec![false; outbounds.len()];
@@ -750,6 +878,7 @@ fn validate_selector_route(
     inbounds: &[(&str, Option<&str>)],
     outbounds: &[&str],
     selectors: &[RawSelector],
+    plans: &[TaggedPlan<'_>],
     source: &str,
 ) -> Result<RouteTable, ConfigError> {
     let tagged_inbounds = inbounds
@@ -825,9 +954,10 @@ fn validate_selector_route(
         }
     };
 
-    compile_selector_route(
+    compile_selector_plans(
         &tagged_inbounds,
         &tagged_outbounds,
+        plans,
         &definitions,
         tagged_route,
     )
@@ -839,6 +969,11 @@ const fn selector_error_field(error: SelectorCompileError, routed: bool) -> Conf
     match error {
         SelectorCompileError::Inbounds => ConfigField::InboundsTag,
         SelectorCompileError::Outbounds => ConfigField::OutboundsTag,
+        SelectorCompileError::Plans => ConfigField::Chains,
+        SelectorCompileError::PlanTag | SelectorCompileError::UnreachablePlan => {
+            ConfigField::ChainsTag
+        }
+        SelectorCompileError::PlanHops => ConfigField::ChainsHops,
         SelectorCompileError::Selectors => ConfigField::Selectors,
         SelectorCompileError::SelectorTag | SelectorCompileError::UnreachableSelector => {
             ConfigField::SelectorsTag
@@ -917,41 +1052,45 @@ fn parse_endpoint(value: &str, field: ConfigField) -> Result<SocketAddrV4, Confi
     Ok(endpoint)
 }
 
-fn parse_method(value: &str) -> Result<TcpMethodProfile, ConfigError> {
+fn parse_method(value: &str, field: ConfigField) -> Result<TcpMethodProfile, ConfigError> {
     match value {
         "2022-blake3-aes-128-gcm" => Ok(TcpMethodProfile::Blake3Aes128Gcm2022),
         "2022-blake3-aes-256-gcm" => Ok(TcpMethodProfile::Blake3Aes256Gcm2022),
         "2022-blake3-chacha20-poly1305" => Ok(TcpMethodProfile::Blake3ChaCha20Poly13052022),
-        _ => Err(ConfigError::semantic(ConfigField::ShadowsocksMethod)),
+        _ => Err(ConfigError::semantic(field)),
     }
 }
 
-fn parse_psk(method: TcpMethodProfile, value: &SecretString) -> Result<MethodPsk, ConfigError> {
+fn parse_psk(
+    method: TcpMethodProfile,
+    value: &SecretString,
+    field: ConfigField,
+) -> Result<MethodPsk, ConfigError> {
     let token = value.as_str();
     let expected_bytes = method.key_bytes();
     let expected_encoded_bytes = expected_bytes.div_ceil(3) * 4;
     if token.len() != expected_encoded_bytes {
-        return Err(ConfigError::semantic(ConfigField::ShadowsocksPsk));
+        return Err(ConfigError::semantic(field));
     }
 
     let mut decoded = Zeroizing::new([0_u8; 32]);
     let decoded_len = STANDARD
         .decode_slice(token.as_bytes(), decoded.as_mut())
-        .map_err(|_| ConfigError::semantic(ConfigField::ShadowsocksPsk))?;
+        .map_err(|_| ConfigError::semantic(field))?;
     if decoded_len != expected_bytes {
-        return Err(ConfigError::semantic(ConfigField::ShadowsocksPsk));
+        return Err(ConfigError::semantic(field));
     }
 
     let mut canonical = Zeroizing::new([0_u8; 44]);
     let encoded_len = STANDARD
         .encode_slice(&decoded[..decoded_len], canonical.as_mut())
-        .map_err(|_| ConfigError::semantic(ConfigField::ShadowsocksPsk))?;
+        .map_err(|_| ConfigError::semantic(field))?;
     if encoded_len != token.len() || &canonical[..encoded_len] != token.as_bytes() {
-        return Err(ConfigError::semantic(ConfigField::ShadowsocksPsk));
+        return Err(ConfigError::semantic(field));
     }
 
     let psk = MethodPsk::try_from_slice(method, &decoded[..decoded_len])
-        .map_err(|_| ConfigError::semantic(ConfigField::ShadowsocksPsk))?;
+        .map_err(|_| ConfigError::semantic(field))?;
     decoded.zeroize();
     canonical.zeroize();
     Ok(psk)
@@ -1078,6 +1217,7 @@ struct RawClientRoot {
     client: Option<RawClient>,
     inbounds: Option<Vec<RawClientInbound>>,
     outbounds: Option<Vec<RawClientOutbound>>,
+    chains: Option<Vec<RawChain>>,
     selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
     shadowsocks: RawShadowsocks,
@@ -1096,6 +1236,7 @@ struct RawServerRoot {
     server: Option<RawServer>,
     inbounds: Option<Vec<RawServerInbound>>,
     outbounds: Option<Vec<RawServerOutbound>>,
+    chains: Option<Vec<RawChain>>,
     selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
     shadowsocks: RawShadowsocks,
@@ -1160,6 +1301,15 @@ struct RawClientInbound {
 struct RawClientOutbound {
     tag: String,
     server: String,
+    method: Option<String>,
+    psk: Option<SecretString>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawChain {
+    tag: Option<String>,
+    hops: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

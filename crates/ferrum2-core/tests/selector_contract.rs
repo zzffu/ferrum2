@@ -2,9 +2,10 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use ferrum2_core::TargetAddr;
-use ferrum2_core::route::{Network, compile_selector_route};
+use ferrum2_core::route::{Network, compile_selector_plans, compile_selector_route};
 use ferrum2_core::selector::{
-    SelectorControl, SelectorDefinition, SelectorError, TaggedInbound, TaggedOutbound, TaggedRoute,
+    SelectorControl, SelectorDefinition, SelectorError, TaggedInbound, TaggedOutbound, TaggedPlan,
+    TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
 };
 
 fn nested_route() -> (ferrum2_core::route::RouteTable, SelectorControl) {
@@ -90,4 +91,43 @@ fn concurrent_queries_and_switches_observe_only_complete_members_and_leaves() {
     shared.1.switch("inner", "leaf-b").unwrap();
     assert_eq!(shared.1.selected("inner"), Ok("leaf-b"));
     assert_eq!(select(&shared.0), 8);
+}
+
+#[test]
+fn public_route_selection_snapshots_complete_static_rule_final_and_selector_plans() {
+    let inbounds = [TaggedInbound::new("entry", 0)];
+    #[rustfmt::skip]
+    let outbounds = [TaggedOutbound::new("a", 7), TaggedOutbound::new("b", 8), TaggedOutbound::new("c", 9)];
+    #[rustfmt::skip]
+    let plans = [TaggedPlan::new("a-b", vec![7, 8]), TaggedPlan::new("b-c", vec![8, 9])];
+    let selectors = [SelectorDefinition::new(
+        "manual",
+        vec!["a-b", "c"],
+        Some("a-b"),
+    )];
+    #[rustfmt::skip]
+    let (route, control) = compile_selector_plans(
+        &inbounds, &outbounds, &plans, &selectors,
+        TaggedRoute::Routed { rules: vec![TaggedRouteRule::new(Some("entry"), Some(Network::Tcp), None, Some("manual"))], final_outbound: Some("b-c") },
+    ).expect("valid routed plans");
+    let target = TargetAddr::domain("plans.test", 443).expect("target");
+    let snapshot = route.select_plan(0, Network::Tcp, &target);
+    #[rustfmt::skip]
+    assert_eq!((snapshot.hops(), route.select_plan(0, Network::Udp, &target).hops(), route.final_plan().hops()), (&[7, 8][..], &[8, 9][..], &[8, 9][..]));
+    control.switch("manual", "c").expect("whole-plan switch");
+    #[rustfmt::skip]
+    assert_eq!((snapshot.hops(), route.select_plan(0, Network::Tcp, &target).hops(), route.final_plan().hops()), (&[7, 8][..], &[9][..], &[8, 9][..]));
+
+    #[rustfmt::skip]
+    let (static_route, _) = compile_selector_plans(
+        &inbounds, &outbounds[..2], &plans[..1], &[], TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "a-b")]),
+    ).expect("valid static plan");
+    assert_eq!(
+        static_route.select_plan(0, Network::Tcp, &target).hops(),
+        &[7, 8]
+    );
+    assert!(
+        std::panic::catch_unwind(|| static_route.select(0, Network::Tcp, &target)).is_err(),
+        "the direct-only accessor must not truncate a multi-hop plan"
+    );
 }

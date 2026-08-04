@@ -204,6 +204,18 @@ pub mod selector {
         }
     }
 
+    /// One tagged immutable multi-hop egress plan supplied to selector-aware compilation.
+    pub struct TaggedPlan<'a> {
+        pub(super) tag: &'a str,
+        pub(super) hops: Vec<usize>,
+    }
+
+    impl<'a> TaggedPlan<'a> {
+        pub fn new(tag: &'a str, hops: Vec<usize>) -> Self {
+            Self { tag, hops }
+        }
+    }
+
     /// One fixed-member selector definition supplied to selector-aware compilation.
     pub struct SelectorDefinition<'a> {
         pub(super) tag: &'a str,
@@ -271,6 +283,9 @@ pub mod selector {
     pub enum SelectorCompileError {
         Inbounds,
         Outbounds,
+        Plans,
+        PlanTag,
+        PlanHops,
         Selectors,
         SelectorTag,
         SelectorOutbounds,
@@ -281,6 +296,7 @@ pub mod selector {
         RouteRuleOutbound,
         RouteFinal,
         UnreachableOutbound,
+        UnreachablePlan,
         UnreachableSelector,
     }
 
@@ -312,7 +328,7 @@ pub mod selector {
 
     #[derive(Clone, Copy)]
     pub(super) enum OutboundAction {
-        Concrete(usize),
+        Plan(usize),
         Selector(usize),
     }
 
@@ -336,7 +352,7 @@ pub mod selector {
         pub(super) fn resolve(&self, mut action: OutboundAction) -> usize {
             for _ in 0..=self.selectors.len() {
                 match action {
-                    OutboundAction::Concrete(outbound) => return outbound,
+                    OutboundAction::Plan(plan) => return plan,
                     OutboundAction::Selector(selector) => {
                         let selector = &self.selectors[selector];
                         action = selector.members[selector.selected.load(Ordering::SeqCst)].action;
@@ -397,7 +413,7 @@ pub mod route {
     use super::selector::{
         MAX_SELECTOR_MEMBERS, MAX_SELECTORS, OutboundAction, Selector, SelectorCompileError,
         SelectorControl, SelectorDefinition, SelectorMember, SelectorState, TaggedInbound,
-        TaggedOutbound, TaggedRoute,
+        TaggedOutbound, TaggedPlan, TaggedRoute,
     };
     use super::{TargetAddr, TargetHost};
     use std::sync::Arc;
@@ -405,6 +421,19 @@ pub mod route {
 
     /// Maximum number of rules retained by one route table.
     pub const MAX_ROUTE_RULES: usize = 64;
+
+    /// One selected immutable ordered plan of concrete outbound identities.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct EgressPlan<'a> {
+        hops: &'a [usize],
+    }
+
+    impl<'a> EgressPlan<'a> {
+        /// Returns every concrete outbound in configured traversal order.
+        pub const fn hops(self) -> &'a [usize] {
+            self.hops
+        }
+    }
 
     /// Transport network presented to route selection.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -432,7 +461,7 @@ pub mod route {
                 inbound,
                 network,
                 target,
-                outbound: OutboundAction::Concrete(outbound),
+                outbound: OutboundAction::Plan(outbound),
             }
         }
 
@@ -458,9 +487,11 @@ pub mod route {
     pub struct RouteTable {
         rules: Vec<RouteRule>,
         final_action: OutboundAction,
+        final_plan: usize,
         final_outbound: usize,
         routed: bool,
         selectors: Arc<SelectorState>,
+        plans: Vec<Box<[usize]>>,
     }
 
     impl RouteTable {
@@ -470,28 +501,54 @@ pub mod route {
             if bindings.len() > MAX_ROUTE_RULES {
                 return None;
             }
+            let plans = bindings
+                .iter()
+                .map(|outbound| Box::from([*outbound]))
+                .collect();
             let rules = bindings
                 .into_iter()
                 .enumerate()
-                .map(|(inbound, outbound)| RouteRule::new(Some(inbound), None, None, outbound))
+                .map(|(inbound, _)| RouteRule {
+                    inbound: Some(inbound),
+                    network: None,
+                    target: None,
+                    outbound: OutboundAction::Plan(inbound),
+                })
                 .collect();
             Some(Self {
                 rules,
-                final_action: OutboundAction::Concrete(final_outbound),
+                final_action: OutboundAction::Plan(0),
+                final_plan: 0,
                 final_outbound,
                 routed: false,
                 selectors: Arc::default(),
+                plans,
             })
         }
 
         /// Stores an already validated routed table and its mandatory final outbound.
-        pub fn routed(rules: Vec<RouteRule>, final_outbound: usize) -> Option<Self> {
-            (rules.len() <= MAX_ROUTE_RULES).then_some(Self {
+        pub fn routed(mut rules: Vec<RouteRule>, final_outbound: usize) -> Option<Self> {
+            if rules.len() > MAX_ROUTE_RULES {
+                return None;
+            }
+            let mut plans = Vec::with_capacity(rules.len() + 1);
+            for rule in &mut rules {
+                let OutboundAction::Plan(outbound) = rule.outbound else {
+                    unreachable!("public route rules are direct")
+                };
+                rule.outbound = OutboundAction::Plan(plans.len());
+                plans.push(Box::from([outbound]));
+            }
+            let final_action = OutboundAction::Plan(plans.len());
+            plans.push(Box::from([final_outbound]));
+            Some(Self {
                 rules,
-                final_action: OutboundAction::Concrete(final_outbound),
+                final_action,
+                final_plan: plans.len() - 1,
                 final_outbound,
                 routed: true,
                 selectors: Arc::default(),
+                plans,
             })
         }
 
@@ -500,7 +557,7 @@ pub mod route {
             self.routed
         }
 
-        /// Returns the compiled no-match outbound identity.
+        /// Returns the first outbound in the configured-default no-match plan.
         pub const fn final_outbound(&self) -> usize {
             self.final_outbound
         }
@@ -514,12 +571,33 @@ pub mod route {
 
         /// Selects the first matching rule or the mandatory final outbound.
         pub fn select(&self, inbound: usize, network: Network, target: &TargetAddr) -> usize {
+            let plan = self.select_plan(inbound, network, target);
+            assert_eq!(plan.hops.len(), 1, "multi-hop route requires select_plan");
+            plan.hops[0]
+        }
+
+        /// Selects one complete immutable plan at the first matching rule or final action.
+        pub fn select_plan(
+            &self,
+            inbound: usize,
+            network: Network,
+            target: &TargetAddr,
+        ) -> EgressPlan<'_> {
             let action = self
                 .rules
                 .iter()
                 .find(|rule| rule.matches(inbound, network, target))
                 .map_or(self.final_action, |rule| rule.outbound);
-            self.selectors.resolve(action)
+            EgressPlan {
+                hops: &self.plans[self.selectors.resolve(action)],
+            }
+        }
+
+        /// Returns the complete configured-default plan snapshot.
+        pub fn final_plan(&self) -> EgressPlan<'_> {
+            EgressPlan {
+                hops: &self.plans[self.final_plan],
+            }
         }
     }
 
@@ -536,7 +614,31 @@ pub mod route {
         definitions: &[SelectorDefinition<'_>],
         route: TaggedRoute<'_>,
     ) -> Result<(RouteTable, SelectorControl), SelectorCompileError> {
-        validate_identities(inbounds, outbounds, definitions)?;
+        if definitions.is_empty() {
+            return Err(SelectorCompileError::Selectors);
+        }
+        compile_selector_plans(inbounds, outbounds, &[], definitions, route)
+    }
+
+    /// Compiles concrete outbounds, immutable multi-hop plans, selectors and route actions atomically.
+    pub fn compile_selector_plans(
+        inbounds: &[TaggedInbound<'_>],
+        outbounds: &[TaggedOutbound<'_>],
+        plans: &[TaggedPlan<'_>],
+        definitions: &[SelectorDefinition<'_>],
+        route: TaggedRoute<'_>,
+    ) -> Result<(RouteTable, SelectorControl), SelectorCompileError> {
+        validate_identities(inbounds, outbounds, plans, definitions)?;
+
+        let compiled_plans = outbounds
+            .iter()
+            .map(|outbound| Box::from([outbound.outbound]))
+            .chain(
+                plans
+                    .iter()
+                    .map(|plan| plan.hops.clone().into_boxed_slice()),
+            )
+            .collect::<Vec<_>>();
 
         let mut selectors = Vec::with_capacity(definitions.len());
         for definition in definitions {
@@ -548,7 +650,7 @@ pub mod route {
                 if !valid_tag(tag) || definition.outbounds[..index].contains(tag) {
                     return Err(SelectorCompileError::SelectorOutbounds);
                 }
-                let action = resolve_tag(tag, outbounds, definitions)
+                let action = resolve_tag(tag, outbounds, plans, definitions)
                     .ok_or(SelectorCompileError::SelectorOutbounds)?;
                 members.push(SelectorMember {
                     tag: (*tag).into(),
@@ -569,10 +671,11 @@ pub mod route {
         validate_acyclic(&selectors)?;
 
         let (rules, final_action, routed, roots) =
-            compile_actions(inbounds, outbounds, definitions, route)?;
-        validate_reachability(&selectors, outbounds, &roots)?;
+            compile_actions(inbounds, outbounds, plans, definitions, route)?;
+        validate_reachability(&selectors, outbounds, &compiled_plans, &roots)?;
         let state = Arc::new(SelectorState { selectors });
-        let final_outbound = state.resolve(final_action);
+        let final_plan = state.resolve(final_action);
+        let final_outbound = compiled_plans[final_plan][0];
         let control = SelectorControl {
             state: Arc::clone(&state),
         };
@@ -580,9 +683,11 @@ pub mod route {
             RouteTable {
                 rules,
                 final_action,
+                final_plan,
                 final_outbound,
                 routed,
                 selectors: state,
+                plans: compiled_plans,
             },
             control,
         ))
@@ -591,6 +696,7 @@ pub mod route {
     fn validate_identities(
         inbounds: &[TaggedInbound<'_>],
         outbounds: &[TaggedOutbound<'_>],
+        plans: &[TaggedPlan<'_>],
         definitions: &[SelectorDefinition<'_>],
     ) -> Result<(), SelectorCompileError> {
         if !(1..=MAX_ROUTE_RULES).contains(&inbounds.len())
@@ -614,7 +720,29 @@ pub mod route {
         {
             return Err(SelectorCompileError::Outbounds);
         }
-        if !(1..=MAX_SELECTORS).contains(&definitions.len()) {
+        if plans.len() > MAX_SELECTORS {
+            return Err(SelectorCompileError::Plans);
+        }
+        for (index, plan) in plans.iter().enumerate() {
+            if !valid_tag(plan.tag)
+                || inbounds.iter().any(|inbound| inbound.tag == plan.tag)
+                || outbounds.iter().any(|outbound| outbound.tag == plan.tag)
+                || plans[..index].iter().any(|other| other.tag == plan.tag)
+            {
+                return Err(SelectorCompileError::PlanTag);
+            }
+            if !(2..=8).contains(&plan.hops.len())
+                || plan.hops.iter().enumerate().any(|(hop, outbound)| {
+                    !outbounds
+                        .iter()
+                        .any(|candidate| candidate.outbound == *outbound)
+                        || plan.hops[..hop].contains(outbound)
+                })
+            {
+                return Err(SelectorCompileError::PlanHops);
+            }
+        }
+        if definitions.len() > MAX_SELECTORS {
             return Err(SelectorCompileError::Selectors);
         }
         if definitions.iter().enumerate().any(|(index, selector)| {
@@ -623,6 +751,7 @@ pub mod route {
                 || outbounds
                     .iter()
                     .any(|outbound| outbound.tag == selector.tag)
+                || plans.iter().any(|plan| plan.tag == selector.tag)
                 || definitions[..index]
                     .iter()
                     .any(|other| other.tag == selector.tag)
@@ -642,12 +771,19 @@ pub mod route {
     fn resolve_tag(
         tag: &str,
         outbounds: &[TaggedOutbound<'_>],
+        plans: &[TaggedPlan<'_>],
         definitions: &[SelectorDefinition<'_>],
     ) -> Option<OutboundAction> {
         outbounds
             .iter()
-            .find(|outbound| outbound.tag == tag)
-            .map(|outbound| OutboundAction::Concrete(outbound.outbound))
+            .position(|outbound| outbound.tag == tag)
+            .map(OutboundAction::Plan)
+            .or_else(|| {
+                plans
+                    .iter()
+                    .position(|plan| plan.tag == tag)
+                    .map(|plan| OutboundAction::Plan(outbounds.len() + plan))
+            })
             .or_else(|| {
                 definitions
                     .iter()
@@ -688,6 +824,7 @@ pub mod route {
     fn compile_actions(
         inbounds: &[TaggedInbound<'_>],
         outbounds: &[TaggedOutbound<'_>],
+        plans: &[TaggedPlan<'_>],
         definitions: &[SelectorDefinition<'_>],
         route: TaggedRoute<'_>,
     ) -> Result<(Vec<RouteRule>, OutboundAction, bool, Vec<OutboundAction>), SelectorCompileError>
@@ -709,7 +846,7 @@ pub mod route {
                         return Err(SelectorCompileError::StaticBinding);
                     }
                     seen[inbound] = true;
-                    let action = resolve_tag(binding.outbound, outbounds, definitions)
+                    let action = resolve_tag(binding.outbound, outbounds, plans, definitions)
                         .ok_or(SelectorCompileError::StaticBinding)?;
                     roots.push(action);
                     rules.push(RouteRule {
@@ -731,7 +868,7 @@ pub mod route {
                 }
                 let final_action = final_outbound
                     .filter(|tag| valid_tag(tag))
-                    .and_then(|tag| resolve_tag(tag, outbounds, definitions))
+                    .and_then(|tag| resolve_tag(tag, outbounds, plans, definitions))
                     .ok_or(SelectorCompileError::RouteFinal)?;
                 let mut roots = vec![final_action];
                 let mut rules = Vec::with_capacity(tagged_rules.len());
@@ -752,7 +889,7 @@ pub mod route {
                     let action = rule
                         .outbound
                         .filter(|tag| valid_tag(tag))
-                        .and_then(|tag| resolve_tag(tag, outbounds, definitions))
+                        .and_then(|tag| resolve_tag(tag, outbounds, plans, definitions))
                         .ok_or(SelectorCompileError::RouteRuleOutbound)?;
                     roots.push(action);
                     rules.push(RouteRule {
@@ -770,33 +907,21 @@ pub mod route {
     fn validate_reachability(
         selectors: &[Selector],
         outbounds: &[TaggedOutbound<'_>],
+        plans: &[Box<[usize]>],
         roots: &[OutboundAction],
     ) -> Result<(), SelectorCompileError> {
         fn visit(
             action: OutboundAction,
             selectors: &[Selector],
-            outbounds: &[TaggedOutbound<'_>],
+            reached_plans: &mut [bool],
             reached_selectors: &mut [bool],
-            reached_outbounds: &mut [bool],
         ) {
             match action {
-                OutboundAction::Concrete(outbound) => {
-                    let index = outbounds
-                        .iter()
-                        .position(|candidate| candidate.outbound == outbound)
-                        .expect("validated concrete identity");
-                    reached_outbounds[index] = true;
-                }
+                OutboundAction::Plan(plan) => reached_plans[plan] = true,
                 OutboundAction::Selector(selector) if !reached_selectors[selector] => {
                     reached_selectors[selector] = true;
                     for member in &selectors[selector].members {
-                        visit(
-                            member.action,
-                            selectors,
-                            outbounds,
-                            reached_selectors,
-                            reached_outbounds,
-                        );
+                        visit(member.action, selectors, reached_plans, reached_selectors);
                     }
                 }
                 OutboundAction::Selector(_) => {}
@@ -804,23 +929,32 @@ pub mod route {
         }
 
         let mut reached_selectors = vec![false; selectors.len()];
-        let mut reached_outbounds = vec![false; outbounds.len()];
+        let mut reached_plans = vec![false; plans.len()];
         for root in roots {
-            visit(
-                *root,
-                selectors,
-                outbounds,
-                &mut reached_selectors,
-                &mut reached_outbounds,
-            );
+            visit(*root, selectors, &mut reached_plans, &mut reached_selectors);
         }
         if reached_selectors.contains(&false) {
-            Err(SelectorCompileError::UnreachableSelector)
-        } else if reached_outbounds.contains(&false) {
-            Err(SelectorCompileError::UnreachableOutbound)
-        } else {
-            Ok(())
+            return Err(SelectorCompileError::UnreachableSelector);
         }
+        if reached_plans[outbounds.len()..].contains(&false) {
+            return Err(SelectorCompileError::UnreachablePlan);
+        }
+        let mut reached_outbounds = vec![false; outbounds.len()];
+        for (plan, reached) in plans.iter().zip(reached_plans) {
+            if reached {
+                for outbound in plan.iter() {
+                    let index = outbounds
+                        .iter()
+                        .position(|candidate| candidate.outbound == *outbound)
+                        .expect("validated plan hop");
+                    reached_outbounds[index] = true;
+                }
+            }
+        }
+        reached_outbounds
+            .contains(&false)
+            .then_some(SelectorCompileError::UnreachableOutbound)
+            .map_or(Ok(()), Err)
     }
 }
 

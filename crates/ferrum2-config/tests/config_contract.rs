@@ -11,7 +11,7 @@ use ferrum2_config::{
 };
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{Network, RouteTable};
-use ferrum2_crypto::TcpMethodProfile;
+use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -417,6 +417,70 @@ fn tagged_graph_normalizes_complete_resolved_collections() {
 }
 
 #[test]
+fn client_credentials_and_fixed_plans_compile_in_order_with_redacted_secret_owners() {
+    #[rustfmt::skip]
+    let source = tagged_client(1, 3)
+        .replacen("outbound = \"o0\"", "outbound = \"three-hop\"", 1)
+        .replacen("server = \"127.0.0.1:20001\"", "server = \"127.0.0.1:20001\"\nmethod = \"2022-blake3-aes-256-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"", 1)
+        .replacen("server = \"127.0.0.1:20002\"", "server = \"127.0.0.1:20002\"\nmethod = \"2022-blake3-chacha20-poly1305\"\npsk = \"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"", 1)
+        .replacen("[shadowsocks]", "[[chains]]\ntag = \"three-hop\"\nhops = [\"o0\", \"o1\", \"o2\"]\n[shadowsocks]", 1);
+    let config = load_client(TempConfig::text(&source).path()).expect("mixed credentials");
+    #[rustfmt::skip]
+    assert_eq!(config.outbound_psks.iter().map(MethodPsk::profile).collect::<Vec<_>>(), [TcpMethodProfile::Blake3Aes128Gcm2022, TcpMethodProfile::Blake3Aes256Gcm2022, TcpMethodProfile::Blake3ChaCha20Poly13052022]);
+    let target = TargetAddr::domain("chain.test", 443).expect("target");
+    #[rustfmt::skip]
+    assert_eq!((config.route.select_plan(0, Network::Tcp, &target).hops(), config.route.final_plan().hops(), config.server), (&[0, 1, 2][..], &[0, 1, 2][..], SocketAddrV4::new(Ipv4Addr::LOCALHOST, 20_000)));
+    assert!(
+        config
+            .outbound_psks
+            .iter()
+            .all(|psk| format!("{psk:?}") == "MethodPsk([REDACTED])")
+    );
+}
+
+#[test]
+fn chain_bounds_and_static_rule_final_selector_actions_are_complete() {
+    #[rustfmt::skip]
+    let routed_source = routed(
+        tagged_client(1, 3), "[route]\nfinal = \"b-c\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\noutbound = \"a-b\"",
+    ).replacen("[shadowsocks]", "[[chains]]\ntag = \"a-b\"\nhops = [\"o0\", \"o1\"]\n[[chains]]\ntag = \"b-c\"\nhops = [\"o1\", \"o2\"]\n[shadowsocks]", 1);
+    let routed =
+        load_client(TempConfig::text(&routed_source).path()).expect("rule and final plans");
+    let target = TargetAddr::domain("chain-actions.test", 443).expect("target");
+    #[rustfmt::skip]
+    assert_eq!((routed.route.select_plan(0, Network::Tcp, &target).hops(), routed.route.select_plan(0, Network::Udp, &target).hops()), (&[0, 1][..], &[1, 2][..]));
+
+    let hops = (0..8)
+        .map(|index| format!("\"o{index}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    #[rustfmt::skip]
+    let eight = tagged_client(1, 8).replacen("outbound = \"o0\"", "outbound = \"eight\"", 1).replacen("[shadowsocks]", &format!("[[chains]]\ntag = \"eight\"\nhops = [{hops}]\n[shadowsocks]"), 1);
+    let eight = load_client(TempConfig::text(&eight).path()).expect("eight hops");
+    assert_eq!(eight.route.final_plan().hops(), &(0..8).collect::<Vec<_>>());
+
+    let tags = (0..64)
+        .map(|index| format!("\"c{index}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let chains = (0..64)
+        .map(|index| format!("[[chains]]\ntag = \"c{index}\"\nhops = [\"o0\", \"o1\"]\n"))
+        .collect::<String>();
+    #[rustfmt::skip]
+    let sixty_four = tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"manual\"", 1).replacen("[shadowsocks]", &format!("{chains}[[selectors]]\ntag = \"manual\"\noutbounds = [{tags}]\ndefault = \"c0\"\n[shadowsocks]"), 1);
+    let config = load_client(TempConfig::text(&sixty_four).path()).expect("64 reachable chains");
+    let snapshot = config.route.final_plan();
+    config.selector_control().switch("manual", "c63").unwrap();
+    assert_eq!(
+        (
+            snapshot.hops(),
+            config.route.select_plan(0, Network::Tcp, &target).hops()
+        ),
+        (&[0, 1][..], &[0, 1][..])
+    );
+}
+
+#[test]
 fn selector_graphs_compile_for_both_roles_and_share_live_route_state() {
     let selectors = "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o1\", \"o0\"]\ndefault = \"o0\"\n[[selectors]]\ntag = \"nested\"\noutbounds = [\"manual\"]\ndefault = \"manual\"";
     let static_source = |source: String| {
@@ -526,6 +590,115 @@ fn selector_graph_rejects_bounds_members_defaults_cycles_and_inert_nodes_redacte
 
     #[rustfmt::skip]
     assert_eq!([ConfigField::Selectors, ConfigField::SelectorsTag, ConfigField::SelectorsOutbounds, ConfigField::SelectorsDefault].map(ConfigField::as_str), ["selectors", "selectors.tag", "selectors.outbounds", "selectors.default"]);
+}
+
+#[test]
+fn outbound_credential_pairs_reject_partial_method_encoding_and_width_redacted() {
+    let with_fields = |fields: &str| {
+        tagged_client(1, 1).replacen(
+            "server = \"127.0.0.1:20000\"",
+            &format!("server = \"127.0.0.1:20000\"\n{fields}"),
+            1,
+        )
+    };
+    #[rustfmt::skip]
+    let cases = [
+        ("method only", with_fields("method = \"2022-blake3-aes-128-gcm\""), ConfigField::OutboundsPsk),
+        ("psk only", with_fields("psk = \"AAECAwQFBgcICQoLDA0ODw==\""), ConfigField::OutboundsMethod),
+        ("unknown method", with_fields("method = \"future-method\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\""), ConfigField::OutboundsMethod),
+        ("unpadded", with_fields("method = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw\""), ConfigField::OutboundsPsk),
+        ("noncanonical", with_fields("method = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODx==\""), ConfigField::OutboundsPsk),
+        ("aes128 wide", with_fields("method = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\""), ConfigField::OutboundsPsk),
+        ("aes256 short", with_fields("method = \"2022-blake3-aes-256-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\""), ConfigField::OutboundsPsk),
+        ("chacha short", with_fields("method = \"2022-blake3-chacha20-poly1305\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\""), ConfigField::OutboundsPsk),
+    ];
+    for (index, (name, source, field)) in cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            ConfigRole::Client,
+            source,
+            (ConfigErrorKind::Semantic, field),
+            150 + index,
+        );
+    }
+
+    assert_tagged_error(
+        "server outbound credentials",
+        ConfigRole::Server,
+        tagged_server(1, 1).replacen(
+            "tag = \"o0\"",
+            "tag = \"o0\"\nmethod = \"2022-blake3-aes-128-gcm\"",
+            1,
+        ),
+        (ConfigErrorKind::Syntax, ConfigField::Config),
+        159,
+    );
+}
+
+#[test]
+fn chains_reject_all_bounds_namespaces_references_and_inert_nodes_redacted() {
+    let chain = |tag: &str, hops: &str| {
+        tagged_client(1, 2)
+            .replacen("outbound = \"o0\"", &format!("outbound = \"{tag}\""), 1)
+            .replacen(
+                "[shadowsocks]",
+                &format!("[[chains]]\ntag = \"{tag}\"\nhops = [{hops}]\n[shadowsocks]"),
+                1,
+            )
+    };
+    let many = (0..65)
+        .map(|index| format!("[[chains]]\ntag = \"c{index}\"\nhops = [\"o0\", \"o1\"]\n"))
+        .collect::<String>();
+    let selector_hop = chain("c", "\"manual\", \"o1\"").replacen(
+        "[shadowsocks]",
+        "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n[shadowsocks]",
+        1,
+    );
+    #[rustfmt::skip]
+    let cases = [
+        ("empty collection", tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 1\nchains = []", 1), ConfigField::Chains, ConfigRole::Client),
+        ("chains missing inbounds", "schema_version = 1\n[[outbounds]]\ntag = \"o0\"\nserver = \"127.0.0.1:20000\"\n[[outbounds]]\ntag = \"o1\"\nserver = \"127.0.0.1:20001\"\n[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Chains, ConfigRole::Client),
+        ("chains missing outbounds", "schema_version = 1\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"c\"\n[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Chains, ConfigRole::Client),
+        ("65 chains", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c0\"", 1).replacen("[shadowsocks]", &format!("{many}[shadowsocks]"), 1), ConfigField::Chains, ConfigRole::Client),
+        ("missing tag", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("[shadowsocks]", "[[chains]]\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Client),
+        ("missing hops", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Client),
+        ("empty hops", chain("c", ""), ConfigField::ChainsHops, ConfigRole::Client),
+        ("one hop", chain("c", "\"o0\""), ConfigField::ChainsHops, ConfigRole::Client),
+        ("nine hops", chain("c", "\"o0\", \"o1\", \"o0\", \"o1\", \"o0\", \"o1\", \"o0\", \"o1\", \"o0\""), ConfigField::ChainsHops, ConfigRole::Client),
+        ("duplicate hop", chain("c", "\"o0\", \"o0\""), ConfigField::ChainsHops, ConfigRole::Client),
+        ("unknown hop", chain("c", "\"o0\", \"missing\""), ConfigField::ChainsHops, ConfigRole::Client),
+        ("case hop", chain("c", "\"o0\", \"O1\""), ConfigField::ChainsHops, ConfigRole::Client),
+        ("inbound hop", chain("c", "\"o0\", \"i0\""), ConfigField::ChainsHops, ConfigRole::Client),
+        ("selector hop", selector_hop, ConfigField::ChainsHops, ConfigRole::Client),
+        ("chain hop", chain("c0", "\"o0\", \"o1\"").replacen("[shadowsocks]", "[[chains]]\ntag = \"c1\"\nhops = [\"c0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::ChainsHops, ConfigRole::Client),
+        ("invalid chain tag", chain("bad/tag", "\"o0\", \"o1\""), ConfigField::ChainsTag, ConfigRole::Client),
+        ("inbound collision", chain("i0", "\"o0\", \"o1\""), ConfigField::ChainsTag, ConfigRole::Client),
+        ("outbound collision", chain("o1", "\"o0\", \"o1\""), ConfigField::ChainsTag, ConfigRole::Client),
+        ("duplicate chain", chain("c", "\"o0\", \"o1\"").replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::ChainsTag, ConfigRole::Client),
+        ("selector collision", chain("manual", "\"o0\", \"o1\"").replacen("[shadowsocks]", "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n[shadowsocks]", 1), ConfigField::ChainsTag, ConfigRole::Client),
+        ("unreachable chain", tagged_client(1, 2).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::ChainsTag, ConfigRole::Client),
+        ("unreachable concrete", tagged_client(1, 3).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::OutboundsTag, ConfigRole::Client),
+        ("legacy chain", CLIENT_BASE.replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Client),
+        ("server chain", tagged_server(1, 1).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Server),
+    ];
+    for (index, (name, source, field, role)) in cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            role,
+            source,
+            (ConfigErrorKind::Semantic, field),
+            170 + index,
+        );
+    }
+    assert_eq!(
+        [
+            ConfigField::Chains,
+            ConfigField::ChainsTag,
+            ConfigField::ChainsHops
+        ]
+        .map(ConfigField::as_str),
+        ["chains", "chains.tag", "chains.hops"]
+    );
 }
 
 #[test]

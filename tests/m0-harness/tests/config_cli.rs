@@ -317,6 +317,7 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
     let client_path = directory.path().join("client-tagged.toml");
     let server_path = directory.path().join("server-tagged.toml");
     let client_route_path = directory.path().join("client-route.toml");
+    let client_chain_path = directory.path().join("client-chain.toml");
     let server_route_path = directory.path().join("server-route.toml");
     let client_selector_path = directory.path().join("client-selector.toml");
     let server_selector_path = directory.path().join("server-selector.toml");
@@ -341,6 +342,12 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         )),
     )
     .expect("client routed config");
+    #[rustfmt::skip]
+    let chain = tagged_client(&[client_address_a], &[server_address_a, server_address_b])
+        .replacen("outbound = \"o0\"", "outbound = \"two-hop\"", 1)
+        .replacen(&format!("server = \"{server_address_b}\""), &format!("server = \"{server_address_b}\"\nmethod = \"2022-blake3-aes-256-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\""), 1)
+        .replacen("[shadowsocks]", "[[chains]]\ntag = \"two-hop\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1);
+    std::fs::write(&client_chain_path, chain).expect("client chain config");
     std::fs::write(
         &server_route_path,
         routed_tagged(tagged_server(&[server_address_a, server_address_b])),
@@ -370,6 +377,7 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
 
     for (binary, path) in [
         ("ferrum2-client", &client_path),
+        ("ferrum2-client", &client_chain_path),
         ("ferrum2-server", &server_path),
     ] {
         let checked = run_binary(
@@ -492,6 +500,33 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         "error[config.semantic] selectors.outbounds: configuration value is invalid\n",
         cycle_sentinel,
     );
+    for (name, source, field) in [
+        (
+            "partial-outbound-credential",
+            tagged_client(&[client_address_a], &[server_address_a]).replacen(
+                &format!("server = \"{server_address_a}\""),
+                &format!("server = \"{server_address_a}\"\nmethod = \"2022-blake3-aes-128-gcm\""),
+                1,
+            ),
+            "outbounds.psk",
+        ),
+        (
+            "invalid-chain-hop",
+            tagged_client(&[client_address_a], &[server_address_a, server_address_b])
+                .replacen("outbound = \"o0\"", "outbound = \"two-hop\"", 1)
+                .replacen("[shadowsocks]", "[[chains]]\ntag = \"two-hop\"\nhops = [\"o0\", \"missing-hop\"]\n[shadowsocks]", 1),
+            "chains.hops",
+        ),
+    ] {
+        let path = directory.path().join(format!("{name}.toml"));
+        std::fs::write(&path, source).expect(name);
+        assert_invalid(
+            "ferrum2-client",
+            &path,
+            &format!("error[config.semantic] {field}: configuration value is invalid\n"),
+            if name.starts_with("invalid") { "missing-hop" } else { "2022-blake3-aes-128-gcm" },
+        );
+    }
 
     for listener in [client_a, client_b, server_a, server_b] {
         let address = listener.local_addr().expect("listener address");
