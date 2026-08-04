@@ -5420,11 +5420,14 @@ mod tests {
 
         let registry = OwnerRegistry::new();
         let baseline = registry.snapshot();
-        let (path, context) = udp_test_context_for_psk(
+        let (path, mut context) = udp_test_context_for_psk(
             registry.clone(),
             servers[0],
             Some(psk_for_method(methods[0])),
         );
+        Arc::get_mut(&mut context)
+            .expect("unique routed context")
+            .udp_id_random = Some(Arc::new(IdSequenceRandom::new([0x41, 0x42, 0x43, 0x44])));
         let outbounds = prepare_client_outbounds(
             servers
                 .map(|server| ferrum2_config::ClientOutboundConfig { server })
@@ -5545,6 +5548,212 @@ mod tests {
             .commit_request(commit, upstream_peer, clock.monotonic_now(), &random)
             .expect("AC inner commit");
 
+        let wrong_outer_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+            other_psk_for_method(methods[0]),
+        ));
+        let wrong_outer_id = IdSequenceRandom::new([0x43]);
+        let mut wrong_outer_client =
+            UdpClientSession::new(&wrong_outer_keys, &wrong_outer_id, |_| false)
+                .expect("same-ID wrong-PSK outer client");
+        let wrong_outer_server = UdpServer::new(&wrong_outer_keys).expect("wrong outer server");
+        let wrong_request = wrong_outer_client
+            .encode_request(
+                &clock,
+                &random,
+                &test_datagram(target.clone(), b"wrong outer request"),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("wrong outer request");
+        let wrong_request = wrong_outer_server
+            .prepare_request(&clock, &wire[..wrong_request], &mut scratch)
+            .expect("wrong outer request credential");
+        let (_, commit) = wrong_request.into_parts();
+        let wrong_outer_capability = wrong_outer_server
+            .commit_request(commit, upstream_peer, clock.monotonic_now(), &random)
+            .expect("wrong outer request commit");
+        let wrong_outer = wrong_outer_server
+            .encode_response(
+                wrong_outer_capability.capability(),
+                &clock,
+                &random,
+                &test_datagram(
+                    TargetAddr::ipv4(servers[2]).expect("C target"),
+                    b"wrong outer response",
+                ),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("same-ID wrong-PSK outer response");
+        let wrong_outer = wire[..wrong_outer.wire_len()].to_vec();
+
+        let wrong_inner_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+            other_psk_for_method(methods[2]),
+        ));
+        let wrong_inner_id = IdSequenceRandom::new([0x44]);
+        let mut wrong_inner_client =
+            UdpClientSession::new(&wrong_inner_keys, &wrong_inner_id, |_| false)
+                .expect("same-ID wrong-PSK inner client");
+        let wrong_inner_server = UdpServer::new(&wrong_inner_keys).expect("wrong inner server");
+        let wrong_request = wrong_inner_client
+            .encode_request(
+                &clock,
+                &random,
+                &test_datagram(target.clone(), b"wrong inner request"),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("wrong inner request");
+        let wrong_request = wrong_inner_server
+            .prepare_request(&clock, &wire[..wrong_request], &mut scratch)
+            .expect("wrong inner request credential");
+        let (_, commit) = wrong_request.into_parts();
+        let wrong_inner_capability = wrong_inner_server
+            .commit_request(commit, upstream_peer, clock.monotonic_now(), &random)
+            .expect("wrong inner request commit");
+        let wrong_inner = wrong_inner_server
+            .encode_response(
+                wrong_inner_capability.capability(),
+                &clock,
+                &random,
+                &test_datagram(target.clone(), b"wrong inner response"),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("same-ID wrong-PSK inner response");
+        let wrong_inner = wire[..wrong_inner.wire_len()].to_vec();
+
+        let stable = registry.snapshot();
+        let deadline = manager.idle_deadline(handle).expect("deadline");
+        let live_ids = context
+            .udp
+            .as_ref()
+            .expect("UDP")
+            .live_ids
+            .lock()
+            .expect("live IDs")
+            .len();
+        upstreams[0]
+            .send_to(&wrong_outer, upstream_peer)
+            .await
+            .expect("wrong outer response send");
+        wait_for_metric(
+            &context.metrics,
+            "ferrum2_udp_datagrams_total{role=\"client\",direction=\"target_to_client\",outcome=\"rejected\"} 1",
+        )
+        .await;
+        assert_eq!(registry.snapshot(), stable);
+        assert_eq!(manager.idle_deadline(handle), Ok(deadline));
+        assert_eq!(
+            context
+                .udp
+                .as_ref()
+                .expect("UDP")
+                .live_ids
+                .lock()
+                .expect("live IDs")
+                .len(),
+            live_ids
+        );
+        assert_eq!(
+            application
+                .try_recv(&mut [0])
+                .expect_err("wrong outer response reached application")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        let wrong_inner_outer = protocol_servers[0]
+            .encode_response(
+                ac_outer.capability(),
+                &clock,
+                &random,
+                &test_datagram(
+                    TargetAddr::ipv4(servers[2]).expect("C target"),
+                    &wrong_inner,
+                ),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("correct outer wrapping wrong-PSK inner");
+        let wrong_inner_outer = wire[..wrong_inner_outer.wire_len()].to_vec();
+        upstreams[0]
+            .send_to(&wrong_inner_outer, upstream_peer)
+            .await
+            .expect("wrong inner response send");
+        wait_for_metric(
+            &context.metrics,
+            "ferrum2_udp_datagrams_total{role=\"client\",direction=\"target_to_client\",outcome=\"rejected\"} 2",
+        )
+        .await;
+        assert_eq!(registry.snapshot(), stable);
+        assert_eq!(manager.idle_deadline(handle), Ok(deadline));
+        assert_eq!(
+            context
+                .udp
+                .as_ref()
+                .expect("UDP")
+                .live_ids
+                .lock()
+                .expect("live IDs")
+                .len(),
+            live_ids
+        );
+        assert_eq!(
+            application
+                .try_recv(&mut [0])
+                .expect_err("wrong inner response reached application")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        let correct_inner = protocol_servers[2]
+            .encode_response(
+                ac_inner.capability(),
+                &clock,
+                &random,
+                &test_datagram(target.clone(), b"AC valid after wrong PSKs"),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("fresh correct AC inner");
+        let correct_inner = wire[..correct_inner.wire_len()].to_vec();
+        let correct_outer = protocol_servers[0]
+            .encode_response(
+                ac_outer.capability(),
+                &clock,
+                &random,
+                &test_datagram(
+                    TargetAddr::ipv4(servers[2]).expect("C target"),
+                    &correct_inner,
+                ),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("fresh correct AC outer");
+        let correct_outer = wire[..correct_outer.wire_len()].to_vec();
+        upstreams[0]
+            .send_to(&correct_outer, upstream_peer)
+            .await
+            .expect("valid-after wrong PSKs send");
+        let received = tokio::time::timeout(Duration::from_secs(2), application.recv(&mut socks))
+            .await
+            .expect("valid-after wrong PSKs timeout")
+            .expect("valid-after wrong PSKs response");
+        assert_eq!(
+            decode_udp_datagram(&socks[..received])
+                .expect("valid-after wrong PSKs SOCKS response")
+                .payload(),
+            b"AC valid after wrong PSKs"
+        );
+
         let encoded = protocol_servers[1]
             .encode_response(
                 ab_inner.capability(),
@@ -5579,7 +5788,7 @@ mod tests {
             .expect("cross-plan response");
         wait_for_metric(
             &context.metrics,
-            "ferrum2_udp_datagrams_total{role=\"client\",direction=\"target_to_client\",outcome=\"rejected\"} 1",
+            "ferrum2_udp_datagrams_total{role=\"client\",direction=\"target_to_client\",outcome=\"rejected\"} 3",
         )
         .await;
         assert_eq!(registry.snapshot(), stable);
@@ -5591,6 +5800,52 @@ mod tests {
                 .kind(),
             io::ErrorKind::WouldBlock
         );
+        assert_eq!(selector.selected("manual"), Ok("a-c"));
+
+        let selected_payload = b"AC remains selected after rejection";
+        let selected_length = encode_udp_datagram(&target, selected_payload, &mut socks)
+            .expect("post-rejection routed request");
+        application
+            .send_to(&socks[..selected_length], relay)
+            .await
+            .expect("post-rejection routed send");
+        let (selected_wire_len, _) =
+            tokio::time::timeout(Duration::from_secs(2), upstreams[0].recv_from(&mut wire))
+                .await
+                .expect("post-rejection outer A timeout")
+                .expect("post-rejection outer A request");
+        wait_for_metric(
+            &context.metrics,
+            "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"accepted\"} 3",
+        )
+        .await;
+        let selected_outer = protocol_servers[0]
+            .prepare_request(&clock, &wire[..selected_wire_len], &mut scratch)
+            .expect("post-rejection outer credential");
+        assert_eq!(
+            selected_outer.datagram().target(),
+            &TargetAddr::ipv4(servers[2]).expect("C target")
+        );
+        let selected_inner_wire = selected_outer.datagram().payload().to_vec();
+        drop(selected_outer);
+        let selected_inner = protocol_servers[2]
+            .prepare_request(&clock, &selected_inner_wire, &mut scratch)
+            .expect("post-rejection inner credential");
+        assert_eq!(selected_inner.datagram().target(), &target);
+        assert_eq!(selected_inner.datagram().payload(), selected_payload);
+        drop(selected_inner);
+        for (socket, label) in [
+            (&upstreams[0], "second outer A packet"),
+            (&upstreams[1], "fallback B packet"),
+            (&upstreams[2], "direct C packet"),
+        ] {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), socket.recv(&mut [0]))
+                    .await
+                    .is_err(),
+                "{label} followed rejected response"
+            );
+        }
 
         for (outer, inner, next, payload) in [
             (&ab_outer, &ab_inner, servers[1], b"AB".as_slice()),
