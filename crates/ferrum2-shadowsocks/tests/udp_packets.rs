@@ -1,6 +1,7 @@
 mod common;
 
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -845,5 +846,106 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
         )
         .expect("valid after duplicate");
         assert_eq!(scratch.storage_identity(), scratch_identity);
+    }
+}
+
+#[test]
+fn reversed_overlapping_response_batches_use_one_lock_order() {
+    let profiles = MethodProfile::ALL;
+    let clock = FakeClock::new(NOW, 0);
+    let target = fixture_target("ipv4");
+    let peer = "127.0.0.1:49152".parse().expect("peer");
+    let mut clients = Vec::new();
+    let mut servers = Vec::new();
+    let mut capabilities = Vec::new();
+    for hop in 0..8 {
+        let keys = MethodKeyAdapter::new(udp_provider(profiles[hop % profiles.len()]));
+        let random = FillRandom::new(0x10 + hop as u8);
+        let mut client = UdpClientSession::new(&keys, &random, |_| false).expect("client");
+        let server = UdpServer::new(&keys).expect("server");
+        let mut wire = vec![0; MAX_UDP_WIRE_LEN];
+        let mut scratch = UdpPacketScratch::new();
+        let request_len = client
+            .encode_request(
+                &clock,
+                &random,
+                &datagram(target.clone(), b"request"),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("request");
+        let request = server
+            .prepare_request(&clock, &wire[..request_len], &mut scratch)
+            .expect("open request");
+        let (_, commit) = request.into_parts();
+        let capability = server
+            .commit_request(commit, peer, MonotonicInstant::ZERO, &random)
+            .expect("commit request")
+            .capability();
+        clients.push(Arc::new(client));
+        servers.push(server);
+        capabilities.push(capability);
+    }
+
+    let mut batches = [Vec::new(), Vec::new()];
+    for batch in &mut batches {
+        for hop in 0..8 {
+            let random = FillRandom::new(0x80 + hop as u8);
+            let mut wire = vec![0; MAX_UDP_WIRE_LEN];
+            let mut scratch = UdpPacketScratch::new();
+            let response = servers[hop]
+                .encode_response(
+                    capabilities[hop],
+                    &clock,
+                    &random,
+                    &datagram(target.clone(), b"response"),
+                    0,
+                    &mut wire,
+                    &mut scratch,
+                )
+                .expect("response");
+            batch.push(
+                clients[hop]
+                    .prepare_response_borrowed(&clock, &wire[..response.wire_len()], &mut scratch)
+                    .expect("open response")
+                    .into_commit(),
+            );
+        }
+    }
+
+    let [forward_commits, reverse_commits] = batches;
+    let barrier = Arc::new(Barrier::new(3));
+    let (finished, completed) = mpsc::channel();
+    let forward_clients = clients.clone();
+    let forward_barrier = Arc::clone(&barrier);
+    let forward_finished = finished.clone();
+    let _forward = std::thread::spawn(move || {
+        forward_barrier.wait();
+        let sessions = forward_clients.iter().map(Arc::as_ref).collect::<Vec<_>>();
+        let result = UdpClientSession::commit_responses(
+            &sessions,
+            forward_commits,
+            MonotonicInstant::from_duration(Duration::from_millis(1)),
+        );
+        let _ = forward_finished.send(result);
+    });
+    let reverse_barrier = Arc::clone(&barrier);
+    let _reverse = std::thread::spawn(move || {
+        reverse_barrier.wait();
+        let sessions = clients.iter().rev().map(Arc::as_ref).collect::<Vec<_>>();
+        let result = UdpClientSession::commit_responses(
+            &sessions,
+            reverse_commits.into_iter().rev().collect(),
+            MonotonicInstant::from_duration(Duration::from_millis(2)),
+        );
+        let _ = finished.send(result);
+    });
+    barrier.wait();
+    for _ in 0..2 {
+        completed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("opposite caller orders deadlocked")
+            .expect("valid batch");
     }
 }

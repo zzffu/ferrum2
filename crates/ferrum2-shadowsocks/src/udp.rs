@@ -420,7 +420,11 @@ impl UdpClientSession {
                 return Err(UdpPacketError::Binding);
             }
         }
-        let mut guards = sessions
+        let mut transitions = sessions.iter().copied().zip(commits).collect::<Vec<_>>();
+        // Borrowed sessions stay alive for the batch, so their addresses define one lock order.
+        transitions.sort_unstable_by_key(|(session, _)| std::ptr::from_ref(*session) as usize);
+        let (ordered_sessions, ordered_commits): (Vec<_>, Vec<_>) = transitions.into_iter().unzip();
+        let mut guards = ordered_sessions
             .iter()
             .map(|session| {
                 session
@@ -433,7 +437,7 @@ impl UdpClientSession {
             .iter()
             .map(|associations| (**associations).clone())
             .collect::<Vec<_>>();
-        for (associations, commit) in updated.iter_mut().zip(commits) {
+        for (associations, commit) in updated.iter_mut().zip(ordered_commits) {
             commit_client_association(associations, commit.session_id, commit.packet_id, now)?;
         }
         for (associations, replacement) in guards.iter_mut().zip(updated) {

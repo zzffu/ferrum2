@@ -3612,6 +3612,16 @@ mod tests {
         }
     }
 
+    fn other_psk_for_method(method: MethodProfile) -> ferrum2_crypto::MethodPsk {
+        match method {
+            MethodProfile::Blake3Aes128Gcm2022 => ferrum2_crypto::MethodPsk::aes128([0xa1; 16]),
+            MethodProfile::Blake3Aes256Gcm2022 => ferrum2_crypto::MethodPsk::aes256([0xa2; 32]),
+            MethodProfile::Blake3ChaCha20Poly13052022 => {
+                ferrum2_crypto::MethodPsk::chacha20_poly1305([0xa3; 32])
+            }
+        }
+    }
+
     #[tokio::test]
     async fn composed_udp_boundaries_are_real_and_sequential_for_every_method_and_target() {
         let targets = [
@@ -5304,6 +5314,346 @@ mod tests {
         ] {
             stock_udp_chain_case(methods, false).await;
         }
+        udp_chain_selector_snapshots_and_cross_plan_binding().await;
+    }
+
+    async fn udp_chain_selector_snapshots_and_cross_plan_binding() {
+        let upstreams = [
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("shared outer A"),
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("inner B"),
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("inner C"),
+        ];
+        let servers: [SocketAddrV4; 3] = upstreams.each_ref().map(|socket| {
+            let SocketAddr::V4(address) = socket.local_addr().expect("upstream address") else {
+                unreachable!("IPv4 upstream")
+            };
+            address
+        });
+        let methods = [
+            MethodProfile::Blake3Aes128Gcm2022,
+            MethodProfile::Blake3Aes256Gcm2022,
+            MethodProfile::Blake3ChaCha20Poly13052022,
+        ];
+        let tagged = [
+            TaggedOutbound::new("a", 0),
+            TaggedOutbound::new("b", 1),
+            TaggedOutbound::new("c", 2),
+        ];
+        let plans = [
+            TaggedPlan::new("a-b", vec![0, 1]),
+            TaggedPlan::new("a-c", vec![0, 2]),
+        ];
+
+        let static_listen = reserve_address();
+        let (static_path, mut static_config) = client_udp_test_config(static_listen, servers[0]);
+        static_config.outbounds = servers
+            .map(|server| ferrum2_config::ClientOutboundConfig { server })
+            .into();
+        static_config.outbound_psks = methods.map(psk_for_method).into();
+        let (static_route, static_selector) = compile_selector_plans(
+            &[TaggedInbound::new("entry", 0)],
+            &tagged,
+            &plans,
+            &[SelectorDefinition::new(
+                "manual",
+                vec!["a-b", "a-c"],
+                Some("a-b"),
+            )],
+            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "manual")]),
+        )
+        .expect("static chain selector");
+        static_config.route = static_route;
+        static_config.udp.as_mut().expect("UDP config").max_sessions = 2;
+        let static_registry = OwnerRegistry::new();
+        let (stop, task) = spawn_test_client(static_config, &static_registry);
+        wait_until_bound(static_listen).await;
+        let first = udp_association(static_listen).await;
+        static_selector
+            .switch("manual", "a-c")
+            .expect("switch static chain");
+        let second = udp_association(static_listen).await;
+        let target = TargetAddr::ipv4("192.0.2.40:53".parse().expect("target")).expect("target");
+        let mut socks = [0; 64];
+        let length = encode_udp_datagram(&target, b"snapshot", &mut socks).expect("request");
+        let outer_keys =
+            MethodKeyAdapter::new(MethodSinglePskProvider::new(psk_for_method(methods[0])));
+        let outer_server = UdpServer::new(&outer_keys).expect("outer protocol");
+        let clock = SystemClock::new();
+        let mut scratch = UdpPacketScratch::new();
+        let mut wire = vec![0; MAX_UDP_WIRE_LEN];
+        let mut relays = Vec::new();
+        for ((control, application, relay), expected) in [(first, servers[1]), (second, servers[2])]
+        {
+            application
+                .send_to(&socks[..length], relay)
+                .await
+                .expect("static chain send");
+            let received =
+                tokio::time::timeout(Duration::from_secs(2), upstreams[0].recv(&mut wire))
+                    .await
+                    .expect("static chain timeout")
+                    .expect("static chain request");
+            assert_eq!(
+                outer_server
+                    .prepare_request(&clock, &wire[..received], &mut scratch)
+                    .expect("static outer")
+                    .datagram()
+                    .target(),
+                &TargetAddr::ipv4(expected).expect("expected inner")
+            );
+            relays.push(relay);
+            drop((control, application));
+        }
+        stop.send(()).expect("stop static selector client");
+        assert_eq!(task.await.expect("static selector client"), Ok(()));
+        for relay in relays {
+            drop(UdpSocket::bind(relay).await.expect("static relay rebind"));
+        }
+        assert_eq!(active(static_registry.snapshot()), OwnerSnapshot::default());
+        std::fs::remove_file(static_path).expect("remove static config");
+
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let (path, context) = udp_test_context_for_psk(
+            registry.clone(),
+            servers[0],
+            Some(psk_for_method(methods[0])),
+        );
+        let outbounds = prepare_client_outbounds(
+            servers
+                .map(|server| ferrum2_config::ClientOutboundConfig { server })
+                .into(),
+            methods.map(psk_for_method).into(),
+        )
+        .expect("routed chain outbounds");
+        let (route, selector) = compile_selector_plans(
+            &[TaggedInbound::new("entry", 0)],
+            &tagged,
+            &plans,
+            &[SelectorDefinition::new(
+                "manual",
+                vec!["a-b", "a-c"],
+                Some("a-b"),
+            )],
+            TaggedRoute::Routed {
+                rules: vec![TaggedRouteRule::new(
+                    Some("entry"),
+                    Some(Network::Udp),
+                    Some(target.clone()),
+                    Some("manual"),
+                )],
+                final_outbound: Some("a-b"),
+            },
+        )
+        .expect("routed chain selector");
+        let routing = Arc::new(ClientRouting { route, outbounds });
+        let prepared =
+            prepare_udp_association_with_bind(&context, Ipv4Addr::LOCALHOST, None, UdpSocket::bind)
+                .await
+                .expect("routed chain preparation");
+        let relay = match prepared.application.local_addr().expect("relay") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 relay"),
+        };
+        let handle = prepared.handle;
+        let manager = prepared.manager.clone();
+        let (association, peer) = parsed_udp_association().await;
+        let running = start_udp_relay(
+            prepared,
+            association.control,
+            Arc::clone(&context),
+            Arc::clone(&routing),
+            0,
+        )
+        .await;
+        drop(association.reply);
+        let application = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("routed application");
+        while registry.snapshot().active_supervisor_children != 1 {
+            tokio::task::yield_now().await;
+        }
+        let protocol_servers = routing
+            .outbounds
+            .iter()
+            .map(|outbound| UdpServer::new(&outbound.keys).expect("protocol server"))
+            .collect::<Vec<_>>();
+        let random = SystemRandom;
+
+        application
+            .send_to(&socks[..length], relay)
+            .await
+            .expect("routed AB send");
+        let (ab_len, upstream_peer) = upstreams[0]
+            .recv_from(&mut wire)
+            .await
+            .expect("routed AB request");
+        let ab_outer = protocol_servers[0]
+            .prepare_request(&clock, &wire[..ab_len], &mut scratch)
+            .expect("AB outer");
+        assert_eq!(
+            ab_outer.datagram().target(),
+            &TargetAddr::ipv4(servers[1]).expect("B target")
+        );
+        let ab_inner_wire = ab_outer.datagram().payload().to_vec();
+        let (_, commit) = ab_outer.into_parts();
+        let ab_outer = protocol_servers[0]
+            .commit_request(commit, upstream_peer, clock.monotonic_now(), &random)
+            .expect("AB outer commit");
+        let ab_inner = protocol_servers[1]
+            .prepare_request(&clock, &ab_inner_wire, &mut scratch)
+            .expect("AB inner");
+        let (_, commit) = ab_inner.into_parts();
+        let ab_inner = protocol_servers[1]
+            .commit_request(commit, upstream_peer, clock.monotonic_now(), &random)
+            .expect("AB inner commit");
+
+        selector
+            .switch("manual", "a-c")
+            .expect("switch routed chain");
+        application
+            .send_to(&socks[..length], relay)
+            .await
+            .expect("routed AC send");
+        let (ac_len, _) = upstreams[0]
+            .recv_from(&mut wire)
+            .await
+            .expect("routed AC request");
+        let ac_outer = protocol_servers[0]
+            .prepare_request(&clock, &wire[..ac_len], &mut scratch)
+            .expect("AC outer");
+        assert_eq!(
+            ac_outer.datagram().target(),
+            &TargetAddr::ipv4(servers[2]).expect("C target")
+        );
+        let ac_inner_wire = ac_outer.datagram().payload().to_vec();
+        let (_, commit) = ac_outer.into_parts();
+        let ac_outer = protocol_servers[0]
+            .commit_request(commit, upstream_peer, clock.monotonic_now(), &random)
+            .expect("AC outer commit");
+        let ac_inner = protocol_servers[2]
+            .prepare_request(&clock, &ac_inner_wire, &mut scratch)
+            .expect("AC inner");
+        let (_, commit) = ac_inner.into_parts();
+        let ac_inner = protocol_servers[2]
+            .commit_request(commit, upstream_peer, clock.monotonic_now(), &random)
+            .expect("AC inner commit");
+
+        let encoded = protocol_servers[1]
+            .encode_response(
+                ab_inner.capability(),
+                &clock,
+                &random,
+                &test_datagram(target.clone(), b"AB"),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("AB inner response");
+        let ab_response = wire[..encoded.wire_len()].to_vec();
+        let crossed = protocol_servers[0]
+            .encode_response(
+                ab_outer.capability(),
+                &clock,
+                &random,
+                &test_datagram(
+                    TargetAddr::ipv4(servers[2]).expect("crossed C target"),
+                    &ab_response,
+                ),
+                0,
+                &mut wire,
+                &mut scratch,
+            )
+            .expect("cross-plan wrapper");
+        let stable = registry.snapshot();
+        let deadline = manager.idle_deadline(handle).expect("deadline");
+        upstreams[0]
+            .send_to(&wire[..crossed.wire_len()], upstream_peer)
+            .await
+            .expect("cross-plan response");
+        wait_for_metric(
+            &context.metrics,
+            "ferrum2_udp_datagrams_total{role=\"client\",direction=\"target_to_client\",outcome=\"rejected\"} 1",
+        )
+        .await;
+        assert_eq!(registry.snapshot(), stable);
+        assert_eq!(manager.idle_deadline(handle), Ok(deadline));
+        assert_eq!(
+            application
+                .try_recv(&mut [0])
+                .expect_err("cross-plan response reached application")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        for (outer, inner, next, payload) in [
+            (&ab_outer, &ab_inner, servers[1], b"AB".as_slice()),
+            (&ac_outer, &ac_inner, servers[2], b"AC".as_slice()),
+        ] {
+            let encoded = protocol_servers[if next == servers[1] { 1 } else { 2 }]
+                .encode_response(
+                    inner.capability(),
+                    &clock,
+                    &random,
+                    &test_datagram(target.clone(), payload),
+                    0,
+                    &mut wire,
+                    &mut scratch,
+                )
+                .expect("inner response");
+            let inner_wire = wire[..encoded.wire_len()].to_vec();
+            let encoded = protocol_servers[0]
+                .encode_response(
+                    outer.capability(),
+                    &clock,
+                    &random,
+                    &test_datagram(
+                        TargetAddr::ipv4(next).expect("intermediate target"),
+                        &inner_wire,
+                    ),
+                    0,
+                    &mut wire,
+                    &mut scratch,
+                )
+                .expect("outer response");
+            upstreams[0]
+                .send_to(&wire[..encoded.wire_len()], upstream_peer)
+                .await
+                .expect("valid plan response");
+            let received =
+                tokio::time::timeout(Duration::from_secs(2), application.recv(&mut socks))
+                    .await
+                    .expect("plan response timeout")
+                    .expect("plan response");
+            assert_eq!(
+                decode_udp_datagram(&socks[..received])
+                    .expect("plan SOCKS response")
+                    .payload(),
+                payload
+            );
+        }
+        assert_eq!(
+            context
+                .udp
+                .as_ref()
+                .expect("UDP")
+                .live_ids
+                .lock()
+                .expect("live IDs")
+                .len(),
+            4
+        );
+        drop(peer);
+        finish_udp_relay(running).await;
+        assert_eq!(registry.snapshot(), baseline);
+        drop(UdpSocket::bind(relay).await.expect("routed relay rebind"));
+        std::fs::remove_file(path).expect("remove routed config");
     }
 
     #[tokio::test]
@@ -5316,6 +5666,224 @@ mod tests {
             true,
         )
         .await;
+        eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers().await;
+    }
+
+    async fn eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers() {
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let mut upstreams = Vec::new();
+        for _ in 0..MAX_UDP_PLAN_HOPS {
+            upstreams.push(
+                UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .expect("eight-hop upstream"),
+            );
+        }
+        let servers = upstreams
+            .iter()
+            .map(
+                |socket| match socket.local_addr().expect("upstream address") {
+                    SocketAddr::V4(address) => address,
+                    SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
+                },
+            )
+            .collect::<Vec<_>>();
+        let methods = (0..MAX_UDP_PLAN_HOPS)
+            .map(|hop| MethodProfile::ALL[hop % MethodProfile::ALL.len()])
+            .collect::<Vec<_>>();
+        let outbounds = prepare_client_outbounds(
+            servers
+                .iter()
+                .copied()
+                .map(|server| ferrum2_config::ClientOutboundConfig { server })
+                .collect(),
+            methods.iter().copied().map(psk_for_method).collect(),
+        )
+        .expect("eight-hop outbounds");
+        let tags = ["o0", "o1", "o2", "o3", "o4", "o5", "o6", "o7"];
+        let tagged_outbounds = tags
+            .iter()
+            .enumerate()
+            .map(|(hop, tag)| TaggedOutbound::new(tag, hop))
+            .collect::<Vec<_>>();
+        let hops = (0..MAX_UDP_PLAN_HOPS).collect::<Vec<_>>();
+        let (route, _) = compile_selector_plans(
+            &[TaggedInbound::new("entry", 0)],
+            &tagged_outbounds,
+            &[TaggedPlan::new("chain", hops.clone())],
+            &[],
+            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "chain")]),
+        )
+        .expect("eight-hop route");
+        let routing = Arc::new(ClientRouting { route, outbounds });
+        let (path, context) = udp_test_context_for_psk(
+            registry.clone(),
+            servers[0],
+            Some(psk_for_method(methods[0])),
+        );
+        let prepared = prepare_udp_association_with_bind(
+            &context,
+            Ipv4Addr::LOCALHOST,
+            Some((hops.clone().into_boxed_slice(), servers[0])),
+            UdpSocket::bind,
+        )
+        .await
+        .expect("eight-hop preparation");
+        let relay = match prepared.application.local_addr().expect("relay") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 relay"),
+        };
+        assert!(prepared.plans.is_empty());
+        assert!(prepared.pending_session.is_some());
+        assert_eq!(prepared._fixed_capacity.len(), 3);
+        assert_eq!(
+            prepared.application_wire.len(),
+            MAX_SOCKS_UDP_DATAGRAM_BYTES
+        );
+        assert_eq!(prepared.upstream_wire.len(), MAX_UDP_WIRE_LEN);
+        assert_eq!(registry.snapshot().udp_buffered_bytes, 3 * MAX_UDP_WIRE_LEN);
+        let handle = prepared.handle;
+        let manager = prepared.manager.clone();
+        let (association, peer) = parsed_udp_association().await;
+        let running = start_udp_relay(
+            prepared,
+            association.control,
+            Arc::clone(&context),
+            Arc::clone(&routing),
+            0,
+        )
+        .await;
+        drop(association.reply);
+        let application = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("application");
+        while registry.snapshot().active_supervisor_children != 1 {
+            tokio::task::yield_now().await;
+        }
+        let target =
+            TargetAddr::ip("[2001:db8::1]:53".parse().expect("IPv6 target")).expect("target");
+        let limit = composed_udp_plan_limit(&routing.outbounds, &hops, false, 19);
+        let mut socks = vec![0; MAX_SOCKS_UDP_DATAGRAM_BYTES];
+        let one_over = encode_udp_datagram(&target, &vec![0x5a; limit + 1], &mut socks)
+            .expect("SOCKS-valid eight-hop maximum+1");
+        let stable = registry.snapshot();
+        let deadline = manager.idle_deadline(handle).expect("pending deadline");
+        application
+            .send_to(&socks[..one_over], relay)
+            .await
+            .expect("maximum+1 send");
+        wait_for_metric(
+            &context.metrics,
+            "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"rejected\"} 1",
+        )
+        .await;
+        assert_eq!(registry.snapshot(), stable);
+        assert_eq!(manager.idle_deadline(handle), Ok(deadline));
+        assert_eq!(manager.session_count(), 1);
+        assert!(
+            context
+                .udp
+                .as_ref()
+                .expect("UDP")
+                .live_ids
+                .lock()
+                .expect("live IDs")
+                .is_empty()
+        );
+        for socket in &upstreams {
+            assert_eq!(
+                socket
+                    .try_recv(&mut [0])
+                    .expect_err("maximum+1 emitted no hop")
+                    .kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+
+        let payload = vec![0x6b; limit];
+        let exact =
+            encode_udp_datagram(&target, &payload, &mut socks).expect("exact eight-hop maximum");
+        application
+            .send_to(&socks[..exact], relay)
+            .await
+            .expect("exact send");
+        let mut wire = vec![0; MAX_UDP_WIRE_LEN];
+        let (wire_len, request_peer) =
+            tokio::time::timeout(Duration::from_secs(2), upstreams[0].recv_from(&mut wire))
+                .await
+                .expect("eight-hop request timeout")
+                .expect("eight-hop request");
+        assert_eq!(wire_len, MAX_UDP_WIRE_LEN);
+        let clock = SystemClock::new();
+        let random = SystemRandom;
+        let mut nested = wire[..wire_len].to_vec();
+        for layer in 0..MAX_UDP_PLAN_HOPS {
+            let server = UdpServer::new(&routing.outbounds[layer].keys).expect("hop server");
+            let mut scratch = UdpPacketScratch::new();
+            let pending = server
+                .prepare_request(&clock, &nested, &mut scratch)
+                .expect("hop credential");
+            let expected = if layer + 1 == MAX_UDP_PLAN_HOPS {
+                target.clone()
+            } else {
+                TargetAddr::ipv4(servers[layer + 1]).expect("next hop")
+            };
+            assert_eq!(pending.datagram().target(), &expected, "hop {layer}");
+            let next = pending.datagram().payload().to_vec();
+            let (_, commit) = pending.into_parts();
+            let accepted = server
+                .commit_request(commit, request_peer, clock.monotonic_now(), &random)
+                .expect("hop commit");
+            assert_eq!(
+                server
+                    .session_snapshot(accepted.capability())
+                    .expect("hop snapshot")
+                    .expect("hop session")
+                    .highest_packet_id(),
+                Some(0),
+                "hop {layer} packet ID"
+            );
+            nested = next;
+        }
+        assert_eq!(nested, payload);
+        for socket in upstreams.iter().skip(1) {
+            assert_eq!(
+                socket
+                    .try_recv(&mut [0])
+                    .expect_err("only hop A receives")
+                    .kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+        assert_eq!(
+            context
+                .udp
+                .as_ref()
+                .expect("UDP")
+                .live_ids
+                .lock()
+                .expect("live IDs")
+                .len(),
+            MAX_UDP_PLAN_HOPS
+        );
+        assert_eq!(registry.snapshot().udp_queued_datagrams, 0);
+
+        drop(peer);
+        finish_udp_relay(running).await;
+        assert!(
+            context
+                .udp
+                .as_ref()
+                .expect("UDP")
+                .live_ids
+                .lock()
+                .expect("live IDs")
+                .is_empty()
+        );
+        assert_eq!(registry.snapshot(), baseline);
+        drop(UdpSocket::bind(relay).await.expect("relay rebind"));
+        std::fs::remove_file(path).expect("remove config");
     }
 
     async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) {
@@ -5372,6 +5940,16 @@ mod tests {
         let outer = protocols[0]
             .prepare_request(&clock, &wire[..outer_len], &mut scratch)
             .expect("outer credential");
+        let wrong_outer_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+            other_psk_for_method(methods[0]),
+        ));
+        assert!(
+            UdpServer::new(&wrong_outer_keys)
+                .expect("wrong outer server")
+                .prepare_request(&clock, &wire[..outer_len], &mut scratch)
+                .is_err(),
+            "wrong outer PSK authenticated"
+        );
         assert_eq!(
             outer.datagram().target(),
             &TargetAddr::ipv4(servers[1]).expect("inner target")
@@ -5384,8 +5962,25 @@ mod tests {
         let inner = protocols[1]
             .prepare_request(&clock, &inner_wire, &mut scratch)
             .expect("inner credential");
+        let wrong_inner_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+            other_psk_for_method(methods[1]),
+        ));
+        assert!(
+            UdpServer::new(&wrong_inner_keys)
+                .expect("wrong inner server")
+                .prepare_request(&clock, &inner_wire, &mut scratch)
+                .is_err(),
+            "wrong inner PSK authenticated"
+        );
         assert_eq!(inner.datagram().target(), &target);
         assert_eq!(inner.datagram().payload(), b"ping");
+        assert_eq!(
+            upstreams[1]
+                .try_recv(&mut [0])
+                .expect_err("only first hop receives network traffic")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
         let (_, inner_commit) = inner.into_parts();
         let inner_accepted = protocols[1]
             .commit_request(inner_commit, peer, clock.monotonic_now(), &random)
@@ -5404,6 +5999,30 @@ mod tests {
             .expect("inner response");
         let inner_wire = wire[..inner_response.wire_len()].to_vec();
         if invalid_inner {
+            let stable = active(registry.snapshot());
+            let wrong_intermediate = protocols[0]
+                .encode_response(
+                    outer_accepted.capability(),
+                    &clock,
+                    &random,
+                    &test_datagram(target.clone(), &inner_wire),
+                    0,
+                    &mut wire,
+                    &mut scratch,
+                )
+                .expect("wrong intermediate wrapper");
+            upstreams[0]
+                .send_to(&wire[..wrong_intermediate.wire_len()], peer)
+                .await
+                .expect("wrong intermediate send");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), application.recv(&mut socks))
+                    .await
+                    .is_err(),
+                "wrong intermediate reached the application"
+            );
+            assert_eq!(active(registry.snapshot()), stable);
+
             let mut tampered = inner_wire.clone();
             *tampered.last_mut().expect("inner wire") ^= 1;
             let invalid_outer = protocols[0]
@@ -5430,6 +6049,35 @@ mod tests {
                     .is_err(),
                 "invalid inner reached the application"
             );
+            assert_eq!(active(registry.snapshot()), stable);
+
+            let outer_tamper = protocols[0]
+                .encode_response(
+                    outer_accepted.capability(),
+                    &clock,
+                    &random,
+                    &test_datagram(
+                        TargetAddr::ipv4(servers[1]).expect("inner target"),
+                        &inner_wire,
+                    ),
+                    0,
+                    &mut wire,
+                    &mut scratch,
+                )
+                .expect("outer tamper wrapper");
+            let mut outer_tamper = wire[..outer_tamper.wire_len()].to_vec();
+            *outer_tamper.last_mut().expect("outer wire") ^= 1;
+            upstreams[0]
+                .send_to(&outer_tamper, peer)
+                .await
+                .expect("outer tamper send");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), application.recv(&mut socks))
+                    .await
+                    .is_err(),
+                "tampered outer reached the application"
+            );
+            assert_eq!(active(registry.snapshot()), stable);
         }
         let outer_response = protocols[0]
             .encode_response(
@@ -5456,6 +6104,89 @@ mod tests {
         let response = decode_udp_datagram(&socks[..received]).expect("SOCKS response");
         assert_eq!(response.to_target_addr(), target);
         assert_eq!(response.payload(), b"pong");
+
+        if invalid_inner {
+            let stable = active(registry.snapshot());
+            upstreams[0]
+                .send_to(&wire[..outer_response.wire_len()], peer)
+                .await
+                .expect("outer replay send");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), application.recv(&mut socks))
+                    .await
+                    .is_err(),
+                "outer replay reached the application"
+            );
+            assert_eq!(active(registry.snapshot()), stable);
+
+            let fresh_outer = protocols[0]
+                .encode_response(
+                    outer_accepted.capability(),
+                    &clock,
+                    &random,
+                    &test_datagram(
+                        TargetAddr::ipv4(servers[1]).expect("inner target"),
+                        &inner_wire,
+                    ),
+                    0,
+                    &mut wire,
+                    &mut scratch,
+                )
+                .expect("fresh outer replayed inner");
+            upstreams[0]
+                .send_to(&wire[..fresh_outer.wire_len()], peer)
+                .await
+                .expect("fresh outer send");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), application.recv(&mut socks))
+                    .await
+                    .is_err(),
+                "fresh outer replayed inner reached the application"
+            );
+            assert_eq!(active(registry.snapshot()), stable);
+
+            let next_inner = protocols[1]
+                .encode_response(
+                    inner_accepted.capability(),
+                    &clock,
+                    &random,
+                    &test_datagram(target.clone(), b"next"),
+                    0,
+                    &mut wire,
+                    &mut scratch,
+                )
+                .expect("next inner response");
+            let next_inner = wire[..next_inner.wire_len()].to_vec();
+            let next_outer = protocols[0]
+                .encode_response(
+                    outer_accepted.capability(),
+                    &clock,
+                    &random,
+                    &test_datagram(
+                        TargetAddr::ipv4(servers[1]).expect("inner target"),
+                        &next_inner,
+                    ),
+                    0,
+                    &mut wire,
+                    &mut scratch,
+                )
+                .expect("next outer response");
+            upstreams[0]
+                .send_to(&wire[..next_outer.wire_len()], peer)
+                .await
+                .expect("next response send");
+            let received =
+                tokio::time::timeout(Duration::from_secs(2), application.recv(&mut socks))
+                    .await
+                    .expect("next response timeout")
+                    .expect("next response");
+            assert_eq!(
+                decode_udp_datagram(&socks[..received])
+                    .expect("next SOCKS response")
+                    .payload(),
+                b"next"
+            );
+        }
 
         if !invalid_inner {
             for (case, (target, encoded_target_len)) in [
