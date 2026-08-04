@@ -1,7 +1,7 @@
 ---
 id: M10-T03
 milestone: M10
-status: blocked
+status: done
 depends_on: [M10-T02]
 owns:
   - docs/ci-status.md
@@ -28,15 +28,16 @@ without inventing a child-process switch channel、new provider/job or performan
 - [x] The unchanged architecture test plus exact-product-SHA Architect inspection prove one core selector
       module、no protocol/runtime policy duplicate、no new trait/dependency/control transport and no
       tag/selection telemetry；no selector-specific architecture test growth is claimed。
-- [ ] Exact integration passes Full、Rust 1.85、three native targets、existing TCP/UDP `12/12` each、
+- [x] Exact integration passes Full、Rust 1.85、three native targets、existing TCP/UDP `12/12` each、
       schema 3 footprint and final blocking review。
-- [ ] Any hosted evidence uses one exact SHA/run/attempt only after separate explicit authorization；no
+- [x] Any hosted evidence uses one exact SHA/run/attempt only after separate explicit authorization；no
       splicing、rerun、second push、PR、tag、release or publication。
 
 ## Validation
 
 Ran the public selector command、all four exact T02 commands、`TEST-0011` T03 commands and the serial
-integration gate exactly as recorded。Remote commands remain unrun until separately authorized。
+integration gate exactly as recorded。After explicit authorization，one non-force push started automatic
+run `30906020944/1` on the exact integration SHA；no rerun or second remote action was used。
 
 ## Result
 
@@ -64,15 +65,22 @@ integration gate exactly as recorded。Remote commands remain unrun until separa
   that repair。
 - Footprint: ticket `PASS` with `0/0/0` case/support/fixture delta；milestone zero-exit
   `REVIEW_REQUIRED` with integrity/change `PASS`、code/tests `16646/27319`、ratio `1.641175` and
-  cumulative `403/0/0`。No remote action was performed。
-- Blocker: one accepted exact SHA/run/attempt must complete `quality`、`test-footprint`、`msrv`、
-  `platform / windows-msvc`、`platform / linux-gnu`、`platform / linux-musl`、`interop`
-  (TCP/UDP `12/12` plus cleanup)、`performance` and `qualification`。Performance is required only as
-  current-workflow regression/aggregate-dependency evidence；M10 adds no performance threshold or claim。
-  These results cannot run without separate explicit authorization for one non-force push；the final
-  exact hosted-SHA review and close remain pending，and old M8 evidence is not M10 PASS。
+  cumulative `403/0/0`。`ARCH-M10T02-001` / `M10-T02-QA-N01` accept the large-file signals。
+- Qualified integration: `2df141e720580d2f8fe16bee6c9698f4e85a520a`，tree
+  `a9a7370499aa2749afab9c7b78ea9e53dd10cf27`。Automatic push run
+  [`30906020944/1`](https://github.com/zzffu/ferrum2/actions/runs/30906020944) completed `success`；
+  quality `91981153772`、test-footprint `91981153797`、MSRV `91981153779`、Windows MSVC
+  `91981153760`、Linux GNU `91981153841`、Linux musl `91981153800`、interop
+  `91981153770`、performance `91981153828` and qualification `91991168302` all succeeded。
+- Same-SHA markers report Full/security/process、schema 3 footprint、Rust 1.85、three platforms、
+  TCP/UDP each `12/12` plus cleanup、10,000 sessions/180 samples/RSS `6/6`/drain and aggregate
+  `PASS`。No old M8 or cross-run evidence was credited。
+- Final exact hosted-SHA Architect returned `PASS_WITH_NOTES` and QA `PASS` with no new finding；all
+  acceptance items are met，T03 is `done` and M10 may close。Performance ran `42m51s` and remains
+  regression/aggregate evidence only；M10 adds no threshold or claim。The push authorization is consumed，
+  and no rerun、second push、dispatch、PR、tag、release or publication is authorized。
 
 ## Rollback / risk
 
-Evidence changes may revert independently before close but cannot waive T01/T02 product evidence or use
-an old hosted run as M10 qualification。Performance remains regression-only。
+The qualified SHA and run/attempt must remain immutable evidence。Performance remains regression-only；
+automatic policy、external control、persistence and connection interruption require a new contract。

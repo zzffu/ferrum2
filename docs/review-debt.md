@@ -120,3 +120,13 @@ No M9 review debt remains。Architect and QA both returned `PASS`。The terminol
 `M9-QA-001` is resolved by recording and running the full `run::tests::...` names，and
 `M9-QA-002` is resolved by the tracked M9 contract/test map。Upstream-group deferral is an
 explicit scope boundary, not review debt。
+
+## M10 close audit
+
+No M10 review debt remains。Final exact hosted-SHA Architect returned `PASS_WITH_NOTES` and QA
+returned `PASS` with no new blocker、major、minor or note。`ARCH-M10T03-001` and
+`M10-T03-QA-001/002/003` are resolved。`ARCH-M10T02-001` and `M10-T02-QA-N01` remain accepted
+numeric footprint dispositions：the two existing binary test modules hold distinct real-I/O snapshot
+seams，and extracting them would duplicate private composition plumbing without adding a product seam。
+External control、automatic policy and the diagnostic-only performance ratio are explicit scope
+boundaries，not review debt。

@@ -14,10 +14,12 @@ and command definitions in their authoritative build/config files where possible
   - Current composition keeps one process-wide PSK/method and supports either
     the legacy single instance or bounded tagged multi-inbound/multi-outbound
     graphs with static bindings or shared exact-target TCP/UDP first-match
-    routing. Client graphs therefore support multiple concrete Shadowsocks
-    upstreams without implying an upstream group or load balancing. Server
-    outbounds remain direct; configuration is typed TOML with `tracing` and
-    low-cardinality metrics.
+    routing. Static and routed actions may name bounded tagged manual selectors;
+    the public Rust control atomically switches fixed members while already
+    selected flows retain their concrete snapshot. Client graphs therefore
+    support multiple concrete Shadowsocks upstreams without implying an upstream
+    group or load balancing. Server outbounds remain direct; configuration is
+    typed TOML with `tracing` and low-cardinality metrics.
   - Release targets are Linux x86_64 GNU/musl and Windows. License:
     `GPL-3.0-only`.
 
@@ -82,7 +84,7 @@ and command definitions in their authoritative build/config files where possible
 - Repository hygiene:
   - Commit `Cargo.lock`; do not commit build output, local evidence, real PSKs,
     or production endpoints. Reviewed non-secret protocol fixtures are source.
-  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M8 are
+  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M10 are
     closed; historical evidence belongs in milestone/history documents, not in
     this context summary.
 

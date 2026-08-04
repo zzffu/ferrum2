@@ -1,6 +1,6 @@
 # M10 — 手动 outbound selector 核心
 
-- **Status:** validating
+- **Status:** closed
 - **Baseline:** `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -67,7 +67,7 @@ ownership 与 process lifecycle 不变。
       snapshot的flow/datagram/leg/response不受switch影响。
 - [x] 现有aggregate admission/replay/UDP session/bytes/IDs、source/inbound binding、shutdown/rebind、
       trace与metric identities保持，selector/tag不进入telemetry。
-- [ ] 一个exact SHA通过Full、Rust 1.85、100+ lifecycle、three native targets、现有TCP/UDP各
+- [x] 一个exact SHA通过Full、Rust 1.85、100+ lifecycle、three native targets、现有TCP/UDP各
       `12/12`+cleanup、schema 3 footprint与blocking review；缺失/失败/未授权不算通过。
 
 ## Tickets
@@ -76,7 +76,7 @@ ownership 与 process lifecycle 不变。
 |---|---|---|---|
 | M10-T01 | Add the bounded selector graph, additive config, and public atomic control interface | — | done |
 | M10-T02 | Prove all existing client/server TCP/UDP selection points consume selector snapshots | M10-T01 | done |
-| M10-T03 | Reuse process/platform/interop evidence and qualify one exact integration SHA | M10-T02 | blocked |
+| M10-T03 | Reuse process/platform/interop evidence and qualify one exact integration SHA | M10-T02 | done |
 
 ```text
 M10-T01 core/config/control contract
@@ -122,10 +122,21 @@ and QA `PASS`；`ARCH-M10T03-001` and `M10-T03-QA-001/002/003` are resolved。Cu
 integration descends from that repair，and post-fast-forward diff-check plus ticket/milestone footprints
 passed。
 
-M10 is `validating` and M10-T03 is `blocked`：one accepted exact SHA/run/attempt must complete
-`quality`、`test-footprint`、`msrv`、`platform / windows-msvc`、`platform / linux-gnu`、
-`platform / linux-musl`、`interop` (TCP/UDP `12/12` plus cleanup)、`performance` and
-`qualification`。Performance is required only as current-workflow regression/aggregate-dependency
-evidence；M10 adds no performance threshold or claim。This requires separate explicit authorization
-for one non-force push；only the final exact hosted-SHA review remains pending。No push、hosted run、
-rerun、dispatch、PR、tag、release or publication was performed；old M8 evidence is not M10 PASS。
+Qualified exact integration `2df141e720580d2f8fe16bee6c9698f4e85a520a`、tree
+`a9a7370499aa2749afab9c7b78ea9e53dd10cf27` passed the exact local gate：format、Clippy、
+binaries、docs and diff checks；workspace `308 passed / 5 ignored`；lifecycle `1/1` in `127.38s`。
+Automatic push run [`30906020944/1`](https://github.com/zzffu/ferrum2/actions/runs/30906020944)
+completed all nine results successfully：quality `91981153772`、test-footprint `91981153797`、
+MSRV `91981153779`、Windows MSVC `91981153760`、Linux GNU `91981153841`、Linux musl
+`91981153800`、interop `91981153770`、performance `91981153828` and qualification
+`91991168302`。Exact markers bind that SHA/run/attempt and report Full/security/process、schema 3
+footprint、three platforms、TCP/UDP each `12/12` plus cleanup、10,000 sessions/180 samples/drain and
+final aggregate `PASS`。
+
+Final exact hosted-SHA Architect returned `PASS_WITH_NOTES` and QA `PASS` with no new blocker、major、
+minor or note；all T03 findings remain resolved。The existing large-file `REVIEW_REQUIRED` signals remain
+accepted because they cover distinct real binary composition seams without a duplicate helper/harness。
+M10 and all three tickets are closed。Performance completed in `42m51s` with diagnostic ratio
+`0.308719307`，but M10 adds no threshold or claim。The one authorized non-force push is consumed；no
+rerun、second push、dispatch、PR、tag、release or publication is authorized or performed，and this
+dedicated local docs-only closeout is not a separately qualified product SHA。

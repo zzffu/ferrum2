@@ -1,37 +1,37 @@
 # CI 与验证状态
 
-## M10 validating / remote qualification blocked
+## M10 closed
 
-- **Product/checkpoint:** locally validated product ancestor (not yet qualified)
-  `93ed9d91929200a1786694ffd59e491b7188a5d1`；local validation checkpoint
-  `eb56b81b709a8e18e4560fbad8cd3b3b27ced44a`。Exact-product Architect inspection bound target
-  `93ed9d9` / tree `ded9f1e` / parent `c55c6c8` and returned `PASS_WITH_NOTES` with no new
-  blocker、major or minor；existing `ARCH-M10T02-001` and `M10-T02-QA-N01` remain accepted。
-  M10-T01 Architect
-  `PASS_WITH_NOTES` / final QA `PASS`；M10-T02 Architect and QA both `PASS_WITH_NOTES` with no
-  blocker、major or minor finding。Reviewed T03 repair `a274a7cdb71ad74af5b2b8bb36cd2f32d2b96396`
-  received targeted Architect and QA `PASS`；`ARCH-M10T03-001` and
-  `M10-T03-QA-001/002/003` are resolved，and current local integration descends from that repair。
-- **Focused local qualification:** binary build `0` (`13.32s`)；public selector `2/2` (`0.52s`)；
-  client TCP/UDP and server TCP/UDP exact rows each `1/1` (`10.54/0.43/4.65/1.04s`)；real-process
-  TCP/UDP each `1/1` (`8.28/1.65s`)；architecture `9/9` (`1.04s`)；Rust 1.85 check `0`
-  (`9.92s`)；ticket footprint `PASS` (`7.48s`) and diff-check `0` (`0.04s`)。
-- **Serial Full:** format `0` (`0.56s`)；Clippy `0` (`6.85s`)；binary build `0` (`0.76s`)；
-  all-features workspace `308 passed / 5 ignored` (`43.88s`)；100+ lifecycle `1/1`
-  (`126.57s` test，`127.64s` command)；docs `0` (`5.57s`)；milestone footprint zero-exit
-  `REVIEW_REQUIRED` (`6.07s`)；diff-check `0` (`0.05s`)。
-- **Footprint:** code/tests `16646/27319`、ratio `1.641175`、cumulative case/support/fixture
-  `403/0/0`；T03 product/test and case/support/fixture deltas are `0/0` and `0/0/0`。Integrity and
-  change are `PASS`；`ARCH-M10T02-001` and `M10-T02-QA-N01` accept the two existing large
-  `run.rs` file `REVIEW_REQUIRED` signals。
-- **Blocker/boundary:** M10 remains `validating` and M10-T03 is `blocked`。One accepted exact SHA/run/
-  attempt must complete `quality`、`test-footprint`、`msrv`、`platform / windows-msvc`、
-  `platform / linux-gnu`、`platform / linux-musl`、`interop` (TCP/UDP `12/12` plus cleanup)、
-  `performance` and `qualification`。Performance is required only as current-workflow regression/
-  aggregate-dependency evidence；M10 adds no performance threshold or claim。These results cannot run
-  without separate explicit authorization for one non-force push；only the final exact hosted-SHA
-  review remains pending。No remote action was performed，and old M8 evidence is not credited as M10
-  PASS。
+- **Qualified exact identity:** `2df141e720580d2f8fe16bee6c9698f4e85a520a`，tree
+  `a9a7370499aa2749afab9c7b78ea9e53dd10cf27`，parent
+  `a274a7cdb71ad74af5b2b8bb36cd2f32d2b96396`。Product ancestor
+  `93ed9d91929200a1786694ffd59e491b7188a5d1` is unchanged by later product、test、Cargo、
+  toolchain、script or workflow files。
+- **Local exact gate:** format、Clippy、binary build、docs、diff and non-product diff passed；workspace
+  `308 passed / 5 ignored`；100+ lifecycle `1/1` in `127.38s`。Focused selector `2/2`、four
+  data-plane rows `1/1` each、real-process TCP/UDP `1/1` each、architecture `9/9` and Rust 1.85
+  had already passed on the unchanged product tree。
+- **Hosted qualification:** automatic push run
+  [`30906020944/1`](https://github.com/zzffu/ferrum2/actions/runs/30906020944) completed `success`
+  on that exact SHA。Jobs: quality `91981153772`、test-footprint `91981153797`、MSRV
+  `91981153779`、Windows MSVC `91981153760`、Linux GNU `91981153841`、Linux musl
+  `91981153800`、interop `91981153770`、performance `91981153828` and qualification
+  `91991168302` all completed `success`。
+- **Decisive markers:** Full/security/process and IPv6 UDP real-process `PASS`；schema 3 footprint
+  `PASS`；Rust/Cargo 1.85 check/build/test passed；each platform reports native/artifacts/linkage `2/2`
+  plus cleanup；interop reports TCP/UDP each `12/12` plus cleanup；performance reports 10 trials、
+  10,000 sessions、180 samples、RSS windows `6/6` and drain `PASS`；both final aggregate markers bind
+  exact SHA/run/attempt and report `PASS`。
+- **Footprint/reviews:** code/tests `16646/27319`、ratio `1.641175`、cumulative
+  case/support/fixture `403/0/0`；T03 adds `0/0/0`。Milestone `REVIEW_REQUIRED` is zero-exit with
+  integrity/change `PASS` and is accepted by `ARCH-M10T02-001` / `M10-T02-QA-N01`。Final exact
+  hosted-SHA Architect returned `PASS_WITH_NOTES` and QA `PASS`；no blocker/major/minor remains，and
+  `ARCH-M10T03-001` plus `M10-T03-QA-001/002/003` are resolved。
+- **Boundary:** performance ran `42m51s` and recorded ferrum/reference medians
+  `147499690/477779285` B/s，ratio `0.308719307`，only as regression/aggregate evidence；M10 makes
+  no performance threshold or claim。The authorized one non-force push is consumed。No rerun、second
+  push、dispatch、PR、tag、release or publication is authorized or performed；this local docs-only
+  closeout is not a separately hosted-qualified product SHA。
 
 ## M9 post-close test-footprint repair
 

@@ -24,3 +24,10 @@ No M8 workflow debt remains。The schema 2 exact-base Budget passed locally and 
 No M9 workflow debt remains。The activated schema 3 policy passed at revision `2` with
 case/support/fixture deltas `0/0/0`，and the milestone reused existing tests without a new harness
 or control-plane change。
+
+## M10 close audit
+
+No M10 workflow debt remains。The unchanged push workflow produced all nine required results on exact
+`2df141e720580d2f8fe16bee6c9698f4e85a520a` in run `30906020944/1`；schema 3 footprint and
+final qualification passed。Performance remains an existing regression/aggregate dependency and creates
+no M10 threshold or claim；no workflow、provider、job or process-control harness was added。
