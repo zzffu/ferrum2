@@ -1,11 +1,1 @@
-# BEGIN MILESTONE WORKFLOW
-/.agents/skills/milestone-workflow/** text eol=lf
-/.agents/AGENTS.override.md text eol=lf
-/.codex/agents/** text eol=lf
-/.codex/AGENTS.override.md text eol=lf
-/docs/agents/milestone-workflow.md text eol=lf
-/scripts/test-budget.sh text eol=lf
-/ci/test-budget-baseline.txt text eol=lf
-/.github/workflows/m0.yml text eol=lf
-/.githooks/pre-commit text eol=lf
-# END MILESTONE WORKFLOW
+* text=auto eol=lf
