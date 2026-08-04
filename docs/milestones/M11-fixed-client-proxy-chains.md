@@ -75,8 +75,8 @@ seam、SIP022 state machines 与 process lifecycle 保持兼容。
 | M11-T01 | Compile additive per-outbound credentials and bounded direct/chain plans | — | done |
 | M11-T02 | Compose ordered fixed TCP chains with existing SIP022 flows | M11-T01 | done |
 | M11-T03 | Compose bounded ordered UDP chains with atomic validation/binding | M11-T02 | done |
-| M11-T04 | Prove mixed-credential two-hop TCP/UDP in existing real-process harness | M11-T03 | active |
-| M11-T05 | Qualify one exact integration SHA locally、hosted and with manual performance | M11-T04 | todo |
+| M11-T04 | Prove mixed-credential two-hop TCP/UDP in existing real-process harness | M11-T03 | done |
+| M11-T05 | Qualify one exact integration SHA locally、hosted and with manual performance | M11-T04 | active |
 
 ```text
 M11-T01 config/plan contract
@@ -100,9 +100,11 @@ is planned。Known growing-file signals：config/local-support/UDP process files
 
 ## Blocker / next action
 
-No execution blocker。M11-T03 ticket candidate
-`0bb938a8d0bedc9d6f3a384b3d55a56aaa6078b8` is integrated at exact product
-`4a82f59bec3b0e957530bef05e763b1ab2d6ffd6` after focused、Full、100+ lifecycle、docs and blocking
-Architect/QA review pass。Milestone footprint integrity and ratio `1.982775` pass；the numeric
-large-file signal is reviewed and accepted。M11-T04 starts from that exact integration product。
-Push、workflow dispatch、hosted run、PR、tag、release and publication remain unauthorized。
+No local execution blocker。M11-T04 ticket candidate
+`bf4f032bbe27f1a24bd75a935360e5a28e52dc15` is integrated at exact product
+`6d975c1e45eb0e614c54961e35fdc19fa2478d98` after both real-process exact rows、architecture、Rust
+1.85、repository Quick and blocking Architect/QA review pass。The two Architect witness gaps were
+closed by one direct test-only repair and targeted re-review。Ticket and milestone footprint integrity
+pass；ratio `2.025588` and numeric growth/large-file signals are reviewed and accepted。M11-T05 starts
+local exact-SHA qualification from that product。Push、workflow dispatch、hosted run、PR、tag、release
+and publication remain unauthorized。

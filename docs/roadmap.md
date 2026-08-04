@@ -50,7 +50,7 @@ regression/aggregate evidence，M10不新增threshold或claim；一次non-force 
 未rerun、second push、dispatch、PR、tag、release或publish。
 M11以clean `master@7a3c876681255b88492b3608af4fa52497435efc`为baseline，
 并从exact ticket base `81469722101bcbb4e71a41e39dfd98e99043d34a`进入`executing`：
-M11-T01/T02/T03已集成，M11-T04 active；尚无qualification、remote或release证据。
+M11-T01/T02/T03/T04已集成，M11-T05 active；local qualification尚未完成，且尚无remote或release证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -952,7 +952,7 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
   per-layer tamper/wrong credential、nested UDP exact bound/+1、no partial mutation；owner cleanup/rebind；
   Full/MSRV/lifecycle/platform/interop/footprint/reviews及manual performance/resource exact-SHA evidence。
 - **Tickets:** M11-T01 config/plan `done`；M11-T02 TCP依赖T01 `done`；M11-T03 UDP依赖T02
-  `done`；M11-T04 real-process依赖T03 `active`；M11-T05 exact qualification依赖T04 `todo`。
+  `done`；M11-T04 real-process依赖T03 `done`；M11-T05 exact qualification依赖T04 `active`。
   Decision/spec/test为ADR-0030、SPEC/TEST-0012。
 - **Forecast:** test case/support/fixture `640/80/0`，预计milestone numeric `REVIEW_REQUIRED`但每票
   `<=240`；不新增fixture、harness、third helper、crate或dependency。Performance为required regression/
@@ -960,8 +960,8 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 - **Deferred/out of scope:** dynamic chain/hop、selector-in-hop、nested chain、health/auto-select/retry/
   fallback/failover/load balancing、SIP023/multi-user、server per-inbound credentials、DNS/Geo/sniff/user
   policy、new Endpoint、transparent/TUN、hot reload、management API、package/release/publication。
-- **Execution / remote boundary:** T01～T03已集成于exact product
-  `4a82f59bec3b0e957530bef05e763b1ab2d6ffd6`；T04从该exact base执行。无push、workflow dispatch、hosted run、PR、
+- **Execution / remote boundary:** T01～T04已集成于exact product
+  `6d975c1e45eb0e614c54961e35fdc19fa2478d98`；T05从该exact SHA执行local qualification。无push、workflow dispatch、hosted run、PR、
   tag、release或publication授权/执行。T05需要分别取得exact-SHA non-force push和manual
   performance dispatch授权。
 
