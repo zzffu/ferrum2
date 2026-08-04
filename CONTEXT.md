@@ -69,6 +69,24 @@ _Avoid_: Listener, route, endpoint
 A named egress identity returned by static binding or route selection.
 _Avoid_: Route, upstream group, endpoint
 
+**Outbound selector**:
+A tagged logical outbound with a fixed non-empty member set and one manually chosen current
+member. It never chooses, retries, checks, or balances members on its own.
+_Avoid_: Upstream group, load balancer, failover policy
+
+**Selector member**:
+One immediate outbound or outbound-selector tag admitted by an outbound selector.
+_Avoid_: Fallback, candidate retry, resolved leaf
+
+**Default selector member**:
+The explicit selector member that becomes current whenever a validated process graph is created.
+_Avoid_: Route final, automatic choice, persisted choice
+
+**Current selector member**:
+The selector's atomically replaceable immediate member; a nested selector remains the current
+member even when it ultimately resolves to a concrete outbound.
+_Avoid_: Healthiest member, fastest member, concrete leaf
+
 **Multi-upstream capability**:
 A client process with multiple concrete Shadowsocks-server outbounds that static binding
 or routing can select independently; selection never implies automatic retry.
@@ -77,7 +95,7 @@ _Avoid_: Upstream group, load balancing, failover
 **Upstream group**:
 A logical candidate set whose policy automatically chooses, balances, checks, retries, or
 chains member upstreams; ferrum2 does not currently provide this policy identity.
-_Avoid_: Multiple tagged outbounds, multi-upstream capability
+_Avoid_: Multiple tagged outbounds, multi-upstream capability, outbound selector
 
 **Static outbound binding**:
 The M7-compatible configuration relation used when no route table exists; one inbound

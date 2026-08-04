@@ -41,6 +41,9 @@ run [`30848182146/1`](https://github.com/zzffu/ferrum2/actions/runs/30848182146)
 M9已在baseline/accepted exact `5b0a8020e5dac1a915dc64c8229ddd129dd4da4a`确认M7/M8
 已交付client multi-upstream；focused、Full、100+ lifecycle、docs、schema 3 footprint及
 Architect/QA review通过，新增product/test LOC为零。Upstream group/load balancing继续延期。
+M10已在baseline `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`规划manual outbound selector：
+additive tagged-only graph、公开Rust query/switch interface、per-selector atomic current member及
+existing selection-call snapshot；尚无product implementation、qualification或remote action。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -66,6 +69,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M7 | M6 closed | 具名多inbound/outbound的静态tag绑定与原子启动 |
 | M8 | M7 closed | 共享最小TCP/UDP first-match routing |
 | M9 | M8 closed | 核验现有tagged multi-outbound已满足client multi-upstream |
+| M10 | M9 closed | tagged manual outbound selector与公开原子切换interface |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -81,6 +85,8 @@ M8已复用`TargetAddr`、tag graph和composition roots交付有界exact-target
 first-match route module；advanced matcher和outbound policy继续延期。
 M9复用M7/M8资格证据并以零product/test code确认multi-upstream；只有出现自动成员
 选择或retry的可观察需求时才考虑upstream group。
+M10只规划手动selector：固定成员、显式default、公开Rust control和新selection观察current；
+自动选择、retry、health、load balancing与外部control入口继续延期。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -887,6 +893,26 @@ M9复用M7/M8资格证据并以零product/test code确认multi-upstream；只有
   chaining、per-upstream credentials/quotas。只有具体自动成员选择或retry需求可重开。
 - **Remote boundary:** 无push、run、rerun、dispatch、PR、tag、release或publication授权/执行。
 
+## M10 — 手动 outbound selector 核心
+
+- **Status:** planned
+- **Objective:** additive tagged-only `[[selectors]]`把固定concrete/selector member graph接入
+  static inbound binding与existing route actions；公开Rust interface查询并原子切换当前直接
+  member，既有selection call已取得的concrete identity不被改写。
+- **Baseline:** `99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`；M9 closed，master clean，
+  code/tests `15996/26916`、ratio `1.682671`。
+- **Exit criteria:** legacy/M7/M8 exact compatibility；完整有界DAG与empty/unknown/duplicate/
+  default/cycle fail-closed；public-only query/switch/concurrency/error integration tests；client/server
+  TCP/UDP latest-selection/old-snapshot evidence；Full/MSRV/lifecycle/platform/interop/footprint与双审。
+- **Tickets:** M10-T01 core/config/control `ready`；M10-T02 data-plane snapshots依赖T01 `todo`；
+  M10-T03 exact qualification依赖T02 `todo`。Spec/Test为`SPEC/TEST-0011`，decision为ADR-0029。
+- **Forecast:** test case/support/fixture `230/0/0`；不新增helper、fixture、process switch harness、
+  crate或dependency。Existing large binary test files的numeric `REVIEW_REQUIRED`必须显式审查。
+- **Deferred/out of scope:** HTTP/IPC/CLI、persistence/hot reload、auto-select/URL test、retry、
+  fallback/health/load balancing/chaining、connection interruption、CAS/graph transaction、new adapter。
+- **Remote boundary:** plan-only；无push、hosted run、rerun、dispatch、PR、tag、release或publication
+  授权/执行。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -928,6 +954,7 @@ M9复用M7/M8资格证据并以零product/test code确认multi-upstream；只有
 | DEC-035 | resolved in M7 plan | additive v1 tagged/legacy互斥shape；inbound/outbound全局唯一且有界tag、静态inbound→outbound引用、全部outbound被引用；保留process-wide method/PSK及aggregate TCP/UDP owners；复用`ProcessSupervisor` transaction且不创建`Endpoint` interface | `ADR-0027`、SPEC/TEST-0008、M7-T01～T04 |
 | DEC-036 | resolved in M8 plan | additive tagged-only route/static互斥shape；最多64条ordered AND/wildcard rules，以inbound/network/pre-resolution exact target首命中并由mandatory final收敛；shared core route interface；TCP per-flow、UDP per-datagram且selected failure不fallback；routed client UDP one-socket/lazy endpoint legs | `ADR-0028`、SPEC/TEST-0009、M8-T01～T04 |
 | DEC-037 | resolved in M9 close | multi-upstream指一个client process拥有多个可被static/routed selection独立选择的concrete Shadowsocks servers；不等同于自动成员选择、retry或health policy。M7/M8已满足前者，upstream group/load balancing继续延期 | `CONTEXT.md`、SPEC/TEST-0010、M9-T01 |
+| DEC-038 | resolved in M10 plan | additive tagged-only `[[selectors]]`、explicit default、bounded all-edge DAG；shared core selector state与公开`selected`/`switch` interface；RouteTable内部返回concrete identity并沿用现有TCP/UDP selection-call granularity；无external control、auto policy、retry/health/LB | `CONTEXT.md`、ADR-0029、SPEC/TEST-0011、M10-T01～T03 |
 
 ## 风险登记
 
@@ -1032,3 +1059,4 @@ M9复用M7/M8资格证据并以零product/test code确认multi-upstream；只有
 | 2026-08-04 | M8-T03 integration | exact `4a1de3a3`集成server authenticated TCP/UDP per-request direct identity route；T03 done，T04 ready | full/targeted review暴露production mutation witness与两类cancellation observability回归；两轮用户指定的双独立xhigh只读分析分别选择最小production-path和pre-open取消修复，最终Architect/QA均PASS | server `18/18`、runtime `17+5+13`、CLI `5/5`、Full、MSRV、ignored lifecycle `1/1`、Clippy/fmt/diff与Budget PASS；growth `749/840`、remaining `91`；integration Quick首次client loopback配置flake后isolated `1/1`、client suite `20x29/29`及unchanged workspace rerun通过；无push/hosted/release/publication |
 | 2026-08-04 | M8 close | M8改为`closed`；四票及六项exit criteria完成，blocking findings为零 | exact `926843d6`以dual-stack echo关闭hosted localhost resolver-order假设；run `30848182146/1`全部jobs及final qualification success | Budget `837/840`、remaining `3`；performance仅作regression且无M8阈值/声明；两次push授权已消费，closeout仅本地docs commit |
 | 2026-08-04 | M9 zero-code close | M7 tagged multi-outbound与M8 first-match route已满足client multi-upstream；不增加upstream group | exact `5b0a802`上focused、Full、100+ lifecycle、docs、schema 3 footprint及Architect/QA review PASS；M8以来product/test diff为空 | M9-T01 done；新增product/test LOC `0/0`；无ADR、dependency、remote action或未解决finding |
+| 2026-08-04 | M10 plan | M10改为`planned`；接受separate tagged-only selector graph、explicit default、nested DAG、public Rust atomic query/switch及existing selection-call snapshot | M9 closed；existing `RouteTable`、resolved tag graph与four data-plane call sites足够，不需要new trait、crate、dependency或process control channel | baseline `99bd62e`；ADR-0029、SPEC/TEST-0011、T01→T02→T03；schema 3 forecast `230/0/0`；plan-only，无product/push/hosted/release/publication |

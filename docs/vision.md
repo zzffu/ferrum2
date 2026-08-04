@@ -127,6 +127,7 @@ operator endpoint、两个 binary roots 和 workspace member 数量是历史现�
 | M7 | 具名多inbound/outbound、静态tag引用和原子prepare/rollback，不建Endpoint interface | closed |
 | M8 | 共享、有界的TCP/UDP first-match routing；只匹配inbound tag、network和exact target | closed |
 | M9 | 核验M7/M8已交付client multi-upstream；零product/test code关闭 | closed |
+| M10 | 固定成员的tagged manual outbound selector与公开Rust原子切换interface | planned |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -194,3 +195,8 @@ client Shadowsocks outbounds与M8的static/routed selection已构成multi-upstre
 Full、100+ lifecycle、docs和schema 3 footprint通过，Architect/QA均PASS。M9未改product或
 test code。Upstream group、load balancing、health/failover和chaining仍是需要独立需求的
 未来策略能力；无remote action授权或执行。
+
+M10以`99bd62e9673f8743a0ea6597962fbfc22b3e3ce7`为planning baseline，规划additive
+tagged-only manual selector：固定有界成员、显式default、公开Rust query/switch和现有
+selection-call snapshot。它不加入自动选择、retry、health/load balancing、HTTP/IPC/CLI、
+persistence或connection interruption；当前仍为planned，尚无product/qualification证据。
