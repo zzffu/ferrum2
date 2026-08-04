@@ -1654,6 +1654,30 @@ fn harness_has_no_concrete_ferrum2_cargo_dependency() {
 }
 
 #[test]
+fn performance_is_manual_and_decoupled_from_qualification() {
+    let workflow =
+        fs::read_to_string(workspace_root().join(".github/workflows/m0.yml")).expect("workflow");
+    let workflow = normalize_line_endings(&workflow).expect("workflow line endings");
+    assert!(workflow.contains(
+        "  performance:\n    name: performance\n    if: ${{ github.event_name == 'workflow_dispatch' }}\n"
+    ));
+    assert!(workflow.contains("test \"$GITHUB_EVENT_NAME\" = \"workflow_dispatch\""));
+    assert!(workflow.contains(
+        "    needs:\n      - quality\n      - budget\n      - msrv\n      - platform\n      - interop\n"
+    ));
+    for forbidden in [
+        "      - performance\n",
+        "PERFORMANCE_RESULT",
+        "m4_qualification_completion",
+    ] {
+        assert!(
+            !workflow.contains(forbidden),
+            "workflow must not contain {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn m4_thp_profile_is_applied_and_restored_around_resource_qualification() {
     let workflow =
         fs::read_to_string(workspace_root().join(".github/workflows/m0.yml")).expect("M4 workflow");

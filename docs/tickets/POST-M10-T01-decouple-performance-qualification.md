@@ -1,7 +1,7 @@
 ---
 id: POST-M10-T01
 milestone: post-M10
-status: active
+status: done
 depends_on: []
 owns:
   - .github/workflows/m0.yml
@@ -20,15 +20,15 @@ performance profile an explicit exact-SHA milestone decision.
 
 ## Acceptance
 
-- [ ] `performance` runs only for `workflow_dispatch` and retains its own fail-closed evidence.
-- [ ] `qualification` requires quality、test footprint、MSRV、all platforms and interop, but does
+- [x] `performance` runs only for `workflow_dispatch` and retains its own fail-closed evidence.
+- [x] `qualification` requires quality、test footprint、MSRV、all platforms and interop, but does
       not wait for or claim performance.
-- [ ] Milestone plans default performance to excluded with a rationale and name the bounded cases
+- [x] Milestone plans default performance to excluded with a rationale and name the bounded cases
       that require it; no correctness or security gate becomes optional.
-- [ ] Existing M4 THP apply/restore/cleanup checks remain covered, and one focused workflow-policy
+- [x] Existing M4 THP apply/restore/cleanup checks remain covered, and one focused workflow-policy
       test prevents reconnecting automatic qualification to performance.
-- [ ] The protected workflow and planning controls are isolated from Rust changes.
-- [ ] Focused validation and repository formatting pass.
+- [x] The protected workflow and planning controls are isolated from Rust changes.
+- [x] Focused validation and repository formatting pass.
 
 ## Validation
 
@@ -42,6 +42,10 @@ git diff --check
 
 ## Result
 
-- Commits: —
-- Review: —
-- Notes: —
+- Commits: control `62949c3a94d86ffddd3e28656dd48e9b2b549a00`; regression evidence in
+  this closeout commit.
+- Review: primary exact-diff review — PASS.
+- Notes: YAML parse、both focused workflow-policy tests、Rustfmt and diff check passed. The
+  footprint integrity gate passed；numeric `REVIEW_REQUIRED` is accepted because the existing
+  `workspace_policy.rs` control seam grew by only 23 case lines and no helper/harness was added.
+  No push、dispatch or other remote action occurred.
