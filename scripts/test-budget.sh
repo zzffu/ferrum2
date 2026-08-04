@@ -8,9 +8,11 @@ TOOL_NAME=rustloc
 TOOL=${RUSTLOC:-rustloc}
 TOOL_VERSION=0.19.1
 SCHEMA=3
-SERIES=rustloc-0.19.1-test-footprint-v1
+SERIES=rustloc-0.19.1-test-footprint-v2
+PREVIOUS_SERIES=rustloc-0.19.1-test-footprint-v1
 METRIC=test_footprint
-CLASSIFICATION=path-v1
+CLASSIFICATION=path-v2
+PREVIOUS_CLASSIFICATION=path-v1
 BASELINE_FILE=ci/test-budget-baseline.txt
 
 usage() {
@@ -99,7 +101,7 @@ kv_get() {
   ' "$file"
 }
 
-load_baseline() {
+parse_baseline() {
   file=$1
   [ -f "$file" ] || error baseline_missing
 
@@ -133,12 +135,7 @@ load_baseline() {
   b_policy_revision=$(kv_get policy_revision "$file") || error baseline_policy_revision_missing
   b_reforecast_ref=$(kv_get reforecast_ref "$file") || error baseline_reforecast_ref_missing
 
-  [ "$b_schema" = "$SCHEMA" ] || error baseline_schema_mismatch
-  [ "$b_series" = "$SERIES" ] || error baseline_series_mismatch
-  [ "$b_tool" = "$TOOL_NAME" ] || error baseline_tool_mismatch
-  [ "$b_tool_version" = "$TOOL_VERSION" ] || error baseline_tool_version_mismatch
-  [ "$b_metric" = "$METRIC" ] || error baseline_metric_mismatch
-  [ "$b_classification" = "$CLASSIFICATION" ] || error baseline_classification_mismatch
+  is_uint "$b_schema" || error baseline_schema_invalid
   printf '%s\n' "$b_milestone" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' \
     || error baseline_milestone_invalid
   printf '%s\n' "$b_commit" | grep -Eq '^[0-9a-f]{40}$' || error baseline_commit_invalid
@@ -167,6 +164,16 @@ load_baseline() {
   resolve_commit "$b_commit" >/dev/null
 }
 
+load_baseline() {
+  parse_baseline "$1"
+  [ "$b_schema" = "$SCHEMA" ] || error baseline_schema_mismatch
+  [ "$b_series" = "$SERIES" ] || error baseline_series_mismatch
+  [ "$b_tool" = "$TOOL_NAME" ] || error baseline_tool_mismatch
+  [ "$b_tool_version" = "$TOOL_VERSION" ] || error baseline_tool_version_mismatch
+  [ "$b_metric" = "$METRIC" ] || error baseline_metric_mismatch
+  [ "$b_classification" = "$CLASSIFICATION" ] || error baseline_classification_mismatch
+}
+
 materialize_tree() {
   object=$1
   dest=$2
@@ -187,11 +194,14 @@ parse_csv_report() {
   root_dir=$2
   report=$3
   map=$4
+  path_prefix=${5:-}
   raw_map="$map.raw"
   normalized_root=$(printf '%s' "$root_dir" | tr '\\' '/')
+  normalized_prefix=$(printf '%s' "$path_prefix" | tr '\\' '/' | sed 's:/*$::')
 
   rm -f "$report" "$map" "$raw_map"
-  awk -F, -v root="$normalized_root" -v report="$report" -v map="$raw_map" '
+  awk -F, -v root="$normalized_root" -v prefix="$normalized_prefix" \
+    -v report="$report" -v map="$raw_map" '
     BEGIN { case_loc = 0; support_loc = 0; fixture_loc = 0 }
     function clean(v) {
       gsub(/\r/, "", v)
@@ -266,6 +276,7 @@ parse_csv_report() {
         invalid = 1
         next
       }
+      if (prefix != "") label = prefix "/" label
       cat = category(label)
       file_test_sum += tests
       if (cat == "case") case_loc += tests
@@ -313,6 +324,82 @@ parse_csv_report() {
   rm -f "$raw_map"
 }
 
+merge_count_reports() {
+  merge_left_report=$1
+  merge_left_map=$2
+  merge_right_report=$3
+  merge_right_map=$4
+  merge_report=$5
+  merge_map=$6
+  merge_raw_map="$merge_map.raw"
+
+  merge_left_code=$(kv_get code "$merge_left_report") || return 2
+  merge_right_code=$(kv_get code "$merge_right_report") || return 2
+  merge_left_tests=$(kv_get tests "$merge_left_report") || return 2
+  merge_right_tests=$(kv_get tests "$merge_right_report") || return 2
+  merge_left_examples=$(kv_get examples "$merge_left_report") || return 2
+  merge_right_examples=$(kv_get examples "$merge_right_report") || return 2
+  merge_left_case=$(kv_get test_case_loc "$merge_left_report") || return 2
+  merge_right_case=$(kv_get test_case_loc "$merge_right_report") || return 2
+  merge_left_support=$(kv_get test_support_loc "$merge_left_report") || return 2
+  merge_right_support=$(kv_get test_support_loc "$merge_right_report") || return 2
+  merge_left_fixture=$(kv_get test_fixture_loc "$merge_left_report") || return 2
+  merge_right_fixture=$(kv_get test_fixture_loc "$merge_right_report") || return 2
+
+  merge_code=$(( merge_left_code + merge_right_code ))
+  merge_tests=$(( merge_left_tests + merge_right_tests ))
+  merge_examples=$(( merge_left_examples + merge_right_examples ))
+  merge_case=$(( merge_left_case + merge_right_case ))
+  merge_support=$(( merge_left_support + merge_right_support ))
+  merge_fixture=$(( merge_left_fixture + merge_right_fixture ))
+  [ $(( merge_case + merge_support + merge_fixture )) -eq "$merge_tests" ] || return 2
+
+  rm -f "$merge_report" "$merge_map" "$merge_raw_map"
+  awk -F '\t' '
+    NF != 3 || $1 == "" || $2 !~ /^[0-9]+$/ || $3 !~ /^(case|support|fixture)$/ {
+      invalid = 1
+      next
+    }
+    seen[$1]++ { invalid = 1; next }
+    { print }
+    END { if (invalid) exit 2 }
+  ' "$merge_left_map" "$merge_right_map" > "$merge_raw_map" || {
+    rm -f "$merge_raw_map"
+    return 2
+  }
+  sort -t "$(printf '\t')" -k1,1 "$merge_raw_map" > "$merge_map"
+  rm -f "$merge_raw_map"
+
+  merge_largest_path=$(awk -F '\t' '
+    $2 > largest || ($2 == largest && (path == "" || $1 < path)) {
+      largest = $2
+      path = $1
+    }
+    END { print path == "" ? "none" : path }
+  ' "$merge_map") || return 2
+  if [ "$merge_largest_path" = none ]; then
+    merge_largest_tests=0
+    merge_largest_category=none
+  else
+    merge_largest_tests=$(awk -F '\t' -v path="$merge_largest_path" \
+      '$1 == path { print $2; found = 1 } END { if (!found) exit 2 }' "$merge_map") || return 2
+    merge_largest_category=$(awk -F '\t' -v path="$merge_largest_path" \
+      '$1 == path { print $3; found = 1 } END { if (!found) exit 2 }' "$merge_map") || return 2
+  fi
+
+  {
+    printf 'code=%s\n' "$merge_code"
+    printf 'tests=%s\n' "$merge_tests"
+    printf 'examples=%s\n' "$merge_examples"
+    printf 'test_case_loc=%s\n' "$merge_case"
+    printf 'test_support_loc=%s\n' "$merge_support"
+    printf 'test_fixture_loc=%s\n' "$merge_fixture"
+    printf 'largest_test_file=%s\n' "$merge_largest_path"
+    printf 'largest_test_file_tests=%s\n' "$merge_largest_tests"
+    printf 'largest_test_file_category=%s\n' "$merge_largest_category"
+  } > "$merge_report"
+}
+
 load_count_report() {
   report=$1
   map=$2
@@ -334,13 +421,34 @@ count_dir() {
   dir=$1
   label=$2
   need_tmp
-  csv="$tmp_root/$label.csv"
-  report="$tmp_root/$label.report"
-  map="$tmp_root/$label.files.tsv"
+  workspace_csv="$tmp_root/$label.workspace.csv"
+  workspace_report="$tmp_root/$label.workspace.report"
+  workspace_map="$tmp_root/$label.workspace.files.tsv"
   (cd "$dir" && "$TOOL" --lang rust --by-file -t code,tests,examples \
-    --output csv --output-file-path "$csv" >/dev/null) || error rustloc_count_failed
-  parse_csv_report "$csv" "$dir" "$report" "$map" || error rustloc_csv_invalid
-  load_count_report "$report" "$map"
+    --output csv --output-file-path "$workspace_csv" >/dev/null) \
+    || error rustloc_count_failed
+  parse_csv_report "$workspace_csv" "$dir" "$workspace_report" "$workspace_map" \
+    || error rustloc_csv_invalid
+
+  fixture_dir="$dir/tests/fixtures"
+  if [ ! -d "$fixture_dir" ]; then
+    load_count_report "$workspace_report" "$workspace_map"
+    return
+  fi
+
+  fixture_csv="$tmp_root/$label.fixture.csv"
+  fixture_report="$tmp_root/$label.fixture.report"
+  fixture_map="$tmp_root/$label.fixture.files.tsv"
+  (cd "$dir" && "$TOOL" tests/fixtures --lang rust --by-file -t code,tests,examples \
+    --output csv --output-file-path "$fixture_csv" >/dev/null) \
+    || error rustloc_fixture_count_failed
+  parse_csv_report "$fixture_csv" "$fixture_dir" "$fixture_report" "$fixture_map" \
+    tests/fixtures || error rustloc_fixture_csv_invalid
+  combined_report="$tmp_root/$label.report"
+  combined_map="$tmp_root/$label.files.tsv"
+  merge_count_reports "$workspace_report" "$workspace_map" "$fixture_report" "$fixture_map" \
+    "$combined_report" "$combined_map" || error rustloc_report_merge_invalid
+  load_count_report "$combined_report" "$combined_map"
 }
 
 count_object() {
@@ -672,6 +780,8 @@ validate_policy_transition() {
   transition_end=$3
 
   load_baseline "$transition_new"
+  new_series=$b_series
+  new_classification=$b_classification
   new_milestone=$b_milestone
   new_commit=$b_commit
   new_code=$b_code
@@ -686,6 +796,7 @@ validate_policy_transition() {
   new_reforecast_ref=$b_reforecast_ref
 
   old_schema=$(legacy_schema "$transition_old")
+  transition_kind=activation
   case "$old_schema" in
     1|2)
       [ "$new_policy_revision" -eq 1 ] || blocked policy_upgrade_revision_must_start_at_one
@@ -693,7 +804,14 @@ validate_policy_transition() {
         && blocked policy_activation_after_rust_change
       ;;
     3)
-      load_baseline "$transition_old"
+      parse_baseline "$transition_old"
+      [ "$b_schema" = "$SCHEMA" ] || error policy_transition_source_schema_mismatch
+      [ "$b_tool" = "$TOOL_NAME" ] || error policy_transition_source_tool_mismatch
+      [ "$b_tool_version" = "$TOOL_VERSION" ] \
+        || error policy_transition_source_tool_version_mismatch
+      [ "$b_metric" = "$METRIC" ] || error policy_transition_source_metric_mismatch
+      old_series=$b_series
+      old_classification=$b_classification
       old_milestone=$b_milestone
       old_commit=$b_commit
       old_code=$b_code
@@ -707,19 +825,47 @@ validate_policy_transition() {
       old_policy_revision=$b_policy_revision
       old_reforecast_ref=$b_reforecast_ref
 
+      measurement_transition=false
+      if [ "$new_series" != "$old_series" ] || \
+          [ "$new_classification" != "$old_classification" ]; then
+        [ "$old_series" = "$PREVIOUS_SERIES" ] && \
+          [ "$old_classification" = "$PREVIOUS_CLASSIFICATION" ] && \
+          [ "$new_series" = "$SERIES" ] && \
+          [ "$new_classification" = "$CLASSIFICATION" ] \
+          || blocked policy_measurement_transition_invalid
+        measurement_transition=true
+      fi
+
       if [ "$new_milestone" = "$old_milestone" ]; then
         [ "$new_commit" = "$old_commit" ] || blocked policy_base_changed_within_milestone
-        [ "$new_code" -eq "$old_code" ] || blocked policy_base_code_changed_within_milestone
-        [ "$new_tests" -eq "$old_tests" ] || blocked policy_base_tests_changed_within_milestone
-        policy_thresholds_changed || blocked policy_revision_without_threshold_change
         [ "$new_policy_revision" -eq $(( old_policy_revision + 1 )) ] \
           || blocked policy_revision_not_incremented
         [ "$new_reforecast_ref" != "$old_reforecast_ref" ] \
           || blocked policy_reforecast_ref_unchanged
+        if $measurement_transition; then
+          [ "$new_code" -eq "$old_code" ] \
+            || blocked policy_measurement_transition_changed_code
+          [ "$new_tests" -gt "$old_tests" ] \
+            || blocked policy_measurement_transition_did_not_add_fixture_tests
+          if policy_thresholds_changed; then
+            blocked policy_measurement_transition_changed_thresholds
+          fi
+          transition_kind=measurement-series
+        else
+          [ "$new_code" -eq "$old_code" ] || blocked policy_base_code_changed_within_milestone
+          [ "$new_tests" -eq "$old_tests" ] \
+            || blocked policy_base_tests_changed_within_milestone
+          policy_thresholds_changed || blocked policy_revision_without_threshold_change
+          transition_kind=reforecast
+        fi
       else
+        if $measurement_transition; then
+          blocked policy_measurement_transition_changed_milestone
+        fi
         [ "$new_policy_revision" -eq 1 ] || blocked successor_policy_revision_must_start_at_one
         range_rust_changed "$new_commit" "$transition_end" \
           && blocked policy_activation_after_rust_change
+        transition_kind=successor
       fi
       ;;
     *) error policy_transition_source_schema_mismatch ;;
@@ -727,8 +873,9 @@ validate_policy_transition() {
 
   load_baseline "$transition_new"
   verify_baseline "$transition_end"
-  printf 'test_budget policy_transition=PASS policy=test_footprint milestone=%s base=%s policy_revision=%s reforecast_ref=%s ratio_warning=%s ratio_review=%s ticket_warning=%s ticket_review=%s file_warning=%s file_review=%s\n' \
-    "$b_milestone" "$b_commit" "$b_policy_revision" "$b_reforecast_ref" \
+  printf 'test_budget policy_transition=PASS policy=test_footprint transition=%s series=%s classification=%s milestone=%s base=%s policy_revision=%s reforecast_ref=%s ratio_warning=%s ratio_review=%s ticket_warning=%s ticket_review=%s file_warning=%s file_review=%s\n' \
+    "$transition_kind" "$b_series" "$b_classification" "$b_milestone" "$b_commit" \
+    "$b_policy_revision" "$b_reforecast_ref" \
     "$(format_milli "$b_ratio_warning_milli")" "$(format_milli "$b_ratio_review_milli")" \
     "$b_ticket_warning" "$b_ticket_review" "$b_file_warning" "$b_file_review"
 }
@@ -834,6 +981,49 @@ CSV
   load_count_report "$report" "$map"
   [ "$count_test_fixture_loc" -eq 0 ] || error self_test_zero_fixture_failed
 
+  workspace_csv="$tmp_root/self-test-workspace.csv"
+  workspace_report="$tmp_root/self-test-workspace.report"
+  workspace_map="$tmp_root/self-test-workspace.files.tsv"
+  fixture_csv="$tmp_root/self-test-fixture.csv"
+  fixture_report="$tmp_root/self-test-fixture.report"
+  fixture_map="$tmp_root/self-test-fixture.files.tsv"
+  combined_report="$tmp_root/self-test-combined.report"
+  combined_map="$tmp_root/self-test-combined.files.tsv"
+  cat > "$workspace_csv" <<'CSV'
+label,code,tests,examples
+src/lib.rs,100,20,0
+tests/common.rs,0,5,0
+TOTAL (2 files),100,25,0
+CSV
+  cat > "$fixture_csv" <<'CSV'
+label,code,tests,examples
+crypto/generator.rs,0,10,0
+TOTAL (1 file),0,10,0
+CSV
+  parse_csv_report "$workspace_csv" "$repo" "$workspace_report" "$workspace_map" \
+    || error self_test_workspace_parse_failed
+  parse_csv_report "$fixture_csv" "$repo/tests/fixtures" "$fixture_report" "$fixture_map" \
+    tests/fixtures || error self_test_fixture_prefix_parse_failed
+  merge_count_reports "$workspace_report" "$workspace_map" "$fixture_report" "$fixture_map" \
+    "$combined_report" "$combined_map" || error self_test_merge_failed
+  load_count_report "$combined_report" "$combined_map"
+  [ "$count_code" -eq 100 ] || error self_test_merged_code_failed
+  [ "$count_tests" -eq 35 ] || error self_test_merged_tests_failed
+  [ "$count_test_case_loc" -eq 20 ] || error self_test_merged_case_failed
+  [ "$count_test_support_loc" -eq 5 ] || error self_test_merged_support_failed
+  [ "$count_test_fixture_loc" -eq 10 ] || error self_test_merged_fixture_failed
+  awk -F '\t' '
+    $1 == "tests/fixtures/crypto/generator.rs" && $2 == 10 && $3 == "fixture" { found = 1 }
+    END { if (!found) exit 1 }
+  ' "$combined_map" || error self_test_merged_fixture_path_failed
+  duplicate_map="$tmp_root/self-test-duplicate.files.tsv"
+  cp "$fixture_map" "$duplicate_map"
+  printf 'src/lib.rs\t10\tfixture\n' >> "$duplicate_map"
+  if merge_count_reports "$workspace_report" "$workspace_map" "$fixture_report" \
+      "$duplicate_map" "$combined_report" "$combined_map"; then
+    error self_test_duplicate_merge_accepted
+  fi
+
   b_milestone=self-test
   b_tests=0
   b_ratio_warning_milli=2000
@@ -927,7 +1117,7 @@ CSV
   printf '%s\n' "$output" | grep -Fq 'file_level=WARN' \
     || error self_test_empty_base_file_map_failed
 
-  printf 'test_budget self_test=PASS policy=test_footprint schema=%s categories=PASS numeric_nonblocking=PASS thresholds=PASS\n' \
+  printf 'test_budget self_test=PASS policy=test_footprint schema=%s categories=PASS fixture_scan=PASS duplicate_rejection=PASS numeric_nonblocking=PASS thresholds=PASS\n' \
     "$SCHEMA"
 }
 

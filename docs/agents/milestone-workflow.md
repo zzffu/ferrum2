@@ -52,11 +52,16 @@ The gate has two different semantics:
 Schema 3 reports the Rustloc `Tests` total as three mutually exclusive categories. Their sum must
 always equal `tests`:
 
-| Metric | `path-v1` classification |
+| Metric | `path-v2` classification |
 |---|---|
 | `test_fixture_loc` | Rust test lines below `tests/fixtures/`, `test-fixtures`/`test_fixtures`, `snapshots`, or `testdata`; evaluated first |
 | `test_support_loc` | Rust test lines in `tests/<harness>/src/**`, `*/tests/{common,support,helpers,fakes}/**`, or matching support/helper/fake test modules |
 | `test_case_loc` | all remaining Rustloc test lines, including inline `#[cfg(test)]` evidence and normal integration-test files |
+
+`path-v2` composes the Cargo-workspace scan with a second Rustloc scan of
+`tests/fixtures/`. Supplemental rows receive a `tests/fixtures/` prefix before
+classification and duplicate paths fail closed, so standalone Rust fixture generators are
+included without changing the Cargo workspace graph.
 
 Static non-Rust fixtures are outside the Rustloc `Tests` total and therefore outside this
 three-way sum. They still require provenance, license, size, and diff review.
@@ -122,6 +127,12 @@ counts stay fixed. Thresholds may be reforecast in the same milestone only throu
 control commit that increments `policy_revision` by exactly one and changes `reforecast_ref` to the
 approved plan/test-plan/review decision. Increasing a threshold is therefore visible and reviewed,
 not forbidden or hidden.
+
+The initial M9 `path-v1` measurement omitted standalone Rust files below `tests/fixtures/`.
+Policy revision 2 performs one isolated `v1/path-v1` to `v2/path-v2` measurement correction:
+the exact base, code count, milestone, and thresholds stay fixed while the reproducibly recomputed
+test total includes those fixture generators. Later revisions use the normal threshold reforecast
+rules.
 
 Malformed, stale, wrong-count, mixed-control, and merge-only policy changes fail closed. Numeric
 `REVIEW_REQUIRED` items must be dispositioned before milestone close as one of: accepted with a

@@ -1,20 +1,20 @@
 # Schema 3 treats test LOC as a maintenance signal, not a correctness gate.
 # Thresholds use strict greater-than comparisons. ratio_* values are thousandths.
 schema=3
-series=rustloc-0.19.1-test-footprint-v1
+series=rustloc-0.19.1-test-footprint-v2
 tool=rustloc
 tool_version=0.19.1
 metric=test_footprint
-classification=path-v1
+classification=path-v2
 milestone=M9
 commit=78cc5cee00cb976a1d46ef7aa9c990eaf1f647dd
 code=15996
-tests=26319
+tests=26916
 ratio_warning_milli=2000
 ratio_review_milli=2500
 ticket_warning=240
 ticket_review=600
 file_warning=800
 file_review=1200
-policy_revision=1
-reforecast_ref=initial-post-M8
+policy_revision=2
+reforecast_ref=docs/research/M9-test-footprint-schema-v3.md

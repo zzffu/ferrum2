@@ -1,9 +1,10 @@
 # M9 test-footprint schema v3 升级说明
 
-- **Status:** control-plane upgrade candidate；尚未替用户创建 Git commit。
+- **Status:** active control-plane policy；revision 2 corrects standalone Rust fixture coverage。
 - **Exact base:** `78cc5cee00cb976a1d46ef7aa9c990eaf1f647dd`（M8 close）。
-- **Baseline counts:** `code=15996`、`tests=26319`，来自 exact base 上用 pinned
-  `rustloc 0.19.1 --lang rust -t code,tests` 重算。
+- **Baseline counts:** `code=15996`、`tests=26916`，来自 exact base 上用 pinned
+  `rustloc 0.19.1` 分别扫描 Cargo workspace 与 `tests/fixtures/` 后去重合并；分类为
+  `test_case_loc=22369`、`test_support_loc=3950`、`test_fixture_loc=597`。
 - **Assumption:** 仓库尚无 M9 计划文件，因此新策略暂命名为 `M9`；正式规划时可在首张产品票
   之前用独立 control-only commit 改名或调整阈值。
 
@@ -35,7 +36,9 @@ Architect/QA 人工 `REVIEW_REQUIRED` 规则。
 
 ## Tests 三分类
 
-脚本对 `rustloc --by-file` 的每个文件测试行进行 first-match 分类：
+脚本对 Cargo workspace 与 `tests/fixtures/` 两次 `rustloc --by-file` 扫描的合并结果进行
+first-match 分类。独立 fixture 扫描的路径先统一加上 `tests/fixtures/` 前缀，重复路径会
+fail closed：
 
 1. `test_fixture_loc`
    - `tests/fixtures/**`；
@@ -56,7 +59,8 @@ test_case_loc + test_support_loc + test_fixture_loc == tests
 ```
 
 静态 JSON/TOML/二进制 fixture 不属于 Rustloc 的 Rust `Tests`，因此不进入上述等式；它们仍需
-provenance、license、体积和 diff 审查。
+provenance、license、体积和 diff 审查。revision 1 的 workspace-only 扫描遗漏了 3 个独立
+Rust fixture generator；revision 2 在不修改 Cargo workspace topology 的前提下纳入其 597 行。
 
 ## 状态与退出码
 
