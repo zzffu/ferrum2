@@ -436,10 +436,10 @@ impl UdpMappings {
             retire_mapping_handle(&mut state, old.handle, self.limit);
         }
         state.orphaned.remove(&capability);
-        if let Some(old_capability) = state.by_handle.remove(&handle) {
-            if let Some(old) = state.by_capability.remove(&old_capability) {
-                state.orphaned.insert(old_capability, old.inbound);
-            }
+        if let Some(old_capability) = state.by_handle.remove(&handle)
+            && let Some(old) = state.by_capability.remove(&old_capability)
+        {
+            state.orphaned.insert(old_capability, old.inbound);
         }
         state.retired.remove(&handle);
         let evicted = if state.by_handle.len() == self.limit {
@@ -464,10 +464,10 @@ impl UdpMappings {
 
     fn invalidate_handle(&self, handle: UdpSessionHandle) {
         let mut state = self.state.lock().expect("UDP mapping lock poisoned");
-        if let Some(capability) = state.by_handle.remove(&handle) {
-            if let Some(old) = state.by_capability.remove(&capability) {
-                state.orphaned.insert(capability, old.inbound);
-            }
+        if let Some(capability) = state.by_handle.remove(&handle)
+            && let Some(old) = state.by_capability.remove(&capability)
+        {
+            state.orphaned.insert(capability, old.inbound);
         }
         retire_mapping_handle(&mut state, handle, self.limit);
         drop(state);
@@ -1394,10 +1394,10 @@ where
 }
 
 fn update_replay_metric(context: &ServerContext) {
-    if let Ok(entries) = context.replay.entry_count() {
-        if let Ok(entries) = u32::try_from(entries) {
-            context.metrics.set_replay_entries(entries);
-        }
+    if let Ok(entries) = context.replay.entry_count()
+        && let Ok(entries) = u32::try_from(entries)
+    {
+        context.metrics.set_replay_entries(entries);
     }
 }
 
