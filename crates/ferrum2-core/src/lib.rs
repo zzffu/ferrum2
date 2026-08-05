@@ -294,6 +294,7 @@ pub mod selector {
         RouteRules,
         RouteRuleInbound,
         RouteRuleOutbound,
+        ExtraRoot,
         RouteFinal,
         UnreachableOutbound,
         UnreachablePlan,
@@ -746,7 +747,7 @@ pub mod route {
             .iter()
             .map(|tag| {
                 resolve_tag(tag, outbounds, plans, definitions)
-                    .ok_or(SelectorCompileError::RouteRuleOutbound)
+                    .ok_or(SelectorCompileError::ExtraRoot)
             })
             .collect::<Result<Vec<_>, _>>()?;
         roots.extend(extra_roots.iter().copied());

@@ -307,6 +307,7 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
                 assert_runtime(config.runtime, case.runtime, case.name);
                 assert!(case.replay_capacity.is_none());
                 assert!(case.udp.is_none());
+                assert!(config.dns.is_none(), "{}", case.name);
                 assert_eq!(config.inbounds.len(), 1, "{}", case.name);
                 assert_eq!(config.outbounds.len(), 1, "{}", case.name);
                 assert_eq!(config.inbounds[0].listen, config.listen, "{}", case.name);
@@ -344,6 +345,7 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
                 );
                 assert_eq!(actual, expected, "{}", case.name);
                 assert_runtime(config.runtime, case.runtime, case.name);
+                assert!(config.dns.is_none(), "{}", case.name);
                 assert_eq!(config.inbounds.len(), 1, "{}", case.name);
                 assert_eq!(config.outbounds.len(), 1, "{}", case.name);
                 assert_eq!(config.inbounds[0].listen, config.listen, "{}", case.name);
@@ -907,6 +909,17 @@ final = "s0""#;
     let many_servers = (0..65)
         .map(|index| format!("[[dns.servers]]\ntag = \"s{index}\"\ntransport = \"udp\"\naddress = \"192.0.2.53:{}\"\n", 1_000 + index))
         .collect::<String>();
+    let many_rules = "[[dns.route.rules]]\nnetwork = \"tcp\"\nserver = \"s0\"\n".repeat(65);
+    let doh_client = |server_name: &str, path: &str| {
+        client()
+            .replace("transport = \"udp\"", "transport = \"doh\"")
+            .replace(
+                "address = \"192.0.2.53:53\"",
+                &format!(
+                    "address = \"192.0.2.53:53\"\nserver_name = \"{server_name}\"\npath = \"{path}\""
+                ),
+            )
+    };
     let tagged_detour = |detour: &str| {
         with_dns(
             tagged_client(1, 1),
@@ -924,7 +937,9 @@ final = "s0""#;
         ("65 client inbounds", with_dns(CLIENT_BASE.to_owned(), &format!("[dns]\n{many_inbounds}[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"s0\"")), ConfigField::DnsInbounds, ConfigRole::Client),
         ("server inbounds", with_dns(SERVER_BASE.to_owned(), base_dns), ConfigField::DnsInbounds, ConfigRole::Server),
         ("missing servers", client().replace("[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n", ""), ConfigField::DnsServers, ConfigRole::Client),
+        ("zero servers", with_dns(CLIENT_BASE.to_owned(), "[dns]\nservers = []\n[[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5353\"\n[dns.route]\nfinal = \"s0\""), ConfigField::DnsServers, ConfigRole::Client),
         ("65 servers", with_dns(CLIENT_BASE.to_owned(), &format!("[dns]\n[[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5353\"\n{many_servers}[dns.route]\nfinal = \"s0\"")), ConfigField::DnsServers, ConfigRole::Client),
+        ("duplicate DNS inbound", client().replacen("[[dns.servers]]", "[[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5354\"\n[[dns.servers]]", 1), ConfigField::DnsInboundsTag, ConfigRole::Client),
         ("timeout low", client().replacen("[dns]", "[dns]\ntimeout_ms = 99", 1), ConfigField::DnsTimeout, ConfigRole::Client),
         ("timeout high", client().replacen("[dns]", "[dns]\ntimeout_ms = 30001", 1), ConfigField::DnsTimeout, ConfigRole::Client),
         ("inflight zero", client().replacen("[dns]", "[dns]\nmax_inflight = 0", 1), ConfigField::DnsMaxInflight, ConfigRole::Client),
@@ -941,12 +956,19 @@ final = "s0""#;
         ("DoT missing TLS name", client().replace("transport = \"udp\"", "transport = \"dot\""), ConfigField::DnsServersServerName, ConfigRole::Client),
         ("DoT path", client().replace("transport = \"udp\"", "transport = \"dot\"").replace("address = \"192.0.2.53:53\"", "address = \"192.0.2.53:53\"\nserver_name = \"resolver.example\"\npath = \"/dns-query\""), ConfigField::DnsServersPath, ConfigRole::Client),
         ("DoH relative path", client().replace("transport = \"udp\"", "transport = \"doh\"").replace("address = \"192.0.2.53:53\"", "address = \"192.0.2.53:53\"\nserver_name = \"resolver.example\"\npath = \"dns-query\""), ConfigField::DnsServersPath, ConfigRole::Client),
+        ("DoH long path", doh_client("resolver.example", &format!("/{}", "a".repeat(1_024))), ConfigField::DnsServersPath, ConfigRole::Client),
+        ("DoH authority path", doh_client("resolver.example", "//resolver.example/dns-query"), ConfigField::DnsServersPath, ConfigRole::Client),
+        ("DoH query path", doh_client("resolver.example", "/dns-query?name=sentinel"), ConfigField::DnsServersPath, ConfigRole::Client),
+        ("DoH fragment path", doh_client("resolver.example", "/dns-query#sentinel"), ConfigField::DnsServersPath, ConfigRole::Client),
+        ("malformed TLS identity", doh_client("-invalid.example", "/dns-query"), ConfigField::DnsServersServerName, ConfigRole::Client),
         ("missing route", client().replace("[dns.route]\nfinal = \"s0\"", ""), ConfigField::DnsRoute, ConfigRole::Client),
+        ("65 DNS rules", client().replace("final = \"s0\"", &format!("final = \"s0\"\n{many_rules}")), ConfigField::DnsRouteRules, ConfigRole::Client),
         ("unknown final", client().replace("final = \"s0\"", "final = \"missing\""), ConfigField::DnsRouteFinal, ConfigRole::Client),
         ("unreachable server", with_dns(CLIENT_BASE.to_owned(), &two_servers), ConfigField::DnsRouteRulesServer, ConfigRole::Client),
         ("unknown route inbound", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\ninbound = \"missing\"\nserver = \"s0\""), ConfigField::DnsRouteRulesInbound, ConfigRole::Client),
         ("unknown route network", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\nnetwork = \"quic\"\nserver = \"s0\""), ConfigField::DnsRouteRulesNetwork, ConfigRole::Client),
         ("invalid route target", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\ntarget = { host = \"example.test\", port = 0 }\nserver = \"s0\""), ConfigField::DnsRouteRulesTarget, ConfigRole::Client),
+        ("unknown rule server", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\nnetwork = \"tcp\"\nserver = \"missing\""), ConfigField::DnsRouteRulesServer, ConfigRole::Client),
         ("DNS outbound action", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\nnetwork = \"tcp\"\noutbound = \"s0\""), ConfigField::DnsRouteRulesServer, ConfigRole::Client),
         ("legacy detour", with_dns(CLIENT_BASE.to_owned(), &base_dns.replace("address = \"192.0.2.53:53\"", "address = \"192.0.2.53:53\"\ndetour = \"legacy\"")), ConfigField::DnsServersDetour, ConfigRole::Client),
         ("unknown detour", tagged_detour("missing"), ConfigField::DnsServersDetour, ConfigRole::Client),
@@ -962,6 +984,28 @@ final = "s0""#;
             250 + index,
         );
     }
+
+    let selector_detour = base_dns.replace(
+        "address = \"192.0.2.53:53\"",
+        "address = \"192.0.2.53:53\"\ndetour = \"manual\"",
+    );
+    let invalid_route_with_valid_detour = with_dns(
+        with_selectors(
+            routed(
+                tagged_client(1, 2),
+                "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"missing\"",
+            ),
+            "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"",
+        ),
+        &selector_detour,
+    );
+    assert_tagged_error(
+        "ordinary route error wins with valid DNS selector detour",
+        ConfigRole::Client,
+        invalid_route_with_valid_detour,
+        (ConfigErrorKind::Semantic, ConfigField::RouteRulesOutbound),
+        289,
+    );
 
     let ordinary_server_action = routed(
         tagged_client(1, 1),

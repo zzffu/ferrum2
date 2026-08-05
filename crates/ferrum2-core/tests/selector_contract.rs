@@ -3,11 +3,12 @@ use std::thread;
 
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{
-    ActionRule, ActionTable, Network, compile_selector_plans, compile_selector_route,
+    ActionRule, ActionTable, Network, compile_selector_plans, compile_selector_plans_with_roots,
+    compile_selector_route,
 };
 use ferrum2_core::selector::{
-    SelectorControl, SelectorDefinition, SelectorError, TaggedInbound, TaggedOutbound, TaggedPlan,
-    TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
+    SelectorCompileError, SelectorControl, SelectorDefinition, SelectorError, TaggedInbound,
+    TaggedOutbound, TaggedPlan, TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
 };
 
 fn nested_route() -> (ferrum2_core::route::RouteTable, SelectorControl) {
@@ -194,4 +195,19 @@ fn one_action_table_preserves_exact_first_match_semantics_for_two_action_domains
         ),
         "final"
     );
+}
+
+#[test]
+fn extra_root_failure_is_distinct_from_an_ordinary_route_action_failure() {
+    let Err(error) = compile_selector_plans_with_roots(
+        &[TaggedInbound::new("entry", 0)],
+        &[TaggedOutbound::new("out", 0)],
+        &[],
+        &[],
+        TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "out")]),
+        &["missing"],
+    ) else {
+        panic!("unknown extra root was accepted")
+    };
+    assert_eq!(error, SelectorCompileError::ExtraRoot);
 }

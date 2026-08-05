@@ -1374,15 +1374,7 @@ fn validate_route(
                     .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRulesInbound))
             })
             .transpose()?;
-        let network = rule
-            .network
-            .as_deref()
-            .map(|network| match network {
-                "tcp" => Ok(Network::Tcp),
-                "udp" => Ok(Network::Udp),
-                _ => Err(ConfigError::semantic(ConfigField::RouteRulesNetwork)),
-            })
-            .transpose()?;
+        let network = validate_network(rule.network.as_deref(), ConfigField::RouteRulesNetwork)?;
         let target = rule
             .target
             .as_ref()
@@ -1481,15 +1473,8 @@ fn validate_selector_route(
                 if rule.server.is_some() {
                     return Err(ConfigError::semantic(ConfigField::RouteRulesOutbound));
                 }
-                let network = rule
-                    .network
-                    .as_deref()
-                    .map(|network| match network {
-                        "tcp" => Ok(Network::Tcp),
-                        "udp" => Ok(Network::Udp),
-                        _ => Err(ConfigError::semantic(ConfigField::RouteRulesNetwork)),
-                    })
-                    .transpose()?;
+                let network =
+                    validate_network(rule.network.as_deref(), ConfigField::RouteRulesNetwork)?;
                 let target = rule
                     .target
                     .as_ref()
@@ -1524,7 +1509,7 @@ fn validate_selector_route(
     )
     .map(|(route, _, roots)| (route, roots))
     .map_err(|error| {
-        if matches!(error, SelectorCompileError::RouteRuleOutbound) && !extra_roots.is_empty() {
+        if matches!(error, SelectorCompileError::ExtraRoot) {
             ConfigError::semantic(ConfigField::DnsServersDetour)
         } else {
             ConfigError::semantic(selector_error_field(error, routed))
@@ -1551,6 +1536,7 @@ const fn selector_error_field(error: SelectorCompileError, routed: bool) -> Conf
         SelectorCompileError::RouteRules => ConfigField::RouteRules,
         SelectorCompileError::RouteRuleInbound => ConfigField::RouteRulesInbound,
         SelectorCompileError::RouteRuleOutbound => ConfigField::RouteRulesOutbound,
+        SelectorCompileError::ExtraRoot => ConfigField::RouteRulesOutbound,
         SelectorCompileError::RouteFinal => ConfigField::RouteFinal,
         SelectorCompileError::UnreachableOutbound if routed => ConfigField::RouteRulesOutbound,
         SelectorCompileError::UnreachableOutbound => ConfigField::OutboundsTag,
