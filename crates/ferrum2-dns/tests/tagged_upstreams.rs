@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use ferrum2_config::{DnsServerConfig, DnsTransport, load_client};
 use ferrum2_dns::{
-    BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsEgress, DnsError, DnsIoFuture, PlanSnapshot,
-    SystemDnsEgress, TaggedResolver,
+    BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsEgress, DnsError, DnsIoFuture, DnsTaskRegistrar,
+    PlanSnapshot, SystemDnsEgress, TaggedResolver,
 };
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, NS, SOA};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
@@ -52,18 +52,20 @@ impl DnsEgress for RecordingEgress {
         target: SocketAddr,
         plan: Option<PlanSnapshot>,
         timeout: Duration,
+        tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
         self.record("tcp", target, &plan);
-        SystemDnsEgress.connect_tcp(target, None, timeout)
+        SystemDnsEgress.connect_tcp(target, None, timeout, tasks)
     }
 
     fn bind_udp(
         &self,
         target: SocketAddr,
         plan: Option<PlanSnapshot>,
+        tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         self.record("udp", target, &plan);
-        SystemDnsEgress.bind_udp(target, None)
+        SystemDnsEgress.bind_udp(target, None, tasks)
     }
 }
 

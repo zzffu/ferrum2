@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+exclude = ["tests/fixtures/*.der", "tests/fixtures/*.pk8"]
 
 [lib]
 path = "src/lib.rs"

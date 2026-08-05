@@ -75,6 +75,7 @@ pub trait DnsEgress: Send + Sync + 'static {
         target: SocketAddr,
         plan: Option<PlanSnapshot>,
         timeout: Duration,
+        tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo>;
 
     /// Binds one unconnected socket for the validated numeric target and optional plan.
@@ -82,6 +83,7 @@ pub trait DnsEgress: Send + Sync + 'static {
         &self,
         target: SocketAddr,
         plan: Option<PlanSnapshot>,
+        tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo>;
 }
 
@@ -95,6 +97,7 @@ impl DnsEgress for SystemDnsEgress {
         target: SocketAddr,
         plan: Option<PlanSnapshot>,
         timeout: Duration,
+        _tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
         Box::pin(async move {
             if plan.is_some() {
@@ -115,6 +118,7 @@ impl DnsEgress for SystemDnsEgress {
         &self,
         target: SocketAddr,
         plan: Option<PlanSnapshot>,
+        _tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         Box::pin(async move {
             if plan.is_some() {
@@ -161,12 +165,22 @@ pub(crate) struct RuntimeCounters {
     pub(crate) tasks: AtomicUsize,
     pub(crate) tcp_streams: AtomicUsize,
     pub(crate) udp_sockets: AtomicUsize,
+    pub(crate) bridge_tasks: AtomicUsize,
+    pub(crate) sessions: AtomicUsize,
+    pub(crate) queues: AtomicUsize,
+    pub(crate) buffers: AtomicUsize,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct TaskSet(Arc<Mutex<JoinSet<()>>>);
 
 impl TaskSet {
+    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+        let mut tasks = self.0.lock().expect("DNS task set poisoned");
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(future);
+    }
+
     pub(crate) async fn abort_and_join(&self) {
         let mut tasks = {
             let mut locked = self.0.lock().expect("DNS task set poisoned");
@@ -174,6 +188,95 @@ impl TaskSet {
         };
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
+    }
+}
+
+/// Kind of detour work registered under one logical DNS query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsEgressTaskKind {
+    /// A bounded I/O bridge carrying the selected DNS transport.
+    Bridge,
+    /// A concrete detour session owned by that bridge.
+    Session,
+}
+
+/// Kind of bounded detour storage owned under one logical DNS query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsEgressResourceKind {
+    /// A bounded queue between the adapter and its bridge.
+    Queue,
+    /// Fixed-capacity bridge buffer storage.
+    Buffer,
+}
+
+/// RAII ownership for bounded detour storage.
+#[must_use = "keep the guard with its queue or buffer owner"]
+pub struct DnsResourceGuard {
+    counters: Arc<RuntimeCounters>,
+    kind: DnsEgressResourceKind,
+}
+
+impl Drop for DnsResourceGuard {
+    fn drop(&mut self) {
+        match self.kind {
+            DnsEgressResourceKind::Queue => &self.counters.queues,
+            DnsEgressResourceKind::Buffer => &self.counters.buffers,
+        }
+        .fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl std::fmt::Debug for DnsResourceGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DnsResourceGuard([redacted])")
+    }
+}
+
+/// Registers detour work for abort-and-join with its logical DNS query.
+#[derive(Clone)]
+pub struct DnsTaskRegistrar {
+    tasks: TaskSet,
+    counters: Arc<RuntimeCounters>,
+}
+
+impl DnsTaskRegistrar {
+    fn new(tasks: TaskSet, counters: Arc<RuntimeCounters>) -> Self {
+        Self { tasks, counters }
+    }
+
+    /// Spawns one bridge or session task on the exclusive DNS runtime.
+    pub fn spawn(
+        &self,
+        kind: DnsEgressTaskKind,
+        future: impl Future<Output = ()> + Send + 'static,
+    ) {
+        let counter = match kind {
+            DnsEgressTaskKind::Bridge => &self.counters.bridge_tasks,
+            DnsEgressTaskKind::Session => &self.counters.sessions,
+        };
+        counter.fetch_add(1, Ordering::AcqRel);
+        let counters = Arc::clone(&self.counters);
+        self.tasks.spawn(async move {
+            let counter = match kind {
+                DnsEgressTaskKind::Bridge => &counters.bridge_tasks,
+                DnsEgressTaskKind::Session => &counters.sessions,
+            };
+            let _guard = CounterGuard::new(counter);
+            future.await;
+        });
+    }
+
+    /// Registers one bounded queue or buffer until the returned guard is dropped.
+    pub fn own(&self, kind: DnsEgressResourceKind) -> DnsResourceGuard {
+        match kind {
+            DnsEgressResourceKind::Queue => &self.counters.queues,
+            DnsEgressResourceKind::Buffer => &self.counters.buffers,
+        }
+        .fetch_add(1, Ordering::AcqRel);
+        DnsResourceGuard {
+            counters: Arc::clone(&self.counters),
+            kind,
+        }
     }
 }
 
@@ -191,9 +294,7 @@ impl Spawn for TrackedHandle {
             let _guard = CounterGuard::new(&counter.tasks);
             future.await;
         };
-        let mut tasks = self.tasks.0.lock().expect("DNS task set poisoned");
-        while tasks.try_join_next().is_some() {}
-        tasks.spawn(future);
+        self.tasks.spawn(future);
     }
 }
 
@@ -277,9 +378,12 @@ impl RuntimeProvider for FerrumRuntimeProvider {
     ) -> DnsIoFuture<Self::Tcp> {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         let timeout = timeout.map_or(remaining, |timeout| timeout.min(remaining));
-        let future = self
-            .egress
-            .connect_tcp(server_addr, self.plan.clone(), timeout);
+        let future = self.egress.connect_tcp(
+            server_addr,
+            self.plan.clone(),
+            timeout,
+            DnsTaskRegistrar::new(self.tasks.clone(), Arc::clone(&self.counters)),
+        );
         let counters = Arc::clone(&self.counters);
         let deadline = self.deadline;
         Box::pin(async move {
@@ -292,7 +396,11 @@ impl RuntimeProvider for FerrumRuntimeProvider {
     }
 
     fn bind_udp(&self, _local_addr: SocketAddr, server_addr: SocketAddr) -> DnsIoFuture<Self::Udp> {
-        let future = self.egress.bind_udp(server_addr, self.plan.clone());
+        let future = self.egress.bind_udp(
+            server_addr,
+            self.plan.clone(),
+            DnsTaskRegistrar::new(self.tasks.clone(), Arc::clone(&self.counters)),
+        );
         let counters = Arc::clone(&self.counters);
         let deadline = self.deadline;
         Box::pin(async move {

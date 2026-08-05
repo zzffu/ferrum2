@@ -8,7 +8,7 @@ use ferrum2_config::DnsServerConfig;
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::lookup::Lookup;
 use tokio::runtime::Builder;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -29,6 +29,14 @@ pub struct RuntimeStats {
     pub tcp_streams: usize,
     /// Selected upstream UDP sockets currently owned.
     pub udp_sockets: usize,
+    /// Detour I/O bridges currently owned by admitted queries.
+    pub bridge_tasks: usize,
+    /// Concrete detour sessions currently owned by admitted queries.
+    pub sessions: usize,
+    /// Bounded detour queues currently registered to admitted queries.
+    pub queues: usize,
+    /// Fixed-capacity detour buffers currently registered to admitted queries.
+    pub buffers: usize,
 }
 
 /// Successful exclusive-runtime shutdown evidence.
@@ -36,6 +44,8 @@ pub struct RuntimeStats {
 pub struct ShutdownReport {
     /// Tokio tasks remaining immediately before the exclusive runtime is dropped.
     pub runtime_tasks: usize,
+    /// All ferrum-owned DNS resources after cancellation and joining.
+    pub stats: RuntimeStats,
 }
 
 enum Command {
@@ -45,14 +55,15 @@ enum Command {
         record_type: RecordType,
         deadline: Instant,
         reply: oneshot::Sender<Result<Lookup, DnsError>>,
+        permit: OwnedSemaphorePermit,
     },
-    Shutdown,
 }
 
 /// Bounded tagged resolver whose entire Hickory task population lives on one owned OS thread.
 #[must_use = "call shutdown() to await the exclusive DNS runtime"]
 pub struct TaggedResolver {
     sender: Option<mpsc::Sender<Command>>,
+    shutdown: Option<oneshot::Sender<()>>,
     admission: Arc<Semaphore>,
     server_count: usize,
     timeout: Duration,
@@ -90,7 +101,11 @@ impl TaggedResolver {
 
     #[cfg(test)]
     pub(crate) fn with_test_tls(
-        servers: Vec<(DnsServerConfig, rustls::ClientConfig)>,
+        servers: Vec<(
+            DnsServerConfig,
+            rustls::ClientConfig,
+            Option<crate::runtime_provider::PlanSnapshot>,
+        )>,
         timeout: Duration,
         max_inflight: NonZeroU16,
         egress: Arc<dyn DnsEgress>,
@@ -98,7 +113,11 @@ impl TaggedResolver {
         Self::start(
             servers
                 .into_iter()
-                .map(|(server, tls)| SelectedServer::from_config(server).with_tls(tls))
+                .map(|(server, tls, plan)| {
+                    SelectedServer::from_config(server)
+                        .with_tls(tls)
+                        .with_plan(plan)
+                })
                 .collect(),
             timeout,
             max_inflight,
@@ -120,6 +139,7 @@ impl TaggedResolver {
         let admission = Arc::new(Semaphore::new(capacity));
         let counters = Arc::new(RuntimeCounters::default());
         let (sender, receiver) = mpsc::channel(capacity);
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
         let thread_counters = Arc::clone(&counters);
         let thread = std::thread::Builder::new()
@@ -133,14 +153,13 @@ impl TaggedResolver {
                     }
                 };
                 let handle = runtime.handle().clone();
-                let tasks = TaskSet::default();
                 let servers = Arc::new(servers);
                 let _ = ready_sender.send(Ok(()));
                 runtime.block_on(run_commands(
                     receiver,
+                    shutdown_receiver,
                     servers,
                     egress,
-                    tasks,
                     thread_counters,
                     handle,
                 ))
@@ -150,6 +169,7 @@ impl TaggedResolver {
 
         Ok(Self {
             sender: Some(sender),
+            shutdown: Some(shutdown_sender),
             admission,
             server_count,
             timeout,
@@ -159,138 +179,160 @@ impl TaggedResolver {
     }
 
     /// Queries one already-selected tagged server under the shared admission and deadline.
-    pub async fn lookup(
+    pub fn lookup(
         &self,
         server: usize,
         name: Name,
         record_type: RecordType,
-    ) -> Result<Lookup, DnsError> {
-        if server >= self.server_count {
-            return Err(DnsError::InvalidServer);
+    ) -> impl std::future::Future<Output = Result<Lookup, DnsError>> + Send + 'static {
+        let server_count = self.server_count;
+        let timeout = self.timeout;
+        let admission = Arc::clone(&self.admission);
+        let sender = self.sender.clone();
+        async move {
+            if server >= server_count {
+                return Err(DnsError::InvalidServer);
+            }
+            let deadline = Instant::now() + timeout;
+            let permit = admission.try_acquire_owned().map_err(|_| DnsError::Busy)?;
+            let (reply, response) = oneshot::channel();
+            let command = Command::Lookup {
+                server,
+                name,
+                record_type,
+                deadline,
+                reply,
+                permit,
+            };
+            tokio::time::timeout_at(deadline, sender.ok_or(DnsError::Shutdown)?.send(command))
+                .await
+                .map_err(|_| DnsError::Timeout)?
+                .map_err(|_| DnsError::Shutdown)?;
+            tokio::time::timeout_at(deadline, response)
+                .await
+                .map_err(|_| DnsError::Timeout)?
+                .map_err(|_| DnsError::Shutdown)?
         }
-        let deadline = Instant::now() + self.timeout;
-        let permit = Arc::clone(&self.admission)
-            .try_acquire_owned()
-            .map_err(|_| DnsError::Busy)?;
-        let (reply, response) = oneshot::channel();
-        let command = Command::Lookup {
-            server,
-            name,
-            record_type,
-            deadline,
-            reply,
-        };
-        tokio::time::timeout_at(
-            deadline,
-            self.sender
-                .as_ref()
-                .ok_or(DnsError::Shutdown)?
-                .send(command),
-        )
-        .await
-        .map_err(|_| DnsError::Timeout)?
-        .map_err(|_| DnsError::Shutdown)?;
-        let result = tokio::time::timeout_at(deadline, response)
-            .await
-            .map_err(|_| DnsError::Timeout)?
-            .map_err(|_| DnsError::Shutdown)?;
-        drop(permit);
-        result
     }
 
     /// Returns stable, low-cardinality owner counts.
     pub fn stats(&self) -> RuntimeStats {
-        RuntimeStats {
-            queries: self.counters.queries.load(Ordering::Acquire),
-            tasks: self.counters.tasks.load(Ordering::Acquire),
-            tcp_streams: self.counters.tcp_streams.load(Ordering::Acquire),
-            udp_sockets: self.counters.udp_sockets.load(Ordering::Acquire),
-        }
+        runtime_stats(&self.counters)
     }
 
     /// Closes intake, aborts and joins every DNS task, and joins the owned OS thread off-worker.
     pub async fn shutdown(mut self) -> Result<ShutdownReport, DnsError> {
-        if let Some(sender) = self.sender.take() {
-            sender
-                .send(Command::Shutdown)
-                .await
-                .map_err(|_| DnsError::Shutdown)?;
-        }
+        self.request_shutdown();
         let thread = self.thread.take().ok_or(DnsError::Shutdown)?;
         tokio::task::spawn_blocking(move || thread.join())
             .await
             .map_err(|_| DnsError::Runtime)?
             .map_err(|_| DnsError::Runtime)?
     }
+
+    fn request_shutdown(&mut self) {
+        self.sender.take();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
 }
 
 impl Drop for TaggedResolver {
     fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.try_send(Command::Shutdown);
+        self.request_shutdown();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
 }
 
 async fn run_commands(
     mut receiver: mpsc::Receiver<Command>,
+    mut shutdown: oneshot::Receiver<()>,
     servers: Arc<Vec<SelectedServer>>,
     egress: Arc<dyn DnsEgress>,
-    tasks: TaskSet,
     counters: Arc<RuntimeCounters>,
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<ShutdownReport, DnsError> {
     let mut queries = JoinSet::new();
+    let (cancel, cancel_rx) = watch::channel(false);
     loop {
         tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
             completed = queries.join_next(), if !queries.is_empty() => {
                 let _ = completed;
             }
             command = receiver.recv() => match command {
-                Some(Command::Lookup { server, name, record_type, deadline, reply }) => {
+                Some(Command::Lookup { server, name, record_type, deadline, mut reply, permit }) => {
                     let plan = servers[server].plan_snapshot();
                     let servers = Arc::clone(&servers);
                     let egress = Arc::clone(&egress);
-                    let tasks = tasks.clone();
                     let counters = Arc::clone(&counters);
+                    let tasks = TaskSet::default();
+                    let query_tasks = tasks.clone();
+                    let mut cancelled = cancel_rx.clone();
                     queries.spawn(async move {
+                        let _permit = permit;
                         let _guard = QueryGuard::new(Arc::clone(&counters));
                         let provider = FerrumRuntimeProvider::new(
                             egress, plan, deadline, tasks, counters,
                         );
-                        let result = resolver::lookup(
-                            &servers[server],
-                            name,
-                            record_type,
-                            deadline,
-                            provider,
-                        )
-                        .await;
-                        let _ = reply.send(result);
+                        let result = tokio::select! {
+                            _ = cancelled.changed() => Err(DnsError::Shutdown),
+                            _ = reply.closed() => Err(DnsError::Shutdown),
+                            result = resolver::lookup(
+                                &servers[server],
+                                name,
+                                record_type,
+                                deadline,
+                                provider,
+                            ) => result,
+                        };
+                        query_tasks.abort_and_join().await;
+                        if !reply.is_closed() {
+                            let _ = reply.send(result);
+                        }
                     });
                 }
-                Some(Command::Shutdown) | None => break,
+                None => break,
             }
         }
     }
 
     receiver.close();
+    let _ = cancel.send(true);
     while let Ok(command) = receiver.try_recv() {
-        if let Command::Lookup { reply, .. } = command {
-            let _ = reply.send(Err(DnsError::Shutdown));
-        }
+        let Command::Lookup { reply, .. } = command;
+        let _ = reply.send(Err(DnsError::Shutdown));
     }
-    queries.abort_all();
     while queries.join_next().await.is_some() {}
-    tasks.abort_and_join().await;
 
     for _ in 0..256 {
-        if runtime_handle.metrics().num_alive_tasks() == 0 {
-            return Ok(ShutdownReport { runtime_tasks: 0 });
+        let stats = runtime_stats(&counters);
+        if runtime_handle.metrics().num_alive_tasks() == 0 && stats == RuntimeStats::default() {
+            return Ok(ShutdownReport {
+                runtime_tasks: 0,
+                stats,
+            });
         }
         tokio::task::yield_now().await;
     }
     Err(DnsError::Runtime)
+}
+
+fn runtime_stats(counters: &RuntimeCounters) -> RuntimeStats {
+    RuntimeStats {
+        queries: counters.queries.load(Ordering::Acquire),
+        tasks: counters.tasks.load(Ordering::Acquire),
+        tcp_streams: counters.tcp_streams.load(Ordering::Acquire),
+        udp_sockets: counters.udp_sockets.load(Ordering::Acquire),
+        bridge_tasks: counters.bridge_tasks.load(Ordering::Acquire),
+        sessions: counters.sessions.load(Ordering::Acquire),
+        queues: counters.queues.load(Ordering::Acquire),
+        buffers: counters.buffers.load(Ordering::Acquire),
+    }
 }
 
 #[cfg(test)]
@@ -298,6 +340,7 @@ mod tests {
     use super::*;
 
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     use ferrum2_config::DnsTransport;
     use hickory_proto::rr::rdata::{A, AAAA, CNAME, NS, SOA};
@@ -310,7 +353,8 @@ mod tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
     use rustls::time_provider::TimeProvider;
     use rustls::{RootCertStore, ServerConfig};
-    use tokio::net::TcpListener;
+    use tokio::io::copy_bidirectional_with_sizes;
+    use tokio::net::{TcpListener, TcpStream};
     use tokio_rustls::TlsAcceptor;
 
     const CERT: &[u8] = include_bytes!("../tests/fixtures/m12-resolver-test.der");
@@ -585,6 +629,87 @@ mod tests {
         (address, task)
     }
 
+    #[derive(Default)]
+    struct ScriptedTlsDetour {
+        attempts: AtomicUsize,
+        require_plan: bool,
+    }
+
+    impl DnsEgress for ScriptedTlsDetour {
+        fn connect_tcp(
+            &self,
+            target: SocketAddr,
+            plan: Option<crate::runtime_provider::PlanSnapshot>,
+            timeout: Duration,
+            tasks: crate::runtime_provider::DnsTaskRegistrar,
+        ) -> crate::runtime_provider::DnsIoFuture<crate::runtime_provider::BoxedDnsTcpIo> {
+            if self.require_plan {
+                assert_eq!(plan.expect("detour plan").hops(), &[0]);
+            } else {
+                assert!(plan.is_none(), "unexpected direct plan");
+            }
+            self.attempts.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async move {
+                let upstream = tokio::time::timeout(timeout, TcpStream::connect(target))
+                    .await
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+                tasks.spawn(
+                    crate::runtime_provider::DnsEgressTaskKind::Session,
+                    std::future::pending(),
+                );
+                let queue = tasks.own(crate::runtime_provider::DnsEgressResourceKind::Queue);
+                let buffer = tasks.own(crate::runtime_provider::DnsEgressResourceKind::Buffer);
+                let (client, mut bridge) = tokio::io::duplex(4_096);
+                tasks.spawn(
+                    crate::runtime_provider::DnsEgressTaskKind::Bridge,
+                    async move {
+                        let (_queue, _buffer) = (queue, buffer);
+                        let mut upstream = upstream;
+                        let _ =
+                            copy_bidirectional_with_sizes(&mut bridge, &mut upstream, 4_096, 4_096)
+                                .await;
+                    },
+                );
+                Ok(Box::new(client) as crate::runtime_provider::BoxedDnsTcpIo)
+            })
+        }
+
+        fn bind_udp(
+            &self,
+            _target: SocketAddr,
+            _plan: Option<crate::runtime_provider::PlanSnapshot>,
+            _tasks: crate::runtime_provider::DnsTaskRegistrar,
+        ) -> crate::runtime_provider::DnsIoFuture<crate::runtime_provider::BoxedDnsDatagramIo>
+        {
+            Box::pin(async { Err(std::io::Error::from(std::io::ErrorKind::Unsupported)) })
+        }
+    }
+
+    async fn stalled_doh() -> (SocketAddr, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("stalled DoH bind");
+        let address = listener.local_addr().expect("stalled DoH address");
+        let active = Arc::new(AtomicBool::new(false));
+        let task_active = Arc::clone(&active);
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("stalled DoH accept");
+            let tls = TlsAcceptor::from(Arc::new(server_tls(b"h2")))
+                .accept(stream)
+                .await
+                .expect("stalled DoH TLS");
+            let mut h2 = h2::server::handshake(tls).await.expect("stalled DoH H2");
+            let _request = h2
+                .accept()
+                .await
+                .expect("stalled DoH request")
+                .expect("valid stalled DoH request");
+            task_active.store(true, Ordering::Release);
+            std::future::pending::<()>().await;
+        });
+        (address, active, task)
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dot_doh_validate_full_zone_and_tls_policy() {
         let fixture = EncryptedFixture::start().await;
@@ -593,6 +718,7 @@ mod tests {
             (
                 encrypted_server(DnsTransport::Dot, fixture.dot, "resolver.test", None),
                 valid.clone(),
+                None,
             ),
             (
                 encrypted_server(
@@ -602,22 +728,27 @@ mod tests {
                     Some("/dns-query"),
                 ),
                 valid.clone(),
+                None,
             ),
             (
                 encrypted_server(DnsTransport::Dot, fixture.dot, "wrong.test", None),
                 valid.clone(),
+                None,
             ),
             (
                 encrypted_server(DnsTransport::Dot, fixture.dot, "resolver.test", None),
                 client_tls(VALID_TIME, false),
+                None,
             ),
             (
                 encrypted_server(DnsTransport::Dot, fixture.dot, "resolver.test", None),
                 client_tls(1_785_915_311, true),
+                None,
             ),
             (
                 encrypted_server(DnsTransport::Dot, fixture.dot, "resolver.test", None),
                 client_tls(2_101_275_313, true),
+                None,
             ),
             (
                 encrypted_server(
@@ -627,18 +758,21 @@ mod tests {
                     Some("/wrong"),
                 ),
                 valid,
+                None,
             ),
         ];
+        let egress = Arc::new(ScriptedTlsDetour::default());
         let resolver = TaggedResolver::with_test_tls(
             servers,
             Duration::from_secs(1),
             NonZeroU16::new(8).expect("nonzero admission"),
-            Arc::new(SystemDnsEgress),
+            egress.clone(),
         )
         .expect("start encrypted resolver");
         assert_full_zone(&resolver, 0).await;
         assert_full_zone(&resolver, 1).await;
         for server in 2..7 {
+            let before = egress.attempts.load(Ordering::Acquire);
             assert!(
                 resolver
                     .lookup(
@@ -650,6 +784,7 @@ mod tests {
                     .is_err(),
                 "encrypted negative server {server} unexpectedly succeeded"
             );
+            assert_eq!(egress.attempts.load(Ordering::Acquire), before + 1);
         }
         assert_eq!(
             resolver
@@ -670,6 +805,7 @@ mod tests {
     async fn doh_rejects_status_content_type_and_malformed_body() {
         for fault in [DohFault::Status, DohFault::ContentType, DohFault::Body] {
             let (address, task) = doh_fault(fault).await;
+            let egress = Arc::new(ScriptedTlsDetour::default());
             let resolver = TaggedResolver::with_test_tls(
                 vec![(
                     encrypted_server(
@@ -679,10 +815,11 @@ mod tests {
                         Some("/dns-query"),
                     ),
                     client_tls(VALID_TIME, true),
+                    None,
                 )],
                 Duration::from_secs(1),
                 NonZeroU16::new(1).expect("nonzero admission"),
-                Arc::new(SystemDnsEgress),
+                egress.clone(),
             )
             .expect("start DoH fault resolver");
             assert!(
@@ -695,6 +832,7 @@ mod tests {
                     .await
                     .is_err()
             );
+            assert_eq!(egress.attempts.load(Ordering::Acquire), 1);
             assert_eq!(
                 resolver
                     .shutdown()
@@ -706,5 +844,79 @@ mod tests {
             task.await.expect("DoH fault join");
             assert_tcp_rebind(address).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_joins_stalled_detoured_doh_h2_and_bridge_owners() {
+        let (address, active, fixture) = stalled_doh().await;
+        let egress = Arc::new(ScriptedTlsDetour {
+            require_plan: true,
+            ..ScriptedTlsDetour::default()
+        });
+        let resolver = TaggedResolver::with_test_tls(
+            vec![(
+                encrypted_server(
+                    DnsTransport::Doh,
+                    address,
+                    "resolver.test",
+                    Some("/dns-query"),
+                ),
+                client_tls(VALID_TIME, true),
+                Some(crate::runtime_provider::PlanSnapshot::new(&[0])),
+            )],
+            Duration::from_secs(5),
+            NonZeroU16::new(1).expect("nonzero admission"),
+            egress.clone(),
+        )
+        .expect("start stalled DoH resolver");
+        let lookup = tokio::spawn(resolver.lookup(
+            0,
+            Name::from_ascii("stalled.resolver.test.").expect("stalled DoH name"),
+            RecordType::A,
+        ));
+        for _ in 0..250 {
+            let stats = resolver.stats();
+            if active.load(Ordering::Acquire)
+                && stats.queries == 1
+                && stats.tasks != 0
+                && stats.tcp_streams == 1
+                && stats.bridge_tasks == 1
+                && stats.sessions == 1
+                && stats.queues == 1
+                && stats.buffers == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let stats = resolver.stats();
+        assert!(active.load(Ordering::Acquire), "H2 request not active");
+        assert_eq!(stats.queries, 1);
+        assert!(stats.tasks <= 2, "bounded Hickory H2 tasks: {stats:?}");
+        assert_eq!(stats.tcp_streams, 1);
+        assert_eq!(stats.bridge_tasks, 1);
+        assert_eq!(stats.sessions, 1);
+        assert_eq!(stats.queues, 1);
+        assert_eq!(stats.buffers, 1);
+        assert_eq!(egress.attempts.load(Ordering::Acquire), 1);
+
+        let report = tokio::time::timeout(Duration::from_millis(250), resolver.shutdown())
+            .await
+            .expect("bounded stalled DoH shutdown")
+            .expect("stalled DoH shutdown");
+        assert_eq!(report.runtime_tasks, 0);
+        assert_eq!(report.stats, RuntimeStats::default());
+        assert_eq!(
+            lookup.await.expect("stalled lookup join"),
+            Err(DnsError::Shutdown)
+        );
+        fixture.abort();
+        assert!(
+            fixture
+                .await
+                .expect_err("stalled fixture cancellation")
+                .is_cancelled()
+        );
+        assert_tcp_rebind(address).await;
     }
 }

@@ -18,6 +18,8 @@ pub(crate) struct SelectedServer {
     config: DnsServerConfig,
     #[cfg(test)]
     tls: Option<rustls::ClientConfig>,
+    #[cfg(test)]
+    plan: Option<PlanSnapshot>,
 }
 
 impl SelectedServer {
@@ -26,6 +28,8 @@ impl SelectedServer {
             config,
             #[cfg(test)]
             tls: None,
+            #[cfg(test)]
+            plan: None,
         }
     }
 
@@ -35,7 +39,17 @@ impl SelectedServer {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_plan(mut self, plan: Option<PlanSnapshot>) -> Self {
+        self.plan = plan;
+        self
+    }
+
     pub(crate) fn plan_snapshot(&self) -> Option<PlanSnapshot> {
+        #[cfg(test)]
+        if self.plan.is_some() {
+            return self.plan.clone();
+        }
         self.config
             .detour
             .as_ref()
