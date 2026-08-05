@@ -1,6 +1,6 @@
 # M12 — tagged DNS resolution and proxy
 
-- **Status:** planned
+- **Status:** executing
 - **Baseline:** `c733e0dd03e711c045c0b7a4ee189277fbe37698`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -100,8 +100,8 @@ Shadowsocks数据面或规则引擎。
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M12-T01 | Pin Hickory 0.26.1 and raise the workspace MSRV to 1.88.0 | — | ready |
-| M12-T02 | Compile DNS config、detour roots and one shared first-match action table | M12-T01 | planned |
+| M12-T01 | Pin Hickory 0.26.1 and raise the workspace MSRV to 1.88.0 | — | done |
+| M12-T02 | Compile DNS config、detour roots and one shared first-match action table | M12-T01 | active |
 | M12-T03 | Implement tagged Hickory upstreams over bounded direct/detour runtime adapters | M12-T02 | planned |
 | M12-T04 | Expose client UDP/TCP DNS proxy with real Shadowsocks detours | M12-T03 | planned |
 | M12-T05 | Compose server resolution/detours and prove external interoperability | M12-T04 | planned |
@@ -131,7 +131,9 @@ test LOC；no second harness、copied DNS codec或second SIP022 UDP data plane i
 
 ## Execution / remote boundary
 
-This is a plan-only change from clean `master@c733e0dd03e711c045c0b7a4ee189277fbe37698`. No product
-code、Cargo dependency、MSRV setting、ticket branch/worktree or remote state has changed yet. Product
-work starts only with M12-T01 in its own worktree. No push、workflow dispatch、hosted run、PR、tag、
-package、release or publication is authorized by this plan。
+M12-T01 is integrated at exact product `d874865f4a66db8d7c50abad85e6092a16f52fb6`；Architect `PASS`、
+QA `PASS_WITH_NOTES` and all focused/Quick/integration gates passed with no blocking ID。The expected
+numeric footprint `REVIEW_REQUIRED` is accepted。M12-T02 starts from that exact ticket base in
+`codex/m12-t02` / `.worktrees/M12-T02` with binding `PASS`。The user authorized remote pushes；none has
+run yet。Manual workflow dispatch remains separately unauthorized；no hosted run、PR、tag、package、
+release or publication has occurred。

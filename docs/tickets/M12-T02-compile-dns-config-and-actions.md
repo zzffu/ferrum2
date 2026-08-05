@@ -1,7 +1,7 @@
 ---
 id: M12-T02
 milestone: M12
-status: planned
+status: active
 depends_on: [M12-T01]
 owns:
   - crates/ferrum2-core/src/lib.rs
