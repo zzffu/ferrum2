@@ -12,6 +12,7 @@ owns:
   - bins/ferrum2-server/src/run.rs
   - crates/ferrum2-dns/Cargo.toml
   - crates/ferrum2-dns/src/resolver.rs
+  - crates/ferrum2-dns/tests/tagged_upstreams.rs
   - tests/m0-harness/src/local_support/mod.rs
   - tests/m0-harness/src/external_support/mod.rs
   - tests/m0-harness/src/qualification/mod.rs
@@ -57,6 +58,10 @@ test-footprint policy，and later product commits must inherit the amended blob 
 The existing client `run.rs` test module has one bounded T05 lease to repair the hosted-only DNS proxy
 readiness race exposed before formal review。Only the failing test and an already-shared test helper may
 change；client product behavior、configuration and public surfaces remain out of scope。
+
+The inherited T03 `tagged_upstreams.rs` has one bounded test-only lease for the same hosted Linux socket
+allocation class。Reuse the existing DNS-test network serialization/paired-address pattern；do not change
+resolver、transport or lifecycle product behavior。
 
 ## Acceptance
 
