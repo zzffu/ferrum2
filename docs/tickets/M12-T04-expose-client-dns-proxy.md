@@ -9,6 +9,8 @@ owns:
   - bins/ferrum2-client/src/main.rs
   - crates/ferrum2-dns/src/proxy.rs
   - crates/ferrum2-dns/src/lib.rs
+  - crates/ferrum2-dns/src/resolver.rs
+  - crates/ferrum2-dns/src/runtime_owner.rs
   - crates/ferrum2-dns/tests/proxy_contract.rs
   - bins/ferrum2-client/src/dns_egress.rs
   - bins/ferrum2-client/src/run.rs
@@ -28,7 +30,9 @@ its absent-direct or configured Shadowsocks detour。
 The client adds the existing `ferrum2-dns` normal workspace edge and may add the existing exact
 `hickory-proto` workspace edge as dev-only typed wire evidence。TCP proxy framing uses
 `hickory_resolver::net`，the exact 0.26.1 resolver re-export already present in the DNS product graph；T04
-does not add a root or DNS-manifest `hickory-net` edge、new package identity、provider or product API。
+does not add a root or DNS-manifest `hickory-net` edge、new package identity or provider。The existing
+T03 resolver command seam may be extended with one Hickory response-preserving single-question API；
+the existing address-lookup API and its server-facing semantics remain intact。
 
 ## Acceptance
 
