@@ -139,5 +139,7 @@ pass；numeric `REVIEW_REQUIRED` is accepted。Three unchanged server `run.rs` R
 remain explicit T06 qualification debt。M12-T03 starts from the exact T02 integration product。The user
 authorized remote pushes；none has run yet。Its ownership includes the DNS crate manifest/module root and
 `Cargo.lock` because the T01 crate is intentionally empty；the root manifest and new dependencies remain
-out of scope。Manual workflow dispatch remains separately unauthorized；no hosted run、PR、tag、package、
-release or publication has occurred。
+out of scope。It also has one bounded lease on server `run.rs` for the three inherited Rust-1.88
+`collapsible_if` repairs required by Full；those changes must remain an isolated mechanical commit。
+Manual workflow dispatch remains separately unauthorized；no hosted run、PR、tag、package、release or
+publication has occurred。

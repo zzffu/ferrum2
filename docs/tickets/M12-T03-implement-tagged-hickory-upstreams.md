@@ -5,6 +5,7 @@ status: active
 depends_on: [M12-T02]
 owns:
   - Cargo.lock
+  - bins/ferrum2-server/src/run.rs
   - crates/ferrum2-dns/Cargo.toml
   - crates/ferrum2-dns/src/lib.rs
   - crates/ferrum2-dns/src/resolver.rs
