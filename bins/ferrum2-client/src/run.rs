@@ -5405,14 +5405,11 @@ mod tests {
                 .expect("readiness upstream rebind"),
         );
 
-        let first =
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("rollback first reserve");
-        let first_address = first.local_addr().expect("rollback first address");
-        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        let first_address = SocketAddr::V4(reserve_address());
+        let occupied_address = SocketAddr::V4(reserve_address());
+        let occupied = TcpListener::bind(occupied_address)
             .await
             .expect("rollback occupied TCP");
-        let occupied_address = occupied.local_addr().expect("rollback occupied address");
-        drop(first);
         assert!(
             DnsProxySockets::bind(
                 vec![first_address, occupied_address],
@@ -6226,17 +6223,7 @@ mod tests {
             })
             .collect();
         let target = TargetAddr::ipv4("192.0.2.1:80".parse().expect("target")).expect("target");
-        let reservations = [
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listen"),
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("unused listen"),
-        ];
-        let listens =
-            reservations
-                .each_ref()
-                .map(|listener| match listener.local_addr().expect("listen") {
-                    SocketAddr::V4(address) => address,
-                    SocketAddr::V6(_) => unreachable!("IPv4 listen"),
-                });
+        let listens = [reserve_address(), reserve_address()];
         let mappings = [(listens[0], servers[0]), (listens[1], servers[1])];
         let (path, mut config) = tagged_client_test_config(&mappings, false);
         let dead = reserve_address();
@@ -6272,7 +6259,6 @@ mod tests {
         .expect("selector route");
         config.route = route;
         let selector = config.selector_control();
-        drop(reservations);
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);
         for listen in listens {

@@ -89,6 +89,7 @@ impl DnsEgress for RecordingEgress {
 
 struct PlainFixture {
     address: SocketAddr,
+    stop: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -152,23 +153,24 @@ impl PlainFixture {
         let mut server = Server::new(catalog);
         server.register_socket(udp);
         server.register_listener(tcp, Duration::from_secs(2), 4);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
+            let _ = stopped.await;
             server
-                .block_until_done()
+                .shutdown_gracefully()
                 .await
                 .expect("fixture server failed");
         });
-        Self { address, task }
+        Self {
+            address,
+            stop,
+            task,
+        }
     }
 
     async fn shutdown(self) {
-        self.task.abort();
-        assert!(
-            self.task
-                .await
-                .expect_err("fixture task should cancel")
-                .is_cancelled()
-        );
+        self.stop.send(()).expect("fixture shutdown signal");
+        self.task.await.expect("fixture shutdown task");
     }
 }
 
