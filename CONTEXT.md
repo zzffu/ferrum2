@@ -141,3 +141,29 @@ _Avoid_: Protocol implementation, transport adapter
 The validated pre-resolution host and non-zero port matched by a route rule; it is not a
 DNS answer, sniffed name, CIDR, or domain pattern.
 _Avoid_: Destination label, resolved target
+
+**DNS server**:
+A tagged upstream DNS service with one numeric bootstrap address and one fixed UDP, TCP, DoT, or DoH
+transport. A DNS action selects the server independently from the optional egress plan used to reach
+it，and it is never a retry group.
+_Avoid_: Outbound, upstream group, system resolver
+
+**DNS action**:
+The result of DNS first-match selection naming exactly one DNS server. Failure of that server does not
+evaluate another rule, the DNS final action, or another server tag.
+_Avoid_: Outbound action, fallback list, retry policy
+
+**DNS detour**:
+An optional DNS-server reference to one existing egress action whose immutable plan carries traffic to
+that server's bootstrap address. Absence means direct egress；it never selects another DNS server.
+_Avoid_: DNS action, DNS server tag, fallback, ordinary route
+
+**DNS bootstrap address**:
+The operator-validated numeric socket used as a DNS server's direct or detoured target. A DoT/DoH
+server name is an authenticated TLS/HTTP identity and is never resolved through ferrum2.
+_Avoid_: Search domain, fallback resolver, DNS answer
+
+**DNS proxy inbound**:
+A tagged client listener exposing DNS queries on both UDP and TCP at one socket address. Its tag and
+received transport participate in DNS action selection.
+_Avoid_: SOCKS inbound, authoritative zone, DNS server

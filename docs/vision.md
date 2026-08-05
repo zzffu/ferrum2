@@ -128,7 +128,8 @@ operator endpoint、两个 binary roots 和 workspace member 数量是历史现�
 | M8 | 共享、有界的TCP/UDP first-match routing；只匹配inbound tag、network和exact target | closed |
 | M9 | 核验M7/M8已交付client multi-upstream；零product/test code关闭 | closed |
 | M10 | 固定成员的tagged manual outbound selector与公开Rust原子切换interface | closed |
-| M11 | client固定有序proxy chain与per-concrete-outbound method/PSK | planned |
+| M11 | client固定有序proxy chain与per-concrete-outbound method/PSK | closed |
+| M12 | tagged DNS resolver/proxy、four transports及per-server outbound detour | planned |
 
 这些状态是证据状态。M0 已由同一集成 SHA 的本地、互操作与三平台证据关闭；
 M1 已由 exact `874c83d0ee71054bd702d6ecac55e88d9e2fbcef` 的本地 full、
@@ -205,9 +206,17 @@ Architect/QA review通过。Performance只作regression/aggregate evidence，不
 声明；自动选择、retry、health/load balancing、HTTP/IPC/CLI、persistence和connection
 interruption仍排除，未release或publish。
 
-M11以`7a3c876681255b88492b3608af4fa52497435efc`为planning baseline，计划在client tagged
-graph上为每个concrete Shadowsocks outbound加入完整override或global-inherited method/PSK，
-并以`2..=8`个固定concrete hops组成有序chain。Static、route与selector只选择一个immutable
-direct/chain plan；TCP/UDP按层复用现有SIP022 state machines，任一失败不retry/fallback。
-Dynamic chain、health/load balancing、SIP023/multi-user和server per-inbound credentials仍排除。
-该状态仅为planned；尚无product、validation、remote、release或publication证据。
+M11以`7a3c876681255b88492b3608af4fa52497435efc`为planning baseline，由exact product
+`6d975c1e45eb0e614c54961e35fdc19fa2478d98`交付per-concrete-outbound credentials和
+`2..=8` fixed chain。Automatic run `30943770483/1`关闭non-performance qualification；
+manual run `30945447936/1`仅credit独立成功的performance job `92114171793`，其重复失败结果保持
+uncredited。Final Architect/QA均`PASS_WITH_NOTES`；M11已closed，未release或publish。
+
+M12以`c733e0dd03e711c045c0b7a4ee189277fbe37698`为planning baseline，计划使用exact latest
+Hickory 0.26.1增加optional tagged DNS graph。Client公开同地址UDP/TCP DNS proxy，server为
+authenticated domain target选择UDP/TCP/DoT/DoH server；DNS route复用唯一first-match matcher，
+但以独立`server` action收敛。每个DNS server另可用optional sing-box-style `detour`引用existing
+egress action；absence direct，client支持concrete/chain/selector，server限existing direct。Numeric
+bootstrap、one absolute timeout、DNS+egress admission和awaited Hickory/detour tasks关闭环路与资源
+边界。Hickory 0.26.1要求Rust 1.88，因此M12 MSRV计划从1.85.0升至1.88.0；build toolchain保持
+1.97.1。该状态仅为planned；尚无product、validation、remote、release或publication证据。

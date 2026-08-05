@@ -53,6 +53,10 @@ push run `30943770483/1`及manual run `30945447936/1`的独立performance job `9
 Manual run整体为`failure`；其重复MSRV、interop和qualification失败保持uncredited，不改写为PASS。
 Final Architect/QA均`PASS_WITH_NOTES`；两次remote授权均已消费，provider-created automatic attempt 2
 不计入，且没有rerun、second push/dispatch或release证据。
+M12以clean `master@c733e0dd03e711c045c0b7a4ee189277fbe37698`进入`planned`：使用exact
+Hickory 0.26.1交付tagged DNS resolver/proxy和sing-box-style outbound `detour`，并因其依赖合同
+把MSRV计划升至Rust 1.88.0。
+当前只有plan documents；尚无product、validation、remote或publication证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -82,6 +86,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M9 | M8 closed | 核验现有tagged multi-outbound已满足client multi-upstream |
 | M10 | M9 closed | tagged manual outbound selector与公开原子切换interface |
 | M11 | M10 closed | client固定有序proxy chain与per-concrete-outbound method/PSK |
+| M12 | M11 closed | tagged DNS resolver/proxy、UDP/TCP/DoT/DoH与独立DNS action |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -101,6 +106,10 @@ M10只规划手动selector：固定成员、显式default、公开Rust control�
 自动选择、retry、health、load balancing与外部control入口继续延期。
 M11只规划immutable direct/chain plan：concrete outbound绑定effective credentials，selector可切换
 整条plan；dynamic chain、retry/fallback、health/load balancing与server credential selection继续延期。
+M12只规划一个optional DNS graph：client UDP/TCP proxy和server domain resolver共享既有
+first-match条件，但以独立server action选择numeric-bootstrap UDP/TCP/DoT/DoH upstream；每个
+server另可用`detour`引用existing egress action。Cache、general retry、new server proxy outbound、
+DNSSEC、DoQ/DoH3和advanced matchers继续延期。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -974,6 +983,43 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
   Final Architect/QA均`PASS_WITH_NOTES`，T05/M11已关闭。两次remote授权均已消费；provider-created
   attempt 2不计入；无rerun、second push/dispatch、PR、tag、package、release或publication授权。
 
+## M12 — tagged DNS resolution and proxy
+
+- **Status:** planned
+- **Objective:** 使用exact Hickory 0.26.1增加optional schema v1 DNS graph。Client
+  `[[dns.inbounds]]`在同地址公开UDP/TCP proxy；server为authenticated domain target选择
+  UDP/TCP/DoT/DoH server。DNS route复用既有inbound/network/exact-target first-match实现，
+  但以独立`server` action收敛；每个server可用optional `detour`引用existing outbound action，
+  路径A/B均按其direct或detoured egress访问上游；`[dns]` absent保持system resolution。
+- **Baseline:** `c733e0dd03e711c045c0b7a4ee189277fbe37698`；M0～M11 closed，master clean，
+  code/tests `16023/32456`、ratio `2.025588`、case/support/fixture
+  `27788/4071/597`。
+- **MSRV/dependency:** `hickory-resolver/proto/server =0.26.1`；resolver no-default，仅Tokio、
+  ring DoT/DoH和WebPKI roots。Workspace/CI MSRV从1.85.0升至1.88.0；selected build toolchain
+  仍为1.97.1。
+- **Exit criteria:** preserved schema cohort；complete DNS role/server/bootstrap/TLS/path/rule/loop/
+  detour validation；one matcher/two action domains；all four transports direct及client concrete/
+  chain/selector detour、server direct-outbound detour；internal DNS UDP不隐式开放public UDP；server
+  16-candidate/absolute-deadline resolution；no route/member fallback/downgrade；global DNS+egress
+  admission、fixed buffers/queues、tracked/awaited Hickory/detour tasks、zero owners/rebind/redaction；
+  Full/MSRV/lifecycle/platforms/existing SIP022+new DNS interop/footprint/reviews/performance exact-SHA
+  evidence。
+- **Tickets:** M12-T01 dependency/MSRV `ready`；M12-T02 config/shared matcher依赖T01
+  `planned`；M12-T03 tagged transports/owner依赖T02 `planned`；M12-T04 client proxy依赖T03
+  `planned`；M12-T05 server resolver/interop依赖T04 `planned`；M12-T06 qualification依赖T05
+  `planned`。Decision/spec/test为ADR-0031、SPEC/TEST-0013。
+- **Forecast:** test case/support/fixture `1160/240/0`，预计milestone numeric
+  `REVIEW_REQUIRED`；T02～T05预计ticket `WARN`。不新增second harness、copied DNS codec或second
+  SIP022 UDP data plane。
+  Performance为required regression/resource evidence，无threshold/claim。
+- **Deferred/out of scope:** recursive/authoritative/DNSSEC/mDNS/DoQ/DoH3、cache/general retry、
+  group/health/LB/fallback、suffix/CIDR/qtype/client-IP/Geo/sniff、hostname bootstrap、new server-side
+  proxy outbound、custom CA/insecure TLS、standalone DNS binary、hot reload、management API、package/
+  release/publication。
+- **Execution / remote boundary:** plan-only；尚未修改product、Cargo dependency、MSRV或remote。
+  T01必须在独立ticket worktree启动。无push、dispatch、hosted run、PR、tag、package、release或
+  publication授权。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -1017,6 +1063,7 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 | DEC-037 | resolved in M9 close | multi-upstream指一个client process拥有多个可被static/routed selection独立选择的concrete Shadowsocks servers；不等同于自动成员选择、retry或health policy。M7/M8已满足前者，upstream group/load balancing继续延期 | `CONTEXT.md`、SPEC/TEST-0010、M9-T01 |
 | DEC-038 | resolved in M10 plan | additive tagged-only `[[selectors]]`、explicit default、bounded all-edge DAG；shared core selector state与公开`selected`/`switch` interface；RouteTable内部返回concrete identity并沿用现有TCP/UDP selection-call granularity；无external control、auto policy、retry/health/LB | `CONTEXT.md`、ADR-0029、SPEC/TEST-0011、M10-T01～T03 |
 | DEC-039 | resolved in M11 plan | global `[shadowsocks]`继续mandatory；client outbound credential fields both-or-neither并可完整override；client-only `[[chains]]`为`1..=64` entries、每条`2..=8` unique concrete hops；direct/chain编译为immutable plan供static/route/selector选择；TCP逐层nest existing flow，UDP inner→outer encode/outer→inner authenticated open；任一失败no retry/fallback，server credentials不变 | `CONTEXT.md`、ADR-0030、SPEC/TEST-0012、M11-T01～T05 |
+| DEC-040 | resolved in M12 plan | exact Hickory resolver/proto/server 0.26.1使MSRV升至1.88.0；optional client DNS UDP/TCP proxy与server custom resolver共用唯一first-match matcher但使用独立server action；每个DNS server可用optional `detour`引用existing egress action，absence direct，client支持concrete/chain/selector且server限existing direct；numeric bootstrap + verified DoT/DoH identity；cache/retry为0，selected/detour failure no fallback；global DNS+egress deadline/admission和tracked awaited tasks | `CONTEXT.md`、ADR-0031、SPEC/TEST-0013、M12-T01～T06 |
 
 ## 风险登记
 
@@ -1055,6 +1102,12 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 | chain被截成单hop、hop重排或失败触发selector/rule/final fallback | P0 | M11 | immutable whole-plan selection、ordered connector/wire witnesses、selector snapshot及first/later-hop no-retry mutations |
 | nested UDP overflow、cross-plan response或invalid inner在outer state先commit | P0 | M11 | pre-mutation recursive length bound、per-layer target/session binding、all-layer prepare then accepted commit、valid-after-invalid table |
 | per-hop TCP/UDP buffer/session/socket/task随配置eager或失败后泄漏 | P0 | M11 | `2..=8`/action ceilings、lazy owner inspection、aggregate limits、success/failure cycles、zero-owner and exact-rebind gates；manual performance/resource required |
+| DNS bootstrap递归、自指listener或外部forward cycle形成查询风暴 | P0 | M12 | numeric-only bootstrap、wildcard alias config rejection、no cross-tag retry、one absolute deadline、global admission和indirect-loop saturation/recovery |
+| DNS rule复制/漂移、selected failure试later rule/final或answer改变ordinary route | P0 | M12 | one generic core first-match action table、two-action mutation tests、pre-resolution context和no-fallback real-process witnesses |
+| DNS detour重跑ordinary route、引用错误plan、selector切换迁移active flow或失败试另一member | P0 | M12 | pre-resolved detour root、existing plan snapshot、bootstrap no-route mutation、UDP per-query/TCP-family per-flow witnesses和no-member-fallback counters |
+| Client internal DNS UDP复制SIP022 data plane或隐式开放public UDP ASSOCIATE | P0 | M12 | reuse existing UDP codec/session owners、separate public admission boolean、on/off matrix、shared saturation/cleanup and architecture review |
+| DoT/DoH错误identity、plaintext downgrade或DoH path/body被宽松接受 | P0 | M12 | ring/WebPKI verified server name、closed transport fields、wrong CA/name/time/path/status/body negatives和no-downgrade counters |
+| Hickory default retry/cache/background task绕过deadline或shutdown owner | P0 | M12 | effective options retry/cache zero、shared max-inflight、tracked runtime task set、forced join/zero-owner/rebind及performance/resource evidence |
 
 ## 决策与范围变更日志
 
@@ -1136,3 +1189,5 @@ M11只规划immutable direct/chain plan：concrete outbound绑定effective crede
 | 2026-08-04 | M11-T01 integration | exact `173d1642`集成per-outbound complete credential override/global inheritance、bounded immutable direct/chain plans及whole-plan static/route/selector selection；T01 done，T02 active | QA initial `M11-T01-QA-001`发现nine-hop负例同时含duplicate hops；用户指定的双独立xhigh只读分析一致选择one-row test-only repair，targeted Architect `PASS_WITH_NOTES`、QA `PASS`关闭finding | core `3/3`、config `14/14`、CLI `5/5`、Clippy/fmt、Quick及diff通过；workspace `311` passed、`5` ignored；footprint `239/0/0` integrity PASS，仅expected file WARN；fresh integration首次CLI缺bins，required build后unchanged rerun通过；无push/hosted/release/publication |
 | 2026-08-05 | M11-T02 integration | exact `e0952534`集成ordered fixed TCP chains、per-concrete credential consumption、recursive owner cleanup及selector whole-plan snapshot；T02 done，T03 active | 初审/复审的production-path evidence缺口经用户指定双独立xhigh分析后关闭；最终QA发现same-method credential alias，直接小修为四hop identity-distinct PSK；Windows UDP fixture跨协议端口竞态随后直接根因修复；final Architect/QA均`PASS_WITH_NOTES`且全部correctness ID关闭 | TCP focused `9/9 + 1/1 + 1/1`、packages `110/110`、candidate/integration serial Full、100+ lifecycle、docs、Clippy/fmt/diff均PASS；UDP fixture exact `20/20`；schema 3 integrity与ratio PASS，预期large `run.rs` numeric `REVIEW_REQUIRED`已接受；无push/hosted/release/publication |
 | 2026-08-05 | M11 automatic qualification / performance blocked | exact product `6d975c1e`通过focused、serial Full、Rust 1.85、100+ lifecycle、schema 3 integrity及automatic push run `30943770483/1`；M11改为`validating`，T05改为`blocked` | Attempt 1的quality、test-footprint、MSRV、three platforms、interop及qualification均success，TCP/UDP各`12/12`+cleanup；push event按合同skip performance。Provider later created attempt 2 without primary request/authorization，故不计入且不替换immutable attempt 1 | Architect `PASS_WITH_NOTES`、QA `PASS`，无blocking finding；一次push授权已消费。仅剩另行授权的exact-SHA manual `workflow_dispatch` performance；无second push、PR、tag、release/publication授权 |
+| 2026-08-05 | M12 plan | M12改为`planned`；接受exact Hickory 0.26.1、Rust 1.88 MSRV、client UDP/TCP DNS proxy、server tagged UDP/TCP/DoT/DoH resolver、shared first-match matcher/separate server action及numeric bootstrap | M11 closed；existing route matcher、runtime resolver seams、bounded supervisor和ProcessRoot足够；Hickory stock TCP accept无admission，故只复用其message/framing并由existing supervisor owner承载 | baseline `c733e0d`；ADR-0031、SPEC/TEST-0013、T01→T02→T03→T04→T05→T06；initial schema 3 forecast `950/180/0` and performance required；plan-only，无product/dependency/MSRV/push/dispatch/hosted/release/publication |
+| 2026-08-05 | M12 DNS detour amendment | 每个DNS server增加optional sing-box-style `detour` outbound-action reference；路径A/B都先选DNS server再按absence-direct或detour plan访问其numeric target。Client支持concrete/chain/selector和SIP022 UDP复用；server限existing direct outbounds | 用户澄清“上游tag”指连接DNS server的outbound，不是DNS server tag。Hickory `RuntimeProvider`是existing transport seam，ordinary route和DNS action保持独立 | ADR/SPEC/TEST-0013、CONTEXT及T02～T06修订；forecast改为`1160/240/0`，status/dependencies/remote boundary不变 |
