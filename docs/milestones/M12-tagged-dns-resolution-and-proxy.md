@@ -156,6 +156,9 @@ ignored lifecycle `1/1` (`130.37s`)、docs and locked offline metadata pass。Fo
 numeric `REVIEW_REQUIRED` (`+2260/0/0`、code `+433`、ratio `2.104062`) is accepted。M12-T05 is active
 from that exact integration product。Before product edits，its ownership was completed with the existing
 server manifest、lock row and workspace-policy assertion required for the already-declared local
-`ferrum2-dns` edge；no new package identity or `main.rs` change is authorized。The user authorized remote
-pushes；none has run yet。Manual workflow dispatch remains separately unauthorized；no hosted run、PR、
-tag、package、release or publication has occurred。
+`ferrum2-dns` edge；no new package identity or `main.rs` change is authorized。The existing external
+qualification provider and its contract test are also owned so CoreDNS/BIND do not create a second
+harness。Hosted provisioning may change `m0.yml` only through an isolated single-parent control-only
+commit before product work，without changing triggers、manual-performance semantics or unrelated jobs。
+The user authorized remote pushes；none has run yet。Manual workflow dispatch remains separately
+unauthorized；no hosted run、PR、tag、package、release or publication has occurred。

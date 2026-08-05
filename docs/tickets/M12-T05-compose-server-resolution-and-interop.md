@@ -4,16 +4,19 @@ milestone: M12
 status: active
 depends_on: [M12-T04]
 owns:
+  - .github/workflows/m0.yml
   - Cargo.lock
   - bins/ferrum2-server/Cargo.toml
   - bins/ferrum2-server/src/dns_egress.rs
   - bins/ferrum2-server/src/run.rs
   - tests/m0-harness/src/local_support/mod.rs
+  - tests/m0-harness/src/external_support/mod.rs
   - tests/m0-harness/src/qualification/mod.rs
   - tests/m0-harness/src/bin/m0_qualification.rs
   - tests/m0-harness/tests/local_e2e.rs
   - tests/m0-harness/tests/udp_local_e2e.rs
   - tests/m0-harness/tests/architecture.rs
+  - tests/m0-harness/tests/qualification_contract.rs
   - tests/m0-harness/tests/workspace_policy.rs
   - tests/interop/versions.toml
 ---
@@ -32,6 +35,13 @@ The server adds only the existing workspace `ferrum2-dns` direct edge required t
 resolver/owner API。The existing lock package row and workspace-policy dependency assertion may change
 only to record that local edge；no root dependency、new package identity、feature or provider is added。
 `run.rs` may declare the sibling `dns_egress.rs` module directly，so `main.rs` remains out of scope。
+
+The existing `external_support` provider/process owner and `qualification_contract` test seam are the
+only authorized external-runner paths；T05 must extend them rather than create a second harness。
+`.github/workflows/m0.yml` may change only in one isolated single-parent control-only commit before any
+Rust/product commit，to provision the exact pinned CoreDNS/BIND artifacts and make the existing interop
+job require the DNS qualification result。It must not change triggers、performance/manual-dispatch
+semantics、unrelated jobs or test-footprint policy，and later product commits must inherit it unchanged。
 
 ## Acceptance
 
