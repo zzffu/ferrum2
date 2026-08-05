@@ -616,6 +616,9 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "hickory-resolver = { version = \"=0.26.1\", default-features = false, features = [\"tokio\", \"tls-ring\", \"https-ring\", \"webpki-roots\"] }",
         "hickory-proto = { version = \"=0.26.1\", default-features = false, features = [\"std\"] }",
         "hickory-server = { version = \"=0.26.1\", default-features = false }",
+        "h2 = { version = \"=0.4.15\", default-features = false, features = [\"stream\"] }",
+        "rustls = { version = \"=0.23.43\", default-features = false, features = [\"ring\", \"std\", \"tls12\"] }",
+        "tokio-rustls = { version = \"=0.26.4\", default-features = false, features = [\"ring\"] }",
         "aes-gcm = { version = \"=0.11.0\", default-features = false, features = [\"aes\", \"bytes\", \"zeroize\"] }",
         "chacha20poly1305 = { version = \"=0.11.0\", default-features = false, features = [\"bytes\", \"zeroize\"] }",
         "blake3 = { version = \"=1.8.5\", default-features = false, features = [\"std\", \"zeroize\"] }",
@@ -660,11 +663,13 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "ferrum2-shadowsocks",
         "ferrum2-socks5",
         "getrandom",
+        "h2",
         "hex",
         "hickory-proto",
         "hickory-resolver",
         "hickory-server",
         "prometheus-client",
+        "rustls",
         "serde",
         "serde_json",
         "shadowsocks-crypto",
@@ -672,6 +677,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "tempfile",
         "thiserror",
         "tokio",
+        "tokio-rustls",
         "toml",
         "tracing",
         "tracing-subscriber",
@@ -743,9 +749,27 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
     assert_eq!(
         dependency_table(&manifest, "[dependencies]").expect("DNS dependencies"),
         BTreeMap::from([
+            ("ferrum2-config.workspace".to_owned(), "true".to_owned()),
             ("hickory-proto.workspace".to_owned(), "true".to_owned()),
             ("hickory-resolver.workspace".to_owned(), "true".to_owned()),
             ("hickory-server.workspace".to_owned(), "true".to_owned()),
+            ("tokio.workspace".to_owned(), "true".to_owned()),
+        ])
+    );
+    assert_eq!(
+        dependency_table(&manifest, "[dev-dependencies]").expect("DNS dev dependencies"),
+        BTreeMap::from([
+            ("h2.workspace".to_owned(), "true".to_owned()),
+            (
+                "hickory-server".to_owned(),
+                r#"{ workspace = true, features = ["__https"] }"#.to_owned(),
+            ),
+            ("rustls.workspace".to_owned(), "true".to_owned()),
+            (
+                "tokio".to_owned(),
+                r#"{ workspace = true, features = ["test-util"] }"#.to_owned(),
+            ),
+            ("tokio-rustls.workspace".to_owned(), "true".to_owned()),
         ])
     );
     assert!(!manifest.contains("[features]"));
@@ -794,7 +818,7 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
                 "webpki-roots",
             ][..],
         ),
-        ("hickory-server", &[][..]),
+        ("hickory-server", &["__https", "__tls"][..]),
     ] {
         let package_id = unique_registry_package_id(&metadata, name, "0.26.1");
         let package = packages
@@ -822,7 +846,16 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
         .iter()
         .map(|package| package["name"].as_str().expect("package name"))
         .collect();
-    for forbidden in ["aws-lc-rs", "aws-lc-sys", "quinn", "h3", "h3-quinn"] {
+    for forbidden in [
+        "aws-lc-rs",
+        "aws-lc-sys",
+        "h3",
+        "h3-quinn",
+        "ipconfig",
+        "quinn",
+        "resolv-conf",
+        "system-configuration",
+    ] {
         assert!(
             !package_names.contains(forbidden),
             "forbidden DNS dependency: {forbidden}"
@@ -836,6 +869,45 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
         1,
         "the DNS TLS graph must resolve one ring provider"
     );
+    assert_eq!(
+        packages
+            .iter()
+            .filter(|package| package["name"] == "socket2")
+            .map(|package| package["version"].as_str().expect("socket2 version"))
+            .collect::<Vec<_>>(),
+        ["0.6.5"]
+    );
+
+    let server_id = unique_registry_package_id(&metadata, "hickory-server", "0.26.1");
+    let server_node = resolve_node(&metadata, &server_id);
+    assert!(
+        server_node["deps"]
+            .as_array()
+            .expect("hickory-server dependencies")
+            .iter()
+            .all(|dependency| dependency["name"] != "hickory_resolver"),
+        "the server-only HTTPS fixture gate must not activate hickory-resolver"
+    );
+
+    for (name, version, expected_features) in [
+        ("h2", "0.4.15", &["stream"][..]),
+        (
+            "rustls",
+            "0.23.43",
+            &["log", "logging", "ring", "std", "tls12"][..],
+        ),
+        ("tokio-rustls", "0.26.4", &["early-data", "ring"][..]),
+    ] {
+        let package_id = unique_registry_package_id(&metadata, name, version);
+        let node = resolve_node(&metadata, &package_id);
+        let actual: BTreeSet<_> = node["features"]
+            .as_array()
+            .expect("resolved TLS test feature set")
+            .iter()
+            .map(|feature| feature.as_str().expect("feature name"))
+            .collect();
+        assert_eq!(actual, expected_features.iter().copied().collect());
+    }
 }
 
 #[test]

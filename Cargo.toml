@@ -36,6 +36,9 @@ shadowsocks-crypto = { version = "=0.7.0", default-features = false, features = 
 hickory-resolver = { version = "=0.26.1", default-features = false, features = ["tokio", "tls-ring", "https-ring", "webpki-roots"] }
 hickory-proto = { version = "=0.26.1", default-features = false, features = ["std"] }
 hickory-server = { version = "=0.26.1", default-features = false }
+h2 = { version = "=0.4.15", default-features = false, features = ["stream"] }
+rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
 
 tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 bytes = "=1.12.1"

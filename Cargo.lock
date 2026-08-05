@@ -439,9 +439,14 @@ dependencies = [
 name = "ferrum2-dns"
 version = "0.1.0"
 dependencies = [
+ "ferrum2-config",
+ "h2",
  "hickory-proto",
  "hickory-resolver",
  "hickory-server",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -758,14 +763,18 @@ dependencies = [
  "cfg-if",
  "data-encoding",
  "futures-util",
+ "h2",
  "hickory-net",
  "hickory-proto",
+ "http",
  "ipnet",
  "prefix-trie",
+ "rustls",
  "serde",
  "thiserror",
  "time",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tracing",
 ]

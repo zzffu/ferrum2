@@ -10,9 +10,19 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+ferrum2-config.workspace = true
 hickory-proto.workspace = true
 hickory-resolver.workspace = true
 hickory-server.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+h2.workspace = true
+# Exact 0.26.1 server-only gate; `https-ring` also locks its optional resolver/system-config edge.
+hickory-server = { workspace = true, features = ["__https"] }
+rustls.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true
