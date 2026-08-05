@@ -201,7 +201,7 @@ fn domain_wire(name: &str, port: u16) -> Vec<u8> {
 
 #[test]
 fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
-    let _spawn_guard = local_support::hold_process_spawns();
+    let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
     let baseline_children = active_child_count();
     let directory = tempfile::tempdir().expect("temporary directory");
     let selected_name = "selected.test.";
