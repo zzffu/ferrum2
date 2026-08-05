@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 ferrum2-config.workspace = true
+futures-util.workspace = true
 hickory-proto.workspace = true
 hickory-resolver.workspace = true
 hickory-server.workspace = true

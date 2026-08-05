@@ -514,15 +514,17 @@ fn exact_binary_tokio_boundary(
             return Err(format!("{role} normal Tokio declaration changed"));
         }
         let dev = dependency_table(&manifest, "[dev-dependencies]")?;
-        if dev
-            != BTreeMap::from([(
-                "tokio".to_owned(),
-                BINARY_TOKIO_DEV_DECLARATION
-                    .strip_prefix("tokio = ")
-                    .expect("dev declaration prefix")
-                    .to_owned(),
-            )])
-        {
+        let mut expected_dev = BTreeMap::from([(
+            "tokio".to_owned(),
+            BINARY_TOKIO_DEV_DECLARATION
+                .strip_prefix("tokio = ")
+                .expect("dev declaration prefix")
+                .to_owned(),
+        )]);
+        if role == "client" {
+            expected_dev.insert("hickory-proto.workspace".to_owned(), "true".to_owned());
+        }
+        if dev != expected_dev {
             return Err(format!("{role} dev dependencies changed"));
         }
         let tokio_lines: Vec<_> = manifest
@@ -617,6 +619,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "hickory-proto = { version = \"=0.26.1\", default-features = false, features = [\"std\"] }",
         "hickory-server = { version = \"=0.26.1\", default-features = false }",
         "h2 = { version = \"=0.4.15\", default-features = false, features = [\"stream\"] }",
+        "futures-util = { version = \"=0.3.33\", default-features = false, features = [\"std\"] }",
         "rustls = { version = \"=0.23.43\", default-features = false, features = [\"ring\", \"std\", \"tls12\"] }",
         "tokio-rustls = { version = \"=0.26.4\", default-features = false, features = [\"ring\"] }",
         "aes-gcm = { version = \"=0.11.0\", default-features = false, features = [\"aes\", \"bytes\", \"zeroize\"] }",
@@ -662,6 +665,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "ferrum2-runtime",
         "ferrum2-shadowsocks",
         "ferrum2-socks5",
+        "futures-util",
         "getrandom",
         "h2",
         "hex",
@@ -750,6 +754,7 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
         dependency_table(&manifest, "[dependencies]").expect("DNS dependencies"),
         BTreeMap::from([
             ("ferrum2-config.workspace".to_owned(), "true".to_owned()),
+            ("futures-util.workspace".to_owned(), "true".to_owned()),
             ("hickory-proto.workspace".to_owned(), "true".to_owned()),
             ("hickory-resolver.workspace".to_owned(), "true".to_owned()),
             ("hickory-server.workspace".to_owned(), "true".to_owned()),
@@ -776,6 +781,34 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
 
     let metadata = metadata();
     let packages = metadata["packages"].as_array().expect("packages");
+    let dns = packages
+        .iter()
+        .find(|package| package["name"] == "ferrum2-dns")
+        .expect("DNS package");
+    let futures = dns["dependencies"]
+        .as_array()
+        .expect("DNS dependencies")
+        .iter()
+        .find(|dependency| dependency["name"] == "futures-util")
+        .expect("DNS Hickory stream trait edge");
+    assert_eq!(futures["req"], "=0.3.33");
+    assert_eq!(futures["kind"], Value::Null);
+    assert_eq!(futures["uses_default_features"], false);
+    assert_eq!(futures["features"], serde_json::json!(["std"]));
+    let futures_id = unique_registry_package_id(&metadata, "futures-util", "0.3.33");
+    let futures_node = resolve_node(&metadata, &futures_id);
+    assert_eq!(
+        futures_node["features"],
+        serde_json::json!([
+            "alloc",
+            "async-await",
+            "async-await-macro",
+            "futures-macro",
+            "slab",
+            "std"
+        ]),
+        "the direct StreamExt edge must not expand the resolved feature set"
+    );
     let hickory: BTreeSet<_> = packages
         .iter()
         .filter_map(|package| {
@@ -1259,10 +1292,12 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
                 "ferrum2-config".to_owned(),
                 "ferrum2-core".to_owned(),
                 "ferrum2-crypto".to_owned(),
+                "ferrum2-dns".to_owned(),
                 "ferrum2-observability".to_owned(),
                 "ferrum2-runtime".to_owned(),
                 "ferrum2-shadowsocks".to_owned(),
                 "ferrum2-socks5".to_owned(),
+                "hickory-proto".to_owned(),
                 "tokio".to_owned(),
                 "tracing".to_owned(),
             ]),
@@ -1288,6 +1323,20 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
             .iter()
             .find(|package| package["name"] == package_name)
             .expect("binary package");
+        let hickory = package["dependencies"]
+            .as_array()
+            .expect("binary dependencies")
+            .iter()
+            .find(|dependency| dependency["name"] == "hickory-proto");
+        if package_name == "ferrum2-client" {
+            let hickory = hickory.expect("client typed DNS test edge");
+            assert_eq!(hickory["req"], "=0.26.1");
+            assert_eq!(hickory["kind"], "dev");
+            assert_eq!(hickory["uses_default_features"], false);
+            assert_eq!(hickory["features"], serde_json::json!(["std"]));
+        } else {
+            assert!(hickory.is_none(), "server has no DNS wire test edge");
+        }
         let tokio_dependencies: Vec<_> = package["dependencies"]
             .as_array()
             .expect("binary dependencies")
