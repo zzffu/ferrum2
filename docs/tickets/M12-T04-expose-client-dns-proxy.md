@@ -23,10 +23,18 @@ Compose every client DNS inbound as one aggregate-bounded UDP/TCP process root t
 encodes through Hickory，selects exactly one DNS server action per question and carries that server over
 its absent-direct or configured Shadowsocks detour。
 
+## Dependency boundary
+
+The client adds the existing `ferrum2-dns` normal workspace edge and may add the existing exact
+`hickory-proto` workspace edge as dev-only typed wire evidence。TCP proxy framing uses
+`hickory_resolver::net`，the exact 0.26.1 resolver re-export already present in the DNS product graph；T04
+does not add a root or DNS-manifest `hickory-net` edge、new package identity、provider or product API。
+
 ## Acceptance
 
 - [ ] Real UDP and TCP queries prove DNS-inbound/network/absolute-qname:53 first/final selection and
-      positive/negative/EDNS/truncation behavior through Hickory。
+      positive/negative/EDNS/truncation behavior through Hickory；typed message assertions replace raw
+      byte-offset or terminal-byte response oracles。
 - [ ] Distinct direct、concrete、fixed-chain and selector detours carry UDP/TCP/DoT/DoH to the configured
       numeric server；bootstrap never runs ordinary route and TCP-family flows/UDP queries preserve
       existing selector snapshot semantics。
