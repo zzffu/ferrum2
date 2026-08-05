@@ -194,12 +194,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install 1.85.0 --profile minimal
-          rustc +1.85.0 -Vv
-          cargo +1.85.0 -V
-          cargo +1.85.0 check --workspace --all-targets --locked
-          cargo +1.85.0 build --workspace --bins --locked
-          cargo +1.85.0 test --workspace --locked
+          rustup toolchain install 1.88.0 --profile minimal
+          rustc +1.88.0 -Vv
+          cargo +1.88.0 -V
+          cargo +1.88.0 check --workspace --all-targets --locked
+          cargo +1.88.0 build --workspace --bins --locked
+          cargo +1.88.0 test --workspace --locked
 
   platform:
     name: platform / ${{ matrix.profile }}
