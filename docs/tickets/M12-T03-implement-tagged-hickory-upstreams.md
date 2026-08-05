@@ -5,6 +5,7 @@ status: active
 depends_on: [M12-T02]
 owns:
   - Cargo.lock
+  - Cargo.toml
   - bins/ferrum2-server/src/run.rs
   - crates/ferrum2-dns/Cargo.toml
   - crates/ferrum2-dns/src/lib.rs
@@ -14,6 +15,11 @@ owns:
   - crates/ferrum2-dns/src/error.rs
   - crates/ferrum2-dns/tests/tagged_upstreams.rs
   - crates/ferrum2-dns/tests/resource_lifecycle.rs
+  - crates/ferrum2-dns/tests/fixtures/m12-test-ca.der
+  - crates/ferrum2-dns/tests/fixtures/m12-resolver-test.der
+  - crates/ferrum2-dns/tests/fixtures/m12-resolver-test.pk8
+  - crates/ferrum2-dns/tests/fixtures/README.md
+  - tests/m0-harness/tests/workspace_policy.rs
 ---
 
 # M12-T03 — Implement tagged Hickory upstreams
@@ -36,11 +42,14 @@ and ferrum-owned awaited background tasks。
 - [ ] Numeric bootstrap uses the direct adapter when `detour` is absent and remains the final target of
       the selected plan when present；WebPKI verification is mandatory and the test-only ephemeral root
       creates no product custom-CA/insecure surface。
+- [ ] Test-only encrypted fixtures use exact workspace-pinned、already-locked Rustls/H2 packages and a
+      dev-only Hickory server HTTPS edge；the normal product graph stays featureless at that edge and
+      adds no package identity、provider or operator TLS surface。
 - [ ] Global saturation、absolute timeout、fixed buffer/queue/connection ceilings and valid-after-failure
       recovery include detour selection/handshake and are observable and stable。
-- [ ] Every lazy Hickory task and detour bridge/session task is registered、dropped/aborted if needed and
-      awaited to zero with exact direct/first-hop/upstream rebind；`TEST-0013` T03、Full、footprint and
-      blocking reviews pass。
+- [ ] Every lazy Hickory task and detour bridge/session task，including Hickory's directly spawned DoH
+      driver，is contained by a ferrum-owned runtime、dropped/aborted if needed and awaited to zero with
+      exact direct/first-hop/upstream rebind；`TEST-0013` T03、Full、footprint and blocking reviews pass。
 
 ## Validation
 

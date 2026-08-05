@@ -135,11 +135,11 @@ M12-T01 is integrated at exact product `d874865f4a66db8d7c50abad85e6092a16f52fb6
 `c2e922d0e4d29e7398ebb0cd3da0dce1516a8a54` is integrated at exact
 `bf26d1587517fe80e701d73abfb45a340f4caa6c`；initial blockers were closed by one bounded repair and
 targeted Architect/QA both returned `PASS`。Focused、Quick、integration and footprint integrity gates
-pass；numeric `REVIEW_REQUIRED` is accepted。Three unchanged server `run.rs` Rust-1.88 Clippy warnings
-remain explicit T06 qualification debt。M12-T03 starts from the exact T02 integration product。The user
-authorized remote pushes；none has run yet。Its ownership includes the DNS crate manifest/module root and
-`Cargo.lock` because the T01 crate is intentionally empty；the root manifest and new dependencies remain
-out of scope。It also has one bounded lease on server `run.rs` for the three inherited Rust-1.88
-`collapsible_if` repairs required by Full；those changes must remain an isolated mechanical commit。
-Manual workflow dispatch remains separately unauthorized；no hosted run、PR、tag、package、release or
-publication has occurred。
+pass；numeric `REVIEW_REQUIRED` is accepted。M12-T03 starts from the exact T02 integration product；its
+isolated `30352074bdf7352d33a00cfc9f04da70fabbaec6` commit closes the three inherited server Rust-1.88
+Clippy warnings and restores workspace Clippy。Two independent xhigh analyses of its encrypted-fixture
+blocker selected exact workspace-pinned `h2/rustls/tokio-rustls` declarations、dev-only Hickory server
+HTTPS features、reviewed static test DER and one ferrum-owned exclusive DNS runtime；normal product
+WebPKI and package identities remain exact。The user authorized remote pushes；none has run yet。Manual
+workflow dispatch remains separately unauthorized；no hosted run、PR、tag、package、release or publication
+has occurred。
