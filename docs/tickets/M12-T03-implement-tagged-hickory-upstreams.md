@@ -42,9 +42,9 @@ and ferrum-owned awaited background tasks。
 - [ ] Numeric bootstrap uses the direct adapter when `detour` is absent and remains the final target of
       the selected plan when present；WebPKI verification is mandatory and the test-only ephemeral root
       creates no product custom-CA/insecure surface。
-- [ ] Test-only encrypted fixtures use exact workspace-pinned、already-locked Rustls/H2 packages and a
-      dev-only Hickory server HTTPS edge；the normal product graph stays featureless at that edge and
-      adds no package identity、provider or operator TLS surface。
+- [ ] Test-only encrypted fixtures use exact workspace-pinned、already-locked Rustls/H2 packages and
+      exact-pinned Hickory server internal `__https` only on the dev edge；the normal product graph stays
+      featureless at that edge and adds no package identity、provider or operator TLS surface。
 - [ ] Global saturation、absolute timeout、fixed buffer/queue/connection ceilings and valid-after-failure
       recovery include detour selection/handshake and are observable and stable。
 - [ ] Every lazy Hickory task and detour bridge/session task，including Hickory's directly spawned DoH
