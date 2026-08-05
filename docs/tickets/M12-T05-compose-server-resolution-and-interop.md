@@ -6,6 +6,7 @@ depends_on: [M12-T04]
 owns:
   - .github/workflows/m0.yml
   - Cargo.lock
+  - bins/ferrum2-client/src/run.rs
   - bins/ferrum2-server/Cargo.toml
   - bins/ferrum2-server/src/dns_egress.rs
   - bins/ferrum2-server/src/run.rs
@@ -52,6 +53,10 @@ job require the DNS qualification result。The existing control commit may be am
 product commit so its isolated client/server build enables `ferrum2-dns/__interop-test-root`；it remains
 one control commit。It must not change triggers、performance/manual-dispatch semantics、unrelated jobs or
 test-footprint policy，and later product commits must inherit the amended blob unchanged。
+
+The existing client `run.rs` test module has one bounded T05 lease to repair the hosted-only DNS proxy
+readiness race exposed before formal review。Only the failing test and an already-shared test helper may
+change；client product behavior、configuration and public surfaces remain out of scope。
 
 ## Acceptance
 
