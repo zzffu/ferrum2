@@ -5762,6 +5762,7 @@ mod tests {
         ])
         .expect("valid maximum wire name");
         assert!(binary_name.to_ascii().len() > 255);
+        wait_until_bound(dns).await;
         for (id, name, expected) in [
             (
                 0x1234,
@@ -5773,18 +5774,13 @@ mod tests {
             let mut query = Message::new(id, MessageType::Query, OpCode::Query);
             query.add_query(Query::query(name, RecordType::A));
             let query = query.to_vec().expect("typed query");
-            let deadline = Instant::now() + Duration::from_secs(2);
             let mut response = [0_u8; 4096];
-            let length = loop {
-                client.send_to(&query, dns).await.expect("proxy query");
-                if let Ok(Ok((length, _))) =
-                    tokio::time::timeout(Duration::from_millis(20), client.recv_from(&mut response))
-                        .await
-                {
-                    break length;
-                }
-                assert!(Instant::now() < deadline, "DNS proxy never bound");
-            };
+            client.send_to(&query, dns).await.expect("proxy query");
+            let (length, _) =
+                tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                    .await
+                    .expect("DNS proxy response timeout")
+                    .expect("DNS proxy response");
             let response = Message::from_vec(&response[..length]).expect("typed proxy response");
             assert_eq!(response.metadata.id, id);
             assert_eq!(response.metadata.message_type, MessageType::Response);
@@ -5931,6 +5927,7 @@ mod tests {
         });
 
         wait_until_bound(socks).await;
+        wait_until_bound(dns).await;
         let mut rejected = tokio::net::TcpStream::connect(socks)
             .await
             .expect("SOCKS public-off connect");
@@ -5967,22 +5964,15 @@ mod tests {
             .expect("detoured UDP client");
         let udp_query = query(0x2201, "udp.detoured.example.");
         let mut response = [0_u8; 4096];
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let udp_length = loop {
-            udp_client
-                .send_to(&udp_query, dns)
-                .await
-                .expect("detoured UDP query");
-            if let Ok(Ok((length, _))) = tokio::time::timeout(
-                Duration::from_millis(20),
-                udp_client.recv_from(&mut response),
-            )
+        udp_client
+            .send_to(&udp_query, dns)
             .await
-            {
-                break length;
-            }
-            assert!(Instant::now() < deadline, "detoured DNS proxy never bound");
-        };
+            .expect("detoured UDP query");
+        let (udp_length, _) =
+            tokio::time::timeout(Duration::from_secs(2), udp_client.recv_from(&mut response))
+                .await
+                .expect("detoured DNS response timeout")
+                .expect("detoured DNS response");
         let udp_response =
             Message::from_vec(&response[..udp_length]).expect("detoured UDP response");
         assert_eq!(udp_response.metadata.id, 0x2201);
