@@ -14,6 +14,7 @@ owns:
   - crates/ferrum2-dns/src/resolver.rs
   - crates/ferrum2-dns/src/runtime_owner.rs
   - crates/ferrum2-dns/tests/tagged_upstreams.rs
+  - tests/m0-harness/Cargo.toml
   - tests/m0-harness/src/local_support/mod.rs
   - tests/m0-harness/src/external_support/mod.rs
   - tests/m0-harness/src/qualification/mod.rs
@@ -68,6 +69,16 @@ The shared `runtime_owner.rs` has one bounded T05 repair lease for the hosted-on
 failure reproduced before formal review。After each completed lookup/query has reaped its registered
 tasks，release that command's admission permit before waking its caller；do not change admission limits、
 deadlines、fallback、thread ownership or shutdown behavior。
+
+Formal Architect/QA review grants one additional bounded T05 repair lease to the existing harness
+manifest and shared DNS command seam。The harness may add only the already pinned
+`hickory-proto.workspace = true` dev edge so `local_support` can replace its handwritten DNS fixture
+codec with Hickory；the lock and exact workspace-policy sets may record only that edge。Server A/AAAA
+resolution may add one address-lookup command that owns one selected-plan snapshot，one admission
+permit，one task set and one absolute `dns.timeout_ms` deadline across both record types。It must
+preserve the outer TCP/UDP phase deadlines，A-before-AAAA ordering，the 16-candidate cap，and existing
+fail-closed/no-fallback behavior。No package identity，provider，retry，cache，second harness or public
+configuration surface is authorized。
 
 ## Acceptance
 
