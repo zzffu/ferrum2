@@ -167,5 +167,9 @@ That commit may be amended before the first product commit to enable the exact d
 `ferrum2-dns/__interop-test-root` feature in the isolated DNS qualification build；T05 additionally owns
 only the DNS manifest/resolver paths needed to embed the reviewed root without product config/runtime
 input。Later product commits inherit the amended control blob unchanged。
+Before formal T05 review，hosted and isolated Linux repetition exposed that a completed DNS command
+woke its caller before releasing the shared `max_inflight` permit；a bounded T05 lease now owns only
+`runtime_owner.rs` to reverse those two completion operations after registered-task cleanup。Admission
+limits、deadlines、fallback and lifecycle ownership remain unchanged。
 The user authorized remote pushes；none has run yet。Manual workflow dispatch remains separately
 unauthorized；no hosted run、PR、tag、package、release or publication has occurred。

@@ -12,6 +12,7 @@ owns:
   - bins/ferrum2-server/src/run.rs
   - crates/ferrum2-dns/Cargo.toml
   - crates/ferrum2-dns/src/resolver.rs
+  - crates/ferrum2-dns/src/runtime_owner.rs
   - crates/ferrum2-dns/tests/tagged_upstreams.rs
   - tests/m0-harness/src/local_support/mod.rs
   - tests/m0-harness/src/external_support/mod.rs
@@ -62,6 +63,11 @@ change；client product behavior、configuration and public surfaces remain out 
 The inherited T03 `tagged_upstreams.rs` has one bounded test-only lease for the same hosted Linux socket
 allocation class。Reuse the existing DNS-test network serialization/paired-address pattern；do not change
 resolver、transport or lifecycle product behavior。
+
+The shared `runtime_owner.rs` has one bounded T05 repair lease for the hosted-only sequential-query
+failure reproduced before formal review。After each completed lookup/query has reaped its registered
+tasks，release that command's admission permit before waking its caller；do not change admission limits、
+deadlines、fallback、thread ownership or shutdown behavior。
 
 ## Acceptance
 
