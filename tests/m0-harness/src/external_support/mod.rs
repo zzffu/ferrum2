@@ -1254,10 +1254,16 @@ fn exercise_socks_tcp(
     read_exact_case(&mut stream, &mut received, deadline, "TCP reverse payload");
     assert_eq!(received, reverse, "TCP reverse payload mismatch");
     record_tcp_event(trace, TcpExchangeEvent::ReverseMatched);
-    stream
-        .shutdown(Shutdown::Write)
-        .expect("application TCP write half-close");
-    record_tcp_event(trace, TcpExchangeEvent::ApplicationShutdown);
+    // Commit the application event before the target can record the resulting EOF.
+    let application_shutdown = {
+        let mut exchange = trace.lock().expect("TCP exchange trace lock");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("application TCP write half-close");
+        exchange.record(TcpExchangeEvent::ApplicationShutdown)
+    };
+    application_shutdown
+        .unwrap_or_else(|error| panic!("{error}: {:?}", TcpExchangeEvent::ApplicationShutdown));
     let application_acknowledgement = target_shutdown
         .wait(deadline.remaining("TCP target shutdown synchronization"))
         .unwrap_or_else(|error| panic!("{error}"));
@@ -1279,11 +1285,8 @@ fn exercise_socks_tcp(
 }
 
 fn record_tcp_event(trace: &Arc<Mutex<TcpExchangeState>>, event: TcpExchangeEvent) {
-    trace
-        .lock()
-        .expect("TCP exchange trace lock")
-        .record(event)
-        .unwrap_or_else(|error| panic!("{error}: {event:?}"));
+    let result = trace.lock().expect("TCP exchange trace lock").record(event);
+    result.unwrap_or_else(|error| panic!("{error}: {event:?}"));
 }
 
 fn tcp_forward_payload() -> Vec<u8> {
