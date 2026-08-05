@@ -8,6 +8,7 @@ owns:
   - crates/ferrum2-core/tests/selector_contract.rs
   - crates/ferrum2-config/src/lib.rs
   - crates/ferrum2-config/tests/config_contract.rs
+  - tests/m0-harness/src/local_support/mod.rs
   - tests/m0-harness/tests/config_cli.rs
 ---
 
