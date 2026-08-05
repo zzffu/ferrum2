@@ -500,6 +500,11 @@ pub mod route {
     }
 
     impl<A: Copy> ActionTable<A> {
+        /// Returns the mandatory action used when no rule can be evaluated or matched.
+        pub const fn final_action(&self) -> A {
+            self.final_action
+        }
+
         /// Selects the first matching action or the mandatory final action.
         pub fn select(&self, inbound: usize, network: Network, target: &TargetAddr) -> A {
             self.rules

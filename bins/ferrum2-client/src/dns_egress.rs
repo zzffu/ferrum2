@@ -127,10 +127,17 @@ impl DnsEgress for ClientDnsEgress {
             let (session_responses, mut responses) = mpsc::channel::<Packet>(1);
             let outbound_queue = tasks.own(DnsEgressResourceKind::Queue);
             let inbound_queue = tasks.own(DnsEgressResourceKind::Queue);
+            let request_queue = tasks.own(DnsEgressResourceKind::Queue);
+            let response_queue = tasks.own(DnsEgressResourceKind::Queue);
             let buffer = tasks.own(DnsEgressResourceKind::Buffer);
             tasks.spawn(DnsEgressTaskKind::Bridge, async move {
-                let (_outbound_queue, _inbound_queue, _buffer) =
-                    (outbound_queue, inbound_queue, buffer);
+                let (_outbound_queue, _inbound_queue, _request_queue, _response_queue, _buffer) = (
+                    outbound_queue,
+                    inbound_queue,
+                    request_queue,
+                    response_queue,
+                    buffer,
+                );
                 while let Some((packet, destination)) = outbound.recv().await {
                     if destination != target.as_socket_addr().expect("numeric DNS target")
                         || session_requests.send((packet, destination)).await.is_err()

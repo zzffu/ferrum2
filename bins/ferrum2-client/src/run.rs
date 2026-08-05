@@ -124,7 +124,16 @@ async fn run_with_registry_and_metrics<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
-    run_with_registry_and_metrics_inner(config, registry, shutdown, metrics, None).await
+    run_with_registry_and_metrics_inner(
+        config,
+        registry,
+        shutdown,
+        metrics,
+        None,
+        #[cfg(test)]
+        None,
+    )
+    .await
 }
 
 async fn run_with_registry_and_metrics_inner<S>(
@@ -133,6 +142,9 @@ async fn run_with_registry_and_metrics_inner<S>(
     shutdown: S,
     metrics: Arc<Metrics>,
     _udp_id_random: Option<Arc<dyn SecureRandom>>,
+    #[cfg(test)] mut dns_observer: Option<
+        tokio::sync::oneshot::Sender<(Arc<ClientContext>, Arc<TaggedResolver>)>,
+    >,
 ) -> Result<(), RunError>
 where
     S: std::future::Future<Output = ()> + Send,
@@ -254,27 +266,27 @@ where
                 Arc::clone(&dns_context),
                 Arc::clone(&dns_routing),
             ));
-            let (resolver, mut owner) = TaggedResolver::new(servers, timeout, max_inflight, egress)
+            let (resolver, owner) = TaggedResolver::new(servers, timeout, max_inflight, egress)
                 .map_err(|_| RunError::StartupProtocol)?;
-            if owner.ready().await.is_err() {
-                drop(resolver);
-                let _ = owner.shutdown().await;
-                return Err(RunError::StartupProtocol);
-            }
             let resolver = Arc::new(resolver);
+            #[cfg(test)]
+            if let Some(observer) = dns_observer.take() {
+                let _ = observer.send((Arc::clone(&dns_context), Arc::clone(&resolver)));
+            }
             let selection = Arc::clone(&route);
             let proxy = Arc::new(DnsProxy::new(
                 Arc::clone(&resolver),
                 move |inbound, transport, name| {
-                    TargetAddr::domain(&name.to_ascii(), 53).ok().map(|target| {
-                        selection.select(
+                    Some(match TargetAddr::domain(&name.to_ascii(), 53) {
+                        Ok(target) => selection.select(
                             inbound,
                             match transport {
                                 ProxyTransport::Udp => Network::Udp,
                                 ProxyTransport::Tcp => Network::Tcp,
                             },
                             &target,
-                        )
+                        ),
+                        Err(_) => selection.final_action(),
                     })
                 },
             ));
@@ -282,6 +294,8 @@ where
                 listeners: Some(sockets.with_proxy(proxy)),
                 resolver: Some(resolver),
                 owner: Some(owner),
+                #[cfg(test)]
+                readiness_gate: None,
             })
         }));
     }
@@ -305,10 +319,13 @@ struct ClientDnsRoot {
     listeners: Option<DnsProxyListeners>,
     resolver: Option<Arc<TaggedResolver>>,
     owner: Option<TaggedResolverOwner>,
+    #[cfg(test)]
+    readiness_gate: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl ClientDnsRoot {
     async fn close_resolver(&mut self) -> Result<(), RunError> {
+        self.listeners.take();
         self.resolver.take();
         self.owner
             .as_mut()
@@ -329,8 +346,36 @@ impl PreparedProcessRoot<RunError> for ClientDnsRoot {
         mut self: Box<Self>,
         mut cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), RunError>> {
-        let listeners = self.listeners.take().expect("prepared DNS listeners");
         Box::pin(async move {
+            #[cfg(test)]
+            if let Some(readiness_gate) = self.readiness_gate.take() {
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        self.close_resolver().await?;
+                        return Ok(());
+                    }
+                    _ = readiness_gate => {}
+                }
+            }
+            let ready = {
+                let owner = self.owner.as_mut().expect("prepared DNS owner");
+                tokio::select! {
+                    _ = cancellation.cancelled() => None,
+                    result = owner.ready() => Some(result),
+                }
+            };
+            match ready {
+                None => {
+                    self.close_resolver().await?;
+                    return Ok(());
+                }
+                Some(Err(_)) => {
+                    self.close_resolver().await?;
+                    return Err(RunError::StartupProtocol);
+                }
+                Some(Ok(())) => {}
+            }
+            let listeners = self.listeners.take().expect("prepared DNS listeners");
             let result = listeners.run(cancellation.cancelled()).await;
             self.close_resolver().await?;
             result.map_err(|_| RunError::RuntimeListener)
@@ -338,10 +383,7 @@ impl PreparedProcessRoot<RunError> for ClientDnsRoot {
     }
 
     fn rollback(mut self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
-        Box::pin(async move {
-            self.listeners.take();
-            self.close_resolver().await
-        })
+        Box::pin(async move { self.close_resolver().await })
     }
 }
 
@@ -2268,7 +2310,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use ferrum2_core::route::{compile_selector_plans, compile_selector_route};
+    use ferrum2_core::route::{
+        compile_selector_plans, compile_selector_plans_with_roots, compile_selector_route,
+    };
     use ferrum2_core::selector::{
         SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute,
         TaggedRouteRule, TaggedStaticBinding,
@@ -5166,6 +5210,7 @@ mod tests {
             },
             Arc::new(Metrics::new()),
             Some(random),
+            None,
         ));
         (stop, task)
     }
@@ -5224,86 +5269,536 @@ mod tests {
         (control, application, relay)
     }
 
+    async fn dns_tcp_detour_once(
+        listener: TcpListener,
+        expected_target: SocketAddr,
+        opened: Option<tokio::sync::oneshot::Sender<()>>,
+        release: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> usize {
+        let (stream, _) = listener.accept().await.expect("DNS detour accept");
+        let stream = ferrum2_runtime::RuntimeTcpStream::from_connected(stream)
+            .expect("DNS detour runtime stream");
+        let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(default_test_psk()));
+        let clock = SystemClock::new();
+        let random = SystemRandom;
+        let replay = TcpReplayStore::new(1024).expect("DNS detour replay");
+        let ferrum2_core::Session {
+            target,
+            stream,
+            initial_payload,
+            ..
+        } = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay)
+            .accept(TokioTransport::new(stream))
+            .await
+            .expect("authenticated DNS detour");
+        assert_eq!(target.as_socket_addr(), Some(expected_target));
+        if let Some(opened) = opened {
+            let _ = opened.send(());
+        }
+        if let Some(release) = release {
+            let _ = release.await;
+        }
+        let mut upstream = tokio::net::TcpStream::connect(expected_target)
+            .await
+            .expect("DNS detour target");
+        upstream
+            .write_all(&initial_payload)
+            .await
+            .expect("DNS detour initial payload");
+        let mut stream = TokioFramed::new(stream);
+        let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+        1 + usize::from(
+            tokio::time::timeout(Duration::from_millis(250), listener.accept())
+                .await
+                .is_ok(),
+        )
+    }
+
     #[tokio::test]
-    async fn dns_proxy_first_match_direct_and_detoured_transports() {
-        let socks = reserve_address();
-        let shadowsocks = reserve_address();
+    async fn dns_proxy_prepare_cancellation_awaits_owner_and_rebinds() {
         let dns = reserve_address();
         let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
-            .expect("DNS upstream");
-        let upstream_address = upstream.local_addr().expect("upstream address");
-        let (path, mut config) = client_test_config(socks, shadowsocks);
-        config.dns = Some(ferrum2_config::DnsConfig {
-            inbounds: vec![ferrum2_config::DnsInboundConfig {
-                listen: SocketAddr::V4(dns),
-            }],
-            servers: vec![ferrum2_config::DnsServerConfig {
+            .expect("readiness upstream");
+        let upstream_address = upstream.local_addr().expect("readiness upstream address");
+        let sockets = DnsProxySockets::bind(
+            vec![SocketAddr::V4(dns)],
+            16,
+            std::num::NonZeroU16::new(1).expect("one DNS connection"),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("prepared paired DNS sockets");
+        let (resolver, owner) = TaggedResolver::new(
+            vec![ferrum2_config::DnsServerConfig {
                 transport: ferrum2_config::DnsTransport::Udp,
                 address: upstream_address,
                 server_name: None,
                 path: None,
                 detour: None,
             }],
-            route: ferrum2_core::route::ActionTable::new(Vec::new(), 0).expect("DNS final action"),
+            Duration::from_secs(1),
+            std::num::NonZeroU16::new(1).expect("one DNS query"),
+            Arc::new(ferrum2_dns::SystemDnsEgress),
+        )
+        .expect("resolver owner handoff");
+        let resolver = Arc::new(resolver);
+        let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), |_, _, _| Some(0)));
+        let (readiness_sender, readiness_gate) = tokio::sync::oneshot::channel();
+        let root = ProcessRoot::new(move || async move {
+            Ok(ClientDnsRoot {
+                listeners: Some(sockets.with_proxy(proxy)),
+                resolver: Some(resolver),
+                owner: Some(owner),
+                readiness_gate: Some(readiness_gate),
+            })
+        });
+        let registry = OwnerRegistry::new();
+        let supervisor =
+            ProcessSupervisor::new(vec![root], Duration::from_secs(1), registry.clone())
+                .expect("readiness supervisor");
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            report_result(
+                supervisor
+                    .run_until(async move {
+                        let _ = stopped.await;
+                    })
+                    .await,
+            )
+        });
+        for _ in 0..100 {
+            if registry.snapshot().active_process_roots == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(registry.snapshot().active_process_roots, 1);
+        stop.send(()).expect("cancel during readiness");
+        assert_eq!(task.await.expect("readiness client join"), Ok(()));
+        drop(readiness_sender);
+        drop(upstream);
+        assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+        drop(
+            UdpSocket::bind(dns)
+                .await
+                .expect("readiness DNS UDP rebind"),
+        );
+        drop(
+            TcpListener::bind(dns)
+                .await
+                .expect("readiness DNS TCP rebind"),
+        );
+        drop(
+            UdpSocket::bind(upstream_address)
+                .await
+                .expect("readiness upstream rebind"),
+        );
+
+        let first =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("rollback first reserve");
+        let first_address = first.local_addr().expect("rollback first address");
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("rollback occupied TCP");
+        let occupied_address = occupied.local_addr().expect("rollback occupied address");
+        drop(first);
+        assert!(
+            DnsProxySockets::bind(
+                vec![first_address, occupied_address],
+                8,
+                std::num::NonZeroU16::new(1).expect("rollback connection"),
+                Duration::from_secs(1),
+            )
+            .await
+            .is_err(),
+            "paired DNS preparation unexpectedly succeeded"
+        );
+        drop(
+            UdpSocket::bind(first_address)
+                .await
+                .expect("rollback first UDP rebind"),
+        );
+        drop(
+            TcpListener::bind(first_address)
+                .await
+                .expect("rollback first TCP rebind"),
+        );
+        drop(
+            UdpSocket::bind(occupied_address)
+                .await
+                .expect("rollback occupied UDP rebind"),
+        );
+        drop(occupied);
+    }
+
+    #[tokio::test]
+    async fn dns_proxy_selector_snapshot_and_no_fallback() {
+        let socks = reserve_address();
+        let dns = reserve_address();
+        let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("TCP DNS upstream");
+        let upstream_address = upstream.local_addr().expect("TCP DNS upstream address");
+        let detours = [
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("outer DNS detour"),
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("inner DNS detour"),
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("later DNS detour"),
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("selected dead detour"),
+        ];
+        let detour_addresses: [SocketAddrV4; 4] = detours.each_ref().map(|listener| match listener
+            .local_addr()
+            .expect("detour address")
+        {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 DNS detour"),
+        });
+        let [outer, inner, later, dead] = detours;
+        let (path, mut config) = client_test_config(socks, detour_addresses[3]);
+        config.outbounds = detour_addresses
+            .map(|server| ferrum2_config::ClientOutboundConfig { server })
+            .into();
+        config.outbound_psks = (0..4).map(|_| default_test_psk()).collect();
+        let (route, selector, mut dns_roots) = compile_selector_plans_with_roots(
+            &[TaggedInbound::new("entry", 0)],
+            &[
+                TaggedOutbound::new("outer", 0),
+                TaggedOutbound::new("inner", 1),
+                TaggedOutbound::new("later", 2),
+                TaggedOutbound::new("dead", 3),
+            ],
+            &[TaggedPlan::new("chain", vec![0, 1])],
+            &[SelectorDefinition::new(
+                "dns-manual",
+                vec!["chain", "later", "dead"],
+                Some("chain"),
+            )],
+            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "dead")]),
+            &["dns-manual"],
+        )
+        .expect("DNS selector graph");
+        config.route = route;
+        config.dns = Some(ferrum2_config::DnsConfig {
+            inbounds: vec![ferrum2_config::DnsInboundConfig {
+                listen: SocketAddr::V4(dns),
+            }],
+            servers: vec![ferrum2_config::DnsServerConfig {
+                transport: ferrum2_config::DnsTransport::Tcp,
+                address: upstream_address,
+                server_name: None,
+                path: None,
+                detour: Some(dns_roots.remove(0)),
+            }],
+            route: ferrum2_core::route::ActionTable::new(Vec::new(), 0)
+                .expect("selector DNS final"),
+            timeout: Duration::from_millis(150),
+            max_inflight: std::num::NonZeroU16::new(1).expect("selector DNS admission"),
+        });
+
+        let upstream_task = tokio::spawn(async move {
+            for answer in [
+                Ipv4Addr::new(203, 0, 113, 50),
+                Ipv4Addr::new(203, 0, 113, 51),
+            ] {
+                let (mut stream, _) = upstream.accept().await.expect("TCP DNS connection");
+                let length = stream.read_u16().await.expect("TCP DNS request length");
+                let mut wire = vec![0_u8; usize::from(length)];
+                stream.read_exact(&mut wire).await.expect("TCP DNS request");
+                let request = Message::from_vec(&wire).expect("typed TCP DNS request");
+                let question = request
+                    .queries
+                    .first()
+                    .expect("one TCP DNS question")
+                    .clone();
+                let mut response = Message::response(request.metadata.id, OpCode::Query);
+                response
+                    .add_query(question.clone())
+                    .add_answer(Record::from_rdata(
+                        question.name().clone(),
+                        30,
+                        RData::A(A(answer)),
+                    ));
+                let response = response.to_vec().expect("typed TCP DNS response");
+                stream
+                    .write_u16(u16::try_from(response.len()).expect("bounded TCP DNS response"))
+                    .await
+                    .expect("TCP DNS response length");
+                stream.write_all(&response).await.expect("TCP DNS response");
+            }
+        });
+        let outer_target = SocketAddr::V4(detour_addresses[1]);
+        let (opened, opened_inner) = tokio::sync::oneshot::channel();
+        let (release_inner, release) = tokio::sync::oneshot::channel();
+        let outer_task = tokio::spawn(dns_tcp_detour_once(outer, outer_target, None, None));
+        let inner_task = tokio::spawn(dns_tcp_detour_once(
+            inner,
+            upstream_address,
+            Some(opened),
+            Some(release),
+        ));
+        let later_task = tokio::spawn(dns_tcp_detour_once(later, upstream_address, None, None));
+        let registry = OwnerRegistry::new();
+        let metrics = Arc::new(Metrics::new());
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_with_registry_and_metrics(
+            config,
+            registry.clone(),
+            async move {
+                let _ = stopped.await;
+            },
+            Arc::clone(&metrics),
+        ));
+        wait_until_bound(dns).await;
+        let mut client = tokio::net::TcpStream::connect(dns)
+            .await
+            .expect("selector DNS client");
+        let query = |id, name: &str| {
+            let mut query = Message::new(id, MessageType::Query, OpCode::Query);
+            query.add_query(Query::query(
+                Name::from_ascii(name).expect("selector query name"),
+                RecordType::A,
+            ));
+            query.to_vec().expect("typed selector query")
+        };
+        let write_query = async |client: &mut tokio::net::TcpStream, query: &[u8]| {
+            client
+                .write_u16(u16::try_from(query.len()).expect("bounded selector query"))
+                .await
+                .expect("selector query length");
+            client.write_all(query).await.expect("selector query");
+        };
+        let read_response = async |client: &mut tokio::net::TcpStream| {
+            let length = client.read_u16().await.expect("selector response length");
+            let mut wire = vec![0_u8; usize::from(length)];
+            client
+                .read_exact(&mut wire)
+                .await
+                .expect("selector response");
+            Message::from_vec(&wire).expect("typed selector response")
+        };
+
+        write_query(&mut client, &query(0x4401, "held.selector.example.")).await;
+        tokio::time::timeout(Duration::from_secs(2), opened_inner)
+            .await
+            .expect("held chain open timeout")
+            .expect("held chain opened");
+        selector
+            .switch("dns-manual", "later")
+            .expect("switch later DNS member");
+        release_inner.send(()).expect("release held chain");
+        let first = tokio::time::timeout(Duration::from_secs(2), read_response(&mut client))
+            .await
+            .expect("held selector response timeout");
+        assert_eq!(first.metadata.id, 0x4401);
+        assert_eq!(
+            first.answers.first().map(|record| &record.data),
+            Some(&RData::A(A(Ipv4Addr::new(203, 0, 113, 50))))
+        );
+
+        write_query(&mut client, &query(0x4402, "later.selector.example.")).await;
+        let second = tokio::time::timeout(Duration::from_secs(2), read_response(&mut client))
+            .await
+            .expect("later selector response timeout");
+        assert_eq!(second.metadata.id, 0x4402);
+        assert_eq!(
+            second.answers.first().map(|record| &record.data),
+            Some(&RData::A(A(Ipv4Addr::new(203, 0, 113, 51))))
+        );
+
+        selector
+            .switch("dns-manual", "dead")
+            .expect("switch selected failure");
+        write_query(&mut client, &query(0x4403, "dead.selector.example.")).await;
+        let failed = tokio::time::timeout(Duration::from_secs(2), read_response(&mut client))
+            .await
+            .expect("selected failure response timeout");
+        assert_eq!(failed.metadata.id, 0x4403);
+        assert_eq!(failed.metadata.response_code, ResponseCode::ServFail);
+        assert_eq!(outer_task.await.expect("outer detour join"), 1);
+        assert_eq!(inner_task.await.expect("inner detour join"), 1);
+        assert_eq!(later_task.await.expect("later detour join"), 1);
+        let (selected_dead, _) = tokio::time::timeout(Duration::from_secs(1), dead.accept())
+            .await
+            .expect("selected dead timeout")
+            .expect("selected dead connection");
+        drop(selected_dead);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), dead.accept())
+                .await
+                .is_err(),
+            "selected failure retried"
+        );
+        upstream_task.await.expect("TCP DNS upstream join");
+        let telemetry = metrics.encode_text().expect("selector metrics");
+        let bootstrap_sentinel = upstream_address.to_string();
+        for sentinel in [
+            "held.selector.example.",
+            "later.selector.example.",
+            "dead.selector.example.",
+            "dns-manual",
+            bootstrap_sentinel.as_str(),
+        ] {
+            assert!(
+                !telemetry.contains(sentinel),
+                "DNS sentinel leaked: {sentinel}"
+            );
+        }
+        drop(client);
+        stop.send(()).expect("stop selector client");
+        assert_eq!(task.await.expect("selector client join"), Ok(()));
+        drop(dead);
+        drop(UdpSocket::bind(dns).await.expect("selector DNS UDP rebind"));
+        drop(
+            TcpListener::bind(dns)
+                .await
+                .expect("selector DNS TCP rebind"),
+        );
+        for address in detour_addresses {
+            drop(
+                TcpListener::bind(address)
+                    .await
+                    .expect("selector detour rebind"),
+            );
+        }
+        drop(
+            TcpListener::bind(upstream_address)
+                .await
+                .expect("selector upstream rebind"),
+        );
+        assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+        std::fs::remove_file(path).expect("remove selector config");
+    }
+
+    #[tokio::test]
+    async fn dns_proxy_first_match_direct_and_detoured_transports() {
+        let socks = reserve_address();
+        let shadowsocks = reserve_address();
+        let dns = reserve_address();
+        let upstreams = [
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("rule DNS upstream"),
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("final DNS upstream"),
+        ];
+        let upstream_addresses = upstreams
+            .each_ref()
+            .map(|upstream| upstream.local_addr().expect("upstream address"));
+        let (path, mut config) = client_test_config(socks, shadowsocks);
+        config.dns = Some(ferrum2_config::DnsConfig {
+            inbounds: vec![ferrum2_config::DnsInboundConfig {
+                listen: SocketAddr::V4(dns),
+            }],
+            servers: upstream_addresses
+                .into_iter()
+                .map(|address| ferrum2_config::DnsServerConfig {
+                    transport: ferrum2_config::DnsTransport::Udp,
+                    address,
+                    server_name: None,
+                    path: None,
+                    detour: None,
+                })
+                .collect(),
+            route: ferrum2_core::route::ActionTable::new(
+                vec![ferrum2_core::route::ActionRule::new(
+                    Some(0),
+                    Some(Network::Udp),
+                    Some(TargetAddr::domain("selected.example.", 53).expect("rule DNS target")),
+                    0,
+                )],
+                1,
+            )
+            .expect("DNS rule and final actions"),
             timeout: Duration::from_secs(1),
             max_inflight: std::num::NonZeroU16::new(1).expect("DNS admission"),
         });
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);
-        let upstream_task = tokio::spawn(async move {
-            let mut request = [0_u8; 4096];
-            let (length, peer) = upstream.recv_from(&mut request).await.expect("DNS request");
-            let request = Message::from_vec(&request[..length]).expect("typed DNS request");
-            assert_eq!(request.metadata.message_type, MessageType::Query);
-            assert_eq!(request.metadata.op_code, OpCode::Query);
-            let question = request.queries.first().expect("one question").clone();
-            let mut response = Message::response(request.metadata.id, OpCode::Query);
-            response.metadata.recursion_available = true;
-            response
-                .add_query(question.clone())
-                .add_answer(Record::from_rdata(
-                    question.name().clone(),
-                    30,
-                    RData::A(A(Ipv4Addr::new(192, 0, 2, 44))),
-                ));
-            upstream
-                .send_to(&response.to_vec().expect("typed DNS response"), peer)
-                .await
-                .expect("DNS response");
-        });
+        let upstream_tasks: Vec<_> = upstreams
+            .into_iter()
+            .zip([Ipv4Addr::new(192, 0, 2, 44), Ipv4Addr::new(192, 0, 2, 45)])
+            .map(|(upstream, answer)| {
+                tokio::spawn(async move {
+                    let mut request = [0_u8; 4096];
+                    let (length, peer) =
+                        upstream.recv_from(&mut request).await.expect("DNS request");
+                    let request = Message::from_vec(&request[..length]).expect("typed DNS request");
+                    assert_eq!(request.metadata.message_type, MessageType::Query);
+                    assert_eq!(request.metadata.op_code, OpCode::Query);
+                    let question = request.queries.first().expect("one question").clone();
+                    let mut response = Message::response(request.metadata.id, OpCode::Query);
+                    response.metadata.recursion_available = true;
+                    response
+                        .add_query(question.clone())
+                        .add_answer(Record::from_rdata(
+                            question.name().clone(),
+                            30,
+                            RData::A(A(answer)),
+                        ));
+                    upstream
+                        .send_to(&response.to_vec().expect("typed DNS response"), peer)
+                        .await
+                        .expect("DNS response");
+                })
+            })
+            .collect();
         let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("DNS client");
-        let mut query = Message::new(0x1234, MessageType::Query, OpCode::Query);
-        query.add_query(Query::query(
-            Name::from_ascii("selected.example.").expect("absolute query name"),
-            RecordType::A,
-        ));
-        let query = query.to_vec().expect("typed query");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut response = [0_u8; 4096];
-        let length = loop {
-            client.send_to(&query, dns).await.expect("proxy query");
-            if let Ok(Ok((length, _))) =
-                tokio::time::timeout(Duration::from_millis(20), client.recv_from(&mut response))
-                    .await
-            {
-                break length;
-            }
-            assert!(Instant::now() < deadline, "DNS proxy never bound");
-        };
-        let response = Message::from_vec(&response[..length]).expect("typed proxy response");
-        assert_eq!(response.metadata.id, 0x1234);
-        assert_eq!(response.metadata.message_type, MessageType::Response);
-        assert_eq!(response.metadata.op_code, OpCode::Query);
-        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
-        assert_eq!(response.queries.len(), 1);
-        assert_eq!(
-            response.answers.first().map(|record| &record.data),
-            Some(&RData::A(A(Ipv4Addr::new(192, 0, 2, 44))))
-        );
-        upstream_task.await.expect("upstream task");
+        let binary_name = Name::from_labels([
+            vec![0x80; 63],
+            vec![0x81; 63],
+            vec![0x82; 63],
+            vec![0x83; 61],
+        ])
+        .expect("valid maximum wire name");
+        assert!(binary_name.to_ascii().len() > 255);
+        for (id, name, expected) in [
+            (
+                0x1234,
+                Name::from_ascii("SeLeCtEd.ExAmPlE.").expect("absolute query name"),
+                Ipv4Addr::new(192, 0, 2, 44),
+            ),
+            (0x1235, binary_name, Ipv4Addr::new(192, 0, 2, 45)),
+        ] {
+            let mut query = Message::new(id, MessageType::Query, OpCode::Query);
+            query.add_query(Query::query(name, RecordType::A));
+            let query = query.to_vec().expect("typed query");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut response = [0_u8; 4096];
+            let length = loop {
+                client.send_to(&query, dns).await.expect("proxy query");
+                if let Ok(Ok((length, _))) =
+                    tokio::time::timeout(Duration::from_millis(20), client.recv_from(&mut response))
+                        .await
+                {
+                    break length;
+                }
+                assert!(Instant::now() < deadline, "DNS proxy never bound");
+            };
+            let response = Message::from_vec(&response[..length]).expect("typed proxy response");
+            assert_eq!(response.metadata.id, id);
+            assert_eq!(response.metadata.message_type, MessageType::Response);
+            assert_eq!(response.metadata.op_code, OpCode::Query);
+            assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+            assert_eq!(response.queries.len(), 1);
+            assert_eq!(
+                response.answers.first().map(|record| &record.data),
+                Some(&RData::A(A(expected)))
+            );
+        }
+        for upstream_task in upstream_tasks {
+            upstream_task.await.expect("upstream task");
+        }
         stop.send(()).expect("stop client");
         assert_eq!(task.await.expect("client task"), Ok(()));
         drop(client);
@@ -5317,7 +5812,16 @@ mod tests {
 
     async fn dns_proxy_detoured_udp_with_public_associate_off() {
         let socks = reserve_address();
-        let shadowsocks = reserve_address();
+        let shadowsocks_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("Shadowsocks UDP hop");
+        let shadowsocks = match shadowsocks_socket
+            .local_addr()
+            .expect("Shadowsocks hop address")
+        {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 Shadowsocks hop"),
+        };
         let dns = reserve_address();
         let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -5371,9 +5875,6 @@ mod tests {
             }
         });
 
-        let shadowsocks_socket = UdpSocket::bind(shadowsocks)
-            .await
-            .expect("Shadowsocks UDP hop");
         let hop_task = tokio::spawn(async move {
             let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(default_test_psk()));
             let server = UdpServer::new(&keys).expect("Shadowsocks UDP server");
@@ -5546,15 +6047,18 @@ mod tests {
     #[tokio::test]
     async fn dns_proxy_detour_saturation_shutdown_and_exact_rebind() {
         let socks = reserve_address();
-        let shadowsocks = reserve_address();
+        let hop = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("stalled Shadowsocks hop");
+        let shadowsocks = match hop.local_addr().expect("stalled Shadowsocks hop address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 stalled Shadowsocks hop"),
+        };
         let dns = [reserve_address(), reserve_address()];
         let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("stalled DNS upstream");
         let upstream_address = upstream.local_addr().expect("stalled upstream address");
-        let hop = UdpSocket::bind(shadowsocks)
-            .await
-            .expect("stalled Shadowsocks hop");
         let (seen, mut received) = tokio::sync::oneshot::channel();
         let hop_task = tokio::spawn(async move {
             let mut wire = vec![0_u8; MAX_UDP_WIRE_LEN];
@@ -5566,8 +6070,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let (path, mut config) = client_test_config(socks, shadowsocks);
-        config.udp = None;
+        let (path, mut config) = client_udp_test_config(socks, shadowsocks);
         config.dns = Some(ferrum2_config::DnsConfig {
             inbounds: dns
                 .into_iter()
@@ -5588,7 +6091,19 @@ mod tests {
             max_inflight: std::num::NonZeroU16::new(1).expect("one DNS admission"),
         });
         let registry = OwnerRegistry::new();
-        let (stop, task) = spawn_test_client(config, &registry);
+        let (observed, resolver) = tokio::sync::oneshot::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_with_registry_and_metrics_inner(
+            config,
+            registry.clone(),
+            async move {
+                let _ = stopped.await;
+            },
+            Arc::new(Metrics::new()),
+            None,
+            Some(observed),
+        ));
+        let (context, resolver) = resolver.await.expect("observed DNS resolver");
         let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("saturation DNS client");
@@ -5613,6 +6128,26 @@ mod tests {
         let held = active(registry.snapshot());
         assert_eq!(held.udp_sessions, 1);
         assert_eq!(held.udp_buffered_bytes, 3 * MAX_UDP_WIRE_LEN);
+        let dns_held = resolver.stats();
+        assert_eq!(dns_held.queries, 1);
+        assert_eq!(dns_held.udp_sockets, 1);
+        assert_eq!(dns_held.bridge_tasks, 1);
+        assert_eq!(dns_held.sessions, 1);
+        assert_eq!(dns_held.queues, 4);
+        assert_eq!(dns_held.buffers, 1);
+        assert_eq!(
+            context
+                .udp
+                .as_ref()
+                .expect("shared DNS/public UDP manager")
+                .manager
+                .session_count(),
+            1
+        );
+        let (public_control, public_reply) = socks_command(socks, 3).await;
+        assert_ne!(public_reply[1], 0, "public UDP used a second manager");
+        drop(public_control);
+        assert_eq!(active(registry.snapshot()), held);
 
         let second = query(0x3302, "busy.detoured.example.");
         client
@@ -5644,6 +6179,8 @@ mod tests {
                 .expect_err("stalled hop cancellation")
                 .is_cancelled()
         );
+        assert_eq!(resolver.stats(), ferrum2_dns::RuntimeStats::default());
+        drop((context, resolver));
         drop((client, upstream));
         for listen in dns {
             drop(
