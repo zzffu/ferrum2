@@ -8,7 +8,7 @@ mod runtime_owner;
 mod runtime_provider;
 
 pub use error::DnsError;
-pub use runtime_owner::{RuntimeStats, ShutdownReport, TaggedResolver};
+pub use runtime_owner::{RuntimeStats, ShutdownReport, TaggedResolver, TaggedResolverOwner};
 pub use runtime_provider::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
     DnsEgressTaskKind, DnsIoFuture, DnsResourceGuard, DnsTaskRegistrar, DnsTcpIo, PlanSnapshot,

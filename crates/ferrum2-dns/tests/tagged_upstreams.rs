@@ -219,7 +219,7 @@ fn configured_server(
 async fn udp_tcp_exact_server_plan_and_negative_semantics() {
     let fixture = PlainFixture::start().await;
     let egress = Arc::new(RecordingEgress::default());
-    let resolver = TaggedResolver::new(
+    let (resolver, mut owner) = TaggedResolver::new(
         vec![
             configured_server(fixture.address, DnsTransport::Udp, true),
             configured_server(fixture.address, DnsTransport::Tcp, false),
@@ -229,6 +229,7 @@ async fn udp_tcp_exact_server_plan_and_negative_semantics() {
         egress.clone(),
     )
     .expect("start resolver");
+    owner.ready().await.expect("resolver ready");
 
     for server in [0, 1] {
         let a = resolver
@@ -307,8 +308,9 @@ async fn udp_tcp_exact_server_plan_and_negative_semantics() {
     }));
     assert!(calls.iter().all(|call| call.target == fixture.address));
 
+    drop(resolver);
     assert_eq!(
-        resolver
+        owner
             .shutdown()
             .await
             .expect("resolver shutdown")
@@ -440,13 +442,14 @@ async fn half_frame() -> (SocketAddr, tokio::task::JoinHandle<()>) {
 async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
     let (address, tasks) = tc_fixture().await;
     let egress = Arc::new(RecordingEgress::default());
-    let resolver = TaggedResolver::new(
+    let (resolver, mut owner) = TaggedResolver::new(
         vec![configured_server(address, DnsTransport::Udp, true)],
         Duration::from_millis(250),
         NonZeroU16::new(1).expect("nonzero admission"),
         egress.clone(),
     )
     .expect("start TC resolver");
+    owner.ready().await.expect("TC resolver ready");
     let tc_result = resolver
         .lookup(
             0,
@@ -477,7 +480,8 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
             },
         ]
     );
-    resolver.shutdown().await.expect("TC resolver shutdown");
+    drop(resolver);
+    owner.shutdown().await.expect("TC resolver shutdown");
     for task in tasks {
         task.await.expect("TC fixture join");
     }
@@ -489,13 +493,14 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
     ] {
         let (address, task) = udp_fault(fault).await;
         let egress = Arc::new(RecordingEgress::default());
-        let resolver = TaggedResolver::new(
+        let (resolver, mut owner) = TaggedResolver::new(
             vec![configured_server(address, DnsTransport::Udp, true)],
             Duration::from_millis(50),
             NonZeroU16::new(1).expect("nonzero admission"),
             egress.clone(),
         )
         .expect("start fault resolver");
+        owner.ready().await.expect("fault resolver ready");
         assert!(
             resolver
                 .lookup(
@@ -514,19 +519,21 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
                 plan: Some(vec![0])
             }]
         );
-        resolver.shutdown().await.expect("fault resolver shutdown");
+        drop(resolver);
+        owner.shutdown().await.expect("fault resolver shutdown");
         task.await.expect("fault fixture join");
     }
 
     let (address, task) = half_frame().await;
     let egress = Arc::new(RecordingEgress::default());
-    let resolver = TaggedResolver::new(
+    let (resolver, mut owner) = TaggedResolver::new(
         vec![configured_server(address, DnsTransport::Tcp, true)],
         Duration::from_millis(100),
         NonZeroU16::new(1).expect("nonzero admission"),
         egress.clone(),
     )
     .expect("start half-frame resolver");
+    owner.ready().await.expect("half-frame resolver ready");
     assert!(
         resolver
             .lookup(
@@ -545,7 +552,8 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
             plan: Some(vec![0])
         }]
     );
-    resolver
+    drop(resolver);
+    owner
         .shutdown()
         .await
         .expect("half-frame resolver shutdown");

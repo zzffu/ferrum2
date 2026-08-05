@@ -171,20 +171,44 @@ pub(crate) struct RuntimeCounters {
     pub(crate) buffers: AtomicUsize,
 }
 
+#[derive(Default)]
+struct TaskSetState {
+    closed: bool,
+    tasks: JoinSet<()>,
+}
+
 #[derive(Clone, Default)]
-pub(crate) struct TaskSet(Arc<Mutex<JoinSet<()>>>);
+pub(crate) struct TaskSet(Arc<Mutex<TaskSetState>>);
 
 impl TaskSet {
-    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut tasks = self.0.lock().expect("DNS task set poisoned");
-        while tasks.try_join_next().is_some() {}
-        tasks.spawn(future);
+    fn spawn_counted(
+        &self,
+        counters: Arc<RuntimeCounters>,
+        kind: CounterKind,
+        future: impl Future<Output = ()> + Send + 'static,
+    ) {
+        let guard = CounterGuard::new(counters, kind);
+        let rejected = {
+            let mut state = self.0.lock().expect("DNS task set poisoned");
+            if state.closed {
+                Some((future, guard))
+            } else {
+                while state.tasks.try_join_next().is_some() {}
+                state.tasks.spawn(async move {
+                    let _guard = guard;
+                    future.await;
+                });
+                None
+            }
+        };
+        drop(rejected);
     }
 
     pub(crate) async fn abort_and_join(&self) {
         let mut tasks = {
-            let mut locked = self.0.lock().expect("DNS task set poisoned");
-            std::mem::take(&mut *locked)
+            let mut state = self.0.lock().expect("DNS task set poisoned");
+            state.closed = true;
+            std::mem::take(&mut state.tasks)
         };
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
@@ -250,20 +274,12 @@ impl DnsTaskRegistrar {
         kind: DnsEgressTaskKind,
         future: impl Future<Output = ()> + Send + 'static,
     ) {
-        let counter = match kind {
-            DnsEgressTaskKind::Bridge => &self.counters.bridge_tasks,
-            DnsEgressTaskKind::Session => &self.counters.sessions,
+        let kind = match kind {
+            DnsEgressTaskKind::Bridge => CounterKind::Bridge,
+            DnsEgressTaskKind::Session => CounterKind::Session,
         };
-        counter.fetch_add(1, Ordering::AcqRel);
-        let counters = Arc::clone(&self.counters);
-        self.tasks.spawn(async move {
-            let counter = match kind {
-                DnsEgressTaskKind::Bridge => &counters.bridge_tasks,
-                DnsEgressTaskKind::Session => &counters.sessions,
-            };
-            let _guard = CounterGuard::new(counter);
-            future.await;
-        });
+        self.tasks
+            .spawn_counted(Arc::clone(&self.counters), kind, future);
     }
 
     /// Registers one bounded queue or buffer until the returned guard is dropped.
@@ -288,27 +304,43 @@ pub(crate) struct TrackedHandle {
 
 impl Spawn for TrackedHandle {
     fn spawn_bg(&mut self, future: impl Future<Output = ()> + Send + 'static) {
-        self.counters.tasks.fetch_add(1, Ordering::AcqRel);
-        let counter = Arc::clone(&self.counters);
-        let future = async move {
-            let _guard = CounterGuard::new(&counter.tasks);
-            future.await;
-        };
-        self.tasks.spawn(future);
+        self.tasks
+            .spawn_counted(Arc::clone(&self.counters), CounterKind::Hickory, future);
     }
 }
 
-struct CounterGuard<'a>(&'a AtomicUsize);
+#[derive(Clone, Copy)]
+enum CounterKind {
+    Hickory,
+    Bridge,
+    Session,
+}
 
-impl<'a> CounterGuard<'a> {
-    fn new(counter: &'a AtomicUsize) -> Self {
-        Self(counter)
+struct CounterGuard {
+    counters: Arc<RuntimeCounters>,
+    kind: CounterKind,
+}
+
+impl CounterGuard {
+    fn new(counters: Arc<RuntimeCounters>, kind: CounterKind) -> Self {
+        match kind {
+            CounterKind::Hickory => &counters.tasks,
+            CounterKind::Bridge => &counters.bridge_tasks,
+            CounterKind::Session => &counters.sessions,
+        }
+        .fetch_add(1, Ordering::AcqRel);
+        Self { counters, kind }
     }
 }
 
-impl Drop for CounterGuard<'_> {
+impl Drop for CounterGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        match self.kind {
+            CounterKind::Hickory => &self.counters.tasks,
+            CounterKind::Bridge => &self.counters.bridge_tasks,
+            CounterKind::Session => &self.counters.sessions,
+        }
+        .fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -481,5 +513,79 @@ impl DnsUdpSocket for CountedUdp {
 impl Drop for CountedUdp {
     fn drop(&mut self) {
         self.counters.udp_sockets.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::AtomicBool;
+
+    struct NeverPolled {
+        polled: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Future for NeverPolled {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polled.store(true, Ordering::Release);
+            Poll::Ready(())
+        }
+    }
+
+    impl Drop for NeverPolled {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    fn never_polled() -> (NeverPolled, Arc<AtomicBool>, Arc<AtomicBool>) {
+        let polled = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        (
+            NeverPolled {
+                polled: Arc::clone(&polled),
+                dropped: Arc::clone(&dropped),
+            },
+            polled,
+            dropped,
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn close_before_first_poll_and_late_spawn_leave_no_task_or_counter() {
+        for _ in 0..100 {
+            let tasks = TaskSet::default();
+            let counters = Arc::new(RuntimeCounters::default());
+            let registrar = DnsTaskRegistrar::new(tasks.clone(), Arc::clone(&counters));
+            let mut handle = TrackedHandle {
+                tasks: tasks.clone(),
+                counters: Arc::clone(&counters),
+            };
+            let mut polled = Vec::new();
+            for spawn in [DnsEgressTaskKind::Bridge, DnsEgressTaskKind::Session] {
+                let (future, was_polled, _) = never_polled();
+                polled.push(was_polled);
+                registrar.spawn(spawn, future);
+            }
+            let (future, was_polled, _) = never_polled();
+            polled.push(was_polled);
+            handle.spawn_bg(future);
+
+            tasks.abort_and_join().await;
+            assert!(polled.iter().all(|flag| !flag.load(Ordering::Acquire)));
+            assert_eq!(counters.tasks.load(Ordering::Acquire), 0);
+            assert_eq!(counters.bridge_tasks.load(Ordering::Acquire), 0);
+            assert_eq!(counters.sessions.load(Ordering::Acquire), 0);
+
+            let (late, late_polled, late_dropped) = never_polled();
+            registrar.spawn(DnsEgressTaskKind::Bridge, late);
+            assert!(!late_polled.load(Ordering::Acquire));
+            assert!(late_dropped.load(Ordering::Acquire));
+            assert_eq!(counters.bridge_tasks.load(Ordering::Acquire), 0);
+        }
     }
 }

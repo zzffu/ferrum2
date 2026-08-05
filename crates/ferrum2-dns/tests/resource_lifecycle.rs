@@ -1,7 +1,8 @@
+use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU16;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -28,13 +29,62 @@ struct ControlledUdp {
 struct GatedEgress {
     blocked: AtomicBool,
     cancelled: Arc<AtomicBool>,
+    cancel: Option<Arc<CancelControl>>,
 }
 
-struct CancelProbe(Arc<AtomicBool>);
+struct CancelProbe {
+    cancelled: Arc<AtomicBool>,
+    cancel: Option<Arc<CancelControl>>,
+}
+
+#[derive(Default)]
+struct CancelControl {
+    state: Mutex<CancelState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct CancelState {
+    entered: bool,
+    released: bool,
+}
+
+impl CancelControl {
+    fn enter(&self) {
+        self.state.lock().expect("cancel gate lock").entered = true;
+        self.changed.notify_all();
+    }
+
+    fn wait_entered(&self) -> bool {
+        let state = self.state.lock().expect("cancel gate lock");
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(1), |state| !state.entered)
+            .expect("cancel entered wait");
+        state.entered
+    }
+
+    fn wait_release(&self) {
+        let state = self.state.lock().expect("cancel gate lock");
+        drop(
+            self.changed
+                .wait_timeout_while(state, Duration::from_secs(1), |state| !state.released)
+                .expect("cancel release wait"),
+        );
+    }
+
+    fn release(&self) {
+        self.state.lock().expect("cancel gate lock").released = true;
+        self.changed.notify_all();
+    }
+}
 
 impl Drop for CancelProbe {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
+        if let Some(cancel) = &self.cancel {
+            cancel.wait_release();
+        }
+        self.cancelled.store(true, Ordering::Release);
     }
 }
 
@@ -57,8 +107,15 @@ impl DnsEgress for GatedEgress {
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         if self.blocked.load(Ordering::Acquire) {
             let cancelled = Arc::clone(&self.cancelled);
+            let cancel = self.cancel.clone();
             Box::pin(async move {
-                let _probe = CancelProbe(cancelled);
+                let _probe = CancelProbe {
+                    cancelled,
+                    cancel: cancel.clone(),
+                };
+                if let Some(cancel) = cancel {
+                    cancel.enter();
+                }
                 std::future::pending().await
             })
         } else {
@@ -443,14 +500,14 @@ async fn wait_for_zero(resolver: &TaggedResolver) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saturation_timeout_recovery_shutdown_and_rebind_are_bounded() {
     let upstream = ControlledUdp::start().await;
-    let resolver = Arc::new(
-        TaggedResolver::direct(
-            vec![direct_udp(upstream.address)],
-            Duration::from_millis(250),
-            NonZeroU16::new(1).expect("nonzero admission"),
-        )
-        .expect("start resolver"),
-    );
+    let (resolver, mut owner) = TaggedResolver::direct(
+        vec![direct_udp(upstream.address)],
+        Duration::from_millis(250),
+        NonZeroU16::new(1).expect("nonzero admission"),
+    )
+    .expect("start resolver");
+    owner.ready().await.expect("resolver ready");
+    let resolver = Arc::new(resolver);
     assert_eq!(resolver.stats(), RuntimeStats::default());
     assert_eq!(
         resolver
@@ -505,20 +562,19 @@ async fn saturation_timeout_recovery_shutdown_and_rebind_are_bounded() {
     wait_for_zero(&resolver).await;
 
     let resolver = Arc::try_unwrap(resolver).ok().expect("one resolver owner");
-    assert_eq!(
-        resolver.shutdown().await.expect("shutdown").runtime_tasks,
-        0
-    );
+    drop(resolver);
+    assert_eq!(owner.shutdown().await.expect("shutdown").runtime_tasks, 0);
 
     let egress = Arc::new(GatedEgress::default());
     egress.blocked.store(true, Ordering::Release);
-    let resolver = TaggedResolver::new(
+    let (resolver, mut owner) = TaggedResolver::new(
         vec![direct_udp(upstream.address)],
         Duration::from_millis(50),
         NonZeroU16::new(1).expect("nonzero admission"),
         egress.clone(),
     )
     .expect("start gated resolver");
+    owner.ready().await.expect("gated resolver ready");
     assert_eq!(
         resolver
             .lookup(
@@ -541,8 +597,9 @@ async fn saturation_timeout_recovery_shutdown_and_rebind_are_bounded() {
             .await
             .is_ok()
     );
+    drop(resolver);
     assert_eq!(
-        resolver
+        owner
             .shutdown()
             .await
             .expect("gated shutdown")
@@ -560,15 +617,15 @@ async fn caller_cancellation_finishes_owned_query_before_readmission() {
     upstream.respond.store(true, Ordering::Release);
     let egress = Arc::new(GatedEgress::default());
     egress.blocked.store(true, Ordering::Release);
-    let resolver = Arc::new(
-        TaggedResolver::new(
-            vec![direct_udp(upstream.address)],
-            Duration::from_secs(5),
-            NonZeroU16::new(1).expect("nonzero admission"),
-            egress.clone(),
-        )
-        .expect("start cancellation resolver"),
-    );
+    let (resolver, mut owner) = TaggedResolver::new(
+        vec![direct_udp(upstream.address)],
+        Duration::from_secs(5),
+        NonZeroU16::new(1).expect("nonzero admission"),
+        egress.clone(),
+    )
+    .expect("start cancellation resolver");
+    owner.ready().await.expect("cancellation resolver ready");
+    let resolver = Arc::new(resolver);
     let active = Arc::clone(&resolver);
     let query = tokio::spawn(async move {
         active
@@ -604,8 +661,9 @@ async fn caller_cancellation_finishes_owned_query_before_readmission() {
             .is_ok()
     );
     let resolver = Arc::try_unwrap(resolver).ok().expect("one resolver owner");
+    drop(resolver);
     assert_eq!(
-        resolver
+        owner
             .shutdown()
             .await
             .expect("cancel shutdown")
@@ -615,21 +673,70 @@ async fn caller_cancellation_finishes_owned_query_before_readmission() {
     upstream.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn drop_joins_the_exclusive_runtime_owner() {
+#[tokio::test(flavor = "current_thread")]
+async fn resolver_drop_is_nonblocking_and_owner_join_is_retryable() {
+    for _ in 0..50 {
+        assert_resolver_drop_cycle().await;
+    }
+}
+
+async fn assert_resolver_drop_cycle() {
     let upstream = ControlledUdp::start().await;
-    let egress = Arc::new(GatedEgress::default());
-    let resolver = TaggedResolver::new(
+    let cancel = Arc::new(CancelControl::default());
+    let egress = Arc::new(GatedEgress {
+        blocked: AtomicBool::new(true),
+        cancelled: Arc::default(),
+        cancel: Some(Arc::clone(&cancel)),
+    });
+    let (resolver, mut owner) = TaggedResolver::new(
         vec![direct_udp(upstream.address)],
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         NonZeroU16::new(1).expect("nonzero admission"),
         egress.clone(),
     )
     .expect("start drop resolver");
+    owner.ready().await.expect("resolver owner ready");
     assert_eq!(Arc::strong_count(&egress), 2);
+    let lookup = tokio::spawn(resolver.lookup(
+        0,
+        Name::from_ascii("drop.resolver.test.").expect("drop name"),
+        RecordType::A,
+    ));
+    let entered = Arc::clone(&cancel);
+    assert!(
+        tokio::task::spawn_blocking(move || entered.wait_entered())
+            .await
+            .expect("cancel entered join"),
+        "active lookup never installed its cancellation guard"
+    );
+    let drop_started = std::time::Instant::now();
     drop(resolver);
+    assert!(drop_started.elapsed() < Duration::from_millis(25));
+    {
+        let first = owner.shutdown();
+        tokio::pin!(first);
+        let first_poll =
+            std::future::poll_fn(|context| Poll::Ready(first.as_mut().poll(context))).await;
+        assert!(
+            first_poll.is_pending(),
+            "cleanup gate must hold the first owner await"
+        );
+    }
+    cancel.release();
+    let report = tokio::time::timeout(Duration::from_millis(250), owner.shutdown())
+        .await
+        .expect("bounded retried owner await")
+        .expect("retried owner shutdown");
+    assert_eq!(report.runtime_tasks, 0);
+    assert_eq!(report.stats, RuntimeStats::default());
+    assert_eq!(
+        lookup.await.expect("drop lookup join"),
+        Err(DnsError::Shutdown)
+    );
     assert_eq!(Arc::strong_count(&egress), 1);
+    let address = upstream.address;
     upstream.shutdown().await;
+    assert!(UdpSocket::bind(address).await.is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -637,21 +744,23 @@ async fn explicit_shutdown_cancels_an_active_owned_lookup() {
     let upstream = ControlledUdp::start().await;
     let egress = Arc::new(GatedEgress::default());
     egress.blocked.store(true, Ordering::Release);
-    let resolver = TaggedResolver::new(
+    let (resolver, mut owner) = TaggedResolver::new(
         vec![direct_udp(upstream.address)],
         Duration::from_secs(5),
         NonZeroU16::new(1).expect("nonzero admission"),
         egress,
     )
     .expect("start active-shutdown resolver");
+    owner.ready().await.expect("active resolver ready");
     let lookup = tokio::spawn(resolver.lookup(
         0,
         Name::from_ascii("shutdown.resolver.test.").expect("shutdown name"),
         RecordType::A,
     ));
     wait_for_nonzero(&resolver).await;
+    drop(resolver);
     assert_eq!(
-        tokio::time::timeout(Duration::from_millis(250), resolver.shutdown())
+        tokio::time::timeout(Duration::from_millis(250), owner.shutdown())
             .await
             .expect("bounded shutdown")
             .expect("active shutdown")
@@ -668,7 +777,7 @@ async fn shutdown_joins_direct_and_detour_stream_session_queue_and_buffer_owners
     let first_hop = TcpStall::start().await;
     let final_upstream = TcpStall::start().await;
     let egress = Arc::new(ScriptedDetour::new(first_hop.address));
-    let resolver = TaggedResolver::new(
+    let (resolver, mut owner) = TaggedResolver::new(
         vec![
             direct_tcp(direct.address),
             detoured_tcp(final_upstream.address),
@@ -678,6 +787,7 @@ async fn shutdown_joins_direct_and_detour_stream_session_queue_and_buffer_owners
         egress.clone(),
     )
     .expect("start detour owner resolver");
+    owner.ready().await.expect("detour resolver ready");
     let direct_lookup = tokio::spawn(resolver.lookup(
         0,
         Name::from_ascii("direct.sentinel.resolver.test.").expect("direct sentinel"),
@@ -725,7 +835,8 @@ async fn shutdown_joins_direct_and_detour_stream_session_queue_and_buffer_owners
         &["PlanSnapshot([redacted])"]
     );
 
-    let report = tokio::time::timeout(Duration::from_millis(250), resolver.shutdown())
+    drop(resolver);
+    let report = tokio::time::timeout(Duration::from_millis(250), owner.shutdown())
         .await
         .expect("bounded detour shutdown")
         .expect("detour shutdown");
@@ -750,7 +861,7 @@ async fn shutdown_bounds_slow_detoured_udp_tcp_dot_and_doh_resources() {
     let tcp_upstream = TcpStall::start().await;
     let udp_upstream = ControlledUdp::start().await;
     let egress = Arc::new(ScriptedDetour::new(first_hop.address));
-    let resolver = TaggedResolver::new(
+    let (resolver, mut owner) = TaggedResolver::new(
         vec![
             detoured_server(udp_upstream.address, DnsTransport::Udp),
             detoured_server(tcp_upstream.address, DnsTransport::Tcp),
@@ -762,6 +873,7 @@ async fn shutdown_bounds_slow_detoured_udp_tcp_dot_and_doh_resources() {
         egress.clone(),
     )
     .expect("start all-transport detour resolver");
+    owner.ready().await.expect("all-transport resolver ready");
     let lookups: Vec<_> = (0..4)
         .map(|server| {
             tokio::spawn(
@@ -804,7 +916,8 @@ async fn shutdown_bounds_slow_detoured_udp_tcp_dot_and_doh_resources() {
     assert_eq!(calls.len(), 4);
     assert!(calls.iter().all(|(_, hops)| hops == &[0]));
 
-    let report = tokio::time::timeout(Duration::from_millis(250), resolver.shutdown())
+    drop(resolver);
+    let report = tokio::time::timeout(Duration::from_millis(250), owner.shutdown())
         .await
         .expect("bounded all-transport shutdown")
         .expect("all-transport shutdown");

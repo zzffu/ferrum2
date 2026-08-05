@@ -1,7 +1,8 @@
 use std::num::NonZeroU16;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
-use std::thread::JoinHandle;
+use std::thread::JoinHandle as ThreadJoinHandle;
 use std::time::Duration;
 
 use ferrum2_config::DnsServerConfig;
@@ -59,16 +60,35 @@ enum Command {
     },
 }
 
-/// Bounded tagged resolver whose entire Hickory task population lives on one owned OS thread.
-#[must_use = "call shutdown() to await the exclusive DNS runtime"]
+struct ShutdownSignal(Mutex<Option<oneshot::Sender<()>>>);
+
+impl ShutdownSignal {
+    fn request(&self) {
+        if let Some(shutdown) = self.0.lock().expect("DNS shutdown lock poisoned").take() {
+            let _ = shutdown.send(());
+        }
+    }
+}
+
+/// Bounded tagged resolver handle backed by one separately awaited runtime owner.
 pub struct TaggedResolver {
     sender: Option<mpsc::Sender<Command>>,
-    shutdown: Option<oneshot::Sender<()>>,
+    shutdown: Arc<ShutdownSignal>,
     admission: Arc<Semaphore>,
     server_count: usize,
     timeout: Duration,
     counters: Arc<RuntimeCounters>,
-    thread: Option<JoinHandle<Result<ShutdownReport, DnsError>>>,
+}
+
+/// Unique join owner for one tagged resolver's exclusive runtime thread.
+#[must_use = "await shutdown() after dropping the TaggedResolver handle"]
+pub struct TaggedResolverOwner {
+    shutdown: Arc<ShutdownSignal>,
+    ready: Option<oneshot::Receiver<Result<(), DnsError>>>,
+    ready_result: Option<Result<(), DnsError>>,
+    thread: Option<ThreadJoinHandle<Result<ShutdownReport, DnsError>>>,
+    join: Option<tokio::task::JoinHandle<Result<ShutdownReport, DnsError>>>,
+    report: Option<Result<ShutdownReport, DnsError>>,
 }
 
 impl TaggedResolver {
@@ -77,7 +97,7 @@ impl TaggedResolver {
         servers: Vec<DnsServerConfig>,
         timeout: Duration,
         max_inflight: NonZeroU16,
-    ) -> Result<Self, DnsError> {
+    ) -> Result<(Self, TaggedResolverOwner), DnsError> {
         Self::new(servers, timeout, max_inflight, Arc::new(SystemDnsEgress))
     }
 
@@ -87,7 +107,7 @@ impl TaggedResolver {
         timeout: Duration,
         max_inflight: NonZeroU16,
         egress: Arc<dyn DnsEgress>,
-    ) -> Result<Self, DnsError> {
+    ) -> Result<(Self, TaggedResolverOwner), DnsError> {
         Self::start(
             servers
                 .into_iter()
@@ -109,7 +129,7 @@ impl TaggedResolver {
         timeout: Duration,
         max_inflight: NonZeroU16,
         egress: Arc<dyn DnsEgress>,
-    ) -> Result<Self, DnsError> {
+    ) -> Result<(Self, TaggedResolverOwner), DnsError> {
         Self::start(
             servers
                 .into_iter()
@@ -130,7 +150,7 @@ impl TaggedResolver {
         timeout: Duration,
         max_inflight: NonZeroU16,
         egress: Arc<dyn DnsEgress>,
-    ) -> Result<Self, DnsError> {
+    ) -> Result<(Self, TaggedResolverOwner), DnsError> {
         if servers.is_empty() {
             return Err(DnsError::InvalidServer);
         }
@@ -140,7 +160,8 @@ impl TaggedResolver {
         let counters = Arc::new(RuntimeCounters::default());
         let (sender, receiver) = mpsc::channel(capacity);
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
-        let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
+        let shutdown = Arc::new(ShutdownSignal(Mutex::new(Some(shutdown_sender))));
+        let (ready_sender, ready_receiver) = oneshot::channel();
         let thread_counters = Arc::clone(&counters);
         let thread = std::thread::Builder::new()
             .name("ferrum2-dns".to_owned())
@@ -165,17 +186,24 @@ impl TaggedResolver {
                 ))
             })
             .map_err(|_| DnsError::Runtime)?;
-        ready_receiver.recv().map_err(|_| DnsError::Runtime)??;
-
-        Ok(Self {
-            sender: Some(sender),
-            shutdown: Some(shutdown_sender),
-            admission,
-            server_count,
-            timeout,
-            counters,
-            thread: Some(thread),
-        })
+        Ok((
+            Self {
+                sender: Some(sender),
+                shutdown: Arc::clone(&shutdown),
+                admission,
+                server_count,
+                timeout,
+                counters,
+            },
+            TaggedResolverOwner {
+                shutdown,
+                ready: Some(ready_receiver),
+                ready_result: None,
+                thread: Some(thread),
+                join: None,
+                report: None,
+            },
+        ))
     }
 
     /// Queries one already-selected tagged server under the shared admission and deadline.
@@ -220,30 +248,63 @@ impl TaggedResolver {
         runtime_stats(&self.counters)
     }
 
-    /// Closes intake, aborts and joins every DNS task, and joins the owned OS thread off-worker.
-    pub async fn shutdown(mut self) -> Result<ShutdownReport, DnsError> {
-        self.request_shutdown();
-        let thread = self.thread.take().ok_or(DnsError::Shutdown)?;
-        tokio::task::spawn_blocking(move || thread.join())
-            .await
-            .map_err(|_| DnsError::Runtime)?
-            .map_err(|_| DnsError::Runtime)?
-    }
-
     fn request_shutdown(&mut self) {
         self.sender.take();
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
+        self.shutdown.request();
     }
 }
 
 impl Drop for TaggedResolver {
     fn drop(&mut self) {
         self.request_shutdown();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+    }
+}
+
+impl TaggedResolverOwner {
+    /// Awaits exclusive-runtime initialization without blocking the calling Tokio worker.
+    pub async fn ready(&mut self) -> Result<(), DnsError> {
+        if let Some(result) = self.ready_result {
+            return result;
         }
+        let result = match self.ready.as_mut() {
+            Some(ready) => ready.await.map_err(|_| DnsError::Runtime)?,
+            None => Err(DnsError::Runtime),
+        };
+        self.ready.take();
+        self.ready_result = Some(result);
+        result
+    }
+
+    /// Signals shutdown and retryably awaits the unique OS-thread join off-worker.
+    pub async fn shutdown(&mut self) -> Result<ShutdownReport, DnsError> {
+        if let Some(result) = self.report {
+            return result;
+        }
+        self.shutdown.request();
+        if self.join.is_none() {
+            let thread = self.thread.take().ok_or(DnsError::Shutdown)?;
+            self.join = Some(tokio::task::spawn_blocking(move || {
+                thread
+                    .join()
+                    .map_err(|_| DnsError::Runtime)
+                    .and_then(|result| result)
+            }));
+        }
+        let result = self
+            .join
+            .as_mut()
+            .expect("DNS join owner present")
+            .await
+            .map_err(|_| DnsError::Runtime)?;
+        self.join.take();
+        self.report = Some(result);
+        result
+    }
+}
+
+impl Drop for TaggedResolverOwner {
+    fn drop(&mut self) {
+        self.shutdown.request();
     }
 }
 
@@ -762,13 +823,14 @@ mod tests {
             ),
         ];
         let egress = Arc::new(ScriptedTlsDetour::default());
-        let resolver = TaggedResolver::with_test_tls(
+        let (resolver, mut owner) = TaggedResolver::with_test_tls(
             servers,
             Duration::from_secs(1),
             NonZeroU16::new(8).expect("nonzero admission"),
             egress.clone(),
         )
         .expect("start encrypted resolver");
+        owner.ready().await.expect("encrypted resolver ready");
         assert_full_zone(&resolver, 0).await;
         assert_full_zone(&resolver, 1).await;
         for server in 2..7 {
@@ -786,8 +848,9 @@ mod tests {
             );
             assert_eq!(egress.attempts.load(Ordering::Acquire), before + 1);
         }
+        drop(resolver);
         assert_eq!(
-            resolver
+            owner
                 .shutdown()
                 .await
                 .expect("resolver shutdown")
@@ -806,7 +869,7 @@ mod tests {
         for fault in [DohFault::Status, DohFault::ContentType, DohFault::Body] {
             let (address, task) = doh_fault(fault).await;
             let egress = Arc::new(ScriptedTlsDetour::default());
-            let resolver = TaggedResolver::with_test_tls(
+            let (resolver, mut owner) = TaggedResolver::with_test_tls(
                 vec![(
                     encrypted_server(
                         DnsTransport::Doh,
@@ -822,6 +885,7 @@ mod tests {
                 egress.clone(),
             )
             .expect("start DoH fault resolver");
+            owner.ready().await.expect("DoH fault resolver ready");
             assert!(
                 resolver
                     .lookup(
@@ -833,8 +897,9 @@ mod tests {
                     .is_err()
             );
             assert_eq!(egress.attempts.load(Ordering::Acquire), 1);
+            drop(resolver);
             assert_eq!(
-                resolver
+                owner
                     .shutdown()
                     .await
                     .expect("DoH fault shutdown")
@@ -853,7 +918,7 @@ mod tests {
             require_plan: true,
             ..ScriptedTlsDetour::default()
         });
-        let resolver = TaggedResolver::with_test_tls(
+        let (resolver, mut owner) = TaggedResolver::with_test_tls(
             vec![(
                 encrypted_server(
                     DnsTransport::Doh,
@@ -869,6 +934,7 @@ mod tests {
             egress.clone(),
         )
         .expect("start stalled DoH resolver");
+        owner.ready().await.expect("stalled DoH resolver ready");
         let lookup = tokio::spawn(resolver.lookup(
             0,
             Name::from_ascii("stalled.resolver.test.").expect("stalled DoH name"),
@@ -900,7 +966,8 @@ mod tests {
         assert_eq!(stats.buffers, 1);
         assert_eq!(egress.attempts.load(Ordering::Acquire), 1);
 
-        let report = tokio::time::timeout(Duration::from_millis(250), resolver.shutdown())
+        drop(resolver);
+        let report = tokio::time::timeout(Duration::from_millis(250), owner.shutdown())
             .await
             .expect("bounded stalled DoH shutdown")
             .expect("stalled DoH shutdown");
