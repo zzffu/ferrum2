@@ -12,10 +12,14 @@ aho-corasick|1.1.4|registry+https://github.com/rust-lang/crates.io-index|ddd31a1
 anstyle|1.0.14|registry+https://github.com/rust-lang/crates.io-index|940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000
 arrayref|0.3.9|registry+https://github.com/rust-lang/crates.io-index|76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb
 arrayvec|0.7.8|registry+https://github.com/rust-lang/crates.io-index|d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56
+async-trait|0.1.91|registry+https://github.com/rust-lang/crates.io-index|ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec
+atomic-waker|1.1.2|registry+https://github.com/rust-lang/crates.io-index|1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0
+autocfg|1.5.1|registry+https://github.com/rust-lang/crates.io-index|f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53
 base64|0.23.0|registry+https://github.com/rust-lang/crates.io-index|b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9
 bitflags|2.13.1|registry+https://github.com/rust-lang/crates.io-index|b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da
 blake3|1.8.5|registry+https://github.com/rust-lang/crates.io-index|0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce
 block-buffer|0.12.1|registry+https://github.com/rust-lang/crates.io-index|d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa
+bumpalo|3.20.3|registry+https://github.com/rust-lang/crates.io-index|72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649
 bytes|1.12.1|registry+https://github.com/rust-lang/crates.io-index|fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04
 cc|1.4.0|registry+https://github.com/rust-lang/crates.io-index|5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9
 cfg-if|1.0.4|registry+https://github.com/rust-lang/crates.io-index|9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801
@@ -27,13 +31,22 @@ clap_builder|4.6.2|registry+https://github.com/rust-lang/crates.io-index|f09628a
 clap_derive|4.6.4|registry+https://github.com/rust-lang/crates.io-index|d012d2b9d65aca7f18f4d9878a045bc17899bba951561ba5ec3c2ba1eed9a061
 clap_lex|1.1.0|registry+https://github.com/rust-lang/crates.io-index|c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9
 cmov|0.5.4|registry+https://github.com/rust-lang/crates.io-index|0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a
+combine|4.6.7|registry+https://github.com/rust-lang/crates.io-index|ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd
 constant_time_eq|0.4.2|registry+https://github.com/rust-lang/crates.io-index|3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b
 cpubits|0.1.1|registry+https://github.com/rust-lang/crates.io-index|15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae
 cpufeatures|0.3.0|registry+https://github.com/rust-lang/crates.io-index|8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201
+critical-section|1.2.0|registry+https://github.com/rust-lang/crates.io-index|790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b
+crossbeam-channel|0.5.16|registry+https://github.com/rust-lang/crates.io-index|d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e
+crossbeam-epoch|0.9.20|registry+https://github.com/rust-lang/crates.io-index|2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f
+crossbeam-utils|0.8.22|registry+https://github.com/rust-lang/crates.io-index|61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17
 crypto-common|0.2.2|registry+https://github.com/rust-lang/crates.io-index|ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453
 ctr|0.10.1|registry+https://github.com/rust-lang/crates.io-index|baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21
 ctutils|0.4.2|registry+https://github.com/rust-lang/crates.io-index|7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e
+data-encoding|2.11.1|registry+https://github.com/rust-lang/crates.io-index|4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06
+deranged|0.5.8|registry+https://github.com/rust-lang/crates.io-index|7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c
+displaydoc|0.2.7|registry+https://github.com/rust-lang/crates.io-index|c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8
 dtoa|1.0.11|registry+https://github.com/rust-lang/crates.io-index|4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590
+either|1.17.0|registry+https://github.com/rust-lang/crates.io-index|9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d
 equivalent|1.0.2|registry+https://github.com/rust-lang/crates.io-index|877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f
 errno|0.3.14|registry+https://github.com/rust-lang/crates.io-index|39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb
 fastrand|2.5.0|registry+https://github.com/rust-lang/crates.io-index|da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223
@@ -41,6 +54,7 @@ ferrum2-client|0.1.0||
 ferrum2-config|0.1.0||
 ferrum2-core|0.1.0||
 ferrum2-crypto|0.1.0||
+ferrum2-dns|0.1.0||
 ferrum2-m0-harness|0.1.0||
 ferrum2-m4-qualification|0.1.0||
 ferrum2-observability|0.1.0||
@@ -49,38 +63,89 @@ ferrum2-server|0.1.0||
 ferrum2-shadowsocks|0.1.0||
 ferrum2-socks5|0.1.0||
 find-msvc-tools|0.1.9|registry+https://github.com/rust-lang/crates.io-index|5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582
+fnv|1.0.7|registry+https://github.com/rust-lang/crates.io-index|3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1
+form_urlencoded|1.2.2|registry+https://github.com/rust-lang/crates.io-index|cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf
+futures-channel|0.3.33|registry+https://github.com/rust-lang/crates.io-index|262590f4fe6afeb0bc83be1daa64e52657fe185690a958af7f3ad0e92085c5ae
+futures-core|0.3.33|registry+https://github.com/rust-lang/crates.io-index|2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7
+futures-io|0.3.33|registry+https://github.com/rust-lang/crates.io-index|4577ecaa3c4f96589d473f679a71b596316f6641bc350038b962a5daf0085d7a
+futures-macro|0.3.33|registry+https://github.com/rust-lang/crates.io-index|2d6d3cde68c518367be28956066ddfef33813991b77a55005a69dae04bf3b10b
+futures-sink|0.3.33|registry+https://github.com/rust-lang/crates.io-index|e34418ac499d6305c2fb5ad0ed2f6ac998c5f8ca209b4510f7f94242c647e307
+futures-task|0.3.33|registry+https://github.com/rust-lang/crates.io-index|b231ed28831efb4a61a08580c4bc233ec56bc009f4cd8f52da2c3cb97df0c109
+futures-util|0.3.33|registry+https://github.com/rust-lang/crates.io-index|a77a90a256fce34da66415271e30f94ee91c57b04b8a2c042d9cf3220179deaa
+getrandom|0.2.17|registry+https://github.com/rust-lang/crates.io-index|ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0
 getrandom|0.4.3|registry+https://github.com/rust-lang/crates.io-index|300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099
 ghash|0.6.0|registry+https://github.com/rust-lang/crates.io-index|2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5
+h2|0.4.15|registry+https://github.com/rust-lang/crates.io-index|6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155
 hashbrown|0.17.1|registry+https://github.com/rust-lang/crates.io-index|ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a
 heck|0.5.0|registry+https://github.com/rust-lang/crates.io-index|2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea
 hex|0.4.3|registry+https://github.com/rust-lang/crates.io-index|7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70
+hickory-net|0.26.1|registry+https://github.com/rust-lang/crates.io-index|e2295ed2f9c31e471e1428a8f88a3f0e1f4b27c15049592138d1eebe9c35b183
+hickory-proto|0.26.1|registry+https://github.com/rust-lang/crates.io-index|0bab31817bfb44672a252e97fe81cd0c18d1b2cf892108922f6818820df8c643
+hickory-resolver|0.26.1|registry+https://github.com/rust-lang/crates.io-index|f0d58d28879ceecde6607729660c2667a081ccdc082e082675042793960f178c
+hickory-server|0.26.1|registry+https://github.com/rust-lang/crates.io-index|130236ba6abba90da6a7acf7a87b27d862b592c3145dc74bc47bf86d8ff198ec
+http|1.5.0|registry+https://github.com/rust-lang/crates.io-index|918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0
 hybrid-array|0.4.13|registry+https://github.com/rust-lang/crates.io-index|818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c
+icu_collections|2.2.0|registry+https://github.com/rust-lang/crates.io-index|2984d1cd16c883d7935b9e07e44071dca8d917fd52ecc02c04d5fa0b5a3f191c
+icu_locale_core|2.2.0|registry+https://github.com/rust-lang/crates.io-index|92219b62b3e2b4d88ac5119f8904c10f8f61bf7e95b640d25ba3075e6cac2c29
+icu_normalizer|2.2.0|registry+https://github.com/rust-lang/crates.io-index|c56e5ee99d6e3d33bd91c5d85458b6005a22140021cc324cea84dd0e72cff3b4
+icu_normalizer_data|2.2.0|registry+https://github.com/rust-lang/crates.io-index|da3be0ae77ea334f4da67c12f149704f19f81d1adf7c51cf482943e84a2bad38
+icu_properties|2.2.0|registry+https://github.com/rust-lang/crates.io-index|bee3b67d0ea5c2cca5003417989af8996f8604e34fb9ddf96208a033901e70de
+icu_properties_data|2.2.0|registry+https://github.com/rust-lang/crates.io-index|8e2bbb201e0c04f7b4b3e14382af113e17ba4f63e2c9d2ee626b720cbce54a14
+icu_provider|2.2.0|registry+https://github.com/rust-lang/crates.io-index|139c4cf31c8b5f33d7e199446eff9c1e02decfc2f0eec2c8d71f65befa45b421
+idna|1.1.0|registry+https://github.com/rust-lang/crates.io-index|3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de
+idna_adapter|1.2.2|registry+https://github.com/rust-lang/crates.io-index|cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714
 indexmap|2.14.0|registry+https://github.com/rust-lang/crates.io-index|d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9
 inout|0.2.2|registry+https://github.com/rust-lang/crates.io-index|4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7
+ipnet|2.12.1|registry+https://github.com/rust-lang/crates.io-index|6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78
 itoa|1.0.18|registry+https://github.com/rust-lang/crates.io-index|8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682
+jni|0.22.4|registry+https://github.com/rust-lang/crates.io-index|5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498
+jni-macros|0.22.4|registry+https://github.com/rust-lang/crates.io-index|a00109accc170f0bdb141fed3e393c565b6f5e072365c3bd58f5b062591560a3
+jni-sys|0.4.1|registry+https://github.com/rust-lang/crates.io-index|c6377a88cb3910bee9b0fa88d4f42e1d2da8e79915598f65fb0c7ee14c878af2
+jni-sys-macros|0.4.1|registry+https://github.com/rust-lang/crates.io-index|38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264
+js-sys|0.3.103|registry+https://github.com/rust-lang/crates.io-index|53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102
 lazy_static|1.5.0|registry+https://github.com/rust-lang/crates.io-index|bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe
 libc|0.2.189|registry+https://github.com/rust-lang/crates.io-index|3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2
 linux-raw-sys|0.12.1|registry+https://github.com/rust-lang/crates.io-index|32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53
+litemap|0.8.2|registry+https://github.com/rust-lang/crates.io-index|92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0
 lock_api|0.4.14|registry+https://github.com/rust-lang/crates.io-index|224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965
+log|0.4.33|registry+https://github.com/rust-lang/crates.io-index|0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad
 matchers|0.2.0|registry+https://github.com/rust-lang/crates.io-index|d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9
 memchr|2.8.3|registry+https://github.com/rust-lang/crates.io-index|cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98
 mio|1.2.2|registry+https://github.com/rust-lang/crates.io-index|30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427
+moka|0.12.15|registry+https://github.com/rust-lang/crates.io-index|957228ad12042ee839f93c8f257b62b4c0ab5eaae1d4fa60de53b27c9d7c5046
+num-conv|0.2.2|registry+https://github.com/rust-lang/crates.io-index|521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441
+num-traits|0.2.19|registry+https://github.com/rust-lang/crates.io-index|071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841
 once_cell|1.21.4|registry+https://github.com/rust-lang/crates.io-index|9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50
 parking_lot|0.12.5|registry+https://github.com/rust-lang/crates.io-index|93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a
 parking_lot_core|0.9.12|registry+https://github.com/rust-lang/crates.io-index|2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1
+percent-encoding|2.3.2|registry+https://github.com/rust-lang/crates.io-index|9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220
 pin-project-lite|0.2.17|registry+https://github.com/rust-lang/crates.io-index|a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd
 poly1305|0.9.1|registry+https://github.com/rust-lang/crates.io-index|6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c
 polyval|0.7.3|registry+https://github.com/rust-lang/crates.io-index|f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd
+portable-atomic|1.14.0|registry+https://github.com/rust-lang/crates.io-index|3d20d5497ef88037a52ff98267d066e7f11fcc5e99bbfbd58a42336193aacec3
+potential_utf|0.1.5|registry+https://github.com/rust-lang/crates.io-index|0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564
+powerfmt|0.2.0|registry+https://github.com/rust-lang/crates.io-index|439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391
+prefix-trie|0.8.4|registry+https://github.com/rust-lang/crates.io-index|4cf6e3177f0684016a5c209b00882e15f8bdd3f3bb48f0491df10cd102d0c6e7
 proc-macro2|1.0.107|registry+https://github.com/rust-lang/crates.io-index|985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9
 prometheus-client|0.25.0|registry+https://github.com/rust-lang/crates.io-index|ba70bf887030e45213b4a95c9b08d5a450b157f87c1d63661ed0847a12fa2aad
 prometheus-client-derive-encode|0.5.0|registry+https://github.com/rust-lang/crates.io-index|9adf1691c04c0a5ff46ff8f262b58beb07b0dbb61f96f9f54f6cbd82106ed87f
 quote|1.0.47|registry+https://github.com/rust-lang/crates.io-index|1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001
 r-efi|6.0.0|registry+https://github.com/rust-lang/crates.io-index|f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf
+rand|0.10.2|registry+https://github.com/rust-lang/crates.io-index|c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80
+rand_core|0.10.1|registry+https://github.com/rust-lang/crates.io-index|63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69
 redox_syscall|0.5.18|registry+https://github.com/rust-lang/crates.io-index|ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d
 regex-automata|0.4.16|registry+https://github.com/rust-lang/crates.io-index|8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad
 regex-syntax|0.8.11|registry+https://github.com/rust-lang/crates.io-index|d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4
+ring|0.17.14|registry+https://github.com/rust-lang/crates.io-index|a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7
+rustc_version|0.4.1|registry+https://github.com/rust-lang/crates.io-index|cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92
 rustix|1.1.4|registry+https://github.com/rust-lang/crates.io-index|b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190
+rustls|0.23.43|registry+https://github.com/rust-lang/crates.io-index|0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06
+rustls-pki-types|1.15.1|registry+https://github.com/rust-lang/crates.io-index|2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96
+rustls-webpki|0.103.13|registry+https://github.com/rust-lang/crates.io-index|61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e
+rustversion|1.0.23|registry+https://github.com/rust-lang/crates.io-index|cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f
+same-file|1.0.6|registry+https://github.com/rust-lang/crates.io-index|93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502
 scopeguard|1.2.0|registry+https://github.com/rust-lang/crates.io-index|94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49
+semver|1.0.28|registry+https://github.com/rust-lang/crates.io-index|8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd
 serde|1.0.229|registry+https://github.com/rust-lang/crates.io-index|4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba
 serde_core|1.0.229|registry+https://github.com/rust-lang/crates.io-index|67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48
 serde_derive|1.0.229|registry+https://github.com/rust-lang/crates.io-index|e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348
@@ -90,17 +155,30 @@ shadowsocks-crypto|0.7.0||
 sharded-slab|0.1.7|registry+https://github.com/rust-lang/crates.io-index|f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6
 shlex|2.0.1|registry+https://github.com/rust-lang/crates.io-index|f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba
 signal-hook-registry|1.4.8|registry+https://github.com/rust-lang/crates.io-index|c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b
+simd_cesu8|1.2.0|registry+https://github.com/rust-lang/crates.io-index|11031e251abf8611c80f460e19dbdeb54a66db918e49c65a7065b46ac7aec520
+simdutf8|0.1.5|registry+https://github.com/rust-lang/crates.io-index|e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e
+slab|0.4.12|registry+https://github.com/rust-lang/crates.io-index|0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5
 smallvec|1.15.2|registry+https://github.com/rust-lang/crates.io-index|8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90
 socket2|0.6.5|registry+https://github.com/rust-lang/crates.io-index|c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4
+stable_deref_trait|1.2.1|registry+https://github.com/rust-lang/crates.io-index|6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596
 subtle|2.6.1|registry+https://github.com/rust-lang/crates.io-index|13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292
 syn|2.0.119|registry+https://github.com/rust-lang/crates.io-index|872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297
 syn|3.0.3|registry+https://github.com/rust-lang/crates.io-index|53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3
+synstructure|0.13.2|registry+https://github.com/rust-lang/crates.io-index|728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2
+tagptr|0.2.0|registry+https://github.com/rust-lang/crates.io-index|7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417
 tempfile|3.27.0|registry+https://github.com/rust-lang/crates.io-index|32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd
 thiserror|2.0.19|registry+https://github.com/rust-lang/crates.io-index|09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9
 thiserror-impl|2.0.19|registry+https://github.com/rust-lang/crates.io-index|43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd
 thread_local|1.1.10|registry+https://github.com/rust-lang/crates.io-index|1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070
+time|0.3.55|registry+https://github.com/rust-lang/crates.io-index|cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134
+time-core|0.1.9|registry+https://github.com/rust-lang/crates.io-index|9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109
+tinystr|0.8.3|registry+https://github.com/rust-lang/crates.io-index|c8323304221c2a851516f22236c5722a72eaa19749016521d6dff0824447d96d
+tinyvec|1.12.0|registry+https://github.com/rust-lang/crates.io-index|bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f
+tinyvec_macros|0.1.1|registry+https://github.com/rust-lang/crates.io-index|1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20
 tokio|1.53.1|registry+https://github.com/rust-lang/crates.io-index|202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed
 tokio-macros|2.7.1|registry+https://github.com/rust-lang/crates.io-index|6328af13490e73a9b4694030fafd93f8c8c6a9dede33e821c3fc63eddf8042ba
+tokio-rustls|0.26.4|registry+https://github.com/rust-lang/crates.io-index|1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61
+tokio-util|0.7.19|registry+https://github.com/rust-lang/crates.io-index|494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52
 toml|1.1.3+spec-1.1.0|registry+https://github.com/rust-lang/crates.io-index|53c96ecdfa941c8fc4fcaed14f99ada8ebed502eef533015095a07e3301d4c3c
 toml_datetime|1.1.1+spec-1.1.0|registry+https://github.com/rust-lang/crates.io-index|3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7
 toml_parser|1.1.2+spec-1.1.0|registry+https://github.com/rust-lang/crates.io-index|a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526
@@ -112,14 +190,44 @@ tracing-subscriber|0.3.23|registry+https://github.com/rust-lang/crates.io-index|
 typenum|1.20.1|registry+https://github.com/rust-lang/crates.io-index|b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20
 unicode-ident|1.0.24|registry+https://github.com/rust-lang/crates.io-index|e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75
 universal-hash|0.6.1|registry+https://github.com/rust-lang/crates.io-index|f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96
+untrusted|0.9.0|registry+https://github.com/rust-lang/crates.io-index|8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1
+url|2.5.8|registry+https://github.com/rust-lang/crates.io-index|ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed
+utf8_iter|1.0.4|registry+https://github.com/rust-lang/crates.io-index|b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be
+uuid|1.24.0|registry+https://github.com/rust-lang/crates.io-index|bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239
 valuable|0.1.1|registry+https://github.com/rust-lang/crates.io-index|ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65
+walkdir|2.5.0|registry+https://github.com/rust-lang/crates.io-index|29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b
 wasi|0.11.1+wasi-snapshot-preview1|registry+https://github.com/rust-lang/crates.io-index|ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b
+wasm-bindgen|0.2.126|registry+https://github.com/rust-lang/crates.io-index|4b067c0c11094aef6b7a801c1e34a26affafdf3d051dba08456b868789aaf9a4
+wasm-bindgen-macro|0.2.126|registry+https://github.com/rust-lang/crates.io-index|167ce5e579f6bcf889c4f7175a8a5a585de84e8ff93976ce393efa5f2837aab1
+wasm-bindgen-macro-support|0.2.126|registry+https://github.com/rust-lang/crates.io-index|f3997c7839262f4ef12cf90b818d6340c18e80f263f1a94bf157d0ec4420380e
+wasm-bindgen-shared|0.2.126|registry+https://github.com/rust-lang/crates.io-index|dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24
+webpki-roots|1.0.9|registry+https://github.com/rust-lang/crates.io-index|7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a
+winapi-util|0.1.11|registry+https://github.com/rust-lang/crates.io-index|c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22
 windows-link|0.2.1|registry+https://github.com/rust-lang/crates.io-index|f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5
+windows-sys|0.52.0|registry+https://github.com/rust-lang/crates.io-index|282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d
 windows-sys|0.61.2|registry+https://github.com/rust-lang/crates.io-index|ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc
+windows-targets|0.52.6|registry+https://github.com/rust-lang/crates.io-index|9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973
+windows_aarch64_gnullvm|0.52.6|registry+https://github.com/rust-lang/crates.io-index|32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3
+windows_aarch64_msvc|0.52.6|registry+https://github.com/rust-lang/crates.io-index|09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469
+windows_i686_gnu|0.52.6|registry+https://github.com/rust-lang/crates.io-index|8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b
+windows_i686_gnullvm|0.52.6|registry+https://github.com/rust-lang/crates.io-index|0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66
+windows_i686_msvc|0.52.6|registry+https://github.com/rust-lang/crates.io-index|240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66
+windows_x86_64_gnu|0.52.6|registry+https://github.com/rust-lang/crates.io-index|147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78
+windows_x86_64_gnullvm|0.52.6|registry+https://github.com/rust-lang/crates.io-index|24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d
+windows_x86_64_msvc|0.52.6|registry+https://github.com/rust-lang/crates.io-index|589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec
 winnow|1.0.4|registry+https://github.com/rust-lang/crates.io-index|23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81
+writeable|0.6.3|registry+https://github.com/rust-lang/crates.io-index|1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4
+yoke|0.8.3|registry+https://github.com/rust-lang/crates.io-index|709fe23a0424b6a435d82152b1bd3fdfb0833487d5fa90d05d42762a9891fef5
+yoke-derive|0.8.2|registry+https://github.com/rust-lang/crates.io-index|de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e
+zerofrom|0.1.8|registry+https://github.com/rust-lang/crates.io-index|0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272
+zerofrom-derive|0.1.7|registry+https://github.com/rust-lang/crates.io-index|11532158c46691caf0f2593ea8358fed6bbf68a0315e80aae9bd41fbade684a1
 zeroize|1.9.0|registry+https://github.com/rust-lang/crates.io-index|e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e
 zeroize_derive|1.5.0|registry+https://github.com/rust-lang/crates.io-index|3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328
-zmij|1.0.23|registry+https://github.com/rust-lang/crates.io-index|29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"#;
+zerotrie|0.2.4|registry+https://github.com/rust-lang/crates.io-index|0f9152d31db0792fa83f70fb2f83148effb5c1f5b8c7686c3459e361d9bc20bf
+zerovec|0.11.6|registry+https://github.com/rust-lang/crates.io-index|90f911cbc359ab6af17377d242225f4d75119aec87ea711a880987b18cd7b239
+zerovec-derive|0.11.3|registry+https://github.com/rust-lang/crates.io-index|625dc425cab0dca6dc3c3319506e6593dcb08a9f387ea3b284dbd52a92c40555
+zmij|1.0.23|registry+https://github.com/rust-lang/crates.io-index|29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b
+"#;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct LockIdentity {
@@ -274,8 +382,8 @@ fn approved_lock_identities() -> Vec<LockIdentity> {
         .collect();
     assert_eq!(
         identities.len(),
-        115,
-        "the approved workspace baseline must contain 115 identities"
+        222,
+        "the approved workspace baseline must contain 222 identities"
     );
     let mut sorted = identities.clone();
     sorted.sort();
@@ -381,7 +489,7 @@ fn exact_binary_tokio_boundary(
     let root_tokio_lines: Vec<_> = root
         .lines()
         .map(str::trim)
-        .filter(|line| line.contains("tokio"))
+        .filter(|line| line.starts_with("tokio = "))
         .collect();
     if root_tokio_lines != [ROOT_TOKIO_DECLARATION] {
         return Err("root contains an extra or moved Tokio declaration".to_owned());
@@ -470,12 +578,25 @@ fn toolchain_and_msrv_are_pinned() {
 
     let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("root manifest");
     assert!(manifest.contains("edition = \"2024\""));
-    assert!(manifest.contains("rust-version = \"1.85.0\""));
+    assert!(manifest.contains("rust-version = \"1.88.0\""));
     assert!(manifest.contains("resolver = \"3\""));
 
     let cargo_config =
         fs::read_to_string(root.join(".cargo/config.toml")).expect("Cargo configuration");
     assert!(cargo_config.contains("incompatible-rust-versions = \"fallback\""));
+
+    let workflow = fs::read_to_string(root.join(".github/workflows/m0.yml")).expect("workflow");
+    for required in [
+        "rustup toolchain install 1.88.0 --profile minimal",
+        "rustc +1.88.0 -Vv",
+        "cargo +1.88.0 -V",
+        "cargo +1.88.0 check --workspace --all-targets --locked",
+        "cargo +1.88.0 build --workspace --bins --locked",
+        "cargo +1.88.0 test --workspace --locked",
+    ] {
+        assert!(workflow.contains(required), "missing MSRV gate: {required}");
+    }
+    assert!(!workflow.contains("1.85.0"));
 }
 
 #[test]
@@ -492,6 +613,9 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "tracing-subscriber = { version = \"=0.3.23\", default-features = false, features = [\"fmt\", \"json\", \"env-filter\"] }",
         "prometheus-client = { version = \"=0.25.0\", default-features = false }",
         "shadowsocks-crypto = { version = \"=0.7.0\", default-features = false, features = [\"v2\"] }",
+        "hickory-resolver = { version = \"=0.26.1\", default-features = false, features = [\"tokio\", \"tls-ring\", \"https-ring\", \"webpki-roots\"] }",
+        "hickory-proto = { version = \"=0.26.1\", default-features = false, features = [\"std\"] }",
+        "hickory-server = { version = \"=0.26.1\", default-features = false }",
         "aes-gcm = { version = \"=0.11.0\", default-features = false, features = [\"aes\", \"bytes\", \"zeroize\"] }",
         "chacha20poly1305 = { version = \"=0.11.0\", default-features = false, features = [\"bytes\", \"zeroize\"] }",
         "blake3 = { version = \"=1.8.5\", default-features = false, features = [\"std\", \"zeroize\"] }",
@@ -530,12 +654,16 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "ferrum2-config",
         "ferrum2-core",
         "ferrum2-crypto",
+        "ferrum2-dns",
         "ferrum2-observability",
         "ferrum2-runtime",
         "ferrum2-shadowsocks",
         "ferrum2-socks5",
         "getrandom",
         "hex",
+        "hickory-proto",
+        "hickory-resolver",
+        "hickory-server",
         "prometheus-client",
         "serde",
         "serde_json",
@@ -604,6 +732,109 @@ fn crypto_manifest_has_one_normal_backend_and_dev_only_oracles() {
     assert!(
         !manifest.contains("[features]"),
         "crypto backend selection features are forbidden"
+    );
+}
+
+#[test]
+fn hickory_graph_and_features_match_the_approved_dns_policy() {
+    let root = workspace_root();
+    let manifest =
+        fs::read_to_string(root.join("crates/ferrum2-dns/Cargo.toml")).expect("DNS manifest");
+    assert_eq!(
+        dependency_table(&manifest, "[dependencies]").expect("DNS dependencies"),
+        BTreeMap::from([
+            ("hickory-proto.workspace".to_owned(), "true".to_owned()),
+            ("hickory-resolver.workspace".to_owned(), "true".to_owned()),
+            ("hickory-server.workspace".to_owned(), "true".to_owned()),
+        ])
+    );
+    assert!(!manifest.contains("[features]"));
+
+    let metadata = metadata();
+    let packages = metadata["packages"].as_array().expect("packages");
+    let hickory: BTreeSet<_> = packages
+        .iter()
+        .filter_map(|package| {
+            let name = package["name"].as_str().expect("package name");
+            name.starts_with("hickory-")
+                .then(|| (name, package["version"].as_str().expect("package version")))
+        })
+        .collect();
+    assert_eq!(
+        hickory,
+        BTreeSet::from([
+            ("hickory-net", "0.26.1"),
+            ("hickory-proto", "0.26.1"),
+            ("hickory-resolver", "0.26.1"),
+            ("hickory-server", "0.26.1"),
+        ])
+    );
+
+    for (name, expected_features) in [
+        (
+            "hickory-net",
+            &[
+                "__https",
+                "__tls",
+                "https-ring",
+                "tls-ring",
+                "tokio",
+                "webpki-roots",
+            ][..],
+        ),
+        ("hickory-proto", &["access-control", "serde", "std"][..]),
+        (
+            "hickory-resolver",
+            &[
+                "__https",
+                "__tls",
+                "https-ring",
+                "tls-ring",
+                "tokio",
+                "webpki-roots",
+            ][..],
+        ),
+        ("hickory-server", &[][..]),
+    ] {
+        let package_id = unique_registry_package_id(&metadata, name, "0.26.1");
+        let package = packages
+            .iter()
+            .find(|package| package["id"] == package_id)
+            .expect("Hickory package");
+        assert_eq!(
+            package["source"],
+            "registry+https://github.com/rust-lang/crates.io-index"
+        );
+        assert_eq!(package["rust_version"], "1.88");
+        assert_eq!(package["license"], "MIT OR Apache-2.0");
+
+        let node = resolve_node(&metadata, &package_id);
+        let actual: BTreeSet<_> = node["features"]
+            .as_array()
+            .expect("resolved Hickory features")
+            .iter()
+            .map(|feature| feature.as_str().expect("feature name"))
+            .collect();
+        assert_eq!(actual, expected_features.iter().copied().collect());
+    }
+
+    let package_names: BTreeSet<_> = packages
+        .iter()
+        .map(|package| package["name"].as_str().expect("package name"))
+        .collect();
+    for forbidden in ["aws-lc-rs", "aws-lc-sys", "quinn", "h3", "h3-quinn"] {
+        assert!(
+            !package_names.contains(forbidden),
+            "forbidden DNS dependency: {forbidden}"
+        );
+    }
+    assert_eq!(
+        packages
+            .iter()
+            .filter(|package| package["name"] == "ring")
+            .count(),
+        1,
+        "the DNS TLS graph must resolve one ring provider"
     );
 }
 
@@ -1425,7 +1656,7 @@ fn metadata_and_lock_prove_one_normal_backend_and_dev_only_oracles() {
             "blake3".to_owned(),
             "bytes".to_owned(),
             "chacha20poly1305".to_owned(),
-            "getrandom".to_owned(),
+            "getrandom 0.4.3".to_owned(),
             "hex".to_owned(),
             "serde_json".to_owned(),
             "shadowsocks-crypto".to_owned(),
@@ -1440,7 +1671,11 @@ fn resolved_crypto_feature_sets_are_exact() {
     for (name, version, expected_features) in [
         ("aes-gcm", "0.11.0", &["aes", "bytes", "zeroize"][..]),
         ("chacha20poly1305", "0.11.0", &["bytes", "zeroize"][..]),
-        ("chacha20", "0.10.1", &["cipher", "xchacha", "zeroize"][..]),
+        (
+            "chacha20",
+            "0.10.1",
+            &["cipher", "rng", "xchacha", "zeroize"][..],
+        ),
         ("poly1305", "0.9.1", &[][..]),
         ("aes", "0.9.1", &["zeroize"][..]),
         ("ghash", "0.6.0", &["zeroize"][..]),
@@ -1448,7 +1683,7 @@ fn resolved_crypto_feature_sets_are_exact() {
         (
             "zeroize",
             "1.9.0",
-            &["aarch64", "alloc", "derive", "zeroize_derive"][..],
+            &["aarch64", "alloc", "default", "derive", "zeroize_derive"][..],
         ),
     ] {
         let package_id = unique_registry_package_id(&metadata, name, version);
@@ -1475,8 +1710,8 @@ fn lock_package_identities_exactly_match_the_approved_workspace_baseline() {
 
     assert_eq!(
         actual.len(),
-        115,
-        "candidate lock must contain 115 packages"
+        222,
+        "candidate lock must contain 222 packages"
     );
     assert_eq!(
         actual, expected,
@@ -1553,7 +1788,7 @@ fn every_project_package_inherits_repository_policy() {
             .expect("member package");
         assert_eq!(package["version"], "0.1.0");
         assert_eq!(package["edition"], "2024");
-        assert_eq!(package["rust_version"], "1.85.0");
+        assert_eq!(package["rust_version"], "1.88.0");
         assert_eq!(package["license"], "GPL-3.0-only");
         assert_eq!(
             package["publish"],

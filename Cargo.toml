@@ -8,6 +8,7 @@ members = [
     "crates/ferrum2-socks5",
     "crates/ferrum2-runtime",
     "crates/ferrum2-config",
+    "crates/ferrum2-dns",
     "crates/ferrum2-observability",
     "tests/m0-harness",
     "tools/ferrum2-m4-qualification",
@@ -18,7 +19,7 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.88.0"
 license = "GPL-3.0-only"
 publish = false
 
@@ -29,8 +30,12 @@ ferrum2-shadowsocks = { path = "crates/ferrum2-shadowsocks", version = "=0.1.0" 
 ferrum2-socks5 = { path = "crates/ferrum2-socks5", version = "=0.1.0" }
 ferrum2-runtime = { path = "crates/ferrum2-runtime", version = "=0.1.0" }
 ferrum2-config = { path = "crates/ferrum2-config", version = "=0.1.0" }
+ferrum2-dns = { path = "crates/ferrum2-dns", version = "=0.1.0" }
 ferrum2-observability = { path = "crates/ferrum2-observability", version = "=0.1.0" }
 shadowsocks-crypto = { version = "=0.7.0", default-features = false, features = ["v2"] }
+hickory-resolver = { version = "=0.26.1", default-features = false, features = ["tokio", "tls-ring", "https-ring", "webpki-roots"] }
+hickory-proto = { version = "=0.26.1", default-features = false, features = ["std"] }
+hickory-server = { version = "=0.26.1", default-features = false }
 
 tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 bytes = "=1.12.1"
