@@ -5091,6 +5091,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dns_proxy_first_match_direct_and_detoured_transports() {
+        let socks = reserve_address();
+        let shadowsocks = reserve_address();
+        let dns = reserve_address();
+        let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("DNS upstream");
+        let upstream_address = upstream.local_addr().expect("upstream address");
+        let (path, mut config) = client_test_config(socks, shadowsocks);
+        config.dns = Some(ferrum2_config::DnsConfig {
+            inbounds: vec![ferrum2_config::DnsInboundConfig {
+                listen: SocketAddr::V4(dns),
+            }],
+            servers: vec![ferrum2_config::DnsServerConfig {
+                transport: ferrum2_config::DnsTransport::Udp,
+                address: upstream_address,
+                server_name: None,
+                path: None,
+                detour: None,
+            }],
+            route: ferrum2_core::route::ActionTable::new(Vec::new(), 0).expect("DNS final action"),
+            timeout: Duration::from_secs(1),
+            max_inflight: std::num::NonZeroU16::new(1).expect("DNS admission"),
+        });
+        let registry = OwnerRegistry::new();
+        let (stop, task) = spawn_test_client(config, &registry);
+        let upstream_task = tokio::spawn(async move {
+            let mut request = [0_u8; 4096];
+            let (length, peer) = upstream.recv_from(&mut request).await.expect("DNS request");
+            let mut response = Vec::from(&request[..length]);
+            response[2] = 0x81;
+            response[3] = 0x80;
+            response[6] = 0;
+            response[7] = 1;
+            response.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 192, 0, 2, 44]);
+            upstream
+                .send_to(&response, peer)
+                .await
+                .expect("DNS response");
+        });
+        let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("DNS client");
+        let query = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, b's',
+            b'e', b'l', b'e', b'c', b't', b'e', b'd', 0x07, b'e', b'x', b'a', b'm', b'p', b'l',
+            b'e', 0x00, 0x00, 0x01, 0x00, 0x01,
+        ];
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut response = [0_u8; 4096];
+        let length = loop {
+            client.send_to(&query, dns).await.expect("proxy query");
+            if let Ok(Ok((length, _))) =
+                tokio::time::timeout(Duration::from_millis(20), client.recv_from(&mut response))
+                    .await
+            {
+                break length;
+            }
+            assert!(Instant::now() < deadline, "DNS proxy never bound");
+        };
+        assert_eq!(&response[..2], &[0x12, 0x34]);
+        assert_eq!(&response[length - 4..length], &[192, 0, 2, 44]);
+        upstream_task.await.expect("upstream task");
+        stop.send(()).expect("stop client");
+        assert_eq!(task.await.expect("client task"), Ok(()));
+        drop(client);
+        drop(UdpSocket::bind(dns).await.expect("DNS UDP rebind"));
+        drop(TcpListener::bind(dns).await.expect("DNS TCP rebind"));
+        assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+        std::fs::remove_file(path).expect("remove config");
+    }
+
+    #[tokio::test]
     async fn routed_tcp_selects_after_target_and_never_falls_back() {
         let upstreams = [
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0))

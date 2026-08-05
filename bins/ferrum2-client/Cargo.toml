@@ -14,6 +14,7 @@ path = "src/main.rs"
 ferrum2-config.workspace = true
 ferrum2-core.workspace = true
 ferrum2-crypto.workspace = true
+ferrum2-dns.workspace = true
 ferrum2-observability.workspace = true
 ferrum2-runtime.workspace = true
 ferrum2-shadowsocks.workspace = true
