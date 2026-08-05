@@ -396,6 +396,7 @@ dependencies = [
  "ferrum2-runtime",
  "ferrum2-shadowsocks",
  "ferrum2-socks5",
+ "hickory-proto",
  "tokio",
  "tracing",
 ]
@@ -441,6 +442,7 @@ name = "ferrum2-dns"
 version = "0.1.0"
 dependencies = [
  "ferrum2-config",
+ "futures-util",
  "h2",
  "hickory-proto",
  "hickory-resolver",

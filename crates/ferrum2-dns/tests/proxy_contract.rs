@@ -5,35 +5,64 @@ use std::time::Duration;
 
 use ferrum2_config::{DnsServerConfig, DnsTransport};
 use ferrum2_dns::{DnsProxy, DnsProxyListeners, ProxyTransport, TaggedResolver};
-use hickory_proto::op::{Message, MessageType, OpCode, Query};
-use hickory_proto::rr::rdata::A;
+use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::rr::rdata::{A, SOA};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
 #[tokio::test]
-async fn valid_udp_query_uses_selected_server_and_returns_response() {
+async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
     let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("upstream bind");
     let upstream_address = upstream.local_addr().expect("upstream address");
     let upstream_task = tokio::spawn(async move {
         let mut wire = [0_u8; 4096];
-        let (length, peer) = upstream.recv_from(&mut wire).await.expect("query");
-        let request = Message::from_vec(&wire[..length]).expect("Hickory request");
-        let query = request.queries.first().expect("one question").clone();
-        let mut response = Message::new(request.id, MessageType::Response, OpCode::Query);
-        response
-            .add_query(query.clone())
-            .add_answer(Record::from_rdata(
-                query.name().clone(),
-                30,
-                RData::A(A(Ipv4Addr::new(192, 0, 2, 44))),
-            ));
-        upstream
-            .send_to(&response.to_vec().expect("response encode"), peer)
-            .await
-            .expect("response send");
+        for index in 0..2 {
+            let (length, peer) = upstream.recv_from(&mut wire).await.expect("query");
+            let request = Message::from_vec(&wire[..length]).expect("Hickory request");
+            let query = request.queries.first().expect("one question").clone();
+            let mut response = Message::new(request.id, MessageType::Response, OpCode::Query);
+            response.add_query(query.clone());
+            if index == 0 {
+                response.add_answer(Record::from_rdata(
+                    query.name().clone(),
+                    30,
+                    RData::A(A(Ipv4Addr::new(192, 0, 2, 44))),
+                ));
+            } else {
+                response.metadata.response_code = ResponseCode::NXDomain;
+                response
+                    .add_authority(Record::from_rdata(
+                        Name::from_ascii("example.").expect("authority owner"),
+                        60,
+                        RData::SOA(SOA::new(
+                            Name::from_ascii("ns.example.").expect("primary name"),
+                            Name::from_ascii("hostmaster.example.").expect("responsible name"),
+                            7,
+                            60,
+                            60,
+                            300,
+                            30,
+                        )),
+                    ))
+                    .add_additional(Record::from_rdata(
+                        Name::from_ascii("ns.example.").expect("additional owner"),
+                        60,
+                        RData::A(A(Ipv4Addr::new(198, 51, 100, 53))),
+                    ))
+                    .set_edns({
+                        let mut edns = Edns::new();
+                        edns.set_max_payload(1232);
+                        edns
+                    });
+            }
+            upstream
+                .send_to(&response.to_vec().expect("response encode"), peer)
+                .await
+                .expect("response send");
+        }
     });
     let server = DnsServerConfig {
         transport: DnsTransport::Udp,
@@ -53,8 +82,11 @@ async fn valid_udp_query_uses_selected_server_and_returns_response() {
     let proxy = DnsProxy::new(Arc::clone(&resolver), |inbound, transport, name| {
         assert_eq!(inbound, 3);
         assert_eq!(transport, ProxyTransport::Udp);
-        assert_eq!(name, &Name::from_ascii("selected.example.").expect("name"));
-        0
+        assert!(
+            name == &Name::from_ascii("selected.example.").expect("positive name")
+                || name == &Name::from_ascii("missing.example.").expect("negative name")
+        );
+        Some(0)
     });
     let mut request = Message::new(0x1234, MessageType::Query, OpCode::Query);
     request.add_query(Query::query(
@@ -76,6 +108,35 @@ async fn valid_udp_query_uses_selected_server_and_returns_response() {
         response.answers.first().map(|record| &record.data),
         Some(&RData::A(A(Ipv4Addr::new(192, 0, 2, 44))))
     );
+
+    let mut request = Message::new(0x4321, MessageType::Query, OpCode::Query);
+    request.add_query(Query::query(
+        Name::from_ascii("missing.example.").expect("missing query name"),
+        RecordType::A,
+    ));
+    let response = proxy
+        .answer(
+            3,
+            ProxyTransport::Udp,
+            &request.to_vec().expect("negative request encode"),
+        )
+        .await
+        .expect("safe negative response");
+    let response = Message::from_vec(&response).expect("Hickory negative response");
+    assert_eq!(response.id, 0x4321);
+    assert_eq!(response.metadata.response_code, ResponseCode::NXDomain);
+    assert!(matches!(
+        response.authorities.as_slice(),
+        [Record {
+            data: RData::SOA(_),
+            ..
+        }]
+    ));
+    assert_eq!(
+        response.additionals.first().map(|record| &record.data),
+        Some(&RData::A(A(Ipv4Addr::new(198, 51, 100, 53))))
+    );
+    assert_eq!(response.edns.as_ref().map(Edns::max_payload), Some(1232));
 
     upstream_task.await.expect("upstream task");
     drop(proxy);
@@ -138,7 +199,7 @@ async fn tcp_listener_frames_one_query_and_shuts_down_cleanly() {
     let resolver = Arc::new(resolver);
     let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), |_, transport, _| {
         assert_eq!(transport, ProxyTransport::Tcp);
-        0
+        Some(0)
     }));
     let reserved = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve");
     let listen = reserved.local_addr().expect("listen");

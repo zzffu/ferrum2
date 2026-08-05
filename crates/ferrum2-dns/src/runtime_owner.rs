@@ -6,6 +6,7 @@ use std::thread::JoinHandle as ThreadJoinHandle;
 use std::time::Duration;
 
 use ferrum2_config::DnsServerConfig;
+use hickory_proto::op::Message;
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::lookup::Lookup;
 use tokio::runtime::Builder;
@@ -56,6 +57,13 @@ enum Command {
         record_type: RecordType,
         deadline: Instant,
         reply: oneshot::Sender<Result<Lookup, DnsError>>,
+        permit: OwnedSemaphorePermit,
+    },
+    Query {
+        server: usize,
+        request: Message,
+        deadline: Instant,
+        reply: oneshot::Sender<Result<Message, DnsError>>,
         permit: OwnedSemaphorePermit,
     },
 }
@@ -243,6 +251,41 @@ impl TaggedResolver {
         }
     }
 
+    /// Sends one already-validated single-question message without discarding response sections.
+    pub fn query(
+        &self,
+        server: usize,
+        request: Message,
+    ) -> impl std::future::Future<Output = Result<Message, DnsError>> + Send + 'static {
+        let server_count = self.server_count;
+        let timeout = self.timeout;
+        let admission = Arc::clone(&self.admission);
+        let sender = self.sender.clone();
+        async move {
+            if server >= server_count {
+                return Err(DnsError::InvalidServer);
+            }
+            let deadline = Instant::now() + timeout;
+            let permit = admission.try_acquire_owned().map_err(|_| DnsError::Busy)?;
+            let (reply, response) = oneshot::channel();
+            let command = Command::Query {
+                server,
+                request,
+                deadline,
+                reply,
+                permit,
+            };
+            tokio::time::timeout_at(deadline, sender.ok_or(DnsError::Shutdown)?.send(command))
+                .await
+                .map_err(|_| DnsError::Timeout)?
+                .map_err(|_| DnsError::Shutdown)?;
+            tokio::time::timeout_at(deadline, response)
+                .await
+                .map_err(|_| DnsError::Timeout)?
+                .map_err(|_| DnsError::Shutdown)?
+        }
+    }
+
     /// Returns stable, low-cardinality owner counts.
     pub fn stats(&self) -> RuntimeStats {
         runtime_stats(&self.counters)
@@ -357,6 +400,36 @@ async fn run_commands(
                         }
                     });
                 }
+                Some(Command::Query { server, request, deadline, mut reply, permit }) => {
+                    let plan = servers[server].plan_snapshot();
+                    let servers = Arc::clone(&servers);
+                    let egress = Arc::clone(&egress);
+                    let counters = Arc::clone(&counters);
+                    let tasks = TaskSet::default();
+                    let query_tasks = tasks.clone();
+                    let mut cancelled = cancel_rx.clone();
+                    queries.spawn(async move {
+                        let _permit = permit;
+                        let _guard = QueryGuard::new(Arc::clone(&counters));
+                        let provider = FerrumRuntimeProvider::new(
+                            egress, plan, deadline, tasks, counters,
+                        );
+                        let result = tokio::select! {
+                            _ = cancelled.changed() => Err(DnsError::Shutdown),
+                            _ = reply.closed() => Err(DnsError::Shutdown),
+                            result = resolver::query(
+                                &servers[server],
+                                request,
+                                deadline,
+                                provider,
+                            ) => result,
+                        };
+                        query_tasks.abort_and_join().await;
+                        if !reply.is_closed() {
+                            let _ = reply.send(result);
+                        }
+                    });
+                }
                 None => break,
             }
         }
@@ -365,8 +438,14 @@ async fn run_commands(
     receiver.close();
     let _ = cancel.send(true);
     while let Ok(command) = receiver.try_recv() {
-        let Command::Lookup { reply, .. } = command;
-        let _ = reply.send(Err(DnsError::Shutdown));
+        match command {
+            Command::Lookup { reply, .. } => {
+                let _ = reply.send(Err(DnsError::Shutdown));
+            }
+            Command::Query { reply, .. } => {
+                let _ = reply.send(Err(DnsError::Shutdown));
+            }
+        }
     }
     while queries.join_next().await.is_some() {}
 

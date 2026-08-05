@@ -4,14 +4,18 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::StreamExt;
+use hickory_proto::op::SerialMessage;
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{DNSClass, Name};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use hickory_resolver::net::runtime::iocompat::AsyncIoTokioAsStd;
+use hickory_resolver::net::tcp::TcpStream as HickoryTcpStream;
+use hickory_resolver::net::xfer::DnsStreamHandle;
 use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
-use crate::{DnsError, TaggedResolver};
+use crate::TaggedResolver;
 
 /// Network on which a client proxy question was received.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,7 +26,7 @@ pub enum ProxyTransport {
     Tcp,
 }
 
-type SelectServer = dyn Fn(usize, ProxyTransport, &Name) -> usize + Send + Sync;
+type SelectServer = dyn Fn(usize, ProxyTransport, &Name) -> Option<usize> + Send + Sync;
 
 /// Hickory-backed DNS proxy request seam.
 pub struct DnsProxy {
@@ -39,6 +43,14 @@ pub struct DnsProxyListeners {
     idle_timeout: Duration,
 }
 
+/// Paired sockets prepared before the resolver owner starts.
+pub struct DnsProxySockets {
+    udp: Vec<UdpSocket>,
+    tcp: Vec<TcpListener>,
+    connections: Arc<Semaphore>,
+    idle_timeout: Duration,
+}
+
 impl DnsProxyListeners {
     /// Atomically binds one UDP and one bounded-backlog TCP listener per address.
     pub async fn bind(
@@ -48,19 +60,11 @@ impl DnsProxyListeners {
         idle_timeout: Duration,
         proxy: Arc<DnsProxy>,
     ) -> io::Result<Self> {
-        let mut udp = Vec::with_capacity(inbounds.len());
-        let mut tcp = Vec::with_capacity(inbounds.len());
-        for address in inbounds {
-            udp.push(UdpSocket::bind(address).await?);
-            tcp.push(bind_tcp(address, backlog)?);
-        }
-        Ok(Self {
-            udp,
-            tcp,
-            proxy,
-            connections: Arc::new(Semaphore::new(usize::from(max_connections.get()))),
-            idle_timeout,
-        })
+        Ok(
+            DnsProxySockets::bind(inbounds, backlog, max_connections, idle_timeout)
+                .await?
+                .with_proxy(proxy),
+        )
     }
 
     /// Runs the fixed listener set until shutdown or a required listener fails.
@@ -69,9 +73,10 @@ impl DnsProxyListeners {
         shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> io::Result<()> {
         let mut listeners = JoinSet::new();
+        let (cancel, cancel_rx) = watch::channel(false);
         for (inbound, socket) in self.udp.into_iter().enumerate() {
             let proxy = Arc::clone(&self.proxy);
-            listeners.spawn(udp_loop(socket, inbound, proxy));
+            listeners.spawn(udp_loop(socket, inbound, proxy, cancel_rx.clone()));
         }
         for (inbound, listener) in self.tcp.into_iter().enumerate() {
             let proxy = Arc::clone(&self.proxy);
@@ -82,6 +87,7 @@ impl DnsProxyListeners {
                 proxy,
                 connections,
                 self.idle_timeout,
+                cancel_rx.clone(),
             ));
         }
         tokio::pin!(shutdown);
@@ -93,9 +99,43 @@ impl DnsProxyListeners {
                 Some(Err(_)) | None => Err(io::Error::other("DNS listener stopped")),
             },
         };
-        listeners.abort_all();
+        let _ = cancel.send(true);
         while listeners.join_next().await.is_some() {}
         result
+    }
+}
+
+impl DnsProxySockets {
+    /// Binds all paired sockets without starting a resolver or service task.
+    pub async fn bind(
+        inbounds: Vec<SocketAddr>,
+        backlog: u32,
+        max_connections: NonZeroU16,
+        idle_timeout: Duration,
+    ) -> io::Result<Self> {
+        let mut udp = Vec::with_capacity(inbounds.len());
+        let mut tcp = Vec::with_capacity(inbounds.len());
+        for address in inbounds {
+            udp.push(UdpSocket::bind(address).await?);
+            tcp.push(bind_tcp(address, backlog)?);
+        }
+        Ok(Self {
+            udp,
+            tcp,
+            connections: Arc::new(Semaphore::new(usize::from(max_connections.get()))),
+            idle_timeout,
+        })
+    }
+
+    /// Completes the prepared root with its ready resolver-backed proxy.
+    pub fn with_proxy(self, proxy: Arc<DnsProxy>) -> DnsProxyListeners {
+        DnsProxyListeners {
+            udp: self.udp,
+            tcp: self.tcp,
+            proxy,
+            connections: self.connections,
+            idle_timeout: self.idle_timeout,
+        }
     }
 }
 
@@ -103,7 +143,7 @@ impl DnsProxy {
     /// Binds one validated first-match selector to one tagged resolver graph.
     pub fn new(
         resolver: Arc<TaggedResolver>,
-        select: impl Fn(usize, ProxyTransport, &Name) -> usize + Send + Sync + 'static,
+        select: impl Fn(usize, ProxyTransport, &Name) -> Option<usize> + Send + Sync + 'static,
     ) -> Self {
         Self {
             resolver,
@@ -142,21 +182,16 @@ impl DnsProxy {
         if query.query_class() != DNSClass::IN {
             return error_response(request, ResponseCode::Refused);
         }
-        let server = (self.select)(inbound, transport, query.name());
-        match self
-            .resolver
-            .lookup(server, query.name().clone(), query.query_type())
-            .await
-        {
-            Ok(lookup) => {
-                let mut response = lookup.message().clone();
+        let Some(server) = (self.select)(inbound, transport, query.name()) else {
+            return error_response(request, ResponseCode::ServFail);
+        };
+        match self.resolver.query(server, request.clone()).await {
+            Ok(mut response) => {
                 response.metadata.id = request.metadata.id;
                 response.queries.clear();
                 response.add_query(query.clone());
                 response
             }
-            Err(DnsError::NxDomain) => error_response(request, ResponseCode::NXDomain),
-            Err(DnsError::NoData) => error_response(request, ResponseCode::NoError),
             Err(_) => error_response(request, ResponseCode::ServFail),
         }
     }
@@ -194,14 +229,23 @@ fn bind_tcp(address: SocketAddr, backlog: u32) -> io::Result<TcpListener> {
     socket.listen(backlog)
 }
 
-async fn udp_loop(socket: UdpSocket, inbound: usize, proxy: Arc<DnsProxy>) -> io::Result<()> {
+async fn udp_loop(
+    socket: UdpSocket,
+    inbound: usize,
+    proxy: Arc<DnsProxy>,
+    mut cancel: watch::Receiver<bool>,
+) -> io::Result<()> {
     let mut request = [0_u8; 4096];
     loop {
-        let (length, peer) = socket.recv_from(&mut request).await?;
-        if let Some(response) = proxy
-            .answer(inbound, ProxyTransport::Udp, &request[..length])
-            .await
-        {
+        let (length, peer) = tokio::select! {
+            result = socket.recv_from(&mut request) => result?,
+            _ = cancelled(&mut cancel) => return Ok(()),
+        };
+        let response = tokio::select! {
+            response = proxy.answer(inbound, ProxyTransport::Udp, &request[..length]) => response,
+            _ = cancelled(&mut cancel) => return Ok(()),
+        };
+        if let Some(response) = response {
             let sent = socket.send_to(&response, peer).await?;
             if sent != response.len() {
                 return Err(io::Error::new(
@@ -219,11 +263,15 @@ async fn tcp_loop(
     proxy: Arc<DnsProxy>,
     connections: Arc<Semaphore>,
     idle_timeout: Duration,
+    mut cancel: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let mut children = JoinSet::new();
     loop {
-        while children.try_join_next().is_some() {}
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = tokio::select! {
+            result = listener.accept() => result?,
+            _ = children.join_next(), if !children.is_empty() => continue,
+            _ = cancelled(&mut cancel) => break,
+        };
         let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
             drop(stream);
             continue;
@@ -234,40 +282,41 @@ async fn tcp_loop(
             tcp_connection(stream, inbound, proxy, idle_timeout).await;
         });
     }
+    children.abort_all();
+    while children.join_next().await.is_some() {}
+    Ok(())
+}
+
+async fn cancelled(cancel: &mut watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    let _ = cancel.changed().await;
 }
 
 async fn tcp_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     inbound: usize,
     proxy: Arc<DnsProxy>,
     idle_timeout: Duration,
 ) {
+    let peer = match stream.peer_addr() {
+        Ok(peer) => peer,
+        Err(_) => return,
+    };
+    let (mut stream, mut responses) =
+        HickoryTcpStream::from_stream(AsyncIoTokioAsStd(stream), peer);
     loop {
-        let Ok(Ok(length)) = tokio::time::timeout(idle_timeout, stream.read_u16()).await else {
+        let Ok(Some(Ok(request))) = tokio::time::timeout(idle_timeout, stream.next()).await else {
             return;
         };
-        if length == 0 {
-            return;
-        }
-        let mut request = vec![0_u8; usize::from(length)];
-        if !matches!(
-            tokio::time::timeout(idle_timeout, stream.read_exact(&mut request)).await,
-            Ok(Ok(_))
-        ) {
-            return;
-        }
-        let Some(response) = proxy.answer(inbound, ProxyTransport::Tcp, &request).await else {
+        let Some(response) = proxy
+            .answer(inbound, ProxyTransport::Tcp, request.bytes())
+            .await
+        else {
             return;
         };
-        let Ok(length) = u16::try_from(response.len()) else {
-            return;
-        };
-        let write = async {
-            stream.write_u16(length).await?;
-            stream.write_all(&response).await?;
-            stream.flush().await
-        };
-        if !matches!(tokio::time::timeout(idle_timeout, write).await, Ok(Ok(()))) {
+        if responses.send(SerialMessage::new(response, peer)).is_err() {
             return;
         }
     }
