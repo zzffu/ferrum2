@@ -4,6 +4,7 @@ milestone: M12
 status: active
 depends_on: [M12-T03]
 owns:
+  - Cargo.toml
   - Cargo.lock
   - bins/ferrum2-client/Cargo.toml
   - bins/ferrum2-client/src/main.rs
@@ -11,6 +12,7 @@ owns:
   - crates/ferrum2-dns/src/lib.rs
   - crates/ferrum2-dns/src/resolver.rs
   - crates/ferrum2-dns/src/runtime_owner.rs
+  - crates/ferrum2-dns/Cargo.toml
   - crates/ferrum2-dns/tests/proxy_contract.rs
   - bins/ferrum2-client/src/dns_egress.rs
   - bins/ferrum2-client/src/run.rs
@@ -32,7 +34,10 @@ The client adds the existing `ferrum2-dns` normal workspace edge and may add the
 `hickory_resolver::net`，the exact 0.26.1 resolver re-export already present in the DNS product graph；T04
 does not add a root or DNS-manifest `hickory-net` edge、new package identity or provider。The existing
 T03 resolver command seam may be extended with one Hickory response-preserving single-question API；
-the existing address-lookup API and its server-facing semantics remain intact。
+the existing address-lookup API and its server-facing semantics remain intact。The DNS crate may
+directly use the existing locked `futures-util = 0.3.33` `std` feature solely to drive Hickory's public
+inbound TCP `Stream` inside ferrum2's bounded accept loop；the already-resolved feature set must not
+widen。
 
 ## Acceptance
 
