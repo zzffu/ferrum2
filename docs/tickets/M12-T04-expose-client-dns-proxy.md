@@ -6,6 +6,7 @@ depends_on: [M12-T03]
 owns:
   - Cargo.toml
   - Cargo.lock
+  - crates/ferrum2-core/src/lib.rs
   - bins/ferrum2-client/Cargo.toml
   - bins/ferrum2-client/src/main.rs
   - crates/ferrum2-dns/src/proxy.rs
@@ -37,7 +38,9 @@ T03 resolver command seam may be extended with one Hickory response-preserving s
 the existing address-lookup API and its server-facing semantics remain intact。The DNS crate may
 directly use the existing locked `futures-util = 0.3.33` `std` feature solely to drive Hickory's public
 inbound TCP `Stream` inside ferrum2's bounded accept loop；the already-resolved feature set must not
-widen。
+widen。T04 may add one copy-returning accessor for the mandatory final action on the existing generic
+`ActionTable` so a valid DNS wire name whose escaped presentation exceeds `TargetAddr`'s textual bound
+still selects that final action；the matcher、schema and ordinary route semantics do not change。
 
 ## Acceptance
 
