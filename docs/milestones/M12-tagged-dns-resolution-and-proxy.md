@@ -154,6 +154,8 @@ exactly one bounded repair；targeted Architect/QA both returned `PASS`，so no 
 diagnosis was required。Integration core/client/DNS tests、workspace policy `21/21`、Full、Rust 1.88、
 ignored lifecycle `1/1` (`130.37s`)、docs and locked offline metadata pass。Footprint integrity passes；
 numeric `REVIEW_REQUIRED` (`+2260/0/0`、code `+433`、ratio `2.104062`) is accepted。M12-T05 is active
-from that exact integration product。The user authorized remote pushes；none has run yet。Manual workflow
-dispatch remains separately unauthorized；no hosted run、PR、tag、package、release or publication has
-occurred。
+from that exact integration product。Before product edits，its ownership was completed with the existing
+server manifest、lock row and workspace-policy assertion required for the already-declared local
+`ferrum2-dns` edge；no new package identity or `main.rs` change is authorized。The user authorized remote
+pushes；none has run yet。Manual workflow dispatch remains separately unauthorized；no hosted run、PR、
+tag、package、release or publication has occurred。

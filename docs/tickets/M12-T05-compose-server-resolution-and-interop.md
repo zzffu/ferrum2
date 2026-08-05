@@ -4,6 +4,8 @@ milestone: M12
 status: active
 depends_on: [M12-T04]
 owns:
+  - Cargo.lock
+  - bins/ferrum2-server/Cargo.toml
   - bins/ferrum2-server/src/dns_egress.rs
   - bins/ferrum2-server/src/run.rs
   - tests/m0-harness/src/local_support/mod.rs
@@ -12,6 +14,7 @@ owns:
   - tests/m0-harness/tests/local_e2e.rs
   - tests/m0-harness/tests/udp_local_e2e.rs
   - tests/m0-harness/tests/architecture.rs
+  - tests/m0-harness/tests/workspace_policy.rs
   - tests/interop/versions.toml
 ---
 
@@ -22,6 +25,13 @@ owns:
 Select a tagged DNS resolver and its optional server-direct detour for authenticated TCP/UDP domain
 targets，preserve the existing connector/deadline/candidate seams and prove real process behavior against
 pinned external DNS software。
+
+## Dependency boundary
+
+The server adds only the existing workspace `ferrum2-dns` direct edge required to compose T03's public
+resolver/owner API。The existing lock package row and workspace-policy dependency assertion may change
+only to record that local edge；no root dependency、new package identity、feature or provider is added。
+`run.rs` may declare the sibling `dns_egress.rs` module directly，so `main.rs` remains out of scope。
 
 ## Acceptance
 
