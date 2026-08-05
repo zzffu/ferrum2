@@ -1,6 +1,7 @@
 use crate::qualification::{
-    CaseFailure, CaseSpec, CleanupState, Direction, Method, QualificationOps, Reference,
-    TcpApplicationGate, TcpExchangeEvent, TcpExchangeState, Transport, tcp_shutdown_gate,
+    CaseFailure, CaseSpec, CleanupState, Direction, DnsCaseSpec, DnsPath, DnsQualificationOps,
+    DnsReference, DnsUpstreamTransport, Method, QualificationOps, Reference, TcpApplicationGate,
+    TcpExchangeEvent, TcpExchangeState, Transport, tcp_shutdown_gate,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -108,6 +109,39 @@ impl QualificationOps for HostedOperations {
         } else {
             Err(CaseFailure::new("cleanup"))
         }
+    }
+}
+
+impl DnsQualificationOps for HostedOperations {
+    fn provision_dns(&mut self, reference: DnsReference) -> Result<(), CaseFailure> {
+        match catch_sanitized(|| provision_dns_reference(reference)) {
+            Ok(()) => Ok(()),
+            Err(payload) => {
+                eprintln!(
+                    "qualification DNS provision failed: reference={reference:?}, diagnostic={}",
+                    panic_diagnostic(payload)
+                );
+                Err(CaseFailure::new(reference.provision_root()))
+            }
+        }
+    }
+
+    fn run_dns_case(&mut self, case: DnsCaseSpec) -> Result<(), CaseFailure> {
+        match catch_sanitized(|| run_external_dns_case(case)) {
+            Ok(()) => Ok(()),
+            Err(payload) => {
+                eprintln!(
+                    "qualification DNS case failed: case_id={}, diagnostic={}",
+                    case.id,
+                    panic_diagnostic(payload)
+                );
+                Err(CaseFailure::new(case.case_root()))
+            }
+        }
+    }
+
+    fn finish_dns_cleanup(&mut self) -> Result<(), CaseFailure> {
+        self.finish_cleanup()
     }
 }
 
@@ -357,6 +391,15 @@ impl ProcessGuard {
     }
 
     fn terminate(&mut self, deadline: CaseDeadline) -> String {
+        let (status, stdout, stderr) = self.terminate_captures(deadline);
+        format!(
+            "terminated_status={status}, stdout={}, stderr={}",
+            sanitize_capture(stdout),
+            sanitize_capture(stderr)
+        )
+    }
+
+    fn terminate_captures(&mut self, deadline: CaseDeadline) -> (ExitStatus, Capture, Capture) {
         self.assert_running(deadline, "pre-cleanup child status");
         self.child
             .as_mut()
@@ -364,8 +407,8 @@ impl ProcessGuard {
             .kill()
             .unwrap_or_else(|error| panic!("terminate {}: {error}", self.label));
         let status = self.wait_for_exit(deadline, "intentional child cleanup");
-        let diagnostics = self.finish_capture(deadline);
-        format!("terminated_status={status}, diagnostics={diagnostics}")
+        let (stdout, stderr) = self.finish_captures(deadline);
+        (status, stdout, stderr)
     }
 
     fn finish_capture(&mut self, deadline: CaseDeadline) -> String {
@@ -482,6 +525,405 @@ fn provision_reference(reference: Reference) {
     }
     verify_transport_configs(reference, &paths, deadline);
     deadline.check("final reference provision verification");
+}
+
+fn provision_dns_reference(reference: DnsReference) {
+    let deadline = CaseDeadline::start();
+    let pin = load_dns_pin(reference);
+    verify_dns_pin(reference, &pin);
+    let paths = dns_reference_paths(reference, &pin);
+    verify_archive(&paths.archive, &pin, deadline);
+    verify_binary_location(&paths.binary, &paths.extraction_root);
+    verify_reviewed_license(&paths.license);
+    if reference == DnsReference::CoreDns {
+        let values = load_pin_values("coredns");
+        let license = fs::read(&paths.license).expect("read CoreDNS license");
+        assert_eq!(
+            license.len(),
+            value(&values, "license_size")
+                .parse::<usize>()
+                .expect("numeric CoreDNS license size")
+        );
+        assert_eq!(
+            sha256_bytes(&license),
+            value(&values, "license_sha256"),
+            "CoreDNS license hash mismatch"
+        );
+    }
+    let mut command = Command::new(&paths.binary);
+    match reference {
+        DnsReference::CoreDns => {
+            command.arg("-version");
+        }
+        DnsReference::Bind => {
+            command.arg("-v");
+        }
+    }
+    let rendered = run_dns_probe(&mut command, deadline, "DNS provider version");
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.contains(&pin.expected_version)),
+        "DNS provider version mismatch"
+    );
+}
+
+fn verify_dns_pin(reference: DnsReference, pin: &Pin) {
+    let (version, commit, asset, url, license) = match reference {
+        DnsReference::CoreDns => (
+            "1.14.6",
+            "424d125775cd70fa90dfc80bf0e52cc9a9aeb574",
+            "coredns_1.14.6_linux_amd64.tgz",
+            "https://github.com/coredns/coredns/releases/download/v1.14.6/",
+            "Apache-2.0",
+        ),
+        DnsReference::Bind => (
+            "9.20.26",
+            "7e228e3ba7c2ca945b1c2a22ed2ef0aa9d7cab10",
+            "bind-9.20.26.tar.xz",
+            "https://downloads.isc.org/isc/bind9/9.20.26/",
+            "MPL-2.0",
+        ),
+    };
+    assert_eq!(pin.version, version, "DNS release pin changed");
+    assert_eq!(pin.source_commit, commit, "DNS source pin changed");
+    assert_eq!(pin.asset, asset, "DNS asset pin changed");
+    assert_eq!(pin.url, format!("{url}{asset}"), "DNS provenance changed");
+    assert!(
+        pin.license_review.contains(license)
+            && pin.license_review.contains("independent test process"),
+        "DNS license boundary changed"
+    );
+}
+
+fn run_external_dns_case(case: DnsCaseSpec) {
+    let deadline = CaseDeadline::start();
+    let coredns = dns_reference_paths(DnsReference::CoreDns, &load_dns_pin(DnsReference::CoreDns));
+    let bind = dns_reference_paths(DnsReference::Bind, &load_dns_pin(DnsReference::Bind));
+    let directory = tempfile::tempdir().expect("isolated DNS interop directory");
+    let mut upstream = ReservedEndpoint::new();
+    let mut dns_proxy = ReservedEndpoint::new();
+    let mut socks = ReservedEndpoint::new();
+    let mut shadowsocks = ReservedEndpoint::new();
+    let upstream_address = upstream.address;
+    let dns_address = dns_proxy.address;
+    let socks_address = socks.address;
+    let shadowsocks_address = shadowsocks.address;
+    let large = "x".repeat(240);
+    let zone = format!(
+        concat!(
+            "$ORIGIN qualification.test.\n",
+            "@ 60 IN SOA ns hostmaster 1 60 60 60 60\n",
+            "@ 60 IN NS ns\n",
+            "ns 60 IN A 127.0.0.1\n",
+            "answer 60 IN A 192.0.2.80\n",
+            "answer 60 IN AAAA 2001:db8::80\n",
+            "nodata 60 IN TXT \"present-without-address\"\n",
+            "large 60 IN TXT \"{0}\" \"{0}\" \"{0}\"\n",
+        ),
+        large
+    );
+    let zone_path = write_config(directory.path(), "qualification.zone", &zone);
+    let tls = matches!(
+        case.upstream,
+        DnsUpstreamTransport::Dot | DnsUpstreamTransport::Doh
+    )
+    .then(|| prepare_coredns_tls(directory.path(), deadline));
+    let scheme = match case.upstream {
+        DnsUpstreamTransport::Udp | DnsUpstreamTransport::Tcp => "",
+        DnsUpstreamTransport::Dot => "tls://",
+        DnsUpstreamTransport::Doh => "https://",
+    };
+    let tls_line = tls
+        .as_ref()
+        .map(|(cert, key)| format!("  tls {} {}\n", path_text(cert), path_text(key)))
+        .unwrap_or_default();
+    let corefile = format!(
+        "{scheme}qualification.test.:{} {{\n  bind 127.0.0.1\n{tls_line}  file {} qualification.test.\n  errors\n}}\n",
+        upstream_address.port(),
+        path_text(&zone_path),
+    );
+    let corefile_path = write_config(directory.path(), "Corefile", &corefile);
+    upstream.release();
+    let mut command = Command::new(&coredns.binary);
+    command.args(["-conf", path_text(&corefile_path)]);
+    let mut coredns_process = ProcessGuard::spawn("pinned CoreDNS", &mut command, deadline);
+    wait_for_stable_child(&mut coredns_process, deadline, "pinned CoreDNS");
+
+    let mut server_process = None;
+    if case.path == DnsPath::Detoured {
+        let server_config = format!(
+            "schema_version = 1\n[server]\nlisten = \"{shadowsocks_address}\"\n\
+             [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n[udp]\n",
+            Method::Aes128Gcm.canonical_name(),
+            Method::Aes128Gcm.synthetic_psk(),
+        );
+        let server_path = write_config(directory.path(), "ferrum-server.toml", &server_config);
+        shadowsocks.release();
+        let mut command = Command::new(ferrum_binary("ferrum2-server"));
+        command.args(["--config", path_text(&server_path)]);
+        let mut process = ProcessGuard::spawn("ferrum DNS detour server", &mut command, deadline);
+        wait_for_tcp_listener(
+            &mut process,
+            shadowsocks_address,
+            deadline,
+            "ferrum DNS detour server",
+        );
+        server_process = Some(process);
+    }
+
+    let transport = match case.upstream {
+        DnsUpstreamTransport::Udp => "udp",
+        DnsUpstreamTransport::Tcp => "tcp",
+        DnsUpstreamTransport::Dot => "dot",
+        DnsUpstreamTransport::Doh => "doh",
+    };
+    let encryption = match case.upstream {
+        DnsUpstreamTransport::Dot => "server_name = \"resolver.test\"\n",
+        DnsUpstreamTransport::Doh => "server_name = \"resolver.test\"\npath = \"/dns-query\"\n",
+        DnsUpstreamTransport::Udp | DnsUpstreamTransport::Tcp => "",
+    };
+    let detour = if case.path == DnsPath::Detoured {
+        "detour = \"dns-hop\"\n"
+    } else {
+        ""
+    };
+    let client_config = format!(
+        "schema_version = 1\n\
+         [[inbounds]]\ntag = \"socks\"\nlisten = \"{socks_address}\"\n\
+         [[outbounds]]\ntag = \"dns-hop\"\nserver = \"{shadowsocks_address}\"\n\
+         [route]\nfinal = \"dns-hop\"\n\
+         [dns]\ntimeout_ms = 5000\nmax_inflight = 4\n\
+         [[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"{dns_address}\"\n\
+         [[dns.servers]]\ntag = \"core\"\ntransport = \"{transport}\"\naddress = \"{upstream_address}\"\n\
+         {encryption}{detour}\
+         [dns.route]\nfinal = \"core\"\n\
+         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n[udp]\n",
+        Method::Aes128Gcm.canonical_name(),
+        Method::Aes128Gcm.synthetic_psk(),
+    );
+    let client_path = write_config(directory.path(), "ferrum-client.toml", &client_config);
+    dns_proxy.release();
+    socks.release();
+    let mut command = Command::new(ferrum_binary("ferrum2-client"));
+    command.args(["--config", path_text(&client_path)]);
+    let mut client = ProcessGuard::spawn("ferrum DNS qualification client", &mut command, deadline);
+    wait_for_tcp_listener(
+        &mut client,
+        dns_address,
+        deadline,
+        "ferrum DNS qualification client",
+    );
+
+    let tcp = case.bind_tcp;
+    let query = |name: &str, record: &str, short: bool| {
+        let mut command = Command::new(&bind.binary);
+        let server_arg = format!("@{}", dns_address.ip());
+        let port_arg = dns_address.port().to_string();
+        command.args([
+            server_arg.as_str(),
+            "-p",
+            port_arg.as_str(),
+            name,
+            record,
+            "+time=2",
+            "+tries=1",
+        ]);
+        if tcp {
+            command.arg("+tcp");
+        }
+        if short {
+            command.arg("+short");
+        } else {
+            command.args(["+noall", "+comments", "+answer"]);
+        }
+        run_dns_probe(&mut command, deadline, "bounded BIND query")
+    };
+    assert_eq!(
+        query("answer.qualification.test.", "A", true).trim(),
+        "192.0.2.80"
+    );
+    assert_eq!(
+        query("answer.qualification.test.", "AAAA", true).trim(),
+        "2001:db8::80"
+    );
+    assert!(query("missing.qualification.test.", "A", false).contains("status: NXDOMAIN"));
+    let nodata = query("nodata.qualification.test.", "A", false);
+    assert!(nodata.contains("status: NOERROR") && !nodata.contains(" IN A "));
+
+    if case.reference == DnsReference::Bind {
+        let mut command = Command::new(&bind.binary);
+        let server_arg = format!("@{}", dns_address.ip());
+        let port_arg = dns_address.port().to_string();
+        command.args([
+            server_arg.as_str(),
+            "-p",
+            port_arg.as_str(),
+            "large.qualification.test.",
+            "TXT",
+            "+bufsize=512",
+            "+time=2",
+            "+tries=1",
+            "+noall",
+            "+comments",
+            "+answer",
+        ]);
+        if case.bind_tcp {
+            command.arg("+tcp");
+        } else {
+            command.arg("+ignore");
+        }
+        let output = run_dns_probe(&mut command, deadline, "bounded BIND EDNS query");
+        if case.bind_tcp {
+            assert!(output.contains(&large));
+        } else {
+            assert!(output.contains(" flags: qr aa tc"));
+        }
+    }
+
+    let mut earlier_client_stderr = String::new();
+    if matches!(
+        case.upstream,
+        DnsUpstreamTransport::Dot | DnsUpstreamTransport::Doh
+    ) {
+        let (_, _, stderr) = client.terminate_captures(deadline);
+        earlier_client_stderr = sanitize_capture(stderr);
+        drop(UdpSocket::bind(dns_address).expect("encrypted-cycle DNS UDP rebind"));
+        drop(TcpListener::bind(dns_address).expect("encrypted-cycle DNS TCP rebind"));
+        drop(UdpSocket::bind(socks_address).expect("encrypted-cycle SOCKS UDP rebind"));
+        drop(TcpListener::bind(socks_address).expect("encrypted-cycle SOCKS TCP rebind"));
+        let negative_config = match case.upstream {
+            DnsUpstreamTransport::Dot => client_config.replace(
+                "server_name = \"resolver.test\"",
+                "server_name = \"wrong.test\"",
+            ),
+            DnsUpstreamTransport::Doh => {
+                client_config.replace("path = \"/dns-query\"", "path = \"/wrong\"")
+            }
+            DnsUpstreamTransport::Udp | DnsUpstreamTransport::Tcp => unreachable!(),
+        };
+        let negative_path = write_config(
+            directory.path(),
+            "ferrum-client-negative.toml",
+            &negative_config,
+        );
+        let mut command = Command::new(ferrum_binary("ferrum2-client"));
+        command.args(["--config", path_text(&negative_path)]);
+        client = ProcessGuard::spawn("ferrum DNS negative client", &mut command, deadline);
+        wait_for_tcp_listener(
+            &mut client,
+            dns_address,
+            deadline,
+            "ferrum DNS negative client",
+        );
+        assert!(
+            query("answer.qualification.test.", "A", false).contains("status: SERVFAIL"),
+            "encrypted DNS negative did not fail closed"
+        );
+    }
+
+    let mut earlier_server_stderr = String::new();
+    if case.path == DnsPath::Detoured
+        && matches!(
+            case.upstream,
+            DnsUpstreamTransport::Udp | DnsUpstreamTransport::Tcp
+        )
+    {
+        let mut server = server_process.take().expect("detoured server owner");
+        let (_, _, stderr) = server.terminate_captures(deadline);
+        earlier_server_stderr = sanitize_capture(stderr);
+        assert!(
+            query("answer.qualification.test.", "A", false).contains("status: SERVFAIL"),
+            "detour failure retried or fell back"
+        );
+    }
+
+    let (_, _, client_stderr) = client.terminate_captures(deadline);
+    let client_stderr = earlier_client_stderr + &sanitize_capture(client_stderr);
+    let server_stderr = server_process
+        .as_mut()
+        .map(|server| {
+            let (_, _, stderr) = server.terminate_captures(deadline);
+            sanitize_capture(stderr)
+        })
+        .unwrap_or(earlier_server_stderr);
+    let (_, _, coredns_stderr) = coredns_process.terminate_captures(deadline);
+    let coredns_stderr = sanitize_capture(coredns_stderr);
+    drop(shadowsocks);
+    let addresses = [
+        upstream_address.to_string(),
+        dns_address.to_string(),
+        socks_address.to_string(),
+        shadowsocks_address.to_string(),
+    ];
+    for sentinel in ["qualification.test", "resolver.test", "dns-hop", "dns-in"]
+        .into_iter()
+        .chain(addresses.iter().map(String::as_str))
+    {
+        assert!(
+            !client_stderr.contains(sentinel)
+                && !server_stderr.contains(sentinel)
+                && !coredns_stderr.contains(sentinel),
+            "DNS child stderr leaked a sentinel"
+        );
+    }
+    for address in [
+        upstream_address,
+        dns_address,
+        socks_address,
+        shadowsocks_address,
+    ] {
+        drop(UdpSocket::bind(address).expect("DNS qualification UDP rebind"));
+        drop(TcpListener::bind(address).expect("DNS qualification TCP rebind"));
+    }
+    directory.close().expect("close DNS interop directory");
+}
+
+fn prepare_coredns_tls(directory: &Path, deadline: CaseDeadline) -> (PathBuf, PathBuf) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("repository root");
+    let fixtures = root.join("crates/ferrum2-dns/tests/fixtures");
+    let certificate = directory.join("resolver.pem");
+    let key = directory.join("resolver-key.pem");
+    let mut command = Command::new("openssl");
+    command.args([
+        "x509",
+        "-inform",
+        "DER",
+        "-in",
+        path_text(&fixtures.join("m12-resolver-test.der")),
+        "-out",
+        path_text(&certificate),
+    ]);
+    let _ = run_dns_probe(&mut command, deadline, "certificate conversion");
+    let mut command = Command::new("openssl");
+    command.args([
+        "pkey",
+        "-inform",
+        "DER",
+        "-in",
+        path_text(&fixtures.join("m12-resolver-test.pk8")),
+        "-out",
+        path_text(&key),
+    ]);
+    let _ = run_dns_probe(&mut command, deadline, "private-key conversion");
+    (certificate, key)
+}
+
+fn run_dns_probe(command: &mut Command, deadline: CaseDeadline, label: &'static str) -> String {
+    let mut process = ProcessGuard::spawn(label, command, deadline);
+    let status = process.wait_for_exit(deadline, label);
+    let (stdout, stderr) = process.finish_captures(deadline);
+    if !status.success() || stdout.truncated || stderr.truncated || !stderr.bytes.is_empty() {
+        panic!(
+            "DNS probe failed: status={status}, stdout={}, stderr={}",
+            sanitize_capture(stdout),
+            sanitize_capture(stderr)
+        );
+    }
+    String::from_utf8(stdout.bytes).expect("DNS probe output must be UTF-8")
 }
 
 fn verify_pin(reference: Reference, pin: &Pin) {
@@ -1595,6 +2037,40 @@ struct ReferencePaths {
     license: Option<PathBuf>,
 }
 
+struct DnsReferencePaths {
+    archive: PathBuf,
+    extraction_root: PathBuf,
+    binary: PathBuf,
+    license: PathBuf,
+}
+
+fn dns_reference_paths(reference: DnsReference, pin: &Pin) -> DnsReferencePaths {
+    let runner_temp = PathBuf::from(
+        std::env::var_os("RUNNER_TEMP")
+            .expect("GitHub runner did not provide the fixed RUNNER_TEMP directory"),
+    );
+    match reference {
+        DnsReference::CoreDns => {
+            let extraction_root = runner_temp.join(format!("coredns-{}", pin.version));
+            DnsReferencePaths {
+                archive: runner_temp.join(&pin.asset),
+                binary: extraction_root.join("coredns"),
+                license: extraction_root.join("LICENSE"),
+                extraction_root,
+            }
+        }
+        DnsReference::Bind => {
+            let extraction_root = runner_temp.join(format!("bind-{}", pin.version));
+            DnsReferencePaths {
+                archive: runner_temp.join(&pin.asset),
+                binary: extraction_root.join("bin/dig/dig"),
+                license: extraction_root.join("LICENSE"),
+                extraction_root,
+            }
+        }
+    }
+}
+
 fn reference_paths(reference: Reference, pin: &Pin) -> ReferencePaths {
     let runner_temp = PathBuf::from(
         std::env::var_os("RUNNER_TEMP")
@@ -1700,17 +2176,31 @@ fn verify_archive_members(reference: Reference, archive: &Path, pin: &Pin, deadl
 }
 
 fn load_pin(reference: Reference) -> Pin {
+    let section = match reference {
+        Reference::SingBox => "sing_box",
+        Reference::ShadowsocksRust => "shadowsocks_rust",
+    };
+    pin_from_values(load_pin_values(section))
+}
+
+fn load_dns_pin(reference: DnsReference) -> Pin {
+    pin_from_values(load_pin_values(match reference {
+        DnsReference::CoreDns => "coredns",
+        DnsReference::Bind => "bind",
+    }))
+}
+
+fn load_pin_values(section: &str) -> HashMap<String, String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("repository root");
     let text = fs::read_to_string(root.join("tests/interop/versions.toml"))
         .expect("read interop version pins");
-    let section = match reference {
-        Reference::SingBox => "sing_box",
-        Reference::ShadowsocksRust => "shadowsocks_rust",
-    };
-    let values = parse_section(&text, section);
+    parse_section(&text, section)
+}
+
+fn pin_from_values(values: HashMap<String, String>) -> Pin {
     Pin {
         version: value(&values, "version").to_owned(),
         source_commit: value(&values, "source_commit").to_owned(),

@@ -9,10 +9,11 @@ use std::time::Duration;
 
 use local_support::{
     ChainRoot, ChildGuard, TCP_METHOD_CONFIGS, active_child_count, bind_loopback_listener,
-    rewrite_config_method, route_tagged_config, unused_loopback, unused_tcp_udp_loopback,
-    wait_for_bound, wait_for_listener, wait_for_metrics, wait_for_metrics_sample,
-    wait_for_tcp_udp_bound, write_client_config, write_client_config_with_psk,
-    write_tagged_client_config, write_tagged_server_config, write_tcp_only_server_config,
+    rewrite_config_method, route_tagged_config, start_dns_answer, unused_loopback,
+    unused_tcp_udp_loopback, wait_for_bound, wait_for_listener, wait_for_metrics,
+    wait_for_metrics_sample, wait_for_tcp_udp_bound, write_client_config,
+    write_client_config_with_psk, write_tagged_client_config, write_tagged_dns_server_config,
+    write_tagged_server_config, write_tcp_only_server_config,
     write_tcp_only_server_config_with_psk, write_two_hop_client_config,
 };
 
@@ -188,6 +189,87 @@ fn socks_connect_wire(client: SocketAddrV4, target: &[u8]) -> (TcpStream, [u8; 1
     let mut reply = [0_u8; 10];
     stream.read_exact(&mut reply).expect("SOCKS reply");
     (stream, reply)
+}
+
+fn domain_wire(name: &str, port: u16) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(name.len() + 4);
+    wire.extend_from_slice(&[3, name.len() as u8]);
+    wire.extend_from_slice(name.as_bytes());
+    wire.extend_from_slice(&port.to_be_bytes());
+    wire
+}
+
+#[test]
+fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
+    let _spawn_guard = local_support::hold_process_spawns();
+    let baseline_children = active_child_count();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let selected_name = "selected.test.";
+    let final_name = "final.test.";
+    let (selected_target, selected_echo) =
+        start_echo_at("127.0.0.1:0".parse().expect("selected target address"));
+    let (final_target, final_echo) =
+        start_echo_at("127.0.0.2:0".parse().expect("final target address"));
+    let selected_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 1), 2);
+    let final_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 2), 2);
+    let dns_addresses = [selected_dns.address(), final_dns.address()];
+    let server_address = unused_tcp_udp_loopback();
+    let client_address = unused_loopback();
+    let server_config = write_tagged_dns_server_config(
+        directory.path(),
+        server_address,
+        selected_name,
+        selected_target.port(),
+        "tcp",
+        dns_addresses,
+        false,
+    )
+    .expect("tagged DNS server config");
+    let client_config = write_client_config(directory.path(), client_address, server_address, None)
+        .expect("client config");
+    let mut server =
+        ChildGuard::spawn_while_holding("ferrum2-server", &server_config, &_spawn_guard);
+    wait_for_listener(&mut server, server_address);
+    let mut client =
+        ChildGuard::spawn_while_holding("ferrum2-client", &client_config, &_spawn_guard);
+    wait_for_listener(&mut client, client_address);
+
+    for (name, target, payload) in [
+        (selected_name, selected_target, b"selected".as_slice()),
+        (final_name, final_target, b"final".as_slice()),
+    ] {
+        let (mut socks, reply) =
+            socks_connect_wire(client_address, &domain_wire(name, target.port()));
+        assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+        socks.write_all(payload).expect("domain payload");
+        socks.shutdown(Shutdown::Write).expect("domain half close");
+        let mut echoed = Vec::new();
+        socks.read_to_end(&mut echoed).expect("domain response");
+        assert_eq!(echoed, payload);
+    }
+
+    assert_eq!(selected_echo.join().expect("selected echo"), b"selected");
+    assert_eq!(final_echo.join().expect("final echo"), b"final");
+    assert_eq!(selected_dns.join(), [1, 28]);
+    assert_eq!(final_dns.join(), [1, 28]);
+    let client_exit = client.terminate_and_reap_with_exit(Duration::from_secs(5));
+    let server_exit = server.terminate_and_reap_with_exit(Duration::from_secs(5));
+    for exit in [&client_exit, &server_exit] {
+        exit.assert_stderr_excludes(&[
+            selected_name,
+            final_name,
+            "selected",
+            "final",
+            "dns-direct",
+            "app-direct",
+        ]);
+    }
+    assert_eq!(active_child_count(), baseline_children);
+    drop(bind_loopback_listener(client_address).expect("client exact rebind"));
+    drop(bind_loopback_listener(server_address).expect("server TCP exact rebind"));
+    drop(UdpSocket::bind(server_address).expect("server UDP exact rebind"));
+    drop(UdpSocket::bind(dns_addresses[0]).expect("selected DNS exact rebind"));
+    drop(UdpSocket::bind(dns_addresses[1]).expect("final DNS exact rebind"));
 }
 
 #[test]

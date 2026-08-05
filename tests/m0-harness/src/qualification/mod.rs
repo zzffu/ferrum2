@@ -129,6 +129,151 @@ pub const UDP_CASES: [CaseSpec; 12] = [
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsReference {
+    CoreDns,
+    Bind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsUpstreamTransport {
+    Udp,
+    Tcp,
+    Dot,
+    Doh,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsPath {
+    Direct,
+    Detoured,
+}
+
+impl DnsReference {
+    pub const fn provision_root(self) -> &'static str {
+        match self {
+            Self::CoreDns => "provision-coredns",
+            Self::Bind => "provision-bind",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DnsCaseSpec {
+    pub id: &'static str,
+    pub reference: DnsReference,
+    pub upstream: DnsUpstreamTransport,
+    pub path: DnsPath,
+    pub bind_tcp: bool,
+    root: &'static str,
+}
+
+impl DnsCaseSpec {
+    pub const fn case_root(self) -> &'static str {
+        self.root
+    }
+}
+
+macro_rules! dns_case {
+    ($id:literal, $reference:expr, $upstream:expr, $path:expr, $bind_tcp:expr) => {
+        DnsCaseSpec {
+            id: $id,
+            reference: $reference,
+            upstream: $upstream,
+            path: $path,
+            bind_tcp: $bind_tcp,
+            root: concat!("case-", $id),
+        }
+    };
+}
+
+pub const DNS_CASES: [DnsCaseSpec; 12] = [
+    dns_case!(
+        "M12-DNS-coredns-udp-direct",
+        DnsReference::CoreDns,
+        DnsUpstreamTransport::Udp,
+        DnsPath::Direct,
+        false
+    ),
+    dns_case!(
+        "M12-DNS-coredns-tcp-direct",
+        DnsReference::CoreDns,
+        DnsUpstreamTransport::Tcp,
+        DnsPath::Direct,
+        true
+    ),
+    dns_case!(
+        "M12-DNS-coredns-dot-direct",
+        DnsReference::CoreDns,
+        DnsUpstreamTransport::Dot,
+        DnsPath::Direct,
+        true
+    ),
+    dns_case!(
+        "M12-DNS-coredns-doh-direct",
+        DnsReference::CoreDns,
+        DnsUpstreamTransport::Doh,
+        DnsPath::Direct,
+        true
+    ),
+    dns_case!(
+        "M12-DNS-coredns-udp-detour",
+        DnsReference::CoreDns,
+        DnsUpstreamTransport::Udp,
+        DnsPath::Detoured,
+        false
+    ),
+    dns_case!(
+        "M12-DNS-coredns-tcp-detour",
+        DnsReference::CoreDns,
+        DnsUpstreamTransport::Tcp,
+        DnsPath::Detoured,
+        true
+    ),
+    dns_case!(
+        "M12-DNS-coredns-dot-detour",
+        DnsReference::CoreDns,
+        DnsUpstreamTransport::Dot,
+        DnsPath::Detoured,
+        true
+    ),
+    dns_case!(
+        "M12-DNS-coredns-doh-detour",
+        DnsReference::CoreDns,
+        DnsUpstreamTransport::Doh,
+        DnsPath::Detoured,
+        true
+    ),
+    dns_case!(
+        "M12-DNS-bind-dig-udp-direct",
+        DnsReference::Bind,
+        DnsUpstreamTransport::Udp,
+        DnsPath::Direct,
+        false
+    ),
+    dns_case!(
+        "M12-DNS-bind-dig-tcp-direct",
+        DnsReference::Bind,
+        DnsUpstreamTransport::Udp,
+        DnsPath::Direct,
+        true
+    ),
+    dns_case!(
+        "M12-DNS-bind-dig-udp-detour",
+        DnsReference::Bind,
+        DnsUpstreamTransport::Udp,
+        DnsPath::Detoured,
+        false
+    ),
+    dns_case!(
+        "M12-DNS-bind-dig-tcp-detour",
+        DnsReference::Bind,
+        DnsUpstreamTransport::Udp,
+        DnsPath::Detoured,
+        true
+    ),
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaseFailure {
     canonical_root: &'static str,
 }
@@ -143,6 +288,12 @@ pub trait QualificationOps {
     fn provision(&mut self, reference: Reference) -> Result<(), CaseFailure>;
     fn run_case(&mut self, case: CaseSpec) -> Result<(), CaseFailure>;
     fn finish_cleanup(&mut self) -> Result<(), CaseFailure>;
+}
+
+pub trait DnsQualificationOps {
+    fn provision_dns(&mut self, reference: DnsReference) -> Result<(), CaseFailure>;
+    fn run_dns_case(&mut self, case: DnsCaseSpec) -> Result<(), CaseFailure>;
+    fn finish_dns_cleanup(&mut self) -> Result<(), CaseFailure>;
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -283,6 +434,28 @@ impl SetupAvailability {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DnsSetupAvailability {
+    coredns: bool,
+    bind: bool,
+}
+
+impl DnsSetupAvailability {
+    pub fn from_provider_status(coredns: Option<&str>, bind: Option<&str>) -> Self {
+        Self {
+            coredns: coredns == Some("0"),
+            bind: bind == Some("0"),
+        }
+    }
+
+    pub const fn is_ready(self, reference: DnsReference) -> bool {
+        match reference {
+            DnsReference::CoreDns => self.coredns,
+            DnsReference::Bind => self.bind,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CaseStatus {
     Pass,
     Fail(&'static str),
@@ -298,6 +471,49 @@ struct CaseResult {
 pub struct QualificationReport {
     results: [[CaseResult; 12]; 2],
     cleanup: CaseStatus,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct DnsQualificationReport {
+    results: [DnsCaseResult; 12],
+    cleanup: CaseStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DnsCaseResult {
+    case: DnsCaseSpec,
+    status: CaseStatus,
+}
+
+impl DnsQualificationReport {
+    pub fn success(&self) -> bool {
+        self.results
+            .iter()
+            .all(|result| result.status == CaseStatus::Pass)
+            && self.cleanup == CaseStatus::Pass
+    }
+
+    pub fn summary_lines(&self) -> [String; 12] {
+        self.results.map(|result| {
+            let status = match result.status {
+                CaseStatus::Pass => "PASS".to_owned(),
+                CaseStatus::Fail(root) => format!("FAIL canonical_root={root}"),
+            };
+            format!("transport=dns case_id={} status={status}", result.case.id)
+        })
+    }
+
+    pub fn completion_line(&self, context: &HostedContext<'_>) -> String {
+        let status = |passed| if passed { "PASS" } else { "FAIL" };
+        format!(
+            "qualification transport=dns status={} cleanup={} sha={} run_id={} run_attempt={}",
+            status(self.success()),
+            status(self.cleanup == CaseStatus::Pass),
+            context.head_sha,
+            context.run_id.unwrap_or("missing"),
+            context.run_attempt.unwrap_or("missing")
+        )
+    }
 }
 
 impl QualificationReport {
@@ -406,6 +622,50 @@ pub fn execute_hosted(
     Ok(execute_with_setup(setup, ops))
 }
 
+pub fn execute_dns_with_setup(
+    setup: DnsSetupAvailability,
+    ops: &mut impl DnsQualificationOps,
+) -> DnsQualificationReport {
+    let mut provision = |reference| {
+        if !setup.is_ready(reference) {
+            return Err(CaseFailure::new(reference.provision_root()));
+        }
+        match catch_unwind(AssertUnwindSafe(|| ops.provision_dns(reference))) {
+            Ok(result) => result,
+            Err(_) => Err(CaseFailure::new(reference.provision_root())),
+        }
+    };
+    let coredns = provision(DnsReference::CoreDns);
+    let bind = provision(DnsReference::Bind);
+    let results = DNS_CASES.map(|case| {
+        let ready = coredns.and(bind);
+        let status = match ready {
+            Err(failure) => CaseStatus::Fail(failure.canonical_root),
+            Ok(()) => match catch_unwind(AssertUnwindSafe(|| ops.run_dns_case(case))) {
+                Ok(Ok(())) => CaseStatus::Pass,
+                Ok(Err(failure)) => CaseStatus::Fail(failure.canonical_root),
+                Err(_) => CaseStatus::Fail(case.case_root()),
+            },
+        };
+        DnsCaseResult { case, status }
+    });
+    let cleanup = match catch_unwind(AssertUnwindSafe(|| ops.finish_dns_cleanup())) {
+        Ok(Ok(())) => CaseStatus::Pass,
+        Ok(Err(failure)) => CaseStatus::Fail(failure.canonical_root),
+        Err(_) => CaseStatus::Fail("cleanup"),
+    };
+    DnsQualificationReport { results, cleanup }
+}
+
+pub fn execute_dns_hosted(
+    context: &HostedContext<'_>,
+    setup: DnsSetupAvailability,
+    ops: &mut impl DnsQualificationOps,
+) -> Result<DnsQualificationReport, &'static str> {
+    validate_dns_hosted(context)?;
+    Ok(execute_dns_with_setup(setup, ops))
+}
+
 fn provision_if_ready(
     setup: SetupAvailability,
     ops: &mut impl QualificationOps,
@@ -438,7 +698,18 @@ pub struct HostedContext<'a> {
 }
 
 pub fn validate_hosted(context: &HostedContext<'_>) -> Result<(), &'static str> {
-    if context.argument_count != 1 {
+    validate_hosted_with_arguments(context, 1)
+}
+
+pub fn validate_dns_hosted(context: &HostedContext<'_>) -> Result<(), &'static str> {
+    validate_hosted_with_arguments(context, 2)
+}
+
+fn validate_hosted_with_arguments(
+    context: &HostedContext<'_>,
+    expected_argument_count: usize,
+) -> Result<(), &'static str> {
+    if context.argument_count != expected_argument_count {
         return Err("qualification accepts no arguments");
     }
     if context.github_actions != Some("true") {

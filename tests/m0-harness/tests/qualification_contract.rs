@@ -2,10 +2,12 @@
 mod qualification;
 
 use qualification::{
-    CaseFailure, CaseSpec, CleanupState, Direction, HostedContext, Method, QualificationOps,
-    Reference, SetupAvailability, TCP_CASES, TCP_EXCHANGE_ORDER, TcpExchangeEvent,
-    TcpExchangeState, TcpTargetGate, Transport, UDP_CASES, execute_hosted, execute_with_setup,
-    tcp_shutdown_gate, validate_hosted,
+    CaseFailure, CaseSpec, CleanupState, DNS_CASES, Direction, DnsCaseSpec, DnsPath,
+    DnsQualificationOps, DnsReference, DnsSetupAvailability, DnsUpstreamTransport, HostedContext,
+    Method, QualificationOps, Reference, SetupAvailability, TCP_CASES, TCP_EXCHANGE_ORDER,
+    TcpExchangeEvent, TcpExchangeState, TcpTargetGate, Transport, UDP_CASES, execute_dns_hosted,
+    execute_dns_with_setup, execute_hosted, execute_with_setup, tcp_shutdown_gate,
+    validate_dns_hosted, validate_hosted,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::thread;
@@ -20,6 +22,108 @@ struct FakeOps {
     provisioned: Vec<Reference>,
     attempted: Vec<&'static str>,
     cleanup_calls: usize,
+}
+
+#[derive(Default)]
+struct FakeDnsOps {
+    fail_provision: Option<DnsReference>,
+    provisioned: Vec<DnsReference>,
+    attempted: Vec<&'static str>,
+    cleanup_calls: usize,
+}
+
+impl DnsQualificationOps for FakeDnsOps {
+    fn provision_dns(&mut self, reference: DnsReference) -> Result<(), CaseFailure> {
+        self.provisioned.push(reference);
+        (self.fail_provision != Some(reference))
+            .then_some(())
+            .ok_or_else(|| CaseFailure::new(reference.provision_root()))
+    }
+
+    fn run_dns_case(&mut self, case: DnsCaseSpec) -> Result<(), CaseFailure> {
+        self.attempted.push(case.id);
+        Ok(())
+    }
+
+    fn finish_dns_cleanup(&mut self) -> Result<(), CaseFailure> {
+        self.cleanup_calls += 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn dns_matrix_is_unique_and_covers_every_external_path() {
+    let ids: BTreeSet<_> = DNS_CASES.iter().map(|case| case.id).collect();
+    assert_eq!(ids.len(), DNS_CASES.len());
+    assert_eq!(DNS_CASES.len(), 12);
+    for transport in [
+        DnsUpstreamTransport::Udp,
+        DnsUpstreamTransport::Tcp,
+        DnsUpstreamTransport::Dot,
+        DnsUpstreamTransport::Doh,
+    ] {
+        for path in [DnsPath::Direct, DnsPath::Detoured] {
+            assert!(DNS_CASES.iter().any(|case| {
+                case.reference == DnsReference::CoreDns
+                    && case.upstream == transport
+                    && case.path == path
+            }));
+        }
+    }
+    for marker in [
+        "udp-direct",
+        "tcp-direct",
+        "dot-direct",
+        "doh-direct",
+        "udp-detour",
+        "tcp-detour",
+        "dot-detour",
+        "doh-detour",
+        "dig-udp-direct",
+        "dig-tcp-direct",
+        "dig-udp-detour",
+        "dig-tcp-detour",
+    ] {
+        assert!(ids.iter().any(|id| id.contains(marker)), "missing {marker}");
+    }
+}
+
+#[test]
+fn dns_setup_failures_are_canonical_and_cleanup_still_runs() {
+    let setup = DnsSetupAvailability::from_provider_status(Some("0"), Some("0"));
+    let mut ops = FakeDnsOps {
+        fail_provision: Some(DnsReference::Bind),
+        ..FakeDnsOps::default()
+    };
+    let report = execute_dns_with_setup(setup, &mut ops);
+
+    assert_eq!(ops.provisioned, [DnsReference::CoreDns, DnsReference::Bind]);
+    assert_eq!(ops.cleanup_calls, 1);
+    assert!(!report.success());
+    assert!(report.summary_lines().iter().any(|line| {
+        line.contains("dig-udp-direct") && line.ends_with("FAIL canonical_root=provision-bind")
+    }));
+}
+
+#[test]
+fn dns_hosted_report_has_one_exact_completion_contract() {
+    let mut context = valid_context();
+    context.argument_count = 2;
+    assert!(validate_dns_hosted(&context).is_ok());
+    let mut ops = FakeDnsOps::default();
+    let report = execute_dns_hosted(
+        &context,
+        DnsSetupAvailability::from_provider_status(Some("0"), Some("0")),
+        &mut ops,
+    )
+    .expect("hosted DNS plan");
+    assert!(report.success());
+    assert_eq!(ops.attempted, DNS_CASES.map(|case| case.id));
+    assert_eq!(
+        report.completion_line(&context),
+        "qualification transport=dns status=PASS cleanup=PASS \
+         sha=0123456789abcdef0123456789abcdef01234567 run_id=123456 run_attempt=1"
+    );
 }
 
 fn all_ready() -> SetupAvailability {

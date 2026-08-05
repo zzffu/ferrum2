@@ -426,3 +426,44 @@ fn recursive_rust_source_discovery_excludes_non_rust_files() {
     assert!(sources.iter().any(|path| path.ends_with("nested.rs")));
     assert!(sources.iter().any(|path| path.ends_with("root.rs")));
 }
+
+#[test]
+fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {
+    let root = workspace_root();
+    let run = fs::read_to_string(root.join("bins/ferrum2-server/src/run.rs"))
+        .expect("server composition");
+    let egress = fs::read_to_string(root.join("bins/ferrum2-server/src/dns_egress.rs"))
+        .expect("server DNS egress adapter");
+
+    for required in [
+        "mod dns_egress;",
+        "ServerDnsRoot",
+        "TaggedResolver::new",
+        "ServerDnsResolver::new",
+        "PreparedProcessRoot<RunError> for ServerDnsRoot",
+    ] {
+        assert!(
+            run.contains(required),
+            "missing server DNS composition: {required}"
+        );
+    }
+    for required in [
+        "ActionTable<usize>",
+        "SystemTcpResolver",
+        "SystemUdpResolver",
+        "impl TcpResolver for ServerDnsResolver",
+        "impl UdpResolver for ServerDnsResolver",
+        "MAX_RESOLVED_CANDIDATES",
+    ] {
+        assert!(
+            egress.contains(required),
+            "missing reused DNS seam: {required}"
+        );
+    }
+    for forbidden in ["Message::from_vec", "hickory_proto", "struct DnsParser"] {
+        assert!(
+            !run.contains(forbidden) && !egress.contains(forbidden),
+            "server composition duplicated DNS protocol behavior: {forbidden}"
+        );
+    }
+}

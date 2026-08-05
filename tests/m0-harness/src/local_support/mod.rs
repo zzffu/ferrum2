@@ -821,6 +821,102 @@ pub fn unused_tcp_udp_loopback() -> SocketAddrV4 {
     }
 }
 
+pub struct DnsAnswerServer {
+    address: SocketAddrV4,
+    worker: Option<std::thread::JoinHandle<Vec<u16>>>,
+}
+
+impl DnsAnswerServer {
+    pub fn address(&self) -> SocketAddrV4 {
+        self.address
+    }
+
+    pub fn join(mut self) -> Vec<u16> {
+        self.worker
+            .take()
+            .expect("DNS answer worker")
+            .join()
+            .expect("DNS answer worker join")
+    }
+}
+
+impl Drop for DnsAnswerServer {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            if let Ok(socket) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)) {
+                let _ = socket.send_to(&[0], self.address);
+            }
+            let _ = worker.join();
+        }
+    }
+}
+
+pub fn start_dns_answer(answer: Ipv4Addr, expected_queries: usize) -> DnsAnswerServer {
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("DNS answer bind");
+    let address = match socket.local_addr().expect("DNS answer address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 DNS answer"),
+    };
+    socket
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("DNS answer timeout");
+    let worker = std::thread::spawn(move || {
+        let mut observed = Vec::with_capacity(expected_queries);
+        let mut request = [0_u8; 4096];
+        while observed.len() < expected_queries {
+            let (length, peer) = socket.recv_from(&mut request).expect("DNS answer receive");
+            assert!(length >= 17, "DNS query too short");
+            let mut end = 12;
+            loop {
+                let label = usize::from(request[end]);
+                end += 1;
+                if label == 0 {
+                    break;
+                }
+                end += label;
+                assert!(end + 4 <= length, "DNS question bounds");
+            }
+            let question_end = end + 4;
+            let record_type = u16::from_be_bytes([request[end], request[end + 1]]);
+            observed.push(record_type);
+            let mut response = Vec::with_capacity(question_end + 16);
+            response.extend_from_slice(&request[..2]);
+            response.extend_from_slice(&[0x81, 0x80, 0, 1]);
+            response.extend_from_slice(if record_type == 1 { &[0, 1] } else { &[0, 0] });
+            response.extend_from_slice(&[0, 0, 0, 0]);
+            response.extend_from_slice(&request[12..question_end]);
+            if record_type == 1 {
+                response.extend_from_slice(&[
+                    0xc0,
+                    0x0c,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    30,
+                    0,
+                    4,
+                    answer.octets()[0],
+                    answer.octets()[1],
+                    answer.octets()[2],
+                    answer.octets()[3],
+                ]);
+            }
+            socket
+                .send_to(&response, peer)
+                .expect("DNS answer response");
+        }
+        observed
+    });
+    DnsAnswerServer {
+        address,
+        worker: Some(worker),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum ChainRoot {
     Static,
@@ -1009,6 +1105,41 @@ pub fn write_tagged_server_config(
         listens[0], outbound_for_inbound[0], listens[1], outbound_for_inbound[1], outbound_one,
     );
     let path = directory.join("tagged-server.toml");
+    fs::write(&path, config)?;
+    Ok(path)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_tagged_dns_server_config(
+    directory: &Path,
+    listen: SocketAddrV4,
+    selected_name: &str,
+    selected_port: u16,
+    network: &str,
+    upstreams: [SocketAddrV4; 2],
+    udp: bool,
+) -> io::Result<PathBuf> {
+    let udp = if udp {
+        ""
+    } else {
+        "\n[udp]\nenabled = false\n"
+    };
+    let config = format!(
+        "schema_version = 1\n\
+         [[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
+         [[outbounds]]\ntag = \"app-direct\"\n\
+         [[outbounds]]\ntag = \"dns-direct\"\n\
+         [route]\nfinal = \"app-direct\"\n\
+         [dns]\ntimeout_ms = 2000\nmax_inflight = 4\n\
+         [[dns.servers]]\ntag = \"selected\"\ntransport = \"udp\"\naddress = \"{}\"\ndetour = \"dns-direct\"\n\
+         [[dns.servers]]\ntag = \"final\"\ntransport = \"udp\"\naddress = \"{}\"\ndetour = \"dns-direct\"\n\
+         [dns.route]\nfinal = \"final\"\n\
+         [[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"{network}\"\ntarget = {{ host = \"{selected_name}\", port = {selected_port} }}\nserver = \"selected\"\n\
+         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
+         {udp}",
+        upstreams[0], upstreams[1],
+    );
+    let path = directory.join(format!("tagged-dns-server-{network}.toml"));
     fs::write(&path, config)?;
     Ok(path)
 }

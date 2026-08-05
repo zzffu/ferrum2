@@ -2,16 +2,18 @@
 mod local_support;
 
 use std::fs;
-use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, TcpStream, UdpSocket};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use local_support::{
-    ChildGuard, active_child_count, bind_loopback_listener, run_binary, unused_tcp_udp_loopback,
-    wait_for_bound, wait_for_tcp_udp_bound, write_server_config,
+    ChildGuard, active_child_count, bind_loopback_listener, run_binary, start_dns_answer,
+    unused_loopback, unused_tcp_udp_loopback, wait_for_bound, wait_for_listener,
+    wait_for_tcp_udp_bound, write_server_config, write_tagged_dns_server_config,
+    write_udp_client_config,
 };
 
 const STARTUP_BIND_DIAGNOSTIC: &[u8] =
@@ -19,6 +21,165 @@ const STARTUP_BIND_DIAGNOSTIC: &[u8] =
 // ponytail: file-wide lock; use socket inheritance if these tests need parallel throughput.
 static UDP_LOCAL_E2E_TEST_LOCK: Mutex<()> = Mutex::new(());
 use socket2::{Domain, Protocol, Socket, Type};
+
+fn udp_associate(client: SocketAddrV4) -> (TcpStream, UdpSocket, SocketAddrV4) {
+    let mut control = TcpStream::connect(client).expect("connect SOCKS control");
+    control
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("control timeout");
+    control.write_all(&[5, 1, 0]).expect("SOCKS greeting");
+    let mut method = [0_u8; 2];
+    control.read_exact(&mut method).expect("SOCKS method");
+    assert_eq!(method, [5, 0]);
+    control
+        .write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
+        .expect("UDP ASSOCIATE");
+    let mut reply = [0_u8; 10];
+    control.read_exact(&mut reply).expect("UDP command reply");
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    let relay = SocketAddrV4::new(
+        Ipv4Addr::new(reply[4], reply[5], reply[6], reply[7]),
+        u16::from_be_bytes([reply[8], reply[9]]),
+    );
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("application UDP socket");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("application timeout");
+    (control, socket, relay)
+}
+
+fn domain_target(name: &str, port: u16) -> Vec<u8> {
+    let mut target = vec![3, u8::try_from(name.len()).expect("domain length")];
+    target.extend_from_slice(name.as_bytes());
+    target.extend_from_slice(&port.to_be_bytes());
+    target
+}
+
+fn ip_target(target: SocketAddrV4) -> Vec<u8> {
+    let mut wire = vec![1];
+    wire.extend_from_slice(&target.ip().octets());
+    wire.extend_from_slice(&target.port().to_be_bytes());
+    wire
+}
+
+fn dns_udp_round_trip(
+    application: &UdpSocket,
+    relay: SocketAddrV4,
+    name: &str,
+    target: SocketAddrV4,
+    payload: &[u8],
+) {
+    let mut request = vec![0, 0, 0];
+    request.extend_from_slice(&domain_target(name, target.port()));
+    request.extend_from_slice(payload);
+    assert_eq!(
+        application.send_to(&request, relay).expect("UDP send"),
+        request.len()
+    );
+    let mut response = [0_u8; 65_507];
+    let (length, source) = application.recv_from(&mut response).expect("UDP response");
+    assert_eq!(source, SocketAddr::V4(relay));
+    let mut expected = vec![0, 0, 0];
+    expected.extend_from_slice(&ip_target(target));
+    expected.extend_from_slice(payload);
+    assert_eq!(&response[..length], expected);
+}
+
+#[test]
+fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
+    let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
+    let baseline_children = active_child_count();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let selected_name = "selected-udp.test.";
+    let final_name = "final-udp.test.";
+    let selected_target = UdpSocket::bind("127.0.0.1:0").expect("selected target");
+    let final_target = UdpSocket::bind("127.0.0.2:0").expect("final target");
+    for target in [&selected_target, &final_target] {
+        target
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("target timeout");
+    }
+    let selected_address = match selected_target.local_addr().expect("selected address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 selected target"),
+    };
+    let final_address = match final_target.local_addr().expect("final address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 final target"),
+    };
+    let selected_echo = thread::spawn(move || {
+        let mut packet = [0_u8; 64];
+        let (length, peer) = selected_target
+            .recv_from(&mut packet)
+            .expect("selected receive");
+        selected_target
+            .send_to(&packet[..length], peer)
+            .expect("selected echo");
+    });
+    let final_echo = thread::spawn(move || {
+        let mut packet = [0_u8; 64];
+        let (length, peer) = final_target.recv_from(&mut packet).expect("final receive");
+        final_target
+            .send_to(&packet[..length], peer)
+            .expect("final echo");
+    });
+    let selected_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 1), 2);
+    let final_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 2), 2);
+    let dns_addresses = [selected_dns.address(), final_dns.address()];
+    let server_address = unused_tcp_udp_loopback();
+    let client_address = unused_loopback();
+    let server_config = write_tagged_dns_server_config(
+        directory.path(),
+        server_address,
+        selected_name,
+        selected_address.port(),
+        "udp",
+        dns_addresses,
+        true,
+    )
+    .expect("tagged DNS server config");
+    let client_config =
+        write_udp_client_config(directory.path(), client_address, server_address, None)
+            .expect("UDP client config");
+    let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+    wait_for_tcp_udp_bound(&mut server, server_address);
+    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+    wait_for_listener(&mut client, client_address);
+    let (control, application, relay) = udp_associate(client_address);
+
+    dns_udp_round_trip(
+        &application,
+        relay,
+        selected_name,
+        selected_address,
+        b"selected",
+    );
+    dns_udp_round_trip(&application, relay, final_name, final_address, b"final");
+    selected_echo.join().expect("selected echo join");
+    final_echo.join().expect("final echo join");
+    assert_eq!(selected_dns.join(), [1, 28]);
+    assert_eq!(final_dns.join(), [1, 28]);
+    drop((application, control));
+    let client_exit = client.terminate_and_reap_with_exit(Duration::from_secs(5));
+    let server_exit = server.terminate_and_reap_with_exit(Duration::from_secs(5));
+    for exit in [&client_exit, &server_exit] {
+        exit.assert_stderr_excludes(&[
+            selected_name,
+            final_name,
+            "selected",
+            "final",
+            "dns-direct",
+            "app-direct",
+        ]);
+    }
+    assert_eq!(active_child_count(), baseline_children);
+    drop(bind_loopback_listener(client_address).expect("client exact rebind"));
+    drop(bind_loopback_listener(server_address).expect("server TCP exact rebind"));
+    drop(UdpSocket::bind(server_address).expect("server UDP exact rebind"));
+    drop(UdpSocket::bind(relay).expect("client relay exact rebind"));
+    drop(UdpSocket::bind(dns_addresses[0]).expect("selected DNS exact rebind"));
+    drop(UdpSocket::bind(dns_addresses[1]).expect("final DNS exact rebind"));
+}
 
 fn disable_udp(path: &std::path::Path) {
     let mut source = fs::read_to_string(path).expect("server config");

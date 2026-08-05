@@ -79,6 +79,8 @@ pub(crate) async fn lookup(
         provider,
     )
     .with_options(options);
+    #[cfg(feature = "__interop-test-root")]
+    let builder = builder.with_tls_config(interop_test_tls()?);
     #[cfg(test)]
     let builder = match server.tls.clone() {
         Some(tls) => builder.with_tls_config(tls),
@@ -104,7 +106,12 @@ pub(crate) async fn query(
     }
 
     let name_server = name_server_config(server)?;
+    #[cfg(not(feature = "__interop-test-root"))]
     let tls = TlsConfig::new().map_err(map_error)?;
+    #[cfg(feature = "__interop-test-root")]
+    let tls = TlsConfig {
+        config: interop_test_tls()?,
+    };
     #[cfg(test)]
     let tls = match server.tls.clone() {
         Some(config) => TlsConfig { config },
@@ -133,6 +140,25 @@ pub(crate) async fn query(
         return send_query(&provider, name_server.ip, tcp, &context, request, deadline).await;
     }
     Ok(response)
+}
+
+#[cfg(feature = "__interop-test-root")]
+fn interop_test_tls() -> Result<rustls::ClientConfig, DnsError> {
+    use rustls::RootCertStore;
+    use rustls::pki_types::CertificateDer;
+
+    const ROOT: &[u8] = include_bytes!("../tests/fixtures/m12-test-ca.der");
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(ROOT.to_vec()))
+        .map_err(|_| DnsError::Protocol)?;
+    rustls::ClientConfig::builder_with_details(
+        Arc::new(rustls::crypto::ring::default_provider()),
+        Arc::new(rustls::time_provider::DefaultTimeProvider),
+    )
+    .with_safe_default_protocol_versions()
+    .map_err(|_| DnsError::Protocol)
+    .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
 }
 
 async fn send_query(

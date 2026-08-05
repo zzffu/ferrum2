@@ -502,6 +502,7 @@ dependencies = [
  "ferrum2-config",
  "ferrum2-core",
  "ferrum2-crypto",
+ "ferrum2-dns",
  "ferrum2-observability",
  "ferrum2-runtime",
  "ferrum2-shadowsocks",
