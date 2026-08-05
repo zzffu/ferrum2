@@ -1,7 +1,7 @@
 ---
 id: M12-T05
 milestone: M12
-status: planned
+status: active
 depends_on: [M12-T04]
 owns:
   - bins/ferrum2-server/src/dns_egress.rs

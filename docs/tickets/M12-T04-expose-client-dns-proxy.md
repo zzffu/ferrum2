@@ -1,7 +1,7 @@
 ---
 id: M12-T04
 milestone: M12
-status: active
+status: done
 depends_on: [M12-T03]
 owns:
   - Cargo.toml
@@ -44,24 +44,24 @@ still selects that final action；the matcher、schema and ordinary route semant
 
 ## Acceptance
 
-- [ ] Real UDP and TCP queries prove DNS-inbound/network/absolute-qname:53 first/final selection and
+- [x] Real UDP and TCP queries prove DNS-inbound/network/absolute-qname:53 first/final selection and
       positive/negative/EDNS/truncation behavior through Hickory；typed message assertions replace raw
       byte-offset or terminal-byte response oracles。
-- [ ] Distinct direct、concrete、fixed-chain and selector detours carry UDP/TCP/DoT/DoH to the configured
+- [x] Distinct direct、concrete、fixed-chain and selector detours carry UDP/TCP/DoT/DoH to the configured
       numeric server；bootstrap never runs ordinary route and TCP-family flows/UDP queries preserve
       existing selector snapshot semantics。
-- [ ] Detoured UDP reuses existing SIP022 packet/session owners and succeeds with public `[udp]` off
+- [x] Detoured UDP reuses existing SIP022 packet/session owners and succeeds with public `[udp]` off
       without accepting SOCKS5 `UDP ASSOCIATE`；public opt-in on/off never creates two managers。
-- [ ] FORMERR/NOTIMP/REFUSED/drop/close/SERVFAIL behavior is exact for malformed、shape、class/opcode、
+- [x] FORMERR/NOTIMP/REFUSED/drop/close/SERVFAIL behavior is exact for malformed、shape、class/opcode、
       frame、busy、timeout and upstream failures，with zero unauthorized upstream work。
-- [ ] Two-listener aggregate connection/inflight saturation、TCP multi-query/idle/half-frame and forced
+- [x] Two-listener aggregate connection/inflight saturation、TCP multi-query/idle/half-frame and forced
       shutdown plus detour connection/session saturation keep fixed permits、queues、buffers and tasks。
-- [ ] Prepare failure rolls back paired UDP/TCP sockets and all roots；success/failure shutdown reaches
+- [x] Prepare failure rolls back paired UDP/TCP sockets and all roots；success/failure shutdown reaches
       zero DNS/egress owners and exact listener、Shadowsocks-hop、DNS-upstream rebind。
-- [ ] Each prepared client DNS root retains both `TaggedResolver` and its `TaggedResolverOwner`；run、
+- [x] Each prepared client DNS root retains both `TaggedResolver` and its `TaggedResolverOwner`；run、
       rollback and forced shutdown drop/close the resolver then explicitly await the owner，never relying
       on owner `Drop` as the transitive reap path。
-- [ ] Destination/tag/bootstrap/TLS/path sentinels are absent from stderr/trace/metrics；`TEST-0013` T04、
+- [x] Destination/tag/bootstrap/TLS/path sentinels are absent from stderr/trace/metrics；`TEST-0013` T04、
       Full、footprint and blocking reviews pass。
 
 ## Validation
@@ -73,3 +73,18 @@ Run `TEST-0013` T04 commands，then repository Full commands before integration�
 Rollback removes client DNS roots while retaining tagged upstreams for later server composition。Main
 risks are using Hickory's unbounded stock accept loop、incorrect UDP truncation or connection admission
 being multiplied by inbound count，plus accidentally forking the SIP022 UDP data plane for internal DNS。
+
+## Evidence
+
+- Candidate `289c58428fabfb0ae362fc3c15234c3082f64201` is integrated at
+  `7d2cadabef8d558ac6d8ee52be1fa7d6183dc6d6` with the candidate as the merge commit's second parent。
+- The initial Architect `ARCH-001`～`ARCH-003` and QA `QA-001`～`QA-003` blockers were closed by exactly
+  one bounded repair。Targeted Architect and QA reviews both returned `PASS`；no dual-agent diagnosis was
+  triggered。
+- Integration focused tests pass (core unit `6/6`、selector `5/5`、client `37/37`、DNS unit `5/5`、
+  proxy `5/5`、lifecycle `7/7`、tagged upstreams `2/2`、workspace policy `21/21`)。Repository Full、
+  ignored lifecycle `1/1` (`130.37s`)、Rust 1.88、docs and locked offline metadata pass。
+- Footprint integrity is `PASS`。Numeric `REVIEW_REQUIRED` (`+2260/0/0` case/support/fixture、code
+  growth `+433`、ratio `2.104062`) is explicitly accepted by Architect and QA；the added evidence closes
+  the real-detour、routing、wire-negative、resource-accounting and cancellation findings without a second
+  harness or product protocol path。

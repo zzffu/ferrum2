@@ -103,8 +103,8 @@ Shadowsocks数据面或规则引擎。
 | M12-T01 | Pin Hickory 0.26.1 and raise the workspace MSRV to 1.88.0 | — | done |
 | M12-T02 | Compile DNS config、detour roots and one shared first-match action table | M12-T01 | done |
 | M12-T03 | Implement tagged Hickory upstreams over bounded direct/detour runtime adapters | M12-T02 | done |
-| M12-T04 | Expose client UDP/TCP DNS proxy with real Shadowsocks detours | M12-T03 | active |
-| M12-T05 | Compose server resolution/detours and prove external interoperability | M12-T04 | planned |
+| M12-T04 | Expose client UDP/TCP DNS proxy with real Shadowsocks detours | M12-T03 | done |
+| M12-T05 | Compose server resolution/detours and prove external interoperability | M12-T04 | active |
 | M12-T06 | Qualify one exact M12 integration SHA | M12-T05 | planned |
 
 ~~~text
@@ -148,6 +148,12 @@ required two-independent-`gpt-5.6-sol/xhigh` diagnosis path。The selected owned
 `TaggedResolverOwner` repair passed deterministic 100-cycle and 50-cycle checks，then final Architect/QA
 both returned `PASS`。Integration focused、Full、Rust 1.88、ignored lifecycle `1/1` (`130.71s`) and docs
 pass。Footprint integrity passes；numeric `REVIEW_REQUIRED` (`+2326/0/0`、code `+813`、ratio `2.026931`)
-is accepted。M12-T04 is active and must retain resolver plus owner in each prepared root and explicitly
-await owner shutdown。The user authorized remote pushes；none has run yet。Manual workflow dispatch remains
-separately unauthorized；no hosted run、PR、tag、package、release or publication has occurred。
+is accepted。M12-T04 final candidate `289c58428fabfb0ae362fc3c15234c3082f64201` is integrated at
+exact `7d2cadabef8d558ac6d8ee52be1fa7d6183dc6d6`。Its initial Architect/QA blockers were closed by
+exactly one bounded repair；targeted Architect/QA both returned `PASS`，so no post-review dual-agent
+diagnosis was required。Integration core/client/DNS tests、workspace policy `21/21`、Full、Rust 1.88、
+ignored lifecycle `1/1` (`130.37s`)、docs and locked offline metadata pass。Footprint integrity passes；
+numeric `REVIEW_REQUIRED` (`+2260/0/0`、code `+433`、ratio `2.104062`) is accepted。M12-T05 is active
+from that exact integration product。The user authorized remote pushes；none has run yet。Manual workflow
+dispatch remains separately unauthorized；no hosted run、PR、tag、package、release or publication has
+occurred。
