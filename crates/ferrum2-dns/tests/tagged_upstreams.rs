@@ -1,5 +1,6 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU16;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +17,23 @@ use hickory_server::store::in_memory::InMemoryZoneHandler;
 use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
+
+static TEST_NETWORK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(10_000);
+
+async fn bind_paired_sockets() -> (SocketAddr, UdpSocket, TcpListener) {
+    loop {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        assert!(port < 30_000, "no paired test address available");
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        if let (Ok(tcp), Ok(udp)) = (
+            TcpListener::bind(address).await,
+            UdpSocket::bind(address).await,
+        ) {
+            return (address, udp, tcp);
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EgressCall {
@@ -76,11 +94,7 @@ struct PlainFixture {
 
 impl PlainFixture {
     async fn start() -> Self {
-        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("bind fixture UDP");
-        let address = udp.local_addr().expect("fixture UDP address");
-        let tcp = TcpListener::bind(address).await.expect("bind fixture TCP");
+        let (address, udp, tcp) = bind_paired_sockets().await;
 
         let origin = Name::from_ascii("resolver.test.").expect("zone origin");
         let mut zone = InMemoryZoneHandler::<TokioRuntimeProvider>::empty(
@@ -217,6 +231,7 @@ fn configured_server(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udp_tcp_exact_server_plan_and_negative_semantics() {
+    let _network = TEST_NETWORK.lock().await;
     let fixture = PlainFixture::start().await;
     let egress = Arc::new(RecordingEgress::default());
     let (resolver, mut owner) = TaggedResolver::new(
@@ -342,11 +357,7 @@ fn answer(request: &hickory_proto::op::Message) -> hickory_proto::op::Message {
 async fn tc_fixture() -> (SocketAddr, Vec<tokio::task::JoinHandle<()>>) {
     use hickory_proto::op::Message;
 
-    let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-        .await
-        .expect("TC UDP bind");
-    let address = udp.local_addr().expect("TC address");
-    let tcp = TcpListener::bind(address).await.expect("TC TCP bind");
+    let (address, udp, tcp) = bind_paired_sockets().await;
     let udp_task = tokio::spawn(async move {
         let mut buffer = [0_u8; 4096];
         let (length, peer) = udp.recv_from(&mut buffer).await.expect("TC UDP receive");
@@ -440,6 +451,7 @@ async fn half_frame() -> (SocketAddr, tokio::task::JoinHandle<()>) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
+    let _network = TEST_NETWORK.lock().await;
     let (address, tasks) = tc_fixture().await;
     let egress = Arc::new(RecordingEgress::default());
     let (resolver, mut owner) = TaggedResolver::new(

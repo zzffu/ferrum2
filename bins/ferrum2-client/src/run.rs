@@ -2335,6 +2335,9 @@ mod tests {
 
     use super::*;
 
+    static ISSUED_TEST_PORTS: std::sync::LazyLock<Mutex<HashSet<u16>>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
     #[cfg(unix)]
     #[tokio::test]
     async fn listener_policy_rebinds_after_traffic_and_excludes_live_contender() {
@@ -5068,14 +5071,21 @@ mod tests {
     }
 
     fn reserve_address() -> SocketAddrV4 {
-        let listener =
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve address");
-        let address = match listener.local_addr().expect("reserved address") {
-            SocketAddr::V4(address) => address,
-            SocketAddr::V6(_) => unreachable!("IPv4 reservation"),
-        };
-        drop(listener);
-        address
+        let mut issued = ISSUED_TEST_PORTS.lock().expect("issued test ports");
+        for port in 10_000..30_000 {
+            if issued.contains(&port) {
+                continue;
+            }
+            let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+            if let (Ok(_tcp), Ok(_udp)) = (
+                std::net::TcpListener::bind(address),
+                std::net::UdpSocket::bind(address),
+            ) {
+                issued.insert(port);
+                return address;
+            }
+        }
+        panic!("no paired test address available")
     }
 
     fn client_test_config(

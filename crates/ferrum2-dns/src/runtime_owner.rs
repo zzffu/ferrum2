@@ -378,7 +378,6 @@ async fn run_commands(
                     let query_tasks = tasks.clone();
                     let mut cancelled = cancel_rx.clone();
                     queries.spawn(async move {
-                        let _permit = permit;
                         let _guard = QueryGuard::new(Arc::clone(&counters));
                         let provider = FerrumRuntimeProvider::new(
                             egress, plan, deadline, tasks, counters,
@@ -395,6 +394,7 @@ async fn run_commands(
                             ) => result,
                         };
                         query_tasks.abort_and_join().await;
+                        drop(permit);
                         if !reply.is_closed() {
                             let _ = reply.send(result);
                         }
@@ -409,7 +409,6 @@ async fn run_commands(
                     let query_tasks = tasks.clone();
                     let mut cancelled = cancel_rx.clone();
                     queries.spawn(async move {
-                        let _permit = permit;
                         let _guard = QueryGuard::new(Arc::clone(&counters));
                         let provider = FerrumRuntimeProvider::new(
                             egress, plan, deadline, tasks, counters,
@@ -425,6 +424,7 @@ async fn run_commands(
                             ) => result,
                         };
                         query_tasks.abort_and_join().await;
+                        drop(permit);
                         if !reply.is_closed() {
                             let _ = reply.send(result);
                         }
