@@ -102,8 +102,8 @@ Shadowsocks数据面或规则引擎。
 |---|---|---|---|
 | M12-T01 | Pin Hickory 0.26.1 and raise the workspace MSRV to 1.88.0 | — | done |
 | M12-T02 | Compile DNS config、detour roots and one shared first-match action table | M12-T01 | done |
-| M12-T03 | Implement tagged Hickory upstreams over bounded direct/detour runtime adapters | M12-T02 | active |
-| M12-T04 | Expose client UDP/TCP DNS proxy with real Shadowsocks detours | M12-T03 | planned |
+| M12-T03 | Implement tagged Hickory upstreams over bounded direct/detour runtime adapters | M12-T02 | done |
+| M12-T04 | Expose client UDP/TCP DNS proxy with real Shadowsocks detours | M12-T03 | active |
 | M12-T05 | Compose server resolution/detours and prove external interoperability | M12-T04 | planned |
 | M12-T06 | Qualify one exact M12 integration SHA | M12-T05 | planned |
 
@@ -140,6 +140,14 @@ isolated `30352074bdf7352d33a00cfc9f04da70fabbaec6` commit closes the three inhe
 Clippy warnings and restores workspace Clippy。Two independent xhigh analyses of its encrypted-fixture
 blocker selected exact workspace-pinned `h2/rustls/tokio-rustls` declarations、dev-only Hickory server
 internal `__https`、reviewed static test DER and one ferrum-owned exclusive DNS runtime；normal product
-WebPKI and 222 package identities remain exact。The user authorized remote pushes；none has run yet。Manual
-workflow dispatch remains separately unauthorized；no hosted run、PR、tag、package、release or publication
-has occurred。
+WebPKI and 222 package identities remain exact。T03 final candidate
+`10b7c31fea92691b94cae1fb16032aac20e65d27` is integrated at exact
+`e1a9ae379a0c9363d7694fc99dbfcad602162d34`。Initial lifecycle review blockers were closed by one
+bounded repair；the remaining pre-first-poll counter and blocking-Drop findings each followed the user's
+required two-independent-`gpt-5.6-sol/xhigh` diagnosis path。The selected owned-guard、closed-TaskSet and
+`TaggedResolverOwner` repair passed deterministic 100-cycle and 50-cycle checks，then final Architect/QA
+both returned `PASS`。Integration focused、Full、Rust 1.88、ignored lifecycle `1/1` (`130.71s`) and docs
+pass。Footprint integrity passes；numeric `REVIEW_REQUIRED` (`+2326/0/0`、code `+813`、ratio `2.026931`)
+is accepted。M12-T04 is active and must retain resolver plus owner in each prepared root and explicitly
+await owner shutdown。The user authorized remote pushes；none has run yet。Manual workflow dispatch remains
+separately unauthorized；no hosted run、PR、tag、package、release or publication has occurred。

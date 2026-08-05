@@ -1,7 +1,7 @@
 ---
 id: M12-T04
 milestone: M12
-status: planned
+status: active
 depends_on: [M12-T03]
 owns:
   - crates/ferrum2-dns/src/proxy.rs
@@ -33,6 +33,9 @@ its absent-direct or configured Shadowsocks detour。
       shutdown plus detour connection/session saturation keep fixed permits、queues、buffers and tasks。
 - [ ] Prepare failure rolls back paired UDP/TCP sockets and all roots；success/failure shutdown reaches
       zero DNS/egress owners and exact listener、Shadowsocks-hop、DNS-upstream rebind。
+- [ ] Each prepared client DNS root retains both `TaggedResolver` and its `TaggedResolverOwner`；run、
+      rollback and forced shutdown drop/close the resolver then explicitly await the owner，never relying
+      on owner `Drop` as the transitive reap path。
 - [ ] Destination/tag/bootstrap/TLS/path sentinels are absent from stderr/trace/metrics；`TEST-0013` T04、
       Full、footprint and blocking reviews pass。
 
