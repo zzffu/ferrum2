@@ -4,6 +4,9 @@ milestone: M12
 status: active
 depends_on: [M12-T02]
 owns:
+  - Cargo.lock
+  - crates/ferrum2-dns/Cargo.toml
+  - crates/ferrum2-dns/src/lib.rs
   - crates/ferrum2-dns/src/resolver.rs
   - crates/ferrum2-dns/src/runtime_owner.rs
   - crates/ferrum2-dns/src/runtime_provider.rs

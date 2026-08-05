@@ -137,5 +137,7 @@ M12-T01 is integrated at exact product `d874865f4a66db8d7c50abad85e6092a16f52fb6
 targeted Architect/QA both returned `PASS`。Focused、Quick、integration and footprint integrity gates
 pass；numeric `REVIEW_REQUIRED` is accepted。Three unchanged server `run.rs` Rust-1.88 Clippy warnings
 remain explicit T06 qualification debt。M12-T03 starts from the exact T02 integration product。The user
-authorized remote pushes；none has run yet。Manual workflow dispatch remains separately unauthorized；
-no hosted run、PR、tag、package、release or publication has occurred。
+authorized remote pushes；none has run yet。Its ownership includes the DNS crate manifest/module root and
+`Cargo.lock` because the T01 crate is intentionally empty；the root manifest and new dependencies remain
+out of scope。Manual workflow dispatch remains separately unauthorized；no hosted run、PR、tag、package、
+release or publication has occurred。
