@@ -4,10 +4,15 @@ milestone: M12
 status: active
 depends_on: [M12-T03]
 owns:
+  - Cargo.lock
+  - bins/ferrum2-client/Cargo.toml
+  - bins/ferrum2-client/src/main.rs
   - crates/ferrum2-dns/src/proxy.rs
+  - crates/ferrum2-dns/src/lib.rs
   - crates/ferrum2-dns/tests/proxy_contract.rs
   - bins/ferrum2-client/src/dns_egress.rs
   - bins/ferrum2-client/src/run.rs
+  - tests/m0-harness/tests/workspace_policy.rs
 ---
 
 # M12-T04 — Expose client DNS proxy
