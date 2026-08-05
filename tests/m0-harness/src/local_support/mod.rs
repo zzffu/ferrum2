@@ -681,10 +681,10 @@ pub fn wait_for_metrics(address: SocketAddrV4) -> Vec<u8> {
 pub fn wait_for_metrics_sample(address: SocketAddrV4, sample: &str) -> Vec<u8> {
     let deadline = Instant::now() + READINESS_TIMEOUT;
     loop {
-        if let Some(body) = fetch_ferrum_metrics(address, deadline) {
-            if contains_bytes(&body, sample.as_bytes()) {
-                return body;
-            }
+        if let Some(body) = fetch_ferrum_metrics(address, deadline)
+            && contains_bytes(&body, sample.as_bytes())
+        {
+            return body;
         }
         assert!(Instant::now() < deadline, "metrics sample timed out");
         thread::sleep(READINESS_POLL);

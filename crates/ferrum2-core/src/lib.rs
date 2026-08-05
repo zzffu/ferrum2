@@ -294,6 +294,7 @@ pub mod selector {
         RouteRules,
         RouteRuleInbound,
         RouteRuleOutbound,
+        ExtraRoot,
         RouteFinal,
         UnreachableOutbound,
         UnreachablePlan,
@@ -442,26 +443,26 @@ pub mod route {
         Udp,
     }
 
-    /// One compiled route rule with resolved inbound and outbound identities.
-    pub struct RouteRule {
+    /// One runtime-neutral first-match rule with a resolved action.
+    pub struct ActionRule<A> {
         inbound: Option<usize>,
         network: Option<Network>,
         target: Option<TargetAddr>,
-        outbound: OutboundAction,
+        action: A,
     }
 
-    impl RouteRule {
+    impl<A> ActionRule<A> {
         pub fn new(
             inbound: Option<usize>,
             network: Option<Network>,
             target: Option<TargetAddr>,
-            outbound: usize,
+            action: A,
         ) -> Self {
             Self {
                 inbound,
                 network,
                 target,
-                outbound: OutboundAction::Plan(outbound),
+                action,
             }
         }
 
@@ -483,15 +484,74 @@ pub mod route {
         }
     }
 
+    /// One bounded ordered first-match table with a mandatory final action.
+    pub struct ActionTable<A> {
+        rules: Vec<ActionRule<A>>,
+        final_action: A,
+    }
+
+    impl<A> ActionTable<A> {
+        pub fn new(rules: Vec<ActionRule<A>>, final_action: A) -> Option<Self> {
+            (rules.len() <= MAX_ROUTE_RULES).then_some(Self {
+                rules,
+                final_action,
+            })
+        }
+    }
+
+    impl<A: Copy> ActionTable<A> {
+        /// Selects the first matching action or the mandatory final action.
+        pub fn select(&self, inbound: usize, network: Network, target: &TargetAddr) -> A {
+            self.rules
+                .iter()
+                .find(|rule| rule.matches(inbound, network, target))
+                .map_or(self.final_action, |rule| rule.action)
+        }
+    }
+
+    /// One ordinary direct outbound rule retained for API compatibility.
+    pub type RouteRule = ActionRule<usize>;
+
+    /// A resolved egress action that snapshots one complete immutable plan when selected.
+    #[derive(Clone)]
+    pub struct EgressPlanHandle {
+        action: OutboundAction,
+        selectors: Arc<SelectorState>,
+        plans: Arc<Vec<Box<[usize]>>>,
+    }
+
+    impl EgressPlanHandle {
+        /// Constructs one immutable single-outbound action.
+        pub fn direct(outbound: usize) -> Self {
+            Self {
+                action: OutboundAction::Plan(0),
+                selectors: Arc::default(),
+                plans: Arc::new(vec![Box::from([outbound])]),
+            }
+        }
+
+        /// Selects the current concrete plan without changing selector state.
+        pub fn snapshot(&self) -> EgressPlan<'_> {
+            EgressPlan {
+                hops: &self.plans[self.selectors.resolve(self.action)],
+            }
+        }
+    }
+
+    impl std::fmt::Debug for EgressPlanHandle {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("EgressPlanHandle([redacted])")
+        }
+    }
+
     /// A compiled route table whose selection always returns an outbound identity.
     pub struct RouteTable {
-        rules: Vec<RouteRule>,
-        final_action: OutboundAction,
+        actions: ActionTable<OutboundAction>,
         final_plan: usize,
         final_outbound: usize,
         routed: bool,
         selectors: Arc<SelectorState>,
-        plans: Vec<Box<[usize]>>,
+        plans: Arc<Vec<Box<[usize]>>>,
     }
 
     impl RouteTable {
@@ -508,21 +568,17 @@ pub mod route {
             let rules = bindings
                 .into_iter()
                 .enumerate()
-                .map(|(inbound, _)| RouteRule {
-                    inbound: Some(inbound),
-                    network: None,
-                    target: None,
-                    outbound: OutboundAction::Plan(inbound),
+                .map(|(inbound, _)| {
+                    ActionRule::new(Some(inbound), None, None, OutboundAction::Plan(inbound))
                 })
                 .collect();
             Some(Self {
-                rules,
-                final_action: OutboundAction::Plan(0),
+                actions: ActionTable::new(rules, OutboundAction::Plan(0))?,
                 final_plan: 0,
                 final_outbound,
                 routed: false,
                 selectors: Arc::default(),
-                plans,
+                plans: Arc::new(plans),
             })
         }
 
@@ -533,22 +589,28 @@ pub mod route {
             }
             let mut plans = Vec::with_capacity(rules.len() + 1);
             for rule in &mut rules {
-                let OutboundAction::Plan(outbound) = rule.outbound else {
-                    unreachable!("public route rules are direct")
-                };
-                rule.outbound = OutboundAction::Plan(plans.len());
+                let outbound = rule.action;
+                rule.action = plans.len();
                 plans.push(Box::from([outbound]));
             }
             let final_action = OutboundAction::Plan(plans.len());
             plans.push(Box::from([final_outbound]));
+            let rules = rules
+                .into_iter()
+                .map(|rule| ActionRule {
+                    inbound: rule.inbound,
+                    network: rule.network,
+                    target: rule.target,
+                    action: OutboundAction::Plan(rule.action),
+                })
+                .collect();
             Some(Self {
-                rules,
-                final_action,
+                actions: ActionTable::new(rules, final_action)?,
                 final_plan: plans.len() - 1,
                 final_outbound,
                 routed: true,
                 selectors: Arc::default(),
-                plans,
+                plans: Arc::new(plans),
             })
         }
 
@@ -583,11 +645,7 @@ pub mod route {
             network: Network,
             target: &TargetAddr,
         ) -> EgressPlan<'_> {
-            let action = self
-                .rules
-                .iter()
-                .find(|rule| rule.matches(inbound, network, target))
-                .map_or(self.final_action, |rule| rule.outbound);
+            let action = self.actions.select(inbound, network, target);
             EgressPlan {
                 hops: &self.plans[self.selectors.resolve(action)],
             }
@@ -628,6 +686,19 @@ pub mod route {
         definitions: &[SelectorDefinition<'_>],
         route: TaggedRoute<'_>,
     ) -> Result<(RouteTable, SelectorControl), SelectorCompileError> {
+        compile_selector_plans_with_roots(inbounds, outbounds, plans, definitions, route, &[])
+            .map(|(route, control, _)| (route, control))
+    }
+
+    /// Compiles selector-aware routing plus additional resolved egress roots atomically.
+    pub fn compile_selector_plans_with_roots(
+        inbounds: &[TaggedInbound<'_>],
+        outbounds: &[TaggedOutbound<'_>],
+        plans: &[TaggedPlan<'_>],
+        definitions: &[SelectorDefinition<'_>],
+        route: TaggedRoute<'_>,
+        extra_roots: &[&str],
+    ) -> Result<(RouteTable, SelectorControl, Vec<EgressPlanHandle>), SelectorCompileError> {
         validate_identities(inbounds, outbounds, plans, definitions)?;
 
         let compiled_plans = outbounds
@@ -670,26 +741,44 @@ pub mod route {
         }
         validate_acyclic(&selectors)?;
 
-        let (rules, final_action, routed, roots) =
+        let (rules, final_action, routed, mut roots) =
             compile_actions(inbounds, outbounds, plans, definitions, route)?;
+        let extra_roots = extra_roots
+            .iter()
+            .map(|tag| {
+                resolve_tag(tag, outbounds, plans, definitions)
+                    .ok_or(SelectorCompileError::ExtraRoot)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        roots.extend(extra_roots.iter().copied());
         validate_reachability(&selectors, outbounds, &compiled_plans, &roots)?;
         let state = Arc::new(SelectorState { selectors });
         let final_plan = state.resolve(final_action);
         let final_outbound = compiled_plans[final_plan][0];
+        let plans = Arc::new(compiled_plans);
         let control = SelectorControl {
             state: Arc::clone(&state),
         };
+        let handles = extra_roots
+            .into_iter()
+            .map(|action| EgressPlanHandle {
+                action,
+                selectors: Arc::clone(&state),
+                plans: Arc::clone(&plans),
+            })
+            .collect();
         Ok((
             RouteTable {
-                rules,
-                final_action,
+                actions: ActionTable::new(rules, final_action)
+                    .expect("compiled action count was validated"),
                 final_plan,
                 final_outbound,
                 routed,
                 selectors: state,
-                plans: compiled_plans,
+                plans,
             },
             control,
+            handles,
         ))
     }
 
@@ -821,14 +910,20 @@ pub mod route {
         Ok(())
     }
 
+    type CompiledActions = (
+        Vec<ActionRule<OutboundAction>>,
+        OutboundAction,
+        bool,
+        Vec<OutboundAction>,
+    );
+
     fn compile_actions(
         inbounds: &[TaggedInbound<'_>],
         outbounds: &[TaggedOutbound<'_>],
         plans: &[TaggedPlan<'_>],
         definitions: &[SelectorDefinition<'_>],
         route: TaggedRoute<'_>,
-    ) -> Result<(Vec<RouteRule>, OutboundAction, bool, Vec<OutboundAction>), SelectorCompileError>
-    {
+    ) -> Result<CompiledActions, SelectorCompileError> {
         match route {
             TaggedRoute::Static(bindings) => {
                 if bindings.len() != inbounds.len() {
@@ -849,12 +944,12 @@ pub mod route {
                     let action = resolve_tag(binding.outbound, outbounds, plans, definitions)
                         .ok_or(SelectorCompileError::StaticBinding)?;
                     roots.push(action);
-                    rules.push(RouteRule {
-                        inbound: Some(inbounds[inbound].inbound),
-                        network: None,
-                        target: None,
-                        outbound: action,
-                    });
+                    rules.push(ActionRule::new(
+                        Some(inbounds[inbound].inbound),
+                        None,
+                        None,
+                        action,
+                    ));
                 }
                 let final_action = roots[0];
                 Ok((rules, final_action, false, roots))
@@ -892,12 +987,7 @@ pub mod route {
                         .and_then(|tag| resolve_tag(tag, outbounds, plans, definitions))
                         .ok_or(SelectorCompileError::RouteRuleOutbound)?;
                     roots.push(action);
-                    rules.push(RouteRule {
-                        inbound,
-                        network: rule.network,
-                        target: rule.target,
-                        outbound: action,
-                    });
+                    rules.push(ActionRule::new(inbound, rule.network, rule.target, action));
                 }
                 Ok((rules, final_action, true, roots))
             }
