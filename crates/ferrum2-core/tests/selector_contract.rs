@@ -2,7 +2,9 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use ferrum2_core::TargetAddr;
-use ferrum2_core::route::{Network, compile_selector_plans, compile_selector_route};
+use ferrum2_core::route::{
+    ActionRule, ActionTable, Network, compile_selector_plans, compile_selector_route,
+};
 use ferrum2_core::selector::{
     SelectorControl, SelectorDefinition, SelectorError, TaggedInbound, TaggedOutbound, TaggedPlan,
     TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
@@ -129,5 +131,67 @@ fn public_route_selection_snapshots_complete_static_rule_final_and_selector_plan
     assert!(
         std::panic::catch_unwind(|| static_route.select(0, Network::Tcp, &target)).is_err(),
         "the direct-only accessor must not truncate a multi-hop plan"
+    );
+}
+
+#[test]
+fn one_action_table_preserves_exact_first_match_semantics_for_two_action_domains() {
+    fn table<A: Copy>(actions: [A; 4]) -> ActionTable<A> {
+        ActionTable::new(
+            vec![
+                ActionRule::new(
+                    Some(2),
+                    Some(Network::Tcp),
+                    Some(TargetAddr::domain("Example.test.", 53).unwrap()),
+                    actions[0],
+                ),
+                ActionRule::new(
+                    None,
+                    Some(Network::Udp),
+                    Some(TargetAddr::ip("192.0.2.1:53".parse().unwrap()).unwrap()),
+                    actions[1],
+                ),
+                ActionRule::new(None, None, None, actions[2]),
+            ],
+            actions[3],
+        )
+        .unwrap()
+    }
+
+    let contexts = [
+        (2, Network::Tcp, "EXAMPLE.TEST.:53", 0),
+        (7, Network::Udp, "192.0.2.1:53", 1),
+        (2, Network::Tcp, "example.test:53", 2),
+        (2, Network::Tcp, "example.test.:54", 2),
+        (7, Network::Udp, "192.0.2.2:53", 2),
+    ];
+    let outbound = table([10, 20, 30, 40]);
+    let dns = table(["primary", "lan", "shadow", "final"]);
+    for (inbound, network, target, expected) in contexts {
+        let target = target
+            .parse()
+            .ok()
+            .and_then(|socket| TargetAddr::ip(socket).ok())
+            .unwrap_or_else(|| {
+                let (host, port) = target.rsplit_once(':').unwrap();
+                TargetAddr::domain(host, port.parse().unwrap()).unwrap()
+            });
+        assert_eq!(
+            outbound.select(inbound, network, &target),
+            [10, 20, 30][expected]
+        );
+        assert_eq!(
+            dns.select(inbound, network, &target),
+            ["primary", "lan", "shadow"][expected]
+        );
+    }
+    let final_only = ActionTable::new(Vec::new(), "final").unwrap();
+    assert_eq!(
+        final_only.select(
+            0,
+            Network::Tcp,
+            &TargetAddr::domain("unused.test", 443).unwrap()
+        ),
+        "final"
     );
 }

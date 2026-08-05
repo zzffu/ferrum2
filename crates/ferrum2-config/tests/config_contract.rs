@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ferrum2_config::{
-    ConfigErrorKind, ConfigField, LoggingLevel, MAX_CONFIG_BYTES, RuntimeConfig, load_client,
-    load_server,
+    ConfigErrorKind, ConfigField, DnsTransport, LoggingLevel, MAX_CONFIG_BYTES, RuntimeConfig,
+    load_client, load_server,
 };
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{Network, RouteTable};
@@ -73,6 +73,10 @@ fn routed(source: String, route: &str) -> String {
 
 fn with_selectors(source: String, selectors: &str) -> String {
     source.replacen("[shadowsocks]", &format!("{selectors}\n[shadowsocks]"), 1)
+}
+
+fn with_dns(source: String, dns: &str) -> String {
+    source.replacen("[shadowsocks]", &format!("{dns}\n[shadowsocks]"), 1)
 }
 
 fn assert_tagged_error(
@@ -728,6 +732,306 @@ fn routed_graph_compiles_resolved_first_match_tables_for_both_roles() {
         );
         load_client(TempConfig::text(&source).path()).expect("bounded routed rules");
     }
+}
+
+#[test]
+fn dns_graph_compiles_independent_server_actions_and_detour_plan_roots() {
+    let graph = "[[chains]]\ntag = \"two-hop\"\nhops = [\"o1\", \"o2\"]\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"o1\", \"o2\"]\ndefault = \"o1\"";
+    let dns = r#"[dns]
+timeout_ms = 100
+max_inflight = 4096
+[[dns.inbounds]]
+tag = "local-dns"
+listen = "127.0.0.1:5353"
+[[dns.servers]]
+tag = "plain"
+transport = "udp"
+address = "[2001:db8::53]:53"
+[[dns.servers]]
+tag = "tcp-v6"
+transport = "tcp"
+address = "127.0.0.1:5353"
+detour = "o0"
+[[dns.servers]]
+tag = "tls"
+transport = "dot"
+address = "192.0.2.54:853"
+server_name = "resolver.example"
+detour = "two-hop"
+[[dns.servers]]
+tag = "https"
+transport = "doh"
+address = "192.0.2.55:443"
+server_name = "resolver.example"
+path = "/resolve"
+detour = "manual"
+[dns.route]
+final = "https"
+[[dns.route.rules]]
+inbound = "local-dns"
+network = "udp"
+target = { host = "plain.example.", port = 53 }
+server = "plain"
+[[dns.route.rules]]
+network = "tcp"
+target = { host = "tcp.example.", port = 53 }
+server = "tcp-v6"
+[[dns.route.rules]]
+target = { host = "tls.example.", port = 53 }
+server = "tls""#;
+    let source =
+        with_dns(with_selectors(tagged_client(1, 3), graph), dns) + "\n[udp]\nenabled = false\n";
+    let config = load_client(TempConfig::text(&source).path()).expect("client DNS graph");
+    let dns = config.dns.as_ref().expect("validated DNS");
+    assert_eq!(
+        (
+            dns.timeout,
+            dns.max_inflight.get(),
+            dns.inbounds[0].listen,
+            dns.servers
+                .iter()
+                .map(|server| server.transport)
+                .collect::<Vec<_>>(),
+            dns.servers[3].path.as_deref(),
+            config.udp.expect("public UDP setting").enabled,
+        ),
+        (
+            Duration::from_millis(100),
+            4096,
+            "127.0.0.1:5353".parse().unwrap(),
+            vec![
+                DnsTransport::Udp,
+                DnsTransport::Tcp,
+                DnsTransport::Dot,
+                DnsTransport::Doh
+            ],
+            Some("/resolve"),
+            false,
+        )
+    );
+    let select_dns = |name: &str, network| {
+        dns.route.select(
+            0,
+            network,
+            &TargetAddr::domain(name, 53).expect("DNS target"),
+        )
+    };
+    assert_eq!(
+        (
+            select_dns("PLAIN.EXAMPLE.", Network::Udp),
+            select_dns("tcp.example.", Network::Tcp),
+            select_dns("tls.example.", Network::Udp),
+            select_dns("other.example.", Network::Udp),
+        ),
+        (0, 1, 2, 3)
+    );
+    assert_eq!(
+        dns.servers[1].detour.as_ref().unwrap().snapshot().hops(),
+        &[0]
+    );
+    assert_eq!(
+        dns.servers[2].detour.as_ref().unwrap().snapshot().hops(),
+        &[1, 2]
+    );
+    assert_eq!(
+        dns.servers[3].detour.as_ref().unwrap().snapshot().hops(),
+        &[1]
+    );
+    config.selector_control().switch("manual", "o2").unwrap();
+    assert_eq!(
+        dns.servers[3].detour.as_ref().unwrap().snapshot().hops(),
+        &[2]
+    );
+
+    let server_dns = r#"[dns]
+[[dns.servers]]
+tag = "direct"
+transport = "doh"
+address = "192.0.2.53:443"
+server_name = "resolver.example"
+[[dns.servers]]
+tag = "detoured"
+transport = "udp"
+address = "192.0.2.54:53"
+detour = "o1"
+[dns.route]
+final = "direct"
+[[dns.route.rules]]
+inbound = "i0"
+network = "tcp"
+server = "detoured""#;
+    let server = load_server(TempConfig::text(&with_dns(tagged_server(1, 2), server_dns)).path())
+        .expect("server DNS graph");
+    let dns = server.dns.expect("server DNS");
+    assert_eq!(dns.servers[0].path.as_deref(), Some("/dns-query"));
+    assert_eq!(
+        dns.servers[1].detour.as_ref().unwrap().snapshot().hops(),
+        &[1]
+    );
+    assert_eq!(
+        dns.route.select(
+            0,
+            Network::Tcp,
+            &TargetAddr::domain("application.example", 443).unwrap()
+        ),
+        1
+    );
+}
+
+#[test]
+fn dns_graph_rejects_each_closed_shape_reference_and_loop_field_redacted() {
+    let base_dns = r#"[dns]
+[[dns.inbounds]]
+tag = "d0"
+listen = "127.0.0.1:5353"
+[[dns.servers]]
+tag = "s0"
+transport = "udp"
+address = "192.0.2.53:53"
+[dns.route]
+final = "s0""#;
+    let client = || with_dns(CLIENT_BASE.to_owned(), base_dns);
+    let two_servers = base_dns.replacen(
+        "[dns.route]",
+        "[[dns.servers]]\ntag = \"s1\"\ntransport = \"tcp\"\naddress = \"192.0.2.54:53\"\n[dns.route]",
+        1,
+    );
+    let many_inbounds = (0..65)
+        .map(|index| {
+            format!(
+                "[[dns.inbounds]]\ntag = \"d{index}\"\nlisten = \"127.0.0.1:{}\"\n",
+                40_000 + index
+            )
+        })
+        .collect::<String>();
+    let many_servers = (0..65)
+        .map(|index| format!("[[dns.servers]]\ntag = \"s{index}\"\ntransport = \"udp\"\naddress = \"192.0.2.53:{}\"\n", 1_000 + index))
+        .collect::<String>();
+    let tagged_detour = |detour: &str| {
+        with_dns(
+            tagged_client(1, 1),
+            &base_dns.replacen(
+                "address = \"192.0.2.53:53\"",
+                &format!("address = \"192.0.2.53:53\"\ndetour = \"{detour}\""),
+                1,
+            ),
+        )
+    };
+    #[rustfmt::skip]
+    let cases = [
+        ("missing client inbounds", client().replace("[[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5353\"\n", ""), ConfigField::DnsInbounds, ConfigRole::Client),
+        ("empty client inbounds", with_dns(CLIENT_BASE.to_owned(), "[dns]\ninbounds = []\n[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"s0\""), ConfigField::DnsInbounds, ConfigRole::Client),
+        ("65 client inbounds", with_dns(CLIENT_BASE.to_owned(), &format!("[dns]\n{many_inbounds}[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"s0\"")), ConfigField::DnsInbounds, ConfigRole::Client),
+        ("server inbounds", with_dns(SERVER_BASE.to_owned(), base_dns), ConfigField::DnsInbounds, ConfigRole::Server),
+        ("missing servers", client().replace("[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n", ""), ConfigField::DnsServers, ConfigRole::Client),
+        ("65 servers", with_dns(CLIENT_BASE.to_owned(), &format!("[dns]\n[[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5353\"\n{many_servers}[dns.route]\nfinal = \"s0\"")), ConfigField::DnsServers, ConfigRole::Client),
+        ("timeout low", client().replacen("[dns]", "[dns]\ntimeout_ms = 99", 1), ConfigField::DnsTimeout, ConfigRole::Client),
+        ("timeout high", client().replacen("[dns]", "[dns]\ntimeout_ms = 30001", 1), ConfigField::DnsTimeout, ConfigRole::Client),
+        ("inflight zero", client().replacen("[dns]", "[dns]\nmax_inflight = 0", 1), ConfigField::DnsMaxInflight, ConfigRole::Client),
+        ("inflight high", client().replacen("[dns]", "[dns]\nmax_inflight = 4097", 1), ConfigField::DnsMaxInflight, ConfigRole::Client),
+        ("inbound global collision", with_dns(tagged_client(1, 1), &base_dns.replace("tag = \"d0\"", "tag = \"i0\"")), ConfigField::DnsInboundsTag, ConfigRole::Client),
+        ("inbound socket collision", client().replace("127.0.0.1:5353", "127.0.0.1:1080"), ConfigField::DnsInboundsListen, ConfigRole::Client),
+        ("duplicate server", with_dns(CLIENT_BASE.to_owned(), &two_servers.replace("tag = \"s1\"", "tag = \"s0\"")), ConfigField::DnsServersTag, ConfigRole::Client),
+        ("unknown transport", client().replace("transport = \"udp\"", "transport = \"quic\""), ConfigField::DnsServersTransport, ConfigRole::Client),
+        ("hostname bootstrap", client().replace("192.0.2.53:53", "resolver.example:53"), ConfigField::DnsServersAddress, ConfigRole::Client),
+        ("zero bootstrap port", client().replace("192.0.2.53:53", "192.0.2.53:0"), ConfigField::DnsServersAddress, ConfigRole::Client),
+        ("direct exact loop", client().replace("192.0.2.53:53", "127.0.0.1:5353"), ConfigField::DnsServersAddress, ConfigRole::Client),
+        ("direct wildcard loop", client().replace("127.0.0.1:5353", "0.0.0.0:5353").replace("192.0.2.53:53", "127.0.0.1:5353"), ConfigField::DnsServersAddress, ConfigRole::Client),
+        ("plain TLS name", client().replace("address = \"192.0.2.53:53\"", "address = \"192.0.2.53:53\"\nserver_name = \"resolver.example\""), ConfigField::DnsServersServerName, ConfigRole::Client),
+        ("DoT missing TLS name", client().replace("transport = \"udp\"", "transport = \"dot\""), ConfigField::DnsServersServerName, ConfigRole::Client),
+        ("DoT path", client().replace("transport = \"udp\"", "transport = \"dot\"").replace("address = \"192.0.2.53:53\"", "address = \"192.0.2.53:53\"\nserver_name = \"resolver.example\"\npath = \"/dns-query\""), ConfigField::DnsServersPath, ConfigRole::Client),
+        ("DoH relative path", client().replace("transport = \"udp\"", "transport = \"doh\"").replace("address = \"192.0.2.53:53\"", "address = \"192.0.2.53:53\"\nserver_name = \"resolver.example\"\npath = \"dns-query\""), ConfigField::DnsServersPath, ConfigRole::Client),
+        ("missing route", client().replace("[dns.route]\nfinal = \"s0\"", ""), ConfigField::DnsRoute, ConfigRole::Client),
+        ("unknown final", client().replace("final = \"s0\"", "final = \"missing\""), ConfigField::DnsRouteFinal, ConfigRole::Client),
+        ("unreachable server", with_dns(CLIENT_BASE.to_owned(), &two_servers), ConfigField::DnsRouteRulesServer, ConfigRole::Client),
+        ("unknown route inbound", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\ninbound = \"missing\"\nserver = \"s0\""), ConfigField::DnsRouteRulesInbound, ConfigRole::Client),
+        ("unknown route network", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\nnetwork = \"quic\"\nserver = \"s0\""), ConfigField::DnsRouteRulesNetwork, ConfigRole::Client),
+        ("invalid route target", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\ntarget = { host = \"example.test\", port = 0 }\nserver = \"s0\""), ConfigField::DnsRouteRulesTarget, ConfigRole::Client),
+        ("DNS outbound action", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\nnetwork = \"tcp\"\noutbound = \"s0\""), ConfigField::DnsRouteRulesServer, ConfigRole::Client),
+        ("legacy detour", with_dns(CLIENT_BASE.to_owned(), &base_dns.replace("address = \"192.0.2.53:53\"", "address = \"192.0.2.53:53\"\ndetour = \"legacy\"")), ConfigField::DnsServersDetour, ConfigRole::Client),
+        ("unknown detour", tagged_detour("missing"), ConfigField::DnsServersDetour, ConfigRole::Client),
+        ("inbound detour", tagged_detour("i0"), ConfigField::DnsServersDetour, ConfigRole::Client),
+        ("DNS server detour", tagged_detour("s0"), ConfigField::DnsServersDetour, ConfigRole::Client),
+    ];
+    for (index, (name, source, field, role)) in cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            role,
+            source,
+            (ConfigErrorKind::Semantic, field),
+            250 + index,
+        );
+    }
+
+    let ordinary_server_action = routed(
+        tagged_client(1, 1),
+        "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"o0\"\nserver = \"dns\"",
+    );
+    assert_tagged_error(
+        "ordinary server action",
+        ConfigRole::Client,
+        ordinary_server_action,
+        (ConfigErrorKind::Semantic, ConfigField::RouteRulesOutbound),
+        290,
+    );
+
+    let hop_collision = with_dns(
+        tagged_client(1, 1),
+        &base_dns.replace("127.0.0.1:5353", "127.0.0.1:20000"),
+    );
+    assert_tagged_error(
+        "DNS listener concrete-hop collision",
+        ConfigRole::Client,
+        hop_collision,
+        (ConfigErrorKind::Semantic, ConfigField::DnsInboundsListen),
+        291,
+    );
+    let server_selector = with_dns(
+        with_selectors(
+            tagged_server(1, 2)
+                .replace("outbound = \"o0\"", "outbound = \"manual\"")
+                .replace("outbound = \"o1\"", "outbound = \"manual\""),
+            "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"",
+        ),
+        &base_dns
+            .replace(
+                "[[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5353\"\n",
+                "",
+            )
+            .replace(
+                "address = \"192.0.2.53:53\"",
+                "address = \"192.0.2.53:53\"\ndetour = \"manual\"",
+            ),
+    );
+    assert_tagged_error(
+        "server selector detour",
+        ConfigRole::Server,
+        server_selector,
+        (ConfigErrorKind::Semantic, ConfigField::DnsServersDetour),
+        292,
+    );
+
+    let inbounds_64 = (0..64)
+        .map(|index| {
+            format!(
+                "[[dns.inbounds]]\ntag = \"d{index}\"\nlisten = \"127.0.0.1:{}\"\n",
+                40_000 + index
+            )
+        })
+        .collect::<String>();
+    let servers_64 = (0..64)
+        .map(|index| format!("[[dns.servers]]\ntag = \"s{index}\"\ntransport = \"udp\"\naddress = \"192.0.2.53:{}\"\n", 1_000 + index))
+        .collect::<String>();
+    let rules_64 = (0..63)
+        .map(|index| format!("[[dns.route.rules]]\ntarget = {{ host = \"s{index}.example.\", port = 53 }}\nserver = \"s{index}\"\n"))
+        .collect::<String>();
+    let maximum = with_dns(
+        CLIENT_BASE.to_owned(),
+        &format!("[dns]\n{inbounds_64}{servers_64}[dns.route]\nfinal = \"s63\"\n{rules_64}"),
+    );
+    let maximum = load_client(TempConfig::text(&maximum).path()).expect("64 DNS identities");
+    let maximum = maximum.dns.expect("DNS maximum");
+    assert_eq!((maximum.inbounds.len(), maximum.servers.len()), (64, 64));
 }
 
 #[test]

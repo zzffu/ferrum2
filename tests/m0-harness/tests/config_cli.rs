@@ -118,6 +118,7 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
     let (server_listener, server_udp, server_address) = reserve_server_tcp_udp();
     let (client_metrics, client_metrics_address) = reserve_loopback();
     let (server_metrics, server_metrics_address) = reserve_loopback();
+    let (dns_listener, dns_udp, dns_address) = reserve_server_tcp_udp();
     let client = write_udp_client_config(
         directory.path(),
         client_address,
@@ -125,6 +126,14 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
         Some(client_metrics_address),
     )
     .expect("client config");
+    let client_source = std::fs::read_to_string(&client).expect("client source");
+    std::fs::write(
+        &client,
+        format!(
+            "{client_source}\n[dns]\n[[dns.inbounds]]\ntag = \"local-dns\"\nlisten = \"{dns_address}\"\n[[dns.servers]]\ntag = \"direct\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"direct\"\n"
+        ),
+    )
+    .expect("client DNS config");
     let server = write_server_config(
         directory.path(),
         server_address,
@@ -151,6 +160,7 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
         server_listener,
         client_metrics,
         server_metrics,
+        dns_listener,
     ] {
         let address = listener.local_addr().expect("listener address");
         assert!(
@@ -161,6 +171,10 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
     assert_eq!(
         server_udp.local_addr().expect("UDP address"),
         std::net::SocketAddr::V4(server_address)
+    );
+    assert_eq!(
+        dns_udp.local_addr().expect("DNS UDP address"),
+        std::net::SocketAddr::V4(dns_address)
     );
 }
 
@@ -226,6 +240,14 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
             "ferrum2-client",
             format!("{CLIENT_BASE}[udp]\nmax_sessions = 0\n"),
             Some("udp.max_sessions"),
+        ),
+        (
+            "client DNS timeout range",
+            "ferrum2-client",
+            format!(
+                "{CLIENT_BASE}[dns]\ntimeout_ms = 99\n[[dns.inbounds]]\ntag = \"local-dns\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"direct\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"direct\"\n"
+            ),
+            Some("dns.timeout_ms"),
         ),
         (
             "server wrong role",
