@@ -101,8 +101,8 @@ Shadowsocks数据面或规则引擎。
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M12-T01 | Pin Hickory 0.26.1 and raise the workspace MSRV to 1.88.0 | — | done |
-| M12-T02 | Compile DNS config、detour roots and one shared first-match action table | M12-T01 | active |
-| M12-T03 | Implement tagged Hickory upstreams over bounded direct/detour runtime adapters | M12-T02 | planned |
+| M12-T02 | Compile DNS config、detour roots and one shared first-match action table | M12-T01 | done |
+| M12-T03 | Implement tagged Hickory upstreams over bounded direct/detour runtime adapters | M12-T02 | active |
 | M12-T04 | Expose client UDP/TCP DNS proxy with real Shadowsocks detours | M12-T03 | planned |
 | M12-T05 | Compose server resolution/detours and prove external interoperability | M12-T04 | planned |
 | M12-T06 | Qualify one exact M12 integration SHA | M12-T05 | planned |
@@ -131,9 +131,11 @@ test LOC；no second harness、copied DNS codec或second SIP022 UDP data plane i
 
 ## Execution / remote boundary
 
-M12-T01 is integrated at exact product `d874865f4a66db8d7c50abad85e6092a16f52fb6`；Architect `PASS`、
-QA `PASS_WITH_NOTES` and all focused/Quick/integration gates passed with no blocking ID。The expected
-numeric footprint `REVIEW_REQUIRED` is accepted。M12-T02 starts from that exact ticket base in
-`codex/m12-t02` / `.worktrees/M12-T02` with binding `PASS`。The user authorized remote pushes；none has
-run yet。Manual workflow dispatch remains separately unauthorized；no hosted run、PR、tag、package、
-release or publication has occurred。
+M12-T01 is integrated at exact product `d874865f4a66db8d7c50abad85e6092a16f52fb6`。M12-T02 candidate
+`c2e922d0e4d29e7398ebb0cd3da0dce1516a8a54` is integrated at exact
+`bf26d1587517fe80e701d73abfb45a340f4caa6c`；initial blockers were closed by one bounded repair and
+targeted Architect/QA both returned `PASS`。Focused、Quick、integration and footprint integrity gates
+pass；numeric `REVIEW_REQUIRED` is accepted。Three unchanged server `run.rs` Rust-1.88 Clippy warnings
+remain explicit T06 qualification debt。M12-T03 starts from the exact T02 integration product。The user
+authorized remote pushes；none has run yet。Manual workflow dispatch remains separately unauthorized；
+no hosted run、PR、tag、package、release or publication has occurred。

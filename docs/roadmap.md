@@ -56,7 +56,8 @@ Final Architect/QA均`PASS_WITH_NOTES`；两次remote授权均已消费，provid
 M12以clean `master@c733e0dd03e711c045c0b7a4ee189277fbe37698`进入`executing`：使用exact
 Hickory 0.26.1交付tagged DNS resolver/proxy和sing-box-style outbound `detour`，并因其依赖合同
 把MSRV升至Rust 1.88.0。T01已集成于exact `d874865f4a66db8d7c50abad85e6092a16f52fb6`，
-T02 active；尚无remote或publication证据。
+T02已集成于exact `bf26d1587517fe80e701d73abfb45a340f4caa6c`，T03 active；尚无remote或
+publication证据。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1192,3 +1193,4 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
 | 2026-08-05 | M12 plan | M12改为`planned`；接受exact Hickory 0.26.1、Rust 1.88 MSRV、client UDP/TCP DNS proxy、server tagged UDP/TCP/DoT/DoH resolver、shared first-match matcher/separate server action及numeric bootstrap | M11 closed；existing route matcher、runtime resolver seams、bounded supervisor和ProcessRoot足够；Hickory stock TCP accept无admission，故只复用其message/framing并由existing supervisor owner承载 | baseline `c733e0d`；ADR-0031、SPEC/TEST-0013、T01→T02→T03→T04→T05→T06；initial schema 3 forecast `950/180/0` and performance required；plan-only，无product/dependency/MSRV/push/dispatch/hosted/release/publication |
 | 2026-08-05 | M12 DNS detour amendment | 每个DNS server增加optional sing-box-style `detour` outbound-action reference；路径A/B都先选DNS server再按absence-direct或detour plan访问其numeric target。Client支持concrete/chain/selector和SIP022 UDP复用；server限existing direct outbounds | 用户澄清“上游tag”指连接DNS server的outbound，不是DNS server tag。Hickory `RuntimeProvider`是existing transport seam，ordinary route和DNS action保持独立 | ADR/SPEC/TEST-0013、CONTEXT及T02～T06修订；forecast改为`1160/240/0`，status/dependencies/remote boundary不变 |
 | 2026-08-05 | M12-T01 integration | exact `d874865f`集成Hickory 0.26.1 compile edge、Rust 1.88 workspace/CI MSRV及exact lock/feature/provider policy；T01 done，T02 active | Architect `PASS`、QA `PASS_WITH_NOTES`，blocking IDs为零；`M12-T01-QA-001`仅保留future-selector mutation note | T01 focused、Quick、integration及diff均PASS，workspace-policy `21/21`；footprint integrity PASS、`+229/0/0`，expected large-file `REVIEW_REQUIRED`已接受；remote push已授权但未执行，manual dispatch未授权 |
+| 2026-08-05 | M12-T02 integration | exact `bf26d158`集成optional client/server DNS graph、shared action table和direct/concrete/chain/selector detour roots；T02 done，T03 active | Rust-1.88 inherited harness lint经两份独立xhigh分析后以one-path lease和one-line repair关闭；initial review的error provenance、negative matrix及third parser由一次bounded repair关闭，targeted Architect/QA均`PASS` | core `5/5`、config `16/16`、CLI `5/5`、scoped Clippy、Quick、diff及integration footprint integrity PASS；`+439/-1/0` numeric `REVIEW_REQUIRED`已接受；首次integration CLI因stale bins失败，required build后unchanged rerun通过；三处unchanged server Clippy lint保留为T06 debt；remote push已授权但未执行，manual dispatch未授权 |
