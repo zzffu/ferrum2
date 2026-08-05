@@ -161,7 +161,10 @@ git diff --check
   SHA-256 and license review. Provisioning or hash failure remains FAIL/BLOCK.
 - CoreDNS serves one synthetic zone on separate loopback UDP/TCP/DoT/DoH endpoints. Ferrum2 queries each
   transport directly and through a real client Shadowsocks detour for positive A/AAAA and NXDOMAIN/
-  NODATA，then BIND `dig` queries ferrum2 proxy via UDP and `+tcp`. No public DNS request is allowed.
+  NODATA，then BIND `dig` queries ferrum2 proxy via UDP and `+tcp`. The encrypted positive rows use only
+  an isolated client/server build with the default-off `ferrum2-dns/__interop-test-root` feature and the
+  reviewed M12 fixture root；normal/default/release artifacts remain WebPKI-only，the feature accepts no
+  runtime trust input and its target directory is deleted after the run. No public DNS request is allowed.
 - Repeat success、detour connect/handshake/UDP failure、TLS failure、DoH failure、direct-loop rejection
   and indirect-loop timeout，then reap all children、tracked Hickory/detour tasks and target workers.
   Exact DNS listener、Shadowsocks hop、upstream TCP+UDP rebind and sentinel absence in child stderr/
@@ -169,10 +172,12 @@ git diff --check
 
 ~~~powershell
 cargo build --workspace --bins --locked
+cargo build -p ferrum2-client -p ferrum2-server --features ferrum2-dns/__interop-test-root --locked
 cargo test -p ferrum2-m0-harness --test local_e2e tagged_dns_tcp_resolution_uses_detour_and_reaps --locked -- --exact --nocapture
 cargo test -p ferrum2-m0-harness --test udp_local_e2e tagged_dns_udp_resolution_uses_detour_and_reaps --locked -- --exact --nocapture
 cargo test -p ferrum2-m0-harness --test architecture --locked
 cargo +1.88.0 check --workspace --all-targets --locked
+cargo +1.88.0 check -p ferrum2-dns -p ferrum2-client -p ferrum2-server --features ferrum2-dns/__interop-test-root --locked
 cargo run -p ferrum2-m0-harness --bin m0_qualification --locked -- --dns-only
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base <exact-ticket-base-sha> --candidate HEAD
 git diff --check

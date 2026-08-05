@@ -53,6 +53,9 @@ Shadowsocks数据面或规则引擎。
 - DNS server `address`必须numeric SocketAddr并作为bootstrap/dial endpoint；DoT/DoH另需verified
   `server_name`，DoH path默认`/dns-query`。无hostname bootstrap、insecure TLS或custom CA product
   field。
+- CoreDNS encrypted positive qualification只可用default-off `ferrum2-dns/__interop-test-root`隔离
+  build内嵌reviewed M12 test CA；chain/time/name验证保持，feature不接受runtime trust input，normal/
+  default/release artifacts保持WebPKI-only且qualification target run后删除。
 - Client proxy rule context是DNS inbound + query transport + absolute qname:53；server resolver
   context是authenticated inbound + application network + original target/port。
 - Selected failure不试later rule/final/other tag；only UDP truncation可同tag同address升级TCP。
@@ -160,5 +163,9 @@ server manifest、lock row and workspace-policy assertion required for the alrea
 qualification provider and its contract test are also owned so CoreDNS/BIND do not create a second
 harness。Hosted provisioning may change `m0.yml` only through an isolated single-parent control-only
 commit before product work，without changing triggers、manual-performance semantics or unrelated jobs。
+That commit may be amended before the first product commit to enable the exact default-off
+`ferrum2-dns/__interop-test-root` feature in the isolated DNS qualification build；T05 additionally owns
+only the DNS manifest/resolver paths needed to embed the reviewed root without product config/runtime
+input。Later product commits inherit the amended control blob unchanged。
 The user authorized remote pushes；none has run yet。Manual workflow dispatch remains separately
 unauthorized；no hosted run、PR、tag、package、release or publication has occurred。

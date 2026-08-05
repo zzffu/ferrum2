@@ -64,7 +64,11 @@ inherit one MSRV. Exact Cargo metadata、feature and lockfile checks prevent a s
 `ring` is the TLS crypto provider because it avoids the native AWS-LC build surface and already supports
 the three required release targets. Product DoT/DoH trusts `webpki-roots` and always verifies the
 configured server name. There is no insecure verifier. A test-only ephemeral trust root may be injected
-by the selected interoperability profile；custom operator CA configuration is deferred.
+by the selected interoperability profile；custom operator CA configuration is deferred. That profile
+uses one default-off internal Cargo feature which embeds only the reviewed M12 synthetic CA，keeps
+chain、time and configured-name verification enabled，and accepts no config、CLI、environment or runtime
+root input。Normal/default/release artifacts remain WebPKI-only，and the isolated qualification artifacts
+are deleted after use.
 
 ### One optional DNS section
 

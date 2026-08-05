@@ -73,6 +73,11 @@ The words MUST、MUST NOT、SHOULD and MAY are normative.
 - DoT/DoH MUST verify time、chain and configured identity against WebPKI roots. Expired、not-yet-valid、
   untrusted or wrong-name certificates fail closed. Product config MUST NOT expose skip-verification or
   custom-root fields in M12.
+- The selected interoperability profile MAY enable the default-off internal
+  `ferrum2-dns/__interop-test-root` feature solely for isolated client/server qualification builds。It
+  MUST embed only the reviewed M12 synthetic CA，retain chain/time/name verification，accept no runtime
+  trust input，and be absent from normal/default/release artifacts；qualification artifacts MUST be
+  deleted after the run。
 - A numeric server address MUST be the direct socket target when `detour` is absent and the final
   application target carried by the selected egress plan when `detour` is present. Neither spelling may
   perform system or configured-DNS bootstrap.
@@ -232,6 +237,9 @@ The words MUST、MUST NOT、SHOULD and MAY are normative.
 - The selected external upstream profile MUST pin CoreDNS 1.14.6 plus artifact hashes/provenance and
   serve one deterministic synthetic zone over UDP、TCP、DoT and DoH. Each transport must prove positive
   A/AAAA and NXDOMAIN/NODATA handling without public-network dependency.
+- CoreDNS DoT/DoH positives MUST use the isolated `ferrum2-dns/__interop-test-root` client/server build
+  and the existing reviewed certificate/key fixtures。The normal WebPKI build MUST independently retain
+  untrusted/wrong-name/time failure evidence and MUST never consume that test root。
 - The selected external client profile MUST pin BIND `dig` 9.20.26 or record an approved equivalent
   substitution. It must query ferrum2's public proxy over UDP and `+tcp`，including EDNS response-size/
   truncation behavior and cleanup.
