@@ -1022,7 +1022,11 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
   exact-candidate run `31111849601/1`通过CoreDNS/BIND、quality、footprint、Rust 1.88、three
   platforms及aggregate TCP/UDP/DNS qualification。该次non-force push授权已用完；T06的任何新
   push与required manual performance dispatch仍各需独立授权。无PR、tag、package、release或
-  publication。
+  publication。T06 local candidate `af7361ca`通过focused/Full/MSRV/lifecycle/docs/footprint，
+  但Architect/QA双审发现manual job只有legacy M4 workload，缺少required DNS roots idle、direct/
+  detoured query load、task/RSS/drain evidence；该SHA未执行任何remote mutation。T06获得一个
+  bounded lease，仅扩展existing M4 qualification seam和同一manual job，禁止第二harness/job及
+  product change；修复后的新SHA仍需重新双审和分别授权。
 
 ## 决策登记
 

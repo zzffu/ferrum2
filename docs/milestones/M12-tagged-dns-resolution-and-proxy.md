@@ -181,3 +181,10 @@ Windows MSVC、Linux GNU/musl and aggregate qualification，including TCP/UDP `1
 The single authorized non-force T05 candidate push was consumed。T06 is active from the exact local
 integration product；any additional push and the required manual performance dispatch each remain
 separately unauthorized。No PR、tag、package、release or publication has occurred。
+T06 local candidate `af7361ca0185b390b206a7d651629c7f8326b456` passed focused T01～T05、Full、
+Rust 1.88、ignored lifecycle、docs and footprint integrity；Architect/QA accepted its architecture and
+numeric `REVIEW_REQUIRED`。Both reviews independently blocked remote qualification because the manual
+job still exposes only the legacy M4 workload and cannot produce M12 DNS idle/direct/detoured resource
+evidence。A bounded T06 repair now owns only the existing M4 qualification seam、its exact workflow
+invocation and required manifest/lock/policy rows；no second harness/job or product change is authorized。
+No push or dispatch authorization was consumed for `af7361ca`，and it will not be reused for a changed SHA。

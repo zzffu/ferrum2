@@ -210,12 +210,13 @@ Schema 3 resets at exact baseline `c733e0dd03e711c045c0b7a4ee189277fbe37698` wit
 | T03 tagged transports、detour adapters and lifecycle | 300 | 60 | 0 |
 | T04 client UDP/TCP proxy and real egress detours | 280 | 60 | 0 |
 | T05 server detour/process/external interop | 240 | 120 | 0 |
-| T06 reused qualification evidence | 0 | 0 | 0 |
-| **Total** | **1160** | **240** | **0** |
+| T06 qualification plus bounded DNS resource harness repair | 0 | 500 | 0 |
+| **Total** | **1160** | **740** | **0** |
 
 The honest milestone forecast exceeds the default `>600` change-set signal and therefore expects
 numeric `REVIEW_REQUIRED`. T02～T05 (`250`、`360`、`340`、`360`) each expect ticket `WARN` but remain
-below ticket review. Existing `bins/ferrum2-client/src/run.rs` already has 7,018 semantic test LOC and
+below ticket review；the bounded T06 repair expects `500` support LOC and ticket `WARN`. Existing
+`bins/ferrum2-client/src/run.rs` already has 7,018 semantic test LOC and
 will continue to report file `REVIEW_REQUIRED` if changed；server/config/local-support files may report
 `WARN`.
 Implementation should keep protocol-heavy tests in new bounded DNS test files and make composition-root
