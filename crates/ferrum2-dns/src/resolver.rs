@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -92,6 +93,51 @@ pub(crate) async fn lookup(
         .await
         .map_err(|_| DnsError::Timeout)?
         .map_err(map_error)
+}
+
+pub(crate) async fn lookup_ips(
+    server: &SelectedServer,
+    name: Name,
+    deadline: Instant,
+    provider: FerrumRuntimeProvider,
+) -> Result<Vec<IpAddr>, DnsError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(DnsError::Timeout);
+    }
+
+    let name_server = name_server_config(server)?;
+    let builder = Resolver::builder_with_config(
+        ResolverConfig::from_parts(None, Vec::new(), vec![name_server]),
+        provider,
+    )
+    .with_options(exact_options(remaining));
+    #[cfg(feature = "__interop-test-root")]
+    let builder = builder.with_tls_config(interop_test_tls()?);
+    #[cfg(test)]
+    let builder = match server.tls.clone() {
+        Some(tls) => builder.with_tls_config(tls),
+        None => builder,
+    };
+    let resolver = builder.build().map_err(|_| DnsError::Protocol)?;
+    let mut addresses = Vec::new();
+    for record_type in [RecordType::A, RecordType::AAAA] {
+        match tokio::time::timeout_at(deadline, resolver.lookup(name.clone(), record_type))
+            .await
+            .map_err(|_| DnsError::Timeout)?
+            .map_err(map_error)
+        {
+            Ok(lookup) => addresses.extend(
+                lookup
+                    .answers()
+                    .iter()
+                    .filter_map(|record| record.data.ip_addr()),
+            ),
+            Err(DnsError::NoData) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(addresses)
 }
 
 pub(crate) async fn query(

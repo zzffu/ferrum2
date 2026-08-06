@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use hickory_proto::rr::RecordType;
 use local_support::{
     ChildGuard, active_child_count, bind_loopback_listener, run_binary, start_dns_answer,
     unused_loopback, unused_tcp_udp_loopback, wait_for_bound, wait_for_listener,
@@ -157,8 +158,8 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
     dns_udp_round_trip(&application, relay, final_name, final_address, b"final");
     selected_echo.join().expect("selected echo join");
     final_echo.join().expect("final echo join");
-    assert_eq!(selected_dns.join(), [1, 28]);
-    assert_eq!(final_dns.join(), [1, 28]);
+    assert_eq!(selected_dns.join(), [RecordType::A, RecordType::AAAA]);
+    assert_eq!(final_dns.join(), [RecordType::A, RecordType::AAAA]);
     drop((application, control));
     let client_exit = client.terminate_and_reap_with_exit(Duration::from_secs(5));
     let server_exit = server.terminate_and_reap_with_exit(Duration::from_secs(5));

@@ -1492,6 +1492,7 @@ fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
         ("aes-gcm.workspace".to_owned(), "true".to_owned()),
         ("blake3.workspace".to_owned(), "true".to_owned()),
         ("hex.workspace".to_owned(), "true".to_owned()),
+        ("hickory-proto.workspace".to_owned(), "true".to_owned()),
         ("serde_json.workspace".to_owned(), "true".to_owned()),
         ("socket2.workspace".to_owned(), "true".to_owned()),
     ]);
@@ -1588,6 +1589,10 @@ fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
                     assert_eq!(dependency["uses_default_features"], true);
                     assert_eq!(dependency["features"], serde_json::json!([]));
                 }
+                "hickory-proto" => {
+                    assert_eq!(dependency["uses_default_features"], false);
+                    assert_eq!(dependency["features"], serde_json::json!(["std"]));
+                }
                 other => panic!("unexpected harness dependency: {other}"),
             }
             name.to_owned()
@@ -1599,6 +1604,7 @@ fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
             "aes-gcm".to_owned(),
             "blake3".to_owned(),
             "hex".to_owned(),
+            "hickory-proto".to_owned(),
             "serde_json".to_owned(),
             "socket2".to_owned(),
             "tempfile".to_owned(),
@@ -1616,6 +1622,7 @@ fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
         "aes-gcm".to_owned(),
         "blake3".to_owned(),
         "hex".to_owned(),
+        "hickory-proto".to_owned(),
         "serde_json".to_owned(),
         "socket2".to_owned(),
         "tempfile".to_owned(),

@@ -459,6 +459,7 @@ dependencies = [
  "aes-gcm",
  "blake3",
  "hex",
+ "hickory-proto",
  "serde_json",
  "socket2",
  "tempfile",

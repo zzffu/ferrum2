@@ -618,6 +618,7 @@ fn run_external_dns_case(case: DnsCaseSpec) {
             "ns 60 IN A 127.0.0.1\n",
             "answer 60 IN A 192.0.2.80\n",
             "answer 60 IN AAAA 2001:db8::80\n",
+            "server-answer 60 IN A 127.0.0.1\n",
             "nodata 60 IN TXT \"present-without-address\"\n",
             "large 60 IN TXT \"{0}\" \"{0}\" \"{0}\"\n",
         ),
@@ -751,6 +752,23 @@ fn run_external_dns_case(case: DnsCaseSpec) {
     let nodata = query("nodata.qualification.test.", "A", false);
     assert!(nodata.contains("status: NOERROR") && !nodata.contains(" IN A "));
 
+    let mut server_target_sentinel = None;
+    if case.reference == DnsReference::CoreDns
+        && case.upstream == DnsUpstreamTransport::Dot
+        && case.path == DnsPath::Direct
+    {
+        let (process, target) = start_server_resolution_witness(
+            directory.path(),
+            upstream_address,
+            shadowsocks_address,
+            socks_address,
+            &mut shadowsocks,
+            deadline,
+        );
+        server_process = Some(process);
+        server_target_sentinel = Some(target);
+    }
+
     if case.reference == DnsReference::Bind {
         let mut command = Command::new(&bind.binary);
         let server_arg = format!("@{}", dns_address.ip());
@@ -856,9 +874,17 @@ fn run_external_dns_case(case: DnsCaseSpec) {
         socks_address.to_string(),
         shadowsocks_address.to_string(),
     ];
-    for sentinel in ["qualification.test", "resolver.test", "dns-hop", "dns-in"]
-        .into_iter()
-        .chain(addresses.iter().map(String::as_str))
+    for sentinel in [
+        "qualification.test",
+        "resolver.test",
+        "dns-hop",
+        "dns-in",
+        "server-dns-direct",
+        "server-app-direct",
+    ]
+    .into_iter()
+    .chain(addresses.iter().map(String::as_str))
+    .chain(server_target_sentinel.iter().map(String::as_str))
     {
         assert!(
             !client_stderr.contains(sentinel)
@@ -877,6 +903,71 @@ fn run_external_dns_case(case: DnsCaseSpec) {
         drop(TcpListener::bind(address).expect("DNS qualification TCP rebind"));
     }
     directory.close().expect("close DNS interop directory");
+}
+
+fn start_server_resolution_witness(
+    directory: &Path,
+    upstream: SocketAddrV4,
+    shadowsocks: SocketAddrV4,
+    socks: SocketAddrV4,
+    shadowsocks_reservation: &mut ReservedEndpoint,
+    deadline: CaseDeadline,
+) -> (ProcessGuard, String) {
+    let mut target = ReservedEndpoint::new();
+    let target_address = target.address;
+    let trace = Arc::new(Mutex::new(TcpExchangeState::default()));
+    let (target_process, target_shutdown) = TcpTarget::start(
+        target.tcp.take().expect("server witness TCP target"),
+        deadline,
+        Arc::clone(&trace),
+    );
+    let config = format!(
+        "schema_version = 1\n\
+         [[inbounds]]\ntag = \"server-in\"\nlisten = \"{shadowsocks}\"\n\
+         [[outbounds]]\ntag = \"server-app-direct\"\n\
+         [[outbounds]]\ntag = \"server-dns-direct\"\n\
+         [route]\nfinal = \"server-app-direct\"\n\
+         [dns]\ntimeout_ms = 5000\nmax_inflight = 4\n\
+         [[dns.servers]]\ntag = \"core\"\ntransport = \"dot\"\naddress = \"{upstream}\"\n\
+         server_name = \"resolver.test\"\ndetour = \"server-dns-direct\"\n\
+         [dns.route]\nfinal = \"core\"\n\
+         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
+        Method::Aes128Gcm.canonical_name(),
+        Method::Aes128Gcm.synthetic_psk(),
+    );
+    let config = write_config(directory, "ferrum-server-resolution.toml", &config);
+    shadowsocks_reservation.release();
+    let mut command = Command::new(ferrum_binary("ferrum2-server"));
+    command.args(["--config", path_text(&config)]);
+    let mut server =
+        ProcessGuard::spawn("ferrum encrypted resolver server", &mut command, deadline);
+    wait_for_tcp_listener(
+        &mut server,
+        shadowsocks,
+        deadline,
+        "ferrum encrypted resolver server",
+    );
+    exercise_socks_domain_tcp(
+        socks,
+        "server-answer.qualification.test.",
+        target_address,
+        deadline,
+        &trace,
+        target_shutdown,
+    );
+    let target_evidence = target_process.finish(deadline);
+    assert!(
+        target_evidence.contains("clean_eof=true"),
+        "server resolution target evidence"
+    );
+    assert!(
+        trace.lock().expect("server witness trace lock").success(),
+        "server resolution exchange order is incomplete"
+    );
+    drop(target.udp.take().expect("server witness UDP reservation"));
+    drop(UdpSocket::bind(target_address).expect("server witness target UDP rebind"));
+    drop(TcpListener::bind(target_address).expect("server witness target TCP rebind"));
+    (server, target_address.to_string())
 }
 
 fn prepare_coredns_tls(directory: &Path, deadline: CaseDeadline) -> (PathBuf, PathBuf) {
@@ -1228,6 +1319,34 @@ fn exercise_socks_tcp(
     trace: &Arc<Mutex<TcpExchangeState>>,
     target_shutdown: TcpApplicationGate,
 ) {
+    let mut request = vec![5, 1, 0, 1];
+    request.extend_from_slice(&target.ip().octets());
+    request.extend_from_slice(&target.port().to_be_bytes());
+    exercise_socks_tcp_request(proxy, &request, deadline, trace, target_shutdown);
+}
+
+fn exercise_socks_domain_tcp(
+    proxy: SocketAddrV4,
+    name: &str,
+    target: SocketAddrV4,
+    deadline: CaseDeadline,
+    trace: &Arc<Mutex<TcpExchangeState>>,
+    target_shutdown: TcpApplicationGate,
+) {
+    let length = u8::try_from(name.len()).expect("SOCKS domain length");
+    let mut request = vec![5, 1, 0, 3, length];
+    request.extend_from_slice(name.as_bytes());
+    request.extend_from_slice(&target.port().to_be_bytes());
+    exercise_socks_tcp_request(proxy, &request, deadline, trace, target_shutdown);
+}
+
+fn exercise_socks_tcp_request(
+    proxy: SocketAddrV4,
+    request: &[u8],
+    deadline: CaseDeadline,
+    trace: &Arc<Mutex<TcpExchangeState>>,
+    target_shutdown: TcpApplicationGate,
+) {
     let mut stream = TcpStream::connect_timeout(
         &proxy.into(),
         deadline.bounded(IO_TIMEOUT, "connect SOCKS TCP"),
@@ -1239,10 +1358,7 @@ fn exercise_socks_tcp(
     read_exact_case(&mut stream, &mut method, deadline, "SOCKS TCP method");
     assert_eq!(method, [5, 0], "SOCKS TCP no-auth selected");
 
-    let mut request = vec![5, 1, 0, 1];
-    request.extend_from_slice(&target.ip().octets());
-    request.extend_from_slice(&target.port().to_be_bytes());
-    write_all_case(&mut stream, &request, deadline, "SOCKS TCP connect request");
+    write_all_case(&mut stream, request, deadline, "SOCKS TCP connect request");
     let mut reply = [0_u8; 10];
     read_exact_case(&mut stream, &mut reply, deadline, "SOCKS TCP connect reply");
     assert_eq!(&reply[..4], &[5, 0, 0, 1], "SOCKS TCP connect failed");

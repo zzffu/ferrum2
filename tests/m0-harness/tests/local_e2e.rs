@@ -5,16 +5,18 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use hickory_proto::rr::RecordType;
 use local_support::{
-    ChainRoot, ChildGuard, TCP_METHOD_CONFIGS, active_child_count, bind_loopback_listener,
-    rewrite_config_method, route_tagged_config, start_dns_answer, unused_loopback,
-    unused_tcp_udp_loopback, wait_for_bound, wait_for_listener, wait_for_metrics,
-    wait_for_metrics_sample, wait_for_tcp_udp_bound, write_client_config,
-    write_client_config_with_psk, write_tagged_client_config, write_tagged_dns_server_config,
-    write_tagged_server_config, write_tcp_only_server_config,
-    write_tcp_only_server_config_with_psk, write_two_hop_client_config,
+    ChainRoot, ChildGuard, DnsReply, DnsStep, TCP_METHOD_CONFIGS, active_child_count,
+    bind_loopback_listener, rewrite_config_method, route_tagged_config, start_dns_answer,
+    start_dns_script, unused_loopback, unused_tcp_udp_loopback, wait_for_bound, wait_for_listener,
+    wait_for_metrics, wait_for_metrics_sample, wait_for_tcp_udp_bound, write_client_config,
+    write_client_config_with_psk, write_tagged_client_config,
+    write_tagged_dns_server_matrix_config, write_tagged_server_config,
+    write_tcp_only_server_config, write_tcp_only_server_config_with_psk,
+    write_two_hop_client_config,
 };
 
 struct EchoWorker {
@@ -199,6 +201,19 @@ fn domain_wire(name: &str, port: u16) -> Vec<u8> {
     wire
 }
 
+fn assert_socks_domain_failure(client: SocketAddrV4, name: &str, port: u16) {
+    let (mut socks, reply) = socks_connect_wire(client, &domain_wire(name, port));
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    socks
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("failed domain timeout");
+    let mut byte = [0_u8; 1];
+    match socks.read(&mut byte) {
+        Ok(0) | Err(_) => {}
+        Ok(read) => panic!("failed domain forwarded {read} application bytes"),
+    }
+}
+
 #[test]
 fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
     let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
@@ -206,23 +221,137 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let selected_name = "selected.test.";
     let final_name = "final.test.";
+    let wrong_name = "wrong-id-sentinel.test.";
+    let empty_name = "empty-sentinel.test.";
+    let timeout_name = "timeout-sentinel.test.";
+    let many_name = "many-sentinel.test.";
+    let delayed_name = "delayed-sentinel.test.";
+    let busy_name = "busy-sentinel.test.";
+    let loop_name = "loop-sentinel.test.";
     let (selected_target, selected_echo) =
         start_echo_at("127.0.0.1:0".parse().expect("selected target address"));
     let (final_target, final_echo) =
         start_echo_at("127.0.0.2:0".parse().expect("final target address"));
-    let selected_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 1), 2);
+    let (bypass_target, bypass_echo) = start_echo();
+    let protected = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("protected target");
+    protected
+        .set_nonblocking(true)
+        .expect("protected target nonblocking");
+    let protected_port = protected
+        .local_addr()
+        .expect("protected target address")
+        .port();
+    let many_target =
+        TcpListener::bind((Ipv4Addr::new(127, 0, 0, 17), 0)).expect("seventeenth candidate target");
+    many_target
+        .set_nonblocking(true)
+        .expect("seventeenth candidate nonblocking");
+    let many_port = many_target
+        .local_addr()
+        .expect("many target address")
+        .port();
+
+    let selected_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 1), 4);
     let final_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 2), 2);
-    let dns_addresses = [selected_dns.address(), final_dns.address()];
+    let wrong_dns = start_dns_script(vec![DnsStep {
+        record_type: RecordType::A,
+        reply: DnsReply::WrongId,
+    }]);
+    let empty_dns = start_dns_script(vec![
+        DnsStep {
+            record_type: RecordType::A,
+            reply: DnsReply::NoData,
+        },
+        DnsStep {
+            record_type: RecordType::AAAA,
+            reply: DnsReply::NoData,
+        },
+    ]);
+    let timeout_dns = start_dns_script(vec![DnsStep {
+        record_type: RecordType::A,
+        reply: DnsReply::Silence(Duration::from_millis(1_200)),
+    }]);
+    let many_dns = start_dns_script(vec![
+        DnsStep {
+            record_type: RecordType::A,
+            reply: DnsReply::Addresses(
+                (1..=17)
+                    .map(|last| Ipv4Addr::new(127, 0, 0, last))
+                    .collect(),
+            ),
+        },
+        DnsStep {
+            record_type: RecordType::AAAA,
+            reply: DnsReply::NoData,
+        },
+    ]);
+    let delayed_dns = start_dns_script(vec![
+        DnsStep {
+            record_type: RecordType::A,
+            reply: DnsReply::DelayedNoData(Duration::from_millis(200)),
+        },
+        DnsStep {
+            record_type: RecordType::AAAA,
+            reply: DnsReply::Silence(Duration::from_millis(1_500)),
+        },
+    ]);
+    let loop_dns = start_dns_script(vec![DnsStep {
+        record_type: RecordType::A,
+        reply: DnsReply::Silence(Duration::from_millis(1_200)),
+    }]);
+    let busy_probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("busy DNS probe");
+    busy_probe
+        .set_nonblocking(true)
+        .expect("busy DNS probe nonblocking");
+    let busy_address = match busy_probe.local_addr().expect("busy DNS probe address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 busy DNS probe"),
+    };
+    let dns_addresses = [
+        selected_dns.address(),
+        final_dns.address(),
+        wrong_dns.address(),
+        empty_dns.address(),
+        timeout_dns.address(),
+        many_dns.address(),
+        delayed_dns.address(),
+        loop_dns.address(),
+    ];
     let server_address = unused_tcp_udp_loopback();
     let client_address = unused_loopback();
-    let server_config = write_tagged_dns_server_config(
+    let metrics_address = unused_loopback();
+    let servers = [
+        ("selected", dns_addresses[0]),
+        ("final", dns_addresses[1]),
+        ("wrong", dns_addresses[2]),
+        ("empty", dns_addresses[3]),
+        ("timeout", dns_addresses[4]),
+        ("many", dns_addresses[5]),
+        ("delayed", dns_addresses[6]),
+        ("loop", dns_addresses[7]),
+        ("busy", busy_address),
+    ];
+    let rules = [
+        (selected_name, selected_target.port(), "selected"),
+        (wrong_name, protected_port, "wrong"),
+        (empty_name, protected_port, "empty"),
+        (timeout_name, protected_port, "timeout"),
+        (many_name, many_port, "many"),
+        (delayed_name, protected_port, "delayed"),
+        (busy_name, protected_port, "busy"),
+        (loop_name, protected_port, "loop"),
+    ];
+    let server_config = write_tagged_dns_server_matrix_config(
         directory.path(),
         server_address,
-        selected_name,
-        selected_target.port(),
         "tcp",
-        dns_addresses,
+        &servers,
+        &rules,
+        "final",
+        1_000,
+        1,
         false,
+        Some(metrics_address),
     )
     .expect("tagged DNS server config");
     let client_config = write_client_config(directory.path(), client_address, server_address, None)
@@ -230,9 +359,11 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
     let mut server =
         ChildGuard::spawn_while_holding("ferrum2-server", &server_config, &_spawn_guard);
     wait_for_listener(&mut server, server_address);
+    wait_for_metrics(metrics_address);
     let mut client =
         ChildGuard::spawn_while_holding("ferrum2-client", &client_config, &_spawn_guard);
     wait_for_listener(&mut client, client_address);
+    drop(_spawn_guard);
 
     for (name, target, payload) in [
         (selected_name, selected_target, b"selected".as_slice()),
@@ -247,13 +378,117 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
         socks.read_to_end(&mut echoed).expect("domain response");
         assert_eq!(echoed, payload);
     }
-
     assert_eq!(selected_echo.join().expect("selected echo"), b"selected");
+    selected_dns.wait_for_query(RecordType::A);
+    selected_dns.wait_for_query(RecordType::AAAA);
+    final_dns.wait_for_query(RecordType::A);
+    final_dns.wait_for_query(RecordType::AAAA);
+    let (recovery_target, recovery_echo) = start_echo_at(selected_target);
+
+    let (mut bypass, reply) =
+        socks_connect_wire(client_address, &address_wire(SocketAddr::V4(bypass_target)));
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    bypass.write_all(b"bypass").expect("IP bypass payload");
+    bypass.shutdown(Shutdown::Write).expect("IP bypass close");
+    let mut bypassed = Vec::new();
+    bypass
+        .read_to_end(&mut bypassed)
+        .expect("IP bypass response");
+    assert_eq!(bypassed, b"bypass");
+
+    assert_socks_domain_failure(client_address, wrong_name, protected_port);
+    wrong_dns.wait_for_query(RecordType::A);
+    assert_socks_domain_failure(client_address, empty_name, protected_port);
+    empty_dns.wait_for_query(RecordType::A);
+    empty_dns.wait_for_query(RecordType::AAAA);
+    assert_socks_domain_failure(client_address, timeout_name, protected_port);
+    timeout_dns.wait_for_query(RecordType::A);
+    assert_socks_domain_failure(client_address, many_name, many_port);
+    many_dns.wait_for_query(RecordType::A);
+    many_dns.wait_for_query(RecordType::AAAA);
+    assert_socks_domain_failure(client_address, loop_name, protected_port);
+    loop_dns.wait_for_query(RecordType::A);
+
+    let (mut recovery, reply) = socks_connect_wire(
+        client_address,
+        &domain_wire(selected_name, recovery_target.port()),
+    );
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    recovery.write_all(b"recovery").expect("recovery payload");
+    selected_dns.wait_for_query(RecordType::A);
+    selected_dns.wait_for_query(RecordType::AAAA);
+    recovery.shutdown(Shutdown::Write).expect("recovery close");
+    let mut recovered = Vec::new();
+    recovery
+        .read_to_end(&mut recovered)
+        .expect("recovery response");
+    assert_eq!(recovered, b"recovery");
+
+    let delayed_started = Instant::now();
+    let (delayed, delayed_reply) =
+        socks_connect_wire(client_address, &domain_wire(delayed_name, protected_port));
+    assert_eq!(&delayed_reply[..4], &[5, 0, 0, 1]);
+    delayed_dns.wait_for_query(RecordType::A);
+    let (saturated, saturated_reply) =
+        socks_connect_wire(client_address, &domain_wire(busy_name, protected_port));
+    assert_eq!(&saturated_reply[..4], &[5, 0, 0, 1]);
+    delayed_dns.wait_for_query(RecordType::AAAA);
+    thread::sleep(Duration::from_millis(900));
+    assert!(
+        matches!(busy_probe.recv_from(&mut [0_u8; 64]), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "saturated DNS request reached its selected upstream"
+    );
+    assert!(
+        delayed_started.elapsed() < Duration::from_millis(1_800),
+        "A/AAAA resolution exceeded one deadline"
+    );
+    drop((delayed, saturated));
+
     assert_eq!(final_echo.join().expect("final echo"), b"final");
-    assert_eq!(selected_dns.join(), [1, 28]);
-    assert_eq!(final_dns.join(), [1, 28]);
+    assert_eq!(bypass_echo.join().expect("bypass echo"), b"bypass");
+    assert_eq!(recovery_echo.join().expect("recovery echo"), b"recovery");
+    assert_eq!(
+        selected_dns.join(),
+        [
+            RecordType::A,
+            RecordType::AAAA,
+            RecordType::A,
+            RecordType::AAAA
+        ]
+    );
+    assert_eq!(final_dns.join(), [RecordType::A, RecordType::AAAA]);
+    assert_eq!(wrong_dns.join(), [RecordType::A]);
+    assert_eq!(empty_dns.join(), [RecordType::A, RecordType::AAAA]);
+    assert_eq!(timeout_dns.join(), [RecordType::A]);
+    assert_eq!(many_dns.join(), [RecordType::A, RecordType::AAAA]);
+    assert_eq!(delayed_dns.join(), [RecordType::A, RecordType::AAAA]);
+    assert_eq!(loop_dns.join(), [RecordType::A]);
+    for target in [&protected, &many_target] {
+        assert!(
+            matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "failed DNS path reached a protected TCP target"
+        );
+    }
+    let metrics = wait_for_metrics(metrics_address);
+    for sentinel in [
+        wrong_name,
+        empty_name,
+        timeout_name,
+        many_name,
+        delayed_name,
+        busy_name,
+        loop_name,
+    ] {
+        assert!(
+            !metrics
+                .windows(sentinel.len())
+                .any(|window| window == sentinel.as_bytes()),
+            "metrics exposed DNS sentinel"
+        );
+    }
     let client_exit = client.terminate_and_reap_with_exit(Duration::from_secs(5));
-    let server_exit = server.terminate_and_reap_with_exit(Duration::from_secs(5));
+    server.request_graceful_shutdown();
+    let server_exit = server.wait_for_exit(Duration::from_secs(5));
     for exit in [&client_exit, &server_exit] {
         exit.assert_stderr_excludes(&[
             selected_name,
@@ -262,14 +497,25 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
             "final",
             "dns-direct",
             "app-direct",
+            wrong_name,
+            empty_name,
+            timeout_name,
+            many_name,
+            delayed_name,
+            busy_name,
+            loop_name,
         ]);
     }
     assert_eq!(active_child_count(), baseline_children);
     drop(bind_loopback_listener(client_address).expect("client exact rebind"));
     drop(bind_loopback_listener(server_address).expect("server TCP exact rebind"));
     drop(UdpSocket::bind(server_address).expect("server UDP exact rebind"));
-    drop(UdpSocket::bind(dns_addresses[0]).expect("selected DNS exact rebind"));
-    drop(UdpSocket::bind(dns_addresses[1]).expect("final DNS exact rebind"));
+    drop(bind_loopback_listener(metrics_address).expect("metrics exact rebind"));
+    drop(busy_probe);
+    drop(UdpSocket::bind(busy_address).expect("busy DNS exact rebind"));
+    for address in dns_addresses {
+        drop(UdpSocket::bind(address).expect("DNS exact rebind"));
+    }
 }
 
 #[test]

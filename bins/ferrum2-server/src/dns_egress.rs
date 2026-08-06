@@ -88,31 +88,20 @@ impl ServerDnsResolver {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS target"))?;
         let selected = state.select(self.inbound, self.network, &target);
         let resolver = state.resolver()?;
-        let mut candidates = Vec::with_capacity(MAX_RESOLVED_CANDIDATES);
-        for record_type in ["A", "AAAA"] {
-            match resolver
-                .lookup(
-                    selected,
-                    host.parse().map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS name")
-                    })?,
-                    record_type.parse().expect("fixed DNS record type"),
-                )
-                .await
-            {
-                Ok(lookup) => candidates.extend(
-                    lookup
-                        .answers()
-                        .iter()
-                        .filter_map(|record| record.data.ip_addr())
-                        .map(|ip| SocketAddr::new(ip, port))
-                        .take(MAX_RESOLVED_CANDIDATES - candidates.len()),
-                ),
-                Err(ferrum2_dns::DnsError::NoData) => {}
-                Err(_) => return Err(io::Error::other("DNS resolution failed")),
-            }
-        }
-        Ok(candidates)
+        let name = host
+            .parse()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS name"))?;
+        resolver
+            .lookup_ips(selected, name)
+            .await
+            .map_err(|_| io::Error::other("DNS resolution failed"))
+            .map(|addresses| {
+                addresses
+                    .into_iter()
+                    .take(MAX_RESOLVED_CANDIDATES)
+                    .map(|address| SocketAddr::new(address, port))
+                    .collect()
+            })
     }
 }
 

@@ -434,6 +434,8 @@ fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {
         .expect("server composition");
     let egress = fs::read_to_string(root.join("bins/ferrum2-server/src/dns_egress.rs"))
         .expect("server DNS egress adapter");
+    let support = fs::read_to_string(root.join("tests/m0-harness/src/local_support/mod.rs"))
+        .expect("shared process support");
 
     for required in [
         "mod dns_egress;",
@@ -464,6 +466,28 @@ fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {
         assert!(
             !run.contains(forbidden) && !egress.contains(forbidden),
             "server composition duplicated DNS protocol behavior: {forbidden}"
+        );
+    }
+    for required in [
+        "Message::from_vec",
+        "Record::from_rdata",
+        "RData::A",
+        ".to_vec().expect(\"DNS answer encode\")",
+    ] {
+        assert!(
+            support.contains(required),
+            "shared DNS fixture must use Hickory: {required}"
+        );
+    }
+    for forbidden in [
+        "let mut end = 12",
+        "u16::from_be_bytes([request[end]",
+        "response.extend_from_slice(&[0x81, 0x80",
+        "0xc0,\n                    0x0c",
+    ] {
+        assert!(
+            !support.contains(forbidden),
+            "shared DNS fixture copied DNS wire behavior: {forbidden}"
         );
     }
 }
