@@ -80,6 +80,15 @@ preserve the outer TCP/UDP phase deadlines，A-before-AAAA ordering，the 16-can
 fail-closed/no-fallback behavior。No package identity，provider，retry，cache，second harness or public
 configuration surface is authorized。
 
+Exact candidate `4dcd89fa879873dc25ae9f5c1a3ef2635261ac76` receives one bounded hosted-quality
+test-only repair lease in `local_e2e.rs`。Run `31110243307/1` passed CoreDNS/BIND interoperability、
+test-footprint、MSRV and all three platforms，but Linux quality observed the DNS case reading one
+unrelated active child while `fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps` was still
+running。After the DNS case has reaped its own client/server，reuse the existing
+`hold_process_spawns_at_or_below(baseline)` pattern through the global-count and exact-rebind probes。
+Do not change product code、the signal-group helper、any other caller or workflow；a new remote mutation
+still requires separate authorization。
+
 ## Acceptance
 
 - [ ] DNS-present server uses authenticated inbound/network/original target for first/final selection；
