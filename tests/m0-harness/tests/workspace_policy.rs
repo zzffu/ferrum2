@@ -758,6 +758,10 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
             ("hickory-proto.workspace".to_owned(), "true".to_owned()),
             ("hickory-resolver.workspace".to_owned(), "true".to_owned()),
             ("hickory-server.workspace".to_owned(), "true".to_owned()),
+            (
+                "rustls".to_owned(),
+                "{ workspace = true, optional = true }".to_owned(),
+            ),
             ("tokio.workspace".to_owned(), "true".to_owned()),
         ])
     );
@@ -777,7 +781,28 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
             ("tokio-rustls.workspace".to_owned(), "true".to_owned()),
         ])
     );
-    assert!(!manifest.contains("[features]"));
+    assert!(
+        manifest.contains("[features]\ndefault = []\n__interop-test-root = [\"dep:rustls\"]\n")
+    );
+    let resolver = fs::read_to_string(root.join("crates/ferrum2-dns/src/resolver.rs"))
+        .expect("DNS resolver source");
+    for required in [
+        "#[cfg(feature = \"__interop-test-root\")]",
+        "include_bytes!(\"../tests/fixtures/m12-test-ca.der\")",
+        "with_root_certificates(roots)",
+        "DefaultTimeProvider",
+    ] {
+        assert!(
+            resolver.contains(required),
+            "missing test-root bound: {required}"
+        );
+    }
+    for forbidden in ["insecure_skip_verify", "std::env", "var_os(", "dangerous()"] {
+        assert!(
+            !resolver.contains(forbidden),
+            "qualification trust must not expose {forbidden}"
+        );
+    }
 
     let metadata = metadata();
     let packages = metadata["packages"].as_array().expect("packages");
@@ -785,6 +810,13 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
         .iter()
         .find(|package| package["name"] == "ferrum2-dns")
         .expect("DNS package");
+    assert_eq!(
+        dns["features"],
+        serde_json::json!({
+            "__interop-test-root": ["dep:rustls"],
+            "default": []
+        })
+    );
     let futures = dns["dependencies"]
         .as_array()
         .expect("DNS dependencies")
@@ -1309,6 +1341,7 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
                 "ferrum2-config".to_owned(),
                 "ferrum2-core".to_owned(),
                 "ferrum2-crypto".to_owned(),
+                "ferrum2-dns".to_owned(),
                 "ferrum2-observability".to_owned(),
                 "ferrum2-runtime".to_owned(),
                 "ferrum2-shadowsocks".to_owned(),
@@ -1409,6 +1442,47 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
 }
 
 #[test]
+fn dns_external_provider_pins_and_hosted_completion_are_exact() {
+    let root = workspace_root();
+    let versions =
+        fs::read_to_string(root.join("tests/interop/versions.toml")).expect("interop version pins");
+    for required in [
+        "[coredns]",
+        "version = \"1.14.6\"",
+        "source_commit = \"424d125775cd70fa90dfc80bf0e52cc9a9aeb574\"",
+        "linux_size = 22574279",
+        "linux_sha256 = \"4402578c8f7b95dac1d8258bfd13e7a9d30f70d7a53f396b02a6d6ca78d56152\"",
+        "license_review = \"Apache-2.0; execute only as an independent test process; do not redistribute\"",
+        "[bind]",
+        "version = \"9.20.26\"",
+        "source_commit = \"7e228e3ba7c2ca945b1c2a22ed2ef0aa9d7cab10\"",
+        "linux_size = 5918032",
+        "linux_sha256 = \"55248def0f870c4c46b3de72978ea972615131516663188a4564dca1d20bf350\"",
+        "license_review = \"MPL-2.0; execute only as an independent test process; do not redistribute\"",
+    ] {
+        assert!(
+            versions.contains(required),
+            "missing provider pin: {required}"
+        );
+    }
+
+    let workflow =
+        fs::read_to_string(root.join(".github/workflows/m0.yml")).expect("hosted workflow");
+    for required in [
+        "M12_COREDNS_SETUP_STATUS",
+        "M12_BIND_SETUP_STATUS",
+        "m0-qualification\" --dns-only",
+        "qualification transport=dns status=PASS cleanup=PASS",
+        "m12_interop_completion status=PASS",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "missing DNS hosted gate: {required}"
+        );
+    }
+}
+
+#[test]
 fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
     let root = workspace_root();
     let manifest =
@@ -1418,6 +1492,7 @@ fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
         ("aes-gcm.workspace".to_owned(), "true".to_owned()),
         ("blake3.workspace".to_owned(), "true".to_owned()),
         ("hex.workspace".to_owned(), "true".to_owned()),
+        ("hickory-proto.workspace".to_owned(), "true".to_owned()),
         ("serde_json.workspace".to_owned(), "true".to_owned()),
         ("socket2.workspace".to_owned(), "true".to_owned()),
     ]);
@@ -1514,6 +1589,10 @@ fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
                     assert_eq!(dependency["uses_default_features"], true);
                     assert_eq!(dependency["features"], serde_json::json!([]));
                 }
+                "hickory-proto" => {
+                    assert_eq!(dependency["uses_default_features"], false);
+                    assert_eq!(dependency["features"], serde_json::json!(["std"]));
+                }
                 other => panic!("unexpected harness dependency: {other}"),
             }
             name.to_owned()
@@ -1525,6 +1604,7 @@ fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
             "aes-gcm".to_owned(),
             "blake3".to_owned(),
             "hex".to_owned(),
+            "hickory-proto".to_owned(),
             "serde_json".to_owned(),
             "socket2".to_owned(),
             "tempfile".to_owned(),
@@ -1542,6 +1622,7 @@ fn harness_dependencies_and_lock_edges_match_the_hosted_qualification_seam() {
         "aes-gcm".to_owned(),
         "blake3".to_owned(),
         "hex".to_owned(),
+        "hickory-proto".to_owned(),
         "serde_json".to_owned(),
         "socket2".to_owned(),
         "tempfile".to_owned(),

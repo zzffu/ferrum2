@@ -8,10 +8,13 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSo
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use hickory_proto::op::{Message, MessageType};
+use hickory_proto::rr::rdata::A;
+use hickory_proto::rr::{RData, Record, RecordType};
 use socket2::{Domain, Protocol, Socket, Type};
 
 pub const SYNTHETIC_PSK: &str = "AAECAwQFBgcICQoLDA0ODw==";
@@ -96,6 +99,14 @@ impl ChildGuard {
         _spawn_guard: &std::sync::MutexGuard<'static, ()>,
     ) -> Self {
         Self::spawn_configured(name, config, "unclassified", false)
+    }
+
+    pub fn spawn_signallable_while_holding(
+        name: &str,
+        config: &Path,
+        _spawn_guard: &std::sync::MutexGuard<'static, ()>,
+    ) -> Self {
+        Self::spawn_configured(name, config, "unclassified", true)
     }
 
     pub fn spawn_with_context(name: &str, config: &Path, context: impl Into<String>) -> Self {
@@ -821,6 +832,162 @@ pub fn unused_tcp_udp_loopback() -> SocketAddrV4 {
     }
 }
 
+pub struct DnsAnswerServer {
+    address: SocketAddrV4,
+    observations: mpsc::Receiver<RecordType>,
+    stop: mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<Vec<RecordType>>>,
+}
+
+impl DnsAnswerServer {
+    pub fn address(&self) -> SocketAddrV4 {
+        self.address
+    }
+
+    pub fn wait_for_query(&self, expected: RecordType) {
+        assert_eq!(
+            self.observations
+                .recv_timeout(Duration::from_secs(5))
+                .expect("DNS query observation"),
+            expected
+        );
+    }
+
+    pub fn join(mut self) -> Vec<RecordType> {
+        let _ = self.stop.send(());
+        self.worker
+            .take()
+            .expect("DNS answer worker")
+            .join()
+            .expect("DNS answer worker join")
+    }
+}
+
+impl Drop for DnsAnswerServer {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let _ = self.stop.send(());
+            let _ = worker.join();
+        }
+    }
+}
+
+pub enum DnsReply {
+    Addresses(Vec<Ipv4Addr>),
+    NoData,
+    WrongId,
+    Silence(Duration),
+    DelayedNoData(Duration),
+}
+
+pub struct DnsStep {
+    pub record_type: RecordType,
+    pub reply: DnsReply,
+}
+
+pub fn start_dns_answer(answer: Ipv4Addr, expected_queries: usize) -> DnsAnswerServer {
+    assert!(
+        expected_queries != 0 && expected_queries.is_multiple_of(2),
+        "address lookups contain A/AAAA pairs"
+    );
+    let mut script = Vec::with_capacity(expected_queries);
+    for _ in 0..expected_queries / 2 {
+        script.extend([
+            DnsStep {
+                record_type: RecordType::A,
+                reply: DnsReply::Addresses(vec![answer]),
+            },
+            DnsStep {
+                record_type: RecordType::AAAA,
+                reply: DnsReply::NoData,
+            },
+        ]);
+    }
+    start_dns_script(script)
+}
+
+pub fn start_dns_script(script: Vec<DnsStep>) -> DnsAnswerServer {
+    assert!(!script.is_empty(), "DNS script must not be empty");
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("DNS answer bind");
+    let address = match socket.local_addr().expect("DNS answer address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 DNS answer"),
+    };
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("DNS answer timeout");
+    let (observation, observations) = mpsc::channel();
+    let (stop, stopped) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut observed = Vec::with_capacity(script.len());
+        let mut request = [0_u8; 4096];
+        'steps: for step in script {
+            let (length, peer) = loop {
+                match socket.recv_from(&mut request) {
+                    Ok(received) => break received,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        if stopped.try_recv().is_ok() {
+                            break 'steps;
+                        }
+                    }
+                    Err(error) => panic!("DNS answer receive: {error}"),
+                }
+            };
+            let request = Message::from_vec(&request[..length]).expect("DNS answer decode");
+            let query = request.queries.first().expect("one DNS question").clone();
+            assert_eq!(
+                query.query_type(),
+                step.record_type,
+                "DNS script query type"
+            );
+            observed.push(query.query_type());
+            observation
+                .send(query.query_type())
+                .expect("DNS query observation receiver");
+            match &step.reply {
+                DnsReply::Silence(duration) => {
+                    thread::sleep(*duration);
+                    continue;
+                }
+                DnsReply::DelayedNoData(duration) => thread::sleep(*duration),
+                _ => {}
+            }
+            let mut response = Message::new(request.id, MessageType::Response, request.op_code);
+            response.metadata.recursion_available = true;
+            response.add_query(query.clone());
+            match step.reply {
+                DnsReply::Addresses(addresses) => {
+                    for address in addresses {
+                        response.add_answer(Record::from_rdata(
+                            query.name().clone(),
+                            30,
+                            RData::A(A(address)),
+                        ));
+                    }
+                }
+                DnsReply::WrongId => response.metadata.id = response.id.wrapping_add(1),
+                DnsReply::NoData | DnsReply::DelayedNoData(_) => {}
+                DnsReply::Silence(_) => unreachable!("silence continued"),
+            }
+            socket
+                .send_to(&response.to_vec().expect("DNS answer encode"), peer)
+                .expect("DNS answer response");
+        }
+        observed
+    });
+    DnsAnswerServer {
+        address,
+        observations,
+        stop,
+        worker: Some(worker),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum ChainRoot {
     Static,
@@ -1009,6 +1176,78 @@ pub fn write_tagged_server_config(
         listens[0], outbound_for_inbound[0], listens[1], outbound_for_inbound[1], outbound_one,
     );
     let path = directory.join("tagged-server.toml");
+    fs::write(&path, config)?;
+    Ok(path)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_tagged_dns_server_config(
+    directory: &Path,
+    listen: SocketAddrV4,
+    selected_name: &str,
+    selected_port: u16,
+    network: &str,
+    upstreams: [SocketAddrV4; 2],
+    udp: bool,
+) -> io::Result<PathBuf> {
+    write_tagged_dns_server_matrix_config(
+        directory,
+        listen,
+        network,
+        &[("selected", upstreams[0]), ("final", upstreams[1])],
+        &[(selected_name, selected_port, "selected")],
+        "final",
+        2_000,
+        4,
+        udp,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_tagged_dns_server_matrix_config(
+    directory: &Path,
+    listen: SocketAddrV4,
+    network: &str,
+    servers: &[(&str, SocketAddrV4)],
+    rules: &[(&str, u16, &str)],
+    final_server: &str,
+    timeout_ms: u16,
+    max_inflight: u16,
+    udp: bool,
+    metrics: Option<SocketAddrV4>,
+) -> io::Result<PathBuf> {
+    let udp = if udp {
+        ""
+    } else {
+        "\n[udp]\nenabled = false\n"
+    };
+    let mut config = format!(
+        "schema_version = 1\n\
+         [[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
+         [[outbounds]]\ntag = \"app-direct\"\n\
+         [[outbounds]]\ntag = \"dns-direct\"\n\
+         [route]\nfinal = \"app-direct\"\n\
+         [dns]\ntimeout_ms = {timeout_ms}\nmax_inflight = {max_inflight}\n"
+    );
+    for (tag, address) in servers {
+        config.push_str(&format!(
+            "[[dns.servers]]\ntag = \"{tag}\"\ntransport = \"udp\"\naddress = \"{address}\"\ndetour = \"dns-direct\"\n"
+        ));
+    }
+    config.push_str(&format!("[dns.route]\nfinal = \"{final_server}\"\n"));
+    for (name, port, server) in rules {
+        config.push_str(&format!(
+            "[[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"{network}\"\ntarget = {{ host = \"{name}\", port = {port} }}\nserver = \"{server}\"\n"
+        ));
+    }
+    config.push_str(&format!(
+        "[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n{udp}"
+    ));
+    if let Some(metrics) = metrics {
+        config.push_str(&format!("\n[metrics]\nlisten = \"{metrics}\"\n"));
+    }
+    let path = directory.join(format!("tagged-dns-server-{network}.toml"));
     fs::write(&path, config)?;
     Ok(path)
 }

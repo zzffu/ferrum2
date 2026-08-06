@@ -426,3 +426,68 @@ fn recursive_rust_source_discovery_excludes_non_rust_files() {
     assert!(sources.iter().any(|path| path.ends_with("nested.rs")));
     assert!(sources.iter().any(|path| path.ends_with("root.rs")));
 }
+
+#[test]
+fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {
+    let root = workspace_root();
+    let run = fs::read_to_string(root.join("bins/ferrum2-server/src/run.rs"))
+        .expect("server composition");
+    let egress = fs::read_to_string(root.join("bins/ferrum2-server/src/dns_egress.rs"))
+        .expect("server DNS egress adapter");
+    let support = fs::read_to_string(root.join("tests/m0-harness/src/local_support/mod.rs"))
+        .expect("shared process support");
+
+    for required in [
+        "mod dns_egress;",
+        "ServerDnsRoot",
+        "TaggedResolver::new",
+        "ServerDnsResolver::new",
+        "PreparedProcessRoot<RunError> for ServerDnsRoot",
+    ] {
+        assert!(
+            run.contains(required),
+            "missing server DNS composition: {required}"
+        );
+    }
+    for required in [
+        "ActionTable<usize>",
+        "SystemTcpResolver",
+        "SystemUdpResolver",
+        "impl TcpResolver for ServerDnsResolver",
+        "impl UdpResolver for ServerDnsResolver",
+        "MAX_RESOLVED_CANDIDATES",
+    ] {
+        assert!(
+            egress.contains(required),
+            "missing reused DNS seam: {required}"
+        );
+    }
+    for forbidden in ["Message::from_vec", "hickory_proto", "struct DnsParser"] {
+        assert!(
+            !run.contains(forbidden) && !egress.contains(forbidden),
+            "server composition duplicated DNS protocol behavior: {forbidden}"
+        );
+    }
+    for required in [
+        "Message::from_vec",
+        "Record::from_rdata",
+        "RData::A",
+        ".to_vec().expect(\"DNS answer encode\")",
+    ] {
+        assert!(
+            support.contains(required),
+            "shared DNS fixture must use Hickory: {required}"
+        );
+    }
+    for forbidden in [
+        "let mut end = 12",
+        "u16::from_be_bytes([request[end]",
+        "response.extend_from_slice(&[0x81, 0x80",
+        "0xc0,\n                    0x0c",
+    ] {
+        assert!(
+            !support.contains(forbidden),
+            "shared DNS fixture copied DNS wire behavior: {forbidden}"
+        );
+    }
+}

@@ -27,3 +27,26 @@ windows_asset = "shadowsocks-v1.24.0.x86_64-pc-windows-msvc.zip"
 windows_url = "https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.24.0/shadowsocks-v1.24.0.x86_64-pc-windows-msvc.zip"
 windows_size = 20864814
 windows_sha256 = "8f4bdd02cf3b42976f6b48e01239bc0ae61f9da7a3c260505a7880de615291d0"
+
+[coredns]
+version = "1.14.6"
+source_commit = "424d125775cd70fa90dfc80bf0e52cc9a9aeb574"
+expected_version = "CoreDNS-1.14.6"
+license_review = "Apache-2.0; execute only as an independent test process; do not redistribute"
+linux_asset = "coredns_1.14.6_linux_amd64.tgz"
+linux_url = "https://github.com/coredns/coredns/releases/download/v1.14.6/coredns_1.14.6_linux_amd64.tgz"
+linux_size = 22574279
+linux_sha256 = "4402578c8f7b95dac1d8258bfd13e7a9d30f70d7a53f396b02a6d6ca78d56152"
+license_url = "https://raw.githubusercontent.com/coredns/coredns/424d125775cd70fa90dfc80bf0e52cc9a9aeb574/LICENSE"
+license_size = 11371
+license_sha256 = "f0530760b1e2ffcf23df322db638ee06d06fc07fead0ed3ddd710f2e224698a9"
+
+[bind]
+version = "9.20.26"
+source_commit = "7e228e3ba7c2ca945b1c2a22ed2ef0aa9d7cab10"
+expected_version = "DiG 9.20.26"
+license_review = "MPL-2.0; execute only as an independent test process; do not redistribute"
+linux_asset = "bind-9.20.26.tar.xz"
+linux_url = "https://downloads.isc.org/isc/bind9/9.20.26/bind-9.20.26.tar.xz"
+linux_size = 5918032
+linux_sha256 = "55248def0f870c4c46b3de72978ea972615131516663188a4564dca1d20bf350"

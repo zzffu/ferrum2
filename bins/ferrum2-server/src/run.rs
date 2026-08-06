@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
-use ferrum2_config::{LoggingLevel, RuntimeConfig, UdpConfig, ValidatedServerConfig};
+use ferrum2_config::{DnsConfig, LoggingLevel, RuntimeConfig, UdpConfig, ValidatedServerConfig};
 use ferrum2_core::route::Network;
 use ferrum2_core::{
     AbortiveClose, ConnectErrorKind, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr,
 };
 use ferrum2_crypto::{Clock as _, MethodSinglePskProvider, SystemClock, SystemRandom};
+use ferrum2_dns::{TaggedResolver, TaggedResolverOwner};
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
     json_subscriber,
@@ -22,8 +23,8 @@ use ferrum2_runtime::{
     MetricsEndpointError, OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessCause,
     ProcessFuture, ProcessReport, ProcessRoot, ProcessRootExit, ProcessSupervisor, RelayFailure,
     RelayRunError, RuntimeTcpStream, SupervisorError, SystemDirectUdpSocketFactory,
-    SystemUdpResolver, TcpConnector, UdpBufferReservation, UdpCommitError, UdpRuntimeError,
-    UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager, relay_lifecycle,
+    SystemSocketInspector, SystemTcpDialer, TcpConnector, UdpBufferReservation, UdpCommitError,
+    UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
     DetectionReason, FlowTerminal, MethodKeyAdapter, PlainDuplex, ProtocolReason,
@@ -32,6 +33,9 @@ use ferrum2_shadowsocks::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 use tokio::net::{TcpListener, TcpSocket, UdpSocket};
+
+#[path = "dns_egress.rs"]
+mod dns_egress;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
@@ -122,17 +126,41 @@ where
     let clock = Arc::new(SystemClock::new());
     let routing = Arc::new(ServerRouting {
         route: config.route,
-        direct: config
-            .outbounds
-            .iter()
-            .map(|_| Arc::new(DirectOutbound::new(TcpConnector::new(connect_timeout))))
-            .collect(),
+        outbound_count: config.outbounds.len(),
     });
     let mut roots = Vec::with_capacity(
         config.inbounds.len() * usize::from(config.udp.enabled)
             + 1
+            + usize::from(config.dns.is_some())
             + usize::from(config.metrics.is_some()),
     );
+    let dns = match config.dns {
+        Some(DnsConfig {
+            inbounds: _,
+            servers,
+            route,
+            timeout,
+            max_inflight,
+        }) => {
+            let state = Arc::new(dns_egress::ServerDnsState::new(route));
+            let root_state = Arc::clone(&state);
+            let outbound_count = routing.outbound_count;
+            roots.push(ProcessRoot::new(move || async move {
+                let egress = Arc::new(dns_egress::ServerDnsEgress::new(outbound_count));
+                let (resolver, owner) = TaggedResolver::new(servers, timeout, max_inflight, egress)
+                    .map_err(|_| RunError::StartupProtocol)?;
+                root_state
+                    .install(Arc::new(resolver))
+                    .map_err(|_| RunError::StartupProtocol)?;
+                Ok(ServerDnsRoot {
+                    state: root_state,
+                    owner,
+                })
+            }));
+            Some(state)
+        }
+        None => None,
+    };
     let mut tcp_listens = Vec::with_capacity(config.inbounds.len());
     let mut tcp_contexts = Vec::with_capacity(config.inbounds.len());
     for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
@@ -146,6 +174,11 @@ where
             random: SystemRandom,
             replay: Arc::clone(&replay),
             runtime: config.runtime,
+            dns: dns_egress::ServerDnsResolver::new(
+                dns.as_ref().map(Arc::clone),
+                inbound_id,
+                Network::Tcp,
+            ),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
         });
@@ -186,6 +219,7 @@ where
             mappings,
             admission,
             connect_timeout,
+            dns: dns.as_ref().map(Arc::clone),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
         };
@@ -234,6 +268,58 @@ fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
             ProcessRootExit::Panicked | ProcessRootExit::JoinFailed => Err(RunError::RuntimeChild),
             ProcessRootExit::Completed => Err(RunError::RuntimeRoot),
         },
+    }
+}
+
+struct ServerDnsRoot {
+    state: Arc<dns_egress::ServerDnsState>,
+    owner: TaggedResolverOwner,
+}
+
+impl ServerDnsRoot {
+    async fn close(&mut self) -> Result<(), RunError> {
+        self.state.take();
+        self.owner
+            .shutdown()
+            .await
+            .map(|_| ())
+            .map_err(|_| RunError::ShutdownCleanup)
+    }
+}
+
+impl PreparedProcessRoot<RunError> for ServerDnsRoot {
+    fn activate(&mut self) -> Result<(), RunError> {
+        Ok(())
+    }
+
+    fn run(
+        mut self: Box<Self>,
+        mut cancellation: ProcessCancellation,
+    ) -> ProcessFuture<Result<(), RunError>> {
+        Box::pin(async move {
+            let ready = {
+                let owner = &mut self.owner;
+                tokio::select! {
+                    _ = cancellation.cancelled() => None,
+                    result = owner.ready() => Some(result),
+                }
+            };
+            match ready {
+                None => self.close().await,
+                Some(Err(_)) => {
+                    self.close().await?;
+                    Err(RunError::StartupProtocol)
+                }
+                Some(Ok(())) => {
+                    cancellation.cancelled().await;
+                    self.close().await
+                }
+            }
+        })
+    }
+
+    fn rollback(mut self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
+        Box::pin(async move { self.close().await })
     }
 }
 
@@ -616,8 +702,11 @@ where
     }
 }
 
-type ProductionUdpRuntime<L> =
-    DirectUdpRuntime<SystemUdpResolver, SystemDirectUdpSocketFactory, ServerUdpResponseHandler<L>>;
+type ProductionUdpRuntime<L> = DirectUdpRuntime<
+    dns_egress::ServerDnsResolver,
+    SystemDirectUdpSocketFactory,
+    ServerUdpResponseHandler<L>,
+>;
 
 struct PreparedUdpServer<L>
 where
@@ -651,6 +740,7 @@ struct ServerUdpShared {
     mappings: Arc<UdpMappings>,
     admission: Arc<tokio::sync::Mutex<()>>,
     connect_timeout: std::time::Duration,
+    dns: Option<Arc<dns_egress::ServerDnsState>>,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
 }
@@ -672,6 +762,7 @@ where
         mappings,
         admission,
         connect_timeout,
+        dns,
         registry,
         metrics,
     } = shared;
@@ -684,9 +775,11 @@ where
         codec: Arc::clone(&response_codec),
         metrics: Arc::clone(&metrics),
     };
-    let runtime = DirectUdpRuntime::with_shared_capacity(
+    let runtime = DirectUdpRuntime::with_shared_adapters(
         sessions,
         connect_timeout,
+        dns_egress::ServerDnsResolver::new(dns, inbound, Network::Udp),
+        SystemDirectUdpSocketFactory,
         handler,
         registry.clone(),
     );
@@ -836,10 +929,10 @@ where
                 let handle = binding.handle;
                 let Some(reserved) = reserve_udp_direct(
                     &routing.route,
-                    &routing.direct,
+                    routing.outbound_count,
                     inbound,
                     pending.datagram().target(),
-                    |_| {
+                    || {
                         std::future::ready(
                             runtime
                                 .reserve_datagram(handle, pending.datagram().allocated_capacity()),
@@ -908,10 +1001,10 @@ where
 
             let Some(admission) = reserve_udp_direct(
                 &routing.route,
-                &routing.direct,
+                routing.outbound_count,
                 inbound,
                 pending.datagram().target(),
-                |_| {
+                || {
                     runtime.reserve_session(
                         tokio::time::Instant::now(),
                         pending.datagram().allocated_capacity(),
@@ -1136,22 +1229,22 @@ async fn shutdown_signal() {
 
 struct ServerRouting {
     route: ferrum2_core::route::RouteTable,
-    direct: Vec<Arc<DirectOutbound<TcpConnector>>>,
+    outbound_count: usize,
 }
 
-async fn reserve_udp_direct<T, R, F>(
+async fn reserve_udp_direct<R, F>(
     route: &ferrum2_core::route::RouteTable,
-    direct: &[T],
+    outbound_count: usize,
     inbound: usize,
     target: &TargetAddr,
-    reserve: impl FnOnce(&T) -> F,
+    reserve: impl FnOnce() -> F,
 ) -> Option<R>
 where
     F: std::future::Future<Output = R>,
 {
     let selected = route.select(inbound, Network::Udp, target);
-    let direct = direct.get(selected)?;
-    Some(reserve(direct).await)
+    (selected < outbound_count).then_some(())?;
+    Some(reserve().await)
 }
 
 #[derive(Debug)]
@@ -1197,6 +1290,7 @@ struct ServerContext {
     random: SystemRandom,
     replay: Arc<TcpReplayStore>,
     runtime: RuntimeConfig,
+    dns: dns_egress::ServerDnsResolver,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
 }
@@ -1265,18 +1359,24 @@ async fn server_connection(
         initial_payload,
         reply,
     } = session;
-    let Some(direct) = context.routing.direct.get(context.routing.route.select(
-        context.inbound,
-        Network::Tcp,
-        &target,
-    )) else {
+    let selected = context
+        .routing
+        .route
+        .select(context.inbound, Network::Tcp, &target);
+    if selected >= context.routing.outbound_count {
         context
             .metrics
             .active_connections_dec(Role::Server, Inbound::Shadowsocks);
         return;
-    };
+    }
+    let direct = DirectOutbound::new(TcpConnector::with_resolution_adapters(
+        SystemSocketInspector,
+        SystemTcpDialer,
+        context.dns.clone(),
+        context.runtime.connect_timeout,
+    ));
     let opened = open_and_prefix(
-        direct.as_ref(),
+        &direct,
         &target,
         &initial_payload,
         context.runtime.idle_timeout,
@@ -1756,6 +1856,28 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+
+    #[test]
+    fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
+        let selected = TargetAddr::domain("selected.example.", 8443).expect("selected target");
+        let other = TargetAddr::domain("other.example.", 8443).expect("final target");
+        let route = ferrum2_core::route::ActionTable::new(
+            vec![ferrum2_core::route::ActionRule::new(
+                Some(1),
+                Some(Network::Tcp),
+                Some(selected.clone()),
+                0,
+            )],
+            1,
+        )
+        .expect("DNS route");
+        let state = dns_egress::ServerDnsState::new(route);
+
+        assert_eq!(state.select(1, Network::Tcp, &selected), 0);
+        assert_eq!(state.select(0, Network::Tcp, &selected), 1);
+        assert_eq!(state.select(1, Network::Udp, &selected), 1);
+        assert_eq!(state.select(1, Network::Tcp, &other), 1);
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -3255,15 +3377,7 @@ mod tests {
             let shared = ServerUdpShared {
                 routing: Arc::new(ServerRouting {
                     route: config.route,
-                    direct: config
-                        .outbounds
-                        .iter()
-                        .map(|_| {
-                            Arc::new(DirectOutbound::new(TcpConnector::new(
-                                config.runtime.connect_timeout,
-                            )))
-                        })
-                        .collect(),
+                    outbound_count: config.outbounds.len(),
                 }),
                 protocol,
                 clock: Arc::new(SystemClock::new()),
@@ -3272,6 +3386,7 @@ mod tests {
                 mappings,
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
+                dns: None,
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             };

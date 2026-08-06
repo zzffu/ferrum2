@@ -2335,6 +2335,9 @@ mod tests {
 
     use super::*;
 
+    static ISSUED_TEST_PORTS: std::sync::LazyLock<Mutex<HashSet<u16>>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
     #[cfg(unix)]
     #[tokio::test]
     async fn listener_policy_rebinds_after_traffic_and_excludes_live_contender() {
@@ -5068,14 +5071,21 @@ mod tests {
     }
 
     fn reserve_address() -> SocketAddrV4 {
-        let listener =
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve address");
-        let address = match listener.local_addr().expect("reserved address") {
-            SocketAddr::V4(address) => address,
-            SocketAddr::V6(_) => unreachable!("IPv4 reservation"),
-        };
-        drop(listener);
-        address
+        let mut issued = ISSUED_TEST_PORTS.lock().expect("issued test ports");
+        for port in 10_000..30_000 {
+            if issued.contains(&port) {
+                continue;
+            }
+            let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+            if let (Ok(_tcp), Ok(_udp)) = (
+                std::net::TcpListener::bind(address),
+                std::net::UdpSocket::bind(address),
+            ) {
+                issued.insert(port);
+                return address;
+            }
+        }
+        panic!("no paired test address available")
     }
 
     fn client_test_config(
@@ -5395,14 +5405,11 @@ mod tests {
                 .expect("readiness upstream rebind"),
         );
 
-        let first =
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("rollback first reserve");
-        let first_address = first.local_addr().expect("rollback first address");
-        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        let first_address = SocketAddr::V4(reserve_address());
+        let occupied_address = SocketAddr::V4(reserve_address());
+        let occupied = TcpListener::bind(occupied_address)
             .await
             .expect("rollback occupied TCP");
-        let occupied_address = occupied.local_addr().expect("rollback occupied address");
-        drop(first);
         assert!(
             DnsProxySockets::bind(
                 vec![first_address, occupied_address],
@@ -5762,6 +5769,7 @@ mod tests {
         ])
         .expect("valid maximum wire name");
         assert!(binary_name.to_ascii().len() > 255);
+        wait_until_bound(dns).await;
         for (id, name, expected) in [
             (
                 0x1234,
@@ -5773,18 +5781,13 @@ mod tests {
             let mut query = Message::new(id, MessageType::Query, OpCode::Query);
             query.add_query(Query::query(name, RecordType::A));
             let query = query.to_vec().expect("typed query");
-            let deadline = Instant::now() + Duration::from_secs(2);
             let mut response = [0_u8; 4096];
-            let length = loop {
-                client.send_to(&query, dns).await.expect("proxy query");
-                if let Ok(Ok((length, _))) =
-                    tokio::time::timeout(Duration::from_millis(20), client.recv_from(&mut response))
-                        .await
-                {
-                    break length;
-                }
-                assert!(Instant::now() < deadline, "DNS proxy never bound");
-            };
+            client.send_to(&query, dns).await.expect("proxy query");
+            let (length, _) =
+                tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                    .await
+                    .expect("DNS proxy response timeout")
+                    .expect("DNS proxy response");
             let response = Message::from_vec(&response[..length]).expect("typed proxy response");
             assert_eq!(response.metadata.id, id);
             assert_eq!(response.metadata.message_type, MessageType::Response);
@@ -5931,6 +5934,7 @@ mod tests {
         });
 
         wait_until_bound(socks).await;
+        wait_until_bound(dns).await;
         let mut rejected = tokio::net::TcpStream::connect(socks)
             .await
             .expect("SOCKS public-off connect");
@@ -5967,22 +5971,15 @@ mod tests {
             .expect("detoured UDP client");
         let udp_query = query(0x2201, "udp.detoured.example.");
         let mut response = [0_u8; 4096];
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let udp_length = loop {
-            udp_client
-                .send_to(&udp_query, dns)
-                .await
-                .expect("detoured UDP query");
-            if let Ok(Ok((length, _))) = tokio::time::timeout(
-                Duration::from_millis(20),
-                udp_client.recv_from(&mut response),
-            )
+        udp_client
+            .send_to(&udp_query, dns)
             .await
-            {
-                break length;
-            }
-            assert!(Instant::now() < deadline, "detoured DNS proxy never bound");
-        };
+            .expect("detoured UDP query");
+        let (udp_length, _) =
+            tokio::time::timeout(Duration::from_secs(2), udp_client.recv_from(&mut response))
+                .await
+                .expect("detoured DNS response timeout")
+                .expect("detoured DNS response");
         let udp_response =
             Message::from_vec(&response[..udp_length]).expect("detoured UDP response");
         assert_eq!(udp_response.metadata.id, 0x2201);
@@ -6226,17 +6223,7 @@ mod tests {
             })
             .collect();
         let target = TargetAddr::ipv4("192.0.2.1:80".parse().expect("target")).expect("target");
-        let reservations = [
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listen"),
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("unused listen"),
-        ];
-        let listens =
-            reservations
-                .each_ref()
-                .map(|listener| match listener.local_addr().expect("listen") {
-                    SocketAddr::V4(address) => address,
-                    SocketAddr::V6(_) => unreachable!("IPv4 listen"),
-                });
+        let listens = [reserve_address(), reserve_address()];
         let mappings = [(listens[0], servers[0]), (listens[1], servers[1])];
         let (path, mut config) = tagged_client_test_config(&mappings, false);
         let dead = reserve_address();
@@ -6272,7 +6259,6 @@ mod tests {
         .expect("selector route");
         config.route = route;
         let selector = config.selector_control();
-        drop(reservations);
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);
         for listen in listens {

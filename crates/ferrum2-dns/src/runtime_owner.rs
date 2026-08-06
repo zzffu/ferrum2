@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -57,6 +58,13 @@ enum Command {
         record_type: RecordType,
         deadline: Instant,
         reply: oneshot::Sender<Result<Lookup, DnsError>>,
+        permit: OwnedSemaphorePermit,
+    },
+    LookupIps {
+        server: usize,
+        name: Name,
+        deadline: Instant,
+        reply: oneshot::Sender<Result<Vec<IpAddr>, DnsError>>,
         permit: OwnedSemaphorePermit,
     },
     Query {
@@ -244,10 +252,39 @@ impl TaggedResolver {
                 .await
                 .map_err(|_| DnsError::Timeout)?
                 .map_err(|_| DnsError::Shutdown)?;
-            tokio::time::timeout_at(deadline, response)
+            response.await.map_err(|_| DnsError::Shutdown)?
+        }
+    }
+
+    /// Resolves A then AAAA through one selected server, admission and deadline.
+    pub fn lookup_ips(
+        &self,
+        server: usize,
+        name: Name,
+    ) -> impl std::future::Future<Output = Result<Vec<IpAddr>, DnsError>> + Send + 'static {
+        let server_count = self.server_count;
+        let timeout = self.timeout;
+        let admission = Arc::clone(&self.admission);
+        let sender = self.sender.clone();
+        async move {
+            if server >= server_count {
+                return Err(DnsError::InvalidServer);
+            }
+            let deadline = Instant::now() + timeout;
+            let permit = admission.try_acquire_owned().map_err(|_| DnsError::Busy)?;
+            let (reply, response) = oneshot::channel();
+            let command = Command::LookupIps {
+                server,
+                name,
+                deadline,
+                reply,
+                permit,
+            };
+            tokio::time::timeout_at(deadline, sender.ok_or(DnsError::Shutdown)?.send(command))
                 .await
                 .map_err(|_| DnsError::Timeout)?
-                .map_err(|_| DnsError::Shutdown)?
+                .map_err(|_| DnsError::Shutdown)?;
+            response.await.map_err(|_| DnsError::Shutdown)?
         }
     }
 
@@ -279,10 +316,7 @@ impl TaggedResolver {
                 .await
                 .map_err(|_| DnsError::Timeout)?
                 .map_err(|_| DnsError::Shutdown)?;
-            tokio::time::timeout_at(deadline, response)
-                .await
-                .map_err(|_| DnsError::Timeout)?
-                .map_err(|_| DnsError::Shutdown)?
+            response.await.map_err(|_| DnsError::Shutdown)?
         }
     }
 
@@ -378,8 +412,7 @@ async fn run_commands(
                     let query_tasks = tasks.clone();
                     let mut cancelled = cancel_rx.clone();
                     queries.spawn(async move {
-                        let _permit = permit;
-                        let _guard = QueryGuard::new(Arc::clone(&counters));
+                        let guard = QueryGuard::new(Arc::clone(&counters));
                         let provider = FerrumRuntimeProvider::new(
                             egress, plan, deadline, tasks, counters,
                         );
@@ -395,6 +428,39 @@ async fn run_commands(
                             ) => result,
                         };
                         query_tasks.abort_and_join().await;
+                        drop(permit);
+                        drop(guard);
+                        if !reply.is_closed() {
+                            let _ = reply.send(result);
+                        }
+                    });
+                }
+                Some(Command::LookupIps { server, name, deadline, mut reply, permit }) => {
+                    let plan = servers[server].plan_snapshot();
+                    let servers = Arc::clone(&servers);
+                    let egress = Arc::clone(&egress);
+                    let counters = Arc::clone(&counters);
+                    let tasks = TaskSet::default();
+                    let query_tasks = tasks.clone();
+                    let mut cancelled = cancel_rx.clone();
+                    queries.spawn(async move {
+                        let guard = QueryGuard::new(Arc::clone(&counters));
+                        let provider = FerrumRuntimeProvider::new(
+                            egress, plan, deadline, tasks, counters,
+                        );
+                        let result = tokio::select! {
+                            _ = cancelled.changed() => Err(DnsError::Shutdown),
+                            _ = reply.closed() => Err(DnsError::Shutdown),
+                            result = resolver::lookup_ips(
+                                &servers[server],
+                                name,
+                                deadline,
+                                provider,
+                            ) => result,
+                        };
+                        query_tasks.abort_and_join().await;
+                        drop(permit);
+                        drop(guard);
                         if !reply.is_closed() {
                             let _ = reply.send(result);
                         }
@@ -409,8 +475,7 @@ async fn run_commands(
                     let query_tasks = tasks.clone();
                     let mut cancelled = cancel_rx.clone();
                     queries.spawn(async move {
-                        let _permit = permit;
-                        let _guard = QueryGuard::new(Arc::clone(&counters));
+                        let guard = QueryGuard::new(Arc::clone(&counters));
                         let provider = FerrumRuntimeProvider::new(
                             egress, plan, deadline, tasks, counters,
                         );
@@ -425,6 +490,8 @@ async fn run_commands(
                             ) => result,
                         };
                         query_tasks.abort_and_join().await;
+                        drop(permit);
+                        drop(guard);
                         if !reply.is_closed() {
                             let _ = reply.send(result);
                         }
@@ -439,10 +506,16 @@ async fn run_commands(
     let _ = cancel.send(true);
     while let Ok(command) = receiver.try_recv() {
         match command {
-            Command::Lookup { reply, .. } => {
+            Command::Lookup { reply, permit, .. } => {
+                drop(permit);
                 let _ = reply.send(Err(DnsError::Shutdown));
             }
-            Command::Query { reply, .. } => {
+            Command::LookupIps { reply, permit, .. } => {
+                drop(permit);
+                let _ = reply.send(Err(DnsError::Shutdown));
+            }
+            Command::Query { reply, permit, .. } => {
+                drop(permit);
                 let _ = reply.send(Err(DnsError::Shutdown));
             }
         }
