@@ -815,11 +815,19 @@ jobs:
           printf '%s\n' "$resource_output"
           expected_resource="m4_resource_completion status=PASS sessions=10000 samples=180 rss_windows=6/6 drain=PASS sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT"
           test "$resource_output" = "$expected_resource"
+          dns_resource_output="$(target/release/m4-qualification dns-resource \
+            --sha "$GITHUB_SHA" \
+            --output "$work/dns-resource.jsonl")"
+          printf '%s\n' "$dns_resource_output"
+          test "$(grep -c '^' <<<"$dns_resource_output")" -eq 1
+          grep -Eq "^m12_dns_resource_completion status=PASS roots=client,server phases=idle,direct,detoured direct_queries=[1-9][0-9]* detoured_queries=[1-9][0-9]* samples=48 rss_windows=12/12 bounds=PASS drain=PASS rebind=PASS sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT$" <<<"$dns_resource_output"
           restore_thp
           trap - EXIT TERM
           printf '%s\n' 'm4_thp_profile status=RESTORED readback=PASS'
           printf 'm4_performance_completion status=PASS ferrum_median=%s reference_median=%s ratio=%s signed_difference_percent=%s sessions=10000 samples=180 rss_windows=6/6 drain=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$ferrum_median" "$reference_median" "$ratio" "$signed_difference" \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          printf 'm12_performance_completion status=PASS legacy=PASS dns_roots=PASS dns_direct=PASS dns_detoured=PASS dns_bounds=PASS dns_drain=PASS dns_rebind=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
       - name: Reap M4 processes and delete generated evidence
         if: ${{ always() }}
