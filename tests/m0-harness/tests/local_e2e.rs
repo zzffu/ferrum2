@@ -356,8 +356,11 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
     .expect("tagged DNS server config");
     let client_config = write_client_config(directory.path(), client_address, server_address, None)
         .expect("client config");
-    let mut server =
-        ChildGuard::spawn_while_holding("ferrum2-server", &server_config, &_spawn_guard);
+    let mut server = ChildGuard::spawn_signallable_while_holding(
+        "ferrum2-server",
+        &server_config,
+        &_spawn_guard,
+    );
     wait_for_listener(&mut server, server_address);
     wait_for_metrics(metrics_address);
     let mut client =

@@ -101,6 +101,14 @@ impl ChildGuard {
         Self::spawn_configured(name, config, "unclassified", false)
     }
 
+    pub fn spawn_signallable_while_holding(
+        name: &str,
+        config: &Path,
+        _spawn_guard: &std::sync::MutexGuard<'static, ()>,
+    ) -> Self {
+        Self::spawn_configured(name, config, "unclassified", true)
+    }
+
     pub fn spawn_with_context(name: &str, config: &Path, context: impl Into<String>) -> Self {
         Self::spawn_with_context_and_signal_group(name, config, context, false)
     }
