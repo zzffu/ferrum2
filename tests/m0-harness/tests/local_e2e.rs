@@ -509,6 +509,7 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
             loop_name,
         ]);
     }
+    let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline_children);
     assert_eq!(active_child_count(), baseline_children);
     drop(bind_loopback_listener(client_address).expect("client exact rebind"));
     drop(bind_loopback_listener(server_address).expect("server TCP exact rebind"));
