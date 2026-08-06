@@ -178,7 +178,7 @@ cargo test -p ferrum2-m0-harness --test udp_local_e2e tagged_dns_udp_resolution_
 cargo test -p ferrum2-m0-harness --test architecture --locked
 cargo +1.88.0 check --workspace --all-targets --locked
 cargo +1.88.0 check -p ferrum2-dns -p ferrum2-client -p ferrum2-server --features ferrum2-dns/__interop-test-root --locked
-cargo run -p ferrum2-m0-harness --bin m0_qualification --locked -- --dns-only
+cargo run -p ferrum2-m0-harness --bin m0-qualification --locked -- --dns-only
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base <exact-ticket-base-sha> --candidate HEAD
 git diff --check
 ~~~

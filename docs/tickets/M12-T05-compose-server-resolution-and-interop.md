@@ -1,7 +1,7 @@
 ---
 id: M12-T05
 milestone: M12
-status: active
+status: done
 depends_on: [M12-T04]
 owns:
   - .github/workflows/m0.yml
@@ -91,22 +91,38 @@ still requires separate authorization。
 
 ## Acceptance
 
-- [ ] DNS-present server uses authenticated inbound/network/original target for first/final selection；
+- [x] DNS-present server uses authenticated inbound/network/original target for first/final selection；
       DNS detour and application outbound may name different direct tags，while DNS-absent system
       resolver、IP bypass、pre-resolution outbound route and 16 candidates remain exact。
-- [ ] Actual client→server→target TCP/UDP cases use distinct synthetic answers to prove selected action；
+- [x] Actual client→server→target TCP/UDP cases use distinct synthetic answers to prove selected action；
       empty/wrong/timeout/exhausted results never connect/forward or fall back。
-- [ ] Existing qualification provider pins/hashes/licenses CoreDNS 1.14.6 and BIND 9.20.26 without a
+- [x] Existing qualification provider pins/hashes/licenses CoreDNS 1.14.6 and BIND 9.20.26 without a
       second harness or public-network DNS dependency。
-- [ ] CoreDNS UDP/TCP/DoT/DoH and BIND-to-ferrum UDP/TCP matrices pass positive、NXDOMAIN/NODATA、EDNS/
+- [x] CoreDNS UDP/TCP/DoT/DoH and BIND-to-ferrum UDP/TCP matrices pass positive、NXDOMAIN/NODATA、EDNS/
       truncation、TLS/HTTP negatives through both direct and real client Shadowsocks detours and cleanup。
-- [ ] Direct/indirect loop、success/failure cycles、redaction、zero Hickory/process owners and exact
+- [x] Direct/indirect loop、success/failure cycles、redaction、zero Hickory/process owners and exact
       DNS/detour/upstream/target rebind pass；`TEST-0013` T05、Rust 1.88、footprint and blocking reviews
       pass。
 
 ## Validation
 
-Run `TEST-0013` T05 commands，then repository Full commands before integration。
+Final candidate `853ad9728aa9cc3dedfc8d565db3264d8f1df398` passed the exact TCP graceful-
+shutdown case (`1/1`，parent Codex survived)、the complete local E2E suite with 2 and 8 test threads
+(`10/10` each)、workspace all-features tests、format/diff checks and schema 3 footprint integrity。
+Numeric footprint was reviewed and accepted as `REVIEW_REQUIRED`：code/tests `18238/39723`，ratio
+`2.178035`，delta `+316/+2014`，case/support/fixture `+932/+1082/+0`。
+
+Automatic hosted run `31111849601/1` passed exact-SHA CoreDNS/BIND interoperability、quality、footprint、
+Rust 1.88 and Windows MSVC/Linux GNU/Linux musl；aggregate qualification job `92652824614` reported
+`PASS` with TCP `12/12`、UDP `12/12`、DNS and cleanup all passing。Architect returned `PASS` and QA
+returned `PASS_WITH_NOTES` with no blocking finding。Candidate was integrated locally at
+`12bde8ba8894ede1bcc4ed664931bb7bf6d782c1`。
+
+The earlier immutable run `31110243307/1` on `4dcd89fa879873dc25ae9f5c1a3ef2635261ac76`
+remains failed：interop、footprint、MSRV and platforms passed，while quality exposed one unrelated
+concurrent child during the DNS global cleanup probe。The bounded one-line spawn-serialization repair
+produced the final candidate above。The single authorized non-force candidate push was consumed；it did
+not authorize another push、manual workflow dispatch、PR、tag、package、release or publication。
 
 ## Rollback / risk
 

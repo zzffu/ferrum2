@@ -107,8 +107,8 @@ Shadowsocks数据面或规则引擎。
 | M12-T02 | Compile DNS config、detour roots and one shared first-match action table | M12-T01 | done |
 | M12-T03 | Implement tagged Hickory upstreams over bounded direct/detour runtime adapters | M12-T02 | done |
 | M12-T04 | Expose client UDP/TCP DNS proxy with real Shadowsocks detours | M12-T03 | done |
-| M12-T05 | Compose server resolution/detours and prove external interoperability | M12-T04 | active |
-| M12-T06 | Qualify one exact M12 integration SHA | M12-T05 | planned |
+| M12-T05 | Compose server resolution/detours and prove external interoperability | M12-T04 | done |
+| M12-T06 | Qualify one exact M12 integration SHA | M12-T05 | active |
 
 ~~~text
 M12-T01 exact dependency/MSRV
@@ -171,5 +171,13 @@ Before formal T05 review，hosted and isolated Linux repetition exposed that a c
 woke its caller before releasing the shared `max_inflight` permit；a bounded T05 lease now owns only
 `runtime_owner.rs` to reverse those two completion operations after registered-task cleanup。Admission
 limits、deadlines、fallback and lifecycle ownership remain unchanged。
-The user authorized remote pushes；none has run yet。Manual workflow dispatch remains separately
-unauthorized；no hosted run、PR、tag、package、release or publication has occurred。
+T05 final candidate `853ad9728aa9cc3dedfc8d565db3264d8f1df398` passed local focused/full evidence
+and final Architect `PASS` plus QA `PASS_WITH_NOTES` with no blocking finding，then integrated locally
+at exact `12bde8ba8894ede1bcc4ed664931bb7bf6d782c1`。The earlier immutable hosted run
+`31110243307/1` remains failed at Linux quality because the DNS cleanup probe observed an unrelated
+concurrent test child；the bounded one-line spawn-serialization repair was re-reviewed。Automatic run
+`31111849601/1` on the repaired exact candidate passed CoreDNS/BIND、quality、footprint、Rust 1.88、
+Windows MSVC、Linux GNU/musl and aggregate qualification，including TCP/UDP `12/12` plus DNS cleanup。
+The single authorized non-force T05 candidate push was consumed。T06 is active from the exact local
+integration product；any additional push and the required manual performance dispatch each remain
+separately unauthorized。No PR、tag、package、release or publication has occurred。

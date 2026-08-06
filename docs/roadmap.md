@@ -1005,10 +1005,9 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
   admission、fixed buffers/queues、tracked/awaited Hickory/detour tasks、zero owners/rebind/redaction；
   Full/MSRV/lifecycle/platforms/existing SIP022+new DNS interop/footprint/reviews/performance exact-SHA
   evidence。
-- **Tickets:** M12-T01 dependency/MSRV `done`；M12-T02 config/shared matcher依赖T01
-  `active`；M12-T03 tagged transports/owner依赖T02 `planned`；M12-T04 client proxy依赖T03
-  `planned`；M12-T05 server resolver/interop依赖T04 `planned`；M12-T06 qualification依赖T05
-  `planned`。Decision/spec/test为ADR-0031、SPEC/TEST-0013。
+- **Tickets:** M12-T01 dependency/MSRV、M12-T02 config/shared matcher、M12-T03 tagged transports/
+  owner、M12-T04 client proxy及M12-T05 server resolver/interop均为`done`；M12-T06 exact-SHA
+  qualification依赖T05，当前`active`。Decision/spec/test为ADR-0031、SPEC/TEST-0013。
 - **Forecast:** test case/support/fixture `1160/240/0`，预计milestone numeric
   `REVIEW_REQUIRED`；T02～T05预计ticket `WARN`。不新增second harness、copied DNS codec或second
   SIP022 UDP data plane。
@@ -1017,9 +1016,13 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
   group/health/LB/fallback、suffix/CIDR/qtype/client-IP/Geo/sniff、hostname bootstrap、new server-side
   proxy outbound、custom CA/insecure TLS、standalone DNS binary、hot reload、management API、package/
   release/publication。
-- **Execution / remote boundary:** T01已集成于exact `d874865f`；T02从该exact base执行。用户已授权
-  remote pushes但尚未执行；manual workflow dispatch仍需独立授权。无hosted run、PR、tag、package、
-  release或publication。
+- **Execution / remote boundary:** T01～T04已依次集成；T05 final candidate `853ad972`通过local
+  evidence、Architect `PASS`及QA non-blocking `PASS_WITH_NOTES`，并集成于exact `12bde8ba`。
+  首次hosted run `31110243307/1`的Linux quality失败保持可见；一行并发spawn序列化修复后的
+  exact-candidate run `31111849601/1`通过CoreDNS/BIND、quality、footprint、Rust 1.88、three
+  platforms及aggregate TCP/UDP/DNS qualification。该次non-force push授权已用完；T06的任何新
+  push与required manual performance dispatch仍各需独立授权。无PR、tag、package、release或
+  publication。
 
 ## 决策登记
 

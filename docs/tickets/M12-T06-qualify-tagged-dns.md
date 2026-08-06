@@ -1,13 +1,14 @@
 ---
 id: M12-T06
 milestone: M12
-status: planned
+status: active
 depends_on: [M12-T05]
 owns:
   - docs/ci-status.md
   - docs/handoffs/HANDOFF-M12-*.md
   - docs/milestones/M12-tagged-dns-resolution-and-proxy.md
   - docs/roadmap.md
+  - docs/test-plans/TEST-0013-m12-tagged-dns-resolution-and-proxy.md
   - docs/tickets/M12-T06-qualify-tagged-dns.md
 ---
 
