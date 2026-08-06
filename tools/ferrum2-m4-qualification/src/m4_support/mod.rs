@@ -1,10 +1,13 @@
 #![allow(dead_code)]
 
+use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::rr::rdata::A;
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -40,6 +43,16 @@ const RESOURCE_SAMPLES: usize = 180;
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const RSS_WINDOW: usize = 30;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
+const DNS_LOAD_WORKERS: usize = 16;
+const DNS_MAX_INFLIGHT: u16 = 32;
+const DNS_RESOURCE_SAMPLES: usize = 24;
+const DNS_RSS_WINDOW: usize = 4;
+const DNS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const DNS_UPSTREAM_DELAY: Duration = Duration::from_millis(5);
+const DNS_OWNER_DELTA: u64 = DNS_MAX_INFLIGHT as u64 * 4 + 32;
+// ponytail: UDP is the one hot-path resource witness; add transports only for a transport claim.
+const DNS_DIRECT_NAME: &str = "direct.performance.test.";
+const DNS_DETOURED_NAME: &str = "detoured.performance.test.";
 const PROCESS_OUTPUT_CAP: usize = 64 * 1024;
 const SMAPS_ROLLUP_CAP: usize = 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,14 +68,17 @@ pub fn run(arguments: impl Iterator<Item = OsString>) -> Result<String, String> 
     let mode = arguments
         .next()
         .and_then(|value| value.into_string().ok())
-        .ok_or_else(|| "expected mode: throughput, resource, or self-check".to_owned())?;
+        .ok_or_else(|| {
+            "expected mode: throughput, resource, dns-resource, or self-check".to_owned()
+        })?;
     let rest: Vec<_> = arguments.collect();
     match mode.as_str() {
         "throughput" => run_throughput(parse_hosted_args(&rest, true)?),
         "resource" => run_resource(parse_hosted_args(&rest, false)?),
+        "dns-resource" => run_dns_resource(parse_hosted_args(&rest, false)?),
         "self-check" if rest.is_empty() => run_self_check(),
         "self-check" => Err("self-check accepts no arguments".to_owned()),
-        _ => Err("expected mode: throughput, resource, or self-check".to_owned()),
+        _ => Err("expected mode: throughput, resource, dns-resource, or self-check".to_owned()),
     }
 }
 
@@ -804,6 +820,310 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
     ))
 }
 
+fn run_dns_resource(arguments: HostedArgs) -> Result<String, String> {
+    let identity = HostedIdentity::load(&arguments.sha, &arguments.output)?;
+    validate_thp_profile(Path::new(THP_MAX_PTES_NONE_PATH))?;
+    let mut output = Evidence::create(&arguments.output)?;
+    output.line(format!(
+        "{{\"kind\":\"identity\",{}}}",
+        identity.json_fields()
+    ))?;
+    let directory = tempfile::Builder::new()
+        .prefix("dns-resource-")
+        .tempdir_in(output.parent())
+        .map_err(clean_io)?;
+    let mut direct_upstream = DnsResponder::start(DNS_DIRECT_NAME)?;
+    let mut detoured_upstream = DnsResponder::start(DNS_DETOURED_NAME)?;
+    let direct_upstream_address = direct_upstream.address;
+    let detoured_upstream_address = detoured_upstream.address;
+    let server_reservation = TcpUdpReservation::new()?;
+    let proxy_reservation = PortReservation::new()?;
+    let direct_dns_reservation = TcpUdpReservation::new()?;
+    let detoured_dns_reservation = TcpUdpReservation::new()?;
+    let client_metrics_reservation = PortReservation::new()?;
+    let server_metrics_reservation = PortReservation::new()?;
+    let server = server_reservation.address;
+    let proxy = proxy_reservation.address;
+    let direct_dns = direct_dns_reservation.address;
+    let detoured_dns = detoured_dns_reservation.address;
+    let client_metrics = client_metrics_reservation.address;
+    let server_metrics = server_metrics_reservation.address;
+    let client_config = directory.path().join("client.toml");
+    let server_config = directory.path().join("server.toml");
+    fs::write(
+        &client_config,
+        ferrum_dns_resource_client_config(
+            proxy,
+            server,
+            direct_dns,
+            detoured_dns,
+            direct_upstream_address,
+            detoured_upstream_address,
+            client_metrics,
+        ),
+    )
+    .map_err(clean_io)?;
+    fs::write(
+        &server_config,
+        ferrum_dns_resource_server_config(server, direct_upstream_address, server_metrics),
+    )
+    .map_err(clean_io)?;
+    let client_hash = sha256("DNS resource client config SHA-256 probe", &client_config)?;
+    let server_hash = sha256("DNS resource server config SHA-256 probe", &server_config)?;
+    output.line(format!(
+        "{{\"kind\":\"dns_resource_profile\",\"max_inflight\":{DNS_MAX_INFLIGHT},\
+         \"load_workers\":{DNS_LOAD_WORKERS},\"samples_per_phase\":{DNS_RESOURCE_SAMPLES},\
+         \"sample_interval_seconds\":{},\"upstream_delay_ms\":{},\
+         \"owner_delta\":{DNS_OWNER_DELTA},\
+         \"client_config_sha256\":{},\"server_config_sha256\":{}}}",
+        DNS_SAMPLE_INTERVAL.as_secs(),
+        DNS_UPSTREAM_DELAY.as_millis(),
+        json(&client_hash),
+        json(&server_hash),
+    ))?;
+
+    server_reservation.release();
+    server_metrics_reservation.release();
+    let mut server_process = spawn_proxy(
+        Topology::Ferrum,
+        "DNS resource server",
+        &ferrum_binary("ferrum2-server")?,
+        &server_config,
+    )?;
+    wait_for_metrics(&mut server_process, server_metrics)?;
+    proxy_reservation.release();
+    direct_dns_reservation.release();
+    detoured_dns_reservation.release();
+    client_metrics_reservation.release();
+    let mut client_process = spawn_proxy(
+        Topology::Ferrum,
+        "DNS resource client",
+        &ferrum_binary("ferrum2-client")?,
+        &client_config,
+    )?;
+    wait_for_metrics(&mut client_process, client_metrics)?;
+    wait_for_listener(&mut client_process, direct_dns)?;
+    wait_for_listener(&mut client_process, detoured_dns)?;
+
+    let idle = wait_for_dns_idle(&mut client_process, &mut server_process)?;
+    output.line(dns_sample_json("idle", 0, idle))?;
+    let direct_queries = run_dns_resource_phase(
+        "direct",
+        direct_dns,
+        DNS_DIRECT_NAME,
+        &mut client_process,
+        &mut server_process,
+        idle,
+        &mut output,
+    )?;
+    if direct_upstream.observed() < direct_queries {
+        return Err("direct DNS upstream observed fewer queries than the load client".to_owned());
+    }
+    let detoured_queries = run_dns_resource_phase(
+        "detoured",
+        detoured_dns,
+        DNS_DETOURED_NAME,
+        &mut client_process,
+        &mut server_process,
+        idle,
+        &mut output,
+    )?;
+    if detoured_upstream.observed() < detoured_queries {
+        return Err("detoured DNS upstream observed fewer queries than the load client".to_owned());
+    }
+
+    client_process.ensure_running()?;
+    server_process.ensure_running()?;
+    client_process.terminate()?;
+    server_process.terminate()?;
+    let direct_upstream_queries = direct_upstream.finish()?;
+    let detoured_upstream_queries = detoured_upstream.finish()?;
+    if direct_upstream_queries < direct_queries || detoured_upstream_queries < detoured_queries {
+        return Err("DNS upstream completion count is incomplete".to_owned());
+    }
+    prove_tcp_udp_rebind(server, "DNS resource server")?;
+    prove_tcp_rebind(proxy, "DNS resource SOCKS listener")?;
+    prove_tcp_udp_rebind(direct_dns, "direct DNS listener")?;
+    prove_tcp_udp_rebind(detoured_dns, "detoured DNS listener")?;
+    prove_tcp_rebind(client_metrics, "DNS resource client metrics")?;
+    prove_tcp_rebind(server_metrics, "DNS resource server metrics")?;
+    prove_udp_rebind(direct_upstream_address, "direct DNS upstream")?;
+    prove_udp_rebind(detoured_upstream_address, "detoured DNS upstream")?;
+    directory.close().map_err(clean_io)?;
+    output.line(format!(
+        "{{\"kind\":\"dns_resource_summary\",\"roots\":\"client,server\",\
+         \"phases\":\"idle,direct,detoured\",\"direct_queries\":{direct_queries},\
+         \"detoured_queries\":{detoured_queries},\"samples\":{},\
+         \"rss_windows\":12,\"bounds\":\"PASS\",\"drain\":\"PASS\",\
+         \"rebind\":\"PASS\"}}",
+        DNS_RESOURCE_SAMPLES * 2,
+    ))?;
+    output.finish()?;
+    assert_no_owners()?;
+    Ok(format!(
+        "m12_dns_resource_completion status=PASS roots=client,server \
+         phases=idle,direct,detoured direct_queries={direct_queries} \
+         detoured_queries={detoured_queries} samples={} rss_windows=12/12 \
+         bounds=PASS drain=PASS rebind=PASS sha={} run_id={} run_attempt={}",
+        DNS_RESOURCE_SAMPLES * 2,
+        identity.sha,
+        identity.run_id,
+        identity.run_attempt,
+    ))
+}
+
+fn run_dns_resource_phase(
+    phase: &'static str,
+    listen: SocketAddrV4,
+    name: &'static str,
+    client: &mut ProcessGuard,
+    server: &mut ProcessGuard,
+    idle: PairSample,
+    output: &mut Evidence,
+) -> Result<usize, String> {
+    let mut load = DnsLoad::start(listen, name)?;
+    load.wait_started(Instant::now() + STARTUP_TIMEOUT)?;
+    let mut samples = Vec::with_capacity(DNS_RESOURCE_SAMPLES);
+    let started = Instant::now();
+    for index in 0..DNS_RESOURCE_SAMPLES {
+        let slot =
+            started + DNS_SAMPLE_INTERVAL * u32::try_from(index + 1).expect("DNS sample index");
+        let next_slot = slot + DNS_SAMPLE_INTERVAL;
+        wait_for_sample_slot(slot, next_slot)?;
+        let sample = dns_process_sample(client, server)?;
+        validate_dns_owner_bound(&sample, &idle)
+            .map_err(|error| format!("{phase} DNS sample {}: {error}", index + 1))?;
+        output.line(dns_sample_json(phase, index + 1, sample))?;
+        samples.push(sample);
+    }
+    let queries = load.finish()?;
+    if queries < DNS_LOAD_WORKERS {
+        return Err(format!("{phase} DNS load completed too few queries"));
+    }
+    let rss = validate_dns_samples(&samples, &idle)?;
+    for verdict in &rss {
+        output.line(verdict.dns_json(phase))?;
+    }
+    let drained = wait_for_dns_drain(client, server, &idle)?;
+    output.line(dns_sample_json(&format!("{phase}-drained"), 0, drained))?;
+    Ok(queries)
+}
+
+fn dns_process_sample(
+    client: &mut ProcessGuard,
+    server: &mut ProcessGuard,
+) -> Result<PairSample, String> {
+    client.ensure_running()?;
+    server.ensure_running()?;
+    Ok(PairSample {
+        client: proc_sample(client.id())?,
+        server: proc_sample(server.id())?,
+    })
+}
+
+fn wait_for_dns_idle(
+    client: &mut ProcessGuard,
+    server: &mut ProcessGuard,
+) -> Result<PairSample, String> {
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let mut previous = None;
+    let mut stable = 0;
+    loop {
+        let sample = dns_process_sample(client, server)?;
+        let tuple = dns_owner_tuple(&sample);
+        if previous == Some(tuple) {
+            stable += 1;
+            if stable == 3 {
+                return Ok(sample);
+            }
+        } else {
+            previous = Some(tuple);
+            stable = 0;
+        }
+        thread::sleep(remaining(deadline)?.min(Duration::from_millis(100)));
+    }
+}
+
+fn wait_for_dns_drain(
+    client: &mut ProcessGuard,
+    server: &mut ProcessGuard,
+    idle: &PairSample,
+) -> Result<PairSample, String> {
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    loop {
+        let sample = dns_process_sample(client, server)?;
+        if dns_owner_tuple(&sample) == dns_owner_tuple(idle) {
+            return Ok(sample);
+        }
+        thread::sleep(remaining(deadline)?.min(Duration::from_millis(100)));
+    }
+}
+
+fn dns_owner_tuple(sample: &PairSample) -> (u64, u64, u64, u64) {
+    (
+        sample.client.fds,
+        sample.server.fds,
+        sample.client.tasks,
+        sample.server.tasks,
+    )
+}
+
+fn validate_dns_owner_bound(sample: &PairSample, idle: &PairSample) -> Result<(), String> {
+    for (role, sample, idle) in [
+        ("client", sample.client, idle.client),
+        ("server", sample.server, idle.server),
+    ] {
+        if sample.active != 0
+            || sample.fds > idle.fds.saturating_add(DNS_OWNER_DELTA)
+            || sample.tasks > idle.tasks.saturating_add(DNS_OWNER_DELTA)
+        {
+            return Err(format!("{role} DNS owner ceiling exceeded"));
+        }
+    }
+    Ok(())
+}
+
+fn dns_sample_json(phase: &str, index: usize, sample: PairSample) -> String {
+    format!(
+        "{{\"kind\":\"dns_resource_sample\",\"phase\":{},\"sample\":{index},\
+         \"client_fds\":{},\"server_fds\":{},\"client_tasks\":{},\
+         \"server_tasks\":{},\"client_rss_kib\":{},\"server_rss_kib\":{},\
+         \"client_smaps_rss_kib\":{},\"server_smaps_rss_kib\":{},\
+         \"client_anonymous_kib\":{},\"server_anonymous_kib\":{},\
+         \"client_anon_huge_pages_kib\":{},\"server_anon_huge_pages_kib\":{}}}",
+        json(phase),
+        sample.client.fds,
+        sample.server.fds,
+        sample.client.tasks,
+        sample.server.tasks,
+        sample.client.rss_kib,
+        sample.server.rss_kib,
+        sample.client.smaps_rss_kib,
+        sample.server.smaps_rss_kib,
+        sample.client.anonymous_kib,
+        sample.server.anonymous_kib,
+        sample.client.anon_huge_pages_kib,
+        sample.server.anon_huge_pages_kib,
+    )
+}
+
+fn prove_tcp_rebind(address: SocketAddrV4, label: &str) -> Result<(), String> {
+    drop(TcpListener::bind(address).map_err(|_| format!("{label} did not rebind"))?);
+    Ok(())
+}
+
+fn prove_udp_rebind(address: SocketAddrV4, label: &str) -> Result<(), String> {
+    drop(UdpSocket::bind(address).map_err(|_| format!("{label} did not rebind"))?);
+    Ok(())
+}
+
+fn prove_tcp_udp_rebind(address: SocketAddrV4, label: &str) -> Result<(), String> {
+    let tcp = TcpListener::bind(address).map_err(|_| format!("{label} TCP did not rebind"))?;
+    let udp = UdpSocket::bind(address).map_err(|_| format!("{label} UDP did not rebind"))?;
+    drop((tcp, udp));
+    Ok(())
+}
+
 fn validate_thp_profile(path: &Path) -> Result<(), String> {
     let profile = fs::read_to_string(path)
         .map_err(|_| "THP max_ptes_none profile is unavailable".to_owned())?;
@@ -1091,8 +1411,19 @@ struct RssVerdict {
 
 impl RssVerdict {
     fn json(&self) -> String {
+        self.json_for("rss_window", None)
+    }
+
+    fn dns_json(&self, phase: &str) -> String {
+        self.json_for("dns_rss_window", Some(phase))
+    }
+
+    fn json_for(&self, kind: &str, phase: Option<&str>) -> String {
+        let phase = phase
+            .map(|phase| format!("\"phase\":{},", json(phase)))
+            .unwrap_or_default();
         format!(
-            "{{\"kind\":\"rss_window\",\"window\":{},\"client_median_twice_kib\":{},\
+            "{{\"kind\":{},{phase}\"window\":{},\"client_median_twice_kib\":{},\
              \"server_median_twice_kib\":{},\"client_smaps_rss_median_twice_kib\":{},\
              \"server_smaps_rss_median_twice_kib\":{},\
              \"client_anonymous_median_twice_kib\":{},\
@@ -1100,6 +1431,7 @@ impl RssVerdict {
              \"client_anon_huge_pages_median_twice_kib\":{},\
              \"server_anon_huge_pages_median_twice_kib\":{},\
              \"limit_percent\":105,\"status\":\"PASS\"}}",
+            json(kind),
             self.window,
             self.client_median_twice,
             self.server_median_twice,
@@ -1125,6 +1457,32 @@ fn validate_samples(
     let first = samples[0];
     for sample in samples {
         validate_owner_tuple(sample, &first, sessions)?;
+    }
+    validate_rss_windows(samples, window_size)
+}
+
+fn validate_dns_samples(
+    samples: &[PairSample],
+    idle: &PairSample,
+) -> Result<Vec<RssVerdict>, String> {
+    if samples.len() != DNS_RESOURCE_SAMPLES
+        || DNS_RSS_WINDOW == 0
+        || DNS_RESOURCE_SAMPLES != DNS_RSS_WINDOW * 6
+    {
+        return Err("DNS sample set is incomplete".to_owned());
+    }
+    for sample in samples {
+        validate_dns_owner_bound(sample, idle)?;
+    }
+    validate_rss_windows(samples, DNS_RSS_WINDOW)
+}
+
+fn validate_rss_windows(
+    samples: &[PairSample],
+    window_size: usize,
+) -> Result<Vec<RssVerdict>, String> {
+    if samples.len() != window_size * 6 || window_size == 0 {
+        return Err("RSS sample set is incomplete".to_owned());
     }
     let mut client_vmrss = [0; 6];
     let mut server_vmrss = [0; 6];
@@ -1469,6 +1827,34 @@ ferrum2_tcp_replay_entries 0\n\
     expect_rejected("incomplete drain", || {
         validate_drain(&incomplete, &baseline)
     })?;
+    let dns_samples = vec![baseline; DNS_RESOURCE_SAMPLES];
+    let dns_verdicts = validate_dns_samples(&dns_samples, &baseline)?;
+    if dns_verdicts[0].dns_json("direct")
+        != "{\"kind\":\"dns_rss_window\",\"phase\":\"direct\",\"window\":1,\
+            \"client_median_twice_kib\":160,\"server_median_twice_kib\":160,\
+            \"client_smaps_rss_median_twice_kib\":160,\
+            \"server_smaps_rss_median_twice_kib\":160,\
+            \"client_anonymous_median_twice_kib\":120,\
+            \"server_anonymous_median_twice_kib\":120,\
+            \"client_anon_huge_pages_median_twice_kib\":0,\
+            \"server_anon_huge_pages_median_twice_kib\":0,\
+            \"limit_percent\":105,\"status\":\"PASS\"}"
+    {
+        return Err("DNS RSS window JSON is incomplete".to_owned());
+    }
+    let mut overbound = baseline;
+    overbound.client.tasks += DNS_OWNER_DELTA + 1;
+    expect_rejected("DNS owner ceiling", || {
+        validate_dns_owner_bound(&overbound, &baseline)
+    })?;
+    let mut responder = DnsResponder::start(DNS_DIRECT_NAME)?;
+    let mut load = DnsLoad::start(responder.address, DNS_DIRECT_NAME)?;
+    load.wait_started(Instant::now() + STARTUP_TIMEOUT)?;
+    let completed = load.finish()?;
+    let observed = responder.finish()?;
+    if completed < DNS_LOAD_WORKERS || observed < completed {
+        return Err("typed DNS load self-check is incomplete".to_owned());
+    }
     expect_rejected("leaked owner", || validate_owner_counts(1, 0))?;
     expect_rejected("secret output", || ensure_redacted(PSK))?;
     let root = repository_root()?.join("target/m4");
@@ -1601,6 +1987,58 @@ fn ferrum_server_config(listen: SocketAddrV4, metrics: Option<SocketAddrV4>) -> 
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn ferrum_dns_resource_client_config(
+    proxy: SocketAddrV4,
+    server: SocketAddrV4,
+    direct_dns: SocketAddrV4,
+    detoured_dns: SocketAddrV4,
+    direct_upstream: SocketAddrV4,
+    detoured_upstream: SocketAddrV4,
+    metrics: SocketAddrV4,
+) -> String {
+    format!(
+        "schema_version = 1\n\
+         [[inbounds]]\ntag = \"socks\"\nlisten = \"{proxy}\"\n\
+         [[outbounds]]\ntag = \"dns-hop\"\nserver = \"{server}\"\n\
+         [route]\nfinal = \"dns-hop\"\n\
+         [dns]\ntimeout_ms = 5000\nmax_inflight = {DNS_MAX_INFLIGHT}\n\
+         [[dns.inbounds]]\ntag = \"dns-direct\"\nlisten = \"{direct_dns}\"\n\
+         [[dns.inbounds]]\ntag = \"dns-detoured\"\nlisten = \"{detoured_dns}\"\n\
+         [[dns.servers]]\ntag = \"direct\"\ntransport = \"udp\"\naddress = \"{direct_upstream}\"\n\
+         [[dns.servers]]\ntag = \"detoured\"\ntransport = \"udp\"\naddress = \"{detoured_upstream}\"\ndetour = \"dns-hop\"\n\
+         [dns.route]\nfinal = \"direct\"\n\
+         [[dns.route.rules]]\ninbound = \"dns-detoured\"\nserver = \"detoured\"\n\
+         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
+         [runtime]\nmax_connections = 1024\nlisten_backlog = 1024\nidle_timeout_ms = 3600000\n\
+         [udp]\nenabled = false\n\
+         [logging]\nlevel = \"error\"\n\
+         [metrics]\nlisten = \"{metrics}\"\n"
+    )
+}
+
+fn ferrum_dns_resource_server_config(
+    listen: SocketAddrV4,
+    dns_upstream: SocketAddrV4,
+    metrics: SocketAddrV4,
+) -> String {
+    format!(
+        "schema_version = 1\n\
+         [[inbounds]]\ntag = \"server-in\"\nlisten = \"{listen}\"\n\
+         [[outbounds]]\ntag = \"app-direct\"\n\
+         [[outbounds]]\ntag = \"dns-direct\"\n\
+         [route]\nfinal = \"app-direct\"\n\
+         [dns]\ntimeout_ms = 5000\nmax_inflight = {DNS_MAX_INFLIGHT}\n\
+         [[dns.servers]]\ntag = \"server-direct\"\ntransport = \"udp\"\naddress = \"{dns_upstream}\"\ndetour = \"dns-direct\"\n\
+         [dns.route]\nfinal = \"server-direct\"\n\
+         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
+         [runtime]\nmax_connections = 1024\nlisten_backlog = 1024\nidle_timeout_ms = 3600000\n\
+         [udp]\n\
+         [logging]\nlevel = \"error\"\n\
+         [metrics]\nlisten = \"{metrics}\"\n"
+    )
+}
+
 fn reference_client_config(listen: SocketAddrV4, server: SocketAddrV4) -> String {
     format!(
         "{{\"local_address\":\"127.0.0.1\",\"local_port\":{},\
@@ -1663,6 +2101,255 @@ impl PortReservation {
 
     fn release(self) {
         drop(self.listener);
+    }
+}
+
+struct TcpUdpReservation {
+    tcp: TcpListener,
+    udp: UdpSocket,
+    address: SocketAddrV4,
+}
+
+impl TcpUdpReservation {
+    fn new() -> Result<Self, String> {
+        loop {
+            let tcp = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
+            let address = v4(tcp.local_addr().map_err(clean_io)?)?;
+            match UdpSocket::bind(address) {
+                Ok(udp) => return Ok(Self { tcp, udp, address }),
+                Err(_) => drop(tcp),
+            }
+        }
+    }
+
+    fn release(self) {
+        drop((self.tcp, self.udp));
+    }
+}
+
+struct DnsResponder {
+    address: SocketAddrV4,
+    stop: Arc<AtomicBool>,
+    observed: Arc<AtomicUsize>,
+    worker: Option<JoinHandle<Result<usize, String>>>,
+}
+
+impl DnsResponder {
+    fn start(expected_name: &'static str) -> Result<Self, String> {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
+        let address = v4(socket.local_addr().map_err(clean_io)?)?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .map_err(clean_io)?;
+        let expected = Name::from_ascii(expected_name)
+            .map_err(|_| "DNS responder name is invalid".to_owned())?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let observed = Arc::new(AtomicUsize::new(0));
+        let worker_stop = Arc::clone(&stop);
+        let worker_observed = Arc::clone(&observed);
+        let worker = spawn_worker(move || {
+            let mut buffer = [0_u8; 4096];
+            let mut count = 0;
+            while !worker_stop.load(Ordering::SeqCst) {
+                let (length, peer) = match socket.recv_from(&mut buffer) {
+                    Ok(received) => received,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(clean_io(error)),
+                };
+                let request = Message::from_vec(&buffer[..length])
+                    .map_err(|_| "DNS responder received malformed wire".to_owned())?;
+                if request.metadata.message_type != MessageType::Query
+                    || request.metadata.op_code != OpCode::Query
+                    || request.queries.len() != 1
+                {
+                    return Err("DNS responder received an invalid query shape".to_owned());
+                }
+                let query = request.queries[0].clone();
+                if query.name() != &expected || query.query_type() != RecordType::A {
+                    return Err("DNS responder received the wrong query".to_owned());
+                }
+                let mut response = Message::new(request.id, MessageType::Response, OpCode::Query);
+                response.metadata.recursion_available = true;
+                response.add_query(query.clone());
+                response.add_answer(Record::from_rdata(
+                    query.name().clone(),
+                    30,
+                    RData::A(A(Ipv4Addr::LOCALHOST)),
+                ));
+                thread::sleep(DNS_UPSTREAM_DELAY);
+                socket
+                    .send_to(
+                        &response
+                            .to_vec()
+                            .map_err(|_| "DNS responder could not encode a response".to_owned())?,
+                        peer,
+                    )
+                    .map_err(clean_io)?;
+                count += 1;
+                worker_observed.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(count)
+        })?;
+        Ok(Self {
+            address,
+            stop,
+            observed,
+            worker: Some(worker),
+        })
+    }
+
+    fn observed(&self) -> usize {
+        self.observed.load(Ordering::SeqCst)
+    }
+
+    fn finish(&mut self) -> Result<usize, String> {
+        self.stop.store(true, Ordering::SeqCst);
+        join_worker(
+            self.worker
+                .take()
+                .ok_or_else(|| "DNS responder was already joined".to_owned())?,
+        )?
+    }
+}
+
+impl Drop for DnsResponder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+struct DnsLoad {
+    stop: Arc<AtomicBool>,
+    completed: Arc<AtomicUsize>,
+    workers: Vec<JoinHandle<Result<usize, String>>>,
+}
+
+impl DnsLoad {
+    fn start(address: SocketAddrV4, name: &'static str) -> Result<Self, String> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let typed_name =
+            Name::from_ascii(name).map_err(|_| "DNS load name is invalid".to_owned())?;
+        let mut workers = Vec::with_capacity(DNS_LOAD_WORKERS);
+        for worker_index in 0..DNS_LOAD_WORKERS {
+            let worker_stop = Arc::clone(&stop);
+            let worker_completed = Arc::clone(&completed);
+            let worker_name = typed_name.clone();
+            let worker = spawn_worker(move || {
+                let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
+                socket.connect(address).map_err(clean_io)?;
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .map_err(clean_io)?;
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .map_err(clean_io)?;
+                let mut response_wire = [0_u8; 4096];
+                let mut count = 0_usize;
+                while !worker_stop.load(Ordering::SeqCst) {
+                    let id = (u16::try_from(worker_index).expect("DNS worker index") << 11)
+                        ^ u16::try_from(count & 0x07ff).expect("bounded DNS sequence")
+                        ^ 1;
+                    let mut request = Message::new(id, MessageType::Query, OpCode::Query);
+                    request.add_query(Query::query(worker_name.clone(), RecordType::A));
+                    socket
+                        .send(
+                            &request
+                                .to_vec()
+                                .map_err(|_| "DNS load could not encode a query".to_owned())?,
+                        )
+                        .map_err(clean_io)?;
+                    let length = match socket.recv(&mut response_wire) {
+                        Ok(length) => length,
+                        Err(error)
+                            if worker_stop.load(Ordering::SeqCst)
+                                && matches!(
+                                    error.kind(),
+                                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                                ) =>
+                        {
+                            break;
+                        }
+                        Err(error) => return Err(clean_io(error)),
+                    };
+                    let response = Message::from_vec(&response_wire[..length])
+                        .map_err(|_| "DNS load received malformed wire".to_owned())?;
+                    if response.metadata.id != id
+                        || response.metadata.message_type != MessageType::Response
+                        || response.answers.first().map(|record| &record.data)
+                            != Some(&RData::A(A(Ipv4Addr::LOCALHOST)))
+                    {
+                        return Err("DNS load received the wrong response".to_owned());
+                    }
+                    count += 1;
+                    worker_completed.fetch_add(1, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Ok(count)
+            });
+            match worker {
+                Ok(worker) => workers.push(worker),
+                Err(error) => {
+                    stop.store(true, Ordering::SeqCst);
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(Self {
+            stop,
+            completed,
+            workers,
+        })
+    }
+
+    fn wait_started(&self, deadline: Instant) -> Result<(), String> {
+        while self.completed.load(Ordering::SeqCst) < DNS_LOAD_WORKERS {
+            thread::sleep(remaining(deadline)?.min(Duration::from_millis(20)));
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<usize, String> {
+        self.stop.store(true, Ordering::SeqCst);
+        let mut total = 0_usize;
+        let mut first_error = None;
+        for worker in std::mem::take(&mut self.workers) {
+            match join_worker(worker).and_then(|result| result) {
+                Ok(count) => total = total.saturating_add(count),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        if total != self.completed.load(Ordering::SeqCst) {
+            return Err("DNS load completion accounting mismatch".to_owned());
+        }
+        Ok(total)
+    }
+}
+
+impl Drop for DnsLoad {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        for worker in std::mem::take(&mut self.workers) {
+            let _ = worker.join();
+        }
     }
 }
 

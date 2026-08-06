@@ -1736,6 +1736,18 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
         m4["dependencies"],
         serde_json::json!([
             {
+                "name": "hickory-proto",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
+                "req": "=0.26.1",
+                "kind": null,
+                "rename": null,
+                "optional": false,
+                "uses_default_features": false,
+                "features": ["std"],
+                "target": null,
+                "registry": null
+            },
+            {
                 "name": "socket2",
                 "source": "registry+https://github.com/rust-lang/crates.io-index",
                 "req": "=0.6.5",
@@ -1781,6 +1793,7 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
     assert_eq!(
         dependency_table(&manifest, "[dependencies]").expect("M4 dependencies"),
         BTreeMap::from([
+            ("hickory-proto.workspace".to_owned(), "true".to_owned()),
             ("socket2.workspace".to_owned(), "true".to_owned()),
             ("tempfile.workspace".to_owned(), "true".to_owned()),
         ])
@@ -1788,7 +1801,11 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
     let lock = fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock");
     assert_eq!(
         lock_package_dependencies(&lock, "ferrum2-m4-qualification").expect("M4 lock dependencies"),
-        BTreeSet::from(["socket2".to_owned(), "tempfile".to_owned()])
+        BTreeSet::from([
+            "hickory-proto".to_owned(),
+            "socket2".to_owned(),
+            "tempfile".to_owned(),
+        ])
     );
 }
 
@@ -2150,10 +2167,14 @@ fn m4_thp_profile_is_applied_and_restored_around_resource_qualification() {
         "printf '%s\\n' 'm4_thp_profile status=APPLIED max_ptes_none=0'",
         "resource_output=\"$(target/release/m4-qualification resource \\",
         "test \"$resource_output\" = \"$expected_resource\"",
+        "dns_resource_output=\"$(target/release/m4-qualification dns-resource \\",
+        "test \"$(grep -c '^' <<<\"$dns_resource_output\")\" -eq 1",
+        "grep -Eq \"^m12_dns_resource_completion status=PASS ",
         "restore_thp",
         "trap - EXIT TERM",
         "printf '%s\\n' 'm4_thp_profile status=RESTORED readback=PASS'",
         "printf 'm4_performance_completion status=PASS ",
+        "printf 'm12_performance_completion status=PASS ",
     ] {
         let relative = main[offset..]
             .find(marker)
