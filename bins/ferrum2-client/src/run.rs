@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
@@ -7,18 +7,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use ferrum2_config::{DnsConfig, LoggingLevel, RuntimeConfig, ValidatedClientConfig};
-use ferrum2_core::route::{EgressPlanSnapshot, Network};
+use ferrum2_core::route::Network;
 use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, Datagram, Inbound as _,
     LocalEndpoint, SessionReply as _, TargetAddr,
 };
 #[cfg(test)]
+use ferrum2_crypto::Clock;
+#[cfg(test)]
 use ferrum2_crypto::MethodProfile;
 #[cfg(test)]
 use ferrum2_crypto::MethodSinglePskProvider;
-use ferrum2_crypto::{
-    Clock, MethodKeyProvider, SecureRandom, SystemClock, SystemRandom, UdpSessionId,
-};
+use ferrum2_crypto::{SecureRandom, SystemClock, SystemRandom};
 use ferrum2_dns::{
     DnsProxy, DnsProxyListeners, DnsProxySockets, ProxyTransport, TaggedResolver,
     TaggedResolverOwner,
@@ -30,22 +30,24 @@ use ferrum2_observability::{
 use ferrum2_runtime::{
     AcceptListener, BoundedSupervisor, CancellationToken, MAX_UDP_MAX_BUFFERED_BYTES,
     MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, MetricsEndpoint, MetricsEndpointError,
-    OwnerRegistry, PendingUdpDatagram, PendingUdpSession, PreparedProcessRoot, ProcessCancellation,
-    ProcessCause, ProcessFuture, ProcessReport, ProcessRoot, ProcessRootExit, ProcessSupervisor,
-    RelayFailure, RelayRunError, SupervisorError, TcpConnector, UdpBufferReservation,
-    UdpCommitError, UdpDirection, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
+    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessCause, ProcessFuture,
+    ProcessReport, ProcessRoot, ProcessRootExit, ProcessSupervisor, RelayFailure, RelayRunError,
+    SupervisorError, TcpConnector, UdpDirection, UdpRuntimeError, UdpRuntimeLimits,
     UdpSessionManager, relay_lifecycle,
 };
+#[cfg(test)]
 use ferrum2_shadowsocks::{
-    BorrowedPendingUdpResponse, DetectionReason, FlowTerminal, MAX_UDP_WIRE_LEN, PlainDuplex,
-    ProtocolReason, ShadowsocksError, TransportIo, UdpClientSession, UdpPacketError,
-    UdpPacketScratch, UdpResponseCommit, max_udp_payload_len_for_encoded_target,
+    BufferObserver, BufferRole, FlowObserver, MethodKeyAdapter, UdpClientSession, UdpPacketScratch,
+};
+use ferrum2_shadowsocks::{
+    DetectionReason, FlowTerminal, MAX_UDP_WIRE_LEN, PlainDuplex, ProtocolReason, ShadowsocksError,
+    TransportIo, UdpPacketError,
 };
 #[cfg(test)]
-use ferrum2_shadowsocks::{BufferObserver, BufferRole, FlowObserver, MethodKeyAdapter};
+use ferrum2_socks5::MAX_SOCKS_UDP_DATAGRAM_BYTES;
 use ferrum2_socks5::{
-    MAX_SOCKS_UDP_DATAGRAM_BYTES, Socks5Inbound, SocksCommand, SocksStream, SocksUdpAssociate,
-    decode_udp_datagram, encode_udp_datagram,
+    Socks5Inbound, SocksCommand, SocksStream, SocksUdpAssociate, decode_udp_datagram,
+    encode_udp_datagram,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpSocket, UdpSocket};
@@ -57,7 +59,14 @@ mod egress;
 mod dns_egress;
 
 use egress::{
-    ClientEgressEngine, ClientOpenFailure, ClientOutboundContext, prepare_client_outbounds,
+    ClientEgressEngine, ClientOpenFailure, ClientOutboundContext, ClientUdpAssociation,
+    ClientUdpContext, UdpPlanResponseError, UdpSendError, composed_udp_plan_limit,
+    prepare_client_outbounds, send_with_lifecycle,
+};
+#[cfg(test)]
+use egress::{
+    IdSequenceRandom, MAX_UDP_PLAN_HOPS, UdpIoFaultPlan, UdpIoOperation,
+    composed_udp_request_limit, composed_udp_response_limit,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -578,7 +587,7 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
                 _ = forced.forced() => {
                     record_forced_udp_sessions(&context);
                     if let Some(udp) = &context.egress.udp {
-                        udp.manager.cancel_all();
+                        udp.cancel_all();
                     }
                     running.await
                 }
@@ -588,7 +597,7 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
                         record_forced_udp_sessions(&context);
                     }
                     if let Some(udp) = &context.egress.udp {
-                        udp.manager.cancel_all();
+                        udp.cancel_all();
                     }
                     running.await
                 }
@@ -677,13 +686,6 @@ struct ClientContext {
     metrics: Arc<Metrics>,
     #[cfg(test)]
     test_udp_server: SocketAddrV4,
-}
-
-struct ClientUdpContext {
-    manager: UdpSessionManager,
-    live_ids: Arc<std::sync::Mutex<HashSet<UdpSessionId>>>,
-    #[cfg(test)]
-    method: MethodProfile,
 }
 
 async fn client_connection(
@@ -830,81 +832,6 @@ async fn client_connection(
     finish_relay(&context, &framed, relay);
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UdpIoOperation {
-    ApplicationRecv,
-    ApplicationSend,
-    UpstreamRecv,
-    UpstreamSend,
-}
-
-#[cfg(test)]
-struct UdpIoFaultPlan {
-    operation: UdpIoOperation,
-    fail_at: usize,
-    calls: std::sync::atomic::AtomicUsize,
-}
-
-#[cfg(test)]
-impl UdpIoFaultPlan {
-    fn new(operation: UdpIoOperation, fail_at: usize) -> Self {
-        Self {
-            operation,
-            fail_at,
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    fn fails(&self, operation: UdpIoOperation) -> bool {
-        self.operation == operation
-            && self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == self.fail_at
-    }
-}
-
-struct PreparedClientUdp {
-    plans: HashMap<Box<[usize]>, ClientUdpPlan>,
-    pending_session: Option<PendingUdpSession>,
-    manager: UdpSessionManager,
-    handle: UdpSessionHandle,
-    live_ids: Arc<std::sync::Mutex<HashSet<UdpSessionId>>>,
-    static_server: Option<SocketAddrV4>,
-    static_plan: Option<EgressPlanSnapshot>,
-    application: UdpSocket,
-    upstream: UdpSocket,
-    application_wire: Vec<u8>,
-    upstream_wire: Vec<u8>,
-    scratch: UdpPacketScratch,
-    _fixed_capacity: Vec<UdpBufferReservation>,
-    #[cfg(test)]
-    io_fault: Option<Arc<UdpIoFaultPlan>>,
-}
-
-struct ClientUdpLeg {
-    protocol: UdpClientSession,
-    id: UdpSessionId,
-}
-
-struct ClientUdpPlan {
-    legs: Vec<ClientUdpLeg>,
-}
-
-const MAX_ACTIVE_UDP_PLANS: usize = 128;
-const MAX_UDP_PLAN_HOPS: usize = 8;
-
-impl Drop for PreparedClientUdp {
-    fn drop(&mut self) {
-        self.manager.remove(self.handle);
-        if let Ok(mut live_ids) = self.live_ids.lock() {
-            for plan in self.plans.values() {
-                for leg in &plan.legs {
-                    live_ids.remove(&leg.id);
-                }
-            }
-        }
-    }
-}
-
 async fn run_udp_association<IO, F, Fut>(
     association: SocksUdpAssociate<IO>,
     peer_ip: IpAddr,
@@ -944,7 +871,7 @@ async fn run_udp_association<IO, F, Fut>(
     }
     let prepared = tokio::select! {
         _ = cancellation.cancelled() => return,
-        prepared = prepare_udp_association_with_bind(&context.egress, local_ip, static_plan, bind) => prepared,
+        prepared = context.egress.prepare_udp(local_ip, static_plan, bind) => prepared,
     };
     let mut prepared = match prepared {
         Ok(prepared) => prepared,
@@ -976,385 +903,8 @@ async fn run_udp_association<IO, F, Fut>(
     .await;
 }
 
-async fn prepare_udp_association_with_bind<F, Fut>(
-    egress: &ClientEgressEngine,
-    local_ip: Ipv4Addr,
-    static_plan: Option<(EgressPlanSnapshot, SocketAddrV4)>,
-    mut bind: F,
-) -> Result<PreparedClientUdp, ()>
-where
-    F: FnMut(SocketAddrV4) -> Fut,
-    Fut: std::future::Future<Output = io::Result<UdpSocket>>,
-{
-    let udp = egress.udp.as_ref().ok_or(())?;
-    if static_plan
-        .as_ref()
-        .is_some_and(|(plan, _)| plan.hops().len() > MAX_UDP_PLAN_HOPS)
-    {
-        return Err(());
-    }
-    let pending_session = udp
-        .manager
-        .reserve_session(Instant::now())
-        .map_err(|_| ())?;
-    let handle = pending_session.handle();
-    let budget = udp.manager.buffer_budget();
-    let mut fixed_capacity = Vec::with_capacity(3);
-    for _ in 0..3 {
-        fixed_capacity.push(budget.reserve(MAX_UDP_WIRE_LEN).map_err(|_| ())?);
-    }
-    let application_wire = vec![0_u8; MAX_SOCKS_UDP_DATAGRAM_BYTES];
-    let upstream_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
-    let scratch = UdpPacketScratch::new();
-    let application = bind(SocketAddrV4::new(local_ip, 0)).await.map_err(|_| ())?;
-    let upstream = bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .map_err(|_| ())?;
-    let static_server = static_plan.as_ref().map(|(_, server)| *server);
-    let prepared = PreparedClientUdp {
-        plans: HashMap::new(),
-        pending_session: Some(pending_session),
-        manager: udp.manager.clone(),
-        handle,
-        live_ids: Arc::clone(&udp.live_ids),
-        static_server,
-        static_plan: static_plan.map(|(plan, _)| plan),
-        application,
-        upstream,
-        application_wire,
-        upstream_wire,
-        scratch,
-        _fixed_capacity: fixed_capacity,
-        #[cfg(test)]
-        io_fault: None,
-    };
-    if let Some(server) = static_server {
-        prepared
-            .upstream
-            .connect(SocketAddr::V4(server))
-            .await
-            .map_err(|_| ())?;
-    }
-    Ok(prepared)
-}
-
-fn activate_udp_plan(
-    prepared: &mut PreparedClientUdp,
-    egress: &ClientEgressEngine,
-    outbounds: &[ClientOutboundContext],
-    hops: &[usize],
-) -> Result<(), ()> {
-    if hops.is_empty() || hops.len() > MAX_UDP_PLAN_HOPS {
-        return Err(());
-    }
-    if !prepared.plans.contains_key(hops) {
-        if prepared.plans.len() >= MAX_ACTIVE_UDP_PLANS {
-            return Err(());
-        }
-        #[cfg(test)]
-        let random = egress.udp_id_random.as_deref().unwrap_or(&egress.random);
-        #[cfg(not(test))]
-        let random = &egress.random;
-        let legs = register_udp_plan(outbounds, hops, random, &prepared.live_ids)?;
-        prepared.plans.insert(hops.into(), ClientUdpPlan { legs });
-    }
-    Ok(())
-}
-
-fn register_udp_plan(
-    outbounds: &[ClientOutboundContext],
-    hops: &[usize],
-    random: &(impl SecureRandom + ?Sized),
-    live_ids: &std::sync::Mutex<HashSet<UdpSessionId>>,
-) -> Result<Vec<ClientUdpLeg>, ()> {
-    let mut live_ids = live_ids.lock().map_err(|_| ())?;
-    let mut legs: Vec<ClientUdpLeg> = Vec::with_capacity(hops.len());
-    for hop in hops {
-        let Some(outbound) = outbounds.get(*hop) else {
-            for leg in &legs {
-                live_ids.remove(&leg.id);
-            }
-            return Err(());
-        };
-        let protocol = match UdpClientSession::new(&outbound.keys, random, |candidate| {
-            live_ids.contains(candidate)
-        }) {
-            Ok(protocol) => protocol,
-            Err(_) => {
-                for leg in &legs {
-                    live_ids.remove(&leg.id);
-                }
-                return Err(());
-            }
-        };
-        let id = protocol.session_id().clone();
-        if !live_ids.insert(id.clone()) {
-            for leg in &legs {
-                live_ids.remove(&leg.id);
-            }
-            return Err(());
-        }
-        legs.push(ClientUdpLeg { protocol, id });
-    }
-    Ok(legs)
-}
-
-fn encode_udp_plan_request(
-    prepared: &mut PreparedClientUdp,
-    outbounds: &[ClientOutboundContext],
-    hops: &[usize],
-    datagram: &Datagram,
-    clock: &(impl Clock + ?Sized),
-    random: &(impl SecureRandom + ?Sized),
-) -> Result<usize, UdpPacketError> {
-    let PreparedClientUdp {
-        plans,
-        application_wire,
-        upstream_wire,
-        scratch,
-        ..
-    } = prepared;
-    let plan = plans
-        .get_mut(hops)
-        .ok_or(UdpPacketError::StateUnavailable)?;
-    let mut wire_len = 0;
-    let mut wire_in_upstream = false;
-    for layer in (0..hops.len()).rev() {
-        let intermediate;
-        let target = if layer + 1 == hops.len() {
-            datagram.target()
-        } else {
-            intermediate = TargetAddr::ipv4(
-                outbounds
-                    .get(hops[layer + 1])
-                    .ok_or(UdpPacketError::StateUnavailable)?
-                    .udp_server,
-            )
-            .map_err(|_| UdpPacketError::Bounds)?;
-            &intermediate
-        };
-        wire_len = if layer + 1 == hops.len() {
-            plan.legs[layer].protocol.encode_request_parts(
-                clock,
-                random,
-                target,
-                datagram.payload(),
-                0,
-                upstream_wire,
-                scratch,
-            )?
-        } else if wire_in_upstream {
-            plan.legs[layer].protocol.encode_request_parts(
-                clock,
-                random,
-                target,
-                &upstream_wire[..wire_len],
-                0,
-                application_wire,
-                scratch,
-            )?
-        } else {
-            plan.legs[layer].protocol.encode_request_parts(
-                clock,
-                random,
-                target,
-                &application_wire[..wire_len],
-                0,
-                upstream_wire,
-                scratch,
-            )?
-        };
-        wire_in_upstream = layer + 1 == hops.len() || !wire_in_upstream;
-    }
-    if !wire_in_upstream {
-        upstream_wire[..wire_len].copy_from_slice(&application_wire[..wire_len]);
-    }
-    Ok(wire_len)
-}
-
-enum UdpPlanResponseError {
-    Packet(UdpPacketError),
-    Runtime(UdpRuntimeError),
-}
-
-fn accept_udp_plan_response(
-    prepared: &mut PreparedClientUdp,
-    outbounds: &[ClientOutboundContext],
-    source: SocketAddrV4,
-    wire_len: usize,
-    clock: &(impl Clock + ?Sized),
-) -> Result<Option<usize>, UdpPlanResponseError> {
-    let PreparedClientUdp {
-        plans,
-        manager,
-        handle,
-        application_wire,
-        upstream_wire,
-        scratch,
-        ..
-    } = prepared;
-    let mut candidate = false;
-    let mut outer_error = UdpPacketError::Binding;
-    // ponytail: scan at most 128 bounded plans; add an authenticated dispatch index if measured.
-    for (hops, plan) in plans.iter() {
-        if outbounds
-            .get(hops[0])
-            .is_none_or(|outbound| outbound.udp_server != source)
-        {
-            continue;
-        }
-        candidate = true;
-        let outer = match plan.legs[0].protocol.prepare_response_borrowed(
-            clock,
-            &upstream_wire[..wire_len],
-            scratch,
-        ) {
-            Ok(pending) => pending,
-            Err(error) => {
-                if !matches!(
-                    error,
-                    UdpPacketError::Authentication | UdpPacketError::Binding
-                ) {
-                    return Err(UdpPlanResponseError::Packet(error));
-                }
-                outer_error = error;
-                continue;
-            }
-        };
-        let mut commits = Vec::with_capacity(hops.len());
-        if hops.len() == 1 {
-            return commit_final_udp_response(
-                outer, plan, hops, outbounds, commits, manager, *handle, clock,
-            )
-            .map(Some);
-        }
-        let expected = TargetAddr::ipv4(
-            outbounds
-                .get(hops[1])
-                .ok_or(UdpPlanResponseError::Packet(
-                    UdpPacketError::StateUnavailable,
-                ))?
-                .udp_server,
-        )
-        .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))?;
-        if !outer.target_matches(&expected) {
-            return Err(UdpPlanResponseError::Packet(UdpPacketError::Binding));
-        }
-        let mut inner_len = outer
-            .copy_payload_to(application_wire)
-            .map_err(UdpPlanResponseError::Packet)?;
-        commits.push(outer.into_commit());
-        let mut wire_in_application = true;
-        for layer in 1..hops.len() {
-            let pending = if wire_in_application {
-                plan.legs[layer].protocol.prepare_response_borrowed(
-                    clock,
-                    &application_wire[..inner_len],
-                    scratch,
-                )
-            } else {
-                plan.legs[layer].protocol.prepare_response_borrowed(
-                    clock,
-                    &upstream_wire[..inner_len],
-                    scratch,
-                )
-            }
-            .map_err(UdpPlanResponseError::Packet)?;
-            if layer + 1 == hops.len() {
-                return commit_final_udp_response(
-                    pending, plan, hops, outbounds, commits, manager, *handle, clock,
-                )
-                .map(Some);
-            }
-            let expected = TargetAddr::ipv4(
-                outbounds
-                    .get(hops[layer + 1])
-                    .ok_or(UdpPlanResponseError::Packet(
-                        UdpPacketError::StateUnavailable,
-                    ))?
-                    .udp_server,
-            )
-            .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))?;
-            if !pending.target_matches(&expected) {
-                return Err(UdpPlanResponseError::Packet(UdpPacketError::Binding));
-            }
-            inner_len = if wire_in_application {
-                pending.copy_payload_to(upstream_wire)
-            } else {
-                pending.copy_payload_to(application_wire)
-            }
-            .map_err(UdpPlanResponseError::Packet)?;
-            commits.push(pending.into_commit());
-            wire_in_application = !wire_in_application;
-        }
-    }
-    if candidate {
-        Err(UdpPlanResponseError::Packet(outer_error))
-    } else {
-        Ok(None)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn commit_final_udp_response(
-    pending: BorrowedPendingUdpResponse<'_>,
-    plan: &ClientUdpPlan,
-    hops: &[usize],
-    outbounds: &[ClientOutboundContext],
-    mut commits: Vec<UdpResponseCommit>,
-    manager: &UdpSessionManager,
-    handle: UdpSessionHandle,
-    clock: &(impl Clock + ?Sized),
-) -> Result<usize, UdpPlanResponseError> {
-    let socks_len = 3_usize
-        .checked_add(pending.encoded_target_len())
-        .and_then(|len| len.checked_add(pending.payload().len()));
-    if socks_len.is_none_or(|len| len > MAX_SOCKS_UDP_DATAGRAM_BYTES)
-        || pending.payload().len()
-            > composed_udp_plan_limit(outbounds, hops, true, pending.encoded_target_len())
-    {
-        return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
-    }
-    let reservation = manager
-        .reserve_datagram(handle, UdpDirection::ToClient, pending.allocated_capacity())
-        .map_err(UdpPlanResponseError::Runtime)?;
-    let payload_len = pending.payload().len();
-    let (datagram, commit) = pending.materialize().into_parts();
-    commits.push(commit);
-    let sessions = plan
-        .legs
-        .iter()
-        .map(|leg| &leg.protocol)
-        .collect::<Vec<_>>();
-    reservation
-        .commit_with(datagram, Instant::now(), || {
-            UdpClientSession::commit_responses(&sessions, commits, clock.monotonic_now())
-        })
-        .map_err(|error| match error {
-            UdpCommitError::Protocol(error) => UdpPlanResponseError::Packet(error),
-            UdpCommitError::Runtime(error) => UdpPlanResponseError::Runtime(error),
-        })?;
-    Ok(payload_len)
-}
-
-#[cfg(test)]
-fn register_udp_session<K: ferrum2_crypto::MethodKeyProvider>(
-    keys: &MethodKeyAdapter<K>,
-    random: &(impl SecureRandom + ?Sized),
-    live_ids: &std::sync::Mutex<HashSet<UdpSessionId>>,
-) -> Result<(UdpClientSession, UdpSessionId), ()> {
-    let mut live_ids = live_ids.lock().map_err(|_| ())?;
-    let protocol = UdpClientSession::new(keys, random, |candidate| live_ids.contains(candidate))
-        .map_err(|_| ())?;
-    let id = protocol.session_id().clone();
-    if !live_ids.insert(id.clone()) {
-        return Err(());
-    }
-    Ok((protocol, id))
-}
-
 async fn relay_udp_association<IO>(
-    prepared: &mut PreparedClientUdp,
+    prepared: &mut ClientUdpAssociation,
     control: &mut SocksStream<IO>,
     peer_ip: IpAddr,
     requested_port: u16,
@@ -1366,13 +916,13 @@ async fn relay_udp_association<IO>(
 {
     let (inbound, routing) = route;
     let mut endpoint_port = (requested_port != 0).then_some(requested_port);
-    let mut session_cancellation = match prepared.manager.cancellation(prepared.handle) {
+    let mut session_cancellation = match prepared.cancellation() {
         Ok(cancellation) => cancellation,
         Err(_) => return,
     };
     let mut control_byte = [0_u8; 1];
     loop {
-        let idle_deadline = match prepared.manager.idle_deadline(prepared.handle) {
+        let idle_deadline = match prepared.idle_deadline() {
             Ok(deadline) => deadline,
             Err(_) => return,
         };
@@ -1383,7 +933,7 @@ async fn relay_udp_association<IO>(
                 return;
             }
             _ = tokio::time::sleep_until(idle_deadline) => {
-                if Instant::now() >= prepared.manager.idle_deadline(prepared.handle).unwrap_or(idle_deadline) {
+                if prepared.idle_expired(idle_deadline) {
                     return;
                 }
             }
@@ -1443,7 +993,7 @@ async fn relay_udp_association<IO>(
                     record_udp_drop(context, Direction::ClientToTarget, Stage::Shadowsocks, Reason::Bounds);
                     continue;
                 }
-                let reservation = match reserve_application_datagram(prepared, payload_len) {
+                let reservation = match prepared.reserve_application_datagram(payload_len) {
                     Ok(reservation) => reservation,
                     Err(error) => {
                         if record_udp_runtime_error(context, Direction::ClientToTarget, error) {
@@ -1453,25 +1003,20 @@ async fn relay_udp_association<IO>(
                     }
                 };
                 let payload = decoded.payload().into();
-                if activate_udp_plan(prepared, &context.egress, &routing.outbounds, plan.hops()).is_err() {
+                if prepared
+                    .activate(&context.egress, &routing.outbounds, plan.hops())
+                    .is_err()
+                {
                     record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
                     return;
                 }
                 let datagram = Datagram::new(target, payload, payload_len)
                     .expect("validated borrowed SOCKS payload");
-                let first = prepared.pending_session.is_some();
-                let committed = if first {
-                    prepared.pending_session.take().expect("first admission").commit(
-                        reservation,
-                        datagram,
-                        Instant::now(),
-                    )
-                } else {
-                    reservation
-                        .commit(datagram, Instant::now())
-                        .map(|()| prepared.handle)
-                };
-                if let Err(error) = committed {
+                if let Err(error) = prepared.commit_application_datagram(
+                    reservation,
+                    datagram,
+                    Instant::now(),
+                ) {
                     if record_udp_runtime_error(context, Direction::ClientToTarget, error) {
                         continue;
                     }
@@ -1480,16 +1025,14 @@ async fn relay_udp_association<IO>(
                 if endpoint_port.is_none() {
                     endpoint_port = Some(source.port());
                 }
-                let Some(datagram) = prepared.manager.pop(prepared.handle, UdpDirection::ToTarget).ok().flatten() else {
+                let Some(datagram) = prepared.pop(UdpDirection::ToTarget).ok().flatten() else {
                     return;
                 };
-                let wire_len = match encode_udp_plan_request(
-                    prepared,
+                let wire_len = match prepared.encode_request(
+                    &context.egress,
                     &routing.outbounds,
                     plan.hops(),
                     datagram.datagram(),
-                    &context.egress.clock,
-                    &context.egress.random,
                 ) {
                     Ok(length) => length,
                     Err(error) => {
@@ -1504,13 +1047,13 @@ async fn relay_udp_association<IO>(
                         return;
                     }
                 };
-                let Ok(send_deadline) = prepared.manager.idle_deadline(prepared.handle) else { return };
+                let Ok(send_deadline) = prepared.idle_deadline() else { return };
                 #[cfg(test)]
                 if prepared.io_fault.as_ref().is_some_and(|plan| plan.fails(UdpIoOperation::UpstreamSend)) {
                     record_udp_terminal(context, Stage::Relay, Reason::Send, Outcome::Failed);
                     return;
                 }
-                match udp_send_with_lifecycle(
+                match send_with_lifecycle(
                         async {
                             match prepared.static_server {
                                 Some(_) => prepared.upstream.send(&prepared.upstream_wire[..wire_len]).await,
@@ -1566,12 +1109,11 @@ async fn relay_udp_association<IO>(
                     record_udp_drop(context, Direction::TargetToClient, Stage::Shadowsocks, Reason::Address);
                     continue;
                 };
-                let payload_len = match accept_udp_plan_response(
-                    prepared,
+                let payload_len = match prepared.accept_response(
+                    &context.egress,
                     &routing.outbounds,
                     source,
                     length,
-                    &context.egress.clock,
                 ) {
                     Ok(Some(payload_len)) => payload_len,
                     Ok(None) => {
@@ -1596,7 +1138,7 @@ async fn relay_udp_association<IO>(
                         return;
                     }
                 };
-                let Some(datagram) = prepared.manager.pop(prepared.handle, UdpDirection::ToClient).ok().flatten() else {
+                let Some(datagram) = prepared.pop(UdpDirection::ToClient).ok().flatten() else {
                     return;
                 };
                 let wire_len = match encode_udp_datagram(
@@ -1609,13 +1151,13 @@ async fn relay_udp_association<IO>(
                 };
                 let Some(port) = endpoint_port else { return };
                 let endpoint = SocketAddr::new(peer_ip, port);
-                let Ok(send_deadline) = prepared.manager.idle_deadline(prepared.handle) else { return };
+                let Ok(send_deadline) = prepared.idle_deadline() else { return };
                 #[cfg(test)]
                 if prepared.io_fault.as_ref().is_some_and(|plan| plan.fails(UdpIoOperation::ApplicationSend)) {
                     record_udp_terminal(context, Stage::Relay, Reason::Send, Outcome::Failed);
                     return;
                 }
-                match udp_send_with_lifecycle(
+                match send_with_lifecycle(
                         prepared.application.send_to(&prepared.application_wire[..wire_len], endpoint),
                         cancellation,
                         &mut session_cancellation,
@@ -1640,87 +1182,6 @@ async fn relay_udp_association<IO>(
             }
         }
     }
-}
-
-fn reserve_application_datagram(
-    prepared: &PreparedClientUdp,
-    payload_len: usize,
-) -> Result<PendingUdpDatagram, UdpRuntimeError> {
-    match prepared.pending_session.as_ref() {
-        Some(session) => session.reserve_datagram(UdpDirection::ToTarget, payload_len),
-        None => {
-            prepared
-                .manager
-                .reserve_datagram(prepared.handle, UdpDirection::ToTarget, payload_len)
-        }
-    }
-}
-
-async fn udp_send_with_lifecycle(
-    send: impl std::future::Future<Output = io::Result<usize>>,
-    cancellation: &mut CancellationToken,
-    session_cancellation: &mut tokio::sync::watch::Receiver<bool>,
-    idle_deadline: Instant,
-) -> Result<usize, UdpSendError> {
-    tokio::select! {
-        _ = cancellation.cancelled() => Err(UdpSendError::Cancelled),
-        _ = session_cancellation.changed() => Err(UdpSendError::Cancelled),
-        _ = tokio::time::sleep_until(idle_deadline) => Err(UdpSendError::Idle),
-        sent = send => sent.map_err(|_| UdpSendError::Io),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UdpSendError {
-    Io,
-    Cancelled,
-    Idle,
-}
-
-#[cfg(test)]
-fn composed_udp_request_limit(method: MethodProfile, encoded_target_len: usize) -> usize {
-    let socks = MAX_SOCKS_UDP_DATAGRAM_BYTES.saturating_sub(3 + encoded_target_len);
-    let request =
-        max_udp_payload_len_for_encoded_target(method, false, encoded_target_len, 0).unwrap_or(0);
-    socks.min(request)
-}
-
-#[cfg(test)]
-fn composed_udp_response_limit(method: MethodProfile, encoded_target_len: usize) -> usize {
-    let socks = MAX_SOCKS_UDP_DATAGRAM_BYTES.saturating_sub(3 + encoded_target_len);
-    let response =
-        max_udp_payload_len_for_encoded_target(method, true, encoded_target_len, 0).unwrap_or(0);
-    socks.min(response)
-}
-
-fn composed_udp_plan_limit(
-    outbounds: &[ClientOutboundContext],
-    hops: &[usize],
-    response: bool,
-    encoded_target_len: usize,
-) -> usize {
-    if hops.is_empty() || hops.len() > MAX_UDP_PLAN_HOPS {
-        return 0;
-    }
-    let overhead = hops
-        .iter()
-        .enumerate()
-        .try_fold(0_usize, |total, (layer, hop)| {
-            let profile = outbounds.get(*hop)?.keys.profile();
-            let target_len = if layer + 1 == hops.len() {
-                encoded_target_len
-            } else {
-                7
-            };
-            let payload =
-                max_udp_payload_len_for_encoded_target(profile, response, target_len, 0).ok()?;
-            total.checked_add(MAX_UDP_WIRE_LEN.checked_sub(payload)?)
-        });
-    let socks = MAX_SOCKS_UDP_DATAGRAM_BYTES.saturating_sub(3 + encoded_target_len);
-    overhead
-        .and_then(|overhead| MAX_UDP_WIRE_LEN.checked_sub(overhead))
-        .unwrap_or(0)
-        .min(socks)
 }
 
 fn record_udp_drop(context: &ClientContext, direction: Direction, stage: Stage, reason: Reason) {
@@ -2223,7 +1684,7 @@ mod tests {
         TaggedRouteRule, TaggedStaticBinding,
     };
     use ferrum2_core::{ConnectError, Connector};
-    use ferrum2_crypto::{KeySelector, MethodKeyProvider, MethodSecretKeyRef, RandomError};
+    use ferrum2_crypto::RandomError;
     use ferrum2_runtime::OwnerSnapshot;
     use ferrum2_shadowsocks::{
         ShadowsocksTcpInbound, TcpReplayStore, TransportPhase, UDP_REPLAY_LAG, UdpReplayWindow,
@@ -2689,139 +2150,7 @@ mod tests {
         );
     }
 
-    struct IdSequenceRandom(Mutex<VecDeque<u8>>);
-
-    impl IdSequenceRandom {
-        fn new(draws: impl IntoIterator<Item = u8>) -> Self {
-            Self(Mutex::new(draws.into_iter().collect()))
-        }
-    }
-
-    impl SecureRandom for IdSequenceRandom {
-        fn fill(&self, destination: &mut [u8]) -> Result<(), RandomError> {
-            let byte = self
-                .0
-                .lock()
-                .expect("ID draw lock")
-                .pop_front()
-                .ok_or(RandomError::Unavailable)?;
-            destination.fill(byte);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn live_udp_registry_accepts_zero_through_seven_collisions_and_rejects_eight() {
-        let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            ferrum2_crypto::MethodPsk::aes128([0x11; 16]),
-        ));
-        for collisions in 0..8 {
-            let live = Mutex::new(HashSet::new());
-            let (_first, first_id) =
-                register_udp_session(&keys, &IdSequenceRandom::new([1]), &live)
-                    .expect("first session");
-            let draws = std::iter::repeat_n(1, collisions).chain([2]);
-            let (_second, second_id) =
-                register_udp_session(&keys, &IdSequenceRandom::new(draws), &live)
-                    .expect("distinct draw within eight attempts");
-            assert_ne!(first_id, second_id);
-            assert_eq!(live.lock().expect("live IDs").len(), 2);
-        }
-
-        let live = Mutex::new(HashSet::new());
-        let _ =
-            register_udp_session(&keys, &IdSequenceRandom::new([1]), &live).expect("first session");
-        assert!(
-            register_udp_session(
-                &keys,
-                &IdSequenceRandom::new(std::iter::repeat_n(1, 8)),
-                &live,
-            )
-            .is_err()
-        );
-        assert_eq!(live.lock().expect("live IDs").len(), 1);
-    }
-
-    struct MissingMethodKey;
-
-    impl MethodKeyProvider for MissingMethodKey {
-        type Error = ();
-
-        fn profile(&self) -> MethodProfile {
-            MethodProfile::Blake3Aes128Gcm2022
-        }
-
-        fn with_method_key<T>(
-            &self,
-            _selector: KeySelector<'_>,
-            _use_key: impl FnOnce(MethodSecretKeyRef<'_>) -> T,
-        ) -> Result<T, Self::Error> {
-            Err(())
-        }
-    }
-
-    async fn assert_registration_failure_rolls_back_setup<K: MethodKeyProvider>(
-        keys: MethodKeyAdapter<K>,
-        random: &impl SecureRandom,
-    ) {
-        let registry = OwnerRegistry::new();
-        let baseline = registry.snapshot();
-        let manager = UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone());
-        let session = manager
-            .reserve_session(Instant::now())
-            .expect("setup session");
-        let budget = manager.buffer_budget();
-        let fixed = (0..3)
-            .map(|_| budget.reserve(MAX_UDP_WIRE_LEN).expect("fixed capacity"))
-            .collect::<Vec<_>>();
-        let application = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("application socket");
-        let upstream = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .await
-            .expect("upstream socket");
-        upstream
-            .connect((Ipv4Addr::LOCALHOST, 9))
-            .await
-            .expect("upstream connect");
-        let application_address = application.local_addr().expect("application address");
-        let upstream_address = upstream.local_addr().expect("upstream address");
-        let live_ids = Mutex::new(HashSet::new());
-        assert!(register_udp_session(&keys, random, &live_ids).is_err());
-        assert!(live_ids.lock().expect("live IDs").is_empty());
-        assert_eq!(manager.session_count(), 1);
-        assert_eq!(budget.reserved_bytes(), 3 * MAX_UDP_WIRE_LEN);
-
-        drop((application, upstream, fixed, session));
-        assert_eq!(manager.session_count(), 0);
-        assert_eq!(budget.reserved_bytes(), 0);
-        assert_eq!(registry.snapshot(), baseline);
-        drop(
-            UdpSocket::bind(application_address)
-                .await
-                .expect("application rebind"),
-        );
-        drop(
-            UdpSocket::bind(upstream_address)
-                .await
-                .expect("upstream rebind"),
-        );
-    }
-
-    #[tokio::test]
-    async fn random_and_key_setup_failures_roll_back_every_prior_owner() {
-        let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            ferrum2_crypto::MethodPsk::aes128([0x11; 16]),
-        ));
-        assert_registration_failure_rolls_back_setup(keys, &IdSequenceRandom::new([])).await;
-        assert_registration_failure_rolls_back_setup(
-            MethodKeyAdapter::new(MissingMethodKey),
-            &FixedRandom,
-        )
-        .await;
-    }
-
-    fn test_datagram(target: TargetAddr, payload: &[u8]) -> Datagram {
+    pub(in crate::run) fn test_datagram(target: TargetAddr, payload: &[u8]) -> Datagram {
         Datagram::new(target, payload.into(), payload.len()).expect("test datagram")
     }
 
@@ -2959,7 +2288,7 @@ mod tests {
                         .await
                         .expect("UDP sender");
                     let (_session_sender, mut session) = tokio::sync::watch::channel(false);
-                    let sent = udp_send_with_lifecycle(
+                    let sent = send_with_lifecycle(
                         sender.send_to(b"ok", receiver.local_addr().expect("receiver address")),
                         &mut cancellation,
                         &mut session,
@@ -2975,7 +2304,7 @@ mod tests {
                         .await
                         .expect("unconnected UDP");
                     assert_eq!(
-                        udp_send_with_lifecycle(
+                        send_with_lifecycle(
                             unconnected.send(b"failure"),
                             &mut cancellation,
                             &mut session,
@@ -2988,7 +2317,7 @@ mod tests {
                     let (session_sender, mut session) = tokio::sync::watch::channel(false);
                     session_sender.send_replace(true);
                     assert_eq!(
-                        udp_send_with_lifecycle(
+                        send_with_lifecycle(
                             std::future::pending::<io::Result<usize>>(),
                             &mut cancellation,
                             &mut session,
@@ -2999,7 +2328,7 @@ mod tests {
                     );
                     let (_idle_sender, mut session) = tokio::sync::watch::channel(false);
                     assert_eq!(
-                        udp_send_with_lifecycle(
+                        send_with_lifecycle(
                             std::future::pending::<io::Result<usize>>(),
                             &mut cancellation,
                             &mut session,
@@ -3018,7 +2347,7 @@ mod tests {
                         .expect("ready");
                     let (_process_sender, mut session) = tokio::sync::watch::channel(false);
                     assert_eq!(
-                        udp_send_with_lifecycle(
+                        send_with_lifecycle(
                             std::future::pending::<io::Result<usize>>(),
                             &mut cancellation,
                             &mut session,
@@ -3049,7 +2378,7 @@ mod tests {
     }
 
     async fn start_udp_relay(
-        prepared: PreparedClientUdp,
+        prepared: ClientUdpAssociation,
         control: SocksStream<tokio::io::DuplexStream>,
         context: Arc<ClientContext>,
         routing: Arc<ClientRouting>,
@@ -3321,14 +2650,11 @@ mod tests {
             ]
             .into(),
         });
-        let prepared = prepare_udp_association_with_bind(
-            &context.egress,
-            Ipv4Addr::LOCALHOST,
-            None,
-            UdpSocket::bind,
-        )
-        .await
-        .expect("routed preparation");
+        let prepared = context
+            .egress
+            .prepare_udp(Ipv4Addr::LOCALHOST, None, UdpSocket::bind)
+            .await
+            .expect("routed preparation");
         let relay = match prepared.application.local_addr().expect("relay") {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 relay"),
@@ -3584,17 +2910,18 @@ mod tests {
                 SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
             };
             let (path, context) = udp_test_context_for_server(registry.clone(), server_address);
-            let mut prepared = prepare_udp_association_with_bind(
-                &context.egress,
-                Ipv4Addr::LOCALHOST,
-                Some((
-                    ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
-                    server_address,
-                )),
-                UdpSocket::bind,
-            )
-            .await
-            .expect("prepared concrete relay");
+            let mut prepared = context
+                .egress
+                .prepare_udp(
+                    Ipv4Addr::LOCALHOST,
+                    Some((
+                        ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                        server_address,
+                    )),
+                    UdpSocket::bind,
+                )
+                .await
+                .expect("prepared concrete relay");
             let relay = prepared.application.local_addr().expect("relay address");
             let upstream_client = prepared.upstream.local_addr().expect("upstream client");
             prepared.io_fault = Some(Arc::new(UdpIoFaultPlan::new(operation, fail_at)));
@@ -3756,17 +3083,18 @@ mod tests {
                     server_address,
                     Some(psk_for_method(method)),
                 );
-                let prepared = prepare_udp_association_with_bind(
-                    &context.egress,
-                    Ipv4Addr::LOCALHOST,
-                    Some((
-                        ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
-                        server_address,
-                    )),
-                    UdpSocket::bind,
-                )
-                .await
-                .expect("prepared relay");
+                let prepared = context
+                    .egress
+                    .prepare_udp(
+                        Ipv4Addr::LOCALHOST,
+                        Some((
+                            ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                            server_address,
+                        )),
+                        UdpSocket::bind,
+                    )
+                    .await
+                    .expect("prepared relay");
                 let relay = prepared.application.local_addr().expect("relay address");
                 let handle = prepared.handle;
                 let manager = prepared.manager.clone();
@@ -4603,7 +3931,7 @@ mod tests {
         (path, config)
     }
 
-    fn default_test_psk() -> ferrum2_crypto::MethodPsk {
+    pub(in crate::run) fn default_test_psk() -> ferrum2_crypto::MethodPsk {
         ferrum2_crypto::MethodPsk::aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
     }
 
@@ -4762,6 +4090,68 @@ mod tests {
                 .await
                 .is_ok(),
         )
+    }
+
+    pub(in crate::run) async fn relay_dns_udp_hop_once(
+        socket: &UdpSocket,
+        server: &UdpServer,
+        upstream_address: SocketAddr,
+        clock: &SystemClock,
+        random: &SystemRandom,
+        scratch: &mut UdpPacketScratch,
+        invalid_first: bool,
+    ) {
+        let mut wire = vec![0_u8; MAX_UDP_WIRE_LEN];
+        let mut plain = [0_u8; 4096];
+        let (length, peer) = socket
+            .recv_from(&mut wire)
+            .await
+            .expect("encrypted DNS query");
+        if invalid_first {
+            socket
+                .send_to(b"bad", peer)
+                .await
+                .expect("invalid encrypted DNS response");
+        }
+        let pending = server
+            .prepare_request(clock, &wire[..length], scratch)
+            .expect("authenticated DNS query");
+        assert_eq!(
+            pending.datagram().target().as_socket_addr(),
+            Some(upstream_address)
+        );
+        let request = pending.datagram().payload().to_vec();
+        let (_, commit) = pending.into_parts();
+        let accepted = server
+            .commit_request(commit, peer, clock.monotonic_now(), random)
+            .expect("commit DNS query");
+        socket
+            .send_to(&request, upstream_address)
+            .await
+            .expect("forward plain DNS query");
+        let (length, source) = socket
+            .recv_from(&mut plain)
+            .await
+            .expect("plain DNS response");
+        assert_eq!(source, upstream_address);
+        let response = server
+            .encode_response(
+                accepted.capability(),
+                clock,
+                random,
+                &test_datagram(
+                    TargetAddr::ip(upstream_address).expect("numeric DNS target"),
+                    &plain[..length],
+                ),
+                0,
+                &mut wire,
+                scratch,
+            )
+            .expect("encrypt DNS response");
+        socket
+            .send_to(&wire[..response.wire_len()], peer)
+            .await
+            .expect("encrypted DNS response");
     }
 
     #[tokio::test]
@@ -5247,10 +4637,9 @@ mod tests {
         drop(TcpListener::bind(dns).await.expect("DNS TCP rebind"));
         assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
         std::fs::remove_file(path).expect("remove config");
-
-        dns_proxy_detoured_udp_with_public_associate_off().await;
     }
 
+    #[tokio::test]
     async fn dns_proxy_detoured_udp_with_public_associate_off() {
         let socks = reserve_address();
         let shadowsocks_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -5322,52 +4711,17 @@ mod tests {
             let clock = SystemClock::new();
             let random = SystemRandom;
             let mut scratch = UdpPacketScratch::new();
-            let mut wire = vec![0_u8; MAX_UDP_WIRE_LEN];
-            let mut plain = [0_u8; 4096];
             for _ in 0..2 {
-                let (length, peer) = shadowsocks_socket
-                    .recv_from(&mut wire)
-                    .await
-                    .expect("encrypted DNS query");
-                let pending = server
-                    .prepare_request(&clock, &wire[..length], &mut scratch)
-                    .expect("authenticated DNS query");
-                assert_eq!(
-                    pending.datagram().target().as_socket_addr(),
-                    Some(upstream_address)
-                );
-                let request = pending.datagram().payload().to_vec();
-                let (_, commit) = pending.into_parts();
-                let accepted = server
-                    .commit_request(commit, peer, clock.monotonic_now(), &random)
-                    .expect("commit DNS query");
-                shadowsocks_socket
-                    .send_to(&request, upstream_address)
-                    .await
-                    .expect("forward plain DNS query");
-                let (length, source) = shadowsocks_socket
-                    .recv_from(&mut plain)
-                    .await
-                    .expect("plain DNS response");
-                assert_eq!(source, upstream_address);
-                let response = server
-                    .encode_response(
-                        accepted.capability(),
-                        &clock,
-                        &random,
-                        &test_datagram(
-                            TargetAddr::ip(upstream_address).expect("numeric DNS target"),
-                            &plain[..length],
-                        ),
-                        0,
-                        &mut wire,
-                        &mut scratch,
-                    )
-                    .expect("encrypt DNS response");
-                shadowsocks_socket
-                    .send_to(&wire[..response.wire_len()], peer)
-                    .await
-                    .expect("encrypted DNS response");
+                relay_dns_udp_hop_once(
+                    &shadowsocks_socket,
+                    &server,
+                    upstream_address,
+                    &clock,
+                    &random,
+                    &mut scratch,
+                    false,
+                )
+                .await;
             }
             assert_eq!(
                 server.session_count().expect("DNS UDP session count"),
@@ -5867,9 +5221,9 @@ mod tests {
         ] {
             stock_udp_chain_case(methods, false).await;
         }
-        udp_chain_selector_snapshots_and_cross_plan_binding().await;
     }
 
+    #[tokio::test]
     async fn udp_chain_selector_snapshots_and_cross_plan_binding() {
         let upstreams = [
             UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -6013,14 +5367,11 @@ mod tests {
         )
         .expect("routed chain selector");
         let routing = Arc::new(ClientRouting { route, outbounds });
-        let prepared = prepare_udp_association_with_bind(
-            &context.egress,
-            Ipv4Addr::LOCALHOST,
-            None,
-            UdpSocket::bind,
-        )
-        .await
-        .expect("routed chain preparation");
+        let prepared = context
+            .egress
+            .prepare_udp(Ipv4Addr::LOCALHOST, None, UdpSocket::bind)
+            .await
+            .expect("routed chain preparation");
         let relay = match prepared.application.local_addr().expect("relay") {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 relay"),
@@ -6547,14 +5898,15 @@ mod tests {
             servers[0],
             Some(psk_for_method(methods[0])),
         );
-        let prepared = prepare_udp_association_with_bind(
-            &context.egress,
-            Ipv4Addr::LOCALHOST,
-            Some((plan, servers[0])),
-            UdpSocket::bind,
-        )
-        .await
-        .expect("eight-hop preparation");
+        let prepared = context
+            .egress
+            .prepare_udp(
+                Ipv4Addr::LOCALHOST,
+                Some((plan, servers[0])),
+                UdpSocket::bind,
+            )
+            .await
+            .expect("eight-hop preparation");
         let relay = match prepared.application.local_addr().expect("relay") {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 relay"),
@@ -7382,7 +6734,7 @@ mod tests {
         udp_test_context_for_server(registry, reserve_address())
     }
 
-    fn udp_test_context_for_server(
+    pub(in crate::run) fn udp_test_context_for_server(
         registry: OwnerRegistry,
         server: SocketAddrV4,
     ) -> (PathBuf, Arc<ClientContext>) {
@@ -7590,17 +6942,18 @@ mod tests {
         assert!(udp.live_ids.lock().expect("live IDs").is_empty());
         assert_eq!(registry.snapshot(), baseline);
 
-        let prepared = prepare_udp_association_with_bind(
-            &context.egress,
-            Ipv4Addr::LOCALHOST,
-            Some((
-                ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
-                context.test_udp_server,
-            )),
-            UdpSocket::bind,
-        )
-        .await
-        .expect("next setup");
+        let prepared = context
+            .egress
+            .prepare_udp(
+                Ipv4Addr::LOCALHOST,
+                Some((
+                    ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                    context.test_udp_server,
+                )),
+                UdpSocket::bind,
+            )
+            .await
+            .expect("next setup");
         let application = prepared
             .application
             .local_addr()
@@ -7624,20 +6977,21 @@ mod tests {
         let (path, context) = udp_test_context(registry.clone());
         let calls = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&calls);
-        let prepared = prepare_udp_association_with_bind(
-            &context.egress,
-            Ipv4Addr::new(127, 0, 0, 2),
-            Some((
-                ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
-                context.test_udp_server,
-            )),
-            move |address| {
-                observed.lock().expect("bind calls").push(address);
-                UdpSocket::bind(address)
-            },
-        )
-        .await
-        .expect("setup");
+        let prepared = context
+            .egress
+            .prepare_udp(
+                Ipv4Addr::new(127, 0, 0, 2),
+                Some((
+                    ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                    context.test_udp_server,
+                )),
+                move |address| {
+                    observed.lock().expect("bind calls").push(address);
+                    UdpSocket::bind(address)
+                },
+            )
+            .await
+            .expect("setup");
         assert_eq!(
             *calls.lock().expect("bind calls"),
             [

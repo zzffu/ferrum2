@@ -7,28 +7,25 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ferrum2_config::{DnsServerConfig, DnsTransport};
+use ferrum2_core::TargetAddr;
 use ferrum2_core::route::EgressPlanSnapshot;
-use ferrum2_core::{Datagram, TargetAddr};
 use ferrum2_dns::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
     DnsEgressTaskKind, DnsIoFuture, DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport,
     SystemDnsEgress,
 };
-use ferrum2_runtime::UdpDirection;
+use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use super::egress::ClientEgressEngine;
-use super::{
-    MAX_UDP_WIRE_LEN, PreparedClientUdp, TokioFramed, accept_udp_plan_response, activate_udp_plan,
-    encode_udp_plan_request, reserve_application_datagram,
-};
+use super::TokioFramed;
+use super::egress::{ClientEgressEngine, ClientUdpAssociation};
 
 type Packet = (Vec<u8>, SocketAddr);
 type ReserveFuture = Pin<
     Box<dyn Future<Output = Result<mpsc::OwnedPermit<Packet>, mpsc::error::SendError<()>>> + Send>,
 >;
-type DnsUdpPool = Arc<Mutex<Vec<PreparedClientUdp>>>;
+type DnsUdpPool = Arc<Mutex<Vec<IdleDnsUdp>>>;
 
 pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamSpec> {
     servers
@@ -74,8 +71,19 @@ impl ClientDnsEgress {
     }
 }
 
+#[derive(Eq, PartialEq)]
+struct DnsUdpPoolKey {
+    first_server: std::net::SocketAddrV4,
+    plan: EgressPlanSnapshot,
+}
+
+struct IdleDnsUdp {
+    key: DnsUdpPoolKey,
+    association: ClientUdpAssociation,
+}
+
 struct PooledDnsUdp {
-    prepared: Option<PreparedClientUdp>,
+    idle: Option<IdleDnsUdp>,
     pool: DnsUdpPool,
     reusable: bool,
 }
@@ -85,13 +93,24 @@ impl Drop for PooledDnsUdp {
         if !self.reusable {
             return;
         }
-        let Some(prepared) = self.prepared.take() else {
+        let Some(idle) = self.idle.take() else {
             return;
         };
         if let Ok(mut pool) = self.pool.lock() {
-            pool.push(prepared);
+            pool.push(idle);
         }
     }
+}
+
+fn take_dns_udp(
+    pool: &DnsUdpPool,
+    key: &DnsUdpPoolKey,
+) -> io::Result<(Option<IdleDnsUdp>, Option<IdleDnsUdp>)> {
+    let mut idle = pool.lock().map_err(|_| invalid_target())?;
+    Ok(match idle.iter().position(|idle| idle.key == *key) {
+        Some(index) => (Some(idle.swap_remove(index)), None),
+        None => (None, idle.pop()),
+    })
 }
 
 impl DnsEgress for ClientDnsEgress {
@@ -158,34 +177,30 @@ impl DnsEgress for ClientDnsEgress {
                 .and_then(|hop| engine.outbounds.get(*hop))
                 .map(|outbound| outbound.udp_server)
                 .ok_or_else(invalid_target)?;
-            let (prepared, stale) = {
-                let mut idle = pool.lock().map_err(|_| invalid_target())?;
-                match idle.iter().position(|prepared| {
-                    prepared.static_server == Some(first_server)
-                        && prepared.static_plan.as_ref() == Some(&plan)
-                }) {
-                    Some(index) => (Some(idle.swap_remove(index)), None),
-                    None => (None, idle.pop()),
-                }
+            let key = DnsUdpPoolKey {
+                first_server,
+                plan: plan.clone(),
             };
+            let (idle, stale) = take_dns_udp(&pool, &key)?;
             drop(stale);
-            let mut prepared = match prepared {
-                Some(prepared) => prepared,
-                None => super::prepare_udp_association_with_bind(
-                    &engine,
-                    Ipv4Addr::LOCALHOST,
-                    Some((plan.clone(), first_server)),
-                    UdpSocket::bind,
-                )
-                .await
-                .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
+            let idle = match idle {
+                Some(idle) => idle,
+                None => IdleDnsUdp {
+                    key,
+                    association: engine
+                        .prepare_udp(
+                            Ipv4Addr::LOCALHOST,
+                            Some((plan.clone(), first_server)),
+                            UdpSocket::bind,
+                        )
+                        .await
+                        .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
+                },
             };
-            activate_udp_plan(&mut prepared, &engine, &engine.outbounds, plan.hops())
-                .map_err(|_| invalid_target())?;
             let mut prepared = PooledDnsUdp {
-                prepared: Some(prepared),
+                idle: Some(idle),
                 pool,
-                reusable: true,
+                reusable: false,
             };
 
             let (outgoing, mut outbound) = mpsc::channel::<Packet>(1);
@@ -222,22 +237,23 @@ impl DnsEgress for ClientDnsEgress {
             tasks.spawn(DnsEgressTaskKind::Session, async move {
                 while let Some((packet, destination)) = requests.recv().await {
                     prepared.reusable = false;
-                    let response = relay_udp_packet(
-                        prepared.prepared.as_mut().expect("pooled DNS UDP owner"),
-                        &engine,
-                        plan.hops(),
-                        first_server,
-                        destination,
-                        packet,
-                    )
-                    .await;
-                    let Ok(response) = response else {
+                    let response = prepared
+                        .idle
+                        .as_mut()
+                        .expect("pooled DNS UDP owner")
+                        .association
+                        .relay(&engine, &plan, first_server, destination, packet)
+                        .await;
+                    let Ok((response, fully_reusable)) = response else {
                         break;
                     };
-                    prepared.reusable = true;
                     if session_responses.send(response).await.is_err() {
                         break;
                     }
+                    if !fully_reusable {
+                        break;
+                    }
+                    prepared.reusable = true;
                 }
             });
             Ok(Box::new(ClientDnsDatagram {
@@ -246,90 +262,6 @@ impl DnsEgress for ClientDnsEgress {
                 incoming: Mutex::new(incoming),
             }) as BoxedDnsDatagramIo)
         })
-    }
-}
-
-async fn relay_udp_packet(
-    prepared: &mut super::PreparedClientUdp,
-    engine: &ClientEgressEngine,
-    hops: &[usize],
-    first_server: std::net::SocketAddrV4,
-    destination: SocketAddr,
-    packet: Vec<u8>,
-) -> io::Result<Packet> {
-    if packet.len() > MAX_UDP_WIRE_LEN {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "DNS UDP packet too large",
-        ));
-    }
-    let target = TargetAddr::ip(destination).map_err(|_| invalid_target())?;
-    let payload_len = packet.len();
-    let reservation = reserve_application_datagram(prepared, payload_len).map_err(runtime_error)?;
-    let datagram = Datagram::new(target, packet.as_slice().into(), payload_len)
-        .map_err(|_| invalid_target())?;
-    let committed = match prepared.pending_session.take() {
-        Some(session) => session.commit(reservation, datagram, tokio::time::Instant::now()),
-        None => reservation
-            .commit(datagram, tokio::time::Instant::now())
-            .map(|()| prepared.handle),
-    };
-    committed.map_err(runtime_error)?;
-    let datagram = prepared
-        .manager
-        .pop(prepared.handle, UdpDirection::ToTarget)
-        .map_err(runtime_error)?
-        .ok_or_else(|| io::Error::other("DNS UDP queue empty"))?;
-    let wire_len = encode_udp_plan_request(
-        prepared,
-        &engine.outbounds,
-        hops,
-        datagram.datagram(),
-        &engine.clock,
-        &engine.random,
-    )
-    .map_err(|_| io::Error::other("DNS UDP encode failed"))?;
-    drop(datagram);
-    let sent = prepared
-        .upstream
-        .send(&prepared.upstream_wire[..wire_len])
-        .await?;
-    if sent != wire_len {
-        return Err(io::Error::new(
-            io::ErrorKind::WriteZero,
-            "short DNS UDP send",
-        ));
-    }
-    loop {
-        let length = prepared.upstream.recv(&mut prepared.upstream_wire).await?;
-        let payload_len = match accept_udp_plan_response(
-            prepared,
-            &engine.outbounds,
-            first_server,
-            length,
-            &engine.clock,
-        ) {
-            Ok(Some(payload_len)) => payload_len,
-            Ok(None) | Err(_) => continue,
-        };
-        let response = prepared
-            .manager
-            .pop(prepared.handle, UdpDirection::ToClient)
-            .map_err(runtime_error)?
-            .ok_or_else(|| io::Error::other("DNS UDP response queue empty"))?;
-        let source = response
-            .datagram()
-            .target()
-            .as_socket_addr()
-            .ok_or_else(invalid_target)?;
-        let payload = response.datagram().payload();
-        if payload.len() != payload_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "DNS UDP length mismatch",
-            ));
-        }
-        return Ok((payload.to_vec(), source));
     }
 }
 
@@ -404,15 +336,22 @@ fn invalid_target() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS egress target")
 }
 
-fn runtime_error(_error: impl Sized) -> io::Error {
-    io::Error::other("DNS UDP runtime unavailable")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use ferrum2_core::route::EgressPlanHandle;
+    use ferrum2_core::route::{EgressPlanHandle, Network, compile_selector_plans};
+    use ferrum2_core::selector::{
+        SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute,
+        TaggedStaticBinding,
+    };
+    use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
+    use ferrum2_shadowsocks::{MethodKeyAdapter, UdpPacketScratch, UdpServer};
+
+    use crate::run::egress::{UdpIoFaultPlan, UdpIoOperation};
+    use crate::run::tests::{
+        default_test_psk, relay_dns_udp_hop_once, udp_test_context_for_server,
+    };
 
     #[test]
     fn dns_runtime_specs_preserve_validated_server_values() {
@@ -524,6 +463,24 @@ mod tests {
             .expect("DNS UDP adapter")
             .0;
         assert!(dns_connect_tcp.contains(&[".", "open_tcp("].concat()));
+        let dns_udp = source
+            .split_once("fn bind_udp(")
+            .expect("DNS UDP adapter")
+            .1
+            .split_once("struct ClientDnsDatagram")
+            .expect("DNS UDP adapter end")
+            .0;
+        assert!(dns_udp.contains(&[".", "prepare_udp("].concat()));
+        assert!(dns_udp.contains(&[".", "relay("].concat()));
+        for forbidden in [
+            ["Prepared", "ClientUdp"].concat(),
+            ["activate", "_udp_plan"].concat(),
+            ["reserve", "_application_datagram"].concat(),
+            ["encode", "_udp_plan_request"].concat(),
+            ["accept", "_udp_plan_response"].concat(),
+        ] {
+            assert!(!source.contains(&forbidden), "DNS UDP bypass: {forbidden}");
+        }
         for forbidden in [
             ["Client", "Context"].concat(),
             ["Client", "Routing"].concat(),
@@ -535,6 +492,7 @@ mod tests {
         let engine = [
             include_str!("run/egress/mod.rs"),
             include_str!("run/egress/tcp.rs"),
+            include_str!("run/egress/udp.rs"),
         ]
         .concat();
         for forbidden in [
@@ -563,5 +521,357 @@ mod tests {
             !outside_engine.contains(&forbidden_executor),
             "TCP executor outside engine: {forbidden_executor}"
         );
+    }
+
+    #[tokio::test]
+    async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_state() {
+        let (route, selector) = compile_selector_plans(
+            &[TaggedInbound::new("entry", 0)],
+            &[
+                TaggedOutbound::new("a", 0),
+                TaggedOutbound::new("b", 1),
+                TaggedOutbound::new("c", 2),
+            ],
+            &[
+                TaggedPlan::new("a-b", vec![0, 1]),
+                TaggedPlan::new("b-a", vec![1, 0]),
+            ],
+            &[SelectorDefinition::new(
+                "manual",
+                vec!["a-b", "b-a", "c"],
+                Some("a-b"),
+            )],
+            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "manual")]),
+        )
+        .expect("DNS UDP pool plans");
+        let target = TargetAddr::domain("pool.test", 53).expect("pool target");
+        let selected = route.select_plan_snapshot(0, Network::Udp, &target);
+        selector.switch("manual", "b-a").expect("reverse plan");
+        let reversed = route.select_plan_snapshot(0, Network::Udp, &target);
+        selector.switch("manual", "c").expect("later plan");
+        let later = route.select_plan_snapshot(0, Network::Udp, &target);
+        let first_server = std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_001);
+        let key_cases = [
+            (
+                "same server/equal snapshot",
+                DnsUdpPoolKey {
+                    first_server,
+                    plan: selected.clone(),
+                },
+                true,
+            ),
+            (
+                "different first server",
+                DnsUdpPoolKey {
+                    first_server: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_002),
+                    plan: selected.clone(),
+                },
+                false,
+            ),
+            (
+                "different hop order",
+                DnsUdpPoolKey {
+                    first_server,
+                    plan: reversed,
+                },
+                false,
+            ),
+            (
+                "selector switched plan",
+                DnsUdpPoolKey {
+                    first_server,
+                    plan: later,
+                },
+                false,
+            ),
+        ];
+
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("association mutation server");
+        let first_server = match server.local_addr().expect("mutation server address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 mutation server"),
+        };
+        let registry = ferrum2_runtime::OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let (path, context) = udp_test_context_for_server(registry.clone(), first_server);
+        let plan = EgressPlanHandle::direct(0).snapshot_owned();
+        let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("mutation DNS upstream");
+        let destination = upstream.local_addr().expect("mutation upstream address");
+        let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(default_test_psk()));
+        let protocol_server = UdpServer::new(&keys).expect("mutation protocol server");
+        let clock = SystemClock::new();
+        let random = SystemRandom;
+        let mut scratch = UdpPacketScratch::new();
+        for (case, candidate, reusable) in key_cases {
+            let association = context
+                .egress
+                .prepare_udp(
+                    Ipv4Addr::LOCALHOST,
+                    Some((selected.clone(), first_server)),
+                    UdpSocket::bind,
+                )
+                .await
+                .expect("key association");
+            let pool = Arc::new(Mutex::new(vec![IdleDnsUdp {
+                key: DnsUdpPoolKey {
+                    first_server: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_001),
+                    plan: selected.clone(),
+                },
+                association,
+            }]));
+            let (matched, stale) = take_dns_udp(&pool, &candidate).expect("key lookup");
+            assert_eq!(matched.is_some(), reusable, "{case}");
+            assert_eq!(stale.is_some(), !reusable, "{case}");
+            drop((matched, stale));
+            assert_eq!(registry.snapshot(), baseline, "{case}");
+        }
+        for case in [
+            "partial",
+            "send-io",
+            "receive-io",
+            "authentication",
+            "cancel",
+            "saturation",
+        ] {
+            let association = context
+                .egress
+                .prepare_udp(
+                    Ipv4Addr::LOCALHOST,
+                    Some((plan.clone(), first_server)),
+                    UdpSocket::bind,
+                )
+                .await
+                .expect("mutation association");
+            let pool = Arc::new(Mutex::new(Vec::new()));
+            let mut pooled = PooledDnsUdp {
+                idle: Some(IdleDnsUdp {
+                    key: DnsUdpPoolKey {
+                        first_server,
+                        plan: plan.clone(),
+                    },
+                    association,
+                }),
+                pool: Arc::clone(&pool),
+                reusable: false,
+            };
+            let association = &mut pooled.idle.as_mut().expect("mutation owner").association;
+            match case {
+                "partial" => {}
+                "send-io" | "receive-io" => {
+                    association.io_fault = Some(Arc::new(UdpIoFaultPlan::new(
+                        if case == "send-io" {
+                            UdpIoOperation::UpstreamSend
+                        } else {
+                            UdpIoOperation::UpstreamRecv
+                        },
+                        1,
+                    )));
+                    assert!(
+                        association
+                            .relay(
+                                &context.egress,
+                                &plan,
+                                first_server,
+                                destination,
+                                vec![0x21],
+                            )
+                            .await
+                            .is_err(),
+                        "{case}"
+                    );
+                    if case == "receive-io" {
+                        let mut wire = [0_u8; MAX_UDP_WIRE_LEN];
+                        tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut wire))
+                            .await
+                            .expect("receive-io request timeout")
+                            .expect("receive-io request");
+                    }
+                }
+                "authentication" => {
+                    let echo = async {
+                        let mut wire = [0_u8; MAX_UDP_WIRE_LEN];
+                        let (length, peer) = upstream
+                            .recv_from(&mut wire)
+                            .await
+                            .expect("authentication upstream query");
+                        upstream
+                            .send_to(&wire[..length], peer)
+                            .await
+                            .expect("authentication upstream response");
+                    };
+                    let payload = vec![0x22];
+                    let (result, (), ()) = tokio::join!(
+                        association.relay(
+                            &context.egress,
+                            &plan,
+                            first_server,
+                            destination,
+                            payload.clone(),
+                        ),
+                        relay_dns_udp_hop_once(
+                            &server,
+                            &protocol_server,
+                            destination,
+                            &clock,
+                            &random,
+                            &mut scratch,
+                            true,
+                        ),
+                        echo,
+                    );
+                    let ((response, source), fully_reusable) =
+                        result.expect("valid response after authentication discard");
+                    assert_eq!((response, source), (payload, destination));
+                    assert!(
+                        !fully_reusable,
+                        "authentication discard left association reusable"
+                    );
+                }
+                "cancel" => {
+                    assert!(
+                        tokio::time::timeout(
+                            Duration::from_millis(20),
+                            association.relay(
+                                &context.egress,
+                                &plan,
+                                first_server,
+                                destination,
+                                vec![0x23],
+                            ),
+                        )
+                        .await
+                        .is_err(),
+                        "cancel"
+                    );
+                    let mut wire = [0_u8; MAX_UDP_WIRE_LEN];
+                    tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut wire))
+                        .await
+                        .expect("cancel request timeout")
+                        .expect("cancel request");
+                }
+                "saturation" => {
+                    assert!(
+                        context
+                            .egress
+                            .prepare_udp(
+                                Ipv4Addr::LOCALHOST,
+                                Some((plan.clone(), first_server)),
+                                UdpSocket::bind,
+                            )
+                            .await
+                            .is_err(),
+                        "saturation admitted a second association"
+                    );
+                }
+                _ => unreachable!("closed mutation table"),
+            }
+            drop(pooled);
+            assert!(pool.lock().expect("mutation pool").is_empty(), "{case}");
+
+            let sessions_before = protocol_server
+                .session_count()
+                .expect("healthy session baseline");
+            let association = context
+                .egress
+                .prepare_udp(
+                    Ipv4Addr::LOCALHOST,
+                    Some((plan.clone(), first_server)),
+                    UdpSocket::bind,
+                )
+                .await
+                .expect("following valid association");
+            let mut initial = Some(IdleDnsUdp {
+                key: DnsUdpPoolKey {
+                    first_server,
+                    plan: plan.clone(),
+                },
+                association,
+            });
+            for valid in 0..2_u8 {
+                let idle = match initial.take() {
+                    Some(idle) => idle,
+                    None => {
+                        let key = DnsUdpPoolKey {
+                            first_server,
+                            plan: plan.clone(),
+                        };
+                        let (matched, stale) = take_dns_udp(&pool, &key).expect("healthy reuse");
+                        assert!(stale.is_none(), "healthy exact key was discarded");
+                        matched.expect("healthy exact-key association")
+                    }
+                };
+                let mut healthy = PooledDnsUdp {
+                    idle: Some(idle),
+                    pool: Arc::clone(&pool),
+                    reusable: false,
+                };
+                let payload = vec![0x30 + valid];
+                let echo = async {
+                    let mut wire = [0_u8; MAX_UDP_WIRE_LEN];
+                    let (length, peer) = upstream
+                        .recv_from(&mut wire)
+                        .await
+                        .expect("following valid upstream query");
+                    upstream
+                        .send_to(&wire[..length], peer)
+                        .await
+                        .expect("following valid upstream response");
+                };
+                let association = &mut healthy.idle.as_mut().expect("healthy owner").association;
+                let (response, (), ()) = tokio::join!(
+                    association.relay(
+                        &context.egress,
+                        &plan,
+                        first_server,
+                        destination,
+                        payload.clone(),
+                    ),
+                    relay_dns_udp_hop_once(
+                        &server,
+                        &protocol_server,
+                        destination,
+                        &clock,
+                        &random,
+                        &mut scratch,
+                        false,
+                    ),
+                    echo,
+                );
+                let ((response, source), fully_reusable) = response.expect("following valid relay");
+                assert_eq!((response, source), (payload, destination), "{case}");
+                assert!(fully_reusable, "{case} healthy association tainted");
+                healthy.reusable = fully_reusable;
+                drop(healthy);
+                assert_eq!(pool.lock().expect("healthy pool").len(), 1, "{case}");
+            }
+            assert_eq!(
+                protocol_server
+                    .session_count()
+                    .expect("healthy session count"),
+                sessions_before + 1,
+                "{case} exact-key reuse created another SIP022 session"
+            );
+            drop(pool.lock().expect("healthy pool").pop());
+            assert_eq!(registry.snapshot(), baseline, "{case}");
+        }
+        drop((context, protocol_server, keys));
+        assert_eq!(registry.snapshot(), baseline);
+        drop(server);
+        drop(upstream);
+        drop(
+            UdpSocket::bind(first_server)
+                .await
+                .expect("mutation server rebind"),
+        );
+        drop(
+            UdpSocket::bind(destination)
+                .await
+                .expect("mutation upstream rebind"),
+        );
+        std::fs::remove_file(path).expect("remove mutation config");
     }
 }

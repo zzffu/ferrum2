@@ -1,4 +1,5 @@
 mod tcp;
+mod udp;
 
 use std::net::SocketAddrV4;
 use std::sync::Arc;
@@ -11,7 +12,17 @@ use ferrum2_shadowsocks::{BoxedClientFlow, MethodKeyAdapter, ShadowsocksError, T
 #[cfg(test)]
 use ferrum2_shadowsocks::{BufferObserver, FlowObserver};
 
-use super::{ClientUdpContext, RunError, TokioConnector};
+use super::{RunError, TokioConnector};
+
+pub(super) use udp::{
+    ClientUdpAssociation, ClientUdpContext, UdpPlanResponseError, UdpSendError,
+    composed_udp_plan_limit, send_with_lifecycle,
+};
+#[cfg(test)]
+pub(super) use udp::{
+    IdSequenceRandom, MAX_UDP_PLAN_HOPS, UdpIoFaultPlan, UdpIoOperation,
+    composed_udp_request_limit, composed_udp_response_limit,
+};
 
 pub(super) struct ClientOutboundContext {
     pub(super) tcp_server: TargetAddr,
@@ -110,6 +121,21 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             observers,
         )
         .await
+    }
+}
+
+impl ClientEgressEngine {
+    pub(super) async fn prepare_udp<F, Fut>(
+        &self,
+        local_ip: std::net::Ipv4Addr,
+        static_plan: Option<(EgressPlanSnapshot, SocketAddrV4)>,
+        bind: F,
+    ) -> Result<ClientUdpAssociation, ()>
+    where
+        F: FnMut(SocketAddrV4) -> Fut,
+        Fut: std::future::Future<Output = std::io::Result<tokio::net::UdpSocket>>,
+    {
+        udp::prepare(self, local_ip, static_plan, bind).await
     }
 }
 
