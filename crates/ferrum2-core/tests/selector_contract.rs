@@ -41,14 +41,21 @@ fn select(route: &ferrum2_core::route::RouteTable) -> usize {
 
 #[test]
 fn public_owned_plan_snapshot_is_redacted() {
-    let snapshot = EgressPlanHandle::direct(0xdead_beef).snapshot_owned();
+    let handle = EgressPlanHandle::direct(0xdead_beef);
+    let borrowed = handle.snapshot();
+    let snapshot = handle.snapshot_owned();
 
+    assert_eq!(borrowed.hops(), snapshot.hops());
+    assert!(std::ptr::eq(borrowed.hops(), snapshot.hops()));
     assert_eq!(format!("{snapshot:?}"), "EgressPlanSnapshot([redacted])");
 }
 
 #[test]
 fn public_control_resolves_nested_members_and_keeps_closed_failures_atomic() {
     let (route, control) = nested_route();
+    let target = TargetAddr::domain("selector.test", 443).expect("target");
+    let borrowed_final = route.final_plan();
+    let owned_final = route.final_plan_snapshot();
     assert_eq!(control.selected("outer"), Ok("inner"));
     assert_eq!(control.selected("inner"), Ok("leaf-a"));
     assert_eq!((select(&route), route.final_outbound()), (7, 7));
@@ -68,6 +75,16 @@ fn public_control_resolves_nested_members_and_keeps_closed_failures_atomic() {
     control.switch("outer", "leaf-b").expect("valid switch");
     control.switch("outer", "leaf-b").expect("no-op switch");
     assert_eq!((select(&route), route.final_outbound()), (8, 7));
+    assert_eq!(
+        (
+            borrowed_final.hops(),
+            owned_final.hops(),
+            route.final_plan().hops(),
+            route.final_plan_snapshot().hops(),
+            route.select_plan_snapshot(0, Network::Tcp, &target).hops(),
+        ),
+        (&[7][..], &[7][..], &[7][..], &[7][..], &[8][..])
+    );
     control.switch("outer", "inner").expect("nested switch");
     control.switch("inner", "leaf-b").expect("inner switch");
     assert_eq!(control.selected("outer"), Ok("inner"));
@@ -110,9 +127,13 @@ fn public_route_selection_snapshots_complete_static_rule_final_and_selector_plan
     #[rustfmt::skip]
     let outbounds = [TaggedOutbound::new("a", 7), TaggedOutbound::new("b", 8), TaggedOutbound::new("c", 9)];
     #[rustfmt::skip]
-    let plans = [TaggedPlan::new("a-b", vec![7, 8]), TaggedPlan::new("b-c", vec![8, 9])];
+    let plans = [
+        TaggedPlan::new("a-b", vec![7, 8]),
+        TaggedPlan::new("b-c", vec![8, 9]),
+        TaggedPlan::new("b-a", vec![8, 7]),
+    ];
     let selectors = [
-        SelectorDefinition::new("manual", vec!["a-b", "c"], Some("a-b")),
+        SelectorDefinition::new("manual", vec!["a-b", "c", "b-a"], Some("a-b")),
         SelectorDefinition::new("inner", vec!["a", "b-c"], Some("a")),
         SelectorDefinition::new("outer", vec!["c", "inner"], Some("inner")),
     ];
@@ -184,8 +205,13 @@ fn public_route_selection_snapshots_complete_static_rule_final_and_selector_plan
         ),
         (&[7, 8][..], &[7, 8][..])
     );
+    control.switch("manual", "b-a").expect("reversed plan");
+    let reversed_snapshot = route.select_plan_snapshot(0, Network::Tcp, &target);
+    assert_eq!(reversed_snapshot.hops(), &[8, 7]);
     let keys = HashSet::from([snapshot]);
     assert!(keys.contains(&static_snapshot));
+    assert!(!keys.contains(&reversed_snapshot));
+    assert!(!keys.contains(&nested_snapshot));
     assert!(!keys.contains(&route.final_plan_snapshot()));
     assert!(
         std::panic::catch_unwind(|| static_route.select(0, Network::Tcp, &target)).is_err(),
