@@ -24,7 +24,7 @@
   `0.264499787`；legacy resources `10000` sessions、`180` samples、RSS `6/6` and drain PASS。DNS
   resources report direct/detoured `4600/4466` queries、48 samples、RSS `12/12`、bounds、drain and
   rebind PASS。THP apply and restored readback both PASS；always-run process/evidence cleanup succeeded。
-- **Footprint disposition:** planning-base code/tests are `21814/39632` with ratio `1.816815` PASS；
+- **Footprint disposition:** qualified-product code/tests are `21814/39632` with ratio `1.816815` PASS；
   case/support/fixture delta is `-116/0/0` and integrity PASS。The sole numeric
   `REVIEW_REQUIRED`—moved owner-file size—is accepted as source reclassification：product test-name
   multiset remains `92/92`，assertion inventory is unchanged，and no support、fixture、helper、harness or
