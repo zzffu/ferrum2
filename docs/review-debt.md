@@ -142,3 +142,14 @@ issue，and automatic/manual exact-SHA qualification passed。The schema 3 numer
 transport、negative、lifecycle、interop and resource evidence；no fixture、second harness、copied DNS
 codec or second SIP022 data plane was added。Deferred DNS features and the diagnostic-only throughput
 ratio are scope boundaries，not review debt。
+
+## M13 close audit
+
+No M13 review debt remains。T05's copied-plan/stale-pool findings and T06's facade、test-placement and
+scanner findings were resolved before qualification；the required two independent escalation analyses
+converged on the final one-file architecture-guard repair。Final full Architect and QA both returned
+`PASS` with zero blocker、major or minor finding。The schema 3 `changed_test_file_size`
+`REVIEW_REQUIRED` signal is accepted as monolith-to-owner source reclassification：product test names
+remain `92/92`，assertions are unchanged and support/fixture deltas are zero。The throughput ratio is
+diagnostic only；deferred upstream groups、retry/fallback、new DNS features、TUN/transparent inbounds and
+management surfaces remain scope boundaries rather than review debt。

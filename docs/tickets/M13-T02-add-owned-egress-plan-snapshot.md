@@ -17,14 +17,14 @@ route/selector interface and result。
 
 ## Acceptance
 
-- [ ] `EgressPlanSnapshot` is owned、immutable、clone/equality/hash capable and redacted；validated direct/
+- [x] `EgressPlanSnapshot` is owned、immutable、clone/equality/hash capable and redacted；validated direct/
       chain plans are never empty and retain order/bounds。
-- [ ] `snapshot_owned`、`select_plan_snapshot` and `final_plan_snapshot` share the graph's hop allocation；
+- [x] `snapshot_owned`、`select_plan_snapshot` and `final_plan_snapshot` share the graph's hop allocation；
       selection/clone does not copy hops。
-- [ ] Existing borrowed methods and public module paths remain source/result compatible。
-- [ ] Static、routed、final、chain and nested-selector rows prove old snapshots remain fixed after switch
+- [x] Existing borrowed methods and public module paths remain source/result compatible。
+- [x] Static、routed、final、chain and nested-selector rows prove old snapshots remain fixed after switch
       while later snapshots observe the switch。
-- [ ] `TEST-0014` T02、repository Quick、ticket footprint and blocking Architect/QA review pass on one
+- [x] `TEST-0014` T02、repository Quick、ticket footprint and blocking Architect/QA review pass on one
       exact candidate。
 
 ## Validation

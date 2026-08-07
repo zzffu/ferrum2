@@ -1,7 +1,7 @@
 ---
 id: M13-T07
 milestone: M13
-status: ready
+status: done
 depends_on: [M13-T06]
 owns:
   - docs/ci-status.md
@@ -21,15 +21,15 @@ three platforms、existing SIP022/DNS interoperability and authorized performanc
 
 ## Acceptance
 
-- [ ] Every T01～T06 focused command passes on the accepted integration SHA；ticket-only results are not
+- [x] Every T01～T06 focused command passes on the accepted integration SHA；ticket-only results are not
       substituted。
-- [ ] Serial Full、Rust 1.88 check/build/test、100+ lifecycle、Windows MSVC、Linux GNU/musl、SIP022
+- [x] Serial Full、Rust 1.88 check/build/test、100+ lifecycle、Windows MSVC、Linux GNU/musl、SIP022
       TCP/UDP `12/12` each plus cleanup and CoreDNS/BIND DNS matrix pass without evidence splicing。
-- [ ] Schema 3 integrity passes；numeric footprint movement/growth is explicitly dispositioned without
+- [x] Schema 3 integrity passes；numeric footprint movement/growth is explicitly dispositioned without
       deleting evidence。Final Architect/QA blocking findings are zero。
-- [ ] After separate explicit authorizations only，one non-force push runs automatic qualification and
+- [x] After separate explicit authorizations only，one non-force push runs automatic qualification and
       one exact-SHA manual dispatch runs the existing M4 + M12 DNS performance/resource profile。
-- [ ] Failed evidence remains visible；no unchanged-SHA rerun、second push/dispatch、PR、tag、package、
+- [x] Failed evidence remains visible；no unchanged-SHA rerun、second push/dispatch、PR、tag、package、
       release or publication is inferred。
 
 ## Validation
@@ -39,9 +39,14 @@ separate exact-SHA push and manual-dispatch authorization。
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `1af1bbf44b37a81c2ae03c562288b2a6e09694b5`
+- Review: final full Architect `PASS`；final full QA `PASS`；zero blocker、major or minor finding。
+- Notes: Every T01～T06 focused command and the serial T07 local gate passed，including Rust 1.88 and
+  lifecycle `1/1` in 128.61s。Automatic push run
+  [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144) and manual dispatch run
+  [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024) both completed `success`
+  on the exact SHA。The one push and one dispatch authorizations are consumed；no rerun、second push/
+  dispatch、PR、tag、package、release or publication occurred。
 
 ## Rollback / risk
 

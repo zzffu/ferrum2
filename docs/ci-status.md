@@ -1,5 +1,38 @@
 # CI 与验证状态
 
+## M13 closed — architecture consolidation qualified without behavior change
+
+- **Exact identity:** qualified product `1af1bbf44b37a81c2ae03c562288b2a6e09694b5`，tree
+  `172870c4ca0dffb6c474f2137399d553e827b1e4`。Remote `codex/integration/m13` points exactly to that
+  product；the dedicated local closeout is documentation-only and is not a new qualified product SHA。
+- **Local qualification:** every T01～T06 focused command passed on the exact integration SHA。Serial
+  format、strict Clippy、workspace bins/all-features tests、Rust 1.88 check/build/test、ignored 100+
+  lifecycle `1/1` in 128.61s、workspace docs、schema 3 integrity and diff all passed。Final full
+  Architect and QA verdicts are `PASS` with zero blocker、major or minor finding。
+- **Automatic hosted qualification:** immutable push run
+  [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144) completed `success`。Quality
+  `93013891018`、test-footprint `93013890926`、MSRV `93013891030`、Windows MSVC `93013891001`、
+  Linux GNU `93013891052`、Linux musl `93013890996`、interop `93013890954` and qualification
+  `93014842564` all succeeded；performance `93013893031` was correctly skipped for the push event。
+- **Automatic decisive markers:** SIP022 TCP and UDP each report `12/12` plus cleanup；all 12 direct/
+  detoured CoreDNS/BIND DNS cases and DNS cleanup pass；the aggregate reports platforms `3/3`、Full、
+  security、process、MSRV and test budget PASS，all bound to exact SHA/run/attempt
+  `1af1bbf…/31223817144/1`。
+- **Manual performance/resource:** workflow-dispatch run
+  [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024) completed all nine jobs
+  `success`。Performance job `93013935727` reports 10-trial medians `144633582/546819276`、ratio
+  `0.264499787`；legacy resources `10000` sessions、`180` samples、RSS `6/6` and drain PASS。DNS
+  resources report direct/detoured `4600/4466` queries、48 samples、RSS `12/12`、bounds、drain and
+  rebind PASS。THP apply and restored readback both PASS；always-run process/evidence cleanup succeeded。
+- **Footprint disposition:** planning-base code/tests are `21814/39632` with ratio `1.816815` PASS；
+  case/support/fixture delta is `-116/0/0` and integrity PASS。The sole numeric
+  `REVIEW_REQUIRED`—moved owner-file size—is accepted as source reclassification：product test-name
+  multiset remains `92/92`，assertion inventory is unchanged，and no support、fixture、helper、harness or
+  data plane was deleted or added to improve the signal。
+- **Closure / boundary:** all M13 tickets are `done` and M13 is `closed`。The authorized one non-force
+  product push and one manual dispatch are consumed；there was no unchanged-SHA rerun、second push/
+  dispatch、force-push、PR、tag、package、release or publication。
+
 ## M12 closed — tagged DNS automatic qualification and full performance complete
 
 - **Exact identity:** product `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`，tree

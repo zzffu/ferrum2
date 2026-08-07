@@ -38,3 +38,11 @@ No M12 workflow debt remains。The existing M4 qualification tool/job was extend
 mode rather than adding a second harness or workflow。Exact product
 `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e` passed automatic run `31143886273/1` and manual run
 `31144255549/1`，including exact-SHA DNS resource markers and successful process/evidence cleanup。
+
+## M13 close audit
+
+No M13 workflow debt remains。The existing schema 3 control handled the ownership-movement signal with
+integrity PASS，and the existing push/manual-dispatch split produced exact-SHA automatic qualification
+`31223817144/1` plus independent performance/resource qualification `31223831024/1`。The scanner repair
+stayed inside the existing architecture test；no workflow、provider、job、parser dependency or second
+harness was added。

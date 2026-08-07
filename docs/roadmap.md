@@ -58,10 +58,11 @@ run `31143886273/1`和full manual performance run `31144255549/1`关闭。Hickor
 tagged DNS UDP/TCP/DoT/DoH、client/server detour、CoreDNS/BIND、SIP022 TCP/UDP、three platforms和
 DNS resource bounds/drain/rebind均通过；首次failed performance `31134561696/1`保留并驱动exact-plan
 UDP association reuse root-cause repair。Blocking findings为零，未package、release或publish。
-M13现为`executing`：以qualified product `c06386e9`和真实planning baseline `4810ec5c`为双重
-证据源，只整固owned egress-plan、DNS runtime dependency、private client egress及composition-root
-ownership，不增加schema、wire、DNS/routing action或产品能力。七票按serial drain执行；performance
-因hot-path/resource ownership迁移而required，但无threshold或claim。
+M13已由exact product `1af1bbf44b37a81c2ae03c562288b2a6e09694b5`、local serial gate、automatic
+run [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144)和manual performance/
+resource run [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024)关闭。Owned
+egress-plan、DNS runtime dependency、private client egress及composition-root ownership完成整固；
+schema、wire、DNS/routing action和产品能力不变，final Architect/QA均`PASS`。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -73,8 +74,9 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M8-2026-08-04.md`、
 `docs/handoffs/HANDOFF-M9-2026-08-04.md`、
 `docs/handoffs/HANDOFF-M10-2026-08-04.md`、
-`docs/handoffs/HANDOFF-M11-2026-08-05.md`和
-`docs/handoffs/HANDOFF-M12-2026-08-07.md`。
+`docs/handoffs/HANDOFF-M11-2026-08-05.md`、
+`docs/handoffs/HANDOFF-M12-2026-08-07.md`和
+`docs/handoffs/HANDOFF-M13-2026-08-08.md`。
 
 ## 依赖顺序
 
@@ -1036,7 +1038,7 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 
 ## M13 — behavior-preserving architecture consolidation
 
-- **Status:** executing
+- **Status:** closed
 - **Objective:** 以core唯一owned `EgressPlanSnapshot`收敛route/DNS identity；用DNS-owned runtime
   spec删除`ferrum2-dns -> ferrum2-config`；让SOCKS TCP/UDP和DNS detour共用private concrete
   `ClientEgressEngine`；语义迁移green后按ownership拆client/server/core/config。
@@ -1047,18 +1049,17 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
   SIP022/DNS wire、first-match/selector/chain、admission/deadline、owner shutdown/rebind和telemetry exact。
 - **Tickets:** T01 contract/control → T02 owned plan → T03 DNS inversion → T04 TCP egress → T05 UDP
   association/reuse → T06 ownership split → T07 exact qualification；全部serial drain。
-- **Footprint:** baseline code/tests `18940/39748`、case/support/fixture `33999/5152/597`；forecast net
-  `550/0/0`，但moved owner files可能触发file-size `REVIEW_REQUIRED`，需显式审查而不删证据。
-- **Performance:** required regression/resource evidence because transport/lifecycle ownership changes；
-  reuse existing M4/M12 workload，no new threshold/claim。
+- **Footprint:** final code/tests `21814/39632`、ratio `1.816815` PASS、case/support/fixture
+  `33883/5152/597` and milestone delta `-116/0/0`。Integrity PASS；moved owner-file size is accepted
+  `REVIEW_REQUIRED` with `92/92` product test names and unchanged assertion inventory。
+- **Performance:** required regression/resource evidence passed in `31223831024/1`：10 throughput trials、
+  10k idle/RSS/drain and DNS direct/detoured bounds/drain/rebind；no new threshold/claim。
 - **Deferred/out of scope:** new matcher/action、retry/fallback/group/health/LB、DNS feature、TUN/
   transparent、typed-ID rewrite、plugin/Endpoint registry、new crate/dependency/harness、hot reload、
   management、package/release/publication。
-- **Next/remote boundary:** T06 accepted at exact `c3bb625b…` after its bounded ownership repair and the
-  required independent scanner escalation；targeted Architect/QA and integration focused/Full all PASS。
-  T07 is ready。Required final non-force pushes and performance/resource dispatches are authorized
-  through close；unchanged-SHA rerun、force-push、PR、tag、package、release and publication remain
-  unauthorized。
+- **Next/remote boundary:** none for M13。All seven tickets are done；automatic `31223817144/1` and
+  manual `31223831024/1` succeeded on exact `1af1bbf…`。The one push and one dispatch scopes are
+  consumed；no rerun、second push/dispatch、force-push、PR、tag、package、release or publication occurred。
 
 ## 决策登记
 
@@ -1263,3 +1264,4 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 | 2026-08-08 | M13-T04 integration | One private concrete `ClientEgressEngine` executes caller-selected owned TCP plans for SOCKS and DNS；composition retains policy，engine retains credentials/deadlines/nested lifetimes；T04 done、T05 ready | Initial Architect `BLOCK` found deadline evidence bypassing the seam and no SOCKS consumer guard while QA passed；one bounded evidence repair `7c1fc99` removed the duplicate executor，moved deadline/min-cap evidence through the engine and closed both IDs in targeted Architect/QA `PASS` | Integration focused and Full PASS，lifecycle `1/1` 126.62s、docs PASS；one invalid parallel focused attempt reproduced process-local port reservation contention，then isolated and authoritative serial runs passed unchanged；footprint integrity PASS、`+49/+197/0/0`、ratio-only WARN、no file signal；no remote action |
 | 2026-08-08 | M13-T05 integration | One engine-owned bounded UDP association now serves SOCKS and DNS；association protocol state keys the core snapshot without copying，and exact-server/snapshot idle reuse resets eligibility before every request；T05 done、T06 ready | Initial Architect/QA `BLOCK` found a boxed hop copy and a matrix unable to kill stale healthy reuse；one bounded repair `4d75d2b` added allocation-identity and same-owner healthy-then-failure mutation evidence，closing all IDs in targeted Architect/QA `PASS` | Integration T05 focused and Full PASS，lifecycle `1/1` 127.26s、docs PASS；ticket footprint integrity PASS、`+528/+122/0/0`、ratio-only WARN。Milestone `+646/0/0` and moved-file numeric `REVIEW_REQUIRED` remain visible for T06/T07 disposition；no remote action |
 | 2026-08-08 | M13-T06 integration / escalation closure | Client/server/core/config implementation and tests now live with explicit owners；composition roots retain process wiring only；T06 done、T07 ready at exact `c3bb625b` | Initial Architect/QA blocked glob-facade、test-monolith and literal-guard evidence；one bounded repair closed ownership/test placement，but targeted QA retained scanner escapes。Two required independent `gpt-5.6-sol/xhigh` read-only analyses agreed on the same one-file repair；exact cfg-test boundaries、counted visibility、all globs/test cycles and root mutation guards then closed every finding in targeted Architect/QA `PASS` | Integration T06 focused and Full PASS，workspace `372/5`、TCP/UDP DNS E2E `1/1` each、lifecycle `1/1`、docs PASS；footprint integrity PASS，ticket `-762/0/0` and milestone `-116/0/0` are reviewed owner-file classification movement with `92/92` names and unchanged assertions；numeric moved-file `REVIEW_REQUIRED` remains visible for T07，no remote action |
+| 2026-08-08 | M13 close | Exact `1af1bbf` closes T01～T07 with one owned plan snapshot、DNS-owned runtime model、shared private TCP/UDP egress and composition-only roots；no product behavior added | Final full Architect/QA both `PASS` with zero blocker；all T01～T06 focused and T07 local/Rust1.88/lifecycle gates passed；moved-file numeric review accepted without evidence deletion | Automatic `31223817144/1` and manual `31223831024/1` both success：platforms `3/3`、TCP/UDP `12/12` + cleanup、12 DNS cases + cleanup、throughput `144633582/546819276` ratio `0.264499787`、10k/180/RSS `6/6`/drain and DNS `4600/4466` queries、48 samples、RSS `12/12`、bounds/drain/rebind PASS；one push/dispatch consumed，no release/publication |

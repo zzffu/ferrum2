@@ -1,7 +1,10 @@
 # M13 — behavior-preserving architecture consolidation
 
-- **Status:** executing
-- **Qualified product baseline:** `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`
+- **Status:** closed
+- **Qualified M12 product baseline:** `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`
+- **Qualified M13 product:** `1af1bbf44b37a81c2ae03c562288b2a6e09694b5`
+- **Qualified product tree:** `172870c4ca0dffb6c474f2137399d553e827b1e4`
+- **Remote branch:** `codex/integration/m13`
 - **Planning baseline:** `4810ec5c5a1063cb8e60d1b950900c7f38d74548`
 - **Planning tree / parent:** `d732eccc2b5b38c91dcccb83d77eba9bfa6ac372` /
   `0b854e7ae2054f4f91b76a7dc705cc20762d9e92`
@@ -47,24 +50,24 @@ real repository；the external archive timestamp is not used as Git identity。
 
 ## Exit criteria
 
-- [ ] Qualified M12 behavior and planning baseline identities remain recorded and reproducible。
-- [ ] Core owns one allocation-preserving、redacted `EgressPlanSnapshot`；borrowed APIs remain compatible
+- [x] Qualified M12 behavior and planning baseline identities remain recorded and reproducible。
+- [x] Core owns one allocation-preserving、redacted `EgressPlanSnapshot`；borrowed APIs remain compatible
       and every product route/DNS-detour call site uses the owned snapshot。
-- [ ] `ferrum2_dns::PlanSnapshot` is removed；DNS has no normal dependency on config or binaries，and
+- [x] `ferrum2_dns::PlanSnapshot` is removed；DNS has no normal dependency on config or binaries，and
       config has no DNS dependency。
-- [ ] Client/server composition converts validated config to DNS runtime specs before side effects。
-- [ ] SOCKS TCP and DNS TCP detours share one chain executor；SOCKS UDP and DNS UDP detours share one
+- [x] Client/server composition converts validated config to DNS runtime specs before side effects。
+- [x] SOCKS TCP and DNS TCP detours share one chain executor；SOCKS UDP and DNS UDP detours share one
       bounded association implementation。
-- [ ] Exact-plan DNS UDP reuse、TC same-plan upgrade、failure discard and selector snapshot behavior are
+- [x] Exact-plan DNS UDP reuse、TC same-plan upgrade、failure discard and selector snapshot behavior are
       unchanged and bounded by existing owners。
-- [ ] Client DNS adapter knows only the existing DNS egress seam plus the private client egress module；
+- [x] Client DNS adapter knows only the existing DNS egress seam plus the private client egress module；
       it does not import SOCKS/process context or TCP/UDP implementation helpers。
-- [ ] Client/server `run.rs` contain root composition only；core/config public paths and all M12
+- [x] Client/server `run.rs` contain root composition only；core/config public paths and all M12
       configuration/error/behavior contracts remain exact。
-- [ ] Task/session/queue/buffer/replay/admission ceilings、graceful/forced shutdown、zero owners、exact
+- [x] Task/session/queue/buffer/replay/admission ceilings、graceful/forced shutdown、zero owners、exact
       rebind and low-cardinality redacted telemetry remain exact。
-- [ ] No new workspace crate、third-party dependency、unsafe、fixture、harness or data plane is added。
-- [ ] One exact integration SHA passes focused、Full、Rust 1.88、100+ lifecycle、three-platform、SIP022
+- [x] No new workspace crate、third-party dependency、unsafe、fixture、harness or data plane is added。
+- [x] One exact integration SHA passes focused、Full、Rust 1.88、100+ lifecycle、three-platform、SIP022
       and DNS interop、footprint、Architect/QA and authorized performance/resource gates with zero
       blocking findings。
 
@@ -78,7 +81,7 @@ real repository；the external archive timestamp is not used as Git identity。
 | M13-T04 | Extract one client TCP egress interface for SOCKS and DNS | M13-T03 | done |
 | M13-T05 | Extract one bounded client UDP association and exact-plan reuse key | M13-T04 | done |
 | M13-T06 | Split client/server/core/config modules by ownership and enforce architecture | M13-T05 | done |
-| M13-T07 | Qualify one exact M13 integration SHA | M13-T06 | ready |
+| M13-T07 | Qualify one exact M13 integration SHA | M13-T06 | done |
 
 ```text
 M13-T01 contract/control
@@ -103,21 +106,20 @@ may trigger file-size `REVIEW_REQUIRED` when moved tests are compared with zero�
 not correctness results，and are dispositioned without deleting independent evidence。No third helper、
 fixture or second harness is planned。
 
-After T06，the exact milestone signal is case/support/fixture `-116/0/0`。The case movement is source
+The final exact milestone signal is case/support/fixture `-116/0/0`。The case movement is source
 reclassification from splitting the former inline monolith：the base/current product test-name multiset
 is `92/92`，assertion inventory is unchanged and workspace behavior remains green。Integrity remains
 `PASS` and the ratio is now `PASS`；the numeric `REVIEW_REQUIRED` is only the forecasted moved owner-file
-size signal。Keep it visible through T07 and disposition it without deleting evidence or reforecasting
-policy merely to reduce the number。
+size signal。Final Architect/QA accept it as honest ownership movement with zero support/fixture loss；
+no evidence was deleted and no policy threshold was reforecast to reduce the number。
 
-The user authorizes all required final non-force pushes and performance/resource workflow dispatches
-through M13 close；the workflow still uses only accepted exact SHAs/ranges and does not rerun unchanged
-failed evidence。No force-push、PR、tag、package、release or publication is authorized。
+The authorized exact product received one non-force push and one manual performance/resource dispatch。
+Both completed `success`；the scopes are consumed。No unchanged-SHA rerun、second push/dispatch、force-
+push、PR、tag、package、release or publication occurred。
 
 ## Blocker / next action
 
-No blocker。T06 is accepted and fast-forward integrated at `c3bb625b…`。The initial ownership split
-required one bounded repair；the first targeted QA still found mutation escapes，so the user-mandated two
-independent read-only analyses were completed and agreed on one test-only scanner repair。The repaired
-exact SHA passed targeted Architect/QA and integration focused/Full。Proceed with T07 exact-SHA local、
-hosted and performance/resource qualification；do not credit ticket-branch or earlier-run evidence。
+No blocker or remaining M13 action。Exact product `1af1bbf…` passed local qualification、final full
+Architect/QA、automatic run `31223817144/1` and manual performance/resource run `31223831024/1`。
+All seven tickets are done and M13 is closed。The closeout commit is documentation-only and does not
+replace the qualified product identity。

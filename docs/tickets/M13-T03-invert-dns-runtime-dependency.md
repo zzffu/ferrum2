@@ -30,18 +30,18 @@ config-to-runtime conversion to client/server composition without changing DNS b
 
 ## Acceptance
 
-- [ ] `TaggedResolver` consumes DNS-owned specs；DNS source/public interface no longer mentions config
+- [x] `TaggedResolver` consumes DNS-owned specs；DNS source/public interface no longer mentions config
       DTOs or exports `PlanSnapshot`。
-- [ ] Cargo metadata proves DNS's only normal workspace-internal dependency is core，config has no DNS
+- [x] Cargo metadata proves DNS's only normal workspace-internal dependency is core，config has no DNS
       edge and no third-party identity/feature/provider changes；the existing DNS manifest/feature
       policy guard is updated in place from the superseded config edge to the approved core edge。
-- [ ] Client/server pure conversions preserve all UDP/TCP/DoT/DoH direct/detour values，validation/error
+- [x] Client/server pure conversions preserve all UDP/TCP/DoT/DoH direct/detour values，validation/error
       ordering and zero-side-effect `--check-config` behavior；binary-owned unit tables prove conversion，
       while the unchanged config contract remains DTO/schema evidence。
-- [ ] Four transports、server order、no fallback/cache/retry、selector snapshot and UDP TC same-plan
+- [x] Four transports、server order、no fallback/cache/retry、selector snapshot and UDP TC same-plan
       behavior pass through `EgressPlanSnapshot` with no hop copy。
-- [ ] Existing DNS owner/admission/deadline/shutdown/rebind and redaction evidence remains exact。
-- [ ] `TEST-0014` T03、repository Quick、ticket footprint and blocking Architect/QA review pass on one
+- [x] Existing DNS owner/admission/deadline/shutdown/rebind and redaction evidence remains exact。
+- [x] `TEST-0014` T03、repository Quick、ticket footprint and blocking Architect/QA review pass on one
       exact candidate。
 
 ## Validation
