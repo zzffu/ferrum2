@@ -76,8 +76,8 @@ pair is either declared together on that outbound or inherited together from glo
 _Avoid_: Chain, selector, server direct outbound, multi-user identity
 
 **Egress plan**:
-The immutable ordered concrete-outbound snapshot returned by one client selection call. A direct action
-has one hop; a proxy chain has two or more.
+The owned, immutable ordered concrete-outbound snapshot returned by one client selection call. A direct
+action has one hop; a proxy chain has two or more，and later selector switches never change that snapshot.
 _Avoid_: Route, selector current state, retry sequence
 
 **Fixed proxy chain**:

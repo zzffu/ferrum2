@@ -58,6 +58,10 @@ run `31143886273/1`和full manual performance run `31144255549/1`关闭。Hickor
 tagged DNS UDP/TCP/DoT/DoH、client/server detour、CoreDNS/BIND、SIP022 TCP/UDP、three platforms和
 DNS resource bounds/drain/rebind均通过；首次failed performance `31134561696/1`保留并驱动exact-plan
 UDP association reuse root-cause repair。Blocking findings为零，未package、release或publish。
+M13现为`planned`：以qualified product `c06386e9`和真实planning baseline `4810ec5c`为双重
+证据源，只整固owned egress-plan、DNS runtime dependency、private client egress及composition-root
+ownership，不增加schema、wire、DNS/routing action或产品能力。七票按serial drain执行；performance
+因hot-path/resource ownership迁移而required，但无threshold或claim。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -89,6 +93,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M10 | M9 closed | tagged manual outbound selector与公开原子切换interface |
 | M11 | M10 closed | client固定有序proxy chain与per-concrete-outbound method/PSK |
 | M12 | M11 closed | tagged DNS resolver/proxy、UDP/TCP/DoT/DoH与独立DNS action |
+| M13 | M12 closed | 行为保持型owned egress、DNS dependency与composition-root整固 |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -112,6 +117,9 @@ M12只规划一个optional DNS graph：client UDP/TCP proxy和server domain reso
 first-match条件，但以独立server action选择numeric-bootstrap UDP/TCP/DoT/DoH upstream；每个
 server另可用`detour`引用existing egress action。Cache、general retry、new server proxy outbound、
 DNSSEC、DoQ/DoH3和advanced matchers继续延期。
+M13只规划架构整固：core提供唯一owned egress-plan snapshot，DNS runtime不再依赖config DTO，
+SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按ownership拆分source。
+所有M12行为和资源合同保持；不增加crate、dependency、registry、harness或future action脚手架。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -1026,6 +1034,29 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
   Post-repair architecture/QA PASS，blocking findings为零；failed run保持可见。No unchanged-SHA rerun、
   duplicate dispatch、PR、tag、package、release或publication。
 
+## M13 — behavior-preserving architecture consolidation
+
+- **Status:** planned
+- **Objective:** 以core唯一owned `EgressPlanSnapshot`收敛route/DNS identity；用DNS-owned runtime
+  spec删除`ferrum2-dns -> ferrum2-config`；让SOCKS TCP/UDP和DNS detour共用private concrete
+  `ClientEgressEngine`；语义迁移green后按ownership拆client/server/core/config。
+- **Baselines:** qualified M12 product `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`；planning exact
+  `4810ec5c5a1063cb8e60d1b950900c7f38d74548`，tree `d732eccc2b5b38c91dcccb83d77eba9bfa6ac372`，
+  parent `0b854e7ae2054f4f91b76a7dc705cc20762d9e92`。
+- **Contracts:** ADR-0032、SPEC-0014、TEST-0014。Borrowed core plan APIs、schema v1、CLI/errors、
+  SIP022/DNS wire、first-match/selector/chain、admission/deadline、owner shutdown/rebind和telemetry exact。
+- **Tickets:** T01 contract/control → T02 owned plan → T03 DNS inversion → T04 TCP egress → T05 UDP
+  association/reuse → T06 ownership split → T07 exact qualification；全部serial drain。
+- **Footprint:** baseline code/tests `18940/39748`、case/support/fixture `33999/5152/597`；forecast net
+  `550/0/0`，但moved owner files可能触发file-size `REVIEW_REQUIRED`，需显式审查而不删证据。
+- **Performance:** required regression/resource evidence because transport/lifecycle ownership changes；
+  reuse existing M4/M12 workload，no new threshold/claim。
+- **Deferred/out of scope:** new matcher/action、retry/fallback/group/health/LB、DNS feature、TUN/
+  transparent、typed-ID rewrite、plugin/Endpoint registry、new crate/dependency/harness、hot reload、
+  management、package/release/publication。
+- **Next/remote boundary:** accept one control+Markdown T01 commit，then start T02 from that exact SHA。
+  No push、dispatch、PR、tag、package、release or publication is authorized by planning。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -1070,6 +1101,7 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
 | DEC-038 | resolved in M10 plan | additive tagged-only `[[selectors]]`、explicit default、bounded all-edge DAG；shared core selector state与公开`selected`/`switch` interface；RouteTable内部返回concrete identity并沿用现有TCP/UDP selection-call granularity；无external control、auto policy、retry/health/LB | `CONTEXT.md`、ADR-0029、SPEC/TEST-0011、M10-T01～T03 |
 | DEC-039 | resolved in M11 plan | global `[shadowsocks]`继续mandatory；client outbound credential fields both-or-neither并可完整override；client-only `[[chains]]`为`1..=64` entries、每条`2..=8` unique concrete hops；direct/chain编译为immutable plan供static/route/selector选择；TCP逐层nest existing flow，UDP inner→outer encode/outer→inner authenticated open；任一失败no retry/fallback，server credentials不变 | `CONTEXT.md`、ADR-0030、SPEC/TEST-0012、M11-T01～T05 |
 | DEC-040 | resolved in M12 plan | exact Hickory resolver/proto/server 0.26.1使MSRV升至1.88.0；optional client DNS UDP/TCP proxy与server custom resolver共用唯一first-match matcher但使用独立server action；每个DNS server可用optional `detour`引用existing egress action，absence direct，client支持concrete/chain/selector且server限existing direct；numeric bootstrap + verified DoT/DoH identity；cache/retry为0，selected/detour failure no fallback；global DNS+egress deadline/admission和tracked awaited tasks | `CONTEXT.md`、ADR-0031、SPEC/TEST-0013、M12-T01～T06 |
+| DEC-041 | resolved in M13 plan | core唯一owned allocation-preserving egress-plan snapshot并保留borrowed views；DNS-owned runtime spec使DNS normal workspace-internal dependency只指向core；private concrete client egress执行caller-selected plan且不拥有policy；semantic migration完成后才按ownership拆composition roots，无new crate/trait/registry/harness | `CONTEXT.md`、ADR-0032、SPEC/TEST-0014、M13-T01～T07 |
 
 ## 风险登记
 
@@ -1114,6 +1146,10 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
 | Client internal DNS UDP复制SIP022 data plane或隐式开放public UDP ASSOCIATE | P0 | M12 | reuse existing UDP codec/session owners、separate public admission boolean、on/off matrix、shared saturation/cleanup and architecture review |
 | DoT/DoH错误identity、plaintext downgrade或DoH path/body被宽松接受 | P0 | M12 | ring/WebPKI verified server name、closed transport fields、wrong CA/name/time/path/status/body negatives和no-downgrade counters |
 | Hickory default retry/cache/background task绕过deadline或shutdown owner | P0 | M12 | effective options retry/cache zero、shared max-inflight、tracked runtime task set、forced join/zero-owner/rebind及performance/resource evidence |
+| route与DNS复制plan identity导致selector snapshot、TC upgrade或UDP reuse分叉 | P0 | M13 | core唯一owned snapshot、allocation/equality/hash mutation rows、删除DNS snapshot和product hop copies |
+| DNS runtime继续持有config DTO或以反向dependency“修复”分层 | P1 | M13 | DNS-owned spec、binary pure conversion、Cargo metadata allowed map与zero-side-effect config cohort |
+| client egress抽取成为shallow trait/registry或DNS仍穿透process/SOCKS context | P1 | M13 | one private concrete module、two real consumers、source/import guards和no-new-crate/dependency policy |
+| source movement破坏UDP mutation ordering、owner shutdown或通过复制tests伪造green | P0 | M13 | semantics-first tickets、interface tests move with owner、architecture guard、Full/100+ lifecycle/rebind及reviewed moved diff |
 
 ## 决策与范围变更日志
 
@@ -1216,3 +1252,4 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
 | 2026-08-05 | M12-T05 formal-review repair lease | Initial Architect/QA both `BLOCK` exact `093109d8` on a fresh A/AAAA DNS deadline，a copied local DNS fixture codec，missing real-server negative/lifecycle evidence and no encrypted server-resolution witness。Per user direction，two independent `gpt-5.6-sol/xhigh` read-only analyses were started before the sole Engineer repair and both completed | Both analyses require Hickory-owned fixture encoding and existing local/external harness extensions；they differ only between two shared-deadline lookups and one `lookup_ips` command。The latter is selected because it owns one deadline，permit，plan snapshot and task set | Grant only `tests/m0-harness/Cargo.toml` for an already pinned test-only `hickory-proto` edge plus the already-owned DNS/server/harness paths；no new identity，provider，retry/fallback，workflow change or second harness。Formal repair counter advances only when the Engineer edits the ticket worktree |
 | 2026-08-06 | M12-T05 hosted child-baseline repair lease | Exact `4dcd89f` run `31110243307/1` passed interop、footprint、MSRV and all platforms，but Linux quality failed the DNS TCP case's global child-count assertion with one concurrent two-hop child still active | The DNS case had reaped both owned children；`ACTIVE_CHILDREN` is changed only by `ChildGuard`，and the same log shows `fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps` completing later。The case released its initial spawn guard before work and did not reacquire it for cleanup | Add only the existing `hold_process_spawns_at_or_below(baseline)` guard after owned-child reap and before count/rebind probes。No signal helper/caller、product、workflow or remote action change；another push requires separate authorization |
 | 2026-08-07 | M12 close | Exact `c06386e9` closes all six tickets and M12 with tagged DNS proxy/resolution、four transports、per-server detour and Rust 1.88 | First performance run `31134561696/1` exposed real per-query detoured SIP022 UDP session retention；the minimal same-server/exact-plan idle association reuse repair kept existing capacity ownership and passed post-repair architecture/QA | Local serial gate、schema 3 integrity、automatic `31143886273/1` and manual `31144255549/1` PASS；DNS `4564/4450` queries、48 samples、RSS `12/12`、bounds/drain/rebind PASS；numeric `6211/1081/0` accepted，no release/publication |
+| 2026-08-07 | M13 plan | M13改为`planned`；接受core owned plan、DNS runtime inversion、private concrete client egress及semantics-first ownership split | M12 closed；current duplicate snapshots、DNS/config edge和client DNS helper reach-through由真实`4810ec5c` source确认，existing route/DNS/egress/lifecycle seams足够，不需new crate/trait/registry | qualified `c06386e9`、planning `4810ec5c`；ADR-0032、SPEC/TEST-0014、T01→T02→T03→T04→T05→T06→T07；schema 3 forecast `550/0/0`、performance required；plan-only，无product/push/dispatch/release/publication |
