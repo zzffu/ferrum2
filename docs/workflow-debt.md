@@ -31,3 +31,10 @@ No M10 workflow debt remains。The unchanged push workflow produced all nine req
 `2df141e720580d2f8fe16bee6c9698f4e85a520a` in run `30906020944/1`；schema 3 footprint and
 final qualification passed。Performance remains an existing regression/aggregate dependency and creates
 no M10 threshold or claim；no workflow、provider、job or process-control harness was added。
+
+## M12 close audit
+
+No M12 workflow debt remains。The existing M4 qualification tool/job was extended with one DNS-resource
+mode rather than adding a second harness or workflow。Exact product
+`c06386e9344c07d86ea4a3b63dc73f37f20ceb0e` passed automatic run `31143886273/1` and manual run
+`31144255549/1`，including exact-SHA DNS resource markers and successful process/evidence cleanup。

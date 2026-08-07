@@ -1,6 +1,6 @@
 # M12 — tagged DNS resolution and proxy
 
-- **Status:** executing
+- **Status:** closed
 - **Baseline:** `c733e0dd03e711c045c0b7a4ee189277fbe37698`
 - **Strategy:** drain
 - **Owner:** primary thread
@@ -78,24 +78,24 @@ Shadowsocks数据面或规则引擎。
 
 ## Exit criteria
 
-- [ ] Exact Hickory 0.26.1 dependency/features/license graph和Rust 1.88.0 MSRV通过；1.97.1 build
+- [x] Exact Hickory 0.26.1 dependency/features/license graph和Rust 1.88.0 MSRV通过；1.97.1 build
       toolchain及existing packages保持。
-- [ ] Legacy/M7/M8/M10/M11 schema cohort在`[dns]` absent时exact；所有DNS count/tag/role/
+- [x] Legacy/M7/M8/M10/M11 schema cohort在`[dns]` absent时exact；所有DNS count/tag/role/
       transport/bootstrap/TLS/path/rule/detour/loop错误在side effect前closed/redacted fail。
-- [ ] Outbound与DNS两种action通过同一core first-match实现；existing route/selector结果exact，
+- [x] Outbound与DNS两种action通过同一core first-match实现；existing route/selector结果exact，
       client qname:53与server original target contexts按first/final选择且failure no fallback。
-- [ ] Path A client proxy和Path B server resolver都按selected DNS server的optional `detour`使用
+- [x] Path A client proxy和Path B server resolver都按selected DNS server的optional `detour`使用
       configured egress action；absence direct、tag reachability、selector/flow snapshot、UDP TC
       same-plan upgrade及detour failure no-fallback通过。
-- [ ] Tagged UDP/TCP/DoT/DoH处理positive/NXDOMAIN/NODATA、UDP TC same-server upgrade、TLS/HTTP
+- [x] Tagged UDP/TCP/DoT/DoH处理positive/NXDOMAIN/NODATA、UDP TC same-server upgrade、TLS/HTTP
       validation、deadline和negative transport matrix；不复制DNS parser/framer。
-- [ ] Client真实UDP/TCP proxy与server真实TCP/UDP domain direct paths通过；malformed/error codes、
+- [x] Client真实UDP/TCP proxy与server真实TCP/UDP domain direct paths通过；malformed/error codes、
       client direct/detoured UDP/TCP/DoT/DoH、internal UDP不隐式开放SOCKS UDP ASSOCIATE、server
       detour、16 candidates、pre-resolution route order、IP bypass和SIP022 domain preservation通过。
-- [ ] Saturation/indirect loop/idle/cancel/graceful/forced cases保持固定connection/query/session/task/
+- [x] Saturation/indirect loop/idle/cancel/graceful/forced cases保持固定connection/query/session/task/
       buffer ceiling，Hickory/detour tasks归零并exact listener/hop/upstream rebind；无destination
       telemetry泄漏。
-- [ ] 一个exact SHA通过Full、Rust 1.88、100+ lifecycle、three native targets、existing SIP022
+- [x] 一个exact SHA通过Full、Rust 1.88、100+ lifecycle、three native targets、existing SIP022
       TCP/UDP各`12/12`+cleanup、CoreDNS/BIND DNS interop、schema 3 footprint、blocking reviews及
       separate authorized performance/resource job。
 
@@ -108,7 +108,7 @@ Shadowsocks数据面或规则引擎。
 | M12-T03 | Implement tagged Hickory upstreams over bounded direct/detour runtime adapters | M12-T02 | done |
 | M12-T04 | Expose client UDP/TCP DNS proxy with real Shadowsocks detours | M12-T03 | done |
 | M12-T05 | Compose server resolution/detours and prove external interoperability | M12-T04 | done |
-| M12-T06 | Qualify one exact M12 integration SHA | M12-T05 | active |
+| M12-T06 | Qualify one exact M12 integration SHA | M12-T05 | done |
 
 ~~~text
 M12-T01 exact dependency/MSRV
@@ -123,14 +123,17 @@ Tickets drain serially because T02 establishes the action/config identities cons
 share the new DNS crate and T05 must prove the integrated client/server path. Each writer uses one
 ticket branch/worktree；workflow documents remain read-only during product work。
 
-## Test-footprint forecast
+## Test-footprint disposition
 
-Schema 3 resets at baseline code/tests `16023/32456`、ratio `2.025588`、
-case/support/fixture `27788/4071/597`. Revised `TEST-0013` forecasts `1160/240/0` new
-case/support/fixture LOC. Milestone numeric `REVIEW_REQUIRED` is expected；T02～T05 expect ticket
-`WARN`，and existing client `run.rs` remains file `REVIEW_REQUIRED` if touched。Signals require
-Architect/QA disposition but do not weaken evidence。New DNS test files should stay below 800 semantic
-test LOC；no second harness、copied DNS codec或second SIP022 UDP data plane is planned。
+Schema 3 resets at baseline code/tests `16023/32456`、ratio `2.025588` and
+case/support/fixture `27788/4071/597`。The exact product reports code/tests `18940/39748`、ratio
+`2.098627` and case/support/fixture `33999/5152/597`，for deltas `6211/1081/0`。Integrity and change
+gates pass；the numeric result is `REVIEW_REQUIRED` for ratio and seven changed files above the file
+review threshold，including client `run.rs` at 8,356 semantic test LOC。
+
+Architecture/QA accept the signal because the growth is distinct DNS transport、negative、lifecycle、
+real-process interop and resource evidence。No fixture LOC、second harness、copied DNS codec or second
+SIP022 data plane was added，and deleting independent evidence solely to lower the metric is rejected。
 
 ## Execution / remote boundary
 
@@ -156,7 +159,7 @@ exact `7d2cadabef8d558ac6d8ee52be1fa7d6183dc6d6`。Its initial Architect/QA bloc
 exactly one bounded repair；targeted Architect/QA both returned `PASS`，so no post-review dual-agent
 diagnosis was required。Integration core/client/DNS tests、workspace policy `21/21`、Full、Rust 1.88、
 ignored lifecycle `1/1` (`130.37s`)、docs and locked offline metadata pass。Footprint integrity passes；
-numeric `REVIEW_REQUIRED` (`+2260/0/0`、code `+433`、ratio `2.104062`) is accepted。M12-T05 is active
+numeric `REVIEW_REQUIRED` (`+2260/0/0`、code `+433`、ratio `2.104062`) is accepted。M12-T05 then started
 from that exact integration product。Before product edits，its ownership was completed with the existing
 server manifest、lock row and workspace-policy assertion required for the already-declared local
 `ferrum2-dns` edge；no new package identity or `main.rs` change is authorized。The existing external
@@ -178,9 +181,8 @@ at exact `12bde8ba8894ede1bcc4ed664931bb7bf6d782c1`。The earlier immutable host
 concurrent test child；the bounded one-line spawn-serialization repair was re-reviewed。Automatic run
 `31111849601/1` on the repaired exact candidate passed CoreDNS/BIND、quality、footprint、Rust 1.88、
 Windows MSVC、Linux GNU/musl and aggregate qualification，including TCP/UDP `12/12` plus DNS cleanup。
-The single authorized non-force T05 candidate push was consumed。T06 is active from the exact local
-integration product；any additional push and the required manual performance dispatch each remain
-separately unauthorized。No PR、tag、package、release or publication has occurred。
+The single authorized non-force T05 candidate push was consumed。T06 then started from the exact local
+integration product；no PR、tag、package、release or publication occurred。
 T06 local candidate `af7361ca0185b390b206a7d651629c7f8326b456` passed focused T01～T05、Full、
 Rust 1.88、ignored lifecycle、docs and footprint integrity；Architect/QA accepted its architecture and
 numeric `REVIEW_REQUIRED`。Both reviews independently blocked remote qualification because the manual
@@ -188,3 +190,28 @@ job still exposes only the legacy M4 workload and cannot produce M12 DNS idle/di
 evidence。A bounded T06 repair now owns only the existing M4 qualification seam、its exact workflow
 invocation and required manifest/lock/policy rows；no second harness/job or product change is authorized。
 No push or dispatch authorization was consumed for `af7361ca`，and it will not be reused for a changed SHA。
+
+The qualification repair integrated at `17f412be0195b6bc7cd2be7944b64d808442f66f`。Its first hosted
+manual performance run `31134561696/1` failed honestly when detoured DNS drove the server FD count above
+the owner ceiling。Exact local reproduction and `/proc` sampling proved a production cause：each query
+dropped its client `PreparedClientUdp` while the server retained the corresponding SIP022 UDP session
+until idle expiry。The minimal product repair `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e` reuses one
+idle association only for the same static server and exact concrete hop plan，drops it after I/O failure，
+and remains bounded by the existing UDP manager。No config/protocol/dependency/new-task surface changed。
+
+Exact product `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`、tree
+`4b963c89be0c2709077e3da4076adf0e122d3fe7` passed the serial local Full、Rust 1.88、100+ lifecycle、
+docs、schema 3 integrity and post-repair architecture/QA gates。Automatic push run
+[`31143886273/1`](https://github.com/zzffu/ferrum2/actions/runs/31143886273) completed `success`：quality、
+test-footprint、MSRV、Windows MSVC、Linux GNU/musl、CoreDNS/BIND plus SIP022 interop and aggregate
+qualification all succeeded；push-event performance was correctly skipped。Separately authorized manual
+run [`31144255549/1`](https://github.com/zzffu/ferrum2/actions/runs/31144255549) completed all nine jobs
+`success`。Its performance markers report legacy throughput/resource PASS and DNS direct `4564`、detoured
+`4450` queries、48 samples、RSS windows `12/12`、bounds/drain/rebind PASS，all bound to the exact
+SHA/run/attempt；cleanup also succeeded。
+
+The failed `31134561696/1` remains visible and is not reclassified。Each changed exact SHA received at
+most one authorized push and one manual dispatch；no unchanged-SHA rerun or duplicate dispatch occurred。
+All six tickets are `done`，blocking findings are zero and M12 is `closed`。No PR、tag、package、release or
+publication was performed；the dedicated closeout commit is documentation-only and is not a separately
+qualified product SHA。

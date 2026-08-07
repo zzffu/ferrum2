@@ -1,7 +1,7 @@
 ---
 id: M12-T06
 milestone: M12
-status: active
+status: done
 depends_on: [M12-T05]
 owns:
   - .github/workflows/m0.yml
@@ -28,15 +28,17 @@ existing SIP022 plus new DNS interoperability and separately authorized performa
 
 ## Acceptance
 
-- [ ] T01～T05 focused commands and serial Full/MSRV/docs/lifecycle pass on the accepted exact SHA；
+- [x] T01～T05 focused commands and serial Full/MSRV/docs/lifecycle pass on the accepted exact SHA；
       ticket-only evidence is not substituted。
-- [ ] Rust 1.88、Windows MSVC、Linux GNU/musl、existing SIP022 TCP/UDP `12/12` each plus cleanup and
+- [x] Rust 1.88、Windows MSVC、Linux GNU/musl、existing SIP022 TCP/UDP `12/12` each plus cleanup and
       direct/detoured CoreDNS/BIND DNS interoperability pass without SHA/run/attempt splicing。
-- [ ] Schema 3 integrity passes and numeric footprint signals are accepted、reduced or honestly
+- [x] Schema 3 integrity passes and numeric footprint signals are accepted、reduced or honestly
       reforecast；blocking Architect/QA findings are zero。
-- [ ] Only after separate explicit authorizations，one non-force push runs automatic qualification and
+- [x] Only after separate explicit authorizations，one non-force push runs automatic qualification and
       one exact-SHA manual dispatch runs required performance/resource evidence。
-- [ ] No rerun、second push/dispatch、PR、tag、package、release or publication is inferred。
+- [x] Failed exact-SHA evidence remains visible；each changed SHA receives at most one authorized push
+      and manual dispatch，with no unchanged-SHA rerun、duplicate dispatch、PR、tag、package、release or
+      publication inferred。
 
 ## Bounded performance repair lease
 
@@ -78,10 +80,46 @@ is authorized。
 
 ## Validation
 
-Run `TEST-0013` T06 focused reruns and its serial integration gate。Remote commands remain blocked until
-the user grants exact authorization。
+Exact product `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e` passed T01～T05 focused reruns；format、
+strict workspace Clippy、workspace binary build/all-features tests、Rust 1.88 check/build/test、the
+ignored 100+ lifecycle row、workspace docs and diff check。The canonical milestone footprint command
+passed integrity and returned the reviewed numeric signal described below。
+
+## Result
+
+- **Identity:** product `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`，tree
+  `4b963c89be0c2709077e3da4076adf0e122d3fe7`。Remote `codex/integration/m12` points exactly to the
+  product；the dedicated local closeout commit is a docs-only descendant。
+- **Repair:** manual run `31134561696/1` on `17f412be0195b6bc7cd2be7944b64d808442f66f` failed the
+  detoured-DNS server owner ceiling。Exact local reproduction showed server FDs rising `16 -> 219` in
+  about one second while tasks stayed at `18`。Commit `c06386e9` reuses an idle client SIP022 UDP
+  association only for the same static server and exact concrete hop plan；I/O failure discards it and
+  the existing UDP manager remains the capacity owner。The sequential regression observes one server
+  session，and selector/saturation/rebind cases pass。
+- **Footprint/review:** schema 3 integrity/change pass。Code/tests are `18940/39748`，ratio `2.098627`；
+  case/support/fixture growth is `6211/1081/0`。The numeric `REVIEW_REQUIRED` signal is accepted because
+  it represents independent DNS transport、negative、lifecycle、interop and resource evidence；no fixture、
+  second harness、copied DNS codec or second SIP022 data plane was added。Post-repair architecture and QA
+  audits report `PASS` with zero blocking finding。
+- **Automatic qualification:** push run
+  [`31143886273/1`](https://github.com/zzffu/ferrum2/actions/runs/31143886273) completed `success` on the
+  exact product。Quality `92759272186`、test-footprint `92759272219`、MSRV `92759272222`、Windows MSVC
+  `92759272313`、Linux GNU `92759272198`、Linux musl `92759272250`、interop `92759272257` and
+  qualification `92760068203` all succeeded；performance `92759272750` was correctly skipped for the
+  push event。Exact markers report SIP022 TCP/UDP `12/12` each plus cleanup、all 12 DNS interop cases、
+  DNS cleanup and aggregate PASS for SHA/run/attempt。
+- **Manual performance/resource:** workflow-dispatch run
+  [`31144255549/1`](https://github.com/zzffu/ferrum2/actions/runs/31144255549) completed all nine jobs
+  `success`。Performance job `92760357350` reports ferrum/reference medians
+  `137553510/478270805`、ratio `0.287605910`、10 trials；`10000` sessions、`180` samples、RSS windows
+  `6/6` and drain PASS；DNS direct `4564`、detoured `4450` queries、48 samples、RSS windows `12/12`、
+  bounds/drain/rebind PASS。All five completion markers and the cleanup step bind
+  `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e/31144255549/1`。The ratio is diagnostic only。
+- **Boundary:** failed run `31134561696/1` remains visible and uncredited。The repaired SHA received one
+  non-force push and one manual dispatch；no unchanged-SHA rerun or duplicate dispatch occurred。No PR、
+  tag、package、release or publication was performed。
 
 ## Rollback / risk
 
-Qualification evidence is immutable and exact-SHA bound。Any failed/partial provider result remains
-visible；repair、rerun or new remote mutation requires a new approved scope。
+Qualification evidence is immutable and exact-SHA bound。Any future repair、rerun、remote mutation or
+publication requires new scope；the closeout commit does not replace the qualified product identity。

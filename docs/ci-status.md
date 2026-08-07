@@ -1,5 +1,46 @@
 # CI 与验证状态
 
+## M12 closed — tagged DNS automatic qualification and full performance complete
+
+- **Exact identity:** product `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`，tree
+  `4b963c89be0c2709077e3da4076adf0e122d3fe7`。Remote `codex/integration/m12` points exactly to that
+  product；the dedicated local closeout commit is a docs-only descendant and is not claimed as a new
+  qualified product。
+- **Local exact gate:** T01～T05 focused evidence、format、strict workspace Clippy、workspace binary
+  build/all-features tests、Rust 1.88 check/build/test、ignored 100+ lifecycle、workspace docs、schema 3
+  integrity and diff passed。Post-repair architecture and QA audits returned `PASS` with no blocking
+  finding。
+- **Automatic hosted qualification:** immutable push run
+  [`31143886273/1`](https://github.com/zzffu/ferrum2/actions/runs/31143886273) completed `success` on the
+  exact product。Quality `92759272186`、test-footprint `92759272219`、MSRV `92759272222`、Windows MSVC
+  `92759272313`、Linux GNU `92759272198`、Linux musl `92759272250`、interop `92759272257` and
+  qualification `92760068203` all succeeded；performance `92759272750` was correctly skipped for the
+  push event。
+- **Decisive automatic markers:** SIP022 TCP and UDP each report `12/12` plus cleanup；all 12 direct/
+  detoured CoreDNS/BIND DNS cases and DNS cleanup pass；the M12 interop and final aggregate markers bind
+  SHA/run/attempt `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e/31143886273/1`。
+- **Full manual performance/resource:** workflow-dispatch run
+  [`31144255549/1`](https://github.com/zzffu/ferrum2/actions/runs/31144255549) completed all nine jobs
+  `success`。Performance job `92760357350` reports throughput medians `137553510/478270805`、ratio
+  `0.287605910`、10 trials；legacy resources `10000` sessions、`180` samples、RSS windows `6/6` and
+  drain PASS；DNS direct `4564`、detoured `4450` queries、48 samples、RSS windows `12/12`、bounds/drain/
+  rebind PASS。`m4_throughput_completion`、`m4_resource_completion`、
+  `m12_dns_resource_completion`、`m4_performance_completion` and `m12_performance_completion` each bind
+  the exact SHA/run/attempt；the main and cleanup steps succeeded。The throughput ratio is diagnostic only。
+- **Root-cause repair:** first manual run `31134561696/1` on exact `17f412be0195b6bc7cd2be7944b64d808442f66f`
+  failed the detoured-DNS server owner ceiling and remains visible。Local reproduction proved one new
+  client SIP022 UDP association per query while server sessions remained alive until idle expiry；server
+  FDs rose `16 -> 219` in about one second with tasks fixed at `18`。Commit `c06386e9` reuses only an idle
+  association matching the same static server and exact concrete hop plan，drops it on I/O failure and
+  keeps the existing UDP manager as the capacity owner。No threshold was raised。
+- **Footprint:** schema 3 integrity/change passed。Code/tests are `18940/39748`、ratio `2.098627`；
+  case/support/fixture growth is `6211/1081/0`。The numeric `REVIEW_REQUIRED` result for ratio and changed
+  file sizes is accepted as distinct DNS transport、negative、lifecycle、interop and resource evidence；
+  no fixture、second harness、copied DNS codec or second SIP022 data plane was added。
+- **Closure / boundary:** all M12 tickets are `done` and M12 is `closed`。Each changed exact SHA received
+  at most one authorized push and manual dispatch；there was no unchanged-SHA rerun or duplicate dispatch。
+  No PR、tag、package、release or publication was performed。
+
 ## M11 closed — automatic qualification and independent manual performance complete
 
 - **Exact identity:** product `6d975c1e45eb0e614c54961e35fdc19fa2478d98`，tree

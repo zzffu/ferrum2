@@ -53,11 +53,11 @@ push run `30943770483/1`及manual run `30945447936/1`的独立performance job `9
 Manual run整体为`failure`；其重复MSRV、interop和qualification失败保持uncredited，不改写为PASS。
 Final Architect/QA均`PASS_WITH_NOTES`；两次remote授权均已消费，provider-created automatic attempt 2
 不计入，且没有rerun、second push/dispatch或release证据。
-M12以clean `master@c733e0dd03e711c045c0b7a4ee189277fbe37698`进入`executing`：使用exact
-Hickory 0.26.1交付tagged DNS resolver/proxy和sing-box-style outbound `detour`，并因其依赖合同
-把MSRV升至Rust 1.88.0。T01已集成于exact `d874865f4a66db8d7c50abad85e6092a16f52fb6`，
-T02已集成于exact `bf26d1587517fe80e701d73abfb45a340f4caa6c`，T03 active；尚无remote或
-publication证据。
+M12已由exact product `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`、local serial gate、automatic
+run `31143886273/1`和full manual performance run `31144255549/1`关闭。Hickory 0.26.1、Rust 1.88、
+tagged DNS UDP/TCP/DoT/DoH、client/server detour、CoreDNS/BIND、SIP022 TCP/UDP、three platforms和
+DNS resource bounds/drain/rebind均通过；首次failed performance `31134561696/1`保留并驱动exact-plan
+UDP association reuse root-cause repair。Blocking findings为零，未package、release或publish。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -68,8 +68,9 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M7-2026-08-03.md`和
 `docs/handoffs/HANDOFF-M8-2026-08-04.md`、
 `docs/handoffs/HANDOFF-M9-2026-08-04.md`、
-`docs/handoffs/HANDOFF-M10-2026-08-04.md`和
-`docs/handoffs/HANDOFF-M11-2026-08-05.md`。
+`docs/handoffs/HANDOFF-M10-2026-08-04.md`、
+`docs/handoffs/HANDOFF-M11-2026-08-05.md`和
+`docs/handoffs/HANDOFF-M12-2026-08-07.md`。
 
 ## 依赖顺序
 
@@ -986,7 +987,7 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
 
 ## M12 — tagged DNS resolution and proxy
 
-- **Status:** executing
+- **Status:** closed
 - **Objective:** 使用exact Hickory 0.26.1增加optional schema v1 DNS graph。Client
   `[[dns.inbounds]]`在同地址公开UDP/TCP proxy；server为authenticated domain target选择
   UDP/TCP/DoT/DoH server。DNS route复用既有inbound/network/exact-target first-match实现，
@@ -1006,27 +1007,24 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
   Full/MSRV/lifecycle/platforms/existing SIP022+new DNS interop/footprint/reviews/performance exact-SHA
   evidence。
 - **Tickets:** M12-T01 dependency/MSRV、M12-T02 config/shared matcher、M12-T03 tagged transports/
-  owner、M12-T04 client proxy及M12-T05 server resolver/interop均为`done`；M12-T06 exact-SHA
-  qualification依赖T05，当前`active`。Decision/spec/test为ADR-0031、SPEC/TEST-0013。
-- **Forecast:** test case/support/fixture `1160/240/0`，预计milestone numeric
-  `REVIEW_REQUIRED`；T02～T05预计ticket `WARN`。不新增second harness、copied DNS codec或second
-  SIP022 UDP data plane。
+  owner、M12-T04 client proxy、M12-T05 server resolver/interop及M12-T06 exact qualification均为
+  `done`。Decision/spec/test为ADR-0031、SPEC/TEST-0013。
+- **Footprint:** exact product code/tests `18940/39748`、ratio `2.098627`、case/support/fixture growth
+  `6211/1081/0`；integrity/change PASS，numeric `REVIEW_REQUIRED`已接受。不新增fixture、second
+  harness、copied DNS codec或second SIP022 UDP data plane。
   Performance为required regression/resource evidence，无threshold/claim。
 - **Deferred/out of scope:** recursive/authoritative/DNSSEC/mDNS/DoQ/DoH3、cache/general retry、
   group/health/LB/fallback、suffix/CIDR/qtype/client-IP/Geo/sniff、hostname bootstrap、new server-side
   proxy outbound、custom CA/insecure TLS、standalone DNS binary、hot reload、management API、package/
   release/publication。
-- **Execution / remote boundary:** T01～T04已依次集成；T05 final candidate `853ad972`通过local
-  evidence、Architect `PASS`及QA non-blocking `PASS_WITH_NOTES`，并集成于exact `12bde8ba`。
-  首次hosted run `31110243307/1`的Linux quality失败保持可见；一行并发spawn序列化修复后的
-  exact-candidate run `31111849601/1`通过CoreDNS/BIND、quality、footprint、Rust 1.88、three
-  platforms及aggregate TCP/UDP/DNS qualification。该次non-force push授权已用完；T06的任何新
-  push与required manual performance dispatch仍各需独立授权。无PR、tag、package、release或
-  publication。T06 local candidate `af7361ca`通过focused/Full/MSRV/lifecycle/docs/footprint，
-  但Architect/QA双审发现manual job只有legacy M4 workload，缺少required DNS roots idle、direct/
-  detoured query load、task/RSS/drain evidence；该SHA未执行任何remote mutation。T06获得一个
-  bounded lease，仅扩展existing M4 qualification seam和同一manual job，禁止第二harness/job及
-  product change；修复后的新SHA仍需重新双审和分别授权。
+- **Execution / remote boundary:** T01～T05依次集成；T06先扩展existing M4 qualification seam，
+  未增加second harness/job。Manual run `31134561696/1`在`17f412be`暴露detoured DNS per-query
+  SIP022 UDP session增长；exact local reproduction后，`c06386e9`以same-server/exact-plan bounded
+  idle association reuse修复生产路径。该exact product通过serial local gate、automatic run
+  [`31143886273/1`](https://github.com/zzffu/ferrum2/actions/runs/31143886273)和manual run
+  [`31144255549/1`](https://github.com/zzffu/ferrum2/actions/runs/31144255549)全部required evidence。
+  Post-repair architecture/QA PASS，blocking findings为零；failed run保持可见。No unchanged-SHA rerun、
+  duplicate dispatch、PR、tag、package、release或publication。
 
 ## 决策登记
 
@@ -1217,3 +1215,4 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
 | 2026-08-05 | M12-T05 Linux socket-test lease | T05 additionally leases inherited `tagged_upstreams.rs` and the existing client `reserve_address` helper for test-only Linux socket allocation repair | Hosted run `31017909356` failed one immediate client SERVFAIL and one tagged-upstream UDP rebind；unchanged exact candidate reproduced under WSL Linux after 13 client suites as DNS UDP rebind `EADDRINUSE` and after 26 tagged-upstream suites as paired TCP bind `EADDRINUSE`。This proves reused/uncoordinated ephemeral ports rather than DNS product semantics | Reuse existing issued-port and DNS `TEST_NETWORK`/paired-address patterns，then require repeated Linux default/all-feature suites、Full/MSRV and a fresh exact-SHA hosted run；no product、protocol、dependency or workflow change |
 | 2026-08-05 | M12-T05 formal-review repair lease | Initial Architect/QA both `BLOCK` exact `093109d8` on a fresh A/AAAA DNS deadline，a copied local DNS fixture codec，missing real-server negative/lifecycle evidence and no encrypted server-resolution witness。Per user direction，two independent `gpt-5.6-sol/xhigh` read-only analyses were started before the sole Engineer repair and both completed | Both analyses require Hickory-owned fixture encoding and existing local/external harness extensions；they differ only between two shared-deadline lookups and one `lookup_ips` command。The latter is selected because it owns one deadline，permit，plan snapshot and task set | Grant only `tests/m0-harness/Cargo.toml` for an already pinned test-only `hickory-proto` edge plus the already-owned DNS/server/harness paths；no new identity，provider，retry/fallback，workflow change or second harness。Formal repair counter advances only when the Engineer edits the ticket worktree |
 | 2026-08-06 | M12-T05 hosted child-baseline repair lease | Exact `4dcd89f` run `31110243307/1` passed interop、footprint、MSRV and all platforms，but Linux quality failed the DNS TCP case's global child-count assertion with one concurrent two-hop child still active | The DNS case had reaped both owned children；`ACTIVE_CHILDREN` is changed only by `ChildGuard`，and the same log shows `fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps` completing later。The case released its initial spawn guard before work and did not reacquire it for cleanup | Add only the existing `hold_process_spawns_at_or_below(baseline)` guard after owned-child reap and before count/rebind probes。No signal helper/caller、product、workflow or remote action change；another push requires separate authorization |
+| 2026-08-07 | M12 close | Exact `c06386e9` closes all six tickets and M12 with tagged DNS proxy/resolution、four transports、per-server detour and Rust 1.88 | First performance run `31134561696/1` exposed real per-query detoured SIP022 UDP session retention；the minimal same-server/exact-plan idle association reuse repair kept existing capacity ownership and passed post-repair architecture/QA | Local serial gate、schema 3 integrity、automatic `31143886273/1` and manual `31144255549/1` PASS；DNS `4564/4450` queries、48 samples、RSS `12/12`、bounds/drain/rebind PASS；numeric `6211/1081/0` accepted，no release/publication |

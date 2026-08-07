@@ -11,15 +11,20 @@ and command definitions in their authoritative build/config files where possible
     current release implements SIP022 TCP/UDP for the three standard
     Shadowsocks 2022 methods; public client inbounds expose SOCKS5 TCP CONNECT
     and explicit opt-in UDP ASSOCIATE.
-  - Current composition keeps one process-wide PSK/method and supports either
-    the legacy single instance or bounded tagged multi-inbound/multi-outbound
-    graphs with static bindings or shared exact-target TCP/UDP first-match
+  - Legacy single-instance composition keeps one process-wide PSK/method. Tagged
+    client graphs may instead use per-concrete-outbound credentials, bounded fixed
+    proxy chains, static bindings or shared exact-target TCP/UDP first-match
     routing. Static and routed actions may name bounded tagged manual selectors;
     the public Rust control atomically switches fixed members while already
-    selected flows retain their concrete snapshot. Client graphs therefore
-    support multiple concrete Shadowsocks upstreams without implying an upstream
-    group or load balancing. Server outbounds remain direct; configuration is
-    typed TOML with `tracing` and low-cardinality metrics.
+    selected flows retain their concrete snapshot. Multiple concrete upstreams,
+    chains and selectors do not imply an upstream group or load balancing. Server
+    outbounds remain direct; configuration is typed TOML with `tracing` and
+    low-cardinality metrics.
+  - An optional tagged DNS graph exposes client UDP/TCP DNS proxy inbounds and
+    resolves authenticated server domain targets through UDP, TCP, DoT or DoH
+    servers. DNS first-match actions are separate from ordinary routing; each DNS
+    server may use an existing outbound action as its detour to a numeric bootstrap
+    address. Missing `[dns]` preserves legacy system-resolution behavior.
   - Release targets are Linux x86_64 GNU/musl and Windows. License:
     `GPL-3.0-only`.
 
@@ -29,6 +34,7 @@ and command definitions in their authoritative build/config files where possible
   - `ferrum2-core` owns runtime-neutral network interfaces and values;
     `ferrum2-crypto` owns secrets and crypto primitives;
     `ferrum2-shadowsocks` and `ferrum2-socks5` own protocol behavior;
+    `ferrum2-dns` owns bounded Hickory integration;
     `ferrum2-runtime` owns bounded I/O and process lifecycle;
     `ferrum2-config` and `ferrum2-observability` own operator surfaces.
     Binaries are composition roots.
@@ -68,8 +74,8 @@ and command definitions in their authoritative build/config files where possible
   - SIP023 and multi-user support are not planned; do not add preparatory
     abstractions without a concrete requirement.
   - Preferred dependency order, adjustable by validated need:
-    upstream groups, load balancing, health/failover and chaining; DNS; Tailscale
-    Endpoint; Linux transparent inbound; Windows TUN; hot reload; management API.
+    upstream groups, load balancing and health/failover; Tailscale Endpoint;
+    Linux transparent inbound; Windows TUN; hot reload; management API.
   - A future Tailscale Endpoint may expose inbound, outbound, and datagram
     adapters under one tag. Prefer external `tailscaled`/OS routing for simple
     Tailnet access; add an embedded endpoint interface only with a concrete,
@@ -84,7 +90,7 @@ and command definitions in their authoritative build/config files where possible
 - Repository hygiene:
   - Commit `Cargo.lock`; do not commit build output, local evidence, real PSKs,
     or production endpoints. Reviewed non-secret protocol fixtures are source.
-  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M10 are
+  - Validation commands live in `docs/agents/milestone-workflow.md`. M0-M12 are
     closed; historical evidence belongs in milestone/history documents, not in
     this context summary.
 

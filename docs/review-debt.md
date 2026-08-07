@@ -130,3 +130,15 @@ numeric footprint dispositions：the two existing binary test modules hold disti
 seams，and extracting them would duplicate private composition plumbing without adding a product seam。
 External control、automatic policy and the diagnostic-only performance ratio are explicit scope
 boundaries，not review debt。
+
+## M12 close audit
+
+No M12 review debt remains。`M12-T06-ARCH-001` and `M12-T06-QA-001` were resolved by extending the
+existing performance seam with DNS resource evidence；the hosted detoured-DNS owner failure then exposed
+and drove the exact-plan UDP association reuse repair at
+`c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`。Post-repair architecture and QA audits found no blocking
+issue，and automatic/manual exact-SHA qualification passed。The schema 3 numeric
+`REVIEW_REQUIRED` result is accepted: case/support/fixture growth `6211/1081/0` is distinct DNS
+transport、negative、lifecycle、interop and resource evidence；no fixture、second harness、copied DNS
+codec or second SIP022 data plane was added。Deferred DNS features and the diagnostic-only throughput
+ratio are scope boundaries，not review debt。
