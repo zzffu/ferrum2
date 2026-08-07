@@ -471,12 +471,255 @@ fn recursive_rust_source_discovery_excludes_non_rust_files() {
 }
 
 #[test]
+fn binary_composition_roots_delegate_protocol_execution_to_owned_modules() {
+    let root = workspace_root();
+    for (binary, forbidden) in [
+        (
+            "ferrum2-client",
+            &[
+                "async fn client_connection(",
+                "async fn run_udp_association<",
+                "async fn relay_udp_association<",
+                "struct TokioTransport<",
+                "fn observation_for_error(",
+            ][..],
+        ),
+        (
+            "ferrum2-server",
+            &[
+                "async fn server_connection(",
+                "struct UdpMappings",
+                "fn prepare_udp_server<",
+                "struct TokioTransport<",
+                "fn observation_for_error(",
+            ][..],
+        ),
+    ] {
+        let run = fs::read_to_string(root.join("bins").join(binary).join("src/run.rs"))
+            .expect("binary composition root");
+        for implementation in forbidden {
+            assert!(
+                !run.contains(implementation),
+                "{binary} run.rs still owns protocol execution: {implementation}"
+            );
+        }
+    }
+}
+
+#[test]
+fn runtime_and_library_owners_are_unique_and_composition_only() {
+    let root = workspace_root();
+    let owners = [
+        (
+            "bins/ferrum2-client/src/run/context.rs",
+            &["struct ClientRouting", "struct ClientContext"][..],
+        ),
+        (
+            "bins/ferrum2-client/src/run/dns.rs",
+            &["struct ClientDnsRoot"][..],
+        ),
+        (
+            "bins/ferrum2-client/src/run/io.rs",
+            &["struct TokioTransport<"][..],
+        ),
+        (
+            "bins/ferrum2-client/src/run/observation.rs",
+            &["struct ClientMetricsRoot", "fn observation_for_error("][..],
+        ),
+        (
+            "bins/ferrum2-client/src/run/socks.rs",
+            &[
+                "struct ClientTcpListeners",
+                "async fn client_connection(",
+                "async fn run_udp_association<",
+                "async fn relay_udp_association<",
+            ][..],
+        ),
+        (
+            "bins/ferrum2-server/src/run/dns.rs",
+            &["struct ServerDnsRoot"][..],
+        ),
+        (
+            "bins/ferrum2-server/src/run/io.rs",
+            &["struct TokioTransport<"][..],
+        ),
+        (
+            "bins/ferrum2-server/src/run/observation.rs",
+            &["struct ServerMetricsRoot", "fn observation_for_error("][..],
+        ),
+        (
+            "bins/ferrum2-server/src/run/tcp.rs",
+            &["struct ServerTcpListeners", "async fn server_connection("][..],
+        ),
+        (
+            "bins/ferrum2-server/src/run/udp.rs",
+            &["struct UdpMappings", "fn prepare_udp_server<"][..],
+        ),
+        (
+            "crates/ferrum2-core/src/route.rs",
+            &["pub struct EgressPlanSnapshot"][..],
+        ),
+        (
+            "crates/ferrum2-core/src/selector.rs",
+            &["pub struct SelectorControl"][..],
+        ),
+        (
+            "crates/ferrum2-config/src/error.rs",
+            &["pub enum ConfigErrorKind", "pub struct ConfigError"][..],
+        ),
+        (
+            "crates/ferrum2-config/src/load.rs",
+            &["pub fn load_client(", "pub fn load_server("][..],
+        ),
+        (
+            "crates/ferrum2-config/src/model.rs",
+            &["pub struct ValidatedClientConfig"][..],
+        ),
+        (
+            "crates/ferrum2-config/src/raw.rs",
+            &["struct RawClientRoot", "struct RawServerRoot"][..],
+        ),
+        (
+            "crates/ferrum2-config/src/validation.rs",
+            &["fn validate_client(", "fn validate_server("][..],
+        ),
+    ];
+    for (owner, required) in owners {
+        let source = fs::read_to_string(root.join(owner)).expect("owned module");
+        for anchor in required {
+            assert!(
+                source.contains(anchor),
+                "{owner} does not own required implementation: {anchor}"
+            );
+        }
+    }
+
+    let core = fs::read_to_string(root.join("crates/ferrum2-core/src/lib.rs"))
+        .expect("core composition module");
+    assert!(core.contains("pub mod route;"));
+    assert!(core.contains("pub mod selector;"));
+    assert!(!core.contains("pub mod route {"));
+    assert!(!core.contains("pub mod selector {"));
+    let config = fs::read_to_string(root.join("crates/ferrum2-config/src/lib.rs"))
+        .expect("config composition module");
+    for reexport in [
+        "pub use error::{ConfigError, ConfigErrorKind, ConfigField};",
+        "pub use load::{load_client, load_server};",
+        "pub use model::{",
+    ] {
+        assert!(
+            config.contains(reexport),
+            "missing config re-export: {reexport}"
+        );
+    }
+    for implementation in [
+        "pub struct ValidatedClientConfig",
+        "pub enum ConfigErrorKind",
+        "pub fn load_client(",
+        "struct RawClientRoot",
+        "fn validate_client(",
+    ] {
+        assert!(
+            !config.contains(implementation),
+            "config lib.rs still owns implementation: {implementation}"
+        );
+    }
+
+    let mut product_sources = Vec::new();
+    for directory in ["bins", "crates"] {
+        product_sources.extend(rust_sources(&root.join(directory)));
+    }
+    for forbidden in [
+        "unsafe {",
+        "unsafe fn ",
+        "unsafe impl ",
+        "unsafe trait ",
+        "#![allow(unsafe_code)]",
+    ] {
+        for path in &product_sources {
+            let source = fs::read_to_string(path).expect("product source");
+            assert!(
+                !source.contains(forbidden),
+                "{} changes the workspace unsafe state: {forbidden}",
+                path.display()
+            );
+        }
+    }
+
+    for (definition, expected_owner) in [
+        (
+            "pub struct EgressPlanSnapshot",
+            "crates/ferrum2-core/src/route.rs",
+        ),
+        (
+            "pub struct ClientTcpOutbound",
+            "crates/ferrum2-shadowsocks/src/lib.rs",
+        ),
+        (
+            "pub struct ShadowsocksTcpInbound",
+            "crates/ferrum2-shadowsocks/src/lib.rs",
+        ),
+        (
+            "pub struct UdpClientSession",
+            "crates/ferrum2-shadowsocks/src/udp.rs",
+        ),
+        (
+            "pub struct UdpServer",
+            "crates/ferrum2-shadowsocks/src/udp.rs",
+        ),
+        (
+            "pub fn encode_request_first_write",
+            "crates/ferrum2-shadowsocks/src/lib.rs",
+        ),
+    ] {
+        let locations: Vec<_> = product_sources
+            .iter()
+            .filter(|path| {
+                fs::read_to_string(path)
+                    .expect("product source")
+                    .contains(definition)
+            })
+            .collect();
+        assert_eq!(locations.len(), 1, "duplicate implementation: {definition}");
+        assert!(
+            locations[0].ends_with(expected_owner),
+            "wrong owner for {definition}: {}",
+            locations[0].display()
+        );
+    }
+    for path in &product_sources {
+        let source = fs::read_to_string(path).expect("product source");
+        assert!(
+            !source.contains("struct PlanSnapshot"),
+            "{} duplicates the owned route snapshot",
+            path.display()
+        );
+    }
+
+    for binary in ["ferrum2-client", "ferrum2-server"] {
+        for adapter in ["src/dns_egress.rs", "src/run/dns.rs"] {
+            let path = root.join("bins").join(binary).join(adapter);
+            let source = fs::read_to_string(&path).expect("DNS adapter source");
+            for forbidden in ["Message::from_vec", "hickory_proto", "struct DnsParser"] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{} duplicated DNS protocol behavior: {forbidden}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {
     let root = workspace_root();
     let run = fs::read_to_string(root.join("bins/ferrum2-server/src/run.rs"))
         .expect("server composition");
     let egress = fs::read_to_string(root.join("bins/ferrum2-server/src/dns_egress.rs"))
         .expect("server DNS egress adapter");
+    let dns = fs::read_to_string(root.join("bins/ferrum2-server/src/run/dns.rs"))
+        .expect("server DNS process owner");
     let support = fs::read_to_string(root.join("tests/m0-harness/src/local_support/mod.rs"))
         .expect("shared process support");
 
@@ -485,13 +728,13 @@ fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {
         "ServerDnsRoot",
         "TaggedResolver::new",
         "ServerDnsResolver::new",
-        "PreparedProcessRoot<RunError> for ServerDnsRoot",
     ] {
         assert!(
             run.contains(required),
             "missing server DNS composition: {required}"
         );
     }
+    assert!(dns.contains("PreparedProcessRoot<RunError> for ServerDnsRoot"));
     for required in [
         "ActionTable<usize>",
         "SystemTcpResolver",
@@ -507,7 +750,7 @@ fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {
     }
     for forbidden in ["Message::from_vec", "hickory_proto", "struct DnsParser"] {
         assert!(
-            !run.contains(forbidden) && !egress.contains(forbidden),
+            !run.contains(forbidden) && !dns.contains(forbidden) && !egress.contains(forbidden),
             "server composition duplicated DNS protocol behavior: {forbidden}"
         );
     }

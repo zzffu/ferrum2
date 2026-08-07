@@ -1,0 +1,53 @@
+use super::*;
+
+pub(super) struct ServerDnsRoot {
+    pub(super) state: Arc<dns_egress::ServerDnsState>,
+    pub(super) owner: TaggedResolverOwner,
+}
+
+impl ServerDnsRoot {
+    async fn close(&mut self) -> Result<(), RunError> {
+        self.state.take();
+        self.owner
+            .shutdown()
+            .await
+            .map(|_| ())
+            .map_err(|_| RunError::ShutdownCleanup)
+    }
+}
+
+impl PreparedProcessRoot<RunError> for ServerDnsRoot {
+    fn activate(&mut self) -> Result<(), RunError> {
+        Ok(())
+    }
+
+    fn run(
+        mut self: Box<Self>,
+        mut cancellation: ProcessCancellation,
+    ) -> ProcessFuture<Result<(), RunError>> {
+        Box::pin(async move {
+            let ready = {
+                let owner = &mut self.owner;
+                tokio::select! {
+                    _ = cancellation.cancelled() => None,
+                    result = owner.ready() => Some(result),
+                }
+            };
+            match ready {
+                None => self.close().await,
+                Some(Err(_)) => {
+                    self.close().await?;
+                    Err(RunError::StartupProtocol)
+                }
+                Some(Ok(())) => {
+                    cancellation.cancelled().await;
+                    self.close().await
+                }
+            }
+        })
+    }
+
+    fn rollback(mut self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
+        Box::pin(async move { self.close().await })
+    }
+}

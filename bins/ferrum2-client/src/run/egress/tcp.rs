@@ -102,10 +102,12 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    use crate::run::socks::tests::FailingConnector;
     use crate::run::tests::{
-        ChainObserver, DeadlineConnector, FailingConnector, FixedRandom, ScriptedIo,
-        assert_open_pending, assert_two_layer_buffers, chain_test_setup, scripted_input,
+        ChainObserver, DeadlineConnector, FixedRandom, assert_open_pending,
+        assert_two_layer_buffers, chain_test_setup, scripted_input,
     };
+    use crate::run::tokio_io::tests::ScriptedIo;
     use crate::run::{
         ClientEgressEngine, ClientOpenFailure, TokioConnector, TokioFramed, TokioTransport,
     };

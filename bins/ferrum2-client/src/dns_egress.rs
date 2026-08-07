@@ -379,9 +379,8 @@ mod tests {
     use ferrum2_shadowsocks::{MethodKeyAdapter, UdpPacketScratch, UdpServer};
 
     use crate::run::egress::{UdpIoFaultPlan, UdpIoOperation};
-    use crate::run::tests::{
-        default_test_psk, relay_dns_udp_hop_once, udp_test_context_for_server,
-    };
+    use crate::run::socks::tests::udp_test_context_for_server;
+    use crate::run::tests::{default_test_psk, relay_dns_udp_hop_once};
 
     #[test]
     fn dns_runtime_specs_preserve_validated_server_values() {
@@ -536,7 +535,7 @@ mod tests {
             );
         }
 
-        let run_source = include_str!("run.rs");
+        let run_source = include_str!("run/socks.rs");
         let socks_connect = run_source
             .split_once("async fn client_connection(")
             .expect("SOCKS production session")
