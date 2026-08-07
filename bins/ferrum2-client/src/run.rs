@@ -1004,7 +1004,7 @@ async fn relay_udp_association<IO>(
                 };
                 let payload = decoded.payload().into();
                 if prepared
-                    .activate(&context.egress, &routing.outbounds, plan.hops())
+                    .activate(&context.egress, &routing.outbounds, &plan)
                     .is_err()
                 {
                     record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
@@ -1031,7 +1031,7 @@ async fn relay_udp_association<IO>(
                 let wire_len = match prepared.encode_request(
                     &context.egress,
                     &routing.outbounds,
-                    plan.hops(),
+                    &plan,
                     datagram.datagram(),
                 ) {
                     Ok(length) => length,
@@ -5367,11 +5367,27 @@ mod tests {
         )
         .expect("routed chain selector");
         let routing = Arc::new(ClientRouting { route, outbounds });
-        let prepared = context
+        let selected_snapshot = routing.route.select_plan_snapshot(0, Network::Udp, &target);
+        assert_eq!(selected_snapshot.hops(), &[0, 1]);
+        let selected_allocation = selected_snapshot.hops().as_ptr();
+        let mut prepared = context
             .egress
             .prepare_udp(Ipv4Addr::LOCALHOST, None, UdpSocket::bind)
             .await
             .expect("routed chain preparation");
+        prepared
+            .activate(&context.egress, &routing.outbounds, &selected_snapshot)
+            .expect("selected snapshot activation");
+        let active_plan = prepared
+            .plans
+            .keys()
+            .find(|active| *active == &selected_snapshot)
+            .expect("selected active plan");
+        assert_eq!(
+            active_plan.hops().as_ptr(),
+            selected_allocation,
+            "association copied the selected plan allocation"
+        );
         let relay = match prepared.application.local_addr().expect("relay") {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 relay"),

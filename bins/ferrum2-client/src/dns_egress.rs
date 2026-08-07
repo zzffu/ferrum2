@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -86,6 +86,37 @@ struct PooledDnsUdp {
     idle: Option<IdleDnsUdp>,
     pool: DnsUdpPool,
     reusable: bool,
+}
+
+impl PooledDnsUdp {
+    fn begin_request(&mut self) {
+        self.reusable = false;
+    }
+
+    async fn relay_request(
+        &mut self,
+        engine: &ClientEgressEngine,
+        plan: &EgressPlanSnapshot,
+        first_server: SocketAddrV4,
+        destination: SocketAddr,
+        packet: Vec<u8>,
+        responses: &mpsc::Sender<Packet>,
+    ) -> io::Result<bool> {
+        self.begin_request();
+        let (response, fully_reusable) = self
+            .idle
+            .as_mut()
+            .expect("pooled DNS UDP owner")
+            .association
+            .relay(engine, plan, first_server, destination, packet)
+            .await?;
+        responses
+            .send(response)
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "DNS UDP response closed"))?;
+        self.reusable = fully_reusable;
+        Ok(fully_reusable)
+    }
 }
 
 impl Drop for PooledDnsUdp {
@@ -182,6 +213,7 @@ impl DnsEgress for ClientDnsEgress {
                 plan: plan.clone(),
             };
             let (idle, stale) = take_dns_udp(&pool, &key)?;
+            let reusable = idle.is_some();
             drop(stale);
             let idle = match idle {
                 Some(idle) => idle,
@@ -200,7 +232,7 @@ impl DnsEgress for ClientDnsEgress {
             let mut prepared = PooledDnsUdp {
                 idle: Some(idle),
                 pool,
-                reusable: false,
+                reusable,
             };
 
             let (outgoing, mut outbound) = mpsc::channel::<Packet>(1);
@@ -236,24 +268,22 @@ impl DnsEgress for ClientDnsEgress {
             });
             tasks.spawn(DnsEgressTaskKind::Session, async move {
                 while let Some((packet, destination)) = requests.recv().await {
-                    prepared.reusable = false;
-                    let response = prepared
-                        .idle
-                        .as_mut()
-                        .expect("pooled DNS UDP owner")
-                        .association
-                        .relay(&engine, &plan, first_server, destination, packet)
+                    let reusable = prepared
+                        .relay_request(
+                            &engine,
+                            &plan,
+                            first_server,
+                            destination,
+                            packet,
+                            &session_responses,
+                        )
                         .await;
-                    let Ok((response, fully_reusable)) = response else {
+                    let Ok(fully_reusable) = reusable else {
                         break;
                     };
-                    if session_responses.send(response).await.is_err() {
-                        break;
-                    }
                     if !fully_reusable {
                         break;
                     }
-                    prepared.reusable = true;
                 }
             });
             Ok(Box::new(ClientDnsDatagram {
@@ -471,7 +501,7 @@ mod tests {
             .expect("DNS UDP adapter end")
             .0;
         assert!(dns_udp.contains(&[".", "prepare_udp("].concat()));
-        assert!(dns_udp.contains(&[".", "relay("].concat()));
+        assert!(dns_udp.contains(&[".", "relay_request("].concat()));
         for forbidden in [
             ["Prepared", "ClientUdp"].concat(),
             ["activate", "_udp_plan"].concat(),
@@ -637,6 +667,9 @@ mod tests {
             "cancel",
             "saturation",
         ] {
+            let sessions_before_failure = protocol_server
+                .session_count()
+                .expect("mutation session baseline");
             let association = context
                 .egress
                 .prepare_udp(
@@ -647,6 +680,7 @@ mod tests {
                 .await
                 .expect("mutation association");
             let pool = Arc::new(Mutex::new(Vec::new()));
+            let (session_responses, mut responses) = mpsc::channel(1);
             let mut pooled = PooledDnsUdp {
                 idle: Some(IdleDnsUdp {
                     key: DnsUdpPoolKey {
@@ -658,26 +692,93 @@ mod tests {
                 pool: Arc::clone(&pool),
                 reusable: false,
             };
-            let association = &mut pooled.idle.as_mut().expect("mutation owner").association;
+            let mutation_handle = pooled
+                .idle
+                .as_ref()
+                .expect("healthy mutation owner")
+                .association
+                .handle;
+            let payload = vec![0x10];
+            let echo = async {
+                let mut wire = [0_u8; MAX_UDP_WIRE_LEN];
+                let (length, peer) = upstream
+                    .recv_from(&mut wire)
+                    .await
+                    .expect("healthy mutation upstream query");
+                upstream
+                    .send_to(&wire[..length], peer)
+                    .await
+                    .expect("healthy mutation upstream response");
+            };
+            let (reusable, (), ()) = tokio::join!(
+                pooled.relay_request(
+                    &context.egress,
+                    &plan,
+                    first_server,
+                    destination,
+                    payload.clone(),
+                    &session_responses,
+                ),
+                relay_dns_udp_hop_once(
+                    &server,
+                    &protocol_server,
+                    destination,
+                    &clock,
+                    &random,
+                    &mut scratch,
+                    false,
+                ),
+                echo,
+            );
+            let fully_reusable = reusable.expect("healthy mutation relay");
+            let (response, source) = responses.try_recv().expect("healthy mutation response");
+            assert_eq!((response, source), (payload, destination), "{case}");
+            assert!(fully_reusable, "{case} healthy mutation tainted");
+            drop(pooled);
+            assert_eq!(pool.lock().expect("healthy mutation pool").len(), 1);
+            assert_eq!(
+                protocol_server
+                    .session_count()
+                    .expect("healthy mutation session"),
+                sessions_before_failure + 1,
+                "{case} healthy mutation session"
+            );
+            let key = DnsUdpPoolKey {
+                first_server,
+                plan: plan.clone(),
+            };
+            let (matched, stale) = take_dns_udp(&pool, &key).expect("mutation exact reuse");
+            assert!(stale.is_none(), "{case} healthy exact key was discarded");
+            let idle = matched.expect("mutation exact-key association");
+            assert_eq!(idle.association.handle, mutation_handle, "{case}");
+            let mut pooled = PooledDnsUdp {
+                idle: Some(idle),
+                pool: Arc::clone(&pool),
+                reusable: true,
+            };
             match case {
-                "partial" => {}
+                "partial" => pooled.begin_request(),
                 "send-io" | "receive-io" => {
-                    association.io_fault = Some(Arc::new(UdpIoFaultPlan::new(
-                        if case == "send-io" {
-                            UdpIoOperation::UpstreamSend
-                        } else {
-                            UdpIoOperation::UpstreamRecv
-                        },
-                        1,
-                    )));
+                    let operation = if case == "send-io" {
+                        UdpIoOperation::UpstreamSend
+                    } else {
+                        UdpIoOperation::UpstreamRecv
+                    };
+                    pooled
+                        .idle
+                        .as_mut()
+                        .expect("mutation owner")
+                        .association
+                        .io_fault = Some(Arc::new(UdpIoFaultPlan::new(operation, 1)));
                     assert!(
-                        association
-                            .relay(
+                        pooled
+                            .relay_request(
                                 &context.egress,
                                 &plan,
                                 first_server,
                                 destination,
                                 vec![0x21],
+                                &session_responses,
                             )
                             .await
                             .is_err(),
@@ -705,12 +806,13 @@ mod tests {
                     };
                     let payload = vec![0x22];
                     let (result, (), ()) = tokio::join!(
-                        association.relay(
+                        pooled.relay_request(
                             &context.egress,
                             &plan,
                             first_server,
                             destination,
                             payload.clone(),
+                            &session_responses,
                         ),
                         relay_dns_udp_hop_once(
                             &server,
@@ -723,8 +825,11 @@ mod tests {
                         ),
                         echo,
                     );
-                    let ((response, source), fully_reusable) =
+                    let fully_reusable =
                         result.expect("valid response after authentication discard");
+                    let (response, source) = responses
+                        .try_recv()
+                        .expect("valid response after authentication discard");
                     assert_eq!((response, source), (payload, destination));
                     assert!(
                         !fully_reusable,
@@ -735,12 +840,13 @@ mod tests {
                     assert!(
                         tokio::time::timeout(
                             Duration::from_millis(20),
-                            association.relay(
+                            pooled.relay_request(
                                 &context.egress,
                                 &plan,
                                 first_server,
                                 destination,
                                 vec![0x23],
+                                &session_responses,
                             ),
                         )
                         .await
@@ -754,6 +860,7 @@ mod tests {
                         .expect("cancel request");
                 }
                 "saturation" => {
+                    pooled.begin_request();
                     assert!(
                         context
                             .egress
@@ -769,6 +876,10 @@ mod tests {
                 }
                 _ => unreachable!("closed mutation table"),
             }
+            assert!(
+                !pooled.reusable,
+                "{case} request start retained reusable state"
+            );
             drop(pooled);
             assert!(pool.lock().expect("mutation pool").is_empty(), "{case}");
 
@@ -792,8 +903,8 @@ mod tests {
                 association,
             });
             for valid in 0..2_u8 {
-                let idle = match initial.take() {
-                    Some(idle) => idle,
+                let (idle, reusable) = match initial.take() {
+                    Some(idle) => (idle, false),
                     None => {
                         let key = DnsUdpPoolKey {
                             first_server,
@@ -801,13 +912,13 @@ mod tests {
                         };
                         let (matched, stale) = take_dns_udp(&pool, &key).expect("healthy reuse");
                         assert!(stale.is_none(), "healthy exact key was discarded");
-                        matched.expect("healthy exact-key association")
+                        (matched.expect("healthy exact-key association"), true)
                     }
                 };
                 let mut healthy = PooledDnsUdp {
                     idle: Some(idle),
                     pool: Arc::clone(&pool),
-                    reusable: false,
+                    reusable,
                 };
                 let payload = vec![0x30 + valid];
                 let echo = async {
@@ -821,14 +932,14 @@ mod tests {
                         .await
                         .expect("following valid upstream response");
                 };
-                let association = &mut healthy.idle.as_mut().expect("healthy owner").association;
-                let (response, (), ()) = tokio::join!(
-                    association.relay(
+                let (reusable, (), ()) = tokio::join!(
+                    healthy.relay_request(
                         &context.egress,
                         &plan,
                         first_server,
                         destination,
                         payload.clone(),
+                        &session_responses,
                     ),
                     relay_dns_udp_hop_once(
                         &server,
@@ -841,10 +952,10 @@ mod tests {
                     ),
                     echo,
                 );
-                let ((response, source), fully_reusable) = response.expect("following valid relay");
+                let fully_reusable = reusable.expect("following valid relay");
+                let (response, source) = responses.try_recv().expect("following valid response");
                 assert_eq!((response, source), (payload, destination), "{case}");
                 assert!(fully_reusable, "{case} healthy association tainted");
-                healthy.reusable = fully_reusable;
                 drop(healthy);
                 assert_eq!(pool.lock().expect("healthy pool").len(), 1, "{case}");
             }

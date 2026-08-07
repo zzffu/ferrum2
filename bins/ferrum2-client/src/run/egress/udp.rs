@@ -96,7 +96,7 @@ impl UdpIoFaultPlan {
 }
 
 pub(in crate::run) struct ClientUdpAssociation {
-    pub(in crate::run) plans: HashMap<Box<[usize]>, ClientUdpPlan>,
+    pub(in crate::run) plans: HashMap<EgressPlanSnapshot, ClientUdpPlan>,
     pub(in crate::run) pending_session: Option<PendingUdpSession>,
     pub(in crate::run) manager: UdpSessionManager,
     pub(in crate::run) handle: UdpSessionHandle,
@@ -157,12 +157,13 @@ impl ClientUdpAssociation {
         &mut self,
         egress: &ClientEgressEngine,
         outbounds: &[ClientOutboundContext],
-        hops: &[usize],
+        snapshot: &EgressPlanSnapshot,
     ) -> Result<(), ()> {
+        let hops = snapshot.hops();
         if hops.is_empty() || hops.len() > MAX_UDP_PLAN_HOPS {
             return Err(());
         }
-        if !self.plans.contains_key(hops) {
+        if !self.plans.contains_key(snapshot) {
             if self.plans.len() >= MAX_ACTIVE_UDP_PLANS {
                 return Err(());
             }
@@ -171,7 +172,7 @@ impl ClientUdpAssociation {
             #[cfg(not(test))]
             let random = &egress.random;
             let legs = register_udp_plan(outbounds, hops, random, &self.live_ids)?;
-            self.plans.insert(hops.into(), ClientUdpPlan { legs });
+            self.plans.insert(snapshot.clone(), ClientUdpPlan { legs });
         }
         Ok(())
     }
@@ -180,13 +181,14 @@ impl ClientUdpAssociation {
         &mut self,
         egress: &ClientEgressEngine,
         outbounds: &[ClientOutboundContext],
-        hops: &[usize],
+        snapshot: &EgressPlanSnapshot,
         datagram: &Datagram,
     ) -> Result<usize, UdpPacketError> {
         let plan = self
             .plans
-            .get_mut(hops)
+            .get_mut(snapshot)
             .ok_or(UdpPacketError::StateUnavailable)?;
+        let hops = snapshot.hops();
         let mut wire_len = 0;
         let mut wire_in_upstream = false;
         for layer in (0..hops.len()).rev() {
@@ -252,7 +254,8 @@ impl ClientUdpAssociation {
         let mut candidate = false;
         let mut outer_error = UdpPacketError::Binding;
         // ponytail: scan at most 128 bounded plans; add an authenticated dispatch index if measured.
-        for (hops, plan) in &self.plans {
+        for (snapshot, plan) in &self.plans {
+            let hops = snapshot.hops();
             if outbounds
                 .get(hops[0])
                 .is_none_or(|outbound| outbound.udp_server != source)
@@ -410,7 +413,7 @@ impl ClientUdpAssociation {
                 "DNS UDP packet too large",
             ));
         }
-        self.activate(engine, &engine.outbounds, plan.hops())
+        self.activate(engine, &engine.outbounds, plan)
             .map_err(|_| invalid_dns_target())?;
         let target = TargetAddr::ip(destination).map_err(|_| invalid_dns_target())?;
         let payload_len = packet.len();
@@ -432,7 +435,7 @@ impl ClientUdpAssociation {
             .map_err(runtime_error)?
             .ok_or_else(|| io::Error::other("DNS UDP queue empty"))?;
         let wire_len = self
-            .encode_request(engine, &engine.outbounds, plan.hops(), datagram.datagram())
+            .encode_request(engine, &engine.outbounds, plan, datagram.datagram())
             .map_err(|_| io::Error::other("DNS UDP encode failed"))?;
         drop(datagram);
         #[cfg(test)]
