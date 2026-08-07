@@ -23,7 +23,7 @@ real repository；the external archive timestamp is not used as Git identity。
 
 ## Baseline evidence
 
-- Current `master` is clean at planning baseline `4810ec5c…`；M12 closeout and two agent-config commits
+- At planning capture，`master` was clean at planning baseline `4810ec5c…`；M12 closeout and two agent-config commits
   are descendants of qualified product `c06386e9…` and do not change Rust product/test sources。
 - `ferrum2-dns` directly imports `DnsServerConfig`/`DnsTransport` in `resolver.rs` and
   `runtime_owner.rs`，and its normal manifest edge includes `ferrum2-config`。

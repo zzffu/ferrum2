@@ -10,6 +10,7 @@ owns:
   - crates/ferrum2-dns/src/resolver.rs
   - crates/ferrum2-dns/src/runtime_owner.rs
   - crates/ferrum2-dns/src/runtime_provider.rs
+  - crates/ferrum2-dns/tests/proxy_contract.rs
   - crates/ferrum2-dns/tests/resource_lifecycle.rs
   - crates/ferrum2-dns/tests/tagged_upstreams.rs
   - bins/ferrum2-client/src/run.rs
@@ -33,7 +34,8 @@ config-to-runtime conversion to client/server composition without changing DNS b
 - [ ] Cargo metadata proves DNS's only normal workspace-internal dependency is core，config has no DNS
       edge and no third-party identity/feature/provider changes。
 - [ ] Client/server pure conversions preserve all UDP/TCP/DoT/DoH direct/detour values，validation/error
-      ordering and zero-side-effect `--check-config` behavior。
+      ordering and zero-side-effect `--check-config` behavior；binary-owned unit tables prove conversion，
+      while the unchanged config contract remains DTO/schema evidence。
 - [ ] Four transports、server order、no fallback/cache/retry、selector snapshot and UDP TC same-plan
       behavior pass through `EgressPlanSnapshot` with no hop copy。
 - [ ] Existing DNS owner/admission/deadline/shutdown/rebind and redaction evidence remains exact。

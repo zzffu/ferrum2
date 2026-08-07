@@ -72,10 +72,11 @@ existing `UdpSessionManager` remains the capacity/session owner。
 ### Split by ownership after semantic migration
 
 The client TCP and UDP egress modules are extracted while their consumers migrate，then the remaining
-client/server/core/config source is split by ownership。Public crate paths、schema v1、CLI/error text、
-SIP022 state machines and process-root semantics remain unchanged。Tests move with their true module and
-continue through agreed interfaces；M13 adds no second helper implementation、real-process harness、DNS
-codec or SIP022 data plane。
+client/server/core/config source is split by ownership。Core/config public paths and all DNS paths except
+the explicitly removed `PlanSnapshot` and replaced resolver constructor inputs remain unchanged，as do
+schema v1、CLI/error text、SIP022 state machines and process-root semantics。Tests move with their true
+module and continue through agreed interfaces；M13 adds no second helper implementation、real-process
+harness、DNS codec or SIP022 data plane。
 
 ## Consequences
 

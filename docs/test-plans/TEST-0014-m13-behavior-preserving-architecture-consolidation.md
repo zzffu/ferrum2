@@ -10,7 +10,7 @@
 |---|---|---|
 | M13-MUST-01 M12 compatibility | existing config/core/DNS/client/server focused cohorts plus real-process TCP/UDP/DNS witnesses | T01 and T03～T05 |
 | M13-MUST-02 owned snapshot | core selector contract table and allocation-identity/redacted-debug unit rows | T02 core |
-| M13-MUST-03 DNS inversion | Cargo metadata architecture guard、config conversion table、existing tagged upstream/lifecycle tests | T03 DNS |
+| M13-MUST-03 DNS inversion | Cargo metadata architecture guard、binary-owned conversion tables、unchanged config cohort and existing tagged upstream/lifecycle tests | T03 DNS |
 | M13-MUST-04 TCP egress | existing client chain/deadline/cancel tests through the new engine plus DNS TCP consumer witness | T04 TCP |
 | M13-MUST-05 UDP egress | existing UDP chain/atomicity tests plus exact-key idle reuse/failure mutation table | T05 UDP |
 | M13-MUST-06 ownership modules | architecture source/dependency guard and unchanged package/public-path tests | T06 structure |
@@ -33,6 +33,39 @@ make it green，then repeats。A failing end-state guard is never integrated by 
 target assertions and existing M12 evidence rather than landing a permanently red suite。Tests do not
 call moved private helpers or duplicate their implementation。
 
+## Frozen M10～M12 preservation inventory
+
+The following existing focused tests and cohorts remain required。T02～T06 run the named owning gate；
+T07 reruns every row on the accepted integration SHA。If T06 moves an inline test module，the test name
+remains stable where practical and the named package command is the authoritative broader witness。
+
+| Existing evidence | M13 requirement | Owning gate |
+|---|---|---|
+| M10/M11/M12 `ferrum2-core --test selector_contract` | MUST-01、02 | T02，T07 |
+| M10/M11/M12 `ferrum2-config --test config_contract` and `m0-harness --test config_cli` | MUST-01、03、06、07 | T03/T06，T07 |
+| M10 client `routed_tcp_selects_after_target_and_never_falls_back` | MUST-01、02、04、07 | T04，T07 |
+| M10 client `routed_udp_uses_lazy_endpoint_legs_and_rejects_cross_leg_responses` | MUST-01、02、05、07 | T05，T07 |
+| M10 server `tagged_tcp_shares_static_direct_mapping_and_one_replay_store` | MUST-01、06、07 | T06，T07 |
+| M10 server `tagged_udp_is_process_bounded_and_bound_to_its_local_inbound` | MUST-01、06、07 | T06，T07 |
+| M10 `ferrum2-client -p ferrum2-server` package cohort | MUST-01、04～07 | T04～T06，T07 |
+| M10 real-process `tagged_two_by_two_tcp_matrix_covers_all_methods_and_exact_rebind` | MUST-01、04、07、09 | T07 focused |
+| M10 real-process `one_association_alternates_two_targets_and_preserves_response_sources` | MUST-01、05、07、09 | T07 focused |
+| M11 `ferrum2-shadowsocks --test tcp_flow_contract`、client `tcp_chain_opens_hops_in_order_with_distinct_credentials_and_no_fallback` and `tcp_chain_failure_and_cancellation_drop_every_layer` | MUST-01、04、07 | T04，T07 |
+| M11 `ferrum2-shadowsocks -p ferrum2-client` TCP package cohort | MUST-01、04、07 | T04，T07 |
+| M11 `ferrum2-shadowsocks --test udp_packets`、client `udp_chain_layers_mixed_credentials_bounds_and_response_binding` and `udp_chain_invalid_inner_state_and_shutdown_are_atomic` | MUST-01、05、07 | T05，T07 |
+| M11 `ferrum2-shadowsocks -p ferrum2-client` UDP package cohort | MUST-01、05、07 | T05，T07 |
+| M11 real-process `fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps` | MUST-01、04、07、09 | T07 focused |
+| M11 real-process `fixed_two_hop_udp_chain_uses_distinct_credentials_and_reaps` | MUST-01、05、07、09 | T07 focused |
+| M12 `m0-harness --test workspace_policy` | MUST-08 | T06，T07 |
+| M12 DNS `tagged_upstreams`、`resource_lifecycle` and complete `ferrum2-dns` package cohorts | MUST-01、03、05、07 | T03/T05，T07 |
+| M12 DNS `proxy_contract` | MUST-01、03、07 | T03，T07 |
+| M12 client `dns_proxy_first_match_direct_and_detoured_transports` | MUST-01、03～05、07 | T03～T05，T07 |
+| M12 client `dns_proxy_detour_saturation_shutdown_and_exact_rebind` | MUST-01、05、07 | T05，T07 |
+| M12 `ferrum2-client -p ferrum2-dns` package cohort | MUST-01、03～07 | T03～T05，T07 |
+| M12 real-process `tagged_dns_tcp_resolution_uses_detour_and_reaps` | MUST-01、03、04、07、09 | T06，T07 focused |
+| M12 real-process `tagged_dns_udp_resolution_uses_detour_and_reaps` | MUST-01、03、05、07、09 | T06，T07 focused |
+| M10～M12 `m0-harness --test architecture`、workspace all-features tests and ignored `full_qualification_runs_twenty_cycles_per_category_and_at_least_100_per_binary` | MUST-06～09 | T06/T07 |
+
 ## T01 exact baseline and contract evidence
 
 - Record qualified product `c06386e9…` and planning HEAD/tree/parent `4810ec5c…` /
@@ -46,12 +79,13 @@ call moved private helpers or duplicate their implementation。
 
 ```powershell
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh verify
+& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base 4810ec5c5a1063cb8e60d1b950900c7f38d74548 --candidate HEAD
 cargo test -p ferrum2-core --test selector_contract --locked
 cargo test -p ferrum2-dns --locked
 cargo test -p ferrum2-client dns_proxy_selector_snapshot_and_no_fallback --locked
 cargo test -p ferrum2-m0-harness --test architecture --locked
 cargo fmt --all -- --check
-git diff --check
+git diff --check 4810ec5c5a1063cb8e60d1b950900c7f38d74548 HEAD
 ```
 
 ## T02 core owned-snapshot evidence
@@ -78,9 +112,9 @@ git diff --check
 
 ## T03 DNS runtime-model and dependency evidence
 
-- Extend the existing config contract rows only to prove client/server pure conversion of already
-  validated UDP/TCP/DoT/DoH direct/detoured values。Schema/error/redaction cohorts remain byte-for-byte
-  equivalent and no conversion performs side effects。
+- Keep the existing config-contract cohort as unchanged DTO/schema/error/redaction evidence。Prove pure
+  conversion of already validated UDP/TCP/DoT/DoH direct/detoured values in the T03-owned client and
+  server unit tables；both tables use the same cases and conversion performs no side effects。
 - Reuse `tagged_upstreams.rs` for selected plan identity、four transports、TC same-plan/no fallback and
   `resource_lifecycle.rs` for owner shutdown。Replace `PlanSnapshot` use with core snapshots in place；do
   not layer a compatibility wrapper in DNS。
@@ -92,9 +126,12 @@ git diff --check
 
 ```powershell
 cargo test -p ferrum2-config --test config_contract --locked
+cargo test -p ferrum2-dns --test proxy_contract --locked
 cargo test -p ferrum2-dns --test tagged_upstreams --locked -- --nocapture
 cargo test -p ferrum2-dns --test resource_lifecycle --locked -- --nocapture
 cargo test -p ferrum2-dns --locked
+cargo test -p ferrum2-client dns_runtime_specs_preserve_validated_server_values --locked
+cargo test -p ferrum2-server dns_runtime_specs_preserve_validated_server_values --locked
 cargo test -p ferrum2-client dns_proxy_first_match_direct_and_detoured_transports --locked
 cargo test -p ferrum2-server tagged_dns_selection_uses_authenticated_original_context_and_final --locked
 cargo test -p ferrum2-m0-harness --test architecture --locked
