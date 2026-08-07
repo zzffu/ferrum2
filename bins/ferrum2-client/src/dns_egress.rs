@@ -516,7 +516,14 @@ mod tests {
 
         let source = include_str!("dns_egress.rs");
         assert!(source.contains(&["engine: Arc<", "ClientEgressEngine", ">"].concat()));
-        assert!(source.contains(&[".", "open_tcp("].concat()));
+        let dns_connect_tcp = source
+            .split_once("fn connect_tcp(")
+            .expect("DNS TCP adapter")
+            .1
+            .split_once("fn bind_udp(")
+            .expect("DNS UDP adapter")
+            .0;
+        assert!(dns_connect_tcp.contains(&[".", "open_tcp("].concat()));
         for forbidden in [
             ["Client", "Context"].concat(),
             ["Client", "Routing"].concat(),
@@ -540,5 +547,21 @@ mod tests {
                 "TCP engine owns policy/ingress: {forbidden}"
             );
         }
+
+        let run_source = include_str!("run.rs");
+        let socks_connect = run_source
+            .split_once("async fn client_connection(")
+            .expect("SOCKS production session")
+            .1
+            .split_once("async fn run_udp_association")
+            .expect("SOCKS production session end")
+            .0;
+        assert!(socks_connect.contains(&[".", "open_tcp("].concat()));
+        let outside_engine = [run_source, source].concat();
+        let forbidden_executor = ["Client", "TcpOutbound"].concat();
+        assert!(
+            !outside_engine.contains(&forbidden_executor),
+            "TCP executor outside engine: {forbidden_executor}"
+        );
     }
 }

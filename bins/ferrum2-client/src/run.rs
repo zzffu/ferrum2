@@ -42,10 +42,7 @@ use ferrum2_shadowsocks::{
     UdpPacketScratch, UdpResponseCommit, max_udp_payload_len_for_encoded_target,
 };
 #[cfg(test)]
-use ferrum2_shadowsocks::{
-    BufferObserver, BufferRole, ClientFlow, ClientTcpOutbound, FlowObserver, MethodKeyAdapter,
-    TcpKeyProvider,
-};
+use ferrum2_shadowsocks::{BufferObserver, BufferRole, FlowObserver, MethodKeyAdapter};
 use ferrum2_socks5::{
     MAX_SOCKS_UDP_DATAGRAM_BYTES, Socks5Inbound, SocksCommand, SocksStream, SocksUdpAssociate,
     decode_udp_datagram, encode_udp_datagram,
@@ -1924,35 +1921,6 @@ fn finish_relay(
     }
 }
 
-#[cfg(test)]
-async fn open_with_deadlines<'a, K, C, T, R>(
-    outbound: &ClientTcpOutbound<'a, K, C, T, R>,
-    application_target: &TargetAddr,
-    connect_timeout: std::time::Duration,
-    handshake_timeout: std::time::Duration,
-) -> Result<ClientFlow<'a, C::Stream, K, T>, ClientOpenFailure>
-where
-    K: TcpKeyProvider + Sync,
-    C: Connector,
-    C::Stream: TransportIo + LocalEndpoint,
-    T: Clock + Sync,
-    R: SecureRandom,
-{
-    let connected = tokio::time::timeout(connect_timeout, outbound.connect_server())
-        .await
-        .map_err(|_| {
-            ClientOpenFailure::Protocol(ShadowsocksError::Connect(ConnectErrorKind::Timeout))
-        })?
-        .map_err(ClientOpenFailure::Protocol)?;
-    tokio::time::timeout(
-        handshake_timeout,
-        connected.write_request(application_target),
-    )
-    .await
-    .map_err(|_| ClientOpenFailure::HandshakeTimeout)?
-    .map_err(ClientOpenFailure::Protocol)
-}
-
 fn record_failure(context: &ClientContext, stage: Stage, reason: Reason, outcome: Outcome) {
     context.metrics.failure(Role::Client, stage, reason);
     emit_observation(Role::Client, stage, outcome, Some(reason));
@@ -2255,10 +2223,7 @@ mod tests {
         TaggedRouteRule, TaggedStaticBinding,
     };
     use ferrum2_core::{ConnectError, Connector};
-    use ferrum2_crypto::{
-        Aes128Psk, KeySelector, MethodKeyProvider, MethodSecretKeyRef, RandomError,
-        SinglePskProvider,
-    };
+    use ferrum2_crypto::{KeySelector, MethodKeyProvider, MethodSecretKeyRef, RandomError};
     use ferrum2_runtime::OwnerSnapshot;
     use ferrum2_shadowsocks::{
         ShadowsocksTcpInbound, TcpReplayStore, TransportPhase, UDP_REPLAY_LAG, UdpReplayWindow,
@@ -4089,6 +4054,8 @@ mod tests {
         runtime: RuntimeConfig,
         connect_delay: Duration,
         handshake: bool,
+        timeout_limit: Option<Duration>,
+        expected_timeout: Duration,
         key: u8,
     ) {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -4101,29 +4068,37 @@ mod tests {
                 Arc::clone(&aborts),
             )))),
         };
-        let keys = SinglePskProvider::new(Aes128Psk::from_bytes([key; 16]));
-        let clock = SystemClock::new();
-        let random = FixedRandom;
-        let server = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41_002)).expect(label);
-        let outbound = ClientTcpOutbound::new(server.clone(), &keys, &connector, &clock, &random);
+        let server_address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41_002);
+        let server = TargetAddr::ipv4(server_address).expect(label);
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext {
+                tcp_server: server,
+                udp_server: server_address,
+                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                    ferrum2_crypto::MethodPsk::aes128([key; 16]),
+                )),
+            }]
+            .into(),
+            connector,
+            SystemClock::new(),
+            FixedRandom,
+            (runtime.connect_timeout, runtime.handshake_timeout),
+            None,
+            None,
+        );
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect(label);
-        let mut opened = Box::pin(open_with_deadlines(
-            &outbound,
+        let mut opened = Box::pin(engine.open_tcp(
+            ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
             &target,
-            runtime.connect_timeout,
-            runtime.handshake_timeout,
+            timeout_limit,
+            None,
         ));
         assert_open_pending(&mut opened).await;
         if handshake {
             tokio::time::advance(connect_delay).await;
             assert_open_pending(&mut opened).await;
         }
-        let timeout = if handshake {
-            runtime.handshake_timeout
-        } else {
-            runtime.connect_timeout
-        };
-        tokio::time::advance(timeout - Duration::from_millis(1)).await;
+        tokio::time::advance(expected_timeout - Duration::from_millis(1)).await;
         assert_open_pending(&mut opened).await;
         tokio::time::advance(Duration::from_millis(1)).await;
         let error = match opened.await {
@@ -4143,16 +4118,7 @@ mod tests {
             },
             "{label}"
         );
-        assert_eq!(
-            connector
-                .targets
-                .lock()
-                .expect("deadline targets")
-                .as_slice(),
-            &[server]
-        );
-        drop(outbound);
-        drop(connector);
+        drop(engine);
         assert_eq!(drops.load(Ordering::SeqCst), 1, "{label}");
         assert_eq!(aborts.load(Ordering::SeqCst), 0, "{label}");
     }
@@ -4187,6 +4153,8 @@ mod tests {
                 defaults,
                 defaults.connect_timeout + Duration::from_secs(1),
                 false,
+                None,
+                Duration::from_secs(10),
                 0x11,
             ),
             (
@@ -4194,6 +4162,8 @@ mod tests {
                 defaults,
                 Duration::from_secs(9),
                 true,
+                None,
+                Duration::from_secs(5),
                 0x12,
             ),
             (
@@ -4201,6 +4171,8 @@ mod tests {
                 custom,
                 custom.connect_timeout + Duration::from_secs(1),
                 false,
+                None,
+                Duration::from_millis(2_300),
                 0x13,
             ),
             (
@@ -4208,11 +4180,31 @@ mod tests {
                 custom,
                 Duration::from_secs(2),
                 true,
+                None,
+                Duration::from_millis(3_700),
                 0x14,
             ),
+            (
+                "DNS connect timeout cap",
+                defaults,
+                Duration::from_secs(1),
+                false,
+                Some(Duration::from_millis(700)),
+                Duration::from_millis(700),
+                0x16,
+            ),
         ];
-        for (label, runtime, delay, handshake, key) in cases {
-            run_timeout_case(label, runtime, delay, handshake, key).await;
+        for (label, runtime, delay, handshake, timeout_limit, expected_timeout, key) in cases {
+            run_timeout_case(
+                label,
+                runtime,
+                delay,
+                handshake,
+                timeout_limit,
+                expected_timeout,
+                key,
+            )
+            .await;
         }
 
         let aborts = Arc::new(AtomicUsize::new(0));
@@ -4226,25 +4218,33 @@ mod tests {
                 Arc::clone(&aborts),
             )))),
         };
-        let keys = SinglePskProvider::new(Aes128Psk::from_bytes([0x15; 16]));
-        let clock = SystemClock::new();
-        let random = FixedRandom;
-        let outbound = ClientTcpOutbound::new(
-            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41_002)).expect("server"),
-            &keys,
-            &connector,
-            &clock,
-            &random,
+        let server = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41_002);
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext {
+                tcp_server: TargetAddr::ipv4(server).expect("server"),
+                udp_server: server,
+                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                    ferrum2_crypto::MethodPsk::aes128([0x15; 16]),
+                )),
+            }]
+            .into(),
+            connector,
+            SystemClock::new(),
+            FixedRandom,
+            (custom.connect_timeout, custom.handshake_timeout),
+            None,
+            None,
         );
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
-        let flow = open_with_deadlines(
-            &outbound,
-            &target,
-            custom.connect_timeout,
-            custom.handshake_timeout,
-        )
-        .await
-        .expect("first write");
+        let flow = engine
+            .open_tcp(
+                ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                &target,
+                None,
+                None,
+            )
+            .await
+            .expect("first write");
         assert_eq!(
             flow.local_endpoint(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152)
