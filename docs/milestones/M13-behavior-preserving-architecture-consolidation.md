@@ -74,8 +74,8 @@ real repository；the external archive timestamp is not used as Git identity。
 |---|---|---|---|
 | M13-T01 | Freeze exact M12 behavior、M13 contracts and migration guards | M12 closed | done |
 | M13-T02 | Add the core owned egress-plan snapshot without breaking borrowed views | M13-T01 | done |
-| M13-T03 | Invert DNS config dependency and converge on the core snapshot | M13-T02 | ready |
-| M13-T04 | Extract one client TCP egress interface for SOCKS and DNS | M13-T03 | todo |
+| M13-T03 | Invert DNS config dependency and converge on the core snapshot | M13-T02 | done |
+| M13-T04 | Extract one client TCP egress interface for SOCKS and DNS | M13-T03 | ready |
 | M13-T05 | Extract one bounded client UDP association and exact-plan reuse key | M13-T04 | todo |
 | M13-T06 | Split client/server/core/config modules by ownership and enforce architecture | M13-T05 | todo |
 | M13-T07 | Qualify one exact M13 integration SHA | M13-T06 | todo |
@@ -109,6 +109,6 @@ failed evidence。No force-push、PR、tag、package、release or publication is
 
 ## Blocker / next action
 
-No blocker。T02 is accepted and fast-forward integrated at `3228c469…` after one bounded repair and
-targeted Architect/QA PASS。Record this state，then create `codex/m13-t03` in `.worktrees/m13-t03` from
-the resulting exact state commit and bind that exact T03 base。
+No blocker。T03 is accepted and merge-integrated at `768c750a…` after one bounded evidence repair and
+targeted Architect/QA PASS。Record this state，then create `codex/m13-t04` in `.worktrees/m13-t04` from
+the resulting exact state commit and bind that exact T04 base。

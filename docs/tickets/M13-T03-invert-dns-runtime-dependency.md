@@ -1,7 +1,7 @@
 ---
 id: M13-T03
 milestone: M13
-status: ready
+status: done
 depends_on: [M13-T02]
 owns:
   - Cargo.lock
@@ -51,9 +51,17 @@ compatibility wrapper or solve the edge by making config depend on DNS。
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: initial `adfe4120eb8c91230fd37c4c9171a4354092e5a2`；accepted repair
+  `dd532597f171dff45b738623e8be6c5e039252a1`；integration merge
+  `768c750a4edfe0818717e2b6f6a8e99a99c10f2e`。
+- Review: initial Architect/QA `BLOCK` on `ARCH-M13T03-001/002` and
+  `M13-T03-QA-001/002`；one bounded evidence-only repair；targeted Architect/QA `PASS`，all IDs closed。
+- Notes: Authentic RED was the exact architecture dependency command at bound base `cc1eb53d…`，which
+  failed `0/1` on the old DNS-to-config edge before the implementation and passed `1/1` afterward。
+  Integration T03 focused and Quick passed；footprint integrity `PASS`，ticket case/support/fixture delta
+  `+219/0/0`。Numeric `REVIEW_REQUIRED` is accepted for necessary conversion/identity evidence in the two
+  existing large binary test targets；ticket growth itself passed and no helper、fixture or harness was
+  added。No remote action。
 
 ## Rollback / risk
 
