@@ -1,7 +1,7 @@
 ---
 id: M13-T07
 milestone: M13
-status: todo
+status: ready
 depends_on: [M13-T06]
 owns:
   - docs/ci-status.md

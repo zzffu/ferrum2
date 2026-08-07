@@ -77,8 +77,8 @@ real repository；the external archive timestamp is not used as Git identity。
 | M13-T03 | Invert DNS config dependency and converge on the core snapshot | M13-T02 | done |
 | M13-T04 | Extract one client TCP egress interface for SOCKS and DNS | M13-T03 | done |
 | M13-T05 | Extract one bounded client UDP association and exact-plan reuse key | M13-T04 | done |
-| M13-T06 | Split client/server/core/config modules by ownership and enforce architecture | M13-T05 | ready |
-| M13-T07 | Qualify one exact M13 integration SHA | M13-T06 | todo |
+| M13-T06 | Split client/server/core/config modules by ownership and enforce architecture | M13-T05 | done |
+| M13-T07 | Qualify one exact M13 integration SHA | M13-T06 | ready |
 
 ```text
 M13-T01 contract/control
@@ -103,10 +103,12 @@ may trigger file-size `REVIEW_REQUIRED` when moved tests are compared with zero�
 not correctness results，and are dispositioned without deleting independent evidence。No third helper、
 fixture or second harness is planned。
 
-After T05，the exact milestone signal is case/support/fixture `+646/0/0`。Integrity remains `PASS`；the
-numeric `REVIEW_REQUIRED` is the forecasted moved/expanded owner-file signal plus the inherited ratio，
-not a correctness failure。Keep it visible through T06/T07 and disposition the final moved-file shape
-after the ownership split；do not delete evidence or reforecast policy merely to reduce the number。
+After T06，the exact milestone signal is case/support/fixture `-116/0/0`。The case movement is source
+reclassification from splitting the former inline monolith：the base/current product test-name multiset
+is `92/92`，assertion inventory is unchanged and workspace behavior remains green。Integrity remains
+`PASS` and the ratio is now `PASS`；the numeric `REVIEW_REQUIRED` is only the forecasted moved owner-file
+size signal。Keep it visible through T07 and disposition it without deleting evidence or reforecasting
+policy merely to reduce the number。
 
 The user authorizes all required final non-force pushes and performance/resource workflow dispatches
 through M13 close；the workflow still uses only accepted exact SHAs/ranges and does not rerun unchanged
@@ -114,7 +116,8 @@ failed evidence。No force-push、PR、tag、package、release or publication is
 
 ## Blocker / next action
 
-No blocker。T05 is accepted and fast-forward integrated at `4d75d2ba…` after one bounded repair closed
-the copied-plan-identity and stale-pool-state findings；targeted Architect/QA both returned `PASS`。
-Record this state，then create `codex/m13-t06` in `.worktrees/m13-t06` from the resulting exact state
-commit and bind that exact T06 base。
+No blocker。T06 is accepted and fast-forward integrated at `c3bb625b…`。The initial ownership split
+required one bounded repair；the first targeted QA still found mutation escapes，so the user-mandated two
+independent read-only analyses were completed and agreed on one test-only scanner repair。The repaired
+exact SHA passed targeted Architect/QA and integration focused/Full。Proceed with T07 exact-SHA local、
+hosted and performance/resource qualification；do not credit ticket-branch or earlier-run evidence。
