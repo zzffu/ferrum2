@@ -112,6 +112,28 @@ fn workspace_contains_current_compatibility_members_without_exhausting_future_to
 
 #[test]
 fn current_deep_modules_keep_one_way_internal_dependencies() {
+    let exposes_standalone_plan_snapshot = |source: &str| {
+        source.split(';').any(|statement| {
+            let mut tokens = statement
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .filter(|token| !token.is_empty());
+            let mut saw_public = false;
+            tokens.any(|token| {
+                saw_public |= token == "pub";
+                saw_public && token == "PlanSnapshot"
+            })
+        })
+    };
+    for mutation in [
+        "pub use runtime_provider::{SystemDnsEgress, PlanSnapshot, DnsTcpIo};",
+        "#[derive(Clone)]\npub struct PlanSnapshot(std::sync::Arc<[usize]>);",
+    ] {
+        assert!(exposes_standalone_plan_snapshot(mutation));
+    }
+    assert!(!exposes_standalone_plan_snapshot(
+        "pub use ferrum2_core::route::EgressPlanSnapshot;"
+    ));
+
     let metadata = metadata();
     let names = package_names_by_id(&metadata);
     let workspace_ids: BTreeSet<_> = metadata["workspace_members"]
@@ -182,11 +204,15 @@ fn current_deep_modules_keep_one_way_internal_dependencies() {
                 path.display()
             );
         }
+        assert!(
+            !exposes_standalone_plan_snapshot(&source),
+            "DNS source exposes a standalone PlanSnapshot: {}",
+            path.display()
+        );
     }
     let public =
         fs::read_to_string(root.join("crates/ferrum2-dns/src/lib.rs")).expect("DNS public module");
     assert!(public.contains("DnsUpstreamSpec"));
-    assert!(!public.contains("DnsTcpIo, PlanSnapshot"));
 }
 
 #[test]

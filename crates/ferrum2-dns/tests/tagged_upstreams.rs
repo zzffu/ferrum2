@@ -471,8 +471,16 @@ async fn address_lookup_shares_one_deadline_admission_plan_and_owner() {
         std::future::pending::<()>().await;
     });
     let egress = Arc::new(RecordingEgress::default());
+    let server = configured_server(address, DnsUpstreamTransport::Udp, true);
+    let configured_plan_ptr = server
+        .detour
+        .as_ref()
+        .expect("configured address detour")
+        .snapshot_owned()
+        .hops()
+        .as_ptr() as usize;
     let (resolver, mut owner) = TaggedResolver::new(
-        vec![configured_server(address, DnsUpstreamTransport::Udp, true)],
+        vec![server],
         Duration::from_millis(200),
         NonZeroU16::new(1).expect("one admission"),
         egress.clone(),
@@ -528,8 +536,7 @@ async fn address_lookup_shares_one_deadline_admission_plan_and_owner() {
         ]
     );
     let plan_ptrs = egress.plan_ptrs();
-    assert_eq!(plan_ptrs.len(), 2);
-    assert_eq!(plan_ptrs[0], plan_ptrs[1]);
+    assert_eq!(plan_ptrs, vec![configured_plan_ptr; 2]);
     drop(resolver);
     assert_eq!(
         owner
@@ -570,8 +577,16 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
     let _network = TEST_NETWORK.lock().await;
     let (address, tasks) = tc_fixture().await;
     let egress = Arc::new(RecordingEgress::default());
+    let server = configured_server(address, DnsUpstreamTransport::Udp, true);
+    let configured_plan_ptr = server
+        .detour
+        .as_ref()
+        .expect("configured TC detour")
+        .snapshot_owned()
+        .hops()
+        .as_ptr() as usize;
     let (resolver, mut owner) = TaggedResolver::new(
-        vec![configured_server(address, DnsUpstreamTransport::Udp, true)],
+        vec![server],
         Duration::from_millis(250),
         NonZeroU16::new(1).expect("nonzero admission"),
         egress.clone(),
@@ -609,8 +624,7 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
         ]
     );
     let plan_ptrs = egress.plan_ptrs();
-    assert_eq!(plan_ptrs.len(), 2);
-    assert_eq!(plan_ptrs[0], plan_ptrs[1]);
+    assert_eq!(plan_ptrs, vec![configured_plan_ptr; 2]);
     drop(resolver);
     owner.shutdown().await.expect("TC resolver shutdown");
     for task in tasks {

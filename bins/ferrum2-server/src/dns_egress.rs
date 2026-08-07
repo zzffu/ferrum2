@@ -251,16 +251,32 @@ mod tests {
                 },
             )
             .collect();
+        let configured_plan_ptrs: Vec<_> = servers
+            .iter()
+            .map(|server| {
+                server
+                    .detour
+                    .as_ref()
+                    .map(|detour| detour.snapshot_owned().hops().as_ptr())
+            })
+            .collect();
 
-        for (index, (spec, (transport, port, server_name, path, detoured))) in
-            dns_runtime_specs(&servers)
-                .into_iter()
-                .zip(cases)
-                .enumerate()
+        for (
+            index,
+            ((spec, (transport, port, server_name, path, detoured)), configured_plan_ptr),
+        ) in dns_runtime_specs(&servers)
+            .into_iter()
+            .zip(cases)
+            .zip(configured_plan_ptrs)
+            .enumerate()
         {
             assert_eq!(spec.address, SocketAddr::from(([192, 0, 2, 53], port)));
             match (detoured, spec.detour.as_ref()) {
-                (true, Some(detour)) => assert_eq!(detour.snapshot_owned().hops(), &[index]),
+                (true, Some(detour)) => {
+                    let converted = detour.snapshot_owned();
+                    assert_eq!(converted.hops(), &[index]);
+                    assert_eq!(Some(converted.hops().as_ptr()), configured_plan_ptr);
+                }
                 (false, None) => {}
                 _ => panic!("DNS runtime detour mapping drift"),
             }
