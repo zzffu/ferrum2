@@ -135,6 +135,7 @@ cargo test -p ferrum2-server dns_runtime_specs_preserve_validated_server_values 
 cargo test -p ferrum2-client dns_proxy_first_match_direct_and_detoured_transports --locked
 cargo test -p ferrum2-server tagged_dns_selection_uses_authenticated_original_context_and_final --locked
 cargo test -p ferrum2-m0-harness --test architecture --locked
+cargo test -p ferrum2-m0-harness --test workspace_policy hickory_graph_and_features_match_the_approved_dns_policy --locked -- --exact
 cargo clippy -p ferrum2-config -p ferrum2-dns -p ferrum2-client -p ferrum2-server --all-targets --all-features --locked -- -D warnings
 cargo fmt --all -- --check
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base <exact-ticket-base-sha> --candidate HEAD

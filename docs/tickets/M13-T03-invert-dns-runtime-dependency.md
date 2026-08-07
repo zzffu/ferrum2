@@ -18,6 +18,7 @@ owns:
   - bins/ferrum2-server/src/run.rs
   - bins/ferrum2-server/src/dns_egress.rs
   - tests/m0-harness/tests/architecture.rs
+  - tests/m0-harness/tests/workspace_policy.rs
 ---
 
 # M13-T03 — Invert the DNS runtime dependency
@@ -32,7 +33,8 @@ config-to-runtime conversion to client/server composition without changing DNS b
 - [ ] `TaggedResolver` consumes DNS-owned specs；DNS source/public interface no longer mentions config
       DTOs or exports `PlanSnapshot`。
 - [ ] Cargo metadata proves DNS's only normal workspace-internal dependency is core，config has no DNS
-      edge and no third-party identity/feature/provider changes。
+      edge and no third-party identity/feature/provider changes；the existing DNS manifest/feature
+      policy guard is updated in place from the superseded config edge to the approved core edge。
 - [ ] Client/server pure conversions preserve all UDP/TCP/DoT/DoH direct/detour values，validation/error
       ordering and zero-side-effect `--check-config` behavior；binary-owned unit tables prove conversion，
       while the unchanged config contract remains DTO/schema evidence。
