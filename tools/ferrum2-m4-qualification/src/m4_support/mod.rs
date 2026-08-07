@@ -1050,10 +1050,20 @@ fn wait_for_dns_drain(
     idle: &PairSample,
 ) -> Result<PairSample, String> {
     let deadline = Instant::now() + DRAIN_TIMEOUT;
+    let mut previous = None;
+    let mut stable = 0;
     loop {
         let sample = dns_process_sample(client, server)?;
-        if dns_owner_tuple(&sample) == dns_owner_tuple(idle) {
-            return Ok(sample);
+        validate_dns_owner_bound(&sample, idle)?;
+        let tuple = dns_owner_tuple(&sample);
+        if previous == Some(tuple) {
+            stable += 1;
+            if stable == 3 {
+                return Ok(sample);
+            }
+        } else {
+            previous = Some(tuple);
+            stable = 0;
         }
         thread::sleep(remaining(deadline)?.min(Duration::from_millis(100)));
     }

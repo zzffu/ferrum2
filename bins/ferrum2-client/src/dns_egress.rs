@@ -16,24 +16,50 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use super::{
-    ClientContext, ClientRouting, MAX_UDP_WIRE_LEN, TokioFramed, accept_udp_plan_response,
-    activate_udp_plan, encode_udp_plan_request, open_chain_with_deadlines,
-    reserve_application_datagram,
+    ClientContext, ClientRouting, MAX_UDP_WIRE_LEN, PreparedClientUdp, TokioFramed,
+    accept_udp_plan_response, activate_udp_plan, encode_udp_plan_request,
+    open_chain_with_deadlines, reserve_application_datagram,
 };
 
 type Packet = (Vec<u8>, SocketAddr);
 type ReserveFuture = Pin<
     Box<dyn Future<Output = Result<mpsc::OwnedPermit<Packet>, mpsc::error::SendError<()>>> + Send>,
 >;
+type DnsUdpPool = Arc<Mutex<Vec<PreparedClientUdp>>>;
 
 pub(super) struct ClientDnsEgress {
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
+    udp_pool: DnsUdpPool,
 }
 
 impl ClientDnsEgress {
     pub(super) fn new(context: Arc<ClientContext>, routing: Arc<ClientRouting>) -> Self {
-        Self { context, routing }
+        Self {
+            context,
+            routing,
+            udp_pool: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+struct PooledDnsUdp {
+    prepared: Option<PreparedClientUdp>,
+    pool: DnsUdpPool,
+    reusable: bool,
+}
+
+impl Drop for PooledDnsUdp {
+    fn drop(&mut self) {
+        if !self.reusable {
+            return;
+        }
+        let Some(prepared) = self.prepared.take() else {
+            return;
+        };
+        if let Ok(mut pool) = self.pool.lock() {
+            pool.push(prepared);
+        }
     }
 }
 
@@ -102,6 +128,7 @@ impl DnsEgress for ClientDnsEgress {
         };
         let context = Arc::clone(&self.context);
         let routing = Arc::clone(&self.routing);
+        let pool = Arc::clone(&self.udp_pool);
         let hops = plan.hops().to_vec();
         Box::pin(async move {
             let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
@@ -110,16 +137,35 @@ impl DnsEgress for ClientDnsEgress {
                 .and_then(|hop| routing.outbounds.get(*hop))
                 .map(|outbound| outbound.udp_server)
                 .ok_or_else(invalid_target)?;
-            let mut prepared = super::prepare_udp_association_with_bind(
-                &context,
-                Ipv4Addr::LOCALHOST,
-                Some((hops.clone().into(), first_server)),
-                UdpSocket::bind,
-            )
-            .await
-            .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?;
+            let (prepared, stale) = {
+                let mut idle = pool.lock().map_err(|_| invalid_target())?;
+                match idle.iter().position(|prepared| {
+                    prepared.static_server == Some(first_server)
+                        && prepared.static_plan.as_deref() == Some(hops.as_slice())
+                }) {
+                    Some(index) => (Some(idle.swap_remove(index)), None),
+                    None => (None, idle.pop()),
+                }
+            };
+            drop(stale);
+            let mut prepared = match prepared {
+                Some(prepared) => prepared,
+                None => super::prepare_udp_association_with_bind(
+                    &context,
+                    Ipv4Addr::LOCALHOST,
+                    Some((hops.clone().into(), first_server)),
+                    UdpSocket::bind,
+                )
+                .await
+                .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
+            };
             activate_udp_plan(&mut prepared, &context, &routing.outbounds, &hops)
                 .map_err(|_| invalid_target())?;
+            let mut prepared = PooledDnsUdp {
+                prepared: Some(prepared),
+                pool,
+                reusable: true,
+            };
 
             let (outgoing, mut outbound) = mpsc::channel::<Packet>(1);
             let (inbound, incoming) = mpsc::channel::<Packet>(1);
@@ -154,8 +200,9 @@ impl DnsEgress for ClientDnsEgress {
             });
             tasks.spawn(DnsEgressTaskKind::Session, async move {
                 while let Some((packet, destination)) = requests.recv().await {
-                    let Ok(response) = relay_udp_packet(
-                        &mut prepared,
+                    prepared.reusable = false;
+                    let response = relay_udp_packet(
+                        prepared.prepared.as_mut().expect("pooled DNS UDP owner"),
                         &context,
                         &routing,
                         &hops,
@@ -163,10 +210,11 @@ impl DnsEgress for ClientDnsEgress {
                         destination,
                         packet,
                     )
-                    .await
-                    else {
+                    .await;
+                    let Ok(response) = response else {
                         break;
                     };
+                    prepared.reusable = true;
                     if session_responses.send(response).await.is_err() {
                         break;
                     }

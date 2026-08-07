@@ -5,6 +5,8 @@ status: active
 depends_on: [M12-T05]
 owns:
   - .github/workflows/m0.yml
+  - bins/ferrum2-client/src/dns_egress.rs
+  - bins/ferrum2-client/src/run.rs
   - Cargo.lock
   - docs/ci-status.md
   - docs/handoffs/HANDOFF-M12-*.md
@@ -57,6 +59,22 @@ samples，drain and reap all owners，and prove exact listener/upstream rebind�
 No product runtime/config surface、second workflow/job/harness/provider、new package identity、public
 DNS dependency、performance threshold or claim is authorized。The failed pre-remote candidate remains
 visible；no remote authorization was consumed，and authorization is not transferred to the repaired SHA。
+
+## Evidence-driven production repair extension
+
+The exact integrated SHA `17f412be0195b6bc7cd2be7944b64d808442f66f` reproduced the hosted
+detoured-DNS failure locally：the server FD count grew monotonically from 16 to 219 in about one
+second while its OS task count stayed at 18。Each completed DNS query discarded its client
+`PreparedClientUdp` and created a new SIP022 UDP session，while the server correctly retained each
+session until its UDP idle deadline。Raising the qualification ceiling would therefore hide a real
+production resource regression。
+
+On 2026-08-07 the user authorized all work required to close M12 and required root-cause repair before
+continuation。This lease is extended only to reuse idle client DNS UDP associations by exact concrete
+detour plan in `dns_egress.rs`，add one focused regression assertion in the existing client test，and
+teach the existing qualification mode that a bounded stable connection pool is quiescent before exact
+process reap/rebind。No config surface、protocol state machine、second pool/provider or threshold increase
+is authorized。
 
 ## Validation
 

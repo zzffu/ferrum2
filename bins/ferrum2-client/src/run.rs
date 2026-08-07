@@ -5931,6 +5931,11 @@ mod tests {
                     .await
                     .expect("encrypted DNS response");
             }
+            assert_eq!(
+                server.session_count().expect("DNS UDP session count"),
+                1,
+                "sequential DNS queries must reuse one SIP022 UDP session"
+            );
         });
 
         wait_until_bound(socks).await;
