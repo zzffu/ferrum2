@@ -227,6 +227,54 @@ fn has_tokens(tokens: &[String], expected: &[&str]) -> bool {
     })
 }
 
+fn balanced_end(tokens: &[String], start: usize, open: &str, close: &str) -> Option<usize> {
+    (tokens.get(start)? == open).then_some(())?;
+    let mut depth = 0;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        if token == open {
+            depth += 1;
+        } else if token == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index + 1);
+            }
+        }
+    }
+    None
+}
+
+fn is_identifier(token: &str) -> bool {
+    token
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+}
+
+fn test_module_end(tokens: &[String], start: usize) -> Option<usize> {
+    if !has_tokens(
+        tokens.get(start..start + 7)?,
+        &["#", "[", "cfg", "(", "test", ")", "]"],
+    ) {
+        return None;
+    }
+    let mut cursor = start + 7;
+    if tokens.get(cursor).is_some_and(|token| token == "pub") {
+        cursor = balanced_end(tokens, cursor + 1, "(", ")")?;
+    }
+    if tokens.get(cursor).map(String::as_str) != Some("mod")
+        || tokens
+            .get(cursor + 1)
+            .is_none_or(|name| !is_identifier(name))
+    {
+        return None;
+    }
+    match tokens.get(cursor + 2)?.as_str() {
+        ";" => Some(cursor + 3),
+        "{" => balanced_end(tokens, cursor + 2, "{", "}"),
+        _ => None,
+    }
+}
+
 struct TokenSource {
     path: String,
     tokens: Vec<String>,
@@ -240,17 +288,34 @@ impl TokenSource {
         }
     }
 
-    fn production_tokens(&self) -> &[String] {
-        let test_module = (0..self.tokens.len().saturating_sub(7)).find(|&index| {
-            has_tokens(
-                &self.tokens[index..index + 7],
-                &["#", "[", "cfg", "(", "test", ")", "]"],
-            ) && self.tokens[index + 7..]
-                .iter()
-                .take_while(|token| token.as_str() != "{")
-                .any(|token| token == "mod")
-        });
-        &self.tokens[..test_module.unwrap_or(self.tokens.len())]
+    fn production_tokens(&self) -> Result<&[String], String> {
+        let mut delimiters = Vec::new();
+        let mut cursor = 0;
+        while cursor < self.tokens.len() {
+            if delimiters.is_empty()
+                && let Some(end) = test_module_end(&self.tokens, cursor)
+            {
+                let production_end = cursor;
+                cursor = end;
+                while cursor < self.tokens.len() {
+                    cursor = test_module_end(&self.tokens, cursor).ok_or_else(|| {
+                        format!("{} has production after a test module", self.path)
+                    })?;
+                }
+                return Ok(&self.tokens[..production_end]);
+            }
+            match self.tokens[cursor].as_str() {
+                "(" => delimiters.push(")"),
+                "[" => delimiters.push("]"),
+                "{" => delimiters.push("}"),
+                token if delimiters.last().is_some_and(|close| *close == token) => {
+                    delimiters.pop();
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        Ok(&self.tokens)
     }
 }
 
@@ -325,7 +390,7 @@ fn check_no_identifiers<'a>(
 ) -> Result<(), String> {
     for source in sources {
         if let Some(identifier) = source
-            .production_tokens()
+            .production_tokens()?
             .iter()
             .find(|token| forbidden.contains(&token.as_str()))
         {
@@ -340,9 +405,10 @@ fn check_no_sequences<'a>(
     forbidden: &[&[&str]],
 ) -> Result<(), String> {
     for source in sources {
+        let tokens = source.production_tokens()?;
         if let Some(sequence) = forbidden
             .iter()
-            .find(|sequence| has_tokens(source.production_tokens(), sequence))
+            .find(|sequence| has_tokens(tokens, sequence))
         {
             return Err(format!("{} contains forbidden {sequence:?}", source.path));
         }
@@ -350,52 +416,93 @@ fn check_no_sequences<'a>(
     Ok(())
 }
 
+fn check_composition_roots(
+    sources: &[TokenSource],
+    expected: &[(&str, &[&str])],
+) -> Result<(), String> {
+    for (path, names) in expected {
+        let source = sources
+            .iter()
+            .find(|source| source.path == *path)
+            .ok_or_else(|| format!("missing composition root {path}"))?;
+        let tokens = source.production_tokens()?;
+        let actual = name_counts(tokens.windows(2).filter_map(|window| {
+            (window[0] == "fn" && is_identifier(&window[1])).then_some(window[1].as_str())
+        }));
+        let expected = name_counts(names.iter().copied());
+        if actual != expected {
+            return Err(format!(
+                "composition root function mismatch for {path}: expected {expected:?}, found {actual:?}"
+            ));
+        }
+        check_no_identifiers([source], &["accept_response", "commit_request"])?;
+    }
+    Ok(())
+}
+
+fn has_glob_use(tokens: &[String]) -> bool {
+    tokens.iter().enumerate().any(|(index, token)| {
+        token == "use"
+            && tokens[index + 1..]
+                .iter()
+                .take_while(|token| token.as_str() != ";")
+                .any(|token| token == "*")
+    })
+}
+
 fn check_no_glob_facades(
     sources: &[TokenSource],
     owners: &[&str],
-    roots: &[(&str, &[&str])],
+    roots: &[&str],
 ) -> Result<(), String> {
     for owner in owners {
         let source = sources
             .iter()
             .find(|source| source.path == *owner)
             .ok_or_else(|| format!("missing owner {owner}"))?;
-        if has_tokens(source.production_tokens(), &["use", "super", ":", ":", "*"]) {
+        if has_glob_use(source.production_tokens()?) {
             return Err(format!("production owner remains a glob facade: {owner}"));
         }
     }
-    for (root, children) in roots {
+    for root in roots {
         let source = sources
             .iter()
             .find(|source| source.path == *root)
             .ok_or_else(|| format!("missing composition root {root}"))?;
-        for child in *children {
-            if has_tokens(source.production_tokens(), &["use", child, ":", ":", "*"]) {
-                return Err(format!("composition root glob-imports {child}: {root}"));
-            }
+        if has_glob_use(source.production_tokens()?) {
+            return Err(format!("composition root has a glob import: {root}"));
         }
     }
     Ok(())
 }
 
-fn restricted_items(tokens: &[String]) -> BTreeSet<String> {
-    let mut items = BTreeSet::new();
-    for (index, window) in tokens.windows(4).enumerate() {
-        if window[0] != "pub"
-            || window[1] != "("
-            || !matches!(window[2].as_str(), "super" | "crate")
-            || window[3] != ")"
+fn name_counts<'a>(names: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for name in names {
+        *counts.entry(name.to_owned()).or_default() += 1;
+    }
+    counts
+}
+
+fn restricted_items(tokens: &[String]) -> BTreeMap<String, usize> {
+    let mut items = BTreeMap::new();
+    for index in 0..tokens.len() {
+        if tokens.get(index).map(String::as_str) != Some("pub")
+            || tokens.get(index + 1).map(String::as_str) != Some("(")
         {
             continue;
         }
-        let declaration = tokens[index + 4..]
+        let Some(declaration_start) = balanced_end(tokens, index + 1, "(", ")") else {
+            continue;
+        };
+        let declaration = tokens[declaration_start..]
             .iter()
             .take_while(|token| !matches!(token.as_str(), "," | ";" | "{" | "}"));
         let declaration: Vec<_> = declaration.map(String::as_str).collect();
         for keyword in ["struct", "enum", "fn", "trait", "type", "const"] {
             if let Some(keyword) = declaration.iter().position(|token| *token == keyword) {
                 if let Some(name) = declaration.get(keyword + 1) {
-                    items.insert((*name).to_owned());
+                    *items.entry((*name).to_owned()).or_default() += 1;
                 }
                 break;
             }
@@ -413,8 +520,8 @@ fn check_restricted_interfaces(
             .iter()
             .find(|source| source.path == *path)
             .ok_or_else(|| format!("missing interface owner {path}"))?;
-        let actual = restricted_items(source.production_tokens());
-        let expected: BTreeSet<_> = names.iter().map(|name| (*name).to_owned()).collect();
+        let actual = restricted_items(source.production_tokens()?);
+        let expected = name_counts(names.iter().copied());
         if actual != expected {
             return Err(format!(
                 "restricted interface mismatch for {path}: expected {expected:?}, found {actual:?}"
@@ -432,28 +539,22 @@ fn check_test_placement(
 ) -> Result<(), String> {
     check_definition_ownership(sources, rules, composition_tests)?;
     for source in sources {
-        let imports_composition_tests = has_tokens(
-            &source.tokens,
-            &["crate", ":", ":", "run", ":", ":", "tests"],
-        );
-        if imports_composition_tests && !composition_tests.contains(&source.path.as_str()) {
-            return Err(format!(
-                "owner tests import composition tests: {}",
-                source.path
-            ));
-        }
-        let imports_owner_tests = source
+        let references_tests = source
             .tokens
             .windows(3)
             .any(|window| window[0] == "tests" && window[1] == ":" && window[2] == ":");
-        if composition_tests.contains(&source.path.as_str()) && imports_owner_tests {
+        if references_tests {
+            let role = if composition_tests.contains(&source.path.as_str()) {
+                "composition"
+            } else if support_modules.contains(&source.path.as_str()) {
+                "support"
+            } else {
+                "owner"
+            };
             return Err(format!(
-                "composition tests import owner test module: {}",
+                "{role} source references a test module: {}",
                 source.path
             ));
-        }
-        if support_modules.contains(&source.path.as_str()) && imports_owner_tests {
-            return Err(format!("test support imports owner tests: {}", source.path));
         }
     }
     Ok(())
@@ -915,6 +1016,97 @@ fn lexical_ownership_scanner_rejects_decoys_and_owner_mutations() {
         check_test_placement(&cycle, &[test_rule], &["sample/tests.rs"], &[]).is_err(),
         "test placement checker accepted an owner/composition cycle"
     );
+
+    let mut accepted = Vec::new();
+    for (mutation, source) in [
+        (
+            "cfg(test) use followed by mod and production",
+            "#[cfg(test)] use crate::fixture; mod tests; fn production() {}",
+        ),
+        (
+            "non-terminal cfg(test) module",
+            "#[cfg(test)] mod tests; fn production() {}",
+        ),
+    ] {
+        let source = TokenSource::new("sample/owner.rs", source);
+        if check_no_identifiers([&source], &["production"]).is_ok() {
+            accepted.push(mutation);
+        }
+    }
+    for (mutation, source, expected) in [
+        (
+            "pub(in path) restricted item",
+            "pub(in crate::run) fn extra() {}",
+            &[][..],
+        ),
+        (
+            "duplicate restricted item name",
+            "struct A; impl A { pub(super) fn new() {} } \
+             struct B; impl B { pub(super) fn new() {} }",
+            &["new"][..],
+        ),
+    ] {
+        let sources = [TokenSource::new("sample/owner.rs", source)];
+        if check_restricted_interfaces(&sources, &[("sample/owner.rs", expected)]).is_ok() {
+            accepted.push(mutation);
+        }
+    }
+    for (mutation, source, owners, roots) in [
+        (
+            "crate root glob import",
+            "use crate::run::*;",
+            &["sample/owner.rs"][..],
+            &[][..],
+        ),
+        (
+            "self child root glob import",
+            "use self::child::*;",
+            &[][..],
+            &["sample/root.rs"][..],
+        ),
+    ] {
+        let sources = [TokenSource::new(
+            if owners.is_empty() {
+                "sample/root.rs"
+            } else {
+                "sample/owner.rs"
+            },
+            source,
+        )];
+        if check_no_glob_facades(&sources, owners, roots).is_ok() {
+            accepted.push(mutation);
+        }
+    }
+    let relative_cycle = [
+        TokenSource::new(
+            "sample/owner.rs",
+            "use super::super::tests::fixture; #[test] fn owned_case() {}",
+        ),
+        TokenSource::new("sample/tests.rs", ""),
+    ];
+    if check_test_placement(&relative_cycle, &[test_rule], &["sample/tests.rs"], &[]).is_ok() {
+        accepted.push("relative owner/test cycle");
+    }
+
+    for (mutation, source) in [
+        (
+            "renamed root executor",
+            "fn run() {} fn renamed_executor() {}",
+        ),
+        (
+            "allowed root function with protocol operation",
+            "fn run() { association.accept_response(); }",
+        ),
+    ] {
+        let sources = [TokenSource::new("sample/root.rs", source)];
+        if check_composition_roots(&sources, &[("sample/root.rs", &["run"])]).is_ok() {
+            accepted.push(mutation);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "ownership scanner accepted mutations: {accepted:?}"
+    );
 }
 
 #[test]
@@ -944,21 +1136,7 @@ fn production_owner_dependencies_are_explicit_and_narrow() {
     let mut paths = owners.to_vec();
     paths.extend(roots);
     let sources = token_sources(&root, &paths);
-    check_no_glob_facades(
-        &sources,
-        &owners,
-        &[
-            (
-                roots[0],
-                &["context", "dns", "observation", "socks", "tokio_io"][..],
-            ),
-            (
-                roots[1],
-                &["dns", "observation", "tcp", "tokio_io", "udp"][..],
-            ),
-        ],
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+    check_no_glob_facades(&sources, &owners, &roots).unwrap_or_else(|error| panic!("{error}"));
 
     check_restricted_interfaces(
         &sources,
@@ -972,6 +1150,8 @@ fn production_owner_dependencies_are_explicit_and_narrow() {
                     "TokioFramed",
                     "TokioTransport",
                     "bind_listener",
+                    "new",
+                    "new",
                     "new",
                     "shutdown_signal",
                     "terminal",
@@ -1002,6 +1182,7 @@ fn production_owner_dependencies_are_explicit_and_narrow() {
                     "TokioFramed",
                     "TokioTransport",
                     "bind_listener",
+                    "new",
                     "new",
                     "shutdown_signal",
                     "terminal",
@@ -1205,19 +1386,38 @@ fn binary_composition_roots_delegate_protocol_execution_to_owned_modules() {
             "bins/ferrum2-server/src/run.rs",
         ],
     );
-    check_no_sequences(
+    check_composition_roots(
         &sources,
         &[
-            &["fn", "client_connection"],
-            &["fn", "run_udp_association"],
-            &["fn", "relay_udp_association"],
-            &["fn", "server_connection"],
-            &["struct", "UdpMappings"],
-            &["fn", "prepare_udp_server"],
-            &["struct", "TokioTransport"],
-            &["fn", "observation_for_error"],
-            &["fn", "framed_error"],
+            (
+                "bins/ferrum2-client/src/run.rs",
+                &[
+                    "fmt",
+                    "run",
+                    "run_async",
+                    "run_with_registry",
+                    "run_with_registry_and_metrics",
+                    "run_with_registry_and_metrics_inner",
+                    "report_result",
+                ],
+            ),
+            (
+                "bins/ferrum2-server/src/run.rs",
+                &[
+                    "fmt",
+                    "run",
+                    "run_async",
+                    "run_with_registry",
+                    "run_with_registry_prepared",
+                    "report_result",
+                ],
+            ),
         ],
+    )
+    .unwrap_or_else(|error| panic!("composition root owns protocol execution: {error}"));
+    check_no_sequences(
+        &sources,
+        &[&["struct", "UdpMappings"], &["struct", "TokioTransport"]],
     )
     .unwrap_or_else(|error| panic!("composition root owns protocol execution: {error}"));
 }
