@@ -1,7 +1,7 @@
 ---
 id: M13-T05
 milestone: M13
-status: ready
+status: done
 depends_on: [M13-T04]
 owns:
   - bins/ferrum2-client/src/run.rs
@@ -19,17 +19,17 @@ identity explicitly `(first server, owned egress plan)`。
 
 ## Acceptance
 
-- [ ] The egress module owns UDP prepare、activate、reserve、nested encode、authenticated accept、commit、
+- [x] The egress module owns UDP prepare、activate、reserve、nested encode、authenticated accept、commit、
       cancel/drop/reap and exposes only the operations its two consumers need。
-- [ ] SOCKS static/routed/selector selection grain、chain bounds、all-layer validation-before-mutation、
+- [x] SOCKS static/routed/selector selection grain、chain bounds、all-layer validation-before-mutation、
       replay/binding and current capacity owners remain exact。
-- [ ] Same server/equal snapshot reuses one healthy idle association；different plan/order、selector
+- [x] Same server/equal snapshot reuses one healthy idle association；different plan/order、selector
       switch、I/O/auth failure、cancel、partial state or saturation cannot reuse it。
-- [ ] Internal DNS UDP remains independent from public UDP opt-in；UDP TC retains the same server/address/
+- [x] Internal DNS UDP remains independent from public UDP opt-in；UDP TC retains the same server/address/
       snapshot/deadline and never re-enters policy。
-- [ ] Failure and forced shutdown return all sessions/tasks/queues/buffers/live IDs and permit exact
+- [x] Failure and forced shutdown return all sessions/tasks/queues/buffers/live IDs and permit exact
       listener/hop/upstream rebind；no second manager、codec、pool ceiling or helper implementation appears。
-- [ ] `TEST-0014` T05、repository Full、ticket footprint and blocking Architect/QA review pass on one
+- [x] `TEST-0014` T05、repository Full、ticket footprint and blocking Architect/QA review pass on one
       exact candidate。
 
 ## Validation
@@ -39,9 +39,13 @@ association interface；reuse existing socket/session fixtures。
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `4d75d2ba0df8112517a3ab2e035aae1ac8123fe7`，fast-forward integrated。
+- Review: Initial Architect/QA `BLOCK` on copied association-plan identity and a pool matrix that could
+  not kill stale `reusable=true`；one bounded repair closed all four corresponding IDs，then targeted
+  Architect and QA both returned `PASS` with no new finding。
+- Notes: T05 focused and serial repository Full pass on the exact integration SHA；lifecycle is `1/1`
+  in `127.26s` and docs pass。Ticket footprint integrity passes with ratio-only `WARN` and
+  case/support/fixture delta `+122/0/0`；no helper、fixture、dependency or second data plane was added。
 
 ## Rollback / risk
 

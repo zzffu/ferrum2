@@ -1,7 +1,7 @@
 ---
 id: M13-T06
 milestone: M13
-status: todo
+status: ready
 depends_on: [M13-T05]
 owns:
   - bins/ferrum2-client/src/run.rs

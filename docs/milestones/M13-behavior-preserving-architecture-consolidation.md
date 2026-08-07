@@ -76,8 +76,8 @@ real repository；the external archive timestamp is not used as Git identity。
 | M13-T02 | Add the core owned egress-plan snapshot without breaking borrowed views | M13-T01 | done |
 | M13-T03 | Invert DNS config dependency and converge on the core snapshot | M13-T02 | done |
 | M13-T04 | Extract one client TCP egress interface for SOCKS and DNS | M13-T03 | done |
-| M13-T05 | Extract one bounded client UDP association and exact-plan reuse key | M13-T04 | ready |
-| M13-T06 | Split client/server/core/config modules by ownership and enforce architecture | M13-T05 | todo |
+| M13-T05 | Extract one bounded client UDP association and exact-plan reuse key | M13-T04 | done |
+| M13-T06 | Split client/server/core/config modules by ownership and enforce architecture | M13-T05 | ready |
 | M13-T07 | Qualify one exact M13 integration SHA | M13-T06 | todo |
 
 ```text
@@ -103,12 +103,18 @@ may trigger file-size `REVIEW_REQUIRED` when moved tests are compared with zero�
 not correctness results，and are dispositioned without deleting independent evidence。No third helper、
 fixture or second harness is planned。
 
+After T05，the exact milestone signal is case/support/fixture `+646/0/0`。Integrity remains `PASS`；the
+numeric `REVIEW_REQUIRED` is the forecasted moved/expanded owner-file signal plus the inherited ratio，
+not a correctness failure。Keep it visible through T06/T07 and disposition the final moved-file shape
+after the ownership split；do not delete evidence or reforecast policy merely to reduce the number。
+
 The user authorizes all required final non-force pushes and performance/resource workflow dispatches
 through M13 close；the workflow still uses only accepted exact SHAs/ranges and does not rerun unchanged
 failed evidence。No force-push、PR、tag、package、release or publication is authorized。
 
 ## Blocker / next action
 
-No blocker。T04 is accepted and fast-forward integrated at `7c1fc99c…` after one bounded evidence
-repair and targeted Architect/QA PASS。Record this state，then create `codex/m13-t05` in
-`.worktrees/m13-t05` from the resulting exact state commit and bind that exact T05 base。
+No blocker。T05 is accepted and fast-forward integrated at `4d75d2ba…` after one bounded repair closed
+the copied-plan-identity and stale-pool-state findings；targeted Architect/QA both returned `PASS`。
+Record this state，then create `codex/m13-t06` in `.worktrees/m13-t06` from the resulting exact state
+commit and bind that exact T06 base。
