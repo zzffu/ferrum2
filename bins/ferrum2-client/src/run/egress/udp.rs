@@ -748,7 +748,7 @@ mod tests {
     use ferrum2_runtime::{OwnerRegistry, UdpRuntimeLimits};
 
     use super::*;
-    use crate::run::tests::FixedRandom;
+    use crate::run::test_support::*;
 
     #[test]
     fn live_udp_registry_accepts_zero_through_seven_collisions_and_rejects_eight() {

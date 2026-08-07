@@ -1,4 +1,22 @@
-use super::*;
+use std::sync::Arc;
+
+use ferrum2_config::LoggingLevel;
+use ferrum2_core::ConnectErrorKind;
+use ferrum2_observability::{
+    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
+};
+use ferrum2_runtime::{
+    MetricsEndpoint, MetricsEndpointError, OwnerRegistry, PreparedProcessRoot, ProcessCancellation,
+    ProcessFuture, RelayFailure, RelayRunError, SupervisorError, UdpRuntimeError,
+};
+use ferrum2_shadowsocks::{
+    DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason, ShadowsocksError, UdpPacketError,
+};
+use tokio::net::TcpListener;
+
+use super::RunError;
+use super::context::ClientContext;
+use super::tokio_io::TokioFramed;
 
 pub(super) fn record_forced_udp_sessions(context: &ClientContext) {
     for _ in 0..context.registry.snapshot().udp_sessions {
@@ -42,7 +60,7 @@ impl PreparedProcessRoot<RunError> for ClientMetricsRoot {
     }
 }
 
-pub(super) fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String {
+fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String {
     let snapshot = registry.snapshot();
     metrics.set_udp_sessions_active(Role::Client, snapshot.udp_sessions);
     metrics.set_udp_buffered_bytes(Role::Client, snapshot.udp_buffered_bytes);
@@ -56,7 +74,7 @@ pub(super) fn run_error_for_supervisor(error: SupervisorError) -> RunError {
     }
 }
 
-pub(super) fn run_error_for_metrics(error: MetricsEndpointError) -> RunError {
+fn run_error_for_metrics(error: MetricsEndpointError) -> RunError {
     match error {
         MetricsEndpointError::ListenerFailure => RunError::RuntimeListener,
         MetricsEndpointError::ChildFailure => RunError::RuntimeChild,
@@ -94,13 +112,13 @@ pub(super) enum UdpPacketPhase {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct UdpPacketPolicy {
+struct UdpPacketPolicy {
     pub(super) reason: Reason,
     pub(super) terminal: bool,
     pub(super) replay: bool,
 }
 
-pub(super) fn udp_packet_policy(phase: UdpPacketPhase, error: UdpPacketError) -> UdpPacketPolicy {
+fn udp_packet_policy(phase: UdpPacketPhase, error: UdpPacketError) -> UdpPacketPolicy {
     let (reason, terminal, replay) = match (phase, error) {
         (
             _,
@@ -177,11 +195,7 @@ pub(super) fn record_udp_packet_error(
     !policy.terminal
 }
 
-pub(super) fn record_udp_packet_metrics(
-    metrics: &Metrics,
-    direction: Direction,
-    policy: UdpPacketPolicy,
-) {
+fn record_udp_packet_metrics(metrics: &Metrics, direction: Direction, policy: UdpPacketPolicy) {
     metrics.udp_failure(Role::Client, Stage::Shadowsocks, policy.reason);
     if !policy.terminal {
         metrics.udp_datagram(Role::Client, direction, Outcome::Rejected);
@@ -285,7 +299,7 @@ pub(super) fn record_failure(
     emit_observation(Role::Client, stage, outcome, Some(reason));
 }
 
-pub(super) fn emit_observation(role: Role, stage: Stage, outcome: Outcome, reason: Option<Reason>) {
+fn emit_observation(role: Role, stage: Stage, outcome: Outcome, reason: Option<Reason>) {
     let record = TraceRecord::new(LogLevel::Warn, Event::Failure, role, stage, outcome);
     emit(match reason {
         Some(reason) => record.with_reason(reason),
@@ -324,7 +338,7 @@ pub(super) fn observation_for_error(error: ShadowsocksError) -> (Stage, Outcome,
     }
 }
 
-pub(super) fn observation_for_terminal(terminal: FlowTerminal) -> (Stage, Outcome, Option<Reason>) {
+fn observation_for_terminal(terminal: FlowTerminal) -> (Stage, Outcome, Option<Reason>) {
     match terminal {
         FlowTerminal::Normal => (Stage::Relay, Outcome::Completed, None),
         FlowTerminal::Detection(reason) => (
@@ -341,7 +355,7 @@ pub(super) fn observation_for_terminal(terminal: FlowTerminal) -> (Stage, Outcom
     }
 }
 
-pub(super) fn reason_for_detection(reason: DetectionReason) -> Reason {
+fn reason_for_detection(reason: DetectionReason) -> Reason {
     match reason {
         DetectionReason::ShortRead
         | DetectionReason::ShortWrite
@@ -364,7 +378,7 @@ pub(super) fn reason_for_detection(reason: DetectionReason) -> Reason {
     }
 }
 
-pub(super) fn reason_for_protocol(reason: ProtocolReason) -> Reason {
+fn reason_for_protocol(reason: ProtocolReason) -> Reason {
     match reason {
         ProtocolReason::Authentication => Reason::Authentication,
         ProtocolReason::FrameBounds => Reason::FrameBounds,
@@ -372,7 +386,7 @@ pub(super) fn reason_for_protocol(reason: ProtocolReason) -> Reason {
     }
 }
 
-pub(super) fn reason_for_connect(kind: ConnectErrorKind) -> Reason {
+fn reason_for_connect(kind: ConnectErrorKind) -> Reason {
     match kind {
         ConnectErrorKind::NetworkUnreachable => Reason::NetworkUnreachable,
         ConnectErrorKind::HostUnreachable => Reason::HostUnreachable,
@@ -387,6 +401,7 @@ mod tests {
     use ferrum2_shadowsocks::{TransportPhase, UDP_REPLAY_LAG, UdpReplayWindow};
 
     use super::*;
+    use crate::run::test_support::*;
 
     #[test]
     fn udp_packet_error_policy_is_closed_for_every_phase_and_variant() {

@@ -1,38 +1,18 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::task::{Context, Poll};
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
-use ferrum2_config::{DnsConfig, LoggingLevel, RuntimeConfig, UdpConfig, ValidatedServerConfig};
+use ferrum2_config::{DnsConfig, ValidatedServerConfig};
 use ferrum2_core::route::Network;
-use ferrum2_core::{
-    AbortiveClose, ConnectErrorKind, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr,
-};
-use ferrum2_crypto::{Clock as _, MethodSinglePskProvider, SystemClock, SystemRandom};
-use ferrum2_dns::{TaggedResolver, TaggedResolverOwner};
-use ferrum2_observability::{
-    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
-    json_subscriber,
-};
+use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
+use ferrum2_dns::TaggedResolver;
+use ferrum2_observability::{Metrics, json_subscriber};
 use ferrum2_runtime::{
-    AcceptListener, AccountedDatagram, BoundedSupervisor, CancellationToken, DirectOutbound,
-    DirectUdpPacketHandler, DirectUdpRuntime, MAX_UDP_WIRE_DATAGRAM_BYTES, MetricsEndpoint,
-    MetricsEndpointError, OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessCause,
-    ProcessFuture, ProcessReport, ProcessRoot, ProcessRootExit, ProcessSupervisor, RelayFailure,
-    RelayRunError, RuntimeTcpStream, SupervisorError, SystemDirectUdpSocketFactory,
-    SystemSocketInspector, SystemTcpDialer, TcpConnector, UdpBufferReservation, UdpCommitError,
-    UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager, relay_lifecycle,
+    BoundedSupervisor, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot, ProcessRootExit,
+    ProcessSupervisor, UdpSessionManager,
 };
-use ferrum2_shadowsocks::{
-    DetectionReason, FlowTerminal, MethodKeyAdapter, PlainDuplex, ProtocolReason,
-    ServerResponseCapability, ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore, TransportIo,
-    UdpPacketError, UdpPacketScratch, UdpServer,
-};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, ReadBuf};
-use tokio::net::{TcpListener, TcpSocket, UdpSocket};
+use ferrum2_shadowsocks::{MethodKeyAdapter, TcpReplayStore, UdpServer};
+use tokio::net::UdpSocket;
 
 mod dns;
 #[path = "dns_egress.rs"]
@@ -43,11 +23,11 @@ mod tcp;
 mod tokio_io;
 mod udp;
 
-use dns::*;
-use observation::*;
-use tcp::*;
-use tokio_io::*;
-use udp::*;
+use dns::ServerDnsRoot;
+use observation::{ServerMetricsRoot, log_level};
+use tcp::{ServerContext, ServerRouting, ServerTcpListeners, ServerTcpRoot};
+use tokio_io::{bind_listener, shutdown_signal};
+use udp::{ServerUdpShared, UdpMappings, prepare_udp_server, udp_runtime_limits};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
@@ -306,5 +286,7 @@ fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
     }
 }
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;

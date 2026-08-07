@@ -1,5 +1,33 @@
-use super::raw::*;
-use super::*;
+use std::net::{IpAddr, SocketAddr, SocketAddrV4};
+use std::num::NonZeroU16;
+use std::time::Duration;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use ferrum2_core::TargetAddr;
+use ferrum2_core::route::{
+    ActionRule, ActionTable, EgressPlanHandle, MAX_ROUTE_RULES, Network, RouteRule, RouteTable,
+    compile_selector_plans_with_roots,
+};
+use ferrum2_core::selector::{
+    SelectorCompileError, SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan,
+    TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
+};
+use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::error::{ConfigError, ConfigErrorKind, ConfigField};
+use crate::model::{
+    ClientInboundConfig, ClientOutboundConfig, DnsConfig, DnsInboundConfig, DnsServerConfig,
+    DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig, ReplayConfig, RuntimeConfig,
+    ServerInboundConfig, ServerOutboundConfig, UdpConfig, ValidatedClientConfig,
+    ValidatedServerConfig,
+};
+use crate::raw::{
+    RawChain, RawClient, RawClientInbound, RawClientOutbound, RawClientRoot, RawDns, RawLogging,
+    RawMetrics, RawReplay, RawRoute, RawRouteTarget, RawRuntime, RawSelector, RawServer,
+    RawServerInbound, RawServerOutbound, RawServerRoot, RawShadowsocks, RawUdp, SecretString,
+};
 
 fn client_global_tags(raw: &RawClientRoot) -> Vec<String> {
     raw.inbounds

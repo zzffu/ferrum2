@@ -102,15 +102,7 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    use crate::run::socks::tests::FailingConnector;
-    use crate::run::tests::{
-        ChainObserver, DeadlineConnector, FixedRandom, assert_open_pending,
-        assert_two_layer_buffers, chain_test_setup, scripted_input,
-    };
-    use crate::run::tokio_io::tests::ScriptedIo;
-    use crate::run::{
-        ClientEgressEngine, ClientOpenFailure, TokioConnector, TokioFramed, TokioTransport,
-    };
+    use crate::run::test_support::*;
 
     #[tokio::test]
     async fn tcp_chain_opens_hops_in_order_with_distinct_credentials_and_no_fallback() {
@@ -684,5 +676,329 @@ mod tests {
             &[outbounds[0].tcp_server.clone()]
         );
         assert_eq!(selector.selected("manual"), Ok("a-b"));
+    }
+
+    pub(in crate::run) async fn assert_open_pending<F>(future: &mut Pin<Box<F>>)
+    where
+        F: std::future::Future,
+    {
+        tokio::select! {
+            biased;
+            _ = future.as_mut() => panic!("open completed before its controlled phase"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+
+    async fn run_timeout_case(
+        label: &str,
+        runtime: RuntimeConfig,
+        connect_delay: Duration,
+        handshake: bool,
+        timeout_limit: Option<Duration>,
+        expected_timeout: Duration,
+        key: u8,
+    ) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let connector = DeadlineConnector {
+            delay: connect_delay,
+            targets: Mutex::new(Vec::new()),
+            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::pending(
+                Arc::clone(&drops),
+                Arc::clone(&aborts),
+            )))),
+        };
+        let server_address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41_002);
+        let server = TargetAddr::ipv4(server_address).expect(label);
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext {
+                tcp_server: server,
+                udp_server: server_address,
+                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                    ferrum2_crypto::MethodPsk::aes128([key; 16]),
+                )),
+            }]
+            .into(),
+            connector,
+            SystemClock::new(),
+            FixedRandom,
+            (runtime.connect_timeout, runtime.handshake_timeout),
+            None,
+            None,
+        );
+        let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect(label);
+        let mut opened = Box::pin(engine.open_tcp(
+            ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+            &target,
+            timeout_limit,
+            None,
+        ));
+        assert_open_pending(&mut opened).await;
+        if handshake {
+            tokio::time::advance(connect_delay).await;
+            assert_open_pending(&mut opened).await;
+        }
+        tokio::time::advance(expected_timeout - Duration::from_millis(1)).await;
+        assert_open_pending(&mut opened).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let error = match opened.await {
+            Ok(_) => panic!("{label}"),
+            Err(error) => error,
+        };
+        assert!(
+            if handshake {
+                matches!(error, ClientOpenFailure::HandshakeTimeout)
+            } else {
+                matches!(
+                    error,
+                    ClientOpenFailure::Protocol(ShadowsocksError::Connect(
+                        ConnectErrorKind::Timeout
+                    ))
+                )
+            },
+            "{label}"
+        );
+        drop(engine);
+        assert_eq!(drops.load(Ordering::SeqCst), 1, "{label}");
+        assert_eq!(aborts.load(Ordering::SeqCst), 0, "{label}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phase_deadline_contract_table_preserves_defaults_overrides_and_first_write() {
+        let defaults = RuntimeConfig {
+            max_connections: std::num::NonZeroU16::new(4_096).expect("non-zero"),
+            listen_backlog: std::num::NonZeroU16::new(1_024).expect("non-zero"),
+            handshake_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(10),
+            idle_timeout: Duration::from_secs(300),
+            shutdown_grace: Duration::from_secs(30),
+        };
+        let custom = RuntimeConfig {
+            connect_timeout: Duration::from_millis(2_300),
+            handshake_timeout: Duration::from_millis(3_700),
+            ..defaults
+        };
+        let actual = [
+            (defaults.connect_timeout, defaults.handshake_timeout),
+            (custom.connect_timeout, custom.handshake_timeout),
+        ];
+        let expected = [
+            (Duration::from_secs(10), Duration::from_secs(5)),
+            (Duration::from_millis(2_300), Duration::from_millis(3_700)),
+        ];
+        assert_eq!(actual, expected);
+        let cases = [
+            (
+                "default connect",
+                defaults,
+                defaults.connect_timeout + Duration::from_secs(1),
+                false,
+                None,
+                Duration::from_secs(10),
+                0x11,
+            ),
+            (
+                "fresh handshake",
+                defaults,
+                Duration::from_secs(9),
+                true,
+                None,
+                Duration::from_secs(5),
+                0x12,
+            ),
+            (
+                "custom connect",
+                custom,
+                custom.connect_timeout + Duration::from_secs(1),
+                false,
+                None,
+                Duration::from_millis(2_300),
+                0x13,
+            ),
+            (
+                "custom handshake",
+                custom,
+                Duration::from_secs(2),
+                true,
+                None,
+                Duration::from_millis(3_700),
+                0x14,
+            ),
+            (
+                "DNS connect timeout cap",
+                defaults,
+                Duration::from_secs(1),
+                false,
+                Some(Duration::from_millis(700)),
+                Duration::from_millis(700),
+                0x16,
+            ),
+        ];
+        for (label, runtime, delay, handshake, timeout_limit, expected_timeout, key) in cases {
+            run_timeout_case(
+                label,
+                runtime,
+                delay,
+                handshake,
+                timeout_limit,
+                expected_timeout,
+                key,
+            )
+            .await;
+        }
+
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let (stream, mut peer) = tokio::io::duplex(2_048);
+        let connector = DeadlineConnector {
+            delay: Duration::ZERO,
+            targets: Mutex::new(Vec::new()),
+            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
+                stream,
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                Arc::clone(&aborts),
+            )))),
+        };
+        let server = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41_002);
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext {
+                tcp_server: TargetAddr::ipv4(server).expect("server"),
+                udp_server: server,
+                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                    ferrum2_crypto::MethodPsk::aes128([0x15; 16]),
+                )),
+            }]
+            .into(),
+            connector,
+            SystemClock::new(),
+            FixedRandom,
+            (custom.connect_timeout, custom.handshake_timeout),
+            None,
+            None,
+        );
+        let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
+        let flow = engine
+            .open_tcp(
+                ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                &target,
+                None,
+                None,
+            )
+            .await
+            .expect("first write");
+        assert_eq!(
+            flow.local_endpoint(),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152)
+        );
+        let mut written = [0_u8; 2_048];
+        assert!(peer.read(&mut written).await.expect("handshake wire") > 0);
+        assert_eq!(aborts.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn routed_tcp_selects_after_target_and_never_falls_back() {
+        let upstreams = [
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("A"),
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("B"),
+        ];
+        let servers: Vec<SocketAddrV4> = upstreams
+            .iter()
+            .map(|socket| match socket.local_addr().expect("upstream") {
+                SocketAddr::V4(address) => address,
+                SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
+            })
+            .collect();
+        let target = TargetAddr::ipv4("192.0.2.1:80".parse().expect("target")).expect("target");
+        let listens = [reserve_address(), reserve_address()];
+        let mappings = [(listens[0], servers[0]), (listens[1], servers[1])];
+        let (path, mut config) = tagged_client_test_config(&mappings, false);
+        let dead = reserve_address();
+        config
+            .outbounds
+            .push(ferrum2_config::ClientOutboundConfig { server: dead });
+        config
+            .outbound_psks
+            .push(psk_for_method(MethodProfile::Blake3Aes128Gcm2022));
+        let rule = |inbound, target, outbound| {
+            TaggedRouteRule::new(inbound, Some(Network::Tcp), target, Some(outbound))
+        };
+        let (route, _) = compile_selector_route(
+            &[TaggedInbound::new("i0", 0), TaggedInbound::new("i1", 1)],
+            &[
+                TaggedOutbound::new("o0", 0),
+                TaggedOutbound::new("o1", 1),
+                TaggedOutbound::new("dead", 2),
+            ],
+            &[SelectorDefinition::new(
+                "manual",
+                vec!["o0", "o1", "dead"],
+                Some("o0"),
+            )],
+            TaggedRoute::Routed {
+                rules: vec![
+                    rule(Some("i1"), None, "manual"),
+                    rule(None, Some(target), "manual"),
+                ],
+                final_outbound: Some("manual"),
+            },
+        )
+        .expect("selector route");
+        config.route = route;
+        let selector = config.selector_control();
+        let registry = OwnerRegistry::new();
+        let (stop, task) = spawn_test_client(config, &registry);
+        for listen in listens {
+            wait_until_bound(listen).await;
+        }
+        let (mut first, reply) = socks_connect_port(listens[0], 80).await;
+        assert_eq!(&reply[..2], &[5, 0]);
+        let (mut first_upstream, _) = upstreams[0].accept().await.expect("selected A");
+        let mut wire = [0; 256];
+        assert!(
+            first_upstream
+                .read(&mut wire)
+                .await
+                .expect("initial A wire")
+                > 0
+        );
+        while first_upstream.try_read(&mut wire).is_ok() {}
+        selector.switch("manual", "o1").expect("switch to B");
+        first
+            .write_all(b"captured A")
+            .await
+            .expect("open flow write");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), first_upstream.read(&mut wire))
+                .await
+                .expect("captured A timeout")
+                .expect("captured A wire")
+                > 0
+        );
+        for (inbound, port) in [(1, 81), (0, 80), (0, 81)] {
+            let (control, reply) = socks_connect_port(listens[inbound], port).await;
+            assert_eq!(&reply[..2], &[5, 0]);
+            let (selected, _) = tokio::time::timeout(Duration::from_secs(2), upstreams[1].accept())
+                .await
+                .expect("selected B timeout")
+                .expect("selected B");
+            drop((control, selected));
+        }
+        drop((first, first_upstream));
+        selector
+            .switch("manual", "dead")
+            .expect("switch to unavailable member");
+        let (_, reply) = socks_connect_port(listens[0], 82).await;
+        assert_ne!(reply[1], 0);
+        assert_eq!(selector.selected("manual"), Ok("dead"));
+        let fallback = tokio::join!(
+            tokio::time::timeout(Duration::from_millis(50), upstreams[0].accept()),
+            tokio::time::timeout(Duration::from_millis(50), upstreams[1].accept()),
+        );
+        assert!(fallback.0.is_err() && fallback.1.is_err());
+        stop.send(()).expect("stop");
+        assert_eq!(task.await.expect("client"), Ok(()));
+        std::fs::remove_file(path).expect("remove config");
     }
 }

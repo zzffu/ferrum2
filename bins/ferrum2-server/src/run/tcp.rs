@@ -1,4 +1,31 @@
-use super::*;
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
+
+use ferrum2_config::RuntimeConfig;
+use ferrum2_core::route::Network;
+use ferrum2_core::{Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr};
+use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
+use ferrum2_observability::{
+    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
+};
+use ferrum2_runtime::{
+    AcceptListener, BoundedSupervisor, CancellationToken, DirectOutbound, OwnerRegistry,
+    PreparedProcessRoot, ProcessCancellation, ProcessFuture, RelayRunError, RuntimeTcpStream,
+    SystemSocketInspector, SystemTcpDialer, TcpConnector, relay_lifecycle,
+};
+use ferrum2_shadowsocks::{MethodKeyAdapter, ShadowsocksTcpInbound, TcpReplayStore};
+use tokio::io::{AsyncWrite, AsyncWriteExt as _};
+use tokio::net::TcpListener;
+
+use super::RunError;
+use super::dns_egress;
+use super::observation::{
+    finish_relay, observation_for_direct_connect, observation_for_error, record_failure,
+    run_error_for_supervisor, update_replay_metric,
+};
+use super::tokio_io::{TokioFramed, TokioTransport};
 
 pub(super) struct ServerTcpListeners {
     pub(super) listeners: Vec<TcpListener>,
@@ -77,13 +104,13 @@ pub(super) struct ServerRouting {
 }
 
 #[derive(Debug)]
-pub(super) enum DirectFlowError<E> {
+enum DirectFlowError<E> {
     CancelledBeforeOpen,
     Open(E),
     Prefix(PrefixFailure),
 }
 
-pub(super) async fn open_and_prefix<O, C>(
+async fn open_and_prefix<O, C>(
     direct: &O,
     target: &TargetAddr,
     initial_payload: &[u8],
@@ -124,7 +151,7 @@ pub(super) struct ServerContext {
     pub(super) metrics: Arc<Metrics>,
 }
 
-pub(super) async fn server_connection(
+async fn server_connection(
     stream: tokio::net::TcpStream,
     mut cancellation: CancellationToken,
     context: Arc<ServerContext>,
@@ -265,12 +292,12 @@ pub(super) async fn server_connection(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct PrefixFailure {
-    pub(super) kind: RelayRunError,
-    pub(super) bytes: u64,
+struct PrefixFailure {
+    kind: RelayRunError,
+    bytes: u64,
 }
 
-pub(super) async fn forward_initial_payload<W, C>(
+async fn forward_initial_payload<W, C>(
     stream: &mut W,
     initial_payload: &[u8],
     idle_timeout: std::time::Duration,
@@ -334,6 +361,7 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::run::test_support::*;
 
     struct RecordingStream {
         bytes: Arc<Mutex<Vec<u8>>>,

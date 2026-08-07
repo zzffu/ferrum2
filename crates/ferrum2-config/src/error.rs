@@ -1,4 +1,5 @@
-use super::*;
+use std::error::Error;
+use std::fmt;
 
 /// Stable operator-facing configuration error category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

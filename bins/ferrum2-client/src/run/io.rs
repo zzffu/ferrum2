@@ -1,4 +1,14 @@
-use super::*;
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use ferrum2_core::{AbortiveClose, ConnectError, Connector, LocalEndpoint, TargetAddr};
+use ferrum2_shadowsocks::{FlowTerminal, PlainDuplex, ShadowsocksError, TransportIo};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpSocket};
+
+use super::RunError;
 
 pub(super) fn bind_listener(
     address: std::net::SocketAddrV4,
@@ -41,12 +51,12 @@ pub(super) async fn shutdown_signal() {
     }
 }
 
-pub(crate) struct TokioConnector<C> {
+pub(super) struct TokioConnector<C> {
     inner: C,
 }
 
 impl<C> TokioConnector<C> {
-    pub(crate) const fn new(inner: C) -> Self {
+    pub(super) const fn new(inner: C) -> Self {
         Self { inner }
     }
 }
@@ -63,12 +73,12 @@ where
     }
 }
 
-pub(crate) struct TokioTransport<T> {
+pub(super) struct TokioTransport<T> {
     inner: T,
 }
 
 impl<T> TokioTransport<T> {
-    pub(crate) const fn new(inner: T) -> Self {
+    pub(super) const fn new(inner: T) -> Self {
         Self { inner }
     }
 }
@@ -141,12 +151,12 @@ where
     }
 }
 
-pub(crate) struct TokioFramed<F> {
+pub(super) struct TokioFramed<F> {
     inner: F,
 }
 
 impl<F> TokioFramed<F> {
-    pub(crate) const fn new(inner: F) -> Self {
+    pub(super) const fn new(inner: F) -> Self {
         Self { inner }
     }
 }
@@ -155,7 +165,7 @@ impl<F> TokioFramed<F>
 where
     F: PlainDuplex,
 {
-    pub(crate) fn terminal(&self) -> Option<FlowTerminal> {
+    pub(super) fn terminal(&self) -> Option<FlowTerminal> {
         self.inner.terminal()
     }
 }
@@ -213,7 +223,7 @@ where
     }
 }
 
-pub(super) fn framed_error(error: ShadowsocksError) -> io::Error {
+fn framed_error(error: ShadowsocksError) -> io::Error {
     match error {
         ShadowsocksError::Detection(_) | ShadowsocksError::Protocol(_) => {
             io::Error::from(io::ErrorKind::InvalidData)
@@ -233,9 +243,7 @@ pub(in crate::run) mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::run::tests::GateConnector;
-    #[cfg(unix)]
-    use crate::run::tests::reserve_address;
+    use crate::run::test_support::*;
 
     #[cfg(unix)]
     #[tokio::test]
@@ -271,204 +279,6 @@ pub(in crate::run) mod tests {
             RunError::StartupBind
         );
         drop(rebound);
-    }
-
-    enum ScriptedMode {
-        Duplex(tokio::io::DuplexStream),
-        Fail,
-        Pending(Arc<AtomicUsize>),
-        StallAfter {
-            writes: usize,
-            drops: Arc<AtomicUsize>,
-        },
-        WriteLimitAfter {
-            writes: usize,
-            limit: Option<usize>,
-            accepted: Arc<Mutex<Vec<u8>>>,
-            calls: Arc<AtomicUsize>,
-            drops: Arc<AtomicUsize>,
-        },
-    }
-
-    pub(in crate::run) struct ScriptedIo {
-        mode: ScriptedMode,
-        endpoint: SocketAddrV4,
-        aborts: Arc<AtomicUsize>,
-    }
-
-    impl ScriptedIo {
-        pub(in crate::run) fn duplex(
-            inner: tokio::io::DuplexStream,
-            endpoint: SocketAddrV4,
-            aborts: Arc<AtomicUsize>,
-        ) -> Self {
-            Self {
-                mode: ScriptedMode::Duplex(inner),
-                endpoint,
-                aborts,
-            }
-        }
-
-        fn failing() -> Self {
-            Self {
-                mode: ScriptedMode::Fail,
-                endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1),
-                aborts: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-
-        pub(in crate::run) fn pending(drops: Arc<AtomicUsize>, aborts: Arc<AtomicUsize>) -> Self {
-            Self {
-                mode: ScriptedMode::Pending(drops),
-                endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
-                aborts,
-            }
-        }
-
-        pub(in crate::run) fn stall_after(
-            writes: usize,
-            drops: Arc<AtomicUsize>,
-            aborts: Arc<AtomicUsize>,
-        ) -> Self {
-            Self {
-                mode: ScriptedMode::StallAfter { writes, drops },
-                endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
-                aborts,
-            }
-        }
-
-        pub(in crate::run) fn write_limit_after(
-            writes: usize,
-            limit: usize,
-            accepted: Arc<Mutex<Vec<u8>>>,
-            calls: Arc<AtomicUsize>,
-            drops: Arc<AtomicUsize>,
-            aborts: Arc<AtomicUsize>,
-        ) -> Self {
-            Self {
-                mode: ScriptedMode::WriteLimitAfter {
-                    writes,
-                    limit: Some(limit),
-                    accepted,
-                    calls,
-                    drops,
-                },
-                endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
-                aborts,
-            }
-        }
-    }
-
-    impl Drop for ScriptedIo {
-        fn drop(&mut self) {
-            match &self.mode {
-                ScriptedMode::Pending(drops)
-                | ScriptedMode::StallAfter { drops, .. }
-                | ScriptedMode::WriteLimitAfter { drops, .. } => {
-                    drops.fetch_add(1, Ordering::SeqCst);
-                }
-                ScriptedMode::Duplex(_) | ScriptedMode::Fail => {}
-            }
-        }
-    }
-
-    impl AsyncRead for ScriptedIo {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buffer: &mut ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            match &mut self.mode {
-                ScriptedMode::Duplex(inner) => Pin::new(inner).poll_read(cx, buffer),
-                ScriptedMode::Fail => {
-                    Poll::Ready(Err(io::Error::other("transport source sentinel")))
-                }
-                ScriptedMode::Pending(_)
-                | ScriptedMode::StallAfter { .. }
-                | ScriptedMode::WriteLimitAfter { .. } => Poll::Pending,
-            }
-        }
-    }
-
-    impl AsyncWrite for ScriptedIo {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            source: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            match &mut self.mode {
-                ScriptedMode::Duplex(inner) => Pin::new(inner).poll_write(cx, source),
-                ScriptedMode::Fail => {
-                    Poll::Ready(Err(io::Error::other("transport source sentinel")))
-                }
-                ScriptedMode::Pending(_) => Poll::Pending,
-                ScriptedMode::StallAfter { writes, .. } if *writes == 0 => Poll::Pending,
-                ScriptedMode::StallAfter { writes, .. } => {
-                    *writes -= 1;
-                    Poll::Ready(Ok(source.len()))
-                }
-                ScriptedMode::WriteLimitAfter {
-                    writes,
-                    limit,
-                    accepted,
-                    calls,
-                    ..
-                } => {
-                    let written = if *writes == 0 {
-                        limit
-                            .take()
-                            .map_or(source.len(), |limit| limit.min(source.len()))
-                    } else {
-                        *writes -= 1;
-                        source.len()
-                    };
-                    accepted
-                        .lock()
-                        .expect("accepted raw wire")
-                        .extend_from_slice(&source[..written]);
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Poll::Ready(Ok(written))
-                }
-            }
-        }
-
-        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            match &mut self.mode {
-                ScriptedMode::Duplex(inner) => Pin::new(inner).poll_flush(cx),
-                ScriptedMode::Fail => {
-                    Poll::Ready(Err(io::Error::other("transport source sentinel")))
-                }
-                ScriptedMode::Pending(_)
-                | ScriptedMode::StallAfter { .. }
-                | ScriptedMode::WriteLimitAfter { .. } => Poll::Ready(Ok(())),
-            }
-        }
-
-        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            match &mut self.mode {
-                ScriptedMode::Duplex(inner) => Pin::new(inner).poll_shutdown(cx),
-                ScriptedMode::Fail => {
-                    Poll::Ready(Err(io::Error::other("transport source sentinel")))
-                }
-                ScriptedMode::Pending(_)
-                | ScriptedMode::StallAfter { .. }
-                | ScriptedMode::WriteLimitAfter { .. } => Poll::Ready(Ok(())),
-            }
-        }
-    }
-
-    impl LocalEndpoint for ScriptedIo {
-        fn local_endpoint(&self) -> SocketAddrV4 {
-            self.endpoint
-        }
-    }
-
-    impl AbortiveClose for ScriptedIo {
-        type Error = io::Error;
-        fn mark_abortive(&mut self) -> Result<(), Self::Error> {
-            self.aborts.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
     }
 
     fn assert_source_free(error: io::Error) {

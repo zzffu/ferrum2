@@ -1,4 +1,29 @@
-use super::*;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use ferrum2_config::UdpConfig;
+use ferrum2_core::TargetAddr;
+use ferrum2_core::route::Network;
+use ferrum2_crypto::{Clock as _, SystemClock, SystemRandom};
+use ferrum2_observability::{Direction, Metrics, Outcome, Reason, Role, Stage};
+use ferrum2_runtime::{
+    AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, MAX_UDP_WIRE_DATAGRAM_BYTES,
+    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture,
+    SystemDirectUdpSocketFactory, UdpBufferReservation, UdpCommitError, UdpRuntimeError,
+    UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
+};
+use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpPacketScratch, UdpServer};
+use tokio::net::UdpSocket;
+
+use super::RunError;
+use super::dns_egress;
+use super::observation::{
+    record_udp_failure, record_udp_protocol_failure, record_udp_request_accepted,
+    record_udp_runtime_failure, update_udp_resource_metrics,
+};
+use super::tcp::ServerRouting;
 
 pub(super) fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntimeLimits> {
     UdpRuntimeLimits::new(
@@ -168,17 +193,17 @@ fn retire_mapping_handle(state: &mut UdpMappingState, handle: UdpSessionHandle, 
     state.retired.insert(handle);
 }
 
-pub(super) struct ResponseCodec {
-    pub(super) scratch: UdpPacketScratch,
-    pub(super) wire: Vec<u8>,
-    pub(super) _scratch_reservation: UdpBufferReservation,
-    pub(super) _wire_reservation: UdpBufferReservation,
+struct ResponseCodec {
+    scratch: UdpPacketScratch,
+    wire: Vec<u8>,
+    _scratch_reservation: UdpBufferReservation,
+    _wire_reservation: UdpBufferReservation,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct UdpAdapterError;
+struct UdpAdapterError;
 
-pub(super) const UDP_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+const UDP_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub(super) trait ServerUdpListener: Send + Sync + 'static {
     fn recv_from(
@@ -203,7 +228,7 @@ impl ServerUdpListener for UdpSocket {
     }
 }
 
-pub(super) struct ServerUdpResponseHandler<L> {
+struct ServerUdpResponseHandler<L> {
     listener: Arc<L>,
     protocol: Arc<UdpServer>,
     mappings: Arc<UdpMappings>,
@@ -264,7 +289,7 @@ where
     }
 }
 
-pub(super) type ProductionUdpRuntime<L> = DirectUdpRuntime<
+type ProductionUdpRuntime<L> = DirectUdpRuntime<
     dns_egress::ServerDnsResolver,
     SystemDirectUdpSocketFactory,
     ServerUdpResponseHandler<L>,
@@ -656,10 +681,8 @@ where
     }
 }
 
-pub(super) fn reconcile_udp_generations<R, F, H>(
-    runtime: &DirectUdpRuntime<R, F, H>,
-    mappings: &UdpMappings,
-) where
+fn reconcile_udp_generations<R, F, H>(runtime: &DirectUdpRuntime<R, F, H>, mappings: &UdpMappings)
+where
     R: ferrum2_runtime::UdpResolver,
     <R::Candidates as IntoIterator>::IntoIter: Send,
     F: ferrum2_runtime::DirectUdpSocketFactory,
@@ -675,7 +698,7 @@ pub(super) fn reconcile_udp_generations<R, F, H>(
     });
 }
 
-pub(super) async fn reserve_udp_direct<R, F>(
+async fn reserve_udp_direct<R, F>(
     route: &ferrum2_core::route::RouteTable,
     outbound_count: usize,
     inbound: usize,
@@ -701,9 +724,7 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::run::tests::{
-        active, aes_keys, encoded_udp_request, recv_udp, server_test_config, udp_loopback,
-    };
+    use crate::run::test_support::*;
 
     struct ScriptedUdpListener {
         request: Mutex<Option<(Vec<u8>, SocketAddr)>>,
@@ -1061,5 +1082,209 @@ mod tests {
         );
         assert_eq!(manager_registry.snapshot().udp_sessions, 0);
         assert_eq!(manager_registry.snapshot().udp_buffered_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn udp_composition_three_methods_echo_and_deferred_client_commit_table() {
+        let rows: [(MethodProfile, &str, &str, &[u8]); 3] = [
+            (
+                MethodProfile::Blake3Aes128Gcm2022,
+                "2022-blake3-aes-128-gcm",
+                "AAECAwQFBgcICQoLDA0ODw==",
+                &PSK_BYTES,
+            ),
+            (
+                MethodProfile::Blake3Aes256Gcm2022,
+                "2022-blake3-aes-256-gcm",
+                "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+                &[
+                    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                    22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+                ],
+            ),
+            (
+                MethodProfile::Blake3ChaCha20Poly13052022,
+                "2022-blake3-chacha20-poly1305",
+                "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+                &[
+                    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+                    52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+                ],
+            ),
+        ];
+        for (profile, method, encoded_psk, psk) in rows {
+            let listen = reserve_address();
+            let echo = udp_loopback().await;
+            let echo_target = echo.local_addr().expect("echo address");
+            let echo_task = tokio::spawn(async move {
+                let mut buffer = [0_u8; 64];
+                for _ in 0..3 {
+                    let (length, peer) = echo.recv_from(&mut buffer).await.expect("echo receive");
+                    echo.send_to(&buffer[..length], peer)
+                        .await
+                        .expect("echo reply");
+                }
+            });
+            let (path, config) = server_test_config_for_method(listen, method, encoded_psk);
+            let registry = OwnerRegistry::new();
+            let (stop, mut server) = spawn_test_server(config, &registry);
+            wait_until_bound(&mut server, listen).await;
+
+            let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                MethodPsk::try_from_slice(profile, psk).expect("method key"),
+            ));
+            let clock = SystemClock::new();
+            let mut client =
+                UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client protocol");
+            let socket = udp_loopback().await;
+            let mut response_scratch = UdpPacketScratch::new();
+            let mut response_wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+            let client_registry = OwnerRegistry::new();
+            let manager =
+                UdpSessionManager::new(UdpRuntimeLimits::default(), client_registry.clone());
+            let mut handle = None;
+
+            for (index, payload) in [b"one".as_slice(), b"two", b"three"]
+                .into_iter()
+                .enumerate()
+            {
+                let target = if profile == MethodProfile::Blake3Aes128Gcm2022 && index == 2 {
+                    TargetAddr::domain("127.0.0.1", echo_target.port())
+                        .expect("numeric domain target")
+                } else {
+                    TargetAddr::ip(echo_target).expect("echo target")
+                };
+                let request_wire = encoded_udp_request(&mut client, &clock, target, payload);
+                socket
+                    .send_to(&request_wire, listen)
+                    .await
+                    .expect("send request");
+                let (length, source) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    socket.recv_from(&mut response_wire),
+                )
+                .await
+                .expect("response deadline")
+                .expect("receive response");
+                assert_eq!(source, SocketAddr::V4(listen));
+                let pending = client
+                    .prepare_response(&clock, &response_wire[..length], &mut response_scratch)
+                    .expect("prepare response");
+                let capacity = pending.datagram().allocated_capacity();
+                let (datagram, commit) = pending.into_parts();
+                let now = tokio::time::Instant::now();
+                let accepted_handle = match handle {
+                    Some(handle) => {
+                        manager
+                            .reserve_datagram(handle, UdpDirection::ToClient, capacity)
+                            .expect("response capacity")
+                            .commit_with(datagram, now, || {
+                                // The local client composition owns this call;
+                                // it mirrors the same deferred T03 transition.
+                                client.commit_response(commit, clock.monotonic_now())
+                            })
+                            .expect("deferred response commit");
+                        handle
+                    }
+                    None => {
+                        let session = manager.reserve_session(now).expect("client session");
+                        let reserved = session
+                            .reserve_datagram(UdpDirection::ToClient, capacity)
+                            .expect("first response capacity");
+                        session
+                            .commit_with(reserved, datagram, now, || {
+                                // The first client association is also deferred
+                                // until session/bytes/queue capacity is reserved.
+                                client.commit_response(commit, clock.monotonic_now())
+                            })
+                            .expect("deferred first response commit")
+                    }
+                };
+                handle = Some(accepted_handle);
+                let accepted = manager
+                    .pop(accepted_handle, UdpDirection::ToClient)
+                    .expect("response queue")
+                    .expect("accepted response");
+                assert_eq!(accepted.datagram().payload(), payload);
+                assert_eq!(
+                    accepted.datagram().target(),
+                    &TargetAddr::ip(echo_target).expect("observed source target")
+                );
+            }
+
+            echo_task.await.expect("echo task");
+            stop.send(()).expect("stop server");
+            assert_eq!(server.await.expect("server task"), Ok(()), "{method}");
+            manager.cancel_all();
+            assert_eq!(client_registry.snapshot().udp_sessions, 0);
+            assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+            std::fs::remove_file(path).expect("remove UDP config");
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_real_socket_session_saturation_never_reaches_second_target() {
+        let listen = reserve_address();
+        let (path, _config) = server_test_config(listen);
+        let mut source = std::fs::read_to_string(&path).expect("server config");
+        source.push_str(
+            "[udp]\nmax_sessions = 1\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n",
+        );
+        std::fs::write(&path, source).expect("bounded UDP config");
+        let config = ferrum2_config::load_server(&path).expect("bounded server config");
+        let registry = OwnerRegistry::new();
+        let (stop, mut server) = spawn_test_server(config, &registry);
+        wait_until_bound(&mut server, listen).await;
+
+        let stalled_target = udp_loopback().await;
+        let stalled_address = stalled_target.local_addr().expect("stalled address");
+        let forbidden_target = udp_loopback().await;
+        let forbidden_address = forbidden_target.local_addr().expect("forbidden address");
+        let keys = aes_keys();
+        let clock = SystemClock::new();
+        let mut first =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("first client");
+        let mut second =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second client");
+        let first_socket = udp_loopback().await;
+        let second_socket = udp_loopback().await;
+        let wire = encoded_udp_request(
+            &mut first,
+            &clock,
+            TargetAddr::ip(stalled_address).expect("stalled target"),
+            b"occupy",
+        );
+        first_socket
+            .send_to(&wire, listen)
+            .await
+            .expect("first send");
+        let mut target_buffer = [0_u8; 32];
+        let (received, _) = recv_udp(&stalled_target, &mut target_buffer).await;
+        assert_eq!(&target_buffer[..received], b"occupy");
+
+        let wire = encoded_udp_request(
+            &mut second,
+            &clock,
+            TargetAddr::ip(forbidden_address).expect("forbidden target"),
+            b"must-not-send",
+        );
+        second_socket
+            .send_to(&wire, listen)
+            .await
+            .expect("second send");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                forbidden_target.recv_from(&mut target_buffer)
+            )
+            .await
+            .is_err(),
+            "saturated session reached the second target"
+        );
+
+        stop.send(()).expect("stop server");
+        assert_eq!(server.await.expect("server task"), Ok(()));
+        assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+        std::fs::remove_file(path).expect("remove saturation config");
     }
 }

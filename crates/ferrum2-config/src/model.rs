@@ -1,4 +1,10 @@
-use super::*;
+use std::net::{SocketAddr, SocketAddrV4};
+use std::num::NonZeroU16;
+use std::time::Duration;
+
+use ferrum2_core::route::{ActionTable, EgressPlanHandle, RouteTable};
+use ferrum2_core::selector::SelectorControl;
+use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
 
 /// A validated client configuration with no retained source text.
 pub struct ValidatedClientConfig {

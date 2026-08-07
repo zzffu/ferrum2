@@ -12,7 +12,8 @@ use ferrum2_shadowsocks::{BoxedClientFlow, MethodKeyAdapter, ShadowsocksError, T
 #[cfg(test)]
 use ferrum2_shadowsocks::{BufferObserver, FlowObserver};
 
-use super::{RunError, TokioConnector};
+use super::RunError;
+use super::tokio_io::TokioConnector;
 
 pub(super) use udp::{
     ClientUdpAssociation, ClientUdpContext, UdpPlanResponseError, UdpSendError,

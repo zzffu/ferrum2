@@ -308,4 +308,26 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
+        let selected = TargetAddr::domain("selected.example.", 8443).expect("selected target");
+        let other = TargetAddr::domain("other.example.", 8443).expect("final target");
+        let route = ferrum2_core::route::ActionTable::new(
+            vec![ferrum2_core::route::ActionRule::new(
+                Some(1),
+                Some(Network::Tcp),
+                Some(selected.clone()),
+                0,
+            )],
+            1,
+        )
+        .expect("DNS route");
+        let state = ServerDnsState::new(route);
+
+        assert_eq!(state.select(1, Network::Tcp, &selected), 0);
+        assert_eq!(state.select(0, Network::Tcp, &selected), 1);
+        assert_eq!(state.select(1, Network::Udp, &selected), 1);
+        assert_eq!(state.select(1, Network::Tcp, &other), 1);
+    }
 }

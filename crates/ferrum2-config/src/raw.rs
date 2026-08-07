@@ -1,4 +1,15 @@
-use super::*;
+use std::fmt;
+
+use serde::Deserialize;
+use serde::de::{Deserializer, Visitor};
+use zeroize::Zeroizing;
+
+use crate::{
+    DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_DNS_MAX_INFLIGHT, DEFAULT_DNS_TIMEOUT_MS,
+    DEFAULT_HANDSHAKE_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_LISTEN_BACKLOG,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_REPLAY_CAPACITY, DEFAULT_SHUTDOWN_GRACE_MS,
+    DEFAULT_UDP_IDLE_TIMEOUT_MS, DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

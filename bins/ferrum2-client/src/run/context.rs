@@ -1,4 +1,19 @@
-use super::*;
+use std::sync::Arc;
+
+#[cfg(test)]
+use std::net::SocketAddrV4;
+
+use ferrum2_config::RuntimeConfig;
+use ferrum2_observability::Metrics;
+use ferrum2_runtime::OwnerRegistry;
+use ferrum2_socks5::Socks5Inbound;
+
+#[cfg(test)]
+use ferrum2_crypto::MethodSinglePskProvider;
+#[cfg(test)]
+use ferrum2_shadowsocks::MethodKeyAdapter;
+
+use super::egress::{ClientEgressEngine, ClientOutboundContext};
 
 pub(super) struct ClientRouting {
     pub(super) route: ferrum2_core::route::RouteTable,

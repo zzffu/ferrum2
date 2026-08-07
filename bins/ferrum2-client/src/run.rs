@@ -1,57 +1,26 @@
 use std::collections::HashSet;
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
+use std::sync::atomic::AtomicUsize;
 
-use ferrum2_config::{DnsConfig, LoggingLevel, RuntimeConfig, ValidatedClientConfig};
+use ferrum2_config::{DnsConfig, ValidatedClientConfig};
+use ferrum2_core::TargetAddr;
 use ferrum2_core::route::Network;
-use ferrum2_core::{
-    AbortiveClose, ConnectError, ConnectErrorKind, Connector, Datagram, Inbound as _,
-    LocalEndpoint, SessionReply as _, TargetAddr,
-};
-#[cfg(test)]
-use ferrum2_crypto::Clock;
 #[cfg(test)]
 use ferrum2_crypto::MethodProfile;
 #[cfg(test)]
 use ferrum2_crypto::MethodSinglePskProvider;
 use ferrum2_crypto::{SecureRandom, SystemClock, SystemRandom};
-use ferrum2_dns::{
-    DnsProxy, DnsProxyListeners, DnsProxySockets, ProxyTransport, TaggedResolver,
-    TaggedResolverOwner,
-};
-use ferrum2_observability::{
-    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
-    json_subscriber,
-};
+use ferrum2_dns::{DnsProxy, DnsProxySockets, ProxyTransport, TaggedResolver};
+use ferrum2_observability::{Metrics, Role, json_subscriber};
 use ferrum2_runtime::{
-    AcceptListener, BoundedSupervisor, CancellationToken, MAX_UDP_MAX_BUFFERED_BYTES,
-    MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, MetricsEndpoint, MetricsEndpointError,
-    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessCause, ProcessFuture,
-    ProcessReport, ProcessRoot, ProcessRootExit, ProcessSupervisor, RelayFailure, RelayRunError,
-    SupervisorError, TcpConnector, UdpDirection, UdpRuntimeError, UdpRuntimeLimits,
-    UdpSessionManager, relay_lifecycle,
+    BoundedSupervisor, MAX_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT,
+    MIN_UDP_MAX_BUFFERED_BYTES, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot,
+    ProcessRootExit, ProcessSupervisor, TcpConnector, UdpRuntimeLimits, UdpSessionManager,
 };
+use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 #[cfg(test)]
-use ferrum2_shadowsocks::{
-    BufferObserver, BufferRole, FlowObserver, MethodKeyAdapter, UdpClientSession, UdpPacketScratch,
-};
-use ferrum2_shadowsocks::{
-    DetectionReason, FlowTerminal, MAX_UDP_WIRE_LEN, PlainDuplex, ProtocolReason, ShadowsocksError,
-    TransportIo, UdpPacketError,
-};
-#[cfg(test)]
-use ferrum2_socks5::MAX_SOCKS_UDP_DATAGRAM_BYTES;
-use ferrum2_socks5::{
-    Socks5Inbound, SocksCommand, SocksStream, SocksUdpAssociate, decode_udp_datagram,
-    encode_udp_datagram,
-};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
-use tokio::net::{TcpListener, TcpSocket, UdpSocket};
-use tokio::time::Instant;
+use ferrum2_shadowsocks::MethodKeyAdapter;
+use ferrum2_socks5::Socks5Inbound;
 
 mod egress;
 
@@ -64,22 +33,15 @@ mod socks;
 #[path = "run/io.rs"]
 mod tokio_io;
 
-use context::*;
-use dns::*;
-use observation::*;
-use socks::*;
-use tokio_io::*;
+use context::{ClientContext, ClientRouting};
+use dns::ClientDnsRoot;
+use observation::{ClientMetricsRoot, log_level};
+use socks::{ClientTcpListeners, ClientTcpRoot};
+use tokio_io::{TokioConnector, bind_listener, shutdown_signal};
 
-use egress::{
-    ClientEgressEngine, ClientOpenFailure, ClientOutboundContext, ClientUdpAssociation,
-    ClientUdpContext, UdpPlanResponseError, UdpSendError, composed_udp_plan_limit,
-    prepare_client_outbounds, send_with_lifecycle,
-};
 #[cfg(test)]
-use egress::{
-    IdSequenceRandom, MAX_UDP_PLAN_HOPS, UdpIoFaultPlan, UdpIoOperation,
-    composed_udp_request_limit, composed_udp_response_limit,
-};
+use egress::IdSequenceRandom;
+use egress::{ClientEgressEngine, ClientUdpContext, prepare_client_outbounds};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
@@ -406,5 +368,7 @@ fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
     }
 }
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;

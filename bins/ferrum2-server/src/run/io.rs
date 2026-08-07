@@ -1,4 +1,14 @@
-use super::*;
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use ferrum2_core::{AbortiveClose, LocalEndpoint};
+use ferrum2_shadowsocks::{FlowTerminal, PlainDuplex, ShadowsocksError, TransportIo};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpSocket};
+
+use super::RunError;
 
 pub(super) fn bind_listener(
     address: std::net::SocketAddrV4,
@@ -41,12 +51,12 @@ pub(super) async fn shutdown_signal() {
     }
 }
 
-pub(crate) struct TokioTransport<T> {
+pub(super) struct TokioTransport<T> {
     inner: T,
 }
 
 impl<T> TokioTransport<T> {
-    pub(crate) const fn new(inner: T) -> Self {
+    pub(super) const fn new(inner: T) -> Self {
         Self { inner }
     }
 }
@@ -119,12 +129,12 @@ where
     }
 }
 
-pub(crate) struct TokioFramed<F> {
+pub(super) struct TokioFramed<F> {
     inner: F,
 }
 
 impl<F> TokioFramed<F> {
-    pub(crate) const fn new(inner: F) -> Self {
+    pub(super) const fn new(inner: F) -> Self {
         Self { inner }
     }
 }
@@ -133,7 +143,7 @@ impl<F> TokioFramed<F>
 where
     F: PlainDuplex,
 {
-    pub(crate) fn terminal(&self) -> Option<FlowTerminal> {
+    pub(super) fn terminal(&self) -> Option<FlowTerminal> {
         self.inner.terminal()
     }
 }
@@ -191,7 +201,7 @@ where
     }
 }
 
-pub(super) fn framed_error(error: ShadowsocksError) -> io::Error {
+fn framed_error(error: ShadowsocksError) -> io::Error {
     match error {
         ShadowsocksError::Detection(_) | ShadowsocksError::Protocol(_) => {
             io::Error::from(io::ErrorKind::InvalidData)
@@ -210,8 +220,7 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
-    #[cfg(unix)]
-    use crate::run::tests::reserve_address;
+    use crate::run::test_support::*;
 
     #[cfg(unix)]
     #[tokio::test]
