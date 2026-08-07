@@ -1,7 +1,7 @@
 ---
 id: M13-T02
 milestone: M13
-status: ready
+status: done
 depends_on: [M13-T01]
 owns:
   - crates/ferrum2-core/src/lib.rs
@@ -34,9 +34,13 @@ close each vertical slice green before adding the next。
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: initial `232d52646acd19b35f48ee4497cb2413a080d90c`；accepted/integrated repair
+  `3228c469b3a9a0613d39bb193f18145e1ae8a2fc`。
+- Review: initial Architect/QA `BLOCK` on `ARCH-M13T02-001`、`M13-T02-QA-001` and note
+  `M13-T02-QA-002`；one bounded test-only repair；targeted Architect/QA `PASS`，all IDs closed。
+- Notes: RED was exact missing-method `E0599` for `snapshot_owned`。Focused/core/clippy/Quick passed on
+  integration；footprint integrity `PASS`，numeric ratio-only `WARN`，code/case/support/fixture delta
+  `+31/+108/0/0`，no file signal。No remote action。
 
 ## Rollback / risk
 

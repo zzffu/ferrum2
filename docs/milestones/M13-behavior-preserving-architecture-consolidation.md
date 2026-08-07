@@ -73,8 +73,8 @@ real repository；the external archive timestamp is not used as Git identity。
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M13-T01 | Freeze exact M12 behavior、M13 contracts and migration guards | M12 closed | done |
-| M13-T02 | Add the core owned egress-plan snapshot without breaking borrowed views | M13-T01 | ready |
-| M13-T03 | Invert DNS config dependency and converge on the core snapshot | M13-T02 | todo |
+| M13-T02 | Add the core owned egress-plan snapshot without breaking borrowed views | M13-T01 | done |
+| M13-T03 | Invert DNS config dependency and converge on the core snapshot | M13-T02 | ready |
 | M13-T04 | Extract one client TCP egress interface for SOCKS and DNS | M13-T03 | todo |
 | M13-T05 | Extract one bounded client UDP association and exact-plan reuse key | M13-T04 | todo |
 | M13-T06 | Split client/server/core/config modules by ownership and enforce architecture | M13-T05 | todo |
@@ -103,12 +103,12 @@ may trigger file-size `REVIEW_REQUIRED` when moved tests are compared with zero�
 not correctness results，and are dispositioned without deleting independent evidence。No third helper、
 fixture or second harness is planned。
 
-The M13 execute request authorizes all required non-force pushes；the workflow will still push only an
-accepted exact SHA/range。Manual performance/resource dispatch remains separately unauthorized。No
-force-push、PR、tag、package、release or publication is authorized。
+The user authorizes all required final non-force pushes and performance/resource workflow dispatches
+through M13 close；the workflow still uses only accepted exact SHAs/ranges and does not rerun unchanged
+failed evidence。No force-push、PR、tag、package、release or publication is authorized。
 
 ## Blocker / next action
 
-No blocker。T01 is accepted at `d7cce680…` after one bounded repair and targeted Architect/QA PASS。
-Record this state，then create `codex/m13-t02` in `.worktrees/m13-t02` from the resulting exact state
-commit and bind that exact T02 base。
+No blocker。T02 is accepted and fast-forward integrated at `3228c469…` after one bounded repair and
+targeted Architect/QA PASS。Record this state，then create `codex/m13-t03` in `.worktrees/m13-t03` from
+the resulting exact state commit and bind that exact T03 base。

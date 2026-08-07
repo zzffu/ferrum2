@@ -1054,9 +1054,10 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 - **Deferred/out of scope:** new matcher/action、retry/fallback/group/health/LB、DNS feature、TUN/
   transparent、typed-ID rewrite、plugin/Endpoint registry、new crate/dependency/harness、hot reload、
   management、package/release/publication。
-- **Next/remote boundary:** T01 accepted after one bounded repair and targeted Architect/QA PASS；start
-  T02 from the exact state commit。The execute request authorizes required non-force pushes；manual
-  dispatch、force-push、PR、tag、package、release and publication remain unauthorized。
+- **Next/remote boundary:** T02 accepted after one bounded repair and targeted Architect/QA PASS；start
+  T03 from the exact state commit。Required final non-force pushes and performance/resource dispatches
+  are authorized through close；unchanged-SHA rerun、force-push、PR、tag、package、release and publication
+  remain unauthorized。
 
 ## 决策登记
 
@@ -1255,3 +1256,4 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 | 2026-08-07 | M12 close | Exact `c06386e9` closes all six tickets and M12 with tagged DNS proxy/resolution、four transports、per-server detour and Rust 1.88 | First performance run `31134561696/1` exposed real per-query detoured SIP022 UDP session retention；the minimal same-server/exact-plan idle association reuse repair kept existing capacity ownership and passed post-repair architecture/QA | Local serial gate、schema 3 integrity、automatic `31143886273/1` and manual `31144255549/1` PASS；DNS `4564/4450` queries、48 samples、RSS `12/12`、bounds/drain/rebind PASS；numeric `6211/1081/0` accepted，no release/publication |
 | 2026-08-07 | M13 plan | M13改为`planned`；接受core owned plan、DNS runtime inversion、private concrete client egress及semantics-first ownership split | M12 closed；current duplicate snapshots、DNS/config edge和client DNS helper reach-through由真实`4810ec5c` source确认，existing route/DNS/egress/lifecycle seams足够，不需new crate/trait/registry | qualified `c06386e9`、planning `4810ec5c`；ADR-0032、SPEC/TEST-0014、T01→T02→T03→T04→T05→T06→T07；schema 3 forecast `550/0/0`、performance required；plan-only，无product/push/dispatch/release/publication |
 | 2026-08-07 | M13-T01 accept / execute | M13改为`executing`；T01 accepted、T02 ready；补齐历史evidence map、exact control checks和T03 `proxy_contract` ownership | Initial Architect/QA `BLOCK`；one bounded docs repair `d7cce680`后targeted Architect/QA均`PASS`，五个finding全部closed | T01 focused+Quick PASS；schema 3 transition/control integrity PASS、numeric ratio-only WARN、`0/0/0`；本次execute授权required non-force pushes，manual dispatch/force-push/release/publication未授权 |
+| 2026-08-07 | M13-T02 integration / remote authorization | Core增加allocation-sharing redacted `EgressPlanSnapshot`及owned selection methods，保留borrowed views；T02 done、T03 ready | Initial Architect/QA `BLOCK`只缺direct/final/order/truncation mutation evidence；one bounded test-only repair `3228c469`后targeted Architect/QA均`PASS` | Integration focused+Quick PASS；footprint integrity PASS、numeric ratio-only WARN、`+31/+108/0/0`；用户授权final non-force pushes及performance/resource dispatches直到close，unchanged-SHA rerun/force-push/release/publication未授权 |

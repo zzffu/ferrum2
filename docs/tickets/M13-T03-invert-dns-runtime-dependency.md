@@ -1,7 +1,7 @@
 ---
 id: M13-T03
 milestone: M13
-status: todo
+status: ready
 depends_on: [M13-T02]
 owns:
   - Cargo.lock
