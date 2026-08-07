@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ferrum2_config::{DnsServerConfig, DnsTransport};
-use ferrum2_dns::{DnsProxy, DnsProxyListeners, ProxyTransport, TaggedResolver};
+use ferrum2_dns::{
+    DnsProxy, DnsProxyListeners, DnsUpstreamSpec, DnsUpstreamTransport, ProxyTransport,
+    TaggedResolver,
+};
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, SOA};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
@@ -104,11 +106,9 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
                 .expect("response send");
         }
     });
-    let server = DnsServerConfig {
-        transport: DnsTransport::Udp,
+    let server = DnsUpstreamSpec {
+        transport: DnsUpstreamTransport::Udp,
         address: upstream_address,
-        server_name: None,
-        path: None,
         detour: None,
     };
     let (resolver, mut owner) = TaggedResolver::direct(
@@ -256,11 +256,9 @@ async fn udp_proxy_drops_malformed_and_rejects_shape_without_upstream_work() {
     let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("unused upstream bind");
-    let server = DnsServerConfig {
-        transport: DnsTransport::Udp,
+    let server = DnsUpstreamSpec {
+        transport: DnsUpstreamTransport::Udp,
         address: upstream.local_addr().expect("unused upstream address"),
-        server_name: None,
-        path: None,
         detour: None,
     };
     let (resolver, mut owner) = TaggedResolver::direct(
@@ -385,11 +383,9 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
     let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("timeout upstream");
-    let server = DnsServerConfig {
-        transport: DnsTransport::Udp,
+    let server = DnsUpstreamSpec {
+        transport: DnsUpstreamTransport::Udp,
         address: upstream.local_addr().expect("timeout upstream address"),
-        server_name: None,
-        path: None,
         detour: None,
     };
     let (resolver, mut owner) = TaggedResolver::direct(
@@ -489,11 +485,9 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
             .expect("large response send");
     });
     let (resolver, mut owner) = TaggedResolver::direct(
-        vec![DnsServerConfig {
-            transport: DnsTransport::Tcp,
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Tcp,
             address,
-            server_name: None,
-            path: None,
             detour: None,
         }],
         Duration::from_secs(1),
@@ -581,11 +575,9 @@ async fn udp_tc_retries_tcp_on_the_same_selected_server() {
         stream.write_all(&response).await.expect("TC response");
     });
     let (resolver, mut owner) = TaggedResolver::direct(
-        vec![DnsServerConfig {
-            transport: DnsTransport::Udp,
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Udp,
             address,
-            server_name: None,
-            path: None,
             detour: None,
         }],
         Duration::from_secs(1),
@@ -657,11 +649,9 @@ async fn tcp_listener_handles_multi_query_frames_bounds_and_clean_eof() {
         }
     });
     let (resolver, mut owner) = TaggedResolver::direct(
-        vec![DnsServerConfig {
-            transport: DnsTransport::Udp,
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Udp,
             address: upstream_address,
-            server_name: None,
-            path: None,
             detour: None,
         }],
         Duration::from_secs(1),

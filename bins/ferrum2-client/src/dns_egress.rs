@@ -6,10 +6,13 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use ferrum2_config::{DnsServerConfig, DnsTransport};
+use ferrum2_core::route::EgressPlanSnapshot;
 use ferrum2_core::{Datagram, TargetAddr};
 use ferrum2_dns::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
-    DnsEgressTaskKind, DnsIoFuture, DnsTaskRegistrar, PlanSnapshot, SystemDnsEgress,
+    DnsEgressTaskKind, DnsIoFuture, DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport,
+    SystemDnsEgress,
 };
 use ferrum2_runtime::UdpDirection;
 use tokio::net::UdpSocket;
@@ -26,6 +29,36 @@ type ReserveFuture = Pin<
     Box<dyn Future<Output = Result<mpsc::OwnedPermit<Packet>, mpsc::error::SendError<()>>> + Send>,
 >;
 type DnsUdpPool = Arc<Mutex<Vec<PreparedClientUdp>>>;
+
+pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamSpec> {
+    servers
+        .iter()
+        .map(|server| {
+            let transport = match server.transport {
+                DnsTransport::Udp => DnsUpstreamTransport::Udp,
+                DnsTransport::Tcp => DnsUpstreamTransport::Tcp,
+                DnsTransport::Dot => DnsUpstreamTransport::Dot {
+                    server_name: server
+                        .server_name
+                        .clone()
+                        .expect("validated DoT server name"),
+                },
+                DnsTransport::Doh => DnsUpstreamTransport::Doh {
+                    server_name: server
+                        .server_name
+                        .clone()
+                        .expect("validated DoH server name"),
+                    path: server.path.clone().expect("validated DoH path"),
+                },
+            };
+            DnsUpstreamSpec {
+                transport,
+                address: server.address,
+                detour: server.detour.clone(),
+            }
+        })
+        .collect()
+}
 
 pub(super) struct ClientDnsEgress {
     context: Arc<ClientContext>,
@@ -67,7 +100,7 @@ impl DnsEgress for ClientDnsEgress {
     fn connect_tcp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
@@ -76,10 +109,13 @@ impl DnsEgress for ClientDnsEgress {
         };
         let context = Arc::clone(&self.context);
         let routing = Arc::clone(&self.routing);
-        let hops = plan.hops().to_vec();
         Box::pin(async move {
             let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
-            if hops.is_empty() || hops.iter().any(|hop| *hop >= routing.outbounds.len()) {
+            if plan
+                .hops()
+                .iter()
+                .any(|hop| *hop >= routing.outbounds.len())
+            {
                 return Err(invalid_target());
             }
             let queue = tasks.own(DnsEgressResourceKind::Queue);
@@ -97,7 +133,7 @@ impl DnsEgress for ClientDnsEgress {
                 );
                 let Ok(flow) = open_chain_with_deadlines(
                     &routing.outbounds,
-                    &hops,
+                    plan.hops(),
                     &context.outbound_connector,
                     &context.clock,
                     &context.random,
@@ -120,7 +156,7 @@ impl DnsEgress for ClientDnsEgress {
     fn bind_udp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         let Some(plan) = plan else {
@@ -129,10 +165,10 @@ impl DnsEgress for ClientDnsEgress {
         let context = Arc::clone(&self.context);
         let routing = Arc::clone(&self.routing);
         let pool = Arc::clone(&self.udp_pool);
-        let hops = plan.hops().to_vec();
         Box::pin(async move {
             let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
-            let first_server = hops
+            let first_server = plan
+                .hops()
                 .first()
                 .and_then(|hop| routing.outbounds.get(*hop))
                 .map(|outbound| outbound.udp_server)
@@ -141,7 +177,7 @@ impl DnsEgress for ClientDnsEgress {
                 let mut idle = pool.lock().map_err(|_| invalid_target())?;
                 match idle.iter().position(|prepared| {
                     prepared.static_server == Some(first_server)
-                        && prepared.static_plan.as_deref() == Some(hops.as_slice())
+                        && prepared.static_plan.as_ref() == Some(&plan)
                 }) {
                     Some(index) => (Some(idle.swap_remove(index)), None),
                     None => (None, idle.pop()),
@@ -153,13 +189,13 @@ impl DnsEgress for ClientDnsEgress {
                 None => super::prepare_udp_association_with_bind(
                     &context,
                     Ipv4Addr::LOCALHOST,
-                    Some((hops.clone().into(), first_server)),
+                    Some((plan.clone(), first_server)),
                     UdpSocket::bind,
                 )
                 .await
                 .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
             };
-            activate_udp_plan(&mut prepared, &context, &routing.outbounds, &hops)
+            activate_udp_plan(&mut prepared, &context, &routing.outbounds, plan.hops())
                 .map_err(|_| invalid_target())?;
             let mut prepared = PooledDnsUdp {
                 prepared: Some(prepared),
@@ -205,7 +241,7 @@ impl DnsEgress for ClientDnsEgress {
                         prepared.prepared.as_mut().expect("pooled DNS UDP owner"),
                         &context,
                         &routing,
-                        &hops,
+                        plan.hops(),
                         first_server,
                         destination,
                         packet,
@@ -387,4 +423,112 @@ fn invalid_target() -> io::Error {
 
 fn runtime_error(_error: impl Sized) -> io::Error {
     io::Error::other("DNS UDP runtime unavailable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ferrum2_core::route::EgressPlanHandle;
+
+    #[test]
+    fn dns_runtime_specs_preserve_validated_server_values() {
+        let cases = [
+            (DnsTransport::Udp, 5300, None, None, false),
+            (DnsTransport::Udp, 5301, None, None, true),
+            (DnsTransport::Tcp, 5302, None, None, false),
+            (DnsTransport::Tcp, 5303, None, None, true),
+            (
+                DnsTransport::Dot,
+                8530,
+                Some("dot-direct.test"),
+                None,
+                false,
+            ),
+            (DnsTransport::Dot, 8531, Some("dot-detour.test"), None, true),
+            (
+                DnsTransport::Doh,
+                4430,
+                Some("doh-direct.test"),
+                Some("/dns-query/direct"),
+                false,
+            ),
+            (
+                DnsTransport::Doh,
+                4431,
+                Some("doh-detour.test"),
+                Some("/dns-query/detour"),
+                true,
+            ),
+        ];
+        let servers: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .map(
+                |(index, &(transport, port, server_name, path, detoured))| DnsServerConfig {
+                    transport,
+                    address: SocketAddr::from(([192, 0, 2, 53], port)),
+                    server_name: server_name.map(Into::into),
+                    path: path.map(Into::into),
+                    detour: detoured.then(|| EgressPlanHandle::direct(index)),
+                },
+            )
+            .collect();
+        let configured_plan_ptrs: Vec<_> = servers
+            .iter()
+            .map(|server| {
+                server
+                    .detour
+                    .as_ref()
+                    .map(|detour| detour.snapshot_owned().hops().as_ptr())
+            })
+            .collect();
+
+        for (
+            index,
+            ((spec, (transport, port, server_name, path, detoured)), configured_plan_ptr),
+        ) in dns_runtime_specs(&servers)
+            .into_iter()
+            .zip(cases)
+            .zip(configured_plan_ptrs)
+            .enumerate()
+        {
+            assert_eq!(spec.address, SocketAddr::from(([192, 0, 2, 53], port)));
+            match (detoured, spec.detour.as_ref()) {
+                (true, Some(detour)) => {
+                    let converted = detour.snapshot_owned();
+                    assert_eq!(converted.hops(), &[index]);
+                    assert_eq!(Some(converted.hops().as_ptr()), configured_plan_ptr);
+                }
+                (false, None) => {}
+                _ => panic!("DNS runtime detour mapping drift"),
+            }
+            match (transport, spec.transport) {
+                (DnsTransport::Udp, DnsUpstreamTransport::Udp)
+                | (DnsTransport::Tcp, DnsUpstreamTransport::Tcp) => {
+                    assert_eq!((server_name, path), (None, None));
+                }
+                (
+                    DnsTransport::Dot,
+                    DnsUpstreamTransport::Dot {
+                        server_name: actual,
+                    },
+                ) => {
+                    assert_eq!(actual.as_ref(), server_name.expect("DoT name"));
+                    assert!(path.is_none());
+                }
+                (
+                    DnsTransport::Doh,
+                    DnsUpstreamTransport::Doh {
+                        server_name: actual_name,
+                        path: actual_path,
+                    },
+                ) => {
+                    assert_eq!(actual_name.as_ref(), server_name.expect("DoH name"));
+                    assert_eq!(actual_path.as_ref(), path.expect("DoH path"));
+                }
+                _ => panic!("DNS runtime transport mapping drift"),
+            }
+        }
+    }
 }

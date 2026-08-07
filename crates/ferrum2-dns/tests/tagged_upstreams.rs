@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ferrum2_config::{DnsServerConfig, DnsTransport, load_client};
+use ferrum2_core::route::{EgressPlanHandle, EgressPlanSnapshot};
 use ferrum2_dns::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsEgress, DnsError, DnsIoFuture, DnsTaskRegistrar,
-    PlanSnapshot, SystemDnsEgress, TaggedResolver,
+    DnsUpstreamSpec, DnsUpstreamTransport, SystemDnsEgress, TaggedResolver,
 };
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, NS, SOA};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
@@ -45,6 +45,7 @@ struct EgressCall {
 #[derive(Default)]
 struct RecordingEgress {
     calls: Mutex<Vec<EgressCall>>,
+    plan_ptrs: Mutex<Vec<usize>>,
 }
 
 impl RecordingEgress {
@@ -52,7 +53,20 @@ impl RecordingEgress {
         self.calls.lock().expect("egress calls poisoned").clone()
     }
 
-    fn record(&self, network: &'static str, target: SocketAddr, plan: &Option<PlanSnapshot>) {
+    fn plan_ptrs(&self) -> Vec<usize> {
+        self.plan_ptrs
+            .lock()
+            .expect("plan pointers poisoned")
+            .clone()
+    }
+
+    fn record(&self, network: &'static str, target: SocketAddr, plan: &Option<EgressPlanSnapshot>) {
+        if let Some(plan) = plan {
+            self.plan_ptrs
+                .lock()
+                .expect("plan pointers poisoned")
+                .push(plan.hops().as_ptr() as usize);
+        }
         self.calls
             .lock()
             .expect("egress calls poisoned")
@@ -68,7 +82,7 @@ impl DnsEgress for RecordingEgress {
     fn connect_tcp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
@@ -79,7 +93,7 @@ impl DnsEgress for RecordingEgress {
     fn bind_udp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         self.record("udp", target, &plan);
@@ -192,59 +206,14 @@ impl PlainFixture {
 
 fn configured_server(
     address: SocketAddr,
-    transport: DnsTransport,
+    transport: DnsUpstreamTransport,
     detoured: bool,
-) -> DnsServerConfig {
-    let detour = if detoured { "detour = \"o0\"\n" } else { "" };
-    let source = format!(
-        "schema_version = 1\n\
-         [[inbounds]]\n\
-         tag = \"i0\"\n\
-         listen = \"127.0.0.1:11080\"\n\
-         outbound = \"o0\"\n\
-         [[outbounds]]\n\
-         tag = \"o0\"\n\
-         server = \"127.0.0.1:20000\"\n\
-         [dns]\n\
-         timeout_ms = 1000\n\
-         max_inflight = 8\n\
-         [[dns.inbounds]]\n\
-         tag = \"d0\"\n\
-         listen = \"127.0.0.1:15353\"\n\
-         [[dns.servers]]\n\
-         tag = \"s0\"\n\
-         transport = \"{}\"\n\
-         address = \"{address}\"\n\
-         {detour}\
-         [dns.route]\n\
-         final = \"s0\"\n\
-         [shadowsocks]\n\
-         method = \"2022-blake3-aes-128-gcm\"\n\
-         psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
-        match transport {
-            DnsTransport::Udp => "udp",
-            DnsTransport::Tcp => "tcp",
-            DnsTransport::Dot => "dot",
-            DnsTransport::Doh => "doh",
-        }
-    );
-    let path = std::env::temp_dir().join(format!(
-        "ferrum2-dns-t03-{}-{}-{}-{:?}.toml",
-        std::process::id(),
-        address.port(),
-        if detoured { "detour" } else { "direct" },
+) -> DnsUpstreamSpec {
+    DnsUpstreamSpec {
         transport,
-    ));
-    std::fs::write(&path, source).expect("write test config");
-    let config = load_client(&path).expect("load test config");
-    std::fs::remove_file(path).expect("remove test config");
-    config
-        .dns
-        .expect("validated DNS")
-        .servers
-        .into_iter()
-        .next()
-        .expect("validated server")
+        address,
+        detour: detoured.then(|| EgressPlanHandle::direct(0)),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -254,8 +223,8 @@ async fn udp_tcp_exact_server_plan_and_negative_semantics() {
     let egress = Arc::new(RecordingEgress::default());
     let (resolver, mut owner) = TaggedResolver::new(
         vec![
-            configured_server(fixture.address, DnsTransport::Udp, true),
-            configured_server(fixture.address, DnsTransport::Tcp, false),
+            configured_server(fixture.address, DnsUpstreamTransport::Udp, true),
+            configured_server(fixture.address, DnsUpstreamTransport::Tcp, false),
         ],
         Duration::from_secs(1),
         NonZeroU16::new(8).expect("nonzero admission"),
@@ -502,8 +471,16 @@ async fn address_lookup_shares_one_deadline_admission_plan_and_owner() {
         std::future::pending::<()>().await;
     });
     let egress = Arc::new(RecordingEgress::default());
+    let server = configured_server(address, DnsUpstreamTransport::Udp, true);
+    let configured_plan_ptr = server
+        .detour
+        .as_ref()
+        .expect("configured address detour")
+        .snapshot_owned()
+        .hops()
+        .as_ptr() as usize;
     let (resolver, mut owner) = TaggedResolver::new(
-        vec![configured_server(address, DnsTransport::Udp, true)],
+        vec![server],
         Duration::from_millis(200),
         NonZeroU16::new(1).expect("one admission"),
         egress.clone(),
@@ -558,6 +535,8 @@ async fn address_lookup_shares_one_deadline_admission_plan_and_owner() {
             },
         ]
     );
+    let plan_ptrs = egress.plan_ptrs();
+    assert_eq!(plan_ptrs, vec![configured_plan_ptr; 2]);
     drop(resolver);
     assert_eq!(
         owner
@@ -598,8 +577,16 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
     let _network = TEST_NETWORK.lock().await;
     let (address, tasks) = tc_fixture().await;
     let egress = Arc::new(RecordingEgress::default());
+    let server = configured_server(address, DnsUpstreamTransport::Udp, true);
+    let configured_plan_ptr = server
+        .detour
+        .as_ref()
+        .expect("configured TC detour")
+        .snapshot_owned()
+        .hops()
+        .as_ptr() as usize;
     let (resolver, mut owner) = TaggedResolver::new(
-        vec![configured_server(address, DnsTransport::Udp, true)],
+        vec![server],
         Duration::from_millis(250),
         NonZeroU16::new(1).expect("nonzero admission"),
         egress.clone(),
@@ -636,6 +623,8 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
             },
         ]
     );
+    let plan_ptrs = egress.plan_ptrs();
+    assert_eq!(plan_ptrs, vec![configured_plan_ptr; 2]);
     drop(resolver);
     owner.shutdown().await.expect("TC resolver shutdown");
     for task in tasks {
@@ -650,7 +639,7 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
         let (address, task) = udp_fault(fault).await;
         let egress = Arc::new(RecordingEgress::default());
         let (resolver, mut owner) = TaggedResolver::new(
-            vec![configured_server(address, DnsTransport::Udp, true)],
+            vec![configured_server(address, DnsUpstreamTransport::Udp, true)],
             Duration::from_millis(50),
             NonZeroU16::new(1).expect("nonzero admission"),
             egress.clone(),
@@ -683,7 +672,7 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
     let (address, task) = half_frame().await;
     let egress = Arc::new(RecordingEgress::default());
     let (resolver, mut owner) = TaggedResolver::new(
-        vec![configured_server(address, DnsTransport::Tcp, true)],
+        vec![configured_server(address, DnsUpstreamTransport::Tcp, true)],
         Duration::from_millis(100),
         NonZeroU16::new(1).expect("nonzero admission"),
         egress.clone(),

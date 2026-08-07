@@ -6,11 +6,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use ferrum2_config::{DnsServerConfig, DnsTransport, load_client};
+use ferrum2_core::route::{EgressPlanHandle, EgressPlanSnapshot};
 use ferrum2_dns::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
-    DnsEgressTaskKind, DnsError, DnsIoFuture, DnsTaskRegistrar, PlanSnapshot, RuntimeStats,
-    SystemDnsEgress, TaggedResolver,
+    DnsEgressTaskKind, DnsError, DnsIoFuture, DnsTaskRegistrar, DnsUpstreamSpec,
+    DnsUpstreamTransport, RuntimeStats, SystemDnsEgress, TaggedResolver,
 };
 use hickory_proto::op::{Message, MessageType, OpCode};
 use hickory_proto::rr::rdata::A;
@@ -92,7 +92,7 @@ impl DnsEgress for GatedEgress {
     fn connect_tcp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
@@ -102,7 +102,7 @@ impl DnsEgress for GatedEgress {
     fn bind_udp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         if self.blocked.load(Ordering::Acquire) {
@@ -145,7 +145,7 @@ impl DnsEgress for ScriptedDetour {
     fn connect_tcp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
@@ -192,7 +192,7 @@ impl DnsEgress for ScriptedDetour {
     fn bind_udp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         let Some(plan) = plan else {
@@ -388,83 +388,32 @@ impl ControlledUdp {
     }
 }
 
-fn direct_udp(address: SocketAddr) -> DnsServerConfig {
-    DnsServerConfig {
-        transport: DnsTransport::Udp,
+fn direct_udp(address: SocketAddr) -> DnsUpstreamSpec {
+    DnsUpstreamSpec {
+        transport: DnsUpstreamTransport::Udp,
         address,
-        server_name: None,
-        path: None,
         detour: None,
     }
 }
 
-fn direct_tcp(address: SocketAddr) -> DnsServerConfig {
-    DnsServerConfig {
-        transport: DnsTransport::Tcp,
+fn direct_tcp(address: SocketAddr) -> DnsUpstreamSpec {
+    DnsUpstreamSpec {
+        transport: DnsUpstreamTransport::Tcp,
         address,
-        server_name: None,
-        path: None,
         detour: None,
     }
 }
 
-fn detoured_tcp(address: SocketAddr) -> DnsServerConfig {
-    let source = format!(
-        "schema_version = 1\n\
-         [[inbounds]]\n\
-         tag = \"i0\"\n\
-         listen = \"127.0.0.1:11080\"\n\
-         outbound = \"o0\"\n\
-         [[outbounds]]\n\
-         tag = \"o0\"\n\
-         server = \"127.0.0.1:20000\"\n\
-         [dns]\n\
-         timeout_ms = 1000\n\
-         max_inflight = 2\n\
-         [[dns.inbounds]]\n\
-         tag = \"d0\"\n\
-         listen = \"127.0.0.1:15353\"\n\
-         [[dns.servers]]\n\
-         tag = \"s0\"\n\
-         transport = \"tcp\"\n\
-         address = \"{address}\"\n\
-         detour = \"o0\"\n\
-         [dns.route]\n\
-         final = \"s0\"\n\
-         [shadowsocks]\n\
-         method = \"2022-blake3-aes-128-gcm\"\n\
-         psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
-    );
-    let path = std::env::temp_dir().join(format!(
-        "ferrum2-dns-t03-lifecycle-{}-{}.toml",
-        std::process::id(),
-        address.port()
-    ));
-    std::fs::write(&path, source).expect("write detour config");
-    let server = load_client(&path)
-        .expect("load detour config")
-        .dns
-        .expect("validated DNS")
-        .servers
-        .into_iter()
-        .next()
-        .expect("validated detour server");
-    std::fs::remove_file(path).expect("remove detour config");
-    server
+fn detoured_tcp(address: SocketAddr) -> DnsUpstreamSpec {
+    detoured_server(address, DnsUpstreamTransport::Tcp)
 }
 
-fn detoured_server(address: SocketAddr, transport: DnsTransport) -> DnsServerConfig {
-    let mut server = detoured_tcp(address);
-    server.transport = transport;
-    match transport {
-        DnsTransport::Dot => server.server_name = Some("resolver.test".into()),
-        DnsTransport::Doh => {
-            server.server_name = Some("resolver.test".into());
-            server.path = Some("/dns-query".into());
-        }
-        DnsTransport::Udp | DnsTransport::Tcp => {}
+fn detoured_server(address: SocketAddr, transport: DnsUpstreamTransport) -> DnsUpstreamSpec {
+    DnsUpstreamSpec {
+        transport,
+        address,
+        detour: Some(EgressPlanHandle::direct(0)),
     }
-    server
 }
 
 async fn assert_tcp_rebind(address: SocketAddr) {
@@ -832,7 +781,7 @@ async fn shutdown_joins_direct_and_detour_stream_session_queue_and_buffer_owners
             .lock()
             .expect("plan debug lock")
             .as_slice(),
-        &["PlanSnapshot([redacted])"]
+        &["EgressPlanSnapshot([redacted])"]
     );
 
     drop(resolver);
@@ -863,10 +812,21 @@ async fn shutdown_bounds_slow_detoured_udp_tcp_dot_and_doh_resources() {
     let egress = Arc::new(ScriptedDetour::new(first_hop.address));
     let (resolver, mut owner) = TaggedResolver::new(
         vec![
-            detoured_server(udp_upstream.address, DnsTransport::Udp),
-            detoured_server(tcp_upstream.address, DnsTransport::Tcp),
-            detoured_server(tcp_upstream.address, DnsTransport::Dot),
-            detoured_server(tcp_upstream.address, DnsTransport::Doh),
+            detoured_server(udp_upstream.address, DnsUpstreamTransport::Udp),
+            detoured_server(tcp_upstream.address, DnsUpstreamTransport::Tcp),
+            detoured_server(
+                tcp_upstream.address,
+                DnsUpstreamTransport::Dot {
+                    server_name: "resolver.test".into(),
+                },
+            ),
+            detoured_server(
+                tcp_upstream.address,
+                DnsUpstreamTransport::Doh {
+                    server_name: "resolver.test".into(),
+                    path: "/dns-query".into(),
+                },
+            ),
         ],
         Duration::from_secs(5),
         NonZeroU16::new(4).expect("nonzero admission"),

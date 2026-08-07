@@ -15,7 +15,7 @@ default = []
 __interop-test-root = ["dep:rustls"]
 
 [dependencies]
-ferrum2-config.workspace = true
+ferrum2-core.workspace = true
 futures-util.workspace = true
 hickory-proto.workspace = true
 hickory-resolver.workspace = true

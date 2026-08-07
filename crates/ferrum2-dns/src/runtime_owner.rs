@@ -6,7 +6,6 @@ use std::sync::atomic::Ordering;
 use std::thread::JoinHandle as ThreadJoinHandle;
 use std::time::Duration;
 
-use ferrum2_config::DnsServerConfig;
 use hickory_proto::op::Message;
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::lookup::Lookup;
@@ -16,7 +15,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::error::DnsError;
-use crate::resolver::{self, SelectedServer};
+use crate::resolver::{self, DnsUpstreamSpec, SelectedServer};
 use crate::runtime_provider::{
     DnsEgress, FerrumRuntimeProvider, QueryGuard, RuntimeCounters, SystemDnsEgress, TaskSet,
 };
@@ -110,7 +109,7 @@ pub struct TaggedResolverOwner {
 impl TaggedResolver {
     /// Starts a lazy resolver graph using direct numeric Tokio sockets.
     pub fn direct(
-        servers: Vec<DnsServerConfig>,
+        servers: Vec<DnsUpstreamSpec>,
         timeout: Duration,
         max_inflight: NonZeroU16,
     ) -> Result<(Self, TaggedResolverOwner), DnsError> {
@@ -119,16 +118,13 @@ impl TaggedResolver {
 
     /// Starts a lazy resolver graph over the supplied direct/detour adapter.
     pub fn new(
-        servers: Vec<DnsServerConfig>,
+        servers: Vec<DnsUpstreamSpec>,
         timeout: Duration,
         max_inflight: NonZeroU16,
         egress: Arc<dyn DnsEgress>,
     ) -> Result<(Self, TaggedResolverOwner), DnsError> {
         Self::start(
-            servers
-                .into_iter()
-                .map(SelectedServer::from_config)
-                .collect(),
+            servers.into_iter().map(SelectedServer::from_spec).collect(),
             timeout,
             max_inflight,
             egress,
@@ -137,11 +133,7 @@ impl TaggedResolver {
 
     #[cfg(test)]
     pub(crate) fn with_test_tls(
-        servers: Vec<(
-            DnsServerConfig,
-            rustls::ClientConfig,
-            Option<crate::runtime_provider::PlanSnapshot>,
-        )>,
+        servers: Vec<(DnsUpstreamSpec, rustls::ClientConfig)>,
         timeout: Duration,
         max_inflight: NonZeroU16,
         egress: Arc<dyn DnsEgress>,
@@ -149,11 +141,7 @@ impl TaggedResolver {
         Self::start(
             servers
                 .into_iter()
-                .map(|(server, tls, plan)| {
-                    SelectedServer::from_config(server)
-                        .with_tls(tls)
-                        .with_plan(plan)
-                })
+                .map(|(server, tls)| SelectedServer::from_spec(server).with_tls(tls))
                 .collect(),
             timeout,
             max_inflight,
@@ -555,7 +543,7 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
-    use ferrum2_config::DnsTransport;
+    use ferrum2_core::route::{EgressPlanHandle, EgressPlanSnapshot};
     use hickory_proto::rr::rdata::{A, AAAA, CNAME, NS, SOA};
     use hickory_proto::rr::{LowerName, RData, Record};
     use hickory_resolver::net::runtime::TokioRuntimeProvider;
@@ -569,6 +557,8 @@ mod tests {
     use tokio::io::copy_bidirectional_with_sizes;
     use tokio::net::{TcpListener, TcpStream};
     use tokio_rustls::TlsAcceptor;
+
+    use crate::resolver::DnsUpstreamTransport;
 
     const CERT: &[u8] = include_bytes!("../tests/fixtures/m12-resolver-test.der");
     const KEY: &[u8] = include_bytes!("../tests/fixtures/m12-resolver-test.pk8");
@@ -714,17 +704,19 @@ mod tests {
         .with_no_client_auth()
     }
 
-    fn encrypted_server(
-        transport: DnsTransport,
-        address: SocketAddr,
-        name: &str,
-        path: Option<&str>,
-    ) -> DnsServerConfig {
-        DnsServerConfig {
+    fn encrypted_server(address: SocketAddr, name: &str, path: Option<&str>) -> DnsUpstreamSpec {
+        let transport = match path {
+            Some(path) => DnsUpstreamTransport::Doh {
+                server_name: name.into(),
+                path: path.into(),
+            },
+            None => DnsUpstreamTransport::Dot {
+                server_name: name.into(),
+            },
+        };
+        DnsUpstreamSpec {
             transport,
             address,
-            server_name: Some(name.into()),
-            path: path.map(Into::into),
             detour: None,
         }
     }
@@ -852,7 +844,7 @@ mod tests {
         fn connect_tcp(
             &self,
             target: SocketAddr,
-            plan: Option<crate::runtime_provider::PlanSnapshot>,
+            plan: Option<EgressPlanSnapshot>,
             timeout: Duration,
             tasks: crate::runtime_provider::DnsTaskRegistrar,
         ) -> crate::runtime_provider::DnsIoFuture<crate::runtime_provider::BoxedDnsTcpIo> {
@@ -890,7 +882,7 @@ mod tests {
         fn bind_udp(
             &self,
             _target: SocketAddr,
-            _plan: Option<crate::runtime_provider::PlanSnapshot>,
+            _plan: Option<EgressPlanSnapshot>,
             _tasks: crate::runtime_provider::DnsTaskRegistrar,
         ) -> crate::runtime_provider::DnsIoFuture<crate::runtime_provider::BoxedDnsDatagramIo>
         {
@@ -929,49 +921,32 @@ mod tests {
         let valid = client_tls(VALID_TIME, true);
         let servers = vec![
             (
-                encrypted_server(DnsTransport::Dot, fixture.dot, "resolver.test", None),
+                encrypted_server(fixture.dot, "resolver.test", None),
                 valid.clone(),
-                None,
             ),
             (
-                encrypted_server(
-                    DnsTransport::Doh,
-                    fixture.doh,
-                    "resolver.test",
-                    Some("/dns-query"),
-                ),
+                encrypted_server(fixture.doh, "resolver.test", Some("/dns-query")),
                 valid.clone(),
-                None,
             ),
             (
-                encrypted_server(DnsTransport::Dot, fixture.dot, "wrong.test", None),
+                encrypted_server(fixture.dot, "wrong.test", None),
                 valid.clone(),
-                None,
             ),
             (
-                encrypted_server(DnsTransport::Dot, fixture.dot, "resolver.test", None),
+                encrypted_server(fixture.dot, "resolver.test", None),
                 client_tls(VALID_TIME, false),
-                None,
             ),
             (
-                encrypted_server(DnsTransport::Dot, fixture.dot, "resolver.test", None),
+                encrypted_server(fixture.dot, "resolver.test", None),
                 client_tls(1_785_915_311, true),
-                None,
             ),
             (
-                encrypted_server(DnsTransport::Dot, fixture.dot, "resolver.test", None),
+                encrypted_server(fixture.dot, "resolver.test", None),
                 client_tls(2_101_275_313, true),
-                None,
             ),
             (
-                encrypted_server(
-                    DnsTransport::Doh,
-                    fixture.doh,
-                    "resolver.test",
-                    Some("/wrong"),
-                ),
+                encrypted_server(fixture.doh, "resolver.test", Some("/wrong")),
                 valid,
-                None,
             ),
         ];
         let egress = Arc::new(ScriptedTlsDetour::default());
@@ -1023,14 +998,8 @@ mod tests {
             let egress = Arc::new(ScriptedTlsDetour::default());
             let (resolver, mut owner) = TaggedResolver::with_test_tls(
                 vec![(
-                    encrypted_server(
-                        DnsTransport::Doh,
-                        address,
-                        "resolver.test",
-                        Some("/dns-query"),
-                    ),
+                    encrypted_server(address, "resolver.test", Some("/dns-query")),
                     client_tls(VALID_TIME, true),
-                    None,
                 )],
                 Duration::from_secs(1),
                 NonZeroU16::new(1).expect("nonzero admission"),
@@ -1070,17 +1039,10 @@ mod tests {
             require_plan: true,
             ..ScriptedTlsDetour::default()
         });
+        let mut server = encrypted_server(address, "resolver.test", Some("/dns-query"));
+        server.detour = Some(EgressPlanHandle::direct(0));
         let (resolver, mut owner) = TaggedResolver::with_test_tls(
-            vec![(
-                encrypted_server(
-                    DnsTransport::Doh,
-                    address,
-                    "resolver.test",
-                    Some("/dns-query"),
-                ),
-                client_tls(VALID_TIME, true),
-                Some(crate::runtime_provider::PlanSnapshot::new(&[0])),
-            )],
+            vec![(server, client_tls(VALID_TIME, true))],
             Duration::from_secs(5),
             NonZeroU16::new(1).expect("nonzero admission"),
             egress.clone(),

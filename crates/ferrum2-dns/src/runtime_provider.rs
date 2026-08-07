@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
+use ferrum2_core::route::EgressPlanSnapshot;
 use hickory_resolver::net::runtime::iocompat::AsyncIoTokioAsStd;
 use hickory_resolver::net::runtime::{DnsUdpSocket, RuntimeProvider, Spawn, TokioTime};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -16,27 +17,6 @@ use tokio::time::Instant;
 
 /// Owned future returned by a DNS egress adapter.
 pub type DnsIoFuture<T> = Pin<Box<dyn Future<Output = io::Result<T>> + Send + 'static>>;
-
-/// One immutable concrete egress-plan selection.
-#[derive(Clone, Eq, PartialEq)]
-pub struct PlanSnapshot(Arc<[usize]>);
-
-impl PlanSnapshot {
-    pub(crate) fn new(hops: &[usize]) -> Self {
-        Self(Arc::from(hops))
-    }
-
-    /// Returns concrete outbound identities in traversal order.
-    pub fn hops(&self) -> &[usize] {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for PlanSnapshot {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("PlanSnapshot([redacted])")
-    }
-}
 
 /// Owned Tokio TCP I/O supplied to Hickory without changing DNS framing.
 pub trait DnsTcpIo: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
@@ -73,7 +53,7 @@ pub trait DnsEgress: Send + Sync + 'static {
     fn connect_tcp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo>;
@@ -82,7 +62,7 @@ pub trait DnsEgress: Send + Sync + 'static {
     fn bind_udp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo>;
 }
@@ -95,7 +75,7 @@ impl DnsEgress for SystemDnsEgress {
     fn connect_tcp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         _tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
@@ -117,7 +97,7 @@ impl DnsEgress for SystemDnsEgress {
     fn bind_udp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         _tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         Box::pin(async move {
@@ -365,7 +345,7 @@ impl Drop for QueryGuard {
 #[derive(Clone)]
 pub(crate) struct FerrumRuntimeProvider {
     egress: Arc<dyn DnsEgress>,
-    plan: Option<PlanSnapshot>,
+    plan: Option<EgressPlanSnapshot>,
     deadline: Instant,
     tasks: TaskSet,
     counters: Arc<RuntimeCounters>,
@@ -374,7 +354,7 @@ pub(crate) struct FerrumRuntimeProvider {
 impl FerrumRuntimeProvider {
     pub(crate) fn new(
         egress: Arc<dyn DnsEgress>,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         deadline: Instant,
         tasks: TaskSet,
         counters: Arc<RuntimeCounters>,
