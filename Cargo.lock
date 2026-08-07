@@ -441,7 +441,7 @@ dependencies = [
 name = "ferrum2-dns"
 version = "0.1.0"
 dependencies = [
- "ferrum2-config",
+ "ferrum2-core",
  "futures-util",
  "h2",
  "hickory-proto",

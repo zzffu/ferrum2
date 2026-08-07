@@ -127,6 +127,7 @@ fn current_deep_modules_keep_one_way_internal_dependencies() {
         ),
         ("ferrum2-core", BTreeSet::new()),
         ("ferrum2-crypto", BTreeSet::new()),
+        ("ferrum2-dns", BTreeSet::from(["ferrum2-core"])),
         ("ferrum2-observability", BTreeSet::new()),
         ("ferrum2-runtime", BTreeSet::from(["ferrum2-core"])),
         (
@@ -170,6 +171,22 @@ fn current_deep_modules_keep_one_way_internal_dependencies() {
             );
         }
     }
+
+    let root = workspace_root();
+    for path in rust_sources(&root.join("crates/ferrum2-dns/src")) {
+        let source = fs::read_to_string(&path).expect("DNS source");
+        for forbidden in ["ferrum2_config", "DnsServerConfig", "DnsTransport"] {
+            assert!(
+                !source.contains(forbidden),
+                "DNS runtime source imports config ownership: {} contains {forbidden}",
+                path.display()
+            );
+        }
+    }
+    let public =
+        fs::read_to_string(root.join("crates/ferrum2-dns/src/lib.rs")).expect("DNS public module");
+    assert!(public.contains("DnsUpstreamSpec"));
+    assert!(!public.contains("DnsTcpIo, PlanSnapshot"));
 }
 
 #[test]

@@ -753,7 +753,7 @@ fn hickory_graph_and_features_match_the_approved_dns_policy() {
     assert_eq!(
         dependency_table(&manifest, "[dependencies]").expect("DNS dependencies"),
         BTreeMap::from([
-            ("ferrum2-config.workspace".to_owned(), "true".to_owned()),
+            ("ferrum2-core.workspace".to_owned(), "true".to_owned()),
             ("futures-util.workspace".to_owned(), "true".to_owned()),
             ("hickory-proto.workspace".to_owned(), "true".to_owned()),
             ("hickory-resolver.workspace".to_owned(), "true".to_owned()),

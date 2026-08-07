@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
-use ferrum2_config::{LoggingLevel, RuntimeConfig, ValidatedClientConfig};
-use ferrum2_core::route::Network;
+use ferrum2_config::{DnsConfig, LoggingLevel, RuntimeConfig, ValidatedClientConfig};
+use ferrum2_core::route::{EgressPlanSnapshot, Network};
 use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, Datagram, Inbound as _,
     LocalEndpoint, SessionReply as _, TargetAddr,
@@ -90,6 +90,10 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
+    let dns_specs = config
+        .dns
+        .as_ref()
+        .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
     let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|_| RunError::StartupObservability)?;
@@ -97,13 +101,27 @@ pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
         .enable_all()
         .build()
         .map_err(|_| RunError::StartupRuntime)?;
-    runtime.block_on(run_async(config))
+    runtime.block_on(run_async(config, dns_specs))
 }
 
-async fn run_async(config: ValidatedClientConfig) -> Result<(), RunError> {
-    run_with_registry(config, OwnerRegistry::new(), shutdown_signal()).await
+async fn run_async(
+    config: ValidatedClientConfig,
+    dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
+) -> Result<(), RunError> {
+    run_with_registry_and_metrics_inner(
+        config,
+        OwnerRegistry::new(),
+        shutdown_signal(),
+        Arc::new(Metrics::new()),
+        None,
+        #[cfg(test)]
+        None,
+        dns_specs,
+    )
+    .await
 }
 
+#[cfg(test)]
 async fn run_with_registry<S>(
     config: ValidatedClientConfig,
     registry: OwnerRegistry,
@@ -115,6 +133,7 @@ where
     run_with_registry_and_metrics(config, registry, shutdown, Arc::new(Metrics::new())).await
 }
 
+#[cfg(test)]
 async fn run_with_registry_and_metrics<S>(
     config: ValidatedClientConfig,
     registry: OwnerRegistry,
@@ -124,6 +143,10 @@ async fn run_with_registry_and_metrics<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
+    let dns_specs = config
+        .dns
+        .as_ref()
+        .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
     run_with_registry_and_metrics_inner(
         config,
         registry,
@@ -132,6 +155,7 @@ where
         None,
         #[cfg(test)]
         None,
+        dns_specs,
     )
     .await
 }
@@ -145,21 +169,43 @@ async fn run_with_registry_and_metrics_inner<S>(
     #[cfg(test)] mut dns_observer: Option<
         tokio::sync::oneshot::Sender<(Arc<ClientContext>, Arc<TaggedResolver>)>,
     >,
+    dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
 ) -> Result<(), RunError>
 where
     S: std::future::Future<Output = ()> + Send,
 {
-    metrics.set_udp_sessions_active(Role::Client, 0);
-    metrics.set_udp_buffered_bytes(Role::Client, 0);
     #[cfg(test)]
     let method = config.method();
-    let dns = config.dns;
+    let dns = match (config.dns, dns_specs) {
+        (
+            Some(DnsConfig {
+                inbounds,
+                servers,
+                route,
+                timeout,
+                max_inflight,
+            }),
+            Some(specs),
+        ) => {
+            let internal_udp_needed = servers.iter().any(|server| {
+                server.transport == ferrum2_config::DnsTransport::Udp && server.detour.is_some()
+            });
+            Some((
+                inbounds,
+                specs,
+                route,
+                timeout,
+                max_inflight,
+                internal_udp_needed,
+            ))
+        }
+        (None, None) => None,
+        _ => return Err(RunError::StartupProtocol),
+    };
+    metrics.set_udp_sessions_active(Role::Client, 0);
+    metrics.set_udp_buffered_bytes(Role::Client, 0);
     let public_udp_enabled = config.udp.is_some_and(|udp| udp.enabled);
-    let internal_udp_needed = dns.as_ref().is_some_and(|dns| {
-        dns.servers.iter().any(|server| {
-            server.transport == ferrum2_config::DnsTransport::Udp && server.detour.is_some()
-        })
-    });
+    let internal_udp_needed = dns.as_ref().is_some_and(|dns| dns.5);
     let runtime = config.runtime;
     let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)?;
     let shutdown_grace = config.runtime.shutdown_grace;
@@ -170,12 +216,12 @@ where
             Some(udp) => (udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout),
             None => {
                 let dns = dns.as_ref().expect("internal UDP requires DNS config");
-                let sessions = usize::from(dns.max_inflight.get());
+                let sessions = usize::from(dns.4.get());
                 let bytes = sessions
                     .checked_mul(3 * MAX_UDP_WIRE_LEN)
                     .ok_or(RunError::StartupProtocol)?
                     .clamp(MIN_UDP_MAX_BUFFERED_BYTES, MAX_UDP_MAX_BUFFERED_BYTES);
-                (sessions, bytes, dns.timeout.max(MIN_UDP_IDLE_TIMEOUT))
+                (sessions, bytes, dns.3.max(MIN_UDP_IDLE_TIMEOUT))
             }
         };
         Some(ClientUdpContext {
@@ -243,14 +289,7 @@ where
             routing,
         })
     })];
-    if let Some(dns) = dns {
-        let ferrum2_config::DnsConfig {
-            inbounds,
-            servers,
-            route,
-            timeout,
-            max_inflight,
-        } = dns;
+    if let Some((inbounds, servers, route, timeout, max_inflight, _)) = dns {
         let addresses = inbounds.into_iter().map(|inbound| inbound.listen).collect();
         let route = Arc::new(route);
         roots.push(ProcessRoot::new(move || async move {
@@ -855,7 +894,7 @@ struct PreparedClientUdp {
     handle: UdpSessionHandle,
     live_ids: Arc<std::sync::Mutex<HashSet<UdpSessionId>>>,
     static_server: Option<SocketAddrV4>,
-    static_plan: Option<Box<[usize]>>,
+    static_plan: Option<EgressPlanSnapshot>,
     application: UdpSocket,
     upstream: UdpSocket,
     application_wire: Vec<u8>,
@@ -916,13 +955,13 @@ async fn run_udp_association<IO, F, Fut>(
             .expect("fixed valid route target");
         let plan = routing
             .route
-            .select_plan(inbound, Network::Udp, &placeholder);
-        let hops: Box<[usize]> = plan.hops().into();
-        let server = hops
+            .select_plan_snapshot(inbound, Network::Udp, &placeholder);
+        let server = plan
+            .hops()
             .first()
             .and_then(|hop| routing.outbounds.get(*hop))
             .map(|outbound| outbound.udp_server);
-        server.map(|server| (hops, server))
+        server.map(|server| (plan, server))
     };
     if !routing.route.is_routed() && static_plan.is_none() {
         let _ = reply.failed(ConnectErrorKind::Other).await;
@@ -965,7 +1004,7 @@ async fn run_udp_association<IO, F, Fut>(
 async fn prepare_udp_association_with_bind<F, Fut>(
     context: &ClientContext,
     local_ip: Ipv4Addr,
-    static_plan: Option<(Box<[usize]>, SocketAddrV4)>,
+    static_plan: Option<(EgressPlanSnapshot, SocketAddrV4)>,
     mut bind: F,
 ) -> Result<PreparedClientUdp, ()>
 where
@@ -975,7 +1014,7 @@ where
     let udp = context.udp.as_ref().ok_or(())?;
     if static_plan
         .as_ref()
-        .is_some_and(|(plan, _)| plan.is_empty() || plan.len() > MAX_UDP_PLAN_HOPS)
+        .is_some_and(|(plan, _)| plan.hops().len() > MAX_UDP_PLAN_HOPS)
     {
         return Err(());
     }
@@ -1406,15 +1445,14 @@ async fn relay_udp_association<IO>(
                 let payload_len = decoded.payload().len();
                 let encoded_target_len = decoded.encoded_target_len();
                 let target = decoded.to_target_addr();
-                let hops: Box<[usize]> = match &prepared.static_plan {
+                let plan = match &prepared.static_plan {
                     Some(plan) => plan.clone(),
                     None => routing
                         .route
-                        .select_plan(inbound, Network::Udp, &target)
-                        .hops()
-                        .into(),
+                        .select_plan_snapshot(inbound, Network::Udp, &target),
                 };
-                let Some(server) = hops
+                let Some(server) = plan
+                    .hops()
                     .first()
                     .and_then(|hop| routing.outbounds.get(*hop))
                     .map(|outbound| outbound.udp_server)
@@ -1423,7 +1461,7 @@ async fn relay_udp_association<IO>(
                 };
                 if payload_len > composed_udp_plan_limit(
                     &routing.outbounds,
-                    &hops,
+                    plan.hops(),
                     false,
                     encoded_target_len,
                 ) {
@@ -1440,7 +1478,7 @@ async fn relay_udp_association<IO>(
                     }
                 };
                 let payload = decoded.payload().into();
-                if activate_udp_plan(prepared, context, &routing.outbounds, &hops).is_err() {
+                if activate_udp_plan(prepared, context, &routing.outbounds, plan.hops()).is_err() {
                     record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
                     return;
                 }
@@ -1473,7 +1511,7 @@ async fn relay_udp_association<IO>(
                 let wire_len = match encode_udp_plan_request(
                     prepared,
                     &routing.outbounds,
-                    &hops,
+                    plan.hops(),
                     datagram.datagram(),
                     &context.clock,
                     &context.random,
@@ -3673,7 +3711,10 @@ mod tests {
             let mut prepared = prepare_udp_association_with_bind(
                 &context,
                 Ipv4Addr::LOCALHOST,
-                Some((Box::from([0]), server_address)),
+                Some((
+                    ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                    server_address,
+                )),
                 UdpSocket::bind,
             )
             .await
@@ -3842,7 +3883,10 @@ mod tests {
                 let prepared = prepare_udp_association_with_bind(
                     &context,
                     Ipv4Addr::LOCALHOST,
-                    Some((Box::from([0]), server_address)),
+                    Some((
+                        ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                        server_address,
+                    )),
                     UdpSocket::bind,
                 )
                 .await
@@ -5212,6 +5256,10 @@ mod tests {
         random: Arc<dyn SecureRandom>,
     ) -> (tokio::sync::oneshot::Sender<()>, TestClientTask) {
         let (stop, stopped) = tokio::sync::oneshot::channel();
+        let dns_specs = config
+            .dns
+            .as_ref()
+            .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
         let task = tokio::spawn(run_with_registry_and_metrics_inner(
             config,
             registry.clone(),
@@ -5221,6 +5269,7 @@ mod tests {
             Arc::new(Metrics::new()),
             Some(random),
             None,
+            dns_specs,
         ));
         (stop, task)
     }
@@ -5340,11 +5389,9 @@ mod tests {
         .await
         .expect("prepared paired DNS sockets");
         let (resolver, owner) = TaggedResolver::new(
-            vec![ferrum2_config::DnsServerConfig {
-                transport: ferrum2_config::DnsTransport::Udp,
+            vec![ferrum2_dns::DnsUpstreamSpec {
+                transport: ferrum2_dns::DnsUpstreamTransport::Udp,
                 address: upstream_address,
-                server_name: None,
-                path: None,
                 detour: None,
             }],
             Duration::from_secs(1),
@@ -6095,6 +6142,10 @@ mod tests {
         let registry = OwnerRegistry::new();
         let (observed, resolver) = tokio::sync::oneshot::channel();
         let (stop, stopped) = tokio::sync::oneshot::channel();
+        let dns_specs = config
+            .dns
+            .as_ref()
+            .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
         let task = tokio::spawn(run_with_registry_and_metrics_inner(
             config,
             registry.clone(),
@@ -6104,6 +6155,7 @@ mod tests {
             Arc::new(Metrics::new()),
             None,
             Some(observed),
+            dns_specs,
         ));
         let (context, resolver) = resolver.await.expect("observed DNS resolver");
         let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -7080,6 +7132,11 @@ mod tests {
             TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "chain")]),
         )
         .expect("eight-hop route");
+        let plan = route.select_plan_snapshot(
+            0,
+            Network::Udp,
+            &TargetAddr::domain("eight-hop.test", 53).expect("eight-hop target"),
+        );
         let routing = Arc::new(ClientRouting { route, outbounds });
         let (path, context) = udp_test_context_for_psk(
             registry.clone(),
@@ -7089,7 +7146,7 @@ mod tests {
         let prepared = prepare_udp_association_with_bind(
             &context,
             Ipv4Addr::LOCALHOST,
-            Some((hops.clone().into_boxed_slice(), servers[0])),
+            Some((plan, servers[0])),
             UdpSocket::bind,
         )
         .await
@@ -8126,7 +8183,10 @@ mod tests {
         let prepared = prepare_udp_association_with_bind(
             &context,
             Ipv4Addr::LOCALHOST,
-            Some((Box::from([0]), context.test_udp_server)),
+            Some((
+                ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                context.test_udp_server,
+            )),
             UdpSocket::bind,
         )
         .await
@@ -8157,7 +8217,10 @@ mod tests {
         let prepared = prepare_udp_association_with_bind(
             &context,
             Ipv4Addr::new(127, 0, 0, 2),
-            Some((Box::from([0]), context.test_udp_server)),
+            Some((
+                ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                context.test_udp_server,
+            )),
             move |address| {
                 observed.lock().expect("bind calls").push(address);
                 UdpSocket::bind(address)

@@ -82,6 +82,10 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedServerConfig) -> Result<(), RunError> {
+    let dns_specs = config
+        .dns
+        .as_ref()
+        .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
     let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|_| RunError::StartupObservability)?;
@@ -89,13 +93,17 @@ pub(crate) fn run(config: ValidatedServerConfig) -> Result<(), RunError> {
         .enable_all()
         .build()
         .map_err(|_| RunError::StartupRuntime)?;
-    runtime.block_on(run_async(config))
+    runtime.block_on(run_async(config, dns_specs))
 }
 
-async fn run_async(config: ValidatedServerConfig) -> Result<(), RunError> {
-    run_with_registry(config, OwnerRegistry::new(), shutdown_signal()).await
+async fn run_async(
+    config: ValidatedServerConfig,
+    dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
+) -> Result<(), RunError> {
+    run_with_registry_prepared(config, OwnerRegistry::new(), shutdown_signal(), dns_specs).await
 }
 
+#[cfg(test)]
 async fn run_with_registry<S>(
     config: ValidatedServerConfig,
     registry: OwnerRegistry,
@@ -104,6 +112,36 @@ async fn run_with_registry<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
+    let dns_specs = config
+        .dns
+        .as_ref()
+        .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
+    run_with_registry_prepared(config, registry, shutdown, dns_specs).await
+}
+
+async fn run_with_registry_prepared<S>(
+    config: ValidatedServerConfig,
+    registry: OwnerRegistry,
+    shutdown: S,
+    dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
+) -> Result<(), RunError>
+where
+    S: std::future::Future<Output = ()> + Send,
+{
+    let dns = match (config.dns, dns_specs) {
+        (
+            Some(DnsConfig {
+                inbounds: _,
+                servers: _,
+                route,
+                timeout,
+                max_inflight,
+            }),
+            Some(servers),
+        ) => Some((servers, route, timeout, max_inflight)),
+        (None, None) => None,
+        _ => return Err(RunError::StartupProtocol),
+    };
     let metrics = Arc::new(Metrics::new());
     let replay = Arc::new(
         TcpReplayStore::new(config.replay.capacity).map_err(|_| RunError::StartupProtocol)?,
@@ -131,17 +169,11 @@ where
     let mut roots = Vec::with_capacity(
         config.inbounds.len() * usize::from(config.udp.enabled)
             + 1
-            + usize::from(config.dns.is_some())
+            + usize::from(dns.is_some())
             + usize::from(config.metrics.is_some()),
     );
-    let dns = match config.dns {
-        Some(DnsConfig {
-            inbounds: _,
-            servers,
-            route,
-            timeout,
-            max_inflight,
-        }) => {
+    let dns = match dns {
+        Some((servers, route, timeout, max_inflight)) => {
             let state = Arc::new(dns_egress::ServerDnsState::new(route));
             let root_state = Arc::clone(&state);
             let outbound_count = routing.outbound_count;

@@ -7,15 +7,46 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ferrum2_config::{DnsServerConfig, DnsTransport};
 use ferrum2_core::TargetAddr;
-use ferrum2_core::route::{ActionTable, Network};
+use ferrum2_core::route::{ActionTable, EgressPlanSnapshot, Network};
 use ferrum2_dns::{
-    BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsEgress, DnsIoFuture, DnsTaskRegistrar, PlanSnapshot,
-    SystemDnsEgress, TaggedResolver,
+    BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsEgress, DnsIoFuture, DnsTaskRegistrar, DnsUpstreamSpec,
+    DnsUpstreamTransport, SystemDnsEgress, TaggedResolver,
 };
 use ferrum2_runtime::{
     MAX_RESOLVED_CANDIDATES, SystemTcpResolver, SystemUdpResolver, TcpResolver, UdpResolver,
 };
+
+pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamSpec> {
+    servers
+        .iter()
+        .map(|server| {
+            let transport = match server.transport {
+                DnsTransport::Udp => DnsUpstreamTransport::Udp,
+                DnsTransport::Tcp => DnsUpstreamTransport::Tcp,
+                DnsTransport::Dot => DnsUpstreamTransport::Dot {
+                    server_name: server
+                        .server_name
+                        .clone()
+                        .expect("validated DoT server name"),
+                },
+                DnsTransport::Doh => DnsUpstreamTransport::Doh {
+                    server_name: server
+                        .server_name
+                        .clone()
+                        .expect("validated DoH server name"),
+                    path: server.path.clone().expect("validated DoH path"),
+                },
+            };
+            DnsUpstreamSpec {
+                transport,
+                address: server.address,
+                detour: server.detour.clone(),
+            }
+        })
+        .collect()
+}
 
 pub(super) struct ServerDnsState {
     route: ActionTable<usize>,
@@ -130,7 +161,7 @@ impl ServerDnsEgress {
         Self { outbound_count }
     }
 
-    fn validate(&self, plan: &Option<PlanSnapshot>) -> io::Result<()> {
+    fn validate(&self, plan: &Option<EgressPlanSnapshot>) -> io::Result<()> {
         match plan {
             None => Ok(()),
             Some(plan) if matches!(plan.hops(), [outbound] if *outbound < self.outbound_count) => {
@@ -148,7 +179,7 @@ impl DnsEgress for ServerDnsEgress {
     fn connect_tcp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
@@ -161,12 +192,104 @@ impl DnsEgress for ServerDnsEgress {
     fn bind_udp(
         &self,
         target: SocketAddr,
-        plan: Option<PlanSnapshot>,
+        plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         if let Err(error) = self.validate(&plan) {
             return Box::pin(async move { Err(error) });
         }
         SystemDnsEgress.bind_udp(target, None, tasks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ferrum2_core::route::EgressPlanHandle;
+
+    #[test]
+    fn dns_runtime_specs_preserve_validated_server_values() {
+        let cases = [
+            (DnsTransport::Udp, 5300, None, None, false),
+            (DnsTransport::Udp, 5301, None, None, true),
+            (DnsTransport::Tcp, 5302, None, None, false),
+            (DnsTransport::Tcp, 5303, None, None, true),
+            (
+                DnsTransport::Dot,
+                8530,
+                Some("dot-direct.test"),
+                None,
+                false,
+            ),
+            (DnsTransport::Dot, 8531, Some("dot-detour.test"), None, true),
+            (
+                DnsTransport::Doh,
+                4430,
+                Some("doh-direct.test"),
+                Some("/dns-query/direct"),
+                false,
+            ),
+            (
+                DnsTransport::Doh,
+                4431,
+                Some("doh-detour.test"),
+                Some("/dns-query/detour"),
+                true,
+            ),
+        ];
+        let servers: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .map(
+                |(index, &(transport, port, server_name, path, detoured))| DnsServerConfig {
+                    transport,
+                    address: SocketAddr::from(([192, 0, 2, 53], port)),
+                    server_name: server_name.map(Into::into),
+                    path: path.map(Into::into),
+                    detour: detoured.then(|| EgressPlanHandle::direct(index)),
+                },
+            )
+            .collect();
+
+        for (index, (spec, (transport, port, server_name, path, detoured))) in
+            dns_runtime_specs(&servers)
+                .into_iter()
+                .zip(cases)
+                .enumerate()
+        {
+            assert_eq!(spec.address, SocketAddr::from(([192, 0, 2, 53], port)));
+            match (detoured, spec.detour.as_ref()) {
+                (true, Some(detour)) => assert_eq!(detour.snapshot_owned().hops(), &[index]),
+                (false, None) => {}
+                _ => panic!("DNS runtime detour mapping drift"),
+            }
+            match (transport, spec.transport) {
+                (DnsTransport::Udp, DnsUpstreamTransport::Udp)
+                | (DnsTransport::Tcp, DnsUpstreamTransport::Tcp) => {
+                    assert_eq!((server_name, path), (None, None));
+                }
+                (
+                    DnsTransport::Dot,
+                    DnsUpstreamTransport::Dot {
+                        server_name: actual,
+                    },
+                ) => {
+                    assert_eq!(actual.as_ref(), server_name.expect("DoT name"));
+                    assert!(path.is_none());
+                }
+                (
+                    DnsTransport::Doh,
+                    DnsUpstreamTransport::Doh {
+                        server_name: actual_name,
+                        path: actual_path,
+                    },
+                ) => {
+                    assert_eq!(actual_name.as_ref(), server_name.expect("DoH name"));
+                    assert_eq!(actual_path.as_ref(), path.expect("DoH path"));
+                }
+                _ => panic!("DNS runtime transport mapping drift"),
+            }
+        }
     }
 }

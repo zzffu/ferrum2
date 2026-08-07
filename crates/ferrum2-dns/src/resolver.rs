@@ -1,8 +1,8 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferrum2_config::{DnsServerConfig, DnsTransport};
+use ferrum2_core::route::{EgressPlanHandle, EgressPlanSnapshot};
 use hickory_proto::op::{DnsRequest, DnsRequestOptions, Message};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::config::{
@@ -15,24 +15,43 @@ use hickory_resolver::{ConnectionProvider, PoolContext, Resolver, TlsConfig};
 use tokio::time::Instant;
 
 use crate::error::DnsError;
-use crate::runtime_provider::{FerrumRuntimeProvider, PlanSnapshot};
+use crate::runtime_provider::FerrumRuntimeProvider;
+
+/// Closed transport values for one validated DNS upstream.
+#[derive(Clone, Eq, PartialEq)]
+pub enum DnsUpstreamTransport {
+    /// DNS over UDP with same-server TCP upgrade on truncation.
+    Udp,
+    /// DNS over TCP.
+    Tcp,
+    /// DNS over TLS with an authenticated server name.
+    Dot { server_name: Box<str> },
+    /// DNS over HTTPS with an authenticated server name and validated path.
+    Doh {
+        server_name: Box<str>,
+        path: Box<str>,
+    },
+}
+
+/// Validated runtime values for one DNS upstream.
+pub struct DnsUpstreamSpec {
+    pub transport: DnsUpstreamTransport,
+    pub address: SocketAddr,
+    pub detour: Option<EgressPlanHandle>,
+}
 
 pub(crate) struct SelectedServer {
-    config: DnsServerConfig,
+    spec: DnsUpstreamSpec,
     #[cfg(test)]
     tls: Option<rustls::ClientConfig>,
-    #[cfg(test)]
-    plan: Option<PlanSnapshot>,
 }
 
 impl SelectedServer {
-    pub(crate) fn from_config(config: DnsServerConfig) -> Self {
+    pub(crate) fn from_spec(spec: DnsUpstreamSpec) -> Self {
         Self {
-            config,
+            spec,
             #[cfg(test)]
             tls: None,
-            #[cfg(test)]
-            plan: None,
         }
     }
 
@@ -42,21 +61,11 @@ impl SelectedServer {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_plan(mut self, plan: Option<PlanSnapshot>) -> Self {
-        self.plan = plan;
-        self
-    }
-
-    pub(crate) fn plan_snapshot(&self) -> Option<PlanSnapshot> {
-        #[cfg(test)]
-        if self.plan.is_some() {
-            return self.plan.clone();
-        }
-        self.config
+    pub(crate) fn plan_snapshot(&self) -> Option<EgressPlanSnapshot> {
+        self.spec
             .detour
             .as_ref()
-            .map(|detour| PlanSnapshot::new(detour.snapshot().hops()))
+            .map(EgressPlanHandle::snapshot_owned)
     }
 }
 
@@ -233,31 +242,20 @@ async fn send_query(
 }
 
 fn name_server_config(server: &SelectedServer) -> Result<NameServerConfig, DnsError> {
-    let mut name_server = match server.config.transport {
-        DnsTransport::Udp => NameServerConfig::udp_and_tcp(server.config.address.ip()),
-        DnsTransport::Tcp => NameServerConfig::tcp(server.config.address.ip()),
-        DnsTransport::Dot => NameServerConfig::tls(
-            server.config.address.ip(),
-            server
-                .config
-                .server_name
-                .as_deref()
-                .map(Arc::from)
-                .ok_or(DnsError::Protocol)?,
-        ),
-        DnsTransport::Doh => NameServerConfig::https(
-            server.config.address.ip(),
-            server
-                .config
-                .server_name
-                .as_deref()
-                .map(Arc::from)
-                .ok_or(DnsError::Protocol)?,
-            server.config.path.as_deref().map(Arc::from),
+    let mut name_server = match &server.spec.transport {
+        DnsUpstreamTransport::Udp => NameServerConfig::udp_and_tcp(server.spec.address.ip()),
+        DnsUpstreamTransport::Tcp => NameServerConfig::tcp(server.spec.address.ip()),
+        DnsUpstreamTransport::Dot { server_name } => {
+            NameServerConfig::tls(server.spec.address.ip(), Arc::from(server_name.as_ref()))
+        }
+        DnsUpstreamTransport::Doh { server_name, path } => NameServerConfig::https(
+            server.spec.address.ip(),
+            Arc::from(server_name.as_ref()),
+            Some(Arc::from(path.as_ref())),
         ),
     };
     for connection in &mut name_server.connections {
-        connection.port = server.config.address.port();
+        connection.port = server.spec.address.port();
     }
     Ok(name_server)
 }

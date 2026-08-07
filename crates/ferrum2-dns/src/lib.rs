@@ -10,9 +10,9 @@ mod runtime_provider;
 
 pub use error::DnsError;
 pub use proxy::{DnsProxy, DnsProxyListeners, DnsProxySockets, ProxyTransport};
+pub use resolver::{DnsUpstreamSpec, DnsUpstreamTransport};
 pub use runtime_owner::{RuntimeStats, ShutdownReport, TaggedResolver, TaggedResolverOwner};
 pub use runtime_provider::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
-    DnsEgressTaskKind, DnsIoFuture, DnsResourceGuard, DnsTaskRegistrar, DnsTcpIo, PlanSnapshot,
-    SystemDnsEgress,
+    DnsEgressTaskKind, DnsIoFuture, DnsResourceGuard, DnsTaskRegistrar, DnsTcpIo, SystemDnsEgress,
 };
