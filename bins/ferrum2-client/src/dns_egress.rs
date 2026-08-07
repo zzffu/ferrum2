@@ -18,10 +18,10 @@ use ferrum2_runtime::UdpDirection;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use super::egress::ClientEgressEngine;
 use super::{
-    ClientContext, ClientRouting, MAX_UDP_WIRE_LEN, PreparedClientUdp, TokioFramed,
-    accept_udp_plan_response, activate_udp_plan, encode_udp_plan_request,
-    open_chain_with_deadlines, reserve_application_datagram,
+    MAX_UDP_WIRE_LEN, PreparedClientUdp, TokioFramed, accept_udp_plan_response, activate_udp_plan,
+    encode_udp_plan_request, reserve_application_datagram,
 };
 
 type Packet = (Vec<u8>, SocketAddr);
@@ -61,16 +61,14 @@ pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamS
 }
 
 pub(super) struct ClientDnsEgress {
-    context: Arc<ClientContext>,
-    routing: Arc<ClientRouting>,
+    engine: Arc<ClientEgressEngine>,
     udp_pool: DnsUdpPool,
 }
 
 impl ClientDnsEgress {
-    pub(super) fn new(context: Arc<ClientContext>, routing: Arc<ClientRouting>) -> Self {
+    pub(super) fn new(engine: Arc<ClientEgressEngine>) -> Self {
         Self {
-            context,
-            routing,
+            engine,
             udp_pool: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -107,15 +105,10 @@ impl DnsEgress for ClientDnsEgress {
         let Some(plan) = plan else {
             return SystemDnsEgress.connect_tcp(target, None, timeout, tasks);
         };
-        let context = Arc::clone(&self.context);
-        let routing = Arc::clone(&self.routing);
+        let engine = Arc::clone(&self.engine);
         Box::pin(async move {
             let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
-            if plan
-                .hops()
-                .iter()
-                .any(|hop| *hop >= routing.outbounds.len())
-            {
+            if plan.hops().iter().any(|hop| *hop >= engine.outbounds.len()) {
                 return Err(invalid_target());
             }
             let queue = tasks.own(DnsEgressResourceKind::Queue);
@@ -127,22 +120,15 @@ impl DnsEgress for ClientDnsEgress {
                 let _ = tokio::io::copy_bidirectional(&mut bridge_front, &mut bridge_back).await;
             });
             tasks.spawn(DnsEgressTaskKind::Session, async move {
-                let deadlines = (
-                    timeout.min(context.runtime.connect_timeout),
-                    timeout.min(context.runtime.handshake_timeout),
-                );
-                let Ok(flow) = open_chain_with_deadlines(
-                    &routing.outbounds,
-                    plan.hops(),
-                    &context.outbound_connector,
-                    &context.clock,
-                    &context.random,
-                    &target,
-                    deadlines,
-                    #[cfg(test)]
-                    None,
-                )
-                .await
+                let Ok(flow) = engine
+                    .open_tcp(
+                        plan,
+                        &target,
+                        Some(timeout),
+                        #[cfg(test)]
+                        None,
+                    )
+                    .await
                 else {
                     return;
                 };
@@ -162,15 +148,14 @@ impl DnsEgress for ClientDnsEgress {
         let Some(plan) = plan else {
             return SystemDnsEgress.bind_udp(target, None, tasks);
         };
-        let context = Arc::clone(&self.context);
-        let routing = Arc::clone(&self.routing);
+        let engine = Arc::clone(&self.engine);
         let pool = Arc::clone(&self.udp_pool);
         Box::pin(async move {
             let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
             let first_server = plan
                 .hops()
                 .first()
-                .and_then(|hop| routing.outbounds.get(*hop))
+                .and_then(|hop| engine.outbounds.get(*hop))
                 .map(|outbound| outbound.udp_server)
                 .ok_or_else(invalid_target)?;
             let (prepared, stale) = {
@@ -187,7 +172,7 @@ impl DnsEgress for ClientDnsEgress {
             let mut prepared = match prepared {
                 Some(prepared) => prepared,
                 None => super::prepare_udp_association_with_bind(
-                    &context,
+                    &engine,
                     Ipv4Addr::LOCALHOST,
                     Some((plan.clone(), first_server)),
                     UdpSocket::bind,
@@ -195,7 +180,7 @@ impl DnsEgress for ClientDnsEgress {
                 .await
                 .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
             };
-            activate_udp_plan(&mut prepared, &context, &routing.outbounds, plan.hops())
+            activate_udp_plan(&mut prepared, &engine, &engine.outbounds, plan.hops())
                 .map_err(|_| invalid_target())?;
             let mut prepared = PooledDnsUdp {
                 prepared: Some(prepared),
@@ -239,8 +224,7 @@ impl DnsEgress for ClientDnsEgress {
                     prepared.reusable = false;
                     let response = relay_udp_packet(
                         prepared.prepared.as_mut().expect("pooled DNS UDP owner"),
-                        &context,
-                        &routing,
+                        &engine,
                         plan.hops(),
                         first_server,
                         destination,
@@ -267,8 +251,7 @@ impl DnsEgress for ClientDnsEgress {
 
 async fn relay_udp_packet(
     prepared: &mut super::PreparedClientUdp,
-    context: &ClientContext,
-    routing: &ClientRouting,
+    engine: &ClientEgressEngine,
     hops: &[usize],
     first_server: std::net::SocketAddrV4,
     destination: SocketAddr,
@@ -299,11 +282,11 @@ async fn relay_udp_packet(
         .ok_or_else(|| io::Error::other("DNS UDP queue empty"))?;
     let wire_len = encode_udp_plan_request(
         prepared,
-        &routing.outbounds,
+        &engine.outbounds,
         hops,
         datagram.datagram(),
-        &context.clock,
-        &context.random,
+        &engine.clock,
+        &engine.random,
     )
     .map_err(|_| io::Error::other("DNS UDP encode failed"))?;
     drop(datagram);
@@ -321,10 +304,10 @@ async fn relay_udp_packet(
         let length = prepared.upstream.recv(&mut prepared.upstream_wire).await?;
         let payload_len = match accept_udp_plan_response(
             prepared,
-            &routing.outbounds,
+            &engine.outbounds,
             first_server,
             length,
-            &context.clock,
+            &engine.clock,
         ) {
             Ok(Some(payload_len)) => payload_len,
             Ok(None) | Err(_) => continue,
@@ -529,6 +512,33 @@ mod tests {
                 }
                 _ => panic!("DNS runtime transport mapping drift"),
             }
+        }
+
+        let source = include_str!("dns_egress.rs");
+        assert!(source.contains(&["engine: Arc<", "ClientEgressEngine", ">"].concat()));
+        assert!(source.contains(&[".", "open_tcp("].concat()));
+        for forbidden in [
+            ["Client", "Context"].concat(),
+            ["Client", "Routing"].concat(),
+            ["open_chain", "_with_deadlines"].concat(),
+        ] {
+            assert!(!source.contains(&forbidden), "DNS TCP bypass: {forbidden}");
+        }
+
+        let engine = [
+            include_str!("run/egress/mod.rs"),
+            include_str!("run/egress/tcp.rs"),
+        ]
+        .concat();
+        for forbidden in [
+            ["Route", "Table"].concat(),
+            ["Selector", "Control"].concat(),
+            ["Socks5", "Inbound"].concat(),
+        ] {
+            assert!(
+                !engine.contains(&forbidden),
+                "TCP engine owns policy/ingress: {forbidden}"
+            );
         }
     }
 }

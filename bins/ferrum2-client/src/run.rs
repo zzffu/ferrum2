@@ -14,9 +14,10 @@ use ferrum2_core::{
 };
 #[cfg(test)]
 use ferrum2_crypto::MethodProfile;
+#[cfg(test)]
+use ferrum2_crypto::MethodSinglePskProvider;
 use ferrum2_crypto::{
-    Clock, MethodKeyProvider, MethodSinglePskProvider, SecureRandom, SystemClock, SystemRandom,
-    UdpSessionId,
+    Clock, MethodKeyProvider, SecureRandom, SystemClock, SystemRandom, UdpSessionId,
 };
 use ferrum2_dns::{
     DnsProxy, DnsProxyListeners, DnsProxySockets, ProxyTransport, TaggedResolver,
@@ -36,13 +37,15 @@ use ferrum2_runtime::{
     UdpSessionManager, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{
-    BorrowedPendingUdpResponse, BoxedClientFlow, ClientTcpOutbound, DetectionReason, FlowTerminal,
-    MAX_UDP_WIRE_LEN, MethodKeyAdapter, PlainDuplex, ProtocolReason, ShadowsocksError, TransportIo,
-    UdpClientSession, UdpPacketError, UdpPacketScratch, UdpResponseCommit,
-    max_udp_payload_len_for_encoded_target,
+    BorrowedPendingUdpResponse, DetectionReason, FlowTerminal, MAX_UDP_WIRE_LEN, PlainDuplex,
+    ProtocolReason, ShadowsocksError, TransportIo, UdpClientSession, UdpPacketError,
+    UdpPacketScratch, UdpResponseCommit, max_udp_payload_len_for_encoded_target,
 };
 #[cfg(test)]
-use ferrum2_shadowsocks::{BufferObserver, BufferRole, ClientFlow, FlowObserver, TcpKeyProvider};
+use ferrum2_shadowsocks::{
+    BufferObserver, BufferRole, ClientFlow, ClientTcpOutbound, FlowObserver, MethodKeyAdapter,
+    TcpKeyProvider,
+};
 use ferrum2_socks5::{
     MAX_SOCKS_UDP_DATAGRAM_BYTES, Socks5Inbound, SocksCommand, SocksStream, SocksUdpAssociate,
     decode_udp_datagram, encode_udp_datagram,
@@ -51,8 +54,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpSocket, UdpSocket};
 use tokio::time::Instant;
 
+mod egress;
+
 #[path = "dns_egress.rs"]
 mod dns_egress;
+
+use egress::{
+    ClientEgressEngine, ClientOpenFailure, ClientOutboundContext, prepare_client_outbounds,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
@@ -237,17 +246,25 @@ where
     } else {
         None
     };
+    let egress = Arc::new(ClientEgressEngine::new(
+        Arc::clone(&outbounds),
+        TokioConnector::new(TcpConnector::new(config.runtime.connect_timeout)),
+        SystemClock::new(),
+        SystemRandom,
+        (
+            config.runtime.connect_timeout,
+            config.runtime.handshake_timeout,
+        ),
+        udp,
+        #[cfg(test)]
+        _udp_id_random,
+    ));
     let context = Arc::new(ClientContext {
         inbound: Socks5Inbound::new(),
-        outbound_connector: TokioConnector::new(TcpConnector::new(config.runtime.connect_timeout)),
+        egress: Arc::clone(&egress),
         #[cfg(test)]
         keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
-        clock: SystemClock::new(),
-        random: SystemRandom,
-        #[cfg(test)]
-        udp_id_random: _udp_id_random,
         runtime: config.runtime,
-        udp,
         udp_associate_enabled: public_udp_enabled,
         registry: registry.clone(),
         metrics: Arc::clone(&metrics),
@@ -259,8 +276,9 @@ where
         route: config.route,
         outbounds,
     });
+    #[cfg(test)]
     let dns_context = Arc::clone(&context);
-    let dns_routing = Arc::clone(&routing);
+    let dns_egress = Arc::clone(&egress);
     for inbound in &config.inbounds {
         listens.push(inbound.listen);
     }
@@ -301,10 +319,7 @@ where
             )
             .await
             .map_err(|_| RunError::StartupBind)?;
-            let egress = Arc::new(dns_egress::ClientDnsEgress::new(
-                Arc::clone(&dns_context),
-                Arc::clone(&dns_routing),
-            ));
+            let egress = Arc::new(dns_egress::ClientDnsEgress::new(Arc::clone(&dns_egress)));
             let (resolver, owner) = TaggedResolver::new(servers, timeout, max_inflight, egress)
                 .map_err(|_| RunError::StartupProtocol)?;
             let resolver = Arc::new(resolver);
@@ -523,36 +538,9 @@ impl AcceptListener for ClientTcpListeners {
     }
 }
 
-struct ClientOutboundContext {
-    tcp_server: TargetAddr,
-    udp_server: SocketAddrV4,
-    keys: MethodKeyAdapter<MethodSinglePskProvider>,
-}
-
-fn prepare_client_outbounds(
-    outbounds: Vec<ferrum2_config::ClientOutboundConfig>,
-    psks: Vec<ferrum2_crypto::MethodPsk>,
-) -> Result<Vec<ClientOutboundContext>, RunError> {
-    if outbounds.len() != psks.len() {
-        return Err(RunError::StartupProtocol);
-    }
-    outbounds
-        .into_iter()
-        .zip(psks)
-        .map(|(outbound, psk)| {
-            Ok(ClientOutboundContext {
-                tcp_server: TargetAddr::ipv4(outbound.server)
-                    .map_err(|_| RunError::StartupProtocol)?,
-                udp_server: outbound.server,
-                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
-            })
-        })
-        .collect()
-}
-
 struct ClientRouting {
     route: ferrum2_core::route::RouteTable,
-    outbounds: Vec<ClientOutboundContext>,
+    outbounds: Arc<[ClientOutboundContext]>,
 }
 
 struct ClientTcpRoot {
@@ -592,7 +580,7 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
                 biased;
                 _ = forced.forced() => {
                     record_forced_udp_sessions(&context);
-                    if let Some(udp) = &context.udp {
+                    if let Some(udp) = &context.egress.udp {
                         udp.manager.cancel_all();
                     }
                     running.await
@@ -602,7 +590,7 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
                         forced.forced().await;
                         record_forced_udp_sessions(&context);
                     }
-                    if let Some(udp) = &context.udp {
+                    if let Some(udp) = &context.egress.udp {
                         udp.manager.cancel_all();
                     }
                     running.await
@@ -683,15 +671,10 @@ fn run_error_for_metrics(error: MetricsEndpointError) -> RunError {
 
 struct ClientContext {
     inbound: Socks5Inbound,
-    outbound_connector: TokioConnector<TcpConnector>,
+    egress: Arc<ClientEgressEngine>,
     #[cfg(test)]
     keys: MethodKeyAdapter<MethodSinglePskProvider>,
-    clock: SystemClock,
-    random: SystemRandom,
-    #[cfg(test)]
-    udp_id_random: Option<Arc<dyn SecureRandom>>,
     runtime: RuntimeConfig,
-    udp: Option<ClientUdpContext>,
     udp_associate_enabled: bool,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
@@ -778,20 +761,15 @@ async fn client_connection(
         initial_payload: _,
         reply,
     } = session;
-    let plan = routing.route.select_plan(inbound, Network::Tcp, &target);
+    let plan = routing
+        .route
+        .select_plan_snapshot(inbound, Network::Tcp, &target);
     let opened = tokio::select! {
         _ = cancellation.cancelled() => return,
-        result = open_chain_with_deadlines(
-            &routing.outbounds,
-            plan.hops(),
-            &context.outbound_connector,
-            &context.clock,
-            &context.random,
+        result = context.egress.open_tcp(
+            plan,
             &target,
-            (
-                context.runtime.connect_timeout,
-                context.runtime.handshake_timeout,
-            ),
+            None,
             #[cfg(test)]
             None,
         ) => result,
@@ -969,7 +947,7 @@ async fn run_udp_association<IO, F, Fut>(
     }
     let prepared = tokio::select! {
         _ = cancellation.cancelled() => return,
-        prepared = prepare_udp_association_with_bind(&context, local_ip, static_plan, bind) => prepared,
+        prepared = prepare_udp_association_with_bind(&context.egress, local_ip, static_plan, bind) => prepared,
     };
     let mut prepared = match prepared {
         Ok(prepared) => prepared,
@@ -1002,7 +980,7 @@ async fn run_udp_association<IO, F, Fut>(
 }
 
 async fn prepare_udp_association_with_bind<F, Fut>(
-    context: &ClientContext,
+    egress: &ClientEgressEngine,
     local_ip: Ipv4Addr,
     static_plan: Option<(EgressPlanSnapshot, SocketAddrV4)>,
     mut bind: F,
@@ -1011,7 +989,7 @@ where
     F: FnMut(SocketAddrV4) -> Fut,
     Fut: std::future::Future<Output = io::Result<UdpSocket>>,
 {
-    let udp = context.udp.as_ref().ok_or(())?;
+    let udp = egress.udp.as_ref().ok_or(())?;
     if static_plan
         .as_ref()
         .is_some_and(|(plan, _)| plan.hops().len() > MAX_UDP_PLAN_HOPS)
@@ -1065,7 +1043,7 @@ where
 
 fn activate_udp_plan(
     prepared: &mut PreparedClientUdp,
-    context: &ClientContext,
+    egress: &ClientEgressEngine,
     outbounds: &[ClientOutboundContext],
     hops: &[usize],
 ) -> Result<(), ()> {
@@ -1077,9 +1055,9 @@ fn activate_udp_plan(
             return Err(());
         }
         #[cfg(test)]
-        let random = context.udp_id_random.as_deref().unwrap_or(&context.random);
+        let random = egress.udp_id_random.as_deref().unwrap_or(&egress.random);
         #[cfg(not(test))]
-        let random = &context.random;
+        let random = &egress.random;
         let legs = register_udp_plan(outbounds, hops, random, &prepared.live_ids)?;
         prepared.plans.insert(hops.into(), ClientUdpPlan { legs });
     }
@@ -1478,7 +1456,7 @@ async fn relay_udp_association<IO>(
                     }
                 };
                 let payload = decoded.payload().into();
-                if activate_udp_plan(prepared, context, &routing.outbounds, plan.hops()).is_err() {
+                if activate_udp_plan(prepared, &context.egress, &routing.outbounds, plan.hops()).is_err() {
                     record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
                     return;
                 }
@@ -1513,8 +1491,8 @@ async fn relay_udp_association<IO>(
                     &routing.outbounds,
                     plan.hops(),
                     datagram.datagram(),
-                    &context.clock,
-                    &context.random,
+                    &context.egress.clock,
+                    &context.egress.random,
                 ) {
                     Ok(length) => length,
                     Err(error) => {
@@ -1596,7 +1574,7 @@ async fn relay_udp_association<IO>(
                     &routing.outbounds,
                     source,
                     length,
-                    &context.clock,
+                    &context.egress.clock,
                 ) {
                     Ok(Some(payload_len)) => payload_len,
                     Ok(None) => {
@@ -1946,85 +1924,6 @@ fn finish_relay(
     }
 }
 
-#[derive(Debug)]
-enum ClientOpenFailure {
-    Protocol(ShadowsocksError),
-    HandshakeTimeout,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn open_chain_with_deadlines<'a, C, T, R>(
-    outbounds: &'a [ClientOutboundContext],
-    plan: &[usize],
-    connector: &'a C,
-    clock: &'a T,
-    random: &'a R,
-    application_target: &TargetAddr,
-    deadlines: (std::time::Duration, std::time::Duration),
-    #[cfg(test)] observers: Option<(&'a dyn BufferObserver, &'a dyn FlowObserver)>,
-) -> Result<BoxedClientFlow<'a>, ClientOpenFailure>
-where
-    C: Connector,
-    C::Stream: TransportIo + LocalEndpoint + 'a,
-    T: Clock + Sync,
-    R: SecureRandom,
-{
-    if plan.is_empty() || plan.iter().any(|index| *index >= outbounds.len()) {
-        return Err(ClientOpenFailure::Protocol(ShadowsocksError::Connect(
-            ConnectErrorKind::Other,
-        )));
-    }
-    let first = &outbounds[plan[0]];
-    let outbound = ClientTcpOutbound::new(
-        first.tcp_server.clone(),
-        &first.keys,
-        connector,
-        clock,
-        random,
-    );
-    #[cfg(test)]
-    let outbound = match observers {
-        Some((buffer, flow)) => outbound.with_observers(buffer, flow),
-        None => outbound,
-    };
-    let connected = tokio::time::timeout(deadlines.0, outbound.connect_server())
-        .await
-        .map_err(|_| {
-            ClientOpenFailure::Protocol(ShadowsocksError::Connect(ConnectErrorKind::Timeout))
-        })?
-        .map_err(ClientOpenFailure::Protocol)?;
-    tokio::time::timeout(deadlines.1, async {
-        let first_target = plan
-            .get(1)
-            .map_or(application_target, |next| &outbounds[*next].tcp_server);
-        let mut flow = connected.write_request(first_target).await?.into_boxed();
-        for (position, index) in plan.iter().copied().enumerate().skip(1) {
-            let hop = &outbounds[index];
-            let next_target = plan
-                .get(position + 1)
-                .map_or(application_target, |next| &outbounds[*next].tcp_server);
-            let outbound =
-                ClientTcpOutbound::new(hop.tcp_server.clone(), &hop.keys, connector, clock, random);
-            #[cfg(test)]
-            let outbound = match observers {
-                Some((buffer, flow)) => outbound.with_observers(buffer, flow),
-                None => outbound,
-            };
-            flow = outbound
-                .write_request_on(flow, next_target)
-                .await?
-                .into_boxed();
-        }
-        if plan.len() > 1 {
-            std::future::poll_fn(|cx| Pin::new(&mut flow).poll_flush_plain(cx)).await?;
-        }
-        Ok(flow)
-    })
-    .await
-    .map_err(|_| ClientOpenFailure::HandshakeTimeout)?
-    .map_err(ClientOpenFailure::Protocol)
-}
-
 #[cfg(test)]
 async fn open_with_deadlines<'a, K, C, T, R>(
     outbound: &ClientTcpOutbound<'a, K, C, T, R>,
@@ -2357,13 +2256,13 @@ mod tests {
     };
     use ferrum2_core::{ConnectError, Connector};
     use ferrum2_crypto::{
-        Aes128Psk, KeySelector, MethodKeyProvider, MethodSecretKeyRef, MethodTcpSalt, RandomError,
+        Aes128Psk, KeySelector, MethodKeyProvider, MethodSecretKeyRef, RandomError,
         SinglePskProvider,
     };
     use ferrum2_runtime::OwnerSnapshot;
     use ferrum2_shadowsocks::{
         ShadowsocksTcpInbound, TcpReplayStore, TransportPhase, UDP_REPLAY_LAG, UdpReplayWindow,
-        UdpServer, encode_response_first_write, max_udp_payload_len,
+        UdpServer, max_udp_payload_len,
     };
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::rdata::A;
@@ -2429,14 +2328,14 @@ mod tests {
         },
     }
 
-    struct ScriptedIo {
+    pub(in crate::run) struct ScriptedIo {
         mode: ScriptedMode,
         endpoint: SocketAddrV4,
         aborts: Arc<AtomicUsize>,
     }
 
     impl ScriptedIo {
-        fn duplex(
+        pub(in crate::run) fn duplex(
             inner: tokio::io::DuplexStream,
             endpoint: SocketAddrV4,
             aborts: Arc<AtomicUsize>,
@@ -2464,7 +2363,11 @@ mod tests {
             }
         }
 
-        fn stall_after(writes: usize, drops: Arc<AtomicUsize>, aborts: Arc<AtomicUsize>) -> Self {
+        pub(in crate::run) fn stall_after(
+            writes: usize,
+            drops: Arc<AtomicUsize>,
+            aborts: Arc<AtomicUsize>,
+        ) -> Self {
             Self {
                 mode: ScriptedMode::StallAfter { writes, drops },
                 endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
@@ -2472,7 +2375,7 @@ mod tests {
             }
         }
 
-        fn write_limit_after(
+        pub(in crate::run) fn write_limit_after(
             writes: usize,
             limit: usize,
             accepted: Arc<Mutex<Vec<u8>>>,
@@ -2682,10 +2585,10 @@ mod tests {
         }
     }
 
-    struct DeadlineConnector {
-        delay: Duration,
-        targets: Mutex<Vec<TargetAddr>>,
-        stream: Mutex<Option<TokioTransport<ScriptedIo>>>,
+    pub(in crate::run) struct DeadlineConnector {
+        pub(in crate::run) delay: Duration,
+        pub(in crate::run) targets: Mutex<Vec<TargetAddr>>,
+        pub(in crate::run) stream: Mutex<Option<TokioTransport<ScriptedIo>>>,
     }
 
     impl Connector for DeadlineConnector {
@@ -2706,7 +2609,7 @@ mod tests {
         }
     }
 
-    struct FixedRandom;
+    pub(in crate::run) struct FixedRandom;
 
     impl SecureRandom for FixedRandom {
         fn fill(&self, destination: &mut [u8]) -> Result<(), RandomError> {
@@ -2716,10 +2619,10 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct ChainObserver {
-        buffers: Mutex<Vec<(BufferRole, usize, usize)>>,
-        terminals: Mutex<Vec<FlowTerminal>>,
-        owner_drops: AtomicUsize,
+    pub(in crate::run) struct ChainObserver {
+        pub(in crate::run) buffers: Mutex<Vec<(BufferRole, usize, usize)>>,
+        pub(in crate::run) terminals: Mutex<Vec<FlowTerminal>>,
+        pub(in crate::run) owner_drops: AtomicUsize,
     }
 
     impl BufferObserver for ChainObserver {
@@ -2744,11 +2647,11 @@ mod tests {
         }
     }
 
-    fn chain_test_setup(
+    pub(in crate::run) fn chain_test_setup(
         methods: [MethodProfile; 4],
         first_port: u16,
     ) -> (
-        Vec<ClientOutboundContext>,
+        Arc<[ClientOutboundContext]>,
         ferrum2_core::route::RouteTable,
         ferrum2_core::selector::SelectorControl,
     ) {
@@ -2793,7 +2696,7 @@ mod tests {
         (outbounds, route, selector)
     }
 
-    async fn scripted_input(bytes: &[u8]) -> TokioTransport<ScriptedIo> {
+    pub(in crate::run) async fn scripted_input(bytes: &[u8]) -> TokioTransport<ScriptedIo> {
         let (io, mut source) = tokio::io::duplex(65_536);
         source.write_all(bytes).await.expect("scripted wire");
         source.shutdown().await.expect("scripted EOF");
@@ -2804,7 +2707,10 @@ mod tests {
         ))
     }
 
-    fn assert_two_layer_buffers(observer: &ChainObserver, label: impl std::fmt::Display) {
+    pub(in crate::run) fn assert_two_layer_buffers(
+        observer: &ChainObserver,
+        label: impl std::fmt::Display,
+    ) {
         let buffers = observer.buffers.lock().expect("chain buffers");
         assert_eq!(buffers.len(), 4, "{label}");
         assert_eq!(
@@ -3447,12 +3353,17 @@ mod tests {
                 outbound(servers[0]),
                 outbound(servers[4]),
                 outbound(servers[3]),
-            ],
+            ]
+            .into(),
         });
-        let prepared =
-            prepare_udp_association_with_bind(&context, Ipv4Addr::LOCALHOST, None, UdpSocket::bind)
-                .await
-                .expect("routed preparation");
+        let prepared = prepare_udp_association_with_bind(
+            &context.egress,
+            Ipv4Addr::LOCALHOST,
+            None,
+            UdpSocket::bind,
+        )
+        .await
+        .expect("routed preparation");
         let relay = match prepared.application.local_addr().expect("relay") {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 relay"),
@@ -3477,7 +3388,7 @@ mod tests {
         let protocol_servers: Vec<UdpServer> = (0..5)
             .map(|_| UdpServer::new(&context.keys).expect("server protocol"))
             .collect();
-        let udp = context.udp.as_ref().expect("UDP");
+        let udp = context.egress.udp.as_ref().expect("UDP");
         let state = || {
             (
                 udp.manager.idle_deadline(handle).expect("deadline"),
@@ -3507,7 +3418,7 @@ mod tests {
         let valid = encode_udp_datagram(&targets[4], b"invalid", &mut socks).expect("request");
 
         let request_limit =
-            composed_udp_request_limit(context.udp.as_ref().expect("UDP").method, 7);
+            composed_udp_request_limit(context.egress.udp.as_ref().expect("UDP").method, 7);
         for (index, label) in [
             "wrong-source request",
             "fragment request",
@@ -3709,7 +3620,7 @@ mod tests {
             };
             let (path, context) = udp_test_context_for_server(registry.clone(), server_address);
             let mut prepared = prepare_udp_association_with_bind(
-                &context,
+                &context.egress,
                 Ipv4Addr::LOCALHOST,
                 Some((
                     ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
@@ -3787,7 +3698,7 @@ mod tests {
             assert!(metrics.contains(&format!(
                 "ferrum2_udp_failures_total{{role=\"client\",stage=\"relay\",reason=\"{expected_reason}\"}} 1"
             )), "{operation:?}: {metrics}");
-            let udp = context.udp.as_ref().expect("UDP context");
+            let udp = context.egress.udp.as_ref().expect("UDP context");
             assert_eq!(udp.manager.session_count(), 0, "{operation:?}");
             assert_eq!(
                 udp.manager.buffer_budget().reserved_bytes(),
@@ -3881,7 +3792,7 @@ mod tests {
                     Some(psk_for_method(method)),
                 );
                 let prepared = prepare_udp_association_with_bind(
-                    &context,
+                    &context.egress,
                     Ipv4Addr::LOCALHOST,
                     Some((
                         ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
@@ -4162,7 +4073,7 @@ mod tests {
         }
     }
 
-    async fn assert_open_pending<F>(future: &mut Pin<Box<F>>)
+    pub(in crate::run) async fn assert_open_pending<F>(future: &mut Pin<Box<F>>)
     where
         F: std::future::Future,
     {
@@ -4341,527 +4252,6 @@ mod tests {
         let mut written = [0_u8; 2_048];
         assert!(peer.read(&mut written).await.expect("handshake wire") > 0);
         assert_eq!(aborts.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn tcp_chain_opens_hops_in_order_with_distinct_credentials_and_no_fallback() {
-        for (case, (first_method, second_method)) in [
-            (
-                MethodProfile::Blake3Aes128Gcm2022,
-                MethodProfile::Blake3Aes256Gcm2022,
-            ),
-            (
-                MethodProfile::Blake3Aes256Gcm2022,
-                MethodProfile::Blake3ChaCha20Poly13052022,
-            ),
-            (
-                MethodProfile::Blake3ChaCha20Poly13052022,
-                MethodProfile::Blake3Aes128Gcm2022,
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let (outbounds, route, selector) = chain_test_setup(
-                [first_method, second_method, second_method, first_method],
-                42_001 + case as u16 * 10,
-            );
-            let application = TargetAddr::ipv4(SocketAddrV4::new(
-                Ipv4Addr::new(192, 0, 2, 1),
-                443 + case as u16,
-            ))
-            .expect("application target");
-            let snapshot = route.select_plan(0, Network::Tcp, &application);
-            assert_eq!(snapshot.hops(), &[0, 1], "rotation {case}");
-            selector.switch("manual", "c-d").expect("switch next flow");
-            assert_eq!(snapshot.hops(), &[0, 1], "captured rotation {case}");
-            let next_snapshot = route.select_plan(0, Network::Tcp, &application);
-            assert_eq!(next_snapshot.hops(), &[2, 3], "next rotation {case}");
-            let clock = SystemClock::new();
-            let random = FixedRandom;
-            for (label, plan) in [("captured", &snapshot), ("next", &next_snapshot)] {
-                let [first, second] = *plan.hops() else {
-                    panic!("two-hop {label} plan")
-                };
-                let aborts = Arc::new(AtomicUsize::new(0));
-                let (stream, mut peer) = tokio::io::duplex(65_536);
-                let connector = DeadlineConnector {
-                    delay: Duration::ZERO,
-                    targets: Mutex::new(Vec::new()),
-                    stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
-                        stream,
-                        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
-                        Arc::clone(&aborts),
-                    )))),
-                };
-                let observer = ChainObserver::default();
-                let flow = open_chain_with_deadlines(
-                    &outbounds,
-                    plan.hops(),
-                    &connector,
-                    &clock,
-                    &random,
-                    &application,
-                    (Duration::from_secs(1), Duration::from_secs(1)),
-                    Some((&observer, &observer)),
-                )
-                .await
-                .expect("selected chain");
-                assert_eq!(
-                    connector.targets.lock().expect("dial targets").as_slice(),
-                    &[outbounds[first].tcp_server.clone()],
-                    "sole {label} raw dial: rotation {case}"
-                );
-                assert_two_layer_buffers(&observer, format_args!("{label}: rotation {case}"));
-                drop(flow);
-                assert_eq!(observer.owner_drops.load(Ordering::SeqCst), 2);
-                let mut raw = Vec::new();
-                peer.read_to_end(&mut raw).await.expect("complete raw wire");
-
-                let outer_replay = TcpReplayStore::new(1024).expect("outer replay");
-                let outer_inbound = ShadowsocksTcpInbound::new(
-                    &outbounds[first].keys,
-                    &clock,
-                    &random,
-                    &outer_replay,
-                );
-                let outer = outer_inbound
-                    .accept_stream(scripted_input(&raw).await)
-                    .await
-                    .expect("configured outer credential");
-                assert_eq!(
-                    outer.target, outbounds[second].tcp_server,
-                    "{label} first targets second: rotation {case}"
-                );
-                assert!(outer.initial_payload.is_empty(), "{label}: rotation {case}");
-                let mut outer_stream = TokioFramed::new(outer.stream);
-                let mut inner_wire = [0_u8; 4_096];
-                let inner_len = outer_stream
-                    .read(&mut inner_wire)
-                    .await
-                    .expect("authenticated inner wire");
-
-                let inner_replay = TcpReplayStore::new(1024).expect("inner replay");
-                let inner_inbound = ShadowsocksTcpInbound::new(
-                    &outbounds[second].keys,
-                    &clock,
-                    &random,
-                    &inner_replay,
-                );
-                let inner = inner_inbound
-                    .accept_stream(scripted_input(&inner_wire[..inner_len]).await)
-                    .await
-                    .expect("configured inner credential");
-                assert_eq!(inner.target, application, "{label}: rotation {case}");
-                assert!(inner.initial_payload.is_empty(), "{label}: rotation {case}");
-
-                if case == 0 && label == "captured" {
-                    let wrong_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-                        ferrum2_crypto::MethodPsk::aes128([0x91; 16]),
-                    ));
-                    for keys in [&outbounds[second].keys, &wrong_keys] {
-                        let replay = TcpReplayStore::new(1024).expect("invalid replay");
-                        let inbound = ShadowsocksTcpInbound::new(keys, &clock, &random, &replay);
-                        assert!(
-                            inbound
-                                .accept_stream(scripted_input(&raw).await)
-                                .await
-                                .is_err(),
-                            "swapped/wrong outer credential"
-                        );
-                    }
-                    let mut truncated = raw.clone();
-                    truncated.pop().expect("nonempty wire");
-                    let replay = TcpReplayStore::new(1024).expect("truncated replay");
-                    let inbound = ShadowsocksTcpInbound::new(
-                        &outbounds[first].keys,
-                        &clock,
-                        &random,
-                        &replay,
-                    );
-                    let truncated_outer = inbound
-                        .accept_stream(scripted_input(&truncated).await)
-                        .await
-                        .expect("valid outer before truncated inner");
-                    let mut truncated_stream = TokioFramed::new(truncated_outer.stream);
-                    assert!(truncated_stream.read(&mut inner_wire).await.is_err());
-                }
-                assert_eq!(aborts.load(Ordering::SeqCst), 0, "{label}: rotation {case}");
-            }
-            assert_eq!(selector.selected("manual"), Ok("c-d"));
-            assert_eq!(snapshot.hops(), &[0, 1], "captured rotation {case}");
-            assert_eq!(next_snapshot.hops(), &[2, 3], "next rotation {case}");
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn tcp_chain_failure_and_cancellation_drop_every_layer() {
-        let (outbounds, route, selector) = chain_test_setup(
-            [
-                MethodProfile::Blake3Aes256Gcm2022,
-                MethodProfile::Blake3ChaCha20Poly13052022,
-                MethodProfile::Blake3Aes128Gcm2022,
-                MethodProfile::Blake3Aes256Gcm2022,
-            ],
-            42_011,
-        );
-        let application = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 443))
-            .expect("application target");
-        let snapshot = route.select_plan(0, Network::Tcp, &application);
-        assert_eq!(snapshot.hops(), &[0, 1]);
-        let clock = SystemClock::new();
-        let random = FixedRandom;
-
-        let calls = Arc::new(AtomicUsize::new(0));
-        let unavailable = TokioConnector::new(FailingConnector {
-            calls: Arc::clone(&calls),
-        });
-        let unavailable_observer = ChainObserver::default();
-        assert!(matches!(
-            open_chain_with_deadlines(
-                &outbounds,
-                snapshot.hops(),
-                &unavailable,
-                &clock,
-                &random,
-                &application,
-                (Duration::from_secs(1), Duration::from_secs(1)),
-                Some((&unavailable_observer, &unavailable_observer)),
-            )
-            .await,
-            Err(ClientOpenFailure::Protocol(ShadowsocksError::Connect(
-                ConnectErrorKind::Other
-            )))
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(
-            unavailable_observer
-                .buffers
-                .lock()
-                .expect("unavailable buffers")
-                .is_empty()
-        );
-        assert_eq!(unavailable_observer.owner_drops.load(Ordering::SeqCst), 0);
-        assert_eq!(selector.selected("manual"), Ok("a-b"));
-
-        for cancel in [false, true] {
-            let drops = Arc::new(AtomicUsize::new(0));
-            let aborts = Arc::new(AtomicUsize::new(0));
-            let observer = ChainObserver::default();
-            let connector = DeadlineConnector {
-                delay: Duration::ZERO,
-                targets: Mutex::new(Vec::new()),
-                stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::stall_after(
-                    1,
-                    Arc::clone(&drops),
-                    Arc::clone(&aborts),
-                )))),
-            };
-            let mut opened = Box::pin(open_chain_with_deadlines(
-                &outbounds,
-                snapshot.hops(),
-                &connector,
-                &clock,
-                &random,
-                &application,
-                (Duration::from_secs(1), Duration::from_millis(10)),
-                Some((&observer, &observer)),
-            ));
-            assert_open_pending(&mut opened).await;
-            assert_two_layer_buffers(&observer, format_args!("cancel={cancel}"));
-            assert_eq!(observer.owner_drops.load(Ordering::SeqCst), 0);
-            if cancel {
-                drop(opened);
-            } else {
-                tokio::time::advance(Duration::from_millis(10)).await;
-                assert!(matches!(
-                    opened.await,
-                    Err(ClientOpenFailure::HandshakeTimeout)
-                ));
-            }
-            assert_eq!(observer.owner_drops.load(Ordering::SeqCst), 2);
-            assert!(
-                observer
-                    .terminals
-                    .lock()
-                    .expect("pending terminals")
-                    .is_empty()
-            );
-            assert_eq!(drops.load(Ordering::SeqCst), 1, "cancel={cancel}");
-            assert_eq!(aborts.load(Ordering::SeqCst), 0, "cancel={cancel}");
-            assert_eq!(
-                connector.targets.lock().expect("dial targets").as_slice(),
-                &[outbounds[0].tcp_server.clone()],
-                "cancel={cancel}"
-            );
-            assert_eq!(selector.selected("manual"), Ok("a-b"));
-        }
-
-        let drops = Arc::new(AtomicUsize::new(0));
-        let aborts = Arc::new(AtomicUsize::new(0));
-        let write_zero_wire = Arc::new(Mutex::new(Vec::new()));
-        let write_zero_calls = Arc::new(AtomicUsize::new(0));
-        let write_zero_observer = ChainObserver::default();
-        let write_zero = DeadlineConnector {
-            delay: Duration::ZERO,
-            targets: Mutex::new(Vec::new()),
-            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::write_limit_after(
-                1,
-                0,
-                Arc::clone(&write_zero_wire),
-                Arc::clone(&write_zero_calls),
-                Arc::clone(&drops),
-                Arc::clone(&aborts),
-            )))),
-        };
-        assert!(matches!(
-            open_chain_with_deadlines(
-                &outbounds,
-                snapshot.hops(),
-                &write_zero,
-                &clock,
-                &random,
-                &application,
-                (Duration::from_secs(1), Duration::from_secs(1)),
-                Some((&write_zero_observer, &write_zero_observer)),
-            )
-            .await,
-            Err(ClientOpenFailure::Protocol(ShadowsocksError::Transport(_)))
-        ));
-        assert_eq!(write_zero_observer.owner_drops.load(Ordering::SeqCst), 2);
-        assert_two_layer_buffers(&write_zero_observer, "write zero");
-        assert_eq!(
-            write_zero_observer
-                .terminals
-                .lock()
-                .expect("write-zero terminals")
-                .len(),
-            2
-        );
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert_eq!(aborts.load(Ordering::SeqCst), 0);
-        assert_eq!(write_zero_calls.load(Ordering::SeqCst), 2);
-        assert!(!write_zero_wire.lock().expect("write-zero wire").is_empty());
-        assert_eq!(
-            write_zero
-                .targets
-                .lock()
-                .expect("write-zero targets")
-                .as_slice(),
-            &[outbounds[0].tcp_server.clone()]
-        );
-        assert_eq!(selector.selected("manual"), Ok("a-b"));
-
-        let drops = Arc::new(AtomicUsize::new(0));
-        let aborts = Arc::new(AtomicUsize::new(0));
-        let partial_wire = Arc::new(Mutex::new(Vec::new()));
-        let partial_calls = Arc::new(AtomicUsize::new(0));
-        let partial_observer = ChainObserver::default();
-        let partial = DeadlineConnector {
-            delay: Duration::ZERO,
-            targets: Mutex::new(Vec::new()),
-            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::write_limit_after(
-                1,
-                1,
-                Arc::clone(&partial_wire),
-                Arc::clone(&partial_calls),
-                Arc::clone(&drops),
-                Arc::clone(&aborts),
-            )))),
-        };
-        let partial_flow = open_chain_with_deadlines(
-            &outbounds,
-            snapshot.hops(),
-            &partial,
-            &clock,
-            &random,
-            &application,
-            (Duration::from_secs(1), Duration::from_secs(1)),
-            Some((&partial_observer, &partial_observer)),
-        )
-        .await
-        .expect("nonzero partial raw write resumes");
-        let mut partial_framed = TokioFramed::new(partial_flow);
-        partial_framed
-            .shutdown()
-            .await
-            .expect("partial recursive half-close");
-        drop(partial_framed);
-        assert_eq!(
-            partial_calls.load(Ordering::SeqCst),
-            3,
-            "full initial, one-byte partial, resumed remainder"
-        );
-        assert_eq!(partial_observer.owner_drops.load(Ordering::SeqCst), 2);
-        assert_two_layer_buffers(&partial_observer, "nonzero partial");
-        assert!(
-            partial_observer
-                .terminals
-                .lock()
-                .expect("partial terminals")
-                .is_empty()
-        );
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert_eq!(aborts.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            partial.targets.lock().expect("partial targets").as_slice(),
-            &[outbounds[0].tcp_server.clone()]
-        );
-        assert_eq!(selector.selected("manual"), Ok("a-b"));
-        let raw = partial_wire.lock().expect("partial wire").clone();
-        let outer_replay = TcpReplayStore::new(1024).expect("partial outer replay");
-        let outer = ShadowsocksTcpInbound::new(&outbounds[0].keys, &clock, &random, &outer_replay)
-            .accept_stream(scripted_input(&raw).await)
-            .await
-            .expect("partial outer wire");
-        assert_eq!(outer.target, outbounds[1].tcp_server);
-        let mut outer_stream = TokioFramed::new(outer.stream);
-        let mut inner_wire = [0_u8; 4_096];
-        let inner_len = outer_stream
-            .read(&mut inner_wire)
-            .await
-            .expect("partial inner wire");
-        let inner_replay = TcpReplayStore::new(1024).expect("partial inner replay");
-        let inner = ShadowsocksTcpInbound::new(&outbounds[1].keys, &clock, &random, &inner_replay)
-            .accept_stream(scripted_input(&inner_wire[..inner_len]).await)
-            .await
-            .expect("partial complete inner wire");
-        assert_eq!(inner.target, application);
-        assert!(inner.initial_payload.is_empty());
-
-        let aborts = Arc::new(AtomicUsize::new(0));
-        let detection_observer = ChainObserver::default();
-        let (detection_stream, mut detection_peer) = tokio::io::duplex(65_536);
-        let detection_connector = DeadlineConnector {
-            delay: Duration::ZERO,
-            targets: Mutex::new(Vec::new()),
-            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
-                detection_stream,
-                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
-                Arc::clone(&aborts),
-            )))),
-        };
-        let detection_flow = open_chain_with_deadlines(
-            &outbounds,
-            snapshot.hops(),
-            &detection_connector,
-            &clock,
-            &random,
-            &application,
-            (Duration::from_secs(1), Duration::from_secs(1)),
-            Some((&detection_observer, &detection_observer)),
-        )
-        .await
-        .expect("opened detection chain");
-        let request_salt =
-            MethodTcpSalt::try_from_slice(outbounds[0].keys.tcp_profile(), &[0x42; 32])
-                .expect("outer request salt");
-        let inner_request_salt =
-            MethodTcpSalt::try_from_slice(outbounds[1].keys.tcp_profile(), &[0x42; 32])
-                .expect("inner request salt");
-        let response_salt =
-            MethodTcpSalt::try_from_slice(outbounds[0].keys.tcp_profile(), &[0x43; 32])
-                .expect("outer response salt");
-        let inner_response_salt =
-            MethodTcpSalt::try_from_slice(outbounds[1].keys.tcp_profile(), &[0x44; 32])
-                .expect("inner response salt");
-        let wrong_inner_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            ferrum2_crypto::MethodPsk::chacha20_poly1305([0x99; 32]),
-        ));
-        let invalid_inner = encode_response_first_write(
-            &wrong_inner_keys,
-            &inner_response_salt,
-            clock.unix_seconds().expect("response time"),
-            &inner_request_salt,
-            b"must not reach application",
-        )
-        .expect("wrong-key inner response");
-        let authenticated_outer = encode_response_first_write(
-            &outbounds[0].keys,
-            &response_salt,
-            clock.unix_seconds().expect("response time"),
-            &request_salt,
-            &invalid_inner,
-        )
-        .expect("authenticated outer response");
-        detection_peer
-            .write_all(&authenticated_outer)
-            .await
-            .expect("later-hop response");
-        let mut detection_framed = TokioFramed::new(detection_flow);
-        let mut application_output = [0x5a_u8; 1];
-        assert!(
-            detection_framed
-                .read(&mut application_output)
-                .await
-                .is_err()
-        );
-        assert_eq!(application_output, [0x5a]);
-        drop(detection_framed);
-        assert_eq!(detection_observer.owner_drops.load(Ordering::SeqCst), 2);
-        assert_two_layer_buffers(&detection_observer, "detection");
-        assert_eq!(
-            detection_observer
-                .terminals
-                .lock()
-                .expect("detection terminals")
-                .as_slice(),
-            &[FlowTerminal::Detection(DetectionReason::Authentication)]
-        );
-        assert_eq!(aborts.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            detection_connector
-                .targets
-                .lock()
-                .expect("detection targets")
-                .as_slice(),
-            &[outbounds[0].tcp_server.clone()]
-        );
-        assert_eq!(selector.selected("manual"), Ok("a-b"));
-
-        let valid_observer = ChainObserver::default();
-        let (valid_stream, mut valid_peer) = tokio::io::duplex(65_536);
-        let valid_connector = DeadlineConnector {
-            delay: Duration::ZERO,
-            targets: Mutex::new(Vec::new()),
-            stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
-                valid_stream,
-                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
-                Arc::new(AtomicUsize::new(0)),
-            )))),
-        };
-        let valid_flow = open_chain_with_deadlines(
-            &outbounds,
-            snapshot.hops(),
-            &valid_connector,
-            &clock,
-            &random,
-            &application,
-            (Duration::from_secs(1), Duration::from_secs(1)),
-            Some((&valid_observer, &valid_observer)),
-        )
-        .await
-        .expect("valid open after isolated failures");
-        let mut valid_framed = TokioFramed::new(valid_flow);
-        valid_framed.shutdown().await.expect("recursive half-close");
-        drop(valid_framed);
-        assert_eq!(valid_observer.owner_drops.load(Ordering::SeqCst), 2);
-        assert_two_layer_buffers(&valid_observer, "valid half-close");
-        let mut valid_wire = Vec::new();
-        valid_peer
-            .read_to_end(&mut valid_wire)
-            .await
-            .expect("recursive raw half-close");
-        assert!(!valid_wire.is_empty());
-        assert_eq!(
-            valid_connector
-                .targets
-                .lock()
-                .expect("valid targets")
-                .as_slice(),
-            &[outbounds[0].tcp_server.clone()]
-        );
-        assert_eq!(selector.selected("manual"), Ok("a-b"));
     }
 
     #[tokio::test]
@@ -5063,8 +4453,8 @@ mod tests {
         ]
     }
 
-    struct FailingConnector {
-        calls: Arc<AtomicUsize>,
+    pub(in crate::run) struct FailingConnector {
+        pub(in crate::run) calls: Arc<AtomicUsize>,
     }
 
     impl Connector for FailingConnector {
@@ -5224,7 +4614,8 @@ mod tests {
                 tcp_server: TargetAddr::ipv4(server).expect("server target"),
                 udp_server: server,
                 keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
-            }],
+            }]
+            .into(),
         }
     }
 
@@ -6191,6 +5582,7 @@ mod tests {
         assert_eq!(dns_held.buffers, 1);
         assert_eq!(
             context
+                .egress
                 .udp
                 .as_ref()
                 .expect("shared DNS/public UDP manager")
@@ -6586,9 +5978,13 @@ mod tests {
             servers[0],
             Some(psk_for_method(methods[0])),
         );
-        Arc::get_mut(&mut context)
-            .expect("unique routed context")
-            .udp_id_random = Some(Arc::new(IdSequenceRandom::new([0x41, 0x42, 0x43, 0x44])));
+        Arc::get_mut(
+            &mut Arc::get_mut(&mut context)
+                .expect("unique routed context")
+                .egress,
+        )
+        .expect("unique routed egress")
+        .udp_id_random = Some(Arc::new(IdSequenceRandom::new([0x41, 0x42, 0x43, 0x44])));
         let outbounds = prepare_client_outbounds(
             servers
                 .map(|server| ferrum2_config::ClientOutboundConfig { server })
@@ -6617,10 +6013,14 @@ mod tests {
         )
         .expect("routed chain selector");
         let routing = Arc::new(ClientRouting { route, outbounds });
-        let prepared =
-            prepare_udp_association_with_bind(&context, Ipv4Addr::LOCALHOST, None, UdpSocket::bind)
-                .await
-                .expect("routed chain preparation");
+        let prepared = prepare_udp_association_with_bind(
+            &context.egress,
+            Ipv4Addr::LOCALHOST,
+            None,
+            UdpSocket::bind,
+        )
+        .await
+        .expect("routed chain preparation");
         let relay = match prepared.application.local_addr().expect("relay") {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 relay"),
@@ -6791,6 +6191,7 @@ mod tests {
         let stable = registry.snapshot();
         let deadline = manager.idle_deadline(handle).expect("deadline");
         let live_ids = context
+            .egress
             .udp
             .as_ref()
             .expect("UDP")
@@ -6811,6 +6212,7 @@ mod tests {
         assert_eq!(manager.idle_deadline(handle), Ok(deadline));
         assert_eq!(
             context
+                .egress
                 .udp
                 .as_ref()
                 .expect("UDP")
@@ -6856,6 +6258,7 @@ mod tests {
         assert_eq!(manager.idle_deadline(handle), Ok(deadline));
         assert_eq!(
             context
+                .egress
                 .udp
                 .as_ref()
                 .expect("UDP")
@@ -7056,6 +6459,7 @@ mod tests {
         }
         assert_eq!(
             context
+                .egress
                 .udp
                 .as_ref()
                 .expect("UDP")
@@ -7144,7 +6548,7 @@ mod tests {
             Some(psk_for_method(methods[0])),
         );
         let prepared = prepare_udp_association_with_bind(
-            &context,
+            &context.egress,
             Ipv4Addr::LOCALHOST,
             Some((plan, servers[0])),
             UdpSocket::bind,
@@ -7204,6 +6608,7 @@ mod tests {
         assert_eq!(manager.session_count(), 1);
         assert!(
             context
+                .egress
                 .udp
                 .as_ref()
                 .expect("UDP")
@@ -7279,6 +6684,7 @@ mod tests {
         }
         assert_eq!(
             context
+                .egress
                 .udp
                 .as_ref()
                 .expect("UDP")
@@ -7294,6 +6700,7 @@ mod tests {
         finish_udp_relay(running).await;
         assert!(
             context
+                .egress
                 .udp
                 .as_ref()
                 .expect("UDP")
@@ -7995,27 +7402,30 @@ mod tests {
         let udp = config.udp.expect("enabled UDP");
         let server = config.server;
         let runtime = config.runtime;
+        let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)
+            .expect("test outbounds");
+        let udp = ClientUdpContext {
+            manager: UdpSessionManager::new(
+                UdpRuntimeLimits::new(udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout)
+                    .expect("UDP limits"),
+                registry.clone(),
+            ),
+            live_ids: Arc::new(Mutex::new(HashSet::new())),
+            method,
+        };
         let context = ClientContext {
             inbound: Socks5Inbound::new(),
-            outbound_connector: TokioConnector::new(TcpConnector::new(runtime.connect_timeout)),
+            egress: Arc::new(ClientEgressEngine::new(
+                outbounds,
+                TokioConnector::new(TcpConnector::new(runtime.connect_timeout)),
+                SystemClock::new(),
+                SystemRandom,
+                (runtime.connect_timeout, runtime.handshake_timeout),
+                Some(udp),
+                None,
+            )),
             keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
-            clock: SystemClock::new(),
-            random: SystemRandom,
-            udp_id_random: None,
             runtime,
-            udp: Some(ClientUdpContext {
-                manager: UdpSessionManager::new(
-                    UdpRuntimeLimits::new(
-                        udp.max_sessions,
-                        udp.max_buffered_bytes,
-                        udp.idle_timeout,
-                    )
-                    .expect("UDP limits"),
-                    registry.clone(),
-                ),
-                live_ids: Arc::new(Mutex::new(HashSet::new())),
-                method,
-            }),
             udp_associate_enabled: true,
             registry,
             metrics: Arc::new(Metrics::new()),
@@ -8150,7 +7560,7 @@ mod tests {
             assert_eq!(reply, [5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
             assert_eq!(peer.read(&mut reply).await.expect("single reply EOF"), 0);
             assert_eq!(calls.load(Ordering::SeqCst), fail_at + 1);
-            let udp = context.udp.as_ref().expect("UDP context");
+            let udp = context.egress.udp.as_ref().expect("UDP context");
             assert_eq!(udp.manager.session_count(), 0);
             assert_eq!(udp.manager.buffer_budget().reserved_bytes(), 0);
             assert!(udp.live_ids.lock().expect("live IDs").is_empty());
@@ -8174,14 +7584,14 @@ mod tests {
             UdpSocket::bind(address)
         })
         .await;
-        let udp = context.udp.as_ref().expect("UDP context");
+        let udp = context.egress.udp.as_ref().expect("UDP context");
         assert_eq!(udp.manager.session_count(), 0);
         assert_eq!(udp.manager.buffer_budget().reserved_bytes(), 0);
         assert!(udp.live_ids.lock().expect("live IDs").is_empty());
         assert_eq!(registry.snapshot(), baseline);
 
         let prepared = prepare_udp_association_with_bind(
-            &context,
+            &context.egress,
             Ipv4Addr::LOCALHOST,
             Some((
                 ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
@@ -8215,7 +7625,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&calls);
         let prepared = prepare_udp_association_with_bind(
-            &context,
+            &context.egress,
             Ipv4Addr::new(127, 0, 0, 2),
             Some((
                 ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
@@ -8300,6 +7710,7 @@ mod tests {
                 tokio::time::advance(Duration::from_secs(300)).await;
             } else {
                 context
+                    .egress
                     .udp
                     .as_ref()
                     .expect("UDP context")
@@ -8310,6 +7721,7 @@ mod tests {
             assert_eq!(peer.read(&mut reply).await.expect("control EOF"), 0);
             assert!(
                 context
+                    .egress
                     .udp
                     .as_ref()
                     .expect("UDP context")
@@ -8740,7 +8152,13 @@ mod tests {
         assert_eq!(live.connection_tasks, 1);
         assert_eq!(live.owned_permits, 2);
         assert_eq!(
-            context.udp.as_ref().expect("UDP").manager.session_count(),
+            context
+                .egress
+                .udp
+                .as_ref()
+                .expect("UDP")
+                .manager
+                .session_count(),
             1
         );
 
@@ -8770,7 +8188,7 @@ mod tests {
             } if root.get() == 0
         ));
         assert_eq!(report.forced_roots(), 0);
-        let udp = context.udp.as_ref().expect("UDP");
+        let udp = context.egress.udp.as_ref().expect("UDP");
         assert_eq!(udp.manager.session_count(), 0);
         assert_eq!(udp.manager.buffer_budget().reserved_bytes(), 0);
         assert!(udp.live_ids.lock().expect("live IDs").is_empty());
