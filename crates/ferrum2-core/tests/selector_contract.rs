@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{
-    ActionRule, ActionTable, Network, compile_selector_plans, compile_selector_plans_with_roots,
-    compile_selector_route,
+    ActionRule, ActionTable, EgressPlanHandle, Network, compile_selector_plans,
+    compile_selector_plans_with_roots, compile_selector_route,
 };
 use ferrum2_core::selector::{
     SelectorCompileError, SelectorControl, SelectorDefinition, SelectorError, TaggedInbound,
@@ -36,6 +37,13 @@ fn select(route: &ferrum2_core::route::RouteTable) -> usize {
         Network::Tcp,
         &TargetAddr::domain("selector.test", 443).expect("target"),
     )
+}
+
+#[test]
+fn public_owned_plan_snapshot_is_redacted() {
+    let snapshot = EgressPlanHandle::direct(0xdead_beef).snapshot_owned();
+
+    assert_eq!(format!("{snapshot:?}"), "EgressPlanSnapshot([redacted])");
 }
 
 #[test]
@@ -103,32 +111,82 @@ fn public_route_selection_snapshots_complete_static_rule_final_and_selector_plan
     let outbounds = [TaggedOutbound::new("a", 7), TaggedOutbound::new("b", 8), TaggedOutbound::new("c", 9)];
     #[rustfmt::skip]
     let plans = [TaggedPlan::new("a-b", vec![7, 8]), TaggedPlan::new("b-c", vec![8, 9])];
-    let selectors = [SelectorDefinition::new(
-        "manual",
-        vec!["a-b", "c"],
-        Some("a-b"),
-    )];
+    let selectors = [
+        SelectorDefinition::new("manual", vec!["a-b", "c"], Some("a-b")),
+        SelectorDefinition::new("inner", vec!["a", "b-c"], Some("a")),
+        SelectorDefinition::new("outer", vec!["c", "inner"], Some("inner")),
+    ];
     #[rustfmt::skip]
-    let (route, control) = compile_selector_plans(
+    let (route, control, handles) = compile_selector_plans_with_roots(
         &inbounds, &outbounds, &plans, &selectors,
-        TaggedRoute::Routed { rules: vec![TaggedRouteRule::new(Some("entry"), Some(Network::Tcp), None, Some("manual"))], final_outbound: Some("b-c") },
+        TaggedRoute::Routed { rules: vec![
+            TaggedRouteRule::new(Some("entry"), Some(Network::Tcp), None, Some("manual")),
+            TaggedRouteRule::new(Some("entry"), Some(Network::Udp), None, Some("outer")),
+        ], final_outbound: Some("b-c") },
+        &["manual"],
     ).expect("valid routed plans");
     let target = TargetAddr::domain("plans.test", 443).expect("target");
-    let snapshot = route.select_plan(0, Network::Tcp, &target);
-    #[rustfmt::skip]
-    assert_eq!((snapshot.hops(), route.select_plan(0, Network::Udp, &target).hops(), route.final_plan().hops()), (&[7, 8][..], &[8, 9][..], &[8, 9][..]));
+    let borrowed = route.select_plan(0, Network::Tcp, &target);
+    let snapshot = route.select_plan_snapshot(0, Network::Tcp, &target);
+    let handle_snapshot = handles[0].snapshot_owned();
+    let nested_snapshot = route.select_plan_snapshot(0, Network::Udp, &target);
+    let cloned = snapshot.clone();
+    let held_ptr = snapshot.hops().as_ptr();
+    let cases = [
+        (borrowed, snapshot.clone(), &[7, 8][..]),
+        (
+            route.select_plan(0, Network::Udp, &target),
+            nested_snapshot.clone(),
+            &[7][..],
+        ),
+        (
+            route.select_plan(1, Network::Tcp, &target),
+            route.select_plan_snapshot(1, Network::Tcp, &target),
+            &[8, 9][..],
+        ),
+    ];
+    for (borrowed, owned, expected) in cases {
+        assert_eq!((borrowed.hops(), owned.hops()), (expected, expected));
+    }
+    assert!(std::ptr::eq(
+        route.final_plan().hops(),
+        route.final_plan_snapshot().hops()
+    ));
+    assert!(std::ptr::eq(borrowed.hops(), snapshot.hops()));
+    assert!(std::ptr::eq(snapshot.hops(), cloned.hops()));
+    assert!(std::ptr::eq(snapshot.hops(), handle_snapshot.hops()));
+    assert!(std::ptr::eq(
+        snapshot.hops(),
+        route.select_plan_snapshot(0, Network::Tcp, &target).hops()
+    ));
+
     control.switch("manual", "c").expect("whole-plan switch");
     #[rustfmt::skip]
-    assert_eq!((snapshot.hops(), route.select_plan(0, Network::Tcp, &target).hops(), route.final_plan().hops()), (&[7, 8][..], &[9][..], &[8, 9][..]));
+    assert_eq!((snapshot.hops(), handle_snapshot.hops(), snapshot.hops().as_ptr(), route.select_plan_snapshot(0, Network::Tcp, &target).hops(), handles[0].snapshot_owned().hops(), route.final_plan_snapshot().hops()), (&[7, 8][..], &[7, 8][..], held_ptr, &[9][..], &[9][..], &[8, 9][..]));
+    control.switch("inner", "b-c").expect("nested switch");
+    assert_eq!(
+        (
+            nested_snapshot.hops(),
+            route.select_plan_snapshot(0, Network::Udp, &target).hops()
+        ),
+        (&[7][..], &[8, 9][..])
+    );
 
     #[rustfmt::skip]
     let (static_route, _) = compile_selector_plans(
         &inbounds, &outbounds[..2], &plans[..1], &[], TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "a-b")]),
     ).expect("valid static plan");
+    let static_snapshot = static_route.select_plan_snapshot(0, Network::Tcp, &target);
     assert_eq!(
-        static_route.select_plan(0, Network::Tcp, &target).hops(),
-        &[7, 8]
+        (
+            static_route.select_plan(0, Network::Tcp, &target).hops(),
+            static_snapshot.hops()
+        ),
+        (&[7, 8][..], &[7, 8][..])
     );
+    let keys = HashSet::from([snapshot]);
+    assert!(keys.contains(&static_snapshot));
+    assert!(!keys.contains(&route.final_plan_snapshot()));
     assert!(
         std::panic::catch_unwind(|| static_route.select(0, Network::Tcp, &target)).is_err(),
         "the direct-only accessor must not truncate a multi-hop plan"

@@ -436,6 +436,25 @@ pub mod route {
         }
     }
 
+    /// One owned immutable ordered plan of concrete outbound identities.
+    #[derive(Clone, Eq, Hash, PartialEq)]
+    pub struct EgressPlanSnapshot {
+        hops: Arc<[usize]>,
+    }
+
+    impl EgressPlanSnapshot {
+        /// Returns every concrete outbound in configured traversal order.
+        pub fn hops(&self) -> &[usize] {
+            &self.hops
+        }
+    }
+
+    impl std::fmt::Debug for EgressPlanSnapshot {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("EgressPlanSnapshot([redacted])")
+        }
+    }
+
     /// Transport network presented to route selection.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Network {
@@ -522,7 +541,7 @@ pub mod route {
     pub struct EgressPlanHandle {
         action: OutboundAction,
         selectors: Arc<SelectorState>,
-        plans: Arc<Vec<Box<[usize]>>>,
+        plans: Arc<Vec<Arc<[usize]>>>,
     }
 
     impl EgressPlanHandle {
@@ -531,14 +550,21 @@ pub mod route {
             Self {
                 action: OutboundAction::Plan(0),
                 selectors: Arc::default(),
-                plans: Arc::new(vec![Box::from([outbound])]),
+                plans: Arc::new(vec![Arc::from([outbound])]),
             }
         }
 
         /// Selects the current concrete plan without changing selector state.
         pub fn snapshot(&self) -> EgressPlan<'_> {
             EgressPlan {
-                hops: &self.plans[self.selectors.resolve(self.action)],
+                hops: self.plans[self.selectors.resolve(self.action)].as_ref(),
+            }
+        }
+
+        /// Selects the current concrete plan as an owned immutable snapshot.
+        pub fn snapshot_owned(&self) -> EgressPlanSnapshot {
+            EgressPlanSnapshot {
+                hops: Arc::clone(&self.plans[self.selectors.resolve(self.action)]),
             }
         }
     }
@@ -556,7 +582,7 @@ pub mod route {
         final_outbound: usize,
         routed: bool,
         selectors: Arc<SelectorState>,
-        plans: Arc<Vec<Box<[usize]>>>,
+        plans: Arc<Vec<Arc<[usize]>>>,
     }
 
     impl RouteTable {
@@ -568,7 +594,7 @@ pub mod route {
             }
             let plans = bindings
                 .iter()
-                .map(|outbound| Box::from([*outbound]))
+                .map(|outbound| Arc::from([*outbound]))
                 .collect();
             let rules = bindings
                 .into_iter()
@@ -596,10 +622,10 @@ pub mod route {
             for rule in &mut rules {
                 let outbound = rule.action;
                 rule.action = plans.len();
-                plans.push(Box::from([outbound]));
+                plans.push(Arc::from([outbound]));
             }
             let final_action = OutboundAction::Plan(plans.len());
-            plans.push(Box::from([final_outbound]));
+            plans.push(Arc::from([final_outbound]));
             let rules = rules
                 .into_iter()
                 .map(|rule| ActionRule {
@@ -652,14 +678,34 @@ pub mod route {
         ) -> EgressPlan<'_> {
             let action = self.actions.select(inbound, network, target);
             EgressPlan {
-                hops: &self.plans[self.selectors.resolve(action)],
+                hops: self.plans[self.selectors.resolve(action)].as_ref(),
+            }
+        }
+
+        /// Selects one complete owned immutable plan at the first matching rule or final action.
+        pub fn select_plan_snapshot(
+            &self,
+            inbound: usize,
+            network: Network,
+            target: &TargetAddr,
+        ) -> EgressPlanSnapshot {
+            let action = self.actions.select(inbound, network, target);
+            EgressPlanSnapshot {
+                hops: Arc::clone(&self.plans[self.selectors.resolve(action)]),
             }
         }
 
         /// Returns the complete configured-default plan snapshot.
         pub fn final_plan(&self) -> EgressPlan<'_> {
             EgressPlan {
-                hops: &self.plans[self.final_plan],
+                hops: self.plans[self.final_plan].as_ref(),
+            }
+        }
+
+        /// Returns the complete configured-default plan as an owned immutable snapshot.
+        pub fn final_plan_snapshot(&self) -> EgressPlanSnapshot {
+            EgressPlanSnapshot {
+                hops: Arc::clone(&self.plans[self.final_plan]),
             }
         }
     }
@@ -708,12 +754,8 @@ pub mod route {
 
         let compiled_plans = outbounds
             .iter()
-            .map(|outbound| Box::from([outbound.outbound]))
-            .chain(
-                plans
-                    .iter()
-                    .map(|plan| plan.hops.clone().into_boxed_slice()),
-            )
+            .map(|outbound| Arc::from([outbound.outbound]))
+            .chain(plans.iter().map(|plan| Arc::from(plan.hops.as_slice())))
             .collect::<Vec<_>>();
 
         let mut selectors = Vec::with_capacity(definitions.len());
@@ -1002,7 +1044,7 @@ pub mod route {
     fn validate_reachability(
         selectors: &[Selector],
         outbounds: &[TaggedOutbound<'_>],
-        plans: &[Box<[usize]>],
+        plans: &[Arc<[usize]>],
         roots: &[OutboundAction],
     ) -> Result<(), SelectorCompileError> {
         fn visit(
@@ -1367,6 +1409,35 @@ mod tests {
         #[rustfmt::skip]
         let oversized = (0..=MAX_ROUTE_RULES).map(|_| RouteRule::new(Some(0), None, None, 0)).collect();
         assert!(RouteTable::routed(oversized, 0).is_none());
+    }
+
+    #[test]
+    fn public_route_constructors_never_yield_empty_plans() {
+        use route::{EgressPlanHandle, RouteTable, compile_selector_plans};
+        use selector::{TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute};
+
+        assert_eq!(EgressPlanHandle::direct(7).snapshot_owned().hops(), &[7]);
+        assert!(RouteTable::static_bindings(Vec::new()).is_none());
+        assert_eq!(
+            RouteTable::routed(Vec::new(), 8)
+                .expect("mandatory final")
+                .final_plan_snapshot()
+                .hops(),
+            &[8]
+        );
+        let Err(error) = compile_selector_plans(
+            &[TaggedInbound::new("entry", 0)],
+            &[TaggedOutbound::new("out", 7)],
+            &[TaggedPlan::new("empty", Vec::new())],
+            &[],
+            TaggedRoute::Routed {
+                rules: Vec::new(),
+                final_outbound: Some("out"),
+            },
+        ) else {
+            panic!("empty plan was accepted")
+        };
+        assert_eq!(error, selector::SelectorCompileError::PlanHops);
     }
 
     #[test]
