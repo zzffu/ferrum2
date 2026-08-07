@@ -1,7 +1,7 @@
 ---
 id: M13-T01
 milestone: M13
-status: ready
+status: done
 depends_on: []
 owns:
   - CONTEXT.md
@@ -43,9 +43,12 @@ product edits into it。
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: initial control `7eb50986a50f57b80a773c5c88b686e8ae7ef4e1`；accepted repair
+  `d7cce680e60e485879d87d8dc8a863169285877e`。
+- Review: initial Architect/QA `BLOCK`；one bounded documentation repair；targeted Architect/QA `PASS`，
+  `ARCH-M13T01-001..003` and `M13-T01-QA-001..002` closed，no unresolved finding。
+- Notes: T01 focused and repository Quick passed；schema 3 transition/control integrity `PASS`，numeric
+  ratio-only `WARN`，case/support/fixture delta `0/0/0`。No remote action。
 
 ## Rollback / risk
 

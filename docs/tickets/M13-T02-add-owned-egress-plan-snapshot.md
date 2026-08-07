@@ -1,7 +1,7 @@
 ---
 id: M13-T02
 milestone: M13
-status: todo
+status: ready
 depends_on: [M13-T01]
 owns:
   - crates/ferrum2-core/src/lib.rs

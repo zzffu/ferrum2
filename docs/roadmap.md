@@ -58,7 +58,7 @@ run `31143886273/1`和full manual performance run `31144255549/1`关闭。Hickor
 tagged DNS UDP/TCP/DoT/DoH、client/server detour、CoreDNS/BIND、SIP022 TCP/UDP、three platforms和
 DNS resource bounds/drain/rebind均通过；首次failed performance `31134561696/1`保留并驱动exact-plan
 UDP association reuse root-cause repair。Blocking findings为零，未package、release或publish。
-M13现为`planned`：以qualified product `c06386e9`和真实planning baseline `4810ec5c`为双重
+M13现为`executing`：以qualified product `c06386e9`和真实planning baseline `4810ec5c`为双重
 证据源，只整固owned egress-plan、DNS runtime dependency、private client egress及composition-root
 ownership，不增加schema、wire、DNS/routing action或产品能力。七票按serial drain执行；performance
 因hot-path/resource ownership迁移而required，但无threshold或claim。
@@ -1036,7 +1036,7 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 
 ## M13 — behavior-preserving architecture consolidation
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** 以core唯一owned `EgressPlanSnapshot`收敛route/DNS identity；用DNS-owned runtime
   spec删除`ferrum2-dns -> ferrum2-config`；让SOCKS TCP/UDP和DNS detour共用private concrete
   `ClientEgressEngine`；语义迁移green后按ownership拆client/server/core/config。
@@ -1054,8 +1054,9 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 - **Deferred/out of scope:** new matcher/action、retry/fallback/group/health/LB、DNS feature、TUN/
   transparent、typed-ID rewrite、plugin/Endpoint registry、new crate/dependency/harness、hot reload、
   management、package/release/publication。
-- **Next/remote boundary:** accept one control+Markdown T01 commit，then start T02 from that exact SHA。
-  No push、dispatch、PR、tag、package、release or publication is authorized by planning。
+- **Next/remote boundary:** T01 accepted after one bounded repair and targeted Architect/QA PASS；start
+  T02 from the exact state commit。The execute request authorizes required non-force pushes；manual
+  dispatch、force-push、PR、tag、package、release and publication remain unauthorized。
 
 ## 决策登记
 
@@ -1253,3 +1254,4 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 | 2026-08-06 | M12-T05 hosted child-baseline repair lease | Exact `4dcd89f` run `31110243307/1` passed interop、footprint、MSRV and all platforms，but Linux quality failed the DNS TCP case's global child-count assertion with one concurrent two-hop child still active | The DNS case had reaped both owned children；`ACTIVE_CHILDREN` is changed only by `ChildGuard`，and the same log shows `fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps` completing later。The case released its initial spawn guard before work and did not reacquire it for cleanup | Add only the existing `hold_process_spawns_at_or_below(baseline)` guard after owned-child reap and before count/rebind probes。No signal helper/caller、product、workflow or remote action change；another push requires separate authorization |
 | 2026-08-07 | M12 close | Exact `c06386e9` closes all six tickets and M12 with tagged DNS proxy/resolution、four transports、per-server detour and Rust 1.88 | First performance run `31134561696/1` exposed real per-query detoured SIP022 UDP session retention；the minimal same-server/exact-plan idle association reuse repair kept existing capacity ownership and passed post-repair architecture/QA | Local serial gate、schema 3 integrity、automatic `31143886273/1` and manual `31144255549/1` PASS；DNS `4564/4450` queries、48 samples、RSS `12/12`、bounds/drain/rebind PASS；numeric `6211/1081/0` accepted，no release/publication |
 | 2026-08-07 | M13 plan | M13改为`planned`；接受core owned plan、DNS runtime inversion、private concrete client egress及semantics-first ownership split | M12 closed；current duplicate snapshots、DNS/config edge和client DNS helper reach-through由真实`4810ec5c` source确认，existing route/DNS/egress/lifecycle seams足够，不需new crate/trait/registry | qualified `c06386e9`、planning `4810ec5c`；ADR-0032、SPEC/TEST-0014、T01→T02→T03→T04→T05→T06→T07；schema 3 forecast `550/0/0`、performance required；plan-only，无product/push/dispatch/release/publication |
+| 2026-08-07 | M13-T01 accept / execute | M13改为`executing`；T01 accepted、T02 ready；补齐历史evidence map、exact control checks和T03 `proxy_contract` ownership | Initial Architect/QA `BLOCK`；one bounded docs repair `d7cce680`后targeted Architect/QA均`PASS`，五个finding全部closed | T01 focused+Quick PASS；schema 3 transition/control integrity PASS、numeric ratio-only WARN、`0/0/0`；本次execute授权required non-force pushes，manual dispatch/force-push/release/publication未授权 |

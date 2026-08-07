@@ -1,6 +1,6 @@
 # M13 — behavior-preserving architecture consolidation
 
-- **Status:** planned
+- **Status:** executing
 - **Qualified product baseline:** `c06386e9344c07d86ea4a3b63dc73f37f20ceb0e`
 - **Planning baseline:** `4810ec5c5a1063cb8e60d1b950900c7f38d74548`
 - **Planning tree / parent:** `d732eccc2b5b38c91dcccb83d77eba9bfa6ac372` /
@@ -72,8 +72,8 @@ real repository；the external archive timestamp is not used as Git identity。
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M13-T01 | Freeze exact M12 behavior、M13 contracts and migration guards | M12 closed | ready |
-| M13-T02 | Add the core owned egress-plan snapshot without breaking borrowed views | M13-T01 | todo |
+| M13-T01 | Freeze exact M12 behavior、M13 contracts and migration guards | M12 closed | done |
+| M13-T02 | Add the core owned egress-plan snapshot without breaking borrowed views | M13-T01 | ready |
 | M13-T03 | Invert DNS config dependency and converge on the core snapshot | M13-T02 | todo |
 | M13-T04 | Extract one client TCP egress interface for SOCKS and DNS | M13-T03 | todo |
 | M13-T05 | Extract one bounded client UDP association and exact-plan reuse key | M13-T04 | todo |
@@ -103,11 +103,12 @@ may trigger file-size `REVIEW_REQUIRED` when moved tests are compared with zero�
 not correctness results，and are dispositioned without deleting independent evidence。No third helper、
 fixture or second harness is planned。
 
-T07 requires one automatic qualification push and one manual performance/resource dispatch only after
-separate explicit authorization for the accepted exact SHA。No remote action、PR、tag、package、release
-or publication is authorized by this plan。
+The M13 execute request authorizes all required non-force pushes；the workflow will still push only an
+accepted exact SHA/range。Manual performance/resource dispatch remains separately unauthorized。No
+force-push、PR、tag、package、release or publication is authorized。
 
 ## Blocker / next action
 
-No plan blocker。Accept the plan/control-only T01 candidate，record its exact commit，then create
-`codex/m13-t02` in `.worktrees/m13-t02` from that accepted commit and bind its exact ticket base。
+No blocker。T01 is accepted at `d7cce680…` after one bounded repair and targeted Architect/QA PASS。
+Record this state，then create `codex/m13-t02` in `.worktrees/m13-t02` from the resulting exact state
+commit and bind that exact T02 base。
