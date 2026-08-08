@@ -724,27 +724,95 @@ fn current_deep_modules_keep_one_way_internal_dependencies() {
         ],
     )
     .unwrap_or_else(|error| panic!("pure sniff module gained runtime/registry ownership: {error}"));
-    assert_eq!(
-        sniff.len(),
-        1,
-        "sniff implementation must stay local to one owner"
-    );
-    let tokens = sniff[0]
-        .production_tokens()
-        .expect("sniff production tokens");
     for required in [
+        &["Header", ":", ":", "read"][..],
         &["Message", ":", ":", "read"][..],
         &["Acceptor", ":", ":", "default"],
         &["httparse", ":", ":", "Request", ":", ":", "new"],
     ] {
-        assert!(
-            has_tokens(tokens, required),
-            "sniff module must retain reviewed upstream parser call {required:?}"
+        assert_eq!(
+            sniff
+                .iter()
+                .map(|source| {
+                    source
+                        .production_tokens()
+                        .expect("sniff production tokens")
+                        .windows(required.len())
+                        .filter(|window| {
+                            window
+                                .iter()
+                                .map(String::as_str)
+                                .eq(required.iter().copied())
+                        })
+                        .count()
+                })
+                .sum::<usize>(),
+            1,
+            "sniff module must have exactly one owner/use of reviewed parser {required:?}"
         );
     }
+
+    let mut decode_dns_bodies = Vec::new();
+    for source in &sniff {
+        let tokens = source.production_tokens().expect("sniff production tokens");
+        for definition in tokens
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, window)| (window == ["fn", "decode_dns"]).then_some(index))
+        {
+            let body_start = (definition + 2..tokens.len())
+                .find(|index| tokens[*index] == "{")
+                .expect("decode_dns body start");
+            let body_end =
+                balanced_end(tokens, body_start, "{", "}").expect("balanced decode_dns definition");
+            decode_dns_bodies.push(&tokens[body_start..body_end]);
+        }
+    }
     assert_eq!(
-        name_counts(tokens.windows(3).filter_map(|window| {
-            (window[0] == "pub" && window[1] == "fn").then_some(window[2].as_str())
+        decode_dns_bodies.len(),
+        1,
+        "DNS decoding must have one semantic production owner"
+    );
+    let decode_dns = decode_dns_bodies[0];
+    let parser_position = |parser: &[&str]| {
+        decode_dns
+            .windows(parser.len())
+            .position(|window| window.iter().map(String::as_str).eq(parser.iter().copied()))
+            .unwrap_or_else(|| panic!("decode_dns must call {parser:?}"))
+    };
+    let header_read = parser_position(&["Header", ":", ":", "read"]);
+    let checked_multiply = parser_position(&[".", "checked_mul"]);
+    let checked_add = parser_position(&[".", "checked_add"]);
+    let message_read = parser_position(&["Message", ":", ":", "read"]);
+    assert!(
+        header_read < checked_multiply
+            && checked_multiply < checked_add
+            && checked_add < message_read,
+        "bounded Hickory Header preflight must precede allocating Message decode"
+    );
+    for required in [
+        &["header", ".", "metadata", ".", "message_type"][..],
+        &["header", ".", "metadata", ".", "op_code"],
+        &["header", ".", "counts", ".", "queries"],
+        &["header", ".", "counts", ".", "answers"],
+        &["header", ".", "counts", ".", "authorities"],
+        &["header", ".", "counts", ".", "additionals"],
+    ] {
+        assert!(
+            has_tokens(decode_dns, required),
+            "DNS Header preflight must constrain {required:?}"
+        );
+    }
+
+    assert_eq!(
+        name_counts(sniff.iter().flat_map(|source| {
+            source
+                .production_tokens()
+                .expect("sniff production tokens")
+                .windows(3)
+                .filter_map(|window| {
+                    (window[0] == "pub" && window[1] == "fn").then_some(window[2].as_str())
+                })
         })),
         BTreeMap::from([("sniff".to_owned(), 1)]),
         "sniff module exposes exactly one byte-slice function"

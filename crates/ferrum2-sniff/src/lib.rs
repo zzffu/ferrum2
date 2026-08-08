@@ -16,7 +16,7 @@ pub enum Transport {
 use std::{fmt, io::Cursor, net::IpAddr};
 
 use hickory_proto::{
-    op::{Message, MessageType, OpCode},
+    op::{Header, Message, MessageType, OpCode},
     rr::{DNSClass, Name},
     serialize::binary::{BinDecodable, BinDecoder},
 };
@@ -131,6 +131,28 @@ fn sniff_dns(
 }
 
 fn decode_dns(bytes: &[u8]) -> Result<Message, ()> {
+    let mut header_decoder = BinDecoder::new(bytes);
+    let header = Header::read(&mut header_decoder).map_err(|_| ())?;
+    let minimum_size = [
+        (header.counts.queries, 5_usize),
+        (header.counts.answers, 11),
+        (header.counts.authorities, 11),
+        (header.counts.additionals, 11),
+    ]
+    .into_iter()
+    .try_fold(header_decoder.index(), |minimum, (count, item_size)| {
+        usize::from(count)
+            .checked_mul(item_size)
+            .and_then(|section| minimum.checked_add(section))
+    });
+    if header.metadata.message_type != MessageType::Query
+        || header.metadata.op_code != OpCode::Query
+        || header.counts.queries != 1
+        || minimum_size.is_none_or(|minimum| minimum > bytes.len())
+    {
+        return Err(());
+    }
+
     let mut decoder = BinDecoder::new(bytes);
     let message = Message::read(&mut decoder).map_err(|_| ())?;
     decoder.is_empty().then_some(message).ok_or(())
@@ -212,16 +234,13 @@ fn sniff_http(bytes: &[u8], max_bytes: usize, transport: Transport) -> Progress 
             };
             Progress::Matched(Metadata::Http { domain })
         }
-        Ok(httparse::Status::Partial) if plausible_http_prefix(bytes) => {
-            bounded_partial(bytes.len(), max_bytes)
-        }
-        Ok(httparse::Status::Partial) => Progress::NoMatch,
-        Err(_) if plausible_http_prefix(bytes) => Progress::Invalid,
+        Ok(httparse::Status::Partial) => bounded_partial(bytes.len(), max_bytes),
+        Err(_) if plausible_http_error(bytes) => Progress::Invalid,
         Err(_) => Progress::NoMatch,
     }
 }
 
-fn plausible_http_prefix(bytes: &[u8]) -> bool {
+fn plausible_http_error(bytes: &[u8]) -> bool {
     bytes.first().is_none_or(u8::is_ascii_uppercase)
 }
 

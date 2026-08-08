@@ -194,6 +194,26 @@ fn dns_transport_strictness_fragmentation_and_limits_are_bounded() {
             Progress::Invalid
         );
     }
+    for (section, offset) in [
+        ("question", 4),
+        ("answer", 6),
+        ("authority", 8),
+        ("additional", 10),
+    ] {
+        let mut extreme_count = wire.clone();
+        extreme_count[offset..offset + 2].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(
+            sniff(
+                &extreme_count,
+                extreme_count.len(),
+                Transport::Udp,
+                53,
+                &[Protocol::Dns]
+            ),
+            Progress::Invalid,
+            "extreme {section} count"
+        );
+    }
     assert_eq!(
         sniff(&[0, 0], 2, Transport::Tcp, 53, &[Protocol::Dns]),
         Progress::Invalid
@@ -302,7 +322,7 @@ fn tls_versions_sni_records_fragmentation_and_limits_are_bounded() {
 
 #[test]
 fn http_requests_headers_fragmentation_and_limits_are_bounded() {
-    let cases: [(&str, &[u8], Option<&str>); 8] = [
+    let cases: [(&str, &[u8], Option<&str>); 10] = [
         (
             "GET mixed-case Host",
             b"GET / HTTP/1.1\r\nhOsT: get.test\r\n\r\n",
@@ -343,6 +363,16 @@ fn http_requests_headers_fragmentation_and_limits_are_bounded() {
             b"GET / HTTP/1.1\r\nHost: [::1]:80\r\n\r\n",
             None,
         ),
+        (
+            "lowercase extension method",
+            b"custom / HTTP/1.1\r\nHost: lowercase.test\r\n\r\n",
+            Some("lowercase.test"),
+        ),
+        (
+            "digit tchar extension method",
+            b"9!probe / HTTP/1.1\r\nHost: tchar.test\r\n\r\n",
+            Some("tchar.test"),
+        ),
     ];
     for (name, request, domain) in cases {
         assert_eq!(
@@ -360,7 +390,11 @@ fn http_requests_headers_fragmentation_and_limits_are_bounded() {
         );
         if matches!(
             name,
-            "GET mixed-case Host" | "POST Host" | "CONNECT authority preferred"
+            "GET mixed-case Host"
+                | "POST Host"
+                | "CONNECT authority preferred"
+                | "lowercase extension method"
+                | "digit tchar extension method"
         ) {
             for boundary in 0..request.len() {
                 assert_eq!(
@@ -474,7 +508,7 @@ fn http_requests_headers_fragmentation_and_limits_are_bounded() {
     for (prefix, expected) in [
         (&b""[..], Progress::NeedMore),
         (&b"G"[..], Progress::NeedMore),
-        (&b"g"[..], Progress::NoMatch),
+        (&b"g"[..], Progress::NeedMore),
         (&b"\x01"[..], Progress::NoMatch),
     ] {
         assert_eq!(
