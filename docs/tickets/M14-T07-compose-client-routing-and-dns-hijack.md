@@ -5,6 +5,8 @@ status: ready
 depends_on:
   - M14-T06
 owns:
+  - Cargo.lock
+  - bins/ferrum2-client/Cargo.toml
   - bins/ferrum2-client/src/dns_egress.rs
   - bins/ferrum2-client/src/run.rs
   - bins/ferrum2-client/src/run/context.rs
@@ -14,10 +16,12 @@ owns:
   - bins/ferrum2-client/src/run/socks.rs
   - bins/ferrum2-client/src/run/test_support.rs
   - bins/ferrum2-client/src/run/tests.rs
+  - bins/ferrum2-server/src/run/observation.rs
   - crates/ferrum2-core/src/lib.rs
   - crates/ferrum2-socks5/src/lib.rs
   - crates/ferrum2-socks5/tests/command.rs
   - tests/m0-harness/tests/architecture.rs
+  - tests/m0-harness/tests/workspace_policy.rs
 ---
 
 # M14-T07 — Compose client routing and DNS hijack
