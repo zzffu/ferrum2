@@ -7,13 +7,14 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use hickory_proto::rr::RecordType;
+use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::rr::{Name, RData, RecordType};
 use local_support::{
-    ChainRoot, ChildGuard, DnsReply, DnsStep, TCP_METHOD_CONFIGS, active_child_count,
-    bind_loopback_listener, rewrite_config_method, route_tagged_config, start_dns_answer,
-    start_dns_script, unused_loopback, unused_tcp_udp_loopback, wait_for_bound, wait_for_listener,
-    wait_for_metrics, wait_for_metrics_sample, wait_for_tcp_udp_bound, write_client_config,
-    write_client_config_with_psk, write_tagged_client_config,
+    ChainRoot, ChildGuard, DnsReply, DnsStep, SYNTHETIC_PSK, TCP_METHOD_CONFIGS,
+    active_child_count, bind_loopback_listener, rewrite_config_method, route_tagged_config,
+    start_dns_answer, start_dns_script, unused_loopback, unused_tcp_udp_loopback, wait_for_bound,
+    wait_for_listener, wait_for_metrics, wait_for_metrics_sample, wait_for_tcp_udp_bound,
+    write_client_config, write_client_config_with_psk, write_tagged_client_config,
     write_tagged_dns_server_matrix_config, write_tagged_server_config,
     write_tcp_only_server_config, write_tcp_only_server_config_with_psk,
     write_two_hop_client_config,
@@ -211,6 +212,322 @@ fn assert_socks_domain_failure(client: SocketAddrV4, name: &str, port: u16) {
     match socks.read(&mut byte) {
         Ok(0) | Err(_) => {}
         Ok(read) => panic!("failed domain forwarded {read} application bytes"),
+    }
+}
+
+#[test]
+fn m14_server_tcp_sniff_routes_rejects_and_replays_prefix() {
+    const CLIENT_ZERO: &str =
+        "ferrum2_tcp_connections_active{role=\"client\",inbound=\"socks5\"} 0";
+    const SERVER_ZERO: &str =
+        "ferrum2_tcp_connections_active{role=\"server\",inbound=\"shadowsocks\"} 0";
+
+    let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
+    let baseline_children = active_child_count();
+    let directory = tempfile::tempdir().expect("M14 server TCP tempdir");
+    let server_address = unused_loopback();
+    let client_address = unused_loopback();
+    let client_metrics = unused_loopback();
+    let server_metrics = unused_loopback();
+    let (route_target, route_echo) = start_echo();
+    let (malformed_target, malformed_echo) = start_echo();
+    let rejected = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("rejected target");
+    rejected
+        .set_nonblocking(true)
+        .expect("rejected target nonblocking");
+    let rejected_target = match rejected.local_addr().expect("rejected target address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 rejected target"),
+    };
+    let server_config = directory.path().join("m14-server-tcp.toml");
+    std::fs::write(
+        &server_config,
+        format!(
+            "schema_version = 2\n\
+             [[inbounds]]\ntag = \"in\"\nlisten = \"{server_address}\"\n\
+             [[outbounds]]\ntag = \"direct\"\n\
+             [route]\nfinal = \"direct\"\n\
+             [route.sniff]\ntimeout_ms = 300\nmax_bytes = 8192\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"http\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nprotocol = \"http\"\ndomain = \"route.test\"\naction = \"route\"\noutbound = \"direct\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nprotocol = \"http\"\ndomain = \"reject.test\"\naction = \"reject\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nport = {}\naction = \"route\"\noutbound = \"direct\"\n\
+             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
+             [udp]\nenabled = false\n\
+             [metrics]\nlisten = \"{server_metrics}\"\n",
+            rejected_target.port(),
+        ),
+    )
+    .expect("M14 server TCP config");
+    let client_config = write_client_config(
+        directory.path(),
+        client_address,
+        server_address,
+        Some(client_metrics),
+    )
+    .expect("M14 server TCP client config");
+
+    let mut server =
+        ChildGuard::spawn_while_holding("ferrum2-server", &server_config, &_spawn_guard);
+    wait_for_listener(&mut server, server_address);
+    wait_for_metrics(server_metrics);
+    let mut client =
+        ChildGuard::spawn_while_holding("ferrum2-client", &client_config, &_spawn_guard);
+    wait_for_listener(&mut client, client_address);
+    wait_for_metrics(client_metrics);
+    drop(_spawn_guard);
+
+    let route_prefix = b"GET /route HTTP/1.1\r\nHost: route.test\r\n\r\nroute-body";
+    let (mut routed, reply) = socks_connect(client_address, route_target);
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    routed.write_all(route_prefix).expect("routed prefix");
+    routed.shutdown(Shutdown::Write).expect("routed half close");
+    let mut echoed = Vec::new();
+    routed.read_to_end(&mut echoed).expect("routed response");
+    assert_eq!(echoed, route_prefix);
+    assert_eq!(route_echo.join().expect("routed target"), route_prefix);
+
+    let (mut denied, reply) = socks_connect(client_address, rejected_target);
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    denied
+        .write_all(b"GET / HTTP/1.1\r\nHost: reject.test\r\n\r\n")
+        .expect("rejected prefix");
+    denied
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("rejected timeout");
+    assert!(matches!(denied.read(&mut [0_u8; 1]), Ok(0) | Err(_)));
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        matches!(rejected.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "terminal reject evaluated its later route"
+    );
+
+    let malformed_prefix = b"G@T / HTTP/1.1\r\nHost: malformed.test\r\n\r\n";
+    let (mut malformed, reply) = socks_connect(client_address, malformed_target);
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    malformed
+        .write_all(malformed_prefix)
+        .expect("malformed prefix");
+    malformed
+        .shutdown(Shutdown::Write)
+        .expect("malformed half close");
+    let mut echoed = Vec::new();
+    malformed
+        .read_to_end(&mut echoed)
+        .expect("malformed response");
+    assert_eq!(echoed, malformed_prefix);
+    assert_eq!(
+        malformed_echo.join().expect("malformed target"),
+        malformed_prefix
+    );
+    drop((routed, denied, malformed));
+
+    let client_body = wait_for_metrics_sample(client_metrics, CLIENT_ZERO);
+    let server_body = wait_for_metrics_sample(server_metrics, SERVER_ZERO);
+    for sentinel in ["route.test", "reject.test", "malformed.test", SYNTHETIC_PSK] {
+        for body in [&client_body, &server_body] {
+            assert!(
+                !body
+                    .windows(sentinel.len())
+                    .any(|window| window == sentinel.as_bytes()),
+                "metrics exposed M14 TCP identity"
+            );
+        }
+    }
+    let exits = [
+        client.terminate_and_reap_with_exit(Duration::from_secs(5)),
+        server.terminate_and_reap_with_exit(Duration::from_secs(5)),
+    ];
+    for exit in &exits {
+        exit.assert_stderr_excludes(&[
+            "route.test",
+            "reject.test",
+            "malformed.test",
+            SYNTHETIC_PSK,
+        ]);
+    }
+    let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline_children);
+    assert_eq!(active_child_count(), baseline_children);
+    drop(rejected);
+    for address in [
+        client_address,
+        server_address,
+        client_metrics,
+        server_metrics,
+        route_target,
+        malformed_target,
+        rejected_target,
+    ] {
+        drop(bind_loopback_listener(address).expect("M14 server TCP exact rebind"));
+    }
+}
+
+#[test]
+fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
+    const CLIENT_ONE: &str = "ferrum2_tcp_connections_active{role=\"client\",inbound=\"socks5\"} 1";
+
+    let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
+    let baseline_children = active_child_count();
+    let directory = tempfile::tempdir().expect("M14 client TCP tempdir");
+    let selected_name = "selected-hijack.test.";
+    let final_name = "final-hijack.test.";
+    let selected_dns = start_dns_script(vec![DnsStep {
+        record_type: RecordType::A,
+        reply: DnsReply::Addresses(vec![Ipv4Addr::new(127, 0, 0, 11)]),
+    }]);
+    let final_dns = start_dns_script(vec![DnsStep {
+        record_type: RecordType::A,
+        reply: DnsReply::Addresses(vec![Ipv4Addr::new(127, 0, 0, 12)]),
+    }]);
+    let dns_addresses = [selected_dns.address(), final_dns.address()];
+    let protected = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("protected upstream");
+    protected
+        .set_nonblocking(true)
+        .expect("protected upstream nonblocking");
+    let protected_address = match protected.local_addr().expect("protected upstream address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 protected upstream"),
+    };
+    let client_address = unused_loopback();
+    let dns_listen = unused_tcp_udp_loopback();
+    let metrics_address = unused_loopback();
+    let client_config = directory.path().join("m14-client-tcp-hijack.toml");
+    std::fs::write(
+        &client_config,
+        format!(
+            "schema_version = 2\n\
+             [[inbounds]]\ntag = \"in\"\nlisten = \"{client_address}\"\n\
+             [[outbounds]]\ntag = \"protected\"\nserver = \"{protected_address}\"\n\
+             [route]\nfinal = \"protected\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nport = 53\naction = \"hijack-dns\"\n\
+             [dns]\nmax_inflight = 4\n\
+             [[dns.inbounds]]\ntag = \"dedicated\"\nlisten = \"{dns_listen}\"\n\
+             [[dns.servers]]\ntag = \"selected\"\ntransport = \"udp\"\naddress = \"{}\"\n\
+             [[dns.servers]]\ntag = \"final\"\ntransport = \"udp\"\naddress = \"{}\"\n\
+             [dns.route]\nfinal = \"final\"\n\
+             [[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nqname = \"{selected_name}\"\nqtype = \"A\"\nserver = \"selected\"\n\
+             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
+             [udp]\nenabled = false\n\
+             [metrics]\nlisten = \"{metrics_address}\"\n",
+            dns_addresses[0], dns_addresses[1],
+        ),
+    )
+    .expect("M14 client TCP hijack config");
+    let checked = std::process::Command::new(local_support::binary_path("ferrum2-client"))
+        .args([
+            "--config",
+            client_config.to_str().expect("UTF-8 M14 client config"),
+        ])
+        .arg("--check-config")
+        .output()
+        .expect("M14 client config check process");
+    assert!(
+        checked.status.success(),
+        "M14 client config check: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let mut client =
+        ChildGuard::spawn_while_holding("ferrum2-client", &client_config, &_spawn_guard);
+    wait_for_listener(&mut client, client_address);
+    wait_for_tcp_udp_bound(&mut client, dns_listen);
+    wait_for_metrics(metrics_address);
+    drop(_spawn_guard);
+
+    let (mut hijacked, reply) =
+        socks_connect(client_address, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53));
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    for (id, name, answer) in [
+        (0x1403, selected_name, Ipv4Addr::new(127, 0, 0, 11)),
+        (0x1404, final_name, Ipv4Addr::new(127, 0, 0, 12)),
+    ] {
+        let mut query = Message::new(id, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(
+            Name::from_ascii(name).expect("M14 hijack DNS name"),
+            RecordType::A,
+        ));
+        let query = query.to_vec().expect("M14 hijack DNS query");
+        hijacked
+            .write_all(&(query.len() as u16).to_be_bytes())
+            .expect("M14 DNS frame length");
+        hijacked.write_all(&query).expect("M14 DNS frame");
+        let mut length = [0_u8; 2];
+        hijacked
+            .read_exact(&mut length)
+            .expect("M14 DNS response length");
+        let mut response = vec![0_u8; usize::from(u16::from_be_bytes(length))];
+        hijacked
+            .read_exact(&mut response)
+            .expect("M14 DNS response");
+        let response = Message::from_vec(&response).expect("M14 typed DNS response");
+        assert_eq!(response.id, id);
+        assert!(
+            response
+                .answers
+                .iter()
+                .any(|record| matches!(&record.data, RData::A(address) if address.0 == answer))
+        );
+    }
+    drop(hijacked);
+    assert_eq!(selected_dns.join(), [RecordType::A]);
+    assert_eq!(final_dns.join(), [RecordType::A]);
+
+    let (mut malformed, reply) =
+        socks_connect(client_address, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53));
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    malformed
+        .write_all(&[0, 3, b'b', b'a', b'd'])
+        .expect("malformed hijack frame");
+    malformed
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("malformed hijack timeout");
+    assert!(matches!(malformed.read(&mut [0_u8; 1]), Ok(0) | Err(_)));
+    drop(malformed);
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        matches!(protected.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "terminal DNS hijack fell back to its later outbound"
+    );
+
+    thread::sleep(Duration::from_millis(100));
+    let metrics = wait_for_metrics(metrics_address);
+    assert!(
+        !metrics
+            .windows(CLIENT_ONE.len())
+            .any(|window| window == CLIENT_ONE.as_bytes()),
+        "hijacked TCP owner did not reap"
+    );
+    for sentinel in [
+        selected_name,
+        final_name,
+        "selected",
+        "final",
+        SYNTHETIC_PSK,
+    ] {
+        assert!(
+            !metrics
+                .windows(sentinel.len())
+                .any(|window| window == sentinel.as_bytes()),
+            "metrics exposed M14 DNS hijack identity"
+        );
+    }
+    let exit = client.terminate_and_reap_with_exit(Duration::from_secs(5));
+    exit.assert_stderr_excludes(&[
+        selected_name,
+        final_name,
+        "selected",
+        "final",
+        SYNTHETIC_PSK,
+    ]);
+    let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline_children);
+    assert_eq!(active_child_count(), baseline_children);
+    drop(protected);
+    for address in [client_address, metrics_address, protected_address] {
+        drop(bind_loopback_listener(address).expect("M14 client TCP exact rebind"));
+    }
+    drop(bind_loopback_listener(dns_listen).expect("M14 DNS TCP exact rebind"));
+    drop(UdpSocket::bind(dns_listen).expect("M14 DNS UDP exact rebind"));
+    for address in dns_addresses {
+        drop(UdpSocket::bind(address).expect("M14 hijack DNS exact rebind"));
     }
 }
 

@@ -13,6 +13,33 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::thread;
 use std::time::Duration;
 
+#[test]
+fn m14_performance_profile_extends_the_existing_resource_driver() {
+    let driver = include_str!("../../../tools/ferrum2-m4-qualification/src/m4_support/mod.rs");
+    for phase in [
+        "legacy-no-sniff-tcp",
+        "legacy-no-sniff-udp",
+        "64-rule",
+        "server-http-sniff",
+        "association-route-once",
+        "client-tcp-dns-hijack",
+        "client-udp-dns-hijack",
+        "resource-owners",
+    ] {
+        assert!(driver.contains(phase), "missing M14 measurement {phase}");
+    }
+    let resource = driver
+        .split_once("fn run_resource(")
+        .expect("existing resource driver")
+        .1
+        .split_once("fn run_dns_resource(")
+        .expect("resource driver end")
+        .0;
+    assert!(resource.contains("run_m14_measurements("));
+    assert!(!driver.contains("m14-threshold"));
+    assert!(!driver.contains("m14-improvement"));
+}
+
 #[derive(Default)]
 struct FakeOps {
     fail_provision: Option<Reference>,
