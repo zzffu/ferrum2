@@ -10,13 +10,15 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
+use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::rr::{Name, RData, RecordType};
 use local_support::{
-    ChainRoot, ChildGuard, TCP_METHOD_CONFIGS, active_child_count, bind_loopback_listener,
-    rewrite_config_method, unused_loopback, unused_tcp_udp_loopback, wait_for_bound,
-    wait_for_listener, wait_for_metrics, wait_for_metrics_sample, wait_for_tcp_udp_bound,
-    write_client_config, write_server_config, write_server_config_with_psk,
-    write_tagged_client_config, write_tagged_server_config, write_two_hop_client_config,
-    write_udp_client_config,
+    ChainRoot, ChildGuard, DnsReply, DnsStep, SYNTHETIC_PSK, TCP_METHOD_CONFIGS,
+    active_child_count, bind_loopback_listener, metric_value, rewrite_config_method,
+    start_dns_script, unused_loopback, unused_tcp_udp_loopback, wait_for_bound, wait_for_listener,
+    wait_for_metrics, wait_for_metrics_sample, wait_for_tcp_udp_bound, write_client_config,
+    write_server_config, write_server_config_with_psk, write_tagged_client_config,
+    write_tagged_server_config, write_two_hop_client_config, write_udp_client_config,
 };
 use socket2::SockRef;
 
@@ -215,6 +217,298 @@ fn wait_udp_rebind(address: SocketAddrV4, label: &str) {
             }
             Err(error) => panic!("{label}: {error}"),
         }
+    }
+}
+
+#[test]
+fn m14_client_udp_association_actions_route_once_and_reap() {
+    const CLIENT_ZERO_SESSIONS: &str = "ferrum2_udp_sessions_active{role=\"client\"} 0";
+    const CLIENT_ZERO_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 0";
+    const CLIENT_ACCEPTED: &str = "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"accepted\"}";
+    const CLIENT_ACCEPTED_ONE: &str = "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"accepted\"} 1";
+    const CLIENT_REJECTED_ONE: &str = "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"rejected\"} 1";
+    const CLIENT_REJECTED_TWO: &str = "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"rejected\"} 2";
+    const SERVER_ZERO_SESSIONS: &str = "ferrum2_udp_sessions_active{role=\"server\"} 0";
+    const SERVER_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"server\"}";
+    const SERVER_ACCEPTED: &str = "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"accepted\"}";
+    const SERVER_ACCEPTED_TWO: &str = "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"accepted\"} 2";
+
+    let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
+    let baseline_children = active_child_count();
+    let directory = tempfile::tempdir().expect("M14 client UDP tempdir");
+    let route_first = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("first route target");
+    let route_later = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("later route target");
+    let address = |socket: &UdpSocket| match socket.local_addr().expect("UDP target address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 M14 UDP target"),
+    };
+    let route_first_address = address(&route_first);
+    let route_later_address = address(&route_later);
+    let first_echo = echo_datagrams(route_first, 1);
+    let later_echo = echo_datagrams(route_later, 1);
+    let rejected_target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("rejected UDP target");
+    let rejected_address = address(&rejected_target);
+    let hijack_fallback =
+        UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("hijack fallback target");
+    let hijack_fallback_address = address(&hijack_fallback);
+    let unselected_server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("unselected server");
+    let unselected_server_address = address(&unselected_server);
+    let dns_upstream = start_dns_script(vec![DnsStep {
+        record_type: RecordType::A,
+        reply: DnsReply::Addresses(vec![Ipv4Addr::new(127, 0, 0, 14)]),
+    }]);
+    let dns_upstream_address = dns_upstream.address();
+
+    let selected_server = unused_tcp_udp_loopback();
+    let client_address = unused_loopback();
+    let dns_listen = unused_tcp_udp_loopback();
+    let client_metrics = unused_loopback();
+    let server_metrics = unused_loopback();
+    let server_config =
+        write_server_config(directory.path(), selected_server, Some(server_metrics))
+            .expect("M14 selected server config");
+    let client_config = directory.path().join("m14-client-udp.toml");
+    std::fs::write(
+        &client_config,
+        format!(
+            "schema_version = 2\n\
+             [[inbounds]]\ntag = \"in\"\nlisten = \"{client_address}\"\n\
+             [[outbounds]]\ntag = \"selected\"\nserver = \"{selected_server}\"\n\
+             [[outbounds]]\ntag = \"unselected\"\nserver = \"{unselected_server_address}\"\n\
+             [[selectors]]\ntag = \"manual\"\noutbounds = [\"selected\", \"unselected\"]\ndefault = \"selected\"\n\
+             [route]\nfinal = \"unselected\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"manual\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"unselected\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"reject\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\naction = \"sniff\"\nsniffers = \"dns\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\nprotocol = \"dns\"\naction = \"hijack-dns\"\n\
+             [dns]\nmax_inflight = 4\n\
+             [[dns.inbounds]]\ntag = \"dedicated\"\nlisten = \"{dns_listen}\"\n\
+             [[dns.servers]]\ntag = \"dns\"\ntransport = \"udp\"\naddress = \"{dns_upstream_address}\"\n\
+             [dns.route]\nfinal = \"dns\"\n\
+             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
+             [udp]\nmax_sessions = 8\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n\
+             [metrics]\nlisten = \"{client_metrics}\"\n",
+            route_first_address.ip(),
+            route_first_address.port(),
+            route_later_address.ip(),
+            route_later_address.port(),
+            rejected_address.ip(),
+            rejected_address.port(),
+        ),
+    )
+    .expect("M14 client UDP config");
+    let checked = std::process::Command::new(local_support::binary_path("ferrum2-client"))
+        .args([
+            "--config",
+            client_config.to_str().expect("UTF-8 M14 UDP config"),
+        ])
+        .arg("--check-config")
+        .output()
+        .expect("M14 client UDP config check process");
+    assert!(
+        checked.status.success(),
+        "M14 client UDP config check: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+
+    let mut server =
+        ChildGuard::spawn_while_holding("ferrum2-server", &server_config, &_spawn_guard);
+    wait_for_tcp_udp_bound(&mut server, selected_server);
+    wait_for_metrics(server_metrics);
+    let mut client =
+        ChildGuard::spawn_while_holding("ferrum2-client", &client_config, &_spawn_guard);
+    wait_for_listener(&mut client, client_address);
+    wait_for_tcp_udp_bound(&mut client, dns_listen);
+    wait_for_metrics(client_metrics);
+    drop(_spawn_guard);
+
+    let (route_control, route_application, route_relay) = udp_associate(client_address, false);
+    let mut fragmented = socks_datagram(route_first_address, b"invalid-first");
+    fragmented[2] = 1;
+    route_application
+        .send_to(&fragmented, route_relay)
+        .expect("fragmented first datagram");
+    assert_no_datagram(&route_application);
+    let before_zero_port = wait_for_metrics_sample(client_metrics, CLIENT_REJECTED_ONE);
+    for owner in [CLIENT_ZERO_SESSIONS, CLIENT_ZERO_BUFFER] {
+        assert!(
+            before_zero_port
+                .windows(owner.len())
+                .any(|window| window == owner.as_bytes())
+        );
+    }
+    assert_eq!(
+        metric_value(&before_zero_port, CLIENT_ACCEPTED).unwrap_or(0),
+        0
+    );
+    let before_server = wait_for_metrics_sample(server_metrics, SERVER_ZERO_SESSIONS);
+    let server_buffer_before = metric_value(&before_server, SERVER_BUFFER).expect("server buffer");
+    let server_accepted_before = metric_value(&before_server, SERVER_ACCEPTED).unwrap_or(0);
+    assert_eq!(server_accepted_before, 0);
+    let zero_port = socks_datagram(
+        SocketAddrV4::new(*route_first_address.ip(), 0),
+        b"invalid-zero-port",
+    );
+    route_application
+        .send_to(&zero_port, route_relay)
+        .expect("zero-port first datagram");
+    assert_no_datagram(&route_application);
+    let after_zero_port = wait_for_metrics_sample(client_metrics, CLIENT_REJECTED_TWO);
+    for owner in [CLIENT_ZERO_SESSIONS, CLIENT_ZERO_BUFFER] {
+        assert!(
+            after_zero_port
+                .windows(owner.len())
+                .any(|window| window == owner.as_bytes())
+        );
+    }
+    let after_server = wait_for_metrics(server_metrics);
+    assert!(
+        after_server
+            .windows(SERVER_ZERO_SESSIONS.len())
+            .any(|window| window == SERVER_ZERO_SESSIONS.as_bytes())
+    );
+    assert_eq!(
+        metric_value(&after_server, SERVER_BUFFER),
+        Some(server_buffer_before),
+        "zero-port datagram changed server buffer ownership"
+    );
+    assert_eq!(
+        metric_value(&after_server, SERVER_ACCEPTED).unwrap_or(0),
+        server_accepted_before,
+        "zero-port datagram reached the server upstream"
+    );
+    assert_eq!(
+        metric_value(&after_zero_port, CLIENT_ACCEPTED).unwrap_or(0),
+        0
+    );
+    round_trip(
+        &route_application,
+        route_relay,
+        &target_wire(SocketAddr::V4(route_first_address)),
+        &target_wire(SocketAddr::V4(route_first_address)),
+        b"first-route",
+    );
+    let after_first_route = wait_for_metrics_sample(client_metrics, CLIENT_ACCEPTED_ONE);
+    assert_eq!(metric_value(&after_first_route, CLIENT_ACCEPTED), Some(1));
+    round_trip(
+        &route_application,
+        route_relay,
+        &target_wire(SocketAddr::V4(route_later_address)),
+        &target_wire(SocketAddr::V4(route_later_address)),
+        b"later-target-same-outbound",
+    );
+    first_echo.join().expect("first route echo");
+    later_echo.join().expect("later route echo");
+    assert_no_datagram(&unselected_server);
+    drop((route_application, route_control));
+
+    let (hijack_control, hijack_application, hijack_relay) = udp_associate(client_address, false);
+    let mut query = Message::new(0x1405, MessageType::Query, OpCode::Query);
+    query.add_query(Query::query(
+        Name::from_ascii("hijack-association.test.").expect("M14 UDP DNS name"),
+        RecordType::A,
+    ));
+    let query = query.to_vec().expect("M14 UDP DNS query");
+    let dns_target = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53);
+    let request = socks_datagram(dns_target, &query);
+    hijack_application
+        .send_to(&request, hijack_relay)
+        .expect("M14 hijack datagram");
+    let mut response = [0_u8; 65_507];
+    let (length, source) = hijack_application
+        .recv_from(&mut response)
+        .expect("M14 hijack response");
+    assert_eq!(source, SocketAddr::V4(hijack_relay));
+    let prefix = socks_datagram(dns_target, &[]);
+    assert_eq!(&response[..prefix.len()], prefix);
+    let response =
+        Message::from_vec(&response[prefix.len()..length]).expect("typed hijack response");
+    assert_eq!(response.id, 0x1405);
+    assert!(response.answers.iter().any(|record| {
+        matches!(&record.data, RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 14))
+    }));
+    let later_non_dns = socks_datagram(hijack_fallback_address, b"not-dns");
+    hijack_application
+        .send_to(&later_non_dns, hijack_relay)
+        .expect("later non-DNS hijack datagram");
+    assert_no_datagram(&hijack_application);
+    assert_no_datagram(&hijack_fallback);
+    drop((hijack_application, hijack_control));
+    assert_eq!(dns_upstream.join(), [RecordType::A]);
+
+    let (reject_control, reject_application, reject_relay) = udp_associate(client_address, false);
+    let rejected = socks_datagram(rejected_address, b"reject-association");
+    reject_application
+        .send_to(&rejected, reject_relay)
+        .expect("M14 rejected datagram");
+    assert_no_datagram(&reject_application);
+    assert_no_datagram(&rejected_target);
+    drop((reject_application, reject_control));
+
+    let client_body = wait_for_metrics_sample(client_metrics, CLIENT_ZERO_SESSIONS);
+    let client_body = if client_body
+        .windows(CLIENT_ZERO_BUFFER.len())
+        .any(|window| window == CLIENT_ZERO_BUFFER.as_bytes())
+    {
+        client_body
+    } else {
+        wait_for_metrics_sample(client_metrics, CLIENT_ZERO_BUFFER)
+    };
+    let server_body = wait_for_metrics_sample(server_metrics, SERVER_ACCEPTED_TWO);
+    for sentinel in [
+        "hijack-association.test",
+        "selected",
+        "unselected",
+        "manual",
+        SYNTHETIC_PSK,
+    ] {
+        for body in [&client_body, &server_body] {
+            assert!(
+                !body
+                    .windows(sentinel.len())
+                    .any(|window| window == sentinel.as_bytes()),
+                "M14 UDP metrics exposed identity"
+            );
+        }
+    }
+    let exits = [
+        client.terminate_and_reap_with_exit(Duration::from_secs(5)),
+        server.terminate_and_reap_with_exit(Duration::from_secs(5)),
+    ];
+    for exit in &exits {
+        exit.assert_stderr_excludes(&[
+            "hijack-association.test",
+            "selected",
+            "unselected",
+            "manual",
+            SYNTHETIC_PSK,
+        ]);
+    }
+    let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline_children);
+    assert_eq!(active_child_count(), baseline_children);
+
+    drop((unselected_server, rejected_target, hijack_fallback));
+    for relay in [route_relay, hijack_relay, reject_relay] {
+        wait_udp_rebind(relay, "M14 association relay exact rebind");
+    }
+    for address in [
+        route_first_address,
+        route_later_address,
+        rejected_address,
+        hijack_fallback_address,
+        unselected_server_address,
+        dns_upstream_address,
+    ] {
+        drop(UdpSocket::bind(address).expect("M14 UDP endpoint exact rebind"));
+    }
+    drop(bind_loopback_listener(client_address).expect("M14 client exact rebind"));
+    drop(bind_loopback_listener(selected_server).expect("M14 server TCP exact rebind"));
+    drop(UdpSocket::bind(selected_server).expect("M14 server UDP exact rebind"));
+    drop(bind_loopback_listener(dns_listen).expect("M14 DNS TCP exact rebind"));
+    drop(UdpSocket::bind(dns_listen).expect("M14 DNS UDP exact rebind"));
+    for metrics in [client_metrics, server_metrics] {
+        drop(bind_loopback_listener(metrics).expect("M14 UDP metrics exact rebind"));
     }
 }
 

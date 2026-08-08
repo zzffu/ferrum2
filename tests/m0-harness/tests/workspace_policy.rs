@@ -1880,6 +1880,18 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
                 "registry": null
             },
             {
+                "name": "rustls",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
+                "req": "=0.23.43",
+                "kind": null,
+                "rename": null,
+                "optional": false,
+                "uses_default_features": false,
+                "features": ["ring", "std", "tls12"],
+                "target": null,
+                "registry": null
+            },
+            {
                 "name": "socket2",
                 "source": "registry+https://github.com/rust-lang/crates.io-index",
                 "req": "=0.6.5",
@@ -1926,6 +1938,7 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
         dependency_table(&manifest, "[dependencies]").expect("M4 dependencies"),
         BTreeMap::from([
             ("hickory-proto.workspace".to_owned(), "true".to_owned()),
+            ("rustls.workspace".to_owned(), "true".to_owned()),
             ("socket2.workspace".to_owned(), "true".to_owned()),
             ("tempfile.workspace".to_owned(), "true".to_owned()),
         ])
@@ -1935,6 +1948,7 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
         lock_package_dependencies(&lock, "ferrum2-m4-qualification").expect("M4 lock dependencies"),
         BTreeSet::from([
             "hickory-proto".to_owned(),
+            "rustls".to_owned(),
             "socket2".to_owned(),
             "tempfile".to_owned(),
         ])

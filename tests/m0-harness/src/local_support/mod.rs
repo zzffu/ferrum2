@@ -748,7 +748,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-fn metric_value(body: &[u8], metric: &str) -> Option<u64> {
+pub(crate) fn metric_value(body: &[u8], metric: &str) -> Option<u64> {
     let body = std::str::from_utf8(body).ok()?;
     body.lines().find_map(|line| {
         let (name, value) = line.rsplit_once(' ')?;

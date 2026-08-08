@@ -701,6 +701,44 @@ fn current_deep_modules_keep_one_way_internal_dependencies() {
         fs::read_to_string(root.join("crates/ferrum2-dns/src/lib.rs")).expect("DNS public module");
     assert!(public.contains("DnsUpstreamSpec"));
 
+    let core_manifest =
+        fs::read_to_string(root.join("crates/ferrum2-core/Cargo.toml")).expect("core manifest");
+    let sniff_manifest =
+        fs::read_to_string(root.join("crates/ferrum2-sniff/Cargo.toml")).expect("sniff manifest");
+    let check_parser_direction = |core: &str, sniff: &str| -> Result<(), &'static str> {
+        if core.contains("ferrum2-sniff")
+            || [
+                "ferrum2-config",
+                "ferrum2-runtime",
+                "ferrum2-client",
+                "ferrum2-server",
+            ]
+            .iter()
+            .any(|dependency| sniff.contains(dependency))
+        {
+            return Err("parser dependency direction inverted");
+        }
+        Ok(())
+    };
+    check_parser_direction(&core_manifest, &sniff_manifest)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        check_parser_direction(
+            &(core_manifest.clone() + "\nferrum2-sniff.workspace = true\n"),
+            &sniff_manifest,
+        )
+        .is_err(),
+        "core-to-parser dependency mutation survived"
+    );
+    assert!(
+        check_parser_direction(
+            &core_manifest,
+            &(sniff_manifest.clone() + "\nferrum2-config.workspace = true\n"),
+        )
+        .is_err(),
+        "parser-to-composition dependency mutation survived"
+    );
+
     let sniff = token_sources_under(&root, &["crates/ferrum2-sniff/src"]);
     check_no_identifiers(
         &sniff,
@@ -1121,8 +1159,49 @@ fn ordered_route_program_is_protocol_neutral_and_the_only_ordinary_engine() {
         "Dns,DNS,Tls,TLS,Http,HTTP,Sniff,sniff,Hijack,hijack,tokio,ferrum2_config,ferrum2_runtime"
             .split(',')
             .collect();
-    check_no_identifiers([route], &concrete)
+    let core_sources = token_sources_under(&root, &["crates/ferrum2-core/src"]);
+    check_no_identifiers(&core_sources, &concrete)
         .unwrap_or_else(|error| panic!("core route owns concrete vocabulary: {error}"));
+    let mut concrete_mutation = token_sources_under(&root, &["crates/ferrum2-core/src"]);
+    concrete_mutation.push(TokenSource::new(
+        "crates/ferrum2-core/src/concrete_protocol.rs",
+        "struct Http;",
+    ));
+    assert!(
+        check_no_identifiers(&concrete_mutation, &concrete).is_err(),
+        "concrete protocol in another core module mutation survived"
+    );
+    let duplicate_route = [
+        TokenSource::new(
+            "crates/ferrum2-core/src/route.rs",
+            &fs::read_to_string(root.join("crates/ferrum2-core/src/route.rs"))
+                .expect("core route owner"),
+        ),
+        TokenSource::new(
+            "crates/ferrum2-core/src/route_duplicate.rs",
+            "struct OrderedRouteProgram; struct RouteProgramEvaluation;",
+        ),
+    ];
+    assert!(
+        check_definition_ownership(
+            &duplicate_route,
+            &[
+                (
+                    "struct",
+                    "OrderedRouteProgram",
+                    "crates/ferrum2-core/src/route.rs",
+                ),
+                (
+                    "struct",
+                    "RouteProgramEvaluation",
+                    "crates/ferrum2-core/src/route.rs",
+                ),
+            ],
+            &[],
+        )
+        .is_err(),
+        "second ordinary route owner mutation survived"
+    );
     check_no_sequences(
         [route],
         &[
@@ -1138,28 +1217,44 @@ fn ordered_route_program_is_protocol_neutral_and_the_only_ordinary_engine() {
         &fs::read_to_string(root.join("crates/ferrum2-config/src/validation.rs"))
             .expect("config validation"),
     );
+    let validation = validation
+        .production_tokens()
+        .expect("config production tokens");
+    let empty_server_plans = [
+        "selectors",
+        ".",
+        "as_deref",
+        "(",
+        ")",
+        ",",
+        "&",
+        "[",
+        "]",
+        ",",
+        "detour_tags",
+        ",",
+        "source",
+    ];
+    let check_server_scalar = |tokens: &[String]| {
+        has_tokens(tokens, &empty_server_plans)
+            .then_some(())
+            .ok_or("server scalar route compilation accepted a multi-hop plan input")
+    };
+    check_server_scalar(validation).unwrap_or_else(|error| panic!("{error}"));
+    let mut multi_hop_server = validation.to_vec();
+    let empty = multi_hop_server
+        .windows(empty_server_plans.len())
+        .position(|window| {
+            window
+                .iter()
+                .map(String::as_str)
+                .eq(empty_server_plans.iter().copied())
+        })
+        .expect("server empty plan input");
+    multi_hop_server[empty + 7] = "plans".to_owned();
     assert!(
-        has_tokens(
-            validation
-                .production_tokens()
-                .expect("config production tokens"),
-            &[
-                "selectors",
-                ".",
-                "as_deref",
-                "(",
-                ")",
-                ",",
-                "&",
-                "[",
-                "]",
-                ",",
-                "detour_tags",
-                ",",
-                "source",
-            ],
-        ),
-        "server scalar route compilation must receive no multi-hop plans"
+        check_server_scalar(&multi_hop_server).is_err(),
+        "server multi-hop scalar selection mutation survived"
     );
 }
 
@@ -1644,6 +1739,7 @@ fn client_socks_owns_one_terminal_route_and_one_plan_udp_association() {
         for forbidden in [
             "select_terminal",
             "select_plan_snapshot",
+            "selector_control",
             "evaluate",
             "program",
             "legacy",
@@ -1651,6 +1747,18 @@ fn client_socks_owns_one_terminal_route_and_one_plan_udp_association() {
         ] {
             if body.iter().any(|token| token == forbidden) {
                 return Err("established UDP association re-entered route state");
+            }
+        }
+        for field in [
+            "plan",
+            "protocol",
+            "pending_session",
+            "upstream",
+            "inner_wire",
+            "upstream_wire",
+        ] {
+            if has_tokens(body, &["prepared", ".", field]) {
+                return Err("SOCKS owner reached through a client UDP field");
             }
         }
         Ok(())
@@ -1670,6 +1778,12 @@ fn client_socks_owns_one_terminal_route_and_one_plan_udp_association() {
             "post-classification route mutation survived: {helper}"
         );
     }
+    let mut reach_through = item_body(socks, &["async", "fn", "forward_udp_request"]).to_vec();
+    reach_through.extend(["prepared", ".", "plan"].map(str::to_owned));
+    assert!(
+        check_post_classification(&reach_through).is_err(),
+        "client UDP field reach-through mutation survived"
+    );
 
     let manifest =
         fs::read_to_string(root.join("bins/ferrum2-client/Cargo.toml")).expect("client manifest");
@@ -2369,6 +2483,41 @@ fn runtime_and_library_owners_are_unique_and_composition_only() {
         "crates/ferrum2-core/src/lib.rs",
     ];
     check_definition_ownership(&sources, &rules, &roots).unwrap_or_else(|error| panic!("{error}"));
+    for (label, keyword, name, owner, duplicate) in [
+        (
+            "DNS",
+            "struct",
+            "DnsProxy",
+            "crates/ferrum2-dns/src/proxy.rs",
+            "crates/ferrum2-dns/src/duplicate_proxy.rs",
+        ),
+        (
+            "SIP022",
+            "struct",
+            "ShadowsocksTcpInbound",
+            "crates/ferrum2-shadowsocks/src/lib.rs",
+            "crates/ferrum2-shadowsocks/src/duplicate_tcp.rs",
+        ),
+        (
+            "SIP022 UDP",
+            "struct",
+            "UdpServer",
+            "crates/ferrum2-shadowsocks/src/udp.rs",
+            "crates/ferrum2-shadowsocks/src/duplicate_udp.rs",
+        ),
+    ] {
+        let mutation = [
+            TokenSource::new(
+                owner,
+                &fs::read_to_string(root.join(owner)).expect("protocol owner source"),
+            ),
+            TokenSource::new(duplicate, &format!("{keyword} {name};")),
+        ];
+        assert!(
+            check_definition_ownership(&mutation, &[(keyword, name, owner)], &[]).is_err(),
+            "second {label} implementation mutation survived"
+        );
+    }
 
     check_no_identifiers(&sources, &["unsafe", "PlanSnapshot"])
         .unwrap_or_else(|error| panic!("product source changes unsafe/plan ownership: {error}"));

@@ -13,6 +13,54 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::thread;
 use std::time::Duration;
 
+#[test]
+fn m14_performance_profile_extends_the_existing_resource_driver() {
+    let driver = include_str!("../../../tools/ferrum2-m4-qualification/src/m4_support/mod.rs");
+    for phase in [
+        "legacy-no-sniff-tcp",
+        "legacy-no-sniff-udp",
+        "schema-v1-routed-udp-rejection",
+        "64-rule",
+        "server-tls-sniff",
+        "server-http-sniff",
+        "association-route-once",
+        "client-tcp-dns-hijack",
+        "client-udp-dns-hijack",
+        "resource-owners",
+    ] {
+        assert!(driver.contains(phase), "missing M14 measurement {phase}");
+    }
+    let resource = driver
+        .split_once("fn run_resource(")
+        .expect("existing resource driver")
+        .1
+        .split_once("fn run_dns_resource(")
+        .expect("resource driver end")
+        .0;
+    assert!(resource.contains("run_m14_measurements("));
+    assert!(driver.contains("m14_tls_client_hello"));
+    assert!(driver.contains("rustls::server::Acceptor::default()"));
+    assert!(driver.contains("&[0x16, 0x03, 0x03, 0, 0]"));
+    assert!(driver.contains("invalid M14 TLS ClientHello"));
+    assert!(!driver.contains("tls_client_hello.is_empty()"));
+    assert!(!driver.contains("empty M14 TLS ClientHello"));
+    assert!(driver.contains("action = \\\"reject\\\""));
+    for mutation in [
+        "missing M14 migration phase",
+        "invalid M14 TLS ClientHello",
+        "non-distinguishing M14 terminal oracle",
+    ] {
+        assert!(
+            driver.contains(mutation),
+            "missing self-check mutation {mutation}"
+        );
+    }
+    let manifest = include_str!("../../../tools/ferrum2-m4-qualification/Cargo.toml");
+    assert!(manifest.contains("rustls.workspace = true"));
+    assert!(!driver.contains("m14-threshold"));
+    assert!(!driver.contains("m14-improvement"));
+}
+
 #[derive(Default)]
 struct FakeOps {
     fail_provision: Option<Reference>,
