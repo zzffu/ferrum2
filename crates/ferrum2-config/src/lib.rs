@@ -15,6 +15,8 @@ const DEFAULT_UDP_MAX_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_UDP_IDLE_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_DNS_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_DNS_MAX_INFLIGHT: u32 = 256;
+const DEFAULT_ROUTE_SNIFF_TIMEOUT_MS: u64 = 300;
+const DEFAULT_ROUTE_SNIFF_MAX_BYTES: usize = 8_192;
 
 mod error;
 mod load;
@@ -25,8 +27,9 @@ mod validation;
 pub use error::{ConfigError, ConfigErrorKind, ConfigField};
 pub use load::{load_client, load_server};
 pub use model::{
-    ClientInboundConfig, ClientOutboundConfig, DnsConfig, DnsInboundConfig, DnsServerConfig,
-    DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig, ReplayConfig, RuntimeConfig,
-    ServerInboundConfig, ServerOutboundConfig, UdpConfig, ValidatedClientConfig,
-    ValidatedServerConfig,
+    ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, CompiledRoute, DnsConfig,
+    DnsInboundConfig, DnsIngressId, DnsQueryType, DnsServerConfig, DnsTransport, LoggingConfig,
+    LoggingLevel, MetricsConfig, ReplayConfig, RouteAction, RouteProtocol, RouteSniffConfig,
+    RuntimeConfig, SchemaVersion, ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig,
+    Sniffers, UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
 };

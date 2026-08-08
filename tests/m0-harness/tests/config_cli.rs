@@ -179,6 +179,86 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
 }
 
 #[test]
+fn schema_v2_check_succeeds_but_run_fails_before_runtime_resources() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let (client_listener, client_address) = reserve_loopback();
+    let (server_listener, server_udp, server_address) = reserve_server_tcp_udp();
+    let cases = [
+        (
+            "ferrum2-client",
+            CLIENT_BASE
+                .replacen("schema_version = 1", "schema_version = 2", 1)
+                .replace("127.0.0.1:1080", &client_address.to_string())
+                .replace("127.0.0.1:8388", &server_address.to_string()),
+        ),
+        (
+            "ferrum2-server",
+            SERVER_BASE
+                .replacen("schema_version = 1", "schema_version = 2", 1)
+                .replace("127.0.0.1:8388", &server_address.to_string()),
+        ),
+    ];
+    for (binary, source) in cases {
+        let path = directory.path().join(format!("{binary}-v2.toml"));
+        std::fs::write(&path, source).expect("schema v2 config");
+        let checked = run_binary(
+            binary,
+            &[
+                "--config",
+                path.to_str().expect("UTF-8 path"),
+                "--check-config",
+            ],
+        );
+        assert_eq!(checked.status.code(), Some(0), "{binary}");
+        assert_eq!(checked.stdout, b"configuration valid\n", "{binary}");
+        assert!(checked.stderr.is_empty(), "{binary}");
+
+        let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
+        assert_eq!(run.status.code(), Some(1), "{binary}");
+        assert!(run.stdout.is_empty(), "{binary}");
+        assert_eq!(
+            run.stderr, b"error[startup.protocol] process: unable to prepare protocol resources\n",
+            "{binary}"
+        );
+    }
+
+    let migration_path = directory.path().join("client-v1-routed-udp.toml");
+    let migration = routed_tagged(tagged_client(
+        &[client_address],
+        &[server_address, unused_loopback()],
+    )) + "[udp]\nenabled = true\n";
+    std::fs::write(&migration_path, migration).expect("migration config");
+    for arguments in [
+        vec![
+            "--config",
+            migration_path.to_str().expect("UTF-8 path"),
+            "--check-config",
+        ],
+        vec!["--config", migration_path.to_str().expect("UTF-8 path")],
+    ] {
+        let output = run_binary("ferrum2-client", &arguments);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr,
+            b"error[config.semantic] schema_version: configuration value is invalid\n"
+        );
+    }
+
+    for listener in [client_listener, server_listener] {
+        let address = listener.local_addr().expect("listener address");
+        assert!(
+            TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1)).is_ok(),
+            "pre-existing listener was disturbed"
+        );
+    }
+    assert_eq!(
+        server_udp.local_addr().expect("UDP address"),
+        std::net::SocketAddr::V4(server_address)
+    );
+}
+
+#[test]
 fn invalid_matrix_is_redacted_and_uses_exit_two() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let sentinel = "M0_PROCESS_SECRET_SENTINEL";
@@ -293,10 +373,7 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
             .join(format!("{}.toml", label.replace(' ', "-")));
         std::fs::write(&path, source).expect("invalid config");
         let expected = semantic_field.map_or_else(
-            || {
-                "error[config.syntax] config: configuration is not valid schema version 1 TOML\n"
-                    .to_owned()
-            },
+            || "error[config.syntax] config: configuration is not valid TOML\n".to_owned(),
             |field| format!("error[config.semantic] {field}: configuration value is invalid\n"),
         );
         assert_invalid(binary, &path, &expected, sentinel);
@@ -307,7 +384,7 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
     assert_invalid(
         "ferrum2-client",
         &syntax_path,
-        "error[config.syntax] config: configuration is not valid schema version 1 TOML\n",
+        "error[config.syntax] config: configuration is not valid TOML\n",
         sentinel,
     );
 

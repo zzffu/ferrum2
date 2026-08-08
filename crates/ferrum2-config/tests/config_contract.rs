@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ferrum2_config::{
-    ConfigErrorKind, ConfigField, DnsTransport, LoggingLevel, MAX_CONFIG_BYTES, RuntimeConfig,
+    ConfigErrorKind, ConfigField, DnsIngressId, DnsQueryType, DnsTransport, LoggingLevel,
+    MAX_CONFIG_BYTES, RouteAction, RouteProtocol, RuntimeConfig, SchemaVersion, Sniffers,
     load_client, load_server,
 };
 use ferrum2_core::TargetAddr;
-use ferrum2_core::route::{Network, RouteTable};
+use ferrum2_core::route::{Network, RouteMetadata, RouteProgramAction, RouteTable};
 use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
 
 fn fixture(name: &str) -> PathBuf {
@@ -128,7 +129,7 @@ fn assert_tagged_error(
     let values = source
         .lines()
         .flat_map(|line| line.split('"').skip(1).step_by(2))
-        .filter(|value| value.len() >= 2);
+        .filter(|value| value.len() >= 2 && !expected.1.as_str().contains(value));
     for sentinel in std::iter::once(raw.as_str())
         .chain(target_host.as_deref())
         .chain(values)
@@ -737,6 +738,256 @@ fn routed_graph_compiles_resolved_first_match_tables_for_both_roles() {
 }
 
 #[test]
+fn schema_v2_compiles_ordered_route_actions_on_the_shared_selector_graph() {
+    let source = with_selectors(
+        routed(
+            tagged_client(1, 2).replacen("schema_version = 1", "schema_version = 2", 1),
+            "[route]\nfinal = \"o0\"\n[route.sniff]\ntimeout_ms = 300\nmax_bytes = 8192\n[[route.rules]]\ninbound = [\"i0\"]\nnetwork = [\"udp\"]\naction = \"sniff\"\nsniffers = \"dns\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"udp\"\nprotocol = \"dns\"\naction = \"route\"\noutbound = \"manual\"",
+        ),
+        "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"",
+    ) + "\n[udp]\nenabled = true\n";
+    let config = load_client(TempConfig::text(&source).path()).expect("schema v2 route");
+    assert_eq!(config.schema_version, SchemaVersion::V2);
+
+    let target = TargetAddr::domain("query.example", 53).expect("target");
+    let mut evaluation = config
+        .route_program
+        .as_ref()
+        .expect("compiled route program")
+        .evaluate(0, Network::Udp, &target);
+    let sniff = evaluation
+        .next(RouteMetadata::new(None, None))
+        .expect("sniff action");
+    assert!(matches!(
+        sniff,
+        RouteProgramAction::Continue(RouteAction::Sniff(Sniffers::Explicit(protocols)))
+            if *protocols == [RouteProtocol::Dns]
+    ));
+
+    config.selector_control().switch("manual", "o1").unwrap();
+    let terminal = evaluation
+        .next(RouteMetadata::new(Some(RouteProtocol::Dns), None))
+        .expect("terminal route action");
+    match terminal {
+        RouteProgramAction::Terminal(RouteAction::Route(handle)) => {
+            assert_eq!(handle.snapshot().hops(), &[1]);
+        }
+        other => panic!("unexpected action: {other:?}"),
+    }
+}
+
+#[test]
+fn schema_v2_scalar_and_singleton_list_matchers_compile_identically() {
+    let scalar_route = r#"[route]
+final = "o0"
+[[route.rules]]
+network = "tcp"
+action = "sniff"
+sniffers = "tls"
+[[route.rules]]
+inbound = "i0"
+network = "tcp"
+protocol = "tls"
+domain = "Api.Example.COM."
+domain_suffix = "example.com"
+port = 443
+port_range = "400:500"
+action = "route"
+outbound = "o1"
+[[route.rules]]
+inbound = "i0"
+network = "tcp"
+ip = "192.0.2.7"
+ip_cidr = "192.0.2.0/24"
+port = 53
+port_range = "50:60"
+action = "reject""#;
+    let list_route = scalar_route
+        .replace("network = \"tcp\"", "network = [\"tcp\"]")
+        .replace("sniffers = \"tls\"", "sniffers = [\"tls\"]")
+        .replace("inbound = \"i0\"", "inbound = [\"i0\"]")
+        .replace("protocol = \"tls\"", "protocol = [\"tls\"]")
+        .replace(
+            "domain = \"Api.Example.COM.\"",
+            "domain = [\"Api.Example.COM.\"]",
+        )
+        .replace(
+            "domain_suffix = \"example.com\"",
+            "domain_suffix = [\"example.com\"]",
+        )
+        .replace("ip = \"192.0.2.7\"", "ip = [\"192.0.2.7\"]")
+        .replace("ip_cidr = \"192.0.2.0/24\"", "ip_cidr = [\"192.0.2.0/24\"]")
+        .replace("port = 443", "port = [443]")
+        .replace("port = 53", "port = [53]")
+        .replace("port_range = \"400:500\"", "port_range = [\"400:500\"]")
+        .replace("port_range = \"50:60\"", "port_range = [\"50:60\"]");
+
+    for route in [scalar_route.to_owned(), list_route] {
+        let source = routed(
+            tagged_server(1, 2).replacen("schema_version = 1", "schema_version = 2", 1),
+            &route,
+        );
+        let config = load_server(TempConfig::text(&source).path()).expect("schema v2 matcher set");
+        let program = config.route_program.as_ref().expect("compiled program");
+
+        let domain = TargetAddr::domain("API.EXAMPLE.COM.", 443).expect("domain target");
+        let mut domain_evaluation = program.evaluate(0, Network::Tcp, &domain);
+        assert!(matches!(
+            domain_evaluation.next(RouteMetadata::new(None, None)),
+            Some(RouteProgramAction::Continue(RouteAction::Sniff(
+                Sniffers::Explicit(protocols)
+            ))) if *protocols == [RouteProtocol::Tls]
+        ));
+        match domain_evaluation.next(RouteMetadata::new(Some(RouteProtocol::Tls), None)) {
+            Some(RouteProgramAction::Terminal(RouteAction::Route(handle))) => {
+                assert_eq!(handle.snapshot().hops(), &[1]);
+            }
+            other => panic!("unexpected domain action: {other:?}"),
+        }
+
+        let ip = TargetAddr::ip("192.0.2.7:53".parse().expect("IP target")).expect("target");
+        let mut ip_evaluation = program.evaluate(0, Network::Tcp, &ip);
+        assert!(matches!(
+            ip_evaluation.next(RouteMetadata::new(None, None)),
+            Some(RouteProgramAction::Continue(_))
+        ));
+        assert!(matches!(
+            ip_evaluation.next(RouteMetadata::new(None, None)),
+            Some(RouteProgramAction::Terminal(RouteAction::Reject))
+        ));
+
+        let miss = TargetAddr::domain("other.example", 80).expect("miss target");
+        let mut miss_evaluation = program.evaluate(0, Network::Tcp, &miss);
+        assert!(matches!(
+            miss_evaluation.next(RouteMetadata::new(None, None)),
+            Some(RouteProgramAction::Continue(_))
+        ));
+        match miss_evaluation.next(RouteMetadata::new(None, None)) {
+            Some(RouteProgramAction::Final(RouteAction::Route(handle))) => {
+                assert_eq!(handle.snapshot().hops(), &[0]);
+            }
+            other => panic!("unexpected final action: {other:?}"),
+        }
+    }
+
+    let defaults = routed(
+        tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"",
+    ) + "[runtime]\nmax_connections = 2\n";
+    let defaults = load_server(TempConfig::text(&defaults).path()).expect("sniff defaults");
+    let program = defaults.route_program.as_ref().expect("compiled program");
+    assert_eq!(
+        program.sniff,
+        ferrum2_config::RouteSniffConfig {
+            timeout: Duration::from_millis(300),
+            max_bytes: 8192,
+            max_aggregate_bytes: 16_384,
+        }
+    );
+    let target = TargetAddr::domain("default.example", 443).expect("target");
+    assert!(matches!(
+        program
+            .evaluate(0, Network::Tcp, &target)
+            .next(RouteMetadata::new(None, None)),
+        Some(RouteProgramAction::Continue(RouteAction::Sniff(
+            Sniffers::Default
+        )))
+    ));
+
+    let bounded_rules = "[[route.rules]]\nnetwork = \"tcp\"\naction = \"reject\"\n".repeat(64);
+    let bounded = routed(
+        tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        &format!("[route]\nfinal = \"o0\"\n{bounded_rules}"),
+    );
+    load_server(TempConfig::text(&bounded).path()).expect("64 schema v2 rules");
+    let values = (0..64)
+        .map(|index| format!("\"v{index}.example\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bounded_values = routed(
+        tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        &format!(
+            "[route]\nfinal = \"o0\"\n[[route.rules]]\ndomain = [{values}]\naction = \"reject\""
+        ),
+    );
+    load_server(TempConfig::text(&bounded_values).path()).expect("64 matcher values");
+}
+
+#[test]
+fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
+    let client = |rules: &str| {
+        routed(
+            tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            &format!("[route]\nfinal = \"o0\"\n{rules}"),
+        )
+    };
+    let server = |rules: &str| {
+        routed(
+            tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            &format!("[route]\nfinal = \"o0\"\n{rules}"),
+        )
+    };
+    let values = (0..65)
+        .map(|index| format!("\"v{index}.example\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let too_many_rules = "[[route.rules]]\nnetwork = \"tcp\"\naction = \"reject\"\n".repeat(65);
+    let migration = routed(
+        tagged_client(1, 1),
+        "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"udp\"\naction = \"reject\"",
+    ) + "[udp]\nenabled = true\n";
+    #[rustfmt::skip]
+    let cases = vec![
+        ("v1 routed UDP migration wins over M14 field", ConfigRole::Client, migration, ConfigField::SchemaVersion),
+        ("v1 rejects M14 protocol", ConfigRole::Client, routed(tagged_client(1, 1), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\noutbound = \"o0\""), ConfigField::RouteRulesProtocol),
+        ("v2 dangling final", ConfigRole::Client, client("").replacen("final = \"o0\"", "final = \"missing\"", 1), ConfigField::RouteFinal),
+        ("v2 dangling rule action", ConfigRole::Client, client("[[route.rules]]\nnetwork = \"tcp\"\naction = \"route\"\noutbound = \"missing\""), ConfigField::RouteRulesOutbound),
+        ("65 rules", ConfigRole::Server, server(&too_many_rules), ConfigField::RouteRules),
+        ("65 matcher values", ConfigRole::Server, server(&format!("[[route.rules]]\ndomain = [{values}]\naction = \"reject\"")), ConfigField::RouteRules),
+        ("empty matcher list", ConfigRole::Server, server("[[route.rules]]\nip = []\naction = \"reject\""), ConfigField::RouteRulesIp),
+        ("duplicate normalized domain", ConfigRole::Server, server("[[route.rules]]\ndomain = [\"Example.COM.\", \"example.com\"]\naction = \"reject\""), ConfigField::RouteRulesDomain),
+        ("normalized empty domain", ConfigRole::Server, server("[[route.rules]]\ndomain = \".\"\naction = \"reject\""), ConfigField::RouteRulesDomain),
+        ("duplicate network", ConfigRole::Server, server("[[route.rules]]\nnetwork = [\"tcp\", \"tcp\"]\naction = \"reject\""), ConfigField::RouteRulesNetwork),
+        ("duplicate parsed CIDR", ConfigRole::Server, server("[[route.rules]]\nip_cidr = [\"2001:db8::/32\", \"2001:0db8::/32\"]\naction = \"reject\""), ConfigField::RouteRulesIpCidr),
+        ("noncanonical CIDR", ConfigRole::Server, server("[[route.rules]]\nip_cidr = \"192.0.2.1/24\"\naction = \"reject\""), ConfigField::RouteRulesIpCidr),
+        ("zero port range", ConfigRole::Server, server("[[route.rules]]\nport_range = \"0:53\"\naction = \"reject\""), ConfigField::RouteRulesPortRange),
+        ("reversed port range", ConfigRole::Server, server("[[route.rules]]\nport_range = \"54:53\"\naction = \"reject\""), ConfigField::RouteRulesPortRange),
+        ("overflow port range", ConfigRole::Server, server("[[route.rules]]\nport_range = \"1:65536\"\naction = \"reject\""), ConfigField::RouteRulesPortRange),
+        ("legacy target mixed with port", ConfigRole::Server, server("[[route.rules]]\ntarget = { host = \"example.test\", port = 443 }\nport = 443\naction = \"reject\""), ConfigField::RouteRulesTarget),
+        ("route requires outbound", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\naction = \"route\""), ConfigField::RouteRulesOutbound),
+        ("route forbids sniffers", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\naction = \"route\"\noutbound = \"o0\"\nsniffers = \"tls\""), ConfigField::RouteRulesSniffers),
+        ("sniff forbids outbound", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"\noutbound = \"o0\""), ConfigField::RouteRulesOutbound),
+        ("reject forbids sniffers", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\naction = \"reject\"\nsniffers = \"tls\""), ConfigField::RouteRulesSniffers),
+        ("absent action requires legacy outbound", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\""), ConfigField::RouteRulesAction),
+        ("unconditional terminal is unreachable", ConfigRole::Server, server("[[route.rules]]\naction = \"reject\""), ConfigField::RouteRules),
+        ("unknown sniffer", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"quic\""), ConfigField::RouteRulesSniffers),
+        ("sniff timeout below range", ConfigRole::Server, server("").replacen("[[route.rules]]", "[route.sniff]\ntimeout_ms = 9\n[[route.rules]]", 1).replacen("[shadowsocks]", "[route.sniff]\ntimeout_ms = 9\n[shadowsocks]", 1), ConfigField::RouteSniffTimeout),
+        ("sniff bytes above range", ConfigRole::Server, server("").replacen("[shadowsocks]", "[route.sniff]\nmax_bytes = 16385\n[shadowsocks]", 1), ConfigField::RouteSniffMaxBytes),
+        ("client TCP sniff", ConfigRole::Client, client("[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"dns\""), ConfigField::RouteRulesAction),
+        ("client UDP TLS sniff", ConfigRole::Client, client("[[route.rules]]\nnetwork = \"udp\"\naction = \"sniff\"\nsniffers = \"tls\""), ConfigField::RouteRulesSniffers),
+        ("client UDP HTTP sniff", ConfigRole::Client, client("[[route.rules]]\nnetwork = \"udp\"\naction = \"sniff\"\nsniffers = \"http\""), ConfigField::RouteRulesSniffers),
+        ("server UDP TLS sniff", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"udp\"\naction = \"sniff\"\nsniffers = \"tls\""), ConfigField::RouteRulesSniffers),
+        ("server UDP HTTP sniff", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"udp\"\naction = \"sniff\"\nsniffers = \"http\""), ConfigField::RouteRulesSniffers),
+        ("server DNS hijack", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\naction = \"hijack-dns\""), ConfigField::RouteRulesAction),
+        ("client hijack without DNS", ConfigRole::Client, client("[[route.rules]]\nnetwork = \"udp\"\naction = \"hijack-dns\""), ConfigField::RouteRulesAction),
+        ("protocol without sniff", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
+        ("port-narrow sniff cannot cover", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\nport = 443\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
+        ("IP-narrow sniff cannot cover", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\nip = \"192.0.2.1\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
+        ("domain-gated sniff cannot prove metadata", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\ndomain = \"example.test\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\ndomain = \"example.test\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
+        ("inbound-narrow sniff cannot cover", ConfigRole::Server, routed(tagged_server(2, 1).replacen("schema_version = 1", "schema_version = 2", 1), "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
+    ];
+    for (index, (name, role, source, field)) in cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            role,
+            source,
+            (ConfigErrorKind::Semantic, field),
+            100 + index,
+        );
+    }
+}
+
+#[test]
 fn dns_graph_compiles_independent_server_actions_and_detour_plan_roots() {
     let graph = "[[chains]]\ntag = \"two-hop\"\nhops = [\"o1\", \"o2\"]\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"o1\", \"o2\"]\ndefault = \"o1\"";
     let dns = r#"[dns]
@@ -878,6 +1129,220 @@ server = "detoured""#;
         ),
         1
     );
+}
+
+#[test]
+fn schema_v2_compiles_separate_client_and_server_dns_programs() {
+    let client_dns = r#"[dns]
+[[dns.inbounds]]
+tag = "listener"
+listen = "127.0.0.1:5353"
+[[dns.servers]]
+tag = "special"
+transport = "udp"
+address = "192.0.2.53:53"
+[[dns.servers]]
+tag = "default"
+transport = "tcp"
+address = "192.0.2.54:53"
+[dns.route]
+final = "default"
+[[dns.route.rules]]
+inbound = ["listener"]
+network = ["udp"]
+qname_suffix = "example.com"
+qtype = ["a", "AAAA", "cname", "MX", "ns", "PTR", "soa", "SRV", "txt", "CAA", "svcb", "HTTPS", "any"]
+server = "special"
+[[dns.route.rules]]
+inbound = "i0"
+network = "udp"
+qname = "query.example.com"
+qtype = "A"
+server = "default""#;
+    let source = with_dns(
+        routed(
+            tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            "[route]\nfinal = \"o0\"\n[[route.rules]]\nport = 9\naction = \"reject\"\n[[route.rules]]\nport = 53\naction = \"hijack-dns\"",
+        ),
+        client_dns,
+    );
+    let client = load_client(TempConfig::text(&source).path()).expect("client DNS program");
+    let policy = client.dns_route.as_ref().expect("client DNS policy");
+    let target = TargetAddr::domain("QUERY.EXAMPLE.COM.", 53).expect("query target");
+    assert_eq!(
+        (
+            policy.select(
+                DnsIngressId::Listener(0),
+                Network::Udp,
+                &target,
+                DnsQueryType::A,
+            ),
+            policy.select(
+                DnsIngressId::Ordinary(0),
+                Network::Udp,
+                &target,
+                DnsQueryType::A,
+            ),
+            policy.select(
+                DnsIngressId::Listener(0),
+                Network::Udp,
+                &target,
+                DnsQueryType::Caa,
+            ),
+        ),
+        (Some(0), Some(1), Some(0))
+    );
+    let route = client
+        .route_program
+        .as_ref()
+        .expect("ordinary route policy");
+    let reject_target = TargetAddr::domain("application.example", 9).expect("reject target");
+    assert!(matches!(
+        route
+            .evaluate(0, Network::Tcp, &reject_target)
+            .next(RouteMetadata::new(None, None)),
+        Some(RouteProgramAction::Terminal(RouteAction::Reject))
+    ));
+    let hijack_target = TargetAddr::domain("resolver.example", 53).expect("hijack target");
+    assert!(matches!(
+        route
+            .evaluate(0, Network::Tcp, &hijack_target)
+            .next(RouteMetadata::new(None, None)),
+        Some(RouteProgramAction::Terminal(RouteAction::HijackDns))
+    ));
+    let list_source = source
+        .replace("inbound = \"i0\"", "inbound = [\"i0\"]")
+        .replace("network = \"udp\"", "network = [\"udp\"]")
+        .replace(
+            "qname = \"query.example.com\"",
+            "qname = [\"query.example.com\"]",
+        )
+        .replace("qtype = \"A\"", "qtype = [\"A\"]");
+    let list_client =
+        load_client(TempConfig::text(&list_source).path()).expect("DNS list spellings");
+    assert_eq!(
+        list_client.dns_route.as_ref().expect("list policy").select(
+            DnsIngressId::Ordinary(0),
+            Network::Udp,
+            &target,
+            DnsQueryType::A,
+        ),
+        Some(1)
+    );
+
+    let server_dns = r#"[dns]
+[[dns.servers]]
+tag = "special"
+transport = "udp"
+address = "192.0.2.53:53"
+[[dns.servers]]
+tag = "default"
+transport = "tcp"
+address = "192.0.2.54:53"
+[dns.route]
+final = "default"
+[[dns.route.rules]]
+inbound = "i0"
+network = "tcp"
+domain = "exact.test"
+port = 53
+server = "special"
+[[dns.route.rules]]
+inbound = ["i0"]
+network = ["tcp", "udp"]
+domain_suffix = "example.com"
+port_range = ["443:8443"]
+server = "special""#;
+    let source = with_dns(
+        tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        server_dns,
+    );
+    let server = load_server(TempConfig::text(&source).path()).expect("server DNS program");
+    let policy = server.dns_route.as_ref().expect("server DNS policy");
+    let target = TargetAddr::domain("API.EXAMPLE.COM.", 443).expect("application target");
+    assert_eq!(policy.select(0, Network::Tcp, &target), 0);
+    let exact = TargetAddr::domain("EXACT.TEST.", 53).expect("exact target");
+    assert_eq!(policy.select(0, Network::Tcp, &exact), 0);
+    let list_source = source
+        .replace("inbound = \"i0\"", "inbound = [\"i0\"]")
+        .replace("network = \"tcp\"", "network = [\"tcp\"]")
+        .replace("domain = \"exact.test\"", "domain = [\"exact.test\"]")
+        .replace("port = 53", "port = [53]");
+    let list_server =
+        load_server(TempConfig::text(&list_source).path()).expect("DNS list spellings");
+    assert_eq!(
+        list_server
+            .dns_route
+            .as_ref()
+            .expect("list policy")
+            .select(0, Network::Tcp, &exact),
+        0
+    );
+    let values = (0..64)
+        .map(|index| format!("\"q{index}.example\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bounded = with_dns(
+        tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        &format!(
+            "[dns]\n[[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"s0\"\n[[dns.route.rules]]\nqname = [{values}]\nserver = \"s0\""
+        ),
+    );
+    load_client(TempConfig::text(&bounded).path()).expect("64 DNS matcher values");
+}
+
+#[test]
+fn schema_v2_dns_rejects_role_mixing_closed_values_and_bounds() {
+    let client = |rule: &str, version: u32| {
+        with_dns(
+            tagged_client(1, 1).replacen(
+                "schema_version = 1",
+                &format!("schema_version = {version}"),
+                1,
+            ),
+            &format!(
+                "[dns]\n[[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"s0\"\n{rule}"
+            ),
+        )
+    };
+    let server = |rule: &str| {
+        with_dns(
+            tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            &format!(
+                "[dns]\n[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"s0\"\n{rule}"
+            ),
+        )
+    };
+    let values = (0..65)
+        .map(|index| format!("\"q{index}.example\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    #[rustfmt::skip]
+    let cases = vec![
+        ("v1 rejects client qname", ConfigRole::Client, client("[[dns.route.rules]]\nqname = \"example.test\"\nserver = \"s0\"", 1), ConfigField::DnsRouteRulesQname),
+        ("client rejects server domain", ConfigRole::Client, client("[[dns.route.rules]]\ndomain = \"example.test\"\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesDomain),
+        ("client rejects server port", ConfigRole::Client, client("[[dns.route.rules]]\nport = 53\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesPort),
+        ("server rejects client qname", ConfigRole::Server, server("[[dns.route.rules]]\nqname = \"example.test\"\nserver = \"s0\""), ConfigField::DnsRouteRulesQname),
+        ("server exposes no qtype", ConfigRole::Server, server("[[dns.route.rules]]\nqtype = \"A\"\nserver = \"s0\""), ConfigField::DnsRouteRulesQtype),
+        ("unknown qtype", ConfigRole::Client, client("[[dns.route.rules]]\nqtype = \"AXFR\"\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQtype),
+        ("empty qtype", ConfigRole::Client, client("[[dns.route.rules]]\nqtype = []\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQtype),
+        ("case-insensitive duplicate qtype", ConfigRole::Client, client("[[dns.route.rules]]\nqtype = [\"a\", \"A\"]\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQtype),
+        ("duplicate normalized qname suffix", ConfigRole::Client, client("[[dns.route.rules]]\nqname_suffix = [\"Example.COM.\", \"example.com\"]\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQnameSuffix),
+        ("normalized empty qname", ConfigRole::Client, client("[[dns.route.rules]]\nqname = \".\"\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQname),
+        ("65 DNS matcher values", ConfigRole::Client, client(&format!("[[dns.route.rules]]\nqname = [{values}]\nserver = \"s0\""), 2), ConfigField::DnsRouteRules),
+        ("client legacy target mixing", ConfigRole::Client, client("[[dns.route.rules]]\ntarget = { host = \"example.test\", port = 53 }\nqname = \"example.test\"\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesTarget),
+        ("server legacy target mixing", ConfigRole::Server, server("[[dns.route.rules]]\ntarget = { host = \"example.test\", port = 443 }\nport = 443\nserver = \"s0\""), ConfigField::DnsRouteRulesTarget),
+        ("server reversed port range", ConfigRole::Server, server("[[dns.route.rules]]\nport_range = \"54:53\"\nserver = \"s0\""), ConfigField::DnsRouteRulesPortRange),
+    ];
+    for (index, (name, role, source, field)) in cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            role,
+            source,
+            (ConfigErrorKind::Semantic, field),
+            150 + index,
+        );
+    }
 }
 
 #[test]
@@ -1475,7 +1940,7 @@ fn invalid_cohort_rows_keep_stable_redacted_categories_and_fields() {
             "wrong declared version",
             ConfigRole::Client,
             CLIENT_BASE
-                .replacen("schema_version = 1", "schema_version = 2", 1)
+                .replacen("schema_version = 1", "schema_version = 3", 1)
                 .into_bytes(),
             ConfigErrorKind::Semantic,
             ConfigField::SchemaVersion,
