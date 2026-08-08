@@ -47,6 +47,90 @@ fn client_hello(
     wire
 }
 
+fn with_ech_client_hello_outer(mut wire: Vec<u8>) -> Vec<u8> {
+    const ECH_OUTER: [u8; 15] = [
+        0xfe, 0x0d, 0x00, 0x0b, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    ];
+
+    let u16_at = |offset: usize| {
+        u16::from_be_bytes(
+            wire.get(offset..offset.checked_add(2).expect("u16 offset"))
+                .expect("complete u16")
+                .try_into()
+                .expect("two bytes"),
+        )
+    };
+    assert_eq!(wire.first(), Some(&0x16), "record must be a handshake");
+    let record_len = usize::from(u16_at(3));
+    assert_eq!(
+        5_usize.checked_add(record_len),
+        Some(wire.len()),
+        "mutation requires one complete TLS record"
+    );
+    let handshake = wire.get(5..9).expect("ClientHello handshake header");
+    assert_eq!(handshake[0], 1, "handshake must be ClientHello");
+    let handshake_len = (usize::from(handshake[1]) << 16)
+        | (usize::from(handshake[2]) << 8)
+        | usize::from(handshake[3]);
+    assert_eq!(
+        handshake_len.checked_add(4),
+        Some(record_len),
+        "record must contain one complete ClientHello"
+    );
+
+    let mut cursor = 9 + 2 + 32;
+    let session_id_len = usize::from(*wire.get(cursor).expect("session id length"));
+    cursor = cursor
+        .checked_add(1 + session_id_len)
+        .expect("complete session id");
+    let cipher_len = usize::from(u16_at(cursor));
+    assert_eq!(cipher_len % 2, 0, "cipher suite vector framing");
+    cursor = cursor
+        .checked_add(2)
+        .and_then(|start| start.checked_add(cipher_len))
+        .expect("complete cipher suites");
+    let compression_len = usize::from(*wire.get(cursor).expect("compression length"));
+    cursor = cursor
+        .checked_add(1 + compression_len)
+        .expect("complete compression methods");
+
+    let extensions_len_offset = cursor;
+    let extensions_len = usize::from(u16_at(cursor));
+    cursor = cursor.checked_add(2).expect("extensions start");
+    assert_eq!(
+        cursor.checked_add(extensions_len),
+        Some(wire.len()),
+        "extensions must terminate ClientHello"
+    );
+    while cursor < wire.len() {
+        assert_ne!(u16_at(cursor), 0xfe0d, "generated hello already has ECH");
+        let extension_len = usize::from(u16_at(cursor + 2));
+        cursor = cursor
+            .checked_add(4)
+            .and_then(|start| start.checked_add(extension_len))
+            .filter(|end| *end <= wire.len())
+            .expect("complete extension");
+    }
+
+    let updated = |length: usize| {
+        length
+            .checked_add(ECH_OUTER.len())
+            .expect("updated TLS length")
+    };
+    let record_len = u16::try_from(updated(record_len)).expect("record length width");
+    wire[3..5].copy_from_slice(&record_len.to_be_bytes());
+    let handshake_len = u32::try_from(updated(handshake_len))
+        .expect("handshake length width")
+        .to_be_bytes();
+    assert_eq!(handshake_len[0], 0, "TLS handshake uses a 24-bit length");
+    wire[6..9].copy_from_slice(&handshake_len[1..]);
+    let extensions_len = u16::try_from(updated(extensions_len)).expect("extensions length width");
+    wire[extensions_len_offset..extensions_len_offset + 2]
+        .copy_from_slice(&extensions_len.to_be_bytes());
+    wire.extend_from_slice(&ECH_OUTER);
+    wire
+}
+
 #[test]
 fn dns_transport_strictness_fragmentation_and_limits_are_bounded() {
     let wire = dns_query("query.test.");
@@ -275,6 +359,37 @@ fn tls_versions_sni_records_fragmentation_and_limits_are_bounded() {
                 );
             }
         }
+    }
+
+    let ech_outer = with_ech_client_hello_outer(client_hello(&TLS13, true, None));
+    let observable_outer_name = Progress::Matched(Metadata::Tls {
+        domain: Some("tls.test".to_owned()),
+    });
+    assert_eq!(
+        sniff(
+            &ech_outer,
+            ech_outer.len(),
+            Transport::Tcp,
+            443,
+            &[Protocol::Tls]
+        ),
+        observable_outer_name,
+        "ECH ClientHelloOuter exposes only rustls' outer public/cover SNI"
+    );
+    // This is outer-name observability evidence, not ECH termination, decryption,
+    // interoperability, or evidence about an encrypted inner name.
+    for boundary in 0..ech_outer.len() {
+        assert_eq!(
+            sniff(
+                &ech_outer[..boundary],
+                ech_outer.len(),
+                Transport::Tcp,
+                443,
+                &[Protocol::Tls]
+            ),
+            Progress::NeedMore,
+            "ECH ClientHelloOuter boundary={boundary}"
+        );
     }
 
     for plausible in [&b""[..], &b"\x16"[..], &b"\x16\x03"[..]] {
