@@ -57,7 +57,8 @@ repository。
   records locked `ipnet 2.12.1` as a later exact no-default direct edge and no-default
   `httparse 1.10.1` as the only new package identity，with its internal external-package unsafe recorded。
   T01 activates neither dependency；T02 now activates only the reviewed exact no-default `ipnet` edge
-  without a new package identity，and T04 remains responsible for `httparse` activation。
+  without a new package identity，and T04 activates the reviewed `httparse` edge without changing exact
+  Hickory/rustls identities or features。
 - Exact planning footprint is code/tests `21814/39632`、ratio `1.816815` and
   case/support/fixture `33883/5152/597`。The current M13 numeric status is
   `REVIEW_REQUIRED` only for moved owner-file size；integrity is `PASS`。
@@ -126,8 +127,8 @@ repository。
 | M14-T01 | Freeze contracts、dependency review、M13 wording and M14 footprint control | M13 closed | done |
 | M14-T02 | Build the protocol-neutral ordered route program and reusable egress graph | M14-T01 | done |
 | M14-T03 | Compile schema v2、migration rejection、matchers/actions and role capabilities | M14-T02 | done |
-| M14-T04 | Add the pure bounded DNS/TLS/HTTP sniff module and parser evidence | M14-T03 | ready |
-| M14-T05 | Compose server TCP/UDP route、sniff、reject and exact prefix replay | M14-T04 | todo |
+| M14-T04 | Add the pure bounded DNS/TLS/HTTP sniff module and parser evidence | M14-T03 | done |
+| M14-T05 | Compose server TCP/UDP route、sniff、reject and exact prefix replay | M14-T04 | ready |
 | M14-T06 | Extend DNS policy through the existing answering/resolver module | M14-T05 | todo |
 | M14-T07 | Compose client route/reject/hijack and one-plan association UDP ownership | M14-T06 | todo |
 | M14-T08 | Close real-process、security、lifecycle、architecture and qualification-tool evidence | M14-T07 | todo |
@@ -163,9 +164,11 @@ force-push、PR、tag、package、release or publication is implied。
 
 ## Blocker / next action
 
-No blocker。T03 is accepted at exact integration `5ff0677f40a11793fde051d9b7df12e5c3a223b6`
-after one bounded repair and targeted Architect/QA `PASS`。The schema-v2 ordinary and role-specific DNS
-programs share one selector graph；schema-v1 routed client UDP fails before side effects；and the temporary
-client/server run latches prevent dormant v2 policy from executing through legacy views before T05/T07。
-The first-overlapping-sniff validation repair is order-aware and fail-closed；integration focused gates、
-Quick `385/5` and footprint integrity/category/ratio all pass。T04 is ready on this exact accepted base。
+No blocker。T04 is accepted at exact integration `11edd5d562fceb5892196ec2e209d285a8ceee83`。
+One bounded repair closed HTTP fragmentation、DNS peer-count allocation and architecture-layout findings；
+ECH remained blocked after targeted re-review，so two required independent `gpt-5.6-sol/xhigh` analyses
+both selected the same contract correction。Exact rustls-observable outer public/cover SNI is now explicit
+untrusted routing metadata，the encrypted inner name is never claimed，and a structured generated/mutated
+ECH outer regression closes the final Architect/QA finding without production TLS code or dependency
+change。Focused、Rust 1.88、Quick `389/5` and footprint integrity/category/ratio pass；the accepted ticket
+advisory is `+952/0/0` case/support/fixture。T05 is ready on this exact accepted base。

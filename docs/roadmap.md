@@ -63,12 +63,13 @@ run [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144)
 resource run [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024)关闭。Owned
 egress-plan、DNS runtime dependency、private client egress及composition-root ownership完成整固；
 schema、wire、DNS/routing action和产品能力不变，final Architect/QA均`PASS`。
-M14现为`executing`：T01 contracts/control与T02 protocol-neutral ordered route program已done，
-T02 exact integration `c8a70ca…`保留legacy `RouteTable`、terminal-time selector snapshot、DNS namespace
-隔离和server one-hop guard。Initial Architect/QA发现一项semantic duplicate校验和两项mutation
-证据缺口；一次有界修复后targeted Architect/QA均`PASS`，T03已ready。Footprint
-integrity/ratio `PASS`，`+583/0/0`与两个existing-large-file信号已明确接受；尚无remote
-action。Execute仅授权所需non-force pushes，manual dispatch及其他发布动作未授权。
+M14现为`executing`：T01～T04已done，T05 ready。T03已编译schema-v2 ordered/DNS programs并保留
+pre-runtime latch；T04 exact integration `11edd5d…`加入纯DNS/TLS/HTTP bounded sniff module。一次有界
+修复关闭HTTP fragmentation、DNS allocation和architecture guard findings；ECH在复审后仍堵塞，
+两名required `gpt-5.6-sol/xhigh`独立只读代理均选择rustls-observable outer-SNI契约修正，最终
+Architect/QA `PASS`。Focused、Rust 1.88、Quick `389/5`及footprint integrity/ratio通过，ticket
+`+952/0/0` advisory已接受；尚无remote action。Execute仅授权所需non-force pushes，manual
+dispatch及其他发布动作未授权。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1326,3 +1327,4 @@ fallback/group/registry继续延期。
 | 2026-08-08 | M14-T03 runtime-latch ownership | T03 additionally owns the existing client/server `run.rs` entrypoints only for a pre-runtime schema-v2 fail-closed latch；`--check-config` still validates the compiled model | Exact load→main→run tracing proves both current binaries otherwise consume only legacy `RouteTable`/DNS `ActionTable` and would silently ignore v2 policy until T05/T07 | No new runtime path or product capability；reject before observability/runtime/listener/task side effects，then T05/T07 must replace the latch when they consume their typed models |
 | 2026-08-08 | M14-T03 superseded UDP evidence lease | T03 additionally owns existing `tests/m0-harness/tests/socks_udp_local_e2e.rs` only to retire the schema-v1 per-datagram multi-outbound row and keep two-hop evidence on supported roots | Workspace Quick exits 2 on `one_association_alternates_two_targets_and_preserves_response_sources` and on the `RouteRule`/`RouteFinal` cases in `fixed_two_hop_udp_chain_uses_distinct_credentials_and_reaps` because M14 correctly rejects schema-v1 routed+enabled-UDP at `schema_version`；TEST-0015 already marks the old expectation superseded | Delete only the incompatible row，retain static/selector two-hop success and run credential failures through static；T07/T08 own schema-v2 association-route-once evidence。Ticket base `d82f2c8…` remains fixed；no product、helper、harness、dependency or remote expansion |
 | 2026-08-08 | M14-T03 integration | Schema-v2 ordinary and role-specific DNS programs compile onto one selector graph；v1 routed client UDP rejects before side effects；temporary run latches fail closed until T05/T07；T03 done、T04 ready | Initial Architect/QA deduplicated one `BLOCK` root；the validator let a later sniff witness protocol coverage after an overlapping first sniff had consumed the sole attempt。One order-aware two-file repair `c8d2b0d` closed both IDs and targeted Architect/QA returned `PASS` | Merge `5ff0677f` focused and Quick `385/5` PASS；footprint integrity/category/ratio PASS and advisory `+498/0/0` accepted for five rows in the existing contract table；no helper/fixture/support/dependency or remote action |
+| 2026-08-08 | M14-T04 integration / escalation closure | Exact `11edd5d` integrates one pure bounded Hickory/rustls/httparse sniff module；TLS metadata is only rustls-observable untrusted outer SNI，never encrypted inner identity；T04 done、T05 ready | One bounded repair closed HTTP fragmentation、DNS peer-count allocation and layout-bound guards，but ECH remained blocked。Two required independent `gpt-5.6-sol/xhigh` read-only analyses both selected the same docs-only contract correction `f958705` plus structured ECH outer regression `920237a`；final targeted Architect/QA both `PASS` | Focused、Rust 1.88 and Quick `389/5` PASS；footprint integrity/category/ratio PASS，advisory `+952/0/0` accepted for required parser/security matrices with no support/fixture/new harness；no remote action |
