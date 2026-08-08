@@ -1470,6 +1470,7 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
                 "ferrum2-observability".to_owned(),
                 "ferrum2-runtime".to_owned(),
                 "ferrum2-shadowsocks".to_owned(),
+                "ferrum2-sniff".to_owned(),
                 "tokio".to_owned(),
                 "tracing".to_owned(),
             ]),

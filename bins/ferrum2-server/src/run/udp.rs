@@ -3,9 +3,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use ferrum2_config::UdpConfig;
+use ferrum2_config::{RouteAction, UdpConfig};
 use ferrum2_core::TargetAddr;
-use ferrum2_core::route::Network;
+use ferrum2_core::route::{Network, RouteMetadata, RouteProgramAction};
 use ferrum2_crypto::{Clock as _, SystemClock, SystemRandom};
 use ferrum2_observability::{Direction, Metrics, Outcome, Reason, Role, Stage};
 use ferrum2_runtime::{
@@ -15,6 +15,7 @@ use ferrum2_runtime::{
     UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpPacketScratch, UdpServer};
+use ferrum2_sniff::Transport;
 use tokio::net::UdpSocket;
 
 use super::RunError;
@@ -23,7 +24,7 @@ use super::observation::{
     record_udp_failure, record_udp_protocol_failure, record_udp_request_accepted,
     record_udp_runtime_failure, update_udp_resource_metrics,
 };
-use super::tcp::ServerRouting;
+use super::tcp::{ServerRouting, ServerTerminalRoute, route_metadata, sniff_order};
 
 pub(super) fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntimeLimits> {
     UdpRuntimeLimits::new(
@@ -133,6 +134,14 @@ impl UdpMappings {
         drop(state);
         self.published.notify_waiters();
         evicted
+    }
+
+    fn publish_rejected(&self, capability: ServerResponseCapability, inbound: usize) {
+        self.state
+            .lock()
+            .expect("UDP mapping lock poisoned")
+            .orphaned
+            .insert(capability, inbound);
     }
 
     fn invalidate_handle(&self, handle: UdpSessionHandle) {
@@ -504,6 +513,51 @@ where
                 record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
                 continue;
             }
+            let terminal = select_udp_route(
+                &routing,
+                inbound,
+                pending.datagram().target(),
+                pending.datagram().payload(),
+            );
+            if existing.is_none() {
+                mappings.prune_protocol(&protocol, clock.monotonic_now());
+                match protocol.session_count() {
+                    Ok(count) if count >= config.max_sessions => {
+                        record_udp_runtime_failure(&metrics, UdpRuntimeError::SessionLimit);
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        record_udp_protocol_failure(&metrics, error);
+                        break Err(RunError::RuntimeRoot);
+                    }
+                }
+            }
+            if terminal == ServerTerminalRoute::Reject {
+                if routing.program().is_none() {
+                    continue;
+                }
+                let (_datagram, commit) = pending.into_parts();
+                match protocol.commit_request(commit, peer, clock.monotonic_now(), &SystemRandom) {
+                    Ok(accepted)
+                        if existing
+                            .is_none_or(|capability| capability == accepted.capability()) =>
+                    {
+                        if existing.is_none() {
+                            mappings.publish_rejected(accepted.capability(), inbound);
+                        }
+                        metrics.udp_datagram(
+                            Role::Server,
+                            Direction::ClientToTarget,
+                            Outcome::Rejected,
+                        );
+                    }
+                    Ok(_) => record_udp_protocol_failure(&metrics, UdpPacketError::Generation),
+                    Err(error) => record_udp_protocol_failure(&metrics, error),
+                }
+                update_udp_resource_metrics(&metrics, &registry);
+                continue;
+            }
             if let Some((capability, binding)) = existing.and_then(|capability| {
                 mappings
                     .handle(capability)
@@ -514,18 +568,11 @@ where
                     continue;
                 }
                 let handle = binding.handle;
-                let Some(reserved) = reserve_udp_direct(
-                    &routing.route,
-                    routing.outbound_count,
-                    inbound,
-                    pending.datagram().target(),
-                    || {
-                        std::future::ready(
-                            runtime
-                                .reserve_datagram(handle, pending.datagram().allocated_capacity()),
-                        )
-                    },
-                )
+                let Some(reserved) = reserve_udp_direct(terminal, || {
+                    std::future::ready(
+                        runtime.reserve_datagram(handle, pending.datagram().allocated_capacity()),
+                    )
+                })
                 .await
                 else {
                     continue;
@@ -571,33 +618,13 @@ where
                     }
                 }
             }
-            if existing.is_none() {
-                mappings.prune_protocol(&protocol, clock.monotonic_now());
-                match protocol.session_count() {
-                    Ok(count) if count >= config.max_sessions => {
-                        record_udp_runtime_failure(&metrics, UdpRuntimeError::SessionLimit);
-                        continue;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        record_udp_protocol_failure(&metrics, error);
-                        break Err(RunError::RuntimeRoot);
-                    }
-                }
-            }
 
-            let Some(admission) = reserve_udp_direct(
-                &routing.route,
-                routing.outbound_count,
-                inbound,
-                pending.datagram().target(),
-                || {
-                    runtime.reserve_session(
-                        tokio::time::Instant::now(),
-                        pending.datagram().allocated_capacity(),
-                    )
-                },
-            )
+            let Some(admission) = reserve_udp_direct(terminal, || {
+                runtime.reserve_session(
+                    tokio::time::Instant::now(),
+                    pending.datagram().allocated_capacity(),
+                )
+            })
             .await
             else {
                 continue;
@@ -698,18 +725,52 @@ where
     });
 }
 
-async fn reserve_udp_direct<R, F>(
-    route: &ferrum2_core::route::RouteTable,
-    outbound_count: usize,
+fn select_udp_route(
+    routing: &ServerRouting,
     inbound: usize,
     target: &TargetAddr,
+    payload: &[u8],
+) -> ServerTerminalRoute {
+    let Some(program) = routing.program() else {
+        return routing.legacy(inbound, Network::Udp, target);
+    };
+    let mut evaluation = program.evaluate(inbound, Network::Udp, target);
+    let mut protocol = None;
+    let mut domain = None;
+    let mut sniffed = false;
+    loop {
+        match evaluation
+            .next(RouteMetadata::new(protocol, domain.as_ref()))
+            .expect("validated route program has one terminal action")
+        {
+            RouteProgramAction::Continue(RouteAction::Sniff(sniffers)) if !sniffed => {
+                sniffed = true;
+                let order = sniff_order(sniffers, Network::Udp);
+                (protocol, domain) = route_metadata(ferrum2_sniff::sniff(
+                    payload,
+                    program.sniff.max_bytes,
+                    Transport::Udp,
+                    target.port().get(),
+                    &order,
+                ));
+            }
+            RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
+            RouteProgramAction::Continue(_) => return ServerTerminalRoute::Reject,
+            RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
+                return routing.terminal(action);
+            }
+        }
+    }
+}
+
+async fn reserve_udp_direct<R, F>(
+    terminal: ServerTerminalRoute,
     reserve: impl FnOnce() -> F,
 ) -> Option<R>
 where
     F: std::future::Future<Output = R>,
 {
-    let selected = route.select(inbound, Network::Udp, target);
-    (selected < outbound_count).then_some(())?;
+    (terminal == ServerTerminalRoute::Direct).then_some(())?;
     Some(reserve().await)
 }
 
@@ -799,7 +860,8 @@ mod tests {
             let observed_mappings = Arc::clone(&mappings);
             let shared = ServerUdpShared {
                 routing: Arc::new(ServerRouting {
-                    route: config.route,
+                    legacy: config.route,
+                    program: config.route_program,
                     outbound_count: config.outbounds.len(),
                 }),
                 protocol,

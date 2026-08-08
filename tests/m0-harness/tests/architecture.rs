@@ -1164,6 +1164,74 @@ fn ordered_route_program_is_protocol_neutral_and_the_only_ordinary_engine() {
 }
 
 #[test]
+fn server_consumes_typed_routes_through_one_runtime_prefix_collector() {
+    let root = workspace_root();
+    let runtime = token_sources_under(&root, &["crates/ferrum2-runtime/src"]);
+    check_definition_ownership(
+        &runtime,
+        &[(
+            "fn",
+            "collect_sniff_prefix",
+            "crates/ferrum2-runtime/src/sniff.rs",
+        )],
+        &[],
+    )
+    .unwrap_or_else(|error| panic!("prefix collector ownership changed: {error}"));
+
+    let server = token_sources(
+        &root,
+        &[
+            "bins/ferrum2-server/src/run.rs",
+            "bins/ferrum2-server/src/run/tcp.rs",
+            "bins/ferrum2-server/src/run/udp.rs",
+        ],
+    );
+    let run = server[0]
+        .production_tokens()
+        .expect("server root production tokens");
+    assert!(has_tokens(
+        run,
+        &["program", ":", "config", ".", "route_program"]
+    ));
+    assert!(
+        !run.iter().any(|token| token == "schema_version"),
+        "server root restored a schema-v2 startup latch"
+    );
+    let tcp = server[1]
+        .production_tokens()
+        .expect("server TCP production tokens");
+    assert!(has_tokens(
+        tcp,
+        &["program", ":", "Option", "<", "CompiledRoute", ">"]
+    ));
+    assert!(has_tokens(tcp, &["collect_sniff_prefix", "("]));
+    assert!(has_tokens(tcp, &["poll_read_plain", "("]));
+    let udp = server[2]
+        .production_tokens()
+        .expect("server UDP production tokens");
+    for required in [
+        &["prepare_request", "("][..],
+        &["select_udp_route", "("][..],
+        &["reserve_udp_direct", "("][..],
+        &["commit_request", "("][..],
+    ] {
+        assert!(
+            has_tokens(udp, required),
+            "missing UDP composition {required:?}"
+        );
+    }
+    check_no_sequences(server.iter(), &[&["fn", "collect_sniff_prefix"]])
+        .unwrap_or_else(|error| panic!("server restored a second prefix collector: {error}"));
+
+    let runtime_manifest = fs::read_to_string(root.join("crates/ferrum2-runtime/Cargo.toml"))
+        .expect("runtime manifest");
+    assert!(!runtime_manifest.contains("ferrum2-sniff"));
+    let server_manifest =
+        fs::read_to_string(root.join("bins/ferrum2-server/Cargo.toml")).expect("server manifest");
+    assert!(server_manifest.contains("ferrum2-sniff.workspace = true"));
+}
+
+#[test]
 fn recursive_rust_source_discovery_excludes_non_rust_files() {
     let directory = tempfile::tempdir().expect("source discovery tempdir");
     let nested = directory.path().join("nested");
@@ -1434,8 +1502,14 @@ fn production_owner_dependencies_are_explicit_and_narrow() {
                 &[
                     "ServerContext",
                     "ServerRouting",
+                    "ServerTerminalRoute",
                     "ServerTcpListeners",
                     "ServerTcpRoot",
+                    "legacy",
+                    "program",
+                    "route_metadata",
+                    "sniff_order",
+                    "terminal",
                 ],
             ),
             (

@@ -65,9 +65,6 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedServerConfig) -> Result<(), RunError> {
-    if config.schema_version.is_v2() {
-        return Err(RunError::StartupProtocol);
-    }
     let dns_specs = config
         .dns
         .as_ref()
@@ -149,7 +146,8 @@ where
     let udp_config = config.udp;
     let clock = Arc::new(SystemClock::new());
     let routing = Arc::new(ServerRouting {
-        route: config.route,
+        legacy: config.route,
+        program: config.route_program,
         outbound_count: config.outbounds.len(),
     });
     let mut roots = Vec::with_capacity(
