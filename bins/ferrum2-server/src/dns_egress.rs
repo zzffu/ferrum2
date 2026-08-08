@@ -212,6 +212,8 @@ mod tests {
     use super::*;
 
     use ferrum2_core::route::EgressPlanHandle;
+    use hickory_proto::op::{Message, MessageType, OpCode};
+    use hickory_proto::rr::{DNSClass, RecordType};
 
     use crate::run::test_support::{
         Ipv4Addr, UdpSocket, assert_pending, recv_udp, reserve_address, server_test_config_source,
@@ -391,44 +393,58 @@ mod tests {
         let other = TargetAddr::domain("other.test", 443).expect("final target");
 
         let selected_task = tokio::spawn(async move {
-            let mut request = [0_u8; 4096];
-            for (qtype_offset, expected_qtype) in [(24, 1), (24, 28), (29, 1), (29, 28)] {
-                let (length, peer) = recv_udp(&selected_socket, &mut request).await;
-                assert!(length >= qtype_offset + 4);
-                assert_eq!(
-                    u16::from_be_bytes([request[qtype_offset], request[qtype_offset + 1]]),
-                    expected_qtype
-                );
-                assert_eq!(&request[qtype_offset + 2..qtype_offset + 4], &[0, 1]);
-                request[2] |= 0x80;
-                request[3] |= 0x80;
+            let mut wire = [0_u8; 4096];
+            for expected_qtype in [
+                RecordType::A,
+                RecordType::AAAA,
+                RecordType::A,
+                RecordType::AAAA,
+            ] {
+                let (length, peer) = recv_udp(&selected_socket, &mut wire).await;
+                let request =
+                    Message::from_vec(&wire[..length]).expect("selected DNS query decode");
+                assert_eq!(request.metadata.message_type, MessageType::Query);
+                assert_eq!(request.metadata.op_code, OpCode::Query);
+                let [query] = request.queries.as_slice() else {
+                    panic!("selected upstream must receive one DNS query");
+                };
+                assert_eq!(query.query_class(), DNSClass::IN);
+                assert_eq!(query.query_type(), expected_qtype);
+                let mut response = Message::response(request.id, OpCode::Query);
+                response.metadata.recursion_available = true;
+                response.add_query(query.clone());
+                let response = response.to_vec().expect("selected DNS response encode");
                 selected_socket
-                    .send_to(&request[..length], peer)
+                    .send_to(&response, peer)
                     .await
                     .expect("selected DNS response");
             }
         });
         let (check_final, start_final_check) = tokio::sync::oneshot::channel();
         let final_task = tokio::spawn(async move {
-            let mut request = [0_u8; 4096];
-            for expected_qtype in [1, 28] {
-                let (length, peer) = recv_udp(&final_socket, &mut request).await;
-                assert!(length >= 28);
-                assert_eq!(
-                    u16::from_be_bytes([request[24], request[25]]),
-                    expected_qtype
-                );
-                assert_eq!(&request[26..28], &[0, 1]);
-                request[2] |= 0x80;
-                request[3] |= 0x80;
+            let mut wire = [0_u8; 4096];
+            for expected_qtype in [RecordType::A, RecordType::AAAA] {
+                let (length, peer) = recv_udp(&final_socket, &mut wire).await;
+                let request = Message::from_vec(&wire[..length]).expect("final DNS query decode");
+                assert_eq!(request.metadata.message_type, MessageType::Query);
+                assert_eq!(request.metadata.op_code, OpCode::Query);
+                let [query] = request.queries.as_slice() else {
+                    panic!("final upstream must receive one DNS query");
+                };
+                assert_eq!(query.query_class(), DNSClass::IN);
+                assert_eq!(query.query_type(), expected_qtype);
+                let mut response = Message::response(request.id, OpCode::Query);
+                response.metadata.recursion_available = true;
+                response.add_query(query.clone());
+                let response = response.to_vec().expect("final DNS response encode");
                 final_socket
-                    .send_to(&request[..length], peer)
+                    .send_to(&response, peer)
                     .await
                     .expect("final DNS response");
             }
             start_final_check.await.expect("start no-fallback check");
             assert_pending(
-                final_socket.recv_from(&mut request),
+                final_socket.recv_from(&mut wire),
                 "selected DNS failure reached the healthy final server",
             )
             .await;
