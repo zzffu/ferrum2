@@ -25,6 +25,8 @@ requests from caller-owned bounded bytes through reviewed upstream parsers。
       route、egress、DNS query or telemetry destination。
 - [ ] Hickory DNS、rustls ClientHello and httparse HTTP/1 behavior satisfies every fragmentation、
       malformed、header/question and exact-bound row in TEST-0015。
+- [ ] The generated/mutated ECH ClientHelloOuter row reports only rustls-observable outer public/cover
+      SNI；no encrypted inner name is claimed and no second TLS/ECH parser is introduced。
 - [ ] Composite order/NeedMore arbitration prevents incomplete non-53 DNS and implausible TLS/HTTP prefixes
       from blocking another parser。
 - [ ] `httparse = 1.10.1` no-default is the only new package identity；Hickory/rustls identities/features

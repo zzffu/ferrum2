@@ -93,6 +93,13 @@ The module owns no socket、Tokio task、route table、egress、DNS query or tel
 bounded TCP prefix collector；UDP callers pass borrowed datagrams。Parsers are attempted in configured
 order and cannot allocate or read beyond the validated aggregate limits。
 
+TLS domain metadata is exactly the optional plaintext SNI exposed by rustls
+`ClientHello::server_name()`。For an ECH ClientHelloOuter this observable value may be the ECHConfig
+public/cover name；the module reports that outer value and never claims it is the encrypted inner name。
+It does not separately detect、parse、validate or decrypt ECH。Absent an observable outer SNI，TLS is
+still recognized with no domain。All such names are untrusted routing metadata，not authenticated peer
+or origin identity。
+
 ### Match metadata never changes the target
 
 The original target remains immutable。Exact IP/CIDR always matches only an original IP literal；port

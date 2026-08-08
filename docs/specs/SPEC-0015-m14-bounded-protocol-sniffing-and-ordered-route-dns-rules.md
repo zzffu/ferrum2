@@ -66,8 +66,9 @@ The words MUST、MUST NOT、SHOULD and MAY are normative。
 - New domain fields match sniffed domain when present，otherwise original domain。Comparison is ASCII
   case-insensitive and ignores one terminal dot；suffix comparison MUST honor label boundaries。
   Sniffed metadata MUST NOT replace or resolve the original target。
-- `protocol` MUST match only a successfully recognized closed value。TLS without SNI still sets protocol
-  TLS and no domain；unknown、invalid、timeout、limit or unavailable does not match a protocol rule。
+- `protocol` MUST match only a successfully recognized closed value。TLS for which rustls exposes no
+  `ClientHello::server_name()` still sets protocol TLS and no domain；unknown、invalid、timeout、limit or
+  unavailable does not match a protocol rule。
 - A route document MUST contain at most 64 rules and one rule at most 64 total matcher values。Empty or
   duplicate lists、zero/reversed/overflow port ranges、noncanonical CIDR and incompatible legacy/new
   target fields MUST fail validation。
@@ -81,8 +82,12 @@ The words MUST、MUST NOT、SHOULD and MAY are normative。
   frame。Only Query/standard opcode/one IN question recognizes DNS；responses、multiple questions、
   invalid class and malformed wire MUST NOT set DNS metadata。
 - TLS parsing MUST use rustls `0.23.43` `server::Acceptor` only through ClientHello，including fragmented
-  and multi-record input。It MUST NOT create a server config or complete a handshake。ECH/no SNI yields
-  TLS with no domain；raw rustls errors MUST NOT escape。
+  and multi-record input。It MUST NOT create a server config or complete a handshake。TLS domain MUST be
+  exactly the optional plaintext `ClientHello::server_name()` exposed by rustls；for an ECH
+  ClientHelloOuter this may be the public/cover name and MUST NOT be described or interpreted as the
+  encrypted inner name。Ferrum2 MUST NOT add a second ECH/TLS parser or attempt ECH validation/decryption；
+  no observable outer SNI yields TLS with no domain，and raw rustls errors MUST NOT escape。The observable
+  name is untrusted routing metadata，not authenticated peer or origin identity。
 - HTTP parsing MUST use exact no-default httparse `1.10.1` with at most 64 headers。Only requests are
   recognized；Host is case-insensitive，CONNECT authority is preferred，body is not consumed，IP literals
   do not become domains and duplicate/invalid Host yields HTTP with no domain。
