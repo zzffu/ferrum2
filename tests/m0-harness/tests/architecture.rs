@@ -1263,7 +1263,7 @@ fn server_consumes_typed_routes_through_one_runtime_prefix_collector() {
         .ok_or("missing immediate UDP terminal split")?;
         let legacy = position(
             tokens,
-            &["if", "routing", ".", "program", "(", ")", ".", "is_none"],
+            &["routing", ".", "program", "(", ")", ".", "is_none"],
             reject + 1,
         )
         .ok_or("legacy reject no-mutation gate moved")?;
@@ -1283,36 +1283,35 @@ fn server_consumes_typed_routes_through_one_runtime_prefix_collector() {
                     .then_some(index)
             })
             .collect();
-        let prunes: Vec<_> = tokens
-            .windows(4)
-            .enumerate()
-            .filter_map(|(index, window)| {
-                (index > select
-                    && window[0] == "mappings"
-                    && window[1] == "."
-                    && window[2] == "prune_protocol"
-                    && window[3] == "(")
-                    .then_some(index)
-            })
-            .collect();
-        let orphan_cap = position(tokens, &["mappings", ".", "orphan_count", "("], select + 1)
-            .ok_or("missing typed-reject orphan cap")?;
+        if has_tokens(tokens, &["orphan_count", "("]) {
+            return Err("UDP restored a split orphan-only admission ceiling".to_owned());
+        }
+        let reconcile = position(tokens, &["reconcile_udp_generations", "("], legacy + 1)
+            .ok_or("missing retained-orphan reconciliation before admission")?;
+        let prune = position(
+            tokens,
+            &["mappings", ".", "prune_protocol", "("],
+            reconcile + 1,
+        )
+        .ok_or("missing retained-orphan prune before admission")?;
+        let session_cap = position(tokens, &["protocol", ".", "session_count", "("], prune + 1)
+            .ok_or("missing shared protocol session ceiling")?;
         if commits.len() != 3
             || reserves.len() != 2
-            || prunes.len() < 2
             || !(select < reject
                 && reject < legacy
-                && legacy < prunes[0]
-                && prunes[0] < orphan_cap
-                && orphan_cap < commits[0]
-                && commits[0] < prunes[1]
-                && prunes[1] < reserves[0]
+                && legacy < reconcile
+                && reconcile < prune
+                && prune < session_cap
+                && session_cap < commits[0]
+                && session_cap < reserves[0]
+                && commits[0] < reserves[0]
                 && reserves[0] < commits[1]
                 && commits[1] < reserves[1]
                 && reserves[1] < commits[2])
         {
             return Err(format!(
-                "UDP prepare/select/reject/direct reservation order changed: select={select} reject={reject} legacy={legacy} prunes={prunes:?} orphan_cap={orphan_cap} commits={commits:?} reserves={reserves:?}"
+                "UDP prepare/select/shared-cap/reject/direct reservation order changed: select={select} reject={reject} legacy={legacy} reconcile={reconcile} prune={prune} session_cap={session_cap} commits={commits:?} reserves={reserves:?}"
             ));
         }
         Ok(())
@@ -1407,6 +1406,15 @@ fn server_consumes_typed_routes_through_one_runtime_prefix_collector() {
     assert!(
         check_udp_order(&reordered_udp).is_err(),
         "UDP prepare/select reorder mutation survived"
+    );
+    let mut split_udp_cap = udp.to_vec();
+    let session_cap = position(&split_udp_cap, &["protocol", ".", "session_count", "("], 0)
+        .expect("shared session ceiling token");
+    split_udp_cap[session_cap] = "mappings".to_owned();
+    split_udp_cap[session_cap + 2] = "orphan_count".to_owned();
+    assert!(
+        check_udp_order(&split_udp_cap).is_err(),
+        "orphan-only admission mutation survived"
     );
     let mut aliased_tcp = tcp.to_vec();
     aliased_tcp.extend(["poll_read_plain".to_owned(), "(".to_owned()]);

@@ -32,7 +32,7 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
         outbounds = [\"direct\", \"missing\"]\n\
         default = \"missing\"\n\
         [route]\n\
-        final = \"manual\"\n\
+        final = \"missing\"\n\
         [route.sniff]\n\
         timeout_ms = 300\n\
         max_bytes = 512\n\
@@ -55,15 +55,29 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
         protocol = \"http\"\n\
         domain = \"reject.test\"\n\
         action = \"reject\"\n\
+        [[route.rules]]\n\
+        network = \"tcp\"\n\
+        protocol = \"http\"\n\
+        domain = \"route.test\"\n\
+        action = \"route\"\n\
+        outbound = \"manual\"\n\
+        [[route.rules]]\n\
+        network = \"tcp\"\n\
+        protocol = \"http\"\n\
+        domain = \"route.test\"\n\
+        action = \"route\"\n\
+        outbound = \"missing\"\n\
         [shadowsocks]\n\
         method = \"2022-blake3-aes-128-gcm\"\n\
         psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
         [runtime]\n\
         shutdown_grace_ms = 0\n"
     );
+    let metrics = reserve_address();
     let (path, mut config) = server_test_config_source("m14-selector", &source);
     let selector = config.selector_control();
     config.outbounds.truncate(1);
+    config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
     wait_until_bound(&mut server, listen).await;
@@ -207,7 +221,8 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
         .await;
     }
 
-    let route_prefix = b"GET / HTTP/1.1\r\nHost: route.test\r\n\r\n";
+    let mut route_prefix = b"GET / HTTP/1.1\r\nHost: route.test\r\n\r\n".to_vec();
+    route_prefix.resize(512, b'x');
     let flow = outbound
         .connect_server()
         .await
@@ -284,7 +299,7 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
         .expect("missing selector request");
     let mut missing = TokioFramed::new(flow);
     missing
-        .write_all(route_prefix)
+        .write_all(&route_prefix)
         .await
         .expect("missing selector prefix");
     missing
@@ -299,6 +314,46 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
     selector
         .switch("manual", "direct")
         .expect("restore direct for terminal I/O cases");
+    let closed_target = TargetAddr::ipv4(reserve_address()).expect("closed numeric target");
+    let flow = outbound
+        .connect_server()
+        .await
+        .expect("selected failure connect")
+        .write_request(&closed_target)
+        .await
+        .expect("selected failure request");
+    let mut selected_failure = TokioFramed::new(flow);
+    selected_failure
+        .write_all(&route_prefix)
+        .await
+        .expect("selected failure prefix");
+    selected_failure
+        .flush()
+        .await
+        .expect("selected failure flush");
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        selected_failure.read(&mut [0_u8; 1]),
+    )
+    .await
+    .expect("selected failure close deadline");
+    let mut metrics_client = tokio::net::TcpStream::connect(metrics)
+        .await
+        .expect("selected failure metrics connect");
+    metrics_client
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .expect("selected failure metrics request");
+    let mut encoded = String::new();
+    metrics_client
+        .read_to_string(&mut encoded)
+        .await
+        .expect("selected failure metrics response");
+    assert!(encoded.contains(
+        "ferrum2_tcp_failures_total{role=\"server\",stage=\"direct\",reason=\"connection_refused\"} 1"
+    ));
+    assert_pending(target.accept(), "selected open failure fell back").await;
+
     let flow = outbound
         .connect_server()
         .await
@@ -357,7 +412,9 @@ async fn route_sniff_reject_tcp_timeout_continues_to_final() {
         network = \"tcp\"\n\
         action = \"sniff\"\n\
         sniffers = \"tls\"\n";
-    let (path, config) = server_v2_test_config(listen, route);
+    let metrics = reserve_address();
+    let (path, mut config) = server_v2_test_config(listen, route);
+    config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
     wait_until_bound(&mut server, listen).await;
@@ -375,11 +432,14 @@ async fn route_sniff_reject_tcp_timeout_continues_to_final() {
         &clock,
         &random,
     );
+    let mut malformed_bound = vec![0_u8; 512];
+    malformed_bound[..5].copy_from_slice(b"\x16\x03\x03\x00\x00");
     let mut exact_bound = vec![0_u8; 512];
-    exact_bound[..5].copy_from_slice(b"\x16\x03\x03\xff\xff");
+    exact_bound[..5].copy_from_slice(b"\x16\x03\x03\x01\xfc");
     for (name, prefix) in [
         ("unknown", b"G".to_vec()),
         ("invalid", b"\x16\x03\x03\x00\x00".to_vec()),
+        ("invalid exact bound", malformed_bound),
         ("exact bound", exact_bound),
     ] {
         let flow = outbound
@@ -433,6 +493,25 @@ async fn route_sniff_reject_tcp_timeout_continues_to_final() {
         .expect("post-timeout relay deadline")
         .expect("relay after timeout");
     assert_eq!(&received, b"after-timeout");
+
+    let mut metrics_client = tokio::net::TcpStream::connect(metrics)
+        .await
+        .expect("metrics connect");
+    metrics_client
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .expect("metrics request");
+    let mut encoded = String::new();
+    metrics_client
+        .read_to_string(&mut encoded)
+        .await
+        .expect("metrics response");
+    assert!(encoded.contains(
+        "ferrum2_sniff_total{role=\"server\",transport=\"tcp\",stage=\"sniff\",outcome=\"limit\",protocol=\"none\"} 1"
+    ));
+    assert!(encoded.contains(
+        "ferrum2_sniff_total{role=\"server\",transport=\"tcp\",stage=\"sniff\",outcome=\"invalid\",protocol=\"none\"} 2"
+    ));
 
     drop((client, accepted));
     stop.send(()).expect("stop server");

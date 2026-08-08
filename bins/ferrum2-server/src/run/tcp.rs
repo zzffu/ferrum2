@@ -288,13 +288,21 @@ where
             RouteProgramAction::Continue(RouteAction::Sniff(sniffers)) if !sniffed => {
                 sniffed = true;
                 let order = sniff_order(sniffers, Network::Tcp);
-                let mut progress = ferrum2_sniff::sniff(
-                    prefix.as_ref(),
-                    program.sniff.max_bytes,
-                    Transport::Tcp,
-                    target.port().get(),
-                    &order,
-                );
+                let max_bytes = program.sniff.max_bytes;
+                let classification_horizon = max_bytes
+                    .checked_add(1)
+                    .expect("validated sniff maximum has one-byte horizon");
+                let mut progress = if prefix.as_ref().len() > max_bytes {
+                    SniffProgress::NeedMore
+                } else {
+                    ferrum2_sniff::sniff(
+                        prefix.as_ref(),
+                        classification_horizon,
+                        Transport::Tcp,
+                        target.port().get(),
+                        &order,
+                    )
+                };
                 let mut collector = None;
                 if progress == SniffProgress::NeedMore {
                     let initial = match prefix {
@@ -305,7 +313,7 @@ where
                     };
                     let collected = collect_sniff_prefix(
                         initial,
-                        program.sniff.max_bytes,
+                        max_bytes,
                         program.sniff.max_aggregate_bytes,
                         &context.registry,
                         program.sniff.timeout,
@@ -316,7 +324,7 @@ where
                         |bytes| {
                             if ferrum2_sniff::sniff(
                                 bytes,
-                                program.sniff.max_bytes,
+                                classification_horizon,
                                 Transport::Tcp,
                                 target.port().get(),
                                 &order,
@@ -334,7 +342,7 @@ where
                         SniffPrefixOutcome::Complete => {
                             progress = ferrum2_sniff::sniff(
                                 collected.as_ref(),
-                                program.sniff.max_bytes,
+                                max_bytes,
                                 Transport::Tcp,
                                 target.port().get(),
                                 &order,
