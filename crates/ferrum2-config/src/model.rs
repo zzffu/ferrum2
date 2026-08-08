@@ -190,12 +190,14 @@ pub struct ClientDnsRoute {
 
 impl ClientDnsRoute {
     /// Selects one DNS server for a validated client query context.
+    ///
+    /// An absent query type represents a wire type outside the closed policy vocabulary.
     pub fn select(
         &self,
         ingress: DnsIngressId,
         network: Network,
         target: &TargetAddr,
-        qtype: DnsQueryType,
+        qtype: Option<DnsQueryType>,
     ) -> Option<usize> {
         let inbound = match ingress {
             DnsIngressId::Listener(index) if index < self.listener_count => index,
@@ -205,7 +207,7 @@ impl ClientDnsRoute {
             _ => return None,
         };
         let mut evaluation = self.program.evaluate(inbound, network, target);
-        match evaluation.next(RouteMetadata::new(Some(qtype), None))? {
+        match evaluation.next(RouteMetadata::new(qtype, None))? {
             RouteProgramAction::Terminal(server) | RouteProgramAction::Final(server) => {
                 Some(*server)
             }

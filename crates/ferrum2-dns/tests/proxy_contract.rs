@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ferrum2_dns::{
-    DnsProxy, DnsProxyListeners, DnsUpstreamSpec, DnsUpstreamTransport, ProxyTransport,
-    TaggedResolver,
+    DnsProxy, DnsProxyListeners, DnsUpstreamSpec, DnsUpstreamTransport, ProxyIngress,
+    ProxyTransport, TaggedResolver,
 };
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, SOA};
@@ -119,10 +119,17 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
     .expect("resolver");
     owner.ready().await.expect("resolver ready");
     let resolver = Arc::new(resolver);
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |inbound, transport, name| {
-        assert_eq!(inbound, 3);
+    let proxy = DnsProxy::new(Arc::clone(&resolver), |ingress, transport, name, qtype| {
+        if name.to_ascii().ends_with(".suffix.example.") {
+            assert_eq!(ingress, ProxyIngress::Ordinary(0));
+            assert_eq!(transport, ProxyTransport::Tcp);
+            assert_eq!(qtype, u16::from(RecordType::AAAA));
+            return None;
+        }
+        assert_eq!(ingress, ProxyIngress::Listener(0));
         assert_eq!(transport, ProxyTransport::Udp);
         assert!(name.is_fqdn(), "wire query must be absolute");
+        assert!(matches!(qtype, 1 | 28));
         Some(0)
     });
     let mut request = Message::new(0x1234, MessageType::Query, OpCode::Query);
@@ -133,7 +140,7 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
 
     let response = proxy
         .answer(
-            3,
+            ProxyIngress::Listener(0),
             ProxyTransport::Udp,
             &request.to_vec().expect("request encode"),
         )
@@ -169,7 +176,7 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
         ));
         let response = proxy
             .answer(
-                3,
+                ProxyIngress::Listener(0),
                 ProxyTransport::Udp,
                 &request.to_vec().expect("typed positive request"),
             )
@@ -190,7 +197,7 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
     ));
     let response = proxy
         .answer(
-            3,
+            ProxyIngress::Listener(0),
             ProxyTransport::Udp,
             &request.to_vec().expect("negative request encode"),
         )
@@ -219,7 +226,7 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
     ));
     let response = proxy
         .answer(
-            3,
+            ProxyIngress::Listener(0),
             ProxyTransport::Udp,
             &request.to_vec().expect("NODATA request encode"),
         )
@@ -228,6 +235,27 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
     let response = Message::from_vec(&response).expect("typed NODATA response");
     assert_eq!(response.metadata.response_code, ResponseCode::NoError);
     assert!(response.answers.is_empty());
+
+    let mut request = Message::new(0x4323, MessageType::Query, OpCode::Query);
+    request.add_query(Query::query(
+        Name::from_ascii("deep.suffix.example.").expect("ordinary query name"),
+        RecordType::AAAA,
+    ));
+    let response = proxy
+        .answer(
+            ProxyIngress::Ordinary(0),
+            ProxyTransport::Tcp,
+            &request.to_vec().expect("ordinary request encode"),
+        )
+        .await
+        .expect("ordinary safe response");
+    assert_eq!(
+        Message::from_vec(&response)
+            .expect("ordinary typed response")
+            .metadata
+            .response_code,
+        ResponseCode::ServFail
+    );
 
     upstream_task.await.expect("upstream task");
     drop(proxy);
@@ -271,7 +299,7 @@ async fn udp_proxy_drops_malformed_and_rejects_shape_without_upstream_work() {
     let resolver = Arc::new(resolver);
     let selections = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&selections);
-    let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), move |_, _, _| {
+    let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), move |_, _, _, _| {
         observed.fetch_add(1, Ordering::AcqRel);
         Some(0)
     }));
@@ -396,7 +424,7 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
     .expect("timeout resolver");
     owner.ready().await.expect("timeout resolver ready");
     let resolver = Arc::new(resolver);
-    let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), |_, _, _| Some(0)));
+    let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0)));
     let query = |id| {
         let mut message = Message::new(id, MessageType::Query, OpCode::Query);
         message.add_query(Query::query(
@@ -408,7 +436,11 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
     let first_proxy = Arc::clone(&proxy);
     let first = tokio::spawn(async move {
         first_proxy
-            .answer(0, ProxyTransport::Udp, &query(0x5201))
+            .answer(
+                ProxyIngress::Listener(0),
+                ProxyTransport::Udp,
+                &query(0x5201),
+            )
             .await
             .expect("timeout response")
     });
@@ -421,7 +453,11 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
     .expect("first upstream timeout")
     .expect("first upstream query");
     let busy = proxy
-        .answer(0, ProxyTransport::Udp, &query(0x5202))
+        .answer(
+            ProxyIngress::Listener(0),
+            ProxyTransport::Udp,
+            &query(0x5202),
+        )
         .await
         .expect("busy response");
     assert_eq!(
@@ -496,7 +532,7 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
     .expect("large resolver");
     owner.ready().await.expect("large resolver ready");
     let resolver = Arc::new(resolver);
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _| Some(0));
+    let proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0));
     let mut request = Message::new(0x5203, MessageType::Query, OpCode::Query);
     request
         .add_query(Query::query(
@@ -510,7 +546,7 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
         });
     let response = proxy
         .answer(
-            0,
+            ProxyIngress::Listener(0),
             ProxyTransport::Udp,
             &request.to_vec().expect("large request"),
         )
@@ -588,7 +624,7 @@ async fn udp_tc_retries_tcp_on_the_same_selected_server() {
     let resolver = Arc::new(resolver);
     let selections = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&selections);
-    let proxy = DnsProxy::new(Arc::clone(&resolver), move |_, _, _| {
+    let proxy = DnsProxy::new(Arc::clone(&resolver), move |_, _, _, _| {
         observed.fetch_add(1, Ordering::AcqRel);
         Some(0)
     });
@@ -599,7 +635,7 @@ async fn udp_tc_retries_tcp_on_the_same_selected_server() {
     ));
     let response = proxy
         .answer(
-            0,
+            ProxyIngress::Listener(0),
             ProxyTransport::Udp,
             &request.to_vec().expect("TC proxy request"),
         )
@@ -660,10 +696,13 @@ async fn tcp_listener_handles_multi_query_frames_bounds_and_clean_eof() {
     .expect("resolver");
     owner.ready().await.expect("resolver ready");
     let resolver = Arc::new(resolver);
-    let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), |_, transport, _| {
-        assert_eq!(transport, ProxyTransport::Tcp);
-        Some(0)
-    }));
+    let proxy = Arc::new(DnsProxy::new(
+        Arc::clone(&resolver),
+        |_, transport, _, _| {
+            assert_eq!(transport, ProxyTransport::Tcp);
+            Some(0)
+        },
+    ));
     let listen: [SocketAddr; 2] = reserve_paired_addresses(2)
         .try_into()
         .expect("two paired listener addresses");

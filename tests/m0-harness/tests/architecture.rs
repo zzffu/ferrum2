@@ -2089,6 +2089,8 @@ fn runtime_and_library_owners_are_unique_and_composition_only() {
             "crates/ferrum2-config/src/validation.rs",
         ),
         ("struct", "DnsProxy", "crates/ferrum2-dns/src/proxy.rs"),
+        ("enum", "ProxyIngress", "crates/ferrum2-dns/src/proxy.rs"),
+        ("fn", "answer", "crates/ferrum2-dns/src/proxy.rs"),
         (
             "struct",
             "SystemDnsEgress",
@@ -2156,6 +2158,162 @@ fn runtime_and_library_owners_are_unique_and_composition_only() {
         check_no_sequences([source], &[&["Message", ":", ":", "from_vec"]])
             .unwrap_or_else(|error| panic!("DNS adapter parses wire: {error}"));
     }
+    let dns_sources: Vec<_> = sources
+        .iter()
+        .filter(|source| source.path.starts_with("crates/ferrum2-dns/src/"))
+        .collect();
+    check_no_identifiers(
+        dns_sources.iter().copied(),
+        &["DnsService", "DnsFramer", "DnsParser", "DnsQueryEngine"],
+    )
+    .unwrap_or_else(|error| panic!("DNS crate restored a delegating/duplicate module: {error}"));
+    let parser_owners: Vec<_> = dns_sources
+        .iter()
+        .filter(|source| {
+            has_tokens(
+                source.production_tokens().expect("DNS production tokens"),
+                &["Message", ":", ":", "from_vec"],
+            )
+        })
+        .map(|source| source.path.as_str())
+        .collect();
+    assert_eq!(
+        parser_owners,
+        ["crates/ferrum2-dns/src/proxy.rs"],
+        "DnsProxy::answer must remain the only DNS wire decoder"
+    );
+    let proxy = dns_sources
+        .iter()
+        .find(|source| source.path == "crates/ferrum2-dns/src/proxy.rs")
+        .expect("DNS proxy owner")
+        .production_tokens()
+        .expect("DNS proxy production tokens");
+    assert_eq!(
+        proxy
+            .windows(4)
+            .filter(|window| *window == ["HickoryTcpStream", ":", ":", "from_stream"])
+            .count(),
+        1,
+        "DnsProxy listeners must retain one Hickory TCP framer"
+    );
+    let server_dns = sources
+        .iter()
+        .find(|source| source.path == "bins/ferrum2-server/src/dns_egress.rs")
+        .expect("server DNS policy adapter");
+    check_no_identifiers([server_dns], &["DnsQueryType", "RecordType", "qtype"])
+        .unwrap_or_else(|error| panic!("server application DNS policy gained qtype: {error}"));
+    let server_dns_tokens = server_dns
+        .production_tokens()
+        .expect("server DNS policy tokens");
+    for (sequence, message) in [
+        (
+            ["state", ".", "select"],
+            "application DNS policy must select exactly once",
+        ),
+        (
+            ["resolver", ".", "lookup_ips"],
+            "server resolution must enter one A+AAAA lookup",
+        ),
+    ] {
+        assert_eq!(
+            server_dns_tokens
+                .windows(sequence.len())
+                .filter(|window| *window == sequence)
+                .count(),
+            1,
+            "{message}"
+        );
+    }
+    let server_run = sources
+        .iter()
+        .find(|source| source.path == "bins/ferrum2-server/src/run.rs")
+        .expect("server composition root")
+        .production_tokens()
+        .expect("server composition tokens");
+    for (sequence, message) in [
+        (
+            &["config", ".", "dns_route"][..],
+            "server root must hand off the application DNS policy exactly once",
+        ),
+        (
+            &[
+                "ServerDnsState",
+                ":",
+                ":",
+                "new",
+                "(",
+                "route",
+                ",",
+                "policy",
+                ")",
+            ],
+            "server root must preserve the selected DNS route and policy",
+        ),
+    ] {
+        assert_eq!(
+            server_run
+                .windows(sequence.len())
+                .filter(|window| {
+                    window
+                        .iter()
+                        .map(String::as_str)
+                        .eq(sequence.iter().copied())
+                })
+                .count(),
+            1,
+            "{message}"
+        );
+    }
+    let server_dns_tests = &server_dns.tokens[server_dns_tokens.len()..];
+    for (sequence, count, message) in [
+        (
+            &["Message", ":", ":", "from_vec"][..],
+            2,
+            "server live DNS responders must decode with Hickory",
+        ),
+        (
+            &["Message", ":", ":", "response"][..],
+            2,
+            "server live DNS responders must construct typed responses",
+        ),
+        (
+            &["response", ".", "to_vec"][..],
+            2,
+            "server live DNS responders must encode with Hickory",
+        ),
+    ] {
+        assert_eq!(
+            server_dns_tests
+                .windows(sequence.len())
+                .filter(|window| {
+                    window
+                        .iter()
+                        .map(String::as_str)
+                        .eq(sequence.iter().copied())
+                })
+                .count(),
+            count,
+            "{message}"
+        );
+    }
+    assert!(
+        !server_dns_tests
+            .iter()
+            .any(|token| matches!(token.as_str(), "qtype_offset" | "from_be_bytes")),
+        "server live DNS responders must not decode query fields manually"
+    );
+    assert!(
+        !server_dns_tests
+            .iter()
+            .any(|token| matches!(token.as_str(), "24" | "25" | "26" | "28" | "29")),
+        "server live DNS responders must not depend on fixed qtype offsets"
+    );
+    assert!(
+        !server_dns_tests.windows(3).any(|window| {
+            window[0] == "[" && matches!(window[1].as_str(), "2" | "3") && window[2] == "]"
+        }),
+        "server live DNS responders must not edit header flag offsets"
+    );
 }
 #[test]
 fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {
@@ -2194,12 +2352,16 @@ fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {
             "missing reused DNS seam: {required}"
         );
     }
-    for forbidden in ["Message::from_vec", "hickory_proto", "struct DnsParser"] {
-        assert!(
-            !run.contains(forbidden) && !dns.contains(forbidden) && !egress.contains(forbidden),
-            "server composition duplicated DNS protocol behavior: {forbidden}"
-        );
-    }
+    let production = [
+        TokenSource::new("bins/ferrum2-server/src/run.rs", &run),
+        TokenSource::new("bins/ferrum2-server/src/run/dns.rs", &dns),
+        TokenSource::new("bins/ferrum2-server/src/dns_egress.rs", &egress),
+    ];
+    check_no_identifiers(production.iter(), &["hickory_proto", "DnsParser"]).unwrap_or_else(
+        |error| panic!("server composition duplicated DNS protocol behavior: {error}"),
+    );
+    check_no_sequences(production.iter(), &[&["Message", ":", ":", "from_vec"]])
+        .unwrap_or_else(|error| panic!("server composition parsed DNS wire: {error}"));
     for required in [
         "Message::from_vec",
         "Record::from_rdata",

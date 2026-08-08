@@ -523,9 +523,7 @@ fn exact_binary_tokio_boundary(
                 .expect("dev declaration prefix")
                 .to_owned(),
         )]);
-        if role == "client" {
-            expected_dev.insert("hickory-proto.workspace".to_owned(), "true".to_owned());
-        }
+        expected_dev.insert("hickory-proto.workspace".to_owned(), "true".to_owned());
         if dev != expected_dev {
             return Err(format!("{role} dev dependencies changed"));
         }
@@ -1471,6 +1469,7 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
                 "ferrum2-runtime".to_owned(),
                 "ferrum2-shadowsocks".to_owned(),
                 "ferrum2-sniff".to_owned(),
+                "hickory-proto".to_owned(),
                 "tokio".to_owned(),
                 "tracing".to_owned(),
             ]),
@@ -1487,15 +1486,11 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
             .expect("binary dependencies")
             .iter()
             .find(|dependency| dependency["name"] == "hickory-proto");
-        if package_name == "ferrum2-client" {
-            let hickory = hickory.expect("client typed DNS test edge");
-            assert_eq!(hickory["req"], "=0.26.1");
-            assert_eq!(hickory["kind"], "dev");
-            assert_eq!(hickory["uses_default_features"], false);
-            assert_eq!(hickory["features"], serde_json::json!(["std"]));
-        } else {
-            assert!(hickory.is_none(), "server has no DNS wire test edge");
-        }
+        let hickory = hickory.expect("binary typed DNS test edge");
+        assert_eq!(hickory["req"], "=0.26.1");
+        assert_eq!(hickory["kind"], "dev");
+        assert_eq!(hickory["uses_default_features"], false);
+        assert_eq!(hickory["features"], serde_json::json!(["std"]));
         let tokio_dependencies: Vec<_> = package["dependencies"]
             .as_array()
             .expect("binary dependencies")

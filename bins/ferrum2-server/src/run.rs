@@ -111,7 +111,7 @@ async fn run_with_registry_prepared<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
-    let dns = match (config.dns, dns_specs) {
+    let dns = match (config.dns, config.dns_route, dns_specs) {
         (
             Some(DnsConfig {
                 inbounds: _,
@@ -120,9 +120,10 @@ where
                 timeout,
                 max_inflight,
             }),
+            policy,
             Some(servers),
-        ) => Some((servers, route, timeout, max_inflight)),
-        (None, None) => None,
+        ) => Some((servers, route, policy, timeout, max_inflight)),
+        (None, None, None) => None,
         _ => return Err(RunError::StartupProtocol),
     };
     let metrics = Arc::new(Metrics::new());
@@ -157,8 +158,8 @@ where
             + usize::from(config.metrics.is_some()),
     );
     let dns = match dns {
-        Some((servers, route, timeout, max_inflight)) => {
-            let state = Arc::new(dns_egress::ServerDnsState::new(route));
+        Some((servers, route, policy, timeout, max_inflight)) => {
+            let state = Arc::new(dns_egress::ServerDnsState::new(route, policy));
             let root_state = Arc::clone(&state);
             let outbound_count = routing.outbound_count;
             roots.push(ProcessRoot::new(move || async move {

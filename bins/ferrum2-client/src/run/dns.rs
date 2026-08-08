@@ -110,7 +110,7 @@ mod tests {
         )
         .expect("resolver owner handoff");
         let resolver = Arc::new(resolver);
-        let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), |_, _, _| Some(0)));
+        let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0)));
         let (readiness_sender, readiness_gate) = tokio::sync::oneshot::channel();
         let root = ProcessRoot::new(move || async move {
             Ok(ClientDnsRoot {

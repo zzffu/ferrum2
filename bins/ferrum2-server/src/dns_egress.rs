@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ferrum2_config::{DnsServerConfig, DnsTransport};
+use ferrum2_config::{DnsServerConfig, DnsTransport, ServerDnsRoute};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{ActionTable, EgressPlanSnapshot, Network};
 use ferrum2_dns::{
@@ -50,19 +50,24 @@ pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamS
 
 pub(super) struct ServerDnsState {
     route: ActionTable<usize>,
+    policy: Option<ServerDnsRoute>,
     resolver: Mutex<Option<Arc<TaggedResolver>>>,
 }
 
 impl ServerDnsState {
-    pub(super) fn new(route: ActionTable<usize>) -> Self {
+    pub(super) fn new(route: ActionTable<usize>, policy: Option<ServerDnsRoute>) -> Self {
         Self {
             route,
+            policy,
             resolver: Mutex::new(None),
         }
     }
 
     pub(super) fn select(&self, inbound: usize, network: Network, target: &TargetAddr) -> usize {
-        self.route.select(inbound, network, target)
+        self.policy.as_ref().map_or_else(
+            || self.route.select(inbound, network, target),
+            |policy| policy.select(inbound, network, target),
+        )
     }
 
     pub(super) fn install(&self, resolver: Arc<TaggedResolver>) -> Result<(), ()> {
@@ -207,6 +212,12 @@ mod tests {
     use super::*;
 
     use ferrum2_core::route::EgressPlanHandle;
+    use hickory_proto::op::{Message, MessageType, OpCode};
+    use hickory_proto::rr::{DNSClass, RecordType};
+
+    use crate::run::test_support::{
+        Ipv4Addr, UdpSocket, assert_pending, recv_udp, reserve_address, server_test_config_source,
+    };
 
     #[test]
     fn dns_runtime_specs_preserve_validated_server_values() {
@@ -309,25 +320,192 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
-        let selected = TargetAddr::domain("selected.example.", 8443).expect("selected target");
-        let other = TargetAddr::domain("other.example.", 8443).expect("final target");
-        let route = ferrum2_core::route::ActionTable::new(
-            vec![ferrum2_core::route::ActionRule::new(
-                Some(1),
-                Some(Network::Tcp),
-                Some(selected.clone()),
-                0,
-            )],
-            1,
-        )
-        .expect("DNS route");
-        let state = ServerDnsState::new(route);
+    #[tokio::test]
+    async fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
+        let listen = reserve_address();
+        let selected_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("selected DNS upstream");
+        let selected_address = selected_socket.local_addr().expect("selected DNS address");
+        let final_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("final DNS upstream");
+        let final_address = final_socket.local_addr().expect("final DNS address");
+        let dead_address = reserve_address();
+        let source = format!(
+            "schema_version = 2\n\
+             [[inbounds]]\n\
+             tag = \"i0\"\n\
+             listen = \"{listen}\"\n\
+             [[outbounds]]\n\
+             tag = \"direct\"\n\
+             [route]\n\
+             final = \"direct\"\n\
+             [shadowsocks]\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+             [dns]\n\
+             timeout_ms = 100\n\
+             [[dns.servers]]\n\
+             tag = \"selected\"\n\
+             transport = \"udp\"\n\
+             address = \"{selected_address}\"\n\
+             [[dns.servers]]\n\
+             tag = \"dead\"\n\
+             transport = \"udp\"\n\
+             address = \"{dead_address}\"\n\
+             [[dns.servers]]\n\
+             tag = \"final\"\n\
+             transport = \"udp\"\n\
+             address = \"{final_address}\"\n\
+             [dns.route]\n\
+             final = \"final\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"i0\"\n\
+             network = \"tcp\"\n\
+             domain = \"exact.test\"\n\
+             port = 53\n\
+             server = \"selected\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"i0\"\n\
+             network = \"tcp\"\n\
+             domain = \"dead.example.com\"\n\
+             port = 443\n\
+             server = \"dead\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"i0\"\n\
+             network = [\"tcp\", \"udp\"]\n\
+             domain_suffix = \"example.com\"\n\
+             port_range = \"443:8443\"\n\
+             server = \"selected\"\n"
+        );
+        let (path, config) = server_test_config_source("dns-policy", &source);
+        let dns = config.dns.expect("server DNS config");
+        let specs = dns_runtime_specs(&dns.servers);
+        let state = Arc::new(ServerDnsState::new(dns.route, config.dns_route));
+        let exact = TargetAddr::domain("EXACT.TEST.", 53).expect("exact target");
+        let suffix_low = TargetAddr::domain("api.example.com.", 443).expect("range low target");
+        let suffix_high =
+            TargetAddr::domain("deep.api.example.com", 8443).expect("range high target");
+        let dead = TargetAddr::domain("dead.example.com", 443).expect("dead target");
+        let below = TargetAddr::domain("api.example.com", 442).expect("below range target");
+        let above = TargetAddr::domain("api.example.com", 8444).expect("above range target");
+        let other = TargetAddr::domain("other.test", 443).expect("final target");
 
-        assert_eq!(state.select(1, Network::Tcp, &selected), 0);
-        assert_eq!(state.select(0, Network::Tcp, &selected), 1);
-        assert_eq!(state.select(1, Network::Udp, &selected), 1);
-        assert_eq!(state.select(1, Network::Tcp, &other), 1);
+        let selected_task = tokio::spawn(async move {
+            let mut wire = [0_u8; 4096];
+            for expected_qtype in [
+                RecordType::A,
+                RecordType::AAAA,
+                RecordType::A,
+                RecordType::AAAA,
+            ] {
+                let (length, peer) = recv_udp(&selected_socket, &mut wire).await;
+                let request =
+                    Message::from_vec(&wire[..length]).expect("selected DNS query decode");
+                assert_eq!(request.metadata.message_type, MessageType::Query);
+                assert_eq!(request.metadata.op_code, OpCode::Query);
+                let [query] = request.queries.as_slice() else {
+                    panic!("selected upstream must receive one DNS query");
+                };
+                assert_eq!(query.query_class(), DNSClass::IN);
+                assert_eq!(query.query_type(), expected_qtype);
+                let mut response = Message::response(request.id, OpCode::Query);
+                response.metadata.recursion_available = true;
+                response.add_query(query.clone());
+                let response = response.to_vec().expect("selected DNS response encode");
+                selected_socket
+                    .send_to(&response, peer)
+                    .await
+                    .expect("selected DNS response");
+            }
+        });
+        let (check_final, start_final_check) = tokio::sync::oneshot::channel();
+        let final_task = tokio::spawn(async move {
+            let mut wire = [0_u8; 4096];
+            for expected_qtype in [RecordType::A, RecordType::AAAA] {
+                let (length, peer) = recv_udp(&final_socket, &mut wire).await;
+                let request = Message::from_vec(&wire[..length]).expect("final DNS query decode");
+                assert_eq!(request.metadata.message_type, MessageType::Query);
+                assert_eq!(request.metadata.op_code, OpCode::Query);
+                let [query] = request.queries.as_slice() else {
+                    panic!("final upstream must receive one DNS query");
+                };
+                assert_eq!(query.query_class(), DNSClass::IN);
+                assert_eq!(query.query_type(), expected_qtype);
+                let mut response = Message::response(request.id, OpCode::Query);
+                response.metadata.recursion_available = true;
+                response.add_query(query.clone());
+                let response = response.to_vec().expect("final DNS response encode");
+                final_socket
+                    .send_to(&response, peer)
+                    .await
+                    .expect("final DNS response");
+            }
+            start_final_check.await.expect("start no-fallback check");
+            assert_pending(
+                final_socket.recv_from(&mut wire),
+                "selected DNS failure reached the healthy final server",
+            )
+            .await;
+        });
+        let egress = Arc::new(ServerDnsEgress::new(config.outbounds.len()));
+        let (resolver, mut owner) =
+            TaggedResolver::new(specs, dns.timeout, dns.max_inflight, egress)
+                .expect("server DNS resolver");
+        owner.ready().await.expect("server DNS resolver ready");
+        state
+            .install(Arc::new(resolver))
+            .expect("install server DNS resolver");
+        let resolver = ServerDnsResolver::new(Some(Arc::clone(&state)), 0, Network::Tcp);
+
+        assert_eq!(
+            TcpResolver::resolve(&resolver, "EXACT.TEST.", 53)
+                .await
+                .expect("exact DNS resolution"),
+            []
+        );
+        assert_eq!(
+            TcpResolver::resolve(&resolver, "api.example.com.", 443)
+                .await
+                .expect("suffix DNS resolution"),
+            []
+        );
+        assert_eq!(
+            TcpResolver::resolve(&resolver, "other.test.", 443)
+                .await
+                .expect("final DNS resolution"),
+            []
+        );
+        check_final.send(()).expect("arm no-fallback check");
+        assert!(
+            TcpResolver::resolve(&resolver, "dead.example.com.", 443)
+                .await
+                .is_err(),
+            "selected DNS failure must remain terminal"
+        );
+
+        selected_task.await.expect("selected DNS upstream join");
+        final_task.await.expect("final DNS upstream join");
+        assert_eq!(state.select(0, Network::Tcp, &exact), 0);
+        assert_eq!(state.select(0, Network::Tcp, &suffix_low), 0);
+        assert_eq!(state.select(0, Network::Udp, &suffix_high), 0);
+        assert_eq!(state.select(0, Network::Tcp, &dead), 1);
+        assert_eq!(state.select(1, Network::Tcp, &exact), 2);
+        assert_eq!(state.select(0, Network::Udp, &exact), 2);
+        assert_eq!(state.select(0, Network::Tcp, &below), 2);
+        assert_eq!(state.select(0, Network::Tcp, &above), 2);
+        assert_eq!(state.select(0, Network::Tcp, &other), 2);
+        drop(resolver);
+        drop(state.take());
+        assert_eq!(
+            owner
+                .shutdown()
+                .await
+                .expect("server DNS resolver shutdown")
+                .stats,
+            ferrum2_dns::RuntimeStats::default()
+        );
+        std::fs::remove_file(path).expect("remove server DNS policy config");
     }
 }

@@ -1226,19 +1226,19 @@ server = "default""#;
                 DnsIngressId::Listener(0),
                 Network::Udp,
                 &target,
-                DnsQueryType::A,
+                Some(DnsQueryType::A),
             ),
             policy.select(
                 DnsIngressId::Ordinary(0),
                 Network::Udp,
                 &target,
-                DnsQueryType::A,
+                Some(DnsQueryType::A),
             ),
             policy.select(
                 DnsIngressId::Listener(0),
                 Network::Udp,
                 &target,
-                DnsQueryType::Caa,
+                Some(DnsQueryType::Caa),
             ),
         ),
         (Some(0), Some(1), Some(0))
@@ -1276,7 +1276,7 @@ server = "default""#;
             DnsIngressId::Ordinary(0),
             Network::Udp,
             &target,
-            DnsQueryType::A,
+            Some(DnsQueryType::A),
         ),
         Some(1)
     );
@@ -1340,6 +1340,68 @@ server = "special""#;
         ),
     );
     load_client(TempConfig::text(&bounded).path()).expect("64 DNS matcher values");
+}
+
+#[test]
+fn client_dns_unknown_wire_qtype_skips_typed_rules_without_becoming_any() {
+    let dns = r#"[dns]
+[[dns.inbounds]]
+tag = "listener"
+listen = "127.0.0.1:5353"
+[[dns.servers]]
+tag = "special"
+transport = "udp"
+address = "192.0.2.53:53"
+[[dns.servers]]
+tag = "default"
+transport = "tcp"
+address = "192.0.2.54:53"
+[dns.route]
+final = "default"
+[[dns.route.rules]]
+qname = "typed.example"
+qtype = "ANY"
+server = "special"
+[[dns.route.rules]]
+qname = "untyped.example"
+server = "special""#;
+    let source = with_dns(
+        tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        dns,
+    );
+    let client = load_client(TempConfig::text(&source).path()).expect("client DNS program");
+    let policy = client.dns_route.as_ref().expect("client DNS policy");
+    let target = |name| TargetAddr::domain(name, 53).expect("query target");
+
+    assert_eq!(
+        (
+            policy.select(
+                DnsIngressId::Listener(0),
+                Network::Udp,
+                &target("typed.example"),
+                Some(DnsQueryType::Any),
+            ),
+            policy.select(
+                DnsIngressId::Listener(0),
+                Network::Udp,
+                &target("typed.example"),
+                None,
+            ),
+            policy.select(
+                DnsIngressId::Listener(0),
+                Network::Udp,
+                &target("untyped.example"),
+                None,
+            ),
+            policy.select(
+                DnsIngressId::Listener(0),
+                Network::Udp,
+                &target("other.example"),
+                None,
+            ),
+        ),
+        (Some(0), Some(1), Some(0), Some(1))
+    );
 }
 
 #[test]
