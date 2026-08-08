@@ -1,6 +1,6 @@
 # M14 — bounded protocol sniffing and ordered route/DNS rules
 
-- **Status:** planned
+- **Status:** executing
 - **Qualified M13 product baseline:** `1af1bbf44b37a81c2ae03c562288b2a6e09694b5`
 - **Qualified product tree:** `172870c4ca0dffb6c474f2137399d553e827b1e4`
 - **Planning baseline:** `cc8a0c2946788c16e5d7af2658a7d80bac0a844b`
@@ -121,8 +121,8 @@ repository。
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M14-T01 | Freeze contracts、dependency review、M13 wording and M14 footprint control | M13 closed | ready |
-| M14-T02 | Build the protocol-neutral ordered route program and reusable egress graph | M14-T01 | todo |
+| M14-T01 | Freeze contracts、dependency review、M13 wording and M14 footprint control | M13 closed | done |
+| M14-T02 | Build the protocol-neutral ordered route program and reusable egress graph | M14-T01 | ready |
 | M14-T03 | Compile schema v2、migration rejection、matchers/actions and role capabilities | M14-T02 | todo |
 | M14-T04 | Add the pure bounded DNS/TLS/HTTP sniff module and parser evidence | M14-T03 | todo |
 | M14-T05 | Compose server TCP/UDP route、sniff、reject and exact prefix replay | M14-T04 | todo |
@@ -155,11 +155,12 @@ case/support/fixture `33883/5152/597`，unchanged thresholds and `TEST-0015` as 
 `REVIEW_REQUIRED` is expected and must be dispositioned without deleting independent security、
 parser or lifecycle evidence。No new fixture or second harness is planned。
 
-No remote action is authorized by this plan。T09 requires separate authorization for one non-force push
-and one manual performance/resource dispatch of the accepted exact SHA。No force-push、rerun、PR、tag、
-package、release or publication is implied。
+The plan itself authorized no remote action。The 2026-08-08 execute request now authorizes all required
+non-force pushes；manual performance/resource dispatch remains separately unauthorized。No rerun、
+force-push、PR、tag、package、release or publication is implied。
 
 ## Blocker / next action
 
-No plan blocker。Accept the planning diff，then create `codex/m14-t01` in `.worktrees/m14-t01` from the
-accepted planning commit and bind that exact ticket base before editing T01-owned control files。
+No blocker。T01 is accepted at exact integration `b446153712b54ec3274d06dd9d2d26646c1d4573` after
+one bounded repair and targeted Architect/QA `PASS`。Create `codex/m14-t02` from the exact integration
+branch HEAD containing this status record，bind that exact ticket base，then implement only the T02 lease。

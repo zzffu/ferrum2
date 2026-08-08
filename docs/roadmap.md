@@ -63,12 +63,12 @@ run [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144)
 resource run [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024)关闭。Owned
 egress-plan、DNS runtime dependency、private client egress及composition-root ownership完成整固；
 schema、wire、DNS/routing action和产品能力不变，final Architect/QA均`PASS`。
-M14现为`planned`：以qualified M13 product `1af1bbf…`和clean planning HEAD `cc8a0c2…`为固定
-来源，计划交付protocol-neutral ordered route program、bounded DNS/TLS/HTTP sniff、terminal
-route/reject/client DNS hijack和schema-v2 client UDP association-level selection。首个合法包填写
-路由元数据并只选一次outbound，后续包保留各自target；v1 routed+UDP启动前拒绝且无逐包兼容
-数据面。ADR-0033、SPEC/TEST-0015与九个serial tickets为当前合同；尚无product commit、worktree、
-review或remote action。
+M14现为`executing`：T01已由exact integration `b446153…`冻结qualified/planning/ticket identities、
+依赖审查、M13 server one-hop措辞和schema 3 control；initial Architect两项major经一次有界
+Markdown修复后，targeted Architect/QA均`PASS`。T02已ready，后续继续serial drain交付
+protocol-neutral ordered route program、bounded DNS/TLS/HTTP sniff、terminal route/reject/client DNS
+hijack和schema-v2 client UDP association-level selection。尚无product commit或remote action；本次
+execute仅授权所需non-force pushes，manual dispatch及其他发布动作未授权。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1075,7 +1075,7 @@ fallback/group/registry继续延期。
 
 ## M14 — bounded protocol sniffing and ordered route/DNS rules
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** 交付一个private monotonic cursor驱动的ordered route program；`sniff` non-terminal，
   `route`/client `hijack-dns`/`reject` terminal。Server authenticated TCP支持DNS/TLS ClientHello/
   HTTP/1 sniff，server/client UDP仅DNS sniff，client SOCKS TCP不pre-route sniff。Schema-v2 client
@@ -1084,7 +1084,8 @@ fallback/group/registry继续延期。
 - **Baselines:** qualified M13 product `1af1bbf44b37a81c2ae03c562288b2a6e09694b5` / tree
   `172870c4ca0dffb6c474f2137399d553e827b1e4`；planning exact
   `cc8a0c2946788c16e5d7af2658a7d80bac0a844b` / tree `7eccfc66c80263e3d949c5b6aded63b0436540ce` /
-  parent `f4dcebca3c9b56f903496d91048c3660ee60ed52`。Intervening changes are docs-only。
+  parent `f4dcebca3c9b56f903496d91048c3660ee60ed52`；T01 ticket base `5c2c7ab…` and accepted
+  integration `b446153…`。Qualified-to-planning and T01 changes are docs/control-only。
 - **Contracts:** ADR-0033、SPEC-0015、TEST-0015。Core is generic over caller-owned protocol/action values；
   config and pure sniff own separate closed spellings with exhaustive binary adapters。Existing
   `DnsProxy::answer` is reused rather than wrapped by a second service。Explicit schema version 2承载
@@ -1102,9 +1103,10 @@ fallback/group/registry继续延期。
   set-options/target override、cache/retry/fallback/group/health/LB、registry、unsafe、MSRV change、hot
   reload、management、automatic config migration、dual per-datagram client route、package/release/
   publication。
-- **Next/remote boundary:** accept the plan，then create/bind `codex/m14-t01` at the accepted planning
-  commit。No product branch/worktree、push、dispatch、PR、tag、package、release or publication is currently
-  authorized or claimed。
+- **Next/remote boundary:** T01 done，T02 ready；create/bind `codex/m14-t02` at the exact integration
+  branch HEAD containing the T01 status record。The execute request authorizes required non-force pushes；
+  no push has occurred，and manual dispatch、rerun、force-push、PR、tag、package、release or publication
+  is authorized or claimed。
 
 ## 决策登记
 
@@ -1319,3 +1321,4 @@ fallback/group/registry继续延期。
 | 2026-08-08 | M13 close | Exact `1af1bbf` closes T01～T07 with one owned plan snapshot、DNS-owned runtime model、shared private TCP/UDP egress and composition-only roots；no product behavior added | Final full Architect/QA both `PASS` with zero blocker；all T01～T06 focused and T07 local/Rust1.88/lifecycle gates passed；moved-file numeric review accepted without evidence deletion | Automatic `31223817144/1` and manual `31223831024/1` both success：platforms `3/3`、TCP/UDP `12/12` + cleanup、12 DNS cases + cleanup、throughput `144633582/546819276` ratio `0.264499787`、10k/180/RSS `6/6`/drain and DNS `4600/4466` queries、48 samples、RSS `12/12`、bounds/drain/rebind PASS；one push/dispatch consumed，no release/publication |
 | 2026-08-08 | M14 plan | M14改为`planned`；接受protocol-neutral ordered program、bounded DNS/TLS/HTTP sniff、terminal reject/client DNS hijack和private lazy UDP ownership | Owner-approved external plan经exact `cc8a0c2` source复核；core concrete protocol placement改为generic seam，existing listener-independent `DnsProxy::answer`取代新pass-through service；test forecast row/total以T02复用existing helper修正为`2360/560/0` | qualified `1af1bbf`、planning `cc8a0c2`；ADR-0033、SPEC/TEST-0015、T01→T02→T03→T04→T05→T06→T07→T08→T09；performance required；plan-only，无product/worktree/push/dispatch/release/publication |
 | 2026-08-08 | M14 client UDP association amendment | Schema-v2 client SOCKS UDP改为sing-box-style first-valid-datagram association routing：terminal action只执行一次，`route`只解析一个outbound/plan，后续数据报保留各自target但不重选；v1 routed+UDP启动前迁移拒绝且不保留逐包数据面 | Owner明确不需要client routed UDP逐包实现；RFC 1928允许association-level内部route粒度，pinned sing-box `v1.13.14` exact source提供首包缓存、一次route、逐包destination调用链；显式successor避免静默重解释 | M14两份research、ADR-0033、SPEC/TEST-0015及T01/T03/T07/T08修订；ticket graph、forecast、remote boundary不变；plan-only，无product/worktree/push/dispatch/release/publication |
+| 2026-08-08 | M14-T01 accept / execute | M14改为`executing`；T01 accepted、T02 ready；冻结exact planning/ticket identities、dependency dispositions、server one-hop compatibility wording和schema 3 M14 control | Initial Architect `BLOCK` on wrong server path name and stale route glossary，QA `PASS_WITH_NOTES`；one bounded Markdown repair `b446153`后targeted Architect/QA均`PASS`，`M14-T01-ARCH-001/002` closed | Focused `43/43`、Quick `372/5`、footprint integrity/numeric PASS and `0/0/0`；execute授权required non-force pushes，manual dispatch/rerun/force-push/PR/tag/package/release/publication未授权；no remote action |

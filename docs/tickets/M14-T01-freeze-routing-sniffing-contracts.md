@@ -1,7 +1,7 @@
 ---
 id: M14-T01
 milestone: M14
-status: ready
+status: done
 depends_on: []
 owns:
   - CONTEXT.md
@@ -26,21 +26,21 @@ reviews all parser/matcher dependencies and activates the M14 footprint baseline
 
 ## Acceptance
 
-- [ ] Qualified M13 product/tree and planning HEAD/tree/parent resolve exactly；their intervening diff has
+- [x] Qualified M13 product/tree and planning HEAD/tree/parent resolve exactly；their intervening diff has
       no Rust、manifest or lock change。
-- [ ] ADR-0032/SPEC-0014 distinguish client/multi-hop/DNS owned snapshots from the validated server
+- [x] ADR-0032/SPEC-0014 distinguish client/multi-hop/DNS owned snapshots from the validated server
       one-hop scalar path without rewriting M13 evidence。
-- [ ] ADR-0033、SPEC-0015、TEST-0015 and all nine tickets agree on actions、matcher/capability semantics、
+- [x] ADR-0033、SPEC-0015、TEST-0015 and all nine tickets agree on actions、matcher/capability semantics、
       schema-v2 first-valid-datagram association selection、schema-v1 routed+UDP migration rejection、
       failure ordering、serial graph、ownership、review bound and remote boundary。No contract retains a
       per-datagram client routed UDP implementation。
-- [ ] The two M14 research notes distinguish RFC permission from the source-derived sing-box behavior：
+- [x] The two M14 research notes distinguish RFC permission from the source-derived sing-box behavior：
       one association-selected outbound and variable per-packet destinations。
-- [ ] Exact Hickory/rustls reuse、locked `ipnet 2.12.1` and new no-default `httparse 1.10.1` have recorded
+- [x] Exact Hickory/rustls reuse、locked `ipnet 2.12.1` and new no-default `httparse 1.10.1` have recorded
       license、MSRV、feature、unsafe/source and dependency dispositions；any failure blocks T02。
-- [ ] Schema 3 M14 policy uses exact `cc8a0c2…` counts `21814/39632` and
+- [x] Schema 3 M14 policy uses exact `cc8a0c2…` counts `21814/39632` and
       `33883/5152/597`，unchanged thresholds、revision 1 and TEST-0015 reforecast reference。
-- [ ] Current selector/config/DNS/architecture evidence and repository Quick pass unchanged；no Rust
+- [x] Current selector/config/DNS/architecture evidence and repository Quick pass unchanged；no Rust
       product、workflow、harness or remote state changes。
 
 ## Validation
@@ -61,10 +61,15 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Footprint: —
-- Notes: —
+- Commit: initial control `392a96dca784d14bef639874e12301c44cd2a935`；accepted repair and
+  integration `b446153712b54ec3274d06dd9d2d26646c1d4573`。
+- Review: initial Architect `BLOCK` on `M14-T01-ARCH-001/002`，QA `PASS_WITH_NOTES`；one bounded
+  three-file Markdown repair；targeted Architect/QA `PASS`，both findings closed，no unresolved blocker。
+- Footprint: policy transition/control/integrity and numeric status `PASS`；code/tests `21814/39632`，
+  case/support/fixture `33883/5152/597`，delta `0/0/0`，no changed-file signal。
+- Notes: T01 focused `43/43` and repository Quick `372 passed / 5 ignored`；fmt/check/build/diff all
+  passed on integration。No remote action was taken；the execute request authorizes non-force pushes，
+  while manual dispatch、rerun、force-push and publication remain unauthorized。
 
 ## Rollback / risk
 
