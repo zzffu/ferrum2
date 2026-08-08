@@ -775,34 +775,57 @@ fn absent_disabled_saturation_release_and_restart_rebind_are_exact() {
 
     let directory = tempfile::tempdir().expect("temporary directory");
     let client_address = unused_loopback();
-    let config = write_udp_client_config(directory.path(), client_address, unused_loopback(), None)
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("saturation upstream");
+    upstream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("saturation upstream timeout");
+    let SocketAddr::V4(upstream_address) = upstream.local_addr().expect("upstream address") else {
+        unreachable!("IPv4 saturation upstream")
+    };
+    let config = write_udp_client_config(directory.path(), client_address, upstream_address, None)
         .expect("saturation config");
     let mut source = std::fs::read_to_string(&config).expect("read saturation config");
     source.push_str("max_sessions = 1\n");
     std::fs::write(&config, source).expect("write saturation config");
     let mut client = ChildGuard::spawn("ferrum2-client", &config);
     wait_for_listener(&mut client, client_address);
-    let (first_control, _application, relay) = udp_associate(client_address, false);
-    let (_second_control, second_reply) = udp_command(client_address);
-    assert_eq!(second_reply, [5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
-    drop(first_control);
+    let target = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 53);
+    let request = socks_datagram(target, b"activate");
+    let (first_control, first_application, relay) = udp_associate(client_address, false);
+    first_application
+        .send_to(&request, relay)
+        .expect("first activation send");
+    let mut upstream_wire = [0; 65_507];
+    upstream
+        .recv_from(&mut upstream_wire)
+        .expect("first activation reached upstream");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let (control, reply) = udp_command(client_address);
-        if reply[1] == 0 {
-            drop(control);
-            break;
-        }
-        assert_eq!(reply[1], 1);
-        drop(control);
-        assert!(
-            std::time::Instant::now() < deadline,
-            "session permit release timeout"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    let (mut second_control, second_application, second_relay) =
+        udp_associate(client_address, false);
+    second_application
+        .send_to(&request, second_relay)
+        .expect("saturated activation send");
+    assert_no_datagram(&upstream);
+    let mut eof = [0; 1];
+    assert_eq!(
+        second_control
+            .read(&mut eof)
+            .expect("saturated control EOF"),
+        0
+    );
+    wait_udp_rebind(second_relay, "saturated relay rebind");
+    drop(first_control);
     wait_udp_rebind(relay, "released relay rebind");
+
+    let (third_control, third_application, third_relay) = udp_associate(client_address, false);
+    third_application
+        .send_to(&request, third_relay)
+        .expect("released activation send");
+    upstream
+        .recv_from(&mut upstream_wire)
+        .expect("released activation reached upstream");
+    drop(third_control);
+    wait_udp_rebind(third_relay, "released association rebind");
     client.terminate_and_reap(Duration::from_secs(5));
     drop(TcpListener::bind(client_address).expect("client restart rebind"));
 }

@@ -1490,42 +1490,106 @@ fn client_socks_owns_one_terminal_route_and_one_plan_udp_association() {
     );
 
     let association = item_body(udp, &["struct", "ClientUdpAssociation"]);
-    for field in [
-        "plan",
-        "protocol",
-        "pending_session",
-        "manager",
-        "handle",
-        "live_ids",
-        "first_server",
-        "upstream",
-        "inner_wire",
-        "upstream_wire",
-        "scratch",
+    let protocol = item_body(udp, &["struct", "ClientUdpProtocol"]);
+    let check_one_plan =
+        |association: &[String], protocol: &[String], udp: &[String]| -> Result<(), &'static str> {
+            for field in ["plan", "first_server", "protocol"] {
+                if !has_tokens(association, &[field, ":"]) {
+                    return Err("association lost its single lazy field");
+                }
+            }
+            if !has_tokens(
+                association,
+                &["protocol", ":", "Option", "<", "ClientUdpProtocol", ">"],
+            ) {
+                return Err("association protocol is not one lazy slot");
+            }
+            for field in [
+                "pending_session",
+                "manager",
+                "handle",
+                "live_ids",
+                "upstream",
+                "inner_wire",
+                "upstream_wire",
+                "scratch",
+            ] {
+                if !has_tokens(protocol, &[field, ":"]) {
+                    return Err("lazy protocol lost an owned field");
+                }
+            }
+            if association
+                .iter()
+                .chain(protocol)
+                .any(|token| token == "pub")
+            {
+                return Err("client UDP exposed an owned field");
+            }
+            if [
+                "plans",
+                "plan_map",
+                "plans_by_key",
+                "application",
+                "application_wire",
+            ]
+            .iter()
+            .any(|forbidden| association.iter().any(|token| token == forbidden))
+                || ["HashMap", "BTreeMap"]
+                    .iter()
+                    .any(|forbidden| udp.iter().any(|token| token == forbidden))
+                || has_tokens(association, &["Vec", "<", "EgressPlanSnapshot", ">"])
+                || has_tokens(association, &["Vec", "<", "ClientUdpPlan", ">"])
+            {
+                return Err("client UDP restored a plan-keyed collection");
+            }
+            Ok(())
+        };
+    check_one_plan(association, protocol, udp).unwrap_or_else(|error| panic!("{error}"));
+
+    let mut btree_map = udp.to_vec();
+    btree_map.push("BTreeMap".to_owned());
+    assert!(
+        check_one_plan(association, protocol, &btree_map).is_err(),
+        "BTreeMap plan-map mutation survived"
+    );
+    let mut vector_map = association.to_vec();
+    vector_map.extend(["plans", ":", "Vec", "<", "EgressPlanSnapshot", ">"].map(str::to_owned));
+    assert!(
+        check_one_plan(&vector_map, protocol, udp).is_err(),
+        "Vec plan-map mutation survived"
+    );
+
+    let check_endpoint_surface = |tokens: &[String]| -> Result<(), &'static str> {
+        for declaration in tokens.windows(2).filter(|window| {
+            matches!(window[0].as_str(), "fn" | "struct" | "trait" | "type")
+                && window[1].to_ascii_lowercase().contains("endpoint")
+        }) {
+            if declaration != ["struct", "SocksUdpEndpoint"] {
+                return Err("SOCKS endpoint gained a helper/factory seam");
+            }
+        }
+        if tokens.iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "Factory" | "factory" | "SocksUdpEndpointFactory"
+            )
+        }) {
+            return Err("SOCKS endpoint gained a factory");
+        }
+        Ok(())
+    };
+    check_endpoint_surface(socks).unwrap_or_else(|error| panic!("{error}"));
+    for mutation in [
+        ["trait", "SocksUdpEndpointFactory"],
+        ["fn", "make_socks_udp_endpoint"],
     ] {
+        let mut mutated = socks.to_vec();
+        mutated.extend(mutation.map(str::to_owned));
         assert!(
-            has_tokens(association, &[field, ":"]),
-            "one-plan association lost private {field} ownership"
+            check_endpoint_surface(&mutated).is_err(),
+            "endpoint helper/factory mutation survived"
         );
     }
-    assert!(
-        !association.iter().any(|token| token == "pub"),
-        "client UDP association exposed an owned field"
-    );
-    for forbidden in ["plans", "application", "application_wire", "HashMap"] {
-        assert!(
-            !association.iter().any(|token| token == forbidden),
-            "client UDP association restored split ownership: {forbidden}"
-        );
-    }
-    assert!(
-        !udp.iter().any(|token| token == "HashMap"),
-        "client UDP restored a plan-keyed map"
-    );
-    assert!(
-        !has_tokens(socks, &["trait", "SocksUdpEndpoint"]),
-        "SOCKS endpoint gained a trait/factory layer"
-    );
 
     let classify = item_body(socks, &["async", "fn", "classify_udp_association"]);
     assert_eq!(
@@ -1544,16 +1608,34 @@ fn client_socks_owns_one_terminal_route_and_one_plan_udp_association() {
         1,
         "terminal route must create one selected plan owner"
     );
-    let relay = item_body(socks, &["async", "fn", "relay_udp_association"]);
-    for forbidden in [
-        "select_terminal",
-        "select_plan_snapshot",
-        "program",
-        "legacy",
+    let check_post_classification = |body: &[String]| -> Result<(), &'static str> {
+        for forbidden in [
+            "select_terminal",
+            "select_plan_snapshot",
+            "evaluate",
+            "program",
+            "legacy",
+            "final",
+        ] {
+            if body.iter().any(|token| token == forbidden) {
+                return Err("established UDP association re-entered route state");
+            }
+        }
+        Ok(())
+    };
+    for (helper, mutation) in [
+        ("relay_udp_association", "select_terminal"),
+        ("forward_udp_request", "program"),
+        ("relay_hijacked_udp", "final"),
+        ("answer_hijacked_udp", "select_plan_snapshot"),
     ] {
+        let body = item_body(socks, &["async", "fn", helper]);
+        check_post_classification(body).unwrap_or_else(|error| panic!("{helper}: {error}"));
+        let mut mutated = body.to_vec();
+        mutated.push(mutation.to_owned());
         assert!(
-            !relay.iter().any(|token| token == forbidden),
-            "established UDP association re-entered route state: {forbidden}"
+            check_post_classification(&mutated).is_err(),
+            "post-classification route mutation survived: {helper}"
         );
     }
 

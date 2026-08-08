@@ -95,19 +95,23 @@ impl UdpIoFaultPlan {
 
 pub(in crate::run) struct ClientUdpAssociation {
     plan: EgressPlanSnapshot,
-    protocol: ClientUdpPlan,
+    first_server: SocketAddrV4,
+    protocol: Option<ClientUdpProtocol>,
+    #[cfg(test)]
+    io_fault: Option<Arc<UdpIoFaultPlan>>,
+}
+
+struct ClientUdpProtocol {
+    plan: ClientUdpPlan,
     pending_session: Option<PendingUdpSession>,
     manager: UdpSessionManager,
     handle: UdpSessionHandle,
     live_ids: Arc<Mutex<HashSet<UdpSessionId>>>,
-    first_server: SocketAddrV4,
     upstream: UdpSocket,
     inner_wire: Vec<u8>,
     upstream_wire: Vec<u8>,
     scratch: UdpPacketScratch,
     _fixed_capacity: Vec<UdpBufferReservation>,
-    #[cfg(test)]
-    io_fault: Option<Arc<UdpIoFaultPlan>>,
 }
 
 pub(in crate::run) struct ClientUdpLeg {
@@ -121,11 +125,11 @@ pub(in crate::run) struct ClientUdpPlan {
 
 pub(in crate::run) const MAX_UDP_PLAN_HOPS: usize = 8;
 
-impl Drop for ClientUdpAssociation {
+impl Drop for ClientUdpProtocol {
     fn drop(&mut self) {
         self.manager.remove(self.handle);
         if let Ok(mut live_ids) = self.live_ids.lock() {
-            for leg in &self.protocol.legs {
+            for leg in &self.plan.legs {
                 live_ids.remove(&leg.id);
             }
         }
@@ -133,18 +137,87 @@ impl Drop for ClientUdpAssociation {
 }
 
 impl ClientUdpAssociation {
+    fn active(&self) -> &ClientUdpProtocol {
+        self.protocol
+            .as_ref()
+            .expect("client UDP protocol is activated before use")
+    }
+
+    fn active_mut(&mut self) -> &mut ClientUdpProtocol {
+        self.protocol
+            .as_mut()
+            .expect("client UDP protocol is activated before use")
+    }
+
+    pub(in crate::run) async fn activate<F, Fut>(
+        &mut self,
+        egress: &ClientEgressEngine,
+        mut bind: F,
+    ) -> Result<(), ()>
+    where
+        F: FnMut(SocketAddrV4) -> Fut,
+        Fut: std::future::Future<Output = io::Result<UdpSocket>>,
+    {
+        if self.protocol.is_some() {
+            return Ok(());
+        }
+        let udp = egress.udp.as_ref().ok_or(())?;
+        let pending_session = udp
+            .manager
+            .reserve_session(Instant::now())
+            .map_err(|_| ())?;
+        let handle = pending_session.handle();
+        let budget = udp.manager.buffer_budget();
+        let mut fixed_capacity = Vec::with_capacity(3);
+        for _ in 0..3 {
+            fixed_capacity.push(budget.reserve(MAX_UDP_WIRE_LEN).map_err(|_| ())?);
+        }
+        let upstream = bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .map_err(|_| ())?;
+        upstream
+            .connect(SocketAddr::V4(self.first_server))
+            .await
+            .map_err(|_| ())?;
+        #[cfg(test)]
+        let random = egress.udp_id_random.as_deref().unwrap_or(&egress.random);
+        #[cfg(not(test))]
+        let random = &egress.random;
+        let legs = register_udp_plan(&egress.outbounds, self.plan.hops(), random, &udp.live_ids)?;
+        self.protocol = Some(ClientUdpProtocol {
+            plan: ClientUdpPlan { legs },
+            pending_session: Some(pending_session),
+            manager: udp.manager.clone(),
+            handle,
+            live_ids: Arc::clone(&udp.live_ids),
+            upstream,
+            inner_wire: vec![0_u8; MAX_UDP_WIRE_LEN],
+            upstream_wire: vec![0_u8; MAX_UDP_WIRE_LEN],
+            scratch: UdpPacketScratch::new(),
+            _fixed_capacity: fixed_capacity,
+        });
+        Ok(())
+    }
+
     pub(in crate::run) fn cancellation(
         &self,
     ) -> Result<tokio::sync::watch::Receiver<bool>, UdpRuntimeError> {
-        self.manager.cancellation(self.handle)
+        let active = self.active();
+        active.manager.cancellation(active.handle)
     }
 
     pub(in crate::run) fn idle_deadline(&self) -> Result<Instant, UdpRuntimeError> {
-        self.manager.idle_deadline(self.handle)
+        let active = self.active();
+        active.manager.idle_deadline(active.handle)
     }
 
     pub(in crate::run) fn idle_expired(&self, observed: Instant) -> bool {
-        Instant::now() >= self.manager.idle_deadline(self.handle).unwrap_or(observed)
+        let active = self.active();
+        Instant::now()
+            >= active
+                .manager
+                .idle_deadline(active.handle)
+                .unwrap_or(observed)
     }
 
     pub(in crate::run) fn encode_request(
@@ -153,8 +226,12 @@ impl ClientUdpAssociation {
         outbounds: &[ClientOutboundContext],
         datagram: &Datagram,
     ) -> Result<usize, UdpPacketError> {
-        let plan = &mut self.protocol;
-        let hops = self.plan.hops();
+        let Self { plan, protocol, .. } = self;
+        let hops = plan.hops();
+        let active = protocol
+            .as_mut()
+            .expect("client UDP protocol is activated before encode");
+        let plan = &mut active.plan;
         let mut wire_len = 0;
         let mut wire_in_upstream = false;
         for layer in (0..hops.len()).rev() {
@@ -178,34 +255,34 @@ impl ClientUdpAssociation {
                     target,
                     datagram.payload(),
                     0,
-                    &mut self.upstream_wire,
-                    &mut self.scratch,
+                    &mut active.upstream_wire,
+                    &mut active.scratch,
                 )?
             } else if wire_in_upstream {
                 plan.legs[layer].protocol.encode_request_parts(
                     &egress.clock,
                     &egress.random,
                     target,
-                    &self.upstream_wire[..wire_len],
+                    &active.upstream_wire[..wire_len],
                     0,
-                    &mut self.inner_wire,
-                    &mut self.scratch,
+                    &mut active.inner_wire,
+                    &mut active.scratch,
                 )?
             } else {
                 plan.legs[layer].protocol.encode_request_parts(
                     &egress.clock,
                     &egress.random,
                     target,
-                    &self.inner_wire[..wire_len],
+                    &active.inner_wire[..wire_len],
                     0,
-                    &mut self.upstream_wire,
-                    &mut self.scratch,
+                    &mut active.upstream_wire,
+                    &mut active.scratch,
                 )?
             };
             wire_in_upstream = layer + 1 == hops.len() || !wire_in_upstream;
         }
         if !wire_in_upstream {
-            self.upstream_wire[..wire_len].copy_from_slice(&self.inner_wire[..wire_len]);
+            active.upstream_wire[..wire_len].copy_from_slice(&active.inner_wire[..wire_len]);
         }
         Ok(wire_len)
     }
@@ -216,26 +293,30 @@ impl ClientUdpAssociation {
         outbounds: &[ClientOutboundContext],
         wire_len: usize,
     ) -> Result<usize, UdpPlanResponseError> {
-        let plan = &self.protocol;
-        let hops = self.plan.hops();
+        let Self { plan, protocol, .. } = self;
+        let hops = plan.hops();
+        let active = protocol
+            .as_mut()
+            .expect("client UDP protocol is activated before response");
+        let plan = &active.plan;
         let outer = plan.legs[0]
             .protocol
             .prepare_response_borrowed(
                 &egress.clock,
-                &self.upstream_wire[..wire_len],
-                &mut self.scratch,
+                &active.upstream_wire[..wire_len],
+                &mut active.scratch,
             )
             .map_err(UdpPlanResponseError::Packet)?;
         let mut commits = Vec::with_capacity(hops.len());
         if hops.len() == 1 {
             return commit_final_udp_response(
                 outer,
-                &self.protocol,
+                plan,
                 hops,
                 outbounds,
                 commits,
-                &self.manager,
-                self.handle,
+                &active.manager,
+                active.handle,
                 &egress.clock,
             );
         }
@@ -252,7 +333,7 @@ impl ClientUdpAssociation {
             return Err(UdpPlanResponseError::Packet(UdpPacketError::Binding));
         }
         let mut inner_len = outer
-            .copy_payload_to(&mut self.inner_wire)
+            .copy_payload_to(&mut active.inner_wire)
             .map_err(UdpPlanResponseError::Packet)?;
         commits.push(outer.into_commit());
         let mut wire_in_inner = true;
@@ -260,26 +341,26 @@ impl ClientUdpAssociation {
             let pending = if wire_in_inner {
                 plan.legs[layer].protocol.prepare_response_borrowed(
                     &egress.clock,
-                    &self.inner_wire[..inner_len],
-                    &mut self.scratch,
+                    &active.inner_wire[..inner_len],
+                    &mut active.scratch,
                 )
             } else {
                 plan.legs[layer].protocol.prepare_response_borrowed(
                     &egress.clock,
-                    &self.upstream_wire[..inner_len],
-                    &mut self.scratch,
+                    &active.upstream_wire[..inner_len],
+                    &mut active.scratch,
                 )
             }
             .map_err(UdpPlanResponseError::Packet)?;
             if layer + 1 == hops.len() {
                 return commit_final_udp_response(
                     pending,
-                    &self.protocol,
+                    plan,
                     hops,
                     outbounds,
                     commits,
-                    &self.manager,
-                    self.handle,
+                    &active.manager,
+                    active.handle,
                     &egress.clock,
                 );
             }
@@ -296,9 +377,9 @@ impl ClientUdpAssociation {
                 return Err(UdpPlanResponseError::Packet(UdpPacketError::Binding));
             }
             inner_len = if wire_in_inner {
-                pending.copy_payload_to(&mut self.upstream_wire)
+                pending.copy_payload_to(&mut active.upstream_wire)
             } else {
-                pending.copy_payload_to(&mut self.inner_wire)
+                pending.copy_payload_to(&mut active.inner_wire)
             }
             .map_err(UdpPlanResponseError::Packet)?;
             commits.push(pending.into_commit());
@@ -311,11 +392,14 @@ impl ClientUdpAssociation {
         &self,
         payload_len: usize,
     ) -> Result<PendingUdpDatagram, UdpRuntimeError> {
-        match self.pending_session.as_ref() {
+        let active = self.active();
+        match active.pending_session.as_ref() {
             Some(session) => session.reserve_datagram(UdpDirection::ToTarget, payload_len),
-            None => self
-                .manager
-                .reserve_datagram(self.handle, UdpDirection::ToTarget, payload_len),
+            None => {
+                active
+                    .manager
+                    .reserve_datagram(active.handle, UdpDirection::ToTarget, payload_len)
+            }
         }
     }
 
@@ -325,7 +409,8 @@ impl ClientUdpAssociation {
         datagram: Datagram,
         now: Instant,
     ) -> Result<(), UdpRuntimeError> {
-        match self.pending_session.take() {
+        let active = self.active_mut();
+        match active.pending_session.take() {
             Some(session) => session.commit(reservation, datagram, now).map(|_| ()),
             None => reservation.commit(datagram, now),
         }
@@ -335,7 +420,8 @@ impl ClientUdpAssociation {
         &self,
         direction: UdpDirection,
     ) -> Result<Option<ferrum2_runtime::AccountedDatagram>, UdpRuntimeError> {
-        self.manager.pop(self.handle, direction)
+        let active = self.active();
+        active.manager.pop(active.handle, direction)
     }
 
     pub(in crate::run) fn payload_limit(
@@ -356,7 +442,11 @@ impl ClientUdpAssociation {
         {
             return Err(io::Error::other("injected upstream send failure"));
         }
-        self.upstream.send(&self.upstream_wire[..wire_len]).await
+        let active = self.active();
+        active
+            .upstream
+            .send(&active.upstream_wire[..wire_len])
+            .await
     }
 
     pub(in crate::run) async fn receive_response_wire(&mut self) -> io::Result<usize> {
@@ -368,17 +458,18 @@ impl ClientUdpAssociation {
         {
             return Err(io::Error::other("injected upstream receive failure"));
         }
-        self.upstream.recv(&mut self.upstream_wire).await
+        let active = self.active_mut();
+        active.upstream.recv(&mut active.upstream_wire).await
     }
 
     #[cfg(test)]
     pub(in crate::run) fn upstream_local_addr(&self) -> io::Result<SocketAddr> {
-        self.upstream.local_addr()
+        self.active().upstream.local_addr()
     }
 
     #[cfg(test)]
     pub(in crate::run) fn handle(&self) -> UdpSessionHandle {
-        self.handle
+        self.active().handle
     }
 
     #[cfg(test)]
@@ -405,21 +496,25 @@ impl ClientUdpAssociation {
         }
         let target = TargetAddr::ip(destination).map_err(|_| invalid_dns_target())?;
         let payload_len = packet.len();
+        let encoded_target_len = match destination {
+            SocketAddr::V4(_) => 7,
+            SocketAddr::V6(_) => 19,
+        };
+        if payload_len > self.payload_limit(&engine.outbounds, false, encoded_target_len) {
+            return Err(invalid_dns_target());
+        }
+        self.activate(engine, UdpSocket::bind)
+            .await
+            .map_err(|_| runtime_error(()))?;
         let reservation = self
             .reserve_application_datagram(payload_len)
             .map_err(runtime_error)?;
         let datagram = Datagram::new(target, packet.as_slice().into(), payload_len)
             .map_err(|_| invalid_dns_target())?;
-        let committed = match self.pending_session.take() {
-            Some(session) => session.commit(reservation, datagram, Instant::now()),
-            None => reservation
-                .commit(datagram, Instant::now())
-                .map(|()| self.handle),
-        };
-        committed.map_err(runtime_error)?;
+        self.commit_application_datagram(reservation, datagram, Instant::now())
+            .map_err(runtime_error)?;
         let datagram = self
-            .manager
-            .pop(self.handle, UdpDirection::ToTarget)
+            .pop(UdpDirection::ToTarget)
             .map_err(runtime_error)?
             .ok_or_else(|| io::Error::other("DNS UDP queue empty"))?;
         let wire_len = self
@@ -444,8 +539,7 @@ impl ClientUdpAssociation {
                 }
             };
             let response = self
-                .manager
-                .pop(self.handle, UdpDirection::ToClient)
+                .pop(UdpDirection::ToClient)
                 .map_err(runtime_error)?
                 .ok_or_else(|| io::Error::other("DNS UDP response queue empty"))?;
             let source = response
@@ -465,62 +559,22 @@ impl ClientUdpAssociation {
     }
 }
 
-pub(in crate::run) async fn prepare<F, Fut>(
+pub(in crate::run) fn prepare(
     egress: &ClientEgressEngine,
     plan: EgressPlanSnapshot,
     first_server: SocketAddrV4,
-    mut bind: F,
-) -> Result<ClientUdpAssociation, ()>
-where
-    F: FnMut(SocketAddrV4) -> Fut,
-    Fut: std::future::Future<Output = io::Result<UdpSocket>>,
-{
-    let udp = egress.udp.as_ref().ok_or(())?;
+) -> Result<ClientUdpAssociation, ()> {
+    egress.udp.as_ref().ok_or(())?;
     if plan.hops().is_empty() || plan.hops().len() > MAX_UDP_PLAN_HOPS {
         return Err(());
     }
-    let pending_session = udp
-        .manager
-        .reserve_session(Instant::now())
-        .map_err(|_| ())?;
-    let handle = pending_session.handle();
-    let budget = udp.manager.buffer_budget();
-    let mut fixed_capacity = Vec::with_capacity(3);
-    for _ in 0..3 {
-        fixed_capacity.push(budget.reserve(MAX_UDP_WIRE_LEN).map_err(|_| ())?);
-    }
-    let inner_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
-    let upstream_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
-    let scratch = UdpPacketScratch::new();
-    let upstream = bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .map_err(|_| ())?;
-    upstream
-        .connect(SocketAddr::V4(first_server))
-        .await
-        .map_err(|_| ())?;
-    #[cfg(test)]
-    let random = egress.udp_id_random.as_deref().unwrap_or(&egress.random);
-    #[cfg(not(test))]
-    let random = &egress.random;
-    let legs = register_udp_plan(&egress.outbounds, plan.hops(), random, &udp.live_ids)?;
-    let prepared = ClientUdpAssociation {
+    Ok(ClientUdpAssociation {
         plan,
-        protocol: ClientUdpPlan { legs },
-        pending_session: Some(pending_session),
-        manager: udp.manager.clone(),
-        handle,
-        live_ids: Arc::clone(&udp.live_ids),
         first_server,
-        upstream,
-        inner_wire,
-        upstream_wire,
-        scratch,
-        _fixed_capacity: fixed_capacity,
+        protocol: None,
         #[cfg(test)]
         io_fault: None,
-    };
-    Ok(prepared)
+    })
 }
 
 fn register_udp_plan(
