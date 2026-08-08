@@ -1,7 +1,7 @@
 ---
 id: M14-T06
 milestone: M14
-status: ready
+status: done
 depends_on:
   - M14-T05
 owns:
@@ -36,16 +36,16 @@ changing M12 upstream/detour behavior。
 
 ## Acceptance
 
-- [ ] Dedicated listener and ordinary inbound identities cannot collide；client selection supports
+- [x] Dedicated listener and ordinary inbound identities cannot collide；client selection supports
       transport、qname exact/suffix and the closed qtype set with mandatory final。
-- [ ] Server resolution supports application network、domain exact/suffix and port/range without qtype，
+- [x] Server resolution supports application network、domain exact/suffix and port/range without qtype，
       and performs one selected A+AAAA sequence under the existing deadline。
-- [ ] `DnsProxy::answer` remains the only parse/select/query/encode implementation；listener and future
+- [x] `DnsProxy::answer` remains the only parse/select/query/encode implementation；listener and future
       hijack adapters reuse it without a delegating service、copied codec or second framer。
-- [ ] Direct/detoured UDP/TCP/DoT/DoH、selected failure no fallback、UDP TC same server/address/plan、
+- [x] Direct/detoured UDP/TCP/DoT/DoH、selected failure no fallback、UDP TC same server/address/plan、
       busy/timeout response and redaction remain exact。
-- [ ] DNS owner shutdown、active query reap and listener/upstream rebind remain bounded and awaited。
-- [ ] T06 focused、Quick、footprint integrity and diff gates pass。
+- [x] DNS owner shutdown、active query reap and listener/upstream rebind remain bounded and awaited。
+- [x] T06 focused、Quick、footprint integrity and diff gates pass。
 
 ## Validation
 
@@ -65,10 +65,21 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Footprint: —
-- Notes: —
+- Commit: initial `1e21082f35f2ac46a55660e7aca2256b9b6903c3`；bounded repair
+  `d4210e40c73daad077c463c5c9db2b9f4b3dddbb`；accepted post-escalation product
+  `4cb3c2da75fb8bf29e8aeca093b8b46e06a4f9af`；integration
+  `2735853ba75183c4046365793020e57f3e1667ca`。
+- Review: initial QA `BLOCK` on disconnected live policy evidence；one bounded repair closed the client
+  unknown-qtype seam but targeted QA retained the production server policy handoff and rejected a copied
+  test DNS codec。Two required independent `gpt-5.6-sol/xhigh` read-only analyses selected the same
+  Hickory dev-only typed-fixture and token-guard repair；final targeted Architect/QA both returned `PASS`
+  with `QA-001..003` closed and no new findings。
+- Footprint: zero-exit `REVIEW_REQUIRED`；integrity/category/ratio `PASS`；ticket case/support/fixture
+  `+611/0/0`，code growth `+42`，ratio `1.789147`。
+- Notes: Exact integration focused and Quick pass；Rust 1.88 workspace check/build/test passed on the
+  accepted product。Unknown wire qtypes remain distinct from `ANY`，selected DNS failure has no fallback，
+  and the only new edge is exact existing `hickory-proto 0.26.1/std` under server dev-dependencies。No new
+  package identity、product dependency、second DNS implementation、helper、fixture、harness or remote action。
 
 ## Rollback / risk
 

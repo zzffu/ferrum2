@@ -129,8 +129,8 @@ repository。
 | M14-T03 | Compile schema v2、migration rejection、matchers/actions and role capabilities | M14-T02 | done |
 | M14-T04 | Add the pure bounded DNS/TLS/HTTP sniff module and parser evidence | M14-T03 | done |
 | M14-T05 | Compose server TCP/UDP route、sniff、reject and exact prefix replay | M14-T04 | done |
-| M14-T06 | Extend DNS policy through the existing answering/resolver module | M14-T05 | ready |
-| M14-T07 | Compose client route/reject/hijack and one-plan association UDP ownership | M14-T06 | todo |
+| M14-T06 | Extend DNS policy through the existing answering/resolver module | M14-T05 | done |
+| M14-T07 | Compose client route/reject/hijack and one-plan association UDP ownership | M14-T06 | ready |
 | M14-T08 | Close real-process、security、lifecycle、architecture and qualification-tool evidence | M14-T07 | todo |
 | M14-T09 | Qualify and close one exact M14 integration SHA | M14-T08 | todo |
 
@@ -164,12 +164,12 @@ force-push、PR、tag、package、release or publication is implied。
 
 ## Blocker / next action
 
-No blocker。T05 is accepted at exact integration `4c65bb0294892b2133116d57a4262f7d9de69c56`。
-One bounded repair closed the initial telemetry、cancellation、prefix ownership、UDP ordering and evidence
-findings，but targeted re-review retained unreachable real `limit` telemetry、a split UDP protocol-session
-ceiling and missing selected-open-failure composition evidence。Two required independent
-`gpt-5.6-sol/xhigh` read-only analyses both selected the same no-new-API correction：one-byte wider parser
-classification with the original collector cap，one shared `UdpServer::session_count()` admission gate，
-and one real closed-port terminal failure witness。Final targeted Architect/QA both returned `PASS`。
-Focused、Rust 1.88 and integration Quick pass；footprint integrity/category/ratio pass and the accepted
-ticket advisory is `+1508/0/0` case/support/fixture。T06 is ready on this exact accepted base。
+No blocker。T06 is accepted at exact integration `2735853ba75183c4046365793020e57f3e1667ca`。
+The first repair connected live client unknown-qtype and server selected A+AAAA policy evidence，but
+targeted QA still found the production server policy handoff unguarded and the test responder to contain a
+copied DNS codec。Two required independent `gpt-5.6-sol/xhigh` read-only analyses both selected the same
+minimal correction：reuse exact Hickory through a server dev-only edge，replace the test bytes with typed
+Hickory operations and guard `ServerDnsState::new(route, policy)` plus codec escapes。Final targeted
+Architect/QA both returned `PASS` with all findings closed。Focused、Rust 1.88 and integration Quick pass；
+footprint integrity/category/ratio pass and the accepted ticket advisory is `+611/0/0`
+case/support/fixture。T07 is ready on this exact accepted base。
