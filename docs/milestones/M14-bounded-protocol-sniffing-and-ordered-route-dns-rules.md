@@ -35,8 +35,9 @@ repository。
   planning baseline changes only tracked Markdown/status files，not Rust product、tests、manifests or
   lock state。The docs-only M14 planning commit `5c2c7ab…` is T01's ticket base，not the schema-3
   measurement baseline。
-- Core currently has one exact-target `ActionTable`/`RouteTable` in
-  `crates/ferrum2-core/src/route.rs`；selection is single-pass and cannot resume after metadata changes。
+- At the planning baseline core had one exact-target `ActionTable`/`RouteTable` in
+  `crates/ferrum2-core/src/route.rs`；T02 now delegates legacy `RouteTable` behavior to the single
+  protocol-neutral ordered program while retaining `ActionTable` only for the separate DNS namespace。
 - SOCKS CONNECT returns an empty `Session.initial_payload` and selects before application bytes exist；
   server TCP already owns authenticated `initial_payload` and an exact prefix-write seam；server UDP
   already exposes the required `prepare -> reserve -> commit` ordering。
@@ -55,7 +56,8 @@ repository。
 - Hickory `0.26.1` and rustls `0.23.43` remain exact workspace dependencies。T01's TEST-0015 review
   records locked `ipnet 2.12.1` as a later exact no-default direct edge and no-default
   `httparse 1.10.1` as the only new package identity，with its internal external-package unsafe recorded。
-  T01 activates neither dependency；T02/T04 remain responsible for exact graph and Rust 1.88 evidence。
+  T01 activates neither dependency；T02 now activates only the reviewed exact no-default `ipnet` edge
+  without a new package identity，and T04 remains responsible for `httparse` activation。
 - Exact planning footprint is code/tests `21814/39632`、ratio `1.816815` and
   case/support/fixture `33883/5152/597`。The current M13 numeric status is
   `REVIEW_REQUIRED` only for moved owner-file size；integrity is `PASS`。
@@ -122,8 +124,8 @@ repository。
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M14-T01 | Freeze contracts、dependency review、M13 wording and M14 footprint control | M13 closed | done |
-| M14-T02 | Build the protocol-neutral ordered route program and reusable egress graph | M14-T01 | ready |
-| M14-T03 | Compile schema v2、migration rejection、matchers/actions and role capabilities | M14-T02 | todo |
+| M14-T02 | Build the protocol-neutral ordered route program and reusable egress graph | M14-T01 | done |
+| M14-T03 | Compile schema v2、migration rejection、matchers/actions and role capabilities | M14-T02 | ready |
 | M14-T04 | Add the pure bounded DNS/TLS/HTTP sniff module and parser evidence | M14-T03 | todo |
 | M14-T05 | Compose server TCP/UDP route、sniff、reject and exact prefix replay | M14-T04 | todo |
 | M14-T06 | Extend DNS policy through the existing answering/resolver module | M14-T05 | todo |
@@ -161,6 +163,6 @@ force-push、PR、tag、package、release or publication is implied。
 
 ## Blocker / next action
 
-No blocker。T01 is accepted at exact integration `b446153712b54ec3274d06dd9d2d26646c1d4573` after
-one bounded repair and targeted Architect/QA `PASS`。Create `codex/m14-t02` from the exact integration
-branch HEAD containing this status record，bind that exact ticket base，then implement only the T02 lease。
+No blocker。T02 is accepted at exact integration `c8a70ca213892e01a1c4ea97bf34f79a9feaf58a`
+after one bounded repair and targeted Architect/QA `PASS`。Create `codex/m14-t03` from the exact integration
+branch HEAD containing this status record，bind that exact ticket base，then implement only the T03 lease。
