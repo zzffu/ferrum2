@@ -1,7 +1,7 @@
 ---
 id: M14-T03
 milestone: M14
-status: ready
+status: done
 depends_on:
   - M14-T02
 owns:
@@ -28,27 +28,27 @@ shape before runtime side effects。
 
 ## Acceptance
 
-- [ ] Scalar/list spellings、AND/OR semantics、normalization、64-rule/value ceilings and exact legacy shape
+- [x] Scalar/list spellings、AND/OR semantics、normalization、64-rule/value ceilings and exact legacy shape
       compile identically for both roles。
-- [ ] Schema version 2 is selected only when declared；schema-v1 client routed+UDP fails on the redacted
+- [x] Schema version 2 is selected only when declared；schema-v1 client routed+UDP fails on the redacted
       migration field before side effects，and no validated/runtime model represents its former
       per-datagram behavior。Other supported schema-v1 shapes remain exact。
-- [ ] Action required/forbidden fields、unconditional terminal reachability、sniff defaults/ranges and
+- [x] Action required/forbidden fields、unconditional terminal reachability、sniff defaults/ranges and
       checked aggregate prefix bound fail on the correct redacted config field。
-- [ ] The complete client/server TCP/UDP capability matrix is enforced at compile time；protocol rules
+- [x] The complete client/server TCP/UDP capability matrix is enforced at compile time；protocol rules
       require an earlier conservatively covering sniff rule。
-- [ ] Client DNS qname/suffix/qtype/transport and server application domain/suffix/port policy compile
+- [x] Client DNS qname/suffix/qtype/transport and server application domain/suffix/port policy compile
       separately，with listener/ordinary identities distinct and no server qtype。
-- [ ] Missing new fields and missing DNS retain the current config/CLI cohort except the explicit v1
+- [x] Missing new fields and missing DNS retain the current config/CLI cohort except the explicit v1
       client routed+UDP migration row；unknown versions、M14 fields in v1 and heuristic fallback fail with
       zero side effects。
-- [ ] `--check-config` accepts the fully compiled schema-v2 model；until T05/T07 consume that model，both
+- [x] `--check-config` accepts the fully compiled schema-v2 model；until T05/T07 consume that model，both
       existing run entrypoints reject version 2 before observability、runtime、listener or task creation
       instead of silently executing the legacy route/DNS views。
-- [ ] The existing SOCKS UDP process harness retires only the explicitly superseded schema-v1
+- [x] The existing SOCKS UDP process harness retires only the explicitly superseded schema-v1
       per-datagram multi-outbound row；two-hop success remains on static/selector roots and credential
       failures run through the supported static root until T07 adds schema-v2 association evidence。
-- [ ] T03 focused、Quick、footprint integrity and diff gates pass。
+- [x] T03 focused、Quick、footprint integrity and diff gates pass。
 
 ## Validation
 
@@ -65,10 +65,16 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Footprint: —
-- Notes: —
+- Commit: product `c8d2b0dee0036ab7cf58625adce4f057518e4321`；integration
+  `5ff0677f40a11793fde051d9b7df12e5c3a223b6`。
+- Review: Initial Architect/QA `BLOCK` deduplicated to first-sniff shadowing；one two-file repair closed
+  `M14-T03-ARCH-001` / `M14-T03-QA-001`，and both targeted reviews returned `PASS` with no new finding。
+- Footprint: Exact ticket gate exited zero with integrity/category/ratio `PASS`，case/support/fixture
+  `+498/0/0`；the advisory `REVIEW_REQUIRED` is accepted for the five mutation rows in the existing
+  authoritative `config_contract.rs`。
+- Notes: Integration focused gates and Quick passed (`385 passed / 5 ignored`) after rebuilding the
+  workspace binaries before the process CLI harness；no helper、fixture、support layer or remote action
+  was added。
 
 ## Rollback / risk
 

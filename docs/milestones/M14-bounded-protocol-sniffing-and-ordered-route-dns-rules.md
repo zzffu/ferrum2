@@ -125,8 +125,8 @@ repository。
 |---|---|---|---|
 | M14-T01 | Freeze contracts、dependency review、M13 wording and M14 footprint control | M13 closed | done |
 | M14-T02 | Build the protocol-neutral ordered route program and reusable egress graph | M14-T01 | done |
-| M14-T03 | Compile schema v2、migration rejection、matchers/actions and role capabilities | M14-T02 | ready |
-| M14-T04 | Add the pure bounded DNS/TLS/HTTP sniff module and parser evidence | M14-T03 | todo |
+| M14-T03 | Compile schema v2、migration rejection、matchers/actions and role capabilities | M14-T02 | done |
+| M14-T04 | Add the pure bounded DNS/TLS/HTTP sniff module and parser evidence | M14-T03 | ready |
 | M14-T05 | Compose server TCP/UDP route、sniff、reject and exact prefix replay | M14-T04 | todo |
 | M14-T06 | Extend DNS policy through the existing answering/resolver module | M14-T05 | todo |
 | M14-T07 | Compose client route/reject/hijack and one-plan association UDP ownership | M14-T06 | todo |
@@ -163,12 +163,9 @@ force-push、PR、tag、package、release or publication is implied。
 
 ## Blocker / next action
 
-No blocker。T02 is accepted at exact integration `c8a70ca213892e01a1c4ea97bf34f79a9feaf58a`
-after one bounded repair and targeted Architect/QA `PASS`。T03 additionally owns only the two existing
-binary `run.rs` entrypoints for a pre-runtime schema-v2 fail-closed latch；without it，the current binaries
-would silently ignore the compiled model before T05/T07 composition。Quick then proved that two existing
-`socks_udp_local_e2e` routed schema-v1 UDP rows conflict with the required migration rejection；T03 now
-owns that one existing test file only to retire the superseded per-datagram row，retain static/selector
-two-hop success and run credential failures through the static root。The ticket base remains exact
-`d82f2c8e9b7da2e017bae4a082f4fe62721f9d62`；the isolated lease commit and candidate are combined at
-integration without weakening product behavior。
+No blocker。T03 is accepted at exact integration `5ff0677f40a11793fde051d9b7df12e5c3a223b6`
+after one bounded repair and targeted Architect/QA `PASS`。The schema-v2 ordinary and role-specific DNS
+programs share one selector graph；schema-v1 routed client UDP fails before side effects；and the temporary
+client/server run latches prevent dormant v2 policy from executing through legacy views before T05/T07。
+The first-overlapping-sniff validation repair is order-aware and fail-closed；integration focused gates、
+Quick `385/5` and footprint integrity/category/ratio all pass。T04 is ready on this exact accepted base。
