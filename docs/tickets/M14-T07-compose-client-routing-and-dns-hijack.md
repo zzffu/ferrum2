@@ -22,6 +22,7 @@ owns:
   - crates/ferrum2-socks5/tests/command.rs
   - tests/m0-harness/tests/architecture.rs
   - tests/m0-harness/tests/config_cli.rs
+  - tests/m0-harness/tests/socks_udp_local_e2e.rs
   - tests/m0-harness/tests/workspace_policy.rs
 ---
 
