@@ -28,7 +28,8 @@ qualification-driver modules，repairing only review findings within an explicit
 ## Acceptance
 
 - [ ] Four M14 real-process TCP/UDP client/server rows prove sniff/route/reject/hijack、malformed
-      no-fallback、zero owners and exact rebind。The client UDP row uses separate associations for
+      no-fallback、zero flow/session owners、exact return to any fixed process-root buffer baseline and
+      exact rebind。The client UDP row uses separate associations for
       terminal actions and proves first-packet route plus later different target/same real outbound；
       together with T07's mandatory actual selector-switch row and architecture mutation guard，this
       proves no rule/final/selector re-read without adding a binary control endpoint。Applicable

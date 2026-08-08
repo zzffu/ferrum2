@@ -276,9 +276,12 @@ git diff --check
   `m14_server_udp_dns_sniff_routes_and_rejects_before_target`、
   `m14_client_tcp_dns_hijack_reuses_policy_and_reaps` and
   `m14_client_udp_association_actions_route_once_and_reap`。
-- Each row includes one distinct malformed/no-fallback negative，exact zero-owner baselines and exact
-  rebind。The client UDP process row uses separate associations for route/hijack/reject and includes two
-  targets with one observed real outbound。The mandatory T07
+- Each row includes one distinct malformed/no-fallback negative，exact zero flow/session owners、return to
+  the fresh process's exact fixed root-buffer baseline and exact rebind。A running server UDP listener
+  intentionally retains four bounded wire buffers；the process row MUST prove this baseline is unchanged
+  after session idle/reap，then prove process shutdown releases the listener by exact rebind rather than
+  misreport the live root buffers as zero。The client UDP process row uses separate associations for
+  route/hijack/reject and includes two targets with one observed real outbound。The mandatory T07
   `routed_udp_first_valid_packet_selects_association_once` row performs the actual post-selection selector
   switch and observes the same captured plan，while the T08 architecture guard forbids selector/rule/final
   reads after classification；these three executable layers form the no-re-read oracle without a binary
