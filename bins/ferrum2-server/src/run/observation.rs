@@ -375,6 +375,7 @@ fn reason_for_connect(kind: ConnectErrorKind) -> Reason {
         ConnectErrorKind::NetworkUnreachable => Reason::NetworkUnreachable,
         ConnectErrorKind::HostUnreachable => Reason::HostUnreachable,
         ConnectErrorKind::ConnectionRefused => Reason::ConnectionRefused,
+        ConnectErrorKind::PolicyDenied => Reason::RelayIo,
         ConnectErrorKind::Timeout => Reason::ConnectTimeout,
         ConnectErrorKind::Other => Reason::RelayIo,
     }
@@ -401,6 +402,7 @@ mod tests {
                 ConnectErrorKind::ConnectionRefused,
                 Reason::ConnectionRefused,
             ),
+            (ConnectErrorKind::PolicyDenied, Reason::RelayIo),
             (ConnectErrorKind::Timeout, Reason::ConnectTimeout),
             (ConnectErrorKind::Other, Reason::RelayIo),
         ] {

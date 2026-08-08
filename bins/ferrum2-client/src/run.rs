@@ -79,9 +79,6 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
-    if config.schema_version.is_v2() {
-        return Err(RunError::StartupProtocol);
-    }
     let dns_specs = config
         .dns
         .as_ref()
@@ -166,8 +163,6 @@ async fn run_with_registry_and_metrics_inner<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
-    #[cfg(test)]
-    let method = config.method();
     let dns = match (config.dns, config.dns_route, dns_specs) {
         (
             Some(DnsConfig {
@@ -196,6 +191,7 @@ where
         (None, None, None) => None,
         _ => return Err(RunError::StartupProtocol),
     };
+    let ordinary_dns = dns.as_ref().map(|_| Arc::new(std::sync::OnceLock::new()));
     metrics.set_udp_sessions_active(Role::Client, 0);
     metrics.set_udp_buffered_bytes(Role::Client, 0);
     let public_udp_enabled = config.udp.is_some_and(|udp| udp.enabled);
@@ -225,8 +221,6 @@ where
                 registry.clone(),
             ),
             live_ids: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            #[cfg(test)]
-            method,
         })
     } else {
         None
@@ -253,12 +247,14 @@ where
         udp_associate_enabled: public_udp_enabled,
         registry: registry.clone(),
         metrics: Arc::clone(&metrics),
+        dns: ordinary_dns.as_ref().map(Arc::clone),
         #[cfg(test)]
         test_udp_server: config.server,
     });
     let mut listens = Vec::with_capacity(config.inbounds.len());
     let routing = Arc::new(ClientRouting {
-        route: config.route,
+        legacy: config.route,
+        program: config.route_program,
         outbounds,
     });
     #[cfg(test)]
@@ -293,6 +289,7 @@ where
         })
     })];
     if let Some((inbounds, servers, route, policy, timeout, max_inflight, _)) = dns {
+        let ordinary_dns = ordinary_dns.expect("validated DNS graph has an ordinary handle");
         let addresses = inbounds.into_iter().map(|inbound| inbound.listen).collect();
         let route = Arc::new(route);
         roots.push(ProcessRoot::new(move || async move {
@@ -338,6 +335,9 @@ where
                     }
                 },
             ));
+            ordinary_dns
+                .set(Arc::clone(&proxy))
+                .map_err(|_| RunError::StartupProtocol)?;
             Ok(ClientDnsRoot {
                 listeners: Some(sockets.with_proxy(proxy)),
                 resolver: Some(resolver),

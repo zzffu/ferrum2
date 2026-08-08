@@ -3,7 +3,8 @@ use std::sync::Arc;
 use ferrum2_config::LoggingLevel;
 use ferrum2_core::ConnectErrorKind;
 use ferrum2_observability::{
-    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
+    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, SniffOutcome,
+    SniffProtocol, Stage, TraceRecord, Transport, emit,
 };
 use ferrum2_runtime::{
     MetricsEndpoint, MetricsEndpointError, OwnerRegistry, PreparedProcessRoot, ProcessCancellation,
@@ -12,6 +13,7 @@ use ferrum2_runtime::{
 use ferrum2_shadowsocks::{
     DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason, ShadowsocksError, UdpPacketError,
 };
+use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress};
 use tokio::net::TcpListener;
 
 use super::RunError;
@@ -22,6 +24,29 @@ pub(super) fn record_forced_udp_sessions(context: &ClientContext) {
     for _ in 0..context.registry.snapshot().udp_sessions {
         context.metrics.udp_forced_shutdown(Role::Client);
     }
+}
+
+pub(super) fn record_sniff(metrics: &Metrics, progress: SniffProgress, limited: bool) {
+    let (outcome, protocol) = if limited {
+        (SniffOutcome::Limit, SniffProtocol::None)
+    } else {
+        match progress {
+            SniffProgress::Matched(SniffMetadata::Dns { .. }) => {
+                (SniffOutcome::Matched, SniffProtocol::Dns)
+            }
+            SniffProgress::Matched(SniffMetadata::Tls { .. }) => {
+                (SniffOutcome::Matched, SniffProtocol::Tls)
+            }
+            SniffProgress::Matched(SniffMetadata::Http { .. }) => {
+                (SniffOutcome::Matched, SniffProtocol::Http)
+            }
+            SniffProgress::NoMatch | SniffProgress::NeedMore => {
+                (SniffOutcome::Unknown, SniffProtocol::None)
+            }
+            SniffProgress::Invalid => (SniffOutcome::Invalid, SniffProtocol::None),
+        }
+    };
+    metrics.sniff(Role::Client, Transport::Udp, outcome, protocol);
 }
 
 pub(super) struct ClientMetricsRoot {
@@ -391,6 +416,7 @@ fn reason_for_connect(kind: ConnectErrorKind) -> Reason {
         ConnectErrorKind::NetworkUnreachable => Reason::NetworkUnreachable,
         ConnectErrorKind::HostUnreachable => Reason::HostUnreachable,
         ConnectErrorKind::ConnectionRefused => Reason::ConnectionRefused,
+        ConnectErrorKind::PolicyDenied => Reason::RelayIo,
         ConnectErrorKind::Timeout => Reason::ConnectTimeout,
         ConnectErrorKind::Other => Reason::RelayIo,
     }
@@ -526,6 +552,7 @@ mod tests {
                 ConnectErrorKind::ConnectionRefused,
                 Reason::ConnectionRefused,
             ),
+            (ConnectErrorKind::PolicyDenied, Reason::RelayIo),
             (ConnectErrorKind::Timeout, Reason::ConnectTimeout),
             (ConnectErrorKind::Other, Reason::RelayIo),
         ];

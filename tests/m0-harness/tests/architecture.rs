@@ -1448,6 +1448,121 @@ fn server_consumes_typed_routes_through_one_runtime_prefix_collector() {
 }
 
 #[test]
+fn client_socks_owns_one_terminal_route_and_one_plan_udp_association() {
+    fn item_body<'a>(tokens: &'a [String], header: &[&str]) -> &'a [String] {
+        let start = tokens
+            .windows(header.len())
+            .position(|window| window.iter().map(String::as_str).eq(header.iter().copied()))
+            .unwrap_or_else(|| panic!("missing item {header:?}"));
+        let body = tokens[start..]
+            .iter()
+            .position(|token| token == "{")
+            .map(|offset| start + offset)
+            .expect("item body");
+        let end = balanced_end(tokens, body, "{", "}").expect("balanced item body");
+        &tokens[body..end]
+    }
+
+    let root = workspace_root();
+    let sources = token_sources(
+        &root,
+        &[
+            "bins/ferrum2-client/src/run/socks.rs",
+            "bins/ferrum2-client/src/run/egress/udp.rs",
+        ],
+    );
+    let socks = sources[0]
+        .production_tokens()
+        .expect("client SOCKS production tokens");
+    let udp = sources[1]
+        .production_tokens()
+        .expect("client UDP production tokens");
+    let endpoint = item_body(socks, &["struct", "SocksUdpEndpoint"]);
+    for field in ["socket", "peer_ip", "port", "wire", "last_valid"] {
+        assert!(
+            has_tokens(endpoint, &[field, ":"]),
+            "SOCKS endpoint lost private {field} ownership"
+        );
+    }
+    assert!(
+        !endpoint.iter().any(|token| token == "pub"),
+        "SOCKS endpoint exposed an owned field"
+    );
+
+    let association = item_body(udp, &["struct", "ClientUdpAssociation"]);
+    for field in [
+        "plan",
+        "protocol",
+        "pending_session",
+        "manager",
+        "handle",
+        "live_ids",
+        "first_server",
+        "upstream",
+        "inner_wire",
+        "upstream_wire",
+        "scratch",
+    ] {
+        assert!(
+            has_tokens(association, &[field, ":"]),
+            "one-plan association lost private {field} ownership"
+        );
+    }
+    assert!(
+        !association.iter().any(|token| token == "pub"),
+        "client UDP association exposed an owned field"
+    );
+    for forbidden in ["plans", "application", "application_wire", "HashMap"] {
+        assert!(
+            !association.iter().any(|token| token == forbidden),
+            "client UDP association restored split ownership: {forbidden}"
+        );
+    }
+    assert!(
+        !udp.iter().any(|token| token == "HashMap"),
+        "client UDP restored a plan-keyed map"
+    );
+    assert!(
+        !has_tokens(socks, &["trait", "SocksUdpEndpoint"]),
+        "SOCKS endpoint gained a trait/factory layer"
+    );
+
+    let classify = item_body(socks, &["async", "fn", "classify_udp_association"]);
+    assert_eq!(
+        classify
+            .windows(2)
+            .filter(|window| window[0] == "select_terminal" && window[1] == "(")
+            .count(),
+        1,
+        "schema-v2 UDP must classify exactly once"
+    );
+    assert_eq!(
+        classify
+            .windows(2)
+            .filter(|window| window[0] == "prepare_udp" && window[1] == "(")
+            .count(),
+        1,
+        "terminal route must create one selected plan owner"
+    );
+    let relay = item_body(socks, &["async", "fn", "relay_udp_association"]);
+    for forbidden in [
+        "select_terminal",
+        "select_plan_snapshot",
+        "program",
+        "legacy",
+    ] {
+        assert!(
+            !relay.iter().any(|token| token == forbidden),
+            "established UDP association re-entered route state: {forbidden}"
+        );
+    }
+
+    let manifest =
+        fs::read_to_string(root.join("bins/ferrum2-client/Cargo.toml")).expect("client manifest");
+    assert!(manifest.contains("ferrum2-sniff.workspace = true"));
+}
+
+#[test]
 fn recursive_rust_source_discovery_excludes_non_rust_files() {
     let directory = tempfile::tempdir().expect("source discovery tempdir");
     let nested = directory.path().join("nested");
@@ -1674,6 +1789,7 @@ fn production_owner_dependencies_are_explicit_and_narrow() {
                     "observation_for_error",
                     "record_failure",
                     "record_forced_udp_sessions",
+                    "record_sniff",
                     "record_udp_drop",
                     "record_udp_packet_error",
                     "record_udp_runtime_error",
@@ -1806,7 +1922,12 @@ fn owner_specific_tests_leave_composition_roots_and_form_no_cycles() {
         ),
         (
             "fn",
-            "routed_udp_uses_lazy_endpoint_legs_and_rejects_cross_leg_responses",
+            "routed_udp_first_valid_packet_selects_association_once",
+            "bins/ferrum2-client/src/run/socks.rs",
+        ),
+        (
+            "fn",
+            "client_route_reject_hijack",
             "bins/ferrum2-client/src/run/socks.rs",
         ),
         (

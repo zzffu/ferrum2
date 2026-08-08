@@ -32,8 +32,8 @@ pub(in crate::run) use ferrum2_runtime::{
 };
 pub(in crate::run) use ferrum2_shadowsocks::{
     BufferObserver, BufferRole, DetectionReason, FlowObserver, FlowTerminal, MAX_UDP_WIRE_LEN,
-    MethodKeyAdapter, ProtocolReason, ShadowsocksTcpInbound, TcpReplayStore, UDP_REPLAY_LAG,
-    UdpServer, max_udp_payload_len,
+    MethodKeyAdapter, ProtocolReason, ShadowsocksTcpInbound, TcpReplayStore, UdpServer,
+    max_udp_payload_len,
 };
 pub(in crate::run) use ferrum2_socks5::{
     Socks5Inbound, SocksCommand, SocksUdpAssociate, encode_udp_datagram,
@@ -540,7 +540,8 @@ pub(in crate::run) fn test_routing(
     psk: ferrum2_crypto::MethodPsk,
 ) -> ClientRouting {
     ClientRouting {
-        route: ferrum2_core::route::RouteTable::static_bindings(vec![0]).expect("test route"),
+        legacy: ferrum2_core::route::RouteTable::static_bindings(vec![0]).expect("test route"),
+        program: None,
         outbounds: vec![ClientOutboundContext {
             tcp_server: TargetAddr::ipv4(server).expect("server target"),
             udp_server: server,
@@ -681,7 +682,6 @@ pub(in crate::run) fn udp_test_context_for_psk(
     if let Some(psk) = psk {
         config.psk = psk;
     }
-    let method = config.method();
     let udp = config.udp.expect("enabled UDP");
     let server = config.server;
     let runtime = config.runtime;
@@ -694,7 +694,6 @@ pub(in crate::run) fn udp_test_context_for_psk(
             registry.clone(),
         ),
         live_ids: Arc::new(Mutex::new(HashSet::new())),
-        method,
     };
     let context = ClientContext {
         inbound: Socks5Inbound::new(),
@@ -712,6 +711,7 @@ pub(in crate::run) fn udp_test_context_for_psk(
         udp_associate_enabled: true,
         registry,
         metrics: Arc::new(Metrics::new()),
+        dns: None,
         test_udp_server: server,
     };
     (path, Arc::new(context))

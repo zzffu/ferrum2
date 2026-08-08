@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+#[cfg(test)]
+use std::net::Ipv4Addr;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -240,11 +242,7 @@ impl DnsEgress for ClientDnsEgress {
                 None => IdleDnsUdp {
                     key,
                     association: engine
-                        .prepare_udp(
-                            Ipv4Addr::LOCALHOST,
-                            Some((plan.clone(), first_server)),
-                            UdpSocket::bind,
-                        )
+                        .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
                         .await
                         .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
                 },
@@ -668,7 +666,24 @@ mod tests {
         };
         let registry = ferrum2_runtime::OwnerRegistry::new();
         let baseline = registry.snapshot();
-        let (path, context) = udp_test_context_for_server(registry.clone(), first_server);
+        let (path, mut context) = udp_test_context_for_server(registry.clone(), first_server);
+        let outbounds = prepare_client_outbounds(
+            vec![
+                ferrum2_config::ClientOutboundConfig {
+                    server: first_server,
+                };
+                3
+            ],
+            (0..3).map(|_| default_test_psk()).collect(),
+        )
+        .expect("pool outbounds");
+        Arc::get_mut(
+            &mut Arc::get_mut(&mut context)
+                .expect("unique pool context")
+                .egress,
+        )
+        .expect("unique pool egress")
+        .outbounds = outbounds;
         let plan = EgressPlanHandle::direct(0).snapshot_owned();
         let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -682,11 +697,7 @@ mod tests {
         for (case, candidate, reusable) in key_cases {
             let association = context
                 .egress
-                .prepare_udp(
-                    Ipv4Addr::LOCALHOST,
-                    Some((selected.clone(), first_server)),
-                    UdpSocket::bind,
-                )
+                .prepare_udp(selected.clone(), first_server, UdpSocket::bind)
                 .await
                 .expect("key association");
             let pool = Arc::new(Mutex::new(vec![IdleDnsUdp {
@@ -715,11 +726,7 @@ mod tests {
                 .expect("mutation session baseline");
             let association = context
                 .egress
-                .prepare_udp(
-                    Ipv4Addr::LOCALHOST,
-                    Some((plan.clone(), first_server)),
-                    UdpSocket::bind,
-                )
+                .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
                 .await
                 .expect("mutation association");
             let pool = Arc::new(Mutex::new(Vec::new()));
@@ -740,7 +747,7 @@ mod tests {
                 .as_ref()
                 .expect("healthy mutation owner")
                 .association
-                .handle;
+                .handle();
             let payload = vec![0x10];
             let echo = async {
                 let mut wire = [0_u8; MAX_UDP_WIRE_LEN];
@@ -793,7 +800,7 @@ mod tests {
             let (matched, stale) = take_dns_udp(&pool, &key).expect("mutation exact reuse");
             assert!(stale.is_none(), "{case} healthy exact key was discarded");
             let idle = matched.expect("mutation exact-key association");
-            assert_eq!(idle.association.handle, mutation_handle, "{case}");
+            assert_eq!(idle.association.handle(), mutation_handle, "{case}");
             let mut pooled = PooledDnsUdp {
                 idle: Some(idle),
                 pool: Arc::clone(&pool),
@@ -812,7 +819,7 @@ mod tests {
                         .as_mut()
                         .expect("mutation owner")
                         .association
-                        .io_fault = Some(Arc::new(UdpIoFaultPlan::new(operation, 1)));
+                        .set_io_fault(Some(Arc::new(UdpIoFaultPlan::new(operation, 1))));
                     assert!(
                         pooled
                             .relay_request(
@@ -907,11 +914,7 @@ mod tests {
                     assert!(
                         context
                             .egress
-                            .prepare_udp(
-                                Ipv4Addr::LOCALHOST,
-                                Some((plan.clone(), first_server)),
-                                UdpSocket::bind,
-                            )
+                            .prepare_udp(plan.clone(), first_server, UdpSocket::bind,)
                             .await
                             .is_err(),
                         "saturation admitted a second association"
@@ -931,11 +934,7 @@ mod tests {
                 .expect("healthy session baseline");
             let association = context
                 .egress
-                .prepare_udp(
-                    Ipv4Addr::LOCALHOST,
-                    Some((plan.clone(), first_server)),
-                    UdpSocket::bind,
-                )
+                .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
                 .await
                 .expect("following valid association");
             let mut initial = Some(IdleDnsUdp {

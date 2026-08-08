@@ -1451,6 +1451,7 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
                 "ferrum2-observability".to_owned(),
                 "ferrum2-runtime".to_owned(),
                 "ferrum2-shadowsocks".to_owned(),
+                "ferrum2-sniff".to_owned(),
                 "ferrum2-socks5".to_owned(),
                 "hickory-proto".to_owned(),
                 "tokio".to_owned(),
@@ -1491,6 +1492,16 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
         assert_eq!(hickory["kind"], "dev");
         assert_eq!(hickory["uses_default_features"], false);
         assert_eq!(hickory["features"], serde_json::json!(["std"]));
+        let sniff = package["dependencies"]
+            .as_array()
+            .expect("binary dependencies")
+            .iter()
+            .find(|dependency| dependency["name"] == "ferrum2-sniff");
+        assert_eq!(
+            sniff.is_some(),
+            matches!(package_name, "ferrum2-client" | "ferrum2-server"),
+            "M14 composition binaries must own the normal sniff edge"
+        );
         let tokio_dependencies: Vec<_> = package["dependencies"]
             .as_array()
             .expect("binary dependencies")

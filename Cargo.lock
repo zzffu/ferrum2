@@ -395,6 +395,7 @@ dependencies = [
  "ferrum2-observability",
  "ferrum2-runtime",
  "ferrum2-shadowsocks",
+ "ferrum2-sniff",
  "ferrum2-socks5",
  "hickory-proto",
  "tokio",

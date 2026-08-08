@@ -302,11 +302,8 @@ async fn tagged_udp_shares_live_id_collisions_across_listeners() {
         .await
         .expect("second activation");
     upstream.recv(&mut wire).await.expect("second upstream");
-    let (mut rejected, rejected_application, rejected_relay) = udp_association(listens[1]).await;
-    rejected_application
-        .send_to(&socks[..length], rejected_relay)
-        .await
-        .expect("rejected activation");
+    let (mut rejected, reply) = socks_command(listens[1], 3).await;
+    assert_eq!(reply, [5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
     let mut eof = [0];
     tokio::time::timeout(Duration::from_secs(2), rejected.read(&mut eof))
         .await
@@ -316,8 +313,8 @@ async fn tagged_udp_shares_live_id_collisions_across_listeners() {
 
     stop.send(()).expect("stop live-ID client");
     assert_eq!(task.await.expect("live-ID client"), Ok(()));
-    let relays = [first.2, second.2, rejected_relay];
-    drop((first, second, rejected, rejected_application));
+    let relays = [first.2, second.2];
+    drop((first, second, rejected));
     for relay in relays {
         drop(UdpSocket::bind(relay).await.expect("live-ID relay rebind"));
     }
@@ -695,8 +692,9 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
             supervisor: Some(supervisor),
             context: tcp_context,
             routing: Arc::new(ClientRouting {
-                route: ferrum2_core::route::RouteTable::static_bindings(vec![0, 1])
+                legacy: ferrum2_core::route::RouteTable::static_bindings(vec![0, 1])
                     .expect("test routes"),
+                program: None,
                 outbounds: listens
                     .map(|_| ClientOutboundContext {
                         tcp_server: TargetAddr::ipv4(server).expect("server target"),

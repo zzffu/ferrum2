@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream
 
 const METHOD: &[u8] = &[5, 0];
 const GENERAL: &[u8] = &[5, 1, 0, 1, 0, 0, 0, 0, 0, 0];
+const DENIED: &[u8] = &[5, 2, 0, 1, 0, 0, 0, 0, 0, 0];
 const NETWORK: &[u8] = &[5, 3, 0, 1, 0, 0, 0, 0, 0, 0];
 const HOST: &[u8] = &[5, 4, 0, 1, 0, 0, 0, 0, 0, 0];
 const REFUSED: &[u8] = &[5, 5, 0, 1, 0, 0, 0, 0, 0, 0];
@@ -196,6 +197,7 @@ async fn legacy_failure_replies_are_mapped_and_exactly_once() {
         ("network", ConnectErrorKind::NetworkUnreachable, NETWORK),
         ("host", ConnectErrorKind::HostUnreachable, HOST),
         ("refused", ConnectErrorKind::ConnectionRefused, REFUSED),
+        ("policy-denied", ConnectErrorKind::PolicyDenied, DENIED),
         ("timeout", ConnectErrorKind::Timeout, GENERAL),
         ("other", ConnectErrorKind::Other, GENERAL),
     ] {

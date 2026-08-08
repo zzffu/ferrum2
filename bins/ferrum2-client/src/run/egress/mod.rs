@@ -16,12 +16,11 @@ use super::RunError;
 use super::tokio_io::TokioConnector;
 
 pub(super) use udp::{
-    ClientUdpAssociation, ClientUdpContext, UdpPlanResponseError, UdpSendError,
-    composed_udp_plan_limit, send_with_lifecycle,
+    ClientUdpAssociation, ClientUdpContext, UdpPlanResponseError, UdpSendError, send_with_lifecycle,
 };
 #[cfg(test)]
 pub(super) use udp::{
-    IdSequenceRandom, MAX_UDP_PLAN_HOPS, UdpIoFaultPlan, UdpIoOperation,
+    IdSequenceRandom, MAX_UDP_PLAN_HOPS, UdpIoFaultPlan, UdpIoOperation, composed_udp_plan_limit,
     composed_udp_request_limit, composed_udp_response_limit,
 };
 
@@ -128,15 +127,15 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
 impl ClientEgressEngine {
     pub(super) async fn prepare_udp<F, Fut>(
         &self,
-        local_ip: std::net::Ipv4Addr,
-        static_plan: Option<(EgressPlanSnapshot, SocketAddrV4)>,
+        plan: EgressPlanSnapshot,
+        first_server: SocketAddrV4,
         bind: F,
     ) -> Result<ClientUdpAssociation, ()>
     where
         F: FnMut(SocketAddrV4) -> Fut,
         Fut: std::future::Future<Output = std::io::Result<tokio::net::UdpSocket>>,
     {
-        udp::prepare(self, local_ip, static_plan, bind).await
+        udp::prepare(self, plan, first_server, bind).await
     }
 }
 
