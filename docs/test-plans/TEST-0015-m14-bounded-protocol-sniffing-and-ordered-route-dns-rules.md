@@ -276,18 +276,26 @@ git diff --check
   `m14_server_udp_dns_sniff_routes_and_rejects_before_target`、
   `m14_client_tcp_dns_hijack_reuses_policy_and_reaps` and
   `m14_client_udp_association_actions_route_once_and_reap`。
-- Each row includes one distinct malformed/no-fallback negative，owner baselines and exact rebind。The
-  client UDP row uses separate associations for route/hijack/reject and includes two targets、a selector
-  switch and a single observed outbound。Existing compatible M10～M13 TCP/UDP/DNS rows remain independent；
-  the former per-datagram multi-outbound expectation is explicitly superseded，not run as compatibility。
+- Each row includes one distinct malformed/no-fallback negative，exact zero-owner baselines and exact
+  rebind。The client UDP process row uses separate associations for route/hijack/reject and includes two
+  targets with one observed real outbound。The mandatory T07
+  `routed_udp_first_valid_packet_selects_association_once` row performs the actual post-selection selector
+  switch and observes the same captured plan，while the T08 architecture guard forbids selector/rule/final
+  reads after classification；these three executable layers form the no-re-read oracle without a binary
+  management/test endpoint。Existing compatible M10～M13 TCP/UDP/DNS rows remain independent；the former
+  per-datagram multi-outbound expectation is explicitly superseded，not run as compatibility。
 - Extend the existing architecture test and qualification driver；do not create another harness/job。
   Any workflow edit is an isolated reviewed control commit and keeps automatic qualification separate
   from manual performance。
-- Performance workload additions measure legacy no-sniff TCP/UDP、64-rule evaluation、server TLS/HTTP
-  sniff、schema-v2 association route once、client TCP/UDP DNS hijack、RSS/tasks/connections/sessions/
-  queries and drain/rebind without a threshold claim。
+- Performance workload additions measure legacy no-sniff TCP/UDP、schema-v1 routed-UDP migration
+  rejection、64-rule evaluation、server TLS/HTTP sniff with valid distinguishable inputs and terminal
+  outcomes、schema-v2 association route once、client TCP/UDP DNS hijack、RSS/tasks/connections/sessions/
+  queries and drain/rebind without a threshold claim。Self-check mutations reject a missing phase、invalid
+  TLS sample and non-distinguishing terminal oracle。
 
 ```powershell
+cargo build --workspace --bins --locked
+cargo test -p ferrum2-client routed_udp_first_valid_packet_selects_association_once --locked
 cargo test -p ferrum2-m0-harness --test local_e2e m14_server_tcp_sniff_routes_rejects_and_replays_prefix --locked -- --exact --nocapture
 cargo test -p ferrum2-m0-harness --test udp_local_e2e m14_server_udp_dns_sniff_routes_and_rejects_before_target --locked -- --exact --nocapture
 cargo test -p ferrum2-m0-harness --test local_e2e m14_client_tcp_dns_hijack_reuses_policy_and_reaps --locked -- --exact --nocapture
@@ -295,6 +303,7 @@ cargo test -p ferrum2-m0-harness --test socks_udp_local_e2e m14_client_udp_assoc
 cargo test -p ferrum2-m0-harness --test architecture --locked
 cargo test -p ferrum2-m0-harness --test qualification_contract --locked
 cargo test -p ferrum2-m4-qualification --locked
+cargo run -p ferrum2-m4-qualification --locked -- self-check
 cargo test --workspace --all-features --locked
 cargo fmt --all -- --check
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh ticket --base <exact-ticket-base-sha> --candidate HEAD
