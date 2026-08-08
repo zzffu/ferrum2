@@ -43,9 +43,9 @@ The words MUST、MUST NOT、SHOULD and MAY are normative。
   `RouteTable::final_plan_snapshot` MUST return owned values。Every client route and every DNS-detour
   data-plane call site MUST use them before any await or mutable selector observation。
 - The validated M13 server ordinary-outbound graph MUST remain direct-only and MAY retain its existing
-  `ActionTable<usize>` one-hop scalar selection。That scalar path MUST NOT accept a multi-hop plan；a
-  future server multi-hop graph must first use the owned snapshot interface and add an architecture
-  guard。This clarification changes no M13 product or qualification evidence。
+  `RouteTable::select` one-hop scalar compatibility path。That scalar path MUST NOT accept a multi-hop
+  plan；a future server multi-hop graph must first use the owned snapshot interface and add compilation
+  and architecture evidence。This clarification changes no M13 product or qualification evidence。
 - Existing `EgressPlan<'_>`、`EgressPlanHandle::snapshot`、`RouteTable::select_plan` and
   `RouteTable::final_plan` MUST remain source-compatible views with identical hop results。
 - One client or DNS-detour snapshot MUST remain fixed after selector switches；only a later selection may

@@ -34,10 +34,11 @@ direct plan remains one hop，a chain remains `2..=8` ordered concrete hops，an
 unchanged by later selector switches。
 
 The validated M13 server ordinary-outbound graph is direct-only and retains its existing
-`ActionTable<usize>` one-hop scalar selection；it does not need an owned multi-hop snapshot for each
-datagram。DNS detours still use the owned snapshot interface。Any future server graph capable of
-multi-hop selection must first leave the scalar path and add an architecture guard that rejects
-multi-hop use there。This wording correction does not change M13 product or qualification evidence。
+`RouteTable::select` direct-only one-hop scalar compatibility path；it does not need an owned multi-hop
+snapshot for each datagram。DNS detours still use the owned snapshot interface。Any future server graph
+capable of multi-hop selection must first leave the scalar path and add compilation and architecture
+evidence that rejects multi-hop use there。This wording correction does not change M13 product or
+qualification evidence。
 
 `ferrum2_dns::PlanSnapshot` is deleted。`DnsEgress` receives an optional core
 `EgressPlanSnapshot`，so TCP execution、UDP exact-plan reuse and DNS TC upgrade share one identity。

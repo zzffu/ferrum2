@@ -129,12 +129,14 @@ always selects one outbound and cannot vary by flow or datagram.
 _Avoid_: Routing rule, fallback, load balancing
 
 **Route rule**:
-One ordered conjunction of optional inbound, network, and exact-target matchers whose
-action is one outbound; the first matching rule decides the request.
+One ordered conjunction of matchers whose action is non-terminal `sniff` or terminal
+`route`、`hijack-dns`、`reject`. A matching sniff resumes after that rule; the first
+matching terminal action decides the request.
 _Avoid_: Fallback, load-balancing policy, static outbound binding
 
 **Final outbound**:
-The mandatory route-mode outbound selected when no route rule matches.
+The mandatory route-mode outbound selected when ordered evaluation exhausts without a
+terminal action.
 _Avoid_: Failure fallback, default retry
 
 **Route network**:
