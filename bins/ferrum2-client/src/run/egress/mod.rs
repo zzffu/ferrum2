@@ -126,12 +126,17 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
 }
 
 impl ClientEgressEngine {
-    pub(super) fn prepare_udp(
+    pub(super) async fn prepare_udp<F, Fut>(
         &self,
         plan: EgressPlanSnapshot,
         first_server: SocketAddrV4,
-    ) -> Result<ClientUdpAssociation, ()> {
-        udp::prepare(self, plan, first_server)
+        bind: F,
+    ) -> Result<ClientUdpAssociation, ()>
+    where
+        F: FnMut(SocketAddrV4) -> Fut,
+        Fut: std::future::Future<Output = std::io::Result<tokio::net::UdpSocket>>,
+    {
+        udp::prepare(self, plan, first_server, bind).await
     }
 }
 

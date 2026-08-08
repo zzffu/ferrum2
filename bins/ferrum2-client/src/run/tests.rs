@@ -190,12 +190,7 @@ async fn tagged_udp_uses_static_outbounds_and_no_fallback() {
 #[tokio::test]
 async fn tagged_udp_shares_byte_budget_across_listeners() {
     let listens = [reserve_address(), reserve_address()];
-    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-        .await
-        .expect("upstream receiver");
-    let SocketAddr::V4(server) = upstream.local_addr().expect("upstream address") else {
-        unreachable!("IPv4 upstream")
-    };
+    let server = reserve_address();
     let (path, mut config) =
         tagged_client_test_config(&listens.map(|listen| (listen, server)), true);
     let udp = config.udp.as_mut().expect("UDP config");
@@ -212,52 +207,22 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
     let mut controls = Vec::new();
     let mut applications = Vec::new();
     let mut relays = Vec::new();
-    let target = TargetAddr::ipv4("192.0.2.1:53".parse().expect("target")).expect("target");
-    let mut request = [0; 64];
-    let length = encode_udp_datagram(&target, b"activate", &mut request).expect("request");
     for _ in 0..5 {
         let (control, application, relay) = udp_association(listens[0]).await;
-        application
-            .send_to(&request[..length], relay)
-            .await
-            .expect("activate shared byte owner");
         controls.push(control);
         applications.push(application);
         relays.push(relay);
     }
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let saturated = loop {
-        let snapshot = registry.snapshot();
-        if snapshot.udp_sessions == baseline.udp_sessions + 5 {
-            break snapshot;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "UDP byte owners did not activate: {snapshot:?}"
-        );
-        tokio::task::yield_now().await;
-    };
+    let saturated = registry.snapshot();
     assert_eq!(saturated.udp_sessions, baseline.udp_sessions + 5);
     assert_eq!(
         saturated.udp_buffered_bytes,
         baseline.udp_buffered_bytes + 15 * MAX_UDP_WIRE_LEN
     );
-    let (mut rejected, rejected_application, rejected_relay) = udp_association(listens[1]).await;
-    rejected_application
-        .send_to(&request[..length], rejected_relay)
-        .await
-        .expect("attempt saturated activation");
-    let mut eof = [0; 1];
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), rejected.read(&mut eof))
-            .await
-            .expect("saturated control EOF timeout")
-            .expect("saturated control EOF"),
-        0
-    );
+    let (rejected, reply) = socks_command(listens[1], 3).await;
+    assert_eq!(&reply[..2], &[5, 1]);
+    drop(rejected);
     assert_eq!(registry.snapshot().udp_sessions, baseline.udp_sessions + 5);
-    drop((rejected, rejected_application));
-    relays.push(rejected_relay);
 
     drop(controls.remove(0));
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -272,10 +237,6 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
         tokio::task::yield_now().await;
     }
     let (control, application, relay) = udp_association(listens[1]).await;
-    application
-        .send_to(&request[..length], relay)
-        .await
-        .expect("reactivate released byte owner");
     controls.push(control);
     applications.push(application);
     relays.push(relay);
@@ -294,7 +255,6 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
         drop(TcpListener::bind(listen).await.expect("listener rebind"));
     }
     assert_eq!(active(registry.snapshot()), active(baseline));
-    drop(upstream);
     std::fs::remove_file(path).expect("remove byte-budget config");
 }
 
@@ -346,13 +306,13 @@ async fn tagged_udp_shares_live_id_collisions_across_listeners() {
     let third = udp_association(listens[1]).await;
     assert_eq!(
         registry.snapshot().udp_sessions,
-        activated.udp_sessions,
-        "association setup cannot create a protocol session"
+        activated.udp_sessions + 1,
+        "association setup must own its pending session"
     );
     assert_eq!(
         registry.snapshot().udp_buffered_bytes,
-        activated.udp_buffered_bytes,
-        "association setup cannot reserve protocol buffers"
+        activated.udp_buffered_bytes + 3 * MAX_UDP_WIRE_LEN,
+        "association setup must own its fixed buffers"
     );
     third
         .1
@@ -499,33 +459,8 @@ async fn udp_process_shutdown_drains_an_active_association_without_forcing() {
         baseline.active_supervisor_children + 1
     );
     assert_eq!(live.connection_tasks, baseline.connection_tasks + 1);
-    let (mut saturated_control, saturated_application, saturated_relay) =
-        udp_association(listens[1]).await;
-    saturated_application
-        .send_to(&request[..request_len], saturated_relay)
-        .await
-        .expect("attempt saturated activation");
-    let mut saturated_wire = [0; MAX_UDP_WIRE_LEN];
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            upstream.recv(&mut saturated_wire)
-        )
-        .await
-        .is_err(),
-        "saturated activation reached upstream"
-    );
-    let mut saturated_eof = [0; 1];
-    assert_eq!(
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            saturated_control.read(&mut saturated_eof)
-        )
-        .await
-        .expect("saturated control EOF timeout")
-        .expect("saturated control EOF"),
-        0
-    );
+    let (_, saturated) = socks_command(listens[1], 3).await;
+    assert_eq!(&saturated[..2], &[5, 1]);
     assert_eq!(registry.snapshot().udp_sessions, baseline.udp_sessions + 1);
 
     shutdown_sender
@@ -572,14 +507,9 @@ async fn udp_process_shutdown_drains_an_active_association_without_forcing() {
             .expect("metrics")
             .contains("ferrum2_udp_forced_shutdown_total{role=\"client\"}")
     );
-    drop((application, saturated_application, saturated_control));
+    drop(application);
     drop(upstream);
     drop(UdpSocket::bind(relay).await.expect("relay rebind"));
-    drop(
-        UdpSocket::bind(saturated_relay)
-            .await
-            .expect("saturated relay rebind"),
-    );
     drop(
         UdpSocket::bind(upstream_client)
             .await

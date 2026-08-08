@@ -1490,74 +1490,106 @@ fn client_socks_owns_one_terminal_route_and_one_plan_udp_association() {
     );
 
     let association = item_body(udp, &["struct", "ClientUdpAssociation"]);
-    let protocol = item_body(udp, &["struct", "ClientUdpProtocol"]);
-    let check_one_plan =
-        |association: &[String], protocol: &[String], udp: &[String]| -> Result<(), &'static str> {
-            for field in ["plan", "first_server", "protocol"] {
-                if !has_tokens(association, &[field, ":"]) {
-                    return Err("association lost its single lazy field");
-                }
+    let check_one_plan = |association: &[String], udp: &[String]| -> Result<(), &'static str> {
+        for field in [
+            "plan",
+            "first_server",
+            "protocol",
+            "pending_session",
+            "manager",
+            "handle",
+            "live_ids",
+            "upstream",
+            "inner_wire",
+            "upstream_wire",
+            "scratch",
+            "_fixed_capacity",
+        ] {
+            if !has_tokens(association, &[field, ":"]) {
+                return Err("association lost setup-time ownership");
             }
-            if !has_tokens(
-                association,
-                &["protocol", ":", "Option", "<", "ClientUdpProtocol", ">"],
-            ) {
-                return Err("association protocol is not one lazy slot");
-            }
-            for field in [
-                "pending_session",
-                "manager",
-                "handle",
-                "live_ids",
-                "upstream",
-                "inner_wire",
-                "upstream_wire",
-                "scratch",
-            ] {
-                if !has_tokens(protocol, &[field, ":"]) {
-                    return Err("lazy protocol lost an owned field");
-                }
-            }
-            if association
+        }
+        if !has_tokens(
+            association,
+            &["protocol", ":", "Option", "<", "ClientUdpPlan", ">"],
+        ) {
+            return Err("association protocol is not one lazy slot");
+        }
+        if association.iter().any(|token| token == "pub") {
+            return Err("client UDP exposed an owned field");
+        }
+        if has_tokens(udp, &["struct", "ClientUdpProtocol"]) {
+            return Err("client UDP restored a duplicate protocol wrapper");
+        }
+        if [
+            "plans",
+            "plan_map",
+            "plans_by_key",
+            "application",
+            "application_wire",
+        ]
+        .iter()
+        .any(|forbidden| association.iter().any(|token| token == forbidden))
+            || ["HashMap", "BTreeMap"]
                 .iter()
-                .chain(protocol)
-                .any(|token| token == "pub")
-            {
-                return Err("client UDP exposed an owned field");
-            }
-            if [
-                "plans",
-                "plan_map",
-                "plans_by_key",
-                "application",
-                "application_wire",
-            ]
-            .iter()
-            .any(|forbidden| association.iter().any(|token| token == forbidden))
-                || ["HashMap", "BTreeMap"]
-                    .iter()
-                    .any(|forbidden| udp.iter().any(|token| token == forbidden))
-                || has_tokens(association, &["Vec", "<", "EgressPlanSnapshot", ">"])
-                || has_tokens(association, &["Vec", "<", "ClientUdpPlan", ">"])
-            {
-                return Err("client UDP restored a plan-keyed collection");
-            }
-            Ok(())
-        };
-    check_one_plan(association, protocol, udp).unwrap_or_else(|error| panic!("{error}"));
+                .any(|forbidden| udp.iter().any(|token| token == forbidden))
+            || has_tokens(association, &["Vec", "<", "EgressPlanSnapshot", ">"])
+            || has_tokens(association, &["Vec", "<", "ClientUdpPlan", ">"])
+        {
+            return Err("client UDP restored a plan-keyed collection");
+        }
+        Ok(())
+    };
+    check_one_plan(association, udp).unwrap_or_else(|error| panic!("{error}"));
 
     let mut btree_map = udp.to_vec();
     btree_map.push("BTreeMap".to_owned());
     assert!(
-        check_one_plan(association, protocol, &btree_map).is_err(),
+        check_one_plan(association, &btree_map).is_err(),
         "BTreeMap plan-map mutation survived"
     );
     let mut vector_map = association.to_vec();
     vector_map.extend(["plans", ":", "Vec", "<", "EgressPlanSnapshot", ">"].map(str::to_owned));
     assert!(
-        check_one_plan(&vector_map, protocol, udp).is_err(),
+        check_one_plan(&vector_map, udp).is_err(),
         "Vec plan-map mutation survived"
     );
+
+    let prepare = item_body(udp, &["async", "fn", "prepare"]);
+    let activate = item_body(udp, &["fn", "activate"]);
+    let check_split_phase = |prepare: &[String], activate: &[String]| -> Result<(), &'static str> {
+        for required in ["reserve_session", "buffer_budget", "bind", "connect"] {
+            if !prepare.iter().any(|token| token == required) {
+                return Err("prepare lost setup-time resource ownership");
+            }
+        }
+        if prepare.iter().any(|token| token == "register_udp_plan") {
+            return Err("prepare eagerly registered protocol state");
+        }
+        if !activate.iter().any(|token| token == "register_udp_plan") {
+            return Err("activate lost protocol registration");
+        }
+        for forbidden in ["reserve_session", "buffer_budget", "bind", "connect"] {
+            if activate.iter().any(|token| token == forbidden) {
+                return Err("activate recreated setup-time resources");
+            }
+        }
+        Ok(())
+    };
+    check_split_phase(prepare, activate).unwrap_or_else(|error| panic!("{error}"));
+    for (phase, mutation) in [("prepare", "register_udp_plan"), ("activate", "bind")] {
+        let mut mutated_prepare = prepare.to_vec();
+        let mut mutated_activate = activate.to_vec();
+        if phase == "prepare" {
+            mutated_prepare.push(mutation.to_owned());
+        } else {
+            mutated_activate.push(mutation.to_owned());
+        }
+        assert!(
+            check_split_phase(&mutated_prepare, &mutated_activate).is_err(),
+            "split-phase mutation survived: {phase}"
+        );
+    }
 
     let check_endpoint_surface = |tokens: &[String]| -> Result<(), &'static str> {
         for declaration in tokens.windows(2).filter(|window| {

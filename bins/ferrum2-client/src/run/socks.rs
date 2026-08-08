@@ -615,7 +615,11 @@ async fn run_udp_association<IO, F, Fut>(
         }
     };
     let mut static_association = if let Some((plan, server)) = static_plan {
-        match context.egress.prepare_udp(plan, server) {
+        let prepared = tokio::select! {
+            _ = cancellation.cancelled() => return,
+            prepared = context.egress.prepare_udp(plan, server, &mut bind) => prepared,
+        };
+        match prepared {
             Ok(prepared) => Some(prepared),
             Err(()) => {
                 let _ = reply.failed(ConnectErrorKind::Other).await;
@@ -639,7 +643,6 @@ async fn run_udp_association<IO, F, Fut>(
                 &context,
                 routing,
                 None,
-                &mut bind,
             )
             .await;
         }
@@ -658,8 +661,7 @@ async fn run_udp_association<IO, F, Fut>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn relay_udp_association<IO, F, Fut>(
+async fn relay_udp_association<IO>(
     endpoint: &mut SocksUdpEndpoint,
     prepared: &mut ClientUdpAssociation,
     control: &mut SocksStream<IO>,
@@ -667,20 +669,34 @@ async fn relay_udp_association<IO, F, Fut>(
     context: &ClientContext,
     routing: &ClientRouting,
     first: Option<(TargetAddr, Vec<u8>)>,
-    bind: &mut F,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
-    F: FnMut(SocketAddrV4) -> Fut,
-    Fut: std::future::Future<Output = io::Result<UdpSocket>>,
 {
+    let mut session_cancellation = match prepared.cancellation() {
+        Ok(cancellation) => cancellation,
+        Err(_) => return,
+    };
     let first = match first {
         Some(first) => first,
         None => {
             let mut control_byte = [0; 1];
             loop {
+                let idle_deadline = match prepared.idle_deadline() {
+                    Ok(deadline) => deadline,
+                    Err(_) => return,
+                };
                 let received = tokio::select! {
                     _ = cancellation.cancelled() => return,
-                    _ = tokio::time::sleep_until(endpoint.idle_deadline(context.runtime.idle_timeout)) => return,
+                    changed = session_cancellation.changed() => {
+                        let _ = changed;
+                        return;
+                    }
+                    _ = tokio::time::sleep_until(idle_deadline) => {
+                        if prepared.idle_expired(idle_deadline) {
+                            return;
+                        }
+                        continue;
+                    }
                     read = control.read(&mut control_byte) => {
                         if !matches!(read, Ok(1)) {
                             return;
@@ -741,18 +757,10 @@ async fn relay_udp_association<IO, F, Fut>(
             }
         }
     };
-    if prepared
-        .activate(&context.egress, &mut *bind)
-        .await
-        .is_err()
-    {
+    if prepared.activate(&context.egress).is_err() {
         record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
         return;
     }
-    let mut session_cancellation = match prepared.cancellation() {
-        Ok(cancellation) => cancellation,
-        Err(_) => return,
-    };
     if !forward_udp_request(
         prepared,
         cancellation,
@@ -999,7 +1007,11 @@ async fn classify_udp_association<IO, F, Fut>(
             else {
                 return;
             };
-            let Ok(mut prepared) = context.egress.prepare_udp(plan, server) else {
+            let prepared = tokio::select! {
+                _ = cancellation.cancelled() => return,
+                prepared = context.egress.prepare_udp(plan, server, &mut bind) => prepared,
+            };
+            let Ok(mut prepared) = prepared else {
                 record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
                 return;
             };
@@ -1011,7 +1023,6 @@ async fn classify_udp_association<IO, F, Fut>(
                 context,
                 routing,
                 Some((target, payload)),
-                &mut bind,
             )
             .await;
         }
@@ -1330,7 +1341,7 @@ pub(in crate::run) mod tests {
     }
 
     #[tokio::test]
-    async fn application_setup_and_lazy_upstream_failures_reply_once_and_roll_back() {
+    async fn first_and_second_socket_setup_failures_reply_once_and_roll_back() {
         for fail_at in 0..2 {
             let registry = OwnerRegistry::new();
             let baseline = registry.snapshot();
@@ -1340,50 +1351,34 @@ pub(in crate::run) mod tests {
             let bound = Arc::new(Mutex::new(Vec::new()));
             let bind_calls = Arc::clone(&calls);
             let bound_addresses = Arc::clone(&bound);
-            let task = tokio::spawn(execute_test_udp_association(
-                association,
-                Arc::clone(&context),
-                Arc::new(test_routing(context.test_udp_server, default_test_psk())),
-                move |address| {
-                    let call = bind_calls.fetch_add(1, Ordering::SeqCst);
-                    let bound_addresses = Arc::clone(&bound_addresses);
-                    async move {
-                        if call == fail_at {
-                            return Err(io::Error::other("injected bind failure"));
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                execute_test_udp_association(
+                    association,
+                    Arc::clone(&context),
+                    Arc::new(test_routing(context.test_udp_server, default_test_psk())),
+                    move |address| {
+                        let call = bind_calls.fetch_add(1, Ordering::SeqCst);
+                        let bound_addresses = Arc::clone(&bound_addresses);
+                        async move {
+                            if call == fail_at {
+                                return Err(io::Error::other("injected bind failure"));
+                            }
+                            let socket = UdpSocket::bind(address).await?;
+                            bound_addresses
+                                .lock()
+                                .expect("bound addresses")
+                                .push(socket.local_addr()?);
+                            Ok(socket)
                         }
-                        let socket = UdpSocket::bind(address).await?;
-                        bound_addresses
-                            .lock()
-                            .expect("bound addresses")
-                            .push(socket.local_addr()?);
-                        Ok(socket)
-                    }
-                },
-            ));
+                    },
+                ),
+            )
+            .await
+            .expect("setup failure must terminate before a UDP packet");
             let mut reply = [0; 10];
-            peer.read_exact(&mut reply).await.expect("one setup reply");
-            if fail_at == 0 {
-                assert_eq!(reply, [5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
-            } else {
-                assert_eq!(&reply[..4], &[5, 0, 0, 1]);
-                let relay = SocketAddrV4::new(
-                    Ipv4Addr::new(reply[4], reply[5], reply[6], reply[7]),
-                    u16::from_be_bytes([reply[8], reply[9]]),
-                );
-                let application = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-                    .await
-                    .expect("application socket");
-                let target =
-                    TargetAddr::ipv4("192.0.2.1:53".parse().expect("target")).expect("target");
-                let mut request = [0; 64];
-                let request_len =
-                    encode_udp_datagram(&target, b"activate", &mut request).expect("SOCKS request");
-                application
-                    .send_to(&request[..request_len], relay)
-                    .await
-                    .expect("application send");
-            }
-            task.await.expect("association task");
+            peer.read_exact(&mut reply).await.expect("failure reply");
+            assert_eq!(reply, [5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
             assert_eq!(peer.read(&mut reply).await.expect("single reply EOF"), 0);
             assert_eq!(calls.load(Ordering::SeqCst), fail_at + 1);
             let udp = context.egress.udp.as_ref().expect("UDP context");
@@ -1433,12 +1428,11 @@ pub(in crate::run) mod tests {
             .prepare_udp(
                 ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
                 context.test_udp_server,
+                UdpSocket::bind,
             )
-            .expect("next setup");
-        prepared
-            .activate(&context.egress, UdpSocket::bind)
             .await
-            .expect("next activation");
+            .expect("next setup");
+        prepared.activate(&context.egress).expect("next activation");
         let upstream = prepared.upstream_local_addr().expect("upstream address");
         drop((endpoint, prepared));
         assert_eq!(registry.snapshot(), baseline);
@@ -1475,12 +1469,11 @@ pub(in crate::run) mod tests {
             .prepare_udp(
                 ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
                 context.test_udp_server,
+                &mut bind,
             )
-            .expect("setup");
-        prepared
-            .activate(&context.egress, &mut bind)
             .await
-            .expect("activation");
+            .expect("setup");
+        prepared.activate(&context.egress).expect("activation");
         assert_eq!(
             *calls.lock().expect("bind calls"),
             [
@@ -1739,7 +1732,6 @@ pub(in crate::run) mod tests {
                 let routing = Arc::clone(&routing);
                 let done_sender = Arc::clone(&done_sender);
                 async move {
-                    let mut bind = UdpSocket::bind;
                     relay_udp_association(
                         &mut endpoint,
                         &mut prepared,
@@ -1748,7 +1740,6 @@ pub(in crate::run) mod tests {
                         &context,
                         &routing,
                         None,
-                        &mut bind,
                     )
                     .await;
                     let _ = done_sender
@@ -2396,11 +2387,12 @@ pub(in crate::run) mod tests {
                 .prepare_udp(
                     ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
                     server_address,
+                    UdpSocket::bind,
                 )
+                .await
                 .expect("prepared concrete relay");
             prepared
-                .activate(&context.egress, UdpSocket::bind)
-                .await
+                .activate(&context.egress)
                 .expect("concrete activation");
             let upstream_client = prepared.upstream_local_addr().expect("upstream client");
             let fault = Some(Arc::new(UdpIoFaultPlan::new(operation, fail_at)));
@@ -2566,11 +2558,12 @@ pub(in crate::run) mod tests {
                     .prepare_udp(
                         ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
                         server_address,
+                        UdpSocket::bind,
                     )
+                    .await
                     .expect("prepared relay");
                 prepared
-                    .activate(&context.egress, UdpSocket::bind)
-                    .await
+                    .activate(&context.egress)
                     .expect("relay activation");
                 let handle = prepared.handle();
                 let manager = context.egress.udp.as_ref().expect("UDP").manager.clone();
@@ -3022,7 +3015,8 @@ pub(in crate::run) mod tests {
         let relay = endpoint.local_addr().expect("routed relay");
         let prepared = context
             .egress
-            .prepare_udp(selected, servers[0])
+            .prepare_udp(selected, servers[0], UdpSocket::bind)
+            .await
             .expect("routed chain preparation");
         let (association, peer) = parsed_udp_association().await;
         let running = start_udp_relay(
@@ -3178,7 +3172,8 @@ pub(in crate::run) mod tests {
         let relay = endpoint.local_addr().expect("relay");
         let prepared = context
             .egress
-            .prepare_udp(plan, servers[0])
+            .prepare_udp(plan, servers[0], UdpSocket::bind)
+            .await
             .expect("eight-hop preparation");
         let manager = context.egress.udp.as_ref().expect("UDP").manager.clone();
         let (association, peer) = parsed_udp_association().await;
@@ -3214,7 +3209,11 @@ pub(in crate::run) mod tests {
         )
         .await;
         assert_eq!(registry.snapshot(), stable);
-        assert_eq!(manager.session_count(), 0);
+        assert_eq!(
+            manager.session_count(),
+            1,
+            "schema-v1 setup owner stays pending after an over-bound packet"
+        );
         assert_eq!(
             context
                 .egress

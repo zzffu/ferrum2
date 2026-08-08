@@ -17,7 +17,6 @@ use ferrum2_dns::{
     SystemDnsEgress,
 };
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
-#[cfg(test)]
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -243,7 +242,8 @@ impl DnsEgress for ClientDnsEgress {
                 None => IdleDnsUdp {
                     key,
                     association: engine
-                        .prepare_udp(plan.clone(), first_server)
+                        .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
+                        .await
                         .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
                 },
             };
@@ -699,7 +699,8 @@ mod tests {
         for (case, candidate, reusable) in key_cases {
             let association = context
                 .egress
-                .prepare_udp(selected.clone(), first_server)
+                .prepare_udp(selected.clone(), first_server, UdpSocket::bind)
+                .await
                 .expect("key association");
             let pool = Arc::new(Mutex::new(vec![IdleDnsUdp {
                 key: DnsUdpPoolKey {
@@ -727,11 +728,11 @@ mod tests {
                 .expect("mutation session baseline");
             let mut association = context
                 .egress
-                .prepare_udp(plan.clone(), first_server)
+                .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
+                .await
                 .expect("mutation association");
             association
-                .activate(&context.egress, UdpSocket::bind)
-                .await
+                .activate(&context.egress)
                 .expect("mutation activation");
             let pool = Arc::new(Mutex::new(Vec::new()));
             let (session_responses, mut responses) = mpsc::channel(1);
@@ -915,13 +916,10 @@ mod tests {
                 }
                 "saturation" => {
                     pooled.begin_request();
-                    let mut saturated = context
-                        .egress
-                        .prepare_udp(plan.clone(), first_server)
-                        .expect("saturated association shape");
                     assert!(
-                        saturated
-                            .activate(&context.egress, UdpSocket::bind)
+                        context
+                            .egress
+                            .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
                             .await
                             .is_err(),
                         "saturation admitted a second association"
@@ -941,7 +939,8 @@ mod tests {
                 .expect("healthy session baseline");
             let association = context
                 .egress
-                .prepare_udp(plan.clone(), first_server)
+                .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
+                .await
                 .expect("following valid association");
             let mut initial = Some(IdleDnsUdp {
                 key: DnsUdpPoolKey {
@@ -1971,25 +1970,9 @@ mod tests {
                 .session_count(),
             1
         );
-        let (mut public_control, public_application, public_relay) = udp_association(socks).await;
-        let target = TargetAddr::ipv4("192.0.2.1:53".parse().expect("public target"))
-            .expect("public target");
-        let mut public_wire = [0; 64];
-        let public_length =
-            encode_udp_datagram(&target, b"saturated", &mut public_wire).expect("public request");
-        public_application
-            .send_to(&public_wire[..public_length], public_relay)
-            .await
-            .expect("public activation attempt");
-        let mut eof = [0];
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), public_control.read(&mut eof))
-                .await
-                .expect("public activation timeout")
-                .expect("public activation EOF"),
-            0
-        );
-        drop((public_control, public_application));
+        let (public_control, public_reply) = socks_command(socks, 3).await;
+        assert_ne!(public_reply[1], 0, "public UDP used a second manager");
+        drop(public_control);
         assert_eq!(active(registry.snapshot()), held);
 
         let second = query(0x3302, "busy.detoured.example.");
