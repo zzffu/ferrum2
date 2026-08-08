@@ -128,15 +128,15 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
 impl ClientEgressEngine {
     pub(super) async fn prepare_udp<F, Fut>(
         &self,
-        local_ip: std::net::Ipv4Addr,
-        static_plan: Option<(EgressPlanSnapshot, SocketAddrV4)>,
+        plan: EgressPlanSnapshot,
+        first_server: SocketAddrV4,
         bind: F,
     ) -> Result<ClientUdpAssociation, ()>
     where
         F: FnMut(SocketAddrV4) -> Fut,
         Fut: std::future::Future<Output = std::io::Result<tokio::net::UdpSocket>>,
     {
-        udp::prepare(self, local_ip, static_plan, bind).await
+        udp::prepare(self, plan, first_server, bind).await
     }
 }
 

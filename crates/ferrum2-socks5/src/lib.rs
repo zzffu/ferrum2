@@ -21,6 +21,7 @@ const ADDRESS_TYPE_IPV4: u8 = 0x01;
 const ADDRESS_TYPE_DOMAIN: u8 = 0x03;
 const ADDRESS_TYPE_IPV6: u8 = 0x04;
 const REPLY_GENERAL_FAILURE: u8 = 0x01;
+const REPLY_CONNECTION_NOT_ALLOWED: u8 = 0x02;
 const REPLY_NETWORK_UNREACHABLE: u8 = 0x03;
 const REPLY_HOST_UNREACHABLE: u8 = 0x04;
 const REPLY_CONNECTION_REFUSED: u8 = 0x05;
@@ -319,6 +320,7 @@ where
             ConnectErrorKind::NetworkUnreachable => REPLY_NETWORK_UNREACHABLE,
             ConnectErrorKind::HostUnreachable => REPLY_HOST_UNREACHABLE,
             ConnectErrorKind::ConnectionRefused => REPLY_CONNECTION_REFUSED,
+            ConnectErrorKind::PolicyDenied => REPLY_CONNECTION_NOT_ALLOWED,
             ConnectErrorKind::Timeout | ConnectErrorKind::Other => REPLY_GENERAL_FAILURE,
         };
         let mut stream = SocksStream { io: self.io };

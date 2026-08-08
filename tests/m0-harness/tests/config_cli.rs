@@ -179,7 +179,7 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
 }
 
 #[test]
-fn schema_v2_check_succeeds_while_client_latch_and_server_runtime_fail_closed() {
+fn schema_v2_check_succeeds_and_occupied_runtime_endpoints_fail_closed() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (client_listener, client_address) = reserve_loopback();
     let (server_listener, server_udp, server_address) = reserve_server_tcp_udp();
@@ -190,7 +190,7 @@ fn schema_v2_check_succeeds_while_client_latch_and_server_runtime_fail_closed() 
                 .replacen("schema_version = 1", "schema_version = 2", 1)
                 .replace("127.0.0.1:1080", &client_address.to_string())
                 .replace("127.0.0.1:8388", &server_address.to_string()),
-            b"error[startup.protocol] process: unable to prepare protocol resources\n".as_slice(),
+            b"error[startup.bind] process: unable to prepare required endpoint\n".as_slice(),
         ),
         (
             "ferrum2-server",

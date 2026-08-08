@@ -1448,6 +1448,235 @@ fn server_consumes_typed_routes_through_one_runtime_prefix_collector() {
 }
 
 #[test]
+fn client_socks_owns_one_terminal_route_and_one_plan_udp_association() {
+    fn item_body<'a>(tokens: &'a [String], header: &[&str]) -> &'a [String] {
+        let start = tokens
+            .windows(header.len())
+            .position(|window| window.iter().map(String::as_str).eq(header.iter().copied()))
+            .unwrap_or_else(|| panic!("missing item {header:?}"));
+        let body = tokens[start..]
+            .iter()
+            .position(|token| token == "{")
+            .map(|offset| start + offset)
+            .expect("item body");
+        let end = balanced_end(tokens, body, "{", "}").expect("balanced item body");
+        &tokens[body..end]
+    }
+
+    let root = workspace_root();
+    let sources = token_sources(
+        &root,
+        &[
+            "bins/ferrum2-client/src/run/socks.rs",
+            "bins/ferrum2-client/src/run/egress/udp.rs",
+        ],
+    );
+    let socks = sources[0]
+        .production_tokens()
+        .expect("client SOCKS production tokens");
+    let udp = sources[1]
+        .production_tokens()
+        .expect("client UDP production tokens");
+    let endpoint = item_body(socks, &["struct", "SocksUdpEndpoint"]);
+    for field in ["socket", "peer_ip", "port", "wire", "last_valid"] {
+        assert!(
+            has_tokens(endpoint, &[field, ":"]),
+            "SOCKS endpoint lost private {field} ownership"
+        );
+    }
+    assert!(
+        !endpoint.iter().any(|token| token == "pub"),
+        "SOCKS endpoint exposed an owned field"
+    );
+
+    let association = item_body(udp, &["struct", "ClientUdpAssociation"]);
+    let check_one_plan = |association: &[String], udp: &[String]| -> Result<(), &'static str> {
+        for field in [
+            "plan",
+            "first_server",
+            "protocol",
+            "pending_session",
+            "manager",
+            "handle",
+            "live_ids",
+            "upstream",
+            "inner_wire",
+            "upstream_wire",
+            "scratch",
+            "_fixed_capacity",
+        ] {
+            if !has_tokens(association, &[field, ":"]) {
+                return Err("association lost setup-time ownership");
+            }
+        }
+        if !has_tokens(
+            association,
+            &["protocol", ":", "Option", "<", "ClientUdpPlan", ">"],
+        ) {
+            return Err("association protocol is not one lazy slot");
+        }
+        if association.iter().any(|token| token == "pub") {
+            return Err("client UDP exposed an owned field");
+        }
+        if has_tokens(udp, &["struct", "ClientUdpProtocol"]) {
+            return Err("client UDP restored a duplicate protocol wrapper");
+        }
+        if [
+            "plans",
+            "plan_map",
+            "plans_by_key",
+            "application",
+            "application_wire",
+        ]
+        .iter()
+        .any(|forbidden| association.iter().any(|token| token == forbidden))
+            || ["HashMap", "BTreeMap"]
+                .iter()
+                .any(|forbidden| udp.iter().any(|token| token == forbidden))
+            || has_tokens(association, &["Vec", "<", "EgressPlanSnapshot", ">"])
+            || has_tokens(association, &["Vec", "<", "ClientUdpPlan", ">"])
+        {
+            return Err("client UDP restored a plan-keyed collection");
+        }
+        Ok(())
+    };
+    check_one_plan(association, udp).unwrap_or_else(|error| panic!("{error}"));
+
+    let mut btree_map = udp.to_vec();
+    btree_map.push("BTreeMap".to_owned());
+    assert!(
+        check_one_plan(association, &btree_map).is_err(),
+        "BTreeMap plan-map mutation survived"
+    );
+    let mut vector_map = association.to_vec();
+    vector_map.extend(["plans", ":", "Vec", "<", "EgressPlanSnapshot", ">"].map(str::to_owned));
+    assert!(
+        check_one_plan(&vector_map, udp).is_err(),
+        "Vec plan-map mutation survived"
+    );
+
+    let prepare = item_body(udp, &["async", "fn", "prepare"]);
+    let activate = item_body(udp, &["fn", "activate"]);
+    let check_split_phase = |prepare: &[String], activate: &[String]| -> Result<(), &'static str> {
+        for required in ["reserve_session", "buffer_budget", "bind", "connect"] {
+            if !prepare.iter().any(|token| token == required) {
+                return Err("prepare lost setup-time resource ownership");
+            }
+        }
+        if prepare.iter().any(|token| token == "register_udp_plan") {
+            return Err("prepare eagerly registered protocol state");
+        }
+        if !activate.iter().any(|token| token == "register_udp_plan") {
+            return Err("activate lost protocol registration");
+        }
+        for forbidden in ["reserve_session", "buffer_budget", "bind", "connect"] {
+            if activate.iter().any(|token| token == forbidden) {
+                return Err("activate recreated setup-time resources");
+            }
+        }
+        Ok(())
+    };
+    check_split_phase(prepare, activate).unwrap_or_else(|error| panic!("{error}"));
+    for (phase, mutation) in [("prepare", "register_udp_plan"), ("activate", "bind")] {
+        let mut mutated_prepare = prepare.to_vec();
+        let mut mutated_activate = activate.to_vec();
+        if phase == "prepare" {
+            mutated_prepare.push(mutation.to_owned());
+        } else {
+            mutated_activate.push(mutation.to_owned());
+        }
+        assert!(
+            check_split_phase(&mutated_prepare, &mutated_activate).is_err(),
+            "split-phase mutation survived: {phase}"
+        );
+    }
+
+    let check_endpoint_surface = |tokens: &[String]| -> Result<(), &'static str> {
+        for declaration in tokens.windows(2).filter(|window| {
+            matches!(window[0].as_str(), "fn" | "struct" | "trait" | "type")
+                && window[1].to_ascii_lowercase().contains("endpoint")
+        }) {
+            if declaration != ["struct", "SocksUdpEndpoint"] {
+                return Err("SOCKS endpoint gained a helper/factory seam");
+            }
+        }
+        if tokens.iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "Factory" | "factory" | "SocksUdpEndpointFactory"
+            )
+        }) {
+            return Err("SOCKS endpoint gained a factory");
+        }
+        Ok(())
+    };
+    check_endpoint_surface(socks).unwrap_or_else(|error| panic!("{error}"));
+    for mutation in [
+        ["trait", "SocksUdpEndpointFactory"],
+        ["fn", "make_socks_udp_endpoint"],
+    ] {
+        let mut mutated = socks.to_vec();
+        mutated.extend(mutation.map(str::to_owned));
+        assert!(
+            check_endpoint_surface(&mutated).is_err(),
+            "endpoint helper/factory mutation survived"
+        );
+    }
+
+    let classify = item_body(socks, &["async", "fn", "classify_udp_association"]);
+    assert_eq!(
+        classify
+            .windows(2)
+            .filter(|window| window[0] == "select_terminal" && window[1] == "(")
+            .count(),
+        1,
+        "schema-v2 UDP must classify exactly once"
+    );
+    assert_eq!(
+        classify
+            .windows(2)
+            .filter(|window| window[0] == "prepare_udp" && window[1] == "(")
+            .count(),
+        1,
+        "terminal route must create one selected plan owner"
+    );
+    let check_post_classification = |body: &[String]| -> Result<(), &'static str> {
+        for forbidden in [
+            "select_terminal",
+            "select_plan_snapshot",
+            "evaluate",
+            "program",
+            "legacy",
+            "final",
+        ] {
+            if body.iter().any(|token| token == forbidden) {
+                return Err("established UDP association re-entered route state");
+            }
+        }
+        Ok(())
+    };
+    for (helper, mutation) in [
+        ("relay_udp_association", "select_terminal"),
+        ("forward_udp_request", "program"),
+        ("relay_hijacked_udp", "final"),
+        ("answer_hijacked_udp", "select_plan_snapshot"),
+    ] {
+        let body = item_body(socks, &["async", "fn", helper]);
+        check_post_classification(body).unwrap_or_else(|error| panic!("{helper}: {error}"));
+        let mut mutated = body.to_vec();
+        mutated.push(mutation.to_owned());
+        assert!(
+            check_post_classification(&mutated).is_err(),
+            "post-classification route mutation survived: {helper}"
+        );
+    }
+
+    let manifest =
+        fs::read_to_string(root.join("bins/ferrum2-client/Cargo.toml")).expect("client manifest");
+    assert!(manifest.contains("ferrum2-sniff.workspace = true"));
+}
+
+#[test]
 fn recursive_rust_source_discovery_excludes_non_rust_files() {
     let directory = tempfile::tempdir().expect("source discovery tempdir");
     let nested = directory.path().join("nested");
@@ -1674,6 +1903,7 @@ fn production_owner_dependencies_are_explicit_and_narrow() {
                     "observation_for_error",
                     "record_failure",
                     "record_forced_udp_sessions",
+                    "record_sniff",
                     "record_udp_drop",
                     "record_udp_packet_error",
                     "record_udp_runtime_error",
@@ -1806,7 +2036,12 @@ fn owner_specific_tests_leave_composition_roots_and_form_no_cycles() {
         ),
         (
             "fn",
-            "routed_udp_uses_lazy_endpoint_legs_and_rejects_cross_leg_responses",
+            "routed_udp_first_valid_packet_selects_association_once",
+            "bins/ferrum2-client/src/run/socks.rs",
+        ),
+        (
+            "fn",
+            "client_route_reject_hijack",
             "bins/ferrum2-client/src/run/socks.rs",
         ),
         (

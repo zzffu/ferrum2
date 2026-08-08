@@ -302,22 +302,44 @@ async fn tagged_udp_shares_live_id_collisions_across_listeners() {
         .await
         .expect("second activation");
     upstream.recv(&mut wire).await.expect("second upstream");
-    let (mut rejected, rejected_application, rejected_relay) = udp_association(listens[1]).await;
-    rejected_application
-        .send_to(&socks[..length], rejected_relay)
+    let activated = registry.snapshot();
+    let third = udp_association(listens[1]).await;
+    assert_eq!(
+        registry.snapshot().udp_sessions,
+        activated.udp_sessions + 1,
+        "association setup must own its pending session"
+    );
+    assert_eq!(
+        registry.snapshot().udp_buffered_bytes,
+        activated.udp_buffered_bytes + 3 * MAX_UDP_WIRE_LEN,
+        "association setup must own its fixed buffers"
+    );
+    third
+        .1
+        .send_to(&socks[..length], third.2)
         .await
-        .expect("rejected activation");
+        .expect("third activation attempt");
+    let mut rejected = third.0;
     let mut eof = [0];
-    tokio::time::timeout(Duration::from_secs(2), rejected.read(&mut eof))
-        .await
-        .expect("rejected control timeout")
-        .expect("rejected control EOF");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), rejected.read(&mut eof))
+            .await
+            .expect("rejected control timeout")
+            .expect("rejected control EOF"),
+        0
+    );
     assert_eq!(registry.snapshot().udp_sessions, baseline.udp_sessions + 2);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), upstream.recv(&mut wire))
+            .await
+            .is_err(),
+        "failed third activation reached the upstream"
+    );
 
     stop.send(()).expect("stop live-ID client");
     assert_eq!(task.await.expect("live-ID client"), Ok(()));
-    let relays = [first.2, second.2, rejected_relay];
-    drop((first, second, rejected, rejected_application));
+    let relays = [first.2, second.2, third.2];
+    drop((first, second, rejected, third.1));
     for relay in relays {
         drop(UdpSocket::bind(relay).await.expect("live-ID relay rebind"));
     }
@@ -695,8 +717,9 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
             supervisor: Some(supervisor),
             context: tcp_context,
             routing: Arc::new(ClientRouting {
-                route: ferrum2_core::route::RouteTable::static_bindings(vec![0, 1])
+                legacy: ferrum2_core::route::RouteTable::static_bindings(vec![0, 1])
                     .expect("test routes"),
+                program: None,
                 outbounds: listens
                     .map(|_| ClientOutboundContext {
                         tcp_server: TargetAddr::ipv4(server).expect("server target"),

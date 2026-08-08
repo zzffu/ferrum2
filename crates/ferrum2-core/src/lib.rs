@@ -360,6 +360,8 @@ pub enum ConnectErrorKind {
     HostUnreachable,
     /// The destination refused the connection.
     ConnectionRefused,
+    /// Local policy denied the connection before opening an outbound.
+    PolicyDenied,
     /// The connection attempt exceeded its deadline.
     Timeout,
     /// A closed implementation error that does not expose its source.
@@ -390,6 +392,7 @@ impl fmt::Display for ConnectError {
             ConnectErrorKind::NetworkUnreachable => "network unreachable",
             ConnectErrorKind::HostUnreachable => "host unreachable",
             ConnectErrorKind::ConnectionRefused => "connection refused",
+            ConnectErrorKind::PolicyDenied => "connection failed",
             ConnectErrorKind::Timeout => "connection timed out",
             ConnectErrorKind::Other => "connection failed",
         };

@@ -786,6 +786,7 @@ fn absent_disabled_saturation_release_and_restart_rebind_are_exact() {
     let (_second_control, second_reply) = udp_command(client_address);
     assert_eq!(second_reply, [5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
     drop(first_control);
+    wait_udp_rebind(relay, "released relay rebind");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -802,7 +803,6 @@ fn absent_disabled_saturation_release_and_restart_rebind_are_exact() {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    wait_udp_rebind(relay, "released relay rebind");
     client.terminate_and_reap(Duration::from_secs(5));
     drop(TcpListener::bind(client_address).expect("client restart rebind"));
 }
