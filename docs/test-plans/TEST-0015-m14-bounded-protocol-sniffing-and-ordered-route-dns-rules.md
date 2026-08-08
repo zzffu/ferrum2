@@ -146,6 +146,10 @@ git diff --check
   a valid broader rule。No runtime no-op substitutes for validation。
 - DNS tables cover client qname/qtype/transport and server domain/suffix/port without qtype，including
   the closed qtype set and listener/ordinary tag identity。
+- Repository Quick updates the existing `socks_udp_local_e2e` table in place：the superseded schema-v1
+  per-datagram multi-outbound row is retired，two-hop success retains only static/selector roots and its
+  credential-failure matrix uses the supported static root。T07/T08 own the replacement schema-v2
+  association-route-once process row；no compatibility branch or second harness is added。
 
 ```powershell
 cargo test -p ferrum2-config --test config_contract --locked

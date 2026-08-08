@@ -15,6 +15,7 @@ owns:
   - crates/ferrum2-config/src/validation/**
   - crates/ferrum2-config/tests/config_contract.rs
   - tests/m0-harness/tests/config_cli.rs
+  - tests/m0-harness/tests/socks_udp_local_e2e.rs
 ---
 
 # M14-T03 — Compile route and DNS policy
@@ -44,6 +45,9 @@ shape before runtime side effects。
 - [ ] `--check-config` accepts the fully compiled schema-v2 model；until T05/T07 consume that model，both
       existing run entrypoints reject version 2 before observability、runtime、listener or task creation
       instead of silently executing the legacy route/DNS views。
+- [ ] The existing SOCKS UDP process harness retires only the explicitly superseded schema-v1
+      per-datagram multi-outbound row；two-hop success remains on static/selector roots and credential
+      failures run through the supported static root until T07 adds schema-v2 association evidence。
 - [ ] T03 focused、Quick、footprint integrity and diff gates pass。
 
 ## Validation

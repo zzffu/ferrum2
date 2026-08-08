@@ -166,6 +166,9 @@ force-push、PR、tag、package、release or publication is implied。
 No blocker。T02 is accepted at exact integration `c8a70ca213892e01a1c4ea97bf34f79a9feaf58a`
 after one bounded repair and targeted Architect/QA `PASS`。T03 additionally owns only the two existing
 binary `run.rs` entrypoints for a pre-runtime schema-v2 fail-closed latch；without it，the current binaries
-would silently ignore the compiled model before T05/T07 composition。Create or advance `codex/m14-t03`
-from the branch HEAD containing this amendment，bind that exact ticket base，then implement only the T03
-lease。
+would silently ignore the compiled model before T05/T07 composition。Quick then proved that two existing
+`socks_udp_local_e2e` routed schema-v1 UDP rows conflict with the required migration rejection；T03 now
+owns that one existing test file only to retire the superseded per-datagram row，retain static/selector
+two-hop success and run credential failures through the static root。The ticket base remains exact
+`d82f2c8e9b7da2e017bae4a082f4fe62721f9d62`；the isolated lease commit and candidate are combined at
+integration without weakening product behavior。
