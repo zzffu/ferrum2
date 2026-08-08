@@ -618,6 +618,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "hickory-resolver = { version = \"=0.26.1\", default-features = false, features = [\"tokio\", \"tls-ring\", \"https-ring\", \"webpki-roots\"] }",
         "hickory-proto = { version = \"=0.26.1\", default-features = false, features = [\"std\"] }",
         "hickory-server = { version = \"=0.26.1\", default-features = false }",
+        "ipnet = { version = \"=2.12.1\", default-features = false }",
         "h2 = { version = \"=0.4.15\", default-features = false, features = [\"stream\"] }",
         "futures-util = { version = \"=0.3.33\", default-features = false, features = [\"std\"] }",
         "rustls = { version = \"=0.23.43\", default-features = false, features = [\"ring\", \"std\", \"tls12\"] }",
@@ -672,6 +673,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "hickory-proto",
         "hickory-resolver",
         "hickory-server",
+        "ipnet",
         "prometheus-client",
         "rustls",
         "serde",
@@ -708,6 +710,50 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
             "forbidden dependency or feature: {forbidden}"
         );
     }
+}
+
+#[test]
+fn core_ipnet_edge_is_exact_no_default_and_adds_no_identity() {
+    let root = workspace_root();
+    let manifest =
+        fs::read_to_string(root.join("crates/ferrum2-core/Cargo.toml")).expect("core manifest");
+    assert_eq!(
+        dependency_table(&manifest, "[dependencies]").expect("core dependencies"),
+        BTreeMap::from([
+            ("bytes.workspace".to_owned(), "true".to_owned()),
+            ("ipnet.workspace".to_owned(), "true".to_owned()),
+        ])
+    );
+
+    let metadata = metadata();
+    let core = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "ferrum2-core")
+        .expect("core package");
+    let ipnet = core["dependencies"]
+        .as_array()
+        .expect("core dependencies")
+        .iter()
+        .find(|dependency| dependency["name"] == "ipnet")
+        .expect("core ipnet dependency");
+    assert_eq!(ipnet["req"], "=2.12.1");
+    assert_eq!(ipnet["kind"], Value::Null);
+    assert_eq!(ipnet["uses_default_features"], false);
+    assert_eq!(ipnet["features"], serde_json::json!([]));
+
+    let package_id = unique_registry_package_id(&metadata, "ipnet", "2.12.1");
+    assert_eq!(
+        resolve_node(&metadata, &package_id)["features"],
+        serde_json::json!(["default", "serde", "std"]),
+        "the no-default core edge must not expand ipnet's existing Hickory feature set"
+    );
+    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock");
+    assert_eq!(
+        lock_package_dependencies(&lock, "ferrum2-core").expect("core lock dependencies"),
+        BTreeSet::from(["bytes".to_owned(), "ipnet".to_owned()])
+    );
 }
 
 #[test]

@@ -4,7 +4,8 @@ use std::thread;
 
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{
-    ActionRule, ActionTable, EgressPlanHandle, Network, compile_selector_plans,
+    ActionRule, ActionTable, EgressPlanHandle, Network, OrderedRouteProgram, OrderedRouteRule,
+    RouteMatcher, RouteMetadata, RouteProgramAction, RouteRuleAction, compile_selector_plans,
     compile_selector_plans_with_roots, compile_selector_route,
 };
 use ferrum2_core::selector::{
@@ -122,6 +123,54 @@ fn concurrent_queries_and_switches_observe_only_complete_members_and_leaves() {
 }
 
 #[test]
+fn terminal_route_resolves_selector_once_after_continuation() {
+    let (route, control) = nested_route();
+    let target = TargetAddr::domain("selector.test", 443).expect("target");
+    let program = OrderedRouteProgram::new(
+        vec![
+            OrderedRouteRule::new(
+                RouteMatcher::new(Vec::new()).unwrap(),
+                RouteRuleAction::Continue(&route),
+            ),
+            OrderedRouteRule::new(
+                RouteMatcher::new(Vec::new()).unwrap(),
+                RouteRuleAction::Terminal(&route),
+            ),
+        ],
+        &route,
+    )
+    .unwrap();
+    let mut evaluation = program.evaluate(0, Network::Tcp, &target);
+
+    assert!(matches!(
+        evaluation.next(RouteMetadata::new(None::<()>, None)),
+        Some(RouteProgramAction::Continue(_))
+    ));
+    control
+        .switch("inner", "leaf-b")
+        .expect("switch while continuation is pending");
+    let selected = match evaluation.next(RouteMetadata::new(None, None)) {
+        Some(RouteProgramAction::Terminal(route)) => {
+            route.select_plan_snapshot(0, Network::Tcp, &target)
+        }
+        _ => panic!("terminal route was not selected"),
+    };
+    control
+        .switch("inner", "leaf-a")
+        .expect("switch after terminal selection");
+
+    assert_eq!(
+        (
+            selected.hops(),
+            route.select_plan_snapshot(0, Network::Tcp, &target).hops()
+        ),
+        (&[8][..], &[7][..]),
+        "later switch changed the held snapshot"
+    );
+    assert!(evaluation.next(RouteMetadata::new(None, None)).is_none());
+}
+
+#[test]
 fn public_route_selection_snapshots_complete_static_rule_final_and_selector_plans() {
     let inbounds = [TaggedInbound::new("entry", 0)];
     #[rustfmt::skip]
@@ -220,29 +269,7 @@ fn public_route_selection_snapshots_complete_static_rule_final_and_selector_plan
 }
 
 #[test]
-fn one_action_table_preserves_exact_first_match_semantics_for_two_action_domains() {
-    fn table<A: Copy>(actions: [A; 4]) -> ActionTable<A> {
-        ActionTable::new(
-            vec![
-                ActionRule::new(
-                    Some(2),
-                    Some(Network::Tcp),
-                    Some(TargetAddr::domain("Example.test.", 53).unwrap()),
-                    actions[0],
-                ),
-                ActionRule::new(
-                    None,
-                    Some(Network::Udp),
-                    Some(TargetAddr::ip("192.0.2.1:53".parse().unwrap()).unwrap()),
-                    actions[1],
-                ),
-                ActionRule::new(None, None, None, actions[2]),
-            ],
-            actions[3],
-        )
-        .unwrap()
-    }
-
+fn action_table_preserves_the_separate_dns_action_namespace() {
     let contexts = [
         (2, Network::Tcp, "EXAMPLE.TEST.:53", 0),
         (7, Network::Udp, "192.0.2.1:53", 1),
@@ -250,8 +277,25 @@ fn one_action_table_preserves_exact_first_match_semantics_for_two_action_domains
         (2, Network::Tcp, "example.test.:54", 2),
         (7, Network::Udp, "192.0.2.2:53", 2),
     ];
-    let outbound = table([10, 20, 30, 40]);
-    let dns = table(["primary", "lan", "shadow", "final"]);
+    let dns = ActionTable::new(
+        vec![
+            ActionRule::new(
+                Some(2),
+                Some(Network::Tcp),
+                Some(TargetAddr::domain("Example.test.", 53).unwrap()),
+                "primary",
+            ),
+            ActionRule::new(
+                None,
+                Some(Network::Udp),
+                Some(TargetAddr::ip("192.0.2.1:53".parse().unwrap()).unwrap()),
+                "lan",
+            ),
+            ActionRule::new(None, None, None, "shadow"),
+        ],
+        "final",
+    )
+    .unwrap();
     for (inbound, network, target, expected) in contexts {
         let target = target
             .parse()
@@ -261,10 +305,6 @@ fn one_action_table_preserves_exact_first_match_semantics_for_two_action_domains
                 let (host, port) = target.rsplit_once(':').unwrap();
                 TargetAddr::domain(host, port.parse().unwrap()).unwrap()
             });
-        assert_eq!(
-            outbound.select(inbound, network, &target),
-            [10, 20, 30][expected]
-        );
         assert_eq!(
             dns.select(inbound, network, &target),
             ["primary", "lan", "shadow"][expected]

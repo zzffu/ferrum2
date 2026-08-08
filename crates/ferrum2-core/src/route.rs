@@ -4,11 +4,16 @@ use super::selector::{
     TaggedOutbound, TaggedPlan, TaggedRoute,
 };
 use super::{TargetAddr, TargetHost};
+use ipnet::IpNet;
+use std::net::IpAddr;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 /// Maximum number of rules retained by one route table.
 pub const MAX_ROUTE_RULES: usize = 64;
+/// Maximum total matcher values retained by one ordered route rule.
+pub const MAX_ROUTE_VALUES: usize = 64;
 
 /// One selected immutable ordered plan of concrete outbound identities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +54,351 @@ pub enum Network {
     Udp,
 }
 
+/// One validated inclusive non-zero port interval.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct PortRange {
+    first: NonZeroU16,
+    last: NonZeroU16,
+}
+
+impl PortRange {
+    /// Validates an inclusive non-zero port interval.
+    pub fn new(first: u16, last: u16) -> Option<Self> {
+        let (first, last) = (NonZeroU16::new(first)?, NonZeroU16::new(last)?);
+        (first <= last).then_some(Self { first, last })
+    }
+
+    fn contains(self, port: NonZeroU16) -> bool {
+        (self.first..=self.last).contains(&port)
+    }
+}
+
+/// One matcher field. Values within a field are ORed; distinct fields are ANDed.
+pub enum RouteMatchField<P> {
+    Inbound(Vec<usize>),
+    Network(Vec<Network>),
+    Protocol(Vec<P>),
+    Domain(Vec<super::DomainName>),
+    DomainSuffix(Vec<super::DomainName>),
+    Ip(Vec<IpAddr>),
+    Cidr(Vec<IpNet>),
+    Port(Vec<NonZeroU16>),
+    PortRange(Vec<PortRange>),
+    Target(Vec<TargetAddr>),
+}
+
+impl<P: Eq> RouteMatchField<P> {
+    fn values_are_valid(&self) -> bool {
+        fn unique<T: Eq>(values: &[T]) -> bool {
+            !values.is_empty()
+                && !values
+                    .iter()
+                    .enumerate()
+                    .any(|(index, value)| values[..index].contains(value))
+        }
+
+        match self {
+            Self::Inbound(values) => unique(values),
+            Self::Network(values) => unique(values),
+            Self::Protocol(values) => unique(values),
+            Self::Domain(values) | Self::DomainSuffix(values) => {
+                !values.is_empty()
+                    && values.iter().enumerate().all(|(index, value)| {
+                        let value = normalized_domain(value.as_str());
+                        !value.is_empty()
+                            && !values[..index].iter().any(|other| {
+                                normalized_domain(other.as_str()).eq_ignore_ascii_case(value)
+                            })
+                    })
+            }
+            Self::Ip(values) => unique(values),
+            Self::Cidr(values) => {
+                unique(values)
+                    && values
+                        .iter()
+                        .all(|network| network.addr() == network.network())
+            }
+            Self::Port(values) => unique(values),
+            Self::PortRange(values) => unique(values),
+            Self::Target(values) => unique(values),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Inbound(values) => values.len(),
+            Self::Network(values) => values.len(),
+            Self::Protocol(values) => values.len(),
+            Self::Domain(values) | Self::DomainSuffix(values) => values.len(),
+            Self::Ip(values) => values.len(),
+            Self::Cidr(values) => values.len(),
+            Self::Port(values) => values.len(),
+            Self::PortRange(values) => values.len(),
+            Self::Target(values) => values.len(),
+        }
+    }
+}
+
+/// One bounded conjunction of generic route matcher fields.
+pub struct RouteMatcher<P> {
+    fields: Vec<RouteMatchField<P>>,
+}
+
+impl<P: Eq> RouteMatcher<P> {
+    /// Validates one matcher, including the 64-value bound and one occurrence per field.
+    pub fn new(fields: Vec<RouteMatchField<P>>) -> Option<Self> {
+        let total = fields.iter().map(RouteMatchField::len).sum::<usize>();
+        let distinct = !fields.iter().enumerate().any(|(index, field)| {
+            fields[..index]
+                .iter()
+                .any(|other| std::mem::discriminant(other) == std::mem::discriminant(field))
+        });
+        let mixes_legacy_target = fields
+            .iter()
+            .any(|field| matches!(field, RouteMatchField::Target(_)))
+            && fields.iter().any(|field| {
+                matches!(
+                    field,
+                    RouteMatchField::Domain(_)
+                        | RouteMatchField::DomainSuffix(_)
+                        | RouteMatchField::Ip(_)
+                        | RouteMatchField::Cidr(_)
+                        | RouteMatchField::Port(_)
+                        | RouteMatchField::PortRange(_)
+                )
+            });
+        (total <= MAX_ROUTE_VALUES
+            && distinct
+            && !mixes_legacy_target
+            && fields.iter().all(RouteMatchField::values_are_valid))
+        .then_some(Self { fields })
+    }
+
+    fn legacy(
+        inbound: Option<usize>,
+        network: Option<Network>,
+        target: Option<TargetAddr>,
+    ) -> Self {
+        let mut fields = Vec::with_capacity(3);
+        if let Some(inbound) = inbound {
+            fields.push(RouteMatchField::Inbound(vec![inbound]));
+        }
+        if let Some(network) = network {
+            fields.push(RouteMatchField::Network(vec![network]));
+        }
+        if let Some(target) = target {
+            fields.push(RouteMatchField::Target(vec![target]));
+        }
+        Self::new(fields).expect("legacy matcher is bounded")
+    }
+
+    fn matches(
+        &self,
+        inbound: usize,
+        network: Network,
+        original: &TargetAddr,
+        metadata: &RouteMetadata<'_, P>,
+    ) -> bool {
+        self.fields.iter().all(|field| match field {
+            RouteMatchField::Inbound(values) => values.contains(&inbound),
+            RouteMatchField::Network(values) => values.contains(&network),
+            RouteMatchField::Protocol(values) => metadata
+                .protocol
+                .as_ref()
+                .is_some_and(|protocol| values.contains(protocol)),
+            RouteMatchField::Domain(values) => selected_domain(original, metadata)
+                .is_some_and(|actual| values.iter().any(|value| domain_eq(value.as_str(), actual))),
+            RouteMatchField::DomainSuffix(values) => selected_domain(original, metadata)
+                .is_some_and(|actual| {
+                    values
+                        .iter()
+                        .any(|value| domain_suffix(value.as_str(), actual))
+                }),
+            RouteMatchField::Ip(values) => match original.host {
+                TargetHost::Ip(actual) => values.contains(&actual),
+                TargetHost::Domain(_) => false,
+            },
+            RouteMatchField::Cidr(values) => match original.host {
+                TargetHost::Ip(actual) => values.iter().any(|network| network.contains(&actual)),
+                TargetHost::Domain(_) => false,
+            },
+            RouteMatchField::Port(values) => values.contains(&original.port),
+            RouteMatchField::PortRange(values) => {
+                values.iter().any(|range| range.contains(original.port))
+            }
+            RouteMatchField::Target(values) => values
+                .iter()
+                .any(|expected| legacy_target_matches(expected, original)),
+        })
+    }
+}
+
+fn selected_domain<'a, P>(
+    original: &'a TargetAddr,
+    metadata: &'a RouteMetadata<'_, P>,
+) -> Option<&'a str> {
+    metadata
+        .detected_domain
+        .map(super::DomainName::as_str)
+        .or_else(|| match &original.host {
+            TargetHost::Domain(domain) => Some(domain.as_str()),
+            TargetHost::Ip(_) => None,
+        })
+}
+
+fn normalized_domain(value: &str) -> &str {
+    value.strip_suffix('.').unwrap_or(value)
+}
+
+fn domain_eq(expected: &str, actual: &str) -> bool {
+    normalized_domain(expected).eq_ignore_ascii_case(normalized_domain(actual))
+}
+
+fn domain_suffix(expected: &str, actual: &str) -> bool {
+    let (expected, actual) = (normalized_domain(expected), normalized_domain(actual));
+    actual.eq_ignore_ascii_case(expected)
+        || actual
+            .len()
+            .checked_sub(expected.len() + 1)
+            .is_some_and(|boundary| {
+                actual.as_bytes()[boundary] == b'.'
+                    && actual[boundary + 1..].eq_ignore_ascii_case(expected)
+            })
+}
+
+fn legacy_target_matches(expected: &TargetAddr, actual: &TargetAddr) -> bool {
+    expected.port == actual.port
+        && match (&expected.host, &actual.host) {
+            (TargetHost::Ip(expected), TargetHost::Ip(actual)) => expected == actual,
+            (TargetHost::Domain(expected), TargetHost::Domain(actual)) => {
+                expected.as_str().eq_ignore_ascii_case(actual.as_str())
+            }
+            _ => false,
+        }
+}
+
+/// Caller-owned recognized metadata used by one ordered evaluation step.
+pub struct RouteMetadata<'a, P> {
+    protocol: Option<P>,
+    detected_domain: Option<&'a super::DomainName>,
+}
+
+impl<'a, P> RouteMetadata<'a, P> {
+    pub const fn new(protocol: Option<P>, detected_domain: Option<&'a super::DomainName>) -> Self {
+        Self {
+            protocol,
+            detected_domain,
+        }
+    }
+}
+
+/// Generic continuation or terminal behavior attached to one matched rule.
+pub enum RouteRuleAction<A> {
+    Continue(A),
+    Terminal(A),
+}
+
+/// One ordered generic rule.
+pub struct OrderedRouteRule<P, A> {
+    matcher: RouteMatcher<P>,
+    action: RouteRuleAction<A>,
+}
+
+impl<P, A> OrderedRouteRule<P, A> {
+    pub const fn new(matcher: RouteMatcher<P>, action: RouteRuleAction<A>) -> Self {
+        Self { matcher, action }
+    }
+}
+
+/// One reusable bounded ordered program with a mandatory final action.
+pub struct OrderedRouteProgram<P, A> {
+    rules: Vec<OrderedRouteRule<P, A>>,
+    final_action: A,
+}
+
+impl<P, A> OrderedRouteProgram<P, A> {
+    pub fn new(rules: Vec<OrderedRouteRule<P, A>>, final_action: A) -> Option<Self> {
+        (rules.len() <= MAX_ROUTE_RULES).then_some(Self {
+            rules,
+            final_action,
+        })
+    }
+
+    /// Starts one evaluation with an immutable original target and private cursor.
+    pub fn evaluate<'program, 'target>(
+        &'program self,
+        inbound: usize,
+        network: Network,
+        original: &'target TargetAddr,
+    ) -> RouteProgramEvaluation<'program, 'target, P, A> {
+        RouteProgramEvaluation {
+            program: self,
+            inbound,
+            network,
+            original,
+            cursor: 0,
+            finished: false,
+        }
+    }
+}
+
+/// Observable result of advancing an ordered route program.
+#[derive(Eq, PartialEq)]
+pub enum RouteProgramAction<'a, A> {
+    Continue(&'a A),
+    Terminal(&'a A),
+    Final(&'a A),
+}
+
+impl<A> std::fmt::Debug for RouteProgramAction<'_, A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Continue(_) => "RouteProgramAction::Continue([redacted])",
+            Self::Terminal(_) => "RouteProgramAction::Terminal([redacted])",
+            Self::Final(_) => "RouteProgramAction::Final([redacted])",
+        })
+    }
+}
+
+/// One private-cursor evaluation borrowing a reusable ordered program.
+pub struct RouteProgramEvaluation<'program, 'target, P, A> {
+    program: &'program OrderedRouteProgram<P, A>,
+    inbound: usize,
+    network: Network,
+    original: &'target TargetAddr,
+    cursor: usize,
+    finished: bool,
+}
+
+impl<'program, P: Eq, A> RouteProgramEvaluation<'program, '_, P, A> {
+    /// Returns the next matching action, or the mandatory final exactly once.
+    pub fn next(
+        &mut self,
+        metadata: RouteMetadata<'_, P>,
+    ) -> Option<RouteProgramAction<'program, A>> {
+        if self.finished {
+            return None;
+        }
+        while let Some(rule) = self.program.rules.get(self.cursor) {
+            self.cursor += 1;
+            if rule
+                .matcher
+                .matches(self.inbound, self.network, self.original, &metadata)
+            {
+                return match &rule.action {
+                    RouteRuleAction::Continue(action) => Some(RouteProgramAction::Continue(action)),
+                    RouteRuleAction::Terminal(action) => {
+                        self.finished = true;
+                        Some(RouteProgramAction::Terminal(action))
+                    }
+                };
+            }
+        }
+        self.finished = true;
+        Some(RouteProgramAction::Final(&self.program.final_action))
+    }
+}
+
 /// One runtime-neutral first-match rule with a resolved action.
 pub struct ActionRule<A> {
     inbound: Option<usize>,
@@ -75,16 +425,10 @@ impl<A> ActionRule<A> {
     fn matches(&self, inbound: usize, network: Network, target: &TargetAddr) -> bool {
         self.inbound.is_none_or(|expected| expected == inbound)
             && self.network.is_none_or(|expected| expected == network)
-            && self.target.as_ref().is_none_or(|expected| {
-                expected.port == target.port
-                    && match (&expected.host, &target.host) {
-                        (TargetHost::Ip(expected), TargetHost::Ip(actual)) => expected == actual,
-                        (TargetHost::Domain(expected), TargetHost::Domain(actual)) => {
-                            expected.as_str().eq_ignore_ascii_case(actual.as_str())
-                        }
-                        _ => false,
-                    }
-            })
+            && self
+                .target
+                .as_ref()
+                .is_none_or(|expected| legacy_target_matches(expected, target))
     }
 }
 
@@ -119,7 +463,28 @@ impl<A: Copy> ActionTable<A> {
 }
 
 /// One ordinary direct outbound rule retained for API compatibility.
-pub type RouteRule = ActionRule<usize>;
+pub struct RouteRule {
+    matcher: RouteMatcher<()>,
+    outbound: usize,
+}
+
+impl RouteRule {
+    pub fn new(
+        inbound: Option<usize>,
+        network: Option<Network>,
+        target: Option<TargetAddr>,
+        outbound: usize,
+    ) -> Self {
+        Self {
+            matcher: RouteMatcher::legacy(inbound, network, target),
+            outbound,
+        }
+    }
+
+    fn into_ordered(self, action: OutboundAction) -> OrderedRouteRule<(), OutboundAction> {
+        OrderedRouteRule::new(self.matcher, RouteRuleAction::Terminal(action))
+    }
+}
 
 /// A resolved egress action that snapshots one complete immutable plan when selected.
 #[derive(Clone)]
@@ -162,7 +527,7 @@ impl std::fmt::Debug for EgressPlanHandle {
 
 /// A compiled route table whose selection always returns an outbound identity.
 pub struct RouteTable {
-    actions: ActionTable<OutboundAction>,
+    program: OrderedRouteProgram<(), OutboundAction>,
     final_plan: usize,
     final_outbound: usize,
     routed: bool,
@@ -185,11 +550,14 @@ impl RouteTable {
             .into_iter()
             .enumerate()
             .map(|(inbound, _)| {
-                ActionRule::new(Some(inbound), None, None, OutboundAction::Plan(inbound))
+                OrderedRouteRule::new(
+                    RouteMatcher::legacy(Some(inbound), None, None),
+                    RouteRuleAction::Terminal(OutboundAction::Plan(inbound)),
+                )
             })
             .collect();
         Some(Self {
-            actions: ActionTable::new(rules, OutboundAction::Plan(0))?,
+            program: OrderedRouteProgram::new(rules, OutboundAction::Plan(0))?,
             final_plan: 0,
             final_outbound,
             routed: false,
@@ -199,29 +567,24 @@ impl RouteTable {
     }
 
     /// Stores an already validated routed table and its mandatory final outbound.
-    pub fn routed(mut rules: Vec<RouteRule>, final_outbound: usize) -> Option<Self> {
+    pub fn routed(rules: Vec<RouteRule>, final_outbound: usize) -> Option<Self> {
         if rules.len() > MAX_ROUTE_RULES {
             return None;
         }
         let mut plans = Vec::with_capacity(rules.len() + 1);
-        for rule in &mut rules {
-            let outbound = rule.action;
-            rule.action = plans.len();
-            plans.push(Arc::from([outbound]));
-        }
-        let final_action = OutboundAction::Plan(plans.len());
-        plans.push(Arc::from([final_outbound]));
         let rules = rules
             .into_iter()
-            .map(|rule| ActionRule {
-                inbound: rule.inbound,
-                network: rule.network,
-                target: rule.target,
-                action: OutboundAction::Plan(rule.action),
+            .map(|rule| {
+                let outbound = rule.outbound;
+                let action = OutboundAction::Plan(plans.len());
+                plans.push(Arc::from([outbound]));
+                rule.into_ordered(action)
             })
             .collect();
+        let final_action = OutboundAction::Plan(plans.len());
+        plans.push(Arc::from([final_outbound]));
         Some(Self {
-            actions: ActionTable::new(rules, final_action)?,
+            program: OrderedRouteProgram::new(rules, final_action)?,
             final_plan: plans.len() - 1,
             final_outbound,
             routed: true,
@@ -261,7 +624,7 @@ impl RouteTable {
         network: Network,
         target: &TargetAddr,
     ) -> EgressPlan<'_> {
-        let action = self.actions.select(inbound, network, target);
+        let action = self.select_action(inbound, network, target);
         EgressPlan {
             hops: self.plans[self.selectors.resolve(action)].as_ref(),
         }
@@ -274,7 +637,7 @@ impl RouteTable {
         network: Network,
         target: &TargetAddr,
     ) -> EgressPlanSnapshot {
-        let action = self.actions.select(inbound, network, target);
+        let action = self.select_action(inbound, network, target);
         EgressPlanSnapshot {
             hops: Arc::clone(&self.plans[self.selectors.resolve(action)]),
         }
@@ -291,6 +654,24 @@ impl RouteTable {
     pub fn final_plan_snapshot(&self) -> EgressPlanSnapshot {
         EgressPlanSnapshot {
             hops: Arc::clone(&self.plans[self.final_plan]),
+        }
+    }
+
+    fn select_action(
+        &self,
+        inbound: usize,
+        network: Network,
+        target: &TargetAddr,
+    ) -> OutboundAction {
+        let mut evaluation = self.program.evaluate(inbound, network, target);
+        match evaluation
+            .next(RouteMetadata::new(None, None))
+            .expect("new route evaluation returns one terminal action")
+        {
+            RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => *action,
+            RouteProgramAction::Continue(_) => {
+                unreachable!("legacy route rules are always terminal")
+            }
         }
     }
 }
@@ -400,7 +781,7 @@ pub fn compile_selector_plans_with_roots(
         .collect();
     Ok((
         RouteTable {
-            actions: ActionTable::new(rules, final_action)
+            program: OrderedRouteProgram::new(rules, final_action)
                 .expect("compiled action count was validated"),
             final_plan,
             final_outbound,
@@ -542,7 +923,7 @@ fn validate_acyclic(selectors: &[Selector]) -> Result<(), SelectorCompileError> 
 }
 
 type CompiledActions = (
-    Vec<ActionRule<OutboundAction>>,
+    Vec<OrderedRouteRule<(), OutboundAction>>,
     OutboundAction,
     bool,
     Vec<OutboundAction>,
@@ -575,11 +956,9 @@ fn compile_actions(
                 let action = resolve_tag(binding.outbound, outbounds, plans, definitions)
                     .ok_or(SelectorCompileError::StaticBinding)?;
                 roots.push(action);
-                rules.push(ActionRule::new(
-                    Some(inbounds[inbound].inbound),
-                    None,
-                    None,
-                    action,
+                rules.push(OrderedRouteRule::new(
+                    RouteMatcher::legacy(Some(inbounds[inbound].inbound), None, None),
+                    RouteRuleAction::Terminal(action),
                 ));
             }
             let final_action = roots[0];
@@ -618,7 +997,10 @@ fn compile_actions(
                     .and_then(|tag| resolve_tag(tag, outbounds, plans, definitions))
                     .ok_or(SelectorCompileError::RouteRuleOutbound)?;
                 roots.push(action);
-                rules.push(ActionRule::new(inbound, rule.network, rule.target, action));
+                rules.push(OrderedRouteRule::new(
+                    RouteMatcher::legacy(inbound, rule.network, rule.target),
+                    RouteRuleAction::Terminal(action),
+                ));
             }
             Ok((rules, final_action, true, roots))
         }

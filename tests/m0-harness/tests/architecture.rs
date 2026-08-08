@@ -716,7 +716,7 @@ fn core_is_runtime_and_protocol_neutral() {
         .map(|dependency| dependency["name"].as_str().expect("dependency name"))
         .collect();
 
-    assert_eq!(dependencies, BTreeSet::from(["bytes"]));
+    assert_eq!(dependencies, BTreeSet::from(["bytes", "ipnet"]));
 }
 
 #[test]
@@ -938,6 +938,110 @@ fn tagged_composition_stays_out_of_core_and_protocol_modules() {
             );
         }
     }
+}
+
+#[test]
+fn ordered_route_program_is_protocol_neutral_and_the_only_ordinary_engine() {
+    let root = workspace_root();
+    let sources = [TokenSource::new(
+        "crates/ferrum2-core/src/route.rs",
+        &fs::read_to_string(root.join("crates/ferrum2-core/src/route.rs"))
+            .expect("core route module"),
+    )];
+    check_definition_ownership(
+        &sources,
+        &[
+            (
+                "struct",
+                "OrderedRouteProgram",
+                "crates/ferrum2-core/src/route.rs",
+            ),
+            (
+                "struct",
+                "RouteProgramEvaluation",
+                "crates/ferrum2-core/src/route.rs",
+            ),
+        ],
+        &[],
+    )
+    .unwrap_or_else(|error| panic!("ordered-route ownership changed: {error}"));
+    let route = &sources[0];
+    let tokens = route.production_tokens().expect("route production tokens");
+    assert!(has_tokens(tokens, &["cursor", ":", "usize"]));
+    assert!(has_tokens(
+        tokens,
+        &[
+            "program",
+            ":",
+            "OrderedRouteProgram",
+            "<",
+            "(",
+            ")",
+            ",",
+            "OutboundAction"
+        ]
+    ));
+    assert!(has_tokens(
+        tokens,
+        &[
+            "assert_eq",
+            "!",
+            "(",
+            "plan",
+            ".",
+            "hops",
+            ".",
+            "len",
+            "(",
+            ")",
+            ",",
+            "1"
+        ]
+    ));
+    let concrete: Vec<_> =
+        "Dns,DNS,Tls,TLS,Http,HTTP,Sniff,sniff,Hijack,hijack,tokio,ferrum2_config,ferrum2_runtime"
+            .split(',')
+            .collect();
+    check_no_identifiers([route], &concrete)
+        .unwrap_or_else(|error| panic!("core route owns concrete vocabulary: {error}"));
+    check_no_sequences(
+        [route],
+        &[
+            &["actions", ":", "ActionTable", "<", "OutboundAction", ">"],
+            &["pub", "cursor"],
+            &["pub", "(", "crate", ")", "cursor"],
+        ],
+    )
+    .unwrap_or_else(|error| panic!("ordered-route ownership changed: {error}"));
+
+    let validation = TokenSource::new(
+        "crates/ferrum2-config/src/validation.rs",
+        &fs::read_to_string(root.join("crates/ferrum2-config/src/validation.rs"))
+            .expect("config validation"),
+    );
+    assert!(
+        has_tokens(
+            validation
+                .production_tokens()
+                .expect("config production tokens"),
+            &[
+                "selectors",
+                ".",
+                "as_deref",
+                "(",
+                ")",
+                ",",
+                "&",
+                "[",
+                "]",
+                ",",
+                "detour_tags",
+                ",",
+                "source",
+            ],
+        ),
+        "server scalar route compilation must receive no multi-hop plans"
+    );
 }
 
 #[test]

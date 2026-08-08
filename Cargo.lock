@@ -419,6 +419,7 @@ name = "ferrum2-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "ipnet",
 ]
 
 [[package]]
