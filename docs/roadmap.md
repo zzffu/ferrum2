@@ -63,12 +63,13 @@ run [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144)
 resource run [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024)关闭。Owned
 egress-plan、DNS runtime dependency、private client egress及composition-root ownership完成整固；
 schema、wire、DNS/routing action和产品能力不变，final Architect/QA均`PASS`。
-M14现为`executing`：T01～T07已done，T08 ready。T07 exact integration `1e29a5ed…`组合client
-TCP route/reject/DNS hijack和schema-v2 first-valid UDP一次选路。一次有界修复后复审发现其错误地
-把schema-v1 static session/buffer/upstream admission也延迟到首包；两名required
-`gpt-5.6-sol/xhigh`独立只读代理均选择单一split-phase association，最终Architect/QA `PASS`。
-Focused、Rust 1.88、integration Quick及footprint integrity/ratio通过，ticket `+161/0/0` advisory
-已接受。Execute continuation已授权直至M14 close的required exact-SHA push及manual
+M14现为`executing`：T01～T08已done，T09 ready。T08 exact integration `1b408741…`加入四条
+real-process route/sniff/reject/hijack证据、architecture mutation guards及同一qualification driver
+的M14 workload。Targeted QA在唯一bounded repair后保留TLS self-check与zero-port accepted oracle；
+两名required `gpt-5.6-sol/xhigh`独立只读代理均选择相同四文件修复，最终Architect/QA `PASS`。
+Focused、Full、100+ lifecycle、docs、Rust 1.88及footprint integrity/ratio通过，ticket
+`+1021/0/0`与milestone `+5334/0/0` numeric advisories已接受。Execute continuation已授权直至
+M14 close的required exact-SHA push及manual
 performance/resource dispatch；workflow仍禁止force-push、unchanged-SHA rerun、PR、tag、package、
 release和publication。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
@@ -1341,3 +1342,4 @@ fallback/group/registry继续延期。
 | 2026-08-09 | M14-T07 integration / escalation closure | Exact `1e29a5ed` integrates client TCP route/reject/DNS hijack and one-plan schema-v2 UDP classification；T07 done、T08 ready | Initial Architect/QA `BLOCK` drove one bounded repair；targeted review then found schema-v1 static setup compatibility regressed。Two required independent `gpt-5.6-sol/xhigh` read-only analyses selected the same single-association split-phase owner，and final Architect/QA both `PASS` with every finding closed | Integration focused and Quick PASS；Rust 1.88 check/build/test PASS on accepted product；footprint integrity/ratio PASS and advisory `+161/0/0` accepted with no helper/support/fixture/new harness or dependency；required remote push and manual performance/resource dispatch now authorized through close，no T07 remote action |
 | 2026-08-09 | M14-T08 review-evidence amendment | Initial full Architect/QA review of exact `a1972bad` found selector-switch evidence split across layers、weak zero-owner/zero-target oracles、stale-bin exposure and a false-green empty TLS qualification sample；product routing itself remains accepted | The binary has no selector control and adding one would create an unplanned management/security surface，so T07 actual-switch + T08 real-process later-target + architecture no-reentry become one mandatory executable oracle。T08 additionally leases only `Cargo.lock` if the existing exact rustls identity is added to the qualification tool | Require fresh workspace bins before process rows；add exact zero owners/zero target、schema-v1 routed-UDP migration、valid distinguishable TLS/HTTP phases and self-check mutations。No product path、second harness/job、threshold、remote action or semantic waiver；one bounded repair remains |
 | 2026-08-09 | M14-T08 server UDP root-buffer oracle | Repair RED proved server session count reaches zero after idle while the live listener intentionally retains exactly four bounded wire buffers (`4 × 65507`) until process shutdown | Treating all live-process buffered bytes as a leak would redefine existing bounded process-root ownership and is not an observable zero requirement；metrics cannot be fetched after process exit | Require fresh-process exact baseline、active increase、post-idle session zero plus exact baseline restoration，then child exit and exact listener rebind。No product path、owner definition、limit、timeout or lease expansion |
+| 2026-08-09 | M14-T08 integration / escalation closure | Exact `1b408741` integrates real-process、architecture、lifecycle and qualification-driver evidence；T08 done、T09 ready | Initial Architect/QA `BLOCK` drove one bounded repair；targeted QA retained non-semantic TLS self-check and missing zero-port accepted counter。Two required independent `gpt-5.6-sol/xhigh` read-only analyses selected exact rustls `Acceptor` plus the existing metrics parser，and final targeted Architect/QA both `PASS` | Integration focused、Full、100+ lifecycle、docs and Rust 1.88 PASS；ticket/milestone integrity and ratio PASS，numeric advisories `+1021/0/0` and `+5334/0/0` accepted for required evidence with no product/new harness/dependency；no T08 remote action |

@@ -131,8 +131,8 @@ repository。
 | M14-T05 | Compose server TCP/UDP route、sniff、reject and exact prefix replay | M14-T04 | done |
 | M14-T06 | Extend DNS policy through the existing answering/resolver module | M14-T05 | done |
 | M14-T07 | Compose client route/reject/hijack and one-plan association UDP ownership | M14-T06 | done |
-| M14-T08 | Close real-process、security、lifecycle、architecture and qualification-tool evidence | M14-T07 | ready |
-| M14-T09 | Qualify and close one exact M14 integration SHA | M14-T08 | todo |
+| M14-T08 | Close real-process、security、lifecycle、architecture and qualification-tool evidence | M14-T07 | done |
+| M14-T09 | Qualify and close one exact M14 integration SHA | M14-T08 | ready |
 
 ```text
 M14-T01 contract/dependency/control
@@ -165,11 +165,11 @@ package、release and publication。
 
 ## Blocker / next action
 
-No blocker。T07 is accepted at exact integration `1e29a5edbc82bd3ec7fa01aa3723331e6c54fab3`。
-The bounded repair closed pre-bound owner mutation and evidence gaps but incorrectly delayed schema-v1
-static capacity admission until the first packet。Two required independent `gpt-5.6-sol/xhigh`
-read-only analyses both selected one split-phase association：setup owns session/buffers/upstream，while
-only plan/live-ID activation remains first-valid-packet lazy。Final targeted Architect/QA both returned
-`PASS` with all findings closed。Focused、Rust 1.88 and integration Quick pass；footprint integrity and
-ratio pass and the accepted ticket advisory is `+161/0/0` case/support/fixture。T08 is ready on this exact
-accepted integration base。
+No blocker。T08 is accepted at exact integration `1b408741756f0cf14d77bdf76f12626b05de28f9`。
+Initial review and one bounded repair closed the broad process/tool gaps；targeted QA retained semantic
+TLS self-check and zero-port accepted-activity evidence。Two required independent
+`gpt-5.6-sol/xhigh` read-only analyses selected the same four-file existing-seam repair，and final targeted
+Architect/QA both returned `PASS` with every finding closed。Focused、Full、100+ lifecycle、docs and
+Rust 1.88 gates pass on the integration。Ticket and milestone footprint integrity/ratio pass；the accepted
+case/support/fixture deltas are `+1021/0/0` and `+5334/0/0`，with numeric file-size review retained。
+T09 is ready to bind this accepted integration and collect same-SHA local and hosted evidence。
