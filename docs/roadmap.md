@@ -63,6 +63,12 @@ run [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144)
 resource run [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024)关闭。Owned
 egress-plan、DNS runtime dependency、private client egress及composition-root ownership完成整固；
 schema、wire、DNS/routing action和产品能力不变，final Architect/QA均`PASS`。
+M14现为`planned`：以qualified M13 product `1af1bbf…`和clean planning HEAD `cc8a0c2…`为固定
+来源，计划交付protocol-neutral ordered route program、bounded DNS/TLS/HTTP sniff、terminal
+route/reject/client DNS hijack和schema-v2 client UDP association-level selection。首个合法包填写
+路由元数据并只选一次outbound，后续包保留各自target；v1 routed+UDP启动前拒绝且无逐包兼容
+数据面。ADR-0033、SPEC/TEST-0015与九个serial tickets为当前合同；尚无product commit、worktree、
+review或remote action。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -96,6 +102,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M11 | M10 closed | client固定有序proxy chain与per-concrete-outbound method/PSK |
 | M12 | M11 closed | tagged DNS resolver/proxy、UDP/TCP/DoT/DoH与独立DNS action |
 | M13 | M12 closed | 行为保持型owned egress、DNS dependency与composition-root整固 |
+| M14 | M13 closed | 有界sniff/ordered policy与schema-v2 client UDP association-level routing |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -122,6 +129,11 @@ DNSSEC、DoQ/DoH3和advanced matchers继续延期。
 M13只规划架构整固：core提供唯一owned egress-plan snapshot，DNS runtime不再依赖config DTO，
 SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按ownership拆分source。
 所有M12行为和资源合同保持；不增加crate、dependency、registry、harness或future action脚手架。
+M14只规划有界policy扩展：core route program保持concrete-protocol-free，pure sniff module复用
+Hickory/rustls/httparse，client TCP不等待payload，server只在认证后sniff，client DNS hijack复用
+existing `DnsProxy::answer`和egress owners；schema-v2 client UDP首个合法包只选一次outbound，
+v1 routed+UDP配置迁移拒绝且无逐包兼容路径。QUIC/TUN/target override/resolve/set-options/retry/
+fallback/group/registry继续延期。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -1061,6 +1073,39 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
   manual `31223831024/1` succeeded on exact `1af1bbf…`。The one push and one dispatch scopes are
   consumed；no rerun、second push/dispatch、force-push、PR、tag、package、release or publication occurred。
 
+## M14 — bounded protocol sniffing and ordered route/DNS rules
+
+- **Status:** planned
+- **Objective:** 交付一个private monotonic cursor驱动的ordered route program；`sniff` non-terminal，
+  `route`/client `hijack-dns`/`reject` terminal。Server authenticated TCP支持DNS/TLS ClientHello/
+  HTTP/1 sniff，server/client UDP仅DNS sniff，client SOCKS TCP不pre-route sniff。Schema-v2 client
+  SOCKS UDP由首个合法数据报填充association metadata并只选择一次terminal action/outbound；后续
+  destination保持逐包，ordinary route不重入。
+- **Baselines:** qualified M13 product `1af1bbf44b37a81c2ae03c562288b2a6e09694b5` / tree
+  `172870c4ca0dffb6c474f2137399d553e827b1e4`；planning exact
+  `cc8a0c2946788c16e5d7af2658a7d80bac0a844b` / tree `7eccfc66c80263e3d949c5b6aded63b0436540ce` /
+  parent `f4dcebca3c9b56f903496d91048c3660ee60ed52`。Intervening changes are docs-only。
+- **Contracts:** ADR-0033、SPEC-0015、TEST-0015。Core is generic over caller-owned protocol/action values；
+  config and pure sniff own separate closed spellings with exhaustive binary adapters。Existing
+  `DnsProxy::answer` is reused rather than wrapped by a second service。Explicit schema version 2承载
+  breaking client UDP语义；v1 routed+UDP配置迁移失败且产品不保留逐包route implementation。
+- **Tickets:** T01 contract/dependency/control → T02 core program/egress graph → T03 config compiler →
+  T04 parser adapters → T05 server slice → T06 DNS policy → T07 client hijack/one-plan UDP association →
+  T08 integrated evidence/tooling → T09 exact qualification；all serial drain。
+- **Footprint:** baseline code/tests `21814/39632`、ratio `1.816815`、case/support/fixture
+  `33883/5152/597`。Forecast `2360/560/0`，milestone numeric `REVIEW_REQUIRED`；no fixture、third helper
+  or second harness。T02 support forecast is zero because existing selector helpers are reused。
+- **Dependencies/performance:** Hickory `0.26.1` and rustls `0.23.43` reused；locked `ipnet 2.12.1`
+  becomes exact direct and no-default `httparse 1.10.1` is the sole planned new package identity after
+  T01 review。Performance is required for hot-path/resource regression evidence with no threshold claim。
+- **Deferred/out of scope:** QUIC/HTTP3、TUN/transparent/Fake-IP、process/Geo/rule sets、resolve/
+  set-options/target override、cache/retry/fallback/group/health/LB、registry、unsafe、MSRV change、hot
+  reload、management、automatic config migration、dual per-datagram client route、package/release/
+  publication。
+- **Next/remote boundary:** accept the plan，then create/bind `codex/m14-t01` at the accepted planning
+  commit。No product branch/worktree、push、dispatch、PR、tag、package、release or publication is currently
+  authorized or claimed。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -1106,6 +1151,7 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 | DEC-039 | resolved in M11 plan | global `[shadowsocks]`继续mandatory；client outbound credential fields both-or-neither并可完整override；client-only `[[chains]]`为`1..=64` entries、每条`2..=8` unique concrete hops；direct/chain编译为immutable plan供static/route/selector选择；TCP逐层nest existing flow，UDP inner→outer encode/outer→inner authenticated open；任一失败no retry/fallback，server credentials不变 | `CONTEXT.md`、ADR-0030、SPEC/TEST-0012、M11-T01～T05 |
 | DEC-040 | resolved in M12 plan | exact Hickory resolver/proto/server 0.26.1使MSRV升至1.88.0；optional client DNS UDP/TCP proxy与server custom resolver共用唯一first-match matcher但使用独立server action；每个DNS server可用optional `detour`引用existing egress action，absence direct，client支持concrete/chain/selector且server限existing direct；numeric bootstrap + verified DoT/DoH identity；cache/retry为0，selected/detour failure no fallback；global DNS+egress deadline/admission和tracked awaited tasks | `CONTEXT.md`、ADR-0031、SPEC/TEST-0013、M12-T01～T06 |
 | DEC-041 | resolved in M13 plan | core唯一owned allocation-preserving egress-plan snapshot并保留borrowed views；DNS-owned runtime spec使DNS normal workspace-internal dependency只指向core；private concrete client egress执行caller-selected plan且不拥有policy；semantic migration完成后才按ownership拆composition roots，无new crate/trait/registry/harness | `CONTEXT.md`、ADR-0032、SPEC/TEST-0014、M13-T01～T07 |
+| DEC-042 | resolved in M14 plan；client UDP amended | generic core ordered program从private monotonic cursor继续；concrete DNS/TLS/HTTP metadata留在config/sniff并由binary exhaustive adapter映射；pure sniff只使用Hickory/rustls/httparse；client TCP不sniff，server认证后sniff，client DNS hijack复用existing `DnsProxy::answer`；schema-v2 client UDP首个合法包填metadata并只选一次terminal action/outbound，后续target逐包保留；v1 routed+UDP配置拒绝且无旧数据面；terminal selection后no fallback | ADR-0033、SPEC/TEST-0015、M14 research、M14-T01～T09 |
 
 ## 风险登记
 
@@ -1154,6 +1200,12 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 | DNS runtime继续持有config DTO或以反向dependency“修复”分层 | P1 | M13 | DNS-owned spec、binary pure conversion、Cargo metadata allowed map与zero-side-effect config cohort |
 | client egress抽取成为shallow trait/registry或DNS仍穿透process/SOCKS context | P1 | M13 | one private concrete module、two real consumers、source/import guards和no-new-crate/dependency policy |
 | source movement破坏UDP mutation ordering、owner shutdown或通过复制tests伪造green | P0 | M13 | semantics-first tickets、interface tests move with owner、architecture guard、Full/100+ lifecycle/rebind及reviewed moved diff |
+| sniff在认证前运行、prefix丢失/重复或timeout/byte上限被重置 | P0 | M14 | authenticated policy point、one absolute deadline、owned bounded prefix、exact replay and cancel/I/O mutation tables |
+| sniffed name覆盖original target、隐式解析或terminal failure回到later/final | P0 | M14 | immutable original context、separate metadata、terminal-state tests、selected failure no-reentry counters |
+| parser/route/DNS形成第二实现或core引入concrete protocol dependency | P1 | M14 | generic core interface、exact upstream parser adapters、reuse `DnsProxy::answer`、Cargo/source architecture guards |
+| UDP sniff/hijack提前reserve SS state或破坏server prepare/reserve/commit | P0 | M14 | borrowed inspection、lazy terminal-route association、authenticated reject commit and zero-owner process evidence |
+| invalid首包抢占client association、缓存首包丢失/重复或后续数据报重新选route/selector | P0 | M14 | source/wire-valid classification gate、one terminal transition、first-packet exact-once replay、different-target/switch/no-reentry mutations |
+| schema-v1 routed+UDP被静默重解释或旧逐包client route残留为第二数据面 | P0 | M14 | explicit v2、v1 zero-side-effect migration rejection、source/architecture guard和两版本config matrix |
 
 ## 决策与范围变更日志
 
@@ -1265,3 +1317,5 @@ SOCKS/DNS共用private concrete client TCP/UDP egress implementation，最后按
 | 2026-08-08 | M13-T05 integration | One engine-owned bounded UDP association now serves SOCKS and DNS；association protocol state keys the core snapshot without copying，and exact-server/snapshot idle reuse resets eligibility before every request；T05 done、T06 ready | Initial Architect/QA `BLOCK` found a boxed hop copy and a matrix unable to kill stale healthy reuse；one bounded repair `4d75d2b` added allocation-identity and same-owner healthy-then-failure mutation evidence，closing all IDs in targeted Architect/QA `PASS` | Integration T05 focused and Full PASS，lifecycle `1/1` 127.26s、docs PASS；ticket footprint integrity PASS、`+528/+122/0/0`、ratio-only WARN。Milestone `+646/0/0` and moved-file numeric `REVIEW_REQUIRED` remain visible for T06/T07 disposition；no remote action |
 | 2026-08-08 | M13-T06 integration / escalation closure | Client/server/core/config implementation and tests now live with explicit owners；composition roots retain process wiring only；T06 done、T07 ready at exact `c3bb625b` | Initial Architect/QA blocked glob-facade、test-monolith and literal-guard evidence；one bounded repair closed ownership/test placement，but targeted QA retained scanner escapes。Two required independent `gpt-5.6-sol/xhigh` read-only analyses agreed on the same one-file repair；exact cfg-test boundaries、counted visibility、all globs/test cycles and root mutation guards then closed every finding in targeted Architect/QA `PASS` | Integration T06 focused and Full PASS，workspace `372/5`、TCP/UDP DNS E2E `1/1` each、lifecycle `1/1`、docs PASS；footprint integrity PASS，ticket `-762/0/0` and milestone `-116/0/0` are reviewed owner-file classification movement with `92/92` names and unchanged assertions；numeric moved-file `REVIEW_REQUIRED` remains visible for T07，no remote action |
 | 2026-08-08 | M13 close | Exact `1af1bbf` closes T01～T07 with one owned plan snapshot、DNS-owned runtime model、shared private TCP/UDP egress and composition-only roots；no product behavior added | Final full Architect/QA both `PASS` with zero blocker；all T01～T06 focused and T07 local/Rust1.88/lifecycle gates passed；moved-file numeric review accepted without evidence deletion | Automatic `31223817144/1` and manual `31223831024/1` both success：platforms `3/3`、TCP/UDP `12/12` + cleanup、12 DNS cases + cleanup、throughput `144633582/546819276` ratio `0.264499787`、10k/180/RSS `6/6`/drain and DNS `4600/4466` queries、48 samples、RSS `12/12`、bounds/drain/rebind PASS；one push/dispatch consumed，no release/publication |
+| 2026-08-08 | M14 plan | M14改为`planned`；接受protocol-neutral ordered program、bounded DNS/TLS/HTTP sniff、terminal reject/client DNS hijack和private lazy UDP ownership | Owner-approved external plan经exact `cc8a0c2` source复核；core concrete protocol placement改为generic seam，existing listener-independent `DnsProxy::answer`取代新pass-through service；test forecast row/total以T02复用existing helper修正为`2360/560/0` | qualified `1af1bbf`、planning `cc8a0c2`；ADR-0033、SPEC/TEST-0015、T01→T02→T03→T04→T05→T06→T07→T08→T09；performance required；plan-only，无product/worktree/push/dispatch/release/publication |
+| 2026-08-08 | M14 client UDP association amendment | Schema-v2 client SOCKS UDP改为sing-box-style first-valid-datagram association routing：terminal action只执行一次，`route`只解析一个outbound/plan，后续数据报保留各自target但不重选；v1 routed+UDP启动前迁移拒绝且不保留逐包数据面 | Owner明确不需要client routed UDP逐包实现；RFC 1928允许association-level内部route粒度，pinned sing-box `v1.13.14` exact source提供首包缓存、一次route、逐包destination调用链；显式successor避免静默重解释 | M14两份research、ADR-0033、SPEC/TEST-0015及T01/T03/T07/T08修订；ticket graph、forecast、remote boundary不变；plan-only，无product/worktree/push/dispatch/release/publication |

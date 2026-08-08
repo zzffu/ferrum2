@@ -46,6 +46,11 @@ The public client-side UDP relay lifetime established by one SOCKS5 `UDP ASSOCIA
 control connection.
 _Avoid_: SIP022 UDP session, route
 
+**Association-routed UDP**:
+The schema-v2 client mode where the first valid SOCKS UDP request fixes one
+terminal action and, for `route`, one outbound while later requests retain their own targets.
+_Avoid_: First-target pinning, per-datagram client route
+
 **Client UDP endpoint**:
 The application-side source address authorized to send datagrams for one SOCKS UDP
 association.
@@ -133,8 +138,8 @@ The mandatory route-mode outbound selected when no route rule matches.
 _Avoid_: Failure fallback, default retry
 
 **Route network**:
-The `tcp` or `udp` traffic class evaluated by a route rule; UDP means each validated
-datagram, not its SOCKS TCP control connection.
+The `tcp` or `udp` traffic class evaluated by a route rule. Its evaluation unit is fixed
+by the ingress contract: a flow, a server datagram, or one association-routed UDP lifetime.
 _Avoid_: Protocol implementation, transport adapter
 
 **Exact route target**:
