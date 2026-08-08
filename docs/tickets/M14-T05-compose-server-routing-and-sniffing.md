@@ -13,8 +13,12 @@ owns:
   - bins/ferrum2-server/src/run/test_support.rs
   - bins/ferrum2-server/src/run/tests.rs
   - bins/ferrum2-server/src/run/udp.rs
+  - crates/ferrum2-observability/src/lib.rs
+  - crates/ferrum2-observability/tests/metrics_contract.rs
+  - crates/ferrum2-observability/tests/tracing_contract.rs
   - crates/ferrum2-runtime/Cargo.toml
   - crates/ferrum2-runtime/src/lib.rs
+  - crates/ferrum2-runtime/src/owner.rs
   - crates/ferrum2-runtime/src/sniff.rs
   - tests/m0-harness/tests/architecture.rs
   - tests/m0-harness/tests/config_cli.rs
