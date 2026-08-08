@@ -65,6 +65,9 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedServerConfig) -> Result<(), RunError> {
+    if config.schema_version.is_v2() {
+        return Err(RunError::StartupProtocol);
+    }
     let dns_specs = config
         .dns
         .as_ref()

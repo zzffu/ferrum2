@@ -7,8 +7,9 @@ use zeroize::Zeroizing;
 use crate::{
     DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_DNS_MAX_INFLIGHT, DEFAULT_DNS_TIMEOUT_MS,
     DEFAULT_HANDSHAKE_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_LISTEN_BACKLOG,
-    DEFAULT_MAX_CONNECTIONS, DEFAULT_REPLAY_CAPACITY, DEFAULT_SHUTDOWN_GRACE_MS,
-    DEFAULT_UDP_IDLE_TIMEOUT_MS, DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_REPLAY_CAPACITY, DEFAULT_ROUTE_SNIFF_MAX_BYTES,
+    DEFAULT_ROUTE_SNIFF_TIMEOUT_MS, DEFAULT_SHUTDOWN_GRACE_MS, DEFAULT_UDP_IDLE_TIMEOUT_MS,
+    DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,
 };
 
 #[derive(Deserialize)]
@@ -138,26 +139,45 @@ pub(super) struct RawSelector {
     pub(super) default: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawRoute {
     #[serde(rename = "final")]
     pub(super) final_outbound: Option<String>,
+    pub(super) sniff: Option<RawRouteSniff>,
     #[serde(default)]
     pub(super) rules: Vec<RawRouteRule>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawRouteRule {
-    pub(super) inbound: Option<String>,
-    pub(super) network: Option<String>,
+    pub(super) inbound: Option<ScalarOrList<String>>,
+    pub(super) network: Option<ScalarOrList<String>>,
     pub(super) target: Option<toml::Spanned<RawRouteTarget>>,
+    pub(super) protocol: Option<ScalarOrList<String>>,
+    pub(super) domain: Option<ScalarOrList<String>>,
+    pub(super) domain_suffix: Option<ScalarOrList<String>>,
+    pub(super) ip: Option<ScalarOrList<String>>,
+    pub(super) ip_cidr: Option<ScalarOrList<String>>,
+    pub(super) port: Option<ScalarOrList<i64>>,
+    pub(super) port_range: Option<ScalarOrList<String>>,
+    pub(super) action: Option<String>,
+    pub(super) sniffers: Option<ScalarOrList<String>>,
     pub(super) outbound: Option<String>,
     pub(super) server: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawRouteSniff {
+    #[serde(default = "default_route_sniff_timeout_ms")]
+    pub(super) timeout_ms: u64,
+    #[serde(default = "default_route_sniff_max_bytes")]
+    pub(super) max_bytes: usize,
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawDns {
     #[serde(default = "default_dns_timeout_ms")]
@@ -169,14 +189,14 @@ pub(super) struct RawDns {
     pub(super) route: Option<RawDnsRoute>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawDnsInbound {
     pub(super) tag: String,
     pub(super) listen: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawDnsServer {
     pub(super) tag: String,
@@ -187,7 +207,7 @@ pub(super) struct RawDnsServer {
     pub(super) detour: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawDnsRoute {
     #[serde(rename = "final")]
@@ -196,21 +216,62 @@ pub(super) struct RawDnsRoute {
     pub(super) rules: Vec<RawDnsRouteRule>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawDnsRouteRule {
-    pub(super) inbound: Option<String>,
-    pub(super) network: Option<String>,
+    pub(super) inbound: Option<ScalarOrList<String>>,
+    pub(super) network: Option<ScalarOrList<String>>,
     pub(super) target: Option<toml::Spanned<RawRouteTarget>>,
+    pub(super) qname: Option<ScalarOrList<String>>,
+    pub(super) qname_suffix: Option<ScalarOrList<String>>,
+    pub(super) qtype: Option<ScalarOrList<String>>,
+    pub(super) domain: Option<ScalarOrList<String>>,
+    pub(super) domain_suffix: Option<ScalarOrList<String>>,
+    pub(super) port: Option<ScalarOrList<i64>>,
+    pub(super) port_range: Option<ScalarOrList<String>>,
     pub(super) server: Option<String>,
     pub(super) outbound: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawRouteTarget {
     pub(super) host: Option<String>,
     pub(super) port: Option<i64>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ScalarOrList<T> {
+    Scalar(T),
+    List(Vec<T>),
+}
+
+impl<T> ScalarOrList<T> {
+    pub fn is_list(&self) -> bool {
+        matches!(self, Self::List(_))
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Scalar(_) => 1,
+            Self::List(values) => values.len(),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        match self {
+            Self::Scalar(value) => std::slice::from_ref(value).iter(),
+            Self::List(values) => values.iter(),
+        }
+    }
+
+    pub fn scalar(&self) -> Option<&T> {
+        match self {
+            Self::Scalar(value) => Some(value),
+            Self::List(_) => None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -377,6 +438,14 @@ const fn default_dns_timeout_ms() -> u64 {
 
 const fn default_dns_max_inflight() -> u32 {
     DEFAULT_DNS_MAX_INFLIGHT
+}
+
+const fn default_route_sniff_timeout_ms() -> u64 {
+    DEFAULT_ROUTE_SNIFF_TIMEOUT_MS
+}
+
+const fn default_route_sniff_max_bytes() -> usize {
+    DEFAULT_ROUTE_SNIFF_MAX_BYTES
 }
 
 fn default_logging_level() -> String {

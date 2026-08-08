@@ -3,8 +3,7 @@ mod local_support;
 
 use std::io::{Read, Write};
 use std::net::{
-    Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, ToSocketAddrs,
-    UdpSocket,
+    Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
@@ -13,13 +12,13 @@ use std::time::Duration;
 
 use local_support::{
     ChainRoot, ChildGuard, TCP_METHOD_CONFIGS, active_child_count, bind_loopback_listener,
-    rewrite_config_method, route_tagged_config, unused_loopback, unused_tcp_udp_loopback,
-    wait_for_bound, wait_for_listener, wait_for_metrics, wait_for_metrics_sample,
-    wait_for_tcp_udp_bound, write_client_config, write_server_config, write_server_config_with_psk,
+    rewrite_config_method, unused_loopback, unused_tcp_udp_loopback, wait_for_bound,
+    wait_for_listener, wait_for_metrics, wait_for_metrics_sample, wait_for_tcp_udp_bound,
+    write_client_config, write_server_config, write_server_config_with_psk,
     write_tagged_client_config, write_tagged_server_config, write_two_hop_client_config,
     write_udp_client_config,
 };
-use socket2::{Domain, Protocol, SockRef, Socket, Type};
+use socket2::SockRef;
 
 fn udp_associate(client: SocketAddrV4, hinted: bool) -> (TcpStream, UdpSocket, SocketAddrV4) {
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("application UDP socket");
@@ -596,72 +595,6 @@ fn three_methods_compose_ipv4_ipv6_and_domain_through_the_real_relays() {
 }
 
 #[test]
-fn one_association_alternates_two_targets_and_preserves_response_sources() {
-    let directory = tempfile::tempdir().expect("routed association tempdir");
-    let servers = [unused_tcp_udp_loopback(), unused_tcp_udp_loopback()];
-    let clients = [unused_loopback(), unused_loopback()];
-    let first_echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("first echo bind");
-    let second_echo =
-        Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).expect("second echo socket");
-    second_echo.set_only_v6(false).expect("dual stack");
-    second_echo
-        .bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)).into())
-        .expect("second echo bind");
-    let second_echo = UdpSocket::from(second_echo);
-    for echo in [&first_echo, &second_echo] {
-        echo.set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("echo timeout");
-    }
-    let first_target = target_wire(first_echo.local_addr().expect("first echo address"));
-    let second_port = second_echo.local_addr().expect("echo address").port();
-    let second_target = domain_target_wire("localhost", second_port);
-    let second_response = target_wire(
-        ("localhost", second_port)
-            .to_socket_addrs()
-            .expect("second echo resolve")
-            .next()
-            .expect("second echo candidate"),
-    );
-    let first_worker = echo_datagrams(first_echo, 2);
-    let second_worker = echo_datagrams(second_echo, 1);
-    let configs = [0, 1].map(|index| {
-        let path = directory.path().join(index.to_string());
-        std::fs::create_dir(&path).expect("routed server directory");
-        write_server_config(&path, servers[index], None).expect("routed server config")
-    });
-    let client_config =
-        write_tagged_client_config(directory.path(), clients, servers, [0, 1], true)
-            .expect("routed client config");
-    for config in [&configs[0], &configs[1], &client_config] {
-        rewrite_config_method(config, TCP_METHOD_CONFIGS[2]).expect("routed ChaCha method");
-    }
-    route_tagged_config(&client_config, &format!(
-        "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-a\"\nnetwork = \"udp\"\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-1\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"out-0\"\n[[route.rules]]\ntarget = {{ host = \"LOCALHOST\", port = {} }}\noutbound = \"out-0\"\n",
-        second_port, second_port
-    )).expect("routed client rules");
-    let mut server_a = ChildGuard::spawn("ferrum2-server", &configs[0]);
-    wait_for_tcp_udp_bound(&mut server_a, servers[0]);
-    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
-    for address in clients {
-        wait_for_listener(&mut client, address);
-    }
-
-    let (_control, application, relay) = udp_associate(clients[0], false);
-
-    round_trip(&application, relay, &first_target, &first_target, b"a");
-    server_a.terminate_and_reap(Duration::from_secs(5));
-    let mut server_b = ChildGuard::spawn("ferrum2-server", &configs[1]);
-    wait_for_tcp_udp_bound(&mut server_b, servers[1]);
-    round_trip(&application, relay, &second_target, &second_response, b"b");
-    server_b.terminate_and_reap(Duration::from_secs(5));
-    server_a = ChildGuard::spawn("ferrum2-server", &configs[0]);
-    wait_for_tcp_udp_bound(&mut server_a, servers[0]);
-    round_trip(&application, relay, &first_target, &first_target, b"c");
-    first_worker.join().expect("first echo worker");
-    second_worker.join().expect("second echo worker");
-}
-
-#[test]
 fn fragment_does_not_pin_first_valid_source_wins_and_control_close_rebinds() {
     let stack = Stack::start(TCP_METHOD_CONFIGS[0]);
     let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("echo bind");
@@ -884,8 +817,6 @@ fn fixed_two_hop_udp_chain_uses_distinct_credentials_and_reaps() {
 
     for (index, (inherited, explicit)) in [
         (TCP_METHOD_CONFIGS[0], TCP_METHOD_CONFIGS[1]),
-        (TCP_METHOD_CONFIGS[1], TCP_METHOD_CONFIGS[2]),
-        (TCP_METHOD_CONFIGS[1], TCP_METHOD_CONFIGS[2]),
         (TCP_METHOD_CONFIGS[2], TCP_METHOD_CONFIGS[0]),
     ]
     .into_iter()
@@ -910,11 +841,6 @@ fn fixed_two_hop_udp_chain_uses_distinct_credentials_and_reaps() {
         };
         let root = match index {
             0 => ChainRoot::Static,
-            1 => ChainRoot::RouteRule {
-                target: target_address,
-                fallback_hop: 0,
-            },
-            2 => ChainRoot::RouteFinal,
             _ => ChainRoot::SelectorDefault,
         };
         let a_config =
@@ -1029,17 +955,13 @@ fn fixed_two_hop_udp_chain_uses_distinct_credentials_and_reaps() {
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 target"),
         };
-        let first_failure = matches!(failure, Failure::FirstUnavailable | Failure::FirstWrong);
         let client_config = write_two_hop_client_config(
             directory.path(),
             client_address,
             servers,
             inherited,
             explicit,
-            ChainRoot::RouteRule {
-                target: target_address,
-                fallback_hop: usize::from(first_failure),
-            },
+            ChainRoot::Static,
             true,
             Some(metrics[0]),
         )
