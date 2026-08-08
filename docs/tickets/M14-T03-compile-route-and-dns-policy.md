@@ -5,6 +5,8 @@ status: ready
 depends_on:
   - M14-T02
 owns:
+  - bins/ferrum2-client/src/run.rs
+  - bins/ferrum2-server/src/run.rs
   - crates/ferrum2-config/src/error.rs
   - crates/ferrum2-config/src/lib.rs
   - crates/ferrum2-config/src/model.rs
@@ -39,6 +41,9 @@ shape before runtime side effects。
 - [ ] Missing new fields and missing DNS retain the current config/CLI cohort except the explicit v1
       client routed+UDP migration row；unknown versions、M14 fields in v1 and heuristic fallback fail with
       zero side effects。
+- [ ] `--check-config` accepts the fully compiled schema-v2 model；until T05/T07 consume that model，both
+      existing run entrypoints reject version 2 before observability、runtime、listener or task creation
+      instead of silently executing the legacy route/DNS views。
 - [ ] T03 focused、Quick、footprint integrity and diff gates pass。
 
 ## Validation
@@ -65,4 +70,5 @@ git diff --check
 
 Rollback removes version-2 raw/model/compiler fields。The primary risk is accepting a rule that an
 ingress cannot execute or accidentally compiling the retired per-datagram client path；the version/role
-matrix is a blocking config table，not a runtime fallback。
+matrix is a blocking config table，not a runtime fallback。The two run-entry latches are temporary
+fail-closed guards and must be replaced，not bypassed，when T05/T07 compose their respective typed models。
