@@ -5,9 +5,11 @@ status: ready
 depends_on:
   - M14-T05
 owns:
+  - Cargo.lock
   - bins/ferrum2-client/src/dns_egress.rs
   - bins/ferrum2-client/src/run.rs
   - bins/ferrum2-client/src/run/dns.rs
+  - bins/ferrum2-server/Cargo.toml
   - bins/ferrum2-server/src/dns_egress.rs
   - bins/ferrum2-server/src/run.rs
   - bins/ferrum2-server/src/run/dns.rs
@@ -21,6 +23,7 @@ owns:
   - crates/ferrum2-dns/tests/resource_lifecycle.rs
   - crates/ferrum2-dns/tests/tagged_upstreams.rs
   - tests/m0-harness/tests/architecture.rs
+  - tests/m0-harness/tests/workspace_policy.rs
 ---
 
 # M14-T06 — Extend DNS policy and answering
