@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ferrum2_config::{DnsServerConfig, DnsTransport};
+use ferrum2_config::{DnsServerConfig, DnsTransport, ServerDnsRoute};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{ActionTable, EgressPlanSnapshot, Network};
 use ferrum2_dns::{
@@ -50,19 +50,24 @@ pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamS
 
 pub(super) struct ServerDnsState {
     route: ActionTable<usize>,
+    policy: Option<ServerDnsRoute>,
     resolver: Mutex<Option<Arc<TaggedResolver>>>,
 }
 
 impl ServerDnsState {
-    pub(super) fn new(route: ActionTable<usize>) -> Self {
+    pub(super) fn new(route: ActionTable<usize>, policy: Option<ServerDnsRoute>) -> Self {
         Self {
             route,
+            policy,
             resolver: Mutex::new(None),
         }
     }
 
     pub(super) fn select(&self, inbound: usize, network: Network, target: &TargetAddr) -> usize {
-        self.route.select(inbound, network, target)
+        self.policy.as_ref().map_or_else(
+            || self.route.select(inbound, network, target),
+            |policy| policy.select(inbound, network, target),
+        )
     }
 
     pub(super) fn install(&self, resolver: Arc<TaggedResolver>) -> Result<(), ()> {
@@ -208,6 +213,8 @@ mod tests {
 
     use ferrum2_core::route::EgressPlanHandle;
 
+    use crate::run::test_support::{reserve_address, server_test_config_source};
+
     #[test]
     fn dns_runtime_specs_preserve_validated_server_values() {
         let cases = [
@@ -311,23 +318,62 @@ mod tests {
 
     #[test]
     fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
-        let selected = TargetAddr::domain("selected.example.", 8443).expect("selected target");
-        let other = TargetAddr::domain("other.example.", 8443).expect("final target");
-        let route = ferrum2_core::route::ActionTable::new(
-            vec![ferrum2_core::route::ActionRule::new(
-                Some(1),
-                Some(Network::Tcp),
-                Some(selected.clone()),
-                0,
-            )],
-            1,
-        )
-        .expect("DNS route");
-        let state = ServerDnsState::new(route);
+        let listen = reserve_address();
+        let source = format!(
+            "schema_version = 2\n\
+             [[inbounds]]\n\
+             tag = \"i0\"\n\
+             listen = \"{listen}\"\n\
+             [[outbounds]]\n\
+             tag = \"direct\"\n\
+             [route]\n\
+             final = \"direct\"\n\
+             [shadowsocks]\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+             [dns]\n\
+             [[dns.servers]]\n\
+             tag = \"selected\"\n\
+             transport = \"udp\"\n\
+             address = \"192.0.2.53:53\"\n\
+             [[dns.servers]]\n\
+             tag = \"final\"\n\
+             transport = \"tcp\"\n\
+             address = \"192.0.2.54:53\"\n\
+             [dns.route]\n\
+             final = \"final\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"i0\"\n\
+             network = \"tcp\"\n\
+             domain = \"exact.test\"\n\
+             port = 53\n\
+             server = \"selected\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"i0\"\n\
+             network = [\"tcp\", \"udp\"]\n\
+             domain_suffix = \"example.com\"\n\
+             port_range = \"443:8443\"\n\
+             server = \"selected\"\n"
+        );
+        let (path, config) = server_test_config_source("dns-policy", &source);
+        let dns = config.dns.expect("server DNS config");
+        let state = ServerDnsState::new(dns.route, config.dns_route);
+        let exact = TargetAddr::domain("EXACT.TEST.", 53).expect("exact target");
+        let suffix_low = TargetAddr::domain("api.example.com.", 443).expect("range low target");
+        let suffix_high =
+            TargetAddr::domain("deep.api.example.com", 8443).expect("range high target");
+        let below = TargetAddr::domain("api.example.com", 442).expect("below range target");
+        let above = TargetAddr::domain("api.example.com", 8444).expect("above range target");
+        let other = TargetAddr::domain("other.test", 443).expect("final target");
 
-        assert_eq!(state.select(1, Network::Tcp, &selected), 0);
-        assert_eq!(state.select(0, Network::Tcp, &selected), 1);
-        assert_eq!(state.select(1, Network::Udp, &selected), 1);
-        assert_eq!(state.select(1, Network::Tcp, &other), 1);
+        assert_eq!(state.select(0, Network::Tcp, &exact), 0);
+        assert_eq!(state.select(0, Network::Tcp, &suffix_low), 0);
+        assert_eq!(state.select(0, Network::Udp, &suffix_high), 0);
+        assert_eq!(state.select(1, Network::Tcp, &exact), 1);
+        assert_eq!(state.select(0, Network::Udp, &exact), 1);
+        assert_eq!(state.select(0, Network::Tcp, &below), 1);
+        assert_eq!(state.select(0, Network::Tcp, &above), 1);
+        assert_eq!(state.select(0, Network::Tcp, &other), 1);
+        std::fs::remove_file(path).expect("remove server DNS policy config");
     }
 }

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use ferrum2_config::{DnsConfig, ValidatedClientConfig};
+use ferrum2_config::{DnsConfig, DnsIngressId, ValidatedClientConfig};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::Network;
 #[cfg(test)]
@@ -10,7 +10,7 @@ use ferrum2_crypto::MethodProfile;
 #[cfg(test)]
 use ferrum2_crypto::MethodSinglePskProvider;
 use ferrum2_crypto::{SecureRandom, SystemClock, SystemRandom};
-use ferrum2_dns::{DnsProxy, DnsProxySockets, ProxyTransport, TaggedResolver};
+use ferrum2_dns::{DnsProxy, DnsProxySockets, ProxyIngress, ProxyTransport, TaggedResolver};
 use ferrum2_observability::{Metrics, Role, json_subscriber};
 use ferrum2_runtime::{
     BoundedSupervisor, MAX_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT,
@@ -168,7 +168,7 @@ where
 {
     #[cfg(test)]
     let method = config.method();
-    let dns = match (config.dns, dns_specs) {
+    let dns = match (config.dns, config.dns_route, dns_specs) {
         (
             Some(DnsConfig {
                 inbounds,
@@ -177,6 +177,7 @@ where
                 timeout,
                 max_inflight,
             }),
+            policy,
             Some(specs),
         ) => {
             let internal_udp_needed = servers.iter().any(|server| {
@@ -186,18 +187,19 @@ where
                 inbounds,
                 specs,
                 route,
+                policy,
                 timeout,
                 max_inflight,
                 internal_udp_needed,
             ))
         }
-        (None, None) => None,
+        (None, None, None) => None,
         _ => return Err(RunError::StartupProtocol),
     };
     metrics.set_udp_sessions_active(Role::Client, 0);
     metrics.set_udp_buffered_bytes(Role::Client, 0);
     let public_udp_enabled = config.udp.is_some_and(|udp| udp.enabled);
-    let internal_udp_needed = dns.as_ref().is_some_and(|dns| dns.5);
+    let internal_udp_needed = dns.as_ref().is_some_and(|dns| dns.6);
     let runtime = config.runtime;
     let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)?;
     let shutdown_grace = config.runtime.shutdown_grace;
@@ -208,12 +210,12 @@ where
             Some(udp) => (udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout),
             None => {
                 let dns = dns.as_ref().expect("internal UDP requires DNS config");
-                let sessions = usize::from(dns.4.get());
+                let sessions = usize::from(dns.5.get());
                 let bytes = sessions
                     .checked_mul(3 * MAX_UDP_WIRE_LEN)
                     .ok_or(RunError::StartupProtocol)?
                     .clamp(MIN_UDP_MAX_BUFFERED_BYTES, MAX_UDP_MAX_BUFFERED_BYTES);
-                (sessions, bytes, dns.3.max(MIN_UDP_IDLE_TIMEOUT))
+                (sessions, bytes, dns.4.max(MIN_UDP_IDLE_TIMEOUT))
             }
         };
         Some(ClientUdpContext {
@@ -290,7 +292,7 @@ where
             routing,
         })
     })];
-    if let Some((inbounds, servers, route, timeout, max_inflight, _)) = dns {
+    if let Some((inbounds, servers, route, policy, timeout, max_inflight, _)) = dns {
         let addresses = inbounds.into_iter().map(|inbound| inbound.listen).collect();
         let route = Arc::new(route);
         roots.push(ProcessRoot::new(move || async move {
@@ -313,18 +315,27 @@ where
             let selection = Arc::clone(&route);
             let proxy = Arc::new(DnsProxy::new(
                 Arc::clone(&resolver),
-                move |inbound, transport, name| {
-                    Some(match TargetAddr::domain(&name.to_ascii(), 53) {
-                        Ok(target) => selection.select(
-                            inbound,
-                            match transport {
-                                ProxyTransport::Udp => Network::Udp,
-                                ProxyTransport::Tcp => Network::Tcp,
-                            },
-                            &target,
-                        ),
-                        Err(_) => selection.final_action(),
-                    })
+                move |ingress, transport, name, qtype| {
+                    let network = match transport {
+                        ProxyTransport::Udp => Network::Udp,
+                        ProxyTransport::Tcp => Network::Tcp,
+                    };
+                    let Ok(target) = TargetAddr::domain(&name.to_ascii(), 53) else {
+                        return Some(selection.final_action());
+                    };
+                    let qtype = dns_egress::dns_query_type(qtype);
+                    match (&policy, ingress) {
+                        (Some(policy), ProxyIngress::Listener(inbound)) => {
+                            policy.select(DnsIngressId::Listener(inbound), network, &target, qtype)
+                        }
+                        (Some(policy), ProxyIngress::Ordinary(inbound)) => {
+                            policy.select(DnsIngressId::Ordinary(inbound), network, &target, qtype)
+                        }
+                        (None, ProxyIngress::Listener(inbound)) => {
+                            Some(selection.select(inbound, network, &target))
+                        }
+                        (None, ProxyIngress::Ordinary(_)) => None,
+                    }
                 },
             ));
             Ok(ClientDnsRoot {

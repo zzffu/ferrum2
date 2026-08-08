@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use ferrum2_config::{DnsServerConfig, DnsTransport};
+use ferrum2_config::{DnsQueryType, DnsServerConfig, DnsTransport};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::EgressPlanSnapshot;
 use ferrum2_dns::{
@@ -55,6 +55,26 @@ pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamS
             }
         })
         .collect()
+}
+
+pub(super) fn dns_query_type(code: u16) -> Option<DnsQueryType> {
+    [
+        DnsQueryType::A,
+        DnsQueryType::Aaaa,
+        DnsQueryType::Cname,
+        DnsQueryType::Mx,
+        DnsQueryType::Ns,
+        DnsQueryType::Ptr,
+        DnsQueryType::Soa,
+        DnsQueryType::Srv,
+        DnsQueryType::Txt,
+        DnsQueryType::Caa,
+        DnsQueryType::Svcb,
+        DnsQueryType::Https,
+        DnsQueryType::Any,
+    ]
+    .into_iter()
+    .find(|qtype| *qtype as u16 == code)
 }
 
 pub(super) struct ClientDnsEgress {
@@ -383,6 +403,28 @@ mod tests {
     use crate::run::{
         dns_egress, run_with_registry_and_metrics, run_with_registry_and_metrics_inner,
     };
+
+    #[test]
+    fn proxy_qtype_codes_map_to_the_closed_config_vocabulary() {
+        for qtype in [
+            ferrum2_config::DnsQueryType::A,
+            ferrum2_config::DnsQueryType::Aaaa,
+            ferrum2_config::DnsQueryType::Cname,
+            ferrum2_config::DnsQueryType::Mx,
+            ferrum2_config::DnsQueryType::Ns,
+            ferrum2_config::DnsQueryType::Ptr,
+            ferrum2_config::DnsQueryType::Soa,
+            ferrum2_config::DnsQueryType::Srv,
+            ferrum2_config::DnsQueryType::Txt,
+            ferrum2_config::DnsQueryType::Caa,
+            ferrum2_config::DnsQueryType::Svcb,
+            ferrum2_config::DnsQueryType::Https,
+            ferrum2_config::DnsQueryType::Any,
+        ] {
+            assert_eq!(dns_query_type(qtype as u16), Some(qtype));
+        }
+        assert_eq!(dns_query_type(0), None);
+    }
 
     #[test]
     fn dns_runtime_specs_preserve_validated_server_values() {
@@ -1354,61 +1396,85 @@ mod tests {
         let upstream_addresses = upstreams
             .each_ref()
             .map(|upstream| upstream.local_addr().expect("upstream address"));
-        let (path, mut config) = client_test_config(socks, shadowsocks);
-        config.dns = Some(ferrum2_config::DnsConfig {
-            inbounds: vec![ferrum2_config::DnsInboundConfig {
-                listen: SocketAddr::V4(dns),
-            }],
-            servers: upstream_addresses
-                .into_iter()
-                .map(|address| ferrum2_config::DnsServerConfig {
-                    transport: ferrum2_config::DnsTransport::Udp,
-                    address,
-                    server_name: None,
-                    path: None,
-                    detour: None,
-                })
-                .collect(),
-            route: ferrum2_core::route::ActionTable::new(
-                vec![ferrum2_core::route::ActionRule::new(
-                    Some(0),
-                    Some(Network::Udp),
-                    Some(TargetAddr::domain("selected.example.", 53).expect("rule DNS target")),
-                    0,
-                )],
-                1,
-            )
-            .expect("DNS rule and final actions"),
-            timeout: Duration::from_secs(1),
-            max_inflight: std::num::NonZeroU16::new(1).expect("DNS admission"),
-        });
+        let (path, _) = client_test_config(socks, shadowsocks);
+        let source = format!(
+            "schema_version = 2\n\
+             [[inbounds]]\n\
+             tag = \"i0\"\n\
+             listen = \"{socks}\"\n\
+             [[outbounds]]\n\
+             tag = \"o0\"\n\
+             server = \"{shadowsocks}\"\n\
+             [route]\n\
+             final = \"o0\"\n\
+             [shadowsocks]\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+             [runtime]\n\
+             shutdown_grace_ms = 0\n\
+             [dns]\n\
+             [[dns.inbounds]]\n\
+             tag = \"d0\"\n\
+             listen = \"{dns}\"\n\
+             [[dns.servers]]\n\
+             tag = \"rule\"\n\
+             transport = \"udp\"\n\
+             address = \"{}\"\n\
+             [[dns.servers]]\n\
+             tag = \"final\"\n\
+             transport = \"udp\"\n\
+             address = \"{}\"\n\
+             [dns.route]\n\
+             final = \"final\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"d0\"\n\
+             network = \"udp\"\n\
+             qname_suffix = \"selected.example\"\n\
+             qtype = \"A\"\n\
+             server = \"rule\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"d0\"\n\
+             network = \"tcp\"\n\
+             qname = \"exact.example\"\n\
+             qtype = \"AAAA\"\n\
+             server = \"rule\"\n",
+            upstream_addresses[0], upstream_addresses[1],
+        );
+        std::fs::write(&path, source).expect("write v2 DNS policy config");
+        let config = ferrum2_config::load_client(&path).expect("validated v2 DNS policy config");
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);
         let upstream_tasks: Vec<_> = upstreams
             .into_iter()
-            .zip([Ipv4Addr::new(192, 0, 2, 44), Ipv4Addr::new(192, 0, 2, 45)])
-            .map(|(upstream, answer)| {
+            .zip([
+                [Ipv4Addr::new(192, 0, 2, 44), Ipv4Addr::new(192, 0, 2, 46)],
+                [Ipv4Addr::new(192, 0, 2, 45), Ipv4Addr::new(192, 0, 2, 47)],
+            ])
+            .map(|(upstream, answers)| {
                 tokio::spawn(async move {
                     let mut request = [0_u8; 4096];
-                    let (length, peer) =
-                        upstream.recv_from(&mut request).await.expect("DNS request");
-                    let request = Message::from_vec(&request[..length]).expect("typed DNS request");
-                    assert_eq!(request.metadata.message_type, MessageType::Query);
-                    assert_eq!(request.metadata.op_code, OpCode::Query);
-                    let question = request.queries.first().expect("one question").clone();
-                    let mut response = Message::response(request.metadata.id, OpCode::Query);
-                    response.metadata.recursion_available = true;
-                    response
-                        .add_query(question.clone())
-                        .add_answer(Record::from_rdata(
-                            question.name().clone(),
-                            30,
-                            RData::A(A(answer)),
-                        ));
-                    upstream
-                        .send_to(&response.to_vec().expect("typed DNS response"), peer)
-                        .await
-                        .expect("DNS response");
+                    for answer in answers {
+                        let (length, peer) =
+                            upstream.recv_from(&mut request).await.expect("DNS request");
+                        let request =
+                            Message::from_vec(&request[..length]).expect("typed DNS request");
+                        assert_eq!(request.metadata.message_type, MessageType::Query);
+                        assert_eq!(request.metadata.op_code, OpCode::Query);
+                        let question = request.queries.first().expect("one question").clone();
+                        let mut response = Message::response(request.metadata.id, OpCode::Query);
+                        response.metadata.recursion_available = true;
+                        response
+                            .add_query(question.clone())
+                            .add_answer(Record::from_rdata(
+                                question.name().clone(),
+                                30,
+                                RData::A(A(answer)),
+                            ));
+                        upstream
+                            .send_to(&response.to_vec().expect("typed DNS response"), peer)
+                            .await
+                            .expect("DNS response");
+                    }
                 })
             })
             .collect();
@@ -1424,16 +1490,22 @@ mod tests {
         .expect("valid maximum wire name");
         assert!(binary_name.to_ascii().len() > 255);
         wait_until_bound(dns).await;
-        for (id, name, expected) in [
+        for (id, name, record_type, expected) in [
             (
                 0x1234,
                 Name::from_ascii("SeLeCtEd.ExAmPlE.").expect("absolute query name"),
+                RecordType::A,
                 Ipv4Addr::new(192, 0, 2, 44),
             ),
-            (0x1235, binary_name, Ipv4Addr::new(192, 0, 2, 45)),
+            (
+                0x1235,
+                Name::from_ascii("selected.example.").expect("wrong qtype name"),
+                RecordType::AAAA,
+                Ipv4Addr::new(192, 0, 2, 45),
+            ),
         ] {
             let mut query = Message::new(id, MessageType::Query, OpCode::Query);
-            query.add_query(Query::query(name, RecordType::A));
+            query.add_query(Query::query(name, record_type));
             let query = query.to_vec().expect("typed query");
             let mut response = [0_u8; 4096];
             client.send_to(&query, dns).await.expect("proxy query");
@@ -1448,6 +1520,44 @@ mod tests {
             assert_eq!(response.metadata.op_code, OpCode::Query);
             assert_eq!(response.metadata.response_code, ResponseCode::NoError);
             assert_eq!(response.queries.len(), 1);
+            assert_eq!(
+                response.answers.first().map(|record| &record.data),
+                Some(&RData::A(A(expected)))
+            );
+        }
+        for (id, name, record_type, expected) in [
+            (
+                0x1236,
+                Name::from_ascii("EXACT.EXAMPLE.").expect("exact TCP query name"),
+                RecordType::AAAA,
+                Ipv4Addr::new(192, 0, 2, 46),
+            ),
+            (
+                0x1237,
+                binary_name,
+                RecordType::A,
+                Ipv4Addr::new(192, 0, 2, 47),
+            ),
+        ] {
+            let mut query = Message::new(id, MessageType::Query, OpCode::Query);
+            query.add_query(Query::query(name, record_type));
+            let query = query.to_vec().expect("typed TCP query");
+            let mut client = tokio::net::TcpStream::connect(dns)
+                .await
+                .expect("DNS TCP client");
+            client
+                .write_u16(u16::try_from(query.len()).expect("bounded TCP query"))
+                .await
+                .expect("DNS TCP query length");
+            client.write_all(&query).await.expect("DNS TCP query");
+            let length = client.read_u16().await.expect("DNS TCP response length");
+            let mut response = vec![0_u8; usize::from(length)];
+            client
+                .read_exact(&mut response)
+                .await
+                .expect("DNS TCP response");
+            let response = Message::from_vec(&response).expect("typed TCP proxy response");
+            assert_eq!(response.metadata.id, id);
             assert_eq!(
                 response.answers.first().map(|record| &record.data),
                 Some(&RData::A(A(expected)))

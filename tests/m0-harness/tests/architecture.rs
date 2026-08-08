@@ -2089,6 +2089,8 @@ fn runtime_and_library_owners_are_unique_and_composition_only() {
             "crates/ferrum2-config/src/validation.rs",
         ),
         ("struct", "DnsProxy", "crates/ferrum2-dns/src/proxy.rs"),
+        ("enum", "ProxyIngress", "crates/ferrum2-dns/src/proxy.rs"),
+        ("fn", "answer", "crates/ferrum2-dns/src/proxy.rs"),
         (
             "struct",
             "SystemDnsEgress",
@@ -2156,6 +2158,50 @@ fn runtime_and_library_owners_are_unique_and_composition_only() {
         check_no_sequences([source], &[&["Message", ":", ":", "from_vec"]])
             .unwrap_or_else(|error| panic!("DNS adapter parses wire: {error}"));
     }
+    let dns_sources: Vec<_> = sources
+        .iter()
+        .filter(|source| source.path.starts_with("crates/ferrum2-dns/src/"))
+        .collect();
+    check_no_identifiers(
+        dns_sources.iter().copied(),
+        &["DnsService", "DnsFramer", "DnsParser", "DnsQueryEngine"],
+    )
+    .unwrap_or_else(|error| panic!("DNS crate restored a delegating/duplicate module: {error}"));
+    let parser_owners: Vec<_> = dns_sources
+        .iter()
+        .filter(|source| {
+            has_tokens(
+                source.production_tokens().expect("DNS production tokens"),
+                &["Message", ":", ":", "from_vec"],
+            )
+        })
+        .map(|source| source.path.as_str())
+        .collect();
+    assert_eq!(
+        parser_owners,
+        ["crates/ferrum2-dns/src/proxy.rs"],
+        "DnsProxy::answer must remain the only DNS wire decoder"
+    );
+    let proxy = dns_sources
+        .iter()
+        .find(|source| source.path == "crates/ferrum2-dns/src/proxy.rs")
+        .expect("DNS proxy owner")
+        .production_tokens()
+        .expect("DNS proxy production tokens");
+    assert_eq!(
+        proxy
+            .windows(4)
+            .filter(|window| *window == ["HickoryTcpStream", ":", ":", "from_stream"])
+            .count(),
+        1,
+        "DnsProxy listeners must retain one Hickory TCP framer"
+    );
+    let server_dns = sources
+        .iter()
+        .find(|source| source.path == "bins/ferrum2-server/src/dns_egress.rs")
+        .expect("server DNS policy adapter");
+    check_no_identifiers([server_dns], &["DnsQueryType", "RecordType", "qtype"])
+        .unwrap_or_else(|error| panic!("server application DNS policy gained qtype: {error}"));
 }
 #[test]
 fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {

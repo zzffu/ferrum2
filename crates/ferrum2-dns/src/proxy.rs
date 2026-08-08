@@ -26,7 +26,16 @@ pub enum ProxyTransport {
     Tcp,
 }
 
-type SelectServer = dyn Fn(usize, ProxyTransport, &Name) -> Option<usize> + Send + Sync;
+/// Collision-free source identity for one client proxy query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProxyIngress {
+    /// A configured dedicated DNS listener.
+    Listener(usize),
+    /// An ordinary inbound serving a hijacked DNS query.
+    Ordinary(usize),
+}
+
+type SelectServer = dyn Fn(ProxyIngress, ProxyTransport, &Name, u16) -> Option<usize> + Send + Sync;
 
 /// Hickory-backed DNS proxy request seam.
 pub struct DnsProxy {
@@ -143,7 +152,10 @@ impl DnsProxy {
     /// Binds one validated first-match selector to one tagged resolver graph.
     pub fn new(
         resolver: Arc<TaggedResolver>,
-        select: impl Fn(usize, ProxyTransport, &Name) -> Option<usize> + Send + Sync + 'static,
+        select: impl Fn(ProxyIngress, ProxyTransport, &Name, u16) -> Option<usize>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         Self {
             resolver,
@@ -153,21 +165,21 @@ impl DnsProxy {
 
     /// Parses, selects, resolves and encodes one DNS message through Hickory.
     ///
-    /// `None` means no client identity could safely be recovered.
+    /// `None` means the supplied bytes could not be parsed as a DNS message.
     pub async fn answer(
         &self,
-        inbound: usize,
+        ingress: ProxyIngress,
         transport: ProxyTransport,
         wire: &[u8],
     ) -> Option<Vec<u8>> {
         let request = Message::from_vec(wire).ok()?;
-        let response = self.response(inbound, transport, &request).await;
+        let response = self.response(ingress, transport, &request).await;
         encode_response(response, transport, request.max_payload())
     }
 
     async fn response(
         &self,
-        inbound: usize,
+        ingress: ProxyIngress,
         transport: ProxyTransport,
         request: &Message,
     ) -> Message {
@@ -182,7 +194,12 @@ impl DnsProxy {
         if query.query_class() != DNSClass::IN {
             return error_response(request, ResponseCode::Refused);
         }
-        let Some(server) = (self.select)(inbound, transport, query.name()) else {
+        let Some(server) = (self.select)(
+            ingress,
+            transport,
+            query.name(),
+            u16::from(query.query_type()),
+        ) else {
             return error_response(request, ResponseCode::ServFail);
         };
         match self.resolver.query(server, request.clone()).await {
@@ -242,7 +259,7 @@ async fn udp_loop(
             _ = cancelled(&mut cancel) => return Ok(()),
         };
         let response = tokio::select! {
-            response = proxy.answer(inbound, ProxyTransport::Udp, &request[..length]) => response,
+            response = proxy.answer(ProxyIngress::Listener(inbound), ProxyTransport::Udp, &request[..length]) => response,
             _ = cancelled(&mut cancel) => return Ok(()),
         };
         if let Some(response) = response {
@@ -311,7 +328,11 @@ async fn tcp_connection(
             return;
         };
         let Some(response) = proxy
-            .answer(inbound, ProxyTransport::Tcp, request.bytes())
+            .answer(
+                ProxyIngress::Listener(inbound),
+                ProxyTransport::Tcp,
+                request.bytes(),
+            )
             .await
         else {
             return;
