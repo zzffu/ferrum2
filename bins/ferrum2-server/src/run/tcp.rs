@@ -9,13 +9,14 @@ use ferrum2_core::route::{Network, RouteMetadata, RouteProgramAction, RouteTable
 use ferrum2_core::{DomainName, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr};
 use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
-    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
+    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord,
+    Transport as ObservationTransport, emit,
 };
 use ferrum2_runtime::{
     AcceptListener, BoundedSupervisor, CancellationToken, DirectOutbound, OwnerRegistry,
     PrefixDecision, PreparedProcessRoot, ProcessCancellation, ProcessFuture, RelayRunError,
-    RuntimeTcpStream, SniffPrefixOutcome, SystemSocketInspector, SystemTcpDialer, TcpConnector,
-    collect_sniff_prefix, relay_lifecycle,
+    RuntimeTcpStream, SniffPrefix, SniffPrefixOutcome, SystemSocketInspector, SystemTcpDialer,
+    TcpConnector, collect_sniff_prefix, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{MethodKeyAdapter, PlainDuplex, ShadowsocksTcpInbound, TcpReplayStore};
 use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress, Protocol, Transport};
@@ -26,7 +27,7 @@ use super::RunError;
 use super::dns_egress;
 use super::observation::{
     finish_relay, observation_for_direct_connect, observation_for_error, record_failure,
-    run_error_for_supervisor, update_replay_metric,
+    record_sniff, run_error_for_supervisor, update_replay_metric,
 };
 use super::tokio_io::{TokioFramed, TokioTransport};
 
@@ -233,34 +234,50 @@ enum TcpRouteFailure {
     Read,
 }
 
-struct TcpRouteSelection {
+struct TcpRouteSelection<P> {
     terminal: ServerTerminalRoute,
-    collected_prefix: Option<Vec<u8>>,
+    prefix: TcpRoutePrefix<P>,
 }
 
-async fn select_tcp_route<F, C>(
-    routing: &ServerRouting,
-    inbound: usize,
+enum TcpRoutePrefix<P> {
+    Initial(P),
+    Collected(SniffPrefix<P>),
+}
+
+impl<P: AsRef<[u8]>> AsRef<[u8]> for TcpRoutePrefix<P> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Initial(prefix) => prefix.as_ref(),
+            Self::Collected(prefix) => prefix.as_ref(),
+        }
+    }
+}
+
+async fn select_tcp_route<F, C, P>(
+    context: &ServerContext,
     target: &TargetAddr,
     stream: &mut F,
-    initial_payload: &[u8],
+    initial_payload: P,
     cancellation: C,
-) -> Result<TcpRouteSelection, TcpRouteFailure>
+) -> Result<TcpRouteSelection<P>, TcpRouteFailure>
 where
     F: PlainDuplex + Unpin,
     C: std::future::Future,
+    P: AsRef<[u8]>,
 {
-    let Some(program) = routing.program() else {
+    let mut prefix = TcpRoutePrefix::Initial(initial_payload);
+    let Some(program) = context.routing.program() else {
         return Ok(TcpRouteSelection {
-            terminal: routing.legacy(inbound, Network::Tcp, target),
-            collected_prefix: None,
+            terminal: context
+                .routing
+                .legacy(context.inbound, Network::Tcp, target),
+            prefix,
         });
     };
-    let mut evaluation = program.evaluate(inbound, Network::Tcp, target);
+    let mut evaluation = program.evaluate(context.inbound, Network::Tcp, target);
     let mut protocol = None;
     let mut domain = None;
     let mut sniffed = false;
-    let mut collected_prefix = None;
     tokio::pin!(cancellation);
 
     loop {
@@ -272,16 +289,25 @@ where
                 sniffed = true;
                 let order = sniff_order(sniffers, Network::Tcp);
                 let mut progress = ferrum2_sniff::sniff(
-                    initial_payload,
+                    prefix.as_ref(),
                     program.sniff.max_bytes,
                     Transport::Tcp,
                     target.port().get(),
                     &order,
                 );
+                let mut collector = None;
                 if progress == SniffProgress::NeedMore {
-                    let prefix = collect_sniff_prefix(
-                        initial_payload.to_vec(),
+                    let initial = match prefix {
+                        TcpRoutePrefix::Initial(initial) => initial,
+                        TcpRoutePrefix::Collected(_) => {
+                            unreachable!("validated route program sniffs at most once")
+                        }
+                    };
+                    let collected = collect_sniff_prefix(
+                        initial,
                         program.sniff.max_bytes,
+                        program.sniff.max_aggregate_bytes,
+                        &context.registry,
                         program.sniff.timeout,
                         cancellation.as_mut(),
                         |context, destination| {
@@ -303,21 +329,29 @@ where
                         },
                     )
                     .await;
-                    let (prefix, outcome) = prefix.into_parts();
+                    let outcome = collected.outcome();
                     match outcome {
                         SniffPrefixOutcome::Complete => {
                             progress = ferrum2_sniff::sniff(
-                                &prefix,
+                                collected.as_ref(),
                                 program.sniff.max_bytes,
                                 Transport::Tcp,
                                 target.port().get(),
                                 &order,
                             );
                         }
-                        SniffPrefixOutcome::Timeout | SniffPrefixOutcome::Limit => {
+                        SniffPrefixOutcome::Timeout
+                        | SniffPrefixOutcome::Limit
+                        | SniffPrefixOutcome::Unavailable => {
                             progress = SniffProgress::NoMatch;
                         }
                         SniffPrefixOutcome::Cancelled | SniffPrefixOutcome::ReadError => {
+                            record_sniff(
+                                &context.metrics,
+                                ObservationTransport::Tcp,
+                                progress,
+                                Some(outcome),
+                            );
                             let _ = stream.mark_abortive_plain();
                             return Err(match outcome {
                                 SniffPrefixOutcome::Cancelled => TcpRouteFailure::Cancelled,
@@ -326,8 +360,15 @@ where
                             });
                         }
                     }
-                    collected_prefix = Some(prefix);
+                    collector = Some(outcome);
+                    prefix = TcpRoutePrefix::Collected(collected);
                 }
+                record_sniff(
+                    &context.metrics,
+                    ObservationTransport::Tcp,
+                    progress.clone(),
+                    collector,
+                );
                 (protocol, domain) = route_metadata(progress);
             }
             RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
@@ -335,18 +376,15 @@ where
                 let _ = stream.mark_abortive_plain();
                 return Ok(TcpRouteSelection {
                     terminal: ServerTerminalRoute::Reject,
-                    collected_prefix,
+                    prefix,
                 });
             }
             RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
-                let terminal = routing.terminal(action);
+                let terminal = context.routing.terminal(action);
                 if terminal == ServerTerminalRoute::Reject {
                     let _ = stream.mark_abortive_plain();
                 }
-                return Ok(TcpRouteSelection {
-                    terminal,
-                    collected_prefix,
-                });
+                return Ok(TcpRouteSelection { terminal, prefix });
             }
         }
     }
@@ -417,11 +455,10 @@ async fn server_connection(
         reply,
     } = session;
     let selection = select_tcp_route(
-        &context.routing,
-        context.inbound,
+        &context,
         &target,
         &mut stream,
-        &initial_payload,
+        initial_payload,
         cancellation.cancelled(),
     )
     .await;
@@ -447,10 +484,7 @@ async fn server_connection(
             .active_connections_dec(Role::Server, Inbound::Shadowsocks);
         return;
     }
-    let prefix = selection
-        .collected_prefix
-        .as_deref()
-        .unwrap_or(&initial_payload);
+    let prefix = selection.prefix;
     let direct = DirectOutbound::new(TcpConnector::with_resolution_adapters(
         SystemSocketInspector,
         SystemTcpDialer,
@@ -460,11 +494,12 @@ async fn server_connection(
     let opened = open_and_prefix(
         &direct,
         &target,
-        prefix,
+        prefix.as_ref(),
         context.runtime.idle_timeout,
         cancellation.cancelled(),
     )
     .await;
+    drop(prefix);
     let (mut target_stream, initial_payload_bytes) = match opened {
         Ok(opened) => opened,
         Err(DirectFlowError::CancelledBeforeOpen) => {

@@ -179,7 +179,7 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
 }
 
 #[test]
-fn schema_v2_check_succeeds_but_run_fails_before_runtime_resources() {
+fn schema_v2_check_succeeds_while_client_latch_and_server_runtime_fail_closed() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (client_listener, client_address) = reserve_loopback();
     let (server_listener, server_udp, server_address) = reserve_server_tcp_udp();

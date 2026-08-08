@@ -3,15 +3,18 @@ use std::sync::Arc;
 use ferrum2_config::LoggingLevel;
 use ferrum2_core::ConnectErrorKind;
 use ferrum2_observability::{
-    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord, emit,
+    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, SniffOutcome,
+    SniffProtocol, Stage, TraceRecord, Transport, emit,
 };
 use ferrum2_runtime::{
     MetricsEndpoint, MetricsEndpointError, OwnerRegistry, PreparedProcessRoot, ProcessCancellation,
-    ProcessFuture, RelayFailure, RelayRunError, SupervisorError, UdpRuntimeError,
+    ProcessFuture, RelayFailure, RelayRunError, SniffPrefixOutcome, SupervisorError,
+    UdpRuntimeError,
 };
 use ferrum2_shadowsocks::{
     DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason, ShadowsocksError, UdpPacketError,
 };
+use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress};
 use tokio::net::TcpListener;
 
 use super::RunError;
@@ -74,6 +77,47 @@ fn run_error_for_metrics(error: MetricsEndpointError) -> RunError {
 pub(super) fn record_udp_request_accepted(metrics: &Metrics, wire_len: usize) {
     metrics.udp_datagram(Role::Server, Direction::ClientToTarget, Outcome::Accepted);
     metrics.add_udp_bytes(Role::Server, Direction::ClientToTarget, wire_len as u64);
+}
+
+pub(super) fn record_sniff(
+    metrics: &Metrics,
+    transport: Transport,
+    progress: SniffProgress,
+    collector: Option<SniffPrefixOutcome>,
+) {
+    let (outcome, protocol) = sniff_observation(progress, collector);
+    metrics.sniff(Role::Server, transport, outcome, protocol);
+}
+
+fn sniff_observation(
+    progress: SniffProgress,
+    collector: Option<SniffPrefixOutcome>,
+) -> (SniffOutcome, SniffProtocol) {
+    match collector {
+        Some(SniffPrefixOutcome::Timeout) => return (SniffOutcome::Timeout, SniffProtocol::None),
+        Some(SniffPrefixOutcome::Limit) => return (SniffOutcome::Limit, SniffProtocol::None),
+        Some(
+            SniffPrefixOutcome::Cancelled
+            | SniffPrefixOutcome::ReadError
+            | SniffPrefixOutcome::Unavailable,
+        ) => return (SniffOutcome::Unavailable, SniffProtocol::None),
+        Some(SniffPrefixOutcome::Complete) | None => {}
+    }
+    match progress {
+        SniffProgress::Matched(SniffMetadata::Dns { .. }) => {
+            (SniffOutcome::Matched, SniffProtocol::Dns)
+        }
+        SniffProgress::Matched(SniffMetadata::Tls { .. }) => {
+            (SniffOutcome::Matched, SniffProtocol::Tls)
+        }
+        SniffProgress::Matched(SniffMetadata::Http { .. }) => {
+            (SniffOutcome::Matched, SniffProtocol::Http)
+        }
+        SniffProgress::NoMatch | SniffProgress::NeedMore => {
+            (SniffOutcome::Unknown, SniffProtocol::None)
+        }
+        SniffProgress::Invalid => (SniffOutcome::Invalid, SniffProtocol::None),
+    }
 }
 
 pub(super) fn update_udp_resource_metrics(metrics: &Metrics, registry: &OwnerRegistry) {
@@ -338,7 +382,10 @@ fn reason_for_connect(kind: ConnectErrorKind) -> Reason {
 
 #[cfg(test)]
 mod tests {
+    use ferrum2_observability::{SniffOutcome, SniffProtocol};
+    use ferrum2_runtime::SniffPrefixOutcome;
     use ferrum2_shadowsocks::TransportPhase;
+    use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress};
 
     use super::*;
 
@@ -397,6 +444,70 @@ mod tests {
             observation_for_terminal(FlowTerminal::Normal),
             (Stage::Relay, Outcome::Completed, None)
         );
+    }
+
+    #[test]
+    fn sniff_observation_mapping_keeps_parser_and_collector_outcomes_closed() {
+        for (progress, collector, expected) in [
+            (
+                SniffProgress::Matched(SniffMetadata::Dns {
+                    domain: "secret.example".to_owned(),
+                }),
+                None,
+                (SniffOutcome::Matched, SniffProtocol::Dns),
+            ),
+            (
+                SniffProgress::Matched(SniffMetadata::Tls {
+                    domain: Some("outer.example".to_owned()),
+                }),
+                Some(SniffPrefixOutcome::Complete),
+                (SniffOutcome::Matched, SniffProtocol::Tls),
+            ),
+            (
+                SniffProgress::Matched(SniffMetadata::Http {
+                    domain: Some("host.example".to_owned()),
+                }),
+                None,
+                (SniffOutcome::Matched, SniffProtocol::Http),
+            ),
+            (
+                SniffProgress::NoMatch,
+                None,
+                (SniffOutcome::Unknown, SniffProtocol::None),
+            ),
+            (
+                SniffProgress::Invalid,
+                None,
+                (SniffOutcome::Invalid, SniffProtocol::None),
+            ),
+            (
+                SniffProgress::NeedMore,
+                Some(SniffPrefixOutcome::Timeout),
+                (SniffOutcome::Timeout, SniffProtocol::None),
+            ),
+            (
+                SniffProgress::NeedMore,
+                Some(SniffPrefixOutcome::Limit),
+                (SniffOutcome::Limit, SniffProtocol::None),
+            ),
+            (
+                SniffProgress::NeedMore,
+                Some(SniffPrefixOutcome::ReadError),
+                (SniffOutcome::Unavailable, SniffProtocol::None),
+            ),
+            (
+                SniffProgress::NeedMore,
+                Some(SniffPrefixOutcome::Cancelled),
+                (SniffOutcome::Unavailable, SniffProtocol::None),
+            ),
+            (
+                SniffProgress::NeedMore,
+                Some(SniffPrefixOutcome::Unavailable),
+                (SniffOutcome::Unavailable, SniffProtocol::None),
+            ),
+        ] {
+            assert_eq!(sniff_observation(progress, collector), expected);
+        }
     }
 
     fn detection_cases() -> [(DetectionReason, Reason); 18] {

@@ -1229,6 +1229,214 @@ fn server_consumes_typed_routes_through_one_runtime_prefix_collector() {
     let server_manifest =
         fs::read_to_string(root.join("bins/ferrum2-server/Cargo.toml")).expect("server manifest");
     assert!(server_manifest.contains("ferrum2-sniff.workspace = true"));
+
+    let position = |tokens: &[String], sequence: &[&str], start: usize| {
+        tokens[start..]
+            .windows(sequence.len())
+            .position(|window| {
+                window
+                    .iter()
+                    .map(String::as_str)
+                    .eq(sequence.iter().copied())
+            })
+            .map(|offset| start + offset)
+    };
+    let check_udp_order = |tokens: &[String]| -> Result<(), String> {
+        let prepare = position(tokens, &["prepare_request", "("], 0)
+            .ok_or("missing authenticated UDP prepare")?;
+        let select = position(tokens, &["select_udp_route", "("], prepare + 1)
+            .ok_or("UDP policy precedes prepare")?;
+        let reject = position(
+            tokens,
+            &[
+                "if",
+                "terminal",
+                "=",
+                "=",
+                "ServerTerminalRoute",
+                ":",
+                ":",
+                "Reject",
+            ],
+            select + 1,
+        )
+        .ok_or("missing immediate UDP terminal split")?;
+        let legacy = position(
+            tokens,
+            &["if", "routing", ".", "program", "(", ")", ".", "is_none"],
+            reject + 1,
+        )
+        .ok_or("legacy reject no-mutation gate moved")?;
+        let commits: Vec<_> = tokens
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, window)| {
+                (index > select && window[0] == "commit_request" && window[1] == "(")
+                    .then_some(index)
+            })
+            .collect();
+        let reserves: Vec<_> = tokens
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, window)| {
+                (index > select && window[0] == "reserve_udp_direct" && window[1] == "(")
+                    .then_some(index)
+            })
+            .collect();
+        let prunes: Vec<_> = tokens
+            .windows(4)
+            .enumerate()
+            .filter_map(|(index, window)| {
+                (index > select
+                    && window[0] == "mappings"
+                    && window[1] == "."
+                    && window[2] == "prune_protocol"
+                    && window[3] == "(")
+                    .then_some(index)
+            })
+            .collect();
+        let orphan_cap = position(tokens, &["mappings", ".", "orphan_count", "("], select + 1)
+            .ok_or("missing typed-reject orphan cap")?;
+        if commits.len() != 3
+            || reserves.len() != 2
+            || prunes.len() < 2
+            || !(select < reject
+                && reject < legacy
+                && legacy < prunes[0]
+                && prunes[0] < orphan_cap
+                && orphan_cap < commits[0]
+                && commits[0] < prunes[1]
+                && prunes[1] < reserves[0]
+                && reserves[0] < commits[1]
+                && commits[1] < reserves[1]
+                && reserves[1] < commits[2])
+        {
+            return Err(format!(
+                "UDP prepare/select/reject/direct reservation order changed: select={select} reject={reject} legacy={legacy} prunes={prunes:?} orphan_cap={orphan_cap} commits={commits:?} reserves={reserves:?}"
+            ));
+        }
+        Ok(())
+    };
+    check_udp_order(udp).unwrap_or_else(|error| panic!("{error}"));
+
+    let check_tcp_boundary = |tokens: &[String]| -> Result<(), String> {
+        if tokens
+            .iter()
+            .filter(|token| token.as_str() == "poll_read_plain")
+            .count()
+            != 1
+            || tokens
+                .windows(2)
+                .filter(|window| window[0] == "collect_sniff_prefix" && window[1] == "(")
+                .count()
+                != 1
+        {
+            return Err("TCP restored an alias read loop or second collector".to_owned());
+        }
+        let function = position(tokens, &["async", "fn", "server_connection"], 0)
+            .ok_or("missing server connection")?;
+        let body_start = tokens[function..]
+            .iter()
+            .position(|token| token == "{")
+            .map(|offset| function + offset)
+            .ok_or("missing server connection body")?;
+        let body_end = balanced_end(tokens, body_start, "{", "}")
+            .ok_or("unbalanced server connection body")?;
+        let body = &tokens[body_start..body_end];
+        let authenticate = position(body, &["inbound", ".", "accept", "("], 0)
+            .ok_or("missing SIP022 authentication")?;
+        let select = position(body, &["select_tcp_route", "("], 0)
+            .ok_or("missing post-auth route selection")?;
+        if authenticate >= select
+            || has_tokens(body, &["ferrum2_sniff", "::", "sniff", "("])
+            || has_tokens(body, &["collect_sniff_prefix", "("])
+        {
+            return Err("TCP sniff moved before authentication or escaped its selector".to_owned());
+        }
+        Ok(())
+    };
+    check_tcp_boundary(tcp).unwrap_or_else(|error| panic!("{error}"));
+    let observation = TokenSource::new(
+        "bins/ferrum2-server/src/run/observation.rs",
+        &fs::read_to_string(root.join("bins/ferrum2-server/src/run/observation.rs"))
+            .expect("server observation"),
+    );
+    let observation = observation
+        .production_tokens()
+        .expect("server observation production tokens");
+    assert_eq!(
+        observation
+            .windows(2)
+            .filter(|window| window[0] == "fn" && window[1] == "record_sniff")
+            .count(),
+        1,
+        "sniff telemetry must keep one server mapping seam"
+    );
+    assert_eq!(
+        observation
+            .windows(4)
+            .filter(|window| {
+                window[0] == "metrics"
+                    && window[1] == "."
+                    && window[2] == "sniff"
+                    && window[3] == "("
+            })
+            .count(),
+        1,
+        "server observation must emit one closed sniff tuple"
+    );
+    assert_eq!(
+        tcp.windows(2)
+            .filter(|window| window[0] == "record_sniff" && window[1] == "(")
+            .count(),
+        2,
+        "TCP must cover fatal and continuing sniff terminals"
+    );
+    assert_eq!(
+        udp.windows(2)
+            .filter(|window| window[0] == "record_sniff" && window[1] == "(")
+            .count(),
+        1,
+        "UDP must emit once after authenticated borrow-sniff"
+    );
+
+    let mut reordered_udp = udp.to_vec();
+    let prepare = position(&reordered_udp, &["prepare_request", "("], 0).expect("prepare token");
+    let select = position(&reordered_udp, &["select_udp_route", "("], 0).expect("select token");
+    reordered_udp.swap(prepare, select);
+    assert!(
+        check_udp_order(&reordered_udp).is_err(),
+        "UDP prepare/select reorder mutation survived"
+    );
+    let mut aliased_tcp = tcp.to_vec();
+    aliased_tcp.extend(["poll_read_plain".to_owned(), "(".to_owned()]);
+    assert!(
+        check_tcp_boundary(&aliased_tcp).is_err(),
+        "second plaintext read-loop mutation survived"
+    );
+    let mut preauth_tcp = tcp.to_vec();
+    let function = position(&preauth_tcp, &["async", "fn", "server_connection"], 0)
+        .expect("server connection token");
+    let authenticate = position(&preauth_tcp, &["accept", "("], function).expect("accept token");
+    let select = position(&preauth_tcp, &["select_tcp_route", "("], function)
+        .expect("route selection token");
+    preauth_tcp.swap(authenticate, select);
+    assert!(
+        check_tcp_boundary(&preauth_tcp).is_err(),
+        "pre-auth TCP sniff mutation survived"
+    );
+    let check_run_latch = |tokens: &[String]| {
+        (!tokens.iter().any(|token| token == "schema_version"))
+            .then_some(())
+            .ok_or("server schema latch restored")
+    };
+    check_run_latch(run).unwrap_or_else(|error| panic!("{error}"));
+    let mut latched_run = run.to_vec();
+    latched_run.push("schema_version".to_owned());
+    assert!(
+        check_run_latch(&latched_run).is_err(),
+        "schema latch mutation survived"
+    );
 }
 
 #[test]
@@ -1488,6 +1696,7 @@ fn production_owner_dependencies_are_explicit_and_narrow() {
                     "observation_for_direct_connect",
                     "observation_for_error",
                     "record_failure",
+                    "record_sniff",
                     "record_udp_failure",
                     "record_udp_protocol_failure",
                     "record_udp_request_accepted",

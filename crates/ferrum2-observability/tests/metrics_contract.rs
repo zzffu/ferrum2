@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use ferrum2_observability::{Direction, Inbound, Metrics, Outcome, Reason, Role, Stage};
+use ferrum2_observability::{
+    Direction, Inbound, Metrics, Outcome, Reason, Role, SniffOutcome, SniffProtocol, Stage,
+    Transport,
+};
 
 fn series(output: &str) -> BTreeSet<String> {
     output
@@ -192,6 +195,39 @@ fn udp_secret_and_identity_sentinels_cannot_change_series_identity() {
         ]
     );
     for sentinel in SENTINELS {
+        assert!(!output.contains(sentinel));
+    }
+}
+
+#[test]
+fn sniff_metrics_are_one_closed_redacted_tuple_per_authenticated_attempt() {
+    let metrics = Metrics::new();
+    for (outcome, protocol) in [
+        (SniffOutcome::Matched, SniffProtocol::Dns),
+        (SniffOutcome::Unknown, SniffProtocol::None),
+        (SniffOutcome::Timeout, SniffProtocol::None),
+        (SniffOutcome::Limit, SniffProtocol::None),
+        (SniffOutcome::Invalid, SniffProtocol::None),
+        (SniffOutcome::Unavailable, SniffProtocol::None),
+    ] {
+        metrics.sniff(Role::Server, Transport::Tcp, outcome, protocol);
+    }
+    let output = metrics.encode_text().expect("sniff metrics");
+    let sniff = series(&output)
+        .into_iter()
+        .filter(|sample| sample.starts_with("ferrum2_sniff"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(sniff.len(), 6);
+    assert!(sniff.contains(
+        "ferrum2_sniff_total{role=\"server\",transport=\"tcp\",stage=\"sniff\",outcome=\"matched\",protocol=\"dns\"}"
+    ));
+    for sentinel in [
+        "secret.example",
+        "Host: secret.example",
+        "192.0.2.1:443",
+        "route-tag",
+        "rule-7",
+    ] {
         assert!(!output.contains(sentinel));
     }
 }
