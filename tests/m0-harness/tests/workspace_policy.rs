@@ -61,6 +61,7 @@ ferrum2-observability|0.1.0||
 ferrum2-runtime|0.1.0||
 ferrum2-server|0.1.0||
 ferrum2-shadowsocks|0.1.0||
+ferrum2-sniff|0.1.0||
 ferrum2-socks5|0.1.0||
 find-msvc-tools|0.1.9|registry+https://github.com/rust-lang/crates.io-index|5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582
 fnv|1.0.7|registry+https://github.com/rust-lang/crates.io-index|3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1
@@ -84,6 +85,7 @@ hickory-proto|0.26.1|registry+https://github.com/rust-lang/crates.io-index|0bab3
 hickory-resolver|0.26.1|registry+https://github.com/rust-lang/crates.io-index|f0d58d28879ceecde6607729660c2667a081ccdc082e082675042793960f178c
 hickory-server|0.26.1|registry+https://github.com/rust-lang/crates.io-index|130236ba6abba90da6a7acf7a87b27d862b592c3145dc74bc47bf86d8ff198ec
 http|1.5.0|registry+https://github.com/rust-lang/crates.io-index|918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0
+httparse|1.10.1|registry+https://github.com/rust-lang/crates.io-index|6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87
 hybrid-array|0.4.13|registry+https://github.com/rust-lang/crates.io-index|818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c
 icu_collections|2.2.0|registry+https://github.com/rust-lang/crates.io-index|2984d1cd16c883d7935b9e07e44071dca8d917fd52ecc02c04d5fa0b5a3f191c
 icu_locale_core|2.2.0|registry+https://github.com/rust-lang/crates.io-index|92219b62b3e2b4d88ac5119f8904c10f8f61bf7e95b640d25ba3075e6cac2c29
@@ -382,8 +384,8 @@ fn approved_lock_identities() -> Vec<LockIdentity> {
         .collect();
     assert_eq!(
         identities.len(),
-        222,
-        "the approved workspace baseline must contain 222 identities"
+        224,
+        "the approved workspace baseline must contain 224 identities"
     );
     let mut sorted = identities.clone();
     sorted.sort();
@@ -623,6 +625,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "futures-util = { version = \"=0.3.33\", default-features = false, features = [\"std\"] }",
         "rustls = { version = \"=0.23.43\", default-features = false, features = [\"ring\", \"std\", \"tls12\"] }",
         "tokio-rustls = { version = \"=0.26.4\", default-features = false, features = [\"ring\"] }",
+        "httparse = { version = \"=1.10.1\", default-features = false }",
         "aes-gcm = { version = \"=0.11.0\", default-features = false, features = [\"aes\", \"bytes\", \"zeroize\"] }",
         "chacha20poly1305 = { version = \"=0.11.0\", default-features = false, features = [\"bytes\", \"zeroize\"] }",
         "blake3 = { version = \"=1.8.5\", default-features = false, features = [\"std\", \"zeroize\"] }",
@@ -665,6 +668,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "ferrum2-observability",
         "ferrum2-runtime",
         "ferrum2-shadowsocks",
+        "ferrum2-sniff",
         "ferrum2-socks5",
         "futures-util",
         "getrandom",
@@ -673,6 +677,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "hickory-proto",
         "hickory-resolver",
         "hickory-server",
+        "httparse",
         "ipnet",
         "prometheus-client",
         "rustls",
@@ -753,6 +758,80 @@ fn core_ipnet_edge_is_exact_no_default_and_adds_no_identity() {
     assert_eq!(
         lock_package_dependencies(&lock, "ferrum2-core").expect("core lock dependencies"),
         BTreeSet::from(["bytes".to_owned(), "ipnet".to_owned()])
+    );
+}
+
+#[test]
+fn sniff_parser_edges_and_resolved_features_are_exact() {
+    let root = workspace_root();
+    let manifest =
+        fs::read_to_string(root.join("crates/ferrum2-sniff/Cargo.toml")).expect("sniff manifest");
+    assert_eq!(
+        dependency_table(&manifest, "[dependencies]").expect("sniff dependencies"),
+        BTreeMap::from([
+            ("hickory-proto.workspace".to_owned(), "true".to_owned()),
+            ("httparse.workspace".to_owned(), "true".to_owned()),
+            ("rustls.workspace".to_owned(), "true".to_owned()),
+        ])
+    );
+
+    let metadata = metadata();
+    let packages = metadata["packages"].as_array().expect("packages");
+    let sniff = packages
+        .iter()
+        .find(|package| package["name"] == "ferrum2-sniff")
+        .expect("sniff package");
+    assert_eq!(sniff["features"], serde_json::json!({}));
+    for (name, version, features) in [
+        ("hickory-proto", "=0.26.1", &["std"][..]),
+        ("httparse", "=1.10.1", &[][..]),
+        ("rustls", "=0.23.43", &["ring", "std", "tls12"][..]),
+    ] {
+        let edge = sniff["dependencies"]
+            .as_array()
+            .expect("sniff dependencies")
+            .iter()
+            .find(|dependency| dependency["name"] == name)
+            .unwrap_or_else(|| panic!("missing sniff dependency {name}"));
+        assert_eq!(edge["req"], version);
+        assert_eq!(edge["kind"], Value::Null);
+        assert_eq!(edge["uses_default_features"], false);
+        assert_eq!(edge["features"], serde_json::json!(features));
+    }
+
+    let httparse_id = unique_registry_package_id(&metadata, "httparse", "1.10.1");
+    let httparse = packages
+        .iter()
+        .find(|package| package["id"] == httparse_id)
+        .expect("httparse package");
+    assert_eq!(
+        httparse["source"],
+        "registry+https://github.com/rust-lang/crates.io-index"
+    );
+    assert_eq!(httparse["license"], "MIT OR Apache-2.0");
+    assert_eq!(httparse["rust_version"], Value::Null);
+    assert_eq!(
+        resolve_node(&metadata, &httparse_id)["features"],
+        serde_json::json!([]),
+        "the no-default sniff edge must not enable httparse's std feature"
+    );
+    assert!(
+        httparse["dependencies"]
+            .as_array()
+            .expect("httparse dependencies")
+            .iter()
+            .all(|dependency| dependency["kind"] == "dev"),
+        "httparse must have no normal or build dependency"
+    );
+
+    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock");
+    assert_eq!(
+        lock_package_dependencies(&lock, "ferrum2-sniff").expect("sniff lock dependencies"),
+        BTreeSet::from([
+            "hickory-proto".to_owned(),
+            "httparse".to_owned(),
+            "rustls".to_owned(),
+        ])
     );
 }
 
@@ -1975,8 +2054,8 @@ fn lock_package_identities_exactly_match_the_approved_workspace_baseline() {
 
     assert_eq!(
         actual.len(),
-        222,
-        "candidate lock must contain 222 packages"
+        224,
+        "candidate lock must contain 224 packages"
     );
     assert_eq!(
         actual, expected,

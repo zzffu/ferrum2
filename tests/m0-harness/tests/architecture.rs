@@ -5,7 +5,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const CURRENT_COMPATIBILITY_MEMBERS: [&str; 10] = [
+const CURRENT_COMPATIBILITY_MEMBERS: [&str; 11] = [
     "bins/ferrum2-client",
     "bins/ferrum2-server",
     "crates/ferrum2-config",
@@ -14,6 +14,7 @@ const CURRENT_COMPATIBILITY_MEMBERS: [&str; 10] = [
     "crates/ferrum2-observability",
     "crates/ferrum2-runtime",
     "crates/ferrum2-shadowsocks",
+    "crates/ferrum2-sniff",
     "crates/ferrum2-socks5",
     "tests/m0-harness",
 ];
@@ -641,6 +642,7 @@ fn current_deep_modules_keep_one_way_internal_dependencies() {
             "ferrum2-shadowsocks",
             BTreeSet::from(["ferrum2-core", "ferrum2-crypto"]),
         ),
+        ("ferrum2-sniff", BTreeSet::new()),
         ("ferrum2-socks5", BTreeSet::from(["ferrum2-core"])),
     ]
     .into_iter()
@@ -698,6 +700,55 @@ fn current_deep_modules_keep_one_way_internal_dependencies() {
     let public =
         fs::read_to_string(root.join("crates/ferrum2-dns/src/lib.rs")).expect("DNS public module");
     assert!(public.contains("DnsUpstreamSpec"));
+
+    let sniff = token_sources_under(&root, &["crates/ferrum2-sniff/src"]);
+    check_no_identifiers(
+        &sniff,
+        &[
+            "unsafe",
+            "async",
+            "spawn",
+            "TcpListener",
+            "TcpStream",
+            "UdpSocket",
+            "ToSocketAddrs",
+            "ServerConfig",
+            "ClientConnection",
+            "HashMap",
+            "dyn",
+            "trait",
+            "ferrum2_config",
+            "ferrum2_runtime",
+            "tracing",
+            "metrics",
+        ],
+    )
+    .unwrap_or_else(|error| panic!("pure sniff module gained runtime/registry ownership: {error}"));
+    assert_eq!(
+        sniff.len(),
+        1,
+        "sniff implementation must stay local to one owner"
+    );
+    let tokens = sniff[0]
+        .production_tokens()
+        .expect("sniff production tokens");
+    for required in [
+        &["Message", ":", ":", "read"][..],
+        &["Acceptor", ":", ":", "default"],
+        &["httparse", ":", ":", "Request", ":", ":", "new"],
+    ] {
+        assert!(
+            has_tokens(tokens, required),
+            "sniff module must retain reviewed upstream parser call {required:?}"
+        );
+    }
+    assert_eq!(
+        name_counts(tokens.windows(3).filter_map(|window| {
+            (window[0] == "pub" && window[1] == "fn").then_some(window[2].as_str())
+        })),
+        BTreeMap::from([("sniff".to_owned(), 1)]),
+        "sniff module exposes exactly one byte-slice function"
+    );
 }
 
 #[test]
