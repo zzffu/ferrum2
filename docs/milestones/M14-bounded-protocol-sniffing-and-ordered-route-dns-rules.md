@@ -132,7 +132,7 @@ repository。
 | M14-T06 | Extend DNS policy through the existing answering/resolver module | M14-T05 | done |
 | M14-T07 | Compose client route/reject/hijack and one-plan association UDP ownership | M14-T06 | done |
 | M14-T08 | Close real-process、security、lifecycle、architecture and qualification-tool evidence | M14-T07 | done |
-| M14-T09 | Qualify and close one exact M14 integration SHA | M14-T08 | ready |
+| M14-T09 | Qualify and close one exact M14 integration SHA | M14-T08 | in_progress |
 
 ```text
 M14-T01 contract/dependency/control
@@ -165,11 +165,13 @@ package、release and publication。
 
 ## Blocker / next action
 
-No blocker。T08 is accepted at exact integration `1b408741756f0cf14d77bdf76f12626b05de28f9`。
+Automatic run `31282591585/1` preserved a hosted qualification blocker on exact `9a7797f714536522910dd1c7fdee8b2998c9f071`：the native routed-UDP and CoreDNS/BIND client generators still emitted schema v1 after M14 made routed+enabled UDP an explicit schema-v2 migration。The unchanged SHA will not be rerun and manual performance remains undispatched。T09 now owns the two existing generators and one existing contract test for a test/tool-only descendant repair；no product、workflow、dependency or second harness change is authorized。
+
+T08 is accepted at exact integration `1b408741756f0cf14d77bdf76f12626b05de28f9`。
 Initial review and one bounded repair closed the broad process/tool gaps；targeted QA retained semantic
 TLS self-check and zero-port accepted-activity evidence。Two required independent
 `gpt-5.6-sol/xhigh` read-only analyses selected the same four-file existing-seam repair，and final targeted
 Architect/QA both returned `PASS` with every finding closed。Focused、Full、100+ lifecycle、docs and
 Rust 1.88 gates pass on the integration。Ticket and milestone footprint integrity/ratio pass；the accepted
 case/support/fixture deltas are `+1021/0/0` and `+5334/0/0`，with numeric file-size review retained。
-T09 is ready to bind this accepted integration and collect same-SHA local and hosted evidence。
+T09 will requalify the reviewed repair locally before one new-SHA automatic push。

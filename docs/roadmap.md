@@ -63,7 +63,7 @@ run [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144)
 resource run [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024)关闭。Owned
 egress-plan、DNS runtime dependency、private client egress及composition-root ownership完成整固；
 schema、wire、DNS/routing action和产品能力不变，final Architect/QA均`PASS`。
-M14现为`executing`：T01～T08已done，T09 ready。T08 exact integration `1b408741…`加入四条
+M14现为`executing`：T01～T08已done，T09 in progress。T08 exact integration `1b408741…`加入四条
 real-process route/sniff/reject/hijack证据、architecture mutation guards及同一qualification driver
 的M14 workload。Targeted QA在唯一bounded repair后保留TLS self-check与zero-port accepted oracle；
 两名required `gpt-5.6-sol/xhigh`独立只读代理均选择相同四文件修复，最终Architect/QA `PASS`。
@@ -71,7 +71,10 @@ Focused、Full、100+ lifecycle、docs、Rust 1.88及footprint integrity/ratio�
 `+1021/0/0`与milestone `+5334/0/0` numeric advisories已接受。Execute continuation已授权直至
 M14 close的required exact-SHA push及manual
 performance/resource dispatch；workflow仍禁止force-push、unchanged-SHA rerun、PR、tag、package、
-release和publication。
+release和publication。首个automatic run `31282591585/1`在exact `9a7797f…`保留为FAIL：三平台
+native route smoke及12个DNS interop cases暴露qualification generator仍以schema v1生成
+routed+enabled-UDP client；quality、MSRV、footprint通过，push-event performance正确skipped。
+该SHA不rerun，manual performance尚未dispatch；T09仅修复既有test/tool generator并在新SHA重新资格。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于

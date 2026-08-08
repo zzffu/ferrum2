@@ -1,5 +1,22 @@
 # CI 与验证状态
 
+## M14 executing — first automatic qualification preserved as failed
+
+- **Failed exact identity:** automatic push run
+  [`31282591585/1`](https://github.com/zzffu/ferrum2/actions/runs/31282591585) ran on
+  `9a7797f714536522910dd1c7fdee8b2998c9f071` and completed `failure`。Quality `93166197812`、
+  test-footprint `93166197751` and MSRV `93166197810` succeeded；performance `93166198181` was
+  correctly skipped for the push event。
+- **Failure partition:** Windows MSVC `93166197794`、Linux GNU `93166197823` and Linux musl
+  `93166197799` all failed with `process-exited-before-readiness`。Interop `93166197822` completed all
+  SIP022 TCP/UDP cases but all 12 CoreDNS/BIND DNS cases failed with the redacted
+  `schema_version` semantic error；aggregate qualification `93166628904` failed closed。
+- **Root cause / next action:** the existing native routed-UDP and DNS interop generators emitted
+  schema v1 for routed+enabled UDP after M14 made that combination an explicit schema-v2 migration。
+  Local `--check-config` reproductions return exit `2` for schema 1 and exit `0` after only changing
+  the generated schema to `2`。The failed SHA will not be rerun；manual performance has not been
+  dispatched。T09 will repair the existing generators on a new reviewed descendant SHA。
+
 ## M13 closed — architecture consolidation qualified without behavior change
 
 - **Exact identity:** qualified product `1af1bbf44b37a81c2ae03c562288b2a6e09694b5`，tree

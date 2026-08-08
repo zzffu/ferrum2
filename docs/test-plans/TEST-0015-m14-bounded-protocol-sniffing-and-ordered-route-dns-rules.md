@@ -323,6 +323,11 @@ git diff --check
 - After separate authorization，one non-force push must pass automatic quality、footprint、MSRV、Windows/
   GNU/musl、SIP022 and CoreDNS/BIND qualification。A separately authorized manual dispatch must pass the
   extended performance/resource job on the same exact SHA。
+- A hosted failure caused by a stale qualification-generated schema is preserved as failed evidence and
+  is not rerun。Repair only the existing generator on a new descendant SHA：native routed+enabled UDP and
+  CoreDNS/BIND routed-UDP clients must emit explicit schema v2，while non-routed legacy schema-v1 cases
+  remain unchanged。An existing contract test must mutation-kill either generator reverting to v1 before
+  the new SHA receives one automatic push；manual performance remains undispatched until that run passes。
 
 ## Test-footprint forecast
 
