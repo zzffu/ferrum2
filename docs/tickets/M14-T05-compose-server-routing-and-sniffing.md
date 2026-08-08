@@ -17,6 +17,7 @@ owns:
   - crates/ferrum2-runtime/src/lib.rs
   - crates/ferrum2-runtime/src/sniff.rs
   - tests/m0-harness/tests/architecture.rs
+  - tests/m0-harness/tests/config_cli.rs
 ---
 
 # M14-T05 — Compose server routing and sniffing
