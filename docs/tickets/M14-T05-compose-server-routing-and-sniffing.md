@@ -18,6 +18,7 @@ owns:
   - crates/ferrum2-runtime/src/sniff.rs
   - tests/m0-harness/tests/architecture.rs
   - tests/m0-harness/tests/config_cli.rs
+  - tests/m0-harness/tests/workspace_policy.rs
 ---
 
 # M14-T05 — Compose server routing and sniffing
