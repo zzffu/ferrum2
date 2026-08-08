@@ -472,6 +472,7 @@ name = "ferrum2-m4-qualification"
 version = "0.1.0"
 dependencies = [
  "hickory-proto",
+ "rustls",
  "socket2",
  "tempfile",
 ]

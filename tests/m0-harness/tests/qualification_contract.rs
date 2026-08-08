@@ -19,7 +19,9 @@ fn m14_performance_profile_extends_the_existing_resource_driver() {
     for phase in [
         "legacy-no-sniff-tcp",
         "legacy-no-sniff-udp",
+        "schema-v1-routed-udp-rejection",
         "64-rule",
+        "server-tls-sniff",
         "server-http-sniff",
         "association-route-once",
         "client-tcp-dns-hijack",
@@ -36,6 +38,20 @@ fn m14_performance_profile_extends_the_existing_resource_driver() {
         .expect("resource driver end")
         .0;
     assert!(resource.contains("run_m14_measurements("));
+    assert!(driver.contains("m14_tls_client_hello"));
+    assert!(driver.contains("action = \\\"reject\\\""));
+    for mutation in [
+        "missing M14 migration phase",
+        "empty M14 TLS ClientHello",
+        "non-distinguishing M14 terminal oracle",
+    ] {
+        assert!(
+            driver.contains(mutation),
+            "missing self-check mutation {mutation}"
+        );
+    }
+    let manifest = include_str!("../../../tools/ferrum2-m4-qualification/Cargo.toml");
+    assert!(manifest.contains("rustls.workspace = true"));
     assert!(!driver.contains("m14-threshold"));
     assert!(!driver.contains("m14-improvement"));
 }

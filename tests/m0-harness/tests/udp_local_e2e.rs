@@ -89,7 +89,12 @@ fn dns_udp_round_trip(
 
 #[test]
 fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
-    const CLIENT_ZERO: &str = "ferrum2_udp_sessions_active{role=\"client\"} 0";
+    const CLIENT_ZERO_SESSION: &str = "ferrum2_udp_sessions_active{role=\"client\"} 0";
+    const CLIENT_ZERO_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 0";
+    const SERVER_ZERO_SESSION: &str = "ferrum2_udp_sessions_active{role=\"server\"} 0";
+    const SERVER_ROOT_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"server\"} 262028";
+    const SERVER_ONE_SESSION: &str = "ferrum2_udp_sessions_active{role=\"server\"} 1";
+    const SERVER_ACTIVE_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"server\"} 327535";
 
     let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
     let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
@@ -156,7 +161,12 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
     let mut server =
         ChildGuard::spawn_while_holding("ferrum2-server", &server_config, &_spawn_guard);
     wait_for_tcp_udp_bound(&mut server, server_address);
-    wait_for_metrics(server_metrics);
+    let server_baseline = wait_for_metrics_sample(server_metrics, SERVER_ZERO_SESSION);
+    assert!(
+        server_baseline
+            .windows(SERVER_ROOT_BUFFER.len())
+            .any(|window| window == SERVER_ROOT_BUFFER.as_bytes())
+    );
     let mut client =
         ChildGuard::spawn_while_holding("ferrum2-client", &client_config, &_spawn_guard);
     wait_for_listener(&mut client, client_address);
@@ -228,10 +238,41 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
         malformed_echo.join().expect("malformed target join"),
         malformed
     );
+    let server_active = wait_for_metrics_sample(server_metrics, SERVER_ONE_SESSION);
+    assert!(
+        server_active
+            .windows(SERVER_ACTIVE_BUFFER.len())
+            .any(|window| window == SERVER_ACTIVE_BUFFER.as_bytes())
+    );
     drop((application, control));
 
-    let client_body = wait_for_metrics_sample(client_metrics, CLIENT_ZERO);
-    let server_body = wait_for_metrics(server_metrics);
+    let client_body = wait_for_metrics_sample(client_metrics, CLIENT_ZERO_SESSION);
+    assert!(
+        client_body
+            .windows(CLIENT_ZERO_BUFFER.len())
+            .any(|window| window == CLIENT_ZERO_BUFFER.as_bytes()),
+        "client UDP buffer owner did not reap"
+    );
+    thread::sleep(Duration::from_secs(61));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let server_body = loop {
+        let body = wait_for_metrics(server_metrics);
+        if body
+            .windows(SERVER_ZERO_SESSION.len())
+            .any(|window| window == SERVER_ZERO_SESSION.as_bytes())
+            && body
+                .windows(SERVER_ROOT_BUFFER.len())
+                .any(|window| window == SERVER_ROOT_BUFFER.as_bytes())
+        {
+            break body;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server UDP owners did not reap: {}",
+            String::from_utf8_lossy(&body)
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
     for sentinel in ["route.test", "reject.test", SYNTHETIC_PSK] {
         for body in [&client_body, &server_body] {
             assert!(

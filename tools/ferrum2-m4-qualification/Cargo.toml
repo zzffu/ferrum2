@@ -13,6 +13,7 @@ test = false
 
 [dependencies]
 hickory-proto.workspace = true
+rustls.workspace = true
 socket2.workspace = true
 tempfile.workspace = true
 

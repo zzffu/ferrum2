@@ -3,6 +3,9 @@
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
+use rustls::{
+    ClientConfig, ClientConnection, RootCertStore, pki_types::ServerName, version::TLS13,
+};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -837,16 +840,21 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
 enum M14TcpProfile {
     Legacy,
     Rules64,
-    ServerSniff,
+    HttpSniff,
+    TlsSniff,
 }
 
 fn run_m14_measurements(output: &mut Evidence, work: &Path) -> Result<(), String> {
+    let tls = m14_tls_client_hello()?;
+    validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &tls, true)?;
+    run_m14_migration_rejection(output, work)?;
     for (phase, profile) in [
         ("legacy-no-sniff-tcp", M14TcpProfile::Legacy),
         ("64-rule", M14TcpProfile::Rules64),
-        ("server-http-sniff", M14TcpProfile::ServerSniff),
+        ("server-tls-sniff", M14TcpProfile::TlsSniff),
+        ("server-http-sniff", M14TcpProfile::HttpSniff),
     ] {
-        run_m14_tcp_measurement(output, work, phase, profile)?;
+        run_m14_tcp_measurement(output, work, phase, profile, &tls)?;
     }
     run_m14_udp_measurement(output, work, "legacy-no-sniff-udp", false)?;
     run_m14_udp_measurement(output, work, "association-route-once", true)?;
@@ -854,11 +862,116 @@ fn run_m14_measurements(output: &mut Evidence, work: &Path) -> Result<(), String
     assert_no_owners()
 }
 
+const M14_MEASUREMENT_PHASES: [&str; 8] = [
+    "legacy-no-sniff-tcp",
+    "legacy-no-sniff-udp",
+    "schema-v1-routed-udp-rejection",
+    "64-rule",
+    "server-tls-sniff",
+    "server-http-sniff",
+    "association-route-once",
+    "client-dns-hijack",
+];
+
+fn validate_m14_measurement_plan(
+    phases: &[&str],
+    tls_client_hello: &[u8],
+    terminal_outcomes_distinguishable: bool,
+) -> Result<(), String> {
+    if !phases.contains(&"schema-v1-routed-udp-rejection") {
+        return Err("missing M14 migration phase".to_owned());
+    }
+    if tls_client_hello.is_empty() {
+        return Err("empty M14 TLS ClientHello".to_owned());
+    }
+    if !terminal_outcomes_distinguishable {
+        return Err("non-distinguishing M14 terminal oracle".to_owned());
+    }
+    Ok(())
+}
+
+fn m14_tls_client_hello() -> Result<Vec<u8>, String> {
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&TLS13])
+            .map_err(|_| "M14 TLS version is unavailable".to_owned())?
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+    let mut client = ClientConnection::new(
+        Arc::new(config),
+        ServerName::try_from("tls.performance.test")
+            .map_err(|_| "M14 TLS server name is invalid".to_owned())?
+            .to_owned(),
+    )
+    .map_err(|_| "M14 TLS client could not start".to_owned())?;
+    let mut wire = Vec::new();
+    while client.wants_write() {
+        client
+            .write_tls(&mut wire)
+            .map_err(|_| "M14 TLS ClientHello could not be encoded".to_owned())?;
+    }
+    Ok(wire)
+}
+
+fn run_m14_migration_rejection(output: &mut Evidence, work: &Path) -> Result<(), String> {
+    let directory = tempfile::Builder::new()
+        .prefix("m14-migration-")
+        .tempdir_in(work)
+        .map_err(clean_io)?;
+    let client = PortReservation::new()?;
+    let server = TcpUdpReservation::new()?;
+    let config = directory.path().join("client.toml");
+    fs::write(
+        &config,
+        format!(
+            "schema_version = 1\n[[inbounds]]\ntag = \"in\"\nlisten = \"{}\"\n\
+             [[outbounds]]\ntag = \"out\"\nserver = \"{}\"\n\
+             [route]\nfinal = \"out\"\n[[route.rules]]\nnetwork = \"udp\"\naction = \"reject\"\n\
+             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
+             [udp]\nenabled = true\n[logging]\nlevel = \"error\"\n",
+            client.address, server.address,
+        ),
+    )
+    .map_err(clean_io)?;
+    let started = Instant::now();
+    let result = Command::new(ferrum_binary("ferrum2-client")?)
+        .args([
+            OsStr::new("--config"),
+            config.as_os_str(),
+            OsStr::new("--check-config"),
+        ])
+        .output()
+        .map_err(|_| "M14 migration check did not start".to_owned())?;
+    if result.status.code() != Some(2)
+        || !result.stdout.is_empty()
+        || result.stderr
+            != b"error[config.semantic] schema_version: configuration value is invalid\n"
+    {
+        return Err("M14 migration check had the wrong observable".to_owned());
+    }
+    ensure_redacted(
+        std::str::from_utf8(&result.stderr).map_err(|_| "migration stderr".to_owned())?,
+    )?;
+    let elapsed = started.elapsed();
+    let client_address = client.address;
+    let server_address = server.address;
+    drop((client, server));
+    directory.close().map_err(clean_io)?;
+    prove_tcp_rebind(client_address, "M14 migration client")?;
+    prove_tcp_udp_rebind(server_address, "M14 migration server")?;
+    output.line(format!(
+        "{{\"kind\":\"m14_measurement\",\"phase\":\"schema-v1-routed-udp-rejection\",\
+         \"exit_code\":2,\"elapsed_ns\":{},\"side_effects\":\"none\",\"rebind\":\"PASS\"}}",
+        elapsed.as_nanos(),
+    ))
+}
+
 fn run_m14_tcp_measurement(
     output: &mut Evidence,
     work: &Path,
     phase: &str,
     profile: M14TcpProfile,
+    tls_client_hello: &[u8],
 ) -> Result<(), String> {
     let directory = tempfile::Builder::new()
         .prefix("m14-tcp-")
@@ -871,18 +984,25 @@ fn run_m14_tcp_measurement(
     let server = server_reservation.address;
     let proxy = proxy_reservation.address;
     let payloads = match profile {
-        M14TcpProfile::ServerSniff => vec![
-            b"GET / HTTP/1.1\r\nHost: performance.test\r\n\r\n".to_vec(),
-            vec![0x16, 0x03, 0x03, 0, 0],
+        M14TcpProfile::HttpSniff => vec![
+            (
+                b"GET / HTTP/1.1\r\nHost: performance.test\r\n\r\n".to_vec(),
+                false,
+            ),
+            (b"G@T invalid\r\n\r\n".to_vec(), true),
         ],
-        _ => vec![b"m14-measurement".to_vec()],
+        M14TcpProfile::TlsSniff => vec![(tls_client_hello.to_vec(), false), (vec![0], true)],
+        _ => vec![(b"m14-measurement".to_vec(), true)],
     };
     let client_config = directory.path().join("client.toml");
     let server_config = directory.path().join("server.toml");
     fs::write(&client_config, ferrum_client_config(proxy, server, None)).map_err(clean_io)?;
     fs::write(&server_config, m14_tcp_server_config(server, profile)).map_err(clean_io)?;
     let config_hash = sha256("M14 TCP config SHA-256 probe", &server_config)?;
-    let target_worker = TargetWorker::echo(target_listener, payloads.len())?;
+    let target_worker = TargetWorker::echo(
+        target_listener,
+        payloads.iter().filter(|(_, echoes)| *echoes).count(),
+    )?;
     server_reservation.release();
     let mut server_process = spawn_proxy(
         Topology::Ferrum,
@@ -900,7 +1020,7 @@ fn run_m14_tcp_measurement(
     )?;
     wait_for_listener(&mut client_process, proxy)?;
     let started = Instant::now();
-    for payload in &payloads {
+    for (payload, echoes) in &payloads {
         let mut stream = socks_connect(proxy, target, Instant::now() + STARTUP_TIMEOUT)?;
         stream
             .set_read_timeout(Some(IO_TIMEOUT))
@@ -908,9 +1028,16 @@ fn run_m14_tcp_measurement(
         stream.write_all(payload).map_err(clean_io)?;
         stream.shutdown(Shutdown::Write).map_err(clean_io)?;
         let mut echoed = Vec::with_capacity(payload.len());
-        stream.read_to_end(&mut echoed).map_err(clean_io)?;
-        if echoed != *payload {
-            return Err(format!("{phase} echo payload mismatch"));
+        if let Err(error) = stream.read_to_end(&mut echoed)
+            && (!matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+            ) || *echoes)
+        {
+            return Err(clean_io(error));
+        }
+        if (*echoes && echoed != *payload) || (!*echoes && !echoed.is_empty()) {
+            return Err(format!("{phase} terminal outcome mismatch"));
         }
     }
     let elapsed = started.elapsed();
@@ -951,17 +1078,24 @@ fn m14_tcp_server_config(listen: SocketAddrV4, profile: M14TcpProfile) -> String
                  [udp]\nenabled = false\n[logging]\nlevel = \"error\"\n"
             )
         }
-        M14TcpProfile::ServerSniff => format!(
-            "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
+        M14TcpProfile::HttpSniff | M14TcpProfile::TlsSniff => {
+            let protocol = match profile {
+                M14TcpProfile::HttpSniff => "http",
+                M14TcpProfile::TlsSniff => "tls",
+                _ => unreachable!(),
+            };
+            format!(
+                "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
              [[outbounds]]\ntag = \"direct\"\n[route]\nfinal = \"direct\"\n\
              [route.sniff]\ntimeout_ms = 300\nmax_bytes = 8192\n\
              [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\naction = \"sniff\"\n\
-             sniffers = [\"tls\", \"http\"]\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nprotocol = [\"tls\", \"http\"]\n\
-             action = \"route\"\noutbound = \"direct\"\n\
+             sniffers = \"{protocol}\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nprotocol = \"{protocol}\"\n\
+             action = \"reject\"\n\
              [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
              [udp]\nenabled = false\n[logging]\nlevel = \"error\"\n"
-        ),
+            )
+        }
     }
 }
 
@@ -2357,16 +2491,31 @@ ferrum2_tcp_replay_entries 0\n\
     }
     expect_rejected("leaked owner", || validate_owner_counts(1, 0))?;
     expect_rejected("secret output", || ensure_redacted(PSK))?;
+    let tls = m14_tls_client_hello()?;
+    validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &tls, true)?;
+    let missing_migration: Vec<_> = M14_MEASUREMENT_PHASES
+        .into_iter()
+        .filter(|phase| *phase != "schema-v1-routed-udp-rejection")
+        .collect();
+    expect_rejected("missing M14 migration phase", || {
+        validate_m14_measurement_plan(&missing_migration, &tls, true)
+    })?;
+    expect_rejected("empty M14 TLS ClientHello", || {
+        validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &[], true)
+    })?;
+    expect_rejected("non-distinguishing M14 terminal oracle", || {
+        validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &tls, false)
+    })?;
     let root = repository_root()?.join("target/m4");
     fs::create_dir_all(&root).map_err(clean_io)?;
     let path = root.join("self-check.jsonl");
     let mut file = BufWriter::new(File::create(&path).map_err(clean_io)?);
-    let line = "{\"kind\":\"self_check\",\"mutations\":20,\"status\":\"PASS\"}\n";
+    let line = "{\"kind\":\"self_check\",\"mutations\":23,\"status\":\"PASS\"}\n";
     ensure_redacted(line)?;
     file.write_all(line.as_bytes()).map_err(clean_io)?;
     file.flush().map_err(clean_io)?;
     assert_no_owners()?;
-    Ok("m4_self_check status=PASS mutations=20".to_owned())
+    Ok("m4_self_check status=PASS mutations=23".to_owned())
 }
 
 fn expect_rejected<T>(

@@ -364,8 +364,6 @@ fn m14_server_tcp_sniff_routes_rejects_and_replays_prefix() {
 
 #[test]
 fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
-    const CLIENT_ONE: &str = "ferrum2_tcp_connections_active{role=\"client\",inbound=\"socks5\"} 1";
-
     let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
     let baseline_children = active_child_count();
     let directory = tempfile::tempdir().expect("M14 client TCP tempdir");
@@ -488,14 +486,29 @@ fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
         "terminal DNS hijack fell back to its later outbound"
     );
 
-    thread::sleep(Duration::from_millis(100));
     let metrics = wait_for_metrics(metrics_address);
-    assert!(
-        !metrics
-            .windows(CLIENT_ONE.len())
-            .any(|window| window == CLIENT_ONE.as_bytes()),
-        "hijacked TCP owner did not reap"
-    );
+    let active = String::from_utf8_lossy(&metrics)
+        .lines()
+        .filter(|line| line.starts_with("ferrum2_tcp_connections_active{"))
+        .map(|line| {
+            line.rsplit_once(' ')
+                .expect("TCP active metric sample")
+                .1
+                .parse::<u64>()
+                .expect("TCP active metric value")
+        })
+        .sum::<u64>();
+    assert_eq!(active, 0, "hijacked TCP owner did not reap");
+    for zero in [
+        "ferrum2_udp_sessions_active{role=\"client\"} 0",
+        "ferrum2_udp_buffered_bytes{role=\"client\"} 0",
+    ] {
+        assert!(
+            metrics
+                .windows(zero.len())
+                .any(|window| window == zero.as_bytes())
+        );
+    }
     for sentinel in [
         selected_name,
         final_name,

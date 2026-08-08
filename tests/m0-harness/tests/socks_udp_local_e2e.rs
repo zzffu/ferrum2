@@ -224,6 +224,7 @@ fn wait_udp_rebind(address: SocketAddrV4, label: &str) {
 fn m14_client_udp_association_actions_route_once_and_reap() {
     const CLIENT_ZERO_SESSIONS: &str = "ferrum2_udp_sessions_active{role=\"client\"} 0";
     const CLIENT_ZERO_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 0";
+    const SERVER_ZERO_SESSIONS: &str = "ferrum2_udp_sessions_active{role=\"server\"} 0";
     const SERVER_ACCEPTED_TWO: &str = "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"accepted\"} 2";
 
     let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
@@ -323,6 +324,39 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
         .send_to(&fragmented, route_relay)
         .expect("fragmented first datagram");
     assert_no_datagram(&route_application);
+    let before_zero_port = wait_for_metrics_sample(client_metrics, CLIENT_ZERO_SESSIONS);
+    assert!(
+        before_zero_port
+            .windows(CLIENT_ZERO_BUFFER.len())
+            .any(|window| window == CLIENT_ZERO_BUFFER.as_bytes())
+    );
+    let before_server = wait_for_metrics_sample(server_metrics, SERVER_ZERO_SESSIONS);
+    let zero_port = socks_datagram(
+        SocketAddrV4::new(*route_first_address.ip(), 0),
+        b"invalid-zero-port",
+    );
+    route_application
+        .send_to(&zero_port, route_relay)
+        .expect("zero-port first datagram");
+    assert_no_datagram(&route_application);
+    let after_zero_port = wait_for_metrics(client_metrics);
+    for owner in [CLIENT_ZERO_SESSIONS, CLIENT_ZERO_BUFFER] {
+        assert!(
+            after_zero_port
+                .windows(owner.len())
+                .any(|window| window == owner.as_bytes())
+        );
+    }
+    let after_server = wait_for_metrics(server_metrics);
+    assert!(
+        after_server
+            .windows(SERVER_ZERO_SESSIONS.len())
+            .any(|window| window == SERVER_ZERO_SESSIONS.as_bytes())
+    );
+    assert_eq!(
+        before_server, after_server,
+        "zero-port datagram reached upstream"
+    );
     round_trip(
         &route_application,
         route_relay,
