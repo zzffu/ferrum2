@@ -10,6 +10,7 @@ members = [
     "crates/ferrum2-config",
     "crates/ferrum2-dns",
     "crates/ferrum2-observability",
+    "crates/ferrum2-sniff",
     "tests/m0-harness",
     "tools/ferrum2-m4-qualification",
 ]
@@ -32,6 +33,7 @@ ferrum2-runtime = { path = "crates/ferrum2-runtime", version = "=0.1.0" }
 ferrum2-config = { path = "crates/ferrum2-config", version = "=0.1.0" }
 ferrum2-dns = { path = "crates/ferrum2-dns", version = "=0.1.0" }
 ferrum2-observability = { path = "crates/ferrum2-observability", version = "=0.1.0" }
+ferrum2-sniff = { path = "crates/ferrum2-sniff", version = "=0.1.0" }
 shadowsocks-crypto = { version = "=0.7.0", default-features = false, features = ["v2"] }
 hickory-resolver = { version = "=0.26.1", default-features = false, features = ["tokio", "tls-ring", "https-ring", "webpki-roots"] }
 hickory-proto = { version = "=0.26.1", default-features = false, features = ["std"] }
@@ -41,6 +43,7 @@ h2 = { version = "=0.4.15", default-features = false, features = ["stream"] }
 futures-util = { version = "=0.3.33", default-features = false, features = ["std"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
+httparse = { version = "=1.10.1", default-features = false }
 
 tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 bytes = "=1.12.1"
