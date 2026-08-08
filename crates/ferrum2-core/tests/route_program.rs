@@ -121,6 +121,13 @@ fn domain_matchers_normalize_and_prefer_sniffed_metadata_without_replacing_origi
             Some(DomainName::new("DETECTED.TEST").unwrap()),
             true,
         ),
+        (
+            "sniffed domain can satisfy a matcher for an original IP target",
+            RouteMatchField::Domain(vec![DomainName::new("detected.test").unwrap()]),
+            TargetAddr::ip("192.0.2.9:443".parse::<SocketAddr>().unwrap()).unwrap(),
+            Some(DomainName::new("DETECTED.TEST.").unwrap()),
+            true,
+        ),
     ];
 
     for (name, field, target, sniffed, expected) in cases {
@@ -351,8 +358,20 @@ fn public_bounds_limit_rules_values_and_monotonic_visits() {
         })
         .collect();
     assert!(OrderedRouteProgram::new(oversized_rules, ()).is_none());
-    assert!(RouteMatcher::<()>::new(vec![RouteMatchField::Inbound((0..64).collect())]).is_some());
-    assert!(RouteMatcher::<()>::new(vec![RouteMatchField::Inbound((0..65).collect())]).is_none());
+    assert!(
+        RouteMatcher::<()>::new(vec![
+            RouteMatchField::Inbound((0..63).collect()),
+            RouteMatchField::Network(vec![Network::Tcp]),
+        ])
+        .is_some()
+    );
+    assert!(
+        RouteMatcher::<()>::new(vec![
+            RouteMatchField::Inbound((0..64).collect()),
+            RouteMatchField::Network(vec![Network::Tcp]),
+        ])
+        .is_none()
+    );
     assert!(RouteMatcher::<()>::new(vec![RouteMatchField::Inbound(Vec::new())]).is_none());
     assert!(
         RouteMatcher::<()>::new(vec![
@@ -366,6 +385,13 @@ fn public_bounds_limit_rules_values_and_monotonic_visits() {
         RouteMatcher::<()>::new(vec![RouteMatchField::Domain(vec![
             DomainName::new("Example.Test").unwrap(),
             DomainName::new("example.test.").unwrap(),
+        ])])
+        .is_none()
+    );
+    assert!(
+        RouteMatcher::<()>::new(vec![RouteMatchField::Target(vec![
+            TargetAddr::domain("Example.Test", 443).unwrap(),
+            TargetAddr::domain("example.test", 443).unwrap(),
         ])])
         .is_none()
     );

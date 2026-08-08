@@ -120,7 +120,14 @@ impl<P: Eq> RouteMatchField<P> {
             }
             Self::Port(values) => unique(values),
             Self::PortRange(values) => unique(values),
-            Self::Target(values) => unique(values),
+            Self::Target(values) => {
+                !values.is_empty()
+                    && values.iter().enumerate().all(|(index, value)| {
+                        !values[..index]
+                            .iter()
+                            .any(|other| legacy_target_matches(other, value))
+                    })
+            }
         }
     }
 
