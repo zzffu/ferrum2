@@ -988,6 +988,57 @@ fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
 }
 
 #[test]
+fn schema_v2_protocol_coverage_uses_the_first_overlapping_sniff() {
+    let server = |rules: &str| {
+        routed(
+            tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            &format!("[route]\nfinal = \"o0\"\n{rules}"),
+        )
+    };
+    #[rustfmt::skip]
+    let cases = [
+        (
+            "broad DNS sniff blocks later TLS sniff",
+            "[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"dns\"\n[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\"",
+            Some((ConfigErrorKind::Semantic, ConfigField::RouteRulesProtocol)),
+        ),
+        (
+            "broad TLS sniff blocks later DNS sniff",
+            "[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"dns\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"dns\"\naction = \"reject\"",
+            Some((ConfigErrorKind::Semantic, ConfigField::RouteRulesProtocol)),
+        ),
+        (
+            "same-port DNS sniff blocks later TLS sniff",
+            "[[route.rules]]\nnetwork = \"tcp\"\nport = 443\naction = \"sniff\"\nsniffers = \"dns\"\n[[route.rules]]\nnetwork = \"tcp\"\nport = 443\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nport = 443\nprotocol = \"tls\"\naction = \"reject\"",
+            Some((ConfigErrorKind::Semantic, ConfigField::RouteRulesProtocol)),
+        ),
+        (
+            "disjoint-port DNS sniff does not block TLS sniff",
+            "[[route.rules]]\nnetwork = \"tcp\"\nport = 53\naction = \"sniff\"\nsniffers = \"dns\"\n[[route.rules]]\nnetwork = \"tcp\"\nport = 443\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nport = 443\nprotocol = \"tls\"\naction = \"reject\"",
+            None,
+        ),
+        (
+            "first sniff may cover a protocol union",
+            "[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = [\"dns\", \"tls\"]\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = [\"dns\", \"tls\"]\naction = \"reject\"",
+            None,
+        ),
+    ];
+
+    let actual = cases
+        .iter()
+        .map(|(name, rules, _)| {
+            let error = load_server(TempConfig::text(&server(rules)).path()).err();
+            (*name, error.map(|error| (error.kind(), error.field())))
+        })
+        .collect::<Vec<_>>();
+    let expected = cases
+        .iter()
+        .map(|(name, _, expected)| (*name, *expected))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn dns_graph_compiles_independent_server_actions_and_detour_plan_roots() {
     let graph = "[[chains]]\ntag = \"two-hop\"\nhops = [\"o1\", \"o2\"]\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"o1\", \"o2\"]\ndefault = \"o1\"";
     let dns = r#"[dns]

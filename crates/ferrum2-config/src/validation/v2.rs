@@ -126,7 +126,7 @@ struct TargetCoverage {
     domain_suffix: Option<Vec<String>>,
     ip: Option<Vec<String>>,
     ip_cidr: Option<Vec<String>>,
-    port: Option<Vec<i64>>,
+    port: Option<Vec<NonZeroU16>>,
     port_range: Option<Vec<String>>,
     legacy: Option<ferrum2_core::TargetAddr>,
 }
@@ -388,17 +388,20 @@ fn compile_route_matcher(
             },
         )?));
     }
-    if let Some(values) = &raw.port {
-        fields.push(RouteMatchField::Port(parse_values(
-            values,
-            ConfigField::RouteRulesPort,
-            |value| {
+    let port = raw
+        .port
+        .as_ref()
+        .map(|values| {
+            parse_values(values, ConfigField::RouteRulesPort, |value| {
                 u16::try_from(*value)
                     .ok()
                     .and_then(NonZeroU16::new)
                     .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRulesPort))
-            },
-        )?));
+            })
+        })
+        .transpose()?;
+    if let Some(values) = &port {
+        fields.push(RouteMatchField::Port(values.clone()));
     }
     if let Some(values) = &raw.port_range {
         fields.push(RouteMatchField::PortRange(parse_values(
@@ -429,10 +432,7 @@ fn compile_route_matcher(
                 domain_suffix: normalized_strings(raw.domain_suffix.as_ref()),
                 ip: normalized_strings(raw.ip.as_ref()),
                 ip_cidr: normalized_strings(raw.ip_cidr.as_ref()),
-                port: raw
-                    .port
-                    .as_ref()
-                    .map(|values| values.iter().copied().collect()),
+                port,
                 port_range: normalized_strings(raw.port_range.as_ref()),
                 legacy: legacy_target,
             },
@@ -528,33 +528,52 @@ fn validate_protocol_coverage(rows: &[Coverage], role: Role) -> Result<(), Confi
             continue;
         };
         for protocol in protocols {
-            let covered = rows[..index].iter().any(|earlier| {
-                earlier.sniffers.as_ref().is_some_and(|sniffers| {
-                    earlier.protocols.is_none()
-                        && earlier.target.domain.is_none()
-                        && earlier.target.domain_suffix.is_none()
-                        && covers(earlier.inbound.as_deref(), row.inbound.as_deref())
-                        && covers(earlier.network.as_deref(), row.network.as_deref())
-                        && covers(earlier.target.ip.as_deref(), row.target.ip.as_deref())
-                        && covers(
-                            earlier.target.ip_cidr.as_deref(),
-                            row.target.ip_cidr.as_deref(),
-                        )
-                        && covers(earlier.target.port.as_deref(), row.target.port.as_deref())
-                        && covers(
-                            earlier.target.port_range.as_deref(),
-                            row.target.port_range.as_deref(),
-                        )
-                        && covers_one(earlier.target.legacy.as_ref(), row.target.legacy.as_ref())
-                        && sniffer_covers(sniffers, *protocol, row.network.as_deref(), role)
+            // Only typed match values prove disjointness; textual target aliases stay overlapping.
+            let covered = rows[..index]
+                .iter()
+                .find(|earlier| {
+                    earlier.sniffers.is_some()
+                        && !disjoint(earlier.inbound.as_deref(), row.inbound.as_deref())
+                        && !disjoint(earlier.network.as_deref(), row.network.as_deref())
+                        && !disjoint(earlier.target.port.as_deref(), row.target.port.as_deref())
                 })
-            });
+                .is_some_and(|earlier| {
+                    earlier.sniffers.as_ref().is_some_and(|sniffers| {
+                        earlier.protocols.is_none()
+                            && earlier.target.domain.is_none()
+                            && earlier.target.domain_suffix.is_none()
+                            && covers(earlier.inbound.as_deref(), row.inbound.as_deref())
+                            && covers(earlier.network.as_deref(), row.network.as_deref())
+                            && covers(earlier.target.ip.as_deref(), row.target.ip.as_deref())
+                            && covers(
+                                earlier.target.ip_cidr.as_deref(),
+                                row.target.ip_cidr.as_deref(),
+                            )
+                            && covers(earlier.target.port.as_deref(), row.target.port.as_deref())
+                            && covers(
+                                earlier.target.port_range.as_deref(),
+                                row.target.port_range.as_deref(),
+                            )
+                            && covers_one(
+                                earlier.target.legacy.as_ref(),
+                                row.target.legacy.as_ref(),
+                            )
+                            && sniffer_covers(sniffers, *protocol, row.network.as_deref(), role)
+                    })
+                });
             if !covered {
                 return Err(ConfigError::semantic(ConfigField::RouteRulesProtocol));
             }
         }
     }
     Ok(())
+}
+
+fn disjoint<T: Eq>(left: Option<&[T]>, right: Option<&[T]>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => !left.iter().any(|value| right.contains(value)),
+        _ => false,
+    }
 }
 
 fn covers_one<T: Eq>(wider: Option<&T>, narrower: Option<&T>) -> bool {
