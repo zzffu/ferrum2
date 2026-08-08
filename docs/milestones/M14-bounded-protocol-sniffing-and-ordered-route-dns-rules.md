@@ -6,6 +6,8 @@
 - **Planning baseline:** `cc8a0c2946788c16e5d7af2658a7d80bac0a844b`
 - **Planning tree / parent:** `7eccfc66c80263e3d949c5b6aded63b0436540ce` /
   `f4dcebca3c9b56f903496d91048c3660ee60ed52`
+- **T01 ticket base:** `5c2c7ab4818cfcddd9b2cd0a45adc5880a74869b` / tree
+  `1794b60c6c8b0d3ca65dd5f32cb82f2504ba07cd` / parent `cc8a0c2946788c16e5d7af2658a7d80bac0a844b`
 - **Strategy:** drain；all tickets integrate serially
 - **Owner:** primary thread
 - **MSRV:** Rust `1.88.0`
@@ -29,9 +31,10 @@ repository。
 
 ## Baseline evidence and source corrections
 
-- `master` is clean at planning baseline `cc8a0c2…`。The diff from qualified product `1af1bbf…` to the
+- `master` was clean at planning baseline `cc8a0c2…`。The diff from qualified product `1af1bbf…` to the
   planning baseline changes only tracked Markdown/status files，not Rust product、tests、manifests or
-  lock state。
+  lock state。The docs-only M14 planning commit `5c2c7ab…` is T01's ticket base，not the schema-3
+  measurement baseline。
 - Core currently has one exact-target `ActionTable`/`RouteTable` in
   `crates/ferrum2-core/src/route.rs`；selection is single-pass and cannot resume after metadata changes。
 - SOCKS CONNECT returns an empty `Session.initial_payload` and selects before application bytes exist；
@@ -49,10 +52,10 @@ repository。
   datagram target but does not prescribe internal outbound-selection lifetime；both findings are captured
   in `docs/research/M14-sing-box-socks-forwarding-baseline.md` and
   `docs/research/M14-socks5-udp-semantics.md`。
-- Hickory `0.26.1` and rustls `0.23.43` are already exact workspace dependencies。`ipnet 2.12.1` is
-  already locked transitively and will become an exact direct workspace dependency；`httparse 1.10.1`
-  is the only planned new package identity。T01 must complete license、MSRV、feature and source review
-  before either edge is activated。
+- Hickory `0.26.1` and rustls `0.23.43` remain exact workspace dependencies。T01's TEST-0015 review
+  records locked `ipnet 2.12.1` as a later exact no-default direct edge and no-default
+  `httparse 1.10.1` as the only new package identity，with its internal external-package unsafe recorded。
+  T01 activates neither dependency；T02/T04 remain responsible for exact graph and Rust 1.88 evidence。
 - Exact planning footprint is code/tests `21814/39632`、ratio `1.816815` and
   case/support/fixture `33883/5152/597`。The current M13 numeric status is
   `REVIEW_REQUIRED` only for moved owner-file size；integrity is `PASS`。

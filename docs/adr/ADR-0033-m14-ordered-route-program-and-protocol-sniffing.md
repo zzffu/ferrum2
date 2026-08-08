@@ -158,7 +158,8 @@ input cannot create sniff/policy telemetry or accepted mutation。
 - One routed association owns at most one selected plan instead of the current plan-keyed set of lazy
   legs；invalid datagrams cannot claim that plan or terminal mode。
 - M14 adds one workspace crate、one new exact package identity and one direct edge to an already locked
-  package，all subject to T01 dependency review。
+  package。T01 records the accepted source/license/MSRV/feature/unsafe/graph dispositions in TEST-0015；
+  dependency activation remains isolated to T02 and T04。
 - Hot-path and lifecycle changes require exact-SHA performance/resource evidence but define no minimum
   throughput or improvement claim。
 

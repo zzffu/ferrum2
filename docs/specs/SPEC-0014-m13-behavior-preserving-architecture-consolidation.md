@@ -40,13 +40,17 @@ The words MUST、MUST NOT、SHOULD and MAY are normative。
 - Direct plans MUST contain one concrete outbound；fixed chains MUST retain `2..=8` unique ordered hops。
   Equality/hash MUST represent the exact ordered concrete plan and be suitable for UDP reuse identity。
 - `EgressPlanHandle::snapshot_owned`、`RouteTable::select_plan_snapshot` and
-  `RouteTable::final_plan_snapshot` MUST return owned values。Every product route and DNS-detour data-plane
-  call site MUST use them before any await or mutable selector observation。
+  `RouteTable::final_plan_snapshot` MUST return owned values。Every client route and every DNS-detour
+  data-plane call site MUST use them before any await or mutable selector observation。
+- The validated M13 server ordinary-outbound graph MUST remain direct-only and MAY retain its existing
+  `ActionTable<usize>` one-hop scalar selection。That scalar path MUST NOT accept a multi-hop plan；a
+  future server multi-hop graph must first use the owned snapshot interface and add an architecture
+  guard。This clarification changes no M13 product or qualification evidence。
 - Existing `EgressPlan<'_>`、`EgressPlanHandle::snapshot`、`RouteTable::select_plan` and
   `RouteTable::final_plan` MUST remain source-compatible views with identical hop results。
-- One snapshot MUST remain fixed after selector switches；only a later selection may observe the new
-  member。Static、routed、final、direct、chain and nested-selector actions MUST retain current selection
-  granularity。
+- One client or DNS-detour snapshot MUST remain fixed after selector switches；only a later selection may
+  observe the new member。Static、routed、final、direct、chain and nested-selector actions MUST retain
+  current selection granularity；the direct-only server scalar path retains its existing granularity。
 - `ferrum2_dns::PlanSnapshot` MUST be removed，and no product adapter may rebuild a plan with
   `Arc::from(hops)`、`to_vec()` or equivalent copying。
 

@@ -61,6 +61,9 @@ cursor storage are not separate test surfaces。
 
 - Resolve qualified product `1af1bbf…` and planning HEAD/tree/parent `cc8a0c2…` /
   `7eccfc6…` / `f4dcebc…`；prove the intervening diff contains no Rust/manifests/lock changes。
+- Keep T01's docs-only ticket base `5c2c7ab4818cfcddd9b2cd0a45adc5880a74869b` / tree
+  `1794b60c6c8b0d3ca65dd5f32cb82f2504ba07cd` / parent `cc8a0c2…` distinct from the schema-3 planning
+  measurement baseline。
 - Amend SPEC-0014/ADR-0032 wording so client/multi-hop/DNS use owned snapshots while server may use its
   validated one-hop scalar path；record the architecture guard required before server route changes。
 - Freeze the explicit schema-v2 migration boundary：v1 client routed+UDP is a zero-side-effect config
@@ -72,6 +75,24 @@ cursor storage are not separate test surfaces。
   `33883/5152/597`，with unchanged thresholds、`policy_revision=1` and this file as `reforecast_ref`。
 - Run current selector、config、DNS proxy and architecture cohorts unchanged；a baseline failure blocks
   implementation。
+
+### T01 dependency review disposition
+
+Evidence sources are the exact `Cargo.lock` and workspace manifest，locked `cargo tree -e features`，and
+the crates.io index/archive plus unpacked `Cargo.toml`、source and `.cargo_vcs_info.json`。The no-default
+`ipnet` and `httparse` library sources also compile directly with `rustc 1.88.0`。No dependency is
+activated by T01。
+
+| Use | Exact source identity | License / MSRV / features | Unsafe and dependency disposition |
+|---|---|---|---|
+| DNS parser reuse | `hickory-proto 0.26.1`，crates.io checksum `0bab31817bfb44672a252e97fe81cd0c18d1b2cf892108922f6818820df8c643`，VCS `f09321075b1f97902b7bc4ca4ffda7816fcf2971:crates/proto` | `MIT OR Apache-2.0`；`rust-version = 1.88`；existing exact no-default workspace edge selects `std`，while existing resolver/server edges account for the already-resolved `access-control`/`serde` features | Proto source has no actual unsafe statement。T04 may add only a direct workspace edge and use Hickory message parsing；no identity、feature、provider、resolver or DNS-answering change。Exact existing resolver/net/server checksums remain `f0d58d28879ceecde6607729660c2667a081ccdc082e082675042793960f178c` / `e2295ed2f9c31e471e1428a8f88a3f0e1f4b27c15049592138d1eebe9c35b183` / `130236ba6abba90da6a7acf7a87b27d862b592c3145dc74bc47bf86d8ff198ec`；resolver platform `system_conf` unsafe stays uncompiled because `system-config` is not selected。 |
+| TLS ClientHello reuse | `rustls 0.23.43`，crates.io checksum `0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06`，VCS `fcf61cdbba30913cfd5b40aefa83989c6233812d:rustls` | `Apache-2.0 OR ISC OR MIT`；`rust-version = 1.71`；existing exact no-default workspace edge retains `ring,std,tls12` | Rustls forbids unsafe code。T04 uses only `server::Acceptor` through ClientHello；no provider、handshake、feature or package change。 |
+| CIDR matcher | locked `ipnet 2.12.1`，crates.io checksum `6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78`，VCS `bdc02c67c85b0298e8315b32bb9018bdd0f8e8f7` | `MIT OR Apache-2.0`；manifest has no `rust-version` and upstream documents Rust 1.26+；no-default source passes Rust 1.88 | Source has no unsafe。T02 may add exact `=2.12.1`、no-default direct core edge with no new feature；the package is already locked through Hickory，so no new identity or transitive package is allowed。 |
+| HTTP/1 request parser | `httparse 1.10.1`，crates.io checksum `6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87`，VCS `9f29e79f9832dbd0ae5220acb17c1866745bdecd` | `MIT OR Apache-2.0`；manifest declares no `rust-version`；no-default/no-feature source passes Rust 1.88；default `std` stays disabled | The external package uses reviewed unsafe pointer/`MaybeUninit` and SWAR/SSE4.2/AVX2/NEON internals with source safety guards。T04 may consume only safe `httparse::Request::parse` with a 64-header caller-owned array and must retain malformed/fragmentation/boundary mutations。This is the sole new package identity，has no normal/build dependencies，and grants no workspace unsafe exception；upgrade or feature change requires renewed review。 |
+
+These dispositions are blocking inputs to T02/T04：a checksum、MSRV、feature、provider、unsafe surface or
+dependency-closure mismatch stops activation and returns to contract amendment rather than being hidden
+in `Cargo.lock`。
 
 ```powershell
 git rev-parse HEAD
