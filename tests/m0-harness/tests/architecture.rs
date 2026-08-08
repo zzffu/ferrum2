@@ -2202,6 +2202,28 @@ fn runtime_and_library_owners_are_unique_and_composition_only() {
         .expect("server DNS policy adapter");
     check_no_identifiers([server_dns], &["DnsQueryType", "RecordType", "qtype"])
         .unwrap_or_else(|error| panic!("server application DNS policy gained qtype: {error}"));
+    let server_dns_tokens = server_dns
+        .production_tokens()
+        .expect("server DNS policy tokens");
+    for (sequence, message) in [
+        (
+            ["state", ".", "select"],
+            "application DNS policy must select exactly once",
+        ),
+        (
+            ["resolver", ".", "lookup_ips"],
+            "server resolution must enter one A+AAAA lookup",
+        ),
+    ] {
+        assert_eq!(
+            server_dns_tokens
+                .windows(sequence.len())
+                .filter(|window| *window == sequence)
+                .count(),
+            1,
+            "{message}"
+        );
+    }
 }
 #[test]
 fn server_dns_composition_reuses_the_tagged_resolver_and_connector_seams() {

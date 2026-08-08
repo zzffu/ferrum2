@@ -1391,6 +1391,12 @@ mod tests {
                 .expect("rule DNS upstream"),
             UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
                 .await
+                .expect("ANY DNS upstream"),
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("qtype-less DNS upstream"),
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
                 .expect("final DNS upstream"),
         ];
         let upstream_addresses = upstreams
@@ -1421,6 +1427,14 @@ mod tests {
              transport = \"udp\"\n\
              address = \"{}\"\n\
              [[dns.servers]]\n\
+             tag = \"any\"\n\
+             transport = \"udp\"\n\
+             address = \"{}\"\n\
+             [[dns.servers]]\n\
+             tag = \"untyped\"\n\
+             transport = \"udp\"\n\
+             address = \"{}\"\n\
+             [[dns.servers]]\n\
              tag = \"final\"\n\
              transport = \"udp\"\n\
              address = \"{}\"\n\
@@ -1437,8 +1451,22 @@ mod tests {
              network = \"tcp\"\n\
              qname = \"exact.example\"\n\
              qtype = \"AAAA\"\n\
-             server = \"rule\"\n",
-            upstream_addresses[0], upstream_addresses[1],
+             server = \"rule\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"d0\"\n\
+             network = \"udp\"\n\
+             qname = \"unknown.policy.example\"\n\
+             qtype = \"ANY\"\n\
+             server = \"any\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"d0\"\n\
+             network = \"udp\"\n\
+             qname = \"unknown.policy.example\"\n\
+             server = \"untyped\"\n",
+            upstream_addresses[0],
+            upstream_addresses[1],
+            upstream_addresses[2],
+            upstream_addresses[3],
         );
         std::fs::write(&path, source).expect("write v2 DNS policy config");
         let config = ferrum2_config::load_client(&path).expect("validated v2 DNS policy config");
@@ -1447,13 +1475,46 @@ mod tests {
         let upstream_tasks: Vec<_> = upstreams
             .into_iter()
             .zip([
-                [Ipv4Addr::new(192, 0, 2, 44), Ipv4Addr::new(192, 0, 2, 46)],
-                [Ipv4Addr::new(192, 0, 2, 45), Ipv4Addr::new(192, 0, 2, 47)],
+                vec![
+                    (
+                        Some("selected.example."),
+                        RecordType::A,
+                        Ipv4Addr::new(192, 0, 2, 44),
+                    ),
+                    (
+                        Some("exact.example."),
+                        RecordType::AAAA,
+                        Ipv4Addr::new(192, 0, 2, 46),
+                    ),
+                ],
+                vec![(
+                    Some("unknown.policy.example."),
+                    RecordType::ANY,
+                    Ipv4Addr::new(192, 0, 2, 48),
+                )],
+                vec![(
+                    Some("unknown.policy.example."),
+                    RecordType::Unknown(65_400),
+                    Ipv4Addr::new(192, 0, 2, 49),
+                )],
+                vec![
+                    (
+                        Some("selected.example."),
+                        RecordType::AAAA,
+                        Ipv4Addr::new(192, 0, 2, 45),
+                    ),
+                    (
+                        Some("unmatched.policy.example."),
+                        RecordType::Unknown(65_400),
+                        Ipv4Addr::new(192, 0, 2, 50),
+                    ),
+                    (None, RecordType::A, Ipv4Addr::new(192, 0, 2, 47)),
+                ],
             ])
-            .map(|(upstream, answers)| {
+            .map(|(upstream, expectations)| {
                 tokio::spawn(async move {
                     let mut request = [0_u8; 4096];
-                    for answer in answers {
+                    for (expected_name, expected_type, answer) in expectations {
                         let (length, peer) =
                             upstream.recv_from(&mut request).await.expect("DNS request");
                         let request =
@@ -1461,6 +1522,13 @@ mod tests {
                         assert_eq!(request.metadata.message_type, MessageType::Query);
                         assert_eq!(request.metadata.op_code, OpCode::Query);
                         let question = request.queries.first().expect("one question").clone();
+                        assert_eq!(question.query_type(), expected_type);
+                        if let Some(expected_name) = expected_name {
+                            assert_eq!(
+                                question.name(),
+                                &Name::from_ascii(expected_name).expect("expected query name")
+                            );
+                        }
                         let mut response = Message::response(request.metadata.id, OpCode::Query);
                         response.metadata.recursion_available = true;
                         response
@@ -1502,6 +1570,24 @@ mod tests {
                 Name::from_ascii("selected.example.").expect("wrong qtype name"),
                 RecordType::AAAA,
                 Ipv4Addr::new(192, 0, 2, 45),
+            ),
+            (
+                0x1238,
+                Name::from_ascii("unknown.policy.example.").expect("unknown qtype name"),
+                RecordType::Unknown(65_400),
+                Ipv4Addr::new(192, 0, 2, 49),
+            ),
+            (
+                0x1239,
+                Name::from_ascii("unmatched.policy.example.").expect("unknown final name"),
+                RecordType::Unknown(65_400),
+                Ipv4Addr::new(192, 0, 2, 50),
+            ),
+            (
+                0x123a,
+                Name::from_ascii("unknown.policy.example.").expect("ANY policy name"),
+                RecordType::ANY,
+                Ipv4Addr::new(192, 0, 2, 48),
             ),
         ] {
             let mut query = Message::new(id, MessageType::Query, OpCode::Query);

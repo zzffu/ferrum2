@@ -165,7 +165,7 @@ impl DnsProxy {
 
     /// Parses, selects, resolves and encodes one DNS message through Hickory.
     ///
-    /// `None` means the supplied bytes could not be parsed as a DNS message.
+    /// `None` means the supplied bytes could not be parsed or the safe response could not be encoded.
     pub async fn answer(
         &self,
         ingress: ProxyIngress,

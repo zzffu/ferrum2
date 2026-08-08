@@ -213,7 +213,9 @@ mod tests {
 
     use ferrum2_core::route::EgressPlanHandle;
 
-    use crate::run::test_support::{reserve_address, server_test_config_source};
+    use crate::run::test_support::{
+        Ipv4Addr, UdpSocket, assert_pending, recv_udp, reserve_address, server_test_config_source,
+    };
 
     #[test]
     fn dns_runtime_specs_preserve_validated_server_values() {
@@ -316,9 +318,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
+    #[tokio::test]
+    async fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
         let listen = reserve_address();
+        let selected_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("selected DNS upstream");
+        let selected_address = selected_socket.local_addr().expect("selected DNS address");
+        let final_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("final DNS upstream");
+        let final_address = final_socket.local_addr().expect("final DNS address");
+        let dead_address = reserve_address();
         let source = format!(
             "schema_version = 2\n\
              [[inbounds]]\n\
@@ -332,14 +343,19 @@ mod tests {
              method = \"2022-blake3-aes-128-gcm\"\n\
              psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
              [dns]\n\
+             timeout_ms = 100\n\
              [[dns.servers]]\n\
              tag = \"selected\"\n\
              transport = \"udp\"\n\
-             address = \"192.0.2.53:53\"\n\
+             address = \"{selected_address}\"\n\
+             [[dns.servers]]\n\
+             tag = \"dead\"\n\
+             transport = \"udp\"\n\
+             address = \"{dead_address}\"\n\
              [[dns.servers]]\n\
              tag = \"final\"\n\
-             transport = \"tcp\"\n\
-             address = \"192.0.2.54:53\"\n\
+             transport = \"udp\"\n\
+             address = \"{final_address}\"\n\
              [dns.route]\n\
              final = \"final\"\n\
              [[dns.route.rules]]\n\
@@ -350,6 +366,12 @@ mod tests {
              server = \"selected\"\n\
              [[dns.route.rules]]\n\
              inbound = \"i0\"\n\
+             network = \"tcp\"\n\
+             domain = \"dead.example.com\"\n\
+             port = 443\n\
+             server = \"dead\"\n\
+             [[dns.route.rules]]\n\
+             inbound = \"i0\"\n\
              network = [\"tcp\", \"udp\"]\n\
              domain_suffix = \"example.com\"\n\
              port_range = \"443:8443\"\n\
@@ -357,23 +379,117 @@ mod tests {
         );
         let (path, config) = server_test_config_source("dns-policy", &source);
         let dns = config.dns.expect("server DNS config");
-        let state = ServerDnsState::new(dns.route, config.dns_route);
+        let specs = dns_runtime_specs(&dns.servers);
+        let state = Arc::new(ServerDnsState::new(dns.route, config.dns_route));
         let exact = TargetAddr::domain("EXACT.TEST.", 53).expect("exact target");
         let suffix_low = TargetAddr::domain("api.example.com.", 443).expect("range low target");
         let suffix_high =
             TargetAddr::domain("deep.api.example.com", 8443).expect("range high target");
+        let dead = TargetAddr::domain("dead.example.com", 443).expect("dead target");
         let below = TargetAddr::domain("api.example.com", 442).expect("below range target");
         let above = TargetAddr::domain("api.example.com", 8444).expect("above range target");
         let other = TargetAddr::domain("other.test", 443).expect("final target");
 
+        let selected_task = tokio::spawn(async move {
+            let mut request = [0_u8; 4096];
+            for (qtype_offset, expected_qtype) in [(24, 1), (24, 28), (29, 1), (29, 28)] {
+                let (length, peer) = recv_udp(&selected_socket, &mut request).await;
+                assert!(length >= qtype_offset + 4);
+                assert_eq!(
+                    u16::from_be_bytes([request[qtype_offset], request[qtype_offset + 1]]),
+                    expected_qtype
+                );
+                assert_eq!(&request[qtype_offset + 2..qtype_offset + 4], &[0, 1]);
+                request[2] |= 0x80;
+                request[3] |= 0x80;
+                selected_socket
+                    .send_to(&request[..length], peer)
+                    .await
+                    .expect("selected DNS response");
+            }
+        });
+        let (check_final, start_final_check) = tokio::sync::oneshot::channel();
+        let final_task = tokio::spawn(async move {
+            let mut request = [0_u8; 4096];
+            for expected_qtype in [1, 28] {
+                let (length, peer) = recv_udp(&final_socket, &mut request).await;
+                assert!(length >= 28);
+                assert_eq!(
+                    u16::from_be_bytes([request[24], request[25]]),
+                    expected_qtype
+                );
+                assert_eq!(&request[26..28], &[0, 1]);
+                request[2] |= 0x80;
+                request[3] |= 0x80;
+                final_socket
+                    .send_to(&request[..length], peer)
+                    .await
+                    .expect("final DNS response");
+            }
+            start_final_check.await.expect("start no-fallback check");
+            assert_pending(
+                final_socket.recv_from(&mut request),
+                "selected DNS failure reached the healthy final server",
+            )
+            .await;
+        });
+        let egress = Arc::new(ServerDnsEgress::new(config.outbounds.len()));
+        let (resolver, mut owner) =
+            TaggedResolver::new(specs, dns.timeout, dns.max_inflight, egress)
+                .expect("server DNS resolver");
+        owner.ready().await.expect("server DNS resolver ready");
+        state
+            .install(Arc::new(resolver))
+            .expect("install server DNS resolver");
+        let resolver = ServerDnsResolver::new(Some(Arc::clone(&state)), 0, Network::Tcp);
+
+        assert_eq!(
+            TcpResolver::resolve(&resolver, "EXACT.TEST.", 53)
+                .await
+                .expect("exact DNS resolution"),
+            []
+        );
+        assert_eq!(
+            TcpResolver::resolve(&resolver, "api.example.com.", 443)
+                .await
+                .expect("suffix DNS resolution"),
+            []
+        );
+        assert_eq!(
+            TcpResolver::resolve(&resolver, "other.test.", 443)
+                .await
+                .expect("final DNS resolution"),
+            []
+        );
+        check_final.send(()).expect("arm no-fallback check");
+        assert!(
+            TcpResolver::resolve(&resolver, "dead.example.com.", 443)
+                .await
+                .is_err(),
+            "selected DNS failure must remain terminal"
+        );
+
+        selected_task.await.expect("selected DNS upstream join");
+        final_task.await.expect("final DNS upstream join");
         assert_eq!(state.select(0, Network::Tcp, &exact), 0);
         assert_eq!(state.select(0, Network::Tcp, &suffix_low), 0);
         assert_eq!(state.select(0, Network::Udp, &suffix_high), 0);
-        assert_eq!(state.select(1, Network::Tcp, &exact), 1);
-        assert_eq!(state.select(0, Network::Udp, &exact), 1);
-        assert_eq!(state.select(0, Network::Tcp, &below), 1);
-        assert_eq!(state.select(0, Network::Tcp, &above), 1);
-        assert_eq!(state.select(0, Network::Tcp, &other), 1);
+        assert_eq!(state.select(0, Network::Tcp, &dead), 1);
+        assert_eq!(state.select(1, Network::Tcp, &exact), 2);
+        assert_eq!(state.select(0, Network::Udp, &exact), 2);
+        assert_eq!(state.select(0, Network::Tcp, &below), 2);
+        assert_eq!(state.select(0, Network::Tcp, &above), 2);
+        assert_eq!(state.select(0, Network::Tcp, &other), 2);
+        drop(resolver);
+        drop(state.take());
+        assert_eq!(
+            owner
+                .shutdown()
+                .await
+                .expect("server DNS resolver shutdown")
+                .stats,
+            ferrum2_dns::RuntimeStats::default()
+        );
         std::fs::remove_file(path).expect("remove server DNS policy config");
     }
 }
