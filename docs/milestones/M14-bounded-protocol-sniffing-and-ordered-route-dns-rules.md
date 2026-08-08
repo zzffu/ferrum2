@@ -130,8 +130,8 @@ repository。
 | M14-T04 | Add the pure bounded DNS/TLS/HTTP sniff module and parser evidence | M14-T03 | done |
 | M14-T05 | Compose server TCP/UDP route、sniff、reject and exact prefix replay | M14-T04 | done |
 | M14-T06 | Extend DNS policy through the existing answering/resolver module | M14-T05 | done |
-| M14-T07 | Compose client route/reject/hijack and one-plan association UDP ownership | M14-T06 | ready |
-| M14-T08 | Close real-process、security、lifecycle、architecture and qualification-tool evidence | M14-T07 | todo |
+| M14-T07 | Compose client route/reject/hijack and one-plan association UDP ownership | M14-T06 | done |
+| M14-T08 | Close real-process、security、lifecycle、architecture and qualification-tool evidence | M14-T07 | ready |
 | M14-T09 | Qualify and close one exact M14 integration SHA | M14-T08 | todo |
 
 ```text
@@ -158,18 +158,18 @@ case/support/fixture `33883/5152/597`，unchanged thresholds and `TEST-0015` as 
 `REVIEW_REQUIRED` is expected and must be dispositioned without deleting independent security、
 parser or lifecycle evidence。No new fixture or second harness is planned。
 
-The plan itself authorized no remote action。The 2026-08-08 execute request now authorizes all required
-non-force pushes；manual performance/resource dispatch remains separately unauthorized。No rerun、
-force-push、PR、tag、package、release or publication is implied。
+The plan itself authorized no remote action。The 2026-08-09 execute continuation now authorizes all
+required remote actions through M14 close，including the exact-SHA non-force push and manual
+performance/resource dispatch。The workflow still forbids force-push、unchanged-SHA rerun、PR、tag、
+package、release and publication。
 
 ## Blocker / next action
 
-No blocker。T06 is accepted at exact integration `2735853ba75183c4046365793020e57f3e1667ca`。
-The first repair connected live client unknown-qtype and server selected A+AAAA policy evidence，but
-targeted QA still found the production server policy handoff unguarded and the test responder to contain a
-copied DNS codec。Two required independent `gpt-5.6-sol/xhigh` read-only analyses both selected the same
-minimal correction：reuse exact Hickory through a server dev-only edge，replace the test bytes with typed
-Hickory operations and guard `ServerDnsState::new(route, policy)` plus codec escapes。Final targeted
-Architect/QA both returned `PASS` with all findings closed。Focused、Rust 1.88 and integration Quick pass；
-footprint integrity/category/ratio pass and the accepted ticket advisory is `+611/0/0`
-case/support/fixture。T07 is ready on this exact accepted base。
+No blocker。T07 is accepted at exact integration `1e29a5edbc82bd3ec7fa01aa3723331e6c54fab3`。
+The bounded repair closed pre-bound owner mutation and evidence gaps but incorrectly delayed schema-v1
+static capacity admission until the first packet。Two required independent `gpt-5.6-sol/xhigh`
+read-only analyses both selected one split-phase association：setup owns session/buffers/upstream，while
+only plan/live-ID activation remains first-valid-packet lazy。Final targeted Architect/QA both returned
+`PASS` with all findings closed。Focused、Rust 1.88 and integration Quick pass；footprint integrity and
+ratio pass and the accepted ticket advisory is `+161/0/0` case/support/fixture。T08 is ready on this exact
+accepted integration base。

@@ -63,14 +63,14 @@ run [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144)
 resource run [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024)关闭。Owned
 egress-plan、DNS runtime dependency、private client egress及composition-root ownership完成整固；
 schema、wire、DNS/routing action和产品能力不变，final Architect/QA均`PASS`。
-M14现为`executing`：T01～T06已done，T07 ready。T06 exact integration `2735853b…`复用既有
-`DnsProxy::answer`/`TaggedResolver`完成client qname/qtype与server application-target policy，unknown
-wire qtype不会别名为`ANY`。一次有界修复后复审仍堵塞server root policy handoff和test-only copied
-codec；两名required `gpt-5.6-sol/xhigh`独立只读代理均选择exact Hickory dev-edge typed fixture与
-token guard最小修正，post-escalation final Architect/QA `PASS`。Focused、Rust 1.88、integration
-Quick及footprint integrity/ratio通过，ticket `+611/0/0` advisory已接受；尚无remote action。
-Execute仅授权所需non-force pushes，manual
-dispatch及其他发布动作未授权。
+M14现为`executing`：T01～T07已done，T08 ready。T07 exact integration `1e29a5ed…`组合client
+TCP route/reject/DNS hijack和schema-v2 first-valid UDP一次选路。一次有界修复后复审发现其错误地
+把schema-v1 static session/buffer/upstream admission也延迟到首包；两名required
+`gpt-5.6-sol/xhigh`独立只读代理均选择单一split-phase association，最终Architect/QA `PASS`。
+Focused、Rust 1.88、integration Quick及footprint integrity/ratio通过，ticket `+161/0/0` advisory
+已接受。Execute continuation已授权直至M14 close的required exact-SHA push及manual
+performance/resource dispatch；workflow仍禁止force-push、unchanged-SHA rerun、PR、tag、package、
+release和publication。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1337,4 +1337,5 @@ fallback/group/registry继续延期。
 | 2026-08-09 | M14-T06 integration / escalation closure | Exact `2735853b` integrates client query and server application-resolution policies through the existing DNS answering/resolver seams；T06 done、T07 ready | Initial QA `BLOCK` drove one bounded repair；targeted QA then retained the server root policy-handoff mutation and rejected the copied test codec。Two required independent `gpt-5.6-sol/xhigh` read-only analyses converged on the same exact Hickory dev-only typed fixture and token guards；final Architect/QA both `PASS` with all IDs closed | Integration focused and Quick PASS；Rust 1.88 check/build/test PASS on the accepted product；footprint integrity/category/ratio PASS and advisory `+611/0/0` accepted with no helper/support/fixture/new harness、package identity or product dependency；no remote action |
 | 2026-08-09 | M14-T07 mechanical composition leases | T07 additionally owns server `run/observation.rs` for the shared closed `ConnectErrorKind::PolicyDenied` mapping，plus client manifest、its lock row and existing workspace-policy evidence for the required normal `ferrum2-sniff` edge | SPEC-0015 requires SOCKS reply `0x02` through a shared policy-denied kind while non-SOCKS adapters map it generically；client UDP must borrow-sniff through the single existing sniff crate。Without these exact paths the core variant leaves server observation non-exhaustive and the client binary cannot call the approved parser | Extend only existing mapping/tables and add the workspace-crate edge；no server routing behavior、new metric dimension、package identity、parser、interface、helper、fixture、harness or remote action |
 | 2026-08-09 | M14-T07 client-latch evidence lease | T07 additionally owns only the existing schema-v2 client row in `config_cli.rs` | Quick proves the now-composed client accepts the validated schema-v2 model and reaches occupied-listener preparation，returning `startup.bind`；the stale row still expects the temporary T03 `startup.protocol` latch that T07 is required to remove | Rename/update only that existing role-specific oracle；server runtime expectation remains unchanged，with no helper、scenario、config acceptance、product or remote expansion |
-| 2026-08-09 | M14-T07 static-lazy E2E lease | T07 additionally owns only the existing static saturation row in `socks_udp_local_e2e.rs` | The bounded repair restores schema-v1's original lazy protocol activation，so the third static ASSOCIATE again returns its relay endpoint before the first valid datagram；the stale row still expects the repaired candidate's eager setup failure | Keep the same process/scenario and move the saturation assertion to the first valid packet plus control EOF；no new harness、helper、fixture、product behavior or remote action |
+| 2026-08-09 | M14-T07 temporary static-lazy E2E lease（superseded） | T07 additionally owned the existing static saturation row after the bounded repair appeared to require first-packet capacity admission | Targeted Architect/QA and two required independent analyses proved the control conclusion conflated setup owner admission with lazy protocol activation：schema-v1 must still fail saturated setup with `0x01` | Ownership remained valid only to restore the base setup-time assertion；the accepted split-phase repair keeps session/buffer/upstream eager and plan/live IDs lazy，without a new harness、helper or fixture |
+| 2026-08-09 | M14-T07 integration / escalation closure | Exact `1e29a5ed` integrates client TCP route/reject/DNS hijack and one-plan schema-v2 UDP classification；T07 done、T08 ready | Initial Architect/QA `BLOCK` drove one bounded repair；targeted review then found schema-v1 static setup compatibility regressed。Two required independent `gpt-5.6-sol/xhigh` read-only analyses selected the same single-association split-phase owner，and final Architect/QA both `PASS` with every finding closed | Integration focused and Quick PASS；Rust 1.88 check/build/test PASS on accepted product；footprint integrity/ratio PASS and advisory `+161/0/0` accepted with no helper/support/fixture/new harness or dependency；required remote push and manual performance/resource dispatch now authorized through close，no T07 remote action |

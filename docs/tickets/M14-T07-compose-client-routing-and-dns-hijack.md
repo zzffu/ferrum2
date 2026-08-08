@@ -1,7 +1,7 @@
 ---
 id: M14-T07
 milestone: M14
-status: ready
+status: done
 depends_on:
   - M14-T06
 owns:
@@ -35,24 +35,24 @@ from its first valid datagram and own exactly one lazy selected plan for the ass
 
 ## Acceptance
 
-- [ ] Client TCP decides from known request fields only，never waits for payload，maps reject to SOCKS
+- [x] Client TCP decides from known request fields only，never waits for payload，maps reject to SOCKS
       `0x02` and serves multiple hijacked DNS frames through the existing answering interface。
-- [ ] `UDP ASSOCIATE` returns its one relay endpoint before payload。Wrong-source/malformed/fragmented
+- [x] `UDP ASSOCIATE` returns its one relay endpoint before payload。Wrong-source/malformed/fragmented
       packets cannot classify it；the first source/wire-valid packet is cached，fills association route
       metadata，borrow-sniffs DNS and runs the ordered program exactly once。
-- [ ] Terminal route resolves one plan/selector snapshot、lazy-creates one bounded owner and forwards the
+- [x] Terminal route resolves one plan/selector snapshot、lazy-creates one bounded owner and forwards the
       cached first packet exactly once。Later packets keep their own targets through that plan and never
       read rules/final/selector again；a later selector switch or differently matching target cannot move
       the association。
-- [ ] Terminal hijack keeps the whole association in DNS answering and returns each response with that
+- [x] Terminal hijack keeps the whole association in DNS answering and returns each response with that
       request's target；later non-DNS/malformed data never routes。Terminal reject silently drops the
       classification packet and ends the association。Neither path creates Shadowsocks state。
-- [ ] `SocksUdpEndpoint` exclusively owns application socket/source/SOCKS wire and all
+- [x] `SocksUdpEndpoint` exclusively owns application socket/source/SOCKS wire and all
       `ClientUdpAssociation` upstream/one-plan/session/runtime fields are private；no plan-keyed map、
       endpoint trait/factory or per-datagram route branch remains。
-- [ ] Existing static UDP setup snapshot、server/DNS behavior、chain order/credentials、all-layer
+- [x] Existing static UDP setup snapshot、server/DNS behavior、chain order/credentials、all-layer
       atomicity、idle/cancel/grace/force/owner/rebind and low-cardinality observations remain exact。
-- [ ] T07 focused、Quick、footprint integrity and diff gates pass。
+- [x] T07 focused、Quick、footprint integrity and diff gates pass。
 
 ## Validation
 
@@ -72,10 +72,22 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Footprint: —
-- Notes: —
+- Commit: initial `201a07a30a4e0bb7667e92a72d5e8def809fe201`；bounded repair
+  `cbf2a6b8a8e3ea95e4fd4b971d3b823779d7fbd7`；accepted post-escalation product
+  `548029ef1156608bcd924c2d8104b9ec6f8dc3be`；integration
+  `1e29a5edbc82bd3ec7fa01aa3723331e6c54fab3`。
+- Review: initial Architect/QA `BLOCK` on pre-bound UDP owner mutation and incomplete architecture/
+  reject evidence。One bounded repair closed those findings but changed schema-v1 static capacity failure from
+  setup-time `0x01` to post-success first-packet failure。Two required independent
+  `gpt-5.6-sol/xhigh` read-only analyses selected the same single-association split-phase repair；final
+  targeted Architect/QA both returned `PASS` with all findings closed and no new finding。
+- Footprint: zero-exit `REVIEW_REQUIRED`；integrity and ratio `PASS`；ticket case/support/fixture
+  `+161/0/0`，code growth `+490`，ratio `1.760476`。The advisory is accepted for distinct in-place
+  state-machine、architecture and E2E evidence，with no helper、support module、fixture or harness。
+- Notes: Exact integration focused and Quick pass；the accepted product also passed Rust 1.88 workspace
+  check/build/test。Schema-v1 static UDP again performs session/buffer/socket admission before success
+  while plan/live-ID activation remains first-valid-packet lazy；schema-v2 validates the selected-plan
+  bound before every owner、source-accept and send mutation。No remote action occurred in T07。
 
 ## Rollback / risk
 
