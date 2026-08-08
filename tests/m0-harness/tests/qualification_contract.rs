@@ -39,10 +39,15 @@ fn m14_performance_profile_extends_the_existing_resource_driver() {
         .0;
     assert!(resource.contains("run_m14_measurements("));
     assert!(driver.contains("m14_tls_client_hello"));
+    assert!(driver.contains("rustls::server::Acceptor::default()"));
+    assert!(driver.contains("&[0x16, 0x03, 0x03, 0, 0]"));
+    assert!(driver.contains("invalid M14 TLS ClientHello"));
+    assert!(!driver.contains("tls_client_hello.is_empty()"));
+    assert!(!driver.contains("empty M14 TLS ClientHello"));
     assert!(driver.contains("action = \\\"reject\\\""));
     for mutation in [
         "missing M14 migration phase",
-        "empty M14 TLS ClientHello",
+        "invalid M14 TLS ClientHello",
         "non-distinguishing M14 terminal oracle",
     ] {
         assert!(

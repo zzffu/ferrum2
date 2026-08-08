@@ -881,8 +881,17 @@ fn validate_m14_measurement_plan(
     if !phases.contains(&"schema-v1-routed-udp-rejection") {
         return Err("missing M14 migration phase".to_owned());
     }
-    if tls_client_hello.is_empty() {
-        return Err("empty M14 TLS ClientHello".to_owned());
+    let mut acceptor = rustls::server::Acceptor::default();
+    let mut input = tls_client_hello;
+    loop {
+        let read = acceptor
+            .read_tls(&mut input)
+            .map_err(|_| "invalid M14 TLS ClientHello".to_owned())?;
+        match acceptor.accept() {
+            Ok(Some(_)) => break,
+            Ok(None) if read != 0 => {}
+            Ok(None) | Err(_) => return Err("invalid M14 TLS ClientHello".to_owned()),
+        }
     }
     if !terminal_outcomes_distinguishable {
         return Err("non-distinguishing M14 terminal oracle".to_owned());
@@ -2500,8 +2509,8 @@ ferrum2_tcp_replay_entries 0\n\
     expect_rejected("missing M14 migration phase", || {
         validate_m14_measurement_plan(&missing_migration, &tls, true)
     })?;
-    expect_rejected("empty M14 TLS ClientHello", || {
-        validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &[], true)
+    expect_rejected("invalid M14 TLS ClientHello", || {
+        validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &[0x16, 0x03, 0x03, 0, 0], true)
     })?;
     expect_rejected("non-distinguishing M14 terminal oracle", || {
         validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &tls, false)

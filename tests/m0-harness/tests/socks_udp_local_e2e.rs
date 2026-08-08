@@ -14,11 +14,11 @@ use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RData, RecordType};
 use local_support::{
     ChainRoot, ChildGuard, DnsReply, DnsStep, SYNTHETIC_PSK, TCP_METHOD_CONFIGS,
-    active_child_count, bind_loopback_listener, rewrite_config_method, start_dns_script,
-    unused_loopback, unused_tcp_udp_loopback, wait_for_bound, wait_for_listener, wait_for_metrics,
-    wait_for_metrics_sample, wait_for_tcp_udp_bound, write_client_config, write_server_config,
-    write_server_config_with_psk, write_tagged_client_config, write_tagged_server_config,
-    write_two_hop_client_config, write_udp_client_config,
+    active_child_count, bind_loopback_listener, metric_value, rewrite_config_method,
+    start_dns_script, unused_loopback, unused_tcp_udp_loopback, wait_for_bound, wait_for_listener,
+    wait_for_metrics, wait_for_metrics_sample, wait_for_tcp_udp_bound, write_client_config,
+    write_server_config, write_server_config_with_psk, write_tagged_client_config,
+    write_tagged_server_config, write_two_hop_client_config, write_udp_client_config,
 };
 use socket2::SockRef;
 
@@ -224,7 +224,13 @@ fn wait_udp_rebind(address: SocketAddrV4, label: &str) {
 fn m14_client_udp_association_actions_route_once_and_reap() {
     const CLIENT_ZERO_SESSIONS: &str = "ferrum2_udp_sessions_active{role=\"client\"} 0";
     const CLIENT_ZERO_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 0";
+    const CLIENT_ACCEPTED: &str = "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"accepted\"}";
+    const CLIENT_ACCEPTED_ONE: &str = "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"accepted\"} 1";
+    const CLIENT_REJECTED_ONE: &str = "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"rejected\"} 1";
+    const CLIENT_REJECTED_TWO: &str = "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"rejected\"} 2";
     const SERVER_ZERO_SESSIONS: &str = "ferrum2_udp_sessions_active{role=\"server\"} 0";
+    const SERVER_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"server\"}";
+    const SERVER_ACCEPTED: &str = "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"accepted\"}";
     const SERVER_ACCEPTED_TWO: &str = "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"accepted\"} 2";
 
     let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
@@ -324,13 +330,22 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
         .send_to(&fragmented, route_relay)
         .expect("fragmented first datagram");
     assert_no_datagram(&route_application);
-    let before_zero_port = wait_for_metrics_sample(client_metrics, CLIENT_ZERO_SESSIONS);
-    assert!(
-        before_zero_port
-            .windows(CLIENT_ZERO_BUFFER.len())
-            .any(|window| window == CLIENT_ZERO_BUFFER.as_bytes())
+    let before_zero_port = wait_for_metrics_sample(client_metrics, CLIENT_REJECTED_ONE);
+    for owner in [CLIENT_ZERO_SESSIONS, CLIENT_ZERO_BUFFER] {
+        assert!(
+            before_zero_port
+                .windows(owner.len())
+                .any(|window| window == owner.as_bytes())
+        );
+    }
+    assert_eq!(
+        metric_value(&before_zero_port, CLIENT_ACCEPTED).unwrap_or(0),
+        0
     );
     let before_server = wait_for_metrics_sample(server_metrics, SERVER_ZERO_SESSIONS);
+    let server_buffer_before = metric_value(&before_server, SERVER_BUFFER).expect("server buffer");
+    let server_accepted_before = metric_value(&before_server, SERVER_ACCEPTED).unwrap_or(0);
+    assert_eq!(server_accepted_before, 0);
     let zero_port = socks_datagram(
         SocketAddrV4::new(*route_first_address.ip(), 0),
         b"invalid-zero-port",
@@ -339,7 +354,7 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
         .send_to(&zero_port, route_relay)
         .expect("zero-port first datagram");
     assert_no_datagram(&route_application);
-    let after_zero_port = wait_for_metrics(client_metrics);
+    let after_zero_port = wait_for_metrics_sample(client_metrics, CLIENT_REJECTED_TWO);
     for owner in [CLIENT_ZERO_SESSIONS, CLIENT_ZERO_BUFFER] {
         assert!(
             after_zero_port
@@ -354,8 +369,18 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
             .any(|window| window == SERVER_ZERO_SESSIONS.as_bytes())
     );
     assert_eq!(
-        before_server, after_server,
-        "zero-port datagram reached upstream"
+        metric_value(&after_server, SERVER_BUFFER),
+        Some(server_buffer_before),
+        "zero-port datagram changed server buffer ownership"
+    );
+    assert_eq!(
+        metric_value(&after_server, SERVER_ACCEPTED).unwrap_or(0),
+        server_accepted_before,
+        "zero-port datagram reached the server upstream"
+    );
+    assert_eq!(
+        metric_value(&after_zero_port, CLIENT_ACCEPTED).unwrap_or(0),
+        0
     );
     round_trip(
         &route_application,
@@ -364,6 +389,8 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
         &target_wire(SocketAddr::V4(route_first_address)),
         b"first-route",
     );
+    let after_first_route = wait_for_metrics_sample(client_metrics, CLIENT_ACCEPTED_ONE);
+    assert_eq!(metric_value(&after_first_route, CLIENT_ACCEPTED), Some(1));
     round_trip(
         &route_application,
         route_relay,
