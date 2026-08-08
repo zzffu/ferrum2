@@ -11,6 +11,8 @@ owns:
   - bins/ferrum2-server/src/dns_egress.rs
   - bins/ferrum2-server/src/run.rs
   - bins/ferrum2-server/src/run/dns.rs
+  - crates/ferrum2-config/src/model.rs
+  - crates/ferrum2-config/tests/config_contract.rs
   - crates/ferrum2-dns/src/lib.rs
   - crates/ferrum2-dns/src/proxy.rs
   - crates/ferrum2-dns/src/resolver.rs
