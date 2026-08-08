@@ -1,7 +1,7 @@
 ---
 id: M14-T05
 milestone: M14
-status: ready
+status: done
 depends_on:
   - M14-T04
 owns:
@@ -34,17 +34,17 @@ or reject，with exact prefix replay and unchanged SIP022/replay/resource orderi
 
 ## Acceptance
 
-- [ ] Runtime provides one lazy、deadline/cancellation/buffer-owned bounded prefix collector with closed
+- [x] Runtime provides one lazy、deadline/cancellation/buffer-owned bounded prefix collector with closed
       timeout/limit/I/O outcomes and no route ownership。
-- [ ] Server TCP authenticates first，sniffs before direct open，continues on nonfatal outcomes，rejects
+- [x] Server TCP authenticates first，sniffs before direct open，continues on nonfatal outcomes，rejects
       without target work and replays the full prefix exactly once on route。
-- [ ] Server UDP authenticates/prepares first，borrow-sniffs before target reservation and retains exact
+- [x] Server UDP authenticates/prepares first，borrow-sniffs before target reservation and retains exact
       reserve/commit ordering；reject forwards nothing while consuming required replay/binding state。
-- [ ] Unauthenticated input cannot mutate/emit sniff policy，and terminal failure never evaluates later
+- [x] Unauthenticated input cannot mutate/emit sniff policy，and terminal failure never evaluates later
       rules/final。
-- [ ] Validated server route remains one hop，with switch/no-fallback、cancel/grace/force/owner/rebind and
+- [x] Validated server route remains one hop，with switch/no-fallback、cancel/grace/force/owner/rebind and
       redacted telemetry exact。
-- [ ] T05 focused、Quick、footprint integrity and diff gates pass。
+- [x] T05 focused、Quick、footprint integrity and diff gates pass。
 
 ## Validation
 
@@ -62,10 +62,21 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Footprint: —
-- Notes: —
+- Commit: initial `da0d9a21db23d4ecad97ffe77f07067c430c758b`；bounded repair
+  `7db1fc84f43d486f56f2f55682a6cac72bd888ea`；accepted post-escalation product
+  `83e55038cfc6b840ef1774ee5669b4fa2cba57e0`；integration
+  `4c65bb0294892b2133116d57a4262f7d9de69c56`。
+- Review: initial Architect/QA `BLOCK`；one bounded repair closed cancellation、prefix ownership、most
+  telemetry/UDP ordering and evidence findings，but targeted re-review still blocked real `limit`
+  reachability、the unified UDP protocol-session ceiling and selected-open-failure evidence。Two required
+  independent `gpt-5.6-sol/xhigh` read-only analyses both selected the same existing-seam correction；final
+  targeted Architect/QA returned `PASS` with `ARCH-001..006` and `QA-001..003` closed。
+- Footprint: zero-exit `REVIEW_REQUIRED`；integrity/category/ratio `PASS`；ticket case/support/fixture
+  `+1508/0/0`，code growth `+692`，ratio `1.767212`。
+- Notes: Exact integration focused and Quick pass。The first integration CLI attempt used the stale
+  pre-merge binary because bins had not yet been rebuilt；building workspace bins and rerunning the same
+  table passed `6/6`，then the complete workspace Quick passed unchanged。Rust 1.88 check/build/test passed
+  on the accepted product；no dependency、new harness/helper/fixture、remote action or publication was added。
 
 ## Rollback / risk
 
