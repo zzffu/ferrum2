@@ -179,7 +179,7 @@ fn no_side_effects_even_when_all_configured_ports_are_occupied() {
 }
 
 #[test]
-fn schema_v2_check_succeeds_but_run_fails_before_runtime_resources() {
+fn schema_v2_check_succeeds_while_client_latch_and_server_runtime_fail_closed() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (client_listener, client_address) = reserve_loopback();
     let (server_listener, server_udp, server_address) = reserve_server_tcp_udp();
@@ -190,15 +190,17 @@ fn schema_v2_check_succeeds_but_run_fails_before_runtime_resources() {
                 .replacen("schema_version = 1", "schema_version = 2", 1)
                 .replace("127.0.0.1:1080", &client_address.to_string())
                 .replace("127.0.0.1:8388", &server_address.to_string()),
+            b"error[startup.protocol] process: unable to prepare protocol resources\n".as_slice(),
         ),
         (
             "ferrum2-server",
             SERVER_BASE
                 .replacen("schema_version = 1", "schema_version = 2", 1)
                 .replace("127.0.0.1:8388", &server_address.to_string()),
+            b"error[startup.bind] process: unable to prepare required endpoint\n".as_slice(),
         ),
     ];
-    for (binary, source) in cases {
+    for (binary, source, expected_stderr) in cases {
         let path = directory.path().join(format!("{binary}-v2.toml"));
         std::fs::write(&path, source).expect("schema v2 config");
         let checked = run_binary(
@@ -216,10 +218,7 @@ fn schema_v2_check_succeeds_but_run_fails_before_runtime_resources() {
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
         assert_eq!(run.status.code(), Some(1), "{binary}");
         assert!(run.stdout.is_empty(), "{binary}");
-        assert_eq!(
-            run.stderr, b"error[startup.protocol] process: unable to prepare protocol resources\n",
-            "{binary}"
-        );
+        assert_eq!(run.stderr, expected_stderr, "{binary}");
     }
 
     let migration_path = directory.path().join("client-v1-routed-udp.toml");

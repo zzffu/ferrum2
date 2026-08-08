@@ -38,6 +38,7 @@ const TRACE_FIELDS_WITH_REASON: &[&str] = &[
     "duration_ms",
     "bytes",
 ];
+const SNIFF_TRACE_FIELDS: &[&str] = &["event", "role", "transport", "stage", "outcome", "protocol"];
 
 /// Closed severity levels accepted by the tracing boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +109,7 @@ pub enum Stage {
     Listen,
     Socks5,
     Shadowsocks,
+    Sniff,
     Direct,
     Relay,
     Metrics,
@@ -121,6 +123,7 @@ impl Stage {
             Self::Listen => "listen",
             Self::Socks5 => "socks5",
             Self::Shadowsocks => "shadowsocks",
+            Self::Sniff => "sniff",
             Self::Direct => "direct",
             Self::Relay => "relay",
             Self::Metrics => "metrics",
@@ -154,6 +157,50 @@ impl Outcome {
     }
 }
 
+/// Closed outcomes produced by one authenticated sniff attempt.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SniffOutcome {
+    Matched,
+    Unknown,
+    Timeout,
+    Limit,
+    Invalid,
+    Unavailable,
+}
+
+impl SniffOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::Unknown => "unknown",
+            Self::Timeout => "timeout",
+            Self::Limit => "limit",
+            Self::Invalid => "invalid",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Closed protocols observable from authenticated, bounded sniffing.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SniffProtocol {
+    Dns,
+    Tls,
+    Http,
+    None,
+}
+
+impl SniffProtocol {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dns => "dns",
+            Self::Tls => "tls",
+            Self::Http => "http",
+            Self::None => "none",
+        }
+    }
+}
+
 /// Closed event names; callers cannot inject a free-form message.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,6 +212,7 @@ pub enum Event {
     Replay,
     Lifecycle,
     ForcedShutdown,
+    Sniff,
 }
 
 impl Event {
@@ -177,6 +225,7 @@ impl Event {
             Self::Replay => "replay",
             Self::Lifecycle => "lifecycle",
             Self::ForcedShutdown => "forced_shutdown",
+            Self::Sniff => "sniff",
         }
     }
 }
@@ -302,6 +351,8 @@ impl_closed_display!(Stage);
 impl_closed_display!(Outcome);
 impl_closed_display!(Event);
 impl_closed_display!(Reason);
+impl_closed_display!(SniffOutcome);
+impl_closed_display!(SniffProtocol);
 
 /// One structured event containing only approved closed fields and numeric values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -395,7 +446,8 @@ fn approved_trace_metadata(metadata: &Metadata<'_>, max_level: LogLevel) -> bool
         && metadata.module_path() == Some(CLOSED_TRACE_MODULE)
         && max_level.enables(metadata.level())
         && (has_exact_fields(metadata, TRACE_FIELDS)
-            || has_exact_fields(metadata, TRACE_FIELDS_WITH_REASON))
+            || has_exact_fields(metadata, TRACE_FIELDS_WITH_REASON)
+            || has_exact_fields(metadata, SNIFF_TRACE_FIELDS))
 }
 
 fn has_exact_fields(metadata: &Metadata<'_>, expected: &[&str]) -> bool {
@@ -445,6 +497,19 @@ pub fn emit(record: TraceRecord) {
         LogLevel::Debug => emit_at!(Level::DEBUG, record),
         LogLevel::Trace => emit_at!(Level::TRACE, record),
     }
+}
+
+fn emit_sniff(role: Role, transport: Transport, outcome: SniffOutcome, protocol: SniffProtocol) {
+    tracing::event!(
+        target: CLOSED_TRACE_TARGET,
+        Level::INFO,
+        event = %Event::Sniff,
+        role = %role,
+        transport = %transport,
+        stage = %Stage::Sniff,
+        outcome = %outcome,
+        protocol = %protocol,
+    );
 }
 
 /// Closed inbound protocol labels.
@@ -499,11 +564,14 @@ macro_rules! impl_label_value {
 }
 
 impl_label_value!(Role);
+impl_label_value!(Transport);
 impl_label_value!(Inbound);
 impl_label_value!(Outcome);
 impl_label_value!(Stage);
 impl_label_value!(Reason);
 impl_label_value!(Direction);
+impl_label_value!(SniffOutcome);
+impl_label_value!(SniffProtocol);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
 struct ConnectionLabels {
@@ -560,6 +628,15 @@ struct UdpReplayLabels {
     reason: Reason,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+struct SniffLabels {
+    role: Role,
+    transport: Transport,
+    stage: Stage,
+    outcome: SniffOutcome,
+    protocol: SniffProtocol,
+}
+
 type ConnectionFamily = Family<ConnectionLabels, Counter>;
 type ActiveFamily = Family<ActiveLabels, Gauge>;
 type FailureFamily = Family<FailureLabels, Counter>;
@@ -570,8 +647,9 @@ type UdpRoleGaugeFamily = Family<UdpRoleLabels, Gauge>;
 type UdpRoleCounterFamily = Family<UdpRoleLabels, Counter>;
 type UdpDatagramFamily = Family<UdpDatagramLabels, Counter>;
 type UdpReplayFamily = Family<UdpReplayLabels, Counter>;
+type SniffFamily = Family<SniffLabels, Counter>;
 
-/// Explicit owner of the seven stable TCP and seven stable UDP metric families.
+/// Explicit owner of the stable TCP, UDP, and authenticated sniff metric families.
 ///
 /// This type installs no global recorder and starts no listener or task.
 pub struct Metrics {
@@ -590,6 +668,7 @@ pub struct Metrics {
     udp_buffered_bytes: UdpRoleGaugeFamily,
     udp_replay_rejections: UdpReplayFamily,
     udp_forced_shutdown: UdpRoleCounterFamily,
+    sniff: SniffFamily,
 }
 
 impl Metrics {
@@ -611,6 +690,7 @@ impl Metrics {
         let udp_buffered_bytes = UdpRoleGaugeFamily::default();
         let udp_replay_rejections = UdpReplayFamily::default();
         let udp_forced_shutdown = UdpRoleCounterFamily::default();
+        let sniff = SniffFamily::default();
 
         let mut registry = Registry::default();
         registry.register(
@@ -683,6 +763,11 @@ impl Metrics {
             "UDP sessions terminated at shutdown deadline",
             udp_forced_shutdown.clone(),
         );
+        registry.register(
+            "ferrum2_sniff",
+            "Authenticated bounded sniff outcomes",
+            sniff.clone(),
+        );
 
         Self {
             registry,
@@ -700,6 +785,7 @@ impl Metrics {
             udp_buffered_bytes,
             udp_replay_rejections,
             udp_forced_shutdown,
+            sniff,
         }
     }
 
@@ -823,6 +909,26 @@ impl Metrics {
         self.udp_forced_shutdown
             .get_or_create(&UdpRoleLabels { role })
             .inc();
+    }
+
+    /// Records and traces exactly one closed tuple for an authenticated sniff.
+    pub fn sniff(
+        &self,
+        role: Role,
+        transport: Transport,
+        outcome: SniffOutcome,
+        protocol: SniffProtocol,
+    ) {
+        self.sniff
+            .get_or_create(&SniffLabels {
+                role,
+                transport,
+                stage: Stage::Sniff,
+                outcome,
+                protocol,
+            })
+            .inc();
+        emit_sniff(role, transport, outcome, protocol);
     }
 
     /// Encodes a stable OpenMetrics text representation.

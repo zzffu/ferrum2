@@ -42,6 +42,8 @@ pub struct OwnerSnapshot {
     pub udp_scratch_buffers: usize,
     /// UDP session tasks terminated after their graceful deadline.
     pub udp_forced_shutdowns: usize,
+    /// Bounded TCP sniff capacity currently held by owned prefix collectors.
+    pub sniff_buffered_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +67,7 @@ struct OwnerCounters {
     udp_buffered_bytes: AtomicUsize,
     udp_scratch_buffers: AtomicUsize,
     udp_forced_shutdowns: AtomicUsize,
+    sniff_buffered_bytes: AtomicUsize,
 }
 
 /// Cloneable owner accounting used by deterministic lifecycle tests.
@@ -101,6 +104,7 @@ impl OwnerRegistry {
             udp_buffered_bytes: self.counters.udp_buffered_bytes.load(Ordering::SeqCst),
             udp_scratch_buffers: self.counters.udp_scratch_buffers.load(Ordering::SeqCst),
             udp_forced_shutdowns: self.counters.udp_forced_shutdowns.load(Ordering::SeqCst),
+            sniff_buffered_bytes: self.counters.sniff_buffered_bytes.load(Ordering::SeqCst),
         }
     }
 
@@ -126,6 +130,27 @@ impl OwnerRegistry {
 
     pub(crate) fn track_buffer(&self) -> OwnerGuard {
         OwnerGuard::new(self, OwnerKind::Buffer)
+    }
+
+    pub(crate) fn track_sniff_buffer(
+        &self,
+        capacity: usize,
+        aggregate_limit: usize,
+    ) -> Option<OwnerGuard> {
+        self.counters
+            .sniff_buffered_bytes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current
+                    .checked_add(capacity)
+                    .filter(|updated| *updated <= aggregate_limit)
+            })
+            .ok()?;
+        self.counters.buffers.fetch_add(1, Ordering::SeqCst);
+        Some(OwnerGuard {
+            counters: Arc::clone(&self.counters),
+            kind: OwnerKind::Buffer,
+            sniff_bytes: capacity,
+        })
     }
 
     pub(crate) fn track_permit(&self) -> OwnerGuard {
@@ -222,6 +247,7 @@ enum OwnerKind {
 pub(crate) struct OwnerGuard {
     counters: Arc<OwnerCounters>,
     kind: OwnerKind,
+    sniff_bytes: usize,
 }
 
 impl OwnerGuard {
@@ -230,12 +256,23 @@ impl OwnerGuard {
         Self {
             counters: Arc::clone(&registry.counters),
             kind,
+            sniff_bytes: 0,
         }
     }
 }
 
 impl Drop for OwnerGuard {
     fn drop(&mut self) {
+        if self.sniff_bytes != 0 {
+            let previous = self
+                .counters
+                .sniff_buffered_bytes
+                .fetch_sub(self.sniff_bytes, Ordering::SeqCst);
+            debug_assert!(
+                previous >= self.sniff_bytes,
+                "sniff byte owner counter underflow"
+            );
+        }
         let previous = counter(&self.counters, self.kind).fetch_sub(1, Ordering::SeqCst);
         debug_assert!(previous > 0, "owner counter underflow");
     }
@@ -275,5 +312,6 @@ impl OwnerSnapshot {
             && self.udp_queued_datagrams == other.udp_queued_datagrams
             && self.udp_buffered_bytes == other.udp_buffered_bytes
             && self.udp_scratch_buffers == other.udp_scratch_buffers
+            && self.sniff_buffered_bytes == other.sniff_buffered_bytes
     }
 }

@@ -3,7 +3,8 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use ferrum2_observability::{
-    Event, LogLevel, Outcome, Reason, Role, Stage, TraceRecord, json_subscriber,
+    Event, LogLevel, Metrics, Outcome, Reason, Role, SniffOutcome, SniffProtocol, Stage,
+    TraceRecord, Transport, json_subscriber,
 };
 use serde_json::Value;
 use tracing::Dispatch;
@@ -206,4 +207,42 @@ fn minimal_udp_record_omits_optional_fields_and_honors_level_filtering() {
         ])
     );
     assert_eq!(value["transport"], "udp");
+}
+
+#[test]
+fn sniff_trace_has_one_exact_closed_tuple_and_no_identity_channel() {
+    let capture = Captured::default();
+    let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
+    let dispatch = Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        Metrics::new().sniff(
+            Role::Server,
+            Transport::Udp,
+            SniffOutcome::Invalid,
+            SniffProtocol::None,
+        );
+    });
+
+    let text = capture.text();
+    assert_eq!(text.lines().count(), 1);
+    let value: Value = serde_json::from_str(text.trim_end()).expect("sniff JSON");
+    let object = value.as_object().expect("sniff object");
+    assert_eq!(
+        object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "event",
+            "level",
+            "outcome",
+            "protocol",
+            "role",
+            "stage",
+            "timestamp",
+            "transport",
+        ])
+    );
+    assert_eq!(object["event"], "sniff");
+    assert_eq!(object["stage"], "sniff");
+    assert_eq!(object["outcome"], "invalid");
+    assert_eq!(object["protocol"], "none");
+    assert_eq!(object["transport"], "udp");
 }

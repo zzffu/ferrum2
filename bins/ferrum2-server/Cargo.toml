@@ -18,6 +18,7 @@ ferrum2-dns.workspace = true
 ferrum2-observability.workspace = true
 ferrum2-runtime.workspace = true
 ferrum2-shadowsocks.workspace = true
+ferrum2-sniff.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true

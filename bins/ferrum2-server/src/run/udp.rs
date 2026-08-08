@@ -3,27 +3,30 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use ferrum2_config::UdpConfig;
+use ferrum2_config::{RouteAction, UdpConfig};
 use ferrum2_core::TargetAddr;
-use ferrum2_core::route::Network;
+use ferrum2_core::route::{Network, RouteMetadata, RouteProgramAction};
 use ferrum2_crypto::{Clock as _, SystemClock, SystemRandom};
-use ferrum2_observability::{Direction, Metrics, Outcome, Reason, Role, Stage};
+use ferrum2_observability::{
+    Direction, Metrics, Outcome, Reason, Role, Stage, Transport as ObservationTransport,
+};
 use ferrum2_runtime::{
     AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, MAX_UDP_WIRE_DATAGRAM_BYTES,
-    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture,
+    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture, SniffPrefixOutcome,
     SystemDirectUdpSocketFactory, UdpBufferReservation, UdpCommitError, UdpRuntimeError,
     UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpPacketScratch, UdpServer};
+use ferrum2_sniff::{Progress as SniffProgress, Transport as SniffTransport};
 use tokio::net::UdpSocket;
 
 use super::RunError;
 use super::dns_egress;
 use super::observation::{
-    record_udp_failure, record_udp_protocol_failure, record_udp_request_accepted,
+    record_sniff, record_udp_failure, record_udp_protocol_failure, record_udp_request_accepted,
     record_udp_runtime_failure, update_udp_resource_metrics,
 };
-use super::tcp::ServerRouting;
+use super::tcp::{ServerRouting, ServerTerminalRoute, route_metadata, sniff_order};
 
 pub(super) fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntimeLimits> {
     UdpRuntimeLimits::new(
@@ -133,6 +136,14 @@ impl UdpMappings {
         drop(state);
         self.published.notify_waiters();
         evicted
+    }
+
+    fn publish_rejected(&self, capability: ServerResponseCapability, inbound: usize) {
+        self.state
+            .lock()
+            .expect("UDP mapping lock poisoned")
+            .orphaned
+            .insert(capability, inbound);
     }
 
     fn invalidate_handle(&self, handle: UdpSessionHandle) {
@@ -504,6 +515,53 @@ where
                 record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
                 continue;
             }
+            let terminal = select_udp_route(
+                &routing,
+                inbound,
+                pending.datagram().target(),
+                pending.datagram().payload(),
+                &metrics,
+            );
+            if terminal == ServerTerminalRoute::Reject && routing.program().is_none() {
+                continue;
+            }
+            if existing.is_none() {
+                reconcile_udp_generations(&runtime, &mappings);
+                mappings.prune_protocol(&protocol, clock.monotonic_now());
+                match protocol.session_count() {
+                    Ok(count) if count >= config.max_sessions => {
+                        record_udp_runtime_failure(&metrics, UdpRuntimeError::SessionLimit);
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        record_udp_protocol_failure(&metrics, error);
+                        break Err(RunError::RuntimeRoot);
+                    }
+                }
+            }
+            if terminal == ServerTerminalRoute::Reject {
+                let (_datagram, commit) = pending.into_parts();
+                match protocol.commit_request(commit, peer, clock.monotonic_now(), &SystemRandom) {
+                    Ok(accepted)
+                        if existing
+                            .is_none_or(|capability| capability == accepted.capability()) =>
+                    {
+                        if existing.is_none() {
+                            mappings.publish_rejected(accepted.capability(), inbound);
+                        }
+                        metrics.udp_datagram(
+                            Role::Server,
+                            Direction::ClientToTarget,
+                            Outcome::Rejected,
+                        );
+                    }
+                    Ok(_) => record_udp_protocol_failure(&metrics, UdpPacketError::Generation),
+                    Err(error) => record_udp_protocol_failure(&metrics, error),
+                }
+                update_udp_resource_metrics(&metrics, &registry);
+                continue;
+            }
             if let Some((capability, binding)) = existing.and_then(|capability| {
                 mappings
                     .handle(capability)
@@ -514,18 +572,11 @@ where
                     continue;
                 }
                 let handle = binding.handle;
-                let Some(reserved) = reserve_udp_direct(
-                    &routing.route,
-                    routing.outbound_count,
-                    inbound,
-                    pending.datagram().target(),
-                    || {
-                        std::future::ready(
-                            runtime
-                                .reserve_datagram(handle, pending.datagram().allocated_capacity()),
-                        )
-                    },
-                )
+                let Some(reserved) = reserve_udp_direct(terminal, || {
+                    std::future::ready(
+                        runtime.reserve_datagram(handle, pending.datagram().allocated_capacity()),
+                    )
+                })
                 .await
                 else {
                     continue;
@@ -571,33 +622,13 @@ where
                     }
                 }
             }
-            if existing.is_none() {
-                mappings.prune_protocol(&protocol, clock.monotonic_now());
-                match protocol.session_count() {
-                    Ok(count) if count >= config.max_sessions => {
-                        record_udp_runtime_failure(&metrics, UdpRuntimeError::SessionLimit);
-                        continue;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        record_udp_protocol_failure(&metrics, error);
-                        break Err(RunError::RuntimeRoot);
-                    }
-                }
-            }
 
-            let Some(admission) = reserve_udp_direct(
-                &routing.route,
-                routing.outbound_count,
-                inbound,
-                pending.datagram().target(),
-                || {
-                    runtime.reserve_session(
-                        tokio::time::Instant::now(),
-                        pending.datagram().allocated_capacity(),
-                    )
-                },
-            )
+            let Some(admission) = reserve_udp_direct(terminal, || {
+                runtime.reserve_session(
+                    tokio::time::Instant::now(),
+                    pending.datagram().allocated_capacity(),
+                )
+            })
             .await
             else {
                 continue;
@@ -698,18 +729,67 @@ where
     });
 }
 
-async fn reserve_udp_direct<R, F>(
-    route: &ferrum2_core::route::RouteTable,
-    outbound_count: usize,
+fn select_udp_route(
+    routing: &ServerRouting,
     inbound: usize,
     target: &TargetAddr,
+    payload: &[u8],
+    metrics: &Metrics,
+) -> ServerTerminalRoute {
+    let Some(program) = routing.program() else {
+        return routing.legacy(inbound, Network::Udp, target);
+    };
+    let mut evaluation = program.evaluate(inbound, Network::Udp, target);
+    let mut protocol = None;
+    let mut domain = None;
+    let mut sniffed = false;
+    loop {
+        match evaluation
+            .next(RouteMetadata::new(protocol, domain.as_ref()))
+            .expect("validated route program has one terminal action")
+        {
+            RouteProgramAction::Continue(RouteAction::Sniff(sniffers)) if !sniffed => {
+                sniffed = true;
+                let order = sniff_order(sniffers, Network::Udp);
+                let (progress, collector) = if payload.len() > program.sniff.max_bytes {
+                    (SniffProgress::NoMatch, Some(SniffPrefixOutcome::Limit))
+                } else {
+                    (
+                        ferrum2_sniff::sniff(
+                            payload,
+                            program.sniff.max_bytes,
+                            SniffTransport::Udp,
+                            target.port().get(),
+                            &order,
+                        ),
+                        None,
+                    )
+                };
+                record_sniff(
+                    metrics,
+                    ObservationTransport::Udp,
+                    progress.clone(),
+                    collector,
+                );
+                (protocol, domain) = route_metadata(progress);
+            }
+            RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
+            RouteProgramAction::Continue(_) => return ServerTerminalRoute::Reject,
+            RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
+                return routing.terminal(action);
+            }
+        }
+    }
+}
+
+async fn reserve_udp_direct<R, F>(
+    terminal: ServerTerminalRoute,
     reserve: impl FnOnce() -> F,
 ) -> Option<R>
 where
     F: std::future::Future<Output = R>,
 {
-    let selected = route.select(inbound, Network::Udp, target);
-    (selected < outbound_count).then_some(())?;
+    (terminal == ServerTerminalRoute::Direct).then_some(())?;
     Some(reserve().await)
 }
 
@@ -799,7 +879,8 @@ mod tests {
             let observed_mappings = Arc::clone(&mappings);
             let shared = ServerUdpShared {
                 routing: Arc::new(ServerRouting {
-                    route: config.route,
+                    legacy: config.route,
+                    program: config.route_program,
                     outbound_count: config.outbounds.len(),
                 }),
                 protocol,
@@ -941,6 +1022,210 @@ mod tests {
                 .expect("lifecycle datagram"),
         );
         (capability, handle)
+    }
+
+    #[tokio::test]
+    async fn authenticated_udp_identities_share_one_protocol_session_ceiling() {
+        const REJECT_DNS_QUERY: &[u8] = &[
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, b'r',
+            b'e', b'j', b'e', b'c', b't', 0x04, b't', b'e', b's', b't', 0x00, 0x00, 0x01, 0x00,
+            0x01,
+        ];
+        let listener = Arc::new(udp_loopback().await);
+        let listen = match listener.local_addr().expect("listener address") {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!("IPv4 listener"),
+        };
+        let route = "[route]\n\
+            final = \"direct\"\n\
+            [route.sniff]\n\
+            max_bytes = 512\n\
+            [[route.rules]]\n\
+            network = \"udp\"\n\
+            action = \"sniff\"\n\
+            sniffers = \"dns\"\n\
+            [[route.rules]]\n\
+            network = \"udp\"\n\
+            protocol = \"dns\"\n\
+            domain = \"reject.test\"\n\
+            action = \"reject\"\n";
+        let (path, mut config) = server_v2_test_config(listen, route);
+        config.udp.max_sessions = 1;
+        let routing = ServerRouting {
+            legacy: config.route,
+            program: config.route_program,
+            outbound_count: config.outbounds.len(),
+        };
+        let registry = OwnerRegistry::new();
+        let sessions = UdpSessionManager::new(
+            udp_runtime_limits(&config.udp).expect("capacity-one limits"),
+            registry.clone(),
+        );
+        let mappings = Arc::new(UdpMappings::new(1));
+        let keys = aes_keys();
+        let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+        let clock = Arc::new(SystemClock::new());
+        let metrics = Arc::new(Metrics::new());
+        let prepared = prepare_udp_server(
+            0,
+            Arc::clone(&listener),
+            ServerUdpShared {
+                routing: Arc::new(routing),
+                protocol: Arc::clone(&protocol),
+                clock: Arc::clone(&clock),
+                config: config.udp,
+                sessions,
+                mappings: Arc::clone(&mappings),
+                admission: Arc::new(tokio::sync::Mutex::new(())),
+                connect_timeout: config.runtime.connect_timeout,
+                dns: None,
+                registry: registry.clone(),
+                metrics: Arc::clone(&metrics),
+            },
+        )
+        .expect("prepare production UDP root");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(prepared.run_with_shutdown(
+            async move {
+                let _ = stopped.await;
+            },
+            |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+
+        let peer = udp_loopback().await;
+        let target = udp_loopback().await;
+        let target_address =
+            TargetAddr::ip(target.local_addr().expect("target address")).expect("numeric target");
+        let mut received = [0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+        let mut first =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("first identity");
+        let rejected = encoded_udp_request(
+            &mut first,
+            clock.as_ref(),
+            target_address.clone(),
+            REJECT_DNS_QUERY,
+        );
+        peer.send_to(&rejected, listen)
+            .await
+            .expect("first typed reject");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if protocol.session_count().expect("first protocol count") == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first typed reject commit deadline");
+        {
+            let state = mappings.state.lock().expect("first mapping state");
+            assert_eq!((state.by_capability.len(), state.orphaned.len()), (0, 1));
+        }
+        assert_eq!(registry.snapshot().udp_sessions, 0);
+        assert_pending(target.recv_from(&mut received), "typed reject forwarded").await;
+
+        peer.send_to(&rejected, listen)
+            .await
+            .expect("duplicate typed reject");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if metrics.encode_text().expect("duplicate metrics").contains(
+                    "ferrum2_udp_replay_rejections_total{role=\"server\",direction=\"client_to_target\",reason=\"duplicate\"} 1",
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("duplicate rejection deadline");
+        assert_eq!(protocol.session_count().expect("duplicate count"), 1);
+
+        let first_direct = encoded_udp_request(
+            &mut first,
+            clock.as_ref(),
+            target_address.clone(),
+            b"first-direct",
+        );
+        peer.send_to(&first_direct, listen)
+            .await
+            .expect("first direct upgrade");
+        let (length, _) = recv_udp(&target, &mut received).await;
+        assert_eq!(&received[..length], b"first-direct");
+        assert_eq!(protocol.session_count().expect("direct protocol count"), 1);
+        assert_eq!(registry.snapshot().udp_sessions, 1);
+        {
+            let state = mappings.state.lock().expect("direct mapping state");
+            assert_eq!((state.by_capability.len(), state.orphaned.len()), (1, 0));
+        }
+
+        let oversized_payload = vec![b'x'; 513];
+        let oversized = encoded_udp_request(
+            &mut first,
+            clock.as_ref(),
+            target_address.clone(),
+            &oversized_payload,
+        );
+        peer.send_to(&oversized, listen)
+            .await
+            .expect("oversized authenticated datagram");
+        let (length, _) = recv_udp(&target, &mut received).await;
+        assert_eq!(&received[..length], oversized_payload);
+        assert!(metrics.encode_text().expect("oversized metrics").contains(
+            "ferrum2_sniff_total{role=\"server\",transport=\"udp\",stage=\"sniff\",outcome=\"limit\",protocol=\"none\"} 1"
+        ));
+
+        let mut second =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second identity");
+        let over_capacity = encoded_udp_request(
+            &mut second,
+            clock.as_ref(),
+            target_address.clone(),
+            REJECT_DNS_QUERY,
+        );
+        for expected_limits in 1..=2 {
+            peer.send_to(&over_capacity, listen)
+                .await
+                .expect("over-capacity typed reject");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if metrics.encode_text().expect("session limit metrics").contains(&format!(
+                        "ferrum2_udp_failures_total{{role=\"server\",stage=\"relay\",reason=\"session_limit\"}} {expected_limits}"
+                    )) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("shared session ceiling deadline");
+            assert_eq!(protocol.session_count().expect("shared ceiling count"), 1);
+            assert_eq!(registry.snapshot().udp_sessions, 1);
+            let state = mappings.state.lock().expect("shared ceiling mapping");
+            assert_eq!((state.by_capability.len(), state.orphaned.len()), (1, 0));
+        }
+        assert_pending(
+            target.recv_from(&mut received),
+            "over-capacity reject forwarded",
+        )
+        .await;
+        assert!(metrics.encode_text().expect("replay metrics").contains(
+            "ferrum2_udp_replay_rejections_total{role=\"server\",direction=\"client_to_target\",reason=\"duplicate\"} 1"
+        ));
+
+        let still_direct =
+            encoded_udp_request(&mut first, clock.as_ref(), target_address, b"still-direct");
+        peer.send_to(&still_direct, listen)
+            .await
+            .expect("existing identity remains legal");
+        let (length, _) = recv_udp(&target, &mut received).await;
+        assert_eq!(&received[..length], b"still-direct");
+
+        stop.send(()).expect("stop production UDP root");
+        assert_eq!(server.await.expect("production UDP task"), Ok(()));
+        assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+        std::fs::remove_file(path).expect("remove typed reject config");
     }
 
     #[tokio::test]

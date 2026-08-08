@@ -509,6 +509,7 @@ dependencies = [
  "ferrum2-observability",
  "ferrum2-runtime",
  "ferrum2-shadowsocks",
+ "ferrum2-sniff",
  "tokio",
  "tracing",
 ]

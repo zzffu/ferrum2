@@ -6,6 +6,7 @@ mod metrics;
 mod owner;
 mod process;
 mod relay;
+mod sniff;
 mod supervisor;
 mod udp;
 
@@ -29,6 +30,7 @@ pub use relay::{
     RELAY_BUFFER_BYTES, RelayFailure, RelayRunError, RelayStats, relay_bidirectional,
     relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout, relay_lifecycle,
 };
+pub use sniff::{PrefixDecision, SniffPrefix, SniffPrefixOutcome, collect_sniff_prefix};
 pub use supervisor::{
     AcceptListener, BoundedSupervisor, CancellationToken, SupervisorConfigError, SupervisorError,
 };
