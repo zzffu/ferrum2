@@ -296,6 +296,7 @@ def write_tagged_config(
     listens: tuple[int, int],
     servers: tuple[int, int] | None,
     routed: bool = False,
+    schema_version: int = 1,
 ) -> None:
     require((spec.role == "client") == (servers is not None), "tagged-config-role")
     inbounds = "\n\n".join(
@@ -312,7 +313,7 @@ tag = "out-{index}"'''
         for index in range(2)
     )
     path.write_text(
-        f'''schema_version = 1
+        f'''schema_version = {schema_version}
 
 {inbounds}
 
@@ -601,7 +602,7 @@ def assert_routed_smoke(specs: tuple[BinarySpec, BinarySpec], directory: Path) -
     udp_dead = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); udp_dead.bind(("127.0.0.1", 0))
     write_tagged_config(configs[0], server, servers, None, True)
     write_tagged_config(configs[1], client, tcp_clients, (servers[0], int(tcp_dead.getsockname()[1])), True)
-    write_tagged_config(configs[2], client, udp_clients, (int(udp_dead.getsockname()[1]), servers[1]), True)
+    write_tagged_config(configs[2], client, udp_clients, (int(udp_dead.getsockname()[1]), servers[1]), True, 2)
     configs[2].write_text(configs[2].read_text() + "\n[udp]\n", encoding="utf-8")
     live: list[tuple[subprocess.Popen[bytes], Capture]] = []; sockets = [tcp, tcp_dead, udp, udp_dead]; streams = []; first_error = None
     try:

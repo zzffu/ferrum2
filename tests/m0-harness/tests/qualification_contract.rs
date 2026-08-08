@@ -174,6 +174,52 @@ fn dns_hosted_report_has_one_exact_completion_contract() {
     );
 }
 
+#[test]
+fn hosted_routed_udp_generators_use_schema_v2() {
+    let native = include_str!("../../platform/qualify_native.py");
+    let writer = native
+        .split_once("def write_tagged_config(")
+        .expect("native tagged config writer")
+        .1
+        .split_once("def assert_tagged_offline_config")
+        .expect("native tagged config writer end")
+        .0;
+    assert!(writer.contains("schema_version: int = 1,"));
+    assert!(writer.contains("schema_version = {schema_version}"));
+
+    let route_smoke = native
+        .split_once("def assert_routed_smoke(")
+        .expect("native route smoke")
+        .1
+        .split_once("def send_genuine_signal")
+        .expect("native route smoke end")
+        .0;
+    let calls: Vec<_> = route_smoke
+        .lines()
+        .filter(|line| line.contains("write_tagged_config("))
+        .collect();
+    assert_eq!(calls.len(), 3);
+    assert!(!calls[0].ends_with(", 2)"));
+    assert!(!calls[1].ends_with(", 2)"));
+    assert!(calls[2].ends_with(", True, 2)"));
+
+    let external = include_str!("../src/external_support/mod.rs");
+    let dns_case = external
+        .split_once("fn run_external_dns_case")
+        .expect("external DNS case")
+        .1
+        .split_once("fn start_server_resolution_witness")
+        .expect("external DNS case end")
+        .0;
+    let (server, client) = dns_case
+        .split_once("let client_config = format!(")
+        .expect("external DNS client config");
+    assert!(server.contains("\"schema_version = 1\\n[server]"));
+    assert!(client.contains("\"schema_version = 2\\n\\\n"));
+    assert!(client.contains("[route]\\nfinal = \\\"dns-hop\\\""));
+    assert!(client.contains("[udp]\\n\""));
+}
+
 fn all_ready() -> SetupAvailability {
     SetupAvailability::from_provider_status(Some("0"), Some("0"))
 }

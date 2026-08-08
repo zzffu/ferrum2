@@ -690,7 +690,7 @@ fn run_external_dns_case(case: DnsCaseSpec) {
         ""
     };
     let client_config = format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          [[inbounds]]\ntag = \"socks\"\nlisten = \"{socks_address}\"\n\
          [[outbounds]]\ntag = \"dns-hop\"\nserver = \"{shadowsocks_address}\"\n\
          [route]\nfinal = \"dns-hop\"\n\
