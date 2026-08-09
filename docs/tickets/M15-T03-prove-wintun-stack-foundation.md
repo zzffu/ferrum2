@@ -1,7 +1,7 @@
 ---
 id: M15-T03
 milestone: M15
-status: planned
+status: ready
 depends_on:
   - M15-T02
 owns:

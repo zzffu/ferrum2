@@ -138,8 +138,8 @@ owner-provided design input，不是仓库证据。上游事实与纠正记录�
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M15-T01 | Freeze corrected contracts、dependency dispositions and footprint control | M14 closed | done |
-| M15-T02 | Prove M14 classification-eligible UDP commit ordering and selector re-read | M15-T01 | ready |
-| M15-T03 | Prove config → Wintun/address/MTU/DAD/session → bounded stack → rollback | M15-T02 | planned |
+| M15-T02 | Prove M14 classification-eligible UDP commit ordering and selector re-read | M15-T01 | done |
+| M15-T03 | Prove config → Wintun/address/MTU/DAD/session → bounded stack → rollback | M15-T02 | ready |
 | M15-T04 | Compose IPv4/IPv6 TUN TCP through the existing policy/DNS/egress/relay seams | M15-T03 | planned |
 | M15-T05 | Compose IPv4/IPv6 TUN UDP mapping and DNS hijack through existing association seams | M15-T04 | planned |
 | M15-T06 | Close failure、lifecycle、architecture、privileged and performance evidence | M15-T05 | planned |
@@ -176,9 +176,9 @@ supplied exact DLL and does not redistribute it。
 
 ## Blocker / next action
 
-No execution blocker。T01 candidate `4942a3d451547eeb104a7617ed0ad5880918adc9` passed bounded review、
-exact validation and footprint control；T02 is ready。Create and bind its isolated worktree from the exact
-integration branch HEAD containing this status record。The direct GitHub-hosted Windows privileged smoke
-and same-SHA performance dispatch are authorized；Hyper-V/self-hosted remains fallback only after a recorded
-direct capability failure。Package/release remains blocked until the Wintun binary-license disposition is
-recorded by the responsible owner。
+No execution blocker。T02 exact integration `fc617cda7dac8e8ebf46c676fae09d4a2dce9bc1` passed Engineer
+validation and independent Architect/QA review with only accepted numeric/timeout notes；T03 is ready。
+Create and bind its isolated worktree from the integration branch HEAD containing this status record。The
+direct GitHub-hosted Windows privileged smoke and same-SHA performance dispatch are authorized；Hyper-V/
+self-hosted remains fallback only after a recorded direct capability failure。Package/release remains
+blocked until the Wintun binary-license disposition is recorded by the responsible owner。

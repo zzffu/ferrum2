@@ -1,7 +1,7 @@
 ---
 id: M15-T02
 milestone: M15
-status: ready
+status: done
 depends_on:
   - M15-T01
 owns:
@@ -22,13 +22,13 @@ expected unless the focused regression first turns red。
 
 ## Acceptance
 
-- [ ] ADR-0033/SPEC-0015/TEST-0015 distinguish ephemeral route/selector calculation from committed terminal
+- [x] ADR-0033/SPEC-0015/TEST-0015 distinguish ephemeral route/selector calculation from committed terminal
       mode、source、association、session/live ID、activity and send state。
-- [ ] One focused regression performs selector A → maximum+1 candidate drop → switch to B → valid candidate
+- [x] One focused regression performs selector A → maximum+1 candidate drop → switch to B → valid candidate
       and proves the valid candidate uses B exactly once。
-- [ ] The rejected candidate has zero accepted activity、association/session/live-ID owners、target traffic
+- [x] The rejected candidate has zero accepted activity、association/session/live-ID owners、target traffic
       and policy-terminal commitment。
-- [ ] Existing first-valid-datagram、later-selector-ignored、response-binding and cleanup evidence remains
+- [x] Existing first-valid-datagram、later-selector-ignored、response-binding and cleanup evidence remains
       green。If the new test already passes，the ticket changes only contract text and the existing test body。
 
 ## Validation
@@ -43,9 +43,19 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: —
+- Commit: `fc617cda7dac8e8ebf46c676fae09d4a2dce9bc1`；tree
+  `a5218d72ed56c74f75f7b9384db33a7bc245383c`；parent/base
+  `32342cb04d52ec42ea126744ce93968803f2c834`。
+- Review: Architect and QA both `PASS_WITH_NOTES`；zero blocker/major/minor。`M15-T02-N01` and
+  `QA-M15-T02-N01` accept the existing `socks.rs` file-size signal；`QA-M15-T02-N02` records one outer
+  124-second command timeout followed by an unchanged exact 131.2-second workspace `PASS`。
+- Footprint: integrity `PASS`；code/tests `25586/45012`，ratio `1.759243 PASS`；case/support/fixture
+  `39263/5152/597`，delta `+3/0/0`。Numeric `REVIEW_REQUIRED` is accepted because the sole existing
+  association regression gained three distinct case lines with no product、helper、support、fixture or
+  harness growth。
+- Notes: RED failed at the old A receive timeout；GREEN focused `1/1`、architecture `18/18` and workspace
+  passed。Primary integration reran focused、architecture、footprint and diff checks successfully。No remote
+  action was taken。
 
 ## Rollback / risk
 

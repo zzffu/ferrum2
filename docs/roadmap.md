@@ -71,12 +71,11 @@ route/reject/hijack、schema-v2 association routing及schema-v1 migration reject
 automatic run `31282591585/1`保留为FAIL且未rerun；其qualification generator schema缺陷在三文件
 test/tool descendant修复。Final Architect/QA均`PASS_WITH_NOTES`且zero finding；schema-3 integrity/
 ratio PASS，`+5377/0/0` numeric advisory已接受。未force-push、PR、tag、package、release或publish。
-M15现为`executing`：T01 candidate `4942a3d451547eeb104a7617ed0ad5880918adc9`已冻结qualified M14/
-planning identities、schema-v2 manual-route Wintun ownership、exact smoltcp 0.13.1/Rust 1.97.1、两条
-deep-module seam及schema-3 footprint control；bounded Architect/QA review与exact Quick/MSRV/footprint
-均`PASS`，T02已ready。后续按T02→T03→T04→T05→T06→T07串行drain；本次execute已授权所需
-non-force push、direct hosted probe及same-SHA performance dispatch，未授权rerun、force-push、PR、tag、
-package、release或publication。
+M15现为`executing`：T01已冻结contracts/control；T02 exact integration `fc617cda…`澄清并证明UDP
+超限候选只做ephemeral selector/plan-limit计算，A超限零提交后B合法候选被采用，提交后切回A仍固定B。
+Engineer、Architect和QA验证通过，numeric `+3/0/0`及一次外层timeout note已接受，T03 ready。后续按
+T03→T04→T05→T06→T07串行drain；本次execute已授权所需non-force push、direct hosted probe及
+same-SHA performance dispatch，未授权rerun、force-push、PR、tag、package、release或publication。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1149,8 +1148,8 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 - **Deferred/out of scope:** explicit/automatic/default/bypass route、system DNS、WFP、network monitoring、
   fragments、ICMP、Fake-IP、process routing、non-Windows/non-AMD64 TUN、multi-stack/sharding、installer、
   service、DLL redistribution、package/release/publication。
-- **Next/remote boundary:** T01 done and T02 ready；create/bind its isolated worktree from the exact integration
-  branch HEAD containing the T01 status record。Required non-force pushes、the direct hosted probe and the
+- **Next/remote boundary:** T01/T02 done and T03 ready；create/bind its isolated worktree from the exact
+  integration branch HEAD containing the T02 status record。Required non-force pushes、the direct hosted probe and the
   same-SHA performance dispatch are authorized；rerun、force-push、PR、tag、package、release and publication
   are not。Hyper-V/self-hosted remains fallback only after a recorded direct capability failure。Combined
   Wintun/Ferrum2 redistribution remains blocked pending the responsible license decision。
@@ -1399,3 +1398,4 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 | 2026-08-09 | M15 initial plan（dependency/MSRV superseded by next row） | M15改为`planned`；接受Windows AMD64手动路由Wintun TUN、single stack owner、flow-level seam和existing policy/DNS/egress composition | External draft经exact `bd374c6` source/CI/upstream复核；schema 3/Rust 1.91/three crates/fragments/2-GiB defaults/blocking activate/Hyper-V-first最初改为schema v2/Rust 1.88/two deep modules/no fragments/bounded prepare/direct hosted-first；Windows-managed connected rows显式纳入合同 | qualified `bc696347…`、planning `bd374c6…`；ADR-0034、SPEC/TEST-0016、M15 research、T01→T02→T03→T04→T05→T06→T07；performance required；plan-only，无product/push/dispatch/release/publication |
 | 2026-08-09 | M15 dependency/MSRV owner amendment | Owner明确要求exact smoltcp 0.13.1及当前latest stable rustc；规划日官方latest为Rust 1.97.1，现有selected build toolchain已匹配 | 保留no-default literal ten-feature graph、双向TCP/UDP filter和no-fragment边界；明确不启用正向`auto-icmp-echo-reply`。T03把workspace、CI及policy MSRV从1.88.0原子提升至1.97.1，Rust1.91只作为upstream minimum事实；未来stable不自动漂移 | M15 milestone/ADR/SPEC/TEST/research/T01/T03/T06/T07同步；control-only T01不修改product/workflow，未授权push/dispatch/release/publication |
 | 2026-08-09 | M15-T01 accept / execute | M15改为`executing`；T01 candidate `4942a3d…`通过review/validation，T02 ready | Qualified/planning identities、manual-route/schema-v2/two-module ownership、Wintun artifact/dependency/MSRV facts、packet/flow boundaries and schema-3 control agree；bounded primary Architect/QA `PASS` with zero finding | Quick、Rust 1.88 historical、Rust 1.97.1 forward、footprint integrity/numeric `PASS` and `0/0/0`；execute授权required non-force pushes、direct hosted probe及same-SHA performance dispatch；no rerun/force-push/PR/tag/package/release/publication |
+| 2026-08-09 | M15-T02 integrate | Exact `fc617cda…` proves rejected plan-bound UDP candidates commit nothing，the next valid candidate re-reads selector state，and a live association retains its accepted snapshot | Existing regression performs A→over-limit drop→B valid and B→A after commit；runtime unchanged。Architect/QA both `PASS_WITH_NOTES`，zero blocker/major/minor | Focused、architecture、workspace and footprint integrity PASS；numeric `+3/0/0` existing-file signal and one outer timeout/exact rerun note accepted；T03 ready，no remote action |
