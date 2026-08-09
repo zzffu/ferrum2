@@ -690,12 +690,11 @@ function Open-TunTcp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
     $client = [Net.Sockets.TcpClient]::new($family)
     $client.NoDelay = $true
     $client.SendBufferSize = 4096
-    $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))
     $connected = $client.ConnectAsync($Address, $Port)
     Assert-True ($connected.Wait(5000)) "TUN TCP local handshake timeout"
     if ($connected.IsFaulted) { throw "TUN TCP local handshake failed" }
     $localEndpoint = [Net.IPEndPoint]$client.Client.LocalEndPoint
-    Assert-True ($localEndpoint.Address.Equals($sourceAddress)) "TUN TCP source bind mismatch"
+    Assert-True ($localEndpoint.Address.Equals($sourceAddress)) "TUN TCP routed source mismatch"
     return [pscustomobject]@{ Client = $client }
 }
 

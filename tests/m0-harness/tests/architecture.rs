@@ -2516,10 +2516,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && open_tcp.is_some_and(|open| {
                 open.contains("[Net.IPAddress]::Parse(\"198.18.0.2\")")
                     && open.contains("[Net.IPAddress]::Parse(\"fd00::2\")")
+                    && !open.contains("$client.Client.Bind(")
                     && open
-                        .find("$client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))")
-                        .zip(open.find("$connected = $client.ConnectAsync($Address, $Port)"))
-                        .is_some_and(|(bound, connected)| bound < connected)
+                        .find("$connected = $client.ConnectAsync($Address, $Port)")
+                        .zip(open.find("$localEndpoint = [Net.IPEndPoint]$client.Client.LocalEndPoint"))
+                        .is_some_and(|(connected, endpoint)| connected < endpoint)
                     && open.contains("$localEndpoint.Address.Equals($sourceAddress)")
                     && !open.contains("Add-TunRoute")
             })
@@ -2818,12 +2819,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("$ports[4] = 53", "$ports[4] = 54"),
         controller.replace("-not $pressureWrite.Wait(500)", "$true"),
         controller.replace(
-            "$client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))",
-            "",
+            "    $connected = $client.ConnectAsync($Address, $Port)",
+            "    $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))\n    $connected = $client.ConnectAsync($Address, $Port)",
         ),
         controller.replace(
-            "    $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))\n    $connected = $client.ConnectAsync($Address, $Port)",
-            "    $connected = $client.ConnectAsync($Address, $Port)\n    $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))",
+            "    Assert-True ($localEndpoint.Address.Equals($sourceAddress)) \"TUN TCP routed source mismatch\"",
+            "",
         ),
         controller.replace(
             "    $client = [Net.Sockets.TcpClient]::new($family)",
