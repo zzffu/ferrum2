@@ -1094,7 +1094,16 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $pressureBytes = [byte[]]::new(8 * 1024 * 1024)
         $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)
         Assert-True (-not $pressureWrite.Wait(500)) "backpressure write unexpectedly drained"
-        Stop-Candidate $activeProcess
+        $forcedShutdown = [Diagnostics.Stopwatch]::StartNew()
+        Assert-True ([Ferrum2ProcessGroup]::Break([uint32]$activeProcess.Id)) "TCP-08 CTRL_BREAK delivery failed"
+        Assert-True (-not (Wait-ProcessExit $activeProcess 300)) "TCP-08 exited during grace"
+        Assert-True (-not $pressureWrite.IsCompleted) "TCP-08 pressured flow was not owned through grace"
+        Assert-True (Wait-ProcessExit $activeProcess 10) "TCP-08 forced cancellation did not exit"
+        $forcedShutdown.Stop()
+        Assert-True ($forcedShutdown.ElapsedMilliseconds -ge 900) "TCP-08 force preceded the grace deadline"
+        $forcedExit = [Ferrum2ProcessGroup]::ExitCode([uint32]$activeProcess.Id)
+        Assert-True ($forcedExit -eq 0) "TCP-08 forced shutdown was not clean: exit=$forcedExit"
+        [Ferrum2ProcessGroup]::Close([uint32]$activeProcess.Id)
         $activeProcess = $null
         $pressure.Client.Dispose()
         Wait-AdapterAbsent $adapterName

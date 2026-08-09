@@ -10,9 +10,11 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use super::*;
 use crate::run::test_support::*;
 
-#[tokio::test]
-async fn tun_tcp_sniff_prefix_is_replayed_exactly_once_into_the_selected_terminal() {
-    use super::routing::{ClientTerminalRoute, ReplayIo};
+#[tokio::test(start_paused = true)]
+async fn tun_tcp_sniff_outcomes_are_fail_closed_and_replay_each_prefix_once() {
+    use ferrum2_runtime::SniffPrefixOutcome;
+
+    use super::routing::{ClientTerminalRoute, ReplayIo, TcpRoutePrefix};
 
     static CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -76,6 +78,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         .await
         .expect("sniff selection");
     assert!(matches!(selection.terminal, ClientTerminalRoute::Reject));
+    assert!(matches!(
+        &selection.prefix,
+        TcpRoutePrefix::Collected(prefix) if prefix.outcome() == SniffPrefixOutcome::Complete
+    ));
     let mut replay = ReplayIo::new(flow, selection.prefix);
     let mut received = Vec::new();
     replay
@@ -84,6 +90,114 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         .expect("replay selected bytes");
     assert_eq!(received, wire, "collected bytes enter the terminal once");
     drop(replay);
+    assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+
+    let mut limit_wire = b"GET / HTTP/1.1\r\nX: ".to_vec();
+    limit_wire.resize(8_192, b'a');
+    for (name, wire, outcome) in [
+        ("limit", limit_wire, SniffPrefixOutcome::Limit),
+        (
+            "invalid",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            SniffPrefixOutcome::Complete,
+        ),
+    ] {
+        let (mut flow, mut peer) = tokio::io::duplex(16_384);
+        peer.write_all(&wire).await.expect("write sniff prefix");
+        peer.shutdown().await.expect("close sniff peer");
+        let selection = routing
+            .select_tcp(
+                0,
+                &target,
+                &mut flow,
+                std::future::pending::<()>(),
+                &registry,
+                &metrics,
+            )
+            .await
+            .expect("sniff falls through to final route");
+        assert!(
+            matches!(&selection.terminal, ClientTerminalRoute::Route(_)),
+            "{name}"
+        );
+        assert!(
+            matches!(&selection.prefix, TcpRoutePrefix::Collected(prefix) if prefix.outcome() == outcome),
+            "{name}"
+        );
+        let mut replay = ReplayIo::new(flow, selection.prefix);
+        let mut received = Vec::new();
+        replay.read_to_end(&mut received).await.expect("replay");
+        assert_eq!(received, wire, "{name} prefix is replayed exactly once");
+    }
+
+    let (mut flow, mut peer) = tokio::io::duplex(128);
+    peer.write_all(b"G").await.expect("timeout prefix");
+    let mut selection = Box::pin(routing.select_tcp(
+        0,
+        &target,
+        &mut flow,
+        std::future::pending::<()>(),
+        &registry,
+        &metrics,
+    ));
+    tokio::select! {
+        _ = &mut selection => panic!("sniff completed before its absolute timeout"),
+        _ = tokio::task::yield_now() => {}
+    }
+    tokio::time::advance(Duration::from_millis(299)).await;
+    tokio::select! {
+        _ = &mut selection => panic!("sniff timeout was shortened"),
+        _ = tokio::task::yield_now() => {}
+    }
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let selection = selection
+        .await
+        .expect("timeout falls through to final route");
+    peer.shutdown().await.expect("timeout EOF");
+    assert!(matches!(&selection.terminal, ClientTerminalRoute::Route(_)));
+    assert!(matches!(
+        &selection.prefix,
+        TcpRoutePrefix::Collected(prefix) if prefix.outcome() == SniffPrefixOutcome::Timeout
+    ));
+    let mut replay = ReplayIo::new(flow, selection.prefix);
+    let mut received = Vec::new();
+    replay
+        .read_to_end(&mut received)
+        .await
+        .expect("timeout replay");
+    assert_eq!(received, b"G");
+    drop(replay);
+
+    let (mut cancelled, _) = tokio::io::duplex(1);
+    assert!(
+        routing
+            .select_tcp(
+                0,
+                &target,
+                &mut cancelled,
+                std::future::ready(()),
+                &registry,
+                &metrics,
+            )
+            .await
+            .is_none(),
+        "cancelled sniff cannot select a terminal"
+    );
+    let mut failed = ScriptedIo::failing();
+    assert!(
+        routing
+            .select_tcp(
+                0,
+                &target,
+                &mut failed,
+                std::future::pending::<()>(),
+                &registry,
+                &metrics,
+            )
+            .await
+            .is_none(),
+        "read failure cannot select a terminal"
+    );
     assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
 }
 

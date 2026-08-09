@@ -6,7 +6,7 @@ pub use tcp::TcpFlow;
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use std::net::IpAddr;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -17,7 +17,7 @@ use smoltcp::iface::{
     Config as InterfaceConfig, Interface, PollIngressSingleResult, Route, SocketHandle, SocketSet,
 };
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::socket::tcp::{
     Socket as TcpSocket, SocketBuffer as TcpSocketBuffer, State as TcpState,
@@ -25,7 +25,10 @@ use smoltcp::socket::tcp::{
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::time::Instant;
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv6Address};
+use smoltcp::wire::{
+    HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv6Address, TcpControl,
+    TcpPacket, TcpRepr,
+};
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const PACKET_QUANTUM: usize = 8;
@@ -364,7 +367,7 @@ where
         Box::pin(async move {
             let mut tasks = tokio::task::JoinSet::new();
             let mut forced = cancellation.clone();
-            let reported = loop {
+            let reported = 'required: loop {
                 if cancellation.is_cancelled() {
                     self.owner.control.admitting.store(false, Ordering::Release);
                 }
@@ -382,10 +385,19 @@ where
                     result = &mut self.done => break reported_owner_exit(result),
                     flow = self.flows.recv() => {
                         if let Some(flow) = flow {
+                            while let Some(result) = tasks.try_join_next() {
+                                if result.is_err() {
+                                    break 'required OwnerExit::RuntimeFailed;
+                                }
+                            }
                             tasks.spawn((self.handle_tcp)(flow, cancellation.clone()));
                         }
                     }
-                    _ = tasks.join_next(), if !tasks.is_empty() => {}
+                    result = tasks.join_next(), if !tasks.is_empty() => {
+                        if result.is_some_and(|result| result.is_err()) {
+                            break OwnerExit::RuntimeFailed;
+                        }
+                    }
                     () = cancellation.cancelled(), if !cancellation.is_cancelled() => {
                         self.owner.control.admitting.store(false, Ordering::Release);
                     }
@@ -1055,10 +1067,10 @@ impl Stack {
         if self.device.ingress_len == INGRESS_SLOTS || !self.device.validator.accepts(packet) {
             return false;
         }
-        if let Some(tuple) = initial_tcp_tuple(packet)
-            && !self.admit_tcp(tuple, admitting)
-        {
-            return false;
+        match initial_tcp_tuple(packet) {
+            Ok(Some(tuple)) if !self.admit_tcp(tuple, admitting) => return false,
+            Err(()) => return false,
+            Ok(Some(_)) | Ok(None) => {}
         }
         self.device.enqueue(packet)
     }
@@ -1156,7 +1168,7 @@ impl Stack {
                         (copied, ())
                     });
                 }
-                if entry.owner.stack_capacity() != 0 && socket.may_send() {
+                if entry.owner.stack_buffered() != 0 && socket.may_send() {
                     entry
                         .owner
                         .drain_to_stack(|bytes| socket.send_slice(bytes).unwrap_or(0));
@@ -1166,7 +1178,7 @@ impl Stack {
                     entry.remote_closed = true;
                 }
                 if entry.owner.shutdown_requested()
-                    && entry.owner.stack_capacity() == self.bridge_capacity
+                    && entry.owner.stack_buffered() == 0
                     && !entry.fin_started
                     && socket.may_send()
                 {
@@ -1228,38 +1240,46 @@ impl Stack {
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-fn initial_tcp_tuple(packet: &[u8]) -> Option<TcpTuple> {
+fn initial_tcp_tuple(packet: &[u8]) -> Result<Option<TcpTuple>, ()> {
     let (source, target, offset) = match packet[0] >> 4 {
         4 if packet.get(9) == Some(&6) => (
-            SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]),
-                u16::from_be_bytes([packet[20], packet[21]]),
+            std::net::IpAddr::V4(Ipv4Addr::new(
+                packet[12], packet[13], packet[14], packet[15],
             )),
-            SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]),
-                u16::from_be_bytes([packet[22], packet[23]]),
+            std::net::IpAddr::V4(Ipv4Addr::new(
+                packet[16], packet[17], packet[18], packet[19],
             )),
             20,
         ),
         6 if packet.get(6) == Some(&6) => (
-            SocketAddr::V6(SocketAddrV6::new(
-                Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?),
-                u16::from_be_bytes([packet[40], packet[41]]),
-                0,
-                0,
+            std::net::IpAddr::V6(Ipv6Addr::from(
+                <[u8; 16]>::try_from(&packet[8..24]).map_err(|_| ())?,
             )),
-            SocketAddr::V6(SocketAddrV6::new(
-                Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).ok()?),
-                u16::from_be_bytes([packet[42], packet[43]]),
-                0,
-                0,
+            std::net::IpAddr::V6(Ipv6Addr::from(
+                <[u8; 16]>::try_from(&packet[24..40]).map_err(|_| ())?,
             )),
             40,
         ),
-        _ => return None,
+        _ => return Ok(None),
     };
-    let flags = *packet.get(offset + 13)?;
-    (flags & 0x12 == 0x02).then_some(TcpTuple { source, target })
+    if packet[offset + 13] & 0x02 == 0 {
+        return Ok(None);
+    }
+    let segment = TcpPacket::new_checked(&packet[offset..]).map_err(|_| ())?;
+    let repr = TcpRepr::parse(
+        &segment,
+        &ip_address(source),
+        &ip_address(target),
+        &ChecksumCapabilities::default(),
+    )
+    .map_err(|_| ())?;
+    if repr.control != TcpControl::Syn || repr.ack_number.is_some() {
+        return Err(());
+    }
+    Ok(Some(TcpTuple {
+        source: SocketAddr::new(source, repr.src_port),
+        target: SocketAddr::new(target, repr.dst_port),
+    }))
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -1284,7 +1304,7 @@ mod tests {
     use super::tcp::tcp_flow_pair;
     use super::{
         GenerationTable, MemoryTx, OutputResult, OwnerControl, OwnerExit, OwnerThread,
-        PacketValidator, Stack, finish_stack_setup, map_owner_spawn, reconcile_owner_exit,
+        PacketValidator, Stack, TunRoot, finish_stack_setup, map_owner_spawn, reconcile_owner_exit,
         reported_owner_exit,
     };
 
@@ -1855,6 +1875,32 @@ mod tests {
             Arc::clone(&flow_count),
         )
         .expect("bounded stack");
+        for (name, mut packet, flags) in [
+            ("SYN+FIN", ipv4_tcp(), 0x03),
+            ("SYN+RST", ipv4_tcp(), 0x06),
+            ("SYN+ACK", ipv4_tcp(), 0x12),
+        ] {
+            packet[33] = flags;
+            repair_ipv4_tcp_checksum(&mut packet);
+            assert!(
+                !stack.enqueue(&packet, true),
+                "{name} is not an initial SYN"
+            );
+            assert_eq!(stack.live_tcp_flows(), 0, "{name} leaked a flow slot");
+        }
+        let mut malformed_option = ipv4_tcp();
+        malformed_option.resize(44, 0);
+        malformed_option[2..4].copy_from_slice(&44_u16.to_be_bytes());
+        malformed_option[32] = 0x60;
+        malformed_option[40..44].copy_from_slice(&[2, 1, 0, 0]);
+        repair_ipv4_header(&mut malformed_option);
+        repair_ipv4_tcp_checksum(&mut malformed_option);
+        assert!(
+            !stack.enqueue(&malformed_option, true),
+            "malformed TCP options fail before admission"
+        );
+        assert_eq!(stack.live_tcp_flows(), 0, "malformed options leaked a slot");
+
         let first = ipv4_tcp();
         assert!(stack.enqueue(&first, true));
         assert_eq!(stack.live_tcp_flows(), 1);
@@ -1969,20 +2015,40 @@ mod tests {
             "optional ACK leaves the fixed TX slot"
         );
 
-        flow.write_all(b"outbound").await.expect("app to stack");
+        let bridge_capacity = stack.bridge_capacity;
+        let outbound = vec![0x5a; bridge_capacity + 17];
+        flow.write_all(&outbound[..bridge_capacity])
+            .await
+            .expect("fill app-to-stack bridge exactly");
+        let mut overflow = Box::pin(flow.write_all(&outbound[bridge_capacity..]));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut overflow)
+                .await
+                .is_err(),
+            "bytes beyond the bridge capacity apply backpressure"
+        );
         stack.poll_quantum(Instant::from_millis(3));
-        let mut outbound = Vec::new();
+        let mut observed = Vec::new();
         assert_eq!(
             stack.take_output(|packet| {
-                outbound.extend_from_slice(packet);
+                observed.extend_from_slice(&packet[40..]);
                 true
             }),
             OutputResult::Sent
         );
-        assert_eq!(&outbound[40..], b"outbound");
+        overflow.await.expect("released bridge write");
+        stack.poll_quantum(Instant::from_millis(4));
+        assert_eq!(
+            stack.take_output(|packet| {
+                observed.extend_from_slice(&packet[40..]);
+                true
+            }),
+            OutputResult::Sent
+        );
+        assert_eq!(observed, outbound, "full bridge drains without byte loss");
 
         drop(flow);
-        stack.poll_quantum(Instant::from_millis(4));
+        stack.poll_quantum(Instant::from_millis(5));
         let mut reset = false;
         assert_eq!(
             stack.take_output(|packet| {
@@ -2304,5 +2370,73 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {})
             .await
             .expect("owner table is bounded");
+    }
+
+    #[tokio::test]
+    async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
+        use ferrum2_runtime::{ProcessCause, ProcessRootExit, ProcessSupervisor};
+
+        let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
+        let control = OwnerControl::new();
+        let active = Arc::clone(&control.active);
+        let owner_control = control.clone();
+        let (done_sender, done_receiver) = tokio::sync::oneshot::channel();
+        let thread = std::thread::spawn(move || {
+            while !owner_control.stop.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let _ = done_sender.send(OwnerExit::Stopped);
+            OwnerExit::Stopped
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let root = ferrum2_runtime::ProcessRoot::new(move || async move {
+            Ok::<_, &'static str>(TunRoot {
+                owner: OwnerThread {
+                    control,
+                    #[cfg(all(windows, target_arch = "x86_64"))]
+                    wake: None,
+                    thread: Some(thread),
+                },
+                done: done_receiver,
+                runtime: Some("runtime"),
+                cleanup: Some("cleanup"),
+                flows: flow_receiver,
+                flow_count: Arc::new(AtomicUsize::new(0)),
+                handle_tcp: Arc::new(move |flow, _| {
+                    let calls = Arc::clone(&handler_calls);
+                    Box::pin(async move {
+                        drop(flow);
+                        if calls.fetch_add(1, Ordering::SeqCst) == 32 {
+                            panic!("injected TUN TCP handler panic");
+                        }
+                    })
+                }),
+            })
+        });
+        let supervisor = ProcessSupervisor::new(
+            vec![root],
+            Duration::from_secs(1),
+            ferrum2_runtime::OwnerRegistry::new(),
+        )
+        .expect("one TUN root");
+        let run = tokio::spawn(supervisor.run_until(std::future::pending::<()>()));
+        while !active.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        for port in 10_000..10_033 {
+            let (flow, _owner) =
+                tcp_flow_pair(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port)), 4);
+            flow_sender.send(flow).await.expect("bounded handler churn");
+        }
+        let report = run.await.expect("process report");
+        assert_eq!(calls.load(Ordering::SeqCst), 33);
+        assert!(matches!(
+            report.cause(),
+            ProcessCause::RootStopped {
+                exit: ProcessRootExit::Failed("runtime"),
+                ..
+            }
+        ));
     }
 }

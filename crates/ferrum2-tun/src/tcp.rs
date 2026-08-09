@@ -146,12 +146,8 @@ impl FlowOwner {
             .remaining()
     }
 
-    pub(super) fn stack_capacity(&self) -> usize {
-        self.bridge
-            .lock()
-            .expect("TUN TCP bridge")
-            .to_stack
-            .remaining()
+    pub(super) fn stack_buffered(&self) -> usize {
+        self.bridge.lock().expect("TUN TCP bridge").to_stack.len
     }
 
     pub(super) fn shutdown_requested(&self) -> bool {

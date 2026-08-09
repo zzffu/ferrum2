@@ -2424,6 +2424,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .count()
                 == 2
             && source.contains("-not $pressureWrite.Wait(500)")
+            && source.contains("-not (Wait-ProcessExit $activeProcess 300)")
+            && source.contains("-not $pressureWrite.IsCompleted")
+            && source.contains("$forcedShutdown.ElapsedMilliseconds -ge 900")
+            && source.contains("TCP-08 forced cancellation did not exit")
+            && source.contains("$forcedExit -eq 0")
             && source.contains("Wait-AdapterAbsent $adapterName")
             && source.contains("profile=tcp tcp=8/8 cleanup=PASS")
             && source.contains("$ownedTargetRoutes")
@@ -2441,6 +2446,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replacen("$tcpRows++", "", 1),
         controller.replace("$dnsResponder.Requests -eq 2", "$true"),
         controller.replace("-not $pressureWrite.Wait(500)", "$true"),
+        controller.replace("-not (Wait-ProcessExit $activeProcess 300)", "$true"),
+        controller.replace("-not $pressureWrite.IsCompleted", "$true"),
+        controller.replace("$forcedShutdown.ElapsedMilliseconds -ge 900", "$true"),
+        controller.replace("TCP-08 forced cancellation did not exit", "TCP-08 exited"),
         controller.replace("profile=tcp tcp=8/8 cleanup=PASS", "profile=tcp"),
     ] {
         assert!(
@@ -2455,7 +2464,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && composition.contains("Arc::clone(&context)")
             && composition.contains("tun_inbound")
             && adapter.contains("move |flow, cancellation|")
-            && adapter.contains("Box::pin(run_tcp(flow, cancellation, context, routing, inbound))")
+            && adapter.contains("Box::pin(run_tcp(")
+            && adapter.contains("flow.target(),")
             && adapter.contains(".select_tcp(")
             && adapter.contains("ClientTerminalRoute::Reject")
             && adapter.contains("ClientTerminalRoute::HijackDns")
@@ -2529,6 +2539,43 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     assert!(tun.contains("generation.checked_add(1)"));
     assert!(!tun_production.contains("generation.wrapping_add(1)"));
     assert!(tun.contains("if self.validator.accepts(&self.output[..len])"));
+    let tcp_owner_path_is_bounded = |source: &str| {
+        source.contains("entry.owner.stack_buffered() != 0")
+            && source.contains("entry.owner.stack_buffered() == 0")
+            && source.contains("let repr = TcpRepr::parse(")
+            && source.contains("repr.control != TcpControl::Syn || repr.ack_number.is_some()")
+            && source.contains("Err(()) => return false")
+            && source
+                .find("while let Some(result) = tasks.try_join_next()")
+                .zip(source.find("tasks.spawn("))
+                .is_some_and(|(drain, spawn)| drain < spawn)
+            && source.contains("break 'required OwnerExit::RuntimeFailed;")
+            && source.contains("result.is_some_and(|result| result.is_err())")
+    };
+    assert!(
+        tcp_owner_path_is_bounded(&tun),
+        "TUN TCP queue, SYN parsing and handler owners must stay production-coupled"
+    );
+    for mutation in [
+        tun.replace(
+            "entry.owner.stack_buffered() != 0",
+            "entry.owner.stack_buffered() == 0",
+        ),
+        tun.replace("let repr = TcpRepr::parse(", "let repr = parse_unchecked("),
+        tun.replace(
+            "while let Some(result) = tasks.try_join_next()",
+            "while let Some(result) = None",
+        ),
+        tun.replace(
+            "break 'required OwnerExit::RuntimeFailed;",
+            "break 'required OwnerExit::Stopped;",
+        ),
+    ] {
+        assert!(
+            !tcp_owner_path_is_bounded(&mutation),
+            "TUN TCP ownership mutation must sever the production proof"
+        );
+    }
     let owner_failures_are_production_connected = |source: &str| {
         source.contains("let thread = map_owner_spawn(")
             && source.contains("match finish_stack_setup(stack, adapter")
