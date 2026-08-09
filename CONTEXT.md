@@ -51,6 +51,11 @@ The schema-v2 client mode where the first valid SOCKS UDP request fixes one
 terminal action and, for `route`, one outbound while later requests retain their own targets.
 _Avoid_: First-target pinning, per-datagram client route
 
+**Classification-eligible datagram**:
+A source- and wire-valid bounded UDP candidate that satisfies the selected terminal action's payload and
+capacity checks before terminal mode, accepted activity, association, session, or send state is committed.
+_Avoid_: Merely parseable datagram, already-routed datagram
+
 **Client UDP endpoint**:
 The application-side source address authorized to send datagrams for one SOCKS UDP
 association.
@@ -69,6 +74,32 @@ _Avoid_: AEAD tag, metric label, endpoint
 **Inbound**:
 A named traffic-entry identity supplied to static binding or route selection.
 _Avoid_: Listener, route, endpoint
+
+**TUN inbound**:
+A client traffic-entry that consumes complete IP packets delivered to a Ferrum2-owned virtual adapter by
+routes owned outside the product. Ferrum2 owns adapter and data-plane lifetime, not explicit capture routes
+or system DNS.
+_Avoid_: Auto-route, full-tunnel owner, SOCKS listener
+
+**TUN TCP flow**:
+One bounded local userspace TCP connection keyed by application source and immutable original numeric
+destination. It receives one terminal policy decision and, for route, one fixed egress snapshot.
+_Avoid_: SOCKS connection, SIP022 flow, packet stream
+
+**TUN UDP mapping**:
+One bounded five-tuple lifetime whose first classification-eligible datagram fixes route, DNS-hijack, or
+reject mode. Later datagrams do not re-enter ordinary policy; expiry permits a new decision.
+_Avoid_: SOCKS UDP association, SIP022 UDP session, per-datagram route
+
+**External capture route**:
+A Windows route created and removed by a controller or operator to deliver selected traffic to the TUN
+adapter. Ferrum2 does not create, own, restore, or delete it in M15.
+_Avoid_: TUN inbound, interface address, Ferrum2 rollback state
+
+**OS-managed connected route**:
+A local/on-link route row materialized by Windows from an interface address and prefix. It is observed as
+an address side effect and disappears with owned interface cleanup; Ferrum2 never mutates it directly.
+_Avoid_: External capture route, product-owned bypass route
 
 **Outbound**:
 A named egress action accepted by static binding or route selection. It resolves to one immutable

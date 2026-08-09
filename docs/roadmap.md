@@ -71,6 +71,12 @@ route/reject/hijack、schema-v2 association routing及schema-v1 migration reject
 automatic run `31282591585/1`保留为FAIL且未rerun；其qualification generator schema缺陷在三文件
 test/tool descendant修复。Final Architect/QA均`PASS_WITH_NOTES`且zero finding；schema-3 integrity/
 ratio PASS，`+5377/0/0` numeric advisory已接受。未force-push、PR、tag、package、release或publish。
+M15现为`planned`：以qualified M14 product `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`
+和docs-only planning baseline `bd374c6ec47470020bfcf908aa1a3475f0b3dbf0`为基础，规划Windows
+NT 10.0+ AMD64手动路由Wintun TUN inbound、单owner userspace TCP/UDP stack及现有M14 policy/
+DNS/egress接入。计划保留schema v2，选择exact smoltcp 0.13.1并把MSRV提升到规划日latest stable
+Rust 1.97.1；拒绝fragment/ICMP/auto-route/system DNS，使用
+T01→T02→T03→T04→T05→T06→T07串行DAG；尚未授权product execution、push、dispatch或publication。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -106,6 +112,7 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 | M12 | M11 closed | tagged DNS resolver/proxy、UDP/TCP/DoT/DoH与独立DNS action |
 | M13 | M12 closed | 行为保持型owned egress、DNS dependency与composition-root整固 |
 | M14 | M13 closed | 有界sniff/ordered policy与schema-v2 client UDP association-level routing |
+| M15 | M14 closed | Windows Wintun手动路由TUN TCP/UDP数据面与既有policy/egress接入 |
 
 M1 已冻结并验证 shared crypto/wire/runtime boundary；M2 已冻结并验证
 method-bound UDP crypto、packet/replay/session、bounded direct UDP runtime、
@@ -137,6 +144,11 @@ Hickory/rustls/httparse，client TCP不等待payload，server只在认证后snif
 existing `DnsProxy::answer`和egress owners；schema-v2 client UDP首个合法包只选一次outbound，
 v1 routed+UDP配置迁移拒绝且无逐包兼容路径。QUIC/TUN/target override/resolve/set-options/retry/
 fallback/group/registry继续延期。
+M15只规划Windows NT 10.0+ AMD64手动路由TUN：官方Wintun adapter/address/MTU/session和一个同步
+smoltcp owner把完整、unfragmented IPv4/IPv6 TCP/UDP转换成flow-level I/O；client binary继续独占
+M14 route/sniff、DNS answering和SIP022 egress。Product不创建capture/default/bypass route，不设置
+system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rust 1.97.1、two-deep-module seam和existing
+`ProcessSupervisor`保持；fragment/ICMP/auto-route/installer/release继续延期。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -1111,6 +1123,37 @@ fallback/group/registry继续延期。
   exact product；the earlier failed `31282591585/1` was not rerun。Required non-force pushes and one
   dispatch are consumed；no force-push、PR、tag、package、release or publication occurred。
 
+## M15 — Windows Wintun TUN data plane
+
+- **Status:** planned
+- **Objective:** 一个optional schema-v2 client `[tun]`在Windows NT 10.0+ AMD64创建独占Wintun
+  adapter，配置双栈address/MTU，由一个同步owner thread运行有界userspace TCP/UDP stack；externally
+  routed flows复用现有ordered route/sniff、DNS answer、client egress和relay，且无第二数据面。
+- **Baselines:** qualified M14 product `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f` / tree
+  `a5533723d251b62529daa767dd083404fa0a30bc`；planning exact
+  `bd374c6ec47470020bfcf908aa1a3475f0b3dbf0` / tree
+  `9a6f10f07495ad45ab24cb07368a6b14d9998377` / parent `bc6963472…`。The intervening diff is docs-only。
+- **Contracts/research:** ADR-0034、SPEC-0016、TEST-0016 and
+  `docs/research/M15-wintun-smoltcp-windows-baseline.md`。External proposal is corrected to schema v2、
+  planning-date latest stable Rust 1.97.1、locked `windows-sys 0.61.2`、exact smoltcp `0.13.1` with
+  mandatory TCP/UDP filters、no positive auto-echo feature、no
+  fragments and two deep modules (`ferrum2-wintun`/`ferrum2-tun`)。
+- **Ownership:** external controller owns narrow capture routes；product owns only its created adapter、
+  addresses、per-family MTU、session、thread and flows/mappings。Address-derived connected/local route rows
+  are Windows-managed and are verified by snapshots，not mutated through product route APIs。
+- **Tickets:** T01 contract/control → T02 existing UDP commit-order proof → T03 privileged Wintun-to-stack
+  foundation → T04 TCP → T05 UDP/DNS → T06 integrated evidence → T07 exact qualification；serial drain。
+- **Footprint/performance:** planning code/tests `25586/45009`，case/support/fixture `39260/5152/597`；
+  forecast growth `2630..4140 / 520..930 / 0`。Performance is required through a separate same-SHA Windows
+  TUN diagnostic/resource job，with no threshold/improvement claim。
+- **Deferred/out of scope:** explicit/automatic/default/bypass route、system DNS、WFP、network monitoring、
+  fragments、ICMP、Fake-IP、process routing、non-Windows/non-AMD64 TUN、multi-stack/sharding、installer、
+  service、DLL redistribution、package/release/publication。
+- **Next/remote boundary:** accept T01 as one control-plus-Markdown commit。No product、push、dispatch、rerun、
+  PR、tag、package、release or publication is authorized。T03 privileged direct hosted probe needs later
+  single-use authorization；Hyper-V/self-hosted is fallback only after recorded direct failure。Combined
+  Wintun/Ferrum2 redistribution remains blocked pending the responsible license decision。
+
 ## 决策登记
 
 | ID | 状态 | 决策/延期边界 | Contract/evidence |
@@ -1157,6 +1200,7 @@ fallback/group/registry继续延期。
 | DEC-040 | resolved in M12 plan | exact Hickory resolver/proto/server 0.26.1使MSRV升至1.88.0；optional client DNS UDP/TCP proxy与server custom resolver共用唯一first-match matcher但使用独立server action；每个DNS server可用optional `detour`引用existing egress action，absence direct，client支持concrete/chain/selector且server限existing direct；numeric bootstrap + verified DoT/DoH identity；cache/retry为0，selected/detour failure no fallback；global DNS+egress deadline/admission和tracked awaited tasks | `CONTEXT.md`、ADR-0031、SPEC/TEST-0013、M12-T01～T06 |
 | DEC-041 | resolved in M13 plan | core唯一owned allocation-preserving egress-plan snapshot并保留borrowed views；DNS-owned runtime spec使DNS normal workspace-internal dependency只指向core；private concrete client egress执行caller-selected plan且不拥有policy；semantic migration完成后才按ownership拆composition roots，无new crate/trait/registry/harness | `CONTEXT.md`、ADR-0032、SPEC/TEST-0014、M13-T01～T07 |
 | DEC-042 | resolved in M14 plan；client UDP amended | generic core ordered program从private monotonic cursor继续；concrete DNS/TLS/HTTP metadata留在config/sniff并由binary exhaustive adapter映射；pure sniff只使用Hickory/rustls/httparse；client TCP不sniff，server认证后sniff，client DNS hijack复用existing `DnsProxy::answer`；schema-v2 client UDP首个合法包填metadata并只选一次terminal action/outbound，后续target逐包保留；v1 routed+UDP配置拒绝且无旧数据面；terminal selection后no fallback | ADR-0033、SPEC/TEST-0015、M14 research、M14-T01～T09 |
+| DEC-043 | resolved in M15 plan；dependency/MSRV amended by owner | Windows NT 10.0+ AMD64 manual-route TUN uses additive schema-v2 `[tun]`、one audited Wintun/Win32 FFI module and one safe flow-level TUN module；exact no-default smoltcp 0.13.1 omits positive auto echo，workspace/toolchain/CI MSRV pin planning-date latest stable Rust 1.97.1；ProcessRoot prepare first starts one final owner thread，which creates、uses and reverses Wintun/smoltcp state before caller join，while activate only gates admission；IPv4 bare-header / IPv6 direct TCP/UDP only，all options/extensions/fragments/ICMP rejected；external routes stay externally owned，address-derived connected rows are OS-managed；existing policy/DNS/egress remains unique | CONTEXT.md、ADR-0034、M15 upstream research、SPEC/TEST-0016、M15-T01～T07 |
 
 ## 风险登记
 
@@ -1211,6 +1255,12 @@ fallback/group/registry继续延期。
 | UDP sniff/hijack提前reserve SS state或破坏server prepare/reserve/commit | P0 | M14 | borrowed inspection、lazy terminal-route association、authenticated reject commit and zero-owner process evidence |
 | invalid首包抢占client association、缓存首包丢失/重复或后续数据报重新选route/selector | P0 | M14 | source/wire-valid classification gate、one terminal transition、first-packet exact-once replay、different-target/switch/no-reentry mutations |
 | schema-v1 routed+UDP被静默重解释或旧逐包client route残留为第二数据面 | P0 | M14 | explicit v2、v1 zero-side-effect migration rejection、source/architecture guard和两版本config matrix |
+| Wintun DLL被搜索劫持、ABI/architecture/hash漂移或custom binary license被误当普通开源许可 | P0 | M15 | executable-sibling absolute/System32-only load、exact ZIP+DLL hash、PE/signature/export/license preflight；no redistribution pending owner/legal decision |
+| Wintun pointer/HANDLE跨thread/await、wait中结束session或silent adapter-removal形成UAF/leak | P0 | M15 | one audited FFI module、owner-thread lexical lifetime、owner wake/stop-poll/EndSession/cleanup/exit before caller join、failure-position rollback、privileged absence/rebind postconditions |
+| interface address/MTU或external route所有权错误导致host route污染/blackhole | P0 | M15 | no product forward/DNS/WFP API、separate IPv4/IPv6 MTU journal、exact-address deletion、before/ready/after connected-row snapshots、controller exact-route cleanup |
+| fragment/ICMP/unknown extension绕过bounds，或smoltcp dynamic allocation/queue pressure扩大内存 | P0 | M15 | ingress+egress TCP/UDP-only filters、all fragments rejected、checked 64-MiB default/256-MiB hard plan、private bounded fake mutations |
+| TUN TCP/UDP复制M14 policy/DNS/SIP022或在selected failure/后续datagram重新进入policy | P0 | M15 | binary-private shared terminal Adapter、existing DnsProxy/egress/association/relay symbols、source guards、selector/no-fallback/no-reentry mutations |
+| privileged evidence不可用、cleanup触碰第三方adapter/route或不同SHA拼接 | P0 | M15 | direct fresh hosted runner first、unique name/prefix、always exact cleanup、unavailable=BLOCKED、same-SHA functional+manual performance+review ledger |
 
 ## 决策与范围变更日志
 
@@ -1345,3 +1395,5 @@ fallback/group/registry继续延期。
 | 2026-08-09 | M14-T08 integration / escalation closure | Exact `1b408741` integrates real-process、architecture、lifecycle and qualification-driver evidence；T08 done、T09 ready | Initial Architect/QA `BLOCK` drove one bounded repair；targeted QA retained non-semantic TLS self-check and missing zero-port accepted counter。Two required independent `gpt-5.6-sol/xhigh` read-only analyses selected exact rustls `Acceptor` plus the existing metrics parser，and final targeted Architect/QA both `PASS` | Integration focused、Full、100+ lifecycle、docs and Rust 1.88 PASS；ticket/milestone integrity and ratio PASS，numeric advisories `+1021/0/0` and `+5334/0/0` accepted for required evidence with no product/new harness/dependency；no T08 remote action |
 | 2026-08-09 | M14-T09 hosted generator repair | Automatic `31282591585/1` on `9a7797f…` remains failed and was not rerun；native/DNS qualification generated routed+enabled-UDP clients as schema v1 | Product correctly rejects this combination before side effects；local schema 1/2 probes isolate the defect to two existing generators | Three-file test/tool repair `bc696347…` makes only routed+UDP clients schema v2，retains neighboring v1 and adds one mutation-sensitive contract；Architect/QA `PASS_WITH_NOTES` with zero finding |
 | 2026-08-09 | M14 close | Exact `bc696347…` passes local serial qualification、automatic `31284062682/1` and manual `31284310711/1`；M14 closed | Automatic run passes quality、footprint、MSRV、three platforms、SIP022/DNS interop and aggregate；manual job passes throughput/resource/DNS resource、THP restore and cleanup | Final schema-3 integrity/ratio PASS；`+5377/0/0` advisory accepted；two necessary non-force pushes and one dispatch consumed，no force-push、unchanged-SHA rerun、PR、tag、package、release or publication；local docs-only closeout not pushed |
+| 2026-08-09 | M15 initial plan（dependency/MSRV superseded by next row） | M15改为`planned`；接受Windows AMD64手动路由Wintun TUN、single stack owner、flow-level seam和existing policy/DNS/egress composition | External draft经exact `bd374c6` source/CI/upstream复核；schema 3/Rust 1.91/three crates/fragments/2-GiB defaults/blocking activate/Hyper-V-first最初改为schema v2/Rust 1.88/two deep modules/no fragments/bounded prepare/direct hosted-first；Windows-managed connected rows显式纳入合同 | qualified `bc696347…`、planning `bd374c6…`；ADR-0034、SPEC/TEST-0016、M15 research、T01→T02→T03→T04→T05→T06→T07；performance required；plan-only，无product/push/dispatch/release/publication |
+| 2026-08-09 | M15 dependency/MSRV owner amendment | Owner明确要求exact smoltcp 0.13.1及当前latest stable rustc；规划日官方latest为Rust 1.97.1，现有selected build toolchain已匹配 | 保留no-default literal ten-feature graph、双向TCP/UDP filter和no-fragment边界；明确不启用正向`auto-icmp-echo-reply`。T03把workspace、CI及policy MSRV从1.88.0原子提升至1.97.1，Rust1.91只作为upstream minimum事实；未来stable不自动漂移 | M15 milestone/ADR/SPEC/TEST/research/T01/T03/T06/T07同步；control-only T01不修改product/workflow，未授权push/dispatch/release/publication |
