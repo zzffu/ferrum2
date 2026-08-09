@@ -2420,9 +2420,21 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("function Add-TunRoute(")
             .and_then(|(_, tail)| tail.split_once("function Add-TargetAddress("))
             .map(|(body, _)| body);
-        let pktmon_parser = source
-            .split_once("function Convert-Tcp01PktmonLines(")
+        let classifier = source
+            .split_once("function Get-Tcp01Boundary(")
             .and_then(|(_, tail)| tail.split_once("function Find-Dumpbin"))
+            .map(|(body, _)| body);
+        let gate = source
+            .split_once("public sealed class Ferrum2TcpGateObservation")
+            .and_then(|(_, tail)| tail.split_once("public sealed class Ferrum2TcpProbe"))
+            .map(|(body, _)| body);
+        let probe = source
+            .split_once("public sealed class Ferrum2TcpProbe")
+            .and_then(|(_, tail)| tail.split_once("public sealed class Ferrum2DnsResponder"))
+            .map(|(body, _)| body);
+        let invoke_echo = source
+            .split_once("function Invoke-EchoRow(")
+            .and_then(|(_, tail)| tail.split_once("function Assert-ResetWithoutEgress("))
             .map(|(body, _)| body);
         let tcp_mode = source
             .split_once("    } else {\n        $serverBinary =")
@@ -2436,6 +2448,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         });
         let cleanup = source.rsplit_once("\nfinally {").map(|(_, body)| body);
         source.contains("[ValidateSet(\"lifecycle\", \"tcp\")]")
+            && !source.to_ascii_lowercase().contains("pktmon")
             && source.matches("$tcpRows++").count() == 8
             && source.matches("Add-TunRoute $").count() == 4
             && source.matches("Add-TargetAddress $").count() == 1
@@ -2451,11 +2464,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .matches("Assert-ResetWithoutEgress $targets[")
                 .count()
                 == 2
-            && source
-                .split_once("function Invoke-EchoRow(")
-                .and_then(|(_, tail)| tail.split_once("function Assert-ResetWithoutEgress("))
-                .is_some_and(|(echo, _)| {
-                    echo.contains(
+            && invoke_echo.is_some_and(|echo| {
+                    echo.contains("[hashtable]$Observation = $null")
+                        && echo.contains(
                         "$session = Open-TunTcp $Address $Port $InterfaceIndex\n    try {",
                     ) && echo
                         .find("$Gate.WaitAccepted($expectedGate, 5000)")
@@ -2467,6 +2478,16 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         .is_some_and(|(((accepted, write), shutdown), probe)| {
                             accepted < write && write < shutdown && shutdown < probe
                         })
+                        && echo
+                            .find("$Observation.Probe = $probe")
+                            .zip(echo.find("$echo = Read-StreamToEnd $stream"))
+                            .is_some_and(|(observation, read)| observation < read)
+                        && echo
+                            .find("$probe.WaitCompleted(5000)")
+                            .zip(echo.find("$probe.SessionComplete -eq \"yes\" -and $probe.Fault -eq \"none\""))
+                            .is_some_and(|(completed, status)| completed < status)
+                        && echo.contains("$errorCursor.SocketErrorCode -eq [Net.Sockets.SocketError]::ConnectionReset")
+                        && echo.contains("$Observation.AppResult = $appResult")
                         && !echo.contains("Add-TargetAddress")
                         && echo.contains("finally { $session.Client.Dispose() }")
                 })
@@ -2524,158 +2545,107 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     )
                     && !tcp.contains("Remove-NetRoute")
             })
-            && pktmon_parser.is_some_and(|parser| {
-                parser.contains("$groupKey = \"$($Matches[1])|$($Matches[2])\"")
-                    && parser.contains("$groups[$groupKey] = \"g$($groups.Count + 1)\"")
-                    && parser.contains("$components[$componentId] = \"c$($components.Count + 1)\"")
-                    && parser.contains("$metadataLines++")
-                    && parser.contains("$clientLines++")
-                    && parser.contains("$targetLines++")
-                    && parser.contains("$flagLines++")
-                    && parser.contains("$tupleLines++")
-                    && parser.contains("TotalLines = [Math]::Min($Lines.Count, 9999)")
-                    && parser.contains("MetadataLines = [Math]::Min($metadataLines, 9999)")
-                    && parser.contains("ClientLines = [Math]::Min($clientLines, 9999)")
-                    && parser.contains("TargetLines = [Math]::Min($targetLines, 9999)")
-                    && parser.contains("FlagLines = [Math]::Min($flagLines, 9999)")
-                    && parser.contains("TupleLines = [Math]::Min($tupleLines, 9999)")
-                    && parser.contains("SummaryLines = [Math]::Min($summaries.Count, 9999)")
-                    && parser.contains("BaselineValid = $baselineValid")
-                    && parser.contains("$current.Role = \"client_to_target\"")
-                    && parser.contains("$current.Role = \"target_to_client\"")
-                    && parser.contains("$current.Drop = \"reported\"")
-                    && parser.contains("tcp01_pktmon group=$($_.Group) appearance=$($_.Appearance) component=$($_.Component) role=$($_.Role) direction=$($_.Direction) flags=$($_.Flags) payload_present=$($_.Payload) drop=$($_.Drop)")
-                    && !parser.contains("Write-Output")
-                    && !parser.contains("[Console]::")
+            && gate.is_some_and(|gate| {
+                gate.contains("ClientToServerBytes")
+                    && gate.contains("ServerToClientBytes")
+                    && gate.contains("ClientToServerEof")
+                    && gate.contains("ServerToClientEof")
+                    && gate.contains("ClientToServerFault")
+                    && gate.contains("ServerToClientFault")
+                    && gate.contains("SessionComplete")
+                    && gate.contains("Pump(client, upstream, observation, true)")
+                    && gate.contains("Pump(upstream, client, observation, false)")
+                    && gate.contains("observation.AddBytes(forward, count)")
+                    && gate.contains("observation.MarkEof(forward)")
+                    && gate.contains("observation.Fail(forward, \"io\")")
+                    && gate.contains("observation.Fail(forward, \"disposed\")")
+                    && gate.contains("observation.Fail(forward, \"socket\")")
+                    && gate.contains("observation.Fail(forward, \"cancelled\")")
+                    && gate.contains("observation.Fail(forward, \"other\")")
+                    && gate.contains("finally { observation.Complete(); }")
+                    && gate.contains("public bool WaitCompleted(int index, int milliseconds)")
+                    && gate.contains("public Ferrum2TcpGateObservation Observation(int index)")
+                    && !gate.contains("catch (IOException) { }")
+            })
+            && probe.is_some_and(|probe| {
+                probe.contains("public byte[] Received")
+                    && probe.contains("public long EchoByteCount")
+                    && probe.contains("public string ReadEof")
+                    && probe.contains("public string SendShutdown")
+                    && probe.contains("public string Fault")
+                    && probe.contains("public string SessionComplete")
+                    && probe.contains("Volatile.Write(ref readEof, 1)")
+                    && probe.contains("Interlocked.Add(ref echoBytes, received.Length)")
+                    && probe.contains("Interlocked.CompareExchange(ref fault, \"io\", null)")
+                    && probe.contains("Interlocked.CompareExchange(ref fault, \"disposed\", null)")
+                    && probe.contains("Interlocked.CompareExchange(ref fault, \"socket\", null)")
+                    && probe.contains("Interlocked.CompareExchange(ref fault, \"cancelled\", null)")
+                    && probe.contains("Interlocked.CompareExchange(ref fault, \"other\", null)")
+                    && probe.contains("Volatile.Write(ref sessionComplete, 1)")
+                    && !probe.contains("catch (IOException) { }")
+            })
+            && classifier.is_some_and(|classifier| {
+                for boundary in [
+                    "BEFORE_TARGET",
+                    "TARGET_ECHO_INCOMPLETE",
+                    "GATE_REVERSE_INCOMPLETE",
+                    "CLIENT_AFTER_GATE_REVERSE",
+                    "COMPLETE",
+                    "UNRESOLVED",
+                ] {
+                    if !classifier.contains(boundary) {
+                        return false;
+                    }
+                }
+                classifier.contains("Get-Tcp01Boundary $state")
+                    && classifier.contains("GateForwardFault = \"invalid\"")
+                    && classifier.contains("ProbeEcho = \"other\"")
+                    && classifier.contains("GateReverseBytes = \"zero\"")
+                    && classifier.contains("AppResult = \"reset\"")
+                    && classifier.contains("TCP-01 boundary table mismatch")
+                    && !classifier.contains("Get-Net")
+                    && !classifier.contains("[Console]::")
             })
             && tcp01_diag.is_some_and(|diag| {
-                let setup = diag
-                    .split_once("        try {\n")
-                    .and_then(|(_, tail)| tail.split_once("        } catch {"))
-                    .map(|(body, _)| body);
-                let row_cleanup = diag
-                    .split_once("        } finally {\n")
-                    .and_then(|(_, tail)| tail.split_once("        }\n\n        if ($tcp01CleanupError)"))
-                    .map(|(body, _)| body);
-                let evidence_order = diag
-                    .find("[Console]::Error.WriteLine(\"tcp01_pktmon_shape")
-                    .and_then(|shape| {
-                        let marker = shape
-                            + diag[shape..].find("[Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus")?;
-                        let primary = marker
-                            + diag[marker..].find("if ($tcp01Error) { throw $tcp01Error }")?;
-                        let valid = primary
-                            + diag[primary..].find("Assert-True $tcp01Parse.BaselineValid")?;
-                        let unresolved = valid
-                            + diag[valid..].find("Assert-True ($tcp01Boundary -ne \"UNRESOLVED\")")?;
-                        let row = unresolved + diag[unresolved..].find("$tcpRows++")?;
-                        Some((shape, marker, primary, valid, unresolved, row))
-                    });
-                setup.is_some_and(|setup| {
-                    setup
-                        .find("& pktmon status")
-                        .zip(setup.find("& pktmon filter list"))
-                        .zip(setup.find(
-                            "Assert-True $tcp01FiltersEmpty \"pktmon filter baseline is not empty\"",
-                        ))
-                        .zip(setup.find("$tcp01FilterCleanupIntent = $true"))
-                        .zip(setup.find(
-                            "& pktmon filter add \"Ferrum2Tcp01\" -i \"198.18.0.2\" $tcp01Target -t TCP -p $tcp01Port",
-                        ))
-                        .zip(setup.find("$tcp01CaptureCleanupIntent = $true"))
-                        .zip(setup.find(
-                            "& pktmon start --capture --comp all --pkt-size 64 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular",
-                        ))
-                        .zip(setup.find("Invoke-EchoRow $tcp01Target $tcp01Port"))
-                        .is_some_and(|(((((((status, filters), empty), filter_intent), exact_filter), capture_intent), start), flow)| {
-                            status < filters
-                                && filters < empty
-                                && empty < filter_intent
-                                && filter_intent < exact_filter
-                                && exact_filter < capture_intent
-                                && capture_intent < start
-                                && start < flow
-                        })
-                }) && row_cleanup.is_some_and(|cleanup| {
-                    cleanup
-                        .find("& pktmon stop")
-                        .zip(cleanup.find(
-                            "& pktmon etl2txt $tcp01Etl --out $tcp01Txt --brief --verbose 3",
-                        ))
-                        .zip(cleanup.find("& pktmon filter remove"))
-                        .zip(cleanup.find("$tcp01FinalStatus = @(& pktmon status"))
-                        .zip(cleanup.find("$tcp01FinalFilters = @(& pktmon filter list"))
-                        .zip(cleanup.find("$tcp01Parse = Convert-Tcp01PktmonLines $tcp01CaptureLines"))
-                        .zip(cleanup.find("Remove-Item -LiteralPath $tcp01Etl -Force"))
-                        .zip(cleanup.find("Remove-Item -LiteralPath $tcp01Txt -Force"))
-                        .zip(cleanup.find("Assert-True (-not (Test-Path -LiteralPath $tcp01Etl))"))
-                        .zip(cleanup.find("Assert-True (-not (Test-Path -LiteralPath $tcp01Txt))"))
-                        .is_some_and(|(((((((((stop, convert), remove_filter), final_status), final_filters), parse), remove_etl), remove_txt), absent_etl), absent_txt)| {
-                            stop < convert
-                                && convert < remove_filter
-                                && remove_filter < final_status
-                                && final_status < final_filters
-                                && final_filters < parse
-                                && parse < remove_etl
-                                && remove_etl < remove_txt
-                                && remove_txt < absent_etl
-                                && absent_etl < absent_txt
-                        })
-                })
-                    && diag.contains("$tcp01Target = $targets[0]")
+                let diagnostic = diag
+                    .lines()
+                    .find(|line| line.contains("$tcp01Diagnostic = \"status=OBSERVED"));
+                diag.contains("$tcp01Target = $targets[0]")
                     && diag.contains("$tcp01Port = $ports[0]")
                     && !diag.contains("192.0.2.200")
-                    && diag.contains("$tcp01SyntheticExpected = @(")
-                    && diag.contains("Assert-True $tcp01SyntheticParse.BaselineValid")
-                    && diag.contains("Assert-True (-not $tcp01ZeroParse.BaselineValid)")
-                    && diag.contains("Assert-True (-not $tcp01DriftParse.BaselineValid)")
-                    && diag.contains("role=client_to_target")
-                    && diag.contains("role=target_to_client")
-                    && diag.contains("drop=reported")
-                    && diag.contains("Ferrum2-Secret {11111111-2222-3333-4444-555555555555}")
-                    && diag.contains("Select-Object -First 48")
-                    && diag.contains("Select-Object -Last 48")
-                    && diag.contains("[Console]::Error.WriteLine($_)")
-                    && !diag.contains("Write-Output \"tcp01_pktmon")
-                    && !diag.contains("Write-Output \"m15_windows_tun_tcp01_diag")
-                    && diag.matches("tcp01_pktmon_shape").count() == 1
-                    && diag.contains("[Console]::Error.WriteLine(\"tcp01_pktmon_shape total_lines=$($tcp01Parse.TotalLines) metadata=$($tcp01Parse.MetadataLines) client=$($tcp01Parse.ClientLines) target=$($tcp01Parse.TargetLines) flags=$($tcp01Parse.FlagLines) tuple=$($tcp01Parse.TupleLines) summaries=$($tcp01Parse.SummaryLines)\")")
-                    && diag.contains("$tcp01CaptureStatus = if ($tcp01Parse.BaselineValid) { \"CAPTURED\" } else { \"CAPTURE_INVALID\" }")
+                    && diag.contains("Invoke-EchoRow $tcp01Target $tcp01Port $ownedInterfaceIndex $gateA $tcp01Payload $tcp01Observation")
+                    && diag.contains("$tcp01Observation.Gate.WaitCompleted")
+                    && diag.contains("$tcp01Observation.Probe.WaitCompleted")
+                    && diag.contains("$tcp01Observation.Gate.Observation")
+                    && diag.contains("$probe.Received")
+                    && diag.contains("$probe.EchoByteCount")
+                    && diag.contains("$tcp01Boundary = Get-Tcp01Boundary $tcp01State")
+                    && diag.contains("$tcp01Diagnostic = \"status=OBSERVED boundary=$tcp01Boundary app=$($tcp01State.AppResult)")
+                    && diagnostic.is_some_and(|line| {
+                        !line.contains("tcp01Target")
+                            && !line.contains("tcp01Port")
+                            && !line.contains("Exception")
+                            && !line.contains("Error")
+                            && !line.contains("Received")
+                    })
                     && diag
-                        .find("$tcp01Boundary = \"UNRESOLVED\"")
-                        .zip(evidence_order)
-                        .is_some_and(|(boundary, (shape, marker, primary, valid, unresolved, row))| {
-                            boundary < shape
-                                && shape < marker
-                                && marker < primary
-                                && primary < valid
-                                && valid < unresolved
-                                && unresolved < row
+                        .find("Invoke-EchoRow $tcp01Target")
+                        .zip(diag.find("$tcp01Observation.Gate.WaitCompleted"))
+                        .zip(diag.find("$tcp01Diagnostic = \"status=OBSERVED"))
+                        .zip(diag.find("if ($tcp01Error) { throw $tcp01Error }"))
+                        .zip(diag.find("Assert-True $false \"TCP-01 diagnostic sentinel\""))
+                        .zip(diag.find("$tcpRows++"))
+                        .is_some_and(|(((((invoke, settle), diagnostic), primary), sentinel), row)| {
+                            invoke < settle
+                                && settle < diagnostic
+                                && diagnostic < primary
+                                && primary < sentinel
+                                && sentinel < row
                         })
-                    && !diag.contains("--hex")
-                    && !diag.contains("--pkt-size 0")
             })
-            && source.matches("$tcp01Boundary = \"UNRESOLVED\"").count() == 1
             && cleanup.is_some_and(|cleanup| {
                 cleanup
-                    .find("if ($tcp01CaptureCleanupIntent)")
-                    .zip(cleanup.find("& pktmon stop"))
-                    .zip(cleanup.find("if ($tcp01FilterCleanupIntent)"))
-                    .zip(cleanup.find("& pktmon filter remove"))
-                    .zip(cleanup.find("$tcp01FallbackStatus = @(& pktmon status"))
-                    .zip(cleanup.find("$tcp01FallbackFilters = @(& pktmon filter list"))
-                    .zip(cleanup.find("foreach ($capturePath in @($tcp01Etl, $tcp01Txt))"))
-                    .zip(cleanup.find("if ($udp4)"))
-                    .is_some_and(|(((((((capture_intent, stop), filter_intent), remove), status), filters), files), os_cleanup)| {
-                        capture_intent < stop
-                            && stop < filter_intent
-                            && filter_intent < remove
-                            && remove < status
-                            && status < filters
-                            && filters < files
-                            && files < os_cleanup
-                    })
-                    && cleanup.contains(
+                    .contains(
                     "foreach ($route in $ownedRoutes) {\n        Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue\n    }",
                 ) && cleanup.contains(
                     "Get-NetRoute -DestinationPrefix $route.DestinationPrefix -PolicyStore ActiveStore",
@@ -2683,9 +2653,21 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && cleanup.contains(
                         "controller-owned route leaked: $($route.DestinationPrefix)",
                     )
-                    && cleanup.contains("[Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag status=CLEANUP_FAILED boundary=UNRESOLVED capture_cleanup=FAIL\")")
-                    && cleanup.contains("if (-not $primaryError) { $primaryError = $outerCleanupError }")
-                    && cleanup.contains("if ($primaryError) { throw $primaryError }")
+                    && cleanup.contains(
+                        "$tcp01Cleanup = if ($outerCleanupError) { \"FAIL\" } else { \"PASS\" }",
+                    )
+                    && cleanup
+                        .find("Assert-True (-not (Test-Path -LiteralPath $work))")
+                        .zip(cleanup.find("if ($tcp01Diagnostic)"))
+                        .zip(cleanup.find("[Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup"))
+                        .zip(cleanup.find("if ($outerCleanupError -and -not $primaryError)"))
+                        .zip(cleanup.find("if ($primaryError) { throw $primaryError }"))
+                        .is_some_and(|((((cleaned, diagnostic), marker), cleanup_error), primary)| {
+                            cleaned < diagnostic
+                                && diagnostic < marker
+                                && marker < cleanup_error
+                                && cleanup_error < primary
+                        })
             })
             && source.contains("-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)")
             && !source.contains("Wait-ProcessExit $activeProcess 300")
@@ -2703,7 +2685,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("Wait-AdapterAbsent $adapterName")
             && source.contains("profile=tcp tcp=8/8 cleanup=PASS")
             && source
-                .find("m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus")
+                .find("m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup")
                 .zip(source.find("m15_windows_tun_e2e status=PASS profile=tcp"))
                 .is_some_and(|(diagnostic, pass)| diagnostic < pass)
             && source.contains("$ownedTargetRoutes")
@@ -2814,120 +2796,116 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "$tcp01Target = \"192.0.2.200\"",
         ),
         controller.replace(
-            "& pktmon filter add \"Ferrum2Tcp01\" -i \"198.18.0.2\" $tcp01Target -t TCP -p $tcp01Port",
-            "& pktmon filter add \"Ferrum2Tcp01\" -i \"198.18.0.2\" -t TCP",
+            "var first = Pump(client, upstream, observation, true);",
+            "var first = Pump(client, upstream, observation, false);",
         ),
         controller.replace(
-            "Assert-True $tcp01FiltersEmpty \"pktmon filter baseline is not empty\"",
-            "Assert-True $true",
-        ),
-        controller.replace(
-            "& pktmon start --capture --comp all --pkt-size 64 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular",
-            "& pktmon start --capture --comp all --pkt-size 0 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular --hex",
-        ),
-        controller.replace(
-            "            $tcp01FilterCleanupIntent = $true\n            $null = @(& pktmon filter add",
-            "            $null = @(& pktmon filter add\n            $tcp01FilterCleanupIntent = $true",
-        ),
-        controller.replace(
-            "            $tcp01CaptureCleanupIntent = $true\n            $null = @(& pktmon start",
-            "            $null = @(& pktmon start\n            $tcp01CaptureCleanupIntent = $true",
-        ),
-        controller.replace("& pktmon stop", "Write-Output \"capture left running\""),
-        controller.replace(
-            "& pktmon etl2txt $tcp01Etl --out $tcp01Txt --brief --verbose 3",
-            "Write-Output \"conversion skipped\"",
-        ),
-        controller.replace(
-            "& pktmon filter remove",
-            "Write-Output \"filter left installed\"",
-        ),
-        controller.replace(
-            "Remove-Item -LiteralPath $tcp01Etl -Force",
-            "Write-Output \"ETL retained\"",
-        ),
-        controller.replace(
-            "Remove-Item -LiteralPath $tcp01Txt -Force",
-            "Write-Output \"text retained\"",
-        ),
-        controller.replace(
-            "$groupKey = \"$($Matches[1])|$($Matches[2])\"",
-            "$groupKey = $Matches[1]",
-        ),
-        controller.replace(
-            "$current.Role = \"target_to_client\"",
-            "$current.Role = \"client_to_target\"",
-        ),
-        controller.replace(
-            "    $groups = @{}",
-            "    Write-Output $Lines\n    $groups = @{}",
-        ),
-        controller.replace(
-            "$tcp01FinalStatus = @(& pktmon status 2>&1)",
-            "$tcp01FinalStatus = @(\"verification skipped\")",
-        ),
-        controller.replace(
-            "$tcp01Parse = Convert-Tcp01PktmonLines $tcp01CaptureLines \"198.18.0.2\" $tcp01Target $tcp01Port",
-            "$tcp01Parse = $null",
-        ),
-        controller.replace(
-            "finally {\n    if ($tcp01CaptureCleanupIntent)",
-            "finally {\n    if ($udp4) { $udp4.Dispose() }\n    if ($tcp01CaptureCleanupIntent)",
-        ),
-        controller.replace(
-            "$tcp01Boundary = \"UNRESOLVED\"",
-            "$tcp01Boundary = \"RESOLVED\"",
-        ),
-        controller.replace(
-            "$tcp01Sha = if ($env:GITHUB_SHA)",
-            "$tcp01Boundary = \"UNRESOLVED\"\n        $tcp01Sha = if ($env:GITHUB_SHA)",
-        ),
-        controller.replace(
-            "[Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus",
-            "Write-Output (\"m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus",
-        ),
-        controller.replace(
-            "        Assert-True $tcp01Parse.BaselineValid \"TCP-01 pktmon parse baseline invalid\"\n        Assert-True ($tcp01Boundary -ne \"UNRESOLVED\") \"TCP-01 pktmon boundary remains unresolved\"\n        $tcpRows++",
-            "        $tcpRows++\n        Assert-True $tcp01Parse.BaselineValid \"TCP-01 pktmon parse baseline invalid\"\n        Assert-True ($tcp01Boundary -ne \"UNRESOLVED\") \"TCP-01 pktmon boundary remains unresolved\"",
-        ),
-        controller.replace(
-            "[Console]::Error.WriteLine(\"tcp01_pktmon_shape total_lines=$($tcp01Parse.TotalLines) metadata=$($tcp01Parse.MetadataLines) client=$($tcp01Parse.ClientLines) target=$($tcp01Parse.TargetLines) flags=$($tcp01Parse.FlagLines) tuple=$($tcp01Parse.TupleLines) summaries=$($tcp01Parse.SummaryLines)\")",
+            "                observation.AddBytes(forward, count);",
             "",
         ),
         controller.replace(
-            "[Console]::Error.WriteLine(\"tcp01_pktmon_shape total_lines=$($tcp01Parse.TotalLines)",
-            "Write-Output (\"tcp01_pktmon_shape total_lines=$($tcp01Parse.TotalLines)",
+            "if (count == 0) { observation.MarkEof(forward); break; }",
+            "if (count == 0) { break; }",
         ),
         controller.replace(
-            "TotalLines = [Math]::Min($Lines.Count, 9999)",
-            "TotalLines = [Math]::Min($summaries.Count, 9999)",
+            "catch (IOException) { observation.Fail(forward, \"io\"); }",
+            "catch (IOException) { }",
         ),
         controller.replace(
-            "$tcp01CaptureStatus = if ($tcp01Parse.BaselineValid) { \"CAPTURED\" } else { \"CAPTURE_INVALID\" }",
-            "$tcp01CaptureStatus = \"CAPTURED\"",
+            "finally { observation.Complete(); }",
+            "finally { }",
         ),
         controller.replace(
-            "        [Console]::Error.WriteLine(\"tcp01_pktmon_shape total_lines=$($tcp01Parse.TotalLines) metadata=$($tcp01Parse.MetadataLines) client=$($tcp01Parse.ClientLines) target=$($tcp01Parse.TargetLines) flags=$($tcp01Parse.FlagLines) tuple=$($tcp01Parse.TupleLines) summaries=$($tcp01Parse.SummaryLines)\")",
+            "if (count == 0) { Volatile.Write(ref readEof, 1); break; }",
+            "if (count == 0) { break; }",
+        ),
+        controller.replace(
+            "Interlocked.Add(ref echoBytes, received.Length);",
             "",
+        ),
+        controller.replace(
+            "catch (IOException) { Interlocked.CompareExchange(ref fault, \"io\", null); }",
+            "catch (IOException) { }",
+        ),
+        controller.replace(
+            "Volatile.Write(ref sessionComplete, 1);",
+            "",
+        ),
+        controller.replace(
+            "if ($null -ne $Observation) { $Observation.Probe = $probe }",
+            "",
+        ),
+        controller.replace(
+            "        if ($null -ne $Observation) { $Observation.Probe = $probe }\n        $Gate.Release($expectedGate)",
+            "        $Gate.Release($expectedGate)",
         ).replace(
-            "        [Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus boundary=$tcp01Boundary capture_cleanup=PASS sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt\")",
-            "        [Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus boundary=$tcp01Boundary capture_cleanup=PASS sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt\")\n        [Console]::Error.WriteLine(\"tcp01_pktmon_shape total_lines=$($tcp01Parse.TotalLines) metadata=$($tcp01Parse.MetadataLines) client=$($tcp01Parse.ClientLines) target=$($tcp01Parse.TargetLines) flags=$($tcp01Parse.FlagLines) tuple=$($tcp01Parse.TupleLines) summaries=$($tcp01Parse.SummaryLines)\")",
+            "        $echo = Read-StreamToEnd $stream",
+            "        $echo = Read-StreamToEnd $stream\n        if ($null -ne $Observation) { $Observation.Probe = $probe }",
         ),
         controller.replace(
-            "        [Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus boundary=$tcp01Boundary capture_cleanup=PASS sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt\")\n        if ($tcp01Error) { throw $tcp01Error }",
-            "        if ($tcp01Error) { throw $tcp01Error }\n        [Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus boundary=$tcp01Boundary capture_cleanup=PASS sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt\")",
+            "Assert-True ($probe.SessionComplete -eq \"yes\" -and $probe.Fault -eq \"none\" -and",
+            "Assert-True ($true -and",
         ),
         controller.replace(
-            "Assert-True $tcp01Parse.BaselineValid \"TCP-01 pktmon parse baseline invalid\"",
-            "Assert-True $true",
+            "$Observation.AppResult = $appResult",
+            "$Observation.AppResult = \"success\"",
         ),
         controller.replace(
-            "if (-not $primaryError) { $primaryError = $outerCleanupError }",
-            "$primaryError = $outerCleanupError",
+            "Assert-True ((Get-Tcp01Boundary $state) -eq $row.Expected)",
+            "Assert-True (\"COMPLETE\" -eq $row.Expected)",
         ),
         controller.replace(
-            "Assert-True ($tcp01Boundary -ne \"UNRESOLVED\")",
-            "Assert-True $true",
+            "$tcp01Boundary = Get-Tcp01Boundary $tcp01State",
+            "$tcp01Boundary = \"COMPLETE\"",
+        ),
+        controller.replace(
+            "@{ Change = @{ ProbeEcho = \"other\" }; Expected = \"TARGET_ECHO_INCOMPLETE\" }",
+            "@{ Change = @{ ProbeEcho = \"exact\" }; Expected = \"TARGET_ECHO_INCOMPLETE\" }",
+        ),
+        controller.replace(
+            "$tcp01Observation.Gate.WaitCompleted([int]$tcp01Observation.GateIndex, 1500)",
+            "$true",
+        ),
+        controller.replace(
+            "$tcp01Observation.Probe.WaitCompleted(1500)",
+            "$true",
+        ),
+        controller.replace(
+            "$tcp01Diagnostic = \"status=OBSERVED boundary=$tcp01Boundary",
+            "$tcp01Diagnostic = \"status=OBSERVED target=$tcp01Target boundary=$tcp01Boundary",
+        ),
+        controller.replace(
+            "Assert-True $false \"TCP-01 diagnostic sentinel\"",
+            "",
+        ),
+        controller.replace(
+            "        Assert-True $false \"TCP-01 diagnostic sentinel\"\n        $tcpRows++",
+            "        $tcpRows++\n        Assert-True $false \"TCP-01 diagnostic sentinel\"",
+        ),
+        controller.replace(
+            "[Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup",
+            "Write-Output (\"m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup",
+        ),
+        controller.replace(
+            "$tcp01Cleanup = if ($outerCleanupError) { \"FAIL\" } else { \"PASS\" }",
+            "$tcp01Cleanup = \"PASS\"",
+        ),
+        controller
+            .replace(
+                "    [Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt\")\n",
+                "",
+            )
+            .replace(
+                "    Assert-True (-not (Test-Path -LiteralPath $work)) \"controller work directory leaked\"",
+                "    [Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt\")\n    Assert-True (-not (Test-Path -LiteralPath $work)) \"controller work directory leaked\"",
+            ),
+        controller.replace(
+            "    [Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt\")\n}\nif ($outerCleanupError -and -not $primaryError) { $primaryError = $outerCleanupError }\nif ($primaryError) { throw $primaryError }",
+            "}\nif ($outerCleanupError -and -not $primaryError) { $primaryError = $outerCleanupError }\nif ($primaryError) { throw $primaryError }\n[Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt\")",
+        ),
+        controller.replace(
+            "$tcp01Diagnostic = \"status=OBSERVED boundary=$tcp01Boundary",
+            "$tcp01Diagnostic = \"status=OBSERVED pktmon=present boundary=$tcp01Boundary",
         ),
     ]
     .into_iter()

@@ -47,106 +47,55 @@ $createdSiblingDll = $false
 $completed = $false
 $primaryError = $null
 $outerCleanupError = $null
-$tcp01CaptureCleanupIntent = $false
-$tcp01FilterCleanupIntent = $false
-$tcp01Etl = $null
-$tcp01Txt = $null
+$tcp01Diagnostic = $null
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
-function Convert-Tcp01PktmonLines(
-    [string[]]$Lines,
-    [string]$Client,
-    [string]$Target,
-    [int]$Port
-) {
-    $groups = @{}
-    $components = @{}
-    $records = [System.Collections.Generic.List[object]]::new()
-    $current = $null
-    $metadataLines = 0
-    $clientLines = 0
-    $targetLines = 0
-    $flagLines = 0
-    $tupleLines = 0
-    $clientEndpoint = "$([regex]::Escape($Client))\.\d+"
-    $targetEndpoint = "$([regex]::Escape($Target))\.$([regex]::Escape([string]$Port))"
-    foreach ($line in $Lines) {
-        if ($line -match "(?i)PktGroupId\s*[:=]?\s*(\d+).*PktNumber\s*[:=]?\s*(\d+)") {
-            $metadataLines++
-            $groupKey = "$($Matches[1])|$($Matches[2])"
-            if (-not $groups.ContainsKey($groupKey)) { $groups[$groupKey] = "g$($groups.Count + 1)" }
-            $appearance = if ($line -match "(?i)Appearance\s*[:=]?\s*(\d+)") { [int]$Matches[1] } else { 0 }
-            $componentId = if ($line -match "(?i)\bComponent(?:Id)?\s*[:=]?\s*(\d+)") { $Matches[1] } else { "0" }
-            if (-not $components.ContainsKey($componentId)) { $components[$componentId] = "c$($components.Count + 1)" }
-            $direction = if ($line -match "(?i)\bDirection\s*[:=]?\s*(Tx|Rx)\b") { $Matches[1].ToLowerInvariant() } else { "unknown" }
-            $current = [pscustomobject]@{
-                Group = $groups[$groupKey]
-                Appearance = $appearance
-                Component = $components[$componentId]
-                Role = "unknown"
-                Direction = $direction
-                Flags = "other"
-                Payload = "unknown"
-                Drop = "none"
-            }
-            $records.Add($current)
-        }
-        $hasClient = $line -match $clientEndpoint
-        $hasTarget = $line -match $targetEndpoint
-        if ($hasClient) { $clientLines++ }
-        if ($hasTarget) { $targetLines++ }
-        $flagText = if ($line -match "(?i)Flags\s*\[([^\]]+)\]") {
-            $flagLines++
-            $Matches[1]
-        } else { $null }
-        $forward = $line -match "$clientEndpoint\s*>\s*$targetEndpoint`:"
-        $reverse = $line -match "$targetEndpoint\s*>\s*$clientEndpoint`:"
-        if ($forward -or $reverse) { $tupleLines++ }
-        if (-not $current) { continue }
-        if ($line -match "(?i)\bdrop(?:Reason)?\b") { $current.Drop = "reported" }
-        if ($forward) {
-            $current.Role = "client_to_target"
-        } elseif ($reverse) {
-            $current.Role = "target_to_client"
-        } else {
-            continue
-        }
-        if ($flagText) {
-            $current.Flags = if ($flagText.Contains("R")) { "rst" }
-                elseif ($flagText -eq "S.") { "syn_ack" }
-                elseif ($flagText -eq "S") { "syn" }
-                elseif ($flagText.Contains("F")) { "fin" }
-                elseif ($flagText.Contains("P")) { "push_ack" }
-                elseif ($flagText -eq ".") { "ack" }
-                else { "other" }
-        }
-        if ($line -match "(?i)\blength\s+(\d+)\b") {
-            $current.Payload = if ([int64]$Matches[1] -eq 0) { "no" } else { "yes" }
-        }
+function Get-Tcp01Boundary([hashtable]$State) {
+    $yesNo = @("yes", "no")
+    $faults = @("none", "io", "disposed", "socket", "cancelled", "other")
+    foreach ($name in @("GateAccepted", "GateForwardEof", "GateReverseEof", "GateComplete", "ProbeAccepted", "ProbeReadEof", "ProbeShutdown", "ProbeComplete")) {
+        if (-not $State.ContainsKey($name) -or $yesNo -notcontains $State[$name]) { return "UNRESOLVED" }
     }
-    $summaries = @($records | Where-Object { $_.Role -ne "unknown" } | ForEach-Object {
-        "tcp01_pktmon group=$($_.Group) appearance=$($_.Appearance) component=$($_.Component) role=$($_.Role) direction=$($_.Direction) flags=$($_.Flags) payload_present=$($_.Payload) drop=$($_.Drop)"
-    })
-    $handshakeComplete =
-        @($summaries | Where-Object { $_ -match "role=client_to_target .*flags=syn\b" }).Count -gt 0 -and
-        @($summaries | Where-Object { $_ -match "role=target_to_client .*flags=syn_ack\b" }).Count -gt 0 -and
-        @($summaries | Where-Object { $_ -match "role=client_to_target .*flags=ack\b" }).Count -gt 0
-    $baselineValid = $metadataLines -gt 0 -and $clientLines -gt 0 -and $targetLines -gt 0 -and
-        $flagLines -gt 0 -and $tupleLines -gt 0 -and $summaries.Count -gt 0 -and $handshakeComplete
-    return [pscustomobject]@{
-        TotalLines = [Math]::Min($Lines.Count, 9999)
-        MetadataLines = [Math]::Min($metadataLines, 9999)
-        ClientLines = [Math]::Min($clientLines, 9999)
-        TargetLines = [Math]::Min($targetLines, 9999)
-        FlagLines = [Math]::Min($flagLines, 9999)
-        TupleLines = [Math]::Min($tupleLines, 9999)
-        SummaryLines = [Math]::Min($summaries.Count, 9999)
-        BaselineValid = $baselineValid
-        Summaries = $summaries
+    foreach ($name in @("GateForwardFault", "GateReverseFault", "ProbeFault")) {
+        if (-not $State.ContainsKey($name) -or $faults -notcontains $State[$name]) { return "UNRESOLVED" }
     }
+    foreach ($name in @("GateForwardBytes", "GateReverseBytes")) {
+        if (-not $State.ContainsKey($name) -or @("zero", "nonzero") -notcontains $State[$name]) { return "UNRESOLVED" }
+    }
+    foreach ($name in @("ProbeRequest", "ProbeEcho")) {
+        if (-not $State.ContainsKey($name) -or @("none", "exact", "other") -notcontains $State[$name]) { return "UNRESOLVED" }
+    }
+    if (-not $State.ContainsKey("AppResult") -or @("reset", "io", "success", "other") -notcontains $State.AppResult) { return "UNRESOLVED" }
+    if ($State.GateAccepted -eq "no" -or $State.GateForwardBytes -eq "zero" -or $State.ProbeAccepted -eq "no") { return "BEFORE_TARGET" }
+    if ($State.ProbeRequest -ne "exact" -or $State.ProbeReadEof -ne "yes" -or $State.ProbeEcho -ne "exact" -or
+        $State.ProbeShutdown -ne "yes" -or $State.ProbeFault -ne "none" -or $State.ProbeComplete -ne "yes") { return "TARGET_ECHO_INCOMPLETE" }
+    if ($State.GateReverseBytes -eq "zero" -or $State.GateReverseEof -ne "yes" -or
+        $State.GateReverseFault -ne "none" -or $State.GateComplete -ne "yes") { return "GATE_REVERSE_INCOMPLETE" }
+    if ($State.GateForwardEof -ne "yes" -or $State.GateForwardFault -ne "none") { return "UNRESOLVED" }
+    if ($State.AppResult -ne "success") { return "CLIENT_AFTER_GATE_REVERSE" }
+    return "COMPLETE"
+}
+
+$tcp01CompleteState = @{
+    GateAccepted = "yes"; GateForwardBytes = "nonzero"; GateForwardEof = "yes"; GateForwardFault = "none"
+    GateReverseBytes = "nonzero"; GateReverseEof = "yes"; GateReverseFault = "none"; GateComplete = "yes"
+    ProbeAccepted = "yes"; ProbeRequest = "exact"; ProbeReadEof = "yes"; ProbeEcho = "exact"
+    ProbeShutdown = "yes"; ProbeFault = "none"; ProbeComplete = "yes"; AppResult = "success"
+}
+foreach ($row in @(
+    @{ Change = @{ GateAccepted = "no" }; Expected = "BEFORE_TARGET" },
+    @{ Change = @{ ProbeEcho = "other" }; Expected = "TARGET_ECHO_INCOMPLETE" },
+    @{ Change = @{ GateReverseBytes = "zero" }; Expected = "GATE_REVERSE_INCOMPLETE" },
+    @{ Change = @{ AppResult = "reset" }; Expected = "CLIENT_AFTER_GATE_REVERSE" },
+    @{ Change = @{}; Expected = "COMPLETE" },
+    @{ Change = @{ GateForwardFault = "invalid" }; Expected = "UNRESOLVED" }
+)) {
+    $state = $tcp01CompleteState.Clone()
+    foreach ($name in $row.Change.Keys) { $state[$name] = $row.Change[$name] }
+    Assert-True ((Get-Tcp01Boundary $state) -eq $row.Expected) "TCP-01 boundary table mismatch"
 }
 
 function Find-Dumpbin {
@@ -435,10 +384,44 @@ public static class Ferrum2ProcessGroup {
     }
 }
 
+public sealed class Ferrum2TcpGateObservation {
+    private long clientToServerBytes;
+    private long serverToClientBytes;
+    private int clientToServerEof;
+    private int serverToClientEof;
+    private int sessionComplete;
+    private string clientToServerFault;
+    private string serverToClientFault;
+
+    public string ClientToServerBytes { get { return Interlocked.Read(ref clientToServerBytes) == 0 ? "zero" : "nonzero"; } }
+    public string ServerToClientBytes { get { return Interlocked.Read(ref serverToClientBytes) == 0 ? "zero" : "nonzero"; } }
+    public string ClientToServerEof { get { return Volatile.Read(ref clientToServerEof) == 0 ? "no" : "yes"; } }
+    public string ServerToClientEof { get { return Volatile.Read(ref serverToClientEof) == 0 ? "no" : "yes"; } }
+    public string ClientToServerFault { get { return Volatile.Read(ref clientToServerFault) ?? "none"; } }
+    public string ServerToClientFault { get { return Volatile.Read(ref serverToClientFault) ?? "none"; } }
+    public string SessionComplete { get { return Volatile.Read(ref sessionComplete) == 0 ? "no" : "yes"; } }
+
+    internal void AddBytes(bool forward, int count) {
+        if (forward) Interlocked.Add(ref clientToServerBytes, count);
+        else Interlocked.Add(ref serverToClientBytes, count);
+    }
+    internal void MarkEof(bool forward) {
+        if (forward) Volatile.Write(ref clientToServerEof, 1);
+        else Volatile.Write(ref serverToClientEof, 1);
+    }
+    internal void Fail(bool forward, string fault) {
+        if (forward) Interlocked.CompareExchange(ref clientToServerFault, fault, null);
+        else Interlocked.CompareExchange(ref serverToClientFault, fault, null);
+    }
+    internal void FailBoth(string fault) { Fail(true, fault); Fail(false, fault); }
+    internal void Complete() { Volatile.Write(ref sessionComplete, 1); }
+}
+
 public sealed class Ferrum2TcpGate : IDisposable {
     private readonly TcpListener listener;
     private readonly int upstreamPort;
     private readonly ConcurrentDictionary<int, ManualResetEventSlim> releases = new ConcurrentDictionary<int, ManualResetEventSlim>();
+    private readonly ConcurrentDictionary<int, Ferrum2TcpGateObservation> observations = new ConcurrentDictionary<int, Ferrum2TcpGateObservation>();
     private readonly ConcurrentBag<TcpClient> clients = new ConcurrentBag<TcpClient>();
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
     private int accepted;
@@ -461,6 +444,22 @@ public sealed class Ferrum2TcpGate : IDisposable {
         return Accepted >= expected;
     }
 
+    public bool WaitCompleted(int index, int milliseconds) {
+        Ferrum2TcpGateObservation observation;
+        if (!observations.TryGetValue(index, out observation)) return false;
+        var deadline = Environment.TickCount64 + milliseconds;
+        while (Environment.TickCount64 < deadline) {
+            if (observation.SessionComplete == "yes") return true;
+            Thread.Sleep(10);
+        }
+        return observation.SessionComplete == "yes";
+    }
+
+    public Ferrum2TcpGateObservation Observation(int index) {
+        Ferrum2TcpGateObservation observation;
+        return observations.TryGetValue(index, out observation) ? observation : null;
+    }
+
     public void Release(int index) {
         ManualResetEventSlim release;
         if (!releases.TryGetValue(index, out release)) throw new InvalidOperationException("gate session missing");
@@ -472,36 +471,54 @@ public sealed class Ferrum2TcpGate : IDisposable {
             while (!stopped.IsCancellationRequested) {
                 var client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
                 clients.Add(client);
-                var index = Interlocked.Increment(ref accepted);
+                var index = Accepted + 1;
                 var release = new ManualResetEventSlim(false);
+                var observation = new Ferrum2TcpGateObservation();
                 releases[index] = release;
-                var ignored = Task.Run(() => RunSession(client, release));
+                observations[index] = observation;
+                Volatile.Write(ref accepted, index);
+                var ignored = Task.Run(() => RunSession(client, release, observation));
             }
         } catch (ObjectDisposedException) { }
         catch (SocketException) when (stopped.IsCancellationRequested) { }
     }
 
-    private void RunSession(TcpClient client, ManualResetEventSlim release) {
+    private void RunSession(TcpClient client, ManualResetEventSlim release, Ferrum2TcpGateObservation observation) {
         try {
             release.Wait(stopped.Token);
             using (client)
             using (var upstream = new TcpClient(AddressFamily.InterNetwork)) {
                 upstream.Connect(IPAddress.Loopback, upstreamPort);
-                var first = Pump(client, upstream);
-                var second = Pump(upstream, client);
+                var first = Pump(client, upstream, observation, true);
+                var second = Pump(upstream, client, observation, false);
                 Task.WaitAll(first, second);
             }
-        } catch (OperationCanceledException) { }
-        catch (IOException) { }
-        catch (SocketException) { }
+        } catch (OperationCanceledException) { observation.FailBoth("cancelled"); }
+        catch (IOException) { observation.FailBoth("io"); }
+        catch (ObjectDisposedException) { observation.FailBoth("disposed"); }
+        catch (SocketException) { observation.FailBoth("socket"); }
+        catch (Exception) { observation.FailBoth("other"); }
+        finally { observation.Complete(); }
     }
 
-    private static async Task Pump(TcpClient source, TcpClient destination) {
+    private static async Task Pump(TcpClient source, TcpClient destination, Ferrum2TcpGateObservation observation, bool forward) {
         try {
-            await source.GetStream().CopyToAsync(destination.GetStream()).ConfigureAwait(false);
-            try { destination.Client.Shutdown(SocketShutdown.Send); } catch (SocketException) { }
-        } catch (IOException) { }
-        catch (ObjectDisposedException) { }
+            var input = source.GetStream();
+            var output = destination.GetStream();
+            var buffer = new byte[4096];
+            while (true) {
+                var count = await input.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+                if (count == 0) { observation.MarkEof(forward); break; }
+                await output.WriteAsync(buffer, 0, count).ConfigureAwait(false);
+                observation.AddBytes(forward, count);
+            }
+            try { destination.Client.Shutdown(SocketShutdown.Send); }
+            catch (SocketException) { observation.Fail(forward, "socket"); }
+        } catch (OperationCanceledException) { observation.Fail(forward, "cancelled"); }
+        catch (IOException) { observation.Fail(forward, "io"); }
+        catch (ObjectDisposedException) { observation.Fail(forward, "disposed"); }
+        catch (SocketException) { observation.Fail(forward, "socket"); }
+        catch (Exception) { observation.Fail(forward, "other"); }
     }
 
     public void Dispose() {
@@ -523,6 +540,11 @@ public sealed class Ferrum2TcpProbe : IDisposable {
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
     private TcpClient client;
     private byte[] received = new byte[0];
+    private long echoBytes;
+    private int readEof;
+    private int sendShutdown;
+    private int sessionComplete;
+    private string fault;
 
     public Ferrum2TcpProbe(string address, int port, string mode) {
         this.mode = mode;
@@ -534,6 +556,11 @@ public sealed class Ferrum2TcpProbe : IDisposable {
     public bool WaitAccepted(int milliseconds) { return accepted.Wait(milliseconds); }
     public bool WaitCompleted(int milliseconds) { return completed.Wait(milliseconds); }
     public byte[] Received { get { return received; } }
+    public long EchoByteCount { get { return Interlocked.Read(ref echoBytes); } }
+    public string ReadEof { get { return Volatile.Read(ref readEof) == 0 ? "no" : "yes"; } }
+    public string SendShutdown { get { return Volatile.Read(ref sendShutdown) == 0 ? "no" : "yes"; } }
+    public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
+    public string SessionComplete { get { return Volatile.Read(ref sessionComplete) == 0 ? "no" : "yes"; } }
 
     private async Task Run() {
         try {
@@ -548,7 +575,7 @@ public sealed class Ferrum2TcpProbe : IDisposable {
                 var buffer = new byte[4096];
                 do {
                     var count = await stream.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
-                    if (count == 0) break;
+                    if (count == 0) { Volatile.Write(ref readEof, 1); break; }
                     bytes.Write(buffer, 0, count);
                     if (mode == "capture") break;
                 } while (!stopped.IsCancellationRequested);
@@ -556,12 +583,21 @@ public sealed class Ferrum2TcpProbe : IDisposable {
             }
             if (mode == "echo") {
                 await stream.WriteAsync(received, 0, received.Length).ConfigureAwait(false);
-                try { client.Client.Shutdown(SocketShutdown.Send); } catch (SocketException) { }
+                Interlocked.Add(ref echoBytes, received.Length);
+                try {
+                    client.Client.Shutdown(SocketShutdown.Send);
+                    Volatile.Write(ref sendShutdown, 1);
+                } catch (SocketException) { Interlocked.CompareExchange(ref fault, "socket", null); }
             }
-        } catch (ObjectDisposedException) { }
-        catch (IOException) { }
-        catch (SocketException) when (stopped.IsCancellationRequested) { }
-        finally { completed.Set(); }
+        } catch (OperationCanceledException) { Interlocked.CompareExchange(ref fault, "cancelled", null); }
+        catch (IOException) { Interlocked.CompareExchange(ref fault, "io", null); }
+        catch (ObjectDisposedException) { Interlocked.CompareExchange(ref fault, "disposed", null); }
+        catch (SocketException) { Interlocked.CompareExchange(ref fault, "socket", null); }
+        catch (Exception) { Interlocked.CompareExchange(ref fault, "other", null); }
+        finally {
+            Volatile.Write(ref sessionComplete, 1);
+            completed.Set();
+        }
     }
 
     public void Dispose() {
@@ -664,22 +700,53 @@ function Invoke-EchoRow(
     [int]$Port,
     [int]$InterfaceIndex,
     [Ferrum2TcpGate]$Gate,
-    [byte[]]$Payload
+    [byte[]]$Payload,
+    [hashtable]$Observation = $null
 ) {
     $expectedGate = $Gate.Accepted + 1
+    if ($null -ne $Observation) {
+        $Observation.Gate = $Gate
+        $Observation.GateIndex = $expectedGate
+        $Observation.GateAccepted = "no"
+        $Observation.Probe = $null
+        $Observation.ProbeAccepted = "no"
+        $Observation.AppResult = "other"
+    }
     $session = Open-TunTcp $Address $Port $InterfaceIndex
     try {
         Assert-True ($Gate.WaitAccepted($expectedGate, 5000)) "selected egress gate was not opened"
+        if ($null -ne $Observation) { $Observation.GateAccepted = "yes" }
         $stream = $session.Client.GetStream()
         $stream.Write($Payload, 0, $Payload.Length)
         $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
         $probe = [Ferrum2TcpProbe]::new($Address, $Port, "echo")
         $script:tcpResources.Add($probe)
+        if ($null -ne $Observation) { $Observation.Probe = $probe }
         $Gate.Release($expectedGate)
-        Assert-True ($probe.WaitAccepted(5000)) "selected target was not opened"
+        $probeAccepted = $probe.WaitAccepted(5000)
+        if ($null -ne $Observation -and $probeAccepted) { $Observation.ProbeAccepted = "yes" }
+        Assert-True $probeAccepted "selected target was not opened"
         $echo = Read-StreamToEnd $stream
         Assert-True (($echo -join ",") -eq ($Payload -join ",")) "echo or half-close mismatch"
         Assert-True ($probe.WaitCompleted(5000)) "target half-close did not complete"
+        Assert-True ($probe.SessionComplete -eq "yes" -and $probe.Fault -eq "none" -and
+            $probe.ReadEof -eq "yes" -and $probe.SendShutdown -eq "yes") "target half-close completed with a fault"
+        if ($null -ne $Observation) { $Observation.AppResult = "success" }
+    } catch {
+        if ($null -ne $Observation) {
+            $errorCursor = $_.Exception
+            $sawIo = $false
+            $appResult = "other"
+            for ($depth = 0; $depth -lt 4 -and $errorCursor; $depth++) {
+                if ($errorCursor -is [Net.Sockets.SocketException] -and
+                    $errorCursor.SocketErrorCode -eq [Net.Sockets.SocketError]::ConnectionReset) { $appResult = "reset"; break }
+                if ($errorCursor -is [IO.IOException]) { $sawIo = $true }
+                $errorCursor = $errorCursor.InnerException
+            }
+            if ($appResult -eq "other" -and $sawIo) { $appResult = "io" }
+            $Observation.AppResult = $appResult
+        }
+        throw
     } finally { $session.Client.Dispose() }
 }
 
@@ -1119,128 +1186,49 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
         $tcp01Target = $targets[0]
         $tcp01Port = $ports[0]
-        $tcp01Boundary = "UNRESOLVED"
-        $tcp01Synthetic = @(
-            "PktGroupId 10 PktNumber 1 Appearance 1 Direction Tx Component 7",
-            "198.18.0.2.55000 > 192.0.2.201.443: Flags [S], length 0",
-            "PktGroupId 10 PktNumber 1 Appearance 2 Direction Rx Component 8",
-            "192.0.2.201.443 > 198.18.0.2.55000: Flags [S.], length 0",
-            "PktGroupId 11 PktNumber 2 Appearance 1 Direction Tx Component 7",
-            "198.18.0.2.55000 > 192.0.2.201.443: Flags [.], length 0",
-            "PktGroupId 12 PktNumber 3 Appearance 1 Direction Rx Component 9 dropReason secret",
-            "192.0.2.201.443 > 198.18.0.2.55000: Flags [R.], length 0",
-            "Component Ferrum2-Secret {11111111-2222-3333-4444-555555555555} 203.0.113.9:65000"
-        )
-        $tcp01SyntheticExpected = @(
-            "tcp01_pktmon group=g1 appearance=1 component=c1 role=client_to_target direction=tx flags=syn payload_present=no drop=none",
-            "tcp01_pktmon group=g1 appearance=2 component=c2 role=target_to_client direction=rx flags=syn_ack payload_present=no drop=none",
-            "tcp01_pktmon group=g2 appearance=1 component=c1 role=client_to_target direction=tx flags=ack payload_present=no drop=none",
-            "tcp01_pktmon group=g3 appearance=1 component=c3 role=target_to_client direction=rx flags=rst payload_present=no drop=reported"
-        )
-        $tcp01SyntheticParse = Convert-Tcp01PktmonLines $tcp01Synthetic "198.18.0.2" "192.0.2.201" 443
-        Assert-True ((@($tcp01SyntheticParse.Summaries) -join "|") -eq ($tcp01SyntheticExpected -join "|")) "TCP-01 pktmon redaction self-check failed"
-        Assert-True $tcp01SyntheticParse.BaselineValid "TCP-01 pktmon valid-shape self-check failed"
-        $tcp01ZeroParse = Convert-Tcp01PktmonLines @() "198.18.0.2" "192.0.2.201" 443
-        Assert-True (-not $tcp01ZeroParse.BaselineValid) "TCP-01 pktmon zero-shape self-check failed"
-        $tcp01DriftParse = Convert-Tcp01PktmonLines @(
-            "PktGroup=10 Packet=1 Direction=Tx Component=7",
-            "198.18.0.2:55000 -> 192.0.2.201:443 TCP SYN"
-        ) "198.18.0.2" "192.0.2.201" 443
-        Assert-True (-not $tcp01DriftParse.BaselineValid) "TCP-01 pktmon format-drift self-check failed"
-
-        $tcp01Etl = Join-Path $work "tcp01-pktmon.etl"
-        $tcp01Txt = Join-Path $work "tcp01-pktmon.txt"
+        $tcp01Payload = [Text.Encoding]::ASCII.GetBytes("tcp-01-half-close")
+        $tcp01Observation = @{ Diagnostic = "pending" }
         $tcp01Error = $null
-        $tcp01CleanupError = $null
-        $tcp01Parse = $null
         try {
-            Assert-True (-not (Test-Path -LiteralPath $tcp01Etl)) "TCP-01 ETL baseline not absent"
-            Assert-True (-not (Test-Path -LiteralPath $tcp01Txt)) "TCP-01 text baseline not absent"
-            $tcp01Status = @(& pktmon status 2>&1)
-            Assert-True ($LASTEXITCODE -eq 0) "pktmon baseline status failed"
-            $tcp01StatusText = $tcp01Status -join "`n"
-            Assert-True ($tcp01StatusText -match "(?im)(collection|packet monitor|measurement|capture).*(stopped|not running)") "pktmon baseline capture is not demonstrably stopped"
-            $tcp01FilterList = @(& pktmon filter list 2>&1)
-            Assert-True ($LASTEXITCODE -eq 0) "pktmon baseline filter query failed"
-            $tcp01FilterText = ($tcp01FilterList -join "`n").Trim()
-            $tcp01FiltersEmpty = [string]::IsNullOrWhiteSpace($tcp01FilterText) -or
-                $tcp01FilterText -match "(?is)^\s*(packet\s+filters?\s*:?\s*)?(none|no\s+(packet\s+)?filters?(\s+(are\s+)?(configured|present|active|set))?\.?)?\s*$"
-            Assert-True $tcp01FiltersEmpty "pktmon filter baseline is not empty"
+            Invoke-EchoRow $tcp01Target $tcp01Port $ownedInterfaceIndex $gateA $tcp01Payload $tcp01Observation
+        } catch { $tcp01Error = $_ }
 
-            $tcp01FilterCleanupIntent = $true
-            $null = @(& pktmon filter add "Ferrum2Tcp01" -i "198.18.0.2" $tcp01Target -t TCP -p $tcp01Port 2>&1)
-            Assert-True ($LASTEXITCODE -eq 0) "TCP-01 pktmon filter setup failed"
-            $tcp01CaptureCleanupIntent = $true
-            $null = @(& pktmon start --capture --comp all --pkt-size 64 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular 2>&1)
-            Assert-True ($LASTEXITCODE -eq 0) "TCP-01 pktmon capture start failed"
-
-            Invoke-EchoRow $tcp01Target $tcp01Port $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-01-half-close"))
-        } catch {
-            $tcp01Error = $_
-        } finally {
-            try {
-                if ($tcp01CaptureCleanupIntent) {
-                    $null = @(& pktmon stop 2>&1)
-                    if ($LASTEXITCODE -ne 0) { $tcp01CleanupError = "TCP-01 pktmon capture stop failed" }
-                }
-            } catch { $tcp01CleanupError = "TCP-01 pktmon capture stop failed" }
-            try {
-                if (Test-Path -LiteralPath $tcp01Etl) {
-                    $null = @(& pktmon etl2txt $tcp01Etl --out $tcp01Txt --brief --verbose 3 2>&1)
-                    if ($LASTEXITCODE -ne 0 -and -not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon conversion failed" }
-                } elseif (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon ETL missing" }
-            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon conversion failed" } }
-            try {
-                if ($tcp01FilterCleanupIntent) {
-                    $null = @(& pktmon filter remove 2>&1)
-                    if ($LASTEXITCODE -ne 0 -and -not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon filter cleanup failed" }
-                }
-            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon filter cleanup failed" } }
-            try {
-                $tcp01FinalStatus = @(& pktmon status 2>&1)
-                $tcp01StatusText = $tcp01FinalStatus -join "`n"
-                if ($LASTEXITCODE -eq 0 -and $tcp01StatusText -match "(?im)(collection|packet monitor|measurement|capture).*(stopped|not running)") {
-                    $tcp01CaptureCleanupIntent = $false
-                } elseif (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon stopped state not proven" }
-                $tcp01FinalFilters = @(& pktmon filter list 2>&1)
-                $tcp01FinalFilterText = ($tcp01FinalFilters -join "`n").Trim()
-                $tcp01FiltersEmpty = $LASTEXITCODE -eq 0 -and (
-                    [string]::IsNullOrWhiteSpace($tcp01FinalFilterText) -or
-                    $tcp01FinalFilterText -match "(?is)^\s*(packet\s+filters?\s*:?\s*)?(none|no\s+(packet\s+)?filters?(\s+(are\s+)?(configured|present|active|set))?\.?)?\s*$"
-                )
-                if ($tcp01FiltersEmpty) { $tcp01FilterCleanupIntent = $false }
-                elseif (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon filter absence not proven" }
-            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon final state not proven" } }
-            try {
-                if (Test-Path -LiteralPath $tcp01Txt) {
-                    $tcp01CaptureLines = @(Get-Content -LiteralPath $tcp01Txt)
-                    $tcp01Parse = Convert-Tcp01PktmonLines $tcp01CaptureLines "198.18.0.2" $tcp01Target $tcp01Port
-                } elseif (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon text missing" }
-            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon parse failed" } }
-            try {
-                if (Test-Path -LiteralPath $tcp01Etl) { Remove-Item -LiteralPath $tcp01Etl -Force }
-                if (Test-Path -LiteralPath $tcp01Txt) { Remove-Item -LiteralPath $tcp01Txt -Force }
-                Assert-True (-not (Test-Path -LiteralPath $tcp01Etl)) "TCP-01 ETL cleanup failed"
-                Assert-True (-not (Test-Path -LiteralPath $tcp01Txt)) "TCP-01 text cleanup failed"
-            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon file cleanup failed" } }
+        if ($tcp01Observation.Gate) {
+            [void]$tcp01Observation.Gate.WaitCompleted([int]$tcp01Observation.GateIndex, 1500)
         }
-
-        if ($tcp01CleanupError) {
-            [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag status=CAPTURE_FAILED boundary=UNRESOLVED capture_cleanup=FAIL")
-            if ($tcp01Error) { throw $tcp01Error }
-            throw $tcp01CleanupError
+        if ($tcp01Observation.Probe) { [void]$tcp01Observation.Probe.WaitCompleted(1500) }
+        $gateObservation = if ($tcp01Observation.Gate) {
+            $tcp01Observation.Gate.Observation([int]$tcp01Observation.GateIndex)
+        } else { $null }
+        $probe = $tcp01Observation.Probe
+        $probeRequest = if (-not $probe -or $probe.Received.Length -eq 0) { "none" }
+            elseif (($probe.Received -join ",") -eq ($tcp01Payload -join ",")) { "exact" }
+            else { "other" }
+        $probeEcho = if (-not $probe -or $probe.EchoByteCount -eq 0) { "none" }
+            elseif ($probeRequest -eq "exact" -and $probe.EchoByteCount -eq $tcp01Payload.Length) { "exact" }
+            else { "other" }
+        $tcp01State = @{
+            GateAccepted = $tcp01Observation.GateAccepted
+            GateForwardBytes = if ($gateObservation) { $gateObservation.ClientToServerBytes } else { "zero" }
+            GateForwardEof = if ($gateObservation) { $gateObservation.ClientToServerEof } else { "no" }
+            GateForwardFault = if ($gateObservation) { $gateObservation.ClientToServerFault } else { "other" }
+            GateReverseBytes = if ($gateObservation) { $gateObservation.ServerToClientBytes } else { "zero" }
+            GateReverseEof = if ($gateObservation) { $gateObservation.ServerToClientEof } else { "no" }
+            GateReverseFault = if ($gateObservation) { $gateObservation.ServerToClientFault } else { "other" }
+            GateComplete = if ($gateObservation) { $gateObservation.SessionComplete } else { "no" }
+            ProbeAccepted = $tcp01Observation.ProbeAccepted
+            ProbeRequest = $probeRequest
+            ProbeReadEof = if ($probe) { $probe.ReadEof } else { "no" }
+            ProbeEcho = $probeEcho
+            ProbeShutdown = if ($probe) { $probe.SendShutdown } else { "no" }
+            ProbeFault = if ($probe) { $probe.Fault } else { "other" }
+            ProbeComplete = if ($probe) { $probe.SessionComplete } else { "no" }
+            AppResult = $tcp01Observation.AppResult
         }
-        $tcp01BoundedSummaries = @($tcp01Parse.Summaries | Select-Object -First 48) + @($tcp01Parse.Summaries | Select-Object -Last 48)
-        @($tcp01BoundedSummaries | Select-Object -Unique) | ForEach-Object { [Console]::Error.WriteLine($_) }
-        [Console]::Error.WriteLine("tcp01_pktmon_shape total_lines=$($tcp01Parse.TotalLines) metadata=$($tcp01Parse.MetadataLines) client=$($tcp01Parse.ClientLines) target=$($tcp01Parse.TargetLines) flags=$($tcp01Parse.FlagLines) tuple=$($tcp01Parse.TupleLines) summaries=$($tcp01Parse.SummaryLines)")
-        $tcp01CaptureStatus = if ($tcp01Parse.BaselineValid) { "CAPTURED" } else { "CAPTURE_INVALID" }
-        $tcp01Sha = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
-        $tcp01RunId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
-        $tcp01RunAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
-        [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus boundary=$tcp01Boundary capture_cleanup=PASS sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt")
+        $tcp01Boundary = Get-Tcp01Boundary $tcp01State
+        $tcp01Diagnostic = "status=OBSERVED boundary=$tcp01Boundary app=$($tcp01State.AppResult) gate_accepted=$($tcp01State.GateAccepted) gate_c2s_bytes=$($tcp01State.GateForwardBytes) gate_c2s_eof=$($tcp01State.GateForwardEof) gate_c2s_fault=$($tcp01State.GateForwardFault) gate_s2c_bytes=$($tcp01State.GateReverseBytes) gate_s2c_eof=$($tcp01State.GateReverseEof) gate_s2c_fault=$($tcp01State.GateReverseFault) gate_complete=$($tcp01State.GateComplete) probe_accepted=$($tcp01State.ProbeAccepted) probe_request=$($tcp01State.ProbeRequest) probe_read_eof=$($tcp01State.ProbeReadEof) probe_echo=$($tcp01State.ProbeEcho) probe_shutdown=$($tcp01State.ProbeShutdown) probe_fault=$($tcp01State.ProbeFault) probe_complete=$($tcp01State.ProbeComplete)"
         if ($tcp01Error) { throw $tcp01Error }
-        Assert-True $tcp01Parse.BaselineValid "TCP-01 pktmon parse baseline invalid"
-        Assert-True ($tcp01Boundary -ne "UNRESOLVED") "TCP-01 pktmon boundary remains unresolved"
+        Assert-True $false "TCP-01 diagnostic sentinel"
         $tcpRows++
         Invoke-EchoRow $targets[1] $ports[1] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-02-two-hop"))
         $tcpRows++
@@ -1342,45 +1330,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 }
 catch { $primaryError = $_ }
 finally {
-    if ($tcp01CaptureCleanupIntent) {
-        try {
-            $null = @(& pktmon stop 2>&1)
-            if ($LASTEXITCODE -ne 0) { $outerCleanupError = "TCP-01 pktmon fallback stop failed" }
-        } catch { $outerCleanupError = "TCP-01 pktmon fallback stop failed" }
-    }
-    if ($tcp01FilterCleanupIntent) {
-        try {
-            $null = @(& pktmon filter remove 2>&1)
-            if ($LASTEXITCODE -ne 0 -and -not $outerCleanupError) { $outerCleanupError = "TCP-01 pktmon fallback filter cleanup failed" }
-        } catch {
-            if (-not $outerCleanupError) { $outerCleanupError = "TCP-01 pktmon fallback filter cleanup failed" }
-        }
-    }
-    if ($tcp01CaptureCleanupIntent -or $tcp01FilterCleanupIntent) {
-        try {
-            $tcp01FallbackStatus = @(& pktmon status 2>&1)
-            $tcp01FallbackStatusText = $tcp01FallbackStatus -join "`n"
-            if ($LASTEXITCODE -eq 0 -and $tcp01FallbackStatusText -match "(?im)(collection|packet monitor|measurement|capture).*(stopped|not running)") {
-                $tcp01CaptureCleanupIntent = $false
-            }
-            $tcp01FallbackFilters = @(& pktmon filter list 2>&1)
-            $tcp01FallbackFilterText = ($tcp01FallbackFilters -join "`n").Trim()
-            $tcp01FallbackFiltersEmpty = $LASTEXITCODE -eq 0 -and (
-                [string]::IsNullOrWhiteSpace($tcp01FallbackFilterText) -or
-                $tcp01FallbackFilterText -match "(?is)^\s*(packet\s+filters?\s*:?\s*)?(none|no\s+(packet\s+)?filters?(\s+(are\s+)?(configured|present|active|set))?\.?)?\s*$"
-            )
-            if ($tcp01FallbackFiltersEmpty) { $tcp01FilterCleanupIntent = $false }
-            if (($tcp01CaptureCleanupIntent -or $tcp01FilterCleanupIntent) -and -not $outerCleanupError) {
-                $outerCleanupError = "TCP-01 pktmon fallback absence not proven"
-            }
-        } catch { if (-not $outerCleanupError) { $outerCleanupError = "TCP-01 pktmon fallback absence not proven" } }
-    }
-    foreach ($capturePath in @($tcp01Etl, $tcp01Txt)) {
-        if ($capturePath -and (Test-Path -LiteralPath $capturePath)) {
-            try { Remove-Item -LiteralPath $capturePath -Force }
-            catch { if (-not $outerCleanupError) { $outerCleanupError = "TCP-01 pktmon fallback file cleanup failed" } }
-        }
-    }
     try {
     if ($udp4) { $udp4.Dispose() }
     if ($heldMetrics) { $heldMetrics.Stop() }
@@ -1431,15 +1380,17 @@ finally {
     if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
     if ($createdSiblingDll) { Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "owned sibling DLL leaked" }
     Assert-True (-not (Test-Path -LiteralPath $work)) "controller work directory leaked"
-    Assert-True (-not $tcp01CaptureCleanupIntent) "TCP-01 pktmon capture cleanup incomplete"
-    Assert-True (-not $tcp01FilterCleanupIntent) "TCP-01 pktmon filter cleanup incomplete"
     } catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
 }
 
-if ($outerCleanupError) {
-    [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag status=CLEANUP_FAILED boundary=UNRESOLVED capture_cleanup=FAIL")
-    if (-not $primaryError) { $primaryError = $outerCleanupError }
+if ($tcp01Diagnostic) {
+    $tcp01Cleanup = if ($outerCleanupError) { "FAIL" } else { "PASS" }
+    $tcp01Sha = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
+    $tcp01RunId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
+    $tcp01RunAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
+    [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt")
 }
+if ($outerCleanupError -and -not $primaryError) { $primaryError = $outerCleanupError }
 if ($primaryError) { throw $primaryError }
 
 if ($completed) {
