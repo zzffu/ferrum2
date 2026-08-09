@@ -1,6 +1,8 @@
 # M14 — bounded protocol sniffing and ordered route/DNS rules
 
-- **Status:** executing
+- **Status:** closed
+- **Qualified M14 product:** `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`
+- **Qualified M14 product tree:** `a5533723d251b62529daa767dd083404fa0a30bc`
 - **Qualified M13 product baseline:** `1af1bbf44b37a81c2ae03c562288b2a6e09694b5`
 - **Qualified product tree:** `172870c4ca0dffb6c474f2137399d553e827b1e4`
 - **Planning baseline:** `cc8a0c2946788c16e5d7af2658a7d80bac0a844b`
@@ -79,45 +81,45 @@ repository。
 
 ## Exit criteria
 
-- [ ] Qualified M13 product and exact planning HEAD/tree/parent remain reproducible；SPEC-0014's
+- [x] Qualified M13 product and exact planning HEAD/tree/parent remain reproducible；SPEC-0014's
       client-owned/server-one-hop snapshot wording is corrected without changing M13 product evidence。
-- [ ] One core-owned ordered program advances a private monotonic cursor，evaluates at most 64 rules and
+- [x] One core-owned ordered program advances a private monotonic cursor，evaluates at most 64 rules and
       preserves legacy exact-target `RouteTable` behavior through the same implementation。
-- [ ] Core remains free of DNS/TLS/HTTP/config/runtime types；`ferrum2-sniff` is one deep pure parsing
+- [x] Core remains free of DNS/TLS/HTTP/config/runtime types；`ferrum2-sniff` is one deep pure parsing
       module using only exact Hickory、rustls and httparse adapters。
-- [ ] Ordinary route supports bounded scalar-or-list inbound/network/protocol/domain/suffix/IP/CIDR/
+- [x] Ordinary route supports bounded scalar-or-list inbound/network/protocol/domain/suffix/IP/CIDR/
       port/range/legacy-target matchers with fields AND、list values OR and immutable original target。
-- [ ] Config rejects unsupported role/network/action combinations、empty/duplicate/overflow values、
+- [x] Config rejects unsupported role/network/action combinations、empty/duplicate/overflow values、
       noncanonical CIDR、unreachable rules and protocol rules without an earlier covering sniff。
-- [ ] Schema version 2 accepts the bounded M14 shape；schema-v1 client routed+UDP fails on a redacted
+- [x] Schema version 2 accepts the bounded M14 shape；schema-v1 client routed+UDP fails on a redacted
       migration error before side effects，and no per-datagram client route path remains in product。
-- [ ] Sniff runs at most once per TCP flow、authenticated server datagram or schema-v2 client association；
+- [x] Sniff runs at most once per TCP flow、authenticated server datagram or schema-v2 client association；
       TCP reads use one absolute deadline and bounded lazy prefix，UDP inspects borrowed bytes；timeout/
       limit/unknown/invalid continue while cancellation/I/O failure terminates。
-- [ ] Selector resolution occurs only at terminal route；selected plan/order/credentials remain fixed and
+- [x] Selector resolution occurs only at terminal route；selected plan/order/credentials remain fixed and
       failure never evaluates a later rule、final、sibling or retry。A schema-v2 client UDP selector is
       read once for the association and ignores later switches。
-- [ ] Server TCP replays every sniffed prefix byte exactly once；server UDP sniffs/routes before target
+- [x] Server TCP replays every sniffed prefix byte exactly once；server UDP sniffs/routes before target
       reservation while authenticated replay/binding commit remains atomic。
-- [ ] Client TCP never waits for application bytes；reject maps to SOCKS policy-denied；TCP/UDP hijack
+- [x] Client TCP never waits for application bytes；reject maps to SOCKS policy-denied；TCP/UDP hijack
       never creates a Shadowsocks flow/session or falls back to ordinary routing。
-- [ ] `UDP ASSOCIATE` returns one relay endpoint before payload；invalid source/wire packets cannot classify
+- [x] `UDP ASSOCIATE` returns one relay endpoint before payload；invalid source/wire packets cannot classify
       the endpoint；the first valid packet is cached、routes once and is forwarded exactly once。Later
       targets use the fixed route plan，while hijack/reject remain association-terminal。
-- [ ] Existing `DnsProxy::answer` is the single reusable DNS answering interface；listener and ordinary
+- [x] Existing `DnsProxy::answer` is the single reusable DNS answering interface；listener and ordinary
       inbound identities cannot collide；client qname/qtype and server target suffix/port policy preserve
       M12 server/detour/TC/no-fallback semantics。
-- [ ] `SocksUdpEndpoint` owns SOCKS wire/source state；`ClientUdpAssociation` owns private lazy
+- [x] `SocksUdpEndpoint` owns SOCKS wire/source state；`ClientUdpAssociation` owns private lazy
       Shadowsocks upstream/plan/session state for exactly one selected plan，with no plan-keyed map、new
       trait/factory or change to existing ceilings、shutdown and exact response binding。
-- [ ] No destination、SNI、Host、qname、rule or tag enters errors、logs、traces or metric labels；new
+- [x] No destination、SNI、Host、qname、rule or tag enters errors、logs、traces or metric labels；new
       telemetry dimensions are fixed enums only。
-- [ ] All M0～M13 behavior outside the explicit schema-v1 client routed+UDP migration rejection remains
+- [x] All M0～M13 behavior outside the explicit schema-v1 client routed+UDP migration rejection remains
       green，including CLI、SIP022 wire/crypto/replay、DNS transports、server routing、selector、chain、
       resource and lifecycle evidence。
-- [ ] One exact integration SHA passes focused、Full、Rust 1.88、100+ lifecycle、three-platform、
+- [x] One exact integration SHA passes focused、Full、Rust 1.88、100+ lifecycle、three-platform、
       SIP022/CoreDNS/BIND interop、footprint and bounded Architect/QA review with zero blocking findings。
-- [ ] After separate explicit authorization，the same exact SHA passes the extended independent
+- [x] After separate explicit authorization，the same exact SHA passes the extended independent
       performance/resource job；no performance threshold or improvement claim is implied。
 
 ## Tickets
@@ -132,7 +134,7 @@ repository。
 | M14-T06 | Extend DNS policy through the existing answering/resolver module | M14-T05 | done |
 | M14-T07 | Compose client route/reject/hijack and one-plan association UDP ownership | M14-T06 | done |
 | M14-T08 | Close real-process、security、lifecycle、architecture and qualification-tool evidence | M14-T07 | done |
-| M14-T09 | Qualify and close one exact M14 integration SHA | M14-T08 | in_progress |
+| M14-T09 | Qualify and close one exact M14 integration SHA | M14-T08 | done |
 
 ```text
 M14-T01 contract/dependency/control
@@ -158,14 +160,26 @@ case/support/fixture `33883/5152/597`，unchanged thresholds and `TEST-0015` as 
 `REVIEW_REQUIRED` is expected and must be dispositioned without deleting independent security、
 parser or lifecycle evidence。No new fixture or second harness is planned。
 
-The plan itself authorized no remote action。The 2026-08-09 execute continuation now authorizes all
-required remote actions through M14 close，including the exact-SHA non-force push and manual
-performance/resource dispatch。The workflow still forbids force-push、unchanged-SHA rerun、PR、tag、
-package、release and publication。
+The plan itself authorized no remote action。The 2026-08-09 execute continuation authorized the required
+exact-SHA pushes and one manual performance/resource dispatch through close；those scopes are consumed。
+The workflow prohibition on force-push、unchanged-SHA rerun、PR、tag、package、release and publication
+was preserved。
 
-## Blocker / next action
+## Close evidence
 
-Automatic run `31282591585/1` preserved a hosted qualification blocker on exact `9a7797f714536522910dd1c7fdee8b2998c9f071`：the native routed-UDP and CoreDNS/BIND client generators still emitted schema v1 after M14 made routed+enabled UDP an explicit schema-v2 migration。The unchanged SHA will not be rerun and manual performance remains undispatched。T09 now owns the two existing generators and one existing contract test for a test/tool-only descendant repair；no product、workflow、dependency or second harness change is authorized。
+Exact product `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f` passes all local focused、Full、Rust
+1.88、100+ lifecycle、docs and footprint-integrity gates。Final T09 Architect and QA verdicts are
+`PASS_WITH_NOTES` with zero blocker、major or minor finding。Automatic run
+[`31284062682/1`](https://github.com/zzffu/ferrum2/actions/runs/31284062682) passes quality、footprint、
+MSRV、Windows/GNU/musl、SIP022 TCP/UDP、CoreDNS/BIND and aggregate qualification。Independent manual
+run [`31284310711/1`](https://github.com/zzffu/ferrum2/actions/runs/31284310711) passes the same-SHA
+performance/resource job、THP restore and cleanup。The cumulative schema-3 case/support/fixture delta
+`+5377/0/0` remains an accepted numeric advisory：it is independent parser、security、real-process、
+lifecycle and mutation evidence in existing harnesses，with integrity and ratio PASS。
+
+Earlier run `31282591585/1` remains failed and was never rerun；its qualification-generator schema defect
+was repaired on the reviewed descendant SHA rather than waived or attributed to product behavior。There
+was no force-push、PR、tag、package、release or publication。No M14 blocker or action remains。
 
 T08 is accepted at exact integration `1b408741756f0cf14d77bdf76f12626b05de28f9`。
 Initial review and one bounded repair closed the broad process/tool gaps；targeted QA retained semantic
@@ -174,4 +188,4 @@ TLS self-check and zero-port accepted-activity evidence。Two required independe
 Architect/QA both returned `PASS` with every finding closed。Focused、Full、100+ lifecycle、docs and
 Rust 1.88 gates pass on the integration。Ticket and milestone footprint integrity/ratio pass；the accepted
 case/support/fixture deltas are `+1021/0/0` and `+5334/0/0`，with numeric file-size review retained。
-T09 will requalify the reviewed repair locally before one new-SHA automatic push。
+T09 requalified the final hosted-generator repair on `bc696347…` before the successful new-SHA push。

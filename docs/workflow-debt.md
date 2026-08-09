@@ -46,3 +46,12 @@ integrity PASS，and the existing push/manual-dispatch split produced exact-SHA 
 `31223817144/1` plus independent performance/resource qualification `31223831024/1`。The scanner repair
 stayed inside the existing architecture test；no workflow、provider、job、parser dependency or second
 harness was added。
+
+## M14 close audit
+
+No M14 workflow debt remains。The existing push workflow produced exact-SHA automatic qualification
+`31284062682/1`，and its existing manual `performance` job produced independent same-SHA throughput、
+10k resource、DNS resource、THP restore and cleanup evidence in `31284310711/1`。M14 extended the existing
+qualification driver and architecture/process harnesses rather than adding a workflow、job、mode or second
+harness。The failed `31282591585/1` was not rerun；a new descendant SHA repaired the generated config at
+the source seam and was qualified normally。

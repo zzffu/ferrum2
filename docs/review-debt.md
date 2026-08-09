@@ -153,3 +153,15 @@ converged on the final one-file architecture-guard repair。Final full Architect
 remain `92/92`，assertions are unchanged and support/fixture deltas are zero。The throughput ratio is
 diagnostic only；deferred upstream groups、retry/fallback、new DNS features、TUN/transparent inbounds and
 management surfaces remain scope boundaries rather than review debt。
+
+## M14 close audit
+
+No M14 review debt remains。All T02～T08 blocking findings were closed before qualification；where the
+single-repair bound remained blocked，the required paired independent analyses converged on the accepted
+existing-seam repair。T09 final Architect and QA both returned `PASS_WITH_NOTES` with zero blocker、major
+or minor finding。The hosted-generator failure from `31282591585/1` is preserved and repaired on exact
+`bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`，which passed automatic and manual same-SHA evidence。
+The schema-3 `+5377/0/0` numeric `REVIEW_REQUIRED` result is accepted as distinct parser、security、
+real-process、lifecycle and mutation evidence in existing harnesses；support/fixture growth is zero。
+Diagnostic throughput ratio and deferred fallback、groups、TUN/transparent and management features are
+scope boundaries，not review debt。

@@ -1,7 +1,7 @@
 ---
 id: M14-T09
 milestone: M14
-status: in_progress
+status: done
 depends_on:
   - M14-T08
 owns:
@@ -28,23 +28,23 @@ same SHA before closing M14。
 
 ## Acceptance
 
-- [ ] Every T01～T08 focused command and repository Full/Rust 1.88/100+ lifecycle/doc/footprint gate
+- [x] Every T01～T08 focused command and repository Full/Rust 1.88/100+ lifecycle/doc/footprint gate
       passes serially on one exact accepted integration SHA。
-- [ ] T08's full Architect/QA review and any single targeted re-review bind that SHA and leave zero
+- [x] T08's full Architect/QA review and any single targeted re-review bind that SHA and leave zero
       blockers；T09 audits identity rather than repeating a full review unless the accepted product SHA
       changes。All numeric footprint findings have explicit disposition。
-- [ ] After separate authorization，one non-force push passes quality、footprint、MSRV、Windows/GNU/musl、
+- [x] After separate authorization，one non-force push passes quality、footprint、MSRV、Windows/GNU/musl、
       SIP022 TCP/UDP、CoreDNS/BIND and aggregate qualification on the exact SHA。
-- [ ] Hosted routed+enabled-UDP generators use explicit schema v2 while unrelated schema-v1 fixtures
+- [x] Hosted routed+enabled-UDP generators use explicit schema v2 while unrelated schema-v1 fixtures
       remain unchanged；the native platform route smoke and CoreDNS/BIND client configs are locked by
       the existing qualification driver and contract test rather than a second harness。
-- [ ] Failed automatic run `31282591585/1` remains visible and is never rerun；the repair is reviewed、
+- [x] Failed automatic run `31282591585/1` remains visible and is never rerun；the repair is reviewed、
       locally requalified and pushed once as a new exact descendant SHA。
-- [ ] After separate authorization，one manual dispatch passes the extended performance/resource job on
+- [x] After separate authorization，one manual dispatch passes the extended performance/resource job on
       that same SHA；results make no uncontracted threshold or improvement claim。
-- [ ] Milestone、ticket、CI status、review/workflow debt and handoff record exact commands、exit status、
+- [x] Milestone、ticket、CI status、review/workflow debt and handoff record exact commands、exit status、
       run/attempt identity and all unrun/failed evidence without splicing。
-- [ ] No force-push、unchanged-SHA rerun、PR、tag、package、release or publication occurs。
+- [x] No force-push、unchanged-SHA rerun、PR、tag、package、release or publication occurs。
 
 ## Validation
 
@@ -65,15 +65,29 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Footprint: —
-- Local evidence: —
-- Remote evidence: authorized；automatic run `31282591585/1` on `9a7797f714536522910dd1c7fdee8b2998c9f071`
-  failed because the native routed-UDP and DNS interop generators emitted schema v1。The failed attempt
-  is preserved，was not rerun，and manual performance was not dispatched。
+- Commit: `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`，tree
+  `a5533723d251b62529daa767dd083404fa0a30bc`；the three-file repair parent is the paired docs control
+  `034cef580b155fffa2407fdb085362068e9396dd`。
+- Review: Architect and QA both `PASS_WITH_NOTES` on the exact product with zero blocker、major or minor
+  finding。The notes only reserved hosted evidence and an uncredited local fixed-port native run；both are
+  closed by the hosted runs below。
+- Footprint: exact code/tests `25586/45009`，ratio `1.759126` PASS；case/support/fixture
+  `39260/5152/597`，ticket delta `+43/0/0` PASS。Milestone delta `+5377/0/0` is a zero-exit
+  `REVIEW_REQUIRED` advisory accepted for distinct evidence in existing harnesses；integrity PASS。
+- Local evidence: every T01～T08 focused command、format、strict Clippy、workspace bins/all-features
+  `413 passed / 5 ignored`、Rust 1.88 check/build/test、100+ lifecycle `1/1`、docs、qualification
+  contract `19/19` and diff checks passed serially on the exact product。
+- Remote evidence: failed run [`31282591585/1`](https://github.com/zzffu/ferrum2/actions/runs/31282591585)
+  on `9a7797f…` remains visible and was not rerun。New-SHA automatic run
+  [`31284062682/1`](https://github.com/zzffu/ferrum2/actions/runs/31284062682) passed every required
+  non-performance job；manual run
+  [`31284310711/1`](https://github.com/zzffu/ferrum2/actions/runs/31284310711) passed all nine jobs，with
+  performance job `93170454318` reporting throughput、10k/180-sample resource、DNS resource、THP restore
+  and cleanup PASS on the same SHA。
 
 ## Rollback / risk
 
-Qualification docs do not replace the accepted product SHA。Missing、failed、unauthorized or wrong-SHA
-remote evidence blocks close rather than being summarized as pass。
+This docs-only closeout does not replace the qualified product SHA。The schema-v1 routed+enabled-UDP
+generator defect was repaired only in the existing test/tool seams；no product or workflow change was
+needed。No M14 risk remains open；deferred upstream groups、fallback/retry、TUN/transparent inbounds and
+management surfaces remain explicit non-goals。

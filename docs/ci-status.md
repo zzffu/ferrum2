@@ -1,21 +1,38 @@
 # CI 与验证状态
 
-## M14 executing — first automatic qualification preserved as failed
+## M14 closed — bounded routing/sniffing qualified on one exact product
 
-- **Failed exact identity:** automatic push run
-  [`31282591585/1`](https://github.com/zzffu/ferrum2/actions/runs/31282591585) ran on
-  `9a7797f714536522910dd1c7fdee8b2998c9f071` and completed `failure`。Quality `93166197812`、
-  test-footprint `93166197751` and MSRV `93166197810` succeeded；performance `93166198181` was
-  correctly skipped for the push event。
-- **Failure partition:** Windows MSVC `93166197794`、Linux GNU `93166197823` and Linux musl
-  `93166197799` all failed with `process-exited-before-readiness`。Interop `93166197822` completed all
-  SIP022 TCP/UDP cases but all 12 CoreDNS/BIND DNS cases failed with the redacted
-  `schema_version` semantic error；aggregate qualification `93166628904` failed closed。
-- **Root cause / next action:** the existing native routed-UDP and DNS interop generators emitted
-  schema v1 for routed+enabled UDP after M14 made that combination an explicit schema-v2 migration。
-  Local `--check-config` reproductions return exit `2` for schema 1 and exit `0` after only changing
-  the generated schema to `2`。The failed SHA will not be rerun；manual performance has not been
-  dispatched。T09 will repair the existing generators on a new reviewed descendant SHA。
+- **Exact identity:** qualified product `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`，tree
+  `a5533723d251b62529daa767dd083404fa0a30bc`。The dedicated closeout commit is documentation-only and
+  does not replace that product identity。
+- **Local qualification:** every T01～T08 focused command and the T09 serial gate passed on the exact
+  product，including workspace all-features `413 passed / 5 ignored`、Rust 1.88 check/build/test、the
+  ignored 100+ lifecycle row `1/1`、docs and diff checks。Final Architect and QA both returned
+  `PASS_WITH_NOTES` with zero blocker、major or minor finding。Schema 3 integrity and ratio passed；the
+  cumulative case/support/fixture delta `+5377/0/0` `REVIEW_REQUIRED` signal is accepted for distinct
+  parser、security、real-process、lifecycle and mutation evidence without a new fixture or second harness。
+- **Automatic hosted qualification:** new-SHA push run
+  [`31284062682/1`](https://github.com/zzffu/ferrum2/actions/runs/31284062682) completed `success` on the
+  exact product。Quality `93169844705`、test-footprint `93169844700`、MSRV `93169844692`、Windows
+  `93169844706`、GNU `93169844720`、musl `93169844719`、interop `93169844685` and aggregate
+  qualification `93170363098` all passed。TCP/UDP each reported `12/12` plus cleanup，all 12
+  CoreDNS/BIND DNS cases passed，and all three platform completion markers bound SHA/run/attempt。
+  Push-event performance `93169845184` was correctly skipped。
+- **Preserved failed evidence:** the earlier automatic run
+  [`31282591585/1`](https://github.com/zzffu/ferrum2/actions/runs/31282591585) remains `failure` on
+  `9a7797f714536522910dd1c7fdee8b2998c9f071`。It exposed schema-v1 qualification generators for
+  routed+enabled UDP；the reviewed three-file test/tool repair moved only those generated clients to
+  schema v2 while neighboring legacy cases remained v1。The failed SHA was not rerun。
+- **Independent manual performance/resource:** workflow-dispatch run
+  [`31284310711/1`](https://github.com/zzffu/ferrum2/actions/runs/31284310711) completed all nine jobs
+  `success` on the same exact product；performance job `93170454318` passed and cleanup succeeded。
+  Throughput medians were `136915626/479269137` B/s across 10 trials，ratio `0.285675867` and signed
+  difference `-71.432413350%`；these are diagnostic values, not a minimum or improvement claim。Resource
+  evidence reports 10,000 sessions、180 samples、RSS `6/6` and drain；DNS direct/detoured reports
+  `4593/4481` queries、48 samples、RSS `12/12`、bounds/drain/rebind；THP apply/restore passed。
+- **Remote boundary:** two necessary non-force pushes occurred—the initially qualified SHA and its
+  reviewed new-SHA repair descendant—followed by one authorized manual dispatch。There was no
+  force-push、unchanged-SHA rerun、PR、tag、package、release or publication。
 
 ## M13 closed — architecture consolidation qualified without behavior change
 

@@ -327,7 +327,8 @@ git diff --check
   is not rerun。Repair only the existing generator on a new descendant SHA：native routed+enabled UDP and
   CoreDNS/BIND routed-UDP clients must emit explicit schema v2，while non-routed legacy schema-v1 cases
   remain unchanged。An existing contract test must mutation-kill either generator reverting to v1 before
-  the new SHA receives one automatic push；manual performance remains undispatched until that run passes。
+  the new SHA receives one automatic push。This ordering was followed：manual performance was dispatched
+  only after the repaired automatic run passed。
 
 ## Test-footprint forecast
 
@@ -370,6 +371,23 @@ cargo doc --workspace --all-features --no-deps --locked
 & 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh milestone --candidate <accepted-integration-sha>
 git diff --check
 ```
+
+## Close evidence
+
+Qualified product `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f` passes the serial integration gate，
+Rust 1.88、100+ lifecycle、three platforms、SIP022 TCP/UDP `12/12` each、all 12 CoreDNS/BIND DNS
+cases、schema-3 integrity and final reviews。Automatic run
+[`31284062682/1`](https://github.com/zzffu/ferrum2/actions/runs/31284062682) and independent manual
+performance/resource run
+[`31284310711/1`](https://github.com/zzffu/ferrum2/actions/runs/31284310711) bind the same SHA。The
+manual job reports 10 throughput trials、10,000 sessions、180 resource samples、48 DNS samples、THP
+restore、drain/rebind and cleanup PASS；the measured ratio is diagnostic only。
+
+Failed run `31282591585/1` is preserved and was not rerun。Its schema-v1 hosted-generator defect is
+mutation-guarded by `hosted_routed_udp_generators_use_schema_v2` on the repaired descendant；unrelated
+schema-v1 cases remain v1。Final code/tests are `25586/45009`，ratio `1.759126` PASS。The cumulative
+case/support/fixture delta `+5377/0/0` is an accepted `REVIEW_REQUIRED` disposition for distinct required
+evidence in existing harnesses；integrity passes and no fixture or second harness was added。
 
 ## Stop rules
 

@@ -63,18 +63,14 @@ run [`31223817144/1`](https://github.com/zzffu/ferrum2/actions/runs/31223817144)
 resource run [`31223831024/1`](https://github.com/zzffu/ferrum2/actions/runs/31223831024)关闭。Owned
 egress-plan、DNS runtime dependency、private client egress及composition-root ownership完成整固；
 schema、wire、DNS/routing action和产品能力不变，final Architect/QA均`PASS`。
-M14现为`executing`：T01～T08已done，T09 in progress。T08 exact integration `1b408741…`加入四条
-real-process route/sniff/reject/hijack证据、architecture mutation guards及同一qualification driver
-的M14 workload。Targeted QA在唯一bounded repair后保留TLS self-check与zero-port accepted oracle；
-两名required `gpt-5.6-sol/xhigh`独立只读代理均选择相同四文件修复，最终Architect/QA `PASS`。
-Focused、Full、100+ lifecycle、docs、Rust 1.88及footprint integrity/ratio通过，ticket
-`+1021/0/0`与milestone `+5334/0/0` numeric advisories已接受。Execute continuation已授权直至
-M14 close的required exact-SHA push及manual
-performance/resource dispatch；workflow仍禁止force-push、unchanged-SHA rerun、PR、tag、package、
-release和publication。首个automatic run `31282591585/1`在exact `9a7797f…`保留为FAIL：三平台
-native route smoke及12个DNS interop cases暴露qualification generator仍以schema v1生成
-routed+enabled-UDP client；quality、MSRV、footprint通过，push-event performance正确skipped。
-该SHA不rerun，manual performance尚未dispatch；T09仅修复既有test/tool generator并在新SHA重新资格。
+M14已由exact product `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`、local serial gate、automatic
+run [`31284062682/1`](https://github.com/zzffu/ferrum2/actions/runs/31284062682)和manual performance/
+resource run [`31284310711/1`](https://github.com/zzffu/ferrum2/actions/runs/31284310711)关闭。Ordered
+ordinary/DNS policy、bounded DNS/TLS/HTTP sniff、server authenticated composition、client TCP/UDP
+route/reject/hijack、schema-v2 association routing及schema-v1 migration rejection全部通过。首个
+automatic run `31282591585/1`保留为FAIL且未rerun；其qualification generator schema缺陷在三文件
+test/tool descendant修复。Final Architect/QA均`PASS_WITH_NOTES`且zero finding；schema-3 integrity/
+ratio PASS，`+5377/0/0` numeric advisory已接受。未force-push、PR、tag、package、release或publish。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -87,8 +83,9 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M9-2026-08-04.md`、
 `docs/handoffs/HANDOFF-M10-2026-08-04.md`、
 `docs/handoffs/HANDOFF-M11-2026-08-05.md`、
-`docs/handoffs/HANDOFF-M12-2026-08-07.md`和
-`docs/handoffs/HANDOFF-M13-2026-08-08.md`。
+`docs/handoffs/HANDOFF-M12-2026-08-07.md`、
+`docs/handoffs/HANDOFF-M13-2026-08-08.md`和
+`docs/handoffs/HANDOFF-M14-2026-08-09.md`。
 
 ## 依赖顺序
 
@@ -1081,27 +1078,28 @@ fallback/group/registry继续延期。
 
 ## M14 — bounded protocol sniffing and ordered route/DNS rules
 
-- **Status:** executing
+- **Status:** closed
 - **Objective:** 交付一个private monotonic cursor驱动的ordered route program；`sniff` non-terminal，
   `route`/client `hijack-dns`/`reject` terminal。Server authenticated TCP支持DNS/TLS ClientHello/
   HTTP/1 sniff，server/client UDP仅DNS sniff，client SOCKS TCP不pre-route sniff。Schema-v2 client
   SOCKS UDP由首个合法数据报填充association metadata并只选择一次terminal action/outbound；后续
   destination保持逐包，ordinary route不重入。
-- **Baselines:** qualified M13 product `1af1bbf44b37a81c2ae03c562288b2a6e09694b5` / tree
+- **Baselines / result:** qualified M13 product `1af1bbf44b37a81c2ae03c562288b2a6e09694b5` / tree
   `172870c4ca0dffb6c474f2137399d553e827b1e4`；planning exact
   `cc8a0c2946788c16e5d7af2658a7d80bac0a844b` / tree `7eccfc66c80263e3d949c5b6aded63b0436540ce` /
   parent `f4dcebca3c9b56f903496d91048c3660ee60ed52`；T01 ticket base `5c2c7ab…` and accepted
-  integration `b446153…`。Qualified-to-planning and T01 changes are docs/control-only。
+  integration `b446153…`。Qualified M14 product is `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f` /
+  tree `a5533723d251b62529daa767dd083404fa0a30bc`。
 - **Contracts:** ADR-0033、SPEC-0015、TEST-0015。Core is generic over caller-owned protocol/action values；
   config and pure sniff own separate closed spellings with exhaustive binary adapters。Existing
   `DnsProxy::answer` is reused rather than wrapped by a second service。Explicit schema version 2承载
   breaking client UDP语义；v1 routed+UDP配置迁移失败且产品不保留逐包route implementation。
 - **Tickets:** T01 contract/dependency/control → T02 core program/egress graph → T03 config compiler →
   T04 parser adapters → T05 server slice → T06 DNS policy → T07 client hijack/one-plan UDP association →
-  T08 integrated evidence/tooling → T09 exact qualification；all serial drain。
-- **Footprint:** baseline code/tests `21814/39632`、ratio `1.816815`、case/support/fixture
-  `33883/5152/597`。Forecast `2360/560/0`，milestone numeric `REVIEW_REQUIRED`；no fixture、third helper
-  or second harness。T02 support forecast is zero because existing selector helpers are reused。
+  T08 integrated evidence/tooling → T09 exact qualification；all done by serial drain。
+- **Footprint:** final code/tests `25586/45009`、ratio `1.759126` PASS；milestone
+  case/support/fixture delta `+5377/0/0`。The numeric `REVIEW_REQUIRED` signal is accepted for distinct
+  required evidence in existing harnesses；integrity passes and no fixture or second harness was added。
 - **Dependencies/performance:** Hickory `0.26.1` and rustls `0.23.43` reused；locked `ipnet 2.12.1`
   becomes exact direct and no-default `httparse 1.10.1` is the sole planned new package identity after
   T01 review。Performance is required for hot-path/resource regression evidence with no threshold claim。
@@ -1109,10 +1107,9 @@ fallback/group/registry继续延期。
   set-options/target override、cache/retry/fallback/group/health/LB、registry、unsafe、MSRV change、hot
   reload、management、automatic config migration、dual per-datagram client route、package/release/
   publication。
-- **Next/remote boundary:** T01 done，T02 ready；create/bind `codex/m14-t02` at the exact integration
-  branch HEAD containing the T01 status record。The execute request authorizes required non-force pushes；
-  no push has occurred，and manual dispatch、rerun、force-push、PR、tag、package、release or publication
-  is authorized or claimed。
+- **Next/remote boundary:** none。Automatic `31284062682/1` and manual `31284310711/1` succeeded on the
+  exact product；the earlier failed `31282591585/1` was not rerun。Required non-force pushes and one
+  dispatch are consumed；no force-push、PR、tag、package、release or publication occurred。
 
 ## 决策登记
 
@@ -1346,3 +1343,5 @@ fallback/group/registry继续延期。
 | 2026-08-09 | M14-T08 review-evidence amendment | Initial full Architect/QA review of exact `a1972bad` found selector-switch evidence split across layers、weak zero-owner/zero-target oracles、stale-bin exposure and a false-green empty TLS qualification sample；product routing itself remains accepted | The binary has no selector control and adding one would create an unplanned management/security surface，so T07 actual-switch + T08 real-process later-target + architecture no-reentry become one mandatory executable oracle。T08 additionally leases only `Cargo.lock` if the existing exact rustls identity is added to the qualification tool | Require fresh workspace bins before process rows；add exact zero owners/zero target、schema-v1 routed-UDP migration、valid distinguishable TLS/HTTP phases and self-check mutations。No product path、second harness/job、threshold、remote action or semantic waiver；one bounded repair remains |
 | 2026-08-09 | M14-T08 server UDP root-buffer oracle | Repair RED proved server session count reaches zero after idle while the live listener intentionally retains exactly four bounded wire buffers (`4 × 65507`) until process shutdown | Treating all live-process buffered bytes as a leak would redefine existing bounded process-root ownership and is not an observable zero requirement；metrics cannot be fetched after process exit | Require fresh-process exact baseline、active increase、post-idle session zero plus exact baseline restoration，then child exit and exact listener rebind。No product path、owner definition、limit、timeout or lease expansion |
 | 2026-08-09 | M14-T08 integration / escalation closure | Exact `1b408741` integrates real-process、architecture、lifecycle and qualification-driver evidence；T08 done、T09 ready | Initial Architect/QA `BLOCK` drove one bounded repair；targeted QA retained non-semantic TLS self-check and missing zero-port accepted counter。Two required independent `gpt-5.6-sol/xhigh` read-only analyses selected exact rustls `Acceptor` plus the existing metrics parser，and final targeted Architect/QA both `PASS` | Integration focused、Full、100+ lifecycle、docs and Rust 1.88 PASS；ticket/milestone integrity and ratio PASS，numeric advisories `+1021/0/0` and `+5334/0/0` accepted for required evidence with no product/new harness/dependency；no T08 remote action |
+| 2026-08-09 | M14-T09 hosted generator repair | Automatic `31282591585/1` on `9a7797f…` remains failed and was not rerun；native/DNS qualification generated routed+enabled-UDP clients as schema v1 | Product correctly rejects this combination before side effects；local schema 1/2 probes isolate the defect to two existing generators | Three-file test/tool repair `bc696347…` makes only routed+UDP clients schema v2，retains neighboring v1 and adds one mutation-sensitive contract；Architect/QA `PASS_WITH_NOTES` with zero finding |
+| 2026-08-09 | M14 close | Exact `bc696347…` passes local serial qualification、automatic `31284062682/1` and manual `31284310711/1`；M14 closed | Automatic run passes quality、footprint、MSRV、three platforms、SIP022/DNS interop and aggregate；manual job passes throughput/resource/DNS resource、THP restore and cleanup | Final schema-3 integrity/ratio PASS；`+5377/0/0` advisory accepted；two necessary non-force pushes and one dispatch consumed，no force-push、unchanged-SHA rerun、PR、tag、package、release or publication；local docs-only closeout not pushed |
