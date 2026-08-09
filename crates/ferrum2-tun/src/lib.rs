@@ -1,23 +1,31 @@
 #![forbid(unsafe_code)]
 
+mod tcp;
+
+pub use tcp::TcpFlow;
+
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use std::net::IpAddr;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ferrum2_runtime::{PreparedProcessRoot, ProcessCancellation, ProcessFuture, ProcessRoot};
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::iface::{
-    Config as InterfaceConfig, Interface, PollIngressSingleResult, Route, SocketSet,
+    Config as InterfaceConfig, Interface, PollIngressSingleResult, Route, SocketHandle, SocketSet,
 };
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+use smoltcp::socket::tcp::{
+    Socket as TcpSocket, SocketBuffer as TcpSocketBuffer, State as TcpState,
+};
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::time::Instant;
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv6Address};
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const PACKET_QUANTUM: usize = 8;
@@ -37,6 +45,7 @@ pub struct Config {
     pub ready_timeout: Duration,
     pub max_tcp_flows: usize,
     pub tcp_buffer_bytes: usize,
+    pub tcp_timeout: Duration,
     pub max_udp_mappings: usize,
     pub max_udp_buffered_bytes: usize,
     pub owned_buffer_bytes: u64,
@@ -46,16 +55,18 @@ pub struct Config {
 ///
 /// Error values are supplied by the binary so this deep module does not depend on
 /// configuration, policy, DNS, protocol, or observability crates.
-pub fn process_root<E, A, D>(
+pub fn process_root<E, H, A, D>(
     config: Config,
     startup: E,
     runtime: E,
     cleanup: E,
+    handle_tcp: H,
     accepted: A,
     foundation_dropped: D,
 ) -> ProcessRoot<E>
 where
     E: Copy + Send + 'static,
+    H: Fn(TcpFlow, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static,
     A: Fn() + Send + Sync + 'static,
     D: Fn() + Send + Sync + 'static,
 {
@@ -65,15 +76,32 @@ where
         }
         prepare(
             config,
-            startup,
-            runtime,
-            cleanup,
+            RootErrors {
+                startup,
+                runtime,
+                cleanup,
+            },
             cancellation,
-            Box::new(accepted),
-            Box::new(foundation_dropped),
+            Arc::new(handle_tcp),
+            PacketMetrics {
+                accepted: Box::new(accepted),
+                foundation_dropped: Box::new(foundation_dropped),
+            },
         )
         .await
     })
+}
+
+#[derive(Clone, Copy)]
+struct RootErrors<E> {
+    startup: E,
+    runtime: E,
+    cleanup: E,
+}
+
+struct PacketMetrics {
+    accepted: Box<dyn Fn() + Send + Sync>,
+    foundation_dropped: Box<dyn Fn() + Send + Sync>,
 }
 
 fn config_is_exact(config: &Config) -> bool {
@@ -97,6 +125,7 @@ fn config_is_exact(config: &Config) -> bool {
         || !(Duration::from_secs(1)..=Duration::from_secs(60)).contains(&config.ready_timeout)
         || !(1..=4096).contains(&config.max_tcp_flows)
         || !(4096..=262_144).contains(&config.tcp_buffer_bytes)
+        || !(Duration::from_secs(1)..=Duration::from_secs(86_400)).contains(&config.tcp_timeout)
         || !(1..=8192).contains(&config.max_udp_mappings)
         || !(65_536..=134_217_728).contains(&config.max_udp_buffered_bytes)
     {
@@ -127,12 +156,10 @@ fn config_is_exact(config: &Config) -> bool {
 
 async fn prepare<E>(
     config: Config,
-    startup: E,
-    _runtime: E,
-    cleanup: E,
+    errors: RootErrors<E>,
     mut cancellation: ProcessCancellation,
-    accepted: Box<dyn Fn() + Send + Sync>,
-    foundation_dropped: Box<dyn Fn() + Send + Sync>,
+    handle_tcp: TcpHandler,
+    metrics: PacketMetrics,
 ) -> Result<Option<TunRoot<E>>, E>
 where
     E: Copy + Send + 'static,
@@ -143,31 +170,20 @@ where
         .unwrap_or_else(std::time::Instant::now);
     let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
     let (done_sender, _done_receiver) = tokio::sync::oneshot::channel();
-    let stop = Arc::new(AtomicBool::new(false));
-    let active = Arc::new(AtomicBool::new(false));
-    let owner_stop = Arc::clone(&stop);
-    let owner_active = Arc::clone(&active);
+    let control = OwnerControl::new();
+    let owner_control = control.clone();
     let thread = map_owner_spawn(
         std::thread::Builder::new()
             .name("ferrum2-tun-owner".into())
             .spawn(move || {
-                let result = owner_main(
-                    config,
-                    owner_stop,
-                    owner_active,
-                    ready_sender,
-                    deadline,
-                    accepted,
-                    foundation_dropped,
-                );
+                let result = owner_main(config, owner_control, ready_sender, deadline, metrics);
                 let _ = done_sender.send(result);
                 result
             }),
-        startup,
+        errors.startup,
     )?;
     let guard = OwnerThread {
-        stop,
-        active,
+        control: control.clone(),
         #[cfg(all(windows, target_arch = "x86_64"))]
         wake: None,
         thread: Some(thread),
@@ -176,34 +192,37 @@ where
     let mut guard = guard;
     loop {
         if cancellation.is_cancelled() {
-            return cancel_prepare(guard, cleanup).await;
+            return cancel_prepare(guard, errors.cleanup).await;
         }
         if std::time::Instant::now() >= deadline {
-            return Err(prepare_failure(guard, startup, cleanup).await);
+            return Err(prepare_failure(guard, errors.startup, errors.cleanup).await);
         }
         match ready_receiver.try_recv() {
             #[cfg(all(windows, target_arch = "x86_64"))]
-            Ok(OwnerReady::Ready { wake }) => {
+            Ok(OwnerReady::Ready { wake, flows }) => {
                 if std::time::Instant::now() >= deadline {
-                    return Err(prepare_failure(guard, startup, cleanup).await);
+                    return Err(prepare_failure(guard, errors.startup, errors.cleanup).await);
                 }
                 guard.wake = Some(wake);
                 return Ok(Some(TunRoot {
                     owner: guard,
                     done: _done_receiver,
-                    runtime: Some(_runtime),
-                    cleanup: Some(cleanup),
+                    runtime: Some(errors.runtime),
+                    cleanup: Some(errors.cleanup),
+                    flows,
+                    flow_count: control.flow_count,
+                    handle_tcp,
                 }));
             }
             Ok(OwnerReady::Failed) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                return Err(prepare_failure(guard, startup, cleanup).await);
+                return Err(prepare_failure(guard, errors.startup, errors.cleanup).await);
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
         tokio::select! {
             biased;
             () = cancellation.cancelled() => {
-                return cancel_prepare(guard, cleanup).await;
+                return cancel_prepare(guard, errors.cleanup).await;
             }
             () = tokio::time::sleep(Duration::from_millis(1)) => {}
         }
@@ -243,13 +262,32 @@ enum OwnerReady {
     #[cfg(all(windows, target_arch = "x86_64"))]
     Ready {
         wake: ferrum2_wintun::StopSignal,
+        flows: tokio::sync::mpsc::Receiver<TcpFlow>,
     },
     Failed,
 }
 
-struct OwnerThread {
+#[derive(Clone)]
+struct OwnerControl {
     stop: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
+    admitting: Arc<AtomicBool>,
+    flow_count: Arc<AtomicUsize>,
+}
+
+impl OwnerControl {
+    fn new() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            active: Arc::new(AtomicBool::new(false)),
+            admitting: Arc::new(AtomicBool::new(false)),
+            flow_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+struct OwnerThread {
+    control: OwnerControl,
     #[cfg(all(windows, target_arch = "x86_64"))]
     wake: Option<ferrum2_wintun::StopSignal>,
     thread: Option<std::thread::JoinHandle<OwnerExit>>,
@@ -257,7 +295,7 @@ struct OwnerThread {
 
 impl OwnerThread {
     fn signal(&self) {
-        self.stop.store(true, Ordering::Release);
+        self.control.stop.store(true, Ordering::Release);
         #[cfg(all(windows, target_arch = "x86_64"))]
         if let Some(wake) = &self.wake {
             let _ = wake.signal();
@@ -301,14 +339,21 @@ struct TunRoot<E> {
     done: tokio::sync::oneshot::Receiver<OwnerExit>,
     runtime: Option<E>,
     cleanup: Option<E>,
+    flows: tokio::sync::mpsc::Receiver<TcpFlow>,
+    flow_count: Arc<AtomicUsize>,
+    handle_tcp: TcpHandler,
 }
+
+type TcpHandler =
+    Arc<dyn Fn(TcpFlow, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static>;
 
 impl<E> PreparedProcessRoot<E> for TunRoot<E>
 where
     E: Send + 'static,
 {
     fn activate(&mut self) -> Result<(), E> {
-        self.owner.active.store(true, Ordering::Release);
+        self.owner.control.admitting.store(true, Ordering::Release);
+        self.owner.control.active.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -317,10 +362,38 @@ where
         mut cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), E>> {
         Box::pin(async move {
-            let reported = tokio::select! {
-                result = &mut self.done => reported_owner_exit(result),
-                () = cancellation.cancelled() => OwnerExit::Stopped,
+            let mut tasks = tokio::task::JoinSet::new();
+            let mut forced = cancellation.clone();
+            let reported = loop {
+                if cancellation.is_cancelled() {
+                    self.owner.control.admitting.store(false, Ordering::Release);
+                }
+                if cancellation.is_forced() {
+                    tasks.abort_all();
+                    break OwnerExit::Stopped;
+                }
+                if cancellation.is_cancelled()
+                    && tasks.is_empty()
+                    && self.flow_count.load(Ordering::Acquire) == 0
+                {
+                    break OwnerExit::Stopped;
+                }
+                tokio::select! {
+                    result = &mut self.done => break reported_owner_exit(result),
+                    flow = self.flows.recv() => {
+                        if let Some(flow) = flow {
+                            tasks.spawn((self.handle_tcp)(flow, cancellation.clone()));
+                        }
+                    }
+                    _ = tasks.join_next(), if !tasks.is_empty() => {}
+                    () = cancellation.cancelled(), if !cancellation.is_cancelled() => {
+                        self.owner.control.admitting.store(false, Ordering::Release);
+                    }
+                    () = forced.forced(), if cancellation.is_cancelled() => {}
+                }
             };
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
             let reaped = self.owner.reap().await;
             let exit = reconcile_owner_exit(reported, reaped);
             match exit {
@@ -386,12 +459,10 @@ fn finish_stack_setup<T, A, C>(
 #[cfg(all(windows, target_arch = "x86_64"))]
 fn owner_main(
     config: Config,
-    stop: Arc<AtomicBool>,
-    active: Arc<AtomicBool>,
+    control: OwnerControl,
     ready: std::sync::mpsc::SyncSender<OwnerReady>,
     deadline: std::time::Instant,
-    accepted: Box<dyn Fn() + Send + Sync>,
-    foundation_dropped: Box<dyn Fn() + Send + Sync>,
+    metrics: PacketMetrics,
 ) -> OwnerExit {
     let adapter_config = match ferrum2_wintun::AdapterConfig::new(
         config.adapter_name,
@@ -409,7 +480,7 @@ fn owner_main(
             return OwnerExit::RuntimeFailed;
         }
     };
-    let adapter = match ferrum2_wintun::Adapter::create(adapter_config, deadline, &stop) {
+    let adapter = match ferrum2_wintun::Adapter::create(adapter_config, deadline, &control.stop) {
         Ok(adapter) => adapter,
         Err(error) => {
             let _ = ready.send(OwnerReady::Failed);
@@ -421,24 +492,27 @@ fn owner_main(
         }
     };
     let wake = adapter.stop_signal();
-    let (mut stack, mut adapter) = match finish_stack_setup(
-        Stack::new(
+    let stack = Stack::new(
+        (
             config.ipv4,
             config.ipv4_prefix,
             config.ipv6,
             config.ipv6_prefix,
-            usize::from(config.mtu),
         ),
-        adapter,
-        |adapter| adapter.cleanup(),
-    ) {
-        Ok(stack) => stack,
-        Err(exit) => {
-            let _ = ready.send(OwnerReady::Failed);
-            return exit;
-        }
-    };
-    let _flow_generations = GenerationTable::new(config.max_tcp_flows);
+        usize::from(config.mtu),
+        config.max_tcp_flows,
+        config.tcp_buffer_bytes,
+        config.tcp_timeout,
+        Arc::clone(&control.flow_count),
+    );
+    let ((mut stack, flows), mut adapter) =
+        match finish_stack_setup(stack, adapter, |adapter| adapter.cleanup()) {
+            Ok(stack) => stack,
+            Err(exit) => {
+                let _ = ready.send(OwnerReady::Failed);
+                return exit;
+            }
+        };
     let _mapping_generations = GenerationTable::new(config.max_udp_mappings);
     if std::time::Instant::now() >= deadline {
         let _ = ready.send(OwnerReady::Failed);
@@ -447,13 +521,14 @@ fn owner_main(
             Err(_) => OwnerExit::CleanupFailed,
         };
     }
-    if ready.send(OwnerReady::Ready { wake }).is_err() {
-        stop.store(true, Ordering::Release);
+    if ready.send(OwnerReady::Ready { wake, flows }).is_err() {
+        control.stop.store(true, Ordering::Release);
     }
 
     let mut fatal = false;
-    while !stop.load(Ordering::Acquire) {
-        if !active.load(Ordering::Acquire) {
+    let clock_origin = std::time::Instant::now();
+    while !control.stop.load(Ordering::Acquire) {
+        if !control.active.load(Ordering::Acquire) {
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
@@ -466,17 +541,29 @@ fn owner_main(
                     break;
                 }
             };
-            if stack.enqueue(&received) {
-                accepted();
+            if stack.enqueue(&received, control.admitting.load(Ordering::Acquire)) {
+                (metrics.accepted)();
             }
         }
-        for _ in 0..stack.poll_quantum() {
-            foundation_dropped();
+        let elapsed = i64::try_from(clock_origin.elapsed().as_millis()).unwrap_or(i64::MAX);
+        for _ in 0..PACKET_QUANTUM {
+            for _ in 0..stack.poll_quantum(Instant::from_millis(elapsed)) {
+                (metrics.foundation_dropped)();
+            }
+            match stack.take_output(|packet| adapter.send(packet).is_ok()) {
+                OutputResult::Sent => {}
+                OutputResult::Empty => break,
+                OutputResult::Failed => {
+                    fatal = true;
+                    break;
+                }
+            }
         }
         if fatal {
             break;
         }
-        match adapter.wait(Duration::from_millis(50)) {
+        let wait = if stack.live_tcp_flows() == 0 { 50 } else { 1 };
+        match adapter.wait(Duration::from_millis(wait)) {
             Ok(_) => {}
             Err(_) => {
                 fatal = true;
@@ -494,12 +581,10 @@ fn owner_main(
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 fn owner_main(
     _config: Config,
-    _stop: Arc<AtomicBool>,
-    _active: Arc<AtomicBool>,
+    _control: OwnerControl,
     ready: std::sync::mpsc::SyncSender<OwnerReady>,
     _deadline: std::time::Instant,
-    _accepted: Box<dyn Fn() + Send + Sync>,
-    _foundation_dropped: Box<dyn Fn() + Send + Sync>,
+    _metrics: PacketMetrics,
 ) -> OwnerExit {
     let _ = ready.send(OwnerReady::Failed);
     OwnerExit::RuntimeFailed
@@ -710,9 +795,11 @@ struct MemoryDevice {
     ingress_head: usize,
     ingress_len: usize,
     output: Box<[u8]>,
+    output_len: usize,
     validator: PacketValidator,
     discarded_output: usize,
     rejected_output: usize,
+    foundation_input: usize,
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -721,14 +808,17 @@ impl MemoryDevice {
         Self {
             ingress: std::array::from_fn(|_| PacketSlot {
                 len: 0,
+                foundation: false,
                 bytes: vec![0_u8; mtu].into_boxed_slice(),
             }),
             ingress_head: 0,
             ingress_len: 0,
             output: vec![0_u8; mtu].into_boxed_slice(),
+            output_len: 0,
             validator: PacketValidator::new(mtu),
             discarded_output: 0,
             rejected_output: 0,
+            foundation_input: 0,
         }
     }
 
@@ -739,24 +829,49 @@ impl MemoryDevice {
         let tail = (self.ingress_head + self.ingress_len) % INGRESS_SLOTS;
         self.ingress[tail].bytes[..packet.len()].copy_from_slice(packet);
         self.ingress[tail].len = packet.len();
+        self.ingress[tail].foundation = match packet[0] >> 4 {
+            4 => packet[9] == 17,
+            6 => packet[6] == 17,
+            _ => false,
+        };
         self.ingress_len += 1;
         true
     }
 
     fn dequeue_index(&mut self) -> Option<usize> {
-        if self.ingress_len == 0 {
+        if self.ingress_len == 0 || self.output_len != 0 {
             return None;
         }
         let index = self.ingress_head;
+        self.foundation_input += usize::from(self.ingress[index].foundation);
         self.ingress_head = (self.ingress_head + 1) % INGRESS_SLOTS;
         self.ingress_len -= 1;
         Some(index)
     }
+
+    fn take_output(&mut self, send: impl FnOnce(&[u8]) -> bool) -> OutputResult {
+        if self.output_len == 0 {
+            return OutputResult::Empty;
+        }
+        if !send(&self.output[..self.output_len]) {
+            return OutputResult::Failed;
+        }
+        self.output_len = 0;
+        OutputResult::Sent
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutputResult {
+    Empty,
+    Sent,
+    Failed,
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct PacketSlot {
     len: usize,
+    foundation: bool,
     bytes: Box<[u8]>,
 }
 
@@ -779,6 +894,7 @@ struct MemoryTx<'a> {
     discarded_output: &'a mut usize,
     rejected_output: &'a mut usize,
     output: &'a mut [u8],
+    output_len: &'a mut usize,
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -792,6 +908,7 @@ impl TxToken for MemoryTx<'_> {
         let result = f(&mut self.output[..len]);
         if self.validator.accepts(&self.output[..len]) {
             *self.discarded_output += 1;
+            *self.output_len = len;
         } else {
             *self.rejected_output += 1;
         }
@@ -813,16 +930,18 @@ impl Device for MemoryDevice {
                 discarded_output: &mut self.discarded_output,
                 rejected_output: &mut self.rejected_output,
                 output: &mut self.output,
+                output_len: &mut self.output_len,
             },
         ))
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        Some(MemoryTx {
+        (self.output_len == 0).then_some(MemoryTx {
             validator: self.validator,
             discarded_output: &mut self.discarded_output,
             rejected_output: &mut self.rejected_output,
             output: &mut self.output,
+            output_len: &mut self.output_len,
         })
     }
 
@@ -840,17 +959,45 @@ struct Stack {
     sockets: SocketSet<'static>,
     device: MemoryDevice,
     foundation_dropped: usize,
+    flows: Box<[Option<TcpFlowEntry>]>,
+    generations: GenerationTable,
+    tcp_buffer_bytes: usize,
+    tcp_timeout_millis: u64,
+    bridge_capacity: usize,
+    flow_sender: tokio::sync::mpsc::Sender<TcpFlow>,
+    flow_count: Arc<AtomicUsize>,
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TcpTuple {
+    source: SocketAddr,
+    target: SocketAddr,
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+struct TcpFlowEntry {
+    tuple: TcpTuple,
+    generation: GenerationId,
+    socket: SocketHandle,
+    owner: tcp::FlowOwner,
+    pending: Option<TcpFlow>,
+    published: bool,
+    remote_closed: bool,
+    fin_started: bool,
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl Stack {
     fn new(
-        ipv4: Ipv4Addr,
-        ipv4_prefix: u8,
-        ipv6: Ipv6Addr,
-        ipv6_prefix: u8,
+        addresses: (Ipv4Addr, u8, Ipv6Addr, u8),
         mtu: usize,
-    ) -> Result<Self, ()> {
+        max_tcp_flows: usize,
+        tcp_buffer_bytes: usize,
+        tcp_timeout: Duration,
+        flow_count: Arc<AtomicUsize>,
+    ) -> Result<(Self, tokio::sync::mpsc::Receiver<TcpFlow>), ()> {
+        let (ipv4, ipv4_prefix, ipv6, ipv6_prefix) = addresses;
         let mut device = MemoryDevice::new(mtu);
         let mut interface = Interface::new(
             InterfaceConfig::new(HardwareAddress::Ip),
@@ -881,35 +1028,176 @@ impl Stack {
         if !third_rejected {
             return Err(());
         }
-        Ok(Self {
-            interface,
-            sockets: SocketSet::new(Vec::new()),
-            device,
-            foundation_dropped: 0,
-        })
+        let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(max_tcp_flows);
+        let tcp_timeout_millis = u64::try_from(tcp_timeout.as_millis()).map_err(|_| ())?;
+        Ok((
+            Self {
+                interface,
+                sockets: SocketSet::new(Vec::with_capacity(max_tcp_flows)),
+                device,
+                foundation_dropped: 0,
+                flows: std::iter::repeat_with(|| None)
+                    .take(max_tcp_flows)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                generations: GenerationTable::new(max_tcp_flows),
+                tcp_buffer_bytes,
+                tcp_timeout_millis,
+                bridge_capacity: mtu / 2,
+                flow_sender,
+                flow_count,
+            },
+            flow_receiver,
+        ))
     }
 
-    fn enqueue(&mut self, packet: &[u8]) -> bool {
+    fn enqueue(&mut self, packet: &[u8], admitting: bool) -> bool {
+        if self.device.ingress_len == INGRESS_SLOTS || !self.device.validator.accepts(packet) {
+            return false;
+        }
+        if let Some(tuple) = initial_tcp_tuple(packet)
+            && !self.admit_tcp(tuple, admitting)
+        {
+            return false;
+        }
         self.device.enqueue(packet)
     }
 
-    fn poll_quantum(&mut self) -> usize {
+    fn admit_tcp(&mut self, tuple: TcpTuple, admitting: bool) -> bool {
+        if self.flows.iter().flatten().any(|flow| flow.tuple == tuple) {
+            return true;
+        }
+        if !admitting {
+            return false;
+        }
+        let Some(slot) = self.flows.iter().position(Option::is_none) else {
+            return false;
+        };
+        let Some(generation) = self.generations.current(slot) else {
+            return false;
+        };
+        let mut socket = TcpSocket::new(
+            TcpSocketBuffer::new(vec![0; self.tcp_buffer_bytes]),
+            TcpSocketBuffer::new(vec![0; self.tcp_buffer_bytes]),
+        );
+        socket.set_timeout(Some(smoltcp::time::Duration::from_millis(
+            self.tcp_timeout_millis,
+        )));
+        socket.set_nagle_enabled(false);
+        let endpoint = IpEndpoint::new(ip_address(tuple.target.ip()), tuple.target.port());
+        if socket.listen(endpoint).is_err() {
+            return false;
+        }
+        let socket = self.sockets.add(socket);
+        let (flow, owner) = tcp::tcp_flow_pair(tuple.target, self.bridge_capacity);
+        self.flows[slot] = Some(TcpFlowEntry {
+            tuple,
+            generation,
+            socket,
+            owner,
+            pending: Some(flow),
+            published: false,
+            remote_closed: false,
+            fin_started: false,
+        });
+        self.flow_count.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
+    fn live_tcp_flows(&self) -> usize {
+        self.flows.iter().flatten().count()
+    }
+
+    fn poll_quantum(&mut self, now: Instant) -> usize {
         let mut processed = 0;
+        let foundation_before = self.device.foundation_input;
         while processed < PACKET_QUANTUM {
             if matches!(
-                self.interface.poll_ingress_single(
-                    Instant::from_millis(processed as i64),
-                    &mut self.device,
-                    &mut self.sockets,
-                ),
+                self.interface
+                    .poll_ingress_single(now, &mut self.device, &mut self.sockets,),
                 PollIngressSingleResult::None
             ) {
                 break;
             }
             processed += 1;
         }
-        self.foundation_dropped += processed;
-        processed
+        let foundation = self.device.foundation_input - foundation_before;
+        self.foundation_dropped += foundation;
+        self.drive_tcp();
+        let _ = self
+            .interface
+            .poll_egress(now, &mut self.device, &mut self.sockets);
+        self.reap_tcp();
+        foundation
+    }
+
+    fn drive_tcp(&mut self) {
+        for entry in self.flows.iter_mut().flatten() {
+            let socket = self.sockets.get_mut::<TcpSocket>(entry.socket);
+
+            if socket.state() == TcpState::Established
+                && let Some(flow) = entry.pending.take()
+            {
+                match self.flow_sender.try_send(flow) {
+                    Ok(()) => entry.published = true,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(flow)) => {
+                        entry.pending = Some(flow);
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => socket.abort(),
+                }
+            }
+
+            if entry.owner.is_aborted() {
+                socket.abort();
+            } else {
+                if entry.owner.application_capacity() != 0 && socket.can_recv() {
+                    let _ = socket.recv(|bytes| {
+                        let copied = entry.owner.write_from_stack(bytes);
+                        (copied, ())
+                    });
+                }
+                if entry.owner.stack_capacity() != 0 && socket.may_send() {
+                    entry
+                        .owner
+                        .drain_to_stack(|bytes| socket.send_slice(bytes).unwrap_or(0));
+                }
+                if !entry.remote_closed && !socket.may_recv() && entry.published {
+                    entry.owner.mark_remote_closed();
+                    entry.remote_closed = true;
+                }
+                if entry.owner.shutdown_requested()
+                    && entry.owner.stack_capacity() == self.bridge_capacity
+                    && !entry.fin_started
+                    && socket.may_send()
+                {
+                    socket.close();
+                    entry.fin_started = true;
+                    entry.owner.mark_fin_sent();
+                }
+            }
+
+            if socket.state() == TcpState::Closed && !entry.remote_closed {
+                entry.owner.mark_reset();
+            }
+        }
+    }
+
+    fn reap_tcp(&mut self) {
+        for index in 0..self.flows.len() {
+            let remove = self.flows[index].as_ref().is_some_and(|entry| {
+                let state = self.sockets.get::<TcpSocket>(entry.socket).state();
+                state == TcpState::Closed || (state == TcpState::TimeWait && entry.remote_closed)
+            });
+            if remove && let Some(entry) = self.flows[index].take() {
+                self.sockets.remove(entry.socket);
+                let _ = self.generations.recycle(entry.generation);
+                self.flow_count.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    fn take_output(&mut self, send: impl FnOnce(&[u8]) -> bool) -> OutputResult {
+        self.device.take_output(send)
     }
 
     #[cfg(test)]
@@ -939,20 +1227,128 @@ impl Stack {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+fn initial_tcp_tuple(packet: &[u8]) -> Option<TcpTuple> {
+    let (source, target, offset) = match packet[0] >> 4 {
+        4 if packet.get(9) == Some(&6) => (
+            SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]),
+                u16::from_be_bytes([packet[20], packet[21]]),
+            )),
+            SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]),
+                u16::from_be_bytes([packet[22], packet[23]]),
+            )),
+            20,
+        ),
+        6 if packet.get(6) == Some(&6) => (
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?),
+                u16::from_be_bytes([packet[40], packet[41]]),
+                0,
+                0,
+            )),
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).ok()?),
+                u16::from_be_bytes([packet[42], packet[43]]),
+                0,
+                0,
+            )),
+            40,
+        ),
+        _ => return None,
+    };
+    let flags = *packet.get(offset + 13)?;
+    (flags & 0x12 == 0x02).then_some(TcpTuple { source, target })
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+fn ip_address(address: std::net::IpAddr) -> IpAddress {
+    match address {
+        std::net::IpAddr::V4(address) => IpAddress::Ipv4(Ipv4Address::from(address.octets())),
+        std::net::IpAddr::V6(address) => IpAddress::Ipv6(Ipv6Address::from(address.octets())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use smoltcp::phy::{Device, TxToken};
     use smoltcp::time::Instant;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    use super::tcp::tcp_flow_pair;
     use super::{
-        GenerationTable, MemoryTx, OwnerExit, OwnerThread, PacketValidator, Stack,
-        finish_stack_setup, map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
+        GenerationTable, MemoryTx, OutputResult, OwnerControl, OwnerExit, OwnerThread,
+        PacketValidator, Stack, finish_stack_setup, map_owner_spawn, reconcile_owner_exit,
+        reported_owner_exit,
     };
+
+    #[tokio::test]
+    async fn tcp_flow_queue_backpressure_partial_writes_fin_and_reset_are_lossless() {
+        let target: SocketAddr = "192.0.2.10:443".parse().expect("target");
+        let (mut flow, mut owner) = tcp_flow_pair(target, 4);
+        assert_eq!(flow.target(), target);
+
+        assert_eq!(flow.write(b"abcdef").await.expect("bounded write"), 4);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), flow.write(b"x"))
+                .await
+                .is_err(),
+            "a full Tokio-to-stack queue applies backpressure"
+        );
+        let mut bytes = [0; 8];
+        assert_eq!(owner.read_to_stack(&mut bytes[..2]), 2);
+        assert_eq!(&bytes[..2], b"ab");
+        assert_eq!(flow.write(b"ef").await.expect("released write"), 2);
+        assert_eq!(owner.read_to_stack(&mut bytes), 4);
+        assert_eq!(&bytes[..4], b"cdef");
+
+        assert_eq!(owner.write_from_stack(b"abcdef"), 4);
+        flow.read_exact(&mut bytes[..2])
+            .await
+            .expect("partial read");
+        assert_eq!(&bytes[..2], b"ab");
+        assert_eq!(owner.write_from_stack(b"ef"), 2);
+        flow.read_exact(&mut bytes[..4])
+            .await
+            .expect("retained read");
+        assert_eq!(&bytes[..4], b"cdef");
+
+        flow.write_all(b"xy").await.expect("write before FIN");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), flow.shutdown())
+                .await
+                .is_err(),
+            "FIN waits behind accepted bytes"
+        );
+        assert_eq!(owner.read_to_stack(&mut bytes), 2);
+        assert_eq!(&bytes[..2], b"xy");
+        assert!(owner.shutdown_requested());
+        owner.mark_fin_sent();
+        flow.shutdown().await.expect("ordered FIN");
+        owner.mark_remote_closed();
+        assert_eq!(flow.read(&mut bytes).await.expect("remote FIN"), 0);
+
+        let (mut reset_flow, mut reset_owner) = tcp_flow_pair(target, 4);
+        reset_owner.mark_reset();
+        assert_eq!(
+            reset_flow
+                .write(b"closed")
+                .await
+                .expect_err("reset is terminal")
+                .kind(),
+            std::io::ErrorKind::ConnectionReset
+        );
+
+        let (dropped, owner) = tcp_flow_pair(target, 4);
+        drop(dropped);
+        assert!(owner.is_aborted(), "dropping a live flow requests reset");
+    }
 
     fn checksum(parts: &[&[u8]]) -> u16 {
         let mut sum = 0_u32;
@@ -1017,6 +1413,7 @@ mod tests {
         packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
         packet[32] = 0x50;
         packet[33] = 0x02;
+        packet[34..36].copy_from_slice(&8192_u16.to_be_bytes());
         let pseudo = [0_u8, 6];
         let length = 20_u16.to_be_bytes();
         let tcp = checksum(&[
@@ -1089,18 +1486,49 @@ mod tests {
         packet[10..12].copy_from_slice(&header.to_be_bytes());
     }
 
+    fn repair_ipv4_tcp_checksum(packet: &mut [u8]) {
+        packet[36..38].fill(0);
+        let pseudo = [0_u8, 6];
+        let length = ((packet.len() - 20) as u16).to_be_bytes();
+        let tcp = checksum(&[
+            &packet[12..16],
+            &packet[16..20],
+            &pseudo,
+            &length,
+            &packet[20..],
+        ]);
+        packet[36..38].copy_from_slice(&tcp.to_be_bytes());
+    }
+
+    fn ipv4_tcp_after_syn(syn_ack: &[u8], flags: u8, payload: &[u8]) -> Vec<u8> {
+        let mut packet = ipv4_tcp();
+        packet.resize(40 + payload.len(), 0);
+        let packet_len = packet.len() as u16;
+        packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+        packet[24..28].copy_from_slice(&1_u32.to_be_bytes());
+        let server_sequence = u32::from_be_bytes(syn_ack[24..28].try_into().expect("SYN-ACK seq"));
+        packet[28..32].copy_from_slice(&server_sequence.wrapping_add(1).to_be_bytes());
+        packet[33] = flags;
+        packet[40..].copy_from_slice(payload);
+        repair_ipv4_header(&mut packet);
+        repair_ipv4_tcp_checksum(&mut packet);
+        packet
+    }
+
     fn assert_ingress_and_egress(name: &str, packet: &[u8], mtu: usize, expected: bool) {
         let validator = PacketValidator::new(mtu);
         assert_eq!(validator.accepts(packet), expected, "ingress {name}");
 
         let mut accepted = 0;
         let mut rejected = 0;
+        let mut output_len = 0;
         let mut output = vec![0_u8; packet.len().max(1)];
         MemoryTx {
             validator,
             discarded_output: &mut accepted,
             rejected_output: &mut rejected,
             output: &mut output,
+            output_len: &mut output_len,
         }
         .consume(packet.len(), |bytes| bytes.copy_from_slice(packet));
         assert_eq!(accepted, usize::from(expected), "egress accept {name}");
@@ -1411,25 +1839,301 @@ mod tests {
     }
 
     #[test]
-    fn stack_route_and_quantum_are_exact_and_output_is_foundation_dropped() {
-        let mut stack = Stack::new(
-            Ipv4Addr::new(198, 18, 0, 2),
-            30,
-            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
-            126,
+    fn tcp_five_tuple_admission_is_bounded_before_socket_or_buffer_creation() {
+        let flow_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (mut stack, _flows) = Stack::new(
+            (
+                Ipv4Addr::new(198, 18, 0, 2),
+                30,
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                126,
+            ),
             1420,
+            1,
+            4096,
+            Duration::from_secs(60),
+            Arc::clone(&flow_count),
+        )
+        .expect("bounded stack");
+        let first = ipv4_tcp();
+        assert!(stack.enqueue(&first, true));
+        assert_eq!(stack.live_tcp_flows(), 1);
+        assert_eq!(flow_count.load(Ordering::Acquire), 1);
+
+        assert!(
+            stack.enqueue(&first, true),
+            "duplicate SYN reuses its tuple"
+        );
+        assert_eq!(stack.live_tcp_flows(), 1);
+
+        let mut second = first.clone();
+        second[20..22].copy_from_slice(&10_001_u16.to_be_bytes());
+        repair_ipv4_tcp_checksum(&mut second);
+        assert!(!stack.enqueue(&second, true), "flow ceiling is exact");
+        assert_eq!(stack.live_tcp_flows(), 1);
+
+        let mut closed = Stack::new(
+            (
+                Ipv4Addr::new(198, 18, 0, 2),
+                30,
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                126,
+            ),
+            1420,
+            1,
+            4096,
+            Duration::from_secs(60),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+        .expect("closed stack")
+        .0;
+        assert!(!closed.enqueue(&first, false), "quiesce rejects new SYN");
+        assert_eq!(closed.live_tcp_flows(), 0);
+
+        let (mut ipv6_stack, _) = Stack::new(
+            (
+                Ipv4Addr::new(198, 18, 0, 2),
+                30,
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                126,
+            ),
+            1420,
+            1,
+            4096,
+            Duration::from_secs(60),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+        .expect("IPv6 stack");
+        assert!(ipv6_stack.enqueue(&ipv6_tcp(), true));
+        assert_eq!(ipv6_stack.live_tcp_flows(), 1, "IPv6 has the same ceiling");
+    }
+
+    #[tokio::test]
+    async fn tcp_handshake_publishes_once_and_preserves_both_byte_directions() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut stack, mut flows) = Stack::new(
+            (
+                Ipv4Addr::new(198, 18, 0, 2),
+                30,
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                126,
+            ),
+            1420,
+            1,
+            4096,
+            Duration::from_secs(60),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+        .expect("bounded stack");
+        assert!(stack.enqueue(&ipv4_tcp(), true));
+        assert_eq!(
+            stack.poll_quantum(Instant::ZERO),
+            0,
+            "TCP is not a foundation drop"
+        );
+        let mut syn_ack = Vec::new();
+        assert_eq!(
+            stack.take_output(|packet| {
+                syn_ack.extend_from_slice(packet);
+                true
+            }),
+            OutputResult::Sent
+        );
+        assert_eq!(syn_ack[33] & 0x12, 0x12);
+
+        let ack = ipv4_tcp_after_syn(&syn_ack, 0x10, &[]);
+        assert!(stack.enqueue(&ack, true));
+        assert_eq!(
+            stack.poll_quantum(Instant::from_millis(1)),
+            0,
+            "TCP is not a foundation drop"
+        );
+        let mut flow = flows.try_recv().expect("flow after completed handshake");
+        assert_eq!(flow.target(), "192.0.2.1:443".parse().expect("target"));
+        assert!(flows.try_recv().is_err(), "one handshake publishes once");
+
+        let inbound = ipv4_tcp_after_syn(&syn_ack, 0x18, b"inbound");
+        assert!(stack.enqueue(&inbound, true));
+        assert_eq!(
+            stack.poll_quantum(Instant::from_millis(2)),
+            0,
+            "TCP is not a foundation drop"
+        );
+        let mut received = [0; 7];
+        flow.read_exact(&mut received).await.expect("stack to app");
+        assert_eq!(&received, b"inbound");
+        assert_ne!(
+            stack.take_output(|_| true),
+            OutputResult::Failed,
+            "optional ACK leaves the fixed TX slot"
+        );
+
+        flow.write_all(b"outbound").await.expect("app to stack");
+        stack.poll_quantum(Instant::from_millis(3));
+        let mut outbound = Vec::new();
+        assert_eq!(
+            stack.take_output(|packet| {
+                outbound.extend_from_slice(packet);
+                true
+            }),
+            OutputResult::Sent
+        );
+        assert_eq!(&outbound[40..], b"outbound");
+
+        drop(flow);
+        stack.poll_quantum(Instant::from_millis(4));
+        let mut reset = false;
+        assert_eq!(
+            stack.take_output(|packet| {
+                reset = packet[33] & 0x04 != 0;
+                true
+            }),
+            OutputResult::Sent
+        );
+        assert!(reset, "terminal drop emits a local TCP reset");
+        assert_eq!(stack.live_tcp_flows(), 0);
+        assert!(stack.enqueue(&ipv4_tcp(), true));
+        assert_eq!(
+            stack.flows[0]
+                .as_ref()
+                .expect("reused slot")
+                .generation
+                .generation,
+            1,
+            "reused tuples receive a new generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_remote_half_close_and_local_fin_traverse_the_real_stack() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut stack, mut flows) = Stack::new(
+            (
+                Ipv4Addr::new(198, 18, 0, 2),
+                30,
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                126,
+            ),
+            1420,
+            1,
+            4096,
+            Duration::from_secs(60),
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .expect("bounded stack");
+        assert!(stack.enqueue(&ipv4_tcp(), true));
+        stack.poll_quantum(Instant::ZERO);
+        let mut syn_ack = Vec::new();
+        assert_eq!(
+            stack.take_output(|packet| {
+                syn_ack.extend_from_slice(packet);
+                true
+            }),
+            OutputResult::Sent
+        );
+        assert!(stack.enqueue(&ipv4_tcp_after_syn(&syn_ack, 0x10, &[]), true));
+        stack.poll_quantum(Instant::from_millis(1));
+        let mut flow = flows.try_recv().expect("established flow");
+
+        let remote_fin = ipv4_tcp_after_syn(&syn_ack, 0x11, &[]);
+        assert!(stack.enqueue(&remote_fin, true));
+        stack.poll_quantum(Instant::from_millis(2));
+        assert_eq!(flow.read(&mut [0; 1]).await.expect("remote FIN"), 0);
+        assert_eq!(stack.take_output(|_| true), OutputResult::Sent);
+
+        flow.write_all(b"reply").await.expect("half-close reply");
+        stack.poll_quantum(Instant::from_millis(3));
+        let mut reply = Vec::new();
+        assert_eq!(
+            stack.take_output(|packet| {
+                reply.extend_from_slice(packet);
+                true
+            }),
+            OutputResult::Sent
+        );
+        assert_eq!(&reply[40..], b"reply");
+
+        let mut reply_ack = ipv4_tcp_after_syn(&syn_ack, 0x10, &[]);
+        reply_ack[24..28].copy_from_slice(&2_u32.to_be_bytes());
+        let reply_sequence = u32::from_be_bytes(reply[24..28].try_into().expect("reply seq"));
+        reply_ack[28..32].copy_from_slice(&reply_sequence.wrapping_add(5).to_be_bytes());
+        repair_ipv4_tcp_checksum(&mut reply_ack);
+        assert!(stack.enqueue(&reply_ack, true));
+        stack.poll_quantum(Instant::from_millis(4));
+
+        let mut shutdown = Box::pin(flow.shutdown());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown waits for the owner to emit FIN"
+        );
+        stack.poll_quantum(Instant::from_millis(5));
+        shutdown.await.expect("local FIN committed");
+        let mut fin = Vec::new();
+        assert_eq!(
+            stack.take_output(|packet| {
+                fin.extend_from_slice(packet);
+                true
+            }),
+            OutputResult::Sent
+        );
+        assert_ne!(fin[33] & 0x01, 0, "smoltcp emitted the local FIN");
+    }
+
+    #[test]
+    fn tcp_idle_timeout_reclaims_an_unfinished_handshake() {
+        let flow_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (mut stack, _) = Stack::new(
+            (
+                Ipv4Addr::new(198, 18, 0, 2),
+                30,
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                126,
+            ),
+            1420,
+            1,
+            4096,
+            Duration::from_secs(1),
+            Arc::clone(&flow_count),
+        )
+        .expect("timeout stack");
+        assert!(stack.enqueue(&ipv4_tcp(), true));
+        stack.poll_quantum(Instant::ZERO);
+        assert_eq!(stack.take_output(|_| true), OutputResult::Sent);
+        stack.poll_quantum(Instant::from_millis(1_001));
+        assert_eq!(stack.live_tcp_flows(), 0, "half-open flow timed out");
+        assert_eq!(flow_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn stack_route_and_quantum_are_exact_and_output_is_foundation_dropped() {
+        let (mut stack, _flows) = Stack::new(
+            (
+                Ipv4Addr::new(198, 18, 0, 2),
+                30,
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                126,
+            ),
+            1420,
+            8,
+            4096,
+            Duration::from_secs(60),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         )
         .expect("bounded stack");
         assert!(stack.has_exact_routes());
         let packet = ipv4_udp();
         for _ in 0..7 {
-            assert!(stack.enqueue(&packet));
+            assert!(stack.enqueue(&packet, true));
         }
         assert!(
-            !stack.enqueue(&packet),
+            !stack.enqueue(&packet, true),
             "seven ingress plus one TX slot is the exact eight-slot pool"
         );
-        assert_eq!(stack.poll_quantum(), 7);
+        assert_eq!(stack.poll_quantum(Instant::ZERO), 7);
         assert_eq!(stack.pending(), 0);
         assert_eq!(stack.discarded_packets(), 7);
 
@@ -1537,8 +2241,12 @@ mod tests {
                 exit
             });
             let guard = OwnerThread {
-                stop,
-                active,
+                control: OwnerControl {
+                    stop,
+                    active,
+                    admitting: Arc::new(AtomicBool::new(false)),
+                    flow_count: Arc::new(AtomicUsize::new(0)),
+                },
                 #[cfg(all(windows, target_arch = "x86_64"))]
                 wake: None,
                 thread: Some(thread),
@@ -1552,8 +2260,12 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let guard = OwnerThread {
-            stop,
-            active: Arc::new(AtomicBool::new(false)),
+            control: OwnerControl {
+                stop,
+                active: Arc::new(AtomicBool::new(false)),
+                admitting: Arc::new(AtomicBool::new(false)),
+                flow_count: Arc::new(AtomicUsize::new(0)),
+            },
             #[cfg(all(windows, target_arch = "x86_64"))]
             wake: None,
             thread: Some(std::thread::spawn(move || {

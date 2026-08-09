@@ -29,6 +29,7 @@ mod dns;
 #[path = "dns_egress.rs"]
 mod dns_egress;
 mod observation;
+mod routing;
 mod socks;
 #[path = "run/io.rs"]
 mod tokio_io;
@@ -255,6 +256,7 @@ where
         test_udp_server: config.server,
     });
     let mut listens = Vec::with_capacity(config.inbounds.len());
+    let tun_inbound = config.inbounds.len();
     let routing = Arc::new(ClientRouting {
         legacy: config.route,
         program: config.route_program,
@@ -268,6 +270,7 @@ where
     }
     let tcp_registry = registry.clone();
     let tcp_context = Arc::clone(&context);
+    let tcp_routing = Arc::clone(&routing);
     let mut roots = Vec::new();
     if !listens.is_empty() {
         roots.push(ProcessRoot::new(move || async move {
@@ -290,12 +293,17 @@ where
             Ok(ClientTcpRoot {
                 supervisor: Some(supervisor),
                 context: tcp_context,
-                routing,
+                routing: tcp_routing,
             })
         }));
     }
     if let Some(tun_config) = tun_config {
-        roots.push(tun::process_root(tun_config, Arc::clone(&metrics)));
+        roots.push(tun::process_root(
+            tun_config,
+            Arc::clone(&context),
+            routing,
+            tun_inbound,
+        ));
     }
     if let Some((inbounds, servers, route, policy, timeout, max_inflight, _)) = dns {
         let ordinary_dns = ordinary_dns.expect("validated DNS graph has an ordinary handle");

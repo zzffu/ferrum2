@@ -4,11 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 
-use ferrum2_config::{RouteAction, RouteProtocol};
-use ferrum2_core::route::{EgressPlanSnapshot, Network, RouteMetadata, RouteProgramAction};
+use ferrum2_core::route::Network;
 use ferrum2_core::{
-    ConnectErrorKind, Datagram, DomainName, Inbound as _, LocalEndpoint, SessionReply as _,
-    TargetAddr,
+    ConnectErrorKind, Datagram, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr,
 };
 use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
@@ -19,12 +17,11 @@ use ferrum2_runtime::{
     ProcessFuture, UdpDirection, relay_lifecycle,
 };
 use ferrum2_shadowsocks::ShadowsocksError;
-use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress, Protocol, Transport};
 use ferrum2_socks5::{
     MAX_SOCKS_UDP_DATAGRAM_BYTES, SocksCommand, SocksStream, SocksUdpAssociate, SocksUdpDatagram,
     decode_udp_datagram, encode_udp_datagram,
 };
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::time::Instant;
 
@@ -36,9 +33,10 @@ use super::egress::{
 };
 use super::observation::{
     UdpPacketPhase, finish_relay, observation_for_error, record_failure,
-    record_forced_udp_sessions, record_sniff, record_udp_drop, record_udp_packet_error,
-    record_udp_runtime_error, record_udp_terminal, run_error_for_supervisor,
+    record_forced_udp_sessions, record_udp_drop, record_udp_packet_error, record_udp_runtime_error,
+    record_udp_terminal, run_error_for_supervisor,
 };
+use super::routing::{ClientTerminalRoute, relay_hijacked_tcp};
 use super::tokio_io::TokioFramed;
 
 #[cfg(test)]
@@ -47,79 +45,6 @@ use super::egress::{UdpIoFaultPlan, UdpIoOperation};
 use super::tokio_io::TokioConnector;
 #[cfg(test)]
 use ferrum2_core::Connector;
-
-enum ClientTerminalRoute {
-    Route(EgressPlanSnapshot),
-    HijackDns,
-    Reject,
-}
-
-impl ClientRouting {
-    fn select_terminal(
-        &self,
-        inbound: usize,
-        network: Network,
-        target: &TargetAddr,
-        payload: Option<&[u8]>,
-        metrics: &ferrum2_observability::Metrics,
-    ) -> ClientTerminalRoute {
-        let Some(program) = self.program.as_ref() else {
-            return ClientTerminalRoute::Route(
-                self.legacy.select_plan_snapshot(inbound, network, target),
-            );
-        };
-        let mut evaluation = program.evaluate(inbound, network, target);
-        let mut protocol = None;
-        let mut domain = None;
-        let mut sniffed = false;
-        loop {
-            match evaluation
-                .next(RouteMetadata::new(protocol, domain.as_ref()))
-                .expect("validated client route program has one terminal action")
-            {
-                RouteProgramAction::Continue(RouteAction::Sniff(_)) if !sniffed => {
-                    sniffed = true;
-                    let Some(payload) = payload else {
-                        continue;
-                    };
-                    let (progress, limited) = if payload.len() > program.sniff.max_bytes {
-                        (SniffProgress::NoMatch, true)
-                    } else {
-                        (
-                            ferrum2_sniff::sniff(
-                                payload,
-                                program.sniff.max_bytes,
-                                Transport::Udp,
-                                target.port().get(),
-                                &[Protocol::Dns],
-                            ),
-                            false,
-                        )
-                    };
-                    record_sniff(metrics, progress.clone(), limited);
-                    if let SniffProgress::Matched(SniffMetadata::Dns { domain: detected }) =
-                        progress
-                        && let Ok(detected) = DomainName::new(&detected)
-                    {
-                        protocol = Some(RouteProtocol::Dns);
-                        domain = Some(detected);
-                    }
-                }
-                RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
-                RouteProgramAction::Continue(_) => return ClientTerminalRoute::Reject,
-                RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
-                    return match action {
-                        RouteAction::Route(handle) => {
-                            ClientTerminalRoute::Route(handle.snapshot_owned())
-                        }
-                        RouteAction::HijackDns => ClientTerminalRoute::HijackDns,
-                        RouteAction::Reject | RouteAction::Sniff(_) => ClientTerminalRoute::Reject,
-                    };
-                }
-            }
-        }
-    }
-}
 
 struct SocksUdpEndpoint {
     socket: UdpSocket,
@@ -441,7 +366,7 @@ async fn client_connection(
                 inbound,
                 &proxy,
                 context.runtime.idle_timeout,
-                &mut cancellation,
+                cancellation.cancelled(),
             )
             .await;
             return;
@@ -514,49 +439,6 @@ async fn client_connection(
         .metrics
         .active_connections_dec(Role::Client, Inbound::Socks5);
     finish_relay(&context, &framed, relay);
-}
-
-async fn relay_hijacked_tcp<IO>(
-    stream: &mut SocksStream<IO>,
-    inbound: usize,
-    proxy: &DnsProxy,
-    idle_timeout: std::time::Duration,
-    cancellation: &mut CancellationToken,
-) where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    loop {
-        let exchange = async {
-            let length = stream.read_u16().await?;
-            if length == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "empty DNS frame",
-                ));
-            }
-            let mut request = vec![0; usize::from(length)];
-            stream.read_exact(&mut request).await?;
-            let response = proxy
-                .answer(
-                    ProxyIngress::Ordinary(inbound),
-                    ProxyTransport::Tcp,
-                    &request,
-                )
-                .await
-                .ok_or_else(|| io::Error::other("DNS answer unavailable"))?;
-            let length = u16::try_from(response.len())
-                .map_err(|_| io::Error::other("DNS answer exceeds TCP frame"))?;
-            stream.write_u16(length).await?;
-            stream.write_all(&response).await
-        };
-        let result = tokio::select! {
-            _ = cancellation.cancelled() => return,
-            result = tokio::time::timeout(idle_timeout, exchange) => result,
-        };
-        if !matches!(result, Ok(Ok(()))) {
-            return;
-        }
-    }
 }
 
 async fn run_udp_association<IO, F, Fut>(

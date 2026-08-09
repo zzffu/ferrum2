@@ -11,6 +11,139 @@ use super::*;
 use crate::run::test_support::*;
 
 #[tokio::test]
+async fn tun_tcp_sniff_prefix_is_replayed_exactly_once_into_the_selected_terminal() {
+    use super::routing::{ClientTerminalRoute, ReplayIo};
+
+    static CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "ferrum2-client-tun-tcp-{}-{}.toml",
+        std::process::id(),
+        CONFIG_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let source = r#"schema_version = 2
+[tun]
+tag = "tun-in"
+adapter_name = "Ferrum2"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+[[outbounds]]
+tag = "proxy"
+server = "192.0.2.10:8388"
+[route]
+final = "proxy"
+[route.sniff]
+timeout_ms = 300
+max_bytes = 8192
+[[route.rules]]
+inbound = "tun-in"
+network = "tcp"
+action = "sniff"
+sniffers = "http"
+[[route.rules]]
+inbound = "tun-in"
+network = "tcp"
+protocol = "http"
+action = "reject"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"#;
+    std::fs::write(&path, source).expect("TUN TCP config");
+    let config = ferrum2_config::load_client(&path).expect("validated TUN TCP config");
+    std::fs::remove_file(path).expect("remove TUN TCP config");
+    let routing = ClientRouting {
+        legacy: config.route,
+        program: config.route_program,
+        outbounds: Arc::from([]),
+    };
+    let target = TargetAddr::ip("192.0.2.1:80".parse().expect("target")).expect("target");
+    let wire = b"GET / HTTP/1.1\r\nHost: replay.test\r\n\r\n";
+    let (mut flow, mut peer) = tokio::io::duplex(128);
+    peer.write_all(wire).await.expect("write sniff prefix");
+    peer.shutdown().await.expect("close sniff peer");
+    let metrics = Metrics::new();
+    let registry = OwnerRegistry::new();
+
+    let selection = routing
+        .select_tcp(
+            0,
+            &target,
+            &mut flow,
+            std::future::pending::<()>(),
+            &registry,
+            &metrics,
+        )
+        .await
+        .expect("sniff selection");
+    assert!(matches!(selection.terminal, ClientTerminalRoute::Reject));
+    let mut replay = ReplayIo::new(flow, selection.prefix);
+    let mut received = Vec::new();
+    replay
+        .read_to_end(&mut received)
+        .await
+        .expect("replay selected bytes");
+    assert_eq!(received, wire, "collected bytes enter the terminal once");
+    drop(replay);
+    assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+}
+
+#[tokio::test]
+async fn tun_tcp_selector_is_snapshotted_once_before_open_and_never_reselected() {
+    use super::routing::ClientTerminalRoute;
+
+    let (outbounds, route, selector) = chain_test_setup(
+        [
+            MethodProfile::Blake3Aes128Gcm2022,
+            MethodProfile::Blake3Aes256Gcm2022,
+            MethodProfile::Blake3ChaCha20Poly13052022,
+            MethodProfile::Blake3Aes128Gcm2022,
+        ],
+        20_000,
+    );
+    let routing = ClientRouting {
+        legacy: route,
+        program: None,
+        outbounds,
+    };
+    let target = TargetAddr::ip("192.0.2.1:443".parse().expect("target")).expect("target");
+    let (mut first_flow, _) = tokio::io::duplex(1);
+    let first = routing
+        .select_tcp(
+            0,
+            &target,
+            &mut first_flow,
+            std::future::pending::<()>(),
+            &OwnerRegistry::new(),
+            &Metrics::new(),
+        )
+        .await
+        .expect("first selection");
+    let ClientTerminalRoute::Route(first) = first.terminal else {
+        panic!("selector routes");
+    };
+    assert_eq!(first.hops(), &[0, 1]);
+
+    selector.switch("manual", "c-d").expect("selector switch");
+    assert_eq!(first.hops(), &[0, 1], "live flow retains its snapshot");
+    let (mut second_flow, _) = tokio::io::duplex(1);
+    let second = routing
+        .select_tcp(
+            0,
+            &target,
+            &mut second_flow,
+            std::future::pending::<()>(),
+            &OwnerRegistry::new(),
+            &Metrics::new(),
+        )
+        .await
+        .expect("second selection");
+    let ClientTerminalRoute::Route(second) = second.terminal else {
+        panic!("selector routes");
+    };
+    assert_eq!(second.hops(), &[2, 3]);
+}
+
+#[tokio::test]
 async fn tagged_tcp_uses_static_outbounds_one_process_permit_and_no_fallback() {
     let listens = [reserve_address(), reserve_address()];
     let upstreams = [

@@ -2146,6 +2146,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     }
     let tun = fs::read_to_string(root.join("crates/ferrum2-tun/src/lib.rs")).expect("TUN source");
     let tun_production = tun.split("#[cfg(test)]").next().expect("TUN production");
+    let tun_tcp = fs::read_to_string(root.join("crates/ferrum2-tun/src/tcp.rs"))
+        .expect("TUN TCP flow source");
+    let client_tun = fs::read_to_string(root.join("bins/ferrum2-client/src/run/tun.rs"))
+        .expect("client TUN adapter");
+    let client_routing = fs::read_to_string(root.join("bins/ferrum2-client/src/run/routing.rs"))
+        .expect("shared client terminal routing");
+    let client_socks = fs::read_to_string(root.join("bins/ferrum2-client/src/run/socks.rs"))
+        .expect("client SOCKS adapter");
     for required in [
         "#![forbid(unsafe_code)]",
         "poll_ingress_single",
@@ -2163,7 +2171,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     }
     let has_reap_contract = |source: &str| {
         source
-            .matches("prepare_failure(guard, startup, cleanup).await")
+            .matches("prepare_failure(guard, errors.startup, errors.cleanup).await")
             .count()
             >= 3
             && source.contains("guard.reap().await == OwnerExit::CleanupFailed")
@@ -2186,7 +2194,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .matches("std::time::Instant::now() >= deadline")
                 .count()
                 >= 3
-            && compact.contains("ready_sender,deadline,accepted,")
+            && compact.contains("owner_main(config,owner_control,ready_sender,deadline,metrics)")
     };
     assert!(
         has_single_deadline_contract(&tun),
@@ -2403,9 +2411,101 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         !supports_headless_process_groups(&controller.replace("CREATE_NEW_CONSOLE", "0")),
         "headless-console creation mutation must remove the process-group proof"
     );
+    let has_tcp_controller = |source: &str| {
+        source.contains("[ValidateSet(\"lifecycle\", \"tcp\")]")
+            && source.matches("$tcpRows++").count() == 8
+            && source.contains("Invoke-EchoRow $targets[0]")
+            && source.contains("Invoke-EchoRow $targets[1]")
+            && source.contains("$ssl.AuthenticateAsClientAsync(\"tls.tun.test\")")
+            && source.contains("HTTP prefix was not replayed exactly once")
+            && source.contains("$dnsResponder.Requests -eq 2")
+            && source
+                .matches("Assert-ResetWithoutEgress $targets[")
+                .count()
+                == 2
+            && source.contains("-not $pressureWrite.Wait(500)")
+            && source.contains("Wait-AdapterAbsent $adapterName")
+            && source.contains("profile=tcp tcp=8/8 cleanup=PASS")
+            && source.contains("$ownedTargetRoutes")
+            && source.find("finally {").is_some_and(|finally| {
+                source
+                    .find("Write-Output \"m15_windows_tun_e2e")
+                    .is_some_and(|marker| marker > finally)
+            })
+    };
+    assert!(
+        has_tcp_controller(&controller),
+        "privileged TCP controller must retain all eight real-process rows and cleanup"
+    );
+    for mutation in [
+        controller.replacen("$tcpRows++", "", 1),
+        controller.replace("$dnsResponder.Requests -eq 2", "$true"),
+        controller.replace("-not $pressureWrite.Wait(500)", "$true"),
+        controller.replace("profile=tcp tcp=8/8 cleanup=PASS", "profile=tcp"),
+    ] {
+        assert!(
+            !has_tcp_controller(&mutation),
+            "TCP controller mutation must remove the eight-row production proof"
+        );
+    }
     let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
         .expect("client composition");
-    assert!(client.contains("roots.push(tun::process_root(tun_config, Arc::clone(&metrics)));"));
+    let composes_tun_tcp = |composition: &str, adapter: &str, routing: &str| {
+        composition.contains("roots.push(tun::process_root(")
+            && composition.contains("Arc::clone(&context)")
+            && composition.contains("tun_inbound")
+            && adapter.contains("move |flow, cancellation|")
+            && adapter.contains("Box::pin(run_tcp(flow, cancellation, context, routing, inbound))")
+            && adapter.contains(".select_tcp(")
+            && adapter.contains("ClientTerminalRoute::Reject")
+            && adapter.contains("ClientTerminalRoute::HijackDns")
+            && adapter.contains("ClientTerminalRoute::Route(plan)")
+            && adapter.contains("context.egress.open_tcp(")
+            && adapter.contains("relay_lifecycle(")
+            && routing.contains("collect_sniff_prefix(")
+            && routing.contains("pub(super) struct ReplayIo")
+            && routing.contains("pub(super) async fn relay_hijacked_tcp")
+    };
+    assert!(
+        composes_tun_tcp(&client, &client_tun, &client_routing),
+        "TUN TCP must compose the one shared policy, prefix, DNS, egress and relay path"
+    );
+    for (composition, adapter, routing) in [
+        (
+            client.replace(
+                "roots.push(tun::process_root(",
+                "roots.push(ProcessRoot::new(",
+            ),
+            client_tun.clone(),
+            client_routing.clone(),
+        ),
+        (
+            client.clone(),
+            client_tun.replace("context.egress.open_tcp(", "return; // open bypassed\n("),
+            client_routing.clone(),
+        ),
+        (
+            client.clone(),
+            client_tun.clone(),
+            client_routing.replace("collect_sniff_prefix(", "collect_other_prefix("),
+        ),
+    ] {
+        assert!(
+            !composes_tun_tcp(&composition, &adapter, &routing),
+            "TUN TCP composition mutation must sever the shared production path"
+        );
+    }
+    assert!(
+        client_socks.contains("routing::{ClientTerminalRoute, relay_hijacked_tcp}")
+            && !client_socks.contains("async fn relay_hijacked_tcp"),
+        "SOCKS and TUN must call one moved terminal/DNS framing implementation"
+    );
+    assert!(
+        tun_tcp.contains("pub struct TcpFlow")
+            && !tun_tcp.contains("impl Clone for TcpFlow")
+            && !tun_tcp.contains("derive(Clone"),
+        "the public TUN TCP flow must remain one non-cloneable bounded stream"
+    );
 
     let runtime = fs::read_to_string(root.join("crates/ferrum2-runtime/src/process.rs"))
         .expect("process lifecycle");
@@ -2427,13 +2527,13 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         "dropped preparation mutation must remove explicit reap proof"
     );
     assert!(tun.contains("generation.checked_add(1)"));
-    assert!(!tun.contains("wrapping_add(1)"));
+    assert!(!tun_production.contains("generation.wrapping_add(1)"));
     assert!(tun.contains("if self.validator.accepts(&self.output[..len])"));
     let owner_failures_are_production_connected = |source: &str| {
         source.contains("let thread = map_owner_spawn(")
-            && source.contains("let (mut stack, mut adapter) = match finish_stack_setup(")
+            && source.contains("match finish_stack_setup(stack, adapter")
             && source.contains("Stack::new(")
-            && source.contains("|adapter| adapter.cleanup(),")
+            && source.contains("|adapter| adapter.cleanup())")
     };
     assert!(
         owner_failures_are_production_connected(tun_production),
@@ -2442,10 +2542,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     for mutation in [
         tun_production.replace("let thread = map_owner_spawn(", "let thread = Ok("),
         tun_production.replace(
-            "let (mut stack, mut adapter) = match finish_stack_setup(",
-            "let (mut stack, mut adapter) = match Stack::new(",
+            "match finish_stack_setup(stack, adapter",
+            "match Ok((stack, adapter)",
         ),
-        tun_production.replace("|adapter| adapter.cleanup(),", "|_| Ok(()),"),
+        tun_production.replace("|adapter| adapter.cleanup())", "|_| Ok(()))"),
     ] {
         assert!(
             !owner_failures_are_production_connected(&mutation),
@@ -2454,9 +2554,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     }
     let packet_witness_path = |source: &str| {
         source.contains("!self.validator.accepts(packet)")
-            && source.contains("if stack.enqueue(&received) {\n                accepted();")
             && source
-                .contains("for _ in 0..stack.poll_quantum() {\n            foundation_dropped();")
+                .contains("if stack.enqueue(&received, control.admitting.load(Ordering::Acquire))")
+            && source.contains("(metrics.accepted)();")
+            && source.contains("stack.poll_quantum(Instant::from_millis(elapsed))")
+            && source.contains("(metrics.foundation_dropped)();")
+            && source.contains("match stack.take_output(|packet| adapter.send(packet).is_ok())")
     };
     assert!(
         packet_witness_path(&tun),
@@ -2464,8 +2567,15 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     );
     for mutation in [
         tun.replace("!self.validator.accepts(packet)", "false"),
-        tun.replace("if stack.enqueue(&received)", "if true"),
-        tun.replace("for _ in 0..stack.poll_quantum()", "for _ in 0..0"),
+        tun.replace(
+            "if stack.enqueue(&received,",
+            "if true || stack.enqueue(&received,",
+        ),
+        tun.replace("stack.poll_quantum(Instant::from_millis(elapsed))", "0..0"),
+        tun.replace(
+            "match stack.take_output(|packet| adapter.send(packet).is_ok())",
+            "match OutputResult::Empty",
+        ),
     ] {
         assert!(
             !packet_witness_path(&mutation),
