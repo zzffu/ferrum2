@@ -185,7 +185,14 @@ using System.Threading;
 
 public static class Ferrum2ProcessGroup {
     private static readonly object Sync = new object();
-    private static readonly Dictionary<uint, IntPtr> Processes = new Dictionary<uint, IntPtr>();
+    private const uint CREATE_NEW_CONSOLE = 0x00000010;
+    private const uint CREATE_NEW_PROCESS_GROUP = 0x00000200;
+    private const int STARTF_USESHOWWINDOW = 0x00000001;
+    private static readonly Dictionary<uint, ProcessEntry> Processes = new Dictionary<uint, ProcessEntry>();
+    private sealed class ProcessEntry {
+        public IntPtr Handle;
+        public bool SeparateConsole;
+    }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct STARTUPINFO {
         public int cb; public string reserved; public string desktop; public string title;
@@ -205,42 +212,61 @@ public static class Ferrum2ProcessGroup {
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetExitCodeProcess(IntPtr handle, out uint exitCode);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateProcess(IntPtr handle, uint exitCode);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
-    [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AllocConsole();
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint GetConsoleProcessList([Out] uint[] processes, uint count);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AttachConsole(uint processId);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool FreeConsole();
+
+    private static bool HasConsole() {
+        return GetConsoleProcessList(new uint[1], 1) != 0;
+    }
 
     public static int Start(string application, string arguments, string directory) {
-        if (GetConsoleWindow() == IntPtr.Zero && !AllocConsole()) throw new Win32Exception(Marshal.GetLastWin32Error());
+        var separateConsole = !HasConsole();
         var startup = new STARTUPINFO(); startup.cb = Marshal.SizeOf(startup);
+        if (separateConsole) startup.flags = STARTF_USESHOWWINDOW;
         PROCESS_INFORMATION process;
         var command = new StringBuilder("\"" + application + "\" " + arguments);
-        if (!CreateProcessW(application, command, IntPtr.Zero, IntPtr.Zero, false, 0x00000200, IntPtr.Zero, directory, ref startup, out process))
-            throw new Win32Exception(Marshal.GetLastWin32Error());
+        var flags = CREATE_NEW_PROCESS_GROUP | (separateConsole ? CREATE_NEW_CONSOLE : 0);
+        if (!CreateProcessW(application, command, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, directory, ref startup, out process))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW");
         CloseHandle(process.thread);
-        lock (Sync) Processes.Add(process.processId, process.process);
+        lock (Sync) Processes.Add(process.processId, new ProcessEntry { Handle = process.process, SeparateConsole = separateConsole });
         return checked((int)process.processId);
     }
     public static bool Wait(uint processId, uint milliseconds) {
-        IntPtr handle; lock (Sync) if (!Processes.TryGetValue(processId, out handle)) return false;
-        return WaitForSingleObject(handle, milliseconds) == 0;
+        ProcessEntry process; lock (Sync) if (!Processes.TryGetValue(processId, out process)) return false;
+        return WaitForSingleObject(process.Handle, milliseconds) == 0;
     }
     public static int ExitCode(uint processId) {
-        IntPtr handle; lock (Sync) if (!Processes.TryGetValue(processId, out handle)) throw new InvalidOperationException();
-        uint exitCode; if (!GetExitCodeProcess(handle, out exitCode)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        ProcessEntry process; lock (Sync) if (!Processes.TryGetValue(processId, out process)) throw new InvalidOperationException();
+        uint exitCode; if (!GetExitCodeProcess(process.Handle, out exitCode)) throw new Win32Exception(Marshal.GetLastWin32Error());
         return unchecked((int)exitCode);
     }
     public static bool Terminate(uint processId) {
-        IntPtr handle; lock (Sync) if (!Processes.TryGetValue(processId, out handle)) return false;
-        return TerminateProcess(handle, 1);
+        ProcessEntry process; lock (Sync) if (!Processes.TryGetValue(processId, out process)) return false;
+        return TerminateProcess(process.Handle, 1);
     }
     public static void Close(uint processId) {
-        IntPtr handle;
-        lock (Sync) { if (!Processes.TryGetValue(processId, out handle)) return; Processes.Remove(processId); }
-        CloseHandle(handle);
+        ProcessEntry process;
+        lock (Sync) { if (!Processes.TryGetValue(processId, out process)) return; Processes.Remove(processId); }
+        CloseHandle(process.Handle);
     }
     public static bool Break(uint processGroup) {
-        if (!SetConsoleCtrlHandler(IntPtr.Zero, true)) return false;
-        try { return GenerateConsoleCtrlEvent(1, processGroup); }
-        finally { Thread.Sleep(250); SetConsoleCtrlHandler(IntPtr.Zero, false); }
+        ProcessEntry process; lock (Sync) if (!Processes.TryGetValue(processGroup, out process)) return false;
+        var attached = false;
+        try {
+            if (process.SeparateConsole) {
+                FreeConsole();
+                if (!AttachConsole(processGroup)) return false;
+                attached = true;
+            }
+            if (!SetConsoleCtrlHandler(IntPtr.Zero, true)) return false;
+            try { return GenerateConsoleCtrlEvent(1, processGroup); }
+            finally { Thread.Sleep(250); SetConsoleCtrlHandler(IntPtr.Zero, false); }
+        }
+        finally {
+            if (attached) FreeConsole();
+        }
     }
 }
 '@

@@ -2356,6 +2356,22 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         !has_cleanup_snapshots(&route_subset_mutation),
         "ready route subset mutation must remove exact-equality proof"
     );
+    let supports_headless_process_groups = |source: &str| {
+        source.contains("GetConsoleProcessList")
+            && source.contains("CREATE_NEW_CONSOLE")
+            && source.contains("AttachConsole")
+            && source.contains("FreeConsole")
+            && !source.contains("GetConsoleWindow")
+            && !source.contains("AllocConsole")
+    };
+    assert!(
+        supports_headless_process_groups(&controller),
+        "privileged controller must support a headless runner console"
+    );
+    assert!(
+        !supports_headless_process_groups(&controller.replace("CREATE_NEW_CONSOLE", "0")),
+        "headless-console creation mutation must remove the process-group proof"
+    );
     let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
         .expect("client composition");
     assert!(client.contains("roots.push(tun::process_root(tun_config, Arc::clone(&metrics)));"));
