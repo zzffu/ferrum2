@@ -2424,7 +2424,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .count()
                 == 2
             && source.contains("-not $pressureWrite.Wait(500)")
-            && source.contains("-not (Wait-ProcessExit $activeProcess 300)")
+            && source.contains("-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)")
+            && !source.contains("Wait-ProcessExit $activeProcess 300")
             && source.contains("-not $pressureWrite.IsCompleted")
             && source.contains("$forcedShutdown.ElapsedMilliseconds -ge 900")
             && source.contains("TCP-08 forced cancellation did not exit")
@@ -2446,7 +2447,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replacen("$tcpRows++", "", 1),
         controller.replace("$dnsResponder.Requests -eq 2", "$true"),
         controller.replace("-not $pressureWrite.Wait(500)", "$true"),
-        controller.replace("-not (Wait-ProcessExit $activeProcess 300)", "$true"),
+        controller.replace(
+            "-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)",
+            "$true",
+        ),
+        controller.replace(
+            "Assert-True (-not $pressureWrite.IsCompleted)",
+            "Wait-ProcessExit $activeProcess 300\nAssert-True (-not $pressureWrite.IsCompleted)",
+        ),
         controller.replace("-not $pressureWrite.IsCompleted", "$true"),
         controller.replace("$forcedShutdown.ElapsedMilliseconds -ge 900", "$true"),
         controller.replace("TCP-08 forced cancellation did not exit", "TCP-08 exited"),

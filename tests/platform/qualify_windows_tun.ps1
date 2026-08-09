@@ -1096,7 +1096,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-True (-not $pressureWrite.Wait(500)) "backpressure write unexpectedly drained"
         $forcedShutdown = [Diagnostics.Stopwatch]::StartNew()
         Assert-True ([Ferrum2ProcessGroup]::Break([uint32]$activeProcess.Id)) "TCP-08 CTRL_BREAK delivery failed"
-        Assert-True (-not (Wait-ProcessExit $activeProcess 300)) "TCP-08 exited during grace"
+        Assert-True (-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)) "TCP-08 exited during grace"
         Assert-True (-not $pressureWrite.IsCompleted) "TCP-08 pressured flow was not owned through grace"
         Assert-True (Wait-ProcessExit $activeProcess 10) "TCP-08 forced cancellation did not exit"
         $forcedShutdown.Stop()
