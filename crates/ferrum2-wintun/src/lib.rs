@@ -4,11 +4,14 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const DLL_BYTES: u64 = 427_552;
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const DLL_SHA256: [u8; 32] = [
     0xe5, 0xda, 0x84, 0x47, 0xdc, 0x2c, 0x32, 0x0e, 0xdc, 0x0f, 0xc5, 0x2f, 0xa0, 0x18, 0x85, 0xc1,
     0x03, 0xde, 0x8c, 0x11, 0x84, 0x81, 0xf6, 0x83, 0x64, 0x3c, 0xac, 0xc3, 0x22, 0x0d, 0xaf, 0xce,
 ];
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const ABI_EXPORTS: [&[u8]; 11] = [
     b"WintunCreateAdapter\0",
     b"WintunCloseAdapter\0",
@@ -91,6 +94,7 @@ impl CreateError {
         }
     }
 
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
     pub(crate) const fn cleanup() -> Self {
         Self {
             cleanup_failed: true,
