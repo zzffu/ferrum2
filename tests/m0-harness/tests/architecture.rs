@@ -2423,7 +2423,37 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .matches("Assert-ResetWithoutEgress $targets[")
                 .count()
                 == 2
-            && source.contains("-not $pressureWrite.Wait(500)")
+            && source
+                .split_once("function Invoke-EchoRow(")
+                .and_then(|(_, tail)| tail.split_once("function Assert-ResetWithoutEgress("))
+                .is_some_and(|(echo, _)| {
+                    echo.contains(
+                        "$session = Open-TunTcp $Address $Port $InterfaceIndex\n    try {",
+                    ) && echo
+                        .find("$Gate.WaitAccepted($expectedGate, 5000)")
+                        .zip(echo.find("$stream.Write($Payload, 0, $Payload.Length)"))
+                        .zip(echo.find(
+                            "$session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)",
+                        ))
+                        .zip(echo.find("Remove-OwnedRoute $session.Route"))
+                        .is_some_and(|(((accepted, write), shutdown), removed)| {
+                            accepted < write && write < shutdown && shutdown < removed
+                        })
+                        && echo.contains("finally { $session.Client.Dispose() }")
+                })
+            && source
+                .split_once("$pressure = Open-TunTcp $targets[7]")
+                .and_then(|(_, tail)| tail.split_once("$activeProcess = Start-Candidate $binary $config"))
+                .is_some_and(|(pressure, _)| {
+                    pressure
+                        .find("$gateA.WaitAccepted($pressureGate, 5000)")
+                        .zip(pressure.find("$pressureWrite = $pressure.Client.GetStream().WriteAsync("))
+                        .zip(pressure.find("-not $pressureWrite.Wait(500)"))
+                        .zip(pressure.find("Remove-OwnedRoute $pressure.Route"))
+                        .is_some_and(|(((accepted, write), pending), removed)| {
+                            accepted < write && write < pending && pending < removed
+                        })
+                })
             && source.contains("-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)")
             && !source.contains("Wait-ProcessExit $activeProcess 300")
             && source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore")
@@ -2454,6 +2484,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replacen("$tcpRows++", "", 1),
         controller.replace("$dnsResponder.Requests -eq 2", "$true"),
         controller.replace("-not $pressureWrite.Wait(500)", "$true"),
+        controller.replace(
+            "        $stream.Write($Payload, 0, $Payload.Length)\n        $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)\n        Remove-OwnedRoute $session.Route",
+            "        Remove-OwnedRoute $session.Route\n        $stream.Write($Payload, 0, $Payload.Length)\n        $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)",
+        ),
+        controller.replace(
+            "        $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)\n        Assert-True (-not $pressureWrite.Wait(500)) \"backpressure write unexpectedly drained\"\n        Remove-OwnedRoute $pressure.Route",
+            "        Remove-OwnedRoute $pressure.Route\n        $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)\n        Assert-True (-not $pressureWrite.Wait(500)) \"backpressure write unexpectedly drained\"",
+        ),
         controller.replace(
             "-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)",
             "$true",

@@ -571,17 +571,17 @@ function Invoke-EchoRow(
 ) {
     $expectedGate = $Gate.Accepted + 1
     $session = Open-TunTcp $Address $Port $InterfaceIndex
-    Assert-True ($Gate.WaitAccepted($expectedGate, 5000)) "selected egress gate was not opened"
-    Remove-OwnedRoute $session.Route
-    [void](Add-TargetAddress $Address)
-    $probe = [Ferrum2TcpProbe]::new($Address, $Port, "echo")
-    $script:tcpResources.Add($probe)
-    $Gate.Release($expectedGate)
-    Assert-True ($probe.WaitAccepted(5000)) "selected target was not opened"
     try {
+        Assert-True ($Gate.WaitAccepted($expectedGate, 5000)) "selected egress gate was not opened"
         $stream = $session.Client.GetStream()
         $stream.Write($Payload, 0, $Payload.Length)
         $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+        Remove-OwnedRoute $session.Route
+        [void](Add-TargetAddress $Address)
+        $probe = [Ferrum2TcpProbe]::new($Address, $Port, "echo")
+        $script:tcpResources.Add($probe)
+        $Gate.Release($expectedGate)
+        Assert-True ($probe.WaitAccepted(5000)) "selected target was not opened"
         $echo = Read-StreamToEnd $stream
         Assert-True (($echo -join ",") -eq ($Payload -join ",")) "echo or half-close mismatch"
         Assert-True ($probe.WaitCompleted(5000)) "target half-close did not complete"
@@ -1085,15 +1085,15 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $pressureGate = $gateA.Accepted + 1
         $pressure = Open-TunTcp $targets[7] $ports[7] $ownedInterfaceIndex
         Assert-True ($gateA.WaitAccepted($pressureGate, 5000)) "backpressure route did not open"
+        $pressureBytes = [byte[]]::new(8 * 1024 * 1024)
+        $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)
+        Assert-True (-not $pressureWrite.Wait(500)) "backpressure write unexpectedly drained"
         Remove-OwnedRoute $pressure.Route
         [void](Add-TargetAddress $targets[7])
         $stall = [Ferrum2TcpProbe]::new($targets[7], $ports[7], "stall")
         $tcpResources.Add($stall)
         $gateA.Release($pressureGate)
         Assert-True ($stall.WaitAccepted(5000)) "backpressure target was not opened"
-        $pressureBytes = [byte[]]::new(8 * 1024 * 1024)
-        $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)
-        Assert-True (-not $pressureWrite.Wait(500)) "backpressure write unexpectedly drained"
         $forcedShutdown = [Diagnostics.Stopwatch]::StartNew()
         Assert-True ([Ferrum2ProcessGroup]::Break([uint32]$activeProcess.Id)) "TCP-08 CTRL_BREAK delivery failed"
         Assert-True (-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)) "TCP-08 exited during grace"
