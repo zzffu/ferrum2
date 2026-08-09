@@ -2424,6 +2424,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("    } else {\n        $serverBinary =")
             .and_then(|(_, tail)| tail.split_once("\n    }\n    $completed = $true"))
             .map(|(body, _)| body);
+        let tcp01_diag = tcp_mode
+            .and_then(|tcp| {
+                tcp.split_once("        $tcp01Etl = Join-Path $work \"tcp01-pktmon.etl\"")
+            })
+            .and_then(|(_, tail)| tail.split_once("        $tcpRows++"))
+            .map(|(body, _)| body);
         let cleanup = source.rsplit_once("\nfinally {").map(|(_, body)| body);
         source.contains("[ValidateSet(\"lifecycle\", \"tcp\")]")
             && source.matches("$tcpRows++").count() == 8
@@ -2514,6 +2520,65 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     )
                     && !tcp.contains("Remove-NetRoute")
             })
+            && tcp01_diag.is_some_and(|diag| {
+                let setup = diag
+                    .split_once("        try {\n")
+                    .and_then(|(_, tail)| tail.split_once("        } catch {"))
+                    .map(|(body, _)| body);
+                let row_cleanup = diag
+                    .split_once("        } finally {\n")
+                    .and_then(|(_, tail)| tail.split_once("        }\n\n        if ($tcp01CleanupError)"))
+                    .map(|(body, _)| body);
+                setup.is_some_and(|setup| {
+                    setup
+                        .find("& pktmon status")
+                        .zip(setup.find("& pktmon filter list"))
+                        .zip(setup.find(
+                            "Assert-True $tcp01FiltersEmpty \"pktmon filter baseline is not empty\"",
+                        ))
+                        .zip(setup.find(
+                            "& pktmon filter add \"Ferrum2Tcp01\" -i \"198.18.0.2\" \"192.0.2.200\" -t TCP -p $ports[0]",
+                        ))
+                        .zip(setup.find(
+                            "& pktmon start --capture --comp all --pkt-size 64 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular",
+                        ))
+                        .zip(setup.find("Invoke-EchoRow $targets[0]"))
+                        .is_some_and(|(((((status, filters), empty), exact_filter), start), flow)| {
+                            status < filters
+                                && filters < empty
+                                && empty < exact_filter
+                                && exact_filter < start
+                                && start < flow
+                        })
+                }) && row_cleanup.is_some_and(|cleanup| {
+                    cleanup
+                        .find("& pktmon stop")
+                        .zip(cleanup.find(
+                            "& pktmon etl2txt $tcp01Etl --out $tcp01Txt --brief --verbose 3",
+                        ))
+                        .zip(cleanup.find("& pktmon filter remove"))
+                        .zip(cleanup.find("Remove-Item -LiteralPath $tcp01Etl -Force"))
+                        .zip(cleanup.find("Remove-Item -LiteralPath $tcp01Txt -Force"))
+                        .is_some_and(|((((stop, convert), remove_filter), remove_etl), remove_txt)| {
+                            stop < convert
+                                && convert < remove_filter
+                                && remove_filter < remove_etl
+                                && remove_etl < remove_txt
+                        })
+                })
+                    && diag.contains("$tcp01StatusText -match \"(?im)(collection|packet monitor|measurement|capture).*(stopped|not running)\"")
+                    && diag.contains("$tcp01FiltersEmpty")
+                    && diag.contains("$tcp01HandshakeComplete")
+                    && diag.contains("Select-Object -First 48")
+                    && diag.contains("Select-Object -Last 48")
+                    && diag.contains("\"<ip>.<port>\"")
+                    && diag
+                        .find("m15_windows_tun_tcp01_diag status=CAPTURED boundary=$tcp01Boundary capture_cleanup=PASS")
+                        .zip(diag.find("Assert-True ($tcp01Boundary -ne \"UNRESOLVED\")"))
+                        .is_some_and(|(marker, unresolved)| marker < unresolved)
+                    && !diag.contains("--hex")
+                    && !diag.contains("--pkt-size 0")
+            })
             && cleanup.is_some_and(|cleanup| {
                 cleanup.contains(
                     "foreach ($route in $ownedRoutes) {\n        Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue\n    }",
@@ -2539,6 +2604,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("$forcedExit -eq 0")
             && source.contains("Wait-AdapterAbsent $adapterName")
             && source.contains("profile=tcp tcp=8/8 cleanup=PASS")
+            && source
+                .find("m15_windows_tun_tcp01_diag status=CAPTURED")
+                .zip(source.find("m15_windows_tun_e2e status=PASS profile=tcp"))
+                .is_some_and(|(diagnostic, pass)| diagnostic < pass)
             && source.contains("$ownedTargetRoutes")
             && source.find("finally {").is_some_and(|finally| {
                 source
@@ -2550,7 +2619,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         has_tcp_controller(&controller),
         "privileged TCP controller must retain all eight real-process rows and cleanup"
     );
-    for mutation in [
+    for (index, mutation) in [
         controller.replacen("$tcpRows++", "", 1),
         controller.replace("$dnsResponder.Requests -eq 2", "$true"),
         controller.replace("-not $pressureWrite.Wait(500)", "$true"),
@@ -2575,8 +2644,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "        Remove-NetRoute -InputObject $ownedRoutes[0] -Confirm:$false\n        Invoke-EchoRow $targets[0]",
         ),
         controller.replace(
-            "        foreach ($targetIndex in @(0, 1, 2, 3, 7)) {\n            [void](Add-TargetAddress $targets[$targetIndex])\n        }\n\n        Invoke-EchoRow $targets[0] $ports[0] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes(\"tcp-01-half-close\"))",
-            "        Invoke-EchoRow $targets[0] $ports[0] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes(\"tcp-01-half-close\"))\n        foreach ($targetIndex in @(0, 1, 2, 3, 7)) {\n            [void](Add-TargetAddress $targets[$targetIndex])\n        }",
+            "        foreach ($targetIndex in @(0, 1, 2, 3, 7)) {\n            [void](Add-TargetAddress $targets[$targetIndex])\n        }",
+            "",
         ),
         controller.replace(
             "        Assert-True ($Gate.WaitAccepted($expectedGate, 5000))",
@@ -2642,10 +2711,54 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("$forcedShutdown.ElapsedMilliseconds -ge 900", "$true"),
         controller.replace("TCP-08 forced cancellation did not exit", "TCP-08 exited"),
         controller.replace("profile=tcp tcp=8/8 cleanup=PASS", "profile=tcp"),
-    ] {
+        controller.replace(
+            "& pktmon filter add \"Ferrum2Tcp01\" -i \"198.18.0.2\" \"192.0.2.200\" -t TCP -p $ports[0]",
+            "& pktmon filter add \"Ferrum2Tcp01\" -i \"198.18.0.2\" -t TCP",
+        ),
+        controller.replace(
+            "Assert-True $tcp01FiltersEmpty \"pktmon filter baseline is not empty\"",
+            "Assert-True $true",
+        ),
+        controller.replace(
+            "& pktmon start --capture --comp all --pkt-size 64 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular",
+            "& pktmon start --capture --comp all --pkt-size 0 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular --hex",
+        ),
+        controller.replace(
+            "            $null = @(& pktmon start --capture --comp all --pkt-size 64 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular 2>&1)",
+            "            Invoke-EchoRow $targets[0] $ports[0] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes(\"capture-started-too-late\"))\n            $null = @(& pktmon start --capture --comp all --pkt-size 64 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular 2>&1)",
+        ),
+        controller.replace("& pktmon stop", "Write-Output \"capture left running\""),
+        controller.replace(
+            "& pktmon etl2txt $tcp01Etl --out $tcp01Txt --brief --verbose 3",
+            "Write-Output \"conversion skipped\"",
+        ),
+        controller.replace(
+            "& pktmon filter remove",
+            "Write-Output \"filter left installed\"",
+        ),
+        controller.replace(
+            "Remove-Item -LiteralPath $tcp01Etl -Force",
+            "Write-Output \"ETL retained\"",
+        ),
+        controller.replace(
+            "Remove-Item -LiteralPath $tcp01Txt -Force",
+            "Write-Output \"text retained\"",
+        ),
+        controller.replace(
+            "$safeLine = $_ -replace \"(?:\\d{1,3}\\.){3}\\d{1,3}\\.\\d{1,5}\", \"<ip>.<port>\"",
+            "$safeLine = $_",
+        ),
+        controller.replace(
+            "Assert-True ($tcp01Boundary -ne \"UNRESOLVED\")",
+            "Assert-True $true",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         assert!(
             !has_tcp_controller(&mutation),
-            "TCP controller mutation must remove the eight-row production proof"
+            "TCP controller mutation {index} must remove the eight-row production proof"
         );
     }
     let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
