@@ -2525,7 +2525,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && route.contains("controller route baseline not absent")
             })
             && tcp_mode.is_some_and(|tcp| {
-                tcp.find("$strongHostInterfaces = @(Get-NetIPInterface -InterfaceIndex @($ownedInterfaceIndex, 1) -PolicyStore ActiveStore -ErrorAction Stop)")
+                tcp.contains("        $ports[4] = 53")
+                    && tcp.find("$strongHostInterfaces = @(Get-NetIPInterface -InterfaceIndex @($ownedInterfaceIndex, 1) -PolicyStore ActiveStore -ErrorAction Stop)")
                     .zip(tcp.find("$strongHostInterfaces.Count -eq 4"))
                     .zip(tcp.find("$_.WeakHostSend -ne \"Disabled\" -or $_.WeakHostReceive -ne \"Disabled\""))
                     .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"192.0.2.200/29\")"))
@@ -2804,6 +2805,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("$dnsResponder.Requests -eq 2", "$true"),
         controller.replace("[byte]($Id -band 0xff)", "[byte]$Id"),
         controller.replace("[byte]($id -band 0xff)", "[byte]$id"),
+        controller.replace("$ports[4] = 53", "$ports[4] = 54"),
         controller.replace("-not $pressureWrite.Wait(500)", "$true"),
         controller.replace(
             "$client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))",

@@ -1016,6 +1016,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $dnsInboundPort = Get-UniqueTcpPort
         $metricsPort = Get-UniqueTcpPort
         $ports = 1..8 | ForEach-Object { Get-UniqueTcpPort }
+        $ports[4] = 53
         $targets = @(
             "192.0.2.201", "2001:db8::202", "192.0.2.203", "2001:db8::204",
             "192.0.2.205", "2001:db8::206", "192.0.2.207", "2001:db8::208"
