@@ -236,7 +236,7 @@ function Add-TargetAddress([string]$Address) {
         $nextHop = if ($Address.Contains(":")) { "::" } else { "0.0.0.0" }
         $localRoute = New-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefixText -NextHop $nextHop -RouteMetric 1 -PolicyStore ActiveStore
     } else {
-        $localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PolicyStore ActiveStore -PassThru
+        $localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PassThru
     }
     $script:ownedTargetRoutes.Add($localRoute)
     return $row

@@ -2428,6 +2428,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && !source.contains("Wait-ProcessExit $activeProcess 300")
             && source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore")
             && !source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore PersistentStore")
+            && source
+                .find("$localRoute = Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefixText -PolicyStore ActiveStore -ErrorAction SilentlyContinue")
+                .zip(source.find("$localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PassThru"))
+                .is_some_and(|(selected, updated)| selected < updated)
+            && !source.contains("Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PolicyStore")
             && source.contains("-not $pressureWrite.IsCompleted")
             && source.contains("$forcedShutdown.ElapsedMilliseconds -ge 900")
             && source.contains("TCP-08 forced cancellation did not exit")
@@ -2464,6 +2469,18 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace(
             "Assert-True (-not $pressureWrite.IsCompleted)",
             "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore PersistentStore\nAssert-True (-not $pressureWrite.IsCompleted)",
+        ),
+        controller.replace(
+            "$localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PassThru",
+            "$localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PolicyStore ActiveStore -PassThru",
+        ),
+        controller.replace(
+            "$localRoute = Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefixText -PolicyStore ActiveStore -ErrorAction SilentlyContinue",
+            "$localRoute = Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefixText -ErrorAction SilentlyContinue",
+        ),
+        controller.replace(
+            "$localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PassThru",
+            "$localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PolicyStore PersistentStore -PassThru\n$localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PassThru",
         ),
         controller.replace("-not $pressureWrite.IsCompleted", "$true"),
         controller.replace("$forcedShutdown.ElapsedMilliseconds -ge 900", "$true"),
