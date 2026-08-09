@@ -14,8 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_BUFFER_OVERFLOW, ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS,
-    FreeLibrary, HANDLE, HMODULE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BUFFER_OVERFLOW,
+    ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, FreeLibrary, GetLastError, HANDLE,
+    HMODULE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     CreateUnicastIpAddressEntry, DeleteUnicastIpAddressEntry, GetIpInterfaceEntry,
@@ -319,17 +320,10 @@ impl Adapter {
         let stop = StopSignal(Arc::new(OwnedHandle(
             create_event().map_err(|_| CreateError::operation())?,
         )));
-        let name = wide(Path::new(config.name.as_ref()));
-        let tunnel = wide(Path::new("Ferrum2"));
-        let adapter =
-            unsafe { (library.exports.create_adapter)(name.as_ptr(), tunnel.as_ptr(), null()) };
-        if adapter.is_null() {
-            return Err(CreateError::operation());
-        }
         let mut owner = Self {
             config,
             library,
-            adapter: Some(adapter),
+            adapter: None,
             luid: NET_LUID_LH::default(),
             mtus: [None, None],
             addresses: Vec::with_capacity(2),
@@ -338,10 +332,8 @@ impl Adapter {
             stop,
             _not_send: PhantomData,
         };
-        unsafe { (owner.library.exports.get_adapter_luid)(adapter, &mut owner.luid) };
         let setup = setup_transaction(&mut PlatformSetup {
             owner: &mut owner,
-            adapter,
             deadline,
             cancelled,
         });
@@ -498,18 +490,18 @@ impl Adapter {
             if cancelled.load(Ordering::Acquire) {
                 return Err(Error);
             }
-            let mut waiting = false;
-            for address in &self.addresses {
+            if self.addresses.len() != 2 {
+                return Err(Error);
+            }
+            let mut states = [IpDadStateInvalid; 2];
+            for (state, address) in states.iter_mut().zip(&self.addresses) {
                 let mut row = *address;
                 if unsafe { GetUnicastIpAddressEntry(&mut row) } != ERROR_SUCCESS {
                     return Err(Error);
                 }
-                match dad_progress(row.DadState)? {
-                    DadProgress::Ready => {}
-                    DadProgress::Waiting => waiting = true,
-                }
+                *state = row.DadState;
             }
-            match dad_poll(waiting, Instant::now() >= deadline)? {
+            match dad_snapshot(self.session.is_some(), states, Instant::now() >= deadline)? {
                 DadProgress::Ready => return Ok(()),
                 DadProgress::Waiting => {}
             }
@@ -642,9 +634,46 @@ fn dad_poll(waiting: bool, deadline_elapsed: bool) -> Result<DadProgress, Error>
     }
 }
 
+fn dad_snapshot(
+    session_started: bool,
+    states: [NL_DAD_STATE; 2],
+    deadline_elapsed: bool,
+) -> Result<DadProgress, Error> {
+    if !session_started {
+        return Err(Error);
+    }
+    let mut waiting = false;
+    for state in states {
+        waiting |= dad_progress(state)? == DadProgress::Waiting;
+    }
+    dad_poll(waiting, deadline_elapsed)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdapterCreateFailure {
+    NoAdmin,
+    NameCollision,
+    Other,
+}
+
+impl AdapterCreateFailure {
+    const fn into_error(self) -> Error {
+        Error
+    }
+}
+
+fn classify_adapter_create_failure(error: u32) -> AdapterCreateFailure {
+    match error {
+        ERROR_ACCESS_DENIED => AdapterCreateFailure::NoAdmin,
+        ERROR_ALREADY_EXISTS => AdapterCreateFailure::NameCollision,
+        _ => AdapterCreateFailure::Other,
+    }
+}
+
 trait SetupOperations {
     fn check_cancelled(&mut self) -> Result<(), Error>;
     fn check_deadline(&mut self) -> Result<(), Error>;
+    fn create_adapter(&mut self) -> Result<(), Error>;
     fn check_driver(&mut self) -> Result<(), Error>;
     fn set_ipv4_mtu(&mut self) -> Result<(), Error>;
     fn set_ipv6_mtu(&mut self) -> Result<(), Error>;
@@ -657,6 +686,7 @@ trait SetupOperations {
 fn setup_transaction(setup: &mut impl SetupOperations) -> Result<(), Error> {
     setup.check_cancelled()?;
     setup.check_deadline()?;
+    setup.create_adapter()?;
     setup.check_driver()?;
     setup.set_ipv4_mtu()?;
     setup.set_ipv6_mtu()?;
@@ -668,7 +698,6 @@ fn setup_transaction(setup: &mut impl SetupOperations) -> Result<(), Error> {
 
 struct PlatformSetup<'a> {
     owner: &'a mut Adapter,
-    adapter: WintunAdapter,
     deadline: Instant,
     cancelled: &'a AtomicBool,
 }
@@ -688,6 +717,20 @@ impl SetupOperations for PlatformSetup<'_> {
         } else {
             Ok(())
         }
+    }
+
+    fn create_adapter(&mut self) -> Result<(), Error> {
+        let name = wide(Path::new(self.owner.config.name.as_ref()));
+        let tunnel = wide(Path::new("Ferrum2"));
+        let adapter = unsafe {
+            (self.owner.library.exports.create_adapter)(name.as_ptr(), tunnel.as_ptr(), null())
+        };
+        if adapter.is_null() {
+            return Err(classify_adapter_create_failure(unsafe { GetLastError() }).into_error());
+        }
+        self.owner.adapter = Some(adapter);
+        unsafe { (self.owner.library.exports.get_adapter_luid)(adapter, &mut self.owner.luid) };
+        Ok(())
     }
 
     fn check_driver(&mut self) -> Result<(), Error> {
@@ -717,11 +760,9 @@ impl SetupOperations for PlatformSetup<'_> {
     }
 
     fn start_session(&mut self) -> Result<(), Error> {
+        let adapter = self.owner.adapter.ok_or(Error)?;
         let session = unsafe {
-            (self.owner.library.exports.start_session)(
-                self.adapter,
-                self.owner.config.ring_capacity,
-            )
+            (self.owner.library.exports.start_session)(adapter, self.owner.config.ring_capacity)
         };
         if session.is_null() {
             return Err(Error);
@@ -987,65 +1028,126 @@ fn wide(path: &Path) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ABI_EXPORTS, CleanupOperations, DLL_BYTES, DLL_SHA256, DadProgress, Error,
-        IpDadStateDeprecated, IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred,
-        IpDadStateTentative, LoaderOperations, SessionJournal, SetupOperations,
-        cleanup_transaction, dad_poll, dad_progress, finish_setup_transaction, load_transaction,
+        ABI_EXPORTS, AdapterCreateFailure, CleanupOperations, DLL_BYTES, DLL_SHA256, DadProgress,
+        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, Error, IpDadStateDeprecated,
+        IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative,
+        LoaderOperations, SessionJournal, SetupOperations, classify_adapter_create_failure,
+        cleanup_transaction, dad_snapshot, finish_setup_transaction, load_transaction,
         require_exports, setup_transaction, validate_artifact,
     };
 
     struct InjectedSetup {
         fail_at: Option<usize>,
+        cleanup_fail_at: Option<usize>,
+        idle: bool,
         calls: Vec<&'static str>,
+        resources: Vec<&'static str>,
+        cleanup_calls: Vec<&'static str>,
     }
 
     impl InjectedSetup {
-        fn step(&mut self, name: &'static str) -> Result<(), Error> {
+        fn step(
+            &mut self,
+            name: &'static str,
+            resource: Option<&'static str>,
+        ) -> Result<(), Error> {
             let position = self.calls.len();
             self.calls.push(name);
             if self.fail_at == Some(position) {
                 Err(Error)
             } else {
+                if let Some(resource) = resource {
+                    self.resources.push(resource);
+                }
                 Ok(())
             }
+        }
+
+        fn cleanup_step(&mut self, resource: &'static str, name: &'static str) -> Option<bool> {
+            if self.resources.last() != Some(&resource) {
+                return None;
+            }
+            self.resources.pop();
+            let position = self.cleanup_calls.len();
+            self.cleanup_calls.push(name);
+            Some(self.cleanup_fail_at == Some(position))
         }
     }
 
     impl SetupOperations for InjectedSetup {
         fn check_cancelled(&mut self) -> Result<(), Error> {
-            self.step("cancel")
+            self.step("cancel", None)
         }
 
         fn check_deadline(&mut self) -> Result<(), Error> {
-            self.step("deadline")
+            self.step("deadline", None)
+        }
+
+        fn create_adapter(&mut self) -> Result<(), Error> {
+            self.step("create", Some("adapter"))
         }
 
         fn check_driver(&mut self) -> Result<(), Error> {
-            self.step("driver")
+            self.step("driver", None)
         }
 
         fn set_ipv4_mtu(&mut self) -> Result<(), Error> {
-            self.step("ipv4-mtu")
+            self.step("ipv4-mtu", Some("ipv4-mtu"))
         }
 
         fn set_ipv6_mtu(&mut self) -> Result<(), Error> {
-            self.step("ipv6-mtu")
+            self.step("ipv6-mtu", Some("ipv6-mtu"))
         }
 
         fn add_ipv4_address(&mut self) -> Result<(), Error> {
-            self.step("ipv4-address")
+            self.step("ipv4-address", Some("ipv4-address"))
         }
 
         fn add_ipv6_address(&mut self) -> Result<(), Error> {
-            self.step("ipv6-address")
+            self.step("ipv6-address", Some("ipv6-address"))
         }
 
         fn start_session(&mut self) -> Result<(), Error> {
-            self.step("start-session")
+            self.step("start-session", Some("session"))
         }
 
         fn wait_for_dad(&mut self) -> Result<(), Error> {
-            self.step("dad")
+            assert_eq!(self.resources.last(), Some(&"session"));
+            self.step("dad", None)
+        }
+    }
+
+    impl CleanupOperations for InjectedSetup {
+        fn session_is_idle(&mut self) -> bool {
+            self.idle
+        }
+
+        fn end_session(&mut self) -> Option<bool> {
+            self.cleanup_step("session", "end-session")
+        }
+
+        fn delete_last_address(&mut self) -> Option<bool> {
+            for (resource, name) in [
+                ("ipv6-address", "ipv6-address"),
+                ("ipv4-address", "ipv4-address"),
+            ] {
+                if let Some(result) = self.cleanup_step(resource, name) {
+                    return Some(result);
+                }
+            }
+            None
+        }
+
+        fn restore_ipv6_mtu(&mut self) -> Option<bool> {
+            self.cleanup_step("ipv6-mtu", "ipv6-mtu")
+        }
+
+        fn restore_ipv4_mtu(&mut self) -> Option<bool> {
+            self.cleanup_step("ipv4-mtu", "ipv4-mtu")
+        }
+
+        fn close_adapter(&mut self) -> Option<bool> {
+            self.cleanup_step("adapter", "adapter")
         }
     }
 
@@ -1093,56 +1195,6 @@ mod tests {
 
         fn resolve_exact_abi(&mut self) -> Result<(), Error> {
             self.step("eleven-exports")
-        }
-    }
-
-    struct InjectedCleanup {
-        fail_at: Option<usize>,
-        idle: bool,
-        addresses: usize,
-        calls: Vec<&'static str>,
-    }
-
-    impl InjectedCleanup {
-        fn step(&mut self, name: &'static str) -> Option<bool> {
-            let position = self.calls.len();
-            self.calls.push(name);
-            Some(self.fail_at == Some(position))
-        }
-    }
-
-    impl CleanupOperations for InjectedCleanup {
-        fn session_is_idle(&mut self) -> bool {
-            self.idle
-        }
-
-        fn end_session(&mut self) -> Option<bool> {
-            self.step("end-session")
-        }
-
-        fn delete_last_address(&mut self) -> Option<bool> {
-            if self.addresses == 0 {
-                return None;
-            }
-            let name = if self.addresses == 2 {
-                "ipv6-address"
-            } else {
-                "ipv4-address"
-            };
-            self.addresses -= 1;
-            self.step(name)
-        }
-
-        fn restore_ipv6_mtu(&mut self) -> Option<bool> {
-            self.step("ipv6-mtu")
-        }
-
-        fn restore_ipv4_mtu(&mut self) -> Option<bool> {
-            self.step("ipv4-mtu")
-        }
-
-        fn close_adapter(&mut self) -> Option<bool> {
-            self.step("adapter")
         }
     }
 
@@ -1215,6 +1267,7 @@ mod tests {
         let order = [
             "cancel",
             "deadline",
+            "create",
             "driver",
             "ipv4-mtu",
             "ipv6-mtu",
@@ -1223,17 +1276,53 @@ mod tests {
             "start-session",
             "dad",
         ];
-        for failed in 0..order.len() {
+        let rollback = [
+            &[][..],
+            &[][..],
+            &[][..],
+            &["adapter"][..],
+            &["adapter"][..],
+            &["ipv4-mtu", "adapter"][..],
+            &["ipv6-mtu", "ipv4-mtu", "adapter"][..],
+            &["ipv4-address", "ipv6-mtu", "ipv4-mtu", "adapter"][..],
+            &[
+                "ipv6-address",
+                "ipv4-address",
+                "ipv6-mtu",
+                "ipv4-mtu",
+                "adapter",
+            ][..],
+            &[
+                "end-session",
+                "ipv6-address",
+                "ipv4-address",
+                "ipv6-mtu",
+                "ipv4-mtu",
+                "adapter",
+            ][..],
+        ];
+        for (failed, expected_cleanup) in rollback.into_iter().enumerate() {
             let mut setup = InjectedSetup {
                 fail_at: Some(failed),
+                cleanup_fail_at: None,
+                idle: true,
                 calls: Vec::new(),
+                resources: Vec::new(),
+                cleanup_calls: Vec::new(),
             };
             assert!(setup_transaction(&mut setup).is_err(), "step {failed}");
             assert_eq!(setup.calls, order[..=failed], "step {failed}");
+            assert!(!cleanup_transaction(&mut setup), "step {failed}");
+            assert_eq!(setup.cleanup_calls, expected_cleanup, "step {failed}");
+            assert!(setup.resources.is_empty(), "step {failed}");
         }
         let mut setup = InjectedSetup {
             fail_at: None,
+            cleanup_fail_at: None,
+            idle: true,
             calls: Vec::new(),
+            resources: Vec::new(),
+            cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut setup).expect("complete setup");
         assert_eq!(setup.calls, order);
@@ -1244,15 +1333,43 @@ mod tests {
     }
 
     #[test]
-    fn only_natural_preferred_dad_is_ready() {
-        assert_eq!(dad_progress(IpDadStateTentative), Ok(DadProgress::Waiting));
-        assert_eq!(dad_progress(IpDadStatePreferred), Ok(DadProgress::Ready));
-        for state in [IpDadStateDuplicate, IpDadStateInvalid, IpDadStateDeprecated] {
-            assert!(dad_progress(state).is_err());
+    fn only_post_session_dual_family_natural_preferred_dad_is_ready() {
+        assert!(dad_snapshot(false, [IpDadStatePreferred, IpDadStatePreferred], false).is_err());
+        assert_eq!(
+            dad_snapshot(true, [IpDadStatePreferred, IpDadStatePreferred], false),
+            Ok(DadProgress::Ready)
+        );
+        for states in [
+            [IpDadStateTentative, IpDadStatePreferred],
+            [IpDadStatePreferred, IpDadStateTentative],
+            [IpDadStateTentative, IpDadStateTentative],
+        ] {
+            assert_eq!(dad_snapshot(true, states, false), Ok(DadProgress::Waiting));
+            assert!(dad_snapshot(true, states, true).is_err());
         }
-        assert_eq!(dad_poll(false, false), Ok(DadProgress::Ready));
-        assert_eq!(dad_poll(true, false), Ok(DadProgress::Waiting));
-        assert!(dad_poll(true, true).is_err(), "Tentative reaches timeout");
+        for family in 0..2 {
+            for state in [IpDadStateDuplicate, IpDadStateInvalid, IpDadStateDeprecated] {
+                let mut states = [IpDadStatePreferred, IpDadStatePreferred];
+                states[family] = state;
+                assert!(dad_snapshot(true, states, false).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn adapter_create_null_causes_are_closed_and_redacted() {
+        assert_eq!(
+            classify_adapter_create_failure(ERROR_ACCESS_DENIED),
+            AdapterCreateFailure::NoAdmin
+        );
+        assert_eq!(
+            classify_adapter_create_failure(ERROR_ALREADY_EXISTS),
+            AdapterCreateFailure::NameCollision
+        );
+        assert_eq!(
+            classify_adapter_create_failure(0xdead_beef),
+            AdapterCreateFailure::Other
+        );
     }
 
     #[test]
@@ -1266,24 +1383,31 @@ mod tests {
             "adapter",
         ];
         for failed in 0..order.len() {
-            let mut cleanup = InjectedCleanup {
-                fail_at: Some(failed),
+            let mut cleanup = InjectedSetup {
+                fail_at: None,
+                cleanup_fail_at: Some(failed),
                 idle: true,
-                addresses: 2,
                 calls: Vec::new(),
+                resources: Vec::new(),
+                cleanup_calls: Vec::new(),
             };
+            setup_transaction(&mut cleanup).expect("complete setup");
             assert!(cleanup_transaction(&mut cleanup), "cleanup step {failed}");
-            assert_eq!(cleanup.calls, order, "cleanup step {failed}");
+            assert_eq!(cleanup.cleanup_calls, order, "cleanup step {failed}");
+            assert!(cleanup.resources.is_empty(), "cleanup step {failed}");
         }
 
-        let mut cleanup = InjectedCleanup {
+        let mut cleanup = InjectedSetup {
             fail_at: None,
+            cleanup_fail_at: None,
             idle: true,
-            addresses: 2,
             calls: Vec::new(),
+            resources: Vec::new(),
+            cleanup_calls: Vec::new(),
         };
+        setup_transaction(&mut cleanup).expect("complete setup");
         assert!(!cleanup_transaction(&mut cleanup));
-        assert_eq!(cleanup.calls, order);
+        assert_eq!(cleanup.cleanup_calls, order);
 
         let journal = SessionJournal::default();
         let wait = journal.begin_wait().expect("first wait");
@@ -1291,26 +1415,25 @@ mod tests {
             journal.begin_wait().is_err(),
             "overlapping waits fail closed"
         );
-        let mut overlap = InjectedCleanup {
+        let mut overlap = InjectedSetup {
             fail_at: None,
             idle: journal.cleanup_is_safe(),
-            addresses: 2,
             calls: Vec::new(),
+            cleanup_fail_at: None,
+            resources: Vec::new(),
+            cleanup_calls: Vec::new(),
         };
+        setup_transaction(&mut overlap).expect("complete setup");
         assert!(cleanup_transaction(&mut overlap));
         assert!(
-            overlap.calls.is_empty(),
+            overlap.cleanup_calls.is_empty(),
             "EndSession cannot overlap an active wait"
         );
         drop(wait);
-        let mut after_wait = InjectedCleanup {
-            fail_at: None,
-            idle: journal.cleanup_is_safe(),
-            addresses: 2,
-            calls: Vec::new(),
-        };
-        assert!(!cleanup_transaction(&mut after_wait));
-        assert_eq!(after_wait.calls, order);
+        assert!(journal.cleanup_is_safe());
+        overlap.idle = true;
+        assert!(!cleanup_transaction(&mut overlap));
+        assert_eq!(overlap.cleanup_calls, order);
 
         let clean = finish_setup_transaction(Err(Error), || false).expect_err("DAD failure");
         assert!(!clean.is_cleanup_failure());

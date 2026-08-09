@@ -147,22 +147,24 @@ where
     let active = Arc::new(AtomicBool::new(false));
     let owner_stop = Arc::clone(&stop);
     let owner_active = Arc::clone(&active);
-    let thread = std::thread::Builder::new()
-        .name("ferrum2-tun-owner".into())
-        .spawn(move || {
-            let result = owner_main(
-                config,
-                owner_stop,
-                owner_active,
-                ready_sender,
-                deadline,
-                accepted,
-                foundation_dropped,
-            );
-            let _ = done_sender.send(result);
-            result
-        })
-        .map_err(|_| startup)?;
+    let thread = map_owner_spawn(
+        std::thread::Builder::new()
+            .name("ferrum2-tun-owner".into())
+            .spawn(move || {
+                let result = owner_main(
+                    config,
+                    owner_stop,
+                    owner_active,
+                    ready_sender,
+                    deadline,
+                    accepted,
+                    foundation_dropped,
+                );
+                let _ = done_sender.send(result);
+                result
+            }),
+        startup,
+    )?;
     let guard = OwnerThread {
         stop,
         active,
@@ -362,6 +364,25 @@ fn reconcile_owner_exit(reported: OwnerExit, reaped: OwnerExit) -> OwnerExit {
     }
 }
 
+fn map_owner_spawn<T, E>(spawned: std::io::Result<T>, startup: E) -> Result<T, E> {
+    spawned.map_err(|_| startup)
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+fn finish_stack_setup<T, A, C>(
+    stack: Result<T, ()>,
+    adapter: A,
+    cleanup: impl FnOnce(A) -> Result<(), C>,
+) -> Result<(T, A), OwnerExit> {
+    match stack {
+        Ok(stack) => Ok((stack, adapter)),
+        Err(()) => Err(match cleanup(adapter) {
+            Ok(()) => OwnerExit::RuntimeFailed,
+            Err(_) => OwnerExit::CleanupFailed,
+        }),
+    }
+}
+
 #[cfg(all(windows, target_arch = "x86_64"))]
 fn owner_main(
     config: Config,
@@ -388,7 +409,7 @@ fn owner_main(
             return OwnerExit::RuntimeFailed;
         }
     };
-    let mut adapter = match ferrum2_wintun::Adapter::create(adapter_config, deadline, &stop) {
+    let adapter = match ferrum2_wintun::Adapter::create(adapter_config, deadline, &stop) {
         Ok(adapter) => adapter,
         Err(error) => {
             let _ = ready.send(OwnerReady::Failed);
@@ -400,20 +421,21 @@ fn owner_main(
         }
     };
     let wake = adapter.stop_signal();
-    let mut stack = match Stack::new(
-        config.ipv4,
-        config.ipv4_prefix,
-        config.ipv6,
-        config.ipv6_prefix,
-        usize::from(config.mtu),
+    let (mut stack, mut adapter) = match finish_stack_setup(
+        Stack::new(
+            config.ipv4,
+            config.ipv4_prefix,
+            config.ipv6,
+            config.ipv6_prefix,
+            usize::from(config.mtu),
+        ),
+        adapter,
+        |adapter| adapter.cleanup(),
     ) {
         Ok(stack) => stack,
-        Err(()) => {
+        Err(exit) => {
             let _ = ready.send(OwnerReady::Failed);
-            return match adapter.cleanup() {
-                Ok(()) => OwnerExit::RuntimeFailed,
-                Err(_) => OwnerExit::CleanupFailed,
-            };
+            return exit;
         }
     };
     let _flow_generations = GenerationTable::new(config.max_tcp_flows);
@@ -929,7 +951,7 @@ mod tests {
 
     use super::{
         GenerationTable, MemoryTx, OwnerExit, OwnerThread, PacketValidator, Stack,
-        reconcile_owner_exit, reported_owner_exit,
+        finish_stack_setup, map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
     };
 
     fn checksum(parts: &[&[u8]]) -> u16 {
@@ -1279,6 +1301,11 @@ mod tests {
                 p[46..48].fill(0);
                 p
             }),
+            ("IPv6 UDP nonzero bad checksum", {
+                let mut p = valid_v6.clone();
+                p[46] ^= 1;
+                p
+            }),
             ("IPv6 trailing", {
                 let mut p = valid_v6.clone();
                 p.push(0);
@@ -1297,6 +1324,16 @@ mod tests {
             ("IPv6 TCP checksum", {
                 let mut p = valid_v6_tcp.clone();
                 p[56] ^= 1;
+                p
+            }),
+            ("IPv6 TCP source zero", {
+                let mut p = valid_v6_tcp.clone();
+                p[40..42].fill(0);
+                p
+            }),
+            ("IPv6 TCP destination zero", {
+                let mut p = valid_v6_tcp.clone();
+                p[42..44].fill(0);
                 p
             }),
         ];
@@ -1439,6 +1476,53 @@ mod tests {
 
     #[tokio::test]
     async fn owner_cancel_eof_panic_and_cleanup_conflict_are_reaped_before_join() {
+        assert_eq!(
+            map_owner_spawn::<(), _>(
+                Err(std::io::Error::other("injected spawn failure")),
+                "startup",
+            ),
+            Err("startup"),
+            "owner spawn failure maps to startup"
+        );
+
+        for (cleanup_result, expected) in [
+            (Ok::<(), ()>(()), OwnerExit::RuntimeFailed),
+            (Err::<(), ()>(()), OwnerExit::CleanupFailed),
+        ] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let owner_events = Arc::clone(&events);
+            let thread = std::thread::spawn(move || {
+                let owner = std::thread::current().id();
+                owner_events.lock().expect("events").push(("stack", owner));
+                let exit = finish_stack_setup::<(), _, _>(Err(()), (), |_| {
+                    owner_events
+                        .lock()
+                        .expect("events")
+                        .push(("cleanup", std::thread::current().id()));
+                    cleanup_result
+                })
+                .expect_err("injected stack setup failure");
+                owner_events
+                    .lock()
+                    .expect("events")
+                    .push(("owner-exit", std::thread::current().id()));
+                exit
+            });
+            assert_eq!(thread.join().expect("owner joins"), expected);
+            events
+                .lock()
+                .expect("events")
+                .push(("joined", std::thread::current().id()));
+            let events = events.lock().expect("events");
+            assert_eq!(
+                events.iter().map(|event| event.0).collect::<Vec<_>>(),
+                ["stack", "cleanup", "owner-exit", "joined"]
+            );
+            assert_eq!(events[0].1, events[1].1);
+            assert_eq!(events[1].1, events[2].1);
+            assert_ne!(events[2].1, events[3].1);
+        }
+
         for exit in [OwnerExit::Stopped, OwnerExit::CleanupFailed] {
             let stop = Arc::new(AtomicBool::new(false));
             let active = Arc::new(AtomicBool::new(false));

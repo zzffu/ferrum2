@@ -2200,6 +2200,41 @@ fn tun_coexistence_preserves_socks_indices_and_routes_tun_last() {
     assert_eq!(reordered.inbounds[0].listen.port(), 10001);
     assert_eq!(reordered.inbounds[1].listen.port(), 10000);
     assert_eq!(selected(&reordered.route, 2), 0, "TUN remains last");
+
+    let one_socks = tun_client(
+        "[[inbounds]]\ntag = \"socks-a\"\nlisten = \"127.0.0.1:10000\"\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\n[route]\nfinal = \"proxy\"\n[[route.rules]]\ninbound = \"tun-in\"\nnetwork = \"tcp\"\naction = \"reject\"\n[dns]\n[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:15353\"\n[[dns.servers]]\ntag = \"special\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[[dns.servers]]\ntag = \"default\"\ntransport = \"tcp\"\naddress = \"192.0.2.54:53\"\n[dns.route]\nfinal = \"default\"\n[[dns.route.rules]]\ninbound = \"tun-in\"\nserver = \"special\"",
+    );
+    let one_socks =
+        load_client(TempConfig::text(&one_socks).path()).expect("one-SOCKS TUN/DNS graph");
+    assert_eq!(one_socks.inbounds.len(), 1);
+    let route = one_socks
+        .route_program
+        .as_ref()
+        .expect("ordinary route program");
+    let target = TargetAddr::domain("query.example", 53).expect("target");
+    assert!(matches!(
+        route
+            .evaluate(1, Network::Tcp, &target)
+            .next(RouteMetadata::new(None, None)),
+        Some(RouteProgramAction::Terminal(RouteAction::Reject))
+    ));
+    assert!(matches!(
+        route
+            .evaluate(0, Network::Tcp, &target)
+            .next(RouteMetadata::new(None, None)),
+        Some(RouteProgramAction::Final(RouteAction::Route(_)))
+    ));
+    let dns = one_socks.dns_route.as_ref().expect("DNS route program");
+    assert_eq!(
+        dns.select(DnsIngressId::Ordinary(1), Network::Udp, &target, None),
+        Some(0),
+        "TUN ordinary ID follows the one declared SOCKS inbound"
+    );
+    assert_eq!(
+        dns.select(DnsIngressId::Ordinary(0), Network::Udp, &target, None),
+        Some(1),
+        "SOCKS ID zero reaches the DNS final"
+    );
 }
 
 #[test]

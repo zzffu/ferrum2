@@ -2145,6 +2145,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         );
     }
     let tun = fs::read_to_string(root.join("crates/ferrum2-tun/src/lib.rs")).expect("TUN source");
+    let tun_production = tun.split("#[cfg(test)]").next().expect("TUN production");
     for required in [
         "#![forbid(unsafe_code)]",
         "poll_ingress_single",
@@ -2179,13 +2180,13 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         "cancellation mutation must remove the guarded reap proof"
     );
     let has_single_deadline_contract = |source: &str| {
+        let compact = source.split_whitespace().collect::<String>();
         source.matches(".checked_add(timeout)").count() == 1
             && source
                 .matches("std::time::Instant::now() >= deadline")
                 .count()
                 >= 3
-            && source
-                .contains("ready_sender,\n                deadline,\n                accepted,")
+            && compact.contains("ready_sender,deadline,accepted,")
     };
     assert!(
         has_single_deadline_contract(&tun),
@@ -2207,6 +2208,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         fs::read_to_string(root.join("crates/ferrum2-wintun/src/lib.rs")).expect("Wintun root");
     let wintun_windows = fs::read_to_string(root.join("crates/ferrum2-wintun/src/windows.rs"))
         .expect("Wintun FFI module");
+    let wintun_production = wintun_windows
+        .split("#[cfg(test)]")
+        .next()
+        .expect("Wintun production");
     assert!(wintun_root.contains("#[allow(unsafe_code)]\nmod windows;"));
     assert_eq!(
         token_sources_under(&root, &["crates/ferrum2-wintun/src"])
@@ -2238,6 +2243,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     let setup_order = [
         "setup.check_cancelled()?",
         "setup.check_deadline()?",
+        "setup.create_adapter()?",
         "setup.check_driver()?",
         "setup.set_ipv4_mtu()?",
         "setup.set_ipv6_mtu()?",
@@ -2290,6 +2296,31 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         reordered_dad, wintun_windows,
         "StartSession-before-DAD mutation anchor missing"
     );
+    let wintun_setup_is_production_connected = |source: &str| {
+        let compact = source.split_whitespace().collect::<String>();
+        compact.contains("setup.create_adapter()?;setup.check_driver()?;")
+            && compact
+                .contains("classify_adapter_create_failure(unsafe{GetLastError()}).into_error()")
+            && compact
+                .contains("dad_snapshot(self.session.is_some(),states,Instant::now()>=deadline)")
+    };
+    assert!(
+        wintun_setup_is_production_connected(wintun_production),
+        "private create classification and post-session dual-family DAD must drive production"
+    );
+    for mutation in [
+        wintun_production.replace("setup.create_adapter()?;", ""),
+        wintun_production.replace(
+            "classify_adapter_create_failure(unsafe { GetLastError() })",
+            "AdapterCreateFailure::Other",
+        ),
+        wintun_production.replace("self.session.is_some()", "false"),
+    ] {
+        assert!(
+            !wintun_setup_is_production_connected(&mutation),
+            "Wintun setup mutation must sever the production proof"
+        );
+    }
     for forbidden in [
         "WintunOpenAdapter",
         "WintunDeleteDriver",
@@ -2398,6 +2429,29 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     assert!(tun.contains("generation.checked_add(1)"));
     assert!(!tun.contains("wrapping_add(1)"));
     assert!(tun.contains("if self.validator.accepts(&self.output[..len])"));
+    let owner_failures_are_production_connected = |source: &str| {
+        source.contains("let thread = map_owner_spawn(")
+            && source.contains("let (mut stack, mut adapter) = match finish_stack_setup(")
+            && source.contains("Stack::new(")
+            && source.contains("|adapter| adapter.cleanup(),")
+    };
+    assert!(
+        owner_failures_are_production_connected(tun_production),
+        "spawn and smoltcp setup failures must use the private owner cleanup helpers"
+    );
+    for mutation in [
+        tun_production.replace("let thread = map_owner_spawn(", "let thread = Ok("),
+        tun_production.replace(
+            "let (mut stack, mut adapter) = match finish_stack_setup(",
+            "let (mut stack, mut adapter) = match Stack::new(",
+        ),
+        tun_production.replace("|adapter| adapter.cleanup(),", "|_| Ok(()),"),
+    ] {
+        assert!(
+            !owner_failures_are_production_connected(&mutation),
+            "owner failure mutation must sever the production proof"
+        );
+    }
     let packet_witness_path = |source: &str| {
         source.contains("!self.validator.accepts(packet)")
             && source.contains("if stack.enqueue(&received) {\n                accepted();")
