@@ -123,7 +123,8 @@ m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS 
 ```
 
 Manual dispatch uses one closed `dispatch_target` choice and a constant workflow mapping；raw input is never
-passed to PowerShell。Push/PR and the default `performance` dispatch map to foundation/lifecycle；the latter
+passed to the controller，because the workflow PowerShell switch maps it to one constant mode and marker。Push/PR
+and the default `performance` dispatch map to foundation/lifecycle；the latter
 alone starts the independent performance job。`windows-tun-tcp` maps to `tcp` and its exact `8/8` marker，
 `windows-tun-transport` maps to `udp` and its exact `16/16` marker，and `windows-tun-full` maps to `full` and
 its exact functional/cycle marker。Unknown、missing、mode/marker mismatch fails before qualification。

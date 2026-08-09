@@ -971,7 +971,6 @@ fn tun_dependency_edges_and_unsafe_exception_are_exact() {
         "$output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode $mode",
         "$markers = @($output | Where-Object { $_ -like \"m15_windows_tun_e2e status=PASS *\" })",
         "$markers.Count -ne 1 -or $markers[0] -ne $expectedMarker",
-        "needs['windows-tun-e2e'].result",
     ];
     let has_selector_contract = |source: &str| {
         selector_contract
@@ -986,6 +985,37 @@ fn tun_dependency_edges_and_unsafe_exception_are_exact() {
             "hosted selector mutation survived: {required}"
         );
     }
+    let qualification_delimiter = "\n  qualification:\n";
+    assert_eq!(workflow.matches(qualification_delimiter).count(), 1);
+    let qualification = workflow
+        .split_once(qualification_delimiter)
+        .expect("qualification job")
+        .1;
+    let qualification_contract = [
+        "    if: ${{ always() }}\n",
+        "      - windows-tun-e2e\n",
+        "          WINDOWS_TUN_RESULT: ${{ needs['windows-tun-e2e'].result }}\n",
+        "          test \"$WINDOWS_TUN_RESULT\" = \"success\"\n",
+    ];
+    let has_qualification_contract = |source: &str| {
+        qualification_contract
+            .iter()
+            .all(|required| source.contains(required))
+    };
+    assert!(has_qualification_contract(qualification));
+    for required in &qualification_contract {
+        let mutation = qualification.replace(*required, "");
+        assert!(
+            !has_qualification_contract(&mutation),
+            "qualification mutation survived: {required}"
+        );
+    }
+    let bypass = qualification.replacen(
+        "          test \"$WINDOWS_TUN_RESULT\" = \"success\"\n",
+        "          true\n",
+        1,
+    );
+    assert!(!has_qualification_contract(&bypass));
     let controller = fs::read_to_string(root.join("tests/platform/qualify_windows_tun.ps1"))
         .expect("TUN controller");
     for required in [

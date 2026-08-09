@@ -8,7 +8,9 @@ owns:
   # Primary-only control lease; the product Engineer keeps these paths read-only.
   - .github/workflows/m0.yml
   - tests/m0-harness/tests/workspace_policy.rs
+  # Product Engineer lease.
   - crates/ferrum2-tun/src/**
+  - bins/ferrum2-client/src/run.rs
   - bins/ferrum2-client/src/run/tun.rs
   - bins/ferrum2-client/src/run/socks.rs
   - bins/ferrum2-client/src/run/context.rs
@@ -18,6 +20,7 @@ owns:
   - crates/ferrum2-config/tests/config_contract.rs
   - crates/ferrum2-observability/src/**
   - crates/ferrum2-observability/tests/**
+  - tests/m0-harness/tests/architecture.rs
   - tests/platform/qualify_windows_tun.ps1
 ---
 
