@@ -15,6 +15,10 @@ const SERVER_BASE: &str = "schema_version = 1\n[server]\nlisten = \"127.0.0.1:83
 
 const PAIRED_PORT_ATTEMPTS: usize = 256;
 
+fn tun_only_client() -> String {
+    "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"192.0.2.10:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".into()
+}
+
 fn tagged_client(inbounds: &[SocketAddrV4], servers: &[SocketAddrV4]) -> String {
     let mut source = "schema_version = 1\n".to_owned();
     for (index, listen) in inbounds.iter().enumerate() {
@@ -108,6 +112,33 @@ fn valid_client_and_server_configs_have_exact_offline_output() {
             );
             assert!(output.stderr.is_empty(), "{binary}: {}", method.0);
         }
+    }
+}
+
+#[test]
+fn tun_check_config_is_offline_and_has_a_pure_target_gate() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let config = directory.path().join("tun-client.toml");
+    std::fs::write(&config, tun_only_client()).expect("TUN config");
+    let output = run_binary(
+        "ferrum2-client",
+        &[
+            "--config",
+            config.to_str().expect("UTF-8 path"),
+            "--check-config",
+        ],
+    );
+    if cfg!(all(windows, target_arch = "x86_64")) {
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stdout, b"configuration valid\n");
+        assert!(output.stderr.is_empty());
+    } else {
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr,
+            b"error[config.semantic] tun: configuration value is invalid\n"
+        );
     }
 }
 

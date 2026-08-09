@@ -179,6 +179,7 @@ pub(super) fn compile_route_draft(
     raw: Option<&RawRoute>,
     inbounds: &[String],
     role: Role,
+    tun_inbound: Option<usize>,
     has_dns: bool,
     max_connections: u32,
     source: &str,
@@ -236,7 +237,13 @@ pub(super) fn compile_route_draft(
                     return Err(ConfigError::semantic(ConfigField::RouteRulesOutbound));
                 }
                 let sniffers = compile_sniffers(rule.sniffers.as_ref())?;
-                validate_sniff_capability(role, current.network.as_deref(), &sniffers)?;
+                validate_sniff_capability(
+                    role,
+                    current.inbound.as_deref(),
+                    current.network.as_deref(),
+                    tun_inbound,
+                    &sniffers,
+                )?;
                 current.sniffers = Some(match &sniffers {
                     Sniffers::Default => SniffersCoverage::Default,
                     Sniffers::Explicit(values) => SniffersCoverage::Explicit(values.clone()),
@@ -500,16 +507,24 @@ fn compile_sniffers(raw: Option<&ScalarOrList<String>>) -> Result<Sniffers, Conf
 
 fn validate_sniff_capability(
     role: Role,
+    inbounds: Option<&[usize]>,
     networks: Option<&[Network]>,
+    tun_inbound: Option<usize>,
     sniffers: &Sniffers,
 ) -> Result<(), ConfigError> {
     let includes_tcp = networks.is_none_or(|values| values.contains(&Network::Tcp));
     let includes_udp = networks.is_none_or(|values| values.contains(&Network::Udp));
-    if matches!(role, Role::Client) && includes_tcp {
+    let tun_only_tcp = matches!(role, Role::Client)
+        && tun_inbound.is_some_and(|tun| inbounds == Some(&[tun][..]))
+        && networks == Some(&[Network::Tcp][..]);
+    if matches!(role, Role::Client) && includes_tcp && !tun_only_tcp {
         return Err(ConfigError::semantic(ConfigField::RouteRulesAction));
     }
     if let Sniffers::Explicit(values) = sniffers {
-        if matches!(role, Role::Client) && values.iter().any(|value| *value != RouteProtocol::Dns) {
+        if matches!(role, Role::Client)
+            && !tun_only_tcp
+            && values.iter().any(|value| *value != RouteProtocol::Dns)
+        {
             return Err(ConfigError::semantic(ConfigField::RouteRulesSniffers));
         }
         if matches!(role, Role::Server)

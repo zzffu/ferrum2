@@ -17,6 +17,13 @@ const DEFAULT_DNS_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_DNS_MAX_INFLIGHT: u32 = 256;
 const DEFAULT_ROUTE_SNIFF_TIMEOUT_MS: u64 = 300;
 const DEFAULT_ROUTE_SNIFF_MAX_BYTES: usize = 8_192;
+const DEFAULT_TUN_MTU: u64 = 1_420;
+const DEFAULT_TUN_RING_CAPACITY: u64 = 8_388_608;
+const DEFAULT_TUN_READY_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_TUN_MAX_TCP_FLOWS: u64 = 256;
+const DEFAULT_TUN_TCP_BUFFER_BYTES: u64 = 32_768;
+const DEFAULT_TUN_MAX_UDP_MAPPINGS: u64 = 1_024;
+const DEFAULT_TUN_MAX_UDP_BUFFERED_BYTES: u64 = 16_777_216;
 
 mod error;
 mod load;
@@ -31,5 +38,5 @@ pub use model::{
     DnsInboundConfig, DnsIngressId, DnsQueryType, DnsServerConfig, DnsTransport, LoggingConfig,
     LoggingLevel, MetricsConfig, ReplayConfig, RouteAction, RouteProtocol, RouteSniffConfig,
     RuntimeConfig, SchemaVersion, ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig,
-    Sniffers, UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
+    Sniffers, TunConfig, UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
 };

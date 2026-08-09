@@ -16,10 +16,12 @@ async-trait|0.1.91|registry+https://github.com/rust-lang/crates.io-index|ae36dc4
 atomic-waker|1.1.2|registry+https://github.com/rust-lang/crates.io-index|1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0
 autocfg|1.5.1|registry+https://github.com/rust-lang/crates.io-index|f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53
 base64|0.23.0|registry+https://github.com/rust-lang/crates.io-index|b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9
+bitflags|1.3.2|registry+https://github.com/rust-lang/crates.io-index|bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a
 bitflags|2.13.1|registry+https://github.com/rust-lang/crates.io-index|b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da
 blake3|1.8.5|registry+https://github.com/rust-lang/crates.io-index|0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce
 block-buffer|0.12.1|registry+https://github.com/rust-lang/crates.io-index|d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa
 bumpalo|3.20.3|registry+https://github.com/rust-lang/crates.io-index|72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649
+byteorder|1.5.0|registry+https://github.com/rust-lang/crates.io-index|1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b
 bytes|1.12.1|registry+https://github.com/rust-lang/crates.io-index|fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04
 cc|1.4.0|registry+https://github.com/rust-lang/crates.io-index|5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9
 cfg-if|1.0.4|registry+https://github.com/rust-lang/crates.io-index|9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801
@@ -43,6 +45,10 @@ crypto-common|0.2.2|registry+https://github.com/rust-lang/crates.io-index|ce6e4c
 ctr|0.10.1|registry+https://github.com/rust-lang/crates.io-index|baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21
 ctutils|0.4.2|registry+https://github.com/rust-lang/crates.io-index|7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e
 data-encoding|2.11.1|registry+https://github.com/rust-lang/crates.io-index|4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06
+defmt|0.3.100|registry+https://github.com/rust-lang/crates.io-index|f0963443817029b2024136fc4dd07a5107eb8f977eaf18fcd1fdeb11306b64ad
+defmt|1.1.1|registry+https://github.com/rust-lang/crates.io-index|e2953bfe4f93bbd20cc71198842756f77d161884c99ebbabc41d80231ded88d1
+defmt-macros|1.1.1|registry+https://github.com/rust-lang/crates.io-index|bad9c72e7ca2137e0dc3813245a0d282fd6daad32fd800af018306a9169b5fe8
+defmt-parser|1.0.0|registry+https://github.com/rust-lang/crates.io-index|10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e
 deranged|0.5.8|registry+https://github.com/rust-lang/crates.io-index|7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c
 displaydoc|0.2.7|registry+https://github.com/rust-lang/crates.io-index|c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8
 dtoa|1.0.11|registry+https://github.com/rust-lang/crates.io-index|4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590
@@ -63,6 +69,8 @@ ferrum2-server|0.1.0||
 ferrum2-shadowsocks|0.1.0||
 ferrum2-sniff|0.1.0||
 ferrum2-socks5|0.1.0||
+ferrum2-tun|0.1.0||
+ferrum2-wintun|0.1.0||
 find-msvc-tools|0.1.9|registry+https://github.com/rust-lang/crates.io-index|5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582
 fnv|1.0.7|registry+https://github.com/rust-lang/crates.io-index|3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1
 form_urlencoded|1.2.2|registry+https://github.com/rust-lang/crates.io-index|cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf
@@ -77,7 +85,9 @@ getrandom|0.2.17|registry+https://github.com/rust-lang/crates.io-index|ff2abc00b
 getrandom|0.4.3|registry+https://github.com/rust-lang/crates.io-index|300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099
 ghash|0.6.0|registry+https://github.com/rust-lang/crates.io-index|2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5
 h2|0.4.15|registry+https://github.com/rust-lang/crates.io-index|6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155
+hash32|0.3.1|registry+https://github.com/rust-lang/crates.io-index|47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606
 hashbrown|0.17.1|registry+https://github.com/rust-lang/crates.io-index|ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a
+heapless|0.9.3|registry+https://github.com/rust-lang/crates.io-index|25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4
 heck|0.5.0|registry+https://github.com/rust-lang/crates.io-index|2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea
 hex|0.4.3|registry+https://github.com/rust-lang/crates.io-index|7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70
 hickory-net|0.26.1|registry+https://github.com/rust-lang/crates.io-index|e2295ed2f9c31e471e1428a8f88a3f0e1f4b27c15049592138d1eebe9c35b183
@@ -111,6 +121,7 @@ linux-raw-sys|0.12.1|registry+https://github.com/rust-lang/crates.io-index|32a66
 litemap|0.8.2|registry+https://github.com/rust-lang/crates.io-index|92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0
 lock_api|0.4.14|registry+https://github.com/rust-lang/crates.io-index|224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965
 log|0.4.33|registry+https://github.com/rust-lang/crates.io-index|0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad
+managed|0.8.0|registry+https://github.com/rust-lang/crates.io-index|0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d
 matchers|0.2.0|registry+https://github.com/rust-lang/crates.io-index|d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9
 memchr|2.8.3|registry+https://github.com/rust-lang/crates.io-index|cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98
 mio|1.2.2|registry+https://github.com/rust-lang/crates.io-index|30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427
@@ -161,6 +172,7 @@ simd_cesu8|1.2.0|registry+https://github.com/rust-lang/crates.io-index|11031e251
 simdutf8|0.1.5|registry+https://github.com/rust-lang/crates.io-index|e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e
 slab|0.4.12|registry+https://github.com/rust-lang/crates.io-index|0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5
 smallvec|1.15.2|registry+https://github.com/rust-lang/crates.io-index|8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90
+smoltcp|0.13.1|registry+https://github.com/rust-lang/crates.io-index|5f73d40463bba65efc9adc6370b56df76d563cc46e2482bba58351b4afb7535e
 socket2|0.6.5|registry+https://github.com/rust-lang/crates.io-index|c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4
 stable_deref_trait|1.2.1|registry+https://github.com/rust-lang/crates.io-index|6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596
 subtle|2.6.1|registry+https://github.com/rust-lang/crates.io-index|13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292
@@ -384,8 +396,8 @@ fn approved_lock_identities() -> Vec<LockIdentity> {
         .collect();
     assert_eq!(
         identities.len(),
-        224,
-        "the approved workspace baseline must contain 224 identities"
+        236,
+        "the approved workspace baseline must contain 236 identities"
     );
     let mut sorted = identities.clone();
     sorted.sort();
@@ -580,7 +592,7 @@ fn toolchain_and_msrv_are_pinned() {
 
     let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("root manifest");
     assert!(manifest.contains("edition = \"2024\""));
-    assert!(manifest.contains("rust-version = \"1.88.0\""));
+    assert!(manifest.contains("rust-version = \"1.97.1\""));
     assert!(manifest.contains("resolver = \"3\""));
 
     let cargo_config =
@@ -589,12 +601,12 @@ fn toolchain_and_msrv_are_pinned() {
 
     let workflow = fs::read_to_string(root.join(".github/workflows/m0.yml")).expect("workflow");
     for required in [
-        "rustup toolchain install 1.88.0 --profile minimal",
-        "rustc +1.88.0 -Vv",
-        "cargo +1.88.0 -V",
-        "cargo +1.88.0 check --workspace --all-targets --locked",
-        "cargo +1.88.0 build --workspace --bins --locked",
-        "cargo +1.88.0 test --workspace --locked",
+        "rustup toolchain install 1.97.1 --profile minimal",
+        "rustc +1.97.1 -Vv",
+        "cargo +1.97.1 -V",
+        "cargo +1.97.1 check --workspace --all-targets --locked",
+        "cargo +1.97.1 build --workspace --bins --locked",
+        "cargo +1.97.1 test --workspace --locked",
     ] {
         assert!(workflow.contains(required), "missing MSRV gate: {required}");
     }
@@ -624,6 +636,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "rustls = { version = \"=0.23.43\", default-features = false, features = [\"ring\", \"std\", \"tls12\"] }",
         "tokio-rustls = { version = \"=0.26.4\", default-features = false, features = [\"ring\"] }",
         "httparse = { version = \"=1.10.1\", default-features = false }",
+        "smoltcp = { version = \"=0.13.1\", default-features = false, features = [\"std\", \"medium-ip\", \"proto-ipv4\", \"proto-ipv6\", \"socket-tcp\", \"socket-tcp-reno\", \"socket-udp\", \"iface-max-addr-count-2\", \"iface-max-route-count-2\", \"assembler-max-segment-count-4\"] }",
         "aes-gcm = { version = \"=0.11.0\", default-features = false, features = [\"aes\", \"bytes\", \"zeroize\"] }",
         "chacha20poly1305 = { version = \"=0.11.0\", default-features = false, features = [\"bytes\", \"zeroize\"] }",
         "blake3 = { version = \"=1.8.5\", default-features = false, features = [\"std\", \"zeroize\"] }",
@@ -668,6 +681,8 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "ferrum2-shadowsocks",
         "ferrum2-sniff",
         "ferrum2-socks5",
+        "ferrum2-tun",
+        "ferrum2-wintun",
         "futures-util",
         "getrandom",
         "h2",
@@ -682,6 +697,7 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         "serde",
         "serde_json",
         "shadowsocks-crypto",
+        "smoltcp",
         "socket2",
         "tempfile",
         "thiserror",
@@ -711,6 +727,113 @@ fn direct_dependency_versions_and_features_match_the_approved_baseline() {
         assert!(
             !manifest.contains(forbidden),
             "forbidden dependency or feature: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn tun_dependency_edges_and_unsafe_exception_are_exact() {
+    let root = workspace_root();
+    let metadata = metadata();
+    let packages = metadata["packages"].as_array().expect("packages");
+    let tun = packages
+        .iter()
+        .find(|package| package["name"] == "ferrum2-tun")
+        .expect("TUN package");
+    let smoltcp = tun["dependencies"]
+        .as_array()
+        .expect("TUN dependencies")
+        .iter()
+        .find(|dependency| dependency["name"] == "smoltcp")
+        .expect("smoltcp edge");
+    assert_eq!(smoltcp["req"], "=0.13.1");
+    assert_eq!(smoltcp["uses_default_features"], false);
+    assert_eq!(
+        smoltcp["features"],
+        serde_json::json!([
+            "std",
+            "medium-ip",
+            "proto-ipv4",
+            "proto-ipv6",
+            "socket-tcp",
+            "socket-tcp-reno",
+            "socket-udp",
+            "iface-max-addr-count-2",
+            "iface-max-route-count-2",
+            "assembler-max-segment-count-4"
+        ])
+    );
+    assert_eq!(
+        packages
+            .iter()
+            .filter(|package| package["name"] == "smoltcp" && package["version"] == "0.13.1")
+            .count(),
+        1
+    );
+
+    let wintun = packages
+        .iter()
+        .find(|package| package["name"] == "ferrum2-wintun")
+        .expect("Wintun package");
+    let windows = wintun["dependencies"]
+        .as_array()
+        .expect("Wintun dependencies")
+        .iter()
+        .find(|dependency| dependency["name"] == "windows-sys")
+        .expect("windows-sys edge");
+    assert_eq!(windows["req"], "=0.61.2");
+    assert_eq!(windows["uses_default_features"], false);
+    assert_eq!(
+        windows["features"],
+        serde_json::json!([
+            "Win32_Foundation",
+            "Win32_Storage_FileSystem",
+            "Win32_System_LibraryLoader",
+            "Win32_System_Threading",
+            "Win32_Security_Cryptography",
+            "Win32_NetworkManagement_IpHelper",
+            "Win32_NetworkManagement_Ndis",
+            "Win32_Networking_WinSock"
+        ])
+    );
+    assert_eq!(
+        windows["target"],
+        "cfg(all(windows, target_arch = \"x86_64\"))"
+    );
+
+    let manifest =
+        fs::read_to_string(root.join("crates/ferrum2-wintun/Cargo.toml")).expect("Wintun manifest");
+    assert!(manifest.contains("[lints.rust]\nunsafe_code = \"deny\""));
+    let library =
+        fs::read_to_string(root.join("crates/ferrum2-wintun/src/lib.rs")).expect("Wintun library");
+    assert!(library.contains("#![deny(unsafe_code)]"));
+    assert!(library.contains("#[allow(unsafe_code)]\nmod windows;"));
+
+    let workflow = fs::read_to_string(root.join(".github/workflows/m0.yml")).expect("workflow");
+    for required in [
+        "windows-tun-e2e:",
+        "https://www.wintun.net/builds/wintun-0.14.1.zip",
+        "tests/platform/qualify_windows_tun.ps1 -Mode lifecycle",
+        "needs['windows-tun-e2e'].result",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "missing hosted foundation contract {required}"
+        );
+    }
+    let controller = fs::read_to_string(root.join("tests/platform/qualify_windows_tun.ps1"))
+        .expect("TUN controller");
+    for required in [
+        "profile=foundation foundation=4/4 cleanup=PASS",
+        "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51",
+        "E5DA8447DC2C320EDC0FC52FA01885C103DE8C118481F683643CACC3220DAFCE",
+        "Get-AuthenticodeSignature",
+        "Remove-NetRoute",
+        "Wait-AdapterAbsent",
+    ] {
+        assert!(
+            controller.contains(required),
+            "missing controller contract {required}"
         );
     }
 }
@@ -1453,6 +1576,7 @@ fn binary_tokio_metadata_trees_and_lock_edges_prove_dev_only_test_util() {
                 "ferrum2-shadowsocks".to_owned(),
                 "ferrum2-sniff".to_owned(),
                 "ferrum2-socks5".to_owned(),
+                "ferrum2-tun".to_owned(),
                 "hickory-proto".to_owned(),
                 "tokio".to_owned(),
                 "tracing".to_owned(),
@@ -2075,8 +2199,8 @@ fn lock_package_identities_exactly_match_the_approved_workspace_baseline() {
 
     assert_eq!(
         actual.len(),
-        224,
-        "candidate lock must contain 224 packages"
+        236,
+        "candidate lock must contain 236 packages"
     );
     assert_eq!(
         actual, expected,
@@ -2153,7 +2277,7 @@ fn every_project_package_inherits_repository_policy() {
             .expect("member package");
         assert_eq!(package["version"], "0.1.0");
         assert_eq!(package["edition"], "2024");
-        assert_eq!(package["rust_version"], "1.88.0");
+        assert_eq!(package["rust_version"], "1.97.1");
         assert_eq!(package["license"], "GPL-3.0-only");
         assert_eq!(
             package["publish"],
@@ -2164,8 +2288,13 @@ fn every_project_package_inherits_repository_policy() {
         let manifest_path =
             PathBuf::from(package["manifest_path"].as_str().expect("manifest path"));
         let manifest = fs::read_to_string(&manifest_path).expect("member manifest");
+        let lint_policy = if package["name"] == "ferrum2-wintun" {
+            "[lints.rust]\nunsafe_code = \"deny\""
+        } else {
+            "[lints]\nworkspace = true"
+        };
         assert!(
-            contains_manifest_policy(&manifest, "[lints]\nworkspace = true"),
+            contains_manifest_policy(&manifest, lint_policy),
             "{} must inherit workspace lints",
             manifest_path
                 .strip_prefix(&root)

@@ -14,20 +14,21 @@ use ferrum2_core::selector::{
     TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
 };
 use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
+use ipnet::{Ipv4Net, Ipv6Net};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{ConfigError, ConfigErrorKind, ConfigField};
 use crate::model::{
     ClientInboundConfig, ClientOutboundConfig, DnsConfig, DnsInboundConfig, DnsServerConfig,
     DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig, ReplayConfig, RuntimeConfig,
-    SchemaVersion, ServerInboundConfig, ServerOutboundConfig, UdpConfig, ValidatedClientConfig,
-    ValidatedServerConfig,
+    SchemaVersion, ServerInboundConfig, ServerOutboundConfig, TunConfig, UdpConfig,
+    ValidatedClientConfig, ValidatedServerConfig,
 };
 use crate::raw::{
     RawChain, RawClient, RawClientInbound, RawClientOutbound, RawClientRoot, RawDns, RawLogging,
     RawMetrics, RawReplay, RawRoute, RawRouteTarget, RawRuntime, RawSelector, RawServer,
-    RawServerInbound, RawServerOutbound, RawServerRoot, RawShadowsocks, RawUdp, ScalarOrList,
-    SecretString,
+    RawServerInbound, RawServerOutbound, RawServerRoot, RawShadowsocks, RawTun, RawUdp,
+    ScalarOrList, SecretString,
 };
 
 mod v2;
@@ -59,6 +60,7 @@ fn client_global_tags(raw: &RawClientRoot) -> Vec<String> {
                 .iter()
                 .map(|item| item.tag.clone()),
         )
+        .chain(raw.tun.iter().map(|tun| tun.tag.clone()))
         .collect()
 }
 
@@ -113,6 +115,7 @@ struct GraphValidation<'a> {
     route_roots: &'a [&'a str],
     detour_tags: &'a [&'a str],
     source: &'a str,
+    retained_client_inbounds: usize,
 }
 
 fn validate_dns(
@@ -388,11 +391,147 @@ fn valid_doh_path(path: &str) -> bool {
             .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'?' | b'#'))
 }
 
+struct ValidatedTun {
+    tag: String,
+    outbound: Option<String>,
+    config: TunConfig,
+}
+
+fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
+    validate_tag(&raw.tag, ConfigField::TunTag)?;
+    if raw.adapter_name.is_empty()
+        || raw.adapter_name.encode_utf16().count() >= 128
+        || raw.adapter_name.chars().any(char::is_control)
+    {
+        return Err(ConfigError::semantic(ConfigField::TunAdapterName));
+    }
+    let ipv4_address: Ipv4Net = raw
+        .ipv4_address
+        .parse()
+        .map_err(|_| ConfigError::semantic(ConfigField::TunIpv4Address))?;
+    let ipv4 = ipv4_address.addr();
+    if ipv4.is_unspecified()
+        || ipv4.is_loopback()
+        || ipv4.is_multicast()
+        || ipv4 == ipv4_address.network()
+        || ipv4 == ipv4_address.broadcast()
+    {
+        return Err(ConfigError::semantic(ConfigField::TunIpv4Address));
+    }
+    let ipv6_address: Ipv6Net = raw
+        .ipv6_address
+        .parse()
+        .map_err(|_| ConfigError::semantic(ConfigField::TunIpv6Address))?;
+    let ipv6 = ipv6_address.addr();
+    if ipv6.is_unspecified() || ipv6.is_loopback() || ipv6.is_multicast() {
+        return Err(ConfigError::semantic(ConfigField::TunIpv6Address));
+    }
+    if !(1_280..=1_500).contains(&raw.mtu) {
+        return Err(ConfigError::semantic(ConfigField::TunMtu));
+    }
+    if !(131_072..=67_108_864).contains(&raw.ring_capacity) || !raw.ring_capacity.is_power_of_two()
+    {
+        return Err(ConfigError::semantic(ConfigField::TunRingCapacity));
+    }
+    if !(1_000..=60_000).contains(&raw.ready_timeout_ms) {
+        return Err(ConfigError::semantic(ConfigField::TunReadyTimeout));
+    }
+    if !(1..=4_096).contains(&raw.max_tcp_flows) {
+        return Err(ConfigError::semantic(ConfigField::TunMaxTcpFlows));
+    }
+    if !(4_096..=262_144).contains(&raw.tcp_buffer_bytes) {
+        return Err(ConfigError::semantic(ConfigField::TunTcpBufferBytes));
+    }
+    if !(1..=8_192).contains(&raw.max_udp_mappings) {
+        return Err(ConfigError::semantic(ConfigField::TunMaxUdpMappings));
+    }
+    if !(65_536..=134_217_728).contains(&raw.max_udp_buffered_bytes) {
+        return Err(ConfigError::semantic(ConfigField::TunMaxUdpBufferedBytes));
+    }
+    let terms = [
+        raw.ring_capacity.checked_mul(2),
+        raw.max_tcp_flows
+            .checked_mul(raw.tcp_buffer_bytes)
+            .and_then(|value| value.checked_mul(2)),
+        Some(raw.max_udp_buffered_bytes),
+        raw.max_tcp_flows.checked_mul(
+            raw.mtu
+                .checked_add(1_024)
+                .ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))?,
+        ),
+        raw.max_udp_mappings.checked_mul(
+            raw.mtu
+                .checked_add(512)
+                .ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))?,
+        ),
+        raw.mtu.checked_mul(8),
+        Some(1_048_576),
+    ];
+    let owned_buffer_bytes = terms.into_iter().try_fold(0_u64, |total, term| {
+        total
+            .checked_add(term.ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))?)
+            .ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))
+    })?;
+    if owned_buffer_bytes > 268_435_456 {
+        return Err(ConfigError::semantic(ConfigField::TunMemory));
+    }
+
+    Ok(ValidatedTun {
+        tag: raw.tag,
+        outbound: raw.outbound,
+        config: TunConfig {
+            adapter_name: raw.adapter_name.into_boxed_str(),
+            ipv4_address,
+            ipv6_address,
+            mtu: raw.mtu as u16,
+            ring_capacity: raw.ring_capacity as u32,
+            ready_timeout: Duration::from_millis(raw.ready_timeout_ms),
+            max_tcp_flows: raw.max_tcp_flows as usize,
+            tcp_buffer_bytes: raw.tcp_buffer_bytes as usize,
+            max_udp_mappings: raw.max_udp_mappings as usize,
+            max_udp_buffered_bytes: raw.max_udp_buffered_bytes as usize,
+            owned_buffer_bytes,
+        },
+    })
+}
+
+fn validate_tun_targets(
+    tun: &TunConfig,
+    outbounds: &[ClientOutboundConfig],
+    dns: Option<&DnsConfig>,
+) -> Result<(), ConfigError> {
+    for address in outbounds
+        .iter()
+        .map(|outbound| IpAddr::V4(*outbound.server.ip()))
+        .chain(
+            dns.into_iter()
+                .flat_map(|dns| dns.servers.iter().map(|server| server.address.ip())),
+        )
+    {
+        match address {
+            IpAddr::V4(address) if tun.ipv4_address.contains(&address) => {
+                return Err(ConfigError::semantic(ConfigField::TunIpv4Address));
+            }
+            IpAddr::V6(address) if tun.ipv6_address.contains(&address) => {
+                return Err(ConfigError::semantic(ConfigField::TunIpv6Address));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_client(
     mut raw: RawClientRoot,
     source: &str,
 ) -> Result<ValidatedClientConfig, ConfigError> {
     let schema_version = v2::validate_version(raw.schema_version)?;
+    if raw.tun.is_some() && schema_version != SchemaVersion::V2 {
+        return Err(ConfigError::semantic(ConfigField::Tun));
+    }
+    if raw.tun.is_some() && raw.client.is_some() {
+        return Err(ConfigError::semantic(ConfigField::Tun));
+    }
     if schema_version == SchemaVersion::V1
         && raw.route.is_some()
         && raw.udp.as_ref().is_some_and(|udp| udp.enabled)
@@ -403,6 +542,17 @@ pub(super) fn validate_client(
         v2::reject_v1_fields(raw.route.as_ref(), raw.dns.as_ref())?;
     }
     let global_tags = client_global_tags(&raw);
+    let socks_inbound_count = raw.inbounds.as_deref().map_or(0, <[RawClientInbound]>::len);
+    let tun = raw.tun.take().map(validate_tun).transpose()?;
+    if let Some(tun) = &tun {
+        raw.inbounds
+            .get_or_insert_with(Vec::new)
+            .push(RawClientInbound {
+                tag: tun.tag.clone(),
+                listen: "0.0.0.0:0".to_owned(),
+                outbound: tun.outbound.clone(),
+            });
+    }
     let context_inbounds = raw
         .inbounds
         .as_deref()
@@ -421,6 +571,7 @@ pub(super) fn validate_client(
             raw.route.as_ref(),
             &context_inbounds,
             v2::Role::Client,
+            tun.as_ref().map(|_| socks_inbound_count),
             raw.dns.is_some(),
             raw.runtime.max_connections,
             source,
@@ -449,6 +600,7 @@ pub(super) fn validate_client(
             route_roots: &route_roots,
             detour_tags: &detour_tags,
             source,
+            retained_client_inbounds: socks_inbound_count,
         },
     )?;
     let detours = roots.split_off(route_roots.len());
@@ -475,6 +627,9 @@ pub(super) fn validate_client(
         detours,
         source,
     )?;
+    if let Some(tun) = &tun {
+        validate_tun_targets(&tun.config, &outbounds, dns.as_ref())?;
+    }
     let dns_route = if schema_version == SchemaVersion::V2 {
         dns_route_raw
             .as_ref()
@@ -510,6 +665,7 @@ pub(super) fn validate_client(
         outbounds,
         route,
         route_program,
+        tun: tun.map(|tun| tun.config),
         dns,
         dns_route,
         psk,
@@ -525,6 +681,9 @@ pub(super) fn validate_server(
     raw: RawServerRoot,
     source: &str,
 ) -> Result<ValidatedServerConfig, ConfigError> {
+    if raw.tun.is_some() {
+        return Err(ConfigError::semantic(ConfigField::Tun));
+    }
     let schema_version = v2::validate_version(raw.schema_version)?;
     if schema_version == SchemaVersion::V1 {
         v2::reject_v1_fields(raw.route.as_ref(), raw.dns.as_ref())?;
@@ -545,6 +704,7 @@ pub(super) fn validate_server(
             raw.route.as_ref(),
             &context_inbounds,
             v2::Role::Server,
+            None,
             raw.dns.is_some(),
             raw.runtime.max_connections,
             source,
@@ -572,6 +732,7 @@ pub(super) fn validate_server(
             route_roots: &route_roots,
             detour_tags: &detour_tags,
             source,
+            retained_client_inbounds: 0,
         },
     )?;
     let detours = roots.split_off(route_roots.len());
@@ -654,6 +815,7 @@ fn validate_client_graph(
         route_roots,
         detour_tags,
         source,
+        retained_client_inbounds: socks_inbound_count,
     } = validation;
     if chains.is_some()
         && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())
@@ -706,8 +868,12 @@ fn validate_client_graph(
                 {
                     return Err(ConfigError::semantic(ConfigField::InboundsTag));
                 }
-                let listen = parse_endpoint(&inbound.listen, ConfigField::InboundsListen)?;
-                if listens.contains(&listen) {
+                let listen = if index < socks_inbound_count {
+                    parse_endpoint(&inbound.listen, ConfigField::InboundsListen)?
+                } else {
+                    SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0)
+                };
+                if index < socks_inbound_count && listens.contains(&listen) {
                     return Err(ConfigError::semantic(ConfigField::InboundsListen));
                 }
                 listens.push(listen);
@@ -788,10 +954,15 @@ fn validate_client_graph(
             )?;
             let validated_inbounds = listens
                 .into_iter()
+                .take(socks_inbound_count)
                 .map(|listen| ClientInboundConfig { listen })
                 .collect::<Vec<_>>();
+            let compatibility_listen = validated_inbounds.first().map_or(
+                SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
+                |inbound| inbound.listen,
+            );
             Ok((
-                validated_inbounds[0].listen,
+                compatibility_listen,
                 validated_outbounds[route.final_outbound()].server,
                 validated_inbounds,
                 validated_outbounds,
@@ -908,6 +1079,7 @@ fn validate_server_graph(
         route_roots,
         detour_tags,
         source,
+        retained_client_inbounds: _,
     } = validation;
     if selectors.is_some()
         && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())

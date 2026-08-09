@@ -8,8 +8,10 @@ use crate::{
     DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_DNS_MAX_INFLIGHT, DEFAULT_DNS_TIMEOUT_MS,
     DEFAULT_HANDSHAKE_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_LISTEN_BACKLOG,
     DEFAULT_MAX_CONNECTIONS, DEFAULT_REPLAY_CAPACITY, DEFAULT_ROUTE_SNIFF_MAX_BYTES,
-    DEFAULT_ROUTE_SNIFF_TIMEOUT_MS, DEFAULT_SHUTDOWN_GRACE_MS, DEFAULT_UDP_IDLE_TIMEOUT_MS,
-    DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,
+    DEFAULT_ROUTE_SNIFF_TIMEOUT_MS, DEFAULT_SHUTDOWN_GRACE_MS, DEFAULT_TUN_MAX_TCP_FLOWS,
+    DEFAULT_TUN_MAX_UDP_BUFFERED_BYTES, DEFAULT_TUN_MAX_UDP_MAPPINGS, DEFAULT_TUN_MTU,
+    DEFAULT_TUN_READY_TIMEOUT_MS, DEFAULT_TUN_RING_CAPACITY, DEFAULT_TUN_TCP_BUFFER_BYTES,
+    DEFAULT_UDP_IDLE_TIMEOUT_MS, DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,
 };
 
 #[derive(Deserialize)]
@@ -23,6 +25,7 @@ pub(super) struct RawClientRoot {
     pub(super) selectors: Option<Vec<RawSelector>>,
     pub(super) route: Option<RawRoute>,
     pub(super) dns: Option<RawDns>,
+    pub(super) tun: Option<RawTun>,
     pub(super) shadowsocks: RawShadowsocks,
     #[serde(default)]
     pub(super) runtime: RawRuntime,
@@ -43,6 +46,7 @@ pub(super) struct RawServerRoot {
     pub(super) selectors: Option<Vec<RawSelector>>,
     pub(super) route: Option<RawRoute>,
     pub(super) dns: Option<RawDns>,
+    pub(super) tun: Option<RawTun>,
     pub(super) shadowsocks: RawShadowsocks,
     #[serde(default)]
     pub(super) runtime: RawRuntime,
@@ -53,6 +57,30 @@ pub(super) struct RawServerRoot {
     #[serde(default)]
     pub(super) logging: RawLogging,
     pub(super) metrics: Option<RawMetrics>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawTun {
+    pub(super) tag: String,
+    pub(super) adapter_name: String,
+    pub(super) ipv4_address: String,
+    pub(super) ipv6_address: String,
+    pub(super) outbound: Option<String>,
+    #[serde(default = "default_tun_mtu")]
+    pub(super) mtu: u64,
+    #[serde(default = "default_tun_ring_capacity")]
+    pub(super) ring_capacity: u64,
+    #[serde(default = "default_tun_ready_timeout_ms")]
+    pub(super) ready_timeout_ms: u64,
+    #[serde(default = "default_tun_max_tcp_flows")]
+    pub(super) max_tcp_flows: u64,
+    #[serde(default = "default_tun_tcp_buffer_bytes")]
+    pub(super) tcp_buffer_bytes: u64,
+    #[serde(default = "default_tun_max_udp_mappings")]
+    pub(super) max_udp_mappings: u64,
+    #[serde(default = "default_tun_max_udp_buffered_bytes")]
+    pub(super) max_udp_buffered_bytes: u64,
 }
 
 #[derive(Deserialize)]
@@ -446,6 +474,34 @@ const fn default_route_sniff_timeout_ms() -> u64 {
 
 const fn default_route_sniff_max_bytes() -> usize {
     DEFAULT_ROUTE_SNIFF_MAX_BYTES
+}
+
+const fn default_tun_mtu() -> u64 {
+    DEFAULT_TUN_MTU
+}
+
+const fn default_tun_ring_capacity() -> u64 {
+    DEFAULT_TUN_RING_CAPACITY
+}
+
+const fn default_tun_ready_timeout_ms() -> u64 {
+    DEFAULT_TUN_READY_TIMEOUT_MS
+}
+
+const fn default_tun_max_tcp_flows() -> u64 {
+    DEFAULT_TUN_MAX_TCP_FLOWS
+}
+
+const fn default_tun_tcp_buffer_bytes() -> u64 {
+    DEFAULT_TUN_TCP_BUFFER_BYTES
+}
+
+const fn default_tun_max_udp_mappings() -> u64 {
+    DEFAULT_TUN_MAX_UDP_MAPPINGS
+}
+
+const fn default_tun_max_udp_buffered_bytes() -> u64 {
+    DEFAULT_TUN_MAX_UDP_BUFFERED_BYTES
 }
 
 fn default_logging_level() -> String {

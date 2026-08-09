@@ -32,6 +32,8 @@ mod observation;
 mod socks;
 #[path = "run/io.rs"]
 mod tokio_io;
+#[path = "run/tun.rs"]
+mod tun;
 
 use context::{ClientContext, ClientRouting};
 use dns::ClientDnsRoot;
@@ -163,6 +165,7 @@ async fn run_with_registry_and_metrics_inner<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
+    let tun_config = config.tun;
     let dns = match (config.dns, config.dns_route, dns_specs) {
         (
             Some(DnsConfig {
@@ -265,29 +268,35 @@ where
     }
     let tcp_registry = registry.clone();
     let tcp_context = Arc::clone(&context);
-    let mut roots = vec![ProcessRoot::new(move || async move {
-        let mut listeners = Vec::with_capacity(listens.len());
-        for listen in listens {
-            listeners.push(bind_listener(listen, listen_backlog)?);
-        }
-        let supervisor = BoundedSupervisor::new(
-            ClientTcpListeners {
-                listeners,
-                next: AtomicUsize::new(0),
-                #[cfg(test)]
-                accept_errors: None,
-            },
-            max_connections,
-            shutdown_grace,
-            tcp_registry,
-        )
-        .map_err(|_| RunError::StartupProtocol)?;
-        Ok(ClientTcpRoot {
-            supervisor: Some(supervisor),
-            context: tcp_context,
-            routing,
-        })
-    })];
+    let mut roots = Vec::new();
+    if !listens.is_empty() {
+        roots.push(ProcessRoot::new(move || async move {
+            let mut listeners = Vec::with_capacity(listens.len());
+            for listen in listens {
+                listeners.push(bind_listener(listen, listen_backlog)?);
+            }
+            let supervisor = BoundedSupervisor::new(
+                ClientTcpListeners {
+                    listeners,
+                    next: AtomicUsize::new(0),
+                    #[cfg(test)]
+                    accept_errors: None,
+                },
+                max_connections,
+                shutdown_grace,
+                tcp_registry,
+            )
+            .map_err(|_| RunError::StartupProtocol)?;
+            Ok(ClientTcpRoot {
+                supervisor: Some(supervisor),
+                context: tcp_context,
+                routing,
+            })
+        }));
+    }
+    if let Some(tun_config) = tun_config {
+        roots.push(tun::process_root(tun_config));
+    }
     if let Some((inbounds, servers, route, policy, timeout, max_inflight, _)) = dns {
         let ordinary_dns = ordinary_dns.expect("validated DNS graph has an ordinary handle");
         let addresses = inbounds.into_iter().map(|inbound| inbound.listen).collect();

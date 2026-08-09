@@ -9,6 +9,7 @@ use ferrum2_core::route::{
 };
 use ferrum2_core::selector::SelectorControl;
 use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
+use ipnet::{Ipv4Net, Ipv6Net};
 
 /// A validated client configuration with no retained source text.
 pub struct ValidatedClientConfig {
@@ -19,6 +20,7 @@ pub struct ValidatedClientConfig {
     pub outbounds: Vec<ClientOutboundConfig>,
     pub route: RouteTable,
     pub route_program: Option<CompiledRoute>,
+    pub tun: Option<TunConfig>,
     pub dns: Option<DnsConfig>,
     pub dns_route: Option<ClientDnsRoute>,
     pub psk: MethodPsk,
@@ -27,6 +29,22 @@ pub struct ValidatedClientConfig {
     pub udp: Option<UdpConfig>,
     pub logging: LoggingConfig,
     pub metrics: Option<MetricsConfig>,
+}
+
+/// Validated Windows TUN configuration and its complete owned-buffer plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunConfig {
+    pub adapter_name: Box<str>,
+    pub ipv4_address: Ipv4Net,
+    pub ipv6_address: Ipv6Net,
+    pub mtu: u16,
+    pub ring_capacity: u32,
+    pub ready_timeout: Duration,
+    pub max_tcp_flows: usize,
+    pub tcp_buffer_bytes: usize,
+    pub max_udp_mappings: usize,
+    pub max_udp_buffered_bytes: usize,
+    pub owned_buffer_bytes: u64,
 }
 
 /// One validated SOCKS5 listener.

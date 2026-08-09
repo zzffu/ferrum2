@@ -5,7 +5,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const CURRENT_COMPATIBILITY_MEMBERS: [&str; 11] = [
+const CURRENT_COMPATIBILITY_MEMBERS: [&str; 13] = [
     "bins/ferrum2-client",
     "bins/ferrum2-server",
     "crates/ferrum2-config",
@@ -16,6 +16,8 @@ const CURRENT_COMPATIBILITY_MEMBERS: [&str; 11] = [
     "crates/ferrum2-shadowsocks",
     "crates/ferrum2-sniff",
     "crates/ferrum2-socks5",
+    "crates/ferrum2-tun",
+    "crates/ferrum2-wintun",
     "tests/m0-harness",
 ];
 
@@ -2114,6 +2116,7 @@ fn production_owner_dependencies_are_explicit_and_narrow() {
                     "RawServerOutbound",
                     "RawServerRoot",
                     "RawShadowsocks",
+                    "RawTun",
                     "RawUdp",
                     "SecretString",
                     "as_str",
@@ -2123,6 +2126,156 @@ fn production_owner_dependencies_are_explicit_and_narrow() {
         ],
     )
     .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
+    let root = workspace_root();
+    let tun_manifest =
+        fs::read_to_string(root.join("crates/ferrum2-tun/Cargo.toml")).expect("TUN manifest");
+    for forbidden in [
+        "ferrum2-config",
+        "ferrum2-dns",
+        "ferrum2-shadowsocks",
+        "bins/",
+    ] {
+        assert!(
+            !tun_manifest.contains(forbidden),
+            "TUN owns forbidden edge {forbidden}"
+        );
+    }
+    let tun = fs::read_to_string(root.join("crates/ferrum2-tun/src/lib.rs")).expect("TUN source");
+    for required in [
+        "#![forbid(unsafe_code)]",
+        "poll_ingress_single",
+        "const PACKET_QUANTUM: usize = 8",
+        "set_any_ip(true)",
+        "add_default_ipv4_route",
+        "add_default_ipv6_route",
+        "ferrum2-tun-owner",
+        "impl<E> PreparedProcessRoot<E>",
+    ] {
+        assert!(
+            tun.contains(required),
+            "missing TUN owner contract {required}"
+        );
+    }
+    let has_reap_contract = |source: &str| {
+        source
+            .matches("prepare_failure(guard, startup, cleanup).await")
+            .count()
+            >= 3
+            && source.contains("guard.reap().await == OwnerExit::CleanupFailed")
+            && source.contains("tokio::task::spawn_blocking(move || thread.join()).await")
+            && source.contains("tokio::task::block_in_place(move ||")
+    };
+    assert!(
+        has_reap_contract(&tun),
+        "prepare/drop reaping contract missing"
+    );
+    let detached_mutation = tun.replace("guard.reap().await == OwnerExit::CleanupFailed", "false");
+    assert!(
+        !has_reap_contract(&detached_mutation),
+        "cancellation mutation must remove the guarded reap proof"
+    );
+    let has_single_deadline_contract = |source: &str| {
+        source.matches(".checked_add(timeout)").count() == 1
+            && source
+                .matches("std::time::Instant::now() >= deadline")
+                .count()
+                >= 3
+            && source
+                .contains("owner_main(config, owner_stop, owner_active, ready_sender, deadline)")
+    };
+    assert!(
+        has_single_deadline_contract(&tun),
+        "prepare and owner must share one absolute readiness deadline"
+    );
+    let late_ready_mutation = tun.replace("std::time::Instant::now() >= deadline", "false");
+    assert!(
+        !has_single_deadline_contract(&late_ready_mutation),
+        "late-ready mutation must remove the deadline proof"
+    );
+    for forbidden in ["VecDeque", "pub trait", "pub enum", "Interface::poll("] {
+        assert!(
+            !tun.contains(forbidden),
+            "TUN exposes or uses forbidden seam {forbidden}"
+        );
+    }
+
+    let wintun_root =
+        fs::read_to_string(root.join("crates/ferrum2-wintun/src/lib.rs")).expect("Wintun root");
+    let wintun_windows = fs::read_to_string(root.join("crates/ferrum2-wintun/src/windows.rs"))
+        .expect("Wintun FFI module");
+    assert!(wintun_root.contains("#[allow(unsafe_code)]\nmod windows;"));
+    assert_eq!(
+        token_sources_under(&root, &["crates/ferrum2-wintun/src"])
+            .iter()
+            .filter(|source| source.tokens.iter().any(|token| token == "unsafe"))
+            .map(|source| source.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["crates/ferrum2-wintun/src/windows.rs"]
+    );
+    let preserves_setup_cleanup_failure = |wintun: &str, tun: &str| {
+        wintun.contains("Err(_) if owner.cleanup_inner() => Err(CreateError::cleanup())")
+            && tun.contains("if error.is_cleanup_failure()")
+            && tun.contains("guard.reap().await == OwnerExit::CleanupFailed")
+    };
+    assert!(
+        preserves_setup_cleanup_failure(&wintun_windows, &tun),
+        "setup rollback failure must reach the cleanup process error"
+    );
+    let swallowed_cleanup_mutation = wintun_windows.replace(
+        "Err(_) if owner.cleanup_inner() => Err(CreateError::cleanup())",
+        "Err(_) => Err(CreateError::operation())",
+    );
+    assert!(
+        !preserves_setup_cleanup_failure(&swallowed_cleanup_mutation, &tun),
+        "setup cleanup mutation must remove the failure-kind proof"
+    );
+    for forbidden in [
+        "WintunOpenAdapter",
+        "WintunDeleteDriver",
+        "WintunSetLogger",
+        "CreateIpForwardEntry",
+        "SetInterfaceDnsSettings",
+        "Fwpm",
+    ] {
+        assert!(
+            !wintun_windows.contains(forbidden),
+            "forbidden platform surface {forbidden}"
+        );
+    }
+
+    let controller = fs::read_to_string(root.join("tests/platform/qualify_windows_tun.ps1"))
+        .expect("Windows TUN qualification controller");
+    let has_cleanup_snapshots = |source: &str| {
+        source.contains("Get-InterfaceAddressSnapshot")
+            && source.contains("Get-InterfaceRouteSnapshot")
+            && source.contains("Assert-SnapshotEqual $systemRoutes $afterOwnedRoutes")
+            && source.contains("Assert-InterfaceGone $adapterName $ownedInterfaceIndex")
+            && source.contains("Stop-Process -InputObject $activeProcess -Force")
+            && source.contains("$binary --config $config --check-config")
+            && source.contains("Wait-AdapterAppeared $adapterName")
+            && source.contains("$failureExit -ne 0")
+            && source.matches("$foundation++").count() == 4
+            && source.contains("m15_windows_tun_e2e status=PASS profile=foundation")
+    };
+    assert!(
+        has_cleanup_snapshots(&controller),
+        "privileged controller snapshot/fallback contract missing"
+    );
+    let cleanup_mutation = controller.replace(
+        "Assert-SnapshotEqual $systemRoutes $afterOwnedRoutes",
+        "Write-Output $afterOwnedRoutes",
+    );
+    assert!(
+        !has_cleanup_snapshots(&cleanup_mutation),
+        "route-cleanup mutation must remove the snapshot proof"
+    );
+    let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
+        .expect("client composition");
+    assert!(client.contains("roots.push(tun::process_root(tun_config));"));
 }
 
 #[test]
@@ -2519,8 +2672,13 @@ fn runtime_and_library_owners_are_unique_and_composition_only() {
         );
     }
 
-    check_no_identifiers(&sources, &["unsafe", "PlanSnapshot"])
-        .unwrap_or_else(|error| panic!("product source changes unsafe/plan ownership: {error}"));
+    check_no_identifiers(
+        sources
+            .iter()
+            .filter(|source| source.path != "crates/ferrum2-wintun/src/windows.rs"),
+        &["unsafe", "PlanSnapshot"],
+    )
+    .unwrap_or_else(|error| panic!("product source changes unsafe/plan ownership: {error}"));
     let dns_adapters = [
         "bins/ferrum2-client/src/dns_egress.rs",
         "bins/ferrum2-client/src/run/dns.rs",

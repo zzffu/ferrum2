@@ -2126,3 +2126,253 @@ fn invalid_cohort_rows_keep_stable_redacted_categories_and_fields() {
     assert_eq!(io_error.kind(), ConfigErrorKind::Io);
     assert!(Error::source(&io_error).is_none());
 }
+
+fn tun_client(tun: &str) -> String {
+    format!(
+        "schema_version = 2\n{tun}\n[[outbounds]]\ntag = \"proxy\"\nserver = \"192.0.2.10:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+    )
+}
+
+#[test]
+fn tun_only_static_config_appends_one_validated_ordinary_inbound() {
+    let file = TempConfig::text(&tun_client(
+        "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"",
+    ));
+    let config = load_client(file.path()).expect("TUN-only config");
+    let tun = config.tun.expect("validated TUN");
+
+    assert!(config.inbounds.is_empty(), "TUN is not a SOCKS listener");
+    assert_eq!(
+        selected(&config.route, 0),
+        0,
+        "TUN-only ordinary ID is zero"
+    );
+    assert_eq!(tun.adapter_name.as_ref(), "Ferrum2");
+    assert_eq!(tun.ipv4_address.to_string(), "198.18.0.2/30");
+    assert_eq!(tun.ipv6_address.to_string(), "fd00::2/126");
+    assert_eq!(tun.owned_buffer_bytes, 53_995_616);
+}
+
+#[test]
+fn tun_coexistence_preserves_socks_indices_and_routes_tun_last() {
+    let source = tun_client(
+        "[[inbounds]]\ntag = \"socks-a\"\nlisten = \"127.0.0.1:10000\"\n[[inbounds]]\ntag = \"socks-b\"\nlisten = \"127.0.0.1:10001\"\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\n[route]\nfinal = \"proxy\"",
+    );
+    let file = TempConfig::text(&source);
+    let config = load_client(file.path()).expect("coexisting routed TUN");
+
+    assert_eq!(config.inbounds.len(), 2);
+    assert_eq!(selected(&config.route, 0), 0);
+    assert_eq!(selected(&config.route, 1), 0);
+    assert_eq!(
+        selected(&config.route, 2),
+        0,
+        "TUN follows declared SOCKS IDs"
+    );
+}
+
+#[test]
+fn tun_resource_and_shape_failures_are_redacted_and_field_specific() {
+    let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"";
+    let cases = [
+        (
+            "mtu below",
+            base.replace("outbound =", "mtu = 1279\noutbound ="),
+            ConfigField::TunMtu,
+        ),
+        (
+            "ring not power of two",
+            base.replace("outbound =", "ring_capacity = 131073\noutbound ="),
+            ConfigField::TunRingCapacity,
+        ),
+        (
+            "TCP flow zero",
+            base.replace("outbound =", "max_tcp_flows = 0\noutbound ="),
+            ConfigField::TunMaxTcpFlows,
+        ),
+        (
+            "budget over ceiling",
+            base.replace(
+                "outbound =",
+                "ring_capacity = 67108864\nmax_udp_buffered_bytes = 134217728\noutbound =",
+            ),
+            ConfigField::TunMemory,
+        ),
+        (
+            "IPv4 network address",
+            base.replace("198.18.0.2/30", "198.18.0.0/30"),
+            ConfigField::TunIpv4Address,
+        ),
+        (
+            "IPv6 multicast",
+            base.replace("fd00::2/126", "ff02::1/126"),
+            ConfigField::TunIpv6Address,
+        ),
+        (
+            "adapter control",
+            base.replace("Ferrum2", "Ferrum2\\u0001"),
+            ConfigField::TunAdapterName,
+        ),
+    ];
+    for (name, tun, field) in cases {
+        let file = TempConfig::text(&tun_client(&tun));
+        let error = load_client(file.path()).err().expect(name);
+        assert_eq!(
+            (error.kind(), error.field()),
+            (ConfigErrorKind::Semantic, field),
+            "{name}"
+        );
+        assert!(!format!("{error:?}").contains("198.18"), "{name}");
+    }
+
+    let server = TempConfig::text(&format!(
+        "schema_version = 2\n{base}\n[server]\nlisten = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+    ));
+    assert_eq!(
+        load_server(server.path())
+            .err()
+            .expect("server TUN")
+            .field(),
+        ConfigField::Tun
+    );
+    let v1 =
+        TempConfig::text(&tun_client(base).replacen("schema_version = 2", "schema_version = 1", 1));
+    assert_eq!(
+        load_client(v1.path()).err().expect("v1 TUN").field(),
+        ConfigField::Tun
+    );
+}
+
+#[test]
+fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
+    let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"";
+    let mutations = [
+        ("mtu low", "mtu = 1279", ConfigField::TunMtu),
+        ("mtu high", "mtu = 1501", ConfigField::TunMtu),
+        (
+            "ring low",
+            "ring_capacity = 65536",
+            ConfigField::TunRingCapacity,
+        ),
+        (
+            "ring high",
+            "ring_capacity = 134217728",
+            ConfigField::TunRingCapacity,
+        ),
+        (
+            "ready low",
+            "ready_timeout_ms = 999",
+            ConfigField::TunReadyTimeout,
+        ),
+        (
+            "ready high",
+            "ready_timeout_ms = 60001",
+            ConfigField::TunReadyTimeout,
+        ),
+        (
+            "flows low",
+            "max_tcp_flows = 0",
+            ConfigField::TunMaxTcpFlows,
+        ),
+        (
+            "flows high",
+            "max_tcp_flows = 4097",
+            ConfigField::TunMaxTcpFlows,
+        ),
+        (
+            "TCP bytes low",
+            "tcp_buffer_bytes = 4095",
+            ConfigField::TunTcpBufferBytes,
+        ),
+        (
+            "TCP bytes high",
+            "tcp_buffer_bytes = 262145",
+            ConfigField::TunTcpBufferBytes,
+        ),
+        (
+            "mappings low",
+            "max_udp_mappings = 0",
+            ConfigField::TunMaxUdpMappings,
+        ),
+        (
+            "mappings high",
+            "max_udp_mappings = 8193",
+            ConfigField::TunMaxUdpMappings,
+        ),
+        (
+            "UDP bytes low",
+            "max_udp_buffered_bytes = 65535",
+            ConfigField::TunMaxUdpBufferedBytes,
+        ),
+        (
+            "UDP bytes high",
+            "max_udp_buffered_bytes = 134217729",
+            ConfigField::TunMaxUdpBufferedBytes,
+        ),
+    ];
+    for (name, mutation, field) in mutations {
+        let source = base.replace("outbound =", &format!("{mutation}\noutbound ="));
+        let file = TempConfig::text(&tun_client(&source));
+        assert_eq!(
+            load_client(file.path()).err().expect(name).field(),
+            field,
+            "{name}"
+        );
+    }
+
+    for (name, mutation, field) in [
+        (
+            "unknown route mutation",
+            "auto_route = true",
+            ConfigField::Config,
+        ),
+        ("proxy inside v4 prefix", "", ConfigField::TunIpv4Address),
+    ] {
+        let mut source =
+            tun_client(&base.replace("outbound =", &format!("{mutation}\noutbound =")));
+        if name.contains("inside") {
+            source = source.replace("192.0.2.10:8388", "198.18.0.1:8388");
+        }
+        let file = TempConfig::text(&source);
+        assert_eq!(
+            load_client(file.path()).err().expect(name).field(),
+            field,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn tun_tcp_sniff_is_narrowly_capable_only_for_the_tun_inbound() {
+    let routed = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\n[route]\nfinal = \"proxy\"\n[[route.rules]]\ninbound = \"tun-in\"\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\ninbound = \"tun-in\"\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\"";
+    let file = TempConfig::text(&tun_client(routed));
+    load_client(file.path()).expect("TUN-only TCP sniff");
+
+    for (name, mutation) in [
+        (
+            "wildcard",
+            routed.replacen("inbound = \"tun-in\"\nnetwork", "network", 1),
+        ),
+        (
+            "mixed SOCKS and TUN",
+            routed
+                .replacen(
+                    "[tun]",
+                    "[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\n[tun]",
+                    1,
+                )
+                .replacen(
+                    "inbound = \"tun-in\"",
+                    "inbound = [\"socks\", \"tun-in\"]",
+                    1,
+                ),
+        ),
+    ] {
+        let file = TempConfig::text(&tun_client(&mutation));
+        assert_eq!(
+            load_client(file.path()).err().expect(name).field(),
+            ConfigField::RouteRulesAction,
+            "{name}"
+        );
+    }
+}

@@ -26,6 +26,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if config.tun.is_some() && !cli::tun_target_supported() {
+        eprintln!("error[config.semantic] tun: configuration value is invalid");
+        return ExitCode::from(2);
+    }
     if cli.check_config {
         println!("configuration valid");
         return ExitCode::SUCCESS;
