@@ -189,15 +189,20 @@ silently change this contract；it requires an explicit control amendment and fr
 
 - `prepare` MUST first start the final stack-owner thread，then await one bounded acknowledgement。Only that
   thread may verify/load the DLL，create a new adapter，obtain identity，snapshot/set IPv4 and IPv6 MTU
-  separately，create the two exact addresses，wait DAD，start the session and construct smoltcp behind its
-  own reverse journal。Setup failure MUST complete that journal and exit before `prepare` reports failure；
-  successful setup MUST acknowledge before the same absolute `ready_timeout_ms` deadline。
+  separately，create the two exact addresses，start the Wintun session and obtain its session-owned read
+  event，then wait DAD and construct smoltcp behind its own reverse journal。Starting the session is required
+  to bring Wintun media up；it is not readiness and MUST NOT begin RX/TX、stack polling or admission。
+  Setup failure MUST complete that journal and exit before `prepare` reports failure；successful setup MUST
+  acknowledge before the same absolute `ready_timeout_ms` deadline。
 - The async prepare side MUST retain a drop guard from thread spawn through successful root handoff。Timeout、
   cancellation or unwind before handoff MUST signal the same rollback command and reap the owner；a detached
   setup/owner thread is never an accepted failure result。
-- Address readiness means both exact rows have `DadState == IpDadStatePreferred`。`Tentative` continues to
-  wait only until the absolute deadline；`Duplicate`、`Invalid` or `Deprecated` fail immediately。Timeout or
-  row disappearance fails setup and enters the same thread-owned rollback path。
+- Ferrum2 MUST NOT set either creation row's input `DadState` to request Windows optimistic DAD。DAD is
+  evaluated only after `WintunStartSession` succeeds。Address readiness means both exact rows have
+  `DadState == IpDadStatePreferred` naturally；`Tentative` continues to wait only until the unchanged
+  absolute deadline，while `Duplicate`、`Invalid` or `Deprecated` fail immediately。Timeout、cancellation or
+  row disappearance fails setup，ends the created session first and enters the same thread-owned rollback
+  path。
 - No flow or mapping may be admitted during prepare。Synchronous `activate` MUST be non-blocking and may
   only open the admission gate；it MUST NOT perform Win32 calls or wait for the owner thread。
 - Readiness MUST be a fixed low-cardinality state after activation；it MUST NOT emit adapter name/index、

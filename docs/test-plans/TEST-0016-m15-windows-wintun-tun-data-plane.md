@@ -16,7 +16,7 @@
 | Wintun ZIP/DLL hash、license、PE/signature/exports | `windows-tun-e2e` PowerShell preflight against official ZIP | hosted job invokes `pwsh ... -Mode artifact`；standalone local run is diagnostic |
 | Exact `windows-sys 0.61.2` direct eight-feature/default-off edge、no delta outside that list's Cargo feature closure and sole no-default `smoltcp 0.13.1` ten-feature identity without auto echo | Existing workspace lock/feature policy mutation guards | `cargo test -p ferrum2-m0-harness --test workspace_policy --locked`；`cargo tree -i smoltcp@0.13.1 -e features --locked` plus windows-sys inverse tree |
 | Trusted local non-reparse sibling/System32-only load、held-path hash/load identity、exact 11-symbol failure and narrow unsafe ABI | `ferrum2-wintun` unit/negative tables + source/lock guards | `cargo test -p ferrum2-wintun --locked`；`cargo test -p ferrum2-m0-harness --test architecture --locked` |
-| Adapter/address/per-family MTU/DAD/session prepare and reverse rollback | Direct ephemeral privileged `windows-tun-e2e` smoke with failure at every setup step | hosted job invokes `pwsh ... -Mode lifecycle`；standalone local run is diagnostic |
+| Adapter/per-family MTU/address/session/DAD/stack prepare and reverse rollback | Direct ephemeral privileged `windows-tun-e2e` smoke with failure at every setup step | hosted job invokes `pwsh ... -Mode lifecycle`；standalone local run is diagnostic |
 | Only expected address-derived Windows rows appear；external routes untouched；adapter truly disappears/rebinds | Before/ready/after OS snapshots and controller-owned narrow-route sentinels | same `-Mode lifecycle` |
 | Single setup/cleanup owner thread、packet lifetime、bounded queues/generation IDs、zero owners | Private memory device + owner/lifecycle mutation tests | `cargo test -p ferrum2-tun --locked` |
 | Exact two smoltcp AnyIP routes and bounded single-packet polling quantum | Route-count/lookup/full and starvation mutations on the private memory device | `cargo test -p ferrum2-tun stack_route --locked` |
@@ -51,11 +51,14 @@
   reparse executable-directory component MUST fail before `LoadLibraryExW`。Path-component retarget、file
   replacement、truncate、rename and writable-open attempts MUST fail while held directory/file handles and the
   library live and succeed only after cleanup。A mutation MUST fail if load can precede every path check/hash。
-- No admin、adapter-name collision、owner-thread spawn、DLL/create/address/IPv4-MTU/IPv6-MTU/DAD/session/
+- No admin、adapter-name collision、owner-thread spawn、DLL/create/IPv4-MTU/IPv6-MTU/address/session/DAD/
   smoltcp failure at every position；later-root failure after TUN prepare；owner panic/EOF；cleanup conflict
-  and close-with-leak。Only `IpDadStatePreferred` passes；Tentative→Preferred、Tentative→timeout and direct
-  Duplicate/Invalid/Deprecated rows are required。Every row proves cleanup completes on the owner thread
-  before its join and that no wait overlaps `WintunEndSession`。
+  and close-with-leak。A call-order mutation MUST fail if DAD is queried before `WintunStartSession`，and
+  source guards MUST fail either optimistic-DAD assignment。Only natural `IpDadStatePreferred` passes；both
+  families prove post-session Tentative→Preferred，plus Tentative→timeout and direct Duplicate/Invalid/
+  Deprecated rows。A session-created DAD failure MUST end that session before address/MTU rollback。Every
+  row proves cleanup completes on the owner thread before its join and that no wait overlaps
+  `WintunEndSession`。
 - IPv4 tables MUST cover every length/header-checksum/transport-checksum/zero-port/TCP-data-offset/UDP-length
   boundary，IHL `4/5/6`，reserved/MF/offset combinations，DF allowed，ICMP/unknown protocol，MTU±1 and trailing
   bytes。IPv6 MUST cover payload-length/checksum/zero-port boundaries and base Next Header `0,43,44,50,51,

@@ -73,7 +73,8 @@ test/tool descendant修复。Final Architect/QA均`PASS_WITH_NOTES`且zero findi
 ratio PASS，`+5377/0/0` numeric advisory已接受。未force-push、PR、tag、package、release或publish。
 M15现为`executing`：T01已冻结contracts/control；T02 exact integration `fc617cda…`澄清并证明UDP
 超限候选只做ephemeral selector/plan-limit计算，A超限零提交后B合法候选被采用，提交后切回A仍固定B。
-Engineer、Architect和QA验证通过，numeric `+3/0/0`及一次外层timeout note已接受，T03 ready。后续按
+Engineer、Architect和QA验证通过，numeric `+3/0/0`及一次外层timeout note已接受。T03 active；真实
+Wintun evidence已把F05勘误为session/media-up先于non-optimistic DAD，仍须两行自然Preferred才ready。后续按
 T03→T04→T05→T06→T07串行drain；本次execute已授权所需non-force push、direct hosted probe及
 same-SHA performance dispatch，未授权rerun、force-push、PR、tag、package、release或publication。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
@@ -1139,7 +1140,9 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
   fragments and two deep modules (`ferrum2-wintun`/`ferrum2-tun`)。
 - **Ownership:** external controller owns narrow capture routes；product owns only its created adapter、
   addresses、per-family MTU、session、thread and flows/mappings。Address-derived connected/local route rows
-  are Windows-managed and are verified by snapshots，not mutated through product route APIs。
+  are Windows-managed and are verified by snapshots，not mutated through product route APIs。Setup uses
+  MTU → addresses → session/media up → natural DAD → stack；optimistic DAD is forbidden and session start
+  alone is never readiness。
 - **Tickets:** T01 contract/control → T02 existing UDP commit-order proof → T03 privileged Wintun-to-stack
   foundation → T04 TCP → T05 UDP/DNS → T06 integrated evidence → T07 exact qualification；serial drain。
 - **Footprint/performance:** planning code/tests `25586/45009`，case/support/fixture `39260/5152/597`；
@@ -1148,8 +1151,8 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 - **Deferred/out of scope:** explicit/automatic/default/bypass route、system DNS、WFP、network monitoring、
   fragments、ICMP、Fake-IP、process routing、non-Windows/non-AMD64 TUN、multi-stack/sharding、installer、
   service、DLL redistribution、package/release/publication。
-- **Next/remote boundary:** T01/T02 done and T03 ready；create/bind its isolated worktree from the exact
-  integration branch HEAD containing the T02 status record。Required non-force pushes、the direct hosted probe and the
+- **Next/remote boundary:** T01/T02 done and T03 active；its isolated worktree is running remaining local
+  gates after the reviewed F05 lifecycle-order contract correction。Required non-force pushes、the direct hosted probe and the
   same-SHA performance dispatch are authorized；rerun、force-push、PR、tag、package、release and publication
   are not。Hyper-V/self-hosted remains fallback only after a recorded direct capability failure。Combined
   Wintun/Ferrum2 redistribution remains blocked pending the responsible license decision。
@@ -1256,7 +1259,7 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 | invalid首包抢占client association、缓存首包丢失/重复或后续数据报重新选route/selector | P0 | M14 | source/wire-valid classification gate、one terminal transition、first-packet exact-once replay、different-target/switch/no-reentry mutations |
 | schema-v1 routed+UDP被静默重解释或旧逐包client route残留为第二数据面 | P0 | M14 | explicit v2、v1 zero-side-effect migration rejection、source/architecture guard和两版本config matrix |
 | Wintun DLL被搜索劫持、ABI/architecture/hash漂移或custom binary license被误当普通开源许可 | P0 | M15 | executable-sibling absolute/System32-only load、exact ZIP+DLL hash、PE/signature/export/license preflight；no redistribution pending owner/legal decision |
-| Wintun pointer/HANDLE跨thread/await、wait中结束session或silent adapter-removal形成UAF/leak | P0 | M15 | one audited FFI module、owner-thread lexical lifetime、owner wake/stop-poll/EndSession/cleanup/exit before caller join、failure-position rollback、privileged absence/rebind postconditions |
+| Wintun pointer/HANDLE跨thread/await、pre-session disconnected media阻塞DAD、wait中结束session或silent adapter-removal形成UAF/leak | P0 | M15 | one audited FFI module、MTU/address→session/media-up→non-optimistic DAD→stack、owner-thread lexical lifetime、owner wake/stop-poll/EndSession/cleanup/exit before caller join、failure-position rollback、privileged absence/rebind postconditions |
 | interface address/MTU或external route所有权错误导致host route污染/blackhole | P0 | M15 | no product forward/DNS/WFP API、separate IPv4/IPv6 MTU journal、exact-address deletion、before/ready/after connected-row snapshots、controller exact-route cleanup |
 | fragment/ICMP/unknown extension绕过bounds，或smoltcp dynamic allocation/queue pressure扩大内存 | P0 | M15 | ingress+egress TCP/UDP-only filters、all fragments rejected、checked 64-MiB default/256-MiB hard plan、private bounded fake mutations |
 | TUN TCP/UDP复制M14 policy/DNS/SIP022或在selected failure/后续datagram重新进入policy | P0 | M15 | binary-private shared terminal Adapter、existing DnsProxy/egress/association/relay symbols、source guards、selector/no-fallback/no-reentry mutations |
@@ -1399,3 +1402,4 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 | 2026-08-09 | M15 dependency/MSRV owner amendment | Owner明确要求exact smoltcp 0.13.1及当前latest stable rustc；规划日官方latest为Rust 1.97.1，现有selected build toolchain已匹配 | 保留no-default literal ten-feature graph、双向TCP/UDP filter和no-fragment边界；明确不启用正向`auto-icmp-echo-reply`。T03把workspace、CI及policy MSRV从1.88.0原子提升至1.97.1，Rust1.91只作为upstream minimum事实；未来stable不自动漂移 | M15 milestone/ADR/SPEC/TEST/research/T01/T03/T06/T07同步；control-only T01不修改product/workflow，未授权push/dispatch/release/publication |
 | 2026-08-09 | M15-T01 accept / execute | M15改为`executing`；T01 candidate `4942a3d…`通过review/validation，T02 ready | Qualified/planning identities、manual-route/schema-v2/two-module ownership、Wintun artifact/dependency/MSRV facts、packet/flow boundaries and schema-3 control agree；bounded primary Architect/QA `PASS` with zero finding | Quick、Rust 1.88 historical、Rust 1.97.1 forward、footprint integrity/numeric `PASS` and `0/0/0`；execute授权required non-force pushes、direct hosted probe及same-SHA performance dispatch；no rerun/force-push/PR/tag/package/release/publication |
 | 2026-08-09 | M15-T02 integrate | Exact `fc617cda…` proves rejected plan-bound UDP candidates commit nothing，the next valid candidate re-reads selector state，and a live association retains its accepted snapshot | Existing regression performs A→over-limit drop→B valid and B→A after commit；runtime unchanged。Architect/QA both `PASS_WITH_NOTES`，zero blocker/major/minor | Focused、architecture、workspace and footprint integrity PASS；numeric `+3/0/0` existing-file signal and one outer timeout/exact rerun note accepted；T03 ready，no remote action |
+| 2026-08-09 | M15-T03 F05 contract erratum | Correct Wintun setup to MTU/address → StartSession/media up → natural dual-family DAD → stack/Ready；optimistic DAD remains forbidden and exact Preferred remains mandatory | Exact 0.14.1 driver registers rings before reporting connected media；local elevated Windows 10.0.26200.0 showed pre-session Disconnected/non-ready rows，then post-session IPv4/IPv6 Tentative→Preferred within one deadline | Contract Architect `M15-T03-CONTRACT-001` required the narrow in-place ADR/SPEC/TEST/ticket/milestone/research correction；no new seam、ADR、dependency、product route API or readiness weakening |

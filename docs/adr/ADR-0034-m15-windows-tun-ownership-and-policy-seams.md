@@ -63,8 +63,11 @@ trust premise explicit and prevents a path component from being retargeted durin
 
 Configuration parsing and `--check-config` remain free of DLL、driver、privilege、thread and OS resources。
 During async `prepare`，the TUN `ProcessRoot` first starts the final synchronous owner thread。That same
-thread secure-loads/verifies the DLL，creates the adapter，snapshots/configures addresses and per-family MTU，
-waits bounded DAD，starts the Wintun session and constructs smoltcp，then sends one prepared acknowledgement。
+thread secure-loads/verifies the DLL，creates the adapter，snapshots/configures per-family MTU and the two
+addresses，then starts the Wintun session to bring the adapter media up before it waits bounded DAD and
+constructs smoltcp。The creation rows do not request optimistic DAD；session start is a media-liveness
+prerequisite，not readiness，and no packet polling or admission begins before both rows are naturally
+`IpDadStatePreferred`。Only then does the thread send one prepared acknowledgement。
 On any setup failure it runs its own reverse journal before reporting failure and exiting；the async root
 reaps the exited thread without blocking a Tokio worker。
 

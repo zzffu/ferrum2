@@ -256,6 +256,23 @@ route 状态，即使应用从未调用 `CreateIpForwardEntry2`。
   运行期间若第三方并发修改 MTU，API 没有 compare-and-swap，所谓精确 rollback 所有权仍是
   undecidable policy，计划应规定冲突时 fail/leave/report，而不是静默覆盖。
 
+### 5.1 Execution addendum：Wintun session 是 DAD 的 media-liveness 前提
+
+2026-08-09 在 Windows `10.0.26200.0` AMD64 elevated 环境，以官方 Wintun `0.14.1` ZIP
+`07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51` 和 AMD64 DLL
+`e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce` 重跑 privileged lifecycle。
+地址创建后、session 前，adapter 是 `MediaConnectStateDisconnected`，
+精确 IPv4/IPv6 rows 无法完成 DAD；移除两处 optimistic `DadState=Preferred` 输入并先调用
+`WintunStartSession` 后，两行首态均为 `Tentative(1)`，随后 IPv6、IPv4 依次自然达到
+`Preferred(4)`，均在同一个 15 秒绝对期限内。
+
+这与 exact 0.14.1 [`api/session.c`](https://git.zx2c4.com/wintun/plain/api/session.c?id=bfef136abfa1665c2592be09a7e383d646cdbe6e)
+注册 rings、[`driver/wintun.c`](https://git.zx2c4.com/wintun/plain/driver/wintun.c?id=bfef136abfa1665c2592be09a7e383d646cdbe6e)
+随注册切换 media connected 的行为，以及 Microsoft 对 media reconnect 会重启/延长 DAD 的说明一致。
+最终顺序因此是 MTU → addresses → session/media up → natural DAD → stack →
+Ready；session start 本身不是 readiness，且不采用官方 example 中为加速启动设置的 optimistic DAD。
+失败回滚仍先 `WintunEndSession`，再删除 addresses、恢复两族 MTU、关闭 adapter/DLL/handles。
+
 ## 6. 计划必须修改的最小清单
 
 1. 对 Wintun 同时固定 ZIP hash 和 AMD64 DLL hash；把 custom binary license 与 GPL-3.0-only

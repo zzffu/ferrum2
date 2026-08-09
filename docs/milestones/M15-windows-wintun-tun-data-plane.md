@@ -43,7 +43,9 @@ owner-provided design input，不是仓库证据。上游事实与纠正记录�
 - 只增加 `ferrum2-wintun` 与 `ferrum2-tun` 两个 deep modules。最小 address/MTU Win32 owner 与
   Wintun adapter 同生命周期，故不建立独立 `ferrum2-windows-net` crate。
 - `--check-config` 仍无 DLL、driver、admin、thread 或 OS mutation。`ProcessRoot::prepare` 先启动最终
-  owner thread，由该线程独占完成并回滚 DLL/adapter/address/MTU/DAD/session/smoltcp setup；停止时该
+  owner thread，由该线程独占完成并回滚 DLL/adapter/MTU/address/session/DAD/smoltcp setup；session
+  仅先使 Wintun media online，creation rows不请求optimistic DAD，且两行自然到达Preferred前不
+  poll packet；停止时该
   线程先醒出 wait、结束 session、清理并退出，async root 最后 join。同步 `activate` 只发送
   non-blocking admission signal，不修改 `ProcessSupervisor` interface。
 - 配置 address/prefix 可能产生 Windows-managed connected/local route rows。合同只禁止产品显式
@@ -107,8 +109,9 @@ owner-provided design input，不是仓库证据。上游事实与纠正记录�
 - [ ] `--check-config` validates tags、addresses、bounds and checked memory with no runtime/OS side effect；
       exact default budget is `53,995,616` bytes；unsupported target、OS、DLL、ABI、privilege and driver
       failures occur before public service。
-- [ ] Prepare starts the final owner thread and that thread creates/reverses adapter/address/per-family MTU/
-      session/smoltcp state；activate is non-blocking；both DAD rows reach exactly Preferred before ready；
+- [ ] Prepare starts the final owner thread and that thread creates/reverses adapter/per-family MTU/address/
+      session/DAD/smoltcp state；session precedes DAD only as media-liveness prerequisite，optimistic DAD is
+      not requested，and activate is non-blocking；both DAD rows naturally reach exactly Preferred before ready；
       cleanup finishes on-thread before join，and every partial failure、later-root failure、panic、graceful
       and forced stop reaps all flow/mapping/thread/HANDLE/buffer owners。
 - [ ] Product calls no explicit route/DNS/WFP mutation API；privileged snapshots prove only expected
@@ -139,7 +142,7 @@ owner-provided design input，不是仓库证据。上游事实与纠正记录�
 |---|---|---|---|
 | M15-T01 | Freeze corrected contracts、dependency dispositions and footprint control | M14 closed | done |
 | M15-T02 | Prove M14 classification-eligible UDP commit ordering and selector re-read | M15-T01 | done |
-| M15-T03 | Prove config → Wintun/address/MTU/DAD/session → bounded stack → rollback | M15-T02 | ready |
+| M15-T03 | Prove config → Wintun/MTU/address/session/DAD → bounded stack → rollback | M15-T02 | active |
 | M15-T04 | Compose IPv4/IPv6 TUN TCP through the existing policy/DNS/egress/relay seams | M15-T03 | planned |
 | M15-T05 | Compose IPv4/IPv6 TUN UDP mapping and DNS hijack through existing association seams | M15-T04 | planned |
 | M15-T06 | Close failure、lifecycle、architecture、privileged and performance evidence | M15-T05 | planned |
@@ -176,9 +179,11 @@ supplied exact DLL and does not redistribute it。
 
 ## Blocker / next action
 
-No execution blocker。T02 exact integration `fc617cda7dac8e8ebf46c676fae09d4a2dce9bc1` passed Engineer
-validation and independent Architect/QA review with only accepted numeric/timeout notes；T03 is ready。
-Create and bind its isolated worktree from the integration branch HEAD containing this status record。The
+No current execution blocker。T02 exact integration `fc617cda7dac8e8ebf46c676fae09d4a2dce9bc1` passed Engineer
+validation and independent Architect/QA review with only accepted numeric/timeout notes。During active T03，
+real-device F05 evidence showed the accepted pre-session DAD order was unreachable；the in-place contract
+erratum now requires session-before-DAD while preserving non-optimistic exact-Preferred readiness。T03 is
+running its remaining local gates before exact-candidate review。The
 direct GitHub-hosted Windows privileged smoke and same-SHA performance dispatch are authorized；Hyper-V/
 self-hosted remains fallback only after a recorded direct capability failure。Package/release remains
 blocked until the Wintun binary-license disposition is recorded by the responsible owner。

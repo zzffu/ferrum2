@@ -1,7 +1,7 @@
 ---
 id: M15-T03
 milestone: M15
-status: ready
+status: active
 depends_on:
   - M15-T02
 owns:
@@ -32,7 +32,8 @@ owns:
 
 Deliver the first real vertical risk slice：a schema-v2 TUN-only or coexistence config validates offline，
 then one required process root starts the final owner thread；that thread securely loads the exact Wintun DLL，
-creates/configures a new dual-stack adapter，waits DAD，constructs the bounded smoltcp stack，accepts a
+creates/configures a new dual-stack adapter，starts its session to bring media up，waits both non-optimistic
+DAD rows to reach exact Preferred，constructs the bounded smoltcp stack，accepts a
 controller-routed valid TCP/UDP IP packet and drops it deterministically before policy，then rolls every owned
 resource back before exit/join。This ticket atomically activates the exact dependencies、Rust 1.97.1
 workspace/CI MSRV and private memory-device evidence in the same slice；it does not yet open egress。
@@ -57,8 +58,10 @@ workspace/CI MSRV and private memory-device evidence in the same slice；it does
 - [ ] `--check-config` invokes no DLL/device/admin/thread/OS seam。Unsupported compile target is reported by a
       pure pre-success gate；OS/DLL/ABI/admin/driver failures occur during prepare before activation。
 - [ ] Prepare first starts the final owner thread；that thread alone performs and reverses every DLL/adapter/
-      address/per-family-MTU/DAD/session/smoltcp step，and shutdown joins it only after thread-owned cleanup。
-      Non-blocking activate fits the existing `ProcessRoot`/`ProcessSupervisor` unchanged；only exact
+      per-family-MTU/address/session/DAD/smoltcp step，and shutdown joins it only after thread-owned cleanup。
+      Session start is only the Wintun media-liveness prerequisite；it precedes DAD polling but no RX/TX、
+      stack polling or admission，and the creation rows do not request optimistic DAD。Non-blocking activate
+      fits the existing `ProcessRoot`/`ProcessSupervisor` unchanged；only naturally reached exact
       `IpDadStatePreferred` is ready，and every setup/later-root failure leaves exact baseline。
 - [ ] Product contains no explicit route/DNS/WFP API；privileged before/ready/after snapshots distinguish
       expected address-derived system rows from controller-owned routes and prove neither leaks。
@@ -101,6 +104,8 @@ git diff --check
 
 Feature removal and dependency-edge reversion restore M14 behavior；no schema-v2 document without `[tun]`
 changes meaning。Highest risks are loader/ABI correctness、narrow unsafe containment、DAD readiness、silent
-adapter-removal failure、MTU/address rollback and a hosted runner that cannot load Wintun。A failed direct
+adapter-removal failure、MTU/address rollback and a hosted runner that cannot load Wintun。Direct evidence
+closed the F05 ordering erratum：pre-session media is disconnected and cannot complete DAD，so session start
+must precede non-optimistic DAD polling without becoming readiness。A failed direct
 probe blocks the ticket and supplies evidence for a separately approved Hyper-V/self-hosted fallback；it is
 not waived。
