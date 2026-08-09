@@ -104,10 +104,12 @@ impl Drop for TcpFlow {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(super) struct FlowOwner {
     bridge: Arc<Mutex<Bridge>>,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl FlowOwner {
     #[cfg(test)]
     pub(super) fn read_to_stack(&mut self, destination: &mut [u8]) -> usize {
@@ -193,6 +195,7 @@ impl FlowOwner {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(super) fn tcp_flow_pair(target: SocketAddr, capacity: usize) -> (TcpFlow, FlowOwner) {
     let bridge = Arc::new(Mutex::new(Bridge {
         to_application: ByteQueue::new(capacity),
@@ -235,6 +238,7 @@ struct ByteQueue {
 }
 
 impl ByteQueue {
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
     fn new(capacity: usize) -> Self {
         Self {
             bytes: vec![0; capacity].into_boxed_slice(),
@@ -270,11 +274,13 @@ impl ByteQueue {
         count
     }
 
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
     fn first(&self) -> &[u8] {
         let count = self.len.min(self.bytes.len() - self.head);
         &self.bytes[self.head..self.head + count]
     }
 
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
     fn consume(&mut self, count: usize) {
         assert!(count <= self.len, "TUN TCP queue consume is bounded");
         self.head = (self.head + count) % self.bytes.len();

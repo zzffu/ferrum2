@@ -2426,6 +2426,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("-not $pressureWrite.Wait(500)")
             && source.contains("-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)")
             && !source.contains("Wait-ProcessExit $activeProcess 300")
+            && source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore")
+            && !source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore PersistentStore")
             && source.contains("-not $pressureWrite.IsCompleted")
             && source.contains("$forcedShutdown.ElapsedMilliseconds -ge 900")
             && source.contains("TCP-08 forced cancellation did not exit")
@@ -2454,6 +2456,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace(
             "Assert-True (-not $pressureWrite.IsCompleted)",
             "Wait-ProcessExit $activeProcess 300\nAssert-True (-not $pressureWrite.IsCompleted)",
+        ),
+        controller.replace(
+            "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore",
+            "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true",
+        ),
+        controller.replace(
+            "Assert-True (-not $pressureWrite.IsCompleted)",
+            "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore PersistentStore\nAssert-True (-not $pressureWrite.IsCompleted)",
         ),
         controller.replace("-not $pressureWrite.IsCompleted", "$true"),
         controller.replace("$forcedShutdown.ElapsedMilliseconds -ge 900", "$true"),

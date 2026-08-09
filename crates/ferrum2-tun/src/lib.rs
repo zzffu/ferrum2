@@ -6,8 +6,12 @@ pub use tcp::TcpFlow;
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use std::net::IpAddr;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr};
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use std::sync::Arc;
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -58,6 +62,7 @@ pub struct Config {
 ///
 /// Error values are supplied by the binary so this deep module does not depend on
 /// configuration, policy, DNS, protocol, or observability crates.
+#[cfg(all(windows, target_arch = "x86_64"))]
 pub fn process_root<E, H, A, D>(
     config: Config,
     startup: E,
@@ -95,6 +100,48 @@ where
     })
 }
 
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+/// Builds a required root that fails during preparation on unsupported targets.
+pub fn process_root<E, H, A, D>(
+    _config: Config,
+    startup: E,
+    _runtime: E,
+    _cleanup: E,
+    _handle_tcp: H,
+    _accepted: A,
+    _foundation_dropped: D,
+) -> ProcessRoot<E>
+where
+    E: Copy + Send + 'static,
+    H: Fn(TcpFlow, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static,
+    A: Fn() + Send + Sync + 'static,
+    D: Fn() + Send + Sync + 'static,
+{
+    ProcessRoot::new(move || async move { Err::<UnsupportedTargetRoot, _>(startup) })
+}
+
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+struct UnsupportedTargetRoot;
+
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+impl<E> PreparedProcessRoot<E> for UnsupportedTargetRoot
+where
+    E: Send + 'static,
+{
+    fn activate(&mut self) -> Result<(), E> {
+        unreachable!("unsupported TUN target cannot prepare")
+    }
+
+    fn run(self: Box<Self>, _cancellation: ProcessCancellation) -> ProcessFuture<Result<(), E>> {
+        unreachable!("unsupported TUN target cannot run")
+    }
+
+    fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), E>> {
+        unreachable!("unsupported TUN target cannot roll back")
+    }
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
 #[derive(Clone, Copy)]
 struct RootErrors<E> {
     startup: E,
@@ -102,11 +149,13 @@ struct RootErrors<E> {
     cleanup: E,
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 struct PacketMetrics {
     accepted: Box<dyn Fn() + Send + Sync>,
     foundation_dropped: Box<dyn Fn() + Send + Sync>,
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn config_is_exact(config: &Config) -> bool {
     let mtu = u64::from(config.mtu);
     let ring = u64::from(config.ring_capacity);
@@ -157,6 +206,7 @@ fn config_is_exact(config: &Config) -> bool {
     computed == Some(config.owned_buffer_bytes) && config.owned_buffer_bytes <= 268_435_456
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 async fn prepare<E>(
     config: Config,
     errors: RootErrors<E>,
@@ -232,6 +282,7 @@ where
     }
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 async fn cancel_prepare<E>(guard: OwnerThread, cleanup: E) -> Result<Option<TunRoot<E>>, E>
 where
     E: Copy + Send + 'static,
@@ -243,6 +294,7 @@ where
     }
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 async fn prepare_failure<E>(guard: OwnerThread, startup: E, cleanup: E) -> E
 where
     E: Copy + Send + 'static,
@@ -254,6 +306,7 @@ where
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OwnerExit {
     Stopped,
@@ -261,8 +314,8 @@ enum OwnerExit {
     CleanupFailed,
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 enum OwnerReady {
-    #[cfg(all(windows, target_arch = "x86_64"))]
     Ready {
         wake: ferrum2_wintun::StopSignal,
         flows: tokio::sync::mpsc::Receiver<TcpFlow>,
@@ -270,25 +323,30 @@ enum OwnerReady {
     Failed,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone)]
 struct OwnerControl {
     stop: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
     admitting: Arc<AtomicBool>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
     flow_count: Arc<AtomicUsize>,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl OwnerControl {
     fn new() -> Self {
         Self {
             stop: Arc::new(AtomicBool::new(false)),
             active: Arc::new(AtomicBool::new(false)),
             admitting: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(windows, target_arch = "x86_64"))]
             flow_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct OwnerThread {
     control: OwnerControl,
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -296,6 +354,7 @@ struct OwnerThread {
     thread: Option<std::thread::JoinHandle<OwnerExit>>,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl OwnerThread {
     fn signal(&self) {
         self.control.stop.store(true, Ordering::Release);
@@ -317,6 +376,7 @@ impl OwnerThread {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl Drop for OwnerThread {
     fn drop(&mut self) {
         self.signal();
@@ -337,6 +397,7 @@ impl Drop for OwnerThread {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct TunRoot<E> {
     owner: OwnerThread,
     done: tokio::sync::oneshot::Receiver<OwnerExit>,
@@ -347,9 +408,11 @@ struct TunRoot<E> {
     handle_tcp: TcpHandler,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 type TcpHandler =
     Arc<dyn Fn(TcpFlow, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static>;
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl<E> PreparedProcessRoot<E> for TunRoot<E>
 where
     E: Send + 'static,
@@ -435,12 +498,14 @@ where
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 fn reported_owner_exit(
     result: Result<OwnerExit, tokio::sync::oneshot::error::RecvError>,
 ) -> OwnerExit {
     result.unwrap_or(OwnerExit::CleanupFailed)
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 fn reconcile_owner_exit(reported: OwnerExit, reaped: OwnerExit) -> OwnerExit {
     if reaped == OwnerExit::CleanupFailed || reported == OwnerExit::Stopped {
         reaped
@@ -449,6 +514,7 @@ fn reconcile_owner_exit(reported: OwnerExit, reaped: OwnerExit) -> OwnerExit {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 fn map_owner_spawn<T, E>(spawned: std::io::Result<T>, startup: E) -> Result<T, E> {
     spawned.map_err(|_| startup)
 }
@@ -588,18 +654,6 @@ fn owner_main(
         Ok(()) if fatal => OwnerExit::RuntimeFailed,
         Ok(()) => OwnerExit::Stopped,
     }
-}
-
-#[cfg(not(all(windows, target_arch = "x86_64")))]
-fn owner_main(
-    _config: Config,
-    _control: OwnerControl,
-    ready: std::sync::mpsc::SyncSender<OwnerReady>,
-    _deadline: std::time::Instant,
-    _metrics: PacketMetrics,
-) -> OwnerExit {
-    let _ = ready.send(OwnerReady::Failed);
-    OwnerExit::RuntimeFailed
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -873,6 +927,7 @@ impl MemoryDevice {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OutputResult {
     Empty,
@@ -2311,6 +2366,7 @@ mod tests {
                     stop,
                     active,
                     admitting: Arc::new(AtomicBool::new(false)),
+                    #[cfg(all(windows, target_arch = "x86_64"))]
                     flow_count: Arc::new(AtomicUsize::new(0)),
                 },
                 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -2330,6 +2386,7 @@ mod tests {
                 stop,
                 active: Arc::new(AtomicBool::new(false)),
                 admitting: Arc::new(AtomicBool::new(false)),
+                #[cfg(all(windows, target_arch = "x86_64"))]
                 flow_count: Arc::new(AtomicUsize::new(0)),
             },
             #[cfg(all(windows, target_arch = "x86_64"))]

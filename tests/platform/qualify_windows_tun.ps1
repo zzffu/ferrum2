@@ -222,7 +222,7 @@ function Add-TargetAddress([string]$Address) {
     $prefix = if ($Address.Contains(":")) { 128 } else { 32 }
     $prefixText = "$Address/$prefix"
     Assert-True (@(Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefixText -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "target route baseline not absent"
-    $row = New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true
+    $row = New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore
     $script:ownedAddresses.Add($row)
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
