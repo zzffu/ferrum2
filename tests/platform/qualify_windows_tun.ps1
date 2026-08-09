@@ -806,7 +806,7 @@ function Assert-ResetWithoutEgress(
 
 function New-DnsQuery([uint16]$Id) {
     $bytes = [System.Collections.Generic.List[byte]]::new()
-    $bytes.AddRange([byte[]]([byte]($Id -shr 8), [byte]$Id, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    $bytes.AddRange([byte[]]([byte]($Id -shr 8), [byte]($Id -band 0xff), 1, 0, 0, 1, 0, 0, 0, 0, 0, 0))
     foreach ($label in @("query", "tun", "test")) {
         $encoded = [Text.Encoding]::ASCII.GetBytes($label)
         $bytes.Add([byte]$encoded.Length)
@@ -1314,7 +1314,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 $length = Read-ExactBytes $dnsStream 2
                 $responseLength = ([int]$length[0] -shl 8) -bor $length[1]
                 $response = Read-ExactBytes $dnsStream $responseLength
-                Assert-True ($response[0] -eq [byte]($id -shr 8) -and $response[1] -eq [byte]$id) "DNS response ID mismatch"
+                Assert-True ($response[0] -eq [byte]($id -shr 8) -and $response[1] -eq [byte]($id -band 0xff)) "DNS response ID mismatch"
             }
             Assert-True ($dnsResponder.Requests -eq 2) "DNS hijack did not answer both framed queries"
             Assert-True ($gateA.Accepted -eq $gateCounts[0] -and $gateB.Accepted -eq $gateCounts[1]) "DNS hijack opened Shadowsocks"

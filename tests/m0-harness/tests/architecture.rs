@@ -2460,6 +2460,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("$ssl.AuthenticateAsClientAsync(\"tls.tun.test\")")
             && source.contains("HTTP prefix was not replayed exactly once")
             && source.contains("$dnsResponder.Requests -eq 2")
+            && source.contains("[byte]($Id -band 0xff)")
+            && source.contains("[byte]($id -band 0xff)")
             && source
                 .matches("Assert-ResetWithoutEgress $targets[")
                 .count()
@@ -2800,6 +2802,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     for (index, mutation) in [
         controller.replacen("$tcpRows++", "", 1),
         controller.replace("$dnsResponder.Requests -eq 2", "$true"),
+        controller.replace("[byte]($Id -band 0xff)", "[byte]$Id"),
+        controller.replace("[byte]($id -band 0xff)", "[byte]$id"),
         controller.replace("-not $pressureWrite.Wait(500)", "$true"),
         controller.replace(
             "$client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))",
