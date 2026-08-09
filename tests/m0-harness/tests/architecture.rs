@@ -2674,6 +2674,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && classifier.contains("GateReverseStage = \"invalid\"")
                     && classifier.contains("ProbeEcho = \"other\"")
                     && classifier.contains("GateReverseBytes = \"zero\"")
+                    && classifier.contains("GateComplete = \"no\"")
+                    && classifier.contains("ProbeComplete = \"no\"")
                     && classifier.contains("AppResult = \"reset\"")
                     && classifier.contains("TCP-01 boundary table mismatch")
                     && !classifier.contains("Get-Net")
@@ -2687,13 +2689,17 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && diag.contains("$tcp01Port = $ports[0]")
                     && !diag.contains("192.0.2.200")
                     && diag.contains("Invoke-EchoRow $tcp01Target $tcp01Port $ownedInterfaceIndex $gateA $tcp01Payload $tcp01Observation")
-                    && diag.contains("$tcp01Observation.Gate.WaitCompleted")
-                    && diag.contains("$tcp01Observation.Probe.WaitCompleted")
+                    && diag.contains("$gateSettled = $false")
+                    && diag.contains("$gateSettled = $tcp01Observation.Gate.WaitCompleted")
+                    && diag.contains("$probeSettled = $false")
+                    && diag.contains("$probeSettled = $tcp01Observation.Probe.WaitCompleted")
                     && diag.contains("$tcp01Observation.Gate.Observation")
                     && diag.contains("$probe.Received")
                     && diag.contains("$probe.EchoByteCount")
                     && diag.contains("GateForwardStage = if ($gateObservation) { $gateObservation.ClientToServerStage } else { \"pending\" }")
                     && diag.contains("GateReverseStage = if ($gateObservation) { $gateObservation.ServerToClientStage } else { \"pending\" }")
+                    && diag.contains("GateComplete = if ($gateSettled -and $gateObservation -and $gateObservation.SessionComplete -eq \"yes\")")
+                    && diag.contains("ProbeComplete = if ($probeSettled -and $probe -and $probe.SessionComplete -eq \"yes\")")
                     && diag.contains("$tcp01Boundary = Get-Tcp01Boundary $tcp01State")
                     && diag.contains("if ($tcp01Error -or $tcp01Boundary -ne \"COMPLETE\") {")
                     && diag.contains("$tcp01Diagnostic = \"status=OBSERVED boundary=$tcp01Boundary app=$($tcp01State.AppResult)")
@@ -2710,15 +2716,25 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     })
                     && diag
                         .find("Invoke-EchoRow $tcp01Target")
-                        .zip(diag.find("$tcp01Observation.Gate.WaitCompleted"))
+                        .zip(diag.find("$gateSettled = $tcp01Observation.Gate.WaitCompleted"))
+                        .zip(diag.find("$probeSettled = $tcp01Observation.Probe.WaitCompleted"))
+                        .zip(diag.find("$gateObservation = if ($tcp01Observation.Gate)"))
+                        .zip(diag.find("$tcp01State = @{"))
+                        .is_some_and(|((((invoke, gate_settle), probe_settle), snapshot), state)| {
+                            invoke < gate_settle
+                                && gate_settle < probe_settle
+                                && probe_settle < snapshot
+                                && snapshot < state
+                        })
+                    && diag
+                        .find("$tcp01State = @{")
                         .zip(diag.find("if ($tcp01Error -or $tcp01Boundary -ne \"COMPLETE\")"))
                         .zip(diag.find("$tcp01Diagnostic = \"status=OBSERVED"))
                         .zip(diag.find("if ($tcp01Error) { throw $tcp01Error }"))
                         .zip(diag.find("Assert-True ($tcp01Boundary -eq \"COMPLETE\")"))
                         .zip(diag.find("$tcpRows++"))
-                        .is_some_and(|((((((invoke, settle), condition), diagnostic), primary), complete), row)| {
-                            invoke < settle
-                                && settle < condition
+                        .is_some_and(|(((((state, condition), diagnostic), primary), complete), row)| {
+                            state < condition
                                 && condition < diagnostic
                                 && diagnostic < primary
                                 && primary < complete
@@ -2985,8 +3001,32 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "$true",
         ),
         controller.replace(
+            "$gateSettled = $tcp01Observation.Gate.WaitCompleted([int]$tcp01Observation.GateIndex, 1500)",
+            "[void]$tcp01Observation.Gate.WaitCompleted([int]$tcp01Observation.GateIndex, 1500)",
+        ),
+        controller.replace(
             "$tcp01Observation.Probe.WaitCompleted(1500)",
             "$true",
+        ),
+        controller.replace(
+            "$probeSettled = $tcp01Observation.Probe.WaitCompleted(1500)",
+            "[void]$tcp01Observation.Probe.WaitCompleted(1500)",
+        ),
+        controller.replace(
+            "GateComplete = if ($gateSettled -and $gateObservation -and $gateObservation.SessionComplete -eq \"yes\")",
+            "GateComplete = if ($gateObservation -and $gateObservation.SessionComplete -eq \"yes\")",
+        ),
+        controller.replace(
+            "ProbeComplete = if ($probeSettled -and $probe -and $probe.SessionComplete -eq \"yes\")",
+            "ProbeComplete = if ($probe -and $probe.SessionComplete -eq \"yes\")",
+        ),
+        controller.replace(
+            "@{ Change = @{ GateComplete = \"no\" }; Expected = \"GATE_REVERSE_INCOMPLETE\" }",
+            "@{ Change = @{ GateComplete = \"yes\" }; Expected = \"GATE_REVERSE_INCOMPLETE\" }",
+        ),
+        controller.replace(
+            "@{ Change = @{ ProbeComplete = \"no\" }; Expected = \"TARGET_ECHO_INCOMPLETE\" }",
+            "@{ Change = @{ ProbeComplete = \"yes\" }; Expected = \"TARGET_ECHO_INCOMPLETE\" }",
         ),
         controller.replace(
             "GateReverseStage = if ($gateObservation) { $gateObservation.ServerToClientStage } else { \"pending\" }",

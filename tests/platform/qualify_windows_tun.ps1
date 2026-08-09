@@ -94,7 +94,9 @@ $tcp01CompleteState = @{
 foreach ($row in @(
     @{ Change = @{ GateAccepted = "no" }; Expected = "BEFORE_TARGET" },
     @{ Change = @{ ProbeEcho = "other" }; Expected = "TARGET_ECHO_INCOMPLETE" },
+    @{ Change = @{ ProbeComplete = "no" }; Expected = "TARGET_ECHO_INCOMPLETE" },
     @{ Change = @{ GateReverseBytes = "zero" }; Expected = "GATE_REVERSE_INCOMPLETE" },
+    @{ Change = @{ GateComplete = "no" }; Expected = "GATE_REVERSE_INCOMPLETE" },
     @{ Change = @{ AppResult = "reset" }; Expected = "CLIENT_AFTER_GATE_REVERSE" },
     @{ Change = @{}; Expected = "COMPLETE" },
     @{ Change = @{ GateForwardFault = "invalid" }; Expected = "UNRESOLVED" },
@@ -1220,10 +1222,14 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             Invoke-EchoRow $tcp01Target $tcp01Port $ownedInterfaceIndex $gateA $tcp01Payload $tcp01Observation
         } catch { $tcp01Error = $_ }
 
+        $gateSettled = $false
         if ($tcp01Observation.Gate) {
-            [void]$tcp01Observation.Gate.WaitCompleted([int]$tcp01Observation.GateIndex, 1500)
+            $gateSettled = $tcp01Observation.Gate.WaitCompleted([int]$tcp01Observation.GateIndex, 1500)
         }
-        if ($tcp01Observation.Probe) { [void]$tcp01Observation.Probe.WaitCompleted(1500) }
+        $probeSettled = $false
+        if ($tcp01Observation.Probe) {
+            $probeSettled = $tcp01Observation.Probe.WaitCompleted(1500)
+        }
         $gateObservation = if ($tcp01Observation.Gate) {
             $tcp01Observation.Gate.Observation([int]$tcp01Observation.GateIndex)
         } else { $null }
@@ -1244,14 +1250,14 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             GateReverseStage = if ($gateObservation) { $gateObservation.ServerToClientStage } else { "pending" }
             GateReverseEof = if ($gateObservation) { $gateObservation.ServerToClientEof } else { "no" }
             GateReverseFault = if ($gateObservation) { $gateObservation.ServerToClientFault } else { "other" }
-            GateComplete = if ($gateObservation) { $gateObservation.SessionComplete } else { "no" }
+            GateComplete = if ($gateSettled -and $gateObservation -and $gateObservation.SessionComplete -eq "yes") { "yes" } else { "no" }
             ProbeAccepted = $tcp01Observation.ProbeAccepted
             ProbeRequest = $probeRequest
             ProbeReadEof = if ($probe) { $probe.ReadEof } else { "no" }
             ProbeEcho = $probeEcho
             ProbeShutdown = if ($probe) { $probe.SendShutdown } else { "no" }
             ProbeFault = if ($probe) { $probe.Fault } else { "other" }
-            ProbeComplete = if ($probe) { $probe.SessionComplete } else { "no" }
+            ProbeComplete = if ($probeSettled -and $probe -and $probe.SessionComplete -eq "yes") { "yes" } else { "no" }
             AppResult = $tcp01Observation.AppResult
         }
         $tcp01Boundary = Get-Tcp01Boundary $tcp01State
