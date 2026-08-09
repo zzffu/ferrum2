@@ -203,18 +203,12 @@ function Start-Server([string]$Executable, [string]$Configuration) {
     return $process
 }
 
-function Add-TunRoute([int]$InterfaceIndex, [string]$Address) {
-    $isV6 = $Address.Contains(":")
-    $prefix = if ($isV6) { "$Address/128" } else { "$Address/32" }
-    $nextHop = if ($isV6) { "::" } else { "0.0.0.0" }
-    $route = New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $InterfaceIndex -NextHop $nextHop -RouteMetric 1 -PolicyStore ActiveStore
+function Add-TunRoute([int]$InterfaceIndex, [string]$DestinationPrefix) {
+    Assert-True (@(Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $DestinationPrefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "controller route baseline not absent"
+    $nextHop = if ($DestinationPrefix.Contains(":")) { "::" } else { "0.0.0.0" }
+    $route = New-NetRoute -DestinationPrefix $DestinationPrefix -InterfaceIndex $InterfaceIndex -NextHop $nextHop -RouteMetric 1 -PolicyStore ActiveStore
     $script:ownedRoutes.Add($route)
     return $route
-}
-
-function Remove-OwnedRoute([object]$Route) {
-    Remove-NetRoute -InputObject $Route -Confirm:$false -ErrorAction Stop
-    [void]$script:ownedRoutes.Remove($Route)
 }
 
 function Add-TargetAddress([string]$Address) {
@@ -526,15 +520,19 @@ public sealed class Ferrum2DnsResponder : IDisposable {
 '@
 
 function Open-TunTcp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
-    $route = Add-TunRoute $InterfaceIndex $Address
-    $family = if ($Address.Contains(":")) { [Net.Sockets.AddressFamily]::InterNetworkV6 } else { [Net.Sockets.AddressFamily]::InterNetwork }
+    $isV6 = $Address.Contains(":")
+    $family = if ($isV6) { [Net.Sockets.AddressFamily]::InterNetworkV6 } else { [Net.Sockets.AddressFamily]::InterNetwork }
+    $sourceAddress = if ($isV6) { [Net.IPAddress]::Parse("fd00::2") } else { [Net.IPAddress]::Parse("198.18.0.2") }
     $client = [Net.Sockets.TcpClient]::new($family)
     $client.NoDelay = $true
     $client.SendBufferSize = 4096
+    $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))
     $connected = $client.ConnectAsync($Address, $Port)
     Assert-True ($connected.Wait(5000)) "TUN TCP local handshake timeout"
     if ($connected.IsFaulted) { throw "TUN TCP local handshake failed" }
-    return [pscustomobject]@{ Client = $client; Route = $route }
+    $localEndpoint = [Net.IPEndPoint]$client.Client.LocalEndPoint
+    Assert-True ($localEndpoint.Address.Equals($sourceAddress)) "TUN TCP source bind mismatch"
+    return [pscustomobject]@{ Client = $client }
 }
 
 function Read-StreamToEnd([Net.Sockets.NetworkStream]$Stream) {
@@ -576,7 +574,6 @@ function Invoke-EchoRow(
         $stream = $session.Client.GetStream()
         $stream.Write($Payload, 0, $Payload.Length)
         $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
-        Remove-OwnedRoute $session.Route
         [void](Add-TargetAddress $Address)
         $probe = [Ferrum2TcpProbe]::new($Address, $Port, "echo")
         $script:tcpResources.Add($probe)
@@ -610,7 +607,6 @@ function Assert-ResetWithoutEgress(
         }
     } finally {
         $session.Client.Dispose()
-        Remove-OwnedRoute $session.Route
     }
 }
 
@@ -714,8 +710,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     )
     $automaticRoutes = @($systemRoutes | Where-Object { $expectedAddressDerivedRoutes -notcontains $_ })
     Assert-SnapshotEqual $expectedAutomaticRoutes $automaticRoutes "exact ready automatic routes"
-    $ownedRoutes.Add((New-NetRoute -DestinationPrefix "192.0.2.200/32" -InterfaceIndex $adapter.ifIndex -NextHop "0.0.0.0" -PolicyStore ActiveStore))
-    $ownedRoutes.Add((New-NetRoute -DestinationPrefix "2001:db8::200/128" -InterfaceIndex $adapter.ifIndex -NextHop "::" -PolicyStore ActiveStore))
+    [void](Add-TunRoute $adapter.ifIndex "192.0.2.200/32")
+    [void](Add-TunRoute $adapter.ifIndex "2001:db8::200/128")
     $withControllerRoutes = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
     $expectedControllerRoutes = @(
         "IPv4|192.0.2.200/32|0.0.0.0",
@@ -1013,6 +1009,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             ($_ -like "IPv4|198.18.0.*" -and $_ -ne "IPv4|198.18.0.3/32|0.0.0.0") -or ($_ -like "IPv6|fd00::*")
         })
         Assert-SnapshotEqual $expectedAddressDerivedRoutes $addressDerivedRoutes "TCP ready address-derived routes"
+        $strongHostInterfaces = @(Get-NetIPInterface -InterfaceIndex @($ownedInterfaceIndex, 1) -PolicyStore ActiveStore -ErrorAction Stop)
+        Assert-True ($strongHostInterfaces.Count -eq 4) "strong-host interface rows missing"
+        $weakHostInterfaces = @($strongHostInterfaces | Where-Object { $_.WeakHostSend -ne "Disabled" -or $_.WeakHostReceive -ne "Disabled" })
+        Assert-True ($weakHostInterfaces.Count -eq 0) "weak-host forwarding is unsupported"
+        [void](Add-TunRoute $ownedInterfaceIndex "192.0.2.200/29")
+        [void](Add-TunRoute $ownedInterfaceIndex "2001:db8::200/120")
 
         Invoke-EchoRow $targets[0] $ports[0] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-01-half-close"))
         $tcpRows++
@@ -1024,7 +1026,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $ssl = [Net.Security.SslStream]::new($tls.Client.GetStream(), $false, { $true })
         $sslTask = $ssl.AuthenticateAsClientAsync("tls.tun.test")
         Assert-True ($gateB.WaitAccepted($tlsGate, 5000)) "TLS sniff did not select its exact egress"
-        Remove-OwnedRoute $tls.Route
         [void](Add-TargetAddress $targets[2])
         $tlsProbe = [Ferrum2TcpProbe]::new($targets[2], $ports[2], "capture")
         $tcpResources.Add($tlsProbe)
@@ -1043,7 +1044,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $httpStream.Write($httpBytes, 0, $httpBytes.Length)
         $http.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
         Assert-True ($gateB.WaitAccepted($httpGate, 5000)) "HTTP sniff did not select its exact egress"
-        Remove-OwnedRoute $http.Route
         [void](Add-TargetAddress $targets[3])
         $httpProbe = [Ferrum2TcpProbe]::new($targets[3], $ports[3], "echo")
         $tcpResources.Add($httpProbe)
@@ -1073,7 +1073,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             Assert-True ($gateA.Accepted -eq $gateCounts[0] -and $gateB.Accepted -eq $gateCounts[1]) "DNS hijack opened Shadowsocks"
         } finally {
             $dnsFlow.Client.Dispose()
-            Remove-OwnedRoute $dnsFlow.Route
         }
         $tcpRows++
 
@@ -1088,7 +1087,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $pressureBytes = [byte[]]::new(8 * 1024 * 1024)
         $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)
         Assert-True (-not $pressureWrite.Wait(500)) "backpressure write unexpectedly drained"
-        Remove-OwnedRoute $pressure.Route
         [void](Add-TargetAddress $targets[7])
         $stall = [Ferrum2TcpProbe]::new($targets[7], $ports[7], "stall")
         $tcpResources.Add($stall)
@@ -1162,10 +1160,10 @@ finally {
     foreach ($route in $ownedTargetRoutes) {
         Assert-True (@(Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $route.DestinationPrefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "controller-owned target route leaked"
     }
-    foreach ($expectedRoute in @("192.0.2.200/32", "2001:db8::200/128")) {
-        $leaked = @(Get-NetRoute -DestinationPrefix $expectedRoute -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
-            Where-Object { $null -ne $ownedInterfaceIndex -and $_.InterfaceIndex -eq $ownedInterfaceIndex })
-        Assert-True ($leaked.Count -eq 0) "controller-owned route leaked: $expectedRoute"
+    foreach ($route in $ownedRoutes) {
+        $leaked = @(Get-NetRoute -DestinationPrefix $route.DestinationPrefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Where-Object { $_.InterfaceIndex -eq $route.InterfaceIndex })
+        Assert-True ($leaked.Count -eq 0) "controller-owned route leaked: $($route.DestinationPrefix)"
     }
     if ($createdSiblingDll -and (Test-Path -LiteralPath $siblingDll)) { Remove-Item -LiteralPath $siblingDll -Force }
     if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }

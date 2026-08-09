@@ -2412,8 +2412,25 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         "headless-console creation mutation must remove the process-group proof"
     );
     let has_tcp_controller = |source: &str| {
+        let open_tcp = source
+            .split_once("function Open-TunTcp(")
+            .and_then(|(_, tail)| tail.split_once("function Read-StreamToEnd("))
+            .map(|(body, _)| body);
+        let add_tun_route = source
+            .split_once("function Add-TunRoute(")
+            .and_then(|(_, tail)| tail.split_once("function Add-TargetAddress("))
+            .map(|(body, _)| body);
+        let tcp_mode = source
+            .split_once("    } else {\n        $serverBinary =")
+            .and_then(|(_, tail)| tail.split_once("\n    }\n    $completed = $true"))
+            .map(|(body, _)| body);
+        let cleanup = source.rsplit_once("\nfinally {").map(|(_, body)| body);
         source.contains("[ValidateSet(\"lifecycle\", \"tcp\")]")
             && source.matches("$tcpRows++").count() == 8
+            && source.matches("Add-TunRoute $").count() == 4
+            && !source.contains("Remove-OwnedRoute")
+            && source.contains("[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")")
+            && source.contains("[void](Add-TunRoute $adapter.ifIndex \"2001:db8::200/128\")")
             && source.contains("Invoke-EchoRow $targets[0]")
             && source.contains("Invoke-EchoRow $targets[1]")
             && source.contains("$ssl.AuthenticateAsClientAsync(\"tls.tun.test\")")
@@ -2435,9 +2452,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         .zip(echo.find(
                             "$session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)",
                         ))
-                        .zip(echo.find("Remove-OwnedRoute $session.Route"))
-                        .is_some_and(|(((accepted, write), shutdown), removed)| {
-                            accepted < write && write < shutdown && shutdown < removed
+                        .zip(echo.find("[void](Add-TargetAddress $Address)"))
+                        .is_some_and(|(((accepted, write), shutdown), target)| {
+                            accepted < write && write < shutdown && shutdown < target
                         })
                         && echo.contains("finally { $session.Client.Dispose() }")
                 })
@@ -2449,11 +2466,54 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         .find("$gateA.WaitAccepted($pressureGate, 5000)")
                         .zip(pressure.find("$pressureWrite = $pressure.Client.GetStream().WriteAsync("))
                         .zip(pressure.find("-not $pressureWrite.Wait(500)"))
-                        .zip(pressure.find("Remove-OwnedRoute $pressure.Route"))
-                        .is_some_and(|(((accepted, write), pending), removed)| {
-                            accepted < write && write < pending && pending < removed
+                        .zip(pressure.find("[void](Add-TargetAddress $targets[7])"))
+                        .is_some_and(|(((accepted, write), pending), target)| {
+                            accepted < write && write < pending && pending < target
                         })
                 })
+            && open_tcp.is_some_and(|open| {
+                open.contains("[Net.IPAddress]::Parse(\"198.18.0.2\")")
+                    && open.contains("[Net.IPAddress]::Parse(\"fd00::2\")")
+                    && open
+                        .find("$client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))")
+                        .zip(open.find("$connected = $client.ConnectAsync($Address, $Port)"))
+                        .is_some_and(|(bound, connected)| bound < connected)
+                    && open.contains("$localEndpoint.Address.Equals($sourceAddress)")
+                    && !open.contains("Add-TunRoute")
+            })
+            && add_tun_route.is_some_and(|route| {
+                route
+                    .find("Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $DestinationPrefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue")
+                    .zip(route.find("New-NetRoute -DestinationPrefix $DestinationPrefix -InterfaceIndex $InterfaceIndex"))
+                    .is_some_and(|(baseline, create)| baseline < create)
+                    && route.contains("controller route baseline not absent")
+            })
+            && tcp_mode.is_some_and(|tcp| {
+                tcp.find("$strongHostInterfaces = @(Get-NetIPInterface -InterfaceIndex @($ownedInterfaceIndex, 1) -PolicyStore ActiveStore -ErrorAction Stop)")
+                    .zip(tcp.find("$strongHostInterfaces.Count -eq 4"))
+                    .zip(tcp.find("$_.WeakHostSend -ne \"Disabled\" -or $_.WeakHostReceive -ne \"Disabled\""))
+                    .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"192.0.2.200/29\")"))
+                    .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"2001:db8::200/120\")"))
+                    .zip(tcp.find("Invoke-EchoRow $targets[0]"))
+                    .is_some_and(|(((((interfaces, count), strong), ipv4), ipv6), first_flow)| {
+                        interfaces < count
+                            && count < strong
+                            && strong < ipv4
+                            && ipv4 < ipv6
+                            && ipv6 < first_flow
+                    })
+                    && !tcp.contains("Remove-NetRoute")
+            })
+            && cleanup.is_some_and(|cleanup| {
+                cleanup.contains(
+                    "foreach ($route in $ownedRoutes) {\n        Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue\n    }",
+                ) && cleanup.contains(
+                    "Get-NetRoute -DestinationPrefix $route.DestinationPrefix -PolicyStore ActiveStore",
+                ) && cleanup.contains("$_.InterfaceIndex -eq $route.InterfaceIndex")
+                    && cleanup.contains(
+                        "controller-owned route leaked: $($route.DestinationPrefix)",
+                    )
+            })
             && source.contains("-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)")
             && !source.contains("Wait-ProcessExit $activeProcess 300")
             && source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore")
@@ -2485,12 +2545,48 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("$dnsResponder.Requests -eq 2", "$true"),
         controller.replace("-not $pressureWrite.Wait(500)", "$true"),
         controller.replace(
-            "        $stream.Write($Payload, 0, $Payload.Length)\n        $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)\n        Remove-OwnedRoute $session.Route",
-            "        Remove-OwnedRoute $session.Route\n        $stream.Write($Payload, 0, $Payload.Length)\n        $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)",
+            "$client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))",
+            "",
         ),
         controller.replace(
-            "        $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)\n        Assert-True (-not $pressureWrite.Wait(500)) \"backpressure write unexpectedly drained\"\n        Remove-OwnedRoute $pressure.Route",
-            "        Remove-OwnedRoute $pressure.Route\n        $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)\n        Assert-True (-not $pressureWrite.Wait(500)) \"backpressure write unexpectedly drained\"",
+            "    $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))\n    $connected = $client.ConnectAsync($Address, $Port)",
+            "    $connected = $client.ConnectAsync($Address, $Port)\n    $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))",
+        ),
+        controller.replace(
+            "    $client = [Net.Sockets.TcpClient]::new($family)",
+            "    $route = Add-TunRoute $InterfaceIndex $Address\n    $client = [Net.Sockets.TcpClient]::new($family)",
+        ),
+        controller.replace(
+            "    Assert-True (@(Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $DestinationPrefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) \"controller route baseline not absent\"\n",
+            "",
+        ),
+        controller.replace(
+            "        Invoke-EchoRow $targets[0]",
+            "        Remove-NetRoute -InputObject $ownedRoutes[0] -Confirm:$false\n        Invoke-EchoRow $targets[0]",
+        ),
+        controller.replace(
+            "192.0.2.200/29",
+            "192.0.2.201/32",
+        ),
+        controller.replace(
+            "2001:db8::200/120",
+            "2001:db8::202/128",
+        ),
+        controller.replace(
+            "[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")",
+            "",
+        ),
+        controller.replace(
+            "$_.WeakHostSend -ne \"Disabled\" -or $_.WeakHostReceive -ne \"Disabled\"",
+            "$false",
+        ),
+        controller.replace(
+            "foreach ($route in $ownedRoutes) {\n        Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue\n    }",
+            "",
+        ),
+        controller.replace(
+            "controller-owned route leaked: $($route.DestinationPrefix)",
+            "controller route cleanup skipped",
         ),
         controller.replace(
             "-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)",
