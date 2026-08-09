@@ -66,10 +66,16 @@ function Convert-Tcp01PktmonLines(
     $components = @{}
     $records = [System.Collections.Generic.List[object]]::new()
     $current = $null
+    $metadataLines = 0
+    $clientLines = 0
+    $targetLines = 0
+    $flagLines = 0
+    $tupleLines = 0
     $clientEndpoint = "$([regex]::Escape($Client))\.\d+"
     $targetEndpoint = "$([regex]::Escape($Target))\.$([regex]::Escape([string]$Port))"
     foreach ($line in $Lines) {
         if ($line -match "(?i)PktGroupId\s*[:=]?\s*(\d+).*PktNumber\s*[:=]?\s*(\d+)") {
+            $metadataLines++
             $groupKey = "$($Matches[1])|$($Matches[2])"
             if (-not $groups.ContainsKey($groupKey)) { $groups[$groupKey] = "g$($groups.Count + 1)" }
             $appearance = if ($line -match "(?i)Appearance\s*[:=]?\s*(\d+)") { [int]$Matches[1] } else { 0 }
@@ -88,32 +94,59 @@ function Convert-Tcp01PktmonLines(
             }
             $records.Add($current)
         }
+        $hasClient = $line -match $clientEndpoint
+        $hasTarget = $line -match $targetEndpoint
+        if ($hasClient) { $clientLines++ }
+        if ($hasTarget) { $targetLines++ }
+        $flagText = if ($line -match "(?i)Flags\s*\[([^\]]+)\]") {
+            $flagLines++
+            $Matches[1]
+        } else { $null }
+        $forward = $line -match "$clientEndpoint\s*>\s*$targetEndpoint`:"
+        $reverse = $line -match "$targetEndpoint\s*>\s*$clientEndpoint`:"
+        if ($forward -or $reverse) { $tupleLines++ }
         if (-not $current) { continue }
         if ($line -match "(?i)\bdrop(?:Reason)?\b") { $current.Drop = "reported" }
-        if ($line -match "$clientEndpoint\s*>\s*$targetEndpoint`:") {
+        if ($forward) {
             $current.Role = "client_to_target"
-        } elseif ($line -match "$targetEndpoint\s*>\s*$clientEndpoint`:") {
+        } elseif ($reverse) {
             $current.Role = "target_to_client"
         } else {
             continue
         }
-        if ($line -match "(?i)Flags\s*\[([^\]]+)\]") {
-            $flags = $Matches[1]
-            $current.Flags = if ($flags.Contains("R")) { "rst" }
-                elseif ($flags -eq "S.") { "syn_ack" }
-                elseif ($flags -eq "S") { "syn" }
-                elseif ($flags.Contains("F")) { "fin" }
-                elseif ($flags.Contains("P")) { "push_ack" }
-                elseif ($flags -eq ".") { "ack" }
+        if ($flagText) {
+            $current.Flags = if ($flagText.Contains("R")) { "rst" }
+                elseif ($flagText -eq "S.") { "syn_ack" }
+                elseif ($flagText -eq "S") { "syn" }
+                elseif ($flagText.Contains("F")) { "fin" }
+                elseif ($flagText.Contains("P")) { "push_ack" }
+                elseif ($flagText -eq ".") { "ack" }
                 else { "other" }
         }
         if ($line -match "(?i)\blength\s+(\d+)\b") {
             $current.Payload = if ([int64]$Matches[1] -eq 0) { "no" } else { "yes" }
         }
     }
-    return @($records | Where-Object { $_.Role -ne "unknown" } | ForEach-Object {
+    $summaries = @($records | Where-Object { $_.Role -ne "unknown" } | ForEach-Object {
         "tcp01_pktmon group=$($_.Group) appearance=$($_.Appearance) component=$($_.Component) role=$($_.Role) direction=$($_.Direction) flags=$($_.Flags) payload_present=$($_.Payload) drop=$($_.Drop)"
     })
+    $handshakeComplete =
+        @($summaries | Where-Object { $_ -match "role=client_to_target .*flags=syn\b" }).Count -gt 0 -and
+        @($summaries | Where-Object { $_ -match "role=target_to_client .*flags=syn_ack\b" }).Count -gt 0 -and
+        @($summaries | Where-Object { $_ -match "role=client_to_target .*flags=ack\b" }).Count -gt 0
+    $baselineValid = $metadataLines -gt 0 -and $clientLines -gt 0 -and $targetLines -gt 0 -and
+        $flagLines -gt 0 -and $tupleLines -gt 0 -and $summaries.Count -gt 0 -and $handshakeComplete
+    return [pscustomobject]@{
+        TotalLines = [Math]::Min($Lines.Count, 9999)
+        MetadataLines = [Math]::Min($metadataLines, 9999)
+        ClientLines = [Math]::Min($clientLines, 9999)
+        TargetLines = [Math]::Min($targetLines, 9999)
+        FlagLines = [Math]::Min($flagLines, 9999)
+        TupleLines = [Math]::Min($tupleLines, 9999)
+        SummaryLines = [Math]::Min($summaries.Count, 9999)
+        BaselineValid = $baselineValid
+        Summaries = $summaries
+    }
 }
 
 function Find-Dumpbin {
@@ -1104,15 +1137,22 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             "tcp01_pktmon group=g2 appearance=1 component=c1 role=client_to_target direction=tx flags=ack payload_present=no drop=none",
             "tcp01_pktmon group=g3 appearance=1 component=c3 role=target_to_client direction=rx flags=rst payload_present=no drop=reported"
         )
-        $tcp01SyntheticActual = @(Convert-Tcp01PktmonLines $tcp01Synthetic "198.18.0.2" "192.0.2.201" 443)
-        Assert-True (($tcp01SyntheticActual -join "|") -eq ($tcp01SyntheticExpected -join "|")) "TCP-01 pktmon redaction self-check failed"
+        $tcp01SyntheticParse = Convert-Tcp01PktmonLines $tcp01Synthetic "198.18.0.2" "192.0.2.201" 443
+        Assert-True ((@($tcp01SyntheticParse.Summaries) -join "|") -eq ($tcp01SyntheticExpected -join "|")) "TCP-01 pktmon redaction self-check failed"
+        Assert-True $tcp01SyntheticParse.BaselineValid "TCP-01 pktmon valid-shape self-check failed"
+        $tcp01ZeroParse = Convert-Tcp01PktmonLines @() "198.18.0.2" "192.0.2.201" 443
+        Assert-True (-not $tcp01ZeroParse.BaselineValid) "TCP-01 pktmon zero-shape self-check failed"
+        $tcp01DriftParse = Convert-Tcp01PktmonLines @(
+            "PktGroup=10 Packet=1 Direction=Tx Component=7",
+            "198.18.0.2:55000 -> 192.0.2.201:443 TCP SYN"
+        ) "198.18.0.2" "192.0.2.201" 443
+        Assert-True (-not $tcp01DriftParse.BaselineValid) "TCP-01 pktmon format-drift self-check failed"
 
         $tcp01Etl = Join-Path $work "tcp01-pktmon.etl"
         $tcp01Txt = Join-Path $work "tcp01-pktmon.txt"
         $tcp01Error = $null
         $tcp01CleanupError = $null
-        $tcp01Summaries = @()
-        $tcp01HandshakeComplete = $false
+        $tcp01Parse = $null
         try {
             Assert-True (-not (Test-Path -LiteralPath $tcp01Etl)) "TCP-01 ETL baseline not absent"
             Assert-True (-not (Test-Path -LiteralPath $tcp01Txt)) "TCP-01 text baseline not absent"
@@ -1174,11 +1214,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             try {
                 if (Test-Path -LiteralPath $tcp01Txt) {
                     $tcp01CaptureLines = @(Get-Content -LiteralPath $tcp01Txt)
-                    $tcp01Summaries = @(Convert-Tcp01PktmonLines $tcp01CaptureLines "198.18.0.2" $tcp01Target $tcp01Port)
-                    $tcp01HandshakeComplete =
-                        @($tcp01Summaries | Where-Object { $_ -match "role=client_to_target .*flags=syn\b" }).Count -gt 0 -and
-                        @($tcp01Summaries | Where-Object { $_ -match "role=target_to_client .*flags=syn_ack\b" }).Count -gt 0 -and
-                        @($tcp01Summaries | Where-Object { $_ -match "role=client_to_target .*flags=ack\b" }).Count -gt 0
+                    $tcp01Parse = Convert-Tcp01PktmonLines $tcp01CaptureLines "198.18.0.2" $tcp01Target $tcp01Port
                 } elseif (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon text missing" }
             } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon parse failed" } }
             try {
@@ -1194,14 +1230,16 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             if ($tcp01Error) { throw $tcp01Error }
             throw $tcp01CleanupError
         }
-        $tcp01BoundedSummaries = @($tcp01Summaries | Select-Object -First 48) + @($tcp01Summaries | Select-Object -Last 48)
+        $tcp01BoundedSummaries = @($tcp01Parse.Summaries | Select-Object -First 48) + @($tcp01Parse.Summaries | Select-Object -Last 48)
         @($tcp01BoundedSummaries | Select-Object -Unique) | ForEach-Object { [Console]::Error.WriteLine($_) }
+        [Console]::Error.WriteLine("tcp01_pktmon_shape total_lines=$($tcp01Parse.TotalLines) metadata=$($tcp01Parse.MetadataLines) client=$($tcp01Parse.ClientLines) target=$($tcp01Parse.TargetLines) flags=$($tcp01Parse.FlagLines) tuple=$($tcp01Parse.TupleLines) summaries=$($tcp01Parse.SummaryLines)")
+        $tcp01CaptureStatus = if ($tcp01Parse.BaselineValid) { "CAPTURED" } else { "CAPTURE_INVALID" }
         $tcp01Sha = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
         $tcp01RunId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
         $tcp01RunAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
-        [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag status=CAPTURED boundary=$tcp01Boundary capture_cleanup=PASS sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt")
+        [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag status=$tcp01CaptureStatus boundary=$tcp01Boundary capture_cleanup=PASS sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt")
         if ($tcp01Error) { throw $tcp01Error }
-        Assert-True $tcp01HandshakeComplete "TCP-01 pktmon handshake baseline incomplete"
+        Assert-True $tcp01Parse.BaselineValid "TCP-01 pktmon parse baseline invalid"
         Assert-True ($tcp01Boundary -ne "UNRESOLVED") "TCP-01 pktmon boundary remains unresolved"
         $tcpRows++
         Invoke-EchoRow $targets[1] $ports[1] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-02-two-hop"))
