@@ -122,6 +122,12 @@ m15_windows_tun_e2e status=PASS profile=tcp tcp=8/8 cleanup=PASS sha=<GITHUB_SHA
 m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=<GITHUB_SHA> run_id=<GITHUB_RUN_ID> run_attempt=<GITHUB_RUN_ATTEMPT>
 ```
 
+Manual dispatch uses one closed `dispatch_target` choice and a constant workflow mapping；raw input is never
+passed to PowerShell。Push/PR and the default `performance` dispatch map to foundation/lifecycle；the latter
+alone starts the independent performance job。`windows-tun-tcp` maps to `tcp` and its exact `8/8` marker，
+`windows-tun-transport` maps to `udp` and its exact `16/16` marker，and `windows-tun-full` maps to `full` and
+its exact functional/cycle marker。Unknown、missing、mode/marker mismatch fails before qualification。
+
 The job is a required aggregate dependency only when this final marker appears after artifact/lifecycle,
 `16/16` functional rows，`100/100` adapter cycles and cleanup：
 
@@ -140,10 +146,12 @@ m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS sha=<GITHUB_S
 Remote invocation is accepted only after a later authorization names the exact candidate SHA、ref，whether
 one non-force push and/or `workflow_dispatch` is allowed，and the permitted attempt count。Automatic evidence
 uses the authorized `codex/integration/**` push or PR；manual evidence uses
-`gh workflow run m0.yml --ref <authorized-ref>` only within that scope。Readback MUST prove the run head SHA
-equals the candidate and the marker's SHA/run ID/attempt equal GitHub context。A rerun changes attempt and
-needs fresh authorization。Hyper-V/self-hosted infrastructure is added only if the direct-runner job records
-a capability failure and a new control amendment is accepted。
+`gh workflow run m0.yml --ref <authorized-ref> -f dispatch_target=performance` for performance，or
+`gh workflow run m0.yml --ref <authorized-ref> -f dispatch_target=windows-tun-tcp` for the T04 witness，only
+within that scope。T05/T06 use the corresponding transport/full closed values above。Readback MUST prove the
+run head SHA equals the candidate and the marker's SHA/run ID/attempt equal GitHub context。A rerun changes
+attempt and needs fresh authorization。Hyper-V/self-hosted infrastructure is added only if the direct-runner
+job records a capability failure and a new control amendment is accepted。
 
 No remote action is authorized by this plan。Failed runs remain evidence and are not rerun or combined with
 another SHA without a new authorization and descendant repair。

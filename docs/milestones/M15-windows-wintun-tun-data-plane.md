@@ -179,11 +179,12 @@ supplied exact DLL and does not redistribute it。
 
 ## Blocker / next action
 
-No current execution blocker。T03 exact integration `2eb6db6a200c374ee2765d200413b3497a69694b` passed local
-focused/full/MSRV/Windows/Clippy/privileged gates and hosted run `31304175220/1`，including exact
-`foundation=4/4 cleanup=PASS` and aggregate qualification。Architect/QA both returned `PASS_WITH_NOTES` with
-all correctness findings closed；numeric `+2310/+0/+0` is accepted as required private transaction and
-mutation evidence。T04 is active on this accepted serial base。Required non-force pushes and the later
-same-SHA performance dispatch remain authorized；Hyper-V/self-hosted remains fallback only after a recorded
-direct capability failure。Package/release remains blocked until the Wintun binary-license disposition is
-recorded by the responsible owner。
+`M15-T04-CONTROL-001` found that the accepted foundation-only workflow could not produce T04's mandatory
+hosted TCP marker；deferring that evidence to T06 would create a T04→T05→T06→T04 closure cycle。A
+primary-owned two-commit control checkpoint therefore precedes the product candidate：the protected
+workflow/Markdown commit adds a closed dispatch-purpose mapping and performance isolation，then an immediate
+policy-oracle commit makes those mappings mutation-sensitive。The active product work must be safely
+relocated so both commits are ancestors before candidate review or remote evidence。Required non-force
+pushes and exact TCP/performance dispatches remain authorized；rerun、force-push、PR、tag、package、release and
+publication remain unauthorized。Hyper-V/self-hosted remains fallback only after a recorded direct
+capability failure；redistribution remains blocked pending the responsible license decision。

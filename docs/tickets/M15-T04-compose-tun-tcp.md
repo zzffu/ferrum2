@@ -5,6 +5,9 @@ status: active
 depends_on:
   - M15-T03
 owns:
+  # Primary-only control lease; the product Engineer keeps these paths read-only.
+  - .github/workflows/m0.yml
+  - tests/m0-harness/tests/workspace_policy.rs
   - crates/ferrum2-tun/src/**
   - bins/ferrum2-client/src/run/tun.rs
   - bins/ferrum2-client/src/run/socks.rs
@@ -26,6 +29,11 @@ Accept externally routed IPv4/IPv6 TCP through the TUN flow interface and compos
 route/sniff、DNS answerer、client TCP egress and relay lifecycle。The ticket moves the SOCKS-local terminal
 selection into one binary-private two-caller module and generalizes the existing DNS-over-TCP adapter once；
 it does not publish egress types or copy policy/parser code。
+
+A primary-owned control predecessor adds one closed `workflow_dispatch` target selector before product
+work is accepted：normal push/PR and the existing default performance dispatch retain the foundation
+profile，while an explicit `windows-tun-tcp` dispatch maps only to controller mode `tcp` and its exact marker。
+The product Engineer keeps workflow/policy files read-only；unknown targets and marker mismatches fail closed。
 
 ## Acceptance
 
@@ -63,7 +71,8 @@ git diff --check
 
 - Commit: —
 - Review: —
-- Notes: hosted execution requires a later exact-ref authorization。
+- Notes: hosted execution requires the candidate to descend from the reviewed primary control checkpoint，
+  then a later exact-ref `dispatch_target=windows-tun-tcp` authorization。
 
 ## Rollback / risk
 

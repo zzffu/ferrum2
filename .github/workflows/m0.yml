@@ -7,6 +7,17 @@ on:
       - master
       - "codex/integration/**"
   workflow_dispatch:
+    inputs:
+      dispatch_target:
+        description: "Closed manual qualification target"
+        required: true
+        type: choice
+        default: performance
+        options:
+          - performance
+          - windows-tun-tcp
+          - windows-tun-transport
+          - windows-tun-full
 
 permissions:
   contents: read
@@ -685,9 +696,11 @@ jobs:
 
   performance:
     name: performance
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dispatch_target == 'performance' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      DISPATCH_TARGET: ${{ inputs.dispatch_target }}
     steps:
       - name: Checkout exact current SHA
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -707,6 +720,7 @@ jobs:
           test "$RUNNER_ARCH" = "X64"
           test "$ImageOS" = "ubuntu24"
           test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$DISPATCH_TARGET" = "performance"
           test ! -e "$RUNNER_TEMP/m4"
           for process in ferrum2-client ferrum2-server sslocal ssserver; do
             ! pgrep -x "$process" >/dev/null
@@ -900,17 +914,47 @@ jobs:
           $archive = Join-Path $env:RUNNER_TEMP "wintun-0.14.1.zip"
           Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $archive
           if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51") { throw "ZIP hash mismatch" }
-      - name: Qualify privileged Wintun foundation with always-run cleanup
+      - name: Qualify privileged Wintun selected profile with always-run cleanup
         shell: pwsh
         env:
           FERRUM2_WINTUN_ZIP: ${{ runner.temp }}\wintun-0.14.1.zip
+          DISPATCH_TARGET: ${{ inputs.dispatch_target }}
         run: |
           $ErrorActionPreference = "Stop"
-          $output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode lifecycle
-          if ($LASTEXITCODE -ne 0) { throw "foundation controller failed" }
+          $dispatchTarget = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            if ([string]::IsNullOrWhiteSpace($env:DISPATCH_TARGET)) { throw "dispatch target missing" }
+            $env:DISPATCH_TARGET
+          } else {
+            "foundation"
+          }
+          switch ($dispatchTarget) {
+            "foundation" {
+              $mode = "lifecycle"
+              $expectedMarker = "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
+            }
+            "performance" {
+              $mode = "lifecycle"
+              $expectedMarker = "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
+            }
+            "windows-tun-tcp" {
+              $mode = "tcp"
+              $expectedMarker = "m15_windows_tun_e2e status=PASS profile=tcp tcp=8/8 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
+            }
+            "windows-tun-transport" {
+              $mode = "udp"
+              $expectedMarker = "m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
+            }
+            "windows-tun-full" {
+              $mode = "full"
+              $expectedMarker = "m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
+            }
+            default { throw "dispatch target invalid" }
+          }
+          $output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode $mode
+          if ($LASTEXITCODE -ne 0) { throw "$mode controller failed" }
           $output | Write-Output
-          $marker = "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
-          if (@($output | Where-Object { $_ -eq $marker }).Count -ne 1) { throw "foundation marker mismatch" }
+          $markers = @($output | Where-Object { $_ -like "m15_windows_tun_e2e status=PASS *" })
+          if ($markers.Count -ne 1 -or $markers[0] -ne $expectedMarker) { throw "Wintun marker mismatch" }
 
   qualification:
     name: qualification
