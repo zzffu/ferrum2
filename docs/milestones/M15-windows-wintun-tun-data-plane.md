@@ -142,8 +142,8 @@ owner-provided design input，不是仓库证据。上游事实与纠正记录�
 |---|---|---|---|
 | M15-T01 | Freeze corrected contracts、dependency dispositions and footprint control | M14 closed | done |
 | M15-T02 | Prove M14 classification-eligible UDP commit ordering and selector re-read | M15-T01 | done |
-| M15-T03 | Prove config → Wintun/MTU/address/session/DAD → bounded stack → rollback | M15-T02 | active |
-| M15-T04 | Compose IPv4/IPv6 TUN TCP through the existing policy/DNS/egress/relay seams | M15-T03 | planned |
+| M15-T03 | Prove config → Wintun/MTU/address/session/DAD → bounded stack → rollback | M15-T02 | done |
+| M15-T04 | Compose IPv4/IPv6 TUN TCP through the existing policy/DNS/egress/relay seams | M15-T03 | active |
 | M15-T05 | Compose IPv4/IPv6 TUN UDP mapping and DNS hijack through existing association seams | M15-T04 | planned |
 | M15-T06 | Close failure、lifecycle、architecture、privileged and performance evidence | M15-T05 | planned |
 | M15-T07 | Qualify and close one exact M15 integration SHA | M15-T06 | planned |
@@ -179,11 +179,11 @@ supplied exact DLL and does not redistribute it。
 
 ## Blocker / next action
 
-No current execution blocker。T02 exact integration `fc617cda7dac8e8ebf46c676fae09d4a2dce9bc1` passed Engineer
-validation and independent Architect/QA review with only accepted numeric/timeout notes。During active T03，
-real-device F05 evidence showed the accepted pre-session DAD order was unreachable；the in-place contract
-erratum now requires session-before-DAD while preserving non-optimistic exact-Preferred readiness。T03 is
-running its remaining local gates before exact-candidate review。The
-direct GitHub-hosted Windows privileged smoke and same-SHA performance dispatch are authorized；Hyper-V/
-self-hosted remains fallback only after a recorded direct capability failure。Package/release remains
-blocked until the Wintun binary-license disposition is recorded by the responsible owner。
+No current execution blocker。T03 exact integration `2eb6db6a200c374ee2765d200413b3497a69694b` passed local
+focused/full/MSRV/Windows/Clippy/privileged gates and hosted run `31304175220/1`，including exact
+`foundation=4/4 cleanup=PASS` and aggregate qualification。Architect/QA both returned `PASS_WITH_NOTES` with
+all correctness findings closed；numeric `+2310/+0/+0` is accepted as required private transaction and
+mutation evidence。T04 is active on this accepted serial base。Required non-force pushes and the later
+same-SHA performance dispatch remain authorized；Hyper-V/self-hosted remains fallback only after a recorded
+direct capability failure。Package/release remains blocked until the Wintun binary-license disposition is
+recorded by the responsible owner。

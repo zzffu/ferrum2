@@ -1,7 +1,7 @@
 ---
 id: M15-T03
 milestone: M15
-status: active
+status: done
 depends_on:
   - M15-T02
 owns:
@@ -44,35 +44,35 @@ workspace/CI MSRV and private memory-device evidence in the same slice；it does
 
 ## Acceptance
 
-- [ ] Exact target-specific `windows-sys 0.61.2` reuses the lock identity with SPEC-0016's literal direct-edge
+- [x] Exact target-specific `windows-sys 0.61.2` reuses the lock identity with SPEC-0016's literal direct-edge
       eight features/default-off declaration and no delta outside their Cargo feature closure；exact no-default
       `smoltcp 0.13.1` is the sole lock identity with the literal ten-feature array，including Reno、two
       addresses/routes and four assembler segments，while `auto-icmp-echo-reply` remains absent。
-- [ ] Workspace `rust-version`、existing selected toolchain、all workflow MSRV selectors and workspace-policy
+- [x] Workspace `rust-version`、existing selected toolchain、all workflow MSRV selectors and workspace-policy
       assertions are exactly Rust `1.97.1`；no residual M15 `1.88.0`/`1.91` or floating channel remains，and
       all non-Windows targets compile without loading Wintun。
-- [ ] `ferrum2-wintun` is the only documented/source-guarded unsafe exception and exposes safe RAII
+- [x] `ferrum2-wintun` is the only documented/source-guarded unsafe exception and exposes safe RAII
       operations that cannot leak a packet pointer or close the session read event incorrectly。
-- [ ] `ferrum2-tun` exposes only a flow-level root boundary；its private memory Adapter proves all packet、
+- [x] `ferrum2-tun` exposes only a flow-level root boundary；its private memory Adapter proves all packet、
       queue、generation、memory and lifecycle invariants without a public test factory。
-- [ ] Schema-v2 `[tun]` supports TUN-only、coexistence、static/routed identity and complete bounds；v1/server/
+- [x] Schema-v2 `[tun]` supports TUN-only、coexistence、static/routed identity and complete bounds；v1/server/
       unsupported rule capability/unknown fields fail closed；no dummy SOCKS listener is created。
-- [ ] Every field boundary and checked memory term matches SPEC-0016；the default is exactly `53,995,616`
+- [x] Every field boundary and checked memory term matches SPEC-0016；the default is exactly `53,995,616`
       bytes，accepted plans are at most `256 MiB`，and no queue/socket/staging/hidden pool escapes accounting。
-- [ ] `--check-config` invokes no DLL/device/admin/thread/OS seam。Unsupported compile target is reported by a
+- [x] `--check-config` invokes no DLL/device/admin/thread/OS seam。Unsupported compile target is reported by a
       pure pre-success gate；OS/DLL/ABI/admin/driver failures occur during prepare before activation。
-- [ ] Prepare first starts the final owner thread；that thread alone performs and reverses every DLL/adapter/
+- [x] Prepare first starts the final owner thread；that thread alone performs and reverses every DLL/adapter/
       per-family-MTU/address/session/DAD/smoltcp step，and shutdown joins it only after thread-owned cleanup。
       Session start is only the Wintun media-liveness prerequisite；it precedes DAD polling but no RX/TX、
       stack polling or admission，and the creation rows do not request optimistic DAD。Non-blocking activate
       fits the existing `ProcessRoot`/`ProcessSupervisor` unchanged；only naturally reached exact
       `IpDadStatePreferred` is ready，and every setup/later-root failure leaves exact baseline。
-- [ ] Product contains no explicit route/DNS/WFP API；privileged before/ready/after snapshots distinguish
+- [x] Product contains no explicit route/DNS/WFP API；privileged before/ready/after snapshots distinguish
       expected address-derived system rows from controller-owned routes and prove neither leaks。
-- [ ] One shared ingress/egress validator enforces SPEC-0016's exact IPv4 IHL-5 and IPv6 direct-6/17 policy；
+- [x] One shared ingress/egress validator enforces SPEC-0016's exact IPv4 IHL-5 and IPv6 direct-6/17 policy；
       every listed extension/truncation、fragment、checksum and length mutation fails before state/TX。
       Exactly two smoltcp internal routes and the eight-packet work quantum are independently proven。
-- [ ] Direct ephemeral Windows runner smoke is attempted before any Hyper-V plan；artifact provenance、
+- [x] Direct ephemeral Windows runner smoke is attempted before any Hyper-V plan；artifact provenance、
       always-run cleanup、adapter absence and exact name rebind pass。Hosted job `windows-tun-e2e` emits the
       exact `profile=foundation foundation=4/4 cleanup=PASS` marker bound to SHA/run/attempt；a local controller
       invocation alone is diagnostic and cannot satisfy this row。
@@ -100,9 +100,23 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: privileged remote command requires separate explicit authorization。
+- Commit: `2eb6db6a200c374ee2765d200413b3497a69694b`；tree
+  `17377e4b8eed75c6cb11bb7e47b4fec26aa2f43f`；parent
+  `019bbf67398d1de96248d903a72aa4b2ab7b2ded`。
+- Review: final Architect and QA both `PASS_WITH_NOTES`；all `ARCH-001..004` and `QA-001..005` are closed
+  with zero blocker/major/minor。After the first targeted QA remained blocked，two independent
+  `gpt-5.6-sol`/`xhigh` read-only diagnoses agreed on the private-transaction repair that became this exact
+  commit。
+- Footprint: integrity and ratio `PASS`；code/tests `27907/47322`，ratio `1.695704`；case/support/fixture
+  `41573/5152/597`，full-range delta `+2310/+0/+0`。Architect and QA accept numeric `REVIEW_REQUIRED`：the
+  growth is distinct failure-position、rollback、DAD、packet、config and production-mutation evidence with no
+  new support、fixture、public factory、backend or harness。
+- Notes: local focused、Rust 1.97.1、Windows target、Clippy、workspace and privileged lifecycle gates passed。
+  Exact hosted run [`31304175220/1`](https://github.com/zzffu/ferrum2/actions/runs/31304175220) passed quality、
+  footprint、MSRV、interop、three platforms、`windows-tun-e2e` and qualification；job `93221731378` emitted
+  `profile=foundation foundation=4/4 cleanup=PASS` bound to the exact SHA/run/attempt。Integration first found
+  a stale pre-T03 client binary；the required workspace-bin build followed by the unchanged failing command
+  and full workspace gate passed。
 
 ## Rollback / risk
 
