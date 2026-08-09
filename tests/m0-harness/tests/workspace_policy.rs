@@ -948,15 +948,42 @@ fn tun_dependency_edges_and_unsafe_exception_are_exact() {
     assert!(library.contains("#[allow(unsafe_code)]\nmod windows;"));
 
     let workflow = fs::read_to_string(root.join(".github/workflows/m0.yml")).expect("workflow");
-    for required in [
+    let workflow = normalize_line_endings(&workflow).expect("workflow line endings");
+    let selector_contract = [
         "windows-tun-e2e:",
         "https://www.wintun.net/builds/wintun-0.14.1.zip",
-        "tests/platform/qualify_windows_tun.ps1 -Mode lifecycle",
+        "      dispatch_target:\n",
+        "        required: true\n",
+        "        type: choice\n",
+        "        default: performance\n",
+        "          - performance\n",
+        "          - windows-tun-tcp\n",
+        "          - windows-tun-transport\n",
+        "          - windows-tun-full\n",
+        "$dispatchTarget = if ($env:GITHUB_EVENT_NAME -eq \"workflow_dispatch\") {",
+        "if ([string]::IsNullOrWhiteSpace($env:DISPATCH_TARGET)) { throw \"dispatch target missing\" }",
+        "\"foundation\" {\n              $mode = \"lifecycle\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "\"performance\" {\n              $mode = \"lifecycle\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "\"windows-tun-tcp\" {\n              $mode = \"tcp\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=tcp tcp=8/8 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "\"windows-tun-transport\" {\n              $mode = \"udp\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "\"windows-tun-full\" {\n              $mode = \"full\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "default { throw \"dispatch target invalid\" }",
+        "$output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode $mode",
+        "$markers = @($output | Where-Object { $_ -like \"m15_windows_tun_e2e status=PASS *\" })",
+        "$markers.Count -ne 1 -or $markers[0] -ne $expectedMarker",
         "needs['windows-tun-e2e'].result",
-    ] {
+    ];
+    let has_selector_contract = |source: &str| {
+        selector_contract
+            .iter()
+            .all(|required| source.contains(required))
+    };
+    assert!(has_selector_contract(&workflow));
+    for required in selector_contract {
+        let mutation = workflow.replace(required, "");
         assert!(
-            workflow.contains(required),
-            "missing hosted foundation contract {required}"
+            !has_selector_contract(&mutation),
+            "hosted selector mutation survived: {required}"
         );
     }
     let controller = fs::read_to_string(root.join("tests/platform/qualify_windows_tun.ps1"))
@@ -2525,18 +2552,33 @@ fn performance_is_manual_and_decoupled_from_qualification() {
     let workflow =
         fs::read_to_string(workspace_root().join(".github/workflows/m0.yml")).expect("workflow");
     let workflow = normalize_line_endings(&workflow).expect("workflow line endings");
-    assert!(workflow.contains(
-        "  performance:\n    name: performance\n    if: ${{ github.event_name == 'workflow_dispatch' }}\n"
-    ));
-    assert!(workflow.contains("test \"$GITHUB_EVENT_NAME\" = \"workflow_dispatch\""));
-    assert!(workflow.contains(
-        "    needs:\n      - quality\n      - budget\n      - msrv\n      - platform\n      - interop\n"
-    ));
-    for forbidden in [
-        "      - performance\n",
-        "PERFORMANCE_RESULT",
-        "m4_qualification_completion",
-    ] {
+    let isolation_contract = [
+        "        default: performance\n",
+        "  performance:\n    name: performance\n    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dispatch_target == 'performance' }}\n",
+        "    timeout-minutes: 90\n    env:\n      DISPATCH_TARGET: ${{ inputs.dispatch_target }}\n",
+        "test \"$GITHUB_EVENT_NAME\" = \"workflow_dispatch\"",
+        "test \"$DISPATCH_TARGET\" = \"performance\"",
+        "    needs:\n      - quality\n      - budget\n      - msrv\n      - platform\n      - interop\n",
+    ];
+    let has_isolation_contract = |source: &str| {
+        isolation_contract
+            .iter()
+            .all(|required| source.contains(required))
+    };
+    assert!(has_isolation_contract(&workflow));
+    for required in isolation_contract {
+        let mutation = workflow.replace(required, "");
+        assert!(
+            !has_isolation_contract(&mutation),
+            "performance isolation mutation survived: {required}"
+        );
+    }
+    let qualification = workflow
+        .split("\n  qualification:\n")
+        .nth(1)
+        .expect("qualification job");
+    assert!(!qualification.contains("      - performance\n"));
+    for forbidden in ["PERFORMANCE_RESULT", "m4_qualification_completion"] {
         assert!(
             !workflow.contains(forbidden),
             "workflow must not contain {forbidden}"
