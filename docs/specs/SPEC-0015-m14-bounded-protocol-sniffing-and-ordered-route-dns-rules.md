@@ -145,11 +145,15 @@ The words MUST、MUST NOT、SHOULD and MAY are normative。
 - `UDP ASSOCIATE` MUST return the existing success reply containing its one actual relay endpoint before
   reading application data。Its TCP-control lifetime、TCP-peer-IP authority、fixed/first-valid source
   port、fragment policy and bounds MUST remain exact。
-- In schema version 2，wrong-source、nonzero `RSV`、`FRAG != 0`、malformed、zero-target or over-limit
-  datagrams MUST be silently dropped without route metadata、terminal-mode、selector、plan、session、
-  accepted-activity or send mutation。The first source/wire-valid datagram MUST become the association
-  classification datagram：its target fills immutable ordinary-route metadata，its payload may be
-  borrow-sniffed once，and the complete datagram is cached while the ordered program runs exactly once。
+- In schema version 2，wrong-source、nonzero `RSV`、`FRAG != 0`、malformed or zero-target datagrams MUST
+  be silently dropped without route metadata、terminal mode、selector、plan、session、accepted activity or
+  send mutation。A source/wire-valid candidate MAY evaluate route and selector/plan state ephemerally to
+  calculate its selected terminal payload limit；when over limit it MUST commit no source、terminal mode、
+  plan、association/session/live ID、accepted activity、target traffic or send state，and the next candidate
+  MUST evaluate current route/selector state again。The first candidate that passes its selected terminal
+  limit MUST become the association classification datagram：its target fills immutable ordinary-route
+  metadata，its payload may be borrow-sniffed once，and the complete datagram is cached for the terminal
+  transition。
   An unknown/invalid DNS sniff outcome continues to later rules/final and the resulting terminal action
   still fixes the association。
 - A terminal `route` MUST resolve one owned `EgressPlanSnapshot` once，lazy-create one private

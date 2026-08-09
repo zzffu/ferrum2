@@ -244,10 +244,11 @@ git diff --check
 - Client TCP tests cover known-target route、reject and port-53 hijack with multiple framed queries；
   config and runtime tests prove no TCP sniff wait and no ordinary fallback after hijack。
 - One client UDP state table proves wrong-source/malformed/fragmented input cannot classify the endpoint；
-  the first valid packet supplies route metadata、is cached、selects once and is forwarded exactly once。
-- Its routed row switches a selector and sends a later target that would match another rule，then proves
-  both packets retain their own destinations through the first plan with no rule/final/selector re-read、
-  second plan/session or fallback。
+  an over-limit candidate may calculate selector A's plan limit but commits zero source/terminal/activity/
+  owner/live-ID/target/wire state，then after A→B the first eligible packet uses B exactly once。
+- Its routed row switches B→A after commitment and sends a later target that would match another rule，then
+  proves both packets retain their own destinations through B with no rule/final/selector re-read、second
+  plan/session or fallback。
 - Separate first-packet rows prove DNS hijack holds the whole association in DNS answering，later non-DNS
   traffic cannot route，reject drops and ends the association，and neither action creates a Shadowsocks
   socket/plan/session/live ID。

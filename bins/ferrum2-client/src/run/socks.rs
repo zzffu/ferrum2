@@ -2256,6 +2256,10 @@ pub(in crate::run) mod tests {
             );
         }
 
+        selector
+            .switch("manual", "selected-b")
+            .expect("switch selector after rejected candidate");
+
         let accepted_application = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("following valid source");
@@ -2271,7 +2275,7 @@ pub(in crate::run) mod tests {
         let clock = SystemClock::new();
         let random = SystemRandom;
         let (first_len, first_peer) =
-            tokio::time::timeout(Duration::from_secs(2), upstreams[1].recv_from(&mut wire))
+            tokio::time::timeout(Duration::from_secs(2), upstreams[3].recv_from(&mut wire))
                 .await
                 .expect("selected first request timeout")
                 .expect("selected first request");
@@ -2280,7 +2284,7 @@ pub(in crate::run) mod tests {
             .expect("selected outer request");
         assert_eq!(
             outer.datagram().target(),
-            &TargetAddr::ipv4(servers[2]).expect("selected inner target")
+            &TargetAddr::ipv4(servers[4]).expect("selected inner target")
         );
         let inner_wire = outer.datagram().payload().to_vec();
         let (_, commit) = outer.into_parts();
@@ -2300,7 +2304,7 @@ pub(in crate::run) mod tests {
         assert_eq!(udp.live_ids.lock().expect("live IDs").len(), 2);
 
         selector
-            .switch("manual", "selected-b")
+            .switch("manual", "selected-a")
             .expect("switch selector after terminal selection");
 
         let later_target =
@@ -2312,7 +2316,7 @@ pub(in crate::run) mod tests {
             .await
             .expect("later request");
         let (later_len, later_peer) =
-            tokio::time::timeout(Duration::from_secs(2), upstreams[1].recv_from(&mut wire))
+            tokio::time::timeout(Duration::from_secs(2), upstreams[3].recv_from(&mut wire))
                 .await
                 .expect("selected later request timeout")
                 .expect("selected later request");
@@ -2322,7 +2326,7 @@ pub(in crate::run) mod tests {
             .expect("selected later outer");
         assert_eq!(
             outer.datagram().target(),
-            &TargetAddr::ipv4(servers[2]).expect("selected inner target")
+            &TargetAddr::ipv4(servers[4]).expect("selected inner target")
         );
         let inner_wire = outer.datagram().payload().to_vec();
         let (_, commit) = outer.into_parts();
@@ -2340,7 +2344,7 @@ pub(in crate::run) mod tests {
             .expect("selected later inner commit");
         assert_eq!(udp.manager.session_count(), 1);
         assert_eq!(udp.live_ids.lock().expect("live IDs").len(), 2);
-        for upstream in [&upstreams[0], &upstreams[2], &upstreams[3], &upstreams[4]] {
+        for upstream in [&upstreams[0], &upstreams[1], &upstreams[2], &upstreams[4]] {
             assert_eq!(
                 upstream
                     .try_recv(&mut absent)

@@ -130,9 +130,12 @@ keeps the existing behavior of returning one relay endpoint before application d
 `SocksUdpEndpoint` owns the application socket、source authorization and SOCKS wire state。Wrong-source、
 nonzero-fragment or malformed datagrams are dropped without classifying or fixing the association。
 
-The first source-authorized、`FRAG=0`、bounded decoded datagram is cached，its target becomes the immutable
-association route target and its payload may be borrow-inspected for DNS。The ordered route program runs
-once and transitions the endpoint once：
+Each source-authorized、`FRAG=0`、bounded decoded candidate may evaluate the ordered program and resolve a
+selector/plan ephemerally to calculate the selected terminal payload limit。An over-limit candidate
+commits no source、terminal mode、plan、association/session/live ID、accepted activity、target traffic or
+send state；the next candidate evaluates current route/selector state again。The first candidate that
+passes its selected terminal limit is cached，its target becomes the immutable association route target，
+and the endpoint commits exactly one terminal transition：
 
 - `route` resolves one owned `EgressPlanSnapshot`，lazy-creates one private `ClientUdpAssociation` and
   forwards the cached first datagram exactly once。Every later valid datagram retains its own SOCKS target
