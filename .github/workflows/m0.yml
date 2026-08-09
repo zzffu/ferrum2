@@ -194,12 +194,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install 1.88.0 --profile minimal
-          rustc +1.88.0 -Vv
-          cargo +1.88.0 -V
-          cargo +1.88.0 check --workspace --all-targets --locked
-          cargo +1.88.0 build --workspace --bins --locked
-          cargo +1.88.0 test --workspace --locked
+          rustup toolchain install 1.97.1 --profile minimal
+          rustc +1.97.1 -Vv
+          cargo +1.97.1 -V
+          cargo +1.97.1 check --workspace --all-targets --locked
+          cargo +1.97.1 build --workspace --bins --locked
+          cargo +1.97.1 test --workspace --locked
 
   platform:
     name: platform / ${{ matrix.profile }}
@@ -871,6 +871,47 @@ jobs:
           fi
           test "$cleanup_status" -eq 0
 
+  windows-tun-e2e:
+    name: windows-tun-e2e
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify runner and exact current SHA
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (git status --porcelain) { throw "dirty checkout" }
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw "SHA mismatch" }
+          if ($env:RUNNER_OS -ne "Windows" -or $env:RUNNER_ARCH -ne "X64") { throw "runner mismatch" }
+          Write-Output "run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT job=$env:GITHUB_JOB sha=$env:GITHUB_SHA image_os=$env:ImageOS image_version=$env:ImageVersion"
+      - name: Install exact Rust and download official Wintun
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          rustup toolchain install 1.97.1 --profile minimal
+          rustc +1.97.1 --version --verbose
+          $archive = Join-Path $env:RUNNER_TEMP "wintun-0.14.1.zip"
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51") { throw "ZIP hash mismatch" }
+      - name: Qualify privileged Wintun foundation with always-run cleanup
+        shell: pwsh
+        env:
+          FERRUM2_WINTUN_ZIP: ${{ runner.temp }}\wintun-0.14.1.zip
+        run: |
+          $ErrorActionPreference = "Stop"
+          $output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode lifecycle
+          if ($LASTEXITCODE -ne 0) { throw "foundation controller failed" }
+          $output | Write-Output
+          $marker = "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
+          if (@($output | Where-Object { $_ -eq $marker }).Count -ne 1) { throw "foundation marker mismatch" }
+
   qualification:
     name: qualification
     if: ${{ always() }}
@@ -880,6 +921,7 @@ jobs:
       - msrv
       - platform
       - interop
+      - windows-tun-e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -898,6 +940,7 @@ jobs:
           MSRV_RESULT: ${{ needs.msrv.result }}
           PLATFORM_RESULT: ${{ needs.platform.result }}
           INTEROP_RESULT: ${{ needs.interop.result }}
+          WINDOWS_TUN_RESULT: ${{ needs['windows-tun-e2e'].result }}
         run: |
           set -euo pipefail
           test "$(git status --porcelain)" = ""
@@ -907,5 +950,6 @@ jobs:
           test "$MSRV_RESULT" = "success"
           test "$PLATFORM_RESULT" = "success"
           test "$INTEROP_RESULT" = "success"
+          test "$WINDOWS_TUN_RESULT" = "success"
           printf 'm3_qualification_completion status=PASS full=PASS security=PASS process=PASS msrv=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS platforms=3/3 test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
