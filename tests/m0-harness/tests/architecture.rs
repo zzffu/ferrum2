@@ -2546,6 +2546,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && !tcp.contains("Remove-NetRoute")
             })
             && gate.is_some_and(|gate| {
+                let pump = gate
+                    .split_once("private static async Task Pump(")
+                    .and_then(|(_, tail)| tail.split_once("\n    public void Dispose()"))
+                    .map(|(body, _)| body);
                 gate.contains("ClientToServerBytes")
                     && gate.contains("ServerToClientBytes")
                     && gate.contains("ClientToServerStage")
@@ -2576,6 +2580,36 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && gate.contains("public bool WaitCompleted(int index, int milliseconds)")
                     && gate.contains("public Ferrum2TcpGateObservation Observation(int index)")
                     && !gate.contains("catch (IOException) { }")
+                    && pump.is_some_and(|pump| {
+                        pump.find("observation.SetStage(forward, \"source_stream\")")
+                            .zip(pump.find("var input = source.GetStream()"))
+                            .zip(pump.find(
+                                "observation.SetStage(forward, \"destination_stream\")",
+                            ))
+                            .zip(pump.find("var output = destination.GetStream()"))
+                            .is_some_and(
+                                |(((source_stage, source_stream), destination_stage), destination_stream)| {
+                                    source_stage < source_stream
+                                        && source_stream < destination_stage
+                                        && destination_stage < destination_stream
+                                },
+                            )
+                            && pump
+                                .find("observation.SetStage(forward, \"read\")")
+                                .zip(pump.find("await input.ReadAsync"))
+                                .is_some_and(|(stage, operation)| stage < operation)
+                            && pump
+                                .find("observation.SetStage(forward, \"write\")")
+                                .zip(pump.find("await output.WriteAsync"))
+                                .zip(pump.find("observation.AddBytes(forward, count)"))
+                                .is_some_and(|((stage, operation), accounted)| {
+                                    stage < operation && operation < accounted
+                                })
+                            && pump
+                                .find("observation.SetStage(forward, \"shutdown\")")
+                                .zip(pump.find("destination.Client.Shutdown"))
+                                .is_some_and(|(stage, operation)| stage < operation)
+                    })
             })
             && probe.is_some_and(|probe| {
                 probe.contains("public byte[] Received")
@@ -2835,6 +2869,18 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace(
             "observation.SetStage(forward, \"destination_stream\");",
             "",
+        ),
+        controller.replace(
+            "                observation.SetStage(forward, \"write\");\n                await output.WriteAsync(buffer, 0, count).ConfigureAwait(false);",
+            "                await output.WriteAsync(buffer, 0, count).ConfigureAwait(false);\n                observation.SetStage(forward, \"write\");",
+        ),
+        controller.replace(
+            "            observation.SetStage(forward, \"source_stream\");\n            var input = source.GetStream();\n            observation.SetStage(forward, \"destination_stream\");\n            var output = destination.GetStream();",
+            "            observation.SetStage(forward, \"destination_stream\");\n            var input = source.GetStream();\n            observation.SetStage(forward, \"source_stream\");\n            var output = destination.GetStream();",
+        ),
+        controller.replace(
+            "            observation.SetStage(forward, \"shutdown\");\n            try { destination.Client.Shutdown(SocketShutdown.Send); }",
+            "            try { destination.Client.Shutdown(SocketShutdown.Send); }\n            observation.SetStage(forward, \"shutdown\");",
         ),
         controller.replace(
             "catch (InvalidOperationException) { observation.Fail(forward, \"invalid_operation\"); }",
