@@ -2548,6 +2548,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && gate.is_some_and(|gate| {
                 gate.contains("ClientToServerBytes")
                     && gate.contains("ServerToClientBytes")
+                    && gate.contains("ClientToServerStage")
+                    && gate.contains("ServerToClientStage")
                     && gate.contains("ClientToServerEof")
                     && gate.contains("ServerToClientEof")
                     && gate.contains("ClientToServerFault")
@@ -2557,10 +2559,18 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && gate.contains("Pump(upstream, client, observation, false)")
                     && gate.contains("observation.AddBytes(forward, count)")
                     && gate.contains("observation.MarkEof(forward)")
+                    && gate.contains("observation.SetStage(forward, \"source_stream\")")
+                    && gate.contains("observation.SetStage(forward, \"destination_stream\")")
+                    && gate.contains("observation.SetStage(forward, \"read\")")
+                    && gate.contains("observation.SetStage(forward, \"write\")")
+                    && gate.contains("observation.SetStage(forward, \"shutdown\")")
                     && gate.contains("observation.Fail(forward, \"io\")")
                     && gate.contains("observation.Fail(forward, \"disposed\")")
                     && gate.contains("observation.Fail(forward, \"socket\")")
                     && gate.contains("observation.Fail(forward, \"cancelled\")")
+                    && gate.contains("observation.Fail(forward, \"invalid_operation\")")
+                    && gate.contains("observation.Fail(forward, \"not_supported\")")
+                    && gate.contains("observation.FailBoth(\"aggregate\")")
                     && gate.contains("observation.Fail(forward, \"other\")")
                     && gate.contains("finally { observation.Complete(); }")
                     && gate.contains("public bool WaitCompleted(int index, int milliseconds)")
@@ -2597,8 +2607,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         return false;
                     }
                 }
-                classifier.contains("Get-Tcp01Boundary $state")
+                classifier.contains("$gateFaults = @(\"none\", \"io\", \"disposed\", \"socket\", \"cancelled\", \"invalid_operation\", \"not_supported\", \"aggregate\", \"other\")")
+                    && classifier.contains("$probeFaults = @(\"none\", \"io\", \"disposed\", \"socket\", \"cancelled\", \"other\")")
+                    && classifier.contains("Get-Tcp01Boundary $state")
                     && classifier.contains("GateForwardFault = \"invalid\"")
+                    && classifier.contains("GateReverseStage = \"invalid\"")
                     && classifier.contains("ProbeEcho = \"other\"")
                     && classifier.contains("GateReverseBytes = \"zero\"")
                     && classifier.contains("AppResult = \"reset\"")
@@ -2619,8 +2632,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && diag.contains("$tcp01Observation.Gate.Observation")
                     && diag.contains("$probe.Received")
                     && diag.contains("$probe.EchoByteCount")
+                    && diag.contains("GateForwardStage = if ($gateObservation) { $gateObservation.ClientToServerStage } else { \"pending\" }")
+                    && diag.contains("GateReverseStage = if ($gateObservation) { $gateObservation.ServerToClientStage } else { \"pending\" }")
                     && diag.contains("$tcp01Boundary = Get-Tcp01Boundary $tcp01State")
                     && diag.contains("$tcp01Diagnostic = \"status=OBSERVED boundary=$tcp01Boundary app=$($tcp01State.AppResult)")
+                    && diag.contains("gate_c2s_stage=$($tcp01State.GateForwardStage)")
+                    && diag.contains("gate_s2c_stage=$($tcp01State.GateReverseStage)")
                     && diagnostic.is_some_and(|line| {
                         !line.contains("tcp01Target")
                             && !line.contains("tcp01Port")
@@ -2816,6 +2833,22 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "finally { }",
         ),
         controller.replace(
+            "observation.SetStage(forward, \"destination_stream\");",
+            "",
+        ),
+        controller.replace(
+            "catch (InvalidOperationException) { observation.Fail(forward, \"invalid_operation\"); }",
+            "catch (InvalidOperationException) { observation.Fail(forward, \"other\"); }",
+        ),
+        controller.replace(
+            "catch (NotSupportedException) { observation.Fail(forward, \"not_supported\"); }",
+            "catch (NotSupportedException) { observation.Fail(forward, \"other\"); }",
+        ),
+        controller.replace(
+            "catch (AggregateException) { observation.FailBoth(\"aggregate\"); }",
+            "catch (AggregateException) { observation.FailBoth(\"other\"); }",
+        ),
+        controller.replace(
             "if (count == 0) { Volatile.Write(ref readEof, 1); break; }",
             "if (count == 0) { break; }",
         ),
@@ -2859,6 +2892,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "$tcp01Boundary = \"COMPLETE\"",
         ),
         controller.replace(
+            "@{ Change = @{ GateReverseStage = \"invalid\" }; Expected = \"UNRESOLVED\" }",
+            "@{ Change = @{ GateReverseStage = \"read\" }; Expected = \"UNRESOLVED\" }",
+        ),
+        controller.replace(
+            "$probeFaults = @(\"none\", \"io\", \"disposed\", \"socket\", \"cancelled\", \"other\")",
+            "$probeFaults = @(\"none\", \"io\", \"disposed\", \"socket\", \"cancelled\", \"aggregate\", \"other\")",
+        ),
+        controller.replace(
             "@{ Change = @{ ProbeEcho = \"other\" }; Expected = \"TARGET_ECHO_INCOMPLETE\" }",
             "@{ Change = @{ ProbeEcho = \"exact\" }; Expected = \"TARGET_ECHO_INCOMPLETE\" }",
         ),
@@ -2871,8 +2912,16 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "$true",
         ),
         controller.replace(
+            "GateReverseStage = if ($gateObservation) { $gateObservation.ServerToClientStage } else { \"pending\" }",
+            "GateReverseStage = \"pending\"",
+        ),
+        controller.replace(
             "$tcp01Diagnostic = \"status=OBSERVED boundary=$tcp01Boundary",
             "$tcp01Diagnostic = \"status=OBSERVED target=$tcp01Target boundary=$tcp01Boundary",
+        ),
+        controller.replace(
+            "gate_s2c_stage=$($tcp01State.GateReverseStage)",
+            "gate_s2c_stage=$($tcp01Error.Exception.Message)",
         ),
         controller.replace(
             "Assert-True $false \"TCP-01 diagnostic sentinel\"",

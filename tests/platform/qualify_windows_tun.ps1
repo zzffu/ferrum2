@@ -55,12 +55,18 @@ function Assert-True([bool]$Condition, [string]$Message) {
 
 function Get-Tcp01Boundary([hashtable]$State) {
     $yesNo = @("yes", "no")
-    $faults = @("none", "io", "disposed", "socket", "cancelled", "other")
+    $gateFaults = @("none", "io", "disposed", "socket", "cancelled", "invalid_operation", "not_supported", "aggregate", "other")
+    $probeFaults = @("none", "io", "disposed", "socket", "cancelled", "other")
+    $stages = @("pending", "source_stream", "destination_stream", "read", "write", "shutdown")
     foreach ($name in @("GateAccepted", "GateForwardEof", "GateReverseEof", "GateComplete", "ProbeAccepted", "ProbeReadEof", "ProbeShutdown", "ProbeComplete")) {
         if (-not $State.ContainsKey($name) -or $yesNo -notcontains $State[$name]) { return "UNRESOLVED" }
     }
-    foreach ($name in @("GateForwardFault", "GateReverseFault", "ProbeFault")) {
-        if (-not $State.ContainsKey($name) -or $faults -notcontains $State[$name]) { return "UNRESOLVED" }
+    foreach ($name in @("GateForwardFault", "GateReverseFault")) {
+        if (-not $State.ContainsKey($name) -or $gateFaults -notcontains $State[$name]) { return "UNRESOLVED" }
+    }
+    if (-not $State.ContainsKey("ProbeFault") -or $probeFaults -notcontains $State.ProbeFault) { return "UNRESOLVED" }
+    foreach ($name in @("GateForwardStage", "GateReverseStage")) {
+        if (-not $State.ContainsKey($name) -or $stages -notcontains $State[$name]) { return "UNRESOLVED" }
     }
     foreach ($name in @("GateForwardBytes", "GateReverseBytes")) {
         if (-not $State.ContainsKey($name) -or @("zero", "nonzero") -notcontains $State[$name]) { return "UNRESOLVED" }
@@ -80,8 +86,8 @@ function Get-Tcp01Boundary([hashtable]$State) {
 }
 
 $tcp01CompleteState = @{
-    GateAccepted = "yes"; GateForwardBytes = "nonzero"; GateForwardEof = "yes"; GateForwardFault = "none"
-    GateReverseBytes = "nonzero"; GateReverseEof = "yes"; GateReverseFault = "none"; GateComplete = "yes"
+    GateAccepted = "yes"; GateForwardBytes = "nonzero"; GateForwardEof = "yes"; GateForwardFault = "none"; GateForwardStage = "shutdown"
+    GateReverseBytes = "nonzero"; GateReverseEof = "yes"; GateReverseFault = "none"; GateReverseStage = "shutdown"; GateComplete = "yes"
     ProbeAccepted = "yes"; ProbeRequest = "exact"; ProbeReadEof = "yes"; ProbeEcho = "exact"
     ProbeShutdown = "yes"; ProbeFault = "none"; ProbeComplete = "yes"; AppResult = "success"
 }
@@ -91,7 +97,8 @@ foreach ($row in @(
     @{ Change = @{ GateReverseBytes = "zero" }; Expected = "GATE_REVERSE_INCOMPLETE" },
     @{ Change = @{ AppResult = "reset" }; Expected = "CLIENT_AFTER_GATE_REVERSE" },
     @{ Change = @{}; Expected = "COMPLETE" },
-    @{ Change = @{ GateForwardFault = "invalid" }; Expected = "UNRESOLVED" }
+    @{ Change = @{ GateForwardFault = "invalid" }; Expected = "UNRESOLVED" },
+    @{ Change = @{ GateReverseStage = "invalid" }; Expected = "UNRESOLVED" }
 )) {
     $state = $tcp01CompleteState.Clone()
     foreach ($name in $row.Change.Keys) { $state[$name] = $row.Change[$name] }
@@ -390,11 +397,15 @@ public sealed class Ferrum2TcpGateObservation {
     private int clientToServerEof;
     private int serverToClientEof;
     private int sessionComplete;
+    private string clientToServerStage = "pending";
+    private string serverToClientStage = "pending";
     private string clientToServerFault;
     private string serverToClientFault;
 
     public string ClientToServerBytes { get { return Interlocked.Read(ref clientToServerBytes) == 0 ? "zero" : "nonzero"; } }
     public string ServerToClientBytes { get { return Interlocked.Read(ref serverToClientBytes) == 0 ? "zero" : "nonzero"; } }
+    public string ClientToServerStage { get { return Volatile.Read(ref clientToServerStage); } }
+    public string ServerToClientStage { get { return Volatile.Read(ref serverToClientStage); } }
     public string ClientToServerEof { get { return Volatile.Read(ref clientToServerEof) == 0 ? "no" : "yes"; } }
     public string ServerToClientEof { get { return Volatile.Read(ref serverToClientEof) == 0 ? "no" : "yes"; } }
     public string ClientToServerFault { get { return Volatile.Read(ref clientToServerFault) ?? "none"; } }
@@ -408,6 +419,10 @@ public sealed class Ferrum2TcpGateObservation {
     internal void MarkEof(bool forward) {
         if (forward) Volatile.Write(ref clientToServerEof, 1);
         else Volatile.Write(ref serverToClientEof, 1);
+    }
+    internal void SetStage(bool forward, string stage) {
+        if (forward) Volatile.Write(ref clientToServerStage, stage);
+        else Volatile.Write(ref serverToClientStage, stage);
     }
     internal void Fail(bool forward, string fault) {
         if (forward) Interlocked.CompareExchange(ref clientToServerFault, fault, null);
@@ -497,27 +512,35 @@ public sealed class Ferrum2TcpGate : IDisposable {
         catch (IOException) { observation.FailBoth("io"); }
         catch (ObjectDisposedException) { observation.FailBoth("disposed"); }
         catch (SocketException) { observation.FailBoth("socket"); }
+        catch (AggregateException) { observation.FailBoth("aggregate"); }
         catch (Exception) { observation.FailBoth("other"); }
         finally { observation.Complete(); }
     }
 
     private static async Task Pump(TcpClient source, TcpClient destination, Ferrum2TcpGateObservation observation, bool forward) {
         try {
+            observation.SetStage(forward, "source_stream");
             var input = source.GetStream();
+            observation.SetStage(forward, "destination_stream");
             var output = destination.GetStream();
             var buffer = new byte[4096];
             while (true) {
+                observation.SetStage(forward, "read");
                 var count = await input.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
                 if (count == 0) { observation.MarkEof(forward); break; }
+                observation.SetStage(forward, "write");
                 await output.WriteAsync(buffer, 0, count).ConfigureAwait(false);
                 observation.AddBytes(forward, count);
             }
+            observation.SetStage(forward, "shutdown");
             try { destination.Client.Shutdown(SocketShutdown.Send); }
             catch (SocketException) { observation.Fail(forward, "socket"); }
         } catch (OperationCanceledException) { observation.Fail(forward, "cancelled"); }
         catch (IOException) { observation.Fail(forward, "io"); }
         catch (ObjectDisposedException) { observation.Fail(forward, "disposed"); }
         catch (SocketException) { observation.Fail(forward, "socket"); }
+        catch (InvalidOperationException) { observation.Fail(forward, "invalid_operation"); }
+        catch (NotSupportedException) { observation.Fail(forward, "not_supported"); }
         catch (Exception) { observation.Fail(forward, "other"); }
     }
 
@@ -1210,9 +1233,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $tcp01State = @{
             GateAccepted = $tcp01Observation.GateAccepted
             GateForwardBytes = if ($gateObservation) { $gateObservation.ClientToServerBytes } else { "zero" }
+            GateForwardStage = if ($gateObservation) { $gateObservation.ClientToServerStage } else { "pending" }
             GateForwardEof = if ($gateObservation) { $gateObservation.ClientToServerEof } else { "no" }
             GateForwardFault = if ($gateObservation) { $gateObservation.ClientToServerFault } else { "other" }
             GateReverseBytes = if ($gateObservation) { $gateObservation.ServerToClientBytes } else { "zero" }
+            GateReverseStage = if ($gateObservation) { $gateObservation.ServerToClientStage } else { "pending" }
             GateReverseEof = if ($gateObservation) { $gateObservation.ServerToClientEof } else { "no" }
             GateReverseFault = if ($gateObservation) { $gateObservation.ServerToClientFault } else { "other" }
             GateComplete = if ($gateObservation) { $gateObservation.SessionComplete } else { "no" }
@@ -1226,7 +1251,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             AppResult = $tcp01Observation.AppResult
         }
         $tcp01Boundary = Get-Tcp01Boundary $tcp01State
-        $tcp01Diagnostic = "status=OBSERVED boundary=$tcp01Boundary app=$($tcp01State.AppResult) gate_accepted=$($tcp01State.GateAccepted) gate_c2s_bytes=$($tcp01State.GateForwardBytes) gate_c2s_eof=$($tcp01State.GateForwardEof) gate_c2s_fault=$($tcp01State.GateForwardFault) gate_s2c_bytes=$($tcp01State.GateReverseBytes) gate_s2c_eof=$($tcp01State.GateReverseEof) gate_s2c_fault=$($tcp01State.GateReverseFault) gate_complete=$($tcp01State.GateComplete) probe_accepted=$($tcp01State.ProbeAccepted) probe_request=$($tcp01State.ProbeRequest) probe_read_eof=$($tcp01State.ProbeReadEof) probe_echo=$($tcp01State.ProbeEcho) probe_shutdown=$($tcp01State.ProbeShutdown) probe_fault=$($tcp01State.ProbeFault) probe_complete=$($tcp01State.ProbeComplete)"
+        $tcp01Diagnostic = "status=OBSERVED boundary=$tcp01Boundary app=$($tcp01State.AppResult) gate_accepted=$($tcp01State.GateAccepted) gate_c2s_bytes=$($tcp01State.GateForwardBytes) gate_c2s_stage=$($tcp01State.GateForwardStage) gate_c2s_eof=$($tcp01State.GateForwardEof) gate_c2s_fault=$($tcp01State.GateForwardFault) gate_s2c_bytes=$($tcp01State.GateReverseBytes) gate_s2c_stage=$($tcp01State.GateReverseStage) gate_s2c_eof=$($tcp01State.GateReverseEof) gate_s2c_fault=$($tcp01State.GateReverseFault) gate_complete=$($tcp01State.GateComplete) probe_accepted=$($tcp01State.ProbeAccepted) probe_request=$($tcp01State.ProbeRequest) probe_read_eof=$($tcp01State.ProbeReadEof) probe_echo=$($tcp01State.ProbeEcho) probe_shutdown=$($tcp01State.ProbeShutdown) probe_fault=$($tcp01State.ProbeFault) probe_complete=$($tcp01State.ProbeComplete)"
         if ($tcp01Error) { throw $tcp01Error }
         Assert-True $false "TCP-01 diagnostic sentinel"
         $tcpRows++
