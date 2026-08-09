@@ -1,6 +1,6 @@
 # M15 — Windows Wintun TUN data plane
 
-- **Status:** planned
+- **Status:** executing
 - **Qualified M14 product:** `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`
 - **Qualified M14 product tree:** `a5533723d251b62529daa767dd083404fa0a30bc`
 - **Planning baseline:** `bd374c6ec47470020bfcf908aa1a3475f0b3dbf0`
@@ -137,8 +137,8 @@ owner-provided design input，不是仓库证据。上游事实与纠正记录�
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M15-T01 | Freeze corrected contracts、dependency dispositions and footprint control | M14 closed | ready |
-| M15-T02 | Prove M14 classification-eligible UDP commit ordering and selector re-read | M15-T01 | planned |
+| M15-T01 | Freeze corrected contracts、dependency dispositions and footprint control | M14 closed | done |
+| M15-T02 | Prove M14 classification-eligible UDP commit ordering and selector re-read | M15-T01 | ready |
 | M15-T03 | Prove config → Wintun/address/MTU/DAD/session → bounded stack → rollback | M15-T02 | planned |
 | M15-T04 | Compose IPv4/IPv6 TUN TCP through the existing policy/DNS/egress/relay seams | M15-T03 | planned |
 | M15-T05 | Compose IPv4/IPv6 TUN UDP mapping and DNS hijack through existing association seams | M15-T04 | planned |
@@ -167,15 +167,18 @@ Numeric `REVIEW_REQUIRED` is expected for some transport/security tickets；inte
 independent evidence must not be compressed or deleted to improve the signal。Use existing crate tests、
 `m0-harness` and one Windows platform controller；no second Rust harness or committed packet/binary fixture。
 
-This plan authorizes no push、workflow dispatch、rerun、PR、tag、package、release or publication。T03's
-first privileged hosted probe and T06/T07 remote evidence require later explicit authorization。The Wintun
-custom prebuilt license permits alongside-API use textually，but GPL-3.0-only combined redistribution is a
-release/legal decision；M15 downloads it ephemerally or requires an operator-supplied exact DLL and does not
-redistribute it。
+The plan itself authorized no remote action。The 2026-08-09 execute request now authorizes every required
+non-force push、the direct hosted probe and the independent same-SHA performance dispatch。A failed run is
+not rerun without fresh authorization；force-push、PR、tag、package、release and publication remain
+unauthorized。The Wintun custom prebuilt license permits alongside-API use textually，but GPL-3.0-only
+combined redistribution is a release/legal decision；M15 downloads it ephemerally or requires an operator-
+supplied exact DLL and does not redistribute it。
 
 ## Blocker / next action
 
-Accept M15-T01 as one control-plus-Markdown commit。Before accepting T03，obtain a single-use authorization
-for the direct GitHub-hosted Windows privileged smoke；use Hyper-V/self-hosted infrastructure only if that
-capability probe fails。Package/release remains blocked until the Wintun binary-license disposition is
+No execution blocker。T01 candidate `4942a3d451547eeb104a7617ed0ad5880918adc9` passed bounded review、
+exact validation and footprint control；T02 is ready。Create and bind its isolated worktree from the exact
+integration branch HEAD containing this status record。The direct GitHub-hosted Windows privileged smoke
+and same-SHA performance dispatch are authorized；Hyper-V/self-hosted remains fallback only after a recorded
+direct capability failure。Package/release remains blocked until the Wintun binary-license disposition is
 recorded by the responsible owner。

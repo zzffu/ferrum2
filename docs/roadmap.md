@@ -71,12 +71,12 @@ route/reject/hijack、schema-v2 association routing及schema-v1 migration reject
 automatic run `31282591585/1`保留为FAIL且未rerun；其qualification generator schema缺陷在三文件
 test/tool descendant修复。Final Architect/QA均`PASS_WITH_NOTES`且zero finding；schema-3 integrity/
 ratio PASS，`+5377/0/0` numeric advisory已接受。未force-push、PR、tag、package、release或publish。
-M15现为`planned`：以qualified M14 product `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`
-和docs-only planning baseline `bd374c6ec47470020bfcf908aa1a3475f0b3dbf0`为基础，规划Windows
-NT 10.0+ AMD64手动路由Wintun TUN inbound、单owner userspace TCP/UDP stack及现有M14 policy/
-DNS/egress接入。计划保留schema v2，选择exact smoltcp 0.13.1并把MSRV提升到规划日latest stable
-Rust 1.97.1；拒绝fragment/ICMP/auto-route/system DNS，使用
-T01→T02→T03→T04→T05→T06→T07串行DAG；尚未授权product execution、push、dispatch或publication。
+M15现为`executing`：T01 candidate `4942a3d451547eeb104a7617ed0ad5880918adc9`已冻结qualified M14/
+planning identities、schema-v2 manual-route Wintun ownership、exact smoltcp 0.13.1/Rust 1.97.1、两条
+deep-module seam及schema-3 footprint control；bounded Architect/QA review与exact Quick/MSRV/footprint
+均`PASS`，T02已ready。后续按T02→T03→T04→T05→T06→T07串行drain；本次execute已授权所需
+non-force push、direct hosted probe及same-SHA performance dispatch，未授权rerun、force-push、PR、tag、
+package、release或publication。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1125,7 +1125,7 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 
 ## M15 — Windows Wintun TUN data plane
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** 一个optional schema-v2 client `[tun]`在Windows NT 10.0+ AMD64创建独占Wintun
   adapter，配置双栈address/MTU，由一个同步owner thread运行有界userspace TCP/UDP stack；externally
   routed flows复用现有ordered route/sniff、DNS answer、client egress和relay，且无第二数据面。
@@ -1149,9 +1149,10 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 - **Deferred/out of scope:** explicit/automatic/default/bypass route、system DNS、WFP、network monitoring、
   fragments、ICMP、Fake-IP、process routing、non-Windows/non-AMD64 TUN、multi-stack/sharding、installer、
   service、DLL redistribution、package/release/publication。
-- **Next/remote boundary:** accept T01 as one control-plus-Markdown commit。No product、push、dispatch、rerun、
-  PR、tag、package、release or publication is authorized。T03 privileged direct hosted probe needs later
-  single-use authorization；Hyper-V/self-hosted is fallback only after recorded direct failure。Combined
+- **Next/remote boundary:** T01 done and T02 ready；create/bind its isolated worktree from the exact integration
+  branch HEAD containing the T01 status record。Required non-force pushes、the direct hosted probe and the
+  same-SHA performance dispatch are authorized；rerun、force-push、PR、tag、package、release and publication
+  are not。Hyper-V/self-hosted remains fallback only after a recorded direct capability failure。Combined
   Wintun/Ferrum2 redistribution remains blocked pending the responsible license decision。
 
 ## 决策登记
@@ -1397,3 +1398,4 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 | 2026-08-09 | M14 close | Exact `bc696347…` passes local serial qualification、automatic `31284062682/1` and manual `31284310711/1`；M14 closed | Automatic run passes quality、footprint、MSRV、three platforms、SIP022/DNS interop and aggregate；manual job passes throughput/resource/DNS resource、THP restore and cleanup | Final schema-3 integrity/ratio PASS；`+5377/0/0` advisory accepted；two necessary non-force pushes and one dispatch consumed，no force-push、unchanged-SHA rerun、PR、tag、package、release or publication；local docs-only closeout not pushed |
 | 2026-08-09 | M15 initial plan（dependency/MSRV superseded by next row） | M15改为`planned`；接受Windows AMD64手动路由Wintun TUN、single stack owner、flow-level seam和existing policy/DNS/egress composition | External draft经exact `bd374c6` source/CI/upstream复核；schema 3/Rust 1.91/three crates/fragments/2-GiB defaults/blocking activate/Hyper-V-first最初改为schema v2/Rust 1.88/two deep modules/no fragments/bounded prepare/direct hosted-first；Windows-managed connected rows显式纳入合同 | qualified `bc696347…`、planning `bd374c6…`；ADR-0034、SPEC/TEST-0016、M15 research、T01→T02→T03→T04→T05→T06→T07；performance required；plan-only，无product/push/dispatch/release/publication |
 | 2026-08-09 | M15 dependency/MSRV owner amendment | Owner明确要求exact smoltcp 0.13.1及当前latest stable rustc；规划日官方latest为Rust 1.97.1，现有selected build toolchain已匹配 | 保留no-default literal ten-feature graph、双向TCP/UDP filter和no-fragment边界；明确不启用正向`auto-icmp-echo-reply`。T03把workspace、CI及policy MSRV从1.88.0原子提升至1.97.1，Rust1.91只作为upstream minimum事实；未来stable不自动漂移 | M15 milestone/ADR/SPEC/TEST/research/T01/T03/T06/T07同步；control-only T01不修改product/workflow，未授权push/dispatch/release/publication |
+| 2026-08-09 | M15-T01 accept / execute | M15改为`executing`；T01 candidate `4942a3d…`通过review/validation，T02 ready | Qualified/planning identities、manual-route/schema-v2/two-module ownership、Wintun artifact/dependency/MSRV facts、packet/flow boundaries and schema-3 control agree；bounded primary Architect/QA `PASS` with zero finding | Quick、Rust 1.88 historical、Rust 1.97.1 forward、footprint integrity/numeric `PASS` and `0/0/0`；execute授权required non-force pushes、direct hosted probe及same-SHA performance dispatch；no rerun/force-push/PR/tag/package/release/publication |

@@ -1,6 +1,6 @@
 # ADR-0034 — M15 Windows TUN ownership and policy seams
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-09
 - **Related:** `SPEC-0016`、`TEST-0016`、M15-T01～T07；preserves ADR-0023、ADR-0024、
   ADR-0031、ADR-0032 and ADR-0033
