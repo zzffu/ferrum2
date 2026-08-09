@@ -690,11 +690,12 @@ function Open-TunTcp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
     $client = [Net.Sockets.TcpClient]::new($family)
     $client.NoDelay = $true
     $client.SendBufferSize = 4096
+    $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))
     $connected = $client.ConnectAsync($Address, $Port)
     Assert-True ($connected.Wait(5000)) "TUN TCP local handshake timeout"
     if ($connected.IsFaulted) { throw "TUN TCP local handshake failed" }
     $localEndpoint = [Net.IPEndPoint]$client.Client.LocalEndPoint
-    Assert-True ($localEndpoint.Address.Equals($sourceAddress)) "TUN TCP routed source mismatch"
+    Assert-True ($localEndpoint.Address.Equals($sourceAddress)) "TUN TCP source bind mismatch"
     return [pscustomobject]@{ Client = $client }
 }
 
@@ -747,7 +748,6 @@ function Invoke-EchoRow(
         $stream = $session.Client.GetStream()
         $stream.Write($Payload, 0, $Payload.Length)
         $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
-        [void](Add-TargetAddress $Address)
         $probe = [Ferrum2TcpProbe]::new($Address, $Port, "echo")
         $script:tcpResources.Add($probe)
         if ($null -ne $Observation) { $Observation.Probe = $probe }
@@ -1210,6 +1210,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-True ($weakHostInterfaces.Count -eq 0) "weak-host forwarding is unsupported"
         [void](Add-TunRoute $ownedInterfaceIndex "192.0.2.200/29")
         [void](Add-TunRoute $ownedInterfaceIndex "2001:db8::200/120")
+        foreach ($targetIndex in @(0, 1, 2, 3, 7)) {
+            [void](Add-TargetAddress $targets[$targetIndex])
+        }
+
         $tcp01Target = $targets[0]
         $tcp01Port = $ports[0]
         $tcp01Payload = [Text.Encoding]::ASCII.GetBytes("tcp-01-half-close")
@@ -1272,7 +1276,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $ssl = [Net.Security.SslStream]::new($tls.Client.GetStream(), $false, { $true })
         $sslTask = $ssl.AuthenticateAsClientAsync("tls.tun.test")
         Assert-True ($gateB.WaitAccepted($tlsGate, 5000)) "TLS sniff did not select its exact egress"
-        [void](Add-TargetAddress $targets[2])
         $tlsProbe = [Ferrum2TcpProbe]::new($targets[2], $ports[2], "capture")
         $tcpResources.Add($tlsProbe)
         $gateB.Release($tlsGate)
@@ -1290,7 +1293,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $httpStream.Write($httpBytes, 0, $httpBytes.Length)
         $http.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
         Assert-True ($gateB.WaitAccepted($httpGate, 5000)) "HTTP sniff did not select its exact egress"
-        [void](Add-TargetAddress $targets[3])
         $httpProbe = [Ferrum2TcpProbe]::new($targets[3], $ports[3], "echo")
         $tcpResources.Add($httpProbe)
         $gateB.Release($httpGate)
@@ -1333,7 +1335,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $pressureBytes = [byte[]]::new(8 * 1024 * 1024)
         $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)
         Assert-True (-not $pressureWrite.Wait(500)) "backpressure write unexpectedly drained"
-        [void](Add-TargetAddress $targets[7])
         $stall = [Ferrum2TcpProbe]::new($targets[7], $ports[7], "stall")
         $tcpResources.Add($stall)
         $gateA.Release($pressureGate)
