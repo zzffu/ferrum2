@@ -2169,6 +2169,37 @@ fn tun_coexistence_preserves_socks_indices_and_routes_tun_last() {
         0,
         "TUN follows declared SOCKS IDs"
     );
+
+    let without_tun = source.replace(
+        "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\n",
+        "",
+    );
+    let without_tun = load_client(TempConfig::text(&without_tun).path()).expect("SOCKS-only peer");
+    assert_eq!(
+        config
+            .inbounds
+            .iter()
+            .map(|inbound| inbound.listen)
+            .collect::<Vec<_>>(),
+        without_tun
+            .inbounds
+            .iter()
+            .map(|inbound| inbound.listen)
+            .collect::<Vec<_>>(),
+        "adding/removing TUN cannot renumber SOCKS declarations"
+    );
+
+    let reordered = source
+        .replace("socks-a", "swap")
+        .replace("socks-b", "socks-a")
+        .replace("swap", "socks-b")
+        .replace("127.0.0.1:10000", "127.0.0.1:10999")
+        .replace("127.0.0.1:10001", "127.0.0.1:10000")
+        .replace("127.0.0.1:10999", "127.0.0.1:10001");
+    let reordered = load_client(TempConfig::text(&reordered).path()).expect("reordered SOCKS");
+    assert_eq!(reordered.inbounds[0].listen.port(), 10001);
+    assert_eq!(reordered.inbounds[1].listen.port(), 10000);
+    assert_eq!(selected(&reordered.route, 2), 0, "TUN remains last");
 }
 
 #[test]
@@ -2246,17 +2277,64 @@ fn tun_resource_and_shape_failures_are_redacted_and_field_specific() {
 #[test]
 fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
     let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"";
+    let minimums = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nmtu = 1280\nring_capacity = 131072\nready_timeout_ms = 1000\nmax_tcp_flows = 1\ntcp_buffer_bytes = 4096\nmax_udp_mappings = 1\nmax_udp_buffered_bytes = 65536\noutbound = \"proxy\"";
+    let accepted = [
+        ("all minima", minimums.to_owned()),
+        ("mtu maximum", minimums.replace("mtu = 1280", "mtu = 1500")),
+        (
+            "ring maximum",
+            minimums.replace("ring_capacity = 131072", "ring_capacity = 67108864"),
+        ),
+        (
+            "ready maximum",
+            minimums.replace("ready_timeout_ms = 1000", "ready_timeout_ms = 60000"),
+        ),
+        (
+            "flow maximum",
+            minimums.replace("max_tcp_flows = 1", "max_tcp_flows = 4096"),
+        ),
+        (
+            "TCP bytes maximum",
+            minimums.replace("tcp_buffer_bytes = 4096", "tcp_buffer_bytes = 262144"),
+        ),
+        (
+            "mapping maximum",
+            minimums.replace("max_udp_mappings = 1", "max_udp_mappings = 8192"),
+        ),
+        (
+            "UDP bytes maximum",
+            minimums.replace(
+                "max_udp_buffered_bytes = 65536",
+                "max_udp_buffered_bytes = 134217728",
+            ),
+        ),
+    ];
+    for (name, source) in accepted {
+        let file = TempConfig::text(&tun_client(&source));
+        load_client(file.path()).unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+
     let mutations = [
         ("mtu low", "mtu = 1279", ConfigField::TunMtu),
         ("mtu high", "mtu = 1501", ConfigField::TunMtu),
         (
-            "ring low",
-            "ring_capacity = 65536",
+            "ring minimum minus one",
+            "ring_capacity = 131071",
             ConfigField::TunRingCapacity,
         ),
         (
-            "ring high",
-            "ring_capacity = 134217728",
+            "ring minimum plus one",
+            "ring_capacity = 131073",
+            ConfigField::TunRingCapacity,
+        ),
+        (
+            "ring maximum minus one",
+            "ring_capacity = 67108863",
+            ConfigField::TunRingCapacity,
+        ),
+        (
+            "ring maximum plus one",
+            "ring_capacity = 67108865",
             ConfigField::TunRingCapacity,
         ),
         (
@@ -2320,6 +2398,32 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
         );
     }
 
+    for (name, udp_bytes, accepted) in [
+        ("256 MiB minus one", 113_776_543_u64, true),
+        ("256 MiB exact", 113_776_544, true),
+        ("256 MiB plus one", 113_776_545, false),
+    ] {
+        let source = base.replace(
+            "outbound =",
+            &format!("ring_capacity = 67108864\nmax_udp_buffered_bytes = {udp_bytes}\noutbound ="),
+        );
+        let file = TempConfig::text(&tun_client(&source));
+        match load_client(file.path()) {
+            Ok(config) => {
+                assert!(accepted, "{name} unexpectedly passed");
+                assert_eq!(
+                    config.tun.expect(name).owned_buffer_bytes,
+                    268_435_456 - u64::from(name.ends_with("minus one")),
+                    "{name}"
+                );
+            }
+            Err(error) => {
+                assert!(!accepted, "{name}: {error}");
+                assert_eq!(error.field(), ConfigField::TunMemory, "{name}");
+            }
+        }
+    }
+
     for (name, mutation, field) in [
         (
             "unknown route mutation",
@@ -2340,6 +2444,44 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
             "{name}"
         );
     }
+
+    let chain_collision = tun_client(&base.replace("outbound = \"proxy\"", "outbound = \"tun-in\""))
+        .replacen(
+            "[shadowsocks]",
+            "[[outbounds]]\ntag = \"other\"\nserver = \"192.0.2.11:8388\"\n[[chains]]\ntag = \"tun-in\"\nhops = [\"proxy\", \"other\"]\n[shadowsocks]",
+            1,
+        );
+    let selector_collision = tun_client(&base.replace("outbound = \"proxy\"", "outbound = \"tun-in\""))
+        .replacen(
+            "[shadowsocks]",
+            "[[outbounds]]\ntag = \"other\"\nserver = \"192.0.2.11:8388\"\n[[selectors]]\ntag = \"tun-in\"\noutbounds = [\"proxy\", \"other\"]\ndefault = \"proxy\"\n[shadowsocks]",
+            1,
+        );
+    let dns_collision = tun_client(base).replacen(
+        "[shadowsocks]",
+        "[dns]\n[[dns.inbounds]]\ntag = \"tun-in\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"resolver\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"resolver\"\n[shadowsocks]",
+        1,
+    );
+    for (name, source) in [
+        (
+            "ordinary inbound collision",
+            tun_client(&format!(
+                "[[inbounds]]\ntag = \"tun-in\"\nlisten = \"127.0.0.1:1080\"\n{base}"
+            )),
+        ),
+        (
+            "outbound collision",
+            tun_client(&base.replace("tag = \"tun-in\"", "tag = \"proxy\"")),
+        ),
+        ("chain collision", chain_collision),
+        ("selector collision", selector_collision),
+        ("DNS inbound collision", dns_collision),
+    ] {
+        let file = TempConfig::text(&source);
+        let error = load_client(file.path()).err().expect(name);
+        assert_eq!(error.kind(), ConfigErrorKind::Semantic, "{name}");
+        assert!(!format!("{error:?}").contains("198.18"), "{name}");
+    }
 }
 
 #[test]
@@ -2348,10 +2490,20 @@ fn tun_tcp_sniff_is_narrowly_capable_only_for_the_tun_inbound() {
     let file = TempConfig::text(&tun_client(routed));
     load_client(file.path()).expect("TUN-only TCP sniff");
 
+    let tun_only_wildcard = routed.replacen("inbound = \"tun-in\"\nnetwork", "network", 1);
+    let file = TempConfig::text(&tun_client(&tun_only_wildcard));
+    load_client(file.path()).expect("TUN-only wildcard TCP sniff");
+
     for (name, mutation) in [
         (
-            "wildcard",
-            routed.replacen("inbound = \"tun-in\"\nnetwork", "network", 1),
+            "coexistence wildcard",
+            routed
+                .replacen(
+                    "[tun]",
+                    "[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\n[tun]",
+                    1,
+                )
+                .replacen("inbound = \"tun-in\"\nnetwork", "network", 1),
         ),
         (
             "mixed SOCKS and TUN",

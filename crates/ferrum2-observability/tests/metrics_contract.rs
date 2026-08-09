@@ -35,6 +35,8 @@ fn registry_preserves_the_fourteen_stable_families_and_allows_additions() {
     metrics.set_udp_buffered_bytes(Role::Server, 65_507);
     metrics.udp_replay_rejection(Role::Server, Direction::ClientToTarget, Reason::Duplicate);
     metrics.udp_forced_shutdown(Role::Server);
+    metrics.tun_packet_accepted();
+    metrics.tun_packet_foundation_dropped();
 
     let output = metrics.encode_text().expect("encode metrics");
     let help: BTreeSet<_> = output
@@ -112,6 +114,14 @@ fn registry_preserves_the_fourteen_stable_families_and_allows_additions() {
         "ferrum2_udp_replay_rejections_total{role=\"server\",direction=\"client_to_target\",reason=\"duplicate\"}"
     ));
     assert!(samples.contains("ferrum2_udp_forced_shutdown_total{role=\"server\"}"));
+    assert!(samples.contains("ferrum2_tun_packets_accepted_total"));
+    assert!(samples.contains("ferrum2_tun_packets_foundation_dropped_total"));
+    assert!(
+        !samples
+            .iter()
+            .any(|sample| sample.starts_with("ferrum2_tun_") && sample.contains('{')),
+        "foundation TUN counters are fixed no-label series"
+    );
     assert!(output.ends_with("# EOF\n"));
 }
 

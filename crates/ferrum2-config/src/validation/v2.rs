@@ -515,7 +515,8 @@ fn validate_sniff_capability(
     let includes_tcp = networks.is_none_or(|values| values.contains(&Network::Tcp));
     let includes_udp = networks.is_none_or(|values| values.contains(&Network::Udp));
     let tun_only_tcp = matches!(role, Role::Client)
-        && tun_inbound.is_some_and(|tun| inbounds == Some(&[tun][..]))
+        && tun_inbound
+            .is_some_and(|tun| inbounds == Some(&[tun][..]) || (tun == 0 && inbounds.is_none()))
         && networks == Some(&[Network::Tcp][..]);
     if matches!(role, Role::Client) && includes_tcp && !tun_only_tcp {
         return Err(ConfigError::semantic(ConfigField::RouteRulesAction));

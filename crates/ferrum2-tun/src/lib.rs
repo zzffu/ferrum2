@@ -38,15 +38,33 @@ pub struct Config {
 ///
 /// Error values are supplied by the binary so this deep module does not depend on
 /// configuration, policy, DNS, protocol, or observability crates.
-pub fn process_root<E>(config: Config, startup: E, runtime: E, cleanup: E) -> ProcessRoot<E>
+pub fn process_root<E, A, D>(
+    config: Config,
+    startup: E,
+    runtime: E,
+    cleanup: E,
+    accepted: A,
+    foundation_dropped: D,
+) -> ProcessRoot<E>
 where
     E: Copy + Send + 'static,
+    A: Fn() + Send + Sync + 'static,
+    D: Fn() + Send + Sync + 'static,
 {
-    ProcessRoot::new(move || async move {
+    ProcessRoot::new_cancellable(move |cancellation| async move {
         if !config_is_exact(&config) {
             return Err(startup);
         }
-        prepare(config, startup, runtime, cleanup).await
+        prepare(
+            config,
+            startup,
+            runtime,
+            cleanup,
+            cancellation,
+            Box::new(accepted),
+            Box::new(foundation_dropped),
+        )
+        .await
     })
 }
 
@@ -99,7 +117,15 @@ fn config_is_exact(config: &Config) -> bool {
     computed == Some(config.owned_buffer_bytes) && config.owned_buffer_bytes <= 268_435_456
 }
 
-async fn prepare<E>(config: Config, startup: E, runtime: E, cleanup: E) -> Result<TunRoot<E>, E>
+async fn prepare<E>(
+    config: Config,
+    startup: E,
+    runtime: E,
+    cleanup: E,
+    mut cancellation: ProcessCancellation,
+    accepted: Box<dyn Fn() + Send + Sync>,
+    foundation_dropped: Box<dyn Fn() + Send + Sync>,
+) -> Result<Option<TunRoot<E>>, E>
 where
     E: Copy + Send + 'static,
 {
@@ -116,7 +142,15 @@ where
     let thread = std::thread::Builder::new()
         .name("ferrum2-tun-owner".into())
         .spawn(move || {
-            let result = owner_main(config, owner_stop, owner_active, ready_sender, deadline);
+            let result = owner_main(
+                config,
+                owner_stop,
+                owner_active,
+                ready_sender,
+                deadline,
+                accepted,
+                foundation_dropped,
+            );
             let _ = done_sender.send(result);
             result
         })
@@ -129,6 +163,9 @@ where
         thread: Some(thread),
     };
     loop {
+        if cancellation.is_cancelled() {
+            return cancel_prepare(guard, cleanup).await;
+        }
         if std::time::Instant::now() >= deadline {
             return Err(prepare_failure(guard, startup, cleanup).await);
         }
@@ -144,19 +181,36 @@ where
                 {
                     guard.wake = Some(wake);
                 }
-                return Ok(TunRoot {
+                return Ok(Some(TunRoot {
                     owner: guard,
                     done: done_receiver,
                     runtime: Some(runtime),
                     cleanup: Some(cleanup),
-                });
+                }));
             }
             Ok(OwnerReady::Failed) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 return Err(prepare_failure(guard, startup, cleanup).await);
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                return cancel_prepare(guard, cleanup).await;
+            }
+            () = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+    }
+}
+
+async fn cancel_prepare<E>(guard: OwnerThread, cleanup: E) -> Result<Option<TunRoot<E>>, E>
+where
+    E: Copy + Send + 'static,
+{
+    if guard.reap().await == OwnerExit::CleanupFailed {
+        Err(cleanup)
+    } else {
+        Ok(None)
     }
 }
 
@@ -257,15 +311,11 @@ where
     ) -> ProcessFuture<Result<(), E>> {
         Box::pin(async move {
             let reported = tokio::select! {
-                result = &mut self.done => result.unwrap_or(OwnerExit::CleanupFailed),
+                result = &mut self.done => reported_owner_exit(result),
                 () = cancellation.cancelled() => OwnerExit::Stopped,
             };
             let reaped = self.owner.reap().await;
-            let exit = if reaped == OwnerExit::CleanupFailed || reported == OwnerExit::Stopped {
-                reaped
-            } else {
-                reported
-            };
+            let exit = reconcile_owner_exit(reported, reaped);
             match exit {
                 OwnerExit::Stopped => Ok(()),
                 OwnerExit::RuntimeFailed => {
@@ -293,6 +343,20 @@ where
     }
 }
 
+fn reported_owner_exit(
+    result: Result<OwnerExit, tokio::sync::oneshot::error::RecvError>,
+) -> OwnerExit {
+    result.unwrap_or(OwnerExit::CleanupFailed)
+}
+
+fn reconcile_owner_exit(reported: OwnerExit, reaped: OwnerExit) -> OwnerExit {
+    if reaped == OwnerExit::CleanupFailed || reported == OwnerExit::Stopped {
+        reaped
+    } else {
+        reported
+    }
+}
+
 #[cfg(all(windows, target_arch = "x86_64"))]
 fn owner_main(
     config: Config,
@@ -300,6 +364,8 @@ fn owner_main(
     active: Arc<AtomicBool>,
     ready: std::sync::mpsc::SyncSender<OwnerReady>,
     deadline: std::time::Instant,
+    accepted: Box<dyn Fn() + Send + Sync>,
+    foundation_dropped: Box<dyn Fn() + Send + Sync>,
 ) -> OwnerExit {
     let adapter_config = match ferrum2_wintun::AdapterConfig::new(
         config.adapter_name,
@@ -373,9 +439,13 @@ fn owner_main(
                     break;
                 }
             };
-            let _ = stack.enqueue(&received);
+            if stack.enqueue(&received) {
+                accepted();
+            }
         }
-        let _ = stack.poll_quantum();
+        for _ in 0..stack.poll_quantum() {
+            foundation_dropped();
+        }
         if fatal {
             break;
         }
@@ -401,6 +471,8 @@ fn owner_main(
     _active: Arc<AtomicBool>,
     ready: std::sync::mpsc::SyncSender<OwnerReady>,
     _deadline: std::time::Instant,
+    _accepted: Box<dyn Fn() + Send + Sync>,
+    _foundation_dropped: Box<dyn Fn() + Send + Sync>,
 ) -> OwnerExit {
     let _ = ready.send(OwnerReady::Failed);
     OwnerExit::RuntimeFailed
@@ -429,6 +501,7 @@ impl GenerationTable {
         self.slots
             .get(slot)
             .copied()
+            .filter(|generation| *generation != u32::MAX)
             .map(|generation| GenerationId { slot, generation })
     }
 
@@ -440,7 +513,10 @@ impl GenerationTable {
         if *generation != id.generation {
             return false;
         }
-        *generation = generation.wrapping_add(1);
+        let Some(next) = generation.checked_add(1) else {
+            return false;
+        };
+        *generation = next;
         true
     }
 }
@@ -601,6 +677,7 @@ struct MemoryDevice {
     output: Box<[u8]>,
     validator: PacketValidator,
     discarded_output: usize,
+    rejected_output: usize,
 }
 
 impl MemoryDevice {
@@ -615,6 +692,7 @@ impl MemoryDevice {
             output: vec![0_u8; mtu].into_boxed_slice(),
             validator: PacketValidator::new(mtu),
             discarded_output: 0,
+            rejected_output: 0,
         }
     }
 
@@ -659,6 +737,7 @@ impl RxToken for MemoryRx<'_> {
 struct MemoryTx<'a> {
     validator: PacketValidator,
     discarded_output: &'a mut usize,
+    rejected_output: &'a mut usize,
     output: &'a mut [u8],
 }
 
@@ -670,8 +749,11 @@ impl TxToken for MemoryTx<'_> {
         assert!(len <= self.output.len(), "stack exceeded validated MTU");
         self.output[..len].fill(0);
         let result = f(&mut self.output[..len]);
-        let _ = self.validator.accepts(&self.output[..len]);
-        *self.discarded_output += 1;
+        if self.validator.accepts(&self.output[..len]) {
+            *self.discarded_output += 1;
+        } else {
+            *self.rejected_output += 1;
+        }
         result
     }
 }
@@ -687,6 +769,7 @@ impl Device for MemoryDevice {
             MemoryTx {
                 validator: self.validator,
                 discarded_output: &mut self.discarded_output,
+                rejected_output: &mut self.rejected_output,
                 output: &mut self.output,
             },
         ))
@@ -696,6 +779,7 @@ impl Device for MemoryDevice {
         Some(MemoryTx {
             validator: self.validator,
             discarded_output: &mut self.discarded_output,
+            rejected_output: &mut self.rejected_output,
             output: &mut self.output,
         })
     }
@@ -712,6 +796,7 @@ struct Stack {
     interface: Interface,
     sockets: SocketSet<'static>,
     device: MemoryDevice,
+    foundation_dropped: usize,
 }
 
 impl Stack {
@@ -756,6 +841,7 @@ impl Stack {
             interface,
             sockets: SocketSet::new(Vec::new()),
             device,
+            foundation_dropped: 0,
         })
     }
 
@@ -778,6 +864,7 @@ impl Stack {
             }
             processed += 1;
         }
+        self.foundation_dropped += processed;
         processed
     }
 
@@ -788,7 +875,17 @@ impl Stack {
 
     #[cfg(test)]
     fn discarded_packets(&self) -> usize {
+        self.foundation_dropped
+    }
+
+    #[cfg(test)]
+    fn validated_egress_packets(&self) -> usize {
         self.device.discarded_output
+    }
+
+    #[cfg(test)]
+    fn rejected_egress_packets(&self) -> usize {
+        self.device.rejected_output
     }
 
     #[cfg(test)]
@@ -801,8 +898,17 @@ impl Stack {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    use super::{GenerationTable, PacketValidator, Stack};
+    use smoltcp::phy::{Device, TxToken};
+    use smoltcp::time::Instant;
+
+    use super::{
+        GenerationTable, MemoryTx, OwnerExit, OwnerThread, PacketValidator, Stack,
+        reconcile_owner_exit, reported_owner_exit,
+    };
 
     fn checksum(parts: &[&[u8]]) -> u16 {
         let mut sum = 0_u32;
@@ -821,22 +927,25 @@ mod tests {
         !(sum as u16)
     }
 
-    fn ipv4_udp() -> Vec<u8> {
-        let mut packet = vec![0_u8; 32];
+    fn ipv4_udp_with_payload(payload: usize) -> Vec<u8> {
+        let len = 28 + payload;
+        let mut packet = vec![0_u8; len];
         packet[0] = 0x45;
-        packet[2..4].copy_from_slice(&32_u16.to_be_bytes());
+        packet[2..4].copy_from_slice(&(len as u16).to_be_bytes());
         packet[8] = 64;
         packet[9] = 17;
         packet[12..16].copy_from_slice(&[198, 18, 0, 1]);
         packet[16..20].copy_from_slice(&[192, 0, 2, 1]);
         packet[20..22].copy_from_slice(&10_000_u16.to_be_bytes());
         packet[22..24].copy_from_slice(&53_u16.to_be_bytes());
-        packet[24..26].copy_from_slice(&12_u16.to_be_bytes());
-        packet[28..].copy_from_slice(b"test");
+        packet[24..26].copy_from_slice(&((8 + payload) as u16).to_be_bytes());
+        for (index, byte) in packet[28..].iter_mut().enumerate() {
+            *byte = index as u8;
+        }
         let header = checksum(&[&packet[..20]]);
         packet[10..12].copy_from_slice(&header.to_be_bytes());
         let pseudo = [0_u8, 17];
-        let length = 12_u16.to_be_bytes();
+        let length = ((8 + payload) as u16).to_be_bytes();
         let udp = checksum(&[
             &packet[12..16],
             &packet[16..20],
@@ -846,6 +955,10 @@ mod tests {
         ]);
         packet[26..28].copy_from_slice(&udp.to_be_bytes());
         packet
+    }
+
+    fn ipv4_udp() -> Vec<u8> {
+        ipv4_udp_with_payload(4)
     }
 
     fn ipv4_tcp() -> Vec<u8> {
@@ -901,31 +1014,134 @@ mod tests {
         packet
     }
 
+    fn ipv6_tcp() -> Vec<u8> {
+        let mut packet = vec![0_u8; 60];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&20_u16.to_be_bytes());
+        packet[6] = 6;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2).octets());
+        packet[24..40].copy_from_slice(&Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets());
+        packet[40..42].copy_from_slice(&10_000_u16.to_be_bytes());
+        packet[42..44].copy_from_slice(&443_u16.to_be_bytes());
+        packet[52] = 0x50;
+        packet[53] = 0x02;
+        let length = 20_u32.to_be_bytes();
+        let next = [0_u8, 0, 0, 6];
+        let tcp = checksum(&[
+            &packet[8..24],
+            &packet[24..40],
+            &length,
+            &next,
+            &packet[40..],
+        ]);
+        packet[56..58].copy_from_slice(&tcp.to_be_bytes());
+        packet
+    }
+
+    fn repair_ipv4_header(packet: &mut [u8]) {
+        packet[10..12].fill(0);
+        let header = checksum(&[&packet[..20]]);
+        packet[10..12].copy_from_slice(&header.to_be_bytes());
+    }
+
+    fn assert_ingress_and_egress(name: &str, packet: &[u8], mtu: usize, expected: bool) {
+        let validator = PacketValidator::new(mtu);
+        assert_eq!(validator.accepts(packet), expected, "ingress {name}");
+
+        let mut accepted = 0;
+        let mut rejected = 0;
+        let mut output = vec![0_u8; packet.len().max(1)];
+        MemoryTx {
+            validator,
+            discarded_output: &mut accepted,
+            rejected_output: &mut rejected,
+            output: &mut output,
+        }
+        .consume(packet.len(), |bytes| bytes.copy_from_slice(packet));
+        assert_eq!(accepted, usize::from(expected), "egress accept {name}");
+        assert_eq!(rejected, usize::from(!expected), "egress reject {name}");
+    }
+
     #[test]
     fn packet_filter_accepts_only_complete_direct_tcp_or_udp() {
-        let validator = PacketValidator::new(1420);
         let valid_v4 = ipv4_udp();
         let valid_v6 = ipv6_udp();
-        let valid_tcp = ipv4_tcp();
-        assert!(validator.accepts(&valid_v4));
-        assert!(validator.accepts(&valid_v6));
-        assert!(validator.accepts(&valid_tcp));
+        let valid_v4_tcp = ipv4_tcp();
+        let valid_v6_tcp = ipv6_tcp();
+        for (name, packet) in [
+            ("IPv4 UDP", valid_v4.as_slice()),
+            ("IPv4 TCP", valid_v4_tcp.as_slice()),
+            ("IPv6 UDP", valid_v6.as_slice()),
+            ("IPv6 TCP", valid_v6_tcp.as_slice()),
+        ] {
+            assert_ingress_and_egress(name, packet, 1420, true);
+        }
         let mut zero_v4_udp = valid_v4.clone();
         zero_v4_udp[26..28].fill(0);
-        assert!(
-            validator.accepts(&zero_v4_udp),
-            "IPv4 UDP checksum zero is allowed"
-        );
+        assert_ingress_and_egress("IPv4 UDP zero checksum", &zero_v4_udp, 1420, true);
 
-        let mutations = [
+        let mut df = valid_v4.clone();
+        df[6] = 0x40;
+        repair_ipv4_header(&mut df);
+        assert_ingress_and_egress("IPv4 DF", &df, 1420, true);
+
+        let minimum_udp = ipv4_udp_with_payload(0);
+        assert_ingress_and_egress("IPv4 UDP minimum", &minimum_udp, 1420, true);
+        let mtu_packet = ipv4_udp_with_payload(1420 - 28);
+        assert_ingress_and_egress("MTU exact", &mtu_packet, 1420, true);
+        assert_ingress_and_egress("MTU plus one", &mtu_packet, 1419, false);
+
+        let mut mutations = vec![
+            ("empty", Vec::new()),
+            ("IPv4 header minimum minus one", valid_v4[..19].to_vec()),
+            ("IPv4 transport minimum minus one", valid_v4[..27].to_vec()),
+            ("IPv4 version", {
+                let mut p = valid_v4.clone();
+                p[0] = 0x55;
+                repair_ipv4_header(&mut p);
+                p
+            }),
+            ("IPv4 IHL 4", {
+                let mut p = valid_v4.clone();
+                p[0] = 0x44;
+                repair_ipv4_header(&mut p);
+                p
+            }),
             ("IPv4 option", {
                 let mut p = valid_v4.clone();
                 p[0] = 0x46;
+                repair_ipv4_header(&mut p);
                 p
             }),
-            ("IPv4 fragment", {
+            ("IPv4 declared length minimum minus one", {
+                let mut p = valid_v4.clone();
+                p[2..4].copy_from_slice(&31_u16.to_be_bytes());
+                repair_ipv4_header(&mut p);
+                p
+            }),
+            ("IPv4 declared length plus one", {
+                let mut p = valid_v4.clone();
+                p[2..4].copy_from_slice(&33_u16.to_be_bytes());
+                repair_ipv4_header(&mut p);
+                p
+            }),
+            ("IPv4 reserved", {
+                let mut p = valid_v4.clone();
+                p[6] = 0x80;
+                repair_ipv4_header(&mut p);
+                p
+            }),
+            ("IPv4 MF", {
                 let mut p = valid_v4.clone();
                 p[6] = 0x20;
+                repair_ipv4_header(&mut p);
+                p
+            }),
+            ("IPv4 fragment offset", {
+                let mut p = valid_v4.clone();
+                p[7] = 1;
+                repair_ipv4_header(&mut p);
                 p
             }),
             ("IPv4 trailing", {
@@ -938,9 +1154,41 @@ mod tests {
                 p[10] ^= 1;
                 p
             }),
+            ("IPv4 ICMP", {
+                let mut p = valid_v4.clone();
+                p[9] = 1;
+                repair_ipv4_header(&mut p);
+                p
+            }),
+            ("IPv4 unknown protocol", {
+                let mut p = valid_v4.clone();
+                p[9] = 99;
+                repair_ipv4_header(&mut p);
+                p
+            }),
             ("IPv4 zero port", {
                 let mut p = valid_v4.clone();
                 p[20..22].fill(0);
+                p
+            }),
+            ("IPv4 UDP destination zero", {
+                let mut p = valid_v4.clone();
+                p[22..24].fill(0);
+                p
+            }),
+            ("IPv4 UDP length minimum minus one", {
+                let mut p = valid_v4.clone();
+                p[24..26].copy_from_slice(&7_u16.to_be_bytes());
+                p
+            }),
+            ("IPv4 UDP length short", {
+                let mut p = valid_v4.clone();
+                p[24..26].copy_from_slice(&11_u16.to_be_bytes());
+                p
+            }),
+            ("IPv4 UDP length long", {
+                let mut p = valid_v4.clone();
+                p[24..26].copy_from_slice(&13_u16.to_be_bytes());
                 p
             }),
             ("IPv4 UDP checksum", {
@@ -949,18 +1197,59 @@ mod tests {
                 p
             }),
             ("TCP data offset", {
-                let mut p = valid_tcp.clone();
+                let mut p = valid_v4_tcp.clone();
                 p[32] = 0x40;
                 p
             }),
+            ("TCP data offset beyond payload", {
+                let mut p = valid_v4_tcp.clone();
+                p[32] = 0x60;
+                p
+            }),
+            ("TCP source zero", {
+                let mut p = valid_v4_tcp.clone();
+                p[20..22].fill(0);
+                p
+            }),
+            ("TCP destination zero", {
+                let mut p = valid_v4_tcp.clone();
+                p[22..24].fill(0);
+                p
+            }),
             ("TCP checksum", {
-                let mut p = valid_tcp.clone();
+                let mut p = valid_v4_tcp.clone();
                 p[36] ^= 1;
                 p
             }),
-            ("IPv6 extension", {
+            ("IPv6 header minimum minus one", valid_v6[..39].to_vec()),
+            ("IPv6 payload length short", {
                 let mut p = valid_v6.clone();
-                p[6] = 0;
+                p[4..6].copy_from_slice(&11_u16.to_be_bytes());
+                p
+            }),
+            ("IPv6 payload length long", {
+                let mut p = valid_v6.clone();
+                p[4..6].copy_from_slice(&13_u16.to_be_bytes());
+                p
+            }),
+            ("IPv6 UDP source zero", {
+                let mut p = valid_v6.clone();
+                p[40..42].fill(0);
+                p
+            }),
+            ("IPv6 UDP destination zero", {
+                let mut p = valid_v6.clone();
+                p[42..44].fill(0);
+                p
+            }),
+            ("IPv6 UDP length minimum minus one", {
+                let mut p = valid_v6.clone();
+                p[44..46].copy_from_slice(&7_u16.to_be_bytes());
+                p
+            }),
+            ("IPv6 UDP length mismatch", {
+                let mut p = valid_v6.clone();
+                p[44..46].copy_from_slice(&11_u16.to_be_bytes());
                 p
             }),
             ("IPv6 zero checksum", {
@@ -973,17 +1262,92 @@ mod tests {
                 p.push(0);
                 p
             }),
+            ("IPv6 TCP data offset minimum minus one", {
+                let mut p = valid_v6_tcp.clone();
+                p[52] = 0x40;
+                p
+            }),
+            ("IPv6 TCP data offset beyond payload", {
+                let mut p = valid_v6_tcp.clone();
+                p[52] = 0x60;
+                p
+            }),
+            ("IPv6 TCP checksum", {
+                let mut p = valid_v6_tcp.clone();
+                p[56] ^= 1;
+                p
+            }),
         ];
-        for (name, packet) in mutations {
-            assert!(!validator.accepts(&packet), "{name}");
+
+        for (name, range, bytes) in [
+            ("IPv4 source unspecified", 12..16, [0, 0, 0, 0]),
+            ("IPv4 source multicast", 12..16, [224, 0, 0, 1]),
+            ("IPv4 destination unspecified", 16..20, [0, 0, 0, 0]),
+            ("IPv4 destination multicast", 16..20, [224, 0, 0, 1]),
+            ("IPv4 destination broadcast", 16..20, [255, 255, 255, 255]),
+        ] {
+            let mut packet = valid_v4.clone();
+            packet[range].copy_from_slice(&bytes);
+            repair_ipv4_header(&mut packet);
+            mutations.push((name, packet));
         }
-        for next_header in [0, 43, 44, 50, 51, 59, 60, 135, 139, 140, 253, 254] {
+
+        for (name, range, bytes) in [
+            (
+                "IPv6 source unspecified",
+                8..24,
+                Ipv6Addr::UNSPECIFIED.octets(),
+            ),
+            (
+                "IPv6 source multicast",
+                8..24,
+                Ipv6Addr::LOCALHOST.octets().map(|_| 0),
+            ),
+            (
+                "IPv6 destination unspecified",
+                24..40,
+                Ipv6Addr::UNSPECIFIED.octets(),
+            ),
+            (
+                "IPv6 destination multicast",
+                24..40,
+                Ipv6Addr::LOCALHOST.octets().map(|_| 0),
+            ),
+        ] {
             let mut packet = valid_v6.clone();
-            packet[6] = next_header;
-            assert!(
-                !validator.accepts(&packet),
-                "IPv6 next header {next_header}"
-            );
+            let mut address = bytes;
+            if name.contains("multicast") {
+                address[0] = 0xff;
+                address[1] = 0x02;
+                address[15] = 1;
+            }
+            packet[range].copy_from_slice(&address);
+            mutations.push((name, packet));
+        }
+
+        for (name, packet) in mutations {
+            assert_ingress_and_egress(name, &packet, 1420, false);
+        }
+
+        for next_header in [0, 43, 44, 50, 51, 59, 60, 135, 139, 140, 253, 254] {
+            for (shape, mut packet) in [
+                ("absent", valid_v6[..40].to_vec()),
+                ("truncated", valid_v6[..41].to_vec()),
+                ("well-formed/chained", valid_v6.clone()),
+            ] {
+                packet[6] = next_header;
+                let payload = packet.len() - 40;
+                packet[4..6].copy_from_slice(&(payload as u16).to_be_bytes());
+                if payload > 0 {
+                    packet[40] = 17;
+                }
+                assert_ingress_and_egress(
+                    &format!("IPv6 next header {next_header} {shape}"),
+                    &packet,
+                    1420,
+                    false,
+                );
+            }
         }
     }
 
@@ -1009,6 +1373,22 @@ mod tests {
         assert_eq!(stack.poll_quantum(), 7);
         assert_eq!(stack.pending(), 0);
         assert_eq!(stack.discarded_packets(), 7);
+
+        let valid_foundation_drops = stack.discarded_packets();
+        let valid_egress = stack.validated_egress_packets();
+        let rejected_egress = stack.rejected_egress_packets();
+        stack
+            .device
+            .transmit(Instant::ZERO)
+            .expect("fixed TX slot")
+            .consume(1, |output| output[0] = 0);
+        assert_eq!(
+            stack.discarded_packets(),
+            valid_foundation_drops,
+            "invalid egress cannot be counted as a validated foundation packet"
+        );
+        assert_eq!(stack.validated_egress_packets(), valid_egress);
+        assert_eq!(stack.rejected_egress_packets(), rejected_egress + 1);
     }
 
     #[test]
@@ -1021,5 +1401,90 @@ mod tests {
             "stale generation must not touch reused slot"
         );
         assert!(table.current(2).is_none(), "capacity is exact");
+
+        table.slots[1] = u32::MAX - 1;
+        let last = table.current(1).expect("last usable generation");
+        assert!(table.recycle(last));
+        assert!(
+            table.current(1).is_none(),
+            "generation exhaustion permanently retires the slot"
+        );
+        assert!(
+            !table.recycle(last),
+            "exhaustion cannot resurrect an old ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_cancel_eof_panic_and_cleanup_conflict_are_reaped_before_join() {
+        for exit in [OwnerExit::Stopped, OwnerExit::CleanupFailed] {
+            let stop = Arc::new(AtomicBool::new(false));
+            let active = Arc::new(AtomicBool::new(false));
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let thread_stop = Arc::clone(&stop);
+            let thread_events = Arc::clone(&events);
+            let thread = std::thread::spawn(move || {
+                while !thread_stop.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                thread_events.lock().expect("events").push("cleanup");
+                exit
+            });
+            let guard = OwnerThread {
+                stop,
+                active,
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                wake: None,
+                thread: Some(thread),
+            };
+
+            assert_eq!(guard.reap().await, exit);
+            events.lock().expect("events").push("joined");
+            assert_eq!(*events.lock().expect("events"), ["cleanup", "joined"]);
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let guard = OwnerThread {
+            stop,
+            active: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            wake: None,
+            thread: Some(std::thread::spawn(move || {
+                while !thread_stop.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                panic!("injected owner panic")
+            })),
+        };
+        assert_eq!(guard.reap().await, OwnerExit::CleanupFailed);
+
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        drop(sender);
+        assert_eq!(
+            reported_owner_exit(receiver.await),
+            OwnerExit::CleanupFailed,
+            "owner EOF is a cleanup failure"
+        );
+        assert_eq!(
+            reconcile_owner_exit(OwnerExit::RuntimeFailed, OwnerExit::Stopped),
+            OwnerExit::RuntimeFailed
+        );
+        assert_eq!(
+            reconcile_owner_exit(OwnerExit::RuntimeFailed, OwnerExit::CleanupFailed),
+            OwnerExit::CleanupFailed
+        );
+        assert_eq!(
+            reconcile_owner_exit(OwnerExit::Stopped, OwnerExit::Stopped),
+            OwnerExit::Stopped
+        );
+        assert_eq!(
+            reconcile_owner_exit(OwnerExit::Stopped, OwnerExit::CleanupFailed),
+            OwnerExit::CleanupFailed
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {})
+            .await
+            .expect("owner table is bounded");
     }
 }

@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::{OsString, c_void};
 use std::fs::File;
 use std::io::Read;
@@ -23,8 +24,9 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{
-    AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, IpDadStatePreferred,
-    IpDadStateTentative, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0,
+    AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, IpDadStateDeprecated,
+    IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative, NL_DAD_STATE,
+    SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0,
 };
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptHash,
@@ -108,40 +110,141 @@ struct Library {
 
 impl Library {
     fn load() -> Result<Self, Error> {
-        let executable = current_executable()?;
-        let directory = executable.parent().ok_or(Error)?;
-        reject_network_path(directory)?;
-        let directories = hold_directories(directory)?;
-        let dll = directory.join("wintun.dll");
-        let file = open_file(&dll)?;
-        verify_regular_non_reparse(file.as_raw_handle() as HANDLE)?;
-        let metadata = file.metadata().map_err(|_| Error)?;
-        if !metadata.is_file() || metadata.len() != DLL_BYTES {
-            return Err(Error);
-        }
-        if cng_sha256(&file)? != DLL_SHA256 {
-            return Err(Error);
-        }
-        let dll_wide = wide(&dll);
-        let module =
-            unsafe { LoadLibraryExW(dll_wide.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
+        let mut loader = PlatformLoader::default();
+        load_transaction(&mut loader)?;
+        loader.finish()
+    }
+}
+
+trait LoaderOperations {
+    fn discover_executable(&mut self) -> Result<(), Error>;
+    fn reject_network_and_reparse_directories(&mut self) -> Result<(), Error>;
+    fn open_sibling_dll(&mut self) -> Result<(), Error>;
+    fn verify_dll_identity(&mut self) -> Result<(), Error>;
+    fn verify_artifact(&mut self) -> Result<(), Error>;
+    fn load_system32_scoped_library(&mut self) -> Result<(), Error>;
+    fn resolve_exact_abi(&mut self) -> Result<(), Error>;
+}
+
+fn load_transaction(loader: &mut impl LoaderOperations) -> Result<(), Error> {
+    loader.discover_executable()?;
+    loader.reject_network_and_reparse_directories()?;
+    loader.open_sibling_dll()?;
+    loader.verify_dll_identity()?;
+    loader.verify_artifact()?;
+    loader.load_system32_scoped_library()?;
+    loader.resolve_exact_abi()
+}
+
+#[derive(Default)]
+struct PlatformLoader {
+    directory: Option<PathBuf>,
+    dll: Option<PathBuf>,
+    directories: Option<Vec<OwnedHandle>>,
+    file: Option<File>,
+    module: HMODULE,
+    exports: Option<Exports>,
+}
+
+impl PlatformLoader {
+    fn finish(mut self) -> Result<Library, Error> {
+        let exports = self.exports.take().ok_or(Error)?;
+        let file = self.file.take().ok_or(Error)?;
+        let directories = self.directories.take().ok_or(Error)?;
+        let module = std::mem::replace(&mut self.module, null_mut());
         if module.is_null() {
             return Err(Error);
         }
-        let exports = unsafe { resolve_exports(module) };
-        match exports {
-            Ok(exports) => Ok(Self {
-                module,
-                exports,
-                _file: file,
-                _directories: directories,
-            }),
-            Err(error) => {
-                unsafe { FreeLibrary(module) };
-                Err(error)
-            }
+        Ok(Library {
+            module,
+            exports,
+            _file: file,
+            _directories: directories,
+        })
+    }
+}
+
+impl Drop for PlatformLoader {
+    fn drop(&mut self) {
+        if !self.module.is_null() {
+            unsafe { FreeLibrary(self.module) };
         }
     }
+}
+
+impl LoaderOperations for PlatformLoader {
+    fn discover_executable(&mut self) -> Result<(), Error> {
+        let executable = current_executable()?;
+        let directory = executable.parent().ok_or(Error)?.to_path_buf();
+        self.dll = Some(directory.join("wintun.dll"));
+        self.directory = Some(directory);
+        Ok(())
+    }
+
+    fn reject_network_and_reparse_directories(&mut self) -> Result<(), Error> {
+        let directory = self.directory.as_deref().ok_or(Error)?;
+        reject_network_path(directory)?;
+        self.directories = Some(hold_directories(directory)?);
+        Ok(())
+    }
+
+    fn open_sibling_dll(&mut self) -> Result<(), Error> {
+        self.file = Some(open_file(self.dll.as_deref().ok_or(Error)?)?);
+        Ok(())
+    }
+
+    fn verify_dll_identity(&mut self) -> Result<(), Error> {
+        let file = self.file.as_ref().ok_or(Error)?;
+        verify_regular_non_reparse(file.as_raw_handle() as HANDLE)?;
+        if file.metadata().map_err(|_| Error)?.is_file() {
+            Ok(())
+        } else {
+            Err(Error)
+        }
+    }
+
+    fn verify_artifact(&mut self) -> Result<(), Error> {
+        let file = self.file.as_ref().ok_or(Error)?;
+        let bytes = file.metadata().map_err(|_| Error)?.len();
+        validate_artifact(bytes, cng_sha256(file)?)
+    }
+
+    fn load_system32_scoped_library(&mut self) -> Result<(), Error> {
+        let dll_wide = wide(self.dll.as_deref().ok_or(Error)?);
+        self.module =
+            unsafe { LoadLibraryExW(dll_wide.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
+        if self.module.is_null() {
+            Err(Error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn resolve_exact_abi(&mut self) -> Result<(), Error> {
+        let module = self.module;
+        self.exports = Some(unsafe {
+            require_exports(|name| GetProcAddress(module, name.as_ptr()).is_some())
+                .and_then(|()| resolve_exports(module))?
+        });
+        Ok(())
+    }
+}
+
+fn validate_artifact(bytes: u64, sha256: [u8; 32]) -> Result<(), Error> {
+    if bytes == DLL_BYTES && sha256 == DLL_SHA256 {
+        Ok(())
+    } else {
+        Err(Error)
+    }
+}
+
+fn require_exports(mut present: impl FnMut(&[u8]) -> bool) -> Result<(), Error> {
+    for name in ABI_EXPORTS {
+        if !present(name) {
+            return Err(Error);
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Library {
@@ -162,6 +265,32 @@ struct SessionState {
     read_event: HANDLE,
 }
 
+#[derive(Default)]
+struct SessionJournal {
+    waiting: Cell<bool>,
+}
+
+impl SessionJournal {
+    fn begin_wait(&self) -> Result<WaitGuard<'_>, Error> {
+        if self.waiting.replace(true) {
+            return Err(Error);
+        }
+        Ok(WaitGuard(&self.waiting))
+    }
+
+    fn cleanup_is_safe(&self) -> bool {
+        !self.waiting.get()
+    }
+}
+
+struct WaitGuard<'a>(&'a Cell<bool>);
+
+impl Drop for WaitGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
 /// Safe RAII owner of the exact Wintun adapter, address, MTU, session and DLL transaction.
 pub struct Adapter {
     config: AdapterConfig,
@@ -171,6 +300,7 @@ pub struct Adapter {
     mtus: [Option<MtuState>; 2],
     addresses: Vec<MIB_UNICASTIPADDRESS_ROW>,
     session: Option<SessionState>,
+    session_journal: SessionJournal,
     stop: StopSignal,
     _not_send: PhantomData<Rc<()>>,
 }
@@ -204,40 +334,20 @@ impl Adapter {
             mtus: [None, None],
             addresses: Vec::with_capacity(2),
             session: None,
+            session_journal: SessionJournal::default(),
             stop,
             _not_send: PhantomData,
         };
         unsafe { (owner.library.exports.get_adapter_luid)(adapter, &mut owner.luid) };
-        let setup = (|| {
-            if cancelled.load(Ordering::Acquire)
-                || Instant::now() >= deadline
-                || unsafe { (owner.library.exports.get_running_driver_version)() } == 0
-            {
-                return Err(Error);
-            }
-            owner.set_mtu(AF_INET, 0)?;
-            owner.set_mtu(AF_INET6, 1)?;
-            owner.add_addresses()?;
-            let session = unsafe {
-                (owner.library.exports.start_session)(adapter, owner.config.ring_capacity)
-            };
-            if session.is_null() {
-                return Err(Error);
-            }
-            let read_event = unsafe { (owner.library.exports.get_read_wait_event)(session) };
-            owner.session = Some(SessionState {
-                handle: session,
-                read_event,
-            });
-            if read_event.is_null() || read_event == INVALID_HANDLE_VALUE {
-                return Err(Error);
-            }
-            owner.wait_for_dad(deadline, cancelled)
-        })();
-        match setup {
+        let setup = setup_transaction(&mut PlatformSetup {
+            owner: &mut owner,
+            adapter,
+            deadline,
+            cancelled,
+        });
+        match finish_setup_transaction(setup, || owner.cleanup_inner()) {
             Ok(()) => Ok(owner),
-            Err(_) if owner.cleanup_inner() => Err(CreateError::cleanup()),
-            Err(_) => Err(CreateError::operation()),
+            Err(error) => Err(error),
         }
     }
 
@@ -272,6 +382,7 @@ impl Adapter {
 
     /// Returns `true` for readable session data and `false` for stop/timeout.
     pub fn wait(&self, timeout: Duration) -> Result<bool, Error> {
+        let _wait = self.session_journal.begin_wait()?;
         let read = self.session.as_ref().ok_or(Error)?.read_event;
         let handles = [self.stop.0.0, read];
         let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
@@ -337,7 +448,7 @@ impl Adapter {
         Ok(())
     }
 
-    fn add_addresses(&mut self) -> Result<(), Error> {
+    fn ipv4_address_row(&self) -> MIB_UNICASTIPADDRESS_ROW {
         let mut ipv4 = MIB_UNICASTIPADDRESS_ROW::default();
         unsafe { InitializeUnicastIpAddressEntry(&mut ipv4) };
         ipv4.InterfaceLuid = self.luid;
@@ -352,8 +463,10 @@ impl Adapter {
             },
             sin_zero: [0; 8],
         };
-        self.create_address(ipv4)?;
+        ipv4
+    }
 
+    fn ipv6_address_row(&self) -> MIB_UNICASTIPADDRESS_ROW {
         let mut ipv6 = MIB_UNICASTIPADDRESS_ROW::default();
         unsafe { InitializeUnicastIpAddressEntry(&mut ipv6) };
         ipv6.InterfaceLuid = self.luid;
@@ -369,7 +482,7 @@ impl Adapter {
             },
             Anonymous: SOCKADDR_IN6_0 { sin6_scope_id: 0 },
         };
-        self.create_address(ipv6)
+        ipv6
     }
 
     fn create_address(&mut self, row: MIB_UNICASTIPADDRESS_ROW) -> Result<(), Error> {
@@ -391,52 +504,242 @@ impl Adapter {
                 if unsafe { GetUnicastIpAddressEntry(&mut row) } != ERROR_SUCCESS {
                     return Err(Error);
                 }
-                match row.DadState {
-                    value if value == IpDadStatePreferred => {}
-                    value if value == IpDadStateTentative => waiting = true,
-                    _ => return Err(Error),
+                match dad_progress(row.DadState)? {
+                    DadProgress::Ready => {}
+                    DadProgress::Waiting => waiting = true,
                 }
             }
-            if !waiting {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(Error);
+            match dad_poll(waiting, Instant::now() >= deadline)? {
+                DadProgress::Ready => return Ok(()),
+                DadProgress::Waiting => {}
             }
             std::thread::sleep(Duration::from_millis(25));
         }
     }
 
     fn cleanup_inner(&mut self) -> bool {
-        let mut failed = false;
-        if let Some(session) = self.session.take() {
-            unsafe { (self.library.exports.end_session)(session.handle) };
-        }
-        for address in self.addresses.drain(..).rev() {
-            let status = unsafe { DeleteUnicastIpAddressEntry(&address) };
-            failed |= status != ERROR_SUCCESS;
-        }
-        for state in self.mtus.iter_mut().rev().filter_map(Option::take) {
-            let mut row = MIB_IPINTERFACE_ROW::default();
-            unsafe { InitializeIpInterfaceEntry(&mut row) };
-            row.Family = state.family;
-            row.InterfaceLuid = self.luid;
-            let get_status = unsafe { GetIpInterfaceEntry(&mut row) };
-            if get_status != ERROR_SUCCESS || row.NlMtu != state.configured {
-                failed = true;
+        cleanup_transaction(&mut PlatformCleanup(self))
+    }
+}
+
+fn finish_setup_transaction(
+    setup: Result<(), Error>,
+    cleanup: impl FnOnce() -> bool,
+) -> Result<(), CreateError> {
+    match setup {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            if cleanup() {
+                Err(CreateError::cleanup())
             } else {
-                if state.family == AF_INET {
-                    row.SitePrefixLength = 0;
-                }
-                row.NlMtu = state.previous;
-                let set_status = unsafe { SetIpInterfaceEntry(&mut row) };
-                failed |= set_status != ERROR_SUCCESS;
+                Err(CreateError::operation())
             }
         }
-        if let Some(adapter) = self.adapter.take() {
-            unsafe { (self.library.exports.close_adapter)(adapter) };
+    }
+}
+
+trait CleanupOperations {
+    fn session_is_idle(&mut self) -> bool;
+    fn end_session(&mut self) -> Option<bool>;
+    fn delete_last_address(&mut self) -> Option<bool>;
+    fn restore_ipv6_mtu(&mut self) -> Option<bool>;
+    fn restore_ipv4_mtu(&mut self) -> Option<bool>;
+    fn close_adapter(&mut self) -> Option<bool>;
+}
+
+fn cleanup_transaction(cleanup: &mut impl CleanupOperations) -> bool {
+    if !cleanup.session_is_idle() {
+        return true;
+    }
+    let mut failed = cleanup.end_session().unwrap_or(false);
+    while let Some(step_failed) = cleanup.delete_last_address() {
+        failed |= step_failed;
+    }
+    failed |= cleanup.restore_ipv6_mtu().unwrap_or(false);
+    failed |= cleanup.restore_ipv4_mtu().unwrap_or(false);
+    failed |= cleanup.close_adapter().unwrap_or(false);
+    failed
+}
+
+struct PlatformCleanup<'a>(&'a mut Adapter);
+
+impl PlatformCleanup<'_> {
+    fn restore_mtu(&mut self, slot: usize) -> Option<bool> {
+        let state = self.0.mtus[slot].take()?;
+        let mut row = MIB_IPINTERFACE_ROW::default();
+        unsafe { InitializeIpInterfaceEntry(&mut row) };
+        row.Family = state.family;
+        row.InterfaceLuid = self.0.luid;
+        let get_status = unsafe { GetIpInterfaceEntry(&mut row) };
+        if get_status != ERROR_SUCCESS || row.NlMtu != state.configured {
+            return Some(true);
         }
-        failed
+        if state.family == AF_INET {
+            row.SitePrefixLength = 0;
+        }
+        row.NlMtu = state.previous;
+        Some(unsafe { SetIpInterfaceEntry(&mut row) } != ERROR_SUCCESS)
+    }
+}
+
+impl CleanupOperations for PlatformCleanup<'_> {
+    fn session_is_idle(&mut self) -> bool {
+        self.0.session_journal.cleanup_is_safe()
+    }
+
+    fn end_session(&mut self) -> Option<bool> {
+        let session = self.0.session.take()?;
+        unsafe { (self.0.library.exports.end_session)(session.handle) };
+        Some(false)
+    }
+
+    fn delete_last_address(&mut self) -> Option<bool> {
+        let address = self.0.addresses.pop()?;
+        Some(unsafe { DeleteUnicastIpAddressEntry(&address) } != ERROR_SUCCESS)
+    }
+
+    fn restore_ipv6_mtu(&mut self) -> Option<bool> {
+        self.restore_mtu(1)
+    }
+
+    fn restore_ipv4_mtu(&mut self) -> Option<bool> {
+        self.restore_mtu(0)
+    }
+
+    fn close_adapter(&mut self) -> Option<bool> {
+        let adapter = self.0.adapter.take()?;
+        unsafe { (self.0.library.exports.close_adapter)(adapter) };
+        Some(false)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DadProgress {
+    Waiting,
+    Ready,
+}
+
+fn dad_progress(state: NL_DAD_STATE) -> Result<DadProgress, Error> {
+    match state {
+        value if value == IpDadStateTentative => Ok(DadProgress::Waiting),
+        value if value == IpDadStatePreferred => Ok(DadProgress::Ready),
+        value
+            if value == IpDadStateDuplicate
+                || value == IpDadStateInvalid
+                || value == IpDadStateDeprecated =>
+        {
+            Err(Error)
+        }
+        _ => Err(Error),
+    }
+}
+
+fn dad_poll(waiting: bool, deadline_elapsed: bool) -> Result<DadProgress, Error> {
+    match (waiting, deadline_elapsed) {
+        (false, _) => Ok(DadProgress::Ready),
+        (true, false) => Ok(DadProgress::Waiting),
+        (true, true) => Err(Error),
+    }
+}
+
+trait SetupOperations {
+    fn check_cancelled(&mut self) -> Result<(), Error>;
+    fn check_deadline(&mut self) -> Result<(), Error>;
+    fn check_driver(&mut self) -> Result<(), Error>;
+    fn set_ipv4_mtu(&mut self) -> Result<(), Error>;
+    fn set_ipv6_mtu(&mut self) -> Result<(), Error>;
+    fn add_ipv4_address(&mut self) -> Result<(), Error>;
+    fn add_ipv6_address(&mut self) -> Result<(), Error>;
+    fn start_session(&mut self) -> Result<(), Error>;
+    fn wait_for_dad(&mut self) -> Result<(), Error>;
+}
+
+fn setup_transaction(setup: &mut impl SetupOperations) -> Result<(), Error> {
+    setup.check_cancelled()?;
+    setup.check_deadline()?;
+    setup.check_driver()?;
+    setup.set_ipv4_mtu()?;
+    setup.set_ipv6_mtu()?;
+    setup.add_ipv4_address()?;
+    setup.add_ipv6_address()?;
+    setup.start_session()?;
+    setup.wait_for_dad()
+}
+
+struct PlatformSetup<'a> {
+    owner: &'a mut Adapter,
+    adapter: WintunAdapter,
+    deadline: Instant,
+    cancelled: &'a AtomicBool,
+}
+
+impl SetupOperations for PlatformSetup<'_> {
+    fn check_cancelled(&mut self) -> Result<(), Error> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(Error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_deadline(&mut self) -> Result<(), Error> {
+        if Instant::now() >= self.deadline {
+            Err(Error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_driver(&mut self) -> Result<(), Error> {
+        if unsafe { (self.owner.library.exports.get_running_driver_version)() } == 0 {
+            Err(Error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn set_ipv4_mtu(&mut self) -> Result<(), Error> {
+        self.owner.set_mtu(AF_INET, 0)
+    }
+
+    fn set_ipv6_mtu(&mut self) -> Result<(), Error> {
+        self.owner.set_mtu(AF_INET6, 1)
+    }
+
+    fn add_ipv4_address(&mut self) -> Result<(), Error> {
+        let row = self.owner.ipv4_address_row();
+        self.owner.create_address(row)
+    }
+
+    fn add_ipv6_address(&mut self) -> Result<(), Error> {
+        let row = self.owner.ipv6_address_row();
+        self.owner.create_address(row)
+    }
+
+    fn start_session(&mut self) -> Result<(), Error> {
+        let session = unsafe {
+            (self.owner.library.exports.start_session)(
+                self.adapter,
+                self.owner.config.ring_capacity,
+            )
+        };
+        if session.is_null() {
+            return Err(Error);
+        }
+        let read_event = unsafe { (self.owner.library.exports.get_read_wait_event)(session) };
+        self.owner.session = Some(SessionState {
+            handle: session,
+            read_event,
+        });
+        if read_event.is_null() || read_event == INVALID_HANDLE_VALUE {
+            Err(Error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn wait_for_dad(&mut self) -> Result<(), Error> {
+        self.owner.wait_for_dad(self.deadline, self.cancelled)
     }
 }
 
@@ -679,4 +982,346 @@ unsafe fn symbol<T: Copy>(module: HMODULE, name: &[u8]) -> Result<T, Error> {
 
 fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ABI_EXPORTS, CleanupOperations, DLL_BYTES, DLL_SHA256, DadProgress, Error,
+        IpDadStateDeprecated, IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred,
+        IpDadStateTentative, LoaderOperations, SessionJournal, SetupOperations,
+        cleanup_transaction, dad_poll, dad_progress, finish_setup_transaction, load_transaction,
+        require_exports, setup_transaction, validate_artifact,
+    };
+
+    struct InjectedSetup {
+        fail_at: Option<usize>,
+        calls: Vec<&'static str>,
+    }
+
+    impl InjectedSetup {
+        fn step(&mut self, name: &'static str) -> Result<(), Error> {
+            let position = self.calls.len();
+            self.calls.push(name);
+            if self.fail_at == Some(position) {
+                Err(Error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl SetupOperations for InjectedSetup {
+        fn check_cancelled(&mut self) -> Result<(), Error> {
+            self.step("cancel")
+        }
+
+        fn check_deadline(&mut self) -> Result<(), Error> {
+            self.step("deadline")
+        }
+
+        fn check_driver(&mut self) -> Result<(), Error> {
+            self.step("driver")
+        }
+
+        fn set_ipv4_mtu(&mut self) -> Result<(), Error> {
+            self.step("ipv4-mtu")
+        }
+
+        fn set_ipv6_mtu(&mut self) -> Result<(), Error> {
+            self.step("ipv6-mtu")
+        }
+
+        fn add_ipv4_address(&mut self) -> Result<(), Error> {
+            self.step("ipv4-address")
+        }
+
+        fn add_ipv6_address(&mut self) -> Result<(), Error> {
+            self.step("ipv6-address")
+        }
+
+        fn start_session(&mut self) -> Result<(), Error> {
+            self.step("start-session")
+        }
+
+        fn wait_for_dad(&mut self) -> Result<(), Error> {
+            self.step("dad")
+        }
+    }
+
+    struct InjectedLoader {
+        fail_at: Option<usize>,
+        calls: Vec<&'static str>,
+    }
+
+    impl InjectedLoader {
+        fn step(&mut self, name: &'static str) -> Result<(), Error> {
+            let position = self.calls.len();
+            self.calls.push(name);
+            if self.fail_at == Some(position) {
+                Err(Error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl LoaderOperations for InjectedLoader {
+        fn discover_executable(&mut self) -> Result<(), Error> {
+            self.step("executable")
+        }
+
+        fn reject_network_and_reparse_directories(&mut self) -> Result<(), Error> {
+            self.step("held-directories")
+        }
+
+        fn open_sibling_dll(&mut self) -> Result<(), Error> {
+            self.step("sibling-dll")
+        }
+
+        fn verify_dll_identity(&mut self) -> Result<(), Error> {
+            self.step("file-identity")
+        }
+
+        fn verify_artifact(&mut self) -> Result<(), Error> {
+            self.step("size/hash")
+        }
+
+        fn load_system32_scoped_library(&mut self) -> Result<(), Error> {
+            self.step("system32-load")
+        }
+
+        fn resolve_exact_abi(&mut self) -> Result<(), Error> {
+            self.step("eleven-exports")
+        }
+    }
+
+    struct InjectedCleanup {
+        fail_at: Option<usize>,
+        idle: bool,
+        addresses: usize,
+        calls: Vec<&'static str>,
+    }
+
+    impl InjectedCleanup {
+        fn step(&mut self, name: &'static str) -> Option<bool> {
+            let position = self.calls.len();
+            self.calls.push(name);
+            Some(self.fail_at == Some(position))
+        }
+    }
+
+    impl CleanupOperations for InjectedCleanup {
+        fn session_is_idle(&mut self) -> bool {
+            self.idle
+        }
+
+        fn end_session(&mut self) -> Option<bool> {
+            self.step("end-session")
+        }
+
+        fn delete_last_address(&mut self) -> Option<bool> {
+            if self.addresses == 0 {
+                return None;
+            }
+            let name = if self.addresses == 2 {
+                "ipv6-address"
+            } else {
+                "ipv4-address"
+            };
+            self.addresses -= 1;
+            self.step(name)
+        }
+
+        fn restore_ipv6_mtu(&mut self) -> Option<bool> {
+            self.step("ipv6-mtu")
+        }
+
+        fn restore_ipv4_mtu(&mut self) -> Option<bool> {
+            self.step("ipv4-mtu")
+        }
+
+        fn close_adapter(&mut self) -> Option<bool> {
+            self.step("adapter")
+        }
+    }
+
+    #[test]
+    fn loader_and_every_abi_position_fail_closed() {
+        let order = [
+            "executable",
+            "held-directories",
+            "sibling-dll",
+            "file-identity",
+            "size/hash",
+            "system32-load",
+            "eleven-exports",
+        ];
+        for failed in 0..order.len() {
+            let mut loader = InjectedLoader {
+                fail_at: Some(failed),
+                calls: Vec::new(),
+            };
+            assert!(load_transaction(&mut loader).is_err(), "loader {failed}");
+            assert_eq!(loader.calls, order[..=failed], "loader {failed}");
+        }
+        let mut loader = InjectedLoader {
+            fail_at: None,
+            calls: Vec::new(),
+        };
+        load_transaction(&mut loader).expect("complete loader");
+        assert_eq!(loader.calls, order);
+
+        assert!(validate_artifact(DLL_BYTES, DLL_SHA256).is_ok());
+        assert!(validate_artifact(DLL_BYTES - 1, DLL_SHA256).is_err());
+        assert!(validate_artifact(DLL_BYTES + 1, DLL_SHA256).is_err());
+        let mut wrong_hash = DLL_SHA256;
+        wrong_hash[0] ^= 1;
+        assert!(validate_artifact(DLL_BYTES, wrong_hash).is_err());
+
+        for missing in 0..ABI_EXPORTS.len() {
+            let mut visited = Vec::new();
+            let result = require_exports(|name| {
+                visited.push(name.to_vec());
+                name != ABI_EXPORTS[missing]
+            });
+            assert!(result.is_err(), "missing export {missing}");
+            assert_eq!(
+                visited,
+                ABI_EXPORTS[..=missing]
+                    .iter()
+                    .map(|name| name.to_vec())
+                    .collect::<Vec<_>>(),
+                "missing export {missing}"
+            );
+        }
+        let mut visited = Vec::new();
+        require_exports(|name| {
+            visited.push(name.to_vec());
+            true
+        })
+        .expect("all exact exports");
+        assert_eq!(
+            visited,
+            ABI_EXPORTS
+                .iter()
+                .map(|name| name.to_vec())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn every_setup_position_fails_before_later_work_and_session_precedes_dad() {
+        let order = [
+            "cancel",
+            "deadline",
+            "driver",
+            "ipv4-mtu",
+            "ipv6-mtu",
+            "ipv4-address",
+            "ipv6-address",
+            "start-session",
+            "dad",
+        ];
+        for failed in 0..order.len() {
+            let mut setup = InjectedSetup {
+                fail_at: Some(failed),
+                calls: Vec::new(),
+            };
+            assert!(setup_transaction(&mut setup).is_err(), "step {failed}");
+            assert_eq!(setup.calls, order[..=failed], "step {failed}");
+        }
+        let mut setup = InjectedSetup {
+            fail_at: None,
+            calls: Vec::new(),
+        };
+        setup_transaction(&mut setup).expect("complete setup");
+        assert_eq!(setup.calls, order);
+        assert!(
+            setup.calls.iter().position(|step| *step == "start-session")
+                < setup.calls.iter().position(|step| *step == "dad")
+        );
+    }
+
+    #[test]
+    fn only_natural_preferred_dad_is_ready() {
+        assert_eq!(dad_progress(IpDadStateTentative), Ok(DadProgress::Waiting));
+        assert_eq!(dad_progress(IpDadStatePreferred), Ok(DadProgress::Ready));
+        for state in [IpDadStateDuplicate, IpDadStateInvalid, IpDadStateDeprecated] {
+            assert!(dad_progress(state).is_err());
+        }
+        assert_eq!(dad_poll(false, false), Ok(DadProgress::Ready));
+        assert_eq!(dad_poll(true, false), Ok(DadProgress::Waiting));
+        assert!(dad_poll(true, true).is_err(), "Tentative reaches timeout");
+    }
+
+    #[test]
+    fn dad_failure_ends_session_first_and_cleanup_conflicts_do_not_short_circuit() {
+        let order = [
+            "end-session",
+            "ipv6-address",
+            "ipv4-address",
+            "ipv6-mtu",
+            "ipv4-mtu",
+            "adapter",
+        ];
+        for failed in 0..order.len() {
+            let mut cleanup = InjectedCleanup {
+                fail_at: Some(failed),
+                idle: true,
+                addresses: 2,
+                calls: Vec::new(),
+            };
+            assert!(cleanup_transaction(&mut cleanup), "cleanup step {failed}");
+            assert_eq!(cleanup.calls, order, "cleanup step {failed}");
+        }
+
+        let mut cleanup = InjectedCleanup {
+            fail_at: None,
+            idle: true,
+            addresses: 2,
+            calls: Vec::new(),
+        };
+        assert!(!cleanup_transaction(&mut cleanup));
+        assert_eq!(cleanup.calls, order);
+
+        let journal = SessionJournal::default();
+        let wait = journal.begin_wait().expect("first wait");
+        assert!(
+            journal.begin_wait().is_err(),
+            "overlapping waits fail closed"
+        );
+        let mut overlap = InjectedCleanup {
+            fail_at: None,
+            idle: journal.cleanup_is_safe(),
+            addresses: 2,
+            calls: Vec::new(),
+        };
+        assert!(cleanup_transaction(&mut overlap));
+        assert!(
+            overlap.calls.is_empty(),
+            "EndSession cannot overlap an active wait"
+        );
+        drop(wait);
+        let mut after_wait = InjectedCleanup {
+            fail_at: None,
+            idle: journal.cleanup_is_safe(),
+            addresses: 2,
+            calls: Vec::new(),
+        };
+        assert!(!cleanup_transaction(&mut after_wait));
+        assert_eq!(after_wait.calls, order);
+
+        let clean = finish_setup_transaction(Err(Error), || false).expect_err("DAD failure");
+        assert!(!clean.is_cleanup_failure());
+        let conflict = finish_setup_transaction(Err(Error), || true).expect_err("cleanup conflict");
+        assert!(conflict.is_cleanup_failure());
+        let mut cleanup_called = false;
+        finish_setup_transaction(Ok(()), || {
+            cleanup_called = true;
+            false
+        })
+        .expect("successful setup");
+        assert!(!cleanup_called, "successful setup retains the journal");
+    }
 }

@@ -118,12 +118,19 @@ pub trait PreparedProcessRoot<E>: Send + 'static {
 }
 
 type PreparedRootBox<E> = Box<dyn PreparedProcessRoot<E>>;
-type PrepareFuture<E> = ProcessFuture<Result<PreparedRootBox<E>, E>>;
-type PrepareFactory<E> = Box<dyn FnOnce() -> PrepareFuture<E> + Send + 'static>;
+enum PrepareOutcome<E> {
+    Prepared(PreparedRootBox<E>),
+    Failed(E),
+    Cancelled,
+}
+
+type PrepareFuture<E> = ProcessFuture<PrepareOutcome<E>>;
+type PrepareFactory<E> = Box<dyn FnOnce(ProcessCancellation) -> PrepareFuture<E> + Send + 'static>;
 
 /// One required root's fallible preparation seam.
 pub struct ProcessRoot<E> {
     prepare: PrepareFactory<E>,
+    reap_on_cancellation: bool,
 }
 
 impl<E> ProcessRoot<E> {
@@ -139,18 +146,46 @@ impl<E> ProcessRoot<E> {
         R: PreparedProcessRoot<E>,
     {
         Self {
-            prepare: Box::new(move || {
+            prepare: Box::new(move |_| {
                 Box::pin(async move {
-                    prepare()
-                        .await
-                        .map(|root| Box::new(root) as PreparedRootBox<E>)
+                    match prepare().await {
+                        Ok(root) => PrepareOutcome::Prepared(Box::new(root) as PreparedRootBox<E>),
+                        Err(error) => PrepareOutcome::Failed(error),
+                    }
                 })
             }),
+            reap_on_cancellation: false,
         }
     }
 
-    fn into_prepare_future(self) -> PrepareFuture<E> {
-        (self.prepare)()
+    /// Creates a root whose in-flight preparation explicitly reaps on cancellation.
+    ///
+    /// `Ok(None)` acknowledges clean cancellation. Once cancellation is signalled,
+    /// `Err` is recorded as cleanup failure and `Ok(Some(root))` is rolled back.
+    pub fn new_cancellable<P, F, R>(prepare: P) -> Self
+    where
+        P: FnOnce(ProcessCancellation) -> F + Send + 'static,
+        F: Future<Output = Result<Option<R>, E>> + Send + 'static,
+        R: PreparedProcessRoot<E>,
+    {
+        Self {
+            prepare: Box::new(move |cancellation| {
+                Box::pin(async move {
+                    match prepare(cancellation).await {
+                        Ok(Some(root)) => {
+                            PrepareOutcome::Prepared(Box::new(root) as PreparedRootBox<E>)
+                        }
+                        Ok(None) => PrepareOutcome::Cancelled,
+                        Err(error) => PrepareOutcome::Failed(error),
+                    }
+                })
+            }),
+            reap_on_cancellation: true,
+        }
+    }
+
+    fn into_prepare_future(self, cancellation: ProcessCancellation) -> (PrepareFuture<E>, bool) {
+        ((self.prepare)(cancellation), self.reap_on_cancellation)
     }
 }
 
@@ -355,9 +390,11 @@ where
 
         for (index, root) in roots.into_iter().enumerate() {
             let root_id = ProcessRootId(index);
-            let preparation = catch_unwind(AssertUnwindSafe(|| root.into_prepare_future()));
+            let preparation = catch_unwind(AssertUnwindSafe(|| {
+                root.into_prepare_future(cancellation.clone())
+            }));
             let preparation = match preparation {
-                Ok(future) => {
+                Ok((future, reap_on_cancellation)) => {
                     let preparation = catch_process_future(future);
                     tokio::pin!(preparation);
                     tokio::select! {
@@ -365,7 +402,34 @@ where
                         () = &mut shutdown => {
                             cancellation_source.quiesce();
                             states.push(ProcessState::Rollback);
-                            let cleanup_failure = rollback_prepared(prepared, &registry).await;
+                            let mut cleanup_failure = None;
+                            if reap_on_cancellation {
+                                match preparation.await {
+                                    Ok(PrepareOutcome::Cancelled) => {}
+                                    Ok(PrepareOutcome::Failed(error)) => {
+                                        cleanup_failure = Some(ProcessCleanupFailure::RootFailed {
+                                            root: root_id,
+                                            error,
+                                        });
+                                    }
+                                    Ok(PrepareOutcome::Prepared(root)) => {
+                                        prepared.push(PreparedEntry {
+                                            id: root_id,
+                                            root,
+                                            guard: registry.track_prepared_process_root(),
+                                        });
+                                    }
+                                    Err(()) => {
+                                        cleanup_failure = Some(ProcessCleanupFailure::RootPanicked {
+                                            root: root_id,
+                                        });
+                                    }
+                                }
+                            }
+                            let rollback_failure = rollback_prepared(prepared, &registry).await;
+                            if cleanup_failure.is_none() {
+                                cleanup_failure = rollback_failure;
+                            }
                             return finish_report(
                                 states,
                                 ProcessCause::ExternalShutdown,
@@ -384,12 +448,12 @@ where
                 Err(_) => Err(()),
             };
             match preparation {
-                Ok(Ok(root)) => prepared.push(PreparedEntry {
+                Ok(PrepareOutcome::Prepared(root)) => prepared.push(PreparedEntry {
                     id: root_id,
                     root,
                     guard: registry.track_prepared_process_root(),
                 }),
-                Ok(Err(error)) => {
+                Ok(PrepareOutcome::Failed(error)) => {
                     cancellation_source.quiesce();
                     states.push(ProcessState::Rollback);
                     let cleanup_failure = rollback_prepared(prepared, &registry).await;
@@ -408,7 +472,7 @@ where
                         },
                     );
                 }
-                Err(()) => {
+                Ok(PrepareOutcome::Cancelled) | Err(()) => {
                     cancellation_source.quiesce();
                     states.push(ProcessState::Rollback);
                     let cleanup_failure = rollback_prepared(prepared, &registry).await;

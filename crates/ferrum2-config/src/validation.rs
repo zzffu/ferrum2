@@ -448,30 +448,15 @@ fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
     if !(65_536..=134_217_728).contains(&raw.max_udp_buffered_bytes) {
         return Err(ConfigError::semantic(ConfigField::TunMaxUdpBufferedBytes));
     }
-    let terms = [
-        raw.ring_capacity.checked_mul(2),
-        raw.max_tcp_flows
-            .checked_mul(raw.tcp_buffer_bytes)
-            .and_then(|value| value.checked_mul(2)),
-        Some(raw.max_udp_buffered_bytes),
-        raw.max_tcp_flows.checked_mul(
-            raw.mtu
-                .checked_add(1_024)
-                .ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))?,
-        ),
-        raw.max_udp_mappings.checked_mul(
-            raw.mtu
-                .checked_add(512)
-                .ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))?,
-        ),
-        raw.mtu.checked_mul(8),
-        Some(1_048_576),
-    ];
-    let owned_buffer_bytes = terms.into_iter().try_fold(0_u64, |total, term| {
-        total
-            .checked_add(term.ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))?)
-            .ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))
-    })?;
+    let owned_buffer_bytes = checked_tun_memory(
+        raw.mtu,
+        raw.ring_capacity,
+        raw.max_tcp_flows,
+        raw.tcp_buffer_bytes,
+        raw.max_udp_mappings,
+        raw.max_udp_buffered_bytes,
+    )
+    .ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))?;
     if owned_buffer_bytes > 268_435_456 {
         return Err(ConfigError::semantic(ConfigField::TunMemory));
     }
@@ -493,6 +478,29 @@ fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
             owned_buffer_bytes,
         },
     })
+}
+
+fn checked_tun_memory(
+    mtu: u64,
+    ring_capacity: u64,
+    max_tcp_flows: u64,
+    tcp_buffer_bytes: u64,
+    max_udp_mappings: u64,
+    max_udp_buffered_bytes: u64,
+) -> Option<u64> {
+    [
+        ring_capacity.checked_mul(2),
+        max_tcp_flows
+            .checked_mul(tcp_buffer_bytes)
+            .and_then(|value| value.checked_mul(2)),
+        Some(max_udp_buffered_bytes),
+        max_tcp_flows.checked_mul(mtu.checked_add(1_024)?),
+        max_udp_mappings.checked_mul(mtu.checked_add(512)?),
+        mtu.checked_mul(8),
+        Some(1_048_576),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, term| total.checked_add(term?))
 }
 
 fn validate_tun_targets(
@@ -1688,4 +1696,33 @@ fn validate_metrics(
         return Err(ConfigError::semantic(ConfigField::MetricsListen));
     }
     Ok(Some(MetricsConfig { listen }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_tun_memory;
+
+    #[test]
+    fn tun_memory_formula_is_exact_and_every_overflow_fails_closed() {
+        assert_eq!(
+            checked_tun_memory(1420, 8_388_608, 256, 32_768, 1024, 16_777_216),
+            Some(53_995_616)
+        );
+        for (name, values) in [
+            ("MTU staging", [u64::MAX, 1, 1, 1, 1, 1]),
+            ("ring product", [1, u64::MAX, 1, 1, 1, 1]),
+            ("flow count product", [1, 1, u64::MAX, 2, 1, 1]),
+            ("flow buffer product", [1, 1, 2, u64::MAX, 1, 1]),
+            ("mapping product", [1, 1, 1, 1, u64::MAX, 1]),
+            ("sum", [1, 1, 1, 1, 1, u64::MAX]),
+        ] {
+            assert_eq!(
+                checked_tun_memory(
+                    values[0], values[1], values[2], values[3], values[4], values[5]
+                ),
+                None,
+                "{name}"
+            );
+        }
+    }
 }

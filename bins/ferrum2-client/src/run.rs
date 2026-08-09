@@ -295,7 +295,7 @@ where
         }));
     }
     if let Some(tun_config) = tun_config {
-        roots.push(tun::process_root(tun_config));
+        roots.push(tun::process_root(tun_config, Arc::clone(&metrics)));
     }
     if let Some((inbounds, servers, route, policy, timeout, max_inflight, _)) = dns {
         let ordinary_dns = ordinary_dns.expect("validated DNS graph has an ordinary handle");

@@ -611,6 +611,59 @@ fn toolchain_and_msrv_are_pinned() {
         assert!(workflow.contains(required), "missing MSRV gate: {required}");
     }
     assert!(!workflow.contains("1.85.0"));
+
+    let exact_msrv = |toolchain: &str, manifest: &str, workflow: &str| {
+        toolchain.contains("channel = \"1.97.1\"")
+            && manifest.contains("rust-version = \"1.97.1\"")
+            && [
+                "rustup toolchain install 1.97.1 --profile minimal",
+                "rustc +1.97.1 -Vv",
+                "cargo +1.97.1 -V",
+                "cargo +1.97.1 check --workspace --all-targets --locked",
+                "cargo +1.97.1 build --workspace --bins --locked",
+                "cargo +1.97.1 test --workspace --locked",
+            ]
+            .iter()
+            .all(|required| workflow.contains(required))
+    };
+    assert!(exact_msrv(&toolchain, &manifest, &workflow));
+    for (name, mutated_toolchain, mutated_manifest, mutated_workflow) in [
+        (
+            "Rust 1.88.0",
+            toolchain.replace("1.97.1", "1.88.0"),
+            manifest.clone(),
+            workflow.clone(),
+        ),
+        (
+            "dependency MSRV 1.91",
+            toolchain.clone(),
+            manifest.replace("1.97.1", "1.91"),
+            workflow.clone(),
+        ),
+        (
+            "floating stable",
+            toolchain.replace("1.97.1", "stable"),
+            manifest.clone(),
+            workflow.clone(),
+        ),
+        (
+            "floating nightly",
+            toolchain.replace("1.97.1", "nightly"),
+            manifest.clone(),
+            workflow.clone(),
+        ),
+        (
+            "workflow drift",
+            toolchain.clone(),
+            manifest.clone(),
+            workflow.replacen("cargo +1.97.1 test", "cargo +stable test", 1),
+        ),
+    ] {
+        assert!(
+            !exact_msrv(&mutated_toolchain, &mutated_manifest, &mutated_workflow),
+            "MSRV mutation survived: {name}"
+        );
+    }
 }
 
 #[test]
@@ -763,6 +816,52 @@ fn tun_dependency_edges_and_unsafe_exception_are_exact() {
             "assembler-max-segment-count-4"
         ])
     );
+    let smoltcp_id = unique_registry_package_id(&metadata, "smoltcp", "0.13.1");
+    let smoltcp_resolved = resolve_node(&metadata, &smoltcp_id)["features"]
+        .as_array()
+        .expect("resolved smoltcp features");
+    assert!(
+        !smoltcp_resolved
+            .iter()
+            .any(|feature| feature == "auto-icmp-echo-reply"),
+        "resolved smoltcp must not regain automatic ICMP replies"
+    );
+
+    let workspace_manifest =
+        fs::read_to_string(root.join("Cargo.toml")).expect("workspace manifest");
+    let exact_smoltcp = "smoltcp = { version = \"=0.13.1\", default-features = false, features = [\"std\", \"medium-ip\", \"proto-ipv4\", \"proto-ipv6\", \"socket-tcp\", \"socket-tcp-reno\", \"socket-udp\", \"iface-max-addr-count-2\", \"iface-max-route-count-2\", \"assembler-max-segment-count-4\"] }";
+    let has_exact_smoltcp = |source: &str| source.matches(exact_smoltcp).count() == 1;
+    assert!(has_exact_smoltcp(&workspace_manifest));
+    for (name, mutation) in [
+        (
+            "missing edge",
+            workspace_manifest.replace(exact_smoltcp, ""),
+        ),
+        (
+            "default enabled",
+            workspace_manifest.replace("default-features = false", "default-features = true"),
+        ),
+        (
+            "missing feature",
+            workspace_manifest.replace(", \"assembler-max-segment-count-4\"", ""),
+        ),
+        (
+            "extra feature",
+            workspace_manifest.replace(
+                "\"assembler-max-segment-count-4\"]",
+                "\"assembler-max-segment-count-4\", \"auto-icmp-echo-reply\"]",
+            ),
+        ),
+        (
+            "floating version",
+            workspace_manifest.replace("version = \"=0.13.1\"", "version = \"0.13\""),
+        ),
+    ] {
+        assert!(
+            !has_exact_smoltcp(&mutation),
+            "smoltcp mutation survived: {name}"
+        );
+    }
     assert_eq!(
         packages
             .iter()
@@ -803,6 +902,45 @@ fn tun_dependency_edges_and_unsafe_exception_are_exact() {
 
     let manifest =
         fs::read_to_string(root.join("crates/ferrum2-wintun/Cargo.toml")).expect("Wintun manifest");
+    let exact_windows_target =
+        "[target.'cfg(all(windows, target_arch = \"x86_64\"))'.dependencies]";
+    let exact_windows = "windows-sys = { version = \"=0.61.2\", default-features = false, features = [\"Win32_Foundation\", \"Win32_Storage_FileSystem\", \"Win32_System_LibraryLoader\", \"Win32_System_Threading\", \"Win32_Security_Cryptography\", \"Win32_NetworkManagement_IpHelper\", \"Win32_NetworkManagement_Ndis\", \"Win32_Networking_WinSock\"] }";
+    let has_exact_windows = |source: &str| {
+        source.matches(exact_windows_target).count() == 1
+            && source.matches(exact_windows).count() == 1
+    };
+    assert!(has_exact_windows(&manifest));
+    for (name, mutation) in [
+        ("missing edge", manifest.replace(exact_windows, "")),
+        (
+            "default enabled",
+            manifest.replace("default-features = false", "default-features = true"),
+        ),
+        (
+            "missing feature",
+            manifest.replace(", \"Win32_Networking_WinSock\"", ""),
+        ),
+        (
+            "extra feature",
+            manifest.replace(
+                "\"Win32_Networking_WinSock\"]",
+                "\"Win32_Networking_WinSock\", \"Win32_System_IO\"]",
+            ),
+        ),
+        (
+            "version drift",
+            manifest.replace("version = \"=0.61.2\"", "version = \"=0.61.1\""),
+        ),
+        (
+            "target drift",
+            manifest.replace(exact_windows_target, "[target.'cfg(windows)'.dependencies]"),
+        ),
+    ] {
+        assert!(
+            !has_exact_windows(&mutation),
+            "windows-sys mutation survived: {name}"
+        );
+    }
     assert!(manifest.contains("[lints.rust]\nunsafe_code = \"deny\""));
     let library =
         fs::read_to_string(root.join("crates/ferrum2-wintun/src/lib.rs")).expect("Wintun library");

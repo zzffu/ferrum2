@@ -1005,6 +1005,82 @@ async fn external_shutdown_during_preparation_cancels_the_same_transaction_and_r
     assert_eq!(snapshot.active_process_roots, 0);
 }
 
+#[tokio::test]
+async fn cancellation_aware_preparation_is_reaped_and_reports_cleanup_failure() {
+    for (cleanup_error, expected_failure) in [(None, None), (Some("cleanup"), Some("cleanup"))] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let preparing_second = Arc::new(Notify::new());
+        let first_events = Arc::clone(&events);
+        let first_polls = Arc::clone(&polls);
+        let second_events = Arc::clone(&events);
+        let second_preparing = Arc::clone(&preparing_second);
+        let registry = OwnerRegistry::new();
+        let supervisor = ProcessSupervisor::new(
+            vec![
+                ProcessRoot::new(move || async move {
+                    first_events
+                        .lock()
+                        .expect("event lock")
+                        .push("prepare:0".to_owned());
+                    Ok(FakeProcessRoot {
+                        index: 0,
+                        activation_failure: None,
+                        events: first_events,
+                        polls: first_polls,
+                    })
+                }),
+                ProcessRoot::new_cancellable(move |mut cancellation| async move {
+                    second_events
+                        .lock()
+                        .expect("event lock")
+                        .push("prepare:1".to_owned());
+                    second_preparing.notify_one();
+                    cancellation.cancelled().await;
+                    second_events
+                        .lock()
+                        .expect("event lock")
+                        .push("reap:1".to_owned());
+                    match cleanup_error {
+                        Some(error) => Err(error),
+                        None => Ok(None::<FakeProcessRoot>),
+                    }
+                }),
+            ],
+            Duration::from_secs(5),
+            registry.clone(),
+        )
+        .expect("two required roots");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let run = tokio::spawn(supervisor.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        preparing_second.notified().await;
+        shutdown_tx.send(()).expect("request startup shutdown");
+        let report = run.await.expect("process owner");
+
+        assert!(matches!(report.cause(), ProcessCause::ExternalShutdown));
+        match expected_failure {
+            Some(error) => assert!(matches!(
+                report.cleanup_failure(),
+                Some(ProcessCleanupFailure::RootFailed { root, error: actual })
+                    if root.get() == 1 && *actual == error
+            )),
+            None => assert!(report.cleanup_failure().is_none()),
+        }
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["prepare:0", "prepare:1", "reap:1", "rollback:0"]
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.process_root_rollbacks, 1);
+        assert_eq!(snapshot.prepared_process_roots, 0);
+        assert_eq!(snapshot.active_process_roots, 0);
+    }
+}
+
 struct HandoffRoot {
     index: usize,
     panic_on_run: bool,

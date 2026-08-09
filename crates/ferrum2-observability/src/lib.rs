@@ -669,6 +669,8 @@ pub struct Metrics {
     udp_replay_rejections: UdpReplayFamily,
     udp_forced_shutdown: UdpRoleCounterFamily,
     sniff: SniffFamily,
+    tun_packets_accepted: Counter,
+    tun_packets_foundation_dropped: Counter,
 }
 
 impl Metrics {
@@ -691,6 +693,8 @@ impl Metrics {
         let udp_replay_rejections = UdpReplayFamily::default();
         let udp_forced_shutdown = UdpRoleCounterFamily::default();
         let sniff = SniffFamily::default();
+        let tun_packets_accepted = Counter::default();
+        let tun_packets_foundation_dropped = Counter::default();
 
         let mut registry = Registry::default();
         registry.register(
@@ -768,6 +772,16 @@ impl Metrics {
             "Authenticated bounded sniff outcomes",
             sniff.clone(),
         );
+        registry.register(
+            "ferrum2_tun_packets_accepted",
+            "Validated TUN packets accepted by the foundation stack",
+            tun_packets_accepted.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_packets_foundation_dropped",
+            "TUN packets deterministically dropped before policy composition",
+            tun_packets_foundation_dropped.clone(),
+        );
 
         Self {
             registry,
@@ -786,7 +800,19 @@ impl Metrics {
             udp_replay_rejections,
             udp_forced_shutdown,
             sniff,
+            tun_packets_accepted,
+            tun_packets_foundation_dropped,
         }
+    }
+
+    /// Records one packet that passed the shared TUN ingress validator.
+    pub fn tun_packet_accepted(&self) {
+        self.tun_packets_accepted.inc();
+    }
+
+    /// Records one accepted packet consumed by the foundation stack before policy.
+    pub fn tun_packet_foundation_dropped(&self) {
+        self.tun_packets_foundation_dropped.inc();
     }
 
     pub fn connection(&self, role: Role, inbound: Inbound, outcome: Outcome) {

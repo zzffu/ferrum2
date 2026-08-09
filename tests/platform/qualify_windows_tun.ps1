@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("lifecycle")]
-    [string]$Mode
+    [string]$Mode,
+    [string]$WintunZip
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,11 +13,8 @@ if (-not $IsWindows -or [System.Runtime.InteropServices.RuntimeInformation]::OSA
 }
 
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$zip = if ($env:FERRUM2_WINTUN_ZIP) {
-    (Resolve-Path -LiteralPath $env:FERRUM2_WINTUN_ZIP).Path
-} else {
-    (Resolve-Path -LiteralPath "C:\Users\ZZZ\Downloads\wintun-0.14.1.zip").Path
-}
+$zipInput = if ($WintunZip) { $WintunZip } elseif ($env:FERRUM2_WINTUN_ZIP) { $env:FERRUM2_WINTUN_ZIP } else { throw "Wintun ZIP path is required via -WintunZip or FERRUM2_WINTUN_ZIP" }
+$zip = (Resolve-Path -LiteralPath $zipInput).Path
 $expectedZipHash = "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51"
 $expectedDllHash = "E5DA8447DC2C320EDC0FC52FA01885C103DE8C118481F683643CACC3220DAFCE"
 $expectedExports = @(
@@ -37,7 +35,10 @@ $ownedRoutes = [System.Collections.Generic.List[object]]::new()
 $activeProcess = $null
 $ownedInterfaceIndex = $null
 $heldMetrics = $null
+$udp4 = $null
 $foundation = 0
+$createdSiblingDll = $false
+$completed = $false
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -115,6 +116,34 @@ function Get-InterfaceRouteSnapshot([int]$InterfaceIndex) {
 function Assert-SnapshotEqual([object[]]$Expected, [object[]]$Actual, [string]$Label) {
     $difference = @(Compare-Object -ReferenceObject @($Expected) -DifferenceObject @($Actual))
     Assert-True ($difference.Count -eq 0) "$Label snapshot changed"
+}
+
+function Get-FreeTcpPort {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    try { return ([Net.IPEndPoint]$listener.LocalEndpoint).Port }
+    finally { $listener.Stop() }
+}
+
+function Get-Metrics([int]$Port, [int]$TimeoutSeconds = 10) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        try { return (Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/metrics" -TimeoutSec 1).Content }
+        catch {
+            if ($script:activeProcess) {
+                $script:activeProcess.Refresh()
+                if ($script:activeProcess.HasExited) { throw "candidate failed before metrics became ready" }
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "metrics readiness timeout"
+}
+
+function Get-CounterValue([string]$Metrics, [string]$Name) {
+    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))_total ([0-9]+)$")
+    Assert-True $match.Success "missing no-label counter: $Name"
+    return [uint64]$match.Groups[1].Value
 }
 
 function Assert-InterfaceGone([string]$Name, [Nullable[int]]$InterfaceIndex) {
@@ -236,6 +265,7 @@ try {
     Push-Location $workspace
     try { & cargo +1.97.1 build -p ferrum2-client --locked; if ($LASTEXITCODE -ne 0) { throw "candidate build failed" } }
     finally { Pop-Location }
+    $metricsPort = Get-FreeTcpPort
     @"
 schema_version = 2
 [tun]
@@ -250,6 +280,8 @@ tag = "proxy"
 server = "192.0.2.10:8388"
 [runtime]
 shutdown_grace_ms = 1000
+[metrics]
+listen = "127.0.0.1:$metricsPort"
 [shadowsocks]
 method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
@@ -265,6 +297,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     $foundation++
 
     Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
+    $createdSiblingDll = $true
     $activeProcess = Start-Candidate $binary $config
     $adapter = Wait-AdapterReady $adapterName
     $ownedInterfaceIndex = [int]$adapter.ifIndex
@@ -272,14 +305,29 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     Assert-True ($readyAddresses -contains "IPv4|198.18.0.2|30|Preferred") "IPv4 address snapshot missing"
     Assert-True ($readyAddresses -contains "IPv6|fd00::2|126|Preferred") "IPv6 address snapshot missing"
     $systemRoutes = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
-    foreach ($expectedRoute in @(
+    $expectedAddressDerivedRoutes = @(
         "IPv4|198.18.0.0/30|0.0.0.0",
         "IPv4|198.18.0.2/32|0.0.0.0",
         "IPv6|fd00::/126|::",
         "IPv6|fd00::2/128|::"
-    )) {
-        Assert-True ($systemRoutes -contains $expectedRoute) "expected OS-managed route missing: $expectedRoute"
-    }
+    )
+    $addressDerivedRoutes = @($systemRoutes | Where-Object {
+        ($_ -like "IPv4|198.18.0.*" -and $_ -ne "IPv4|198.18.0.3/32|0.0.0.0") -or
+        ($_ -like "IPv6|fd00::*")
+    })
+    Assert-SnapshotEqual $expectedAddressDerivedRoutes $addressDerivedRoutes "exact ready address-derived routes"
+    $dynamicLinkLocalRoutes = @($systemRoutes | Where-Object { $_ -match '^IPv6\|fe80::.+/128\|::$' })
+    Assert-True ($dynamicLinkLocalRoutes.Count -eq 1) "unexpected link-local host route count"
+    $expectedAutomaticRoutes = @(
+        "IPv4|198.18.0.3/32|0.0.0.0",
+        "IPv4|224.0.0.0/4|0.0.0.0",
+        "IPv4|255.255.255.255/32|0.0.0.0",
+        "IPv6|fe80::/64|::",
+        $dynamicLinkLocalRoutes[0],
+        "IPv6|ff00::/8|::"
+    )
+    $automaticRoutes = @($systemRoutes | Where-Object { $expectedAddressDerivedRoutes -notcontains $_ })
+    Assert-SnapshotEqual $expectedAutomaticRoutes $automaticRoutes "exact ready automatic routes"
     $ownedRoutes.Add((New-NetRoute -DestinationPrefix "192.0.2.200/32" -InterfaceIndex $adapter.ifIndex -NextHop "0.0.0.0" -PolicyStore ActiveStore))
     $ownedRoutes.Add((New-NetRoute -DestinationPrefix "2001:db8::200/128" -InterfaceIndex $adapter.ifIndex -NextHop "::" -PolicyStore ActiveStore))
     $withControllerRoutes = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
@@ -292,14 +340,50 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     }
     Assert-True ($withControllerRoutes.Count -eq $systemRoutes.Count + 2) "unexpected route mutation"
     $udp4 = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
-    $udp6 = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetworkV6)
+    $udp4.Connect("192.0.2.200", 53)
+    $settleDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $stableSamples = 0
+    $acceptedBefore = -1
+    $droppedBefore = -1
+    do {
+        $beforeMetrics = Get-Metrics $metricsPort
+        $acceptedSample = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_accepted"
+        $droppedSample = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_foundation_dropped"
+        if ($acceptedSample -eq $acceptedBefore -and $droppedSample -eq $droppedBefore) {
+            $stableSamples++
+        } else {
+            $stableSamples = 0
+            $acceptedBefore = $acceptedSample
+            $droppedBefore = $droppedSample
+        }
+        if ($stableSamples -ge 5) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $settleDeadline)
+    Assert-True ($stableSamples -ge 5) "TUN packet counters did not reach a bounded quiet baseline"
     try {
-        [void]$udp4.Send([byte[]](1,2,3,4), 4, "192.0.2.200", 53)
-        [void]$udp6.Send([byte[]](5,6,7,8), 4, "2001:db8::200", 53)
-        $tcp = [Net.Sockets.TcpClient]::new()
-        try { $attempt = $tcp.BeginConnect("192.0.2.200", 443, $null, $null); [void]$attempt.AsyncWaitHandle.WaitOne(250) }
-        finally { $tcp.Dispose() }
-    } finally { $udp4.Dispose(); $udp6.Dispose() }
+        [void]$udp4.Send([byte[]](1,2,3,4), 4)
+    } finally { $udp4.Dispose(); $udp4 = $null }
+    $packetDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $afterMetrics = Get-Metrics $metricsPort
+        $acceptedAfter = Get-CounterValue $afterMetrics "ferrum2_tun_packets_accepted"
+        $droppedAfter = Get-CounterValue $afterMetrics "ferrum2_tun_packets_foundation_dropped"
+        $acceptedDelta = $acceptedAfter - $acceptedBefore
+        $droppedDelta = $droppedAfter - $droppedBefore
+        if ($acceptedDelta -gt 0 -and $acceptedDelta -eq $droppedDelta) { break }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $packetDeadline)
+    Assert-True ($acceptedDelta -gt 0) "valid packet did not traverse receive/validation/enqueue"
+    Assert-True ($droppedDelta -gt 0) "valid packet did not traverse poll/foundation drop"
+    Assert-True ($acceptedDelta -eq $droppedDelta) "accepted packet did not have one foundation-drop outcome"
+    $udp6 = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetworkV6)
+    try { [void]$udp6.Send([byte[]](5,6,7,8), 4, "2001:db8::200", 53) }
+    finally { $udp6.Dispose() }
+    $tcp = [Net.Sockets.TcpClient]::new()
+    try {
+        $attempt = $tcp.BeginConnect("192.0.2.200", 443, $null, $null)
+        [void]$attempt.AsyncWaitHandle.WaitOne(250)
+    } finally { $tcp.Dispose() }
     Start-Sleep -Milliseconds 250
     $activeProcess.Refresh()
     Assert-True (-not $activeProcess.HasExited) "valid packets terminated the required root"
@@ -316,8 +400,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
     $heldMetrics = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
     $heldMetrics.Start()
-    $metricsPort = ([Net.IPEndPoint]$heldMetrics.LocalEndpoint).Port
-    "$(Get-Content -LiteralPath $config -Raw)`n[metrics]`nlisten = `"127.0.0.1:$metricsPort`"`n" |
+    $heldPort = ([Net.IPEndPoint]$heldMetrics.LocalEndpoint).Port
+    (Get-Content -LiteralPath $config -Raw).Replace("127.0.0.1:$metricsPort", "127.0.0.1:$heldPort") |
         Set-Content -LiteralPath $failureConfig -Encoding utf8NoBOM
     $activeProcess = Start-Candidate $binary $failureConfig
     $failedAdapter = Wait-AdapterAppeared $adapterName
@@ -345,12 +429,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     $foundation++
 
     Assert-True ($foundation -eq 4) "foundation row count mismatch"
-    $sha = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
-    $runId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
-    $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
-    Write-Output "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+    $completed = $true
 }
 finally {
+    if ($udp4) { $udp4.Dispose() }
     if ($heldMetrics) { $heldMetrics.Stop() }
     foreach ($route in $ownedRoutes) {
         Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue
@@ -372,6 +454,15 @@ finally {
             Where-Object { $null -ne $ownedInterfaceIndex -and $_.InterfaceIndex -eq $ownedInterfaceIndex })
         Assert-True ($leaked.Count -eq 0) "controller-owned route leaked: $expectedRoute"
     }
-    if (Test-Path -LiteralPath $siblingDll) { Remove-Item -LiteralPath $siblingDll -Force }
+    if ($createdSiblingDll -and (Test-Path -LiteralPath $siblingDll)) { Remove-Item -LiteralPath $siblingDll -Force }
     if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
+    if ($createdSiblingDll) { Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "owned sibling DLL leaked" }
+    Assert-True (-not (Test-Path -LiteralPath $work)) "controller work directory leaked"
+}
+
+if ($completed) {
+    $sha = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
+    $runId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
+    $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
+    Write-Output "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
 }

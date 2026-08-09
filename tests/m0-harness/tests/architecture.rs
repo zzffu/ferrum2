@@ -2185,7 +2185,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .count()
                 >= 3
             && source
-                .contains("owner_main(config, owner_stop, owner_active, ready_sender, deadline)")
+                .contains("ready_sender,\n                deadline,\n                accepted,")
     };
     assert!(
         has_single_deadline_contract(&tun),
@@ -2217,7 +2217,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         vec!["crates/ferrum2-wintun/src/windows.rs"]
     );
     let preserves_setup_cleanup_failure = |wintun: &str, tun: &str| {
-        wintun.contains("Err(_) if owner.cleanup_inner() => Err(CreateError::cleanup())")
+        wintun.contains("finish_setup_transaction(setup, || owner.cleanup_inner())")
+            && wintun.contains("if cleanup()")
+            && wintun.contains("Err(CreateError::cleanup())")
             && tun.contains("if error.is_cleanup_failure()")
             && tun.contains("guard.reap().await == OwnerExit::CleanupFailed")
     };
@@ -2226,12 +2228,67 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         "setup rollback failure must reach the cleanup process error"
     );
     let swallowed_cleanup_mutation = wintun_windows.replace(
-        "Err(_) if owner.cleanup_inner() => Err(CreateError::cleanup())",
-        "Err(_) => Err(CreateError::operation())",
+        "Err(CreateError::cleanup())",
+        "Err(CreateError::operation())",
     );
     assert!(
         !preserves_setup_cleanup_failure(&swallowed_cleanup_mutation, &tun),
         "setup cleanup mutation must remove the failure-kind proof"
+    );
+    let setup_order = [
+        "setup.check_cancelled()?",
+        "setup.check_deadline()?",
+        "setup.check_driver()?",
+        "setup.set_ipv4_mtu()?",
+        "setup.set_ipv6_mtu()?",
+        "setup.add_ipv4_address()?",
+        "setup.add_ipv6_address()?",
+        "setup.start_session()?",
+        "setup.wait_for_dad()",
+    ];
+    let cleanup_order = [
+        "cleanup.end_session()",
+        "cleanup.delete_last_address()",
+        "cleanup.restore_ipv6_mtu()",
+        "cleanup.restore_ipv4_mtu()",
+        "cleanup.close_adapter()",
+    ];
+    for order in [setup_order.as_slice(), cleanup_order.as_slice()] {
+        let positions = order
+            .iter()
+            .map(|needle| wintun_windows.find(needle).expect("transaction step"))
+            .collect::<Vec<_>>();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "Wintun transaction order drifted: {order:?}"
+        );
+    }
+    let wait_cleanup_is_serial = |source: &str| {
+        source.contains("let _wait = self.session_journal.begin_wait()?")
+            && source.contains("if !cleanup.session_is_idle()")
+            && source.find("if !cleanup.session_is_idle()") < source.find("cleanup.end_session()")
+    };
+    assert!(
+        wait_cleanup_is_serial(&wintun_windows),
+        "active receive wait must fail closed before EndSession"
+    );
+    let overlapping_wait_mutation =
+        wintun_windows.replace("if !cleanup.session_is_idle()", "if false");
+    assert!(
+        !wait_cleanup_is_serial(&overlapping_wait_mutation),
+        "wait/EndSession overlap mutation must remove the serialization proof"
+    );
+    assert!(
+        !wintun_windows.contains("DadState = IpDadStatePreferred"),
+        "optimistic DAD assignment is forbidden"
+    );
+    let reordered_dad = wintun_windows.replace(
+        "setup.start_session()?;\n    setup.wait_for_dad()",
+        "setup.wait_for_dad()?;\n    setup.start_session()",
+    );
+    assert_ne!(
+        reordered_dad, wintun_windows,
+        "StartSession-before-DAD mutation anchor missing"
     );
     for forbidden in [
         "WintunOpenAdapter",
@@ -2258,8 +2315,26 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("$binary --config $config --check-config")
             && source.contains("Wait-AdapterAppeared $adapterName")
             && source.contains("$failureExit -ne 0")
+            && source.contains(
+                "Assert-SnapshotEqual $expectedAddressDerivedRoutes $addressDerivedRoutes",
+            )
+            && source.contains("Assert-SnapshotEqual $expectedAutomaticRoutes $automaticRoutes")
+            && source.contains("ferrum2_tun_packets_accepted")
+            && source.contains("ferrum2_tun_packets_foundation_dropped")
+            && source.contains("$acceptedDelta -gt 0")
+            && source.contains("$droppedDelta -gt 0")
+            && source.contains("$acceptedDelta -eq $droppedDelta")
+            && source.contains("$createdSiblingDll")
+            && source.contains("FERRUM2_WINTUN_ZIP")
+            && source.contains("Resolve-Path -LiteralPath $zipInput")
+            && !source.contains("Downloads")
             && source.matches("$foundation++").count() == 4
             && source.contains("m15_windows_tun_e2e status=PASS profile=foundation")
+            && source.find("finally {").is_some_and(|finally| {
+                source
+                    .find("Write-Output \"m15_windows_tun_e2e")
+                    .is_some_and(|marker| marker > finally)
+            })
     };
     assert!(
         has_cleanup_snapshots(&controller),
@@ -2273,9 +2348,60 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         !has_cleanup_snapshots(&cleanup_mutation),
         "route-cleanup mutation must remove the snapshot proof"
     );
+    let route_subset_mutation = controller.replace(
+        "Assert-SnapshotEqual $expectedAddressDerivedRoutes $addressDerivedRoutes",
+        "foreach ($route in $expectedAddressDerivedRoutes) { Assert-True ($addressDerivedRoutes -contains $route) 'subset' }",
+    );
+    assert!(
+        !has_cleanup_snapshots(&route_subset_mutation),
+        "ready route subset mutation must remove exact-equality proof"
+    );
     let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
         .expect("client composition");
-    assert!(client.contains("roots.push(tun::process_root(tun_config));"));
+    assert!(client.contains("roots.push(tun::process_root(tun_config, Arc::clone(&metrics)));"));
+
+    let runtime = fs::read_to_string(root.join("crates/ferrum2-runtime/src/process.rs"))
+        .expect("process lifecycle");
+    let cancellation_reap = |source: &str| {
+        source.contains("pub fn new_cancellable")
+            && source.contains("if reap_on_cancellation")
+            && source.contains("match preparation.await")
+            && source.contains("ProcessCleanupFailure::RootFailed")
+    };
+    assert!(
+        cancellation_reap(&runtime),
+        "in-flight cancellation-aware preparation is not explicitly reaped"
+    );
+    assert!(
+        !cancellation_reap(&runtime.replace(
+            "match preparation.await",
+            "drop(preparation); match Err(())"
+        )),
+        "dropped preparation mutation must remove explicit reap proof"
+    );
+    assert!(tun.contains("generation.checked_add(1)"));
+    assert!(!tun.contains("wrapping_add(1)"));
+    assert!(tun.contains("if self.validator.accepts(&self.output[..len])"));
+    let packet_witness_path = |source: &str| {
+        source.contains("!self.validator.accepts(packet)")
+            && source.contains("if stack.enqueue(&received) {\n                accepted();")
+            && source
+                .contains("for _ in 0..stack.poll_quantum() {\n            foundation_dropped();")
+    };
+    assert!(
+        packet_witness_path(&tun),
+        "packet witness must traverse validation, enqueue, poll and foundation drop"
+    );
+    for mutation in [
+        tun.replace("!self.validator.accepts(packet)", "false"),
+        tun.replace("if stack.enqueue(&received)", "if true"),
+        tun.replace("for _ in 0..stack.poll_quantum()", "for _ in 0..0"),
+    ] {
+        assert!(
+            !packet_witness_path(&mutation),
+            "packet-path mutation must remove the real witness proof"
+        );
+    }
 }
 
 #[test]
