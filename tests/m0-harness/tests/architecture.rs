@@ -2428,6 +2428,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         source.contains("[ValidateSet(\"lifecycle\", \"tcp\")]")
             && source.matches("$tcpRows++").count() == 8
             && source.matches("Add-TunRoute $").count() == 4
+            && source.matches("Add-TargetAddress $").count() == 1
             && !source.contains("Remove-OwnedRoute")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"2001:db8::200/128\")")
@@ -2452,10 +2453,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         .zip(echo.find(
                             "$session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)",
                         ))
-                        .zip(echo.find("[void](Add-TargetAddress $Address)"))
-                        .is_some_and(|(((accepted, write), shutdown), target)| {
-                            accepted < write && write < shutdown && shutdown < target
+                        .zip(echo.find("$probe = [Ferrum2TcpProbe]::new($Address, $Port, \"echo\")"))
+                        .is_some_and(|(((accepted, write), shutdown), probe)| {
+                            accepted < write && write < shutdown && shutdown < probe
                         })
+                        && !echo.contains("Add-TargetAddress")
                         && echo.contains("finally { $session.Client.Dispose() }")
                 })
             && source
@@ -2466,10 +2468,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         .find("$gateA.WaitAccepted($pressureGate, 5000)")
                         .zip(pressure.find("$pressureWrite = $pressure.Client.GetStream().WriteAsync("))
                         .zip(pressure.find("-not $pressureWrite.Wait(500)"))
-                        .zip(pressure.find("[void](Add-TargetAddress $targets[7])"))
-                        .is_some_and(|(((accepted, write), pending), target)| {
-                            accepted < write && write < pending && pending < target
+                        .zip(pressure.find("$stall = [Ferrum2TcpProbe]::new($targets[7]"))
+                        .is_some_and(|(((accepted, write), pending), probe)| {
+                            accepted < write && write < pending && pending < probe
                         })
+                        && !pressure.contains("Add-TargetAddress")
                 })
             && open_tcp.is_some_and(|open| {
                 open.contains("[Net.IPAddress]::Parse(\"198.18.0.2\")")
@@ -2494,14 +2497,21 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     .zip(tcp.find("$_.WeakHostSend -ne \"Disabled\" -or $_.WeakHostReceive -ne \"Disabled\""))
                     .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"192.0.2.200/29\")"))
                     .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"2001:db8::200/120\")"))
+                    .zip(tcp.find("foreach ($targetIndex in @(0, 1, 2, 3, 7)) {"))
+                    .zip(tcp.find("[void](Add-TargetAddress $targets[$targetIndex])"))
                     .zip(tcp.find("Invoke-EchoRow $targets[0]"))
-                    .is_some_and(|(((((interfaces, count), strong), ipv4), ipv6), first_flow)| {
+                    .is_some_and(|(((((((interfaces, count), strong), ipv4), ipv6), targets), provision), first_flow)| {
                         interfaces < count
                             && count < strong
                             && strong < ipv4
                             && ipv4 < ipv6
-                            && ipv6 < first_flow
+                            && ipv6 < targets
+                            && targets < provision
+                            && provision < first_flow
                     })
+                    && tcp.contains(
+                        "foreach ($targetIndex in @(0, 1, 2, 3, 7)) {\n            [void](Add-TargetAddress $targets[$targetIndex])\n        }",
+                    )
                     && !tcp.contains("Remove-NetRoute")
             })
             && cleanup.is_some_and(|cleanup| {
@@ -2563,6 +2573,18 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace(
             "        Invoke-EchoRow $targets[0]",
             "        Remove-NetRoute -InputObject $ownedRoutes[0] -Confirm:$false\n        Invoke-EchoRow $targets[0]",
+        ),
+        controller.replace(
+            "        foreach ($targetIndex in @(0, 1, 2, 3, 7)) {\n            [void](Add-TargetAddress $targets[$targetIndex])\n        }\n\n        Invoke-EchoRow $targets[0] $ports[0] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes(\"tcp-01-half-close\"))",
+            "        Invoke-EchoRow $targets[0] $ports[0] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes(\"tcp-01-half-close\"))\n        foreach ($targetIndex in @(0, 1, 2, 3, 7)) {\n            [void](Add-TargetAddress $targets[$targetIndex])\n        }",
+        ),
+        controller.replace(
+            "        Assert-True ($Gate.WaitAccepted($expectedGate, 5000))",
+            "        [void](Add-TargetAddress $Address)\n        Assert-True ($Gate.WaitAccepted($expectedGate, 5000))",
+        ),
+        controller.replace(
+            "@(0, 1, 2, 3, 7)",
+            "@(0, 1, 2, 3, 6)",
         ),
         controller.replace(
             "192.0.2.200/29",
