@@ -2127,9 +2127,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tcp_remote_half_close_and_local_fin_traverse_the_real_stack() {
+    async fn tcp_payload_fin_retransmission_and_final_ack_reap_without_reset() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+        let flow_count = Arc::new(AtomicUsize::new(0));
         let (mut stack, mut flows) = Stack::new(
             (
                 Ipv4Addr::new(198, 18, 0, 2),
@@ -2141,7 +2142,7 @@ mod tests {
             1,
             4096,
             Duration::from_secs(60),
-            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&flow_count),
         )
         .expect("bounded stack");
         assert!(stack.enqueue(&ipv4_tcp(), true));
@@ -2157,51 +2158,112 @@ mod tests {
         assert!(stack.enqueue(&ipv4_tcp_after_syn(&syn_ack, 0x10, &[]), true));
         stack.poll_quantum(Instant::from_millis(1));
         let mut flow = flows.try_recv().expect("established flow");
+        assert!(flows.try_recv().is_err(), "one handshake publishes once");
+        assert_eq!(flow_count.load(Ordering::Acquire), 1);
 
-        let remote_fin = ipv4_tcp_after_syn(&syn_ack, 0x11, &[]);
+        let request = b"request";
+        let remote_fin = ipv4_tcp_after_syn(&syn_ack, 0x19, request);
         assert!(stack.enqueue(&remote_fin, true));
         stack.poll_quantum(Instant::from_millis(2));
+        let mut received = [0; 7];
+        flow.read_exact(&mut received)
+            .await
+            .expect("request payload");
+        assert_eq!(&received, request);
         assert_eq!(flow.read(&mut [0; 1]).await.expect("remote FIN"), 0);
-        assert_eq!(stack.take_output(|_| true), OutputResult::Sent);
-
-        flow.write_all(b"reply").await.expect("half-close reply");
-        stack.poll_quantum(Instant::from_millis(3));
-        let mut reply = Vec::new();
-        assert_eq!(
+        let mut reset = false;
+        assert_ne!(
             stack.take_output(|packet| {
-                reply.extend_from_slice(packet);
+                reset |= packet[33] & 0x04 != 0;
                 true
             }),
-            OutputResult::Sent
+            OutputResult::Failed
         );
-        assert_eq!(&reply[40..], b"reply");
+        assert!(!reset, "remote payload+FIN is acknowledged without reset");
 
-        let mut reply_ack = ipv4_tcp_after_syn(&syn_ack, 0x10, &[]);
-        reply_ack[24..28].copy_from_slice(&2_u32.to_be_bytes());
-        let reply_sequence = u32::from_be_bytes(reply[24..28].try_into().expect("reply seq"));
-        reply_ack[28..32].copy_from_slice(&reply_sequence.wrapping_add(5).to_be_bytes());
-        repair_ipv4_tcp_checksum(&mut reply_ack);
-        assert!(stack.enqueue(&reply_ack, true));
-        stack.poll_quantum(Instant::from_millis(4));
-
+        let reply = b"reply";
+        flow.write_all(reply).await.expect("half-close reply");
         let mut shutdown = Box::pin(flow.shutdown());
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut shutdown)
                 .await
                 .is_err(),
-            "shutdown waits for the owner to emit FIN"
+            "shutdown waits for the owner poll"
         );
-        stack.poll_quantum(Instant::from_millis(5));
-        shutdown.await.expect("local FIN committed");
-        let mut fin = Vec::new();
+        stack.poll_quantum(Instant::from_millis(3));
+        let mut reply_fin = Vec::new();
         assert_eq!(
             stack.take_output(|packet| {
-                fin.extend_from_slice(packet);
+                reply_fin.extend_from_slice(packet);
                 true
             }),
             OutputResult::Sent
         );
-        assert_ne!(fin[33] & 0x01, 0, "smoltcp emitted the local FIN");
+        assert_eq!(&reply_fin[40..], reply);
+        assert_ne!(reply_fin[33] & 0x01, 0, "reply carries local FIN");
+        assert_eq!(reply_fin[33] & 0x04, 0, "reply carries no reset");
+
+        stack.poll_quantum(Instant::from_millis(1_004));
+        let mut retransmission = Vec::new();
+        assert_eq!(
+            stack.take_output(|packet| {
+                retransmission.extend_from_slice(packet);
+                true
+            }),
+            OutputResult::Sent
+        );
+        assert_eq!(&retransmission[24..28], &reply_fin[24..28]);
+        assert_eq!(&retransmission[40..], reply);
+        assert_ne!(retransmission[33] & 0x01, 0, "retransmission retains FIN");
+        assert_eq!(
+            retransmission[33] & 0x04,
+            0,
+            "retransmission carries no reset"
+        );
+
+        let mut final_ack = ipv4_tcp_after_syn(&syn_ack, 0x10, &[]);
+        final_ack[24..28].copy_from_slice(&(1_u32 + request.len() as u32 + 1).to_be_bytes());
+        let reply_sequence =
+            u32::from_be_bytes(reply_fin[24..28].try_into().expect("reply sequence"));
+        final_ack[28..32].copy_from_slice(
+            &reply_sequence
+                .wrapping_add(reply.len() as u32 + 1)
+                .to_be_bytes(),
+        );
+        repair_ipv4_tcp_checksum(&mut final_ack);
+        assert!(stack.enqueue(&final_ack, true));
+        stack.poll_quantum(Instant::from_millis(1_005));
+        reset = false;
+        assert_eq!(
+            stack.take_output(|packet| {
+                reset |= packet[33] & 0x04 != 0;
+                true
+            }),
+            OutputResult::Empty
+        );
+        assert!(!reset, "final ACK produces no reset");
+        shutdown.await.expect("local FIN committed");
+        assert_eq!(stack.live_tcp_flows(), 0);
+        assert!(stack.flows[0].is_none(), "flow slot is reaped");
+        assert!(stack.sockets.iter().next().is_none(), "socket is reaped");
+        assert_eq!(
+            stack
+                .generations
+                .current(0)
+                .expect("recycled slot")
+                .generation,
+            1,
+            "generation advances exactly once"
+        );
+        assert_eq!(flow_count.load(Ordering::Acquire), 0);
+
+        drop(flow);
+        stack.poll_quantum(Instant::from_millis(1_006));
+        assert_eq!(
+            stack.take_output(|_| true),
+            OutputResult::Empty,
+            "dropping a completed flow does not abort"
+        );
     }
 
     #[test]

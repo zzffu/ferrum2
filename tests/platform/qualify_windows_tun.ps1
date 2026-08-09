@@ -45,13 +45,75 @@ $tcpResources = [System.Collections.Generic.List[System.IDisposable]]::new()
 $usedTcpPorts = [System.Collections.Generic.HashSet[int]]::new()
 $createdSiblingDll = $false
 $completed = $false
-$tcp01CaptureOwned = $false
-$tcp01FilterOwned = $false
+$primaryError = $null
+$outerCleanupError = $null
+$tcp01CaptureCleanupIntent = $false
+$tcp01FilterCleanupIntent = $false
 $tcp01Etl = $null
 $tcp01Txt = $null
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
+}
+
+function Convert-Tcp01PktmonLines(
+    [string[]]$Lines,
+    [string]$Client,
+    [string]$Target,
+    [int]$Port
+) {
+    $groups = @{}
+    $components = @{}
+    $records = [System.Collections.Generic.List[object]]::new()
+    $current = $null
+    $clientEndpoint = "$([regex]::Escape($Client))\.\d+"
+    $targetEndpoint = "$([regex]::Escape($Target))\.$([regex]::Escape([string]$Port))"
+    foreach ($line in $Lines) {
+        if ($line -match "(?i)PktGroupId\s*[:=]?\s*(\d+).*PktNumber\s*[:=]?\s*(\d+)") {
+            $groupKey = "$($Matches[1])|$($Matches[2])"
+            if (-not $groups.ContainsKey($groupKey)) { $groups[$groupKey] = "g$($groups.Count + 1)" }
+            $appearance = if ($line -match "(?i)Appearance\s*[:=]?\s*(\d+)") { [int]$Matches[1] } else { 0 }
+            $componentId = if ($line -match "(?i)\bComponent(?:Id)?\s*[:=]?\s*(\d+)") { $Matches[1] } else { "0" }
+            if (-not $components.ContainsKey($componentId)) { $components[$componentId] = "c$($components.Count + 1)" }
+            $direction = if ($line -match "(?i)\bDirection\s*[:=]?\s*(Tx|Rx)\b") { $Matches[1].ToLowerInvariant() } else { "unknown" }
+            $current = [pscustomobject]@{
+                Group = $groups[$groupKey]
+                Appearance = $appearance
+                Component = $components[$componentId]
+                Role = "unknown"
+                Direction = $direction
+                Flags = "other"
+                Payload = "unknown"
+                Drop = "none"
+            }
+            $records.Add($current)
+        }
+        if (-not $current) { continue }
+        if ($line -match "(?i)\bdrop(?:Reason)?\b") { $current.Drop = "reported" }
+        if ($line -match "$clientEndpoint\s*>\s*$targetEndpoint`:") {
+            $current.Role = "client_to_target"
+        } elseif ($line -match "$targetEndpoint\s*>\s*$clientEndpoint`:") {
+            $current.Role = "target_to_client"
+        } else {
+            continue
+        }
+        if ($line -match "(?i)Flags\s*\[([^\]]+)\]") {
+            $flags = $Matches[1]
+            $current.Flags = if ($flags.Contains("R")) { "rst" }
+                elseif ($flags -eq "S.") { "syn_ack" }
+                elseif ($flags -eq "S") { "syn" }
+                elseif ($flags.Contains("F")) { "fin" }
+                elseif ($flags.Contains("P")) { "push_ack" }
+                elseif ($flags -eq ".") { "ack" }
+                else { "other" }
+        }
+        if ($line -match "(?i)\blength\s+(\d+)\b") {
+            $current.Payload = if ([int64]$Matches[1] -eq 0) { "no" } else { "yes" }
+        }
+    }
+    return @($records | Where-Object { $_.Role -ne "unknown" } | ForEach-Object {
+        "tcp01_pktmon group=$($_.Group) appearance=$($_.Appearance) component=$($_.Component) role=$($_.Role) direction=$($_.Direction) flags=$($_.Flags) payload_present=$($_.Payload) drop=$($_.Drop)"
+    })
 }
 
 function Find-Dumpbin {
@@ -1022,21 +1084,42 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [void](Add-TargetAddress $targets[$targetIndex])
         }
 
+        $tcp01Target = $targets[0]
+        $tcp01Port = $ports[0]
+        $tcp01Boundary = "UNRESOLVED"
+        $tcp01Synthetic = @(
+            "PktGroupId 10 PktNumber 1 Appearance 1 Direction Tx Component 7",
+            "198.18.0.2.55000 > 192.0.2.201.443: Flags [S], length 0",
+            "PktGroupId 10 PktNumber 1 Appearance 2 Direction Rx Component 8",
+            "192.0.2.201.443 > 198.18.0.2.55000: Flags [S.], length 0",
+            "PktGroupId 11 PktNumber 2 Appearance 1 Direction Tx Component 7",
+            "198.18.0.2.55000 > 192.0.2.201.443: Flags [.], length 0",
+            "PktGroupId 12 PktNumber 3 Appearance 1 Direction Rx Component 9 dropReason secret",
+            "192.0.2.201.443 > 198.18.0.2.55000: Flags [R.], length 0",
+            "Component Ferrum2-Secret {11111111-2222-3333-4444-555555555555} 203.0.113.9:65000"
+        )
+        $tcp01SyntheticExpected = @(
+            "tcp01_pktmon group=g1 appearance=1 component=c1 role=client_to_target direction=tx flags=syn payload_present=no drop=none",
+            "tcp01_pktmon group=g1 appearance=2 component=c2 role=target_to_client direction=rx flags=syn_ack payload_present=no drop=none",
+            "tcp01_pktmon group=g2 appearance=1 component=c1 role=client_to_target direction=tx flags=ack payload_present=no drop=none",
+            "tcp01_pktmon group=g3 appearance=1 component=c3 role=target_to_client direction=rx flags=rst payload_present=no drop=reported"
+        )
+        $tcp01SyntheticActual = @(Convert-Tcp01PktmonLines $tcp01Synthetic "198.18.0.2" "192.0.2.201" 443)
+        Assert-True (($tcp01SyntheticActual -join "|") -eq ($tcp01SyntheticExpected -join "|")) "TCP-01 pktmon redaction self-check failed"
+
         $tcp01Etl = Join-Path $work "tcp01-pktmon.etl"
         $tcp01Txt = Join-Path $work "tcp01-pktmon.txt"
         $tcp01Error = $null
         $tcp01CleanupError = $null
-        $tcp01Stopped = $false
-        $tcp01CaptureLines = @()
+        $tcp01Summaries = @()
+        $tcp01HandshakeComplete = $false
         try {
             Assert-True (-not (Test-Path -LiteralPath $tcp01Etl)) "TCP-01 ETL baseline not absent"
             Assert-True (-not (Test-Path -LiteralPath $tcp01Txt)) "TCP-01 text baseline not absent"
-
             $tcp01Status = @(& pktmon status 2>&1)
             Assert-True ($LASTEXITCODE -eq 0) "pktmon baseline status failed"
             $tcp01StatusText = $tcp01Status -join "`n"
             Assert-True ($tcp01StatusText -match "(?im)(collection|packet monitor|measurement|capture).*(stopped|not running)") "pktmon baseline capture is not demonstrably stopped"
-
             $tcp01FilterList = @(& pktmon filter list 2>&1)
             Assert-True ($LASTEXITCODE -eq 0) "pktmon baseline filter query failed"
             $tcp01FilterText = ($tcp01FilterList -join "`n").Trim()
@@ -1044,132 +1127,81 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 $tcp01FilterText -match "(?is)^\s*(packet\s+filters?\s*:?\s*)?(none|no\s+(packet\s+)?filters?(\s+(are\s+)?(configured|present|active|set))?\.?)?\s*$"
             Assert-True $tcp01FiltersEmpty "pktmon filter baseline is not empty"
 
-            $null = @(& pktmon filter add "Ferrum2Tcp01" -i "198.18.0.2" "192.0.2.200" -t TCP -p $ports[0] 2>&1)
+            $tcp01FilterCleanupIntent = $true
+            $null = @(& pktmon filter add "Ferrum2Tcp01" -i "198.18.0.2" $tcp01Target -t TCP -p $tcp01Port 2>&1)
             Assert-True ($LASTEXITCODE -eq 0) "TCP-01 pktmon filter setup failed"
-            $tcp01FilterOwned = $true
+            $tcp01CaptureCleanupIntent = $true
             $null = @(& pktmon start --capture --comp all --pkt-size 64 --trace --provider Microsoft-Windows-TCPIP --file-name $tcp01Etl --file-size 8 --log-mode circular 2>&1)
             Assert-True ($LASTEXITCODE -eq 0) "TCP-01 pktmon capture start failed"
-            $tcp01CaptureOwned = $true
 
-            Invoke-EchoRow $targets[0] $ports[0] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-01-half-close"))
+            Invoke-EchoRow $tcp01Target $tcp01Port $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-01-half-close"))
         } catch {
             $tcp01Error = $_
         } finally {
             try {
-                if ($tcp01CaptureOwned) {
+                if ($tcp01CaptureCleanupIntent) {
                     $null = @(& pktmon stop 2>&1)
-                    if ($LASTEXITCODE -eq 0) { $tcp01Stopped = $true }
-                    else { $tcp01CleanupError = "TCP-01 pktmon capture stop failed" }
+                    if ($LASTEXITCODE -ne 0) { $tcp01CleanupError = "TCP-01 pktmon capture stop failed" }
                 }
             } catch { $tcp01CleanupError = "TCP-01 pktmon capture stop failed" }
-
             try {
                 if (Test-Path -LiteralPath $tcp01Etl) {
                     $null = @(& pktmon etl2txt $tcp01Etl --out $tcp01Txt --brief --verbose 3 2>&1)
-                    if ($LASTEXITCODE -ne 0 -and -not $tcp01CleanupError) {
-                        $tcp01CleanupError = "TCP-01 pktmon conversion failed"
-                    }
-                } elseif (-not $tcp01CleanupError) {
-                    $tcp01CleanupError = "TCP-01 pktmon ETL missing"
-                }
-            } catch {
-                if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon conversion failed" }
-            }
-
+                    if ($LASTEXITCODE -ne 0 -and -not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon conversion failed" }
+                } elseif (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon ETL missing" }
+            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon conversion failed" } }
             try {
-                if ($tcp01FilterOwned) {
+                if ($tcp01FilterCleanupIntent) {
                     $null = @(& pktmon filter remove 2>&1)
-                    if ($LASTEXITCODE -ne 0 -and -not $tcp01CleanupError) {
-                        $tcp01CleanupError = "TCP-01 pktmon filter cleanup failed"
-                    }
+                    if ($LASTEXITCODE -ne 0 -and -not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon filter cleanup failed" }
                 }
-            } catch {
-                if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon filter cleanup failed" }
-            }
-
+            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon filter cleanup failed" } }
             try {
                 $tcp01FinalStatus = @(& pktmon status 2>&1)
                 $tcp01StatusText = $tcp01FinalStatus -join "`n"
                 if ($LASTEXITCODE -eq 0 -and $tcp01StatusText -match "(?im)(collection|packet monitor|measurement|capture).*(stopped|not running)") {
-                    $tcp01CaptureOwned = $false
-                } elseif (-not $tcp01CleanupError) {
-                    $tcp01CleanupError = "TCP-01 pktmon stopped state not proven"
-                }
-            } catch {
-                if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon stopped state not proven" }
-            }
-
-            try {
+                    $tcp01CaptureCleanupIntent = $false
+                } elseif (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon stopped state not proven" }
                 $tcp01FinalFilters = @(& pktmon filter list 2>&1)
                 $tcp01FinalFilterText = ($tcp01FinalFilters -join "`n").Trim()
                 $tcp01FiltersEmpty = $LASTEXITCODE -eq 0 -and (
                     [string]::IsNullOrWhiteSpace($tcp01FinalFilterText) -or
                     $tcp01FinalFilterText -match "(?is)^\s*(packet\s+filters?\s*:?\s*)?(none|no\s+(packet\s+)?filters?(\s+(are\s+)?(configured|present|active|set))?\.?)?\s*$"
                 )
-                if ($tcp01FiltersEmpty) { $tcp01FilterOwned = $false }
+                if ($tcp01FiltersEmpty) { $tcp01FilterCleanupIntent = $false }
                 elseif (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon filter absence not proven" }
-            } catch {
-                if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon filter absence not proven" }
-            }
-
+            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon final state not proven" } }
             try {
                 if (Test-Path -LiteralPath $tcp01Txt) {
                     $tcp01CaptureLines = @(Get-Content -LiteralPath $tcp01Txt)
-                } elseif (-not $tcp01CleanupError) {
-                    $tcp01CleanupError = "TCP-01 pktmon text missing"
-                }
-            } catch {
-                if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon text read failed" }
-            }
+                    $tcp01Summaries = @(Convert-Tcp01PktmonLines $tcp01CaptureLines "198.18.0.2" $tcp01Target $tcp01Port)
+                    $tcp01HandshakeComplete =
+                        @($tcp01Summaries | Where-Object { $_ -match "role=client_to_target .*flags=syn\b" }).Count -gt 0 -and
+                        @($tcp01Summaries | Where-Object { $_ -match "role=target_to_client .*flags=syn_ack\b" }).Count -gt 0 -and
+                        @($tcp01Summaries | Where-Object { $_ -match "role=client_to_target .*flags=ack\b" }).Count -gt 0
+                } elseif (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon text missing" }
+            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon parse failed" } }
             try {
                 if (Test-Path -LiteralPath $tcp01Etl) { Remove-Item -LiteralPath $tcp01Etl -Force }
                 if (Test-Path -LiteralPath $tcp01Txt) { Remove-Item -LiteralPath $tcp01Txt -Force }
-                if ((Test-Path -LiteralPath $tcp01Etl) -or (Test-Path -LiteralPath $tcp01Txt)) {
-                    if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon file cleanup failed" }
-                }
-            } catch {
-                if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon file cleanup failed" }
-            }
+                Assert-True (-not (Test-Path -LiteralPath $tcp01Etl)) "TCP-01 ETL cleanup failed"
+                Assert-True (-not (Test-Path -LiteralPath $tcp01Txt)) "TCP-01 text cleanup failed"
+            } catch { if (-not $tcp01CleanupError) { $tcp01CleanupError = "TCP-01 pktmon file cleanup failed" } }
         }
 
         if ($tcp01CleanupError) {
-            Write-Output "tcp01_pktmon capture_cleanup=FAIL"
+            [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag status=CAPTURE_FAILED boundary=UNRESOLVED capture_cleanup=FAIL")
             if ($tcp01Error) { throw $tcp01Error }
             throw $tcp01CleanupError
         }
-        Assert-True $tcp01Stopped "TCP-01 pktmon capture was not stopped"
-        $tcp01Port = [regex]::Escape([string]$ports[0])
-        $tcp01Forward = "198\.18\.0\.2\.\d+\s+>\s+192\.0\.2\.200\.$tcp01Port`:"
-        $tcp01Reverse = "192\.0\.2\.200\.$tcp01Port\s+>\s+198\.18\.0\.2\.\d+`:"
-        $tcp01Syn = @($tcp01CaptureLines | Where-Object { $_ -match $tcp01Forward -and $_ -match "Flags \[S\]" }).Count -gt 0
-        $tcp01SynAck = @($tcp01CaptureLines | Where-Object { $_ -match $tcp01Reverse -and $_ -match "Flags \[S\.\]" }).Count -gt 0
-        $tcp01Ack = @($tcp01CaptureLines | Where-Object { $_ -match $tcp01Forward -and $_ -match "Flags \[\.\]" }).Count -gt 0
-        $tcp01HandshakeComplete = $tcp01Syn -and $tcp01SynAck -and $tcp01Ack
-        $tcp01InterestingLines = @($tcp01CaptureLines | Where-Object {
-            $_ -match "(?i)(PktGroupId|PktNumber|Appearance|Component|dropReason|\bdrop\b|198\.18\.0\.2|192\.0\.2\.200|Flags)"
-        })
-        $tcp01BoundedLines = @($tcp01InterestingLines | Select-Object -First 48) +
-            @($tcp01InterestingLines | Select-Object -Last 48)
-        $tcp01BoundedLines | Select-Object -Unique | ForEach-Object {
-            $safeLine = $_ -replace "(?:\d{1,3}\.){3}\d{1,3}\.\d{1,5}", "<ip>.<port>"
-            $safeLine = $safeLine -replace "(?:\d{1,3}\.){3}\d{1,3}", "<ip>"
-            $safeLine = $safeLine -replace "(?i)(?<![0-9a-f])(?:[0-9a-f]{0,4}:){2,}[0-9a-f:.]*", "<ip6>"
-            $safeLine = $safeLine -replace "(?i)(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}", "<mac>"
-            $safeLine = $safeLine -replace "(?i)\b(src|dst|sport|dport|port)\s*[=:]\s*\d+", '$1=<n>'
-            $safeLine = $safeLine -replace "\b[0-9A-Fa-f]{16,}\b", "<redacted>"
-            if ($safeLine.Length -gt 240) { $safeLine = $safeLine.Substring(0, 240) }
-            Write-Output "tcp01_pktmon $safeLine"
-        }
-        $tcp01Boundary = "UNRESOLVED"
+        $tcp01BoundedSummaries = @($tcp01Summaries | Select-Object -First 48) + @($tcp01Summaries | Select-Object -Last 48)
+        @($tcp01BoundedSummaries | Select-Object -Unique) | ForEach-Object { [Console]::Error.WriteLine($_) }
         $tcp01Sha = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
         $tcp01RunId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
         $tcp01RunAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
-        Write-Output "m15_windows_tun_tcp01_diag status=CAPTURED boundary=$tcp01Boundary capture_cleanup=PASS sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt"
-        if (-not $tcp01HandshakeComplete) {
-            if ($tcp01Error) { throw $tcp01Error }
-            throw "TCP-01 pktmon handshake baseline incomplete"
-        }
+        [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag status=CAPTURED boundary=$tcp01Boundary capture_cleanup=PASS sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt")
         if ($tcp01Error) { throw $tcp01Error }
+        Assert-True $tcp01HandshakeComplete "TCP-01 pktmon handshake baseline incomplete"
         Assert-True ($tcp01Boundary -ne "UNRESOLVED") "TCP-01 pktmon boundary remains unresolved"
         $tcpRows++
         Invoke-EchoRow $targets[1] $ports[1] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-02-two-hop"))
@@ -1270,30 +1302,48 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     }
     $completed = $true
 }
+catch { $primaryError = $_ }
 finally {
-    $tcp01OuterCleanupError = $null
-    if ($tcp01CaptureOwned) {
+    if ($tcp01CaptureCleanupIntent) {
         try {
             $null = @(& pktmon stop 2>&1)
-            if ($LASTEXITCODE -eq 0) { $tcp01CaptureOwned = $false }
-            else { $tcp01OuterCleanupError = "TCP-01 pktmon fallback stop failed" }
-        } catch { $tcp01OuterCleanupError = "TCP-01 pktmon fallback stop failed" }
+            if ($LASTEXITCODE -ne 0) { $outerCleanupError = "TCP-01 pktmon fallback stop failed" }
+        } catch { $outerCleanupError = "TCP-01 pktmon fallback stop failed" }
     }
-    if ($tcp01FilterOwned) {
+    if ($tcp01FilterCleanupIntent) {
         try {
             $null = @(& pktmon filter remove 2>&1)
-            if ($LASTEXITCODE -eq 0) { $tcp01FilterOwned = $false }
-            elseif (-not $tcp01OuterCleanupError) { $tcp01OuterCleanupError = "TCP-01 pktmon fallback filter cleanup failed" }
+            if ($LASTEXITCODE -ne 0 -and -not $outerCleanupError) { $outerCleanupError = "TCP-01 pktmon fallback filter cleanup failed" }
         } catch {
-            if (-not $tcp01OuterCleanupError) { $tcp01OuterCleanupError = "TCP-01 pktmon fallback filter cleanup failed" }
+            if (-not $outerCleanupError) { $outerCleanupError = "TCP-01 pktmon fallback filter cleanup failed" }
         }
+    }
+    if ($tcp01CaptureCleanupIntent -or $tcp01FilterCleanupIntent) {
+        try {
+            $tcp01FallbackStatus = @(& pktmon status 2>&1)
+            $tcp01FallbackStatusText = $tcp01FallbackStatus -join "`n"
+            if ($LASTEXITCODE -eq 0 -and $tcp01FallbackStatusText -match "(?im)(collection|packet monitor|measurement|capture).*(stopped|not running)") {
+                $tcp01CaptureCleanupIntent = $false
+            }
+            $tcp01FallbackFilters = @(& pktmon filter list 2>&1)
+            $tcp01FallbackFilterText = ($tcp01FallbackFilters -join "`n").Trim()
+            $tcp01FallbackFiltersEmpty = $LASTEXITCODE -eq 0 -and (
+                [string]::IsNullOrWhiteSpace($tcp01FallbackFilterText) -or
+                $tcp01FallbackFilterText -match "(?is)^\s*(packet\s+filters?\s*:?\s*)?(none|no\s+(packet\s+)?filters?(\s+(are\s+)?(configured|present|active|set))?\.?)?\s*$"
+            )
+            if ($tcp01FallbackFiltersEmpty) { $tcp01FilterCleanupIntent = $false }
+            if (($tcp01CaptureCleanupIntent -or $tcp01FilterCleanupIntent) -and -not $outerCleanupError) {
+                $outerCleanupError = "TCP-01 pktmon fallback absence not proven"
+            }
+        } catch { if (-not $outerCleanupError) { $outerCleanupError = "TCP-01 pktmon fallback absence not proven" } }
     }
     foreach ($capturePath in @($tcp01Etl, $tcp01Txt)) {
         if ($capturePath -and (Test-Path -LiteralPath $capturePath)) {
             try { Remove-Item -LiteralPath $capturePath -Force }
-            catch { if (-not $tcp01OuterCleanupError) { $tcp01OuterCleanupError = "TCP-01 pktmon fallback file cleanup failed" } }
+            catch { if (-not $outerCleanupError) { $outerCleanupError = "TCP-01 pktmon fallback file cleanup failed" } }
         }
     }
+    try {
     if ($udp4) { $udp4.Dispose() }
     if ($heldMetrics) { $heldMetrics.Stop() }
     foreach ($route in $ownedRoutes) {
@@ -1343,10 +1393,16 @@ finally {
     if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
     if ($createdSiblingDll) { Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "owned sibling DLL leaked" }
     Assert-True (-not (Test-Path -LiteralPath $work)) "controller work directory leaked"
-    Assert-True (-not $tcp01CaptureOwned) "TCP-01 pktmon capture cleanup incomplete"
-    Assert-True (-not $tcp01FilterOwned) "TCP-01 pktmon filter cleanup incomplete"
-    if ($tcp01OuterCleanupError) { throw $tcp01OuterCleanupError }
+    Assert-True (-not $tcp01CaptureCleanupIntent) "TCP-01 pktmon capture cleanup incomplete"
+    Assert-True (-not $tcp01FilterCleanupIntent) "TCP-01 pktmon filter cleanup incomplete"
+    } catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
 }
+
+if ($outerCleanupError) {
+    [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag status=CLEANUP_FAILED boundary=UNRESOLVED capture_cleanup=FAIL")
+    if (-not $primaryError) { $primaryError = $outerCleanupError }
+}
+if ($primaryError) { throw $primaryError }
 
 if ($completed) {
     $sha = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
