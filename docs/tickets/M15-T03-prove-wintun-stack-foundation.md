@@ -15,6 +15,10 @@ owns:
   - crates/ferrum2-observability/tests/**
   - crates/ferrum2-wintun/**
   - crates/ferrum2-tun/**
+  - crates/ferrum2-runtime/src/lib.rs
+  - crates/ferrum2-runtime/src/process.rs
+  - crates/ferrum2-runtime/tests/lifecycle.rs
+  - crates/ferrum2-runtime/tests/shutdown.rs
   - bins/ferrum2-client/Cargo.toml
   - bins/ferrum2-client/src/main.rs
   - bins/ferrum2-client/src/cli.rs
