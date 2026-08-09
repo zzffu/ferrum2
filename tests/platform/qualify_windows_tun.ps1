@@ -504,25 +504,29 @@ public sealed class Ferrum2TcpGate : IDisposable {
             using (client)
             using (var upstream = new TcpClient(AddressFamily.InterNetwork)) {
                 upstream.Connect(IPAddress.Loopback, upstreamPort);
-                var first = Pump(client, upstream, observation, true);
-                var second = Pump(upstream, client, observation, false);
+                observation.SetStage(true, "source_stream");
+                observation.SetStage(false, "destination_stream");
+                var clientStream = client.GetStream();
+                observation.SetStage(true, "destination_stream");
+                observation.SetStage(false, "source_stream");
+                var upstreamStream = upstream.GetStream();
+                var first = Pump(clientStream, upstreamStream, upstream.Client, observation, true);
+                var second = Pump(upstreamStream, clientStream, client.Client, observation, false);
                 Task.WaitAll(first, second);
             }
         } catch (OperationCanceledException) { observation.FailBoth("cancelled"); }
         catch (IOException) { observation.FailBoth("io"); }
         catch (ObjectDisposedException) { observation.FailBoth("disposed"); }
         catch (SocketException) { observation.FailBoth("socket"); }
+        catch (InvalidOperationException) { observation.FailBoth("invalid_operation"); }
+        catch (NotSupportedException) { observation.FailBoth("not_supported"); }
         catch (AggregateException) { observation.FailBoth("aggregate"); }
         catch (Exception) { observation.FailBoth("other"); }
         finally { observation.Complete(); }
     }
 
-    private static async Task Pump(TcpClient source, TcpClient destination, Ferrum2TcpGateObservation observation, bool forward) {
+    private static async Task Pump(NetworkStream input, NetworkStream output, Socket destination, Ferrum2TcpGateObservation observation, bool forward) {
         try {
-            observation.SetStage(forward, "source_stream");
-            var input = source.GetStream();
-            observation.SetStage(forward, "destination_stream");
-            var output = destination.GetStream();
             var buffer = new byte[4096];
             while (true) {
                 observation.SetStage(forward, "read");
@@ -533,7 +537,7 @@ public sealed class Ferrum2TcpGate : IDisposable {
                 observation.AddBytes(forward, count);
             }
             observation.SetStage(forward, "shutdown");
-            try { destination.Client.Shutdown(SocketShutdown.Send); }
+            try { destination.Shutdown(SocketShutdown.Send); }
             catch (SocketException) { observation.Fail(forward, "socket"); }
         } catch (OperationCanceledException) { observation.Fail(forward, "cancelled"); }
         catch (IOException) { observation.Fail(forward, "io"); }
@@ -1251,9 +1255,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             AppResult = $tcp01Observation.AppResult
         }
         $tcp01Boundary = Get-Tcp01Boundary $tcp01State
-        $tcp01Diagnostic = "status=OBSERVED boundary=$tcp01Boundary app=$($tcp01State.AppResult) gate_accepted=$($tcp01State.GateAccepted) gate_c2s_bytes=$($tcp01State.GateForwardBytes) gate_c2s_stage=$($tcp01State.GateForwardStage) gate_c2s_eof=$($tcp01State.GateForwardEof) gate_c2s_fault=$($tcp01State.GateForwardFault) gate_s2c_bytes=$($tcp01State.GateReverseBytes) gate_s2c_stage=$($tcp01State.GateReverseStage) gate_s2c_eof=$($tcp01State.GateReverseEof) gate_s2c_fault=$($tcp01State.GateReverseFault) gate_complete=$($tcp01State.GateComplete) probe_accepted=$($tcp01State.ProbeAccepted) probe_request=$($tcp01State.ProbeRequest) probe_read_eof=$($tcp01State.ProbeReadEof) probe_echo=$($tcp01State.ProbeEcho) probe_shutdown=$($tcp01State.ProbeShutdown) probe_fault=$($tcp01State.ProbeFault) probe_complete=$($tcp01State.ProbeComplete)"
+        if ($tcp01Error -or $tcp01Boundary -ne "COMPLETE") {
+            $tcp01Diagnostic = "status=OBSERVED boundary=$tcp01Boundary app=$($tcp01State.AppResult) gate_accepted=$($tcp01State.GateAccepted) gate_c2s_bytes=$($tcp01State.GateForwardBytes) gate_c2s_stage=$($tcp01State.GateForwardStage) gate_c2s_eof=$($tcp01State.GateForwardEof) gate_c2s_fault=$($tcp01State.GateForwardFault) gate_s2c_bytes=$($tcp01State.GateReverseBytes) gate_s2c_stage=$($tcp01State.GateReverseStage) gate_s2c_eof=$($tcp01State.GateReverseEof) gate_s2c_fault=$($tcp01State.GateReverseFault) gate_complete=$($tcp01State.GateComplete) probe_accepted=$($tcp01State.ProbeAccepted) probe_request=$($tcp01State.ProbeRequest) probe_read_eof=$($tcp01State.ProbeReadEof) probe_echo=$($tcp01State.ProbeEcho) probe_shutdown=$($tcp01State.ProbeShutdown) probe_fault=$($tcp01State.ProbeFault) probe_complete=$($tcp01State.ProbeComplete)"
+        }
         if ($tcp01Error) { throw $tcp01Error }
-        Assert-True $false "TCP-01 diagnostic sentinel"
+        Assert-True ($tcp01Boundary -eq "COMPLETE") "TCP-01 observation incomplete"
         $tcpRows++
         Invoke-EchoRow $targets[1] $ports[1] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-02-two-hop"))
         $tcpRows++

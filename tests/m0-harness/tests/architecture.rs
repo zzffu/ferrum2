@@ -2559,12 +2559,48 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && gate.contains("ClientToServerFault")
                     && gate.contains("ServerToClientFault")
                     && gate.contains("SessionComplete")
-                    && gate.contains("Pump(client, upstream, observation, true)")
-                    && gate.contains("Pump(upstream, client, observation, false)")
+                    && gate
+                        .find("var clientStream = client.GetStream()")
+                        .zip(gate.find("var upstreamStream = upstream.GetStream()"))
+                        .zip(gate.find(
+                            "Pump(clientStream, upstreamStream, upstream.Client, observation, true)",
+                        ))
+                        .zip(gate.find(
+                            "Pump(upstreamStream, clientStream, client.Client, observation, false)",
+                        ))
+                        .is_some_and(
+                            |(((client_stream, upstream_stream), forward), reverse)| {
+                                client_stream < upstream_stream
+                                    && upstream_stream < forward
+                                    && upstream_stream < reverse
+                            },
+                        )
                     && gate.contains("observation.AddBytes(forward, count)")
                     && gate.contains("observation.MarkEof(forward)")
-                    && gate.contains("observation.SetStage(forward, \"source_stream\")")
-                    && gate.contains("observation.SetStage(forward, \"destination_stream\")")
+                    && gate.contains("observation.SetStage(true, \"source_stream\")")
+                    && gate.contains("observation.SetStage(false, \"destination_stream\")")
+                    && gate.contains("observation.SetStage(true, \"destination_stream\")")
+                    && gate.contains("observation.SetStage(false, \"source_stream\")")
+                    && gate
+                        .find("observation.SetStage(true, \"source_stream\")")
+                        .zip(gate.find(
+                            "observation.SetStage(false, \"destination_stream\")",
+                        ))
+                        .zip(gate.find("var clientStream = client.GetStream()"))
+                        .zip(gate.find(
+                            "observation.SetStage(true, \"destination_stream\")",
+                        ))
+                        .zip(gate.find("observation.SetStage(false, \"source_stream\")"))
+                        .zip(gate.find("var upstreamStream = upstream.GetStream()"))
+                        .is_some_and(
+                            |(((((forward_source, reverse_destination), client_stream), forward_destination), reverse_source), upstream_stream)| {
+                                forward_source < reverse_destination
+                                    && reverse_destination < client_stream
+                                    && client_stream < forward_destination
+                                    && forward_destination < reverse_source
+                                    && reverse_source < upstream_stream
+                            },
+                        )
                     && gate.contains("observation.SetStage(forward, \"read\")")
                     && gate.contains("observation.SetStage(forward, \"write\")")
                     && gate.contains("observation.SetStage(forward, \"shutdown\")")
@@ -2581,19 +2617,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && gate.contains("public Ferrum2TcpGateObservation Observation(int index)")
                     && !gate.contains("catch (IOException) { }")
                     && pump.is_some_and(|pump| {
-                        pump.find("observation.SetStage(forward, \"source_stream\")")
-                            .zip(pump.find("var input = source.GetStream()"))
-                            .zip(pump.find(
-                                "observation.SetStage(forward, \"destination_stream\")",
-                            ))
-                            .zip(pump.find("var output = destination.GetStream()"))
-                            .is_some_and(
-                                |(((source_stage, source_stream), destination_stage), destination_stream)| {
-                                    source_stage < source_stream
-                                        && source_stream < destination_stage
-                                        && destination_stage < destination_stream
-                                },
-                            )
+                        gate.contains(
+                            "private static async Task Pump(NetworkStream input, NetworkStream output, Socket destination",
+                        ) && !pump.contains("GetStream()")
                             && pump
                                 .find("observation.SetStage(forward, \"read\")")
                                 .zip(pump.find("await input.ReadAsync"))
@@ -2607,7 +2633,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                                 })
                             && pump
                                 .find("observation.SetStage(forward, \"shutdown\")")
-                                .zip(pump.find("destination.Client.Shutdown"))
+                                .zip(pump.find("destination.Shutdown"))
                                 .is_some_and(|(stage, operation)| stage < operation)
                     })
             })
@@ -2669,9 +2695,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && diag.contains("GateForwardStage = if ($gateObservation) { $gateObservation.ClientToServerStage } else { \"pending\" }")
                     && diag.contains("GateReverseStage = if ($gateObservation) { $gateObservation.ServerToClientStage } else { \"pending\" }")
                     && diag.contains("$tcp01Boundary = Get-Tcp01Boundary $tcp01State")
+                    && diag.contains("if ($tcp01Error -or $tcp01Boundary -ne \"COMPLETE\") {")
                     && diag.contains("$tcp01Diagnostic = \"status=OBSERVED boundary=$tcp01Boundary app=$($tcp01State.AppResult)")
                     && diag.contains("gate_c2s_stage=$($tcp01State.GateForwardStage)")
                     && diag.contains("gate_s2c_stage=$($tcp01State.GateReverseStage)")
+                    && diag.contains("Assert-True ($tcp01Boundary -eq \"COMPLETE\") \"TCP-01 observation incomplete\"")
+                    && !diag.contains("TCP-01 diagnostic sentinel")
                     && diagnostic.is_some_and(|line| {
                         !line.contains("tcp01Target")
                             && !line.contains("tcp01Port")
@@ -2682,16 +2711,18 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && diag
                         .find("Invoke-EchoRow $tcp01Target")
                         .zip(diag.find("$tcp01Observation.Gate.WaitCompleted"))
+                        .zip(diag.find("if ($tcp01Error -or $tcp01Boundary -ne \"COMPLETE\")"))
                         .zip(diag.find("$tcp01Diagnostic = \"status=OBSERVED"))
                         .zip(diag.find("if ($tcp01Error) { throw $tcp01Error }"))
-                        .zip(diag.find("Assert-True $false \"TCP-01 diagnostic sentinel\""))
+                        .zip(diag.find("Assert-True ($tcp01Boundary -eq \"COMPLETE\")"))
                         .zip(diag.find("$tcpRows++"))
-                        .is_some_and(|(((((invoke, settle), diagnostic), primary), sentinel), row)| {
+                        .is_some_and(|((((((invoke, settle), condition), diagnostic), primary), complete), row)| {
                             invoke < settle
-                                && settle < diagnostic
+                                && settle < condition
+                                && condition < diagnostic
                                 && diagnostic < primary
-                                && primary < sentinel
-                                && sentinel < row
+                                && primary < complete
+                                && complete < row
                         })
             })
             && cleanup.is_some_and(|cleanup| {
@@ -2847,8 +2878,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "$tcp01Target = \"192.0.2.200\"",
         ),
         controller.replace(
-            "var first = Pump(client, upstream, observation, true);",
-            "var first = Pump(client, upstream, observation, false);",
+            "                var upstreamStream = upstream.GetStream();\n                var first = Pump(clientStream, upstreamStream, upstream.Client, observation, true);",
+            "                var first = Pump(clientStream, upstreamStream, upstream.Client, observation, true);\n                var upstreamStream = upstream.GetStream();",
         ),
         controller.replace(
             "                observation.AddBytes(forward, count);",
@@ -2867,7 +2898,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "finally { }",
         ),
         controller.replace(
-            "observation.SetStage(forward, \"destination_stream\");",
+            "observation.SetStage(true, \"destination_stream\");",
             "",
         ),
         controller.replace(
@@ -2875,12 +2906,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "                await output.WriteAsync(buffer, 0, count).ConfigureAwait(false);\n                observation.SetStage(forward, \"write\");",
         ),
         controller.replace(
-            "            observation.SetStage(forward, \"source_stream\");\n            var input = source.GetStream();\n            observation.SetStage(forward, \"destination_stream\");\n            var output = destination.GetStream();",
-            "            observation.SetStage(forward, \"destination_stream\");\n            var input = source.GetStream();\n            observation.SetStage(forward, \"source_stream\");\n            var output = destination.GetStream();",
+            "                observation.SetStage(true, \"source_stream\");\n                observation.SetStage(false, \"destination_stream\");\n                var clientStream = client.GetStream();",
+            "                observation.SetStage(false, \"destination_stream\");\n                observation.SetStage(true, \"source_stream\");\n                var clientStream = client.GetStream();",
         ),
         controller.replace(
-            "            observation.SetStage(forward, \"shutdown\");\n            try { destination.Client.Shutdown(SocketShutdown.Send); }",
-            "            try { destination.Client.Shutdown(SocketShutdown.Send); }\n            observation.SetStage(forward, \"shutdown\");",
+            "            observation.SetStage(forward, \"shutdown\");\n            try { destination.Shutdown(SocketShutdown.Send); }",
+            "            try { destination.Shutdown(SocketShutdown.Send); }\n            observation.SetStage(forward, \"shutdown\");",
         ),
         controller.replace(
             "catch (InvalidOperationException) { observation.Fail(forward, \"invalid_operation\"); }",
@@ -2970,12 +3001,16 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "gate_s2c_stage=$($tcp01Error.Exception.Message)",
         ),
         controller.replace(
-            "Assert-True $false \"TCP-01 diagnostic sentinel\"",
+            "if ($tcp01Error -or $tcp01Boundary -ne \"COMPLETE\") {",
+            "if ($true) {",
+        ),
+        controller.replace(
+            "Assert-True ($tcp01Boundary -eq \"COMPLETE\") \"TCP-01 observation incomplete\"",
             "",
         ),
         controller.replace(
-            "        Assert-True $false \"TCP-01 diagnostic sentinel\"\n        $tcpRows++",
-            "        $tcpRows++\n        Assert-True $false \"TCP-01 diagnostic sentinel\"",
+            "        Assert-True ($tcp01Boundary -eq \"COMPLETE\") \"TCP-01 observation incomplete\"\n        $tcpRows++",
+            "        $tcpRows++\n        Assert-True ($tcp01Boundary -eq \"COMPLETE\") \"TCP-01 observation incomplete\"",
         ),
         controller.replace(
             "[Console]::Error.WriteLine(\"m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup",
