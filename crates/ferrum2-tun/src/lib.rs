@@ -1,19 +1,27 @@
 #![forbid(unsafe_code)]
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+use std::net::IpAddr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ferrum2_runtime::{PreparedProcessRoot, ProcessCancellation, ProcessFuture, ProcessRoot};
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::iface::{
     Config as InterfaceConfig, Interface, PollIngressSingleResult, Route, SocketSet,
 };
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::time::Instant;
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const PACKET_QUANTUM: usize = 8;
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const INGRESS_SLOTS: usize = PACKET_QUANTUM - 1;
 
 /// Complete, already-validated construction input for the private TUN owner.
@@ -120,7 +128,7 @@ fn config_is_exact(config: &Config) -> bool {
 async fn prepare<E>(
     config: Config,
     startup: E,
-    runtime: E,
+    _runtime: E,
     cleanup: E,
     mut cancellation: ProcessCancellation,
     accepted: Box<dyn Fn() + Send + Sync>,
@@ -134,7 +142,7 @@ where
         .checked_add(timeout)
         .unwrap_or_else(std::time::Instant::now);
     let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
-    let (done_sender, done_receiver) = tokio::sync::oneshot::channel();
+    let (done_sender, _done_receiver) = tokio::sync::oneshot::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let active = Arc::new(AtomicBool::new(false));
     let owner_stop = Arc::clone(&stop);
@@ -155,13 +163,15 @@ where
             result
         })
         .map_err(|_| startup)?;
-    let mut guard = OwnerThread {
+    let guard = OwnerThread {
         stop,
         active,
         #[cfg(all(windows, target_arch = "x86_64"))]
         wake: None,
         thread: Some(thread),
     };
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let mut guard = guard;
     loop {
         if cancellation.is_cancelled() {
             return cancel_prepare(guard, cleanup).await;
@@ -170,21 +180,16 @@ where
             return Err(prepare_failure(guard, startup, cleanup).await);
         }
         match ready_receiver.try_recv() {
-            Ok(OwnerReady::Ready {
-                #[cfg(all(windows, target_arch = "x86_64"))]
-                wake,
-            }) => {
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            Ok(OwnerReady::Ready { wake }) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(prepare_failure(guard, startup, cleanup).await);
                 }
-                #[cfg(all(windows, target_arch = "x86_64"))]
-                {
-                    guard.wake = Some(wake);
-                }
+                guard.wake = Some(wake);
                 return Ok(Some(TunRoot {
                     owner: guard,
-                    done: done_receiver,
-                    runtime: Some(runtime),
+                    done: _done_receiver,
+                    runtime: Some(_runtime),
                     cleanup: Some(cleanup),
                 }));
             }
@@ -233,8 +238,8 @@ enum OwnerExit {
 }
 
 enum OwnerReady {
+    #[cfg(all(windows, target_arch = "x86_64"))]
     Ready {
-        #[cfg(all(windows, target_arch = "x86_64"))]
         wake: ferrum2_wintun::StopSignal,
     },
     Failed,
@@ -479,16 +484,19 @@ fn owner_main(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[allow(dead_code)] // Reserved IDs are allocated now; T04/T05 are the first admission users.
 struct GenerationId {
     slot: usize,
     generation: u32,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct GenerationTable {
     slots: Box<[u32]>,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl GenerationTable {
     fn new(capacity: usize) -> Self {
         Self {
@@ -522,10 +530,12 @@ impl GenerationTable {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct PacketValidator {
     mtu: usize,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl PacketValidator {
     const fn new(mtu: usize) -> Self {
         Self { mtu }
@@ -649,10 +659,12 @@ impl PacketValidator {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 fn ipv4_unicast(address: Ipv4Addr) -> bool {
     !address.is_unspecified() && !address.is_multicast() && !address.is_broadcast()
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 fn checksum(parts: &[&[u8]]) -> u16 {
     let mut sum = 0_u32;
     for part in parts {
@@ -670,6 +682,7 @@ fn checksum(parts: &[&[u8]]) -> u16 {
     !(sum as u16)
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct MemoryDevice {
     ingress: [PacketSlot; INGRESS_SLOTS],
     ingress_head: usize,
@@ -680,6 +693,7 @@ struct MemoryDevice {
     rejected_output: usize,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl MemoryDevice {
     fn new(mtu: usize) -> Self {
         Self {
@@ -718,13 +732,16 @@ impl MemoryDevice {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct PacketSlot {
     len: usize,
     bytes: Box<[u8]>,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct MemoryRx<'a>(&'a PacketSlot);
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl RxToken for MemoryRx<'_> {
     fn consume<R, F>(self, f: F) -> R
     where
@@ -734,6 +751,7 @@ impl RxToken for MemoryRx<'_> {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct MemoryTx<'a> {
     validator: PacketValidator,
     discarded_output: &'a mut usize,
@@ -741,6 +759,7 @@ struct MemoryTx<'a> {
     output: &'a mut [u8],
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl TxToken for MemoryTx<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
@@ -758,6 +777,7 @@ impl TxToken for MemoryTx<'_> {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl Device for MemoryDevice {
     type RxToken<'a> = MemoryRx<'a>;
     type TxToken<'a> = MemoryTx<'a>;
@@ -792,6 +812,7 @@ impl Device for MemoryDevice {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct Stack {
     interface: Interface,
     sockets: SocketSet<'static>,
@@ -799,6 +820,7 @@ struct Stack {
     foundation_dropped: usize,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl Stack {
     fn new(
         ipv4: Ipv4Addr,
