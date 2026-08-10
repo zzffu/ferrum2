@@ -564,8 +564,12 @@ async fn saturation_timeout_recovery_shutdown_and_rebind_are_bounded() {
 async fn caller_cancellation_finishes_owned_query_before_readmission() {
     let upstream = ControlledUdp::start().await;
     upstream.respond.store(true, Ordering::Release);
-    let egress = Arc::new(GatedEgress::default());
-    egress.blocked.store(true, Ordering::Release);
+    let cancel = Arc::new(CancelControl::default());
+    let egress = Arc::new(GatedEgress {
+        blocked: AtomicBool::new(true),
+        cancelled: Arc::default(),
+        cancel: Some(Arc::clone(&cancel)),
+    });
     let (resolver, mut owner) = TaggedResolver::new(
         vec![direct_udp(upstream.address)],
         Duration::from_secs(5),
@@ -585,7 +589,14 @@ async fn caller_cancellation_finishes_owned_query_before_readmission() {
             )
             .await
     });
-    wait_for_nonzero(&resolver).await;
+    let entered = Arc::clone(&cancel);
+    assert!(
+        tokio::task::spawn_blocking(move || entered.wait_entered())
+            .await
+            .expect("cancel entered join"),
+        "active lookup never installed its cancellation guard"
+    );
+    cancel.release();
     query.abort();
     assert!(query.await.expect_err("caller cancellation").is_cancelled());
 
