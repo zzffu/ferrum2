@@ -157,7 +157,7 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
 - [x] T01 restores the exact current VM/checkpoint，records actual product、edition、architecture and full
       version/build，and freezes route values；pinned/unpinned、DNS、capture interval and hard-kill cleanup all
       pass，or the milestone stops before product work。
-- [ ] `--check-config` remains side-effect-free；old outbounds default to Shadowsocks；direct closed fields、
+- [x] `--check-config` remains side-effect-free；old outbounds default to Shadowsocks；direct closed fields、
       direct-only credentials、chain rejection and every managed-TUN bound/relationship fail closed correctly。
 - [ ] Static/rule/final/selector can choose direct for SOCKS and non-Windows TUN IPv4/IPv6 TCP/UDP；Windows
       TUN-selected direct qualifies IPv4 only and rejects original IPv6 before any physical socket。DNS
@@ -195,8 +195,8 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
 | M16-T01 | Prove IPv4 Windows host-network capabilities and freeze measured contracts | accepted Markdown-only IPv4 scope amendment atop `a8205c2…` | done |
-| M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | ready |
-| M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | planned |
+| M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | done |
+| M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | ready |
 | M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | planned |
 | M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | planned |
 | M16-T06 | Close network-change、failure、hard-kill and current-VM lifecycle evidence | M16-T05 | planned |
@@ -229,14 +229,24 @@ case/support/fixture delta `+112/+0/+0` and numeric `REVIEW_REQUIRED` because in
 all pass。It also accepted qualifier net `+1153/-20` beyond the original non-Rust forecast because the work
 remains one mode in the existing qualifier with no duplicate harness or helper。
 
-The user explicitly authorizes required non-force pushes，including performance-related pushes；none has
-occurred yet。This does not authorize workflow dispatch or rerun、force-push、PR、tag、package、release or
-publication without separate explicit authority。Every remote action must still bind its accepted exact SHA。
+T02 final candidate `136dbe280a242c0a93fcc122f1c70ad58294158f` passed final Architect and QA
+`PASS_WITH_NOTES` with zero blocker/major/minor。Its integrity gate passes；the numeric `REVIEW_REQUIRED`
+advisory is accepted at code/tests `30095/51191`、ratio `1.700980 PASS`、case/support/fixture
+`45442/5152/597`、ticket delta `+756/0/0` and code growth `+324` because it is distinct contract evidence in
+existing seams with no support/fixture growth or duplicate helper/harness。
+
+The T01 non-force push and automatic Actions run remain historical evidence already recorded；no T02 remote
+action has occurred。The user explicitly authorizes required non-force pushes，including performance-related
+pushes。This does not authorize workflow dispatch or rerun、force-push、PR、tag、package、release or publication
+without separate explicit authority。Every remote action must still bind its accepted exact SHA。
 
 ## Blocker / next action
 
-The M16-T01 capability gate is complete and its frozen IPv4 route、metric、binding、DNS、capture-window and
-hard-kill results are recorded。M16-T02 is the next serial frontier and may compile the approved closed direct/
-managed-TUN configuration from the accepted T01 descendant。Architect and QA both returned
-`PASS_WITH_NOTES` on exact candidate `1d7968ea10289dd1dab61873c571058a37df7ef2` with zero
-blocker/major/minor；the notes above are accepted and review bookkeeping is complete。T02 remains ready。
+M16-T02 is done on exact reviewed candidate `136dbe280a242c0a93fcc122f1c70ad58294158f`。Initial Architect
+`BLOCK` findings on sentinel credentials and catalog-level Direct rejection were resolved by `6edba670…`；the
+remaining targeted test-evidence gap was diagnosed as test-only and resolved by `136dbe280…`。Focused config
+`4/4`、client Direct `1/1`、CLI `1/1`、full config `33`、full client `50`、full CLI `8`、architecture `19`、
+warning-free workspace all-target、format/diff/hook and QA full workspace regression all pass。Final Architect
+and QA are both `PASS_WITH_NOTES` with zero blocker/major/minor；only the accepted footprint advisory remains。
+M16-T03 is ready and is the current serial frontier。T02 is not yet claimed integrated or pushed；the primary
+thread performs integration after this documentation review。

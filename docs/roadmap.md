@@ -88,7 +88,8 @@ M16现为`executing`，planning baseline是
 IPv4 auto-route/Wintun DNS steering合成一个里程碑；M16-new managed route/DNS/pinning/change/privileged
 evidence只覆盖IPv4，M15 manual-route IPv6与existing IPv6 regressions保持。M16-T01 current-VM IPv4
 capability gate 已由 exact candidate `cc26aba…` 全行通过并冻结 route/metric/binding 公式；T01 done，
-M16-T02 ready，且不从该单一 build 推断跨版本兼容。
+M16-T02 exact candidate `136dbe280…` 已通过最终双审并 done，M16-T03 ready / current frontier；仍不从
+该单一 build 推断跨版本兼容，也不声称 T02 已集成或推送。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1215,7 +1216,8 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   same tag remains allowed。Auto-route-off M15-compatible IPv6 proxy/absent/direct-detour DNS egress remains。
   Target-specific fidelity is out。
 - **Tickets:** planning/control `a9619ef…` → single-VM amendment `a8205c2…` → accepted Markdown-only IPv4 scope
-  amendment `451edcb…` → T01 capability/measured contracts `cc26aba…` done → T02 config graph ready → T03 direct TCP/UDP → T04 capture/binding → T05 DNS
+  amendment `451edcb…` → T01 capability/measured contracts `cc26aba…` done → T02 config graph
+  `136dbe280…` done → T03 direct TCP/UDP ready → T04 capture/binding → T05 DNS
   steering → T06 lifecycle/VM evidence → T07 exact qualification；serial drain。
 - **Entry gate:** exact VM `Windows 10 MSIX packaging environment` restored from checkpoint
   `M15-T04-before-2b0c25b-20260810` must record its actual product、edition、architecture and full version/build，
@@ -1225,16 +1227,19 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   exact IPv4 `/1` pair with unspecified next hop、row metric `1`、unchanged interface metric and a `768 ms`
   capture window；no second VM or cross-version claim is inferred。
 - **Footprint/performance:** baseline code/tests `29771/50323`、case/support/fixture `44574/5152/597`；forecast
-  `+2250..3650 / +160..460 / +0` Rust tests plus existing qualifier growth。Performance is required without a
-  threshold/improvement claim。
+  `+2250..3650 / +160..460 / +0` Rust tests plus existing qualifier growth。T02 reports integrity `PASS` and
+  numeric `REVIEW_REQUIRED` advisory at code/tests `30095/51191`、ratio `1.700980 PASS`、case/support/fixture
+  `45442/5152/597`、ticket delta `+756/0/0` and code growth `+324`；final reviews accept the distinct existing-
+  seam evidence with no support/fixture growth。Performance is required without a threshold/improvement claim。
 - **Deferred/out of scope:** WFP/kill switch/DNS anti-leak、physical bypass rows、per-target multihomed routing、
   live migration、service/watchdog/installer、non-Windows managed TUN、new crate/dependency、ring-full
   maintenance unrelated to a proven blocker、M16-managed IPv6、release/publication。The IPv6 deferral does not
   weaken M15 manual-route IPv6、SIP022 IPv6 or non-managed/SOCKS direct IPv6。
-- **Next/remote boundary:** M16-T01 is done、review complete and M16-T02 ready on the accepted evidence
-  descendant。Required non-force pushes，including performance-related pushes，are explicitly authorized but
-  none has occurred。Workflow dispatch/rerun、force-push、PR、tag、package、release or publication remains
-  unauthorized without separate explicit authority。
+- **Next/remote boundary:** M16-T02 is done and M16-T03 is ready / current frontier on exact reviewed candidate
+  `136dbe280…`；T02 is not yet claimed integrated or pushed。The T01 non-force push and automatic Actions run
+  remain historical evidence already recorded，and no T02 remote action has occurred。Required non-force
+  pushes，including performance-related pushes，remain explicitly authorized。Workflow dispatch/rerun、force-
+  push、PR、tag、package、release or publication remains unauthorized without separate explicit authority。
 
 ## 决策登记
 
@@ -1497,3 +1502,4 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 | 2026-08-10 | M16 single-VM evidence amendment | Owner narrows every privileged M16 capability/full-with-100-cycles/hard-kill proof to current VM `Windows 10 MSIX packaging environment` and checkpoint `M15-T04-before-2b0c25b-20260810` | Actual guest product、edition、architecture and full version/build are recorded after restore；one result proves only that asset，not independent Windows 10/11 or cross-build compatibility；hosted jobs remain regression/resource gates；the bound full marker is the sole VM cycles evidence | Markdown-only descendant of planning/control `a9619ef…`；T01 remains the sole frontier；no product/control/push/dispatch/release/publication |
 | 2026-08-11 | M16 IPv4 managed-network amendment / review repair | Narrow only M16-new Windows managed capture、DNS、pinning、change evidence and privileged qualification to IPv4；TUN-origin direct IPv6 fails pre-socket for auto-route on/off，while SOCKS origin using the same tag and auto-route-off M15-compatible IPv6 DNS remain | Restored-VM preflight found one IPv4 default but no usable IPv6 evidence boundary；review required managed first-hop restriction only under auto-route and one closed engine request-origin obligation。Transient host-listener reachability is also preflight，not PASS；existing IPv6 remains | Markdown-only descendants of `a8205c2…`；config evidence maps to existing tables；one local-ledger-bound transient support listener is permitted，but no knob、VM、committed endpoint、helper/harness、public seam、product/control/remote expansion；performance remains required |
 | 2026-08-11 | M16-T01 accept / execute | M16 becomes `executing`；exact candidate `cc26aba…` passes the restored-VM IPv4 capability gate，T01 is done and T02 ready | Exact `/1` capture、fixed/dynamic pinned versus unpinned、DNS UDP/TCP、`768 ms` capture window、hard-kill and cleanup evidence all passed；the frozen formula uses `GetBestInterfaceEx` then constrained `GetBestRoute2` for fixed endpoints and one pre-capture IPv4 default for dynamic direct | Evidence commit `1d7968e…` Architect/QA both `PASS_WITH_NOTES` with zero blocker/major/minor；accepted notes are `architecture.rs` `4605` LOC、`+112/+0/+0` numeric `REVIEW_REQUIRED` with integrity/category/ratio PASS，and qualifier `+1153/-20` while retaining one existing mode/no duplicate harness/helper；required non-force pushes including performance-related pushes are authorized，none occurred；no workflow dispatch/rerun、force-push、PR/tag/package/release/publication authority |
+| 2026-08-11 | M16-T02 review closeout | Exact candidate chain `6aff6cb…` → bounded product repair `6edba670…` → test-only evidence repair `136dbe280…` compiles the closed Direct/Shadowsocks config and bounded managed-TUN plan；T02 done、T03 ready | Initial Architect `BLOCK` on sentinel credentials/catalog-level rejection was closed in `6edba670…`；targeted raw include/exclude evidence gap was correctly diagnosed as test-only and closed in `136dbe280…` with no product/helper/harness change。Final Architect/QA both `PASS_WITH_NOTES`，zero blocker/major/minor | Focused `4/4 + 1/1 + 1/1`、full config/client/CLI `33/50/8`、architecture `19`、warning-free workspace and QA full regression PASS；integrity PASS、numeric `+756/0/0` advisory accepted；no T02 remote action and no integration/push claim |
