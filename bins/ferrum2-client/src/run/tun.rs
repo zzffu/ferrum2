@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use ferrum2_config::TunConfig;
@@ -23,6 +23,10 @@ pub(super) fn process_root(
     routing: Arc<ClientRouting>,
     inbound: usize,
 ) -> ProcessRoot<RunError> {
+    let udp_sources = [
+        IpAddr::V4(config.ipv4_address.addr()),
+        IpAddr::V6(config.ipv6_address.addr()),
+    ];
     let metrics = Arc::clone(&context.metrics);
     let accepted_metrics = Arc::clone(&metrics);
     let handler_context = Arc::clone(&context);
@@ -63,7 +67,14 @@ pub(super) fn process_root(
         move |candidate, cancellation| {
             let context = Arc::clone(&udp_context);
             let routing = Arc::clone(&routing);
-            Box::pin(run_udp(candidate, cancellation, context, routing, inbound))
+            Box::pin(run_udp(
+                candidate,
+                cancellation,
+                context,
+                routing,
+                inbound,
+                udp_sources,
+            ))
         },
         (
             move || accepted_metrics.tun_packet_accepted(),
@@ -85,8 +96,12 @@ async fn run_udp(
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
     inbound: usize,
+    udp_sources: [IpAddr; 2],
 ) {
     let tuple = candidate.tuple();
+    if !udp_sources.contains(&tuple.source().ip()) {
+        return;
+    }
     let Ok(target) = TargetAddr::ip(tuple.target()) else {
         return;
     };
