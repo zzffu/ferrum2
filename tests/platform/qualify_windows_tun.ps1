@@ -1743,6 +1743,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 Wait-AdapterAbsent $adapterName
                 Assert-InterfaceGone $adapterName $ownedInterfaceIndex
                 $env:FERRUM2_T05_UDP_SOCKET_PROBE = "1"
+                $env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA
                 $activeProcess = Start-Candidate $binary $config
                 $adapter = Wait-AdapterReady $adapterName
                 $ownedInterfaceIndex = [int]$adapter.ifIndex

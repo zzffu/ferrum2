@@ -3167,12 +3167,21 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .matches("$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"")
                 .count()
                 == 1
+            && source
+                .matches("$env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA")
+                .count()
+                == 1
             && udp01_setup.is_some_and(|setup| {
                 setup
                     .rfind("Stop-Candidate $activeProcess")
                     .zip(setup.rfind("$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\""))
+                    .zip(setup.rfind(
+                        "$env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA",
+                    ))
                     .zip(setup.rfind("$activeProcess = Start-Candidate $binary $config"))
-                    .is_some_and(|((stop, env), start)| stop < env && env < start)
+                    .is_some_and(|(((stop, probe), gate), start)| {
+                        stop < probe && probe < gate && gate < start
+                    })
             })
             && gate.is_some_and(|gate| {
                 gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
@@ -3283,6 +3292,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace(
             "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
             "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"0\"",
+        ),
+        controller.replace(
+            "$env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA",
+            "$env:FERRUM2_T05_UDP_GATE_PORT = \"0\"",
         ),
         controller.replace("$firstUdpAcceptedDelta", "$ignoredFirstUdpDelta"),
         controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
@@ -3397,10 +3410,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && association.contains("fn prepare_application_request(")
             && association.contains("fn prepare_application_response(")
             && association.contains("FERRUM2_T05_UDP_SOCKET_PROBE")
+            && association.contains("FERRUM2_T05_UDP_GATE_PORT")
             && association.contains("upstream.local_addr()")
             && association.contains("upstream.peer_addr()")
             && association
                 .contains("m15_udp_socket_diag local={local_category} peer={peer_category}")
+            && association.contains("peer_category == \"gate_a\"")
+            && association.contains("peer.port() == gate_port")
+            && association.contains("first_server.port() == gate_port")
             && association.contains("upstream.send(&[]).await")
             && !association.contains("local={local}")
             && !association.contains("peer={peer}")
@@ -3452,6 +3469,16 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             tun_udp.clone(),
             client_tun.replace("run_udp_dns(", "run_udp_route("),
             client_udp.clone(),
+        ),
+        (
+            tun_udp.clone(),
+            client_tun.clone(),
+            client_udp.replace("peer.port() == gate_port", "true"),
+        ),
+        (
+            tun_udp.clone(),
+            client_tun.clone(),
+            client_udp.replace("first_server.port() == gate_port", "false"),
         ),
         (
             tun_udp.clone(),

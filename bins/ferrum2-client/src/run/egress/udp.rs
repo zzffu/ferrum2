@@ -568,13 +568,18 @@ where
         } else {
             "other"
         };
-        let peer_category = if peer == SocketAddr::V4(first_server) {
-            "expected"
+        let gate_port = std::env::var("FERRUM2_T05_UDP_GATE_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok());
+        let peer_category = if gate_port.is_some_and(|gate_port| {
+            peer.ip().is_loopback() && peer.port() == gate_port && first_server.port() == gate_port
+        }) {
+            "gate_a"
         } else {
             "other"
         };
         eprintln!("m15_udp_socket_diag local={local_category} peer={peer_category}");
-        if !matches!(upstream.send(&[]).await, Ok(0)) {
+        if peer_category == "gate_a" && !matches!(upstream.send(&[]).await, Ok(0)) {
             return Err(());
         }
     }
