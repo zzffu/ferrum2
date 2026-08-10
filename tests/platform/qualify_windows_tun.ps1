@@ -211,9 +211,16 @@ function Get-Metrics([int]$Port, [int]$TimeoutSeconds = 10) {
     throw "metrics readiness timeout"
 }
 
-function Get-CounterValue([string]$Metrics, [string]$Name) {
-    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))_total ([0-9]+)$")
-    Assert-True $match.Success "missing no-label counter: $Name"
+function Get-CounterValue(
+    [string]$Metrics,
+    [string]$Name,
+    [string]$Labels = "",
+    [bool]$MissingIsZero = $false
+) {
+    $labelSet = if ($Labels) { "\{$([regex]::Escape($Labels))\}" } else { "" }
+    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))_total$labelSet ([0-9]+)$")
+    if (-not $match.Success -and $MissingIsZero) { return [uint64]0 }
+    Assert-True $match.Success "missing bounded counter: $Name"
     return [uint64]$match.Groups[1].Value
 }
 
@@ -969,8 +976,17 @@ function Invoke-UdpEchoRow(
     $script:tcpResources.Add($probe)
     $client = Open-TunUdp $Address $Port $InterfaceIndex
     try {
+        $acceptedLabels = 'role="client",direction="client_to_target",outcome="accepted"'
+        $beforeMetrics = Get-Metrics $script:metricsPort
+        $tunAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_accepted"
+        $udpAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_udp_datagrams" $acceptedLabels $true
         [void]$client.Send($Payload, $Payload.Length)
-        Assert-True ($Gate.WaitRequests($expectedGate, 5000)) "selected UDP egress gate was not opened"
+        $gateOpened = $Gate.WaitRequests($expectedGate, 5000)
+        $afterMetrics = Get-Metrics $script:metricsPort
+        $tunAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_tun_packets_accepted") - $tunAcceptedBefore
+        $udpAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
+        Assert-True $gateOpened "selected UDP egress gate was not opened: tun_accepted=$tunAcceptedDelta udp_c2t_accepted=$udpAcceptedDelta gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
+        Assert-True ($tunAcceptedDelta -gt 0 -and $udpAcceptedDelta -eq 1) "UDP ingress/association witness mismatch"
         $response = Receive-TunUdp $client
         Assert-True (($response -join ",") -eq ($Payload -join ",")) "UDP echo mismatch"
         Assert-True ($probe.WaitRequests(1, 5000)) "UDP target did not receive datagram"

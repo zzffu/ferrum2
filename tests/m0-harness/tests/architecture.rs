@@ -3135,6 +3135,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("        # UDP-01")
             .and_then(|(_, tail)| tail.split_once("        Assert-True ($udpRows -eq 8)"))
             .map(|(body, _)| body);
+        let echo = source
+            .split_once("function Invoke-UdpEchoRow(")
+            .and_then(|(_, tail)| tail.split_once("\ntry {"))
+            .map(|(body, _)| body);
         source.contains("[ValidateSet(\"lifecycle\", \"tcp\", \"udp\")]")
             && source.matches("$udpRows++").count() == 8
             && source.contains("function Open-TunUdp(")
@@ -3147,6 +3151,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("network = \"udp\"")
             && source.contains("action = \"hijack-dns\"")
             && source.contains("profile=transport functional=16/16 cleanup=PASS")
+            && source.contains("[string]$Labels = \"\"")
+            && source.contains("[bool]$MissingIsZero = $false")
             && gate.is_some_and(|gate| {
                 gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
                     && gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))")
@@ -3157,6 +3163,17 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 probe.contains("new UdpClient(new IPEndPoint(IPAddress.Parse(address), port))")
                     && probe.contains("await socket.ReceiveAsync()")
                     && probe.contains("await socket.SendAsync(request.Buffer")
+            })
+            && echo.is_some_and(|echo| {
+                echo.contains("ferrum2_tun_packets_accepted")
+                    && echo.contains("ferrum2_udp_datagrams")
+                    && echo.contains(
+                        "role=\"client\",direction=\"client_to_target\",outcome=\"accepted\"",
+                    )
+                    && echo.contains("$tunAcceptedDelta")
+                    && echo.contains("$udpAcceptedDelta")
+                    && echo.contains("gate_fault=$($Gate.Fault)")
+                    && echo.contains("probe_fault=$($probe.Fault)")
             })
             && rows.is_some_and(|rows| {
                 for id in 2..=8 {
@@ -3190,6 +3207,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "Start-Sleep -Milliseconds 2500",
             "Start-Sleep -Milliseconds 1",
         ),
+        controller.replace("$udpAcceptedDelta", "$ignoredUdpDelta"),
         controller.replace(
             "profile=transport functional=16/16 cleanup=PASS",
             "profile=transport functional=8/8 cleanup=PASS",
