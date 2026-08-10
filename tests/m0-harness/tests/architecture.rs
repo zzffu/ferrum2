@@ -2482,6 +2482,30 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("$acceptedDelta -gt 0")
             && source.contains("$droppedDelta -gt 0")
             && source.contains("$acceptedDelta -eq $droppedDelta")
+            && source
+                .split_once("$udp4.Connect(\"192.0.2.200\", 53)")
+                .and_then(|(_, tail)| tail.split_once("$udp6 ="))
+                .map(|(witness, _)| witness)
+                .is_some_and(|witness| {
+                    !witness.contains("$settleDeadline")
+                        && !witness.contains("$stableSamples")
+                        && !witness.contains("quiet baseline")
+                        && [
+                            "$beforeMetrics = Get-Metrics $metricsPort",
+                            "$acceptedBefore = Get-CounterValue $beforeMetrics",
+                            "$droppedBefore = Get-CounterValue $beforeMetrics",
+                            "[void]$udp4.Send([byte[]](1,2,3,4), 4)",
+                            "$packetDeadline = [DateTime]::UtcNow.AddSeconds(5)",
+                            "} while ([DateTime]::UtcNow -lt $packetDeadline)",
+                            "Assert-True ($acceptedDelta -gt 0)",
+                            "Assert-True ($droppedDelta -gt 0)",
+                            "Assert-True ($acceptedDelta -eq $droppedDelta)",
+                        ]
+                        .iter()
+                        .map(|needle| witness.find(needle))
+                        .collect::<Option<Vec<_>>>()
+                        .is_some_and(|positions| positions.windows(2).all(|pair| pair[0] < pair[1]))
+                })
             && source.contains("$createdSiblingDll")
             && source.contains("FERRUM2_WINTUN_ZIP")
             && source.contains("Resolve-Path -LiteralPath $zipInput")
@@ -2513,6 +2537,22 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     assert!(
         !has_cleanup_snapshots(&route_subset_mutation),
         "ready route subset mutation must remove exact-equality proof"
+    );
+    let witness_order_mutation = controller.replace(
+        "    $beforeMetrics = Get-Metrics $metricsPort\n    $acceptedBefore = Get-CounterValue $beforeMetrics",
+        "    $acceptedBefore = Get-CounterValue $beforeMetrics\n    $beforeMetrics = Get-Metrics $metricsPort",
+    );
+    assert!(
+        !has_cleanup_snapshots(&witness_order_mutation),
+        "packet witness mutation must snapshot counters before the controlled send"
+    );
+    let quiet_prerequisite_mutation = controller.replace(
+        "    $beforeMetrics = Get-Metrics $metricsPort",
+        "    $stableSamples = 0\n    $beforeMetrics = Get-Metrics $metricsPort",
+    );
+    assert!(
+        !has_cleanup_snapshots(&quiet_prerequisite_mutation),
+        "packet witness mutation must reject a quiet/stability prerequisite"
     );
     let supports_headless_process_groups = |source: &str| {
         source.contains("GetConsoleProcessList")

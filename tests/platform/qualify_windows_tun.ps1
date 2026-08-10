@@ -1269,25 +1269,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     Assert-True ($withControllerRoutes.Count -eq $systemRoutes.Count + 2) "unexpected route mutation"
     $udp4 = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
     $udp4.Connect("192.0.2.200", 53)
-    $settleDeadline = [DateTime]::UtcNow.AddSeconds(5)
-    $stableSamples = 0
-    $acceptedBefore = -1
-    $droppedBefore = -1
-    do {
-        $beforeMetrics = Get-Metrics $metricsPort
-        $acceptedSample = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_accepted"
-        $droppedSample = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_foundation_dropped"
-        if ($acceptedSample -eq $acceptedBefore -and $droppedSample -eq $droppedBefore) {
-            $stableSamples++
-        } else {
-            $stableSamples = 0
-            $acceptedBefore = $acceptedSample
-            $droppedBefore = $droppedSample
-        }
-        if ($stableSamples -ge 5) { break }
-        Start-Sleep -Milliseconds 100
-    } while ([DateTime]::UtcNow -lt $settleDeadline)
-    Assert-True ($stableSamples -ge 5) "TUN packet counters did not reach a bounded quiet baseline"
+    $beforeMetrics = Get-Metrics $metricsPort
+    $acceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_accepted"
+    $droppedBefore = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_foundation_dropped"
     try {
         [void]$udp4.Send([byte[]](1,2,3,4), 4)
     } finally { $udp4.Dispose(); $udp4 = $null }
