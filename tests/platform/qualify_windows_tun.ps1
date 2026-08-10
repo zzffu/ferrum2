@@ -157,6 +157,21 @@ $capabilityUdpRows = 0
 $capabilityDnsRows = 0
 $capabilityWindowRows = 0
 $capabilityHardKillRows = 0
+$pktmonStarted = $false
+$pktmonStartAttempted = $false
+$pktmonTcpFilterOwned = $false
+$pktmonUdpFilterOwned = $false
+$pktmonComponentId = $null
+$capabilityFilteredPackets = [ordered]@{
+    fixed_tcp_unpinned = $null
+    fixed_tcp_pinned = $null
+    dynamic_tcp_unpinned = $null
+    dynamic_tcp_pinned = $null
+    fixed_udp_unpinned = $null
+    fixed_udp_pinned = $null
+    dynamic_udp_unpinned = $null
+    dynamic_udp_pinned = $null
+}
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -1470,24 +1485,219 @@ function Wait-TunAcceptedAfter([int]$MetricsPort, [uint64]$Before) {
     throw "unpinned packet did not enter Wintun"
 }
 
-function Wait-TunAcceptedQuiescent([int]$MetricsPort, [uint64]$Expected) {
-    $quietMilliseconds = 500
-    $timeoutMilliseconds = 5000
-    $timeout = [Diagnostics.Stopwatch]::StartNew()
-    $quiet = [Diagnostics.Stopwatch]::StartNew()
-    $last = $Expected
-    while ($timeout.ElapsedMilliseconds -lt $timeoutMilliseconds) {
-        $current = Get-TunAccepted $MetricsPort
-        Assert-True ($current -ge $last) "TUN accepted counter regressed"
-        if ($current -ne $last) {
-            $last = $current
-            $quiet.Restart()
-        } elseif ($quiet.ElapsedMilliseconds -ge $quietMilliseconds) {
-            return $last
+function Invoke-PktMon([string[]]$Arguments, [int]$TimeoutMilliseconds = 5000) {
+    $path = "C:\Windows\System32\PktMon.exe"
+    $item = Get-Item -LiteralPath $path -ErrorAction Stop
+    $version = [Version](($item.VersionInfo.FileVersion -split " ")[0])
+    Assert-True ($version -eq [Version]"10.0.19041.906") "PktMon version mismatch"
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $path
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        Assert-True $process.Start() "PktMon did not start"
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            $process.Kill($true)
+            [void]$process.WaitForExit(5000)
+            throw "PktMon command timed out"
         }
-        Start-Sleep -Milliseconds 50
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        Assert-True ($process.ExitCode -eq 0) "PktMon command failed"
+        return [pscustomobject]@{ Stdout = $stdout; Stderr = $stderr }
+    } finally {
+        $process.Dispose()
     }
-    throw "TUN accepted counter did not quiesce"
+}
+
+function Get-PktMonOutputLines([string]$Text) {
+    return @($Text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 0 })
+}
+
+function Assert-PktMonAbsent {
+    $status = Get-PktMonOutputLines (Invoke-PktMon @("status")).Stdout
+    Assert-True (@($status | Where-Object { $_ -ceq "Packet Monitor is not running." }).Count -eq 1) "PktMon baseline is running"
+    $filters = Get-PktMonOutputLines (Invoke-PktMon @("filter", "list")).Stdout
+    Assert-True ($filters.Count -eq 2 -and $filters[0] -ceq "Packet Filters:" -and $filters[1] -ceq "None") "PktMon filter baseline is not empty"
+}
+
+function Get-PktMonDirectProperties([object]$Record) {
+    $propertyField = $Record.PSObject.Properties["Properties"]
+    Assert-True ($null -ne $propertyField -and $propertyField.Value -is [Array]) "PktMon component properties are invalid"
+    $result = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    foreach ($property in @($propertyField.Value)) {
+        Assert-True ((@($property.PSObject.Properties.Name) -join "|") -ceq "Name|Value") "PktMon component property shape is invalid"
+        $name = [string]$property.Name
+        Assert-True (-not [string]::IsNullOrWhiteSpace($name)) "PktMon component property name is invalid"
+        if ($name -ceq "ifIndex" -or $name -ceq "ifGuid") {
+            Assert-True (-not $result.ContainsKey($name)) "PktMon identity property is duplicated"
+            $result.Add($name, $property.Value)
+        }
+    }
+    return $result
+}
+
+function Get-PktMonComponentId([object]$Adapter) {
+    $text = (Invoke-PktMon @("list", "--json")).Stdout.Trim()
+    Assert-True ($text.StartsWith("[") -and $text.EndsWith("]")) "PktMon component JSON is invalid"
+    try { $groups = @($text | ConvertFrom-Json -Depth 32 -ErrorAction Stop) }
+    catch { throw "PktMon component JSON is invalid" }
+    Assert-True ($groups.Count -gt 0) "PktMon component groups are empty"
+    $interfaceGuid = [guid]::Empty
+    Assert-True ([guid]::TryParse([string]$Adapter.InterfaceGuid, [ref]$interfaceGuid)) "owned adapter GUID is invalid"
+    $expectedDriver = $null
+    if ($null -ne $Adapter.PSObject.Properties["DriverFileName"] -and
+        -not [string]::IsNullOrWhiteSpace([string]$Adapter.DriverFileName)) {
+        $expectedDriver = [IO.Path]::GetFileName([string]$Adapter.DriverFileName)
+    }
+    $recordsById = @{}
+    foreach ($group in $groups) {
+        Assert-True ($null -ne $group.PSObject.Properties["Components"] -and $group.Components -is [Array]) "PktMon component group shape is invalid"
+        foreach ($record in @($group.Components)) {
+            [int]$id = 0
+            Assert-True ($null -ne $record.PSObject.Properties["Id"] -and
+                [int]::TryParse([string]$record.Id, [ref]$id) -and $id -gt 0) "PktMon component Id is invalid"
+            [void](Get-PktMonDirectProperties $record)
+            if (-not $recordsById.ContainsKey($id)) { $recordsById[$id] = [Collections.Generic.List[object]]::new() }
+            $recordsById[$id].Add($record)
+        }
+    }
+    $matches = [Collections.Generic.List[int]]::new()
+    foreach ($entry in $recordsById.GetEnumerator()) {
+        $hasIdentityRecord = $false
+        $hasDriver = $null -eq $expectedDriver
+        foreach ($record in $entry.Value) {
+            $properties = Get-PktMonDirectProperties $record
+            $recordIndexMatches = $false
+            $recordGuidMatches = $false
+            if ($properties.ContainsKey("ifIndex")) {
+                [int]$ifIndex = 0
+                Assert-True ([int]::TryParse([string]$properties["ifIndex"], [ref]$ifIndex)) "PktMon ifIndex is invalid"
+                $recordIndexMatches = $ifIndex -eq [int]$Adapter.ifIndex
+            }
+            if ($properties.ContainsKey("ifGuid")) {
+                $ifGuid = [guid]::Empty
+                Assert-True ([guid]::TryParse([string]$properties["ifGuid"], [ref]$ifGuid)) "PktMon ifGuid is invalid"
+                $recordGuidMatches = $ifGuid -eq $interfaceGuid
+            }
+            if ($recordIndexMatches -and $recordGuidMatches) { $hasIdentityRecord = $true }
+            if ($null -ne $expectedDriver -and $null -ne $record.PSObject.Properties["DriverName"] -and
+                -not [string]::IsNullOrWhiteSpace([string]$record.DriverName) -and
+                [IO.Path]::GetFileName([string]$record.DriverName) -ieq $expectedDriver) {
+                $hasDriver = $true
+            }
+        }
+        if ($hasIdentityRecord -and $hasDriver) { $matches.Add([int]$entry.Key) }
+    }
+    Assert-True ($matches.Count -eq 1) "owned Wintun PktMon component is ambiguous"
+    return $matches[0]
+}
+
+function ConvertTo-PktMonUInt64([object]$Value) {
+    [uint64]$parsed = 0
+    Assert-True ([uint64]::TryParse([string]$Value, [ref]$parsed)) "PktMon counter value is invalid"
+    return $parsed
+}
+
+function Add-PktMonChecked([uint64]$Total, [uint64]$Value) {
+    Assert-True ($Value -le [uint64]::MaxValue - $Total) "PktMon counter overflowed"
+    return [uint64]($Total + $Value)
+}
+
+function Get-PktMonFlowPackets {
+    $text = (Invoke-PktMon @("counters", "--type", "flow", "--json", "--zero")).Stdout.Trim()
+    Assert-True ($text.StartsWith("[") -and $text.EndsWith("]")) "PktMon counter JSON is invalid"
+    try { $groups = @($text | ConvertFrom-Json -Depth 32 -ErrorAction Stop) }
+    catch { throw "PktMon counter JSON is invalid" }
+    Assert-True ($groups.Count -gt 0) "PktMon counter groups are empty"
+    $records = [Collections.Generic.List[object]]::new()
+    foreach ($group in $groups) {
+        Assert-True ($null -ne $group.PSObject.Properties["Components"] -and $group.Components -is [Array]) "PktMon counter group shape is invalid"
+        foreach ($component in @($group.Components)) {
+            [int]$id = 0
+            Assert-True ($null -ne $component.PSObject.Properties["Id"] -and
+                [int]::TryParse([string]$component.Id, [ref]$id) -and $id -gt 0) "PktMon counter component Id is invalid"
+            if ($id -eq $script:pktmonComponentId) { $records.Add($component) }
+        }
+    }
+    Assert-True ($records.Count -gt 0) "owned PktMon component counters are missing"
+    [uint64]$total = 0
+    $flowEdges = 0
+    foreach ($component in $records) {
+        Assert-True ($null -ne $component.PSObject.Properties["Counters"] -and $component.Counters -is [Array]) "PktMon counter component shape is invalid"
+        foreach ($counter in @($component.Counters)) {
+            Assert-True ($null -ne $counter.PSObject.Properties["Type"] -and $counter.Type -ceq "Flows") "PktMon counter edge type is invalid"
+            foreach ($direction in @("Inbound", "Outbound")) {
+                $edge = $counter.PSObject.Properties[$direction]
+                Assert-True ($null -ne $edge -and $null -ne $edge.Value.PSObject.Properties["Packets"] -and
+                    $null -ne $edge.Value.PSObject.Properties["Bytes"]) "PktMon flow edge shape is invalid"
+                $packets = ConvertTo-PktMonUInt64 $edge.Value.Packets
+                [void](ConvertTo-PktMonUInt64 $edge.Value.Bytes)
+                $total = Add-PktMonChecked $total $packets
+            }
+            $flowEdges++
+        }
+    }
+    Assert-True ($flowEdges -gt 0) "owned PktMon flow counters are missing"
+    return $total
+}
+
+function Get-PktMonFlowPacketDelta([uint64]$Before) {
+    $after = Get-PktMonFlowPackets
+    Assert-True ($after -ge $Before) "PktMon flow counter regressed"
+    return [uint64]($after - $Before)
+}
+
+function Wait-PktMonFlowPacketsAfter([uint64]$Before) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    $quiet = [Diagnostics.Stopwatch]::StartNew()
+    [uint64]$last = $Before
+    $observed = $false
+    do {
+        $after = Get-PktMonFlowPackets
+        Assert-True ($after -ge $last) "PktMon flow counter regressed"
+        if ($after -gt $Before) {
+            if (-not $observed -or $after -ne $last) {
+                $observed = $true
+                $quiet.Restart()
+            } elseif ($quiet.ElapsedMilliseconds -ge 500) {
+                return [uint64]($after - $Before)
+            }
+        }
+        $last = $after
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "filtered unpinned flow did not enter Wintun"
+}
+
+function Stop-CapabilityPktMon {
+    $cleanupFailures = [Collections.Generic.List[string]]::new()
+    if ($script:pktmonStarted -or $script:pktmonStartAttempted) {
+        try {
+            [void](Invoke-PktMon @("stop"))
+            $script:pktmonStarted = $false
+            $script:pktmonStartAttempted = $false
+        } catch { $cleanupFailures.Add("stop") }
+    }
+    if ($script:pktmonTcpFilterOwned -or $script:pktmonUdpFilterOwned) {
+        try {
+            [void](Invoke-PktMon @("filter", "remove"))
+            $script:pktmonTcpFilterOwned = $false
+            $script:pktmonUdpFilterOwned = $false
+        } catch { $cleanupFailures.Add("filters") }
+        try { [void](Invoke-PktMon @("reset")) }
+        catch { $cleanupFailures.Add("reset") }
+    }
+    try { Assert-PktMonAbsent }
+    catch { $cleanupFailures.Add("absence") }
+    Assert-True ($cleanupFailures.Count -eq 0) "PktMon cleanup failed"
 }
 
 function Invoke-UnpinnedTcpCapture([string]$Address, [int]$Port, [int]$MetricsPort, [byte[]]$Payload) {
@@ -1509,8 +1719,7 @@ function Invoke-UnpinnedTcpCapture([string]$Address, [int]$Port, [int]$MetricsPo
         if ($_.Exception.Flatten().InnerExceptions | Where-Object { $_ -isnot [Net.Sockets.SocketException] -and $_ -isnot [IO.IOException] }) { throw }
     } catch [Net.Sockets.SocketException] { } catch [IO.IOException] { }
     finally { $client.Dispose() }
-    $accepted = Wait-TunAcceptedAfter $MetricsPort $before
-    return Wait-TunAcceptedQuiescent $MetricsPort $accepted
+    [void](Wait-TunAcceptedAfter $MetricsPort $before)
 }
 
 function Invoke-UnpinnedUdpCapture([string]$Address, [int]$Port, [int]$MetricsPort, [byte[]]$Payload) {
@@ -1528,8 +1737,7 @@ function Invoke-UnpinnedUdpCapture([string]$Address, [int]$Port, [int]$MetricsPo
         if ($_.Exception.Flatten().InnerExceptions | Where-Object { $_ -isnot [Net.Sockets.SocketException] -and $_ -isnot [IO.IOException] }) { throw }
     } catch [Net.Sockets.SocketException] { } catch [IO.IOException] { }
     finally { $client.Dispose() }
-    $accepted = Wait-TunAcceptedAfter $MetricsPort $before
-    return Wait-TunAcceptedQuiescent $MetricsPort $accepted
+    [void](Wait-TunAcceptedAfter $MetricsPort $before)
 }
 
 function Invoke-SystemDnsWitness([string]$Name, [bool]$TcpOnly, [Ferrum2DnsResponder]$Responder) {
@@ -1776,6 +1984,7 @@ try {
         finally { Pop-Location }
     }
     if ($Mode -eq "network-feasibility") {
+        Assert-PktMonAbsent
         Assert-True ([Ferrum2NetworkFeasibility]::RouteRowSize -eq 104) "route ABI size mismatch"
         $supportAddress = $capabilityIdentity.SupportAddress
         $supportTcpPort = $capabilityIdentity.TcpPort
@@ -1920,16 +2129,34 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         foreach ($route in $capabilityRoutes) { $route.Verify() }
         $capabilityRouteRows = 2
 
+        Assert-PktMonAbsent
+        $pktmonComponentId = Get-PktMonComponentId $adapter
+        $pktmonTcpFilterOwned = $true
+        [void](Invoke-PktMon @("filter", "add", "M16Tcp", "-i", $supportAddress, "-t", "TCP", "-p", [string]$supportTcpPort))
+        $pktmonUdpFilterOwned = $true
+        [void](Invoke-PktMon @("filter", "add", "M16Udp", "-i", $supportAddress, "-t", "UDP", "-p", [string]$supportUdpPort))
+        $pktmonStartAttempted = $true
+        [void](Invoke-PktMon @("start", "--capture", "--counters-only", "--comp", [string]$pktmonComponentId, "--type", "flow"))
+        $pktmonStarted = $true
+        $pktmonStartAttempted = $false
+        [void](Get-PktMonFlowPackets)
+
         foreach ($row in @(
             @{ Name = "fixed"; Underlay = $fixedUnderlay },
             @{ Name = "dynamic"; Underlay = $dynamicUnderlay }
         )) {
             $payload = [Text.Encoding]::ASCII.GetBytes("m16-$($row.Name)-tcp")
-            $acceptedBefore = Invoke-UnpinnedTcpCapture $supportAddress $supportTcpPort $metricsPort $payload
+            $filteredBefore = Get-PktMonFlowPackets
+            [void](Invoke-UnpinnedTcpCapture $supportAddress $supportTcpPort $metricsPort $payload)
+            $filteredPackets = Wait-PktMonFlowPacketsAfter -Before $filteredBefore
+            $capabilityFilteredPackets["$($row.Name)_tcp_unpinned"] = $filteredPackets
             $capabilityTcpRows++
+            $filteredBefore = Get-PktMonFlowPackets
             [Ferrum2NetworkFeasibility]::TcpEcho($supportAddress, $supportTcpPort, $row.Underlay.InterfaceIndex, $row.Underlay.SourceAddress, $payload)
-            $acceptedAfter = Wait-TunAcceptedQuiescent $metricsPort $acceptedBefore
-            Assert-True ($acceptedAfter -eq $acceptedBefore) "pinned TCP entered Wintun"
+            Start-Sleep -Milliseconds 500
+            $filteredPackets = Get-PktMonFlowPacketDelta -Before $filteredBefore
+            Assert-True ($filteredPackets -eq 0) "pinned TCP entered Wintun"
+            $capabilityFilteredPackets["$($row.Name)_tcp_pinned"] = $filteredPackets
             $capabilityTcpRows++
         }
         foreach ($row in @(
@@ -1937,11 +2164,17 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             @{ Name = "dynamic"; Underlay = $dynamicUnderlay }
         )) {
             $payload = [Text.Encoding]::ASCII.GetBytes("m16-$($row.Name)-udp")
-            $acceptedBefore = Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort $payload
+            $filteredBefore = Get-PktMonFlowPackets
+            [void](Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort $payload)
+            $filteredPackets = Wait-PktMonFlowPacketsAfter -Before $filteredBefore
+            $capabilityFilteredPackets["$($row.Name)_udp_unpinned"] = $filteredPackets
             $capabilityUdpRows++
+            $filteredBefore = Get-PktMonFlowPackets
             [Ferrum2NetworkFeasibility]::UdpEcho($supportAddress, $supportUdpPort, $row.Underlay.InterfaceIndex, $row.Underlay.SourceAddress, $payload)
-            $acceptedAfter = Wait-TunAcceptedQuiescent $metricsPort $acceptedBefore
-            Assert-True ($acceptedAfter -eq $acceptedBefore) "pinned UDP entered Wintun"
+            Start-Sleep -Milliseconds 500
+            $filteredPackets = Get-PktMonFlowPacketDelta -Before $filteredBefore
+            Assert-True ($filteredPackets -eq 0) "pinned UDP entered Wintun"
+            $capabilityFilteredPackets["$($row.Name)_udp_pinned"] = $filteredPackets
             $capabilityUdpRows++
         }
         Assert-True ($capabilityTcpRows -eq 4 -and $capabilityUdpRows -eq 4) "socket pin row count mismatch"
@@ -1976,8 +2209,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             tcp_rows = $capabilityTcpRows
             udp_rows = $capabilityUdpRows
             dns_rows = $capabilityDnsRows
+            pktmon_filtered_flow_packets = $capabilityFilteredPackets
         })
 
+        Stop-CapabilityPktMon
         Remove-CapabilityRoutes
         Assert-SnapshotEqual $routeBaseline @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex) "capture route exact rollback"
         Restore-CapabilityDns $ownedInterfaceIndex
@@ -2905,6 +3140,8 @@ finally {
         Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue
     }
     if ($Mode -eq "network-feasibility") {
+        try { Stop-CapabilityPktMon }
+        catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
         try { Remove-CapabilityRoutes }
         catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
         $capabilityAdapter = Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue

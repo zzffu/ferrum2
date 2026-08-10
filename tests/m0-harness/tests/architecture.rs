@@ -2589,8 +2589,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("function Get-Tcp01Boundary(")
             .and_then(|(_, tail)| tail.split_once("function Get-PeExportNames"))
             .map(|(body, _)| body);
-        let tun_counter_quiescence = source
-            .split_once("function Wait-TunAcceptedQuiescent(")
+        let pktmon_attribution = source
+            .split_once("function Invoke-PktMon(")
             .and_then(|(_, tail)| tail.split_once("function Invoke-UnpinnedTcpCapture("))
             .map(|(body, _)| body);
         let gate = source
@@ -2621,37 +2621,65 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         source.contains(
             "[ValidateSet(\"lifecycle\", \"tcp\", \"udp\", \"cycles\", \"full\", \"performance\", \"cleanup\")]",
         )
-            && !source.to_ascii_lowercase().contains("pktmon")
             && source.contains("[Reflection.PortableExecutable.PEReader]::new($stream)")
             && source.contains("$exports = @(Get-PeExportNames $pe)")
             && !source.to_ascii_lowercase().contains("dumpbin.exe")
             && !source.to_ascii_lowercase().contains("vswhere")
-            && tun_counter_quiescence.is_some_and(|quiet| {
-                quiet.contains("$quietMilliseconds = 500")
-                    && quiet.contains("$timeoutMilliseconds = 5000")
-                    && quiet.contains("while ($timeout.ElapsedMilliseconds -lt $timeoutMilliseconds)")
-                    && quiet.contains("Assert-True ($current -ge $last)")
-                    && quiet.contains("$quiet.Restart()")
-                    && quiet.contains("$quiet.ElapsedMilliseconds -ge $quietMilliseconds")
-                    && quiet.contains("throw \"TUN accepted counter did not quiesce\"")
+            && pktmon_attribution.is_some_and(|pktmon| {
+                pktmon.contains("C:\\Windows\\System32\\PktMon.exe")
+                    && pktmon.contains("10.0.19041.906")
+                    && pktmon.contains("[Diagnostics.ProcessStartInfo]::new()")
+                    && pktmon.contains("$start.ArgumentList.Add($argument)")
+                    && pktmon.contains("function Assert-PktMonAbsent")
+                    && pktmon.contains("function Get-PktMonComponentId")
+                    && pktmon.contains("$Record.PSObject.Properties[\"Properties\"]")
+                    && pktmon.contains("$group.Components")
+                    && pktmon.contains("$properties[\"ifIndex\"]")
+                    && pktmon.contains("$properties[\"ifGuid\"]")
+                    && pktmon.contains("if ($recordIndexMatches -and $recordGuidMatches) { $hasIdentityRecord = $true }")
+                    && pktmon.contains("if ($hasIdentityRecord -and $hasDriver)")
+                    && pktmon.contains("$Adapter.InterfaceGuid")
+                    && pktmon.contains("$record.DriverName")
+                    && pktmon.contains("$Adapter.DriverFileName")
+                    && pktmon.contains("function Get-PktMonFlowPackets")
+                    && pktmon.contains("@(\"counters\", \"--type\", \"flow\", \"--json\", \"--zero\")")
+                    && pktmon.contains("$component.Counters")
+                    && pktmon.contains("$counter.Type -ceq \"Flows\"")
+                    && pktmon.contains("foreach ($direction in @(\"Inbound\", \"Outbound\"))")
+                    && pktmon.contains("$edge.Value.Packets")
+                    && pktmon.contains("$edge.Value.Bytes")
+                    && pktmon.contains("function Wait-PktMonFlowPacketsAfter")
+                    && pktmon.contains("$deadline = [DateTime]::UtcNow.AddSeconds(5)")
+                    && pktmon.contains("$quiet.ElapsedMilliseconds -ge 500")
+                    && pktmon.contains("Assert-True ($after -ge $last)")
+                    && pktmon.contains("function Stop-CapabilityPktMon")
+                    && pktmon.contains("$cleanupFailures.Add(\"stop\")")
+                    && pktmon.contains("$cleanupFailures.Add(\"filters\")")
+                    && pktmon.contains("$cleanupFailures.Add(\"reset\")")
+                    && pktmon.contains("$cleanupFailures.Add(\"absence\")")
             })
+            && !source.contains("Wait-TunAcceptedQuiescent")
             && source
-                .matches("$accepted = Wait-TunAcceptedAfter $MetricsPort $before")
+                .matches("[void](Wait-TunAcceptedAfter $MetricsPort $before)")
                 .count()
                 == 2
             && source
-                .matches("return Wait-TunAcceptedQuiescent $MetricsPort $accepted")
-                .count()
-                == 2
-            && source.matches("$acceptedBefore = Invoke-Unpinned").count() == 2
-            && source
-                .matches("$acceptedAfter = Wait-TunAcceptedQuiescent $metricsPort $acceptedBefore")
+                .matches("$filteredPackets = Wait-PktMonFlowPacketsAfter -Before $filteredBefore")
                 .count()
                 == 2
             && source
-                .matches("Assert-True ($acceptedAfter -eq $acceptedBefore)")
+                .matches("$filteredPackets = Get-PktMonFlowPacketDelta -Before $filteredBefore")
                 .count()
                 == 2
+            && source
+                .matches("Assert-True ($filteredPackets -eq 0)")
+                .count()
+                == 2
+            && source.contains("pktmon_filtered_flow_packets = $capabilityFilteredPackets")
+            && source.matches("Stop-CapabilityPktMon").count() >= 3
+            && source.matches("Assert-PktMonAbsent").count() >= 4
+            && source.contains("@(\"start\", \"--capture\", \"--counters-only\", \"--comp\", [string]$pktmonComponentId, \"--type\", \"flow\")")
+            && source.matches("Start-Sleep -Milliseconds 500").count() >= 2
             && source.contains("[void](Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort")
             && source.matches("$tcpRows++").count() == 8
             && source.matches("Add-TunRoute $").count() == 5
