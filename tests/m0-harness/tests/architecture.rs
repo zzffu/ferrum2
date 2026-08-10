@@ -2593,6 +2593,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("function Invoke-PktMon(")
             .and_then(|(_, tail)| tail.split_once("function Invoke-UnpinnedTcpCapture("))
             .map(|(body, _)| body);
+        let capture_route_cleanup = source
+            .split_once(
+                "$routesBeforeCaptureCleanup = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)",
+            )
+            .and_then(|(_, tail)| tail.split_once("Restore-CapabilityDns $ownedInterfaceIndex"))
+            .map(|(body, _)| body);
         let gate = source
             .split_once("public sealed class Ferrum2TcpGateObservation")
             .and_then(|(_, tail)| tail.split_once("public sealed class Ferrum2TcpProbe"))
@@ -2680,6 +2686,27 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.matches("Assert-PktMonAbsent").count() >= 4
             && source.contains("@(\"start\", \"--capture\", \"--counters-only\", \"--comp\", [string]$pktmonComponentId, \"--type\", \"flow\")")
             && source.matches("Start-Sleep -Milliseconds 500").count() >= 2
+            && source.contains("Assert-SnapshotEqual $routeBaseline @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex) \"partial route rollback\"")
+            && capture_route_cleanup.is_some_and(|cleanup| {
+                cleanup.contains("\"IPv4|0.0.0.0/1|0.0.0.0\"")
+                    && cleanup.contains("\"IPv4|128.0.0.0/1|0.0.0.0\"")
+                    && cleanup.contains("@($routesBeforeCaptureCleanup | Where-Object { $_ -ceq $captureRouteRow }).Count -eq 1")
+                    && cleanup.contains("$captureRouteRows -cnotcontains $_")
+                    && cleanup.contains("$expectedRoutesAfterCaptureCleanup.Count -eq $routesBeforeCaptureCleanup.Count - 2")
+                    && !cleanup.contains("$routeBaseline")
+                    && [
+                        "$captureRouteRows = @(",
+                        "foreach ($captureRouteRow in $captureRouteRows)",
+                        "$expectedRoutesAfterCaptureCleanup = @(",
+                        "Assert-True ($expectedRoutesAfterCaptureCleanup.Count",
+                        "Remove-CapabilityRoutes",
+                        "Assert-SnapshotEqual $expectedRoutesAfterCaptureCleanup",
+                    ]
+                    .iter()
+                    .map(|needle| cleanup.find(needle))
+                    .collect::<Option<Vec<_>>>()
+                    .is_some_and(|positions| positions.windows(2).all(|pair| pair[0] < pair[1]))
+            })
             && source.contains("[void](Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort")
             && source.matches("$tcpRows++").count() == 8
             && source.matches("Add-TunRoute $").count() == 5
