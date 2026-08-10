@@ -1,6 +1,6 @@
 # ADR-0035 — M16 client direct outbound
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-10
 - **Related:** `ADR-0029`、`ADR-0030`、`ADR-0032`、`SPEC-0017`、`TEST-0017`、M16-T01～T07
 

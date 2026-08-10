@@ -1,6 +1,6 @@
 # SPEC-0017 — M16 Windows managed TUN routing, DNS and direct egress
 
-- **Status:** Draft
+- **Status:** Approved
 - **Milestone:** M16
 - **Baseline:** `fcef80dcc7e62bbca63ffbf7832df369dd418abd`
 - **Related:** ADR-0034、ADR-0035、ADR-0036、TEST-0017
@@ -192,6 +192,11 @@ through the frozen IPv4 physical default interface。These are different policie
 - Dynamic direct IPv4 targets MUST bind to one unambiguous capture-before IPv4 physical default interface。
   Missing or ambiguous policy MUST fail prepare before capture。This policy does not preserve target-specific
   non-default LAN/VPN routing；operators MUST exclude those IPv4 prefixes when that fidelity is required。
+- The accepted fixed-first-hop formula is `GetBestInterfaceEx(destination)` → validated physical index →
+  interface-constrained `GetBestRoute2` → frozen preferred source/route fingerprint。The accepted dynamic
+  formula is the one unique capture-before IPv4 physical default。On the qualified asset，both underlay rows
+  had prefix length `0`、row metric `0` and the same physical interface/source/next-hop identity；the raw
+  identity remains local evidence and MUST NOT enter product telemetry。
 - Applicable IPv4 sockets MUST set `IP_UNICAST_IF` with the required network-byte-order index before TCP
   connect or UDP first send。Failure MUST close the socket and MUST NOT retry unpinned。M16 MUST NOT publish an
   IPv6 binder；Windows TUN-selected direct IPv6 fails before socket creation instead。
@@ -202,10 +207,10 @@ through the frozen IPv4 physical default interface。These are different policie
 
 ### M16-MUST-08 — exact route ownership
 
-- M16-T01 MUST freeze one next-hop derivation、route-metric and interface-metric disposition that passes
-  positive/negative readback on the exact current qualification VM/checkpoint。Until that evidence amendment
-  is accepted，M16-T02 and later product tickets remain blocked。These values MUST NOT become operator knobs
-  merely to avoid the probe。
+- The accepted M16-T01 route contract creates exactly `0.0.0.0/1` and `128.0.0.0/1` with unspecified IPv4
+  next hop `0.0.0.0` and row metric `1`。It leaves the Wintun IPv4 interface metric unchanged and therefore
+  creates no interface-metric lease。This disposition passed positive/negative readback on the exact current
+  qualification VM/checkpoint and MUST NOT become an operator knob or a cross-build inference。
 - Every route row MUST begin with `InitializeIpForwardEntry` and then explicitly set every field required by
   the accepted contract，including fields whose initializer value is true or illegal。Create success alone
   is insufficient：ActiveStore readback MUST exactly match the owned identity and allowed system-derived

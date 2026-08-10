@@ -1,6 +1,6 @@
 # ADR-0036 — M16 Windows managed TUN policy
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-10
 - **Related:** `ADR-0034`、`ADR-0035`、`SPEC-0017`、`TEST-0017`、M16-T01～T07
 
@@ -57,6 +57,15 @@ values。M16-T01 must freeze them from positive/negative readback on the current
 architecture and full version/build are recorded after restore；the VM label is not treated as OS-version
 evidence。If one bounded rule does not work on that exact asset，the contract stops for replanning rather than
 exposing an unproved operator knob。
+
+M16-T01 froze the passing IPv4 rule on that exact asset。The two capture rows are `0.0.0.0/1` and
+`128.0.0.0/1` with unspecified next hop `0.0.0.0` and row metric `1`；the Wintun interface metric remains
+unchanged and no metric lease exists。A fixed physical first hop uses
+`GetBestInterfaceEx(destination)` → validated physical index → interface-constrained `GetBestRoute2`，then
+freezes the preferred source and route fingerprint。Dynamic direct uses the one unique capture-before IPv4
+physical default。Both measured underlay rows had prefix length `0` and row metric `0` and selected the same
+physical interface、source and next hop；their local identities remain outside the repository。These values
+are the M16 implementation contract for this VM/build，not operator knobs or a cross-build claim。
 
 ### Immutable physical underlay policy
 

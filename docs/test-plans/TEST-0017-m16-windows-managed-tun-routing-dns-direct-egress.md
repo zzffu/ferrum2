@@ -1,6 +1,6 @@
 # TEST-0017 — M16 Windows managed TUN routing, DNS and direct egress
 
-- **Status:** Planned
+- **Status:** Approved
 - **Milestone:** M16
 - **Baseline:** `fcef80dcc7e62bbca63ffbf7832df369dd418abd`
 - **Qualification VM:** `Windows 10 MSIX packaging environment`
@@ -88,6 +88,18 @@ The restored qualification VM emits exactly one successful capability marker onl
 ```text
 m16_windows_network_feasibility status=PASS routes=2/2 tcp_pin=4/4 udp_pin=4/4 dns=2/2 capture_window=1/1 hard_kill=1/1 interface_metric=<unchanged|leased> cleanup=PASS guest_build=<exact-build-and-ubr> run_token=<unique> candidate_sha=<exact-candidate-sha> probe_sha256=<exact-probe-sha256> identity_sha256=<exact-ledger-sha256>
 ```
+
+The accepted T01 run used candidate `cc26aba03d816dfd29e8e04177a6f70a9d009b37` and probe SHA-256
+`58b18f2d33da8f065f8f572acf252b64d6a503ecc61e59b1cd45843796f5ca90` on Windows 10 Enterprise
+Evaluation、`EnterpriseEval`、AMD64、version `10.0.19044.0`、build `19044.1288`。It observed one IPv4
+default and zero IPv6 defaults。The exact `/1` rows used next hop `0.0.0.0`、row metric `1` and no interface-
+metric lease；the capture-before-admission interval was `768 ms`。PktMon endpoint-filtered flow deltas were
+fixed TCP `5/0`、dynamic TCP `5/0`、fixed UDP `1/0` and dynamic UDP `1/0` for unpinned/pinned respectively，
+so every unpinned witness was positive and every pinned witness was zero without recording the local endpoint。
+The evidence phases were exactly `before|active|normal-cleanup|hard-kill-active|after`，and cleanup audits
+found the listener absent、guest pre-remediation residue zero/absent、host network/firewall fingerprints
+unchanged and the final restored checkpoint pristine。This approves only the entry capability contract；the
+full M16 same-SHA qualification requirements below remain pending product implementation。
 
 An inaccessible/mismatched VM or checkpoint，an ambiguous/no IPv4 default underlay，a failed pinned/unpinned
 distinction，an inadmissible or residual support listener，unreliable DNS steering，capture-window overflow or

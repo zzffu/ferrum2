@@ -83,12 +83,12 @@ independent read-only diagnoses选定canonical exact-job-name ledger correction�
 `+475/0/0`与milestone `+5303/0/0`已接受。
 所有失败VM候选和15个hosted attempt-1均保留且未remotely rerun/credited。无force-push、PR、
 tag、package、release或publication；combined Wintun redistribution仍需responsible legal decision。
-M16现为`planned`，planning baseline是
+M16现为`executing`，planning baseline是
 `fcef80dcc7e62bbca63ffbf7832df369dd418abd`。它把client `type = "direct"`与Windows compatible
 IPv4 auto-route/Wintun DNS steering合成一个里程碑；M16-new managed route/DNS/pinning/change/privileged
-evidence只覆盖IPv4，M15 manual-route IPv6与existing IPv6 regressions保持。首个frontier只有M16-T01
-current-VM IPv4 capability gate，exact VM/checkpoint identity或任何route/pinning/DNS/hard-kill关键行
-失败即停止product implementation。
+evidence只覆盖IPv4，M15 manual-route IPv6与existing IPv6 regressions保持。M16-T01 current-VM IPv4
+capability gate 已由 exact candidate `cc26aba…` 全行通过并冻结 route/metric/binding 公式；T01 done，
+M16-T02 ready，且不从该单一 build 推断跨版本兼容。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1191,7 +1191,7 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 
 ## M16 — Windows managed TUN routing, DNS and direct egress
 
-- **Status:** planned
+- **Status:** executing
 - **Objective:** Add client `[[outbounds]] type = "direct"` as one terminal singleton egress plan and let
   existing static/ordered route/selector/DNS detour choose raw direct or existing Shadowsocks TCP/UDP；when
   explicitly enabled on Windows，own IPv4-only compatible Wintun capture rows、physical socket pinning and
@@ -1215,13 +1215,15 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   same tag remains allowed。Auto-route-off M15-compatible IPv6 proxy/absent/direct-detour DNS egress remains。
   Target-specific fidelity is out。
 - **Tickets:** planning/control `a9619ef…` → single-VM amendment `a8205c2…` → accepted Markdown-only IPv4 scope
-  amendment → T01 capability/measured contracts → T02 config graph → T03 direct TCP/UDP → T04 capture/binding → T05 DNS
+  amendment `451edcb…` → T01 capability/measured contracts `cc26aba…` done → T02 config graph ready → T03 direct TCP/UDP → T04 capture/binding → T05 DNS
   steering → T06 lifecycle/VM evidence → T07 exact qualification；serial drain。
 - **Entry gate:** exact VM `Windows 10 MSIX packaging environment` restored from checkpoint
   `M15-T04-before-2b0c25b-20260810` must record its actual product、edition、architecture and full version/build，
   then prove IPv4 route values、fixed/dynamic pinned positive/
   unpinned negative、IPv4 resolver UDP/TCP steering、capture interval and external hard-kill zero residue before T02。
-  Unavailable、mismatched or failed evidence is BLOCKED；no second VM or cross-version claim is required。
+  Candidate `cc26aba…` passed every row on Windows 10 Enterprise Evaluation `19044.1288`：capture rows are the
+  exact IPv4 `/1` pair with unspecified next hop、row metric `1`、unchanged interface metric and a `768 ms`
+  capture window；no second VM or cross-version claim is inferred。
 - **Footprint/performance:** baseline code/tests `29771/50323`、case/support/fixture `44574/5152/597`；forecast
   `+2250..3650 / +160..460 / +0` Rust tests plus existing qualifier growth。Performance is required without a
   threshold/improvement claim。
@@ -1229,9 +1231,9 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   live migration、service/watchdog/installer、non-Windows managed TUN、new crate/dependency、ring-full
   maintenance unrelated to a proven blocker、M16-managed IPv6、release/publication。The IPv6 deferral does not
   weaken M15 manual-route IPv6、SIP022 IPv6 or non-managed/SOCKS direct IPv6。
-- **Next/remote boundary:** planning/control `a9619ef…` and single-VM amendment `a8205c2…` are accepted；accept
-  the Markdown-only IPv4 scope amendment，then M16-T01 only。No product work、push、dispatch、PR、tag、package、release or publication is
-  authorized by planning。
+- **Next/remote boundary:** M16-T01 is done and M16-T02 is ready on the accepted evidence descendant；its
+  independent Architect/QA evidence review remains pending and must be recorded separately。No push、dispatch、
+  PR、tag、package、release or publication is authorized by this local transition。
 
 ## 决策登记
 
@@ -1280,8 +1282,8 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 | DEC-041 | resolved in M13 plan | core唯一owned allocation-preserving egress-plan snapshot并保留borrowed views；DNS-owned runtime spec使DNS normal workspace-internal dependency只指向core；private concrete client egress执行caller-selected plan且不拥有policy；semantic migration完成后才按ownership拆composition roots，无new crate/trait/registry/harness | `CONTEXT.md`、ADR-0032、SPEC/TEST-0014、M13-T01～T07 |
 | DEC-042 | resolved in M14 plan；client UDP amended | generic core ordered program从private monotonic cursor继续；concrete DNS/TLS/HTTP metadata留在config/sniff并由binary exhaustive adapter映射；pure sniff只使用Hickory/rustls/httparse；client TCP不sniff，server认证后sniff，client DNS hijack复用existing `DnsProxy::answer`；schema-v2 client UDP首个合法包填metadata并只选一次terminal action/outbound，后续target逐包保留；v1 routed+UDP配置拒绝且无旧数据面；terminal selection后no fallback | ADR-0033、SPEC/TEST-0015、M14 research、M14-T01～T09 |
 | DEC-043 | resolved in M15 plan；dependency/MSRV amended by owner | Windows NT 10.0+ AMD64 manual-route TUN uses additive schema-v2 `[tun]`、one audited Wintun/Win32 FFI module and one safe flow-level TUN module；exact no-default smoltcp 0.13.1 omits positive auto echo，workspace/toolchain/CI MSRV pin planning-date latest stable Rust 1.97.1；ProcessRoot prepare first starts one final owner thread，which creates、uses and reverses Wintun/smoltcp state before caller join，while activate only gates admission；IPv4 bare-header / IPv6 direct TCP/UDP only，all options/extensions/fragments/ICMP rejected；external routes stay externally owned，address-derived connected rows are OS-managed；existing policy/DNS/egress remains unique | CONTEXT.md、ADR-0034、M15 upstream research、SPEC/TEST-0016、M15-T01～T07 |
-| DEC-044 | proposed in M16 plan；Windows TUN IPv6/origin amended by owner | Client schema-v2 outbound is a closed Direct/Shadowsocks sum；missing type remains Shadowsocks，direct has no endpoint/credentials and is a singleton terminal plan usable by static/route/final/selector/DNS detour but never a chain hop；one private dispatcher accepts closed SOCKS/TUN/DNS request origin plus selected plan/original target。Callers stay kind-agnostic/socket-free；TUN-origin direct IPv6 fails pre-socket for both auto-route states，SOCKS origin using the same tag remains，and selected failure never falls back | ADR-0035、SPEC/TEST-0017、M16-T01～T07 |
-| DEC-045 | proposed in M16 plan；T01 capability-gated；single-VM and IPv4 scope amended by owner | Opt-in compatible Windows auto-route owns bounded IPv4 include-minus-exclude split capture rows；only while auto-route is active，fixed physical first hops must resolve to IPv4，SOCKS direct/proxy/DNS IPv4 sockets are pinned and logical IPv6 DNS behind an IPv4 proxy remains。TUN-origin direct uses one frozen IPv4 default in both states。Auto-DNS steers only Wintun IPv4；auto-route-off M15-compatible IPv6 proxy/absent/direct-detour DNS egress remains；no managed-IPv6、cross-build、WFP、strict/anti-leak、multihomed or live-migration claim | ADR-0036、M16 research、SPEC/TEST-0017、M16-T01～T07 |
+| DEC-044 | accepted in M16-T01；Windows TUN IPv6/origin amended by owner | Client schema-v2 outbound is a closed Direct/Shadowsocks sum；missing type remains Shadowsocks，direct has no endpoint/credentials and is a singleton terminal plan usable by static/route/final/selector/DNS detour but never a chain hop；one private dispatcher accepts closed SOCKS/TUN/DNS request origin plus selected plan/original target。Callers stay kind-agnostic/socket-free；TUN-origin direct IPv6 fails pre-socket for both auto-route states，SOCKS origin using the same tag remains，and selected failure never falls back | ADR-0035、SPEC/TEST-0017、M16-T01～T07 |
+| DEC-045 | accepted in M16-T01；single-VM and IPv4 scope amended by owner | Opt-in compatible Windows auto-route owns bounded IPv4 include-minus-exclude split capture rows；only while auto-route is active，fixed physical first hops must resolve to IPv4，SOCKS direct/proxy/DNS IPv4 sockets are pinned and logical IPv6 DNS behind an IPv4 proxy remains。TUN-origin direct uses one frozen IPv4 default in both states。Auto-DNS steers only Wintun IPv4；auto-route-off M15-compatible IPv6 proxy/absent/direct-detour DNS egress remains；no managed-IPv6、cross-build、WFP、strict/anti-leak、multihomed or live-migration claim | ADR-0036、M16 research、SPEC/TEST-0017、M16-T01～T07 |
 
 ## 风险登记
 
@@ -1493,3 +1495,4 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 | 2026-08-10 | M16 combined plan | Combine route-selectable client direct egress with compatible Windows auto-route and Wintun DNS steering in one serial milestone；the initial plan used a dual-build feasibility gate superseded by the next amendment | Existing core plan/client egress/Wintun owner/qualifier are sufficient seams；sing-box/Microsoft comparison corrects `/0`、best-route、DNS and ActiveStore assumptions；the initial dynamic-direct design selected one frozen physical default per family and deferred per-target multihomed fidelity | qualified `7ba6268…`、planning `fcef80d…`；CONTEXT、ADR-0035/0036、SPEC/TEST-0017、M16 research、T01→T07；performance required；plan-only，no product/push/dispatch/release/publication |
 | 2026-08-10 | M16 single-VM evidence amendment | Owner narrows every privileged M16 capability/full-with-100-cycles/hard-kill proof to current VM `Windows 10 MSIX packaging environment` and checkpoint `M15-T04-before-2b0c25b-20260810` | Actual guest product、edition、architecture and full version/build are recorded after restore；one result proves only that asset，not independent Windows 10/11 or cross-build compatibility；hosted jobs remain regression/resource gates；the bound full marker is the sole VM cycles evidence | Markdown-only descendant of planning/control `a9619ef…`；T01 remains the sole frontier；no product/control/push/dispatch/release/publication |
 | 2026-08-11 | M16 IPv4 managed-network amendment / review repair | Narrow only M16-new Windows managed capture、DNS、pinning、change evidence and privileged qualification to IPv4；TUN-origin direct IPv6 fails pre-socket for auto-route on/off，while SOCKS origin using the same tag and auto-route-off M15-compatible IPv6 DNS remain | Restored-VM preflight found one IPv4 default but no usable IPv6 evidence boundary；review required managed first-hop restriction only under auto-route and one closed engine request-origin obligation。Transient host-listener reachability is also preflight，not PASS；existing IPv6 remains | Markdown-only descendants of `a8205c2…`；config evidence maps to existing tables；one local-ledger-bound transient support listener is permitted，but no knob、VM、committed endpoint、helper/harness、public seam、product/control/remote expansion；performance remains required |
+| 2026-08-11 | M16-T01 accept / execute | M16 becomes `executing`；exact candidate `cc26aba…` passes the restored-VM IPv4 capability gate，T01 is done and T02 ready | Exact `/1` capture、fixed/dynamic pinned versus unpinned、DNS UDP/TCP、`768 ms` capture window、hard-kill and cleanup evidence all passed；the frozen formula uses `GetBestInterfaceEx` then constrained `GetBestRoute2` for fixed endpoints and one pre-capture IPv4 default for dynamic direct | Windows 10 Enterprise Evaluation `19044.1288`；probe `58b18f2d…`；interface metric unchanged；single-asset IPv4 evidence only；independent Architect/QA evidence review pending，no remote action |

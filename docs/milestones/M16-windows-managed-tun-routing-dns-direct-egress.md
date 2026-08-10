@@ -1,6 +1,6 @@
 # M16 — Windows managed TUN routing, DNS and direct egress
 
-- **Status:** planned
+- **Status:** executing
 - **Qualified M15 product:** `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9`
 - **Qualified M15 product tree:** `72a3cfb5c881a35b1416cbf9ffea593973cc3570`
 - **Planning baseline:** `fcef80dcc7e62bbca63ffbf7832df369dd418abd`
@@ -99,14 +99,24 @@ required firewall exception blocks T01。An inaccessible/mismatched asset or any
 capability leaves M16 blocked for contract replanning；T02 cannot paper over it with another VM、fakes、new
 knobs、a service or watchdog。M16 makes no independent cross-version Windows qualification claim。
 
+M16-T01 passed this entry gate on candidate `cc26aba03d816dfd29e8e04177a6f70a9d009b37` with probe SHA-256
+`58b18f2d33da8f065f8f572acf252b64d6a503ecc61e59b1cd45843796f5ca90`。The restored guest was Windows
+10 Enterprise Evaluation、`EnterpriseEval`、AMD64、version `10.0.19044.0`、build `19044.1288`，with one
+IPv4 default and zero IPv6 defaults。The exact capture rows were `0.0.0.0/1` and `128.0.0.0/1` with next hop
+`0.0.0.0` and row metric `1`；the interface metric remained unchanged。Fixed binding uses
+`GetBestInterfaceEx(destination)` → validated physical index → interface-constrained `GetBestRoute2` →
+frozen preferred source/route fingerprint，while dynamic direct freezes the one unique pre-capture IPv4
+physical default。The measured underlay rows had prefix length `0` and row metric `0` and agreed on physical
+interface/source/next hop without committing their identities。Pinned/unpinned、DNS、`768 ms` capture window、
+hard-kill and cleanup rows all passed，so T02 is ready；the result remains limited to this exact asset/build。
+
 ## Planning/control isolation
 
 The isolated control-plus-Markdown M16 plan is accepted at
 `a9619ef8269424fd345403de8d3bb033b0d5f9d8`，and its single-VM evidence-scope amendment is accepted at
-`a8205c2bee31283294fdd5ca47349c74b3195cad`。This IPv4 contract amendment is Markdown-only and must be accepted
-as its single-parent descendant before T01 starts。T01 binds the amended exact commit as its base
-and may add only the existing qualifier probe plus Markdown evidence amendments；it does not reopen the
-protected footprint control。
+`a8205c2bee31283294fdd5ca47349c74b3195cad`。The Markdown-only IPv4 contract amendment and review repair are
+accepted at `451edcbe04bc4abe7950f64dd10c1c25c7a692b0`，the exact base bound by T01。T01 added only the
+existing qualifier probe plus Markdown evidence amendments；it did not reopen the protected footprint control。
 
 ## Existing seams and minimum deepening
 
@@ -144,7 +154,7 @@ protected footprint control。
 
 ## Exit criteria
 
-- [ ] T01 restores the exact current VM/checkpoint，records actual product、edition、architecture and full
+- [x] T01 restores the exact current VM/checkpoint，records actual product、edition、architecture and full
       version/build，and freezes route values；pinned/unpinned、DNS、capture interval and hard-kill cleanup all
       pass，or the milestone stops before product work。
 - [ ] `--check-config` remains side-effect-free；old outbounds default to Shadowsocks；direct closed fields、
@@ -184,8 +194,8 @@ protected footprint control。
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M16-T01 | Prove IPv4 Windows host-network capabilities and freeze measured contracts | accepted Markdown-only IPv4 scope amendment atop `a8205c2…` | ready |
-| M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | planned |
+| M16-T01 | Prove IPv4 Windows host-network capabilities and freeze measured contracts | accepted Markdown-only IPv4 scope amendment atop `a8205c2…` | done |
+| M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | ready |
 | M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | planned |
 | M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | planned |
 | M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | planned |
@@ -220,8 +230,8 @@ user authorization and must bind the accepted exact SHA。
 
 ## Blocker / next action
 
-First accept this Markdown-only IPv4 scope amendment atop `a8205c2…`。Then execute M16-T01 only：bind that
-exact amended base，restore `Windows 10 MSIX packaging environment` from
-`M15-T04-before-2b0c25b-20260810`，record the actual guest identity，extend the existing qualifier with the
-bounded IPv4 capability mode，and freeze the route/metric/hard-kill results in ADR-0036、SPEC-0017 and TEST-0017。
-Do not begin product implementation until every entry capability row passes。
+The M16-T01 capability gate is complete and its frozen IPv4 route、metric、binding、DNS、capture-window and
+hard-kill results are recorded。M16-T02 is the next serial frontier and may compile the approved closed direct/
+managed-TUN configuration from the accepted T01 descendant。Independent T01 Architect/QA evidence review is
+still pending；it must not be reported as passed until completed。No push、dispatch or product work beyond T02
+is authorized by this status transition。

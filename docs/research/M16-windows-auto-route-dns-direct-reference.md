@@ -225,6 +225,26 @@ socket 前失败。Auto-route off 时，managed physical-first-hop restriction �
 DNS physical egress，不新增 managed-network state query/mutation。SOCKS origin 即使在 mixed TUN graph
 中也不因 process-wide TUN presence 被拒绝。
 
+### 3.2 M16-T01 实测冻结值
+
+Exact restored-VM qualification on candidate `cc26aba03d816dfd29e8e04177a6f70a9d009b37`（probe SHA-256
+`58b18f2d33da8f065f8f572acf252b64d6a503ecc61e59b1cd45843796f5ca90`）把规划公式收敛为：
+
+- fixed endpoint：`GetBestInterfaceEx(destination)` → validate physical index → interface-constrained
+  `GetBestRoute2` → freeze preferred source/route fingerprint；
+- dynamic direct：freeze the one unique pre-capture IPv4 physical default；
+- capture：exact `0.0.0.0/1` + `128.0.0.0/1`，unspecified next hop `0.0.0.0`，row metric `1`；
+- interface metric：`unchanged`，没有 lease；
+- measured fixed/dynamic underlay：prefix length `0`、row metric `0`，且使用同一 physical interface、
+  source 与 next hop；raw identity 不进入仓库。
+
+Qualification guest was Windows 10 Enterprise Evaluation、`EnterpriseEval`、AMD64、version
+`10.0.19044.0`、build `19044.1288`，with one IPv4 default and zero IPv6 defaults。The capture window was
+`768 ms`。Endpoint-filtered PktMon deltas for fixed TCP、dynamic TCP、fixed UDP and dynamic UDP were
+respectively `5/0`、`5/0`、`1/0`、`1/0`（unpinned/pinned）；the listener completed TCP/UDP `3/3` with no
+fault and was absent afterward。This freezes the formula only for the approved single-asset IPv4 contract；
+it does not add managed IPv6、per-target multihomed fidelity or a Windows cross-build claim。
+
 ## 4. 不复制 sing-box 的项目
 
 - 不复制 Windows `/0 + interface metric 0 + route metric 0`；Ferrum2 使用自己的 split `/1` 与实测

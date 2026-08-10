@@ -1,7 +1,7 @@
 ---
 id: M16-T02
 milestone: M16
-status: planned
+status: ready
 depends_on:
   - M16-T01
 owns:
