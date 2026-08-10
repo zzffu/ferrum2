@@ -144,8 +144,8 @@ owner-provided design input，不是仓库证据。上游事实与纠正记录�
 | M15-T02 | Prove M14 classification-eligible UDP commit ordering and selector re-read | M15-T01 | done |
 | M15-T03 | Prove config → Wintun/MTU/address/session/DAD → bounded stack → rollback | M15-T02 | done |
 | M15-T04 | Compose IPv4/IPv6 TUN TCP through the existing policy/DNS/egress/relay seams | M15-T03 | done |
-| M15-T05 | Compose IPv4/IPv6 TUN UDP mapping and DNS hijack through existing association seams | M15-T04 | active |
-| M15-T06 | Close failure、lifecycle、architecture、privileged and performance evidence | M15-T05 | planned |
+| M15-T05 | Compose IPv4/IPv6 TUN UDP mapping and DNS hijack through existing association seams | M15-T04 | done |
+| M15-T06 | Close failure、lifecycle、architecture、privileged and performance evidence | M15-T05 | active |
 | M15-T07 | Qualify and close one exact M15 integration SHA | M15-T06 | planned |
 
 ```text
@@ -179,11 +179,11 @@ supplied exact DLL and does not redistribute it。
 
 ## Blocker / next action
 
-No current blocker。Exact T04 `a7d25a21009a7d2ced6e2c68f8f8b957e389300b` passed local gates、a fresh
-isolated-VM `tcp=8/8` run with zero residue、post-VM Architect/QA review and hosted run
-[`31344321422/1`](https://github.com/zzffu/ferrum2/actions/runs/31344321422)。T05 is active on this serial
-base。For remaining VM-backed tickets，the Engineer obtains an exact-candidate VM PASS before final
-Architect/QA review；failed candidates are repaired and retested without spending intermediate review
-rounds。Required non-force pushes and the exact performance dispatch remain authorized；rerun、force-push、
-PR、tag、package、release and publication remain unauthorized。Redistribution remains blocked pending the
-responsible license decision。
+No current blocker。Exact T05 `da38170947b8c708d230d14970c4a63f802accf3` passed local gates and hosted
+run [`31360570556/1`](https://github.com/zzffu/ferrum2/actions/runs/31360570556)，including the exact
+`profile=transport functional=16/16 cleanup=PASS` marker；its Windows-equivalent parent also passed a fresh
+isolated-VM `16/16` run with zero residue before final review。T06 is active on this serial base and owns the
+integrated full/lifecycle/performance evidence only；product paths remain read-only unless a concrete defect
+requires a narrow amendment。Required non-force pushes and the exact performance dispatch remain authorized；
+rerun、force-push、PR、tag、package、release and publication remain unauthorized。Redistribution remains
+blocked pending the responsible license decision。

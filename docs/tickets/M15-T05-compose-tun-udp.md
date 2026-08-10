@@ -1,7 +1,7 @@
 ---
 id: M15-T05
 milestone: M15
-status: active
+status: done
 depends_on:
   - M15-T04
 owns:
@@ -28,24 +28,24 @@ once so SOCKS、DNS and TUN do not assemble three security-sensitive mutation lo
 
 ## Acceptance
 
-- [ ] Mapping admission、generation、expiry、no-live-eviction、aggregate bytes、queue/drop and accepted-
+- [x] Mapping admission、generation、expiry、no-live-eviction、aggregate bytes、queue/drop and accepted-
       activity ordering match SPEC-0016 for both families and MTU boundaries。
-- [ ] An absent tuple first yields a provisional candidate with no mapping；the client caller returns one
+- [x] An absent tuple first yields a provisional candidate with no mapping；the client caller returns one
       opaque terminal token/payload bound or drop，and only the owner thread rechecks generation/capacity and
       commits before exact-once first-datagram release。Route/hijack/reject mode and plan remain client-owned；
       `ferrum2-tun` cannot inspect them。Stale/duplicate decisions fail closed。
-- [ ] First valid route candidate creates one fixed owned plan/association；later datagrams do not re-enter
+- [x] First valid route candidate creates one fixed owned plan/association；later datagrams do not re-enter
       ordinary policy or selector，while expiry permits current selection。
-- [ ] Selector A → over-limit/queue-full no-commit → switch B → valid candidate uses B；after commitment，
+- [x] Selector A → over-limit/queue-full no-commit → switch B → valid candidate uses B；after commitment，
       switch C does not affect the live mapping。Rejected candidates create no terminal/activity/SS owner。
-- [ ] `ClientUdpAssociation` owns one shared reserve/encode/send and receive/authenticate/pop transition；
+- [x] `ClientUdpAssociation` owns one shared reserve/encode/send and receive/authenticate/pop transition；
       wrong target/session/generation responses and invalid inner packets cannot inject or commit state。
-- [ ] DNS hijack calls `DnsProxy::answer` for accepted requests，keeps ordinary mode terminal，drops malformed
+- [x] DNS hijack calls `DnsProxy::answer` for accepted requests，keeps ordinary mode terminal，drops malformed
       requests without fallback and creates no Shadowsocks association。Reject retains only a bounded
       tombstone and creates no network owner。
-- [ ] Saturation and Wintun ring-full drop one complete datagram、do not block the stack thread、do not update
+- [x] Saturation and Wintun ring-full drop one complete datagram、do not block the stack thread、do not update
       accepted idle and recover after capacity/expiry；grace/force reaps all mappings and bytes。
-- [ ] Real IPv4/IPv6 one-hop/chain/selector、DNS、reject、over-limit、binding、expiry and cleanup/rebind rows
+- [x] Real IPv4/IPv6 one-hop/chain/selector、DNS、reject、over-limit、binding、expiry and cleanup/rebind rows
       pass。Hosted `windows-tun-e2e` emits the exact `profile=transport functional=16/16 cleanup=PASS`
       SHA/run/attempt marker；a local controller run is diagnostic only。
 
@@ -66,11 +66,25 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: required non-force push and exact-ref hosted execution are authorized。To avoid repeated review
-  churn，the Engineer first obtains one clean exact-candidate VM PASS；final Architect/QA review starts only
-  after that evidence exists。
+- Commit: `da38170947b8c708d230d14970c4a63f802accf3` / tree
+  `53923f6f22fd8c5b35664ba887ad216a0af94fa5` / parent
+  `352999160be919520dfa8edf3624ae4c9007d08f`。
+- Review: the primary completed the final product and bounded two-file repair review after fresh isolated-VM
+  transport evidence；no blocking finding remained。The post-VM repair only made the existing UDP bridge
+  compile on unsupported targets and changed no Windows behavior。
+- Notes: focused、workspace、MSRV、GNU/musl、Windows-target、strict Clippy、architecture and policy gates
+  passed。Fresh VM candidate `352999160be919520dfa8edf3624ae4c9007d08f` emitted
+  `profile=transport functional=16/16 cleanup=PASS sha=352999160be919520dfa8edf3624ae4c9007d08f run_id=vm run_attempt=3`
+  with zero guest/host residue。
+  Its first hosted run [`31360038841/1`](https://github.com/zzffu/ferrum2/actions/runs/31360038841)
+  independently passed the Windows transport job but exposed one Linux-only `PACKET_QUANTUM` cfg error；the
+  run was not rerun。The exact descendant run
+  [`31360570556/1`](https://github.com/zzffu/ferrum2/actions/runs/31360570556) then passed every required job
+  and emitted `profile=transport functional=16/16 cleanup=PASS sha=da38170947b8c708d230d14970c4a63f802accf3
+  run_id=31360570556 run_attempt=1`；performance correctly skipped。
+  Footprint integrity and ratio passed；numeric `REVIEW_REQUIRED` `+693/+0/+0` was accepted as bounded
+  product/platform evidence in existing files，with the oversized architecture test retained as debt。No
+  force-push、rerun、PR、tag、package、release or publication occurred。
 
 ## Rollback / risk
 
