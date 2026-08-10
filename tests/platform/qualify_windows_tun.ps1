@@ -1,8 +1,9 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("lifecycle", "tcp", "udp")]
+    [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
     [string]$Mode,
-    [string]$WintunZip
+    [string]$WintunZip,
+    [string]$RunToken
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,9 +13,6 @@ if (-not $IsWindows -or [System.Runtime.InteropServices.RuntimeInformation]::OSA
     throw "Windows AMD64 is required"
 }
 
-$workspace = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$zipInput = if ($WintunZip) { $WintunZip } elseif ($env:FERRUM2_WINTUN_ZIP) { $env:FERRUM2_WINTUN_ZIP } else { throw "Wintun ZIP path is required via -WintunZip or FERRUM2_WINTUN_ZIP" }
-$zip = (Resolve-Path -LiteralPath $zipInput).Path
 $expectedZipHash = "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51"
 $expectedDllHash = "E5DA8447DC2C320EDC0FC52FA01885C103DE8C118481F683643CACC3220DAFCE"
 $expectedExports = @(
@@ -25,12 +23,74 @@ $expectedExports = @(
     "WintunStartSession"
 ) | Sort-Object
 
-$work = Join-Path ([System.IO.Path]::GetTempPath()) ("ferrum2-m15-tun-" + [Guid]::NewGuid().ToString("N"))
+$workspace = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$runIdentity = if ($RunToken) { $RunToken } elseif ($Mode -eq "cleanup") { throw "cleanup requires RunToken" } else { "local-$PID" }
+if ($runIdentity -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,47}$') { throw "RunToken is invalid" }
+$work = Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$runIdentity"
 $binary = Join-Path $workspace "target\debug\ferrum2-client.exe"
+$serverBinary = Join-Path $workspace "target\debug\ferrum2-server.exe"
 $siblingDll = Join-Path (Split-Path -Parent $binary) "wintun.dll"
-$adapterName = "Ferrum2-M15-$PID"
+$adapterName = "Ferrum2-M15-$runIdentity"
 $config = Join-Path $work "client.toml"
 $failureConfig = Join-Path $work "client-failure.toml"
+$addressJournal = Join-Path $work "owned-target-addresses.txt"
+$dllJournal = Join-Path $work "owned-wintun-dll.txt"
+
+function Get-ExactRunProcesses([string]$WorkPath) {
+    $executables = @($binary, $serverBinary)
+    return @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        $_.ExecutablePath -and
+        $executables -contains $_.ExecutablePath -and
+        $_.CommandLine -and
+        $_.CommandLine.IndexOf($WorkPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+}
+
+if ($Mode -eq "cleanup") {
+    foreach ($process in @(Get-ExactRunProcesses $work)) {
+        Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        $processes = @(Get-ExactRunProcesses $work)
+        $adapter = Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue
+        if ($processes.Count -eq 0 -and -not $adapter) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    $allowedAddresses = @(
+        "192.0.2.201", "2001:db8::202", "192.0.2.203", "2001:db8::204",
+        "192.0.2.205", "2001:db8::206", "192.0.2.207", "2001:db8::208", "192.0.2.250"
+    )
+    $journaledAddresses = if (Test-Path -LiteralPath $addressJournal) { @(Get-Content -LiteralPath $addressJournal) } else { @() }
+    foreach ($address in $journaledAddresses) {
+        if ($allowedAddresses -notcontains $address) { throw "target address journal is invalid" }
+        $prefix = if ($address.Contains(":")) { "$address/128" } else { "$address/32" }
+        Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+        Get-NetIPAddress -InterfaceIndex 1 -IPAddress $address -ErrorAction SilentlyContinue |
+            Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $dllJournal) {
+        if (Test-Path -LiteralPath $siblingDll) {
+            if ((Get-FileHash -LiteralPath $siblingDll -Algorithm SHA256).Hash -ne $expectedDllHash) { throw "owned sibling DLL hash mismatch" }
+            Remove-Item -LiteralPath $siblingDll -Force
+        }
+    }
+    if ((Get-ExactRunProcesses $work).Count -ne 0) { throw "controller process residue" }
+    if (Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue) { throw "controller adapter residue" }
+    foreach ($address in $journaledAddresses) {
+        $prefix = if ($address.Contains(":")) { "$address/128" } else { "$address/32" }
+        if (Get-NetIPAddress -InterfaceIndex 1 -IPAddress $address -ErrorAction SilentlyContinue) { throw "controller address residue" }
+        if (Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue) { throw "controller route residue" }
+    }
+    if ((Test-Path -LiteralPath $dllJournal) -and (Test-Path -LiteralPath $siblingDll)) { throw "controller DLL residue" }
+    if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
+    if (Test-Path -LiteralPath $work) { throw "controller temp residue" }
+    return
+}
+
+$zipInput = if ($WintunZip) { $WintunZip } elseif ($env:FERRUM2_WINTUN_ZIP) { $env:FERRUM2_WINTUN_ZIP } else { throw "Wintun ZIP path is required via -WintunZip or FERRUM2_WINTUN_ZIP" }
+$zip = (Resolve-Path -LiteralPath $zipInput).Path
 $ownedRoutes = [System.Collections.Generic.List[object]]::new()
 $activeProcess = $null
 $ownedInterfaceIndex = $null
@@ -51,6 +111,31 @@ $completed = $false
 $primaryError = $null
 $outerCleanupError = $null
 $tcp01Diagnostic = $null
+$cycleRows = 0
+$performanceWitnesses = 0
+$performanceAdapterRxBytes = [uint64]0
+$performanceAdapterTxBytes = [uint64]0
+$performanceAdapterRxPackets = [uint64]0
+$performanceAdapterTxPackets = [uint64]0
+$performanceAdapterRxErrors = [uint64]0
+$performanceAdapterTxErrors = [uint64]0
+$performanceAdapterRxDiscards = [uint64]0
+$performanceAdapterTxDiscards = [uint64]0
+$performanceTunAcceptedDelta = [uint64]0
+$performanceCpuMilliseconds = [uint64]0
+$performanceRssBytes = [uint64]0
+$performanceHandlesPeak = [uint64]0
+$performanceThreadsPeak = [uint64]0
+$performanceUdpSessionsPeak = [uint64]0
+$performanceUdpBufferedBytesPeak = [uint64]0
+$performanceControllerInflightPeak = [uint64]0
+$performanceCpuBaseline = [double]0
+$performanceTunAcceptedBaseline = [uint64]0
+$performanceTrafficBaseline = $null
+$performanceFieldsCollected = $false
+$performanceAdapterChurn = 0
+$performanceGraceDrain = $false
+$performanceForceDrain = $false
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -217,6 +302,76 @@ function Get-CounterValue([string]$Metrics, [string]$Name) {
     return [uint64]$match.Groups[1].Value
 }
 
+function Get-ClientGaugeValue([string]$Metrics, [string]$Name) {
+    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))\{role=`"client`"\} ([0-9]+)$")
+    Assert-True $match.Success "missing client gauge: $Name"
+    return [uint64]$match.Groups[1].Value
+}
+
+function Get-AdapterTraffic([string]$Name) {
+    $statistics = Get-NetAdapterStatistics -Name $Name -ErrorAction Stop
+    return @{
+        ReceivedBytes = [uint64]$statistics.ReceivedBytes
+        SentBytes = [uint64]$statistics.SentBytes
+        ReceivedUnicastPackets = [uint64]$statistics.ReceivedUnicastPackets
+        SentUnicastPackets = [uint64]$statistics.SentUnicastPackets
+        ReceivedPacketErrors = [uint64]$statistics.ReceivedPacketErrors
+        OutboundPacketErrors = [uint64]$statistics.OutboundPacketErrors
+        ReceivedDiscardedPackets = [uint64]$statistics.ReceivedDiscardedPackets
+        OutboundDiscardedPackets = [uint64]$statistics.OutboundDiscardedPackets
+    }
+}
+
+function Update-PerformancePeaks([System.Diagnostics.Process]$Process, [int]$MetricsPort) {
+    $Process.Refresh()
+    $script:performanceRssBytes = [Math]::Max($script:performanceRssBytes, [uint64]$Process.WorkingSet64)
+    $script:performanceHandlesPeak = [Math]::Max($script:performanceHandlesPeak, [uint64]$Process.HandleCount)
+    $script:performanceThreadsPeak = [Math]::Max($script:performanceThreadsPeak, [uint64]$Process.Threads.Count)
+    $metrics = Get-Metrics $MetricsPort
+    $script:performanceUdpSessionsPeak = [Math]::Max(
+        $script:performanceUdpSessionsPeak,
+        (Get-ClientGaugeValue $metrics "ferrum2_udp_sessions_active")
+    )
+    $script:performanceUdpBufferedBytesPeak = [Math]::Max(
+        $script:performanceUdpBufferedBytesPeak,
+        (Get-ClientGaugeValue $metrics "ferrum2_udp_buffered_bytes")
+    )
+}
+
+function Start-PerformanceSample([System.Diagnostics.Process]$Process, [int]$MetricsPort) {
+    $Process.Refresh()
+    $script:performanceCpuBaseline = $Process.TotalProcessorTime.TotalMilliseconds
+    $metrics = Get-Metrics $MetricsPort
+    $script:performanceTunAcceptedBaseline = Get-CounterValue $metrics "ferrum2_tun_packets_accepted"
+    $script:performanceTrafficBaseline = Get-AdapterTraffic $script:adapterName
+    $script:performanceFieldsCollected = $true
+    Update-PerformancePeaks $Process $MetricsPort
+}
+
+function Complete-PerformanceSample([System.Diagnostics.Process]$Process, [int]$MetricsPort) {
+    Update-PerformancePeaks $Process $MetricsPort
+    $Process.Refresh()
+    $cpu = $Process.TotalProcessorTime.TotalMilliseconds
+    Assert-True ($cpu -ge $script:performanceCpuBaseline) "candidate CPU counter moved backwards"
+    $script:performanceCpuMilliseconds += [uint64][Math]::Ceiling($cpu - $script:performanceCpuBaseline)
+    $metrics = Get-Metrics $MetricsPort
+    $accepted = Get-CounterValue $metrics "ferrum2_tun_packets_accepted"
+    Assert-True ($accepted -ge $script:performanceTunAcceptedBaseline) "TUN accepted counter moved backwards"
+    $script:performanceTunAcceptedDelta += $accepted - $script:performanceTunAcceptedBaseline
+    $after = Get-AdapterTraffic $script:adapterName
+    foreach ($property in $script:performanceTrafficBaseline.Keys) {
+        Assert-True ($after[$property] -ge $script:performanceTrafficBaseline[$property]) "adapter counter moved backwards: $property"
+    }
+    $script:performanceAdapterRxBytes += $after.ReceivedBytes - $script:performanceTrafficBaseline.ReceivedBytes
+    $script:performanceAdapterTxBytes += $after.SentBytes - $script:performanceTrafficBaseline.SentBytes
+    $script:performanceAdapterRxPackets += $after.ReceivedUnicastPackets - $script:performanceTrafficBaseline.ReceivedUnicastPackets
+    $script:performanceAdapterTxPackets += $after.SentUnicastPackets - $script:performanceTrafficBaseline.SentUnicastPackets
+    $script:performanceAdapterRxErrors += $after.ReceivedPacketErrors - $script:performanceTrafficBaseline.ReceivedPacketErrors
+    $script:performanceAdapterTxErrors += $after.OutboundPacketErrors - $script:performanceTrafficBaseline.OutboundPacketErrors
+    $script:performanceAdapterRxDiscards += $after.ReceivedDiscardedPackets - $script:performanceTrafficBaseline.ReceivedDiscardedPackets
+    $script:performanceAdapterTxDiscards += $after.OutboundDiscardedPackets - $script:performanceTrafficBaseline.OutboundDiscardedPackets
+}
+
 function Assert-InterfaceGone([string]$Name, [Nullable[int]]$InterfaceIndex) {
     Assert-True (-not (Get-NetAdapter -Name $Name -IncludeHidden -ErrorAction SilentlyContinue)) "adapter leaked"
     Assert-True (@(Get-NetIPAddress -InterfaceAlias $Name -ErrorAction SilentlyContinue).Count -eq 0) "address rows leaked"
@@ -276,6 +431,7 @@ function Add-TargetAddress([string]$Address, [bool]$SkipAsSource = $true) {
     $prefix = if ($Address.Contains(":")) { 128 } else { 32 }
     $prefixText = "$Address/$prefix"
     Assert-True (@(Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefixText -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "target route baseline not absent"
+    Add-Content -LiteralPath $script:addressJournal -Value $Address -Encoding utf8
     $row = New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $SkipAsSource -PolicyStore ActiveStore
     $script:ownedAddresses.Add($row)
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -979,7 +1135,39 @@ function Invoke-UdpEchoRow(
     } finally { $client.Dispose() }
 }
 
+function Invoke-AdapterCycles([string]$Executable, [string]$Configuration) {
+    for ($cycle = 0; $cycle -lt 100; $cycle++) {
+        Assert-True (-not $script:activeProcess) "cycle candidate state was not empty"
+        $candidateBaseline = @(Get-ExactRunProcesses $script:work | Where-Object { $_.ExecutablePath -eq $script:binary })
+        Assert-True ($candidateBaseline.Count -eq 0) "cycle candidate baseline not absent"
+        Assert-InterfaceGone $script:adapterName $null
+        $script:activeProcess = Start-Candidate $Executable $Configuration
+        $adapter = Wait-AdapterReady $script:adapterName
+        $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+        $cycleRoute = Add-TunRoute $script:ownedInterfaceIndex "192.0.2.200/32"
+        $cycleRouteReadback = @(Get-NetRoute -InterfaceIndex $script:ownedInterfaceIndex -DestinationPrefix "192.0.2.200/32" -PolicyStore ActiveStore -ErrorAction Stop)
+        Assert-True ($cycleRouteReadback.Count -eq 1) "cycle route readback mismatch"
+        Remove-NetRoute -InputObject $cycleRoute -Confirm:$false -ErrorAction Stop
+        Assert-True $script:ownedRoutes.Remove($cycleRoute) "cycle route ownership mismatch"
+        Assert-True (@(Get-NetRoute -InterfaceIndex $script:ownedInterfaceIndex -DestinationPrefix "192.0.2.200/32" -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "cycle route leaked"
+        $cycleProcess = $script:activeProcess
+        Stop-Candidate $cycleProcess
+        $cycleProcess.Refresh()
+        Assert-True $cycleProcess.HasExited "cycle candidate process leaked"
+        $script:activeProcess = $null
+        $candidateAfterStop = @(Get-ExactRunProcesses $script:work | Where-Object { $_.ExecutablePath -eq $script:binary })
+        Assert-True ($candidateAfterStop.Count -eq 0) "cycle candidate remained after stop"
+        Wait-AdapterAbsent $script:adapterName
+        Assert-InterfaceGone $script:adapterName $script:ownedInterfaceIndex
+        $script:cycleRows++
+    }
+    Assert-True ($script:cycleRows -eq 100) "adapter cycle count mismatch"
+}
+
 try {
+    Assert-True (-not (Test-Path -LiteralPath $work)) "run work baseline not absent"
+    Assert-True ((Get-ExactRunProcesses $work).Count -eq 0) "run process baseline not absent"
+    Assert-True (-not (Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue)) "run adapter baseline not absent"
     Assert-True ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq $expectedZipHash) "ZIP hash mismatch"
     New-Item -ItemType Directory -Path $work | Out-Null
     Expand-Archive -LiteralPath $zip -DestinationPath $work
@@ -998,12 +1186,12 @@ try {
 
     Push-Location $workspace
     try {
-        if ($Mode -ne "lifecycle") { & cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --locked }
+        if ($Mode -in @("tcp", "udp", "full", "performance")) { & cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --locked }
         else { & cargo +1.97.1 build -p ferrum2-client --locked }
         if ($LASTEXITCODE -ne 0) { throw "candidate build failed" }
     }
     finally { Pop-Location }
-    if ($Mode -eq "lifecycle") {
+    if ($Mode -in @("lifecycle", "full")) {
     $metricsPort = Get-FreeTcpPort
     @"
 schema_version = 2
@@ -1035,6 +1223,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     Assert-InterfaceGone $adapterName $null
     $foundation++
 
+    Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
     Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
     $createdSiblingDll = $true
     $activeProcess = Start-Candidate $binary $config
@@ -1168,7 +1357,40 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     $foundation++
 
     Assert-True ($foundation -eq 4) "foundation row count mismatch"
-    } else {
+    }
+    if ($Mode -eq "cycles") {
+        $metricsPort = Get-FreeTcpPort
+        @"
+schema_version = 2
+[tun]
+tag = "tun-in"
+adapter_name = "$adapterName"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+outbound = "proxy"
+ready_timeout_ms = 15000
+[[outbounds]]
+tag = "proxy"
+server = "192.0.2.10:8388"
+[runtime]
+shutdown_grace_ms = 1000
+[metrics]
+listen = "127.0.0.1:$metricsPort"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"@ | Set-Content -LiteralPath $config -Encoding utf8NoBOM
+        Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "sibling DLL baseline not absent"
+        Assert-InterfaceGone $adapterName $null
+        $offlineOutput = @(& $binary --config $config --check-config 2>&1)
+        Assert-True ($LASTEXITCODE -eq 0) "cycle config validation failed"
+        Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "cycle config marker mismatch"
+        Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+        Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
+        $createdSiblingDll = $true
+        Invoke-AdapterCycles $binary $config
+    }
+    if ($Mode -in @("tcp", "udp", "full", "performance")) {
         $serverBinary = Join-Path $workspace "target\debug\ferrum2-server.exe"
         $serverPortA = Get-UniqueTcpPort
         $serverPortB = Get-UniqueTcpPort
@@ -1215,7 +1437,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $tcpResources.Add($gateA)
         $tcpResources.Add($gateB)
         $tcpResources.Add($dnsResponder)
-        if ($Mode -eq "udp") {
+        if ($Mode -in @("udp", "full", "performance")) {
             [void](Add-TargetAddress $udpGateAddress $false)
             $udpGateA = [Ferrum2UdpGate]::new($udpGateAddress, $gatePortA, $serverPortA)
             $udpGateB = [Ferrum2UdpGate]::new($udpGateAddress, $gatePortB, $serverPortB)
@@ -1233,6 +1455,7 @@ ipv6_address = "fd00::2/126"
 ready_timeout_ms = 15000
 max_tcp_flows = 8
 tcp_buffer_bytes = 4096
+ring_capacity = 8388608
 max_udp_mappings = 4
 max_udp_buffered_bytes = 4194304
 [[outbounds]]
@@ -1449,17 +1672,25 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "@ | Set-Content -LiteralPath $config -Encoding utf8NoBOM
 
-        Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "sibling DLL baseline not absent"
+        if ($Mode -eq "full") {
+            Assert-True ((Get-FileHash -LiteralPath $siblingDll -Algorithm SHA256).Hash -eq $expectedDllHash) "full profile sibling DLL drifted"
+        } else {
+            Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "sibling DLL baseline not absent"
+        }
         Assert-InterfaceGone $adapterName $null
         $offlineOutput = @(& $binary --config $config --check-config 2>&1)
         Assert-True ($LASTEXITCODE -eq 0) "TCP config validation failed: $($offlineOutput -join '|')"
         Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "TCP config marker mismatch"
-        Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
-        $createdSiblingDll = $true
+        if ($Mode -ne "full") {
+            Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+            Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
+            $createdSiblingDll = $true
+        }
         $activeProcess = Start-Candidate $binary $config
         $adapter = Wait-AdapterReady $adapterName
         $ownedInterfaceIndex = [int]$adapter.ifIndex
-        [void](Get-Metrics $metricsPort)
+        if ($Mode -eq "performance") { Start-PerformanceSample $activeProcess $metricsPort }
+        else { [void](Get-Metrics $metricsPort) }
         $readyRoutes = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
         $expectedAddressDerivedRoutes = @(
             "IPv4|198.18.0.0/30|0.0.0.0", "IPv4|198.18.0.2/32|0.0.0.0",
@@ -1486,6 +1717,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $tcp01Payload = [Text.Encoding]::ASCII.GetBytes("tcp-01-half-close")
         $tcp01Observation = @{ Diagnostic = "pending" }
         $tcp01Error = $null
+        if ($Mode -eq "performance") {
+            $performanceControllerInflightPeak = [Math]::Max($performanceControllerInflightPeak, [uint64]1)
+        }
         try {
             Invoke-EchoRow $tcp01Target $tcp01Port $ownedInterfaceIndex $gateA $tcp01Payload $tcp01Observation
         } catch { $tcp01Error = $_ }
@@ -1535,6 +1769,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         if ($tcp01Error) { throw $tcp01Error }
         Assert-True ($tcp01Boundary -eq "COMPLETE") "TCP-01 observation incomplete"
         $tcpRows++
+        if ($Mode -eq "performance") {
+            $performanceWitnesses++
+            Update-PerformancePeaks $activeProcess $metricsPort
+        }
         Invoke-EchoRow $targets[1] $ports[1] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-02-two-hop"))
         $tcpRows++
 
@@ -1610,6 +1848,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $tcpResources.Add($stall)
         $gateA.Release($pressureGate)
         Assert-True ($stall.WaitAccepted(5000)) "backpressure target was not opened"
+        if ($Mode -eq "performance") { Complete-PerformanceSample $activeProcess $metricsPort }
         $forcedShutdown = [Diagnostics.Stopwatch]::StartNew()
         Assert-True ([Ferrum2ProcessGroup]::Break([uint32]$activeProcess.Id)) "TCP-08 CTRL_BREAK delivery failed"
         Assert-True (-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)) "TCP-08 exited during grace"
@@ -1619,6 +1858,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-True ($forcedShutdown.ElapsedMilliseconds -ge 900) "TCP-08 force preceded the grace deadline"
         $forcedExit = [Ferrum2ProcessGroup]::ExitCode([uint32]$activeProcess.Id)
         Assert-True ($forcedExit -eq 0) "TCP-08 forced shutdown was not clean: exit=$forcedExit"
+        if ($Mode -eq "performance") { $performanceForceDrain = $true }
         [Ferrum2ProcessGroup]::Close([uint32]$activeProcess.Id)
         $activeProcess = $null
         $pressure.Client.Dispose()
@@ -1628,6 +1868,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $activeProcess = Start-Candidate $binary $config
         $adapter = Wait-AdapterReady $adapterName
         $ownedInterfaceIndex = [int]$adapter.ifIndex
+        if ($Mode -eq "performance") {
+            $performanceAdapterChurn++
+            Start-PerformanceSample $activeProcess $metricsPort
+        }
         if ($Mode -eq "tcp") {
             Stop-Candidate $activeProcess
             $activeProcess = $null
@@ -1642,14 +1886,21 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $tcpRows++
         Assert-True ($tcpRows -eq 8) "TCP row count mismatch"
 
-        if ($Mode -eq "udp") {
+        if ($Mode -in @("udp", "full", "performance")) {
             foreach ($targetIndex in @(4, 5, 6)) {
                 [void](Add-TargetAddress $targets[$targetIndex])
             }
 
             # UDP-01 IPv4 one-hop route and authenticated response binding.
+            if ($Mode -eq "performance") {
+                $performanceControllerInflightPeak = [Math]::Max($performanceControllerInflightPeak, [uint64]1)
+            }
             Invoke-UdpEchoRow $targets[0] $ports[0] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes("udp-01-one-hop"))
             $udpRows++
+            if ($Mode -eq "performance") {
+                $performanceWitnesses++
+                Update-PerformancePeaks $activeProcess $metricsPort
+            }
 
             # UDP-02 IPv6 fixed two-hop chain.
             $beforeGateA = $udpGateA.Requests
@@ -1783,18 +2034,36 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             $udpRows++
             Assert-True ($udpRows -eq 8) "UDP row count mismatch"
 
+            if ($Mode -eq "performance") { Complete-PerformanceSample $activeProcess $metricsPort }
             Stop-Candidate $activeProcess
+            if ($Mode -eq "performance") { $performanceGraceDrain = $true }
             $activeProcess = $null
             Wait-AdapterAbsent $adapterName
             Assert-InterfaceGone $adapterName $ownedInterfaceIndex
             $activeProcess = Start-Candidate $binary $config
             $adapter = Wait-AdapterReady $adapterName
             $ownedInterfaceIndex = [int]$adapter.ifIndex
+            if ($Mode -eq "performance") { $performanceAdapterChurn++ }
             Stop-Candidate $activeProcess
             $activeProcess = $null
             Wait-AdapterAbsent $adapterName
             Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+            if ($Mode -eq "performance") {
+                Assert-True $performanceFieldsCollected "performance fields were not collected"
+                Assert-True ($performanceWitnesses -eq 2) "performance witness count mismatch"
+                Assert-True ($performanceAdapterRxBytes -gt 0 -and $performanceAdapterTxBytes -gt 0) "adapter byte witnesses missing"
+                Assert-True ($performanceAdapterRxPackets -gt 0 -and $performanceAdapterTxPackets -gt 0) "adapter packet witnesses missing"
+                Assert-True ($performanceTunAcceptedDelta -gt 0) "TUN accepted witness missing"
+                Assert-True ($performanceRssBytes -gt 0 -and $performanceHandlesPeak -gt 0 -and $performanceThreadsPeak -gt 0) "process resource sample missing"
+                Assert-True ($performanceControllerInflightPeak -gt 0) "controller inflight sample missing"
+                Assert-True ($performanceAdapterChurn -ge 2) "adapter churn witness missing"
+                Assert-True ($performanceGraceDrain -and $performanceForceDrain) "grace/force drain witness missing"
+            }
         }
+    }
+    if ($Mode -eq "full") {
+        Assert-True ($foundation -eq 4 -and $tcpRows -eq 8 -and $udpRows -eq 8) "full profile prerequisite count mismatch"
+        Invoke-AdapterCycles $binary $config
     }
     $completed = $true
 }
@@ -1871,6 +2140,13 @@ if ($completed) {
         Write-Output "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
     } elseif ($Mode -eq "tcp") {
         Write-Output "m15_windows_tun_e2e status=PASS profile=tcp tcp=8/8 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+    } elseif ($Mode -eq "cycles") {
+        Write-Output "m15_windows_tun_cycles status=PASS cycles=100/100 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+    } elseif ($Mode -eq "performance") {
+        Write-Output "m15_windows_tun_performance_resource adapter_rx_bytes=$performanceAdapterRxBytes adapter_tx_bytes=$performanceAdapterTxBytes adapter_rx_packets=$performanceAdapterRxPackets adapter_tx_packets=$performanceAdapterTxPackets adapter_rx_errors=$performanceAdapterRxErrors adapter_tx_errors=$performanceAdapterTxErrors adapter_rx_discards=$performanceAdapterRxDiscards adapter_tx_discards=$performanceAdapterTxDiscards tun_accepted_delta=$performanceTunAcceptedDelta cpu_ms_delta=$performanceCpuMilliseconds rss_bytes=$performanceRssBytes handles_peak=$performanceHandlesPeak threads_peak=$performanceThreadsPeak udp_sessions_peak=$performanceUdpSessionsPeak udp_buffered_bytes_peak=$performanceUdpBufferedBytesPeak controller_inflight_peak=$performanceControllerInflightPeak queues=bounded bounds_ring_bytes=8388608 bounds_tcp_flows=8 bounds_tcp_buffer_bytes=4096 bounds_udp_mappings=4 bounds_udp_buffered_bytes=4194304 adapter_churn=$performanceAdapterChurn grace_drain=PASS force_drain=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+        Write-Output "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+    } elseif ($Mode -eq "full") {
+        Write-Output "m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
     } else {
         Write-Output "m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
     }

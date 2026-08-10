@@ -962,15 +962,18 @@ fn tun_dependency_edges_and_unsafe_exception_are_exact() {
         "          - windows-tun-full\n",
         "$dispatchTarget = if ($env:GITHUB_EVENT_NAME -eq \"workflow_dispatch\") {",
         "if ([string]::IsNullOrWhiteSpace($env:DISPATCH_TARGET)) { throw \"dispatch target missing\" }",
-        "\"foundation\" {\n              $mode = \"lifecycle\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
-        "\"performance\" {\n              $mode = \"lifecycle\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
-        "\"windows-tun-tcp\" {\n              $mode = \"tcp\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=tcp tcp=8/8 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
-        "\"windows-tun-transport\" {\n              $mode = \"udp\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
-        "\"windows-tun-full\" {\n              $mode = \"full\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "\"foundation\" {\n              if ($env:GITHUB_EVENT_NAME -eq \"workflow_dispatch\") { throw \"dispatch target invalid\" }\n              $mode = \"lifecycle\"\n              $closedProfile = \"foundation\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "\"performance\" {\n              $mode = \"lifecycle\"\n              $closedProfile = \"foundation\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "\"windows-tun-tcp\" {\n              $mode = \"tcp\"\n              $closedProfile = \"tcp\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=tcp tcp=8/8 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "\"windows-tun-transport\" {\n              $mode = \"udp\"\n              $closedProfile = \"transport\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
+        "\"windows-tun-full\" {\n              $mode = \"full\"\n              $closedProfile = \"full\"\n              $expectedMarker = \"m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT\"\n            }",
         "default { throw \"dispatch target invalid\" }",
-        "$output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode $mode",
+        "$output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode $mode -RunToken $env:FERRUM2_TUN_RUN_TOKEN",
         "$markers = @($output | Where-Object { $_ -like \"m15_windows_tun_e2e status=PASS *\" })",
         "$markers.Count -ne 1 -or $markers[0] -ne $expectedMarker",
+        "    outputs:\n      profile: ${{ steps.tun-profile.outputs.profile }}\n",
+        "        id: tun-profile\n",
+        "\"profile=$closedProfile\" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append",
     ];
     let has_selector_contract = |source: &str| {
         selector_contract
@@ -985,6 +988,56 @@ fn tun_dependency_edges_and_unsafe_exception_are_exact() {
             "hosted selector mutation survived: {required}"
         );
     }
+    let windows_e2e = workflow
+        .split_once("\n  windows-tun-e2e:\n")
+        .and_then(|(_, tail)| tail.split_once("\n  windows-tun-performance:\n"))
+        .map(|(job, _)| job)
+        .expect("Windows TUN E2E job");
+    let has_independent_reap = |job: &str, main: &str, cleanup: &str, token: &str| {
+        job.find(main)
+            .zip(job.find(cleanup))
+            .is_some_and(|(main, cleanup)| main < cleanup)
+            && job.contains("        if: ${{ always() }}\n")
+            && job.matches(token).count() == 2
+            && job.contains("-Mode cleanup -RunToken $env:FERRUM2_TUN_RUN_TOKEN")
+            && job.contains("if ($LASTEXITCODE -ne 0) { throw \"controller cleanup failed\" }")
+            && !job.contains("Ferrum2-M15-*")
+            && !job.contains("ferrum2-m15-tun-*")
+            && !job.contains("Get-Process -Name ferrum2-client")
+    };
+    let main_step =
+        "      - name: Qualify privileged Wintun selected profile with always-run cleanup\n";
+    let cleanup_step = "      - name: Reap and assert controller-owned Windows TUN residue\n";
+    assert!(
+        has_independent_reap(
+            windows_e2e,
+            main_step,
+            cleanup_step,
+            "FERRUM2_TUN_RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-e2e",
+        ),
+        "Windows TUN E2E needs a later always-run owned-residue assertion"
+    );
+    for mutation in [
+        windows_e2e.replace("        if: ${{ always() }}\n", ""),
+        windows_e2e.replace(
+            "-Mode cleanup -RunToken $env:FERRUM2_TUN_RUN_TOKEN",
+            "-Mode cleanup",
+        ),
+        windows_e2e.replace(
+            "FERRUM2_TUN_RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-e2e",
+            "FERRUM2_TUN_RUN_TOKEN: shared",
+        ),
+    ] {
+        assert!(
+            !has_independent_reap(
+                &mutation,
+                main_step,
+                cleanup_step,
+                "FERRUM2_TUN_RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-e2e",
+            ),
+            "Windows TUN timeout/cancel cleanup mutation survived"
+        );
+    }
     let qualification_delimiter = "\n  qualification:\n";
     assert_eq!(workflow.matches(qualification_delimiter).count(), 1);
     let qualification = workflow
@@ -995,7 +1048,16 @@ fn tun_dependency_edges_and_unsafe_exception_are_exact() {
         "    if: ${{ always() }}\n",
         "      - windows-tun-e2e\n",
         "          WINDOWS_TUN_RESULT: ${{ needs['windows-tun-e2e'].result }}\n",
+        "          WINDOWS_TUN_PROFILE: ${{ needs['windows-tun-e2e'].outputs.profile }}\n",
+        "          DISPATCH_TARGET: ${{ inputs.dispatch_target }}\n",
         "          test \"$WINDOWS_TUN_RESULT\" = \"success\"\n",
+        "              performance) expected_windows_tun_profile=foundation ;;\n",
+        "              windows-tun-tcp) expected_windows_tun_profile=tcp ;;\n",
+        "              windows-tun-transport) expected_windows_tun_profile=transport ;;\n",
+        "              windows-tun-full) expected_windows_tun_profile=full ;;\n",
+        "            expected_windows_tun_profile=foundation\n",
+        "          test \"$WINDOWS_TUN_PROFILE\" = \"$expected_windows_tun_profile\"\n",
+        "m15_windows_tun_qualification status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS",
     ];
     let has_qualification_contract = |source: &str| {
         qualification_contract
@@ -1025,6 +1087,15 @@ fn tun_dependency_edges_and_unsafe_exception_are_exact() {
         "Get-AuthenticodeSignature",
         "Remove-NetRoute",
         "Wait-AdapterAbsent",
+        "if ($Mode -eq \"cleanup\")",
+        "ferrum2-m15-tun-$runIdentity",
+        "Ferrum2-M15-$runIdentity",
+        "Get-ExactRunProcesses $work",
+        "$executables -contains $_.ExecutablePath",
+        "$_.CommandLine.IndexOf($WorkPath, [StringComparison]::OrdinalIgnoreCase)",
+        "$addressJournal",
+        "$dllJournal",
+        "run work baseline not absent",
     ] {
         assert!(
             controller.contains(required),
@@ -2614,6 +2685,70 @@ fn performance_is_manual_and_decoupled_from_qualification() {
             "workflow must not contain {forbidden}"
         );
     }
+
+    let windows_contract = [
+        "  windows-tun-performance:\n    name: windows-tun-performance\n",
+        "    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dispatch_target == 'performance' }}\n",
+        "    runs-on: windows-2022\n",
+        "https://www.wintun.net/builds/wintun-0.14.1.zip",
+        "tests/platform/qualify_windows_tun.ps1 -Mode performance -RunToken $env:FERRUM2_TUN_RUN_TOKEN",
+        "$resourcePattern = '^m15_windows_tun_performance_resource adapter_rx_bytes=[0-9]+ adapter_tx_bytes=[0-9]+ adapter_rx_packets=[0-9]+ adapter_tx_packets=[0-9]+",
+        "queues=bounded bounds_ring_bytes=8388608 bounds_tcp_flows=8 bounds_tcp_buffer_bytes=4096 bounds_udp_mappings=4 bounds_udp_buffered_bytes=4194304",
+        "adapter_churn=[0-9]+ grace_drain=PASS force_drain=PASS",
+        "if ($resources[0] -notmatch $resourcePattern) { throw \"Wintun performance resource schema mismatch\" }",
+        "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT",
+        "$markers = @($output | Where-Object { $_ -like \"m15_windows_tun_performance status=PASS *\" })",
+        "$markers.Count -ne 1 -or $markers[0] -ne $expectedMarker",
+    ];
+    let has_windows_contract = |source: &str| {
+        windows_contract
+            .iter()
+            .all(|required| source.contains(required))
+    };
+    assert!(has_windows_contract(&workflow));
+    for required in windows_contract {
+        let mutation = workflow.replace(required, "");
+        assert!(
+            !has_windows_contract(&mutation),
+            "Windows TUN performance mutation survived: {required}"
+        );
+    }
+    let windows_performance = workflow
+        .split_once("\n  windows-tun-performance:\n")
+        .and_then(|(_, tail)| tail.split_once("\n  qualification:\n"))
+        .map(|(job, _)| job)
+        .expect("Windows TUN performance job");
+    let performance_main = windows_performance
+        .find("      - name: Record independent Windows TUN performance and resource witnesses\n")
+        .expect("performance main step");
+    let performance_reap = windows_performance
+        .find("      - name: Reap and assert performance controller-owned Windows TUN residue\n")
+        .expect("performance cleanup step");
+    assert!(performance_main < performance_reap);
+    for required in [
+        "        if: ${{ always() }}\n",
+        "FERRUM2_TUN_RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-performance",
+        "-Mode cleanup -RunToken $env:FERRUM2_TUN_RUN_TOKEN",
+        "if ($LASTEXITCODE -ne 0) { throw \"controller cleanup failed\" }",
+    ] {
+        assert!(
+            windows_performance.contains(required),
+            "performance cleanup contract missing {required}"
+        );
+    }
+    assert_eq!(
+        windows_performance
+            .matches(
+                "FERRUM2_TUN_RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-performance",
+            )
+            .count(),
+        2
+    );
+    assert!(!windows_performance.contains("Ferrum2-M15-*"));
+    assert!(!windows_performance.contains("ferrum2-m15-tun-*"));
+    assert!(!windows_performance.contains("Get-Process -Name ferrum2-client"));
+    assert!(!qualification.contains("      - windows-tun-performance\n"));
+    assert!(!qualification.contains("WINDOWS_TUN_PERFORMANCE_RESULT"));
 }
 
 #[test]

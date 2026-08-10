@@ -2233,6 +2233,121 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .collect::<Vec<_>>(),
         vec!["crates/ferrum2-wintun/src/windows.rs"]
     );
+    let received_packet_is_borrowed_and_released = |source: &str| {
+        source.matches("pub struct ReceivedPacket<'a>").count() == 1
+            && source
+                .contains("pub fn receive(&mut self) -> Result<Option<ReceivedPacket<'_>>, Error>")
+            && source.contains("_borrow: PhantomData<&'a mut Adapter>")
+            && source.contains("_not_send: PhantomData<Rc<()>>")
+            && source.contains("release: self.library.exports.release_receive_packet")
+            && source.contains("impl Drop for ReceivedPacket<'_>")
+            && source.contains("unsafe { (self.release)(self.session, self.packet) };")
+            && !source.contains("unsafe impl Send for ReceivedPacket")
+    };
+    assert!(
+        received_packet_is_borrowed_and_released(wintun_production),
+        "ReceivedPacket must borrow Adapter, remain !Send and release exactly on Drop"
+    );
+    for mutation in [
+        wintun_production.replace(
+            "_borrow: PhantomData<&'a mut Adapter>",
+            "_borrow: PhantomData<&'a ()>",
+        ),
+        wintun_production.replace(
+            "_not_send: PhantomData<Rc<()>>",
+            "_not_send: PhantomData<()>",
+        ),
+        wintun_production.replace(
+            "unsafe { (self.release)(self.session, self.packet) };",
+            "let _ = self.packet;",
+        ),
+    ] {
+        assert!(
+            !received_packet_is_borrowed_and_released(&mutation),
+            "ReceivedPacket lifetime/affinity/release mutation survived"
+        );
+    }
+    let sole_stack_owner = |source: &str| {
+        let owner = source
+            .split_once("fn owner_main<T: Send + 'static>(")
+            .and_then(|(_, tail)| tail.split_once("\n#[derive(Clone, Copy)]"))
+            .map(|(body, _)| body);
+        source.matches("ferrum2_wintun::Adapter::create(").count() == 1
+            && source.matches("Stack::new_with_udp(").count() == 1
+            && source
+                .matches("owner_main(config, owner_control, ready_sender, deadline, metrics)")
+                .count()
+                == 1
+            && owner.is_some_and(|owner| {
+                owner.contains("ferrum2_wintun::Adapter::create(")
+                    && owner.contains("Stack::new_with_udp(")
+                    && owner.contains("adapter.receive()")
+                    && owner.contains("stack.enqueue_at(")
+                    && owner.contains("stack.poll_udp_events(")
+                    && owner.contains("stack.poll_quantum(")
+                    && owner.contains("stack.take_output(|packet| adapter.send(packet).is_ok())")
+                    && owner.contains("match adapter.cleanup()")
+            })
+    };
+    assert!(
+        sole_stack_owner(tun_production),
+        "the named TUN owner must exclusively own the adapter and stack pump"
+    );
+    for mutation in [
+        tun_production.replace("adapter.receive()", "receive_packet()"),
+        tun_production.replace("stack.poll_udp_events(", "poll_udp_events("),
+        tun_production.replace(
+            "stack.take_output(|packet| adapter.send(packet).is_ok())",
+            "stack.take_output(|_| true)",
+        ),
+    ] {
+        assert!(
+            !sole_stack_owner(&mutation),
+            "sole adapter/stack owner mutation survived"
+        );
+    }
+    let mut product_sources = token_sources_under(&root, &["bins", "crates"]);
+    let forbidden_platform_prefixes = [
+        "CreateIpForward",
+        "SetIpForward",
+        "DeleteIpForward",
+        "SetInterfaceDns",
+        "DnsInterfaceSettings",
+        "Fwpm",
+    ];
+    let has_no_platform_mutation = |sources: &[TokenSource]| {
+        sources.iter().all(|source| {
+            source.production_tokens().is_ok_and(|tokens| {
+                tokens.iter().all(|token| {
+                    forbidden_platform_prefixes
+                        .iter()
+                        .all(|prefix| !token.starts_with(prefix))
+                })
+            })
+        })
+    };
+    assert!(
+        has_no_platform_mutation(&product_sources),
+        "product code must not mutate host routes, DNS or WFP"
+    );
+    for forbidden in [
+        "CreateIpForwardEntry2",
+        "SetIpForwardEntry2",
+        "DeleteIpForwardEntry2",
+        "SetInterfaceDnsSettings",
+        "DnsInterfaceSettings",
+        "FwpmFilterAdd0",
+    ] {
+        product_sources.push(TokenSource::new(
+            "crates/ferrum2-tun/src/platform_mutation.rs",
+            &format!("fn mutation() {{ {forbidden}(); }}"),
+        ));
+        assert!(
+            !has_no_platform_mutation(&product_sources),
+            "product-wide platform mutation oracle missed {forbidden}"
+        );
+        product_sources.pop();
+    }
     let preserves_setup_cleanup_failure = |wintun: &str, tun: &str| {
         wintun.contains("finish_setup_transaction(setup, || owner.cleanup_inner())")
             && wintun.contains("if cleanup()")
@@ -2441,8 +2556,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .and_then(|(_, tail)| tail.split_once("function Assert-ResetWithoutEgress("))
             .map(|(body, _)| body);
         let tcp_mode = source
-            .split_once("    } else {\n        $serverBinary =")
-            .and_then(|(_, tail)| tail.split_once("\n    }\n    $completed = $true"))
+            .split_once(
+                "if ($Mode -in @(\"tcp\", \"udp\", \"full\", \"performance\")) {\n        $serverBinary =",
+            )
+            .and_then(|(_, tail)| tail.split_once("\n    if ($Mode -eq \"full\")"))
             .map(|(body, _)| body);
         let tcp01_diag = tcp_mode.and_then(|tcp| {
             let start = tcp.find("        $tcp01Target = $targets[0]")?;
@@ -2451,10 +2568,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             Some(&tcp[start..end])
         });
         let cleanup = source.rsplit_once("\nfinally {").map(|(_, body)| body);
-        source.contains("[ValidateSet(\"lifecycle\", \"tcp\", \"udp\")]")
+        source.contains(
+            "[ValidateSet(\"lifecycle\", \"tcp\", \"udp\", \"cycles\", \"full\", \"performance\", \"cleanup\")]",
+        )
             && !source.to_ascii_lowercase().contains("pktmon")
             && source.matches("$tcpRows++").count() == 8
-            && source.matches("Add-TunRoute $").count() == 4
+            && source.matches("Add-TunRoute $").count() == 5
             && source.matches("Add-TargetAddress $").count() == 3
             && !source.contains("Remove-OwnedRoute")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")")
@@ -3140,7 +3259,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("function Add-TargetAddress(")
             .and_then(|(_, tail)| tail.split_once("Add-Type -TypeDefinition"))
             .map(|(body, _)| body);
-        source.contains("[ValidateSet(\"lifecycle\", \"tcp\", \"udp\")]")
+        source.contains(
+            "[ValidateSet(\"lifecycle\", \"tcp\", \"udp\", \"cycles\", \"full\", \"performance\", \"cleanup\")]",
+        )
             && source.matches("$udpRows++").count() == 8
             && !source.contains("FERRUM2_T05_")
             && !source.contains("m15_udp_")
@@ -3266,6 +3387,172 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         assert!(
             !has_udp_controller(&mutation),
             "UDP controller mutation must remove the sixteen-row transport proof"
+        );
+    }
+
+    let has_integrated_controller_profiles = |source: &str| {
+        let cycles = source
+            .split_once("function Invoke-AdapterCycles(")
+            .and_then(|(_, tail)| tail.split_once("\ntry {"))
+            .map(|(body, _)| body);
+        let completion = source
+            .rsplit_once("\nif ($completed) {")
+            .map(|(_, body)| body);
+        source.contains(
+            "[ValidateSet(\"lifecycle\", \"tcp\", \"udp\", \"cycles\", \"full\", \"performance\", \"cleanup\")]",
+        ) && source.matches("Get-FileHash -LiteralPath $zip -Algorithm SHA256").count() == 1
+            && source.contains("if ($Mode -eq \"cleanup\")")
+            && source.contains("ferrum2-m15-tun-$runIdentity")
+            && source.contains("Ferrum2-M15-$runIdentity")
+            && source.contains("Get-ExactRunProcesses $work")
+            && source.contains("$executables -contains $_.ExecutablePath")
+            && source.contains("$_.CommandLine.IndexOf($WorkPath, [StringComparison]::OrdinalIgnoreCase)")
+            && source.contains("$addressJournal")
+            && source.contains("$dllJournal")
+            && source.contains("run work baseline not absent")
+            && source.contains("run process baseline not absent")
+            && source.contains("run adapter baseline not absent")
+            && !source.contains("Ferrum2-M15-*")
+            && !source.contains("ferrum2-m15-tun-*")
+            && !source.contains("Get-Process -Name ferrum2-client")
+            && source.contains("if ($Mode -in @(\"lifecycle\", \"full\"))")
+            && source.contains("if ($Mode -in @(\"tcp\", \"udp\", \"full\", \"performance\"))")
+            && source.contains("if ($Mode -in @(\"udp\", \"full\", \"performance\"))")
+            && source.contains(
+                "Assert-True ($foundation -eq 4 -and $tcpRows -eq 8 -and $udpRows -eq 8) \"full profile prerequisite count mismatch\"",
+            )
+            && source.contains("Invoke-AdapterCycles $binary $config")
+            && !source.contains("$PSCommandPath")
+            && cycles.is_some_and(|cycles| {
+                cycles.contains("for ($cycle = 0; $cycle -lt 100; $cycle++)")
+                    && cycles
+                        .find("$candidateBaseline = @(Get-ExactRunProcesses $script:work")
+                        .zip(cycles.find("$script:activeProcess = Start-Candidate"))
+                        .is_some_and(|(baseline, start)| baseline < start)
+                    && cycles
+                        .find("Assert-True $cycleProcess.HasExited")
+                        .zip(cycles.find("$candidateAfterStop = @(Get-ExactRunProcesses $script:work"))
+                        .zip(cycles.find("Wait-AdapterAbsent $script:adapterName"))
+                        .is_some_and(|((stopped, process_absent), adapter_absent)| {
+                            stopped < process_absent && process_absent < adapter_absent
+                        })
+                    && cycles
+                        .find("$cycleRoute = Add-TunRoute $script:ownedInterfaceIndex \"192.0.2.200/32\"")
+                        .zip(cycles.find("$cycleRouteReadback = @(Get-NetRoute"))
+                        .zip(cycles.find("Remove-NetRoute -InputObject $cycleRoute"))
+                        .zip(cycles.find("\"cycle route leaked\""))
+                        .zip(cycles.find("Stop-Candidate $cycleProcess"))
+                        .zip(cycles.find("Assert-True $cycleProcess.HasExited"))
+                        .zip(cycles.find("Wait-AdapterAbsent $script:adapterName"))
+                        .zip(cycles.find(
+                            "Assert-InterfaceGone $script:adapterName $script:ownedInterfaceIndex",
+                        ))
+                        .zip(cycles.find("$script:cycleRows++"))
+                        .is_some_and(|((((((((created, readback), removed), route_absent), stop), process), absent), interface), counted)| {
+                            created < readback
+                                && readback < removed
+                                && removed < route_absent
+                                && route_absent < stop
+                                && stop < process
+                                && process < absent
+                                && absent < interface
+                                && interface < counted
+                        })
+                    && cycles.contains(
+                        "Assert-True ($script:cycleRows -eq 100) \"adapter cycle count mismatch\"",
+                    )
+            })
+            && source.contains("if ($Mode -in @(\"udp\", \"full\", \"performance\"))")
+            && source.contains("Get-NetAdapterStatistics -Name $Name")
+            && source.contains("TotalProcessorTime.TotalMilliseconds")
+            && source.contains("WorkingSet64")
+            && source.contains("HandleCount")
+            && source.contains("Threads.Count")
+            && source.contains("ferrum2_udp_sessions_active")
+            && source.contains("ferrum2_udp_buffered_bytes")
+            && source.contains("ReceivedBytes")
+            && source.contains("SentBytes")
+            && source.contains("ReceivedUnicastPackets")
+            && source.contains("SentUnicastPackets")
+            && source.contains("ReceivedPacketErrors")
+            && source.contains("OutboundPacketErrors")
+            && source.contains("ReceivedDiscardedPackets")
+            && source.contains("OutboundDiscardedPackets")
+            && source.contains("adapter_rx_bytes=$performanceAdapterRxBytes")
+            && source.contains("adapter_tx_bytes=$performanceAdapterTxBytes")
+            && source.contains("adapter_rx_packets=$performanceAdapterRxPackets")
+            && source.contains("adapter_tx_packets=$performanceAdapterTxPackets")
+            && source.contains("adapter_rx_errors=$performanceAdapterRxErrors")
+            && source.contains("adapter_tx_errors=$performanceAdapterTxErrors")
+            && source.contains("adapter_rx_discards=$performanceAdapterRxDiscards")
+            && source.contains("adapter_tx_discards=$performanceAdapterTxDiscards")
+            && source.contains("tun_accepted_delta=$performanceTunAcceptedDelta")
+            && source.contains("cpu_ms_delta=$performanceCpuMilliseconds")
+            && source.contains("rss_bytes=$performanceRssBytes")
+            && source.contains("handles_peak=$performanceHandlesPeak")
+            && source.contains("threads_peak=$performanceThreadsPeak")
+            && source.contains("udp_sessions_peak=$performanceUdpSessionsPeak")
+            && source.contains("udp_buffered_bytes_peak=$performanceUdpBufferedBytesPeak")
+            && source.contains("controller_inflight_peak=$performanceControllerInflightPeak")
+            && source.contains("queues=bounded bounds_ring_bytes=8388608 bounds_tcp_flows=8 bounds_tcp_buffer_bytes=4096 bounds_udp_mappings=4 bounds_udp_buffered_bytes=4194304")
+            && source.contains("adapter_churn=$performanceAdapterChurn grace_drain=PASS force_drain=PASS")
+            && source.contains("$performanceAdapterChurn -ge 2")
+            && completion.is_some_and(|completion| {
+                completion.contains(
+                    "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS",
+                ) && completion.contains(
+                    "m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS",
+                ) && completion
+                    .find("m15_windows_tun_performance_resource adapter_rx_bytes=")
+                    .zip(completion.find(
+                        "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS",
+                    ))
+                    .is_some_and(|(resource, marker)| resource < marker)
+            })
+            && !source.contains("m15_windows_tun_performance threshold=")
+            && !source.contains("m15_windows_tun_performance ratio=")
+            && !source.contains("$performanceCpuMilliseconds -gt 0")
+    };
+    assert!(
+        has_integrated_controller_profiles(&controller),
+        "integrated full/cycle/performance controller contract missing"
+    );
+    for mutation in [
+        controller.replace("Ferrum2-M15-$runIdentity", "Ferrum2-M15-*"),
+        controller.replace("$executables -contains $_.ExecutablePath", "$true"),
+        controller.replace("run work baseline not absent", "run work ignored"),
+        controller.replace("$cycle -lt 100", "$cycle -lt 99"),
+        controller.replace("$script:cycleRows++", ""),
+        controller.replace(
+            "Get-NetAdapterStatistics -Name $Name",
+            "Get-NetAdapter -Name $Name",
+        ),
+        controller.replace(
+            "TotalProcessorTime.TotalMilliseconds",
+            "UserProcessorTime.TotalMilliseconds",
+        ),
+        controller.replace("ferrum2_udp_buffered_bytes", "ferrum2_udp_packets"),
+        controller.replace(
+            "udp_sessions_peak=$performanceUdpSessionsPeak",
+            "udp_sessions=unknown",
+        ),
+        controller.replace(
+            "controller_inflight_peak=$performanceControllerInflightPeak",
+            "controller_inflight=unknown",
+        ),
+        controller.replace(
+            "adapter_churn=$performanceAdapterChurn grace_drain=PASS force_drain=PASS",
+            "adapter_churn=unknown",
+        ),
+        controller.replace(
+            "profile=full functional=16/16 cycles=100/100 cleanup=PASS",
+            "profile=full cleanup=PASS",
+        ),
+        controller.replace("witnesses=2/2 cleanup=PASS", "witnesses=1/2 cleanup=PASS"),
+    ] {
+        assert!(
+            !has_integrated_controller_profiles(&mutation),
+            "integrated controller mutation must remove full/performance proof"
         );
     }
     let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
