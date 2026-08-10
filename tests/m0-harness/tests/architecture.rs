@@ -3229,6 +3229,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("$maxActiveSessions")
                     && echo.contains("$selfTestsBefore = $Gate.SelfTests")
                     && echo.contains("$socketProbesBefore = $Gate.SocketProbes")
+                    && echo.contains("$socketProbesBefore -eq 0")
+                    && echo.contains("socket_probes=$($Gate.SocketProbes)")
                     && echo.contains("self_tests=$($Gate.SelfTests)")
                     && echo.contains("self_test_delta=$selfTestDelta")
                     && echo.contains("socket_probe_delta=$socketProbeDelta")
@@ -3236,6 +3238,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("gate_state=$($Gate.State)")
                     && echo.contains("gate_fault=$($Gate.Fault)")
                     && echo.contains("probe_fault=$($probe.Fault)")
+                    && echo
+                        .find("$socketProbesBefore -eq 0")
+                        .zip(echo.find("[void]$client.Send($Payload, $Payload.Length)"))
+                        .is_some_and(|(baseline, send)| baseline < send)
                     && echo.contains("[bool]$DiagnosticOnly = $false")
                     && echo.contains(
                         "m15_windows_tun_udp01_diag status=OBSERVED result=complete",
@@ -3301,6 +3307,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace(
             "$socketProbesBefore = $Gate.SocketProbes",
             "$socketProbesBefore = 0",
+        ),
+        controller.replace("$socketProbesBefore -eq 0", "$true"),
+        controller.replace(
+            "socket_probes=$($Gate.SocketProbes)",
+            "socket_probes=hidden",
         ),
         controller.replace("socket_probe=$socketProbe", "socket_probe=bypassed"),
         controller.replace(
