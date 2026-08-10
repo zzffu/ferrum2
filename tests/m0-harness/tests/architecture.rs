@@ -3302,9 +3302,6 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && adapter.contains("run_udp_reject(")
             && association.contains("fn prepare_application_request(")
             && association.contains("fn prepare_application_response(")
-            && association.contains("first_server.ip().is_loopback()")
-            && association.contains("*first_server.ip()")
-            && association.contains("Ipv4Addr::UNSPECIFIED")
             && adapter.contains("association.prepare_application_request(")
             && adapter.contains("association.prepare_application_response(")
             && client_socks.contains("prepared.prepare_application_request(")
@@ -3353,11 +3350,6 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 "fn prepare_application_response(",
                 "fn prepare_other_response(",
             ),
-        ),
-        (
-            tun_udp.clone(),
-            client_tun.clone(),
-            client_udp.replace("first_server.ip().is_loopback()", "false"),
         ),
     ] {
         assert!(

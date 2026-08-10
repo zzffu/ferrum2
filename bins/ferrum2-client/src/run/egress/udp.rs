@@ -551,12 +551,9 @@ where
     let inner_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
     let upstream_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
     let scratch = UdpPacketScratch::new();
-    let bind_ip = if first_server.ip().is_loopback() {
-        *first_server.ip()
-    } else {
-        Ipv4Addr::UNSPECIFIED
-    };
-    let upstream = bind(SocketAddrV4::new(bind_ip, 0)).await.map_err(|_| ())?;
+    let upstream = bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .map_err(|_| ())?;
     upstream
         .connect(SocketAddr::V4(first_server))
         .await

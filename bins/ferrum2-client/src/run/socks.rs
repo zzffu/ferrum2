@@ -1343,21 +1343,10 @@ pub(in crate::run) mod tests {
             .await
             .expect("setup");
         prepared.activate(&context.egress).expect("activation");
-        drop(prepared);
-        let remote = context
-            .egress
-            .prepare_udp(
-                ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
-                "192.0.2.10:8388".parse().expect("remote server"),
-                &mut bind,
-            )
-            .await
-            .expect("remote setup");
         assert_eq!(
             *calls.lock().expect("bind calls"),
             [
                 SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 0),
-                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
                 SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
             ]
         );
@@ -1365,7 +1354,7 @@ pub(in crate::run) mod tests {
             *endpoint.local_addr().expect("relay").ip(),
             Ipv4Addr::new(127, 0, 0, 2)
         );
-        drop((endpoint, remote));
+        drop((endpoint, prepared));
         assert_eq!(registry.snapshot(), baseline);
         std::fs::remove_file(path).expect("remove config");
     }
