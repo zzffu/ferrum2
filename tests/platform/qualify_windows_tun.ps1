@@ -1830,7 +1830,7 @@ action = "hijack-dns"
 enabled = false
 max_sessions = 8
 max_buffered_bytes = 1048576
-idle_timeout_ms = 5000
+idle_timeout_ms = 60000
 [dns]
 [[dns.inbounds]]
 tag = "dns-control"
