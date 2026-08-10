@@ -1,9 +1,11 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
+    # Legacy M15 mode contract: [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
+    [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "network-feasibility", "cleanup")]
     [string]$Mode,
     [string]$WintunZip,
-    [string]$RunToken
+    [string]$RunToken,
+    [string]$IdentityLedger
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,11 +28,15 @@ $expectedExports = @(
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $runIdentity = if ($RunToken) { $RunToken } elseif ($Mode -eq "cleanup") { throw "cleanup requires RunToken" } else { "local-$PID" }
 if ($runIdentity -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,47}$') { throw "RunToken is invalid" }
-$work = Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$runIdentity"
+$work = if ($Mode -eq "network-feasibility") {
+    Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-network-$runIdentity"
+} else {
+    Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$runIdentity"
+}
 $binary = Join-Path $workspace "target\debug\ferrum2-client.exe"
 $serverBinary = Join-Path $workspace "target\debug\ferrum2-server.exe"
 $siblingDll = Join-Path (Split-Path -Parent $binary) "wintun.dll"
-$adapterName = "Ferrum2-M15-$runIdentity"
+$adapterName = if ($Mode -eq "network-feasibility") { "Ferrum2-M16-$runIdentity" } else { "Ferrum2-M15-$runIdentity" }
 $config = Join-Path $work "client.toml"
 $failureConfig = Join-Path $work "client-failure.toml"
 $addressJournal = Join-Path $work "owned-target-addresses.txt"
@@ -136,9 +142,96 @@ $performanceFieldsCollected = $false
 $performanceAdapterChurn = 0
 $performanceGraceDrain = $false
 $performanceForceDrain = $false
+$capabilityIdentity = $null
+$capabilityIdentityHash = $null
+$capabilityEvidence = $null
+$capabilityRoutes = [System.Collections.Generic.List[System.IDisposable]]::new()
+$capabilityDnsSnapshot = $null
+$capabilityDnsApplied = $false
+$capabilityMetricSnapshot = $null
+$capabilityMetricApplied = $false
+$capabilityInterfaceMetric = $null
+$capabilityRouteRows = 0
+$capabilityTcpRows = 0
+$capabilityUdpRows = 0
+$capabilityDnsRows = 0
+$capabilityWindowRows = 0
+$capabilityHardKillRows = 0
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
+}
+
+function Get-NetworkFeasibilityIdentity([string]$Path) {
+    Assert-True (-not [string]::IsNullOrWhiteSpace($Path)) "network feasibility requires IdentityLedger"
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $bytes = [IO.File]::ReadAllBytes($resolved)
+    Assert-True ($bytes.Length -gt 1 -and $bytes[$bytes.Length - 1] -eq 10) "identity ledger must end in one LF"
+    Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf)) "identity ledger must not have a BOM"
+    Assert-True (@($bytes | Where-Object { $_ -eq 10 }).Count -eq 1 -and @($bytes | Where-Object { $_ -eq 13 }).Count -eq 0) "identity ledger must be one LF-terminated line"
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    $text = $utf8.GetString($bytes)
+    $json = $text.Substring(0, $text.Length - 1)
+    $ledger = $json | ConvertFrom-Json -Depth 4
+    $keys = @(
+        "schema", "vm_name", "vm_id", "checkpoint_name", "checkpoint_id", "guest_product",
+        "guest_edition", "guest_architecture", "guest_version", "guest_build", "candidate_sha",
+        "probe_sha256", "support_listener"
+    )
+    Assert-True ((@($ledger.PSObject.Properties.Name) -join "|") -ceq ($keys -join "|")) "identity ledger keys are invalid"
+    $listenerKeys = @("ipv4", "tcp_port", "udp_port", "pid", "owner")
+    Assert-True ((@($ledger.support_listener.PSObject.Properties.Name) -join "|") -ceq ($listenerKeys -join "|")) "support listener keys are invalid"
+    Assert-True (($ledger | ConvertTo-Json -Compress -Depth 4) -ceq $json) "identity ledger is not canonical JSON"
+    Assert-True ($ledger.schema -is [long] -and $ledger.schema -eq 1) "identity ledger schema is invalid"
+    Assert-True ($ledger.vm_name -ceq "Windows 10 MSIX packaging environment") "identity ledger VM name is invalid"
+    Assert-True ($ledger.checkpoint_name -ceq "M15-T04-before-2b0c25b-20260810") "identity ledger checkpoint name is invalid"
+    $parsedGuid = [Guid]::Empty
+    Assert-True ([Guid]::TryParseExact([string]$ledger.vm_id, "D", [ref]$parsedGuid) -and $parsedGuid -ne [Guid]::Empty) "identity ledger VM ID is invalid"
+    $parsedGuid = [Guid]::Empty
+    Assert-True ([Guid]::TryParseExact([string]$ledger.checkpoint_id, "D", [ref]$parsedGuid) -and $parsedGuid -ne [Guid]::Empty) "identity ledger checkpoint ID is invalid"
+    Assert-True ([string]$ledger.candidate_sha -cmatch '^[0-9a-f]{40}$') "identity ledger candidate SHA is invalid"
+    Assert-True ([string]$ledger.probe_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger probe hash is invalid"
+    $probePath = Join-Path $PSScriptRoot "qualify_windows_tun.ps1"
+    $probeHash = (Get-FileHash -LiteralPath $probePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ($ledger.probe_sha256 -ceq $probeHash) "identity ledger probe hash mismatch"
+
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+    $version = [Environment]::OSVersion.Version.ToString()
+    $currentVersion = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+    $build = "$($currentVersion.CurrentBuildNumber).$($currentVersion.UBR)"
+    Assert-True ($ledger.guest_product -ceq [string]$currentVersion.ProductName) "identity ledger guest product mismatch"
+    Assert-True ($ledger.guest_edition -ceq [string]$currentVersion.EditionID) "identity ledger guest edition mismatch"
+    Assert-True ($ledger.guest_architecture -ceq "AMD64" -and [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "X64") "identity ledger guest architecture mismatch"
+    Assert-True ($ledger.guest_version -ceq $version) "identity ledger guest version mismatch"
+    Assert-True ($ledger.guest_build -ceq $build -and [string]$os.BuildNumber -ceq [string]$currentVersion.CurrentBuildNumber) "identity ledger guest build mismatch"
+
+    $address = $null
+    Assert-True ([Net.IPAddress]::TryParse([string]$ledger.support_listener.ipv4, [ref]$address) -and $address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) "support listener address is not IPv4"
+    $octets = $address.GetAddressBytes()
+    Assert-True (-not [Net.IPAddress]::IsLoopback($address) -and $octets[0] -ne 0 -and $octets[0] -lt 224 -and -not ($octets[0] -eq 169 -and $octets[1] -eq 254)) "support listener address is not eligible"
+    Assert-True (@(Get-NetIPAddress -AddressFamily IPv4 -IPAddress $address.IPAddressToString -ErrorAction SilentlyContinue).Count -eq 0) "support listener address is guest-local"
+    foreach ($name in @("tcp_port", "udp_port")) {
+        Assert-True ($ledger.support_listener.$name -is [long] -and $ledger.support_listener.$name -ge 1 -and $ledger.support_listener.$name -le 65535) "support listener port is invalid"
+    }
+    Assert-True ($ledger.support_listener.pid -is [long] -and $ledger.support_listener.pid -ge 1 -and $ledger.support_listener.pid -le [uint32]::MaxValue) "support listener PID is invalid"
+    Assert-True ([string]$ledger.support_listener.owner -cmatch '^[^\r\n]{1,256}$') "support listener owner is invalid"
+
+    return [pscustomobject]@{
+        Ledger = $ledger
+        Path = $resolved
+        IdentitySha256 = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash.ToLowerInvariant()
+        GuestBuild = $build
+        SupportAddress = $address.IPAddressToString
+        TcpPort = [int]$ledger.support_listener.tcp_port
+        UdpPort = [int]$ledger.support_listener.udp_port
+    }
+}
+
+if ($Mode -eq "network-feasibility") {
+    $capabilityIdentity = Get-NetworkFeasibilityIdentity $IdentityLedger
+    $capabilityIdentityHash = $capabilityIdentity.IdentitySha256
+    $capabilityEvidence = "$($capabilityIdentity.Path).evidence-$runIdentity.jsonl"
+    Assert-True (-not (Test-Path -LiteralPath $capabilityEvidence)) "network feasibility evidence baseline not absent"
 }
 
 function Get-Tcp01Boundary([hashtable]$State) {
@@ -454,6 +547,7 @@ function Add-TargetAddress([string]$Address, [bool]$SkipAsSource = $true) {
 
 Add-Type -TypeDefinition @'
 using System;
+using System.Collections;
 using System.ComponentModel;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -959,7 +1053,440 @@ public sealed class Ferrum2DnsResponder : IDisposable {
         stopped.Dispose();
     }
 }
+
+[StructLayout(LayoutKind.Explicit, Size = 28)]
+internal struct Ferrum2SockaddrInet {
+    [FieldOffset(0)] internal ushort Family;
+    [FieldOffset(2)] internal ushort Port;
+    [FieldOffset(4)] internal uint Address;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct Ferrum2IpAddressPrefix {
+    internal Ferrum2SockaddrInet Prefix;
+    internal byte PrefixLength;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct Ferrum2IpForwardRow2 {
+    internal ulong InterfaceLuid;
+    internal uint InterfaceIndex;
+    internal Ferrum2IpAddressPrefix DestinationPrefix;
+    internal Ferrum2SockaddrInet NextHop;
+    internal byte SitePrefixLength;
+    internal uint ValidLifetime;
+    internal uint PreferredLifetime;
+    internal uint Metric;
+    internal int Protocol;
+    [MarshalAs(UnmanagedType.U1)] internal bool Loopback;
+    [MarshalAs(UnmanagedType.U1)] internal bool AutoconfigureAddress;
+    [MarshalAs(UnmanagedType.U1)] internal bool Publish;
+    [MarshalAs(UnmanagedType.U1)] internal bool Immortal;
+    internal uint Age;
+    internal int Origin;
+}
+
+public sealed class Ferrum2UnderlayProbe {
+    public uint InterfaceIndex { get; internal set; }
+    public string SourceAddress { get; internal set; }
+    public string NextHop { get; internal set; }
+    public byte PrefixLength { get; internal set; }
+    public uint RouteMetric { get; internal set; }
+}
+
+public sealed class Ferrum2CaptureRoute : IDisposable {
+    private const uint ERROR_NOT_FOUND = 1168;
+    private Ferrum2IpForwardRow2 intended;
+    private bool disposed;
+
+    internal Ferrum2CaptureRoute(Ferrum2IpForwardRow2 row) { intended = row; }
+
+    public void Verify() {
+        Ferrum2IpForwardRow2 current;
+        var result = Ferrum2NetworkFeasibility.ReadRoute(intended, out current);
+        if (result != 0) throw new Win32Exception(checked((int)result), "GetIpForwardEntry2");
+        if (!Ferrum2NetworkFeasibility.MatchesOwned(intended, current))
+            throw new InvalidOperationException("capture route readback mismatch");
+    }
+
+    public void Dispose() {
+        if (disposed) return;
+        Ferrum2IpForwardRow2 current;
+        var result = Ferrum2NetworkFeasibility.ReadRoute(intended, out current);
+        if (result == ERROR_NOT_FOUND) { disposed = true; return; }
+        if (result != 0) throw new Win32Exception(checked((int)result), "GetIpForwardEntry2");
+        if (!Ferrum2NetworkFeasibility.MatchesOwned(intended, current))
+            throw new InvalidOperationException("capture route ownership changed");
+        result = Ferrum2NetworkFeasibility.DeleteRoute(ref current);
+        if (result != 0 && result != ERROR_NOT_FOUND)
+            throw new Win32Exception(checked((int)result), "DeleteIpForwardEntry2");
+        result = Ferrum2NetworkFeasibility.ReadRoute(intended, out current);
+        if (result != ERROR_NOT_FOUND) throw new InvalidOperationException("capture route delete readback mismatch");
+        disposed = true;
+    }
+}
+
+public static class Ferrum2NetworkFeasibility {
+    private const ushort AF_INET = 2;
+    private const uint ERROR_NOT_FOUND = 1168;
+    private const int IPPROTO_IP = 0;
+    private const int IP_UNICAST_IF = 31;
+
+    [DllImport("iphlpapi.dll")]
+    private static extern void InitializeIpForwardEntry(ref Ferrum2IpForwardRow2 row);
+    [DllImport("iphlpapi.dll")]
+    private static extern uint CreateIpForwardEntry2(ref Ferrum2IpForwardRow2 row);
+    [DllImport("iphlpapi.dll")]
+    private static extern uint GetIpForwardEntry2(ref Ferrum2IpForwardRow2 row);
+    [DllImport("iphlpapi.dll")]
+    private static extern uint DeleteIpForwardEntry2(ref Ferrum2IpForwardRow2 row);
+    [DllImport("iphlpapi.dll")]
+    private static extern uint GetBestInterfaceEx(ref Ferrum2SockaddrInet destination, out uint interfaceIndex);
+    [DllImport("iphlpapi.dll")]
+    private static extern uint GetBestRoute2(IntPtr interfaceLuid, uint interfaceIndex, IntPtr sourceAddress,
+        ref Ferrum2SockaddrInet destination, uint addressSortOptions,
+        out Ferrum2IpForwardRow2 bestRoute, out Ferrum2SockaddrInet bestSourceAddress);
+    [DllImport("ws2_32.dll", SetLastError = true)]
+    private static extern int setsockopt(IntPtr socket, int level, int option, ref uint value, int valueLength);
+    [DllImport("ws2_32.dll")]
+    private static extern int WSAGetLastError();
+
+    public static int RouteRowSize { get { return Marshal.SizeOf(typeof(Ferrum2IpForwardRow2)); } }
+
+    private static Ferrum2SockaddrInet Address(string text) {
+        var address = IPAddress.Parse(text);
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+            throw new ArgumentException("IPv4 is required", "text");
+        return new Ferrum2SockaddrInet {
+            Family = AF_INET,
+            Address = BitConverter.ToUInt32(address.GetAddressBytes(), 0)
+        };
+    }
+
+    private static string Address(Ferrum2SockaddrInet value) {
+        if (value.Family != AF_INET) throw new InvalidOperationException("IPv4 readback is required");
+        return new IPAddress(BitConverter.GetBytes(value.Address)).ToString();
+    }
+
+    private static Ferrum2IpForwardRow2 Key(Ferrum2IpForwardRow2 intended) {
+        var key = new Ferrum2IpForwardRow2();
+        InitializeIpForwardEntry(ref key);
+        key.InterfaceIndex = intended.InterfaceIndex;
+        key.DestinationPrefix = intended.DestinationPrefix;
+        key.NextHop = intended.NextHop;
+        return key;
+    }
+
+    internal static uint ReadRoute(Ferrum2IpForwardRow2 intended, out Ferrum2IpForwardRow2 current) {
+        current = Key(intended);
+        return GetIpForwardEntry2(ref current);
+    }
+
+    internal static uint DeleteRoute(ref Ferrum2IpForwardRow2 row) { return DeleteIpForwardEntry2(ref row); }
+
+    internal static bool MatchesOwned(Ferrum2IpForwardRow2 expected, Ferrum2IpForwardRow2 actual) {
+        return actual.InterfaceIndex == expected.InterfaceIndex &&
+            actual.DestinationPrefix.Prefix.Family == AF_INET &&
+            actual.DestinationPrefix.Prefix.Address == expected.DestinationPrefix.Prefix.Address &&
+            actual.DestinationPrefix.PrefixLength == expected.DestinationPrefix.PrefixLength &&
+            actual.NextHop.Family == AF_INET && actual.NextHop.Address == 0 &&
+            actual.SitePrefixLength == expected.SitePrefixLength &&
+            actual.ValidLifetime == expected.ValidLifetime &&
+            actual.PreferredLifetime == expected.PreferredLifetime &&
+            actual.Metric == expected.Metric && actual.Protocol == expected.Protocol &&
+            actual.Loopback == expected.Loopback &&
+            actual.AutoconfigureAddress == expected.AutoconfigureAddress &&
+            actual.Publish == expected.Publish && actual.Immortal == expected.Immortal &&
+            actual.Origin == expected.Origin;
+    }
+
+    public static Ferrum2CaptureRoute CreateCaptureRoute(uint interfaceIndex, string prefix, uint metric) {
+        if (RouteRowSize != 104) throw new InvalidOperationException("MIB_IPFORWARD_ROW2 ABI size mismatch");
+        var parts = prefix.Split('/');
+        if (parts.Length != 2 || parts[1] != "1" || (parts[0] != "0.0.0.0" && parts[0] != "128.0.0.0"))
+            throw new ArgumentException("an exact IPv4 /1 capture prefix is required", "prefix");
+        var row = new Ferrum2IpForwardRow2();
+        InitializeIpForwardEntry(ref row);
+        row.InterfaceLuid = 0;
+        row.InterfaceIndex = interfaceIndex;
+        row.DestinationPrefix = new Ferrum2IpAddressPrefix { Prefix = Address(parts[0]), PrefixLength = 1 };
+        row.NextHop = Address("0.0.0.0");
+        row.SitePrefixLength = 0;
+        row.ValidLifetime = UInt32.MaxValue;
+        row.PreferredLifetime = UInt32.MaxValue;
+        row.Metric = metric;
+        row.Protocol = 3;
+        row.Loopback = false;
+        row.AutoconfigureAddress = false;
+        row.Publish = false;
+        row.Immortal = false;
+        row.Age = 0;
+        row.Origin = 0;
+        Ferrum2IpForwardRow2 ignored;
+        var result = ReadRoute(row, out ignored);
+        if (result != ERROR_NOT_FOUND) {
+            if (result == 0) throw new InvalidOperationException("capture route baseline not absent");
+            throw new Win32Exception(checked((int)result), "GetIpForwardEntry2");
+        }
+        result = CreateIpForwardEntry2(ref row);
+        if (result != 0) throw new Win32Exception(checked((int)result), "CreateIpForwardEntry2");
+        var lease = new Ferrum2CaptureRoute(row);
+        try { lease.Verify(); return lease; }
+        catch { lease.Dispose(); throw; }
+    }
+
+    public static Ferrum2UnderlayProbe GetFixedRoute(string destinationText) {
+        var destination = Address(destinationText);
+        uint interfaceIndex;
+        var result = GetBestInterfaceEx(ref destination, out interfaceIndex);
+        if (result != 0) throw new Win32Exception(checked((int)result), "GetBestInterfaceEx");
+        return GetConstrainedRoute(destinationText, interfaceIndex);
+    }
+
+    public static Ferrum2UnderlayProbe GetConstrainedRoute(string destinationText, uint interfaceIndex) {
+        var destination = Address(destinationText);
+        Ferrum2IpForwardRow2 route;
+        Ferrum2SockaddrInet source;
+        var result = GetBestRoute2(IntPtr.Zero, interfaceIndex, IntPtr.Zero, ref destination, 0, out route, out source);
+        if (result != 0) throw new Win32Exception(checked((int)result), "GetBestRoute2");
+        if (route.InterfaceIndex != interfaceIndex || source.Family != AF_INET || source.Address == 0)
+            throw new InvalidOperationException("constrained best route identity mismatch");
+        return new Ferrum2UnderlayProbe {
+            InterfaceIndex = interfaceIndex,
+            SourceAddress = Address(source),
+            NextHop = Address(route.NextHop),
+            PrefixLength = route.DestinationPrefix.PrefixLength,
+            RouteMetric = route.Metric
+        };
+    }
+
+    private static void Pin(Socket socket, uint interfaceIndex) {
+        var networkOrder = unchecked((uint)IPAddress.HostToNetworkOrder(unchecked((int)interfaceIndex)));
+        if (setsockopt(socket.Handle, IPPROTO_IP, IP_UNICAST_IF, ref networkOrder, sizeof(uint)) != 0)
+            throw new Win32Exception(WSAGetLastError(), "IP_UNICAST_IF");
+    }
+
+    private static void SendAll(Socket socket, byte[] payload) {
+        var offset = 0;
+        while (offset < payload.Length) offset += socket.Send(payload, offset, payload.Length - offset, SocketFlags.None);
+    }
+
+    private static byte[] ReceiveExact(Socket socket, int length) {
+        var received = new byte[length];
+        var offset = 0;
+        while (offset < length) {
+            var count = socket.Receive(received, offset, length - offset, SocketFlags.None);
+            if (count == 0) throw new EndOfStreamException("support listener closed before echo");
+            offset += count;
+        }
+        return received;
+    }
+
+    private static void VerifySource(Socket socket, string expectedSource) {
+        var local = socket.LocalEndPoint as IPEndPoint;
+        if (local == null || local.Address.ToString() != expectedSource)
+            throw new InvalidOperationException("pinned socket source mismatch");
+    }
+
+    public static void TcpEcho(string address, int port, uint interfaceIndex, string expectedSource, byte[] payload) {
+        using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)) {
+            socket.SendTimeout = 5000; socket.ReceiveTimeout = 5000;
+            Pin(socket, interfaceIndex);
+            socket.Connect(IPAddress.Parse(address), port);
+            VerifySource(socket, expectedSource);
+            SendAll(socket, payload);
+            var response = ReceiveExact(socket, payload.Length);
+            if (!StructuralComparisons.StructuralEqualityComparer.Equals(payload, response))
+                throw new InvalidDataException("support TCP echo mismatch");
+        }
+    }
+
+    public static void UdpEcho(string address, int port, uint interfaceIndex, string expectedSource, byte[] payload) {
+        using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)) {
+            socket.SendTimeout = 5000; socket.ReceiveTimeout = 5000;
+            Pin(socket, interfaceIndex);
+            socket.Connect(IPAddress.Parse(address), port);
+            SendAll(socket, payload);
+            VerifySource(socket, expectedSource);
+            var response = ReceiveExact(socket, payload.Length);
+            if (!StructuralComparisons.StructuralEqualityComparer.Equals(payload, response))
+                throw new InvalidDataException("support UDP echo mismatch");
+        }
+    }
+}
 '@
+
+function Write-CapabilityEvidence([string]$Phase, [hashtable]$Data) {
+    $row = [ordered]@{
+        schema = 1
+        phase = $Phase
+        timestamp_utc = [DateTime]::UtcNow.ToString("O")
+        data = $Data
+    }
+    Add-Content -LiteralPath $script:capabilityEvidence -Value ($row | ConvertTo-Json -Compress -Depth 8) -Encoding utf8NoBOM
+}
+
+function Get-Ipv4DefaultUnderlay {
+    $rows = @(
+        Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" -PolicyStore ActiveStore -ErrorAction Stop |
+            ForEach-Object {
+                $route = $_
+                $interface = Get-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -PolicyStore ActiveStore -ErrorAction Stop
+                $adapter = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -IncludeHidden -ErrorAction Stop
+                if ($route.InterfaceIndex -ne 1 -and $route.InterfaceIndex -ne $script:ownedInterfaceIndex -and
+                    $interface.ConnectionState -eq "Connected" -and $adapter.Status -eq "Up" -and
+                    $adapter.InterfaceDescription -notmatch "Wintun") {
+                    [pscustomobject]@{
+                        Route = $route
+                        Interface = $interface
+                        EffectiveMetric = [uint64]$route.RouteMetric + [uint64]$interface.InterfaceMetric
+                    }
+                }
+            }
+    )
+    Assert-True ($rows.Count -gt 0) "eligible IPv4 default underlay is missing"
+    $minimum = ($rows | Measure-Object EffectiveMetric -Minimum).Minimum
+    $best = @($rows | Where-Object { $_.EffectiveMetric -eq $minimum })
+    $indices = @($best | ForEach-Object { [uint32]$_.Route.InterfaceIndex } | Sort-Object -Unique)
+    Assert-True ($indices.Count -eq 1 -and $best.Count -eq 1) "eligible IPv4 default underlay is ambiguous"
+    $sources = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $indices[0] -AddressState Preferred -ErrorAction Stop |
+        Where-Object { $_.IPAddress -ne "0.0.0.0" -and $_.IPAddress -notlike "169.254.*" })
+    Assert-True ($sources.Count -ge 1) "eligible IPv4 default source is missing"
+    return [pscustomobject]@{ InterfaceIndex = $indices[0]; Row = $best[0]; Sources = $sources }
+}
+
+function Get-PhysicalDnsSnapshot([int]$TunInterfaceIndex) {
+    return @(
+        Get-DnsClientServerAddress -ErrorAction Stop |
+            Where-Object { $_.InterfaceIndex -ne $TunInterfaceIndex } |
+            Sort-Object InterfaceIndex, AddressFamily |
+            ForEach-Object { "$($_.InterfaceIndex)|$($_.AddressFamily)|$(@($_.ServerAddresses) -join ',')" }
+    )
+}
+
+function Get-TunIpv4Dns([int]$InterfaceIndex) {
+    $row = Get-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop
+    return @($row.ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Set-CapabilityDns([int]$InterfaceIndex) {
+    Assert-True (-not $script:capabilityDnsApplied) "capability DNS is already applied"
+    $script:capabilityDnsSnapshot = @(Get-TunIpv4Dns $InterfaceIndex)
+    Set-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -ServerAddresses "198.18.0.1" -Validate -ErrorAction Stop
+    $script:capabilityDnsApplied = $true
+    Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $InterfaceIndex) "capability DNS readback"
+}
+
+function Restore-CapabilityDns([int]$InterfaceIndex) {
+    if (-not $script:capabilityDnsApplied) { return }
+    Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $InterfaceIndex) "capability DNS ownership"
+    if ($script:capabilityDnsSnapshot.Count -eq 0) {
+        Set-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -ResetServerAddresses -ErrorAction Stop
+    } else {
+        Set-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -ServerAddresses $script:capabilityDnsSnapshot -Validate -ErrorAction Stop
+    }
+    Assert-SnapshotEqual @($script:capabilityDnsSnapshot) @(Get-TunIpv4Dns $InterfaceIndex) "capability DNS restore"
+    $script:capabilityDnsApplied = $false
+    $script:capabilityDnsSnapshot = $null
+}
+
+function Set-CapabilityInterfaceMetric([int]$InterfaceIndex) {
+    Assert-True (-not $script:capabilityMetricApplied) "capability interface metric is already applied"
+    $row = Get-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+    $script:capabilityMetricSnapshot = [pscustomobject]@{
+        AutomaticMetric = [string]$row.AutomaticMetric
+        InterfaceMetric = [uint32]$row.InterfaceMetric
+    }
+    Set-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 1 -PolicyStore ActiveStore -ErrorAction Stop
+    $script:capabilityMetricApplied = $true
+    $current = Get-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+    Assert-True ($current.AutomaticMetric -eq "Disabled" -and $current.InterfaceMetric -eq 1) "capability interface metric readback mismatch"
+}
+
+function Restore-CapabilityInterfaceMetric([int]$InterfaceIndex) {
+    if (-not $script:capabilityMetricApplied) { return }
+    $current = Get-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+    Assert-True ($current.AutomaticMetric -eq "Disabled" -and $current.InterfaceMetric -eq 1) "capability interface metric ownership changed"
+    Set-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 `
+        -AutomaticMetric $script:capabilityMetricSnapshot.AutomaticMetric `
+        -InterfaceMetric $script:capabilityMetricSnapshot.InterfaceMetric -PolicyStore ActiveStore -ErrorAction Stop
+    $restored = Get-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+    Assert-True ([string]$restored.AutomaticMetric -eq $script:capabilityMetricSnapshot.AutomaticMetric -and
+        [uint32]$restored.InterfaceMetric -eq $script:capabilityMetricSnapshot.InterfaceMetric) "capability interface metric restore mismatch"
+    $script:capabilityMetricApplied = $false
+    $script:capabilityMetricSnapshot = $null
+}
+
+function Remove-CapabilityRoutes {
+    for ($index = $script:capabilityRoutes.Count - 1; $index -ge 0; $index--) {
+        $script:capabilityRoutes[$index].Dispose()
+        $script:capabilityRoutes.RemoveAt($index)
+    }
+}
+
+function Get-TunAccepted([int]$MetricsPort) {
+    return Get-CounterValue (Get-Metrics $MetricsPort) "ferrum2_tun_packets_accepted"
+}
+
+function Wait-TunAcceptedAfter([int]$MetricsPort, [uint64]$Before) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $after = Get-TunAccepted $MetricsPort
+        if ($after -gt $Before) { return $after }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "unpinned packet did not enter Wintun"
+}
+
+function Invoke-UnpinnedTcpCapture([string]$Address, [int]$Port, [int]$MetricsPort, [byte[]]$Payload) {
+    $before = Get-TunAccepted $MetricsPort
+    $client = [Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+    try {
+        $connected = $client.ConnectAsync($Address, $Port)
+        if ($connected.Wait(1500) -and -not $connected.IsFaulted) {
+            $stream = $client.GetStream()
+            $stream.Write($Payload, 0, $Payload.Length)
+            $read = [byte[]]::new($Payload.Length)
+            $response = $stream.ReadAsync($read, 0, $read.Length)
+            if ($response.Wait(750) -and -not $response.IsFaulted -and $response.Result -gt 0 -and
+                (($read[0..($response.Result - 1)] -join ",") -eq ($Payload[0..($response.Result - 1)] -join ","))) {
+                throw "unpinned TCP reached the support listener"
+            }
+        }
+    } catch [AggregateException] {
+        if ($_.Exception.Flatten().InnerExceptions | Where-Object { $_ -isnot [Net.Sockets.SocketException] -and $_ -isnot [IO.IOException] }) { throw }
+    } catch [Net.Sockets.SocketException] { } catch [IO.IOException] { }
+    finally { $client.Dispose() }
+    [void](Wait-TunAcceptedAfter $MetricsPort $before)
+}
+
+function Invoke-UnpinnedUdpCapture([string]$Address, [int]$Port, [int]$MetricsPort, [byte[]]$Payload) {
+    $before = Get-TunAccepted $MetricsPort
+    $client = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+    try {
+        $client.Connect($Address, $Port)
+        [void]$client.Send($Payload, $Payload.Length)
+        $response = $client.ReceiveAsync()
+        if ($response.Wait(750) -and -not $response.IsFaulted -and
+            (($response.Result.Buffer -join ",") -eq ($Payload -join ","))) {
+            throw "unpinned UDP reached the support listener"
+        }
+    } catch [AggregateException] {
+        if ($_.Exception.Flatten().InnerExceptions | Where-Object { $_ -isnot [Net.Sockets.SocketException] -and $_ -isnot [IO.IOException] }) { throw }
+    } catch [Net.Sockets.SocketException] { } catch [IO.IOException] { }
+    finally { $client.Dispose() }
+    [void](Wait-TunAcceptedAfter $MetricsPort $before)
+}
+
+function Invoke-SystemDnsWitness([string]$Name, [bool]$TcpOnly, [Ferrum2DnsResponder]$Responder) {
+    $before = $Responder.Requests
+    Clear-DnsClientCache -ErrorAction Stop
+    $parameters = @{ Name = $Name; Type = "A"; DnsOnly = $true; NoHostsFile = $true; ErrorAction = "Stop" }
+    if ($TcpOnly) { $parameters.TcpOnly = $true }
+    $answer = @(Resolve-DnsName @parameters | Where-Object { $_.Type -eq "A" -and $_.IPAddress -eq "192.0.2.55" })
+    Assert-True ($answer.Count -ge 1) "Windows resolver did not return the capability answer"
+    Assert-True ($Responder.Requests -eq $before + 1) "Windows resolver did not use the local DNS answer path exactly once"
+}
 
 function Open-TunTcp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
     $isV6 = $Address.Contains(":")
@@ -1184,13 +1711,285 @@ try {
     Assert-True (($exports -join "|") -eq ($expectedExports -join "|")) "DLL export set mismatch"
     $foundation++
 
-    Push-Location $workspace
-    try {
-        if ($Mode -in @("tcp", "udp", "full", "performance")) { & cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --locked }
-        else { & cargo +1.97.1 build -p ferrum2-client --locked }
-        if ($LASTEXITCODE -ne 0) { throw "candidate build failed" }
+    if ($Mode -eq "network-feasibility") {
+        Assert-True (Test-Path -LiteralPath $binary) "staged candidate binary is missing"
+    } else {
+        Push-Location $workspace
+        try {
+            if ($Mode -in @("tcp", "udp", "full", "performance")) { & cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --locked }
+            else { & cargo +1.97.1 build -p ferrum2-client --locked }
+            if ($LASTEXITCODE -ne 0) { throw "candidate build failed" }
+        }
+        finally { Pop-Location }
     }
-    finally { Pop-Location }
+    if ($Mode -eq "network-feasibility") {
+        Assert-True ([Ferrum2NetworkFeasibility]::RouteRowSize -eq 104) "route ABI size mismatch"
+        $supportAddress = $capabilityIdentity.SupportAddress
+        $supportTcpPort = $capabilityIdentity.TcpPort
+        $supportUdpPort = $capabilityIdentity.UdpPort
+        $fixedUnderlay = [Ferrum2NetworkFeasibility]::GetFixedRoute($supportAddress)
+        $defaultUnderlay = Get-Ipv4DefaultUnderlay
+        Assert-True ($fixedUnderlay.InterfaceIndex -eq $defaultUnderlay.InterfaceIndex -and $fixedUnderlay.PrefixLength -eq 0) "fixed endpoint did not use the eligible IPv4 physical default"
+        Assert-True (@($defaultUnderlay.Sources | Where-Object { $_.IPAddress -eq $fixedUnderlay.SourceAddress }).Count -eq 1) "fixed endpoint best source mismatch"
+        $dynamicUnderlay = [Ferrum2NetworkFeasibility]::GetConstrainedRoute($supportAddress, $defaultUnderlay.InterfaceIndex)
+        Assert-True ($dynamicUnderlay.InterfaceIndex -eq $defaultUnderlay.InterfaceIndex -and $dynamicUnderlay.PrefixLength -eq 0) "dynamic default constrained route mismatch"
+        Assert-True (@($defaultUnderlay.Sources | Where-Object { $_.IPAddress -eq $dynamicUnderlay.SourceAddress }).Count -eq 1) "dynamic default source mismatch"
+
+        $preflightTcp = [Text.Encoding]::ASCII.GetBytes("m16-$($capabilityIdentityHash.Substring(0, 16))-tcp-live")
+        $preflightUdp = [Text.Encoding]::ASCII.GetBytes("m16-$($capabilityIdentityHash.Substring(0, 16))-udp-live")
+        [Ferrum2NetworkFeasibility]::TcpEcho($supportAddress, $supportTcpPort, $fixedUnderlay.InterfaceIndex, $fixedUnderlay.SourceAddress, $preflightTcp)
+        [Ferrum2NetworkFeasibility]::UdpEcho($supportAddress, $supportUdpPort, $fixedUnderlay.InterfaceIndex, $fixedUnderlay.SourceAddress, $preflightUdp)
+
+        $physicalDnsBaseline = @(Get-PhysicalDnsSnapshot 0)
+        Write-CapabilityEvidence "before" ([ordered]@{
+            candidate_sha = $capabilityIdentity.Ledger.candidate_sha
+            probe_sha256 = $capabilityIdentity.Ledger.probe_sha256
+            identity_sha256 = $capabilityIdentityHash
+            guest_build = $capabilityIdentity.GuestBuild
+            physical_default = @($defaultUnderlay.Row.Route | Select-Object InterfaceIndex, DestinationPrefix, NextHop, RouteMetric)
+            fixed_underlay = $fixedUnderlay | Select-Object InterfaceIndex, SourceAddress, NextHop, PrefixLength, RouteMetric
+            dynamic_underlay = $dynamicUnderlay | Select-Object InterfaceIndex, SourceAddress, NextHop, PrefixLength, RouteMetric
+            physical_dns = $physicalDnsBaseline
+            ferrum2_processes = @(Get-ExactRunProcesses -WorkPath $work).Count
+            ferrum2_adapters = @(Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue).Count
+        })
+
+        $metricsPort = Get-UniqueTcpPort
+        $dnsPort = Get-UniqueTcpPort
+        $dnsInboundPort = Get-UniqueTcpPort
+        @"
+schema_version = 2
+[tun]
+tag = "tun-in"
+adapter_name = "$adapterName"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+ready_timeout_ms = 15000
+ring_capacity = 8388608
+[[outbounds]]
+tag = "dead"
+server = "127.0.0.1:9"
+[route]
+final = "dead"
+[[route.rules]]
+inbound = "tun-in"
+network = "tcp"
+ip = "$supportAddress"
+port = $supportTcpPort
+action = "reject"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$supportAddress"
+port = $supportUdpPort
+action = "reject"
+[[route.rules]]
+inbound = "tun-in"
+network = "tcp"
+ip = "198.18.0.1"
+port = 53
+action = "hijack-dns"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "198.18.0.1"
+port = 53
+action = "hijack-dns"
+[udp]
+enabled = false
+max_sessions = 8
+max_buffered_bytes = 1048576
+idle_timeout_ms = 5000
+[dns]
+[[dns.inbounds]]
+tag = "dns-control"
+listen = "127.0.0.1:$dnsInboundPort"
+[[dns.servers]]
+tag = "resolver"
+transport = "udp"
+address = "127.0.0.1:$dnsPort"
+[dns.route]
+final = "resolver"
+[runtime]
+shutdown_grace_ms = 1000
+idle_timeout_ms = 2000
+[metrics]
+listen = "127.0.0.1:$metricsPort"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"@ | Set-Content -LiteralPath $config -Encoding utf8NoBOM
+
+        $dnsResponder = [Ferrum2DnsResponder]::new($dnsPort)
+        $tcpResources.Add($dnsResponder)
+        Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "sibling DLL baseline not absent"
+        Assert-InterfaceGone $adapterName $null
+        $offlineOutput = @(& $binary --config $config --check-config 2>&1)
+        Assert-True ($LASTEXITCODE -eq 0) "network feasibility config validation failed"
+        Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "network feasibility config marker mismatch"
+        Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+        Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
+        $createdSiblingDll = $true
+
+        $activeProcess = Start-Candidate $binary $config
+        $adapter = Wait-AdapterReady $adapterName
+        $ownedInterfaceIndex = [int]$adapter.ifIndex
+        [void](Get-Metrics $metricsPort)
+        $addressBaseline = @(Get-InterfaceAddressSnapshot $ownedInterfaceIndex)
+        $routeBaseline = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
+        $ipv6AddressBaseline = @($addressBaseline | Where-Object { $_ -like "IPv6|*" })
+        Assert-True ($addressBaseline -contains "IPv4|198.18.0.2|30|Preferred" -and $addressBaseline -contains "IPv6|fd00::2|126|Preferred") "network feasibility address baseline mismatch"
+
+        $partial = [Ferrum2NetworkFeasibility]::CreateCaptureRoute([uint32]$ownedInterfaceIndex, "0.0.0.0/1", 1)
+        $capabilityRoutes.Add($partial)
+        $partial.Verify()
+        $partial.Dispose()
+        Assert-True $capabilityRoutes.Remove($partial) "partial route journal mismatch"
+        Assert-SnapshotEqual $routeBaseline @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex) "partial route rollback"
+
+        $captureTraffic = Get-AdapterTraffic $adapterName
+        $captureWindow = [Diagnostics.Stopwatch]::StartNew()
+        $firstPrefix = if ([byte][Net.IPAddress]::Parse($supportAddress).GetAddressBytes()[0] -lt 128) { "0.0.0.0/1" } else { "128.0.0.0/1" }
+        $secondPrefix = if ($firstPrefix -eq "0.0.0.0/1") { "128.0.0.0/1" } else { "0.0.0.0/1" }
+        $firstRoute = [Ferrum2NetworkFeasibility]::CreateCaptureRoute([uint32]$ownedInterfaceIndex, $firstPrefix, 1)
+        $capabilityRoutes.Add($firstRoute)
+        Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort ([Text.Encoding]::ASCII.GetBytes("m16-capture-window"))
+        $secondRoute = [Ferrum2NetworkFeasibility]::CreateCaptureRoute([uint32]$ownedInterfaceIndex, $secondPrefix, 1)
+        $capabilityRoutes.Add($secondRoute)
+        $captureWindow.Stop()
+        Assert-True ($captureWindow.ElapsedMilliseconds -le 3000) "capture-before-admission window exceeded"
+        $captureTrafficAfter = Get-AdapterTraffic $adapterName
+        Assert-True ($captureTrafficAfter.ReceivedPacketErrors -eq $captureTraffic.ReceivedPacketErrors -and
+            $captureTrafficAfter.OutboundPacketErrors -eq $captureTraffic.OutboundPacketErrors -and
+            $captureTrafficAfter.ReceivedDiscardedPackets -eq $captureTraffic.ReceivedDiscardedPackets -and
+            $captureTrafficAfter.OutboundDiscardedPackets -eq $captureTraffic.OutboundDiscardedPackets) "capture-before-admission overflowed the Wintun ring"
+        $capabilityWindowRows = 1
+        foreach ($route in $capabilityRoutes) { $route.Verify() }
+        $capabilityRouteRows = 2
+
+        foreach ($row in @(
+            @{ Name = "fixed"; Underlay = $fixedUnderlay },
+            @{ Name = "dynamic"; Underlay = $dynamicUnderlay }
+        )) {
+            $payload = [Text.Encoding]::ASCII.GetBytes("m16-$($row.Name)-tcp")
+            Invoke-UnpinnedTcpCapture $supportAddress $supportTcpPort $metricsPort $payload
+            $capabilityTcpRows++
+            $acceptedBefore = Get-TunAccepted $metricsPort
+            [Ferrum2NetworkFeasibility]::TcpEcho($supportAddress, $supportTcpPort, $row.Underlay.InterfaceIndex, $row.Underlay.SourceAddress, $payload)
+            Start-Sleep -Milliseconds 100
+            Assert-True ((Get-TunAccepted $metricsPort) -eq $acceptedBefore) "pinned TCP entered Wintun"
+            $capabilityTcpRows++
+        }
+        foreach ($row in @(
+            @{ Name = "fixed"; Underlay = $fixedUnderlay },
+            @{ Name = "dynamic"; Underlay = $dynamicUnderlay }
+        )) {
+            $payload = [Text.Encoding]::ASCII.GetBytes("m16-$($row.Name)-udp")
+            Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort $payload
+            $capabilityUdpRows++
+            $acceptedBefore = Get-TunAccepted $metricsPort
+            [Ferrum2NetworkFeasibility]::UdpEcho($supportAddress, $supportUdpPort, $row.Underlay.InterfaceIndex, $row.Underlay.SourceAddress, $payload)
+            Start-Sleep -Milliseconds 100
+            Assert-True ((Get-TunAccepted $metricsPort) -eq $acceptedBefore) "pinned UDP entered Wintun"
+            $capabilityUdpRows++
+        }
+        Assert-True ($capabilityTcpRows -eq 4 -and $capabilityUdpRows -eq 4) "socket pin row count mismatch"
+
+        Set-CapabilityDns $ownedInterfaceIndex
+        Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "physical DNS after Wintun apply"
+        try {
+            Invoke-SystemDnsWitness "m16-$runIdentity-udp.tun.test" $false $dnsResponder
+            Invoke-SystemDnsWitness "m16-$runIdentity-tcp.tun.test" $true $dnsResponder
+            $capabilityDnsRows = 2
+            $capabilityInterfaceMetric = "unchanged"
+        } catch {
+            Set-CapabilityInterfaceMetric $ownedInterfaceIndex
+            $capabilityDnsRows = 0
+            Invoke-SystemDnsWitness "m16-$runIdentity-lease-udp.tun.test" $false $dnsResponder
+            Invoke-SystemDnsWitness "m16-$runIdentity-lease-tcp.tun.test" $true $dnsResponder
+            $capabilityDnsRows = 2
+            $capabilityInterfaceMetric = "leased"
+        }
+        Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "physical DNS active sentinel"
+        Assert-SnapshotEqual $ipv6AddressBaseline @((Get-InterfaceAddressSnapshot $ownedInterfaceIndex) | Where-Object { $_ -like "IPv6|*" }) "M15 IPv6 address active sentinel"
+
+        Write-CapabilityEvidence "active" ([ordered]@{
+            interface_metric = $capabilityInterfaceMetric
+            capture_window_ms = $captureWindow.ElapsedMilliseconds
+            addresses = @(Get-InterfaceAddressSnapshot $ownedInterfaceIndex)
+            routes = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
+            tun_ipv4_dns = @(Get-TunIpv4Dns $ownedInterfaceIndex)
+            physical_dns = @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex)
+            tun_accepted = Get-TunAccepted $metricsPort
+            route_rows = $capabilityRouteRows
+            tcp_rows = $capabilityTcpRows
+            udp_rows = $capabilityUdpRows
+            dns_rows = $capabilityDnsRows
+        })
+
+        Remove-CapabilityRoutes
+        Assert-SnapshotEqual $routeBaseline @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex) "capture route exact rollback"
+        Restore-CapabilityDns $ownedInterfaceIndex
+        Restore-CapabilityInterfaceMetric $ownedInterfaceIndex
+        Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "physical DNS normal cleanup sentinel"
+        Assert-SnapshotEqual $ipv6AddressBaseline @((Get-InterfaceAddressSnapshot $ownedInterfaceIndex) | Where-Object { $_ -like "IPv6|*" }) "M15 IPv6 address normal cleanup sentinel"
+        $ownerMetrics = Get-Metrics $metricsPort
+        Assert-True ((Get-ClientGaugeValue $ownerMetrics "ferrum2_udp_sessions_active") -eq 0 -and
+            (Get-ClientGaugeValue $ownerMetrics "ferrum2_udp_buffered_bytes") -eq 0) "normal cleanup process-private owners remained"
+        Stop-Candidate $activeProcess
+        $activeProcess = $null
+        Wait-AdapterAbsent $adapterName
+        Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+        Assert-True (@(Get-ExactRunProcesses -WorkPath $work).Count -eq 0) "normal cleanup process residue"
+        Write-CapabilityEvidence "normal-cleanup" ([ordered]@{
+            processes = @(Get-ExactRunProcesses -WorkPath $work).Count
+            adapters = @(Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue).Count
+            addresses = @(Get-NetIPAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count
+            routes = @(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count
+            dns = @(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count
+        })
+
+        $activeProcess = Start-Candidate $binary $config
+        $adapter = Wait-AdapterReady $adapterName
+        $ownedInterfaceIndex = [int]$adapter.ifIndex
+        [void](Get-Metrics $metricsPort)
+        if ($capabilityInterfaceMetric -eq "leased") { Set-CapabilityInterfaceMetric $ownedInterfaceIndex }
+        Set-CapabilityDns $ownedInterfaceIndex
+        foreach ($prefix in @("0.0.0.0/1", "128.0.0.0/1")) {
+            $route = [Ferrum2NetworkFeasibility]::CreateCaptureRoute([uint32]$ownedInterfaceIndex, $prefix, 1)
+            $capabilityRoutes.Add($route)
+        }
+        Write-CapabilityEvidence "hard-kill-active" ([ordered]@{
+            addresses = @(Get-InterfaceAddressSnapshot $ownedInterfaceIndex)
+            routes = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
+            tun_ipv4_dns = @(Get-TunIpv4Dns $ownedInterfaceIndex)
+        })
+        $killedProcess = $activeProcess
+        Assert-True ([Ferrum2ProcessGroup]::Terminate([uint32]$killedProcess.Id)) "TerminateProcess failed"
+        Assert-True (Wait-ProcessExit $killedProcess 20) "hard-kill candidate did not exit"
+        Assert-True ([Ferrum2ProcessGroup]::ExitCode([uint32]$killedProcess.Id) -ne 0) "hard-kill candidate unexpectedly exited cleanly"
+        [Ferrum2ProcessGroup]::Close([uint32]$killedProcess.Id)
+        $activeProcess = $null
+        Wait-AdapterAbsent $adapterName
+        Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+        Assert-True (@(Get-ExactRunProcesses -WorkPath $work).Count -eq 0) "hard-kill process residue"
+        Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "hard-kill DNS residue"
+        Remove-CapabilityRoutes
+        $capabilityDnsApplied = $false
+        $capabilityDnsSnapshot = $null
+        $capabilityMetricApplied = $false
+        $capabilityMetricSnapshot = $null
+        $capabilityHardKillRows = 1
+        Write-CapabilityEvidence "after" ([ordered]@{
+            processes = @(Get-ExactRunProcesses -WorkPath $work).Count
+            adapters = @(Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue).Count
+            addresses = @(Get-NetIPAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count
+            routes = @(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count
+            dns = @(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count
+            physical_dns = @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex)
+        })
+        Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "physical DNS final sentinel"
+    }
     if ($Mode -in @("lifecycle", "full")) {
     $metricsPort = Get-FreeTcpPort
     @"
@@ -2054,6 +2853,22 @@ finally {
     foreach ($route in $ownedRoutes) {
         Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue
     }
+    if ($Mode -eq "network-feasibility") {
+        try { Remove-CapabilityRoutes }
+        catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
+        $capabilityAdapter = Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue
+        if ($capabilityAdapter) {
+            try { Restore-CapabilityDns ([int]$capabilityAdapter.ifIndex) }
+            catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
+            try { Restore-CapabilityInterfaceMetric ([int]$capabilityAdapter.ifIndex) }
+            catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
+        } else {
+            $capabilityDnsApplied = $false
+            $capabilityDnsSnapshot = $null
+            $capabilityMetricApplied = $false
+            $capabilityMetricSnapshot = $null
+        }
+    }
     if ($activeProcess -and -not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 0)) {
         [void][Ferrum2ProcessGroup]::Break([uint32]$activeProcess.Id)
         if (-not (Wait-ProcessExit $activeProcess 5)) {
@@ -2124,6 +2939,12 @@ if ($completed) {
     } elseif ($Mode -eq "performance") {
         Write-Output "m15_windows_tun_performance_resource adapter_rx_bytes=$performanceAdapterRxBytes adapter_tx_bytes=$performanceAdapterTxBytes adapter_rx_packets=$performanceAdapterRxPackets adapter_tx_packets=$performanceAdapterTxPackets adapter_rx_errors=$performanceAdapterRxErrors adapter_tx_errors=$performanceAdapterTxErrors adapter_rx_discards=$performanceAdapterRxDiscards adapter_tx_discards=$performanceAdapterTxDiscards tun_accepted_delta=$performanceTunAcceptedDelta cpu_ms_delta=$performanceCpuMilliseconds rss_bytes=$performanceRssBytes handles_peak=$performanceHandlesPeak threads_peak=$performanceThreadsPeak udp_sessions_peak=$performanceUdpSessionsPeak udp_buffered_bytes_peak=$performanceUdpBufferedBytesPeak controller_inflight_peak=$performanceControllerInflightPeak queues=bounded bounds_ring_bytes=8388608 bounds_tcp_flows=8 bounds_tcp_buffer_bytes=4096 bounds_udp_mappings=4 bounds_udp_buffered_bytes=4194304 adapter_churn=$performanceAdapterChurn grace_drain=PASS force_drain=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
         Write-Output "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+    } elseif ($Mode -eq "network-feasibility") {
+        Assert-True ($capabilityRouteRows -eq 2 -and $capabilityTcpRows -eq 4 -and $capabilityUdpRows -eq 4 -and
+            $capabilityDnsRows -eq 2 -and $capabilityWindowRows -eq 1 -and $capabilityHardKillRows -eq 1 -and
+            $capabilityInterfaceMetric -in @("unchanged", "leased")) "network feasibility marker prerequisites mismatch"
+        Assert-True (Test-Path -LiteralPath $capabilityEvidence) "network feasibility evidence is missing"
+        Write-Output "m16_windows_network_feasibility status=PASS routes=2/2 tcp_pin=4/4 udp_pin=4/4 dns=2/2 capture_window=1/1 hard_kill=1/1 interface_metric=$capabilityInterfaceMetric cleanup=PASS guest_build=$($capabilityIdentity.GuestBuild) run_token=$runIdentity candidate_sha=$($capabilityIdentity.Ledger.candidate_sha) probe_sha256=$($capabilityIdentity.Ledger.probe_sha256) identity_sha256=$capabilityIdentityHash"
     } elseif ($Mode -eq "full") {
         Write-Output "m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
     } else {
