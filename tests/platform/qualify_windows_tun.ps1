@@ -51,7 +51,6 @@ $completed = $false
 $primaryError = $null
 $outerCleanupError = $null
 $udp01DiagnosticOnly = $Mode -eq "udp" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq "1"
-if ($udp01DiagnosticOnly) { $env:FERRUM2_T05_UDP_SOCKET_PROBE = "1" }
 $tcp01Diagnostic = $null
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -1738,6 +1737,20 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         }
 
         if ($Mode -eq "udp") {
+            if ($udp01DiagnosticOnly) {
+                Stop-Candidate $activeProcess
+                $activeProcess = $null
+                Wait-AdapterAbsent $adapterName
+                Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+                $env:FERRUM2_T05_UDP_SOCKET_PROBE = "1"
+                $activeProcess = Start-Candidate $binary $config
+                $adapter = Wait-AdapterReady $adapterName
+                $ownedInterfaceIndex = [int]$adapter.ifIndex
+                foreach ($target in $targets) {
+                    $prefixLength = if ($target.Contains(":")) { 128 } else { 32 }
+                    [void](Add-TunRoute $ownedInterfaceIndex "$target/$prefixLength" 500)
+                }
+            }
             foreach ($targetIndex in @(4, 5, 6)) {
                 [void](Add-TargetAddress $targets[$targetIndex])
             }

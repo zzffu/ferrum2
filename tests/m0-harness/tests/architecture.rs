@@ -2454,7 +2454,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         source.contains("[ValidateSet(\"lifecycle\", \"tcp\", \"udp\")]")
             && !source.to_ascii_lowercase().contains("pktmon")
             && source.matches("$tcpRows++").count() == 8
-            && source.matches("Add-TunRoute $").count() == 4
+            && source.matches("Add-TunRoute $").count() == 5
             && source.matches("Add-TargetAddress $").count() == 2
             && !source.contains("Remove-OwnedRoute")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")")
@@ -3139,6 +3139,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("        # UDP-01")
             .and_then(|(_, tail)| tail.split_once("        Assert-True ($udpRows -eq 8)"))
             .map(|(body, _)| body);
+        let udp01_setup = source.split_once("        # UDP-01").map(|(head, _)| head);
         let echo = source
             .split_once("function Invoke-UdpEchoRow(")
             .and_then(|(_, tail)| tail.split_once("\ntry {"))
@@ -3162,9 +3163,17 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains(
                 "$udp01DiagnosticOnly = $Mode -eq \"udp\" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq \"1\"",
             )
-            && source.contains(
-                "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
-            )
+            && source
+                .matches("$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"")
+                .count()
+                == 1
+            && udp01_setup.is_some_and(|setup| {
+                setup
+                    .rfind("Stop-Candidate $activeProcess")
+                    .zip(setup.rfind("$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\""))
+                    .zip(setup.rfind("$activeProcess = Start-Candidate $binary $config"))
+                    .is_some_and(|((stop, env), start)| stop < env && env < start)
+            })
             && gate.is_some_and(|gate| {
                 gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
                     && gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))")
@@ -3271,6 +3280,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("Interlocked.Increment(ref selfTests)", ""),
         controller.replace("$selfTestsBefore = $Gate.SelfTests", "$selfTestsBefore = 0"),
         controller.replace("socket_probe=$socketProbe", "socket_probe=bypassed"),
+        controller.replace(
+            "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
+            "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"0\"",
+        ),
         controller.replace("$firstUdpAcceptedDelta", "$ignoredFirstUdpDelta"),
         controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
         controller.replace(
