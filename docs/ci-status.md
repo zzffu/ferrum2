@@ -1,5 +1,49 @@
 # CI 与验证状态
 
+## M15 closed — Windows Wintun TUN qualified on one exact product
+
+- **Exact identity:** product `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9`，tree
+  `72a3cfb5c881a35b1416cbf9ffea593973cc3570`，parent
+  `b04432708f2229562fcb2e4d47f2bfdbfb8daec3`。Every accepted T01～T06 commit is an ancestor。
+  The T07 closeout is documentation-only and does not replace the qualified product。
+- **Local qualification:** format、strict Clippy、workspace bins/all-features tests、ignored 100+
+  lifecycle `1/1`、docs、Rust 1.97.1 check/build and diff passed serially。The first exact Rust 1.97.1
+  workspace test failed one DNS cancellation assertion；one authorized exact focused diagnostic and one
+  unchanged exact workspace retry passed。The failure and bounded retry remain recorded；no product edit or
+  further rerun occurred。T07 did not run its prohibited controller、VM、Wintun or host-network command。
+- **VM evidence retained from T06:** candidates `c845b04…`，`739bfe7…` and `b044327…` respectively
+  exposed an empty-count StrictMode assumption，an invalid quiet prerequisite and an obsolete foundation-drop
+  counter；each left zero residue and was repaired by its next descendant。Accepted full VM attempt 4 passed
+  `functional=16/16 cycles=100/100 cleanup=PASS` in `688.7s`；performance attempt 5 passed
+  `witnesses=2/2 cleanup=PASS` in `207.9s`，with zero guest/host residue。T07 did not reproduce these
+  assertions。
+- **Automatic hosted qualification:** push
+  [`31368732658/1`](https://github.com/zzffu/ferrum2/actions/runs/31368732658) and authorized full
+  [`31368750439/1`](https://github.com/zzffu/ferrum2/actions/runs/31368750439) had all required jobs succeed
+  on the exact product。The full job emitted `functional=16/16 cycles=100/100 cleanup=PASS` with matching
+  SHA/run/attempt。
+- **Independent Windows performance/resource:** authorized
+  [`31368752781/1`](https://github.com/zzffu/ferrum2/actions/runs/31368752781) emitted
+  `witnesses=2/2 cleanup=PASS`。RX/TX bytes were `2763/31016`，packets `46/201`，all errors/discards
+  `0`，accepted `63`，CPU `16ms`，RSS `36839424`，handles `216`，threads `15`，sessions `1`，
+  buffered `196521`，inflight `1`，churn `2`，bounds `8388608/8/4096/4/4194304` and grace/force
+  `PASS`。`queues=bounded` is a configured-bounds witness，not measured queue depth；no threshold or
+  improvement is claimed。
+- **Preserved failures:** fifteen attempt-1 hosted runs remain uncredited and were never remotely rerun；the complete
+  run/SHA/event/failed-job ledger is in M15-T07 and
+  [`HANDOFF-M15-2026-08-10.md`](handoffs/HANDOFF-M15-2026-08-10.md)。Repairs used new descendant SHAs。
+- **Footprint/review:** integrity and ratio pass。Qualified code/tests are `29771/50312`，ratio
+  `1.689967`，case/support/fixture `44563/5152/597`，delta `+5303/0/0`。The milestone numeric
+  `REVIEW_REQUIRED` and T06 `+475/0/0` are accepted as distinct evidence with zero support/fixture growth。
+  Fresh final Architect returned `PASS_WITH_NOTES` with zero blocker、major or minor finding。Initial and
+  first targeted QA retained `QA-M15-T07-001`；two independent read-only diagnoses selected the canonical
+  exact-job-name ledger correction。Second targeted QA returned `PASS`，closed the finding and reported
+  blocker/major/minor `0/0/0`。
+- **Boundary:** all authorized non-force pushes and dispatches are consumed。T07 performed no remote action，
+  force-push、PR、tag、package、release or publication。No Wintun binary、production endpoint/
+  route、PSK、capture、build output or evidence artifact is committed。Combined Wintun/Ferrum2
+  redistribution remains blocked pending the responsible legal decision。
+
 ## M14 closed — bounded routing/sniffing qualified on one exact product
 
 - **Exact identity:** qualified product `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`，tree

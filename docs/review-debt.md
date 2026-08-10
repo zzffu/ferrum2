@@ -165,3 +165,21 @@ The schema-3 `+5377/0/0` numeric `REVIEW_REQUIRED` result is accepted as distinc
 real-process、lifecycle and mutation evidence in existing harnesses；support/fixture growth is zero。
 Diagnostic throughput ratio and deferred fallback、groups、TUN/transparent and management features are
 scope boundaries，not review debt。
+
+## M15 close audit
+
+No M15 review debt remains。All product/security/lifecycle findings were resolved before qualification。
+Fresh final Architect returned
+`PASS_WITH_NOTES` on exact product
+`7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9` / tree
+`72a3cfb5c881a35b1416cbf9ffea593973cc3570` with zero blocker、major or minor finding。Initial and first
+targeted QA retained `QA-M15-T07-001`；two independent read-only diagnoses selected the canonical exact-
+job-name correction in the complete 15-run failed attempt-1 hosted ledgers in M15-T07 and the handoff。
+Second targeted QA returned `PASS`，closed the finding and reported blocker/major/minor `0/0/0`；none is
+remotely rerun or credited。The T06 `+475/0/0` and milestone
+`+5303/0/0` numeric
+`REVIEW_REQUIRED` results are accepted as distinct full/cycle/performance、accepted-packet、security、
+lifecycle and mutation case evidence；integrity and ratio pass，support/fixture growth is zero and no
+third helper or second harness exists。`queues=bounded` means configured bounds，not measured internal
+queue depth。Combined Wintun/Ferrum2 redistribution remains a blocked release/legal boundary rather than
+review debt；the source candidate and ephemeral/operator-supplied exact DLL path are qualified。

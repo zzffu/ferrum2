@@ -71,13 +71,18 @@ route/reject/hijack、schema-v2 association routing及schema-v1 migration reject
 automatic run `31282591585/1`保留为FAIL且未rerun；其qualification generator schema缺陷在三文件
 test/tool descendant修复。Final Architect/QA均`PASS_WITH_NOTES`且zero finding；schema-3 integrity/
 ratio PASS，`+5377/0/0` numeric advisory已接受。未force-push、PR、tag、package、release或publish。
-M15现为`executing`：T01～T04 done。T04 exact integration `a7d25a2…`交付bounded TUN TCP、shared
-route/sniff/DNS/egress/relay composition和8-row privileged controller。Fresh isolated VM先通过
-`tcp=8/8 cleanup=PASS`且零残留，随后final Architect/QA均`PASS`；hosted
-[`31344321422/1`](https://github.com/zzffu/ferrum2/actions/runs/31344321422)亦全绿并输出exact marker。
-Numeric `+1750/+0/+0`已作为必要mutation/platform证据接受。T05 active；后续按T05→T06→T07串行
-drain，VM-backed候选先通过VM再做final review。本次execute已授权所需non-force push、direct hosted
-probe及same-SHA performance dispatch，未授权rerun、force-push、PR、tag、package、release或publication。
+M15现已`closed`。Exact product `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9`的local serial
+gate、fresh isolated-VM full/performance与hosted runs
+[`31368732658/1`](https://github.com/zzffu/ferrum2/actions/runs/31368732658)、
+[`31368750439/1`](https://github.com/zzffu/ferrum2/actions/runs/31368750439)和
+[`31368752781/1`](https://github.com/zzffu/ferrum2/actions/runs/31368752781)已通过，exact markers报告
+`functional=16/16 cycles=100/100 cleanup=PASS`与独立`witnesses=2/2 cleanup=PASS`。Architect
+`PASS_WITH_NOTES`且zero blocker/major/minor；initial/first targeted QA保留`QA-M15-T07-001`，两个
+independent read-only diagnoses选定canonical exact-job-name ledger correction，second targeted QA
+`PASS`并关闭该finding，最终zero blocker/major/minor。Footprint integrity/ratio PASS，T06
+`+475/0/0`与milestone `+5303/0/0`已接受。
+所有失败VM候选和15个hosted attempt-1均保留且未remotely rerun/credited。无force-push、PR、
+tag、package、release或publication；combined Wintun redistribution仍需responsible legal decision。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -91,8 +96,9 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M10-2026-08-04.md`、
 `docs/handoffs/HANDOFF-M11-2026-08-05.md`、
 `docs/handoffs/HANDOFF-M12-2026-08-07.md`、
-`docs/handoffs/HANDOFF-M13-2026-08-08.md`和
-`docs/handoffs/HANDOFF-M14-2026-08-09.md`。
+`docs/handoffs/HANDOFF-M13-2026-08-08.md`、
+`docs/handoffs/HANDOFF-M14-2026-08-09.md`和
+`docs/handoffs/HANDOFF-M15-2026-08-10.md`。
 
 ## 依赖顺序
 
@@ -1126,7 +1132,7 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 
 ## M15 — Windows Wintun TUN data plane
 
-- **Status:** executing
+- **Status:** closed
 - **Objective:** 一个optional schema-v2 client `[tun]`在Windows NT 10.0+ AMD64创建独占Wintun
   adapter，配置双栈address/MTU，由一个同步owner thread运行有界userspace TCP/UDP stack；externally
   routed flows复用现有ordered route/sniff、DNS answer、client egress和relay，且无第二数据面。
@@ -1152,12 +1158,21 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 - **Deferred/out of scope:** explicit/automatic/default/bypass route、system DNS、WFP、network monitoring、
   fragments、ICMP、Fake-IP、process routing、non-Windows/non-AMD64 TUN、multi-stack/sharding、installer、
   service、DLL redistribution、package/release/publication。
-- **Next/remote boundary:** T01～T04 done and T05 active on exact accepted base `a7d25a2…`。Fresh VM and
-  hosted [`31344321422/1`](https://github.com/zzffu/ferrum2/actions/runs/31344321422) passed exact T04 TCP
-  `8/8` with cleanup。Required non-force pushes and the later same-SHA performance dispatch are authorized；
-  rerun、force-push、PR、tag、package、release and publication are not。VM-backed candidates must pass one
-  fresh VM run before final review。Combined Wintun/Ferrum2 redistribution remains blocked pending the
-  responsible license decision。
+- **Qualified identity/evidence:** exact product `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9` / tree
+  `72a3cfb5c881a35b1416cbf9ffea593973cc3570` passed local serial qualification，fresh VM full/performance
+  with zero residue，and exact-SHA hosted `31368732658/1`、`31368750439/1`、`31368752781/1`。
+  Functional is `16/16`，cycles `100/100`，performance witnesses `2/2` and cleanup `PASS`。Final
+  Architect is `PASS_WITH_NOTES` with zero blocker/major/minor。Initial and first targeted QA retained
+  `QA-M15-T07-001`；two independent read-only diagnoses selected the canonical exact-job-name ledger
+  correction，and second targeted QA returned `PASS`、closed the finding and reported zero
+  blocker/major/minor。
+- **Footprint:** final code/tests `29771/50312`，ratio `1.689967 PASS`，case/support/fixture
+  `44563/5152/597`，delta `+5303/0/0`。Milestone and T06 `+475/0/0` numeric advisories are accepted
+  distinct case evidence；integrity/category sum pass and support/fixture growth is zero。
+- **Next/remote boundary:** none for M15。Authorized non-force pushes/dispatches are consumed；
+  failed hosted runs were not remotely rerun or credited。No force-push、PR、tag、package、release or
+  publication occurred。Combined
+  Wintun/Ferrum2 redistribution remains blocked pending the responsible legal decision。
 
 ## 决策登记
 
@@ -1402,8 +1417,11 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 | 2026-08-09 | M14 close | Exact `bc696347…` passes local serial qualification、automatic `31284062682/1` and manual `31284310711/1`；M14 closed | Automatic run passes quality、footprint、MSRV、three platforms、SIP022/DNS interop and aggregate；manual job passes throughput/resource/DNS resource、THP restore and cleanup | Final schema-3 integrity/ratio PASS；`+5377/0/0` advisory accepted；two necessary non-force pushes and one dispatch consumed，no force-push、unchanged-SHA rerun、PR、tag、package、release or publication；local docs-only closeout not pushed |
 | 2026-08-09 | M15 initial plan（dependency/MSRV superseded by next row） | M15改为`planned`；接受Windows AMD64手动路由Wintun TUN、single stack owner、flow-level seam和existing policy/DNS/egress composition | External draft经exact `bd374c6` source/CI/upstream复核；schema 3/Rust 1.91/three crates/fragments/2-GiB defaults/blocking activate/Hyper-V-first最初改为schema v2/Rust 1.88/two deep modules/no fragments/bounded prepare/direct hosted-first；Windows-managed connected rows显式纳入合同 | qualified `bc696347…`、planning `bd374c6…`；ADR-0034、SPEC/TEST-0016、M15 research、T01→T02→T03→T04→T05→T06→T07；performance required；plan-only，无product/push/dispatch/release/publication |
 | 2026-08-09 | M15 dependency/MSRV owner amendment | Owner明确要求exact smoltcp 0.13.1及当前latest stable rustc；规划日官方latest为Rust 1.97.1，现有selected build toolchain已匹配 | 保留no-default literal ten-feature graph、双向TCP/UDP filter和no-fragment边界；明确不启用正向`auto-icmp-echo-reply`。T03把workspace、CI及policy MSRV从1.88.0原子提升至1.97.1，Rust1.91只作为upstream minimum事实；未来stable不自动漂移 | M15 milestone/ADR/SPEC/TEST/research/T01/T03/T06/T07同步；control-only T01不修改product/workflow，未授权push/dispatch/release/publication |
-| 2026-08-09 | M15-T01 accept / execute | M15改为`executing`；T01 candidate `4942a3d…`通过review/validation，T02 ready | Qualified/planning identities、manual-route/schema-v2/two-module ownership、Wintun artifact/dependency/MSRV facts、packet/flow boundaries and schema-3 control agree；bounded primary Architect/QA `PASS` with zero finding | Quick、Rust 1.88 historical、Rust 1.97.1 forward、footprint integrity/numeric `PASS` and `0/0/0`；execute授权required non-force pushes、direct hosted probe及same-SHA performance dispatch；no rerun/force-push/PR/tag/package/release/publication |
+| 2026-08-09 | M15-T01 accept / execute | M15改为`executing`；T01 candidate `4942a3d…`通过review/validation，T02 ready | Qualified/planning identities、manual-route/schema-v2/two-module ownership、Wintun artifact/dependency/MSRV facts、packet/flow boundaries and schema-3 control agree；bounded primary Architect/QA `PASS` with zero finding | Quick、Rust 1.88 historical、Rust 1.97.1 forward、footprint integrity/numeric `PASS` and `0/0/0`；execute授权required non-force pushes、direct hosted probe及same-SHA performance dispatch；no hosted rerun/force-push/PR/tag/package/release/publication |
 | 2026-08-09 | M15-T02 integrate | Exact `fc617cda…` proves rejected plan-bound UDP candidates commit nothing，the next valid candidate re-reads selector state，and a live association retains its accepted snapshot | Existing regression performs A→over-limit drop→B valid and B→A after commit；runtime unchanged。Architect/QA both `PASS_WITH_NOTES`，zero blocker/major/minor | Focused、architecture、workspace and footprint integrity PASS；numeric `+3/0/0` existing-file signal and one outer timeout/exact rerun note accepted；T03 ready，no remote action |
 | 2026-08-09 | M15-T03 F05 contract erratum | Correct Wintun setup to MTU/address → StartSession/media up → natural dual-family DAD → stack/Ready；optimistic DAD remains forbidden and exact Preferred remains mandatory | Exact 0.14.1 driver registers rings before reporting connected media；local elevated Windows 10.0.26200.0 showed pre-session Disconnected/non-ready rows，then post-session IPv4/IPv6 Tentative→Preferred within one deadline | Contract Architect `M15-T03-CONTRACT-001` required the narrow in-place ADR/SPEC/TEST/ticket/milestone/research correction；no new seam、ADR、dependency、product route API or readiness weakening |
-| 2026-08-09 | M15-T03 integrate | Exact `2eb6db6…` integrates schema-v2 TUN identity、single Wintun owner/unsafe RAII、bounded smoltcp foundation、dual-Preferred DAD、packet validation and complete rollback；T03 done，T04 active | Initial Architect/QA review found cancellation cleanup、partial transaction、real packet、route snapshot、config/packet/dependency evidence gaps；one repair plus blocked targeted review triggered two independent xhigh diagnoses，whose private-transaction repair closed the remaining QA-002/004 | Local focused/full/MSRV/Windows/Clippy/privileged and hosted `31304175220/1` PASS；final Architect/QA `PASS_WITH_NOTES` with zero blocker/major/minor；integrity/ratio PASS and numeric `+2310/+0/+0` accepted；normal non-force probe pushes only，no rerun/force-push/PR/release/publication |
-| 2026-08-10 | M15-T04 integrate | Exact `a7d25a2…` integrates bounded IPv4/IPv6 TUN TCP through shared route/sniff、DNS、egress and relay seams；T04 done，T05 active | Fresh isolated VM first passed all eight TCP rows with zero residue；final Architect/QA then both returned `PASS` with zero blocker/major/minor | Local full/MSRV/Windows/Clippy、VM and hosted `31344321422/1` PASS with exact `tcp=8/8 cleanup=PASS` marker；footprint integrity/ratio PASS and numeric `+1750/+0/+0` accepted；one non-force exact push/dispatch，no rerun/force-push/PR/release/publication |
+| 2026-08-09 | M15-T03 integrate | Exact `2eb6db6…` integrates schema-v2 TUN identity、single Wintun owner/unsafe RAII、bounded smoltcp foundation、dual-Preferred DAD、packet validation and complete rollback；T03 done，T04 active | Initial Architect/QA review found cancellation cleanup、partial transaction、real packet、route snapshot、config/packet/dependency evidence gaps；one repair plus blocked targeted review triggered two independent xhigh diagnoses，whose private-transaction repair closed the remaining QA-002/004 | Local focused/full/MSRV/Windows/Clippy/privileged and hosted `31304175220/1` PASS；final Architect/QA `PASS_WITH_NOTES` with zero blocker/major/minor；integrity/ratio PASS and numeric `+2310/+0/+0` accepted；normal non-force probe pushes only，no hosted rerun/force-push/PR/release/publication |
+| 2026-08-10 | M15-T04 integrate | Exact `a7d25a2…` integrates bounded IPv4/IPv6 TUN TCP through shared route/sniff、DNS、egress and relay seams；T04 done，T05 active | Fresh isolated VM first passed all eight TCP rows with zero residue；final Architect/QA then both returned `PASS` with zero blocker/major/minor | Local full/MSRV/Windows/Clippy、VM and hosted `31344321422/1` PASS with exact `tcp=8/8 cleanup=PASS` marker；footprint integrity/ratio PASS and numeric `+1750/+0/+0` accepted；one non-force exact push/dispatch，no hosted rerun/force-push/PR/release/publication |
+| 2026-08-10 | M15-T05 integrate | Exact `da38170…` integrates IPv4/IPv6 TUN UDP route/chain/selector/DNS/reject through the existing association seam；T05 done，T06 active | VM transport `16/16` passed with zero residue。`31360038841/1` retained its Linux-only cfg failure although Windows transport passed；descendant repair qualified normally in `31360570556/1` | Focused/full/MSRV/three-target/VM/hosted gates PASS；numeric evidence accepted；failed hosted attempt not remotely rerun or credited |
+| 2026-08-10 | M15-T06 integrate | Exact `7ba6268…` closes failure/lifecycle/architecture/full/performance evidence through the existing controller/workflow | Three fresh VM candidates failed the empty count、quiet prerequisite and obsolete counter oracles with zero residue；descendant repairs produced full attempt 4 and performance attempt 5 PASS | Hosted `31368732658/1`、`31368750439/1`、`31368752781/1` bind exact SHA/attempt 1 and required markers；T06 `+475/0/0` accepted；no failed hosted run was remotely rerun |
+| 2026-08-10 | M15 close | Exact product `7ba6268…` passes all product/evidence gates；T01-T07 and M15 are closed by this docs-only closeout | Final Architect `PASS_WITH_NOTES`，zero blocker/major/minor；initial and first targeted QA retained `QA-M15-T07-001`；dual read-only diagnoses selected canonical exact-job-name ledgers，and second targeted QA returned `PASS`、closed the finding and reported zero blocker/major/minor | Serial local gate and schema-3 integrity/ratio PASS；milestone `+5303/0/0` accepted；authorized pushes/dispatches consumed；no force-push/PR/tag/package/release/publication；combined Wintun redistribution remains legally blocked |

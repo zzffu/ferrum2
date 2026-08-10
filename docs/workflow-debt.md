@@ -55,3 +55,15 @@ No M14 workflow debt remains。The existing push workflow produced exact-SHA aut
 qualification driver and architecture/process harnesses rather than adding a workflow、job、mode or second
 harness。The failed `31282591585/1` was not rerun；a new descendant SHA repaired the generated config at
 the source seam and was qualified normally。
+
+## M15 close audit
+
+No M15 workflow debt remains。The existing workflow gained the required Windows TUN functional aggregate
+and independent performance job during T06，then exact product
+`7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9` passed automatic/full/performance runs
+`31368732658/1`、`31368750439/1` and `31368752781/1`。The existing schema-3 control reported
+integrity/category/ratio PASS and numeric case/support/fixture delta `+5303/0/0`；the advisory is accepted
+without deleting evidence or adding a second Rust harness。All failed attempt-1 hosted runs remain
+uncredited and were repaired only on new descendant SHAs，never remotely rerun。No control-plane package、provider、
+policy or helper gap remains。Combined Wintun/Ferrum2 redistribution is a release/legal decision，not a
+workflow capability request。

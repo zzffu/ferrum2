@@ -1,6 +1,9 @@
 # M15 — Windows Wintun TUN data plane
 
-- **Status:** executing
+- **Status:** closed
+- **Qualified M15 product:** `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9`
+- **Qualified M15 product tree / parent:** `72a3cfb5c881a35b1416cbf9ffea593973cc3570` /
+  `b04432708f2229562fcb2e4d47f2bfdbfb8daec3`
 - **Qualified M14 product:** `bc6963472d9ae8e3c84d82851fd64d78c9f2a65f`
 - **Qualified M14 product tree:** `a5533723d251b62529daa767dd083404fa0a30bc`
 - **Planning baseline:** `bd374c6ec47470020bfcf908aa1a3475f0b3dbf0`
@@ -85,54 +88,54 @@ owner-provided design input，不是仓库证据。上游事实与纠正记录�
 
 ## Exit criteria
 
-- [ ] Exact M14 product and planning HEAD/tree/parent resolve；their diff is tracked documentation only。
-- [ ] Official Wintun `0.14.1` ZIP hash
+- [x] Exact M14 product and planning HEAD/tree/parent resolve；their diff is tracked documentation only。
+- [x] Official Wintun `0.14.1` ZIP hash
       `07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51` and AMD64 DLL hash
       `e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce`、PE architecture、
       Authenticode、license member and required ABI exports are verified before use。
-- [ ] Runtime loads only the exact executable-sibling DLL through an absolute path and System32-only
+- [x] Runtime loads only the exact executable-sibling DLL through an absolute path and System32-only
       dependency search，holds a non-write/non-delete-shared handle across hash/load，checks exact size/hash
       and the eleven allowlisted symbols，and fails closed otherwise。
-- [ ] `windows-sys = 0.61.2` reuses the existing identity with the direct-edge literal eight features and no
+- [x] `windows-sys = 0.61.2` reuses the existing identity with the direct-edge literal eight features and no
       resolved-feature delta outside their Cargo feature closure；one exact
       `smoltcp = 0.13.1` uses the literal ten no-default features，omits `auto-icmp-echo-reply` and configures
       exactly two internal AnyIP routes。
-- [ ] Official latest-stable evidence freezes Rust `1.97.1` for this plan；workspace `rust-version`、selected
+- [x] Official latest-stable evidence freezes Rust `1.97.1` for this plan；workspace `rust-version`、selected
       toolchain、all CI MSRV selectors and workspace-policy assertions resolve exactly to `1.97.1`。No
       floating `stable`/`latest`/nightly selector or residual implementation/qualification `+1.88.0` gate
       remains；T01's pre-change 1.88 baseline probe stays historical control evidence only。
-- [ ] One audited `ferrum2-wintun` unsafe exception contains all Wintun/Win32 calls and raw pointers；
+- [x] One audited `ferrum2-wintun` unsafe exception contains all Wintun/Win32 calls and raw pointers；
       all other product sources remain unsafe-forbidden。
-- [ ] Schema-v2 `[tun]` supports TUN-only and SOCKS+TUN client graphs、static binding or the existing
+- [x] Schema-v2 `[tun]` supports TUN-only and SOCKS+TUN client graphs、static binding or the existing
       ordered program；ordinary SOCKS indices stay declaration-ordered and TUN appends last；schema-v1 and
       server TUN fail closed；TUN omission preserves M0～M14 exactly。
-- [ ] `--check-config` validates tags、addresses、bounds and checked memory with no runtime/OS side effect；
+- [x] `--check-config` validates tags、addresses、bounds and checked memory with no runtime/OS side effect；
       exact default budget is `53,995,616` bytes；unsupported target、OS、DLL、ABI、privilege and driver
       failures occur before public service。
-- [ ] Prepare starts the final owner thread and that thread creates/reverses adapter/per-family MTU/address/
+- [x] Prepare starts the final owner thread and that thread creates/reverses adapter/per-family MTU/address/
       session/DAD/smoltcp state；session precedes DAD only as media-liveness prerequisite，optimistic DAD is
       not requested，and activate is non-blocking；both DAD rows naturally reach exactly Preferred before ready；
       cleanup finishes on-thread before join，and every partial failure、later-root failure、panic、graceful
       and forced stop reaps all flow/mapping/thread/HANDLE/buffer owners。
-- [ ] Product calls no explicit route/DNS/WFP mutation API；privileged snapshots prove only expected
+- [x] Product calls no explicit route/DNS/WFP mutation API；privileged snapshots prove only expected
       address-derived system rows appear and all Ferrum2-owned interface state disappears after stop。
-- [ ] Invalid、fragmented、oversize、IPv4-option、non-TCP/UDP or any IPv6 extension input cannot create a
+- [x] Invalid、fragmented、oversize、IPv4-option、non-TCP/UDP or any IPv6 extension input cannot create a
       flow、mapping、route metadata、egress/session state or unbounded allocation；no such packet reaches TX。
-- [ ] IPv4/IPv6 TUN TCP route/sniff/hijack/reject、prefix exact replay、eager local handshake/reset on
+- [x] IPv4/IPv6 TUN TCP route/sniff/hijack/reject、prefix exact replay、eager local handshake/reset on
       selected-open failure、half-close、backpressure and forced drain pass without policy fallback。
-- [ ] IPv4/IPv6 TUN UDP selects one terminal mode/plan at the first classification-eligible datagram；
+- [x] IPv4/IPv6 TUN UDP selects one terminal mode/plan at the first classification-eligible datagram；
       provisional candidates remain mapping-free until the caller decision，over-limit candidates commit
       nothing，later valid candidates re-read selector state，live mappings never re-enter ordinary policy，
       and expiry permits reselection。
-- [ ] TUN UDP route uses the existing `ClientUdpAssociation` transitions and exact response binding；DNS
+- [x] TUN UDP route uses the existing `ClientUdpAssociation` transitions and exact response binding；DNS
       hijack uses the existing `DnsProxy::answer`；reject/hijack create no Shadowsocks owner。
-- [ ] No target、packet、adapter identity、route、tag、SNI、Host、qname or secret enters errors、logs、traces
+- [x] No target、packet、adapter identity、route、tag、SNI、Host、qname or secret enters errors、logs、traces
       or metric labels；new telemetry is fixed and low-cardinality only。
-- [ ] One exact integration SHA passes focused、Full、Rust 1.97.1、100+ lifecycle、Windows/GNU/musl
+- [x] One exact integration SHA passes focused、Full、Rust 1.97.1、100+ lifecycle、Windows/GNU/musl
       non-driver、SIP022/CoreDNS/BIND、architecture、footprint、privileged Windows TUN E2E and bounded
       Architect/QA review with zero blocking findings；the required job marker reports `functional=16/16`、
       `cycles=100/100`、cleanup and matching SHA/run/attempt。
-- [ ] After explicit remote authorization，the same SHA passes an independent Windows TUN
+- [x] After explicit remote authorization，the same SHA passes an independent Windows TUN
       `windows-tun-performance` job with `witnesses=2/2`、cleanup and matching SHA/run/attempt；no threshold
       or improvement claim is implied。
 
@@ -146,7 +149,7 @@ owner-provided design input，不是仓库证据。上游事实与纠正记录�
 | M15-T04 | Compose IPv4/IPv6 TUN TCP through the existing policy/DNS/egress/relay seams | M15-T03 | done |
 | M15-T05 | Compose IPv4/IPv6 TUN UDP mapping and DNS hijack through existing association seams | M15-T04 | done |
 | M15-T06 | Close failure、lifecycle、architecture、privileged and performance evidence | M15-T05 | done |
-| M15-T07 | Qualify and close one exact M15 integration SHA | M15-T06 | active |
+| M15-T07 | Qualify and close one exact M15 integration SHA | M15-T06 | done |
 
 ```text
 M15-T01 contracts/control
@@ -164,28 +167,30 @@ worktree、writer and accepted exact base。
 
 ## Test-footprint and remote boundary
 
-Planning baseline is code/tests `25586/45009`、ratio `1.759126` and
-case/support/fixture `39260/5152/597`。TEST-0016 forecasts `2630..4140 / 520..930 / 0` growth。
-Numeric `REVIEW_REQUIRED` is expected for some transport/security tickets；integrity remains blocking and
-independent evidence must not be compressed or deleted to improve the signal。Use existing crate tests、
-`m0-harness` and one Windows platform controller；no second Rust harness or committed packet/binary fixture。
+Planning baseline is code/tests `25586/45009`、ratio `1.759126` and case/support/fixture
+`39260/5152/597`。Qualified product is `29771/50312`、ratio `1.689967 PASS`，with
+case/support/fixture `44563/5152/597` and delta `+5303/0/0`。Integrity and category sum pass。The
+numeric `REVIEW_REQUIRED` changed-file-size result is accepted as distinct transport、security、failure、
+lifecycle、accepted-packet and platform mutation evidence；no support、fixture、second Rust harness or
+committed packet/binary fixture was added。T06's ticket delta `+475/0/0` is accepted on the same rationale。
 
-The plan itself authorized no remote action。The 2026-08-09 execute request now authorizes every required
-non-force push、the direct hosted probe and the independent same-SHA performance dispatch。A failed run is
-not rerun without fresh authorization；force-push、PR、tag、package、release and publication remain
-unauthorized。The Wintun custom prebuilt license permits alongside-API use textually，but GPL-3.0-only
-combined redistribution is a release/legal decision；M15 downloads it ephemerally or requires an operator-
-supplied exact DLL and does not redistribute it。
+The 2026-08-09 execute authorization's required non-force pushes and same-SHA dispatches are consumed。
+Every failed hosted attempt remains uncredited and was not remotely rerun；repairs used descendant SHAs。T07 made no
+remote action。Force-push、PR、tag、package、release and publication did not occur。The qualified
+source candidate supports ephemeral or operator-supplied exact DLL use；GPL-3.0-only combined Wintun/Ferrum2
+redistribution remains blocked pending the responsible legal decision。
 
-## Blocker / next action
+## Closure / next action
 
-No current blocker。Exact T06 `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9` passed serial local gates、fresh
-isolated-VM full/performance runs with zero residue、final Architect/QA review and all three hosted runs。
-Automatic [`31368732658/1`](https://github.com/zzffu/ferrum2/actions/runs/31368732658) passed foundation and
-the existing aggregate；full [`31368750439/1`](https://github.com/zzffu/ferrum2/actions/runs/31368750439)
-passed `functional=16/16 cycles=100/100 cleanup=PASS`；performance
-[`31368752781/1`](https://github.com/zzffu/ferrum2/actions/runs/31368752781) passed the independent Windows
-`witnesses=2/2 cleanup=PASS` job and the existing Linux performance job，all bound to attempt 1。T07 is
-active and will bind the final ledger、serial exact-SHA recheck、reviews and documentation-only closeout。
-No rerun、force-push、PR、tag、package、release or publication is authorized or performed；redistribution
-remains blocked pending the responsible license decision。
+No product or workflow blocker remains。Exact product `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9`
+passed serial local gates，fresh isolated-VM full/performance with zero residue and hosted automatic/full/
+performance runs [`31368732658/1`](https://github.com/zzffu/ferrum2/actions/runs/31368732658)，
+[`31368750439/1`](https://github.com/zzffu/ferrum2/actions/runs/31368750439) and
+[`31368752781/1`](https://github.com/zzffu/ferrum2/actions/runs/31368752781)。All required jobs succeeded；
+exact markers report `functional=16/16 cycles=100/100 cleanup=PASS` and independent
+`witnesses=2/2 cleanup=PASS`，all at attempt 1。Fresh final Architect returned `PASS_WITH_NOTES`
+with zero blocker、major or minor finding。Initial and first targeted QA retained `QA-M15-T07-001`；two
+independent read-only diagnoses selected the canonical exact-job-name ledger correction in T07 and the
+handoff。Second targeted QA returned `PASS`，closed the finding and reported blocker/major/minor `0/0/0`。
+M15 is closed。The continuing release boundary is the responsible legal decision before combined Wintun
+redistribution。
