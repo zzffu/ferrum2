@@ -3153,9 +3153,13 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("profile=transport functional=16/16 cleanup=PASS")
             && source.contains("[string]$Labels = \"\"")
             && source.contains("[bool]$MissingIsZero = $false")
+            && source.contains("$udpGateA.SelfTest() -and $udpGateB.SelfTest()")
             && gate.is_some_and(|gate| {
                 gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
                     && gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))")
+                    && gate.contains("private readonly Task worker;")
+                    && gate.contains("public bool SelfTest()")
+                    && gate.contains("request.Buffer.Length == 0")
                     && gate.contains("await upstream.ReceiveAsync()")
                     && gate.contains("ReplayFirstToLatest")
             })
@@ -3172,6 +3176,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     )
                     && echo.contains("$tunAcceptedDelta")
                     && echo.contains("$udpAcceptedDelta")
+                    && echo.contains("$firstUdpAcceptedDelta")
+                    && echo.contains("$maxActiveSessions")
+                    && echo.contains("gate_state=$($Gate.State)")
                     && echo.contains("gate_fault=$($Gate.Fault)")
                     && echo.contains("probe_fault=$($probe.Fault)")
             })
@@ -3202,6 +3209,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "await upstream.ReceiveAsync()",
             "await socket.ReceiveAsync()",
         ),
+        controller.replace("public bool SelfTest()", "public bool SelfTestBypassed()"),
+        controller.replace("$firstUdpAcceptedDelta", "$ignoredFirstUdpDelta"),
         controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
         controller.replace(
             "Start-Sleep -Milliseconds 2500",

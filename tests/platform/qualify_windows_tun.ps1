@@ -224,6 +224,12 @@ function Get-CounterValue(
     return [uint64]$match.Groups[1].Value
 }
 
+function Get-GaugeValue([string]$Metrics, [string]$Name, [string]$Labels) {
+    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))\{$([regex]::Escape($Labels))\} ([0-9]+)$")
+    if (-not $match.Success) { return [uint64]0 }
+    return [uint64]$match.Groups[1].Value
+}
+
 function Assert-InterfaceGone([string]$Name, [Nullable[int]]$InterfaceIndex) {
     Assert-True (-not (Get-NetAdapter -Name $Name -IncludeHidden -ErrorAction SilentlyContinue)) "adapter leaked"
     Assert-True (@(Get-NetIPAddress -InterfaceAlias $Name -ErrorAction SilentlyContinue).Count -eq 0) "address rows leaked"
@@ -653,7 +659,10 @@ public sealed class Ferrum2UdpGate : IDisposable {
     private readonly object sync = new object();
     private readonly UdpClient socket;
     private readonly int upstreamPort;
+    private readonly int listenPort;
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
+    private readonly ManualResetEventSlim selfTest = new ManualResetEventSlim(false);
+    private readonly Task worker;
     private byte[] firstResponse;
     private IPEndPoint latestClient;
     private int requests;
@@ -661,14 +670,23 @@ public sealed class Ferrum2UdpGate : IDisposable {
     private string fault;
 
     public Ferrum2UdpGate(int listenPort, int upstreamPort) {
+        this.listenPort = listenPort;
         this.upstreamPort = upstreamPort;
         socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort));
-        var ignored = Task.Run(Run);
+        worker = Task.Run(Run);
     }
 
     public int Requests { get { return Volatile.Read(ref requests); } }
     public int Responses { get { return Volatile.Read(ref responses); } }
     public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
+    public string State { get { return worker.IsFaulted ? "faulted" : worker.IsCompleted ? "completed" : "running"; } }
+
+    public bool SelfTest() {
+        using (var sender = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))) {
+            sender.Send(new byte[0], 0, new IPEndPoint(IPAddress.Loopback, listenPort));
+        }
+        return selfTest.Wait(1000);
+    }
 
     public bool WaitRequests(int expected, int milliseconds) {
         var deadline = Environment.TickCount64 + milliseconds;
@@ -695,6 +713,10 @@ public sealed class Ferrum2UdpGate : IDisposable {
         try {
             while (!stopped.IsCancellationRequested) {
                 var request = await socket.ReceiveAsync().ConfigureAwait(false);
+                if (request.Buffer.Length == 0 && request.RemoteEndPoint.Address.Equals(IPAddress.Loopback)) {
+                    selfTest.Set();
+                    continue;
+                }
                 lock (sync) { latestClient = request.RemoteEndPoint; }
                 Interlocked.Increment(ref requests);
                 using (var upstream = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))) {
@@ -716,6 +738,7 @@ public sealed class Ferrum2UdpGate : IDisposable {
     public void Dispose() {
         stopped.Cancel();
         socket.Dispose();
+        selfTest.Dispose();
         stopped.Dispose();
     }
 }
@@ -981,11 +1004,29 @@ function Invoke-UdpEchoRow(
         $tunAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_accepted"
         $udpAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_udp_datagrams" $acceptedLabels $true
         [void]$client.Send($Payload, $Payload.Length)
-        $gateOpened = $Gate.WaitRequests($expectedGate, 5000)
+        $firstTunAcceptedDelta = $null
+        $firstUdpAcceptedDelta = $null
+        $maxActiveSessions = [uint64]0
+        $gateDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $sampleMetrics = Get-Metrics $script:metricsPort
+            $sampleTunDelta = (Get-CounterValue $sampleMetrics "ferrum2_tun_packets_accepted") - $tunAcceptedBefore
+            $sampleUdpDelta = (Get-CounterValue $sampleMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
+            $sampleActive = Get-GaugeValue $sampleMetrics "ferrum2_udp_sessions_active" 'role="client"'
+            if ($sampleActive -gt $maxActiveSessions) { $maxActiveSessions = $sampleActive }
+            if ($null -eq $firstUdpAcceptedDelta -and $sampleUdpDelta -gt 0) {
+                $firstTunAcceptedDelta = $sampleTunDelta
+                $firstUdpAcceptedDelta = $sampleUdpDelta
+            }
+            if ($Gate.Requests -ge $expectedGate) { break }
+            Start-Sleep -Milliseconds 25
+        } while ([DateTime]::UtcNow -lt $gateDeadline)
+        $gateOpened = $Gate.Requests -ge $expectedGate
         $afterMetrics = Get-Metrics $script:metricsPort
         $tunAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_tun_packets_accepted") - $tunAcceptedBefore
         $udpAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
-        Assert-True $gateOpened "selected UDP egress gate was not opened: tun_accepted=$tunAcceptedDelta udp_c2t_accepted=$udpAcceptedDelta gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
+        if ($null -eq $firstUdpAcceptedDelta) { $firstTunAcceptedDelta = $tunAcceptedDelta; $firstUdpAcceptedDelta = $udpAcceptedDelta }
+        Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
         Assert-True ($tunAcceptedDelta -gt 0 -and $udpAcceptedDelta -eq 1) "UDP ingress/association witness mismatch"
         $response = Receive-TunUdp $client
         Assert-True (($response -join ",") -eq ($Payload -join ",")) "UDP echo mismatch"
@@ -1235,6 +1276,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             $udpGateB = [Ferrum2UdpGate]::new($gatePortB, $serverPortB)
             $tcpResources.Add($udpGateA)
             $tcpResources.Add($udpGateB)
+            Assert-True ($udpGateA.SelfTest() -and $udpGateB.SelfTest()) "UDP gate loopback self-test failed"
         }
 
         @"
