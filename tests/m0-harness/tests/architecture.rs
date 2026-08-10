@@ -3185,8 +3185,22 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("gate_fault=$($Gate.Fault)")
                     && echo.contains("probe_fault=$($probe.Fault)")
                     && echo.contains("[bool]$DiagnosticOnly = $false")
-                    && echo.contains("m15_windows_tun_udp01_diag status=OBSERVED")
+                    && echo.contains(
+                        "m15_windows_tun_udp01_diag status=OBSERVED result=complete",
+                    )
                     && echo.contains("throw \"UDP-01 diagnostic sentinel\"")
+                    && echo
+                        .find("Assert-True $gateOpened")
+                        .zip(echo.find("m15_windows_tun_udp01_diag status=OBSERVED"))
+                        .is_some_and(|(gate, marker)| gate < marker)
+                    && echo
+                        .find("UDP echo mismatch")
+                        .zip(echo.find("m15_windows_tun_udp01_diag status=OBSERVED"))
+                        .is_some_and(|(response, marker)| response < marker)
+                    && echo
+                        .find("UDP witness faulted")
+                        .zip(echo.find("m15_windows_tun_udp01_diag status=OBSERVED"))
+                        .is_some_and(|(witness, marker)| witness < marker)
             })
             && rows.is_some_and(|rows| {
                 for id in 2..=8 {
@@ -3234,7 +3248,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "[bool]$DiagnosticOnly = $true",
         ),
         controller.replace(
-            "m15_windows_tun_udp01_diag status=OBSERVED",
+            "m15_windows_tun_udp01_diag status=OBSERVED result=complete",
             "m15_windows_tun_udp01_diag status=BYPASSED",
         ),
         controller.replace("throw \"UDP-01 diagnostic sentinel\"", "return"),
@@ -3325,6 +3339,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && owner.contains("source != tuple.target")
             && adapter.contains("enum TunUdpTerminal")
             && adapter.contains("move |candidate, cancellation|")
+            && adapter.contains("udp_sources.contains(&tuple.source().ip())")
+            && !adapter.contains("server.ip().is_loopback()")
             && adapter.contains("select_udp_terminal(")
             && adapter.contains("candidate.commit(terminal, selected_bound).await")
             && adapter.contains("run_udp_route(")
@@ -3358,6 +3374,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         (
             tun_udp.replace("self.generations.current(id.slot) != Some(id)", "false"),
             client_tun.clone(),
+            client_udp.clone(),
+        ),
+        (
+            tun_udp.clone(),
+            client_tun.replace(
+                "udp_sources.contains(&tuple.source().ip())",
+                "udp_sources.is_empty()",
+            ),
             client_udp.clone(),
         ),
         (

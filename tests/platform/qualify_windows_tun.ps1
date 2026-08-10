@@ -1028,14 +1028,6 @@ function Invoke-UdpEchoRow(
         $tunAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_tun_packets_accepted") - $tunAcceptedBefore
         $udpAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
         if ($null -eq $firstUdpAcceptedDelta) { $firstTunAcceptedDelta = $tunAcceptedDelta; $firstUdpAcceptedDelta = $udpAcceptedDelta }
-        if ($DiagnosticOnly) {
-            $sourceCategory = if ($udpAcceptedDelta -gt 1) { "exact_source_recurrence" }
-                elseif ($tunAcceptedDelta -gt 1 -and $udpAcceptedDelta -eq 1) { "non_exact_source_recurrence" }
-                elseif ($tunAcceptedDelta -eq 1 -and $udpAcceptedDelta -eq 1) { "single" }
-                else { "unresolved" }
-            [Console]::Error.WriteLine("m15_windows_tun_udp01_diag status=OBSERVED source=$sourceCategory first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)")
-            throw "UDP-01 diagnostic sentinel"
-        }
         Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
         Assert-True ($tunAcceptedDelta -gt 0 -and $udpAcceptedDelta -eq 1) "UDP ingress/association witness mismatch"
         $response = Receive-TunUdp $client
@@ -1043,6 +1035,14 @@ function Invoke-UdpEchoRow(
         Assert-True ($probe.WaitRequests(1, 5000)) "UDP target did not receive datagram"
         Assert-True (($probe.Received -join ",") -eq ($Payload -join ",")) "UDP target payload mismatch"
         Assert-True ($Gate.Fault -eq "none" -and $probe.Fault -eq "none") "UDP witness faulted"
+        if ($DiagnosticOnly) {
+            $sourceCategory = if ($udpAcceptedDelta -gt 1) { "exact_source_recurrence" }
+                elseif ($tunAcceptedDelta -gt 1 -and $udpAcceptedDelta -eq 1) { "non_exact_source_recurrence" }
+                elseif ($tunAcceptedDelta -eq 1 -and $udpAcceptedDelta -eq 1) { "single" }
+                else { "unresolved" }
+            [Console]::Error.WriteLine("m15_windows_tun_udp01_diag status=OBSERVED result=complete source=$sourceCategory first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)")
+            throw "UDP-01 diagnostic sentinel"
+        }
     } finally { $client.Dispose() }
 }
 
