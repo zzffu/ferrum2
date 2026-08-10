@@ -12,6 +12,7 @@ owns:
   - bins/ferrum2-client/src/run/tests.rs
   - crates/ferrum2-observability/src/**
   - crates/ferrum2-observability/tests/**
+  - tests/m0-harness/tests/architecture.rs
   - tests/platform/qualify_windows_tun.ps1
 ---
 
