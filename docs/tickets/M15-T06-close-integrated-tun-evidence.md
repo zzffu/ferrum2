@@ -1,7 +1,7 @@
 ---
 id: M15-T06
 milestone: M15
-status: active
+status: done
 depends_on:
   - M15-T05
 owns:
@@ -22,23 +22,23 @@ changing existing Linux/Windows/GNU/musl、interop or TUN-absent gates。
 
 ## Acceptance
 
-- [ ] Artifact acquisition、hash/signature/license/PE/export checks，unique names/prefixes，narrow controller-
+- [x] Artifact acquisition、hash/signature/license/PE/export checks，unique names/prefixes，narrow controller-
       owned routes and `always` cleanup are deterministic and bind one exact candidate SHA。
-- [ ] Every prepare position、later-root failure、runtime device/thread failure、panic、grace、force、cleanup
+- [x] Every prepare position、later-root failure、runtime device/thread failure、panic、grace、force、cleanup
       conflict and 100+ repeated lifecycle path proves exact owners and adapter/name/route rebind。
-- [ ] Architecture/workspace policy guards dependency directions、exact identities/features/MSRV、narrow
+- [x] Architecture/workspace policy guards dependency directions、exact identities/features/MSRV、narrow
       unsafe exception、pointer lifetime、one stack owner、one policy/DNS/SIP022 path and the absence of
       product route/DNS/WFP calls；each has a mutation-sensitive oracle。
-- [ ] Real-process IPv4/IPv6 TCP/UDP route/chain/selector/sniff/DNS/reject/failure/saturation rows and
+- [x] Real-process IPv4/IPv6 TCP/UDP route/chain/selector/sniff/DNS/reject/failure/saturation rows and
       TUN-absent M0～M14 rows pass from fresh binaries with bounded output and secret/destination exclusion。
-- [ ] Required `windows-tun-e2e` is integrated into the existing aggregate without suppressing quality、
+- [x] Required `windows-tun-e2e` is integrated into the existing aggregate without suppressing quality、
       footprint、MSRV、platform or interop results。It prints the exact `profile=full functional=16/16
       cycles=100/100 cleanup=PASS` marker bound to GitHub SHA/run/attempt only after cleanup。
-- [ ] Independent manual Windows TUN performance/resource records one TCP and one UDP witness、raw RX/TX、
+- [x] Independent manual Windows TUN performance/resource records one TCP and one UDP witness、raw RX/TX、
       CPU/RSS/handles/threads/queues、adapter churn、grace/force drain and cleanup on the exact SHA；it makes
       no threshold or improvement claim，and prints the exact `windows-tun-performance` marker from
       TEST-0016 only after cleanup。
-- [ ] Product paths are not owned by default。Any discovered product defect requires an explicit narrow
+- [x] Product paths are not owned by default。Any discovered product defect requires an explicit narrow
       ownership amendment、descendant repair and fresh focused/full review；evidence code cannot hide a fix。
 
 ## Validation
@@ -62,9 +62,27 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: workflow push/dispatch requires separate explicit authorization。
+- Commit: `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9` / tree
+  `72a3cfb5c881a35b1416cbf9ffea593973cc3570` / parent
+  `b04432708f2229562fcb2e4d47f2bfdbfb8daec3`；the isolated workflow commit is
+  `4ff38b6d6f0ef07aefa5905b2f56324adcbeec7d`。
+- Review: fresh Architect and QA both returned `PASS_WITH_NOTES` after exact-candidate VM full and
+  performance runs，with zero blocker、major or minor finding。Their hosted-evidence reservation is closed
+  by the exact runs below；performance values remain diagnostic only，and `queues=bounded` is a configured-
+  bounds witness rather than measured internal queue depth。
+- Notes: serial local architecture `19/19`、workspace policy `25/25`、config CLI `7/7`、format、strict
+  Clippy、workspace all-features、ignored 100+ lifecycle、docs、Rust 1.97.1 and diff gates passed。Fresh
+  isolated VM full and performance runs emitted the exact `16/16 + 100/100` and `2/2` markers with zero
+  guest/host residue。Automatic push run
+  [`31368732658/1`](https://github.com/zzffu/ferrum2/actions/runs/31368732658) passed every required job and
+  foundation `4/4`；authorized full run
+  [`31368750439/1`](https://github.com/zzffu/ferrum2/actions/runs/31368750439) passed all jobs and emitted
+  `profile=full functional=16/16 cycles=100/100 cleanup=PASS`；authorized performance run
+  [`31368752781/1`](https://github.com/zzffu/ferrum2/actions/runs/31368752781) passed all jobs and emitted
+  `witnesses=2/2 cleanup=PASS` plus the closed resource row，all on the exact SHA and attempt 1。Footprint
+  integrity and ratio passed；numeric `REVIEW_REQUIRED` `+475/+0/+0` is accepted as distinct full/cycle/
+  performance and mutation evidence in the existing harness。No rerun、force-push、PR、tag、package、release
+  or publication occurred。
 
 ## Rollback / risk
 
