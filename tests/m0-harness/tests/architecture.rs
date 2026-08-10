@@ -2454,7 +2454,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         source.contains("[ValidateSet(\"lifecycle\", \"tcp\", \"udp\")]")
             && !source.to_ascii_lowercase().contains("pktmon")
             && source.matches("$tcpRows++").count() == 8
-            && source.matches("Add-TunRoute $").count() == 5
+            && source.matches("Add-TunRoute $").count() == 4
             && source.matches("Add-TargetAddress $").count() == 2
             && !source.contains("Remove-OwnedRoute")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")")
@@ -3139,7 +3139,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("        # UDP-01")
             .and_then(|(_, tail)| tail.split_once("        Assert-True ($udpRows -eq 8)"))
             .map(|(body, _)| body);
-        let udp01_setup = source.split_once("        # UDP-01").map(|(head, _)| head);
+        let udp_transport_setup = source
+            .split_once("TCP config marker mismatch")
+            .and_then(|(_, tail)| tail.split_once("        if (-not $udp01DiagnosticOnly) {"))
+            .map(|(body, _)| body);
         let echo = source
             .split_once("function Invoke-UdpEchoRow(")
             .and_then(|(_, tail)| tail.split_once("\ntry {"))
@@ -3160,6 +3163,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("[bool]$MissingIsZero = $false")
             && source.contains("Assert-UdpGateCrossProcess $udpGateA $gatePortA")
             && source.contains("Assert-UdpGateCrossProcess $udpGateB $gatePortB")
+            && source
+                .matches("Assert-UdpGateCrossProcess $udpGateA $gatePortA")
+                .count()
+                == 2
+            && source.contains("Assert-UdpGateCrossProcess $udpGateA $gatePortA 2")
             && source.contains(
                 "$udp01DiagnosticOnly = $Mode -eq \"udp\" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq \"1\"",
             )
@@ -3171,17 +3179,24 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .matches("$env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA")
                 .count()
                 == 1
-            && udp01_setup.is_some_and(|setup| {
+            && udp_transport_setup.is_some_and(|setup| {
                 setup
-                    .rfind("Stop-Candidate $activeProcess")
-                    .zip(setup.rfind("$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\""))
-                    .zip(setup.rfind(
+                    .find("$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"")
+                    .zip(setup.find(
                         "$env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA",
                     ))
-                    .zip(setup.rfind("$activeProcess = Start-Candidate $binary $config"))
-                    .is_some_and(|(((stop, probe), gate), start)| {
-                        stop < probe && probe < gate && gate < start
+                    .zip(setup.find("$activeProcess = Start-Candidate $binary $config"))
+                    .zip(setup.find("$adapter = Wait-AdapterReady $adapterName"))
+                    .zip(setup.find("Assert-UdpGateCrossProcess $udpGateA $gatePortA 2"))
+                    .is_some_and(|((((probe, gate), start), ready), post_wintun)| {
+                        probe < gate && gate < start && start < ready && ready < post_wintun
                     })
+                    && setup.contains("$udpGateA.WaitEarlyProbe(1000)")
+                    && setup.contains("$udpGateA.EarlyProbes -eq 1")
+                    && setup.contains("$udpGateA.Requests -eq 0")
+                    && setup.contains("$udpGateA.State -eq \"running\"")
+                    && setup.contains("$udpGateA.Fault -eq \"none\"")
+                    && !setup.contains("Stop-Candidate $activeProcess")
             })
             && gate.is_some_and(|gate| {
                 gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
@@ -3211,16 +3226,18 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && !gate.contains("public bool SelfTest()")
             })
             && cross_process_self_test.is_some_and(|self_test| {
-                self_test.contains("[Diagnostics.ProcessStartInfo]::new()")
+                self_test.contains("[int]$ExpectedSelfTests = 1")
+                    && self_test.contains("[Diagnostics.ProcessStartInfo]::new()")
                     && self_test.contains("(Get-Process -Id $PID).Path")
                     && self_test.contains("[byte[]]::new(0)")
                     && self_test.contains("[Net.IPAddress]::Loopback")
                     && self_test.contains("$process.WaitForExit(5000)")
                     && self_test.contains("$process.Kill($true)")
-                    && self_test.contains("$Gate.WaitSelfTest(1000)")
-                    && self_test.contains("$Gate.SelfTests -eq 1")
+                    && self_test.contains("$Gate.SelfTests -lt $ExpectedSelfTests")
+                    && self_test.contains("$Gate.SelfTests -eq $ExpectedSelfTests")
                     && self_test.contains("$Gate.SocketProbes -eq 0")
                     && self_test.contains("$Gate.StdProbes -eq 0")
+                    && self_test.contains("$ExpectedSelfTests -eq 1")
                     && self_test.contains("$Gate.EarlyProbes -eq 0")
             })
             && probe.is_some_and(|probe| {
@@ -3324,11 +3341,25 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "public bool WaitSelfTestBypassed(int milliseconds)",
         ),
         controller.replace("$process.WaitForExit(5000)", "$true"),
-        controller.replace("$Gate.WaitSelfTest(1000)", "$true"),
-        controller.replace("$Gate.SelfTests -eq 1", "$true"),
+        controller.replace("[int]$ExpectedSelfTests = 1", "[int]$ExpectedSelfTests = 2"),
+        controller.replace("$Gate.SelfTests -lt $ExpectedSelfTests", "$false"),
+        controller.replace("$Gate.SelfTests -eq $ExpectedSelfTests", "$true"),
         controller.replace("$Gate.SocketProbes -eq 0", "$true"),
         controller.replace("$Gate.StdProbes -eq 0", "$true"),
         controller.replace("$Gate.EarlyProbes -eq 0", "$true"),
+        controller.replace("$udpGateA.EarlyProbes -eq 1", "$true"),
+        controller.replace(
+            "Assert-UdpGateCrossProcess $udpGateA $gatePortA 2",
+            "Assert-UdpGateCrossProcess $udpGateA $gatePortA 1",
+        ),
+        controller.replace(
+            "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
+            "$activeProcess = Start-Candidate $binary $config\n            $env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
+        ),
+        controller.replace(
+            "Assert-UdpGateCrossProcess $udpGateA $gatePortA 2",
+            "Stop-Candidate $activeProcess\n            Assert-UdpGateCrossProcess $udpGateA $gatePortA 2",
+        ),
         controller.replace("Interlocked.Increment(ref selfTests)", ""),
         controller.replace("Interlocked.Increment(ref socketProbes)", ""),
         controller.replace("Interlocked.Increment(ref stdProbes)", ""),

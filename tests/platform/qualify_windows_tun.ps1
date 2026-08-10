@@ -1007,7 +1007,7 @@ function New-DnsQuery([uint16]$Id) {
     return $bytes.ToArray()
 }
 
-function Assert-UdpGateCrossProcess([Ferrum2UdpGate]$Gate, [int]$Port) {
+function Assert-UdpGateCrossProcess([Ferrum2UdpGate]$Gate, [int]$Port, [int]$ExpectedSelfTests = 1) {
     $sender = @'
 $socket = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
 try {
@@ -1033,11 +1033,16 @@ try {
             throw "UDP gate self-test process timed out"
         }
         Assert-True ($process.ExitCode -eq 0) "UDP gate self-test process failed"
-        Assert-True ($Gate.WaitSelfTest(1000)) "UDP gate cross-process self-test failed"
-        Assert-True ($Gate.SelfTests -eq 1) "UDP gate self-test count mismatch"
+        $deadline = [DateTime]::UtcNow.AddSeconds(1)
+        while ($Gate.SelfTests -lt $ExpectedSelfTests -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 10
+        }
+        Assert-True ($Gate.SelfTests -eq $ExpectedSelfTests) "UDP gate self-test count mismatch"
         Assert-True ($Gate.SocketProbes -eq 0) "UDP socket probe baseline mismatch"
         Assert-True ($Gate.StdProbes -eq 0) "UDP std probe baseline mismatch"
-        Assert-True ($Gate.EarlyProbes -eq 0) "UDP early probe baseline mismatch"
+        if ($ExpectedSelfTests -eq 1) {
+            Assert-True ($Gate.EarlyProbes -eq 0) "UDP early probe baseline mismatch"
+        }
     } finally {
         if (-not $process.HasExited) { $process.Kill($true); $process.WaitForExit() }
         $process.Dispose()
@@ -1614,6 +1619,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "TCP config marker mismatch"
         Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
         $createdSiblingDll = $true
+        if ($udp01DiagnosticOnly) {
+            $env:FERRUM2_T05_UDP_SOCKET_PROBE = "1"
+            $env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA
+        }
         $activeProcess = Start-Candidate $binary $config
         $adapter = Wait-AdapterReady $adapterName
         $ownedInterfaceIndex = [int]$adapter.ifIndex
@@ -1637,6 +1646,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         }
         foreach ($targetIndex in @(0, 1, 2, 3, 7)) {
             [void](Add-TargetAddress $targets[$targetIndex])
+        }
+
+        if ($udp01DiagnosticOnly) {
+            Assert-True ($udpGateA.WaitEarlyProbe(1000)) "UDP pre-Wintun same-exe probe timed out"
+            Assert-UdpGateCrossProcess $udpGateA $gatePortA 2
+            Assert-True ($udpGateA.EarlyProbes -eq 1 -and $udpGateA.Requests -eq 0 -and
+                $udpGateA.State -eq "running" -and $udpGateA.Fault -eq "none") "UDP post-Wintun gate witness mismatch: self_tests=$($udpGateA.SelfTests) early_probes=$($udpGateA.EarlyProbes) requests=$($udpGateA.Requests) gate_state=$($udpGateA.State) gate_fault=$($udpGateA.Fault)"
         }
 
         if (-not $udp01DiagnosticOnly) {
@@ -1803,21 +1819,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         }
 
         if ($Mode -eq "udp") {
-            if ($udp01DiagnosticOnly) {
-                Stop-Candidate $activeProcess
-                $activeProcess = $null
-                Wait-AdapterAbsent $adapterName
-                Assert-InterfaceGone $adapterName $ownedInterfaceIndex
-                $env:FERRUM2_T05_UDP_SOCKET_PROBE = "1"
-                $env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA
-                $activeProcess = Start-Candidate $binary $config
-                $adapter = Wait-AdapterReady $adapterName
-                $ownedInterfaceIndex = [int]$adapter.ifIndex
-                foreach ($target in $targets) {
-                    $prefixLength = if ($target.Contains(":")) { 128 } else { 32 }
-                    [void](Add-TunRoute $ownedInterfaceIndex "$target/$prefixLength" 500)
-                }
-            }
             foreach ($targetIndex in @(4, 5, 6)) {
                 [void](Add-TargetAddress $targets[$targetIndex])
             }
