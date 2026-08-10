@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 
 use ferrum2_core::route::EgressPlanSnapshot;
-use ferrum2_core::{Datagram, TargetAddr};
+use ferrum2_core::{Datagram, TargetAddr, TargetHostRef};
 #[cfg(test)]
 use ferrum2_crypto::MethodProfile;
 use ferrum2_crypto::{Clock, MethodKeyProvider, SecureRandom, UdpSessionId};
@@ -378,6 +378,67 @@ impl ClientUdpAssociation {
         composed_udp_plan_limit(outbounds, self.plan.hops(), response, encoded_target_len)
     }
 
+    pub(in crate::run) fn prepare_application_request(
+        &mut self,
+        engine: &ClientEgressEngine,
+        outbounds: &[ClientOutboundContext],
+        target: TargetAddr,
+        payload: &[u8],
+        now: Instant,
+    ) -> Result<usize, UdpPlanResponseError> {
+        let encoded_target_len = match target.host() {
+            TargetHostRef::Ip(std::net::IpAddr::V4(_)) => 7,
+            TargetHostRef::Ip(std::net::IpAddr::V6(_)) => 19,
+            TargetHostRef::Domain(name) => 3_usize
+                .checked_add(name.len())
+                .ok_or(UdpPlanResponseError::Packet(UdpPacketError::Bounds))?,
+        };
+        if payload.len() > self.payload_limit(outbounds, false, encoded_target_len) {
+            return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
+        }
+        let reservation = self
+            .reserve_application_datagram(payload.len())
+            .map_err(UdpPlanResponseError::Runtime)?;
+        let datagram = Datagram::new(target, payload.into(), payload.len())
+            .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))?;
+        self.commit_application_datagram(reservation, datagram, now)
+            .map_err(UdpPlanResponseError::Runtime)?;
+        let datagram = self
+            .pop(UdpDirection::ToTarget)
+            .map_err(UdpPlanResponseError::Runtime)?
+            .ok_or(UdpPlanResponseError::Runtime(UdpRuntimeError::Bounds))?;
+        let wire_len = self
+            .encode_request(engine, outbounds, datagram.datagram())
+            .map_err(UdpPlanResponseError::Packet)?;
+        drop(datagram);
+        Ok(wire_len)
+    }
+
+    pub(in crate::run) fn prepare_application_response(
+        &mut self,
+        engine: &ClientEgressEngine,
+        outbounds: &[ClientOutboundContext],
+        wire_len: usize,
+    ) -> Result<(TargetAddr, Vec<u8>), UdpPlanResponseError> {
+        let payload_len = self
+            .accept_response(engine, outbounds, wire_len)
+            .map_err(|error| match error {
+                UdpPlanResponseError::Packet(error) => UdpPlanResponseError::Packet(error),
+                UdpPlanResponseError::Runtime(error) => UdpPlanResponseError::Runtime(error),
+            })?;
+        let response = self
+            .pop(UdpDirection::ToClient)
+            .map_err(UdpPlanResponseError::Runtime)?
+            .ok_or(UdpPlanResponseError::Runtime(UdpRuntimeError::Bounds))?;
+        if response.datagram().payload().len() != payload_len {
+            return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
+        }
+        Ok((
+            response.datagram().target().clone(),
+            response.datagram().payload().to_vec(),
+        ))
+    }
+
     pub(in crate::run) async fn send_encoded_request(&self, wire_len: usize) -> io::Result<usize> {
         #[cfg(test)]
         if self
@@ -435,30 +496,10 @@ impl ClientUdpAssociation {
             return Err(invalid_dns_target());
         }
         let target = TargetAddr::ip(destination).map_err(|_| invalid_dns_target())?;
-        let payload_len = packet.len();
-        let encoded_target_len = match destination {
-            SocketAddr::V4(_) => 7,
-            SocketAddr::V6(_) => 19,
-        };
-        if payload_len > self.payload_limit(&engine.outbounds, false, encoded_target_len) {
-            return Err(invalid_dns_target());
-        }
         self.activate(engine).map_err(|_| runtime_error(()))?;
-        let reservation = self
-            .reserve_application_datagram(payload_len)
-            .map_err(runtime_error)?;
-        let datagram = Datagram::new(target, packet.as_slice().into(), payload_len)
-            .map_err(|_| invalid_dns_target())?;
-        self.commit_application_datagram(reservation, datagram, Instant::now())
-            .map_err(runtime_error)?;
-        let datagram = self
-            .pop(UdpDirection::ToTarget)
-            .map_err(runtime_error)?
-            .ok_or_else(|| io::Error::other("DNS UDP queue empty"))?;
         let wire_len = self
-            .encode_request(engine, &engine.outbounds, datagram.datagram())
+            .prepare_application_request(engine, &engine.outbounds, target, &packet, Instant::now())
             .map_err(|_| io::Error::other("DNS UDP encode failed"))?;
-        drop(datagram);
         let sent = self.send_encoded_request(wire_len).await?;
         if sent != wire_len {
             return Err(io::Error::new(
@@ -469,30 +510,16 @@ impl ClientUdpAssociation {
         let mut reusable = true;
         loop {
             let length = self.receive_response_wire().await?;
-            let payload_len = match self.accept_response(engine, &engine.outbounds, length) {
-                Ok(payload_len) => payload_len,
-                Err(_) => {
-                    reusable = false;
-                    continue;
-                }
-            };
-            let response = self
-                .pop(UdpDirection::ToClient)
-                .map_err(runtime_error)?
-                .ok_or_else(|| io::Error::other("DNS UDP response queue empty"))?;
-            let source = response
-                .datagram()
-                .target()
-                .as_socket_addr()
-                .ok_or_else(invalid_dns_target)?;
-            let payload = response.datagram().payload();
-            if payload.len() != payload_len {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "DNS UDP length mismatch",
-                ));
-            }
-            return Ok(((payload.to_vec(), source), reusable));
+            let (source, payload) =
+                match self.prepare_application_response(engine, &engine.outbounds, length) {
+                    Ok(response) => response,
+                    Err(_) => {
+                        reusable = false;
+                        continue;
+                    }
+                };
+            let source = source.as_socket_addr().ok_or_else(invalid_dns_target)?;
+            return Ok(((payload, source), reusable));
         }
     }
 }

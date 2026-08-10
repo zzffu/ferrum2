@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("lifecycle", "tcp")]
+    [ValidateSet("lifecycle", "tcp", "udp")]
     [string]$Mode,
     [string]$WintunZip
 )
@@ -38,10 +38,13 @@ $heldMetrics = $null
 $udp4 = $null
 $foundation = 0
 $tcpRows = 0
+$udpRows = 0
 $serverProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
 $ownedAddresses = [System.Collections.Generic.List[object]]::new()
 $ownedTargetRoutes = [System.Collections.Generic.List[object]]::new()
 $tcpResources = [System.Collections.Generic.List[System.IDisposable]]::new()
+$udpGateA = $null
+$udpGateB = $null
 $usedTcpPorts = [System.Collections.Generic.HashSet[int]]::new()
 $createdSiblingDll = $false
 $completed = $false
@@ -639,6 +642,125 @@ public sealed class Ferrum2TcpProbe : IDisposable {
     }
 }
 
+public sealed class Ferrum2UdpGate : IDisposable {
+    private readonly object sync = new object();
+    private readonly UdpClient socket;
+    private readonly int upstreamPort;
+    private readonly CancellationTokenSource stopped = new CancellationTokenSource();
+    private byte[] firstResponse;
+    private IPEndPoint latestClient;
+    private int requests;
+    private int responses;
+    private string fault;
+
+    public Ferrum2UdpGate(int listenPort, int upstreamPort) {
+        this.upstreamPort = upstreamPort;
+        socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort));
+        var ignored = Task.Run(Run);
+    }
+
+    public int Requests { get { return Volatile.Read(ref requests); } }
+    public int Responses { get { return Volatile.Read(ref responses); } }
+    public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
+
+    public bool WaitRequests(int expected, int milliseconds) {
+        var deadline = Environment.TickCount64 + milliseconds;
+        while (Environment.TickCount64 < deadline) {
+            if (Requests >= expected) return true;
+            Thread.Sleep(10);
+        }
+        return Requests >= expected;
+    }
+
+    public bool ReplayFirstToLatest() {
+        byte[] response;
+        IPEndPoint client;
+        lock (sync) {
+            response = firstResponse;
+            client = latestClient;
+        }
+        if (response == null || client == null) return false;
+        socket.Send(response, response.Length, client);
+        return true;
+    }
+
+    private async Task Run() {
+        try {
+            while (!stopped.IsCancellationRequested) {
+                var request = await socket.ReceiveAsync().ConfigureAwait(false);
+                lock (sync) { latestClient = request.RemoteEndPoint; }
+                Interlocked.Increment(ref requests);
+                using (var upstream = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))) {
+                    upstream.Connect(IPAddress.Loopback, upstreamPort);
+                    await upstream.SendAsync(request.Buffer, request.Buffer.Length).ConfigureAwait(false);
+                    var response = await upstream.ReceiveAsync().ConfigureAwait(false);
+                    lock (sync) {
+                        if (firstResponse == null) firstResponse = (byte[])response.Buffer.Clone();
+                    }
+                    await socket.SendAsync(response.Buffer, response.Buffer.Length, request.RemoteEndPoint).ConfigureAwait(false);
+                    Interlocked.Increment(ref responses);
+                }
+            }
+        } catch (ObjectDisposedException) { }
+        catch (SocketException) when (stopped.IsCancellationRequested) { }
+        catch (Exception) { Interlocked.CompareExchange(ref fault, "other", null); }
+    }
+
+    public void Dispose() {
+        stopped.Cancel();
+        socket.Dispose();
+        stopped.Dispose();
+    }
+}
+
+public sealed class Ferrum2UdpProbe : IDisposable {
+    private readonly UdpClient socket;
+    private readonly CancellationTokenSource stopped = new CancellationTokenSource();
+    private byte[] received = new byte[0];
+    private int requests;
+    private int responses;
+    private string fault;
+
+    public Ferrum2UdpProbe(string address, int port) {
+        socket = new UdpClient(new IPEndPoint(IPAddress.Parse(address), port));
+        var ignored = Task.Run(Run);
+    }
+
+    public int Requests { get { return Volatile.Read(ref requests); } }
+    public int Responses { get { return Volatile.Read(ref responses); } }
+    public byte[] Received { get { return Volatile.Read(ref received); } }
+    public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
+
+    public bool WaitRequests(int expected, int milliseconds) {
+        var deadline = Environment.TickCount64 + milliseconds;
+        while (Environment.TickCount64 < deadline) {
+            if (Requests >= expected) return true;
+            Thread.Sleep(10);
+        }
+        return Requests >= expected;
+    }
+
+    private async Task Run() {
+        try {
+            while (!stopped.IsCancellationRequested) {
+                var request = await socket.ReceiveAsync().ConfigureAwait(false);
+                Volatile.Write(ref received, (byte[])request.Buffer.Clone());
+                Interlocked.Increment(ref requests);
+                await socket.SendAsync(request.Buffer, request.Buffer.Length, request.RemoteEndPoint).ConfigureAwait(false);
+                Interlocked.Increment(ref responses);
+            }
+        } catch (ObjectDisposedException) { }
+        catch (SocketException) when (stopped.IsCancellationRequested) { }
+        catch (Exception) { Interlocked.CompareExchange(ref fault, "other", null); }
+    }
+
+    public void Dispose() {
+        stopped.Cancel();
+        socket.Dispose();
+        stopped.Dispose();
+    }
+}
+
 public sealed class Ferrum2DnsResponder : IDisposable {
     private readonly UdpClient socket;
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
@@ -816,6 +938,47 @@ function New-DnsQuery([uint16]$Id) {
     return $bytes.ToArray()
 }
 
+function Open-TunUdp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
+    $isV6 = $Address.Contains(":")
+    $family = if ($isV6) { [Net.Sockets.AddressFamily]::InterNetworkV6 } else { [Net.Sockets.AddressFamily]::InterNetwork }
+    $sourceAddress = if ($isV6) { [Net.IPAddress]::Parse("fd00::2") } else { [Net.IPAddress]::Parse("198.18.0.2") }
+    $client = [Net.Sockets.UdpClient]::new($family)
+    $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))
+    $client.Connect($Address, $Port)
+    $localEndpoint = [Net.IPEndPoint]$client.Client.LocalEndPoint
+    Assert-True ($localEndpoint.Address.Equals($sourceAddress)) "TUN UDP source bind mismatch"
+    return $client
+}
+
+function Receive-TunUdp([Net.Sockets.UdpClient]$Client, [int]$TimeoutMilliseconds = 5000) {
+    $receive = $Client.ReceiveAsync()
+    Assert-True ($receive.Wait($TimeoutMilliseconds)) "TUN UDP response timeout"
+    if ($receive.IsFaulted) { throw "TUN UDP response failed" }
+    return $receive.Result.Buffer
+}
+
+function Invoke-UdpEchoRow(
+    [string]$Address,
+    [int]$Port,
+    [int]$InterfaceIndex,
+    [Ferrum2UdpGate]$Gate,
+    [byte[]]$Payload
+) {
+    $expectedGate = $Gate.Requests + 1
+    $probe = [Ferrum2UdpProbe]::new($Address, $Port)
+    $script:tcpResources.Add($probe)
+    $client = Open-TunUdp $Address $Port $InterfaceIndex
+    try {
+        [void]$client.Send($Payload, $Payload.Length)
+        Assert-True ($Gate.WaitRequests($expectedGate, 5000)) "selected UDP egress gate was not opened"
+        $response = Receive-TunUdp $client
+        Assert-True (($response -join ",") -eq ($Payload -join ",")) "UDP echo mismatch"
+        Assert-True ($probe.WaitRequests(1, 5000)) "UDP target did not receive datagram"
+        Assert-True (($probe.Received -join ",") -eq ($Payload -join ",")) "UDP target payload mismatch"
+        Assert-True ($Gate.Fault -eq "none" -and $probe.Fault -eq "none") "UDP witness faulted"
+    } finally { $client.Dispose() }
+}
+
 try {
     Assert-True ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq $expectedZipHash) "ZIP hash mismatch"
     New-Item -ItemType Directory -Path $work | Out-Null
@@ -835,7 +998,7 @@ try {
 
     Push-Location $workspace
     try {
-        if ($Mode -eq "tcp") { & cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --locked }
+        if ($Mode -ne "lifecycle") { & cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --locked }
         else { & cargo +1.97.1 build -p ferrum2-client --locked }
         if ($LASTEXITCODE -ne 0) { throw "candidate build failed" }
     }
@@ -1030,6 +1193,11 @@ schema_version = 1
 listen = "127.0.0.1:$($serverCase[1])"
 [runtime]
 shutdown_grace_ms = 1000
+[udp]
+enabled = true
+max_sessions = 32
+max_buffered_bytes = 4194304
+idle_timeout_ms = 60000
 [shadowsocks]
 method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
@@ -1046,6 +1214,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $tcpResources.Add($gateA)
         $tcpResources.Add($gateB)
         $tcpResources.Add($dnsResponder)
+        if ($Mode -eq "udp") {
+            $udpGateA = [Ferrum2UdpGate]::new($gatePortA, $serverPortA)
+            $udpGateB = [Ferrum2UdpGate]::new($gatePortB, $serverPortB)
+            $tcpResources.Add($udpGateA)
+            $tcpResources.Add($udpGateB)
+        }
 
         @"
 schema_version = 2
@@ -1057,6 +1231,8 @@ ipv6_address = "fd00::2/126"
 ready_timeout_ms = 15000
 max_tcp_flows = 8
 tcp_buffer_bytes = 4096
+max_udp_mappings = 4
+max_udp_buffered_bytes = 4194304
 [[outbounds]]
 tag = "one"
 server = "127.0.0.1:$gatePortA"
@@ -1072,13 +1248,23 @@ server = "127.0.0.1:$deadPort"
 [[outbounds]]
 tag = "fallback"
 server = "127.0.0.1:$gatePortB"
+[[outbounds]]
+tag = "udp-inner"
+server = "127.0.0.1:$gatePortB"
 [[chains]]
 tag = "two-hop"
 hops = ["one", "inner"]
+[[chains]]
+tag = "udp-two-hop"
+hops = ["one", "udp-inner"]
 [[selectors]]
 tag = "manual"
 outbounds = ["dead", "fallback"]
 default = "dead"
+[[selectors]]
+tag = "udp-manual"
+outbounds = ["one", "udp-inner"]
+default = "one"
 [route]
 final = "one"
 [route.sniff]
@@ -1164,6 +1350,68 @@ ip = "$($targets[7])"
 port = $($ports[7])
 action = "route"
 outbound = "one"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($targets[0])"
+port = $($ports[0])
+action = "route"
+outbound = "one"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($targets[1])"
+port = $($ports[1])
+action = "route"
+outbound = "udp-two-hop"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($targets[2])"
+port = $($ports[2])
+action = "route"
+outbound = "udp-manual"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($targets[3])"
+port = $($ports[3])
+action = "sniff"
+sniffers = "dns"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($targets[3])"
+port = $($ports[3])
+protocol = "dns"
+action = "route"
+outbound = "udp-two-hop"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($targets[4])"
+port = $($ports[4])
+action = "hijack-dns"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($targets[5])"
+port = $($ports[5])
+action = "reject"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($targets[6])"
+port = $($ports[6])
+action = "route"
+outbound = "udp-manual"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($targets[7])"
+port = $($ports[7])
+action = "route"
+outbound = "one"
 [dns]
 [[dns.inbounds]]
 tag = "dns-control"
@@ -1176,7 +1424,7 @@ address = "127.0.0.1:$dnsPort"
 final = "resolver"
 [runtime]
 shutdown_grace_ms = 1000
-idle_timeout_ms = 10000
+idle_timeout_ms = 2000
 [metrics]
 listen = "127.0.0.1:$metricsPort"
 [shadowsocks]
@@ -1363,12 +1611,171 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $activeProcess = Start-Candidate $binary $config
         $adapter = Wait-AdapterReady $adapterName
         $ownedInterfaceIndex = [int]$adapter.ifIndex
-        Stop-Candidate $activeProcess
-        $activeProcess = $null
-        Wait-AdapterAbsent $adapterName
-        Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+        if ($Mode -eq "tcp") {
+            Stop-Candidate $activeProcess
+            $activeProcess = $null
+            Wait-AdapterAbsent $adapterName
+            Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+        } else {
+            foreach ($target in $targets) {
+                $prefixLength = if ($target.Contains(":")) { 128 } else { 32 }
+                [void](Add-TunRoute $ownedInterfaceIndex "$target/$prefixLength" 500)
+            }
+        }
         $tcpRows++
         Assert-True ($tcpRows -eq 8) "TCP row count mismatch"
+
+        if ($Mode -eq "udp") {
+            foreach ($targetIndex in @(4, 5, 6)) {
+                [void](Add-TargetAddress $targets[$targetIndex])
+            }
+
+            # UDP-01 IPv4 one-hop route and authenticated response binding.
+            Invoke-UdpEchoRow $targets[0] $ports[0] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes("udp-01-one-hop"))
+            $udpRows++
+
+            # UDP-02 IPv6 fixed two-hop chain.
+            $beforeGateA = $udpGateA.Requests
+            $beforeGateB = $udpGateB.Requests
+            Invoke-UdpEchoRow $targets[1] $ports[1] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes("udp-02-two-hop"))
+            Assert-True ($udpGateA.Requests -eq $beforeGateA + 1 -and $udpGateB.Requests -eq $beforeGateB + 1) "UDP-02 did not traverse both exact hops"
+            $udpRows++
+
+            # UDP-03 IPv4 selector snapshot unchanged for a live mapping.
+            $selectorProbe = [Ferrum2UdpProbe]::new($targets[2], $ports[2])
+            $tcpResources.Add($selectorProbe)
+            $selectorClient = Open-TunUdp $targets[2] $ports[2] $ownedInterfaceIndex
+            try {
+                $beforeGateA = $udpGateA.Requests
+                $beforeGateB = $udpGateB.Requests
+                foreach ($payload in @(
+                    [Text.Encoding]::ASCII.GetBytes("udp-03-first"),
+                    [Text.Encoding]::ASCII.GetBytes("udp-03-snapshot")
+                )) {
+                    [void]$selectorClient.Send($payload, $payload.Length)
+                    $response = Receive-TunUdp $selectorClient
+                    Assert-True (($response -join ",") -eq ($payload -join ",")) "UDP-03 mapping changed its response binding"
+                }
+                Assert-True ($selectorProbe.WaitRequests(2, 5000)) "UDP-03 target did not receive both datagrams"
+                Assert-True ($udpGateA.Requests -eq $beforeGateA + 2 -and $udpGateB.Requests -eq $beforeGateB) "UDP-03 selector mapping was not fixed"
+            } finally { $selectorClient.Dispose() }
+            $udpRows++
+
+            # UDP-04 IPv6 expiry and reselection.
+            $expiryProbe = [Ferrum2UdpProbe]::new($targets[3], $ports[3])
+            $tcpResources.Add($expiryProbe)
+            $expiryClient = Open-TunUdp $targets[3] $ports[3] $ownedInterfaceIndex
+            try {
+                $beforeGateA = $udpGateA.Requests
+                $beforeGateB = $udpGateB.Requests
+                $plain = [Text.Encoding]::ASCII.GetBytes("udp-04-before-dns")
+                [void]$expiryClient.Send($plain, $plain.Length)
+                Assert-True (((Receive-TunUdp $expiryClient) -join ",") -eq ($plain -join ",")) "UDP-04 initial response mismatch"
+                $query = New-DnsQuery 0x1401
+                [void]$expiryClient.Send($query, $query.Length)
+                Assert-True (((Receive-TunUdp $expiryClient) -join ",") -eq ($query -join ",")) "UDP-04 live snapshot response mismatch"
+                Assert-True ($udpGateA.Requests -eq $beforeGateA + 2 -and $udpGateB.Requests -eq $beforeGateB) "UDP-04 live mapping re-entered policy"
+                Start-Sleep -Milliseconds 2500
+                [void]$expiryClient.Send($query, $query.Length)
+                Assert-True (((Receive-TunUdp $expiryClient) -join ",") -eq ($query -join ",")) "UDP-04 expired response mismatch"
+                Assert-True ($udpGateA.Requests -eq $beforeGateA + 3 -and $udpGateB.Requests -eq $beforeGateB + 1) "UDP-04 did not reselect after expiry"
+            } finally { $expiryClient.Dispose() }
+            $udpRows++
+
+            # UDP-05 IPv4 DNS hijack with zero Shadowsocks owner.
+            $beforeGateA = $udpGateA.Requests
+            $beforeGateB = $udpGateB.Requests
+            $beforeDns = $dnsResponder.Requests
+            $dnsClient = Open-TunUdp $targets[4] $ports[4] $ownedInterfaceIndex
+            try {
+                $query = New-DnsQuery 0x1501
+                [void]$dnsClient.Send($query, $query.Length)
+                $response = Receive-TunUdp $dnsClient
+                Assert-True ($response[0] -eq 0x15 -and $response[1] -eq 0x01) "UDP-05 DNS response ID mismatch"
+                Assert-True ($dnsResponder.Requests -eq $beforeDns + 1) "UDP-05 DNS proxy did not answer"
+                Assert-True ($udpGateA.Requests -eq $beforeGateA -and $udpGateB.Requests -eq $beforeGateB) "UDP-05 DNS hijack opened Shadowsocks"
+            } finally { $dnsClient.Dispose() }
+            $udpRows++
+
+            # UDP-06 IPv6 reject tombstone and no policy re-entry.
+            $beforeGateA = $udpGateA.Requests
+            $beforeGateB = $udpGateB.Requests
+            $rejectClient = Open-TunUdp $targets[5] $ports[5] $ownedInterfaceIndex
+            try {
+                $rejected = [Text.Encoding]::ASCII.GetBytes("udp-06-reject")
+                [void]$rejectClient.Send($rejected, $rejected.Length)
+                [void]$rejectClient.Send($rejected, $rejected.Length)
+                $rejectedResponse = $rejectClient.ReceiveAsync()
+                Assert-True (-not $rejectedResponse.Wait(500)) "UDP-06 reject returned a datagram"
+                Assert-True ($udpGateA.Requests -eq $beforeGateA -and $udpGateB.Requests -eq $beforeGateB) "UDP-06 reject opened an egress"
+            } finally { $rejectClient.Dispose() }
+            $udpRows++
+
+            # UDP-07 IPv4 over-limit no-commit then selector re-read.
+            $overLimitClient = Open-TunUdp $targets[6] $ports[6] $ownedInterfaceIndex
+            try {
+                $beforeGateA = $udpGateA.Requests
+                $beforeGateB = $udpGateB.Requests
+                $overLimit = [byte[]]::new(2000)
+                [void]$overLimitClient.Send($overLimit, $overLimit.Length)
+                Start-Sleep -Milliseconds 500
+                Assert-True ($udpGateA.Requests -eq $beforeGateA -and $udpGateB.Requests -eq $beforeGateB) "UDP-07 over-limit candidate committed"
+                $overLimitProbe = [Ferrum2UdpProbe]::new($targets[6], $ports[6])
+                $tcpResources.Add($overLimitProbe)
+                $valid = [Text.Encoding]::ASCII.GetBytes("udp-07-valid")
+                [void]$overLimitClient.Send($valid, $valid.Length)
+                Assert-True (((Receive-TunUdp $overLimitClient) -join ",") -eq ($valid -join ",")) "UDP-07 recovery response mismatch"
+                Assert-True ($udpGateA.Requests -eq $beforeGateA + 1 -and $udpGateB.Requests -eq $beforeGateB) "UDP-07 valid candidate did not re-read selector"
+            } finally { $overLimitClient.Dispose() }
+            $udpRows++
+
+            # UDP-08 IPv6 mapping saturation, generation reuse and wrong-response drop.
+            Start-Sleep -Milliseconds 2500
+            $saturationProbe = [Ferrum2UdpProbe]::new($targets[7], $ports[7])
+            $tcpResources.Add($saturationProbe)
+            $saturatedClients = [System.Collections.Generic.List[Net.Sockets.UdpClient]]::new()
+            $overflowClient = $null
+            try {
+                $beforeGateA = $udpGateA.Requests
+                foreach ($index in 0..3) {
+                    $mappingClient = Open-TunUdp $targets[7] $ports[7] $ownedInterfaceIndex
+                    $saturatedClients.Add($mappingClient)
+                    $payload = [Text.Encoding]::ASCII.GetBytes("udp-08-slot-$index")
+                    [void]$mappingClient.Send($payload, $payload.Length)
+                    Assert-True (((Receive-TunUdp $mappingClient) -join ",") -eq ($payload -join ",")) "UDP-08 live mapping response mismatch"
+                }
+                Assert-True ($saturatedClients.Count -eq 4) "UDP-08 mapping saturation setup mismatch"
+                Assert-True ($udpGateA.Requests -eq $beforeGateA + 4) "UDP-08 did not commit the fixed mapping capacity"
+                $overflowClient = Open-TunUdp $targets[7] $ports[7] $ownedInterfaceIndex
+                $overflow = [Text.Encoding]::ASCII.GetBytes("udp-08-overflow")
+                [void]$overflowClient.Send($overflow, $overflow.Length)
+                $overflowResponse = $overflowClient.ReceiveAsync()
+                Assert-True (-not $overflowResponse.Wait(500) -and $udpGateA.Requests -eq $beforeGateA + 4) "UDP-08 evicted a live mapping"
+                Start-Sleep -Milliseconds 2500
+                [void]$overflowClient.Send($overflow, $overflow.Length)
+                Assert-True (((Receive-TunUdp $overflowClient) -join ",") -eq ($overflow -join ",")) "UDP-08 expired slot was not reusable"
+                Assert-True ($udpGateA.ReplayFirstToLatest()) "UDP-08 stale response replay was unavailable"
+                $staleResponse = $overflowClient.ReceiveAsync()
+                Assert-True (-not $staleResponse.Wait(500)) "UDP-08 stale response crossed the new generation"
+            } finally {
+                if ($overflowClient) { $overflowClient.Dispose() }
+                foreach ($client in $saturatedClients) { $client.Dispose() }
+            }
+            $udpRows++
+            Assert-True ($udpRows -eq 8) "UDP row count mismatch"
+
+            Stop-Candidate $activeProcess
+            $activeProcess = $null
+            Wait-AdapterAbsent $adapterName
+            Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+            $activeProcess = Start-Candidate $binary $config
+            $adapter = Wait-AdapterReady $adapterName
+            $ownedInterfaceIndex = [int]$adapter.ifIndex
+            Stop-Candidate $activeProcess
+            $activeProcess = $null
+            Wait-AdapterAbsent $adapterName
+            Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+        }
     }
     $completed = $true
 }
@@ -1443,7 +1850,9 @@ if ($completed) {
     $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
     if ($Mode -eq "lifecycle") {
         Write-Output "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
-    } else {
+    } elseif ($Mode -eq "tcp") {
         Write-Output "m15_windows_tun_e2e status=PASS profile=tcp tcp=8/8 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+    } else {
+        Write-Output "m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
     }
 }

@@ -1,8 +1,14 @@
 #![forbid(unsafe_code)]
 
 mod tcp;
+mod udp;
 
 pub use tcp::TcpFlow;
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+use udp::{Admission as UdpAdmission, UdpTable};
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+use udp::{GenerationId, GenerationTable};
+pub use udp::{UdpCandidate, UdpCommitError, UdpDatagram, UdpMapping, UdpTuple};
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use std::net::IpAddr;
@@ -63,21 +69,24 @@ pub struct Config {
 /// Error values are supplied by the binary so this deep module does not depend on
 /// configuration, policy, DNS, protocol, or observability crates.
 #[cfg(all(windows, target_arch = "x86_64"))]
-pub fn process_root<E, H, A, D>(
+pub fn process_root<E, T, H, U, A, D>(
     config: Config,
     startup: E,
     runtime: E,
     cleanup: E,
     handle_tcp: H,
-    accepted: A,
-    foundation_dropped: D,
+    handle_udp: U,
+    packet_metrics: (A, D),
 ) -> ProcessRoot<E>
 where
     E: Copy + Send + 'static,
+    T: Send + 'static,
     H: Fn(TcpFlow, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static,
+    U: Fn(UdpCandidate<T>, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static,
     A: Fn() + Send + Sync + 'static,
     D: Fn() + Send + Sync + 'static,
 {
+    let (accepted, foundation_dropped) = packet_metrics;
     ProcessRoot::new_cancellable(move |cancellation| async move {
         if !config_is_exact(&config) {
             return Err(startup);
@@ -91,6 +100,7 @@ where
             },
             cancellation,
             Arc::new(handle_tcp),
+            Arc::new(handle_udp),
             PacketMetrics {
                 accepted: Box::new(accepted),
                 foundation_dropped: Box::new(foundation_dropped),
@@ -102,18 +112,20 @@ where
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 /// Builds a required root that fails during preparation on unsupported targets.
-pub fn process_root<E, H, A, D>(
+pub fn process_root<E, T, H, U, A, D>(
     _config: Config,
     startup: E,
     _runtime: E,
     _cleanup: E,
     _handle_tcp: H,
-    _accepted: A,
-    _foundation_dropped: D,
+    _handle_udp: U,
+    _packet_metrics: (A, D),
 ) -> ProcessRoot<E>
 where
     E: Copy + Send + 'static,
+    T: Send + 'static,
     H: Fn(TcpFlow, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static,
+    U: Fn(UdpCandidate<T>, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static,
     A: Fn() + Send + Sync + 'static,
     D: Fn() + Send + Sync + 'static,
 {
@@ -207,15 +219,17 @@ fn config_is_exact(config: &Config) -> bool {
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-async fn prepare<E>(
+async fn prepare<E, T>(
     config: Config,
     errors: RootErrors<E>,
     mut cancellation: ProcessCancellation,
     handle_tcp: TcpHandler,
+    handle_udp: UdpHandler<T>,
     metrics: PacketMetrics,
-) -> Result<Option<TunRoot<E>>, E>
+) -> Result<Option<TunRoot<E, T>>, E>
 where
     E: Copy + Send + 'static,
+    T: Send + 'static,
 {
     let timeout = config.ready_timeout;
     let deadline = std::time::Instant::now()
@@ -252,7 +266,11 @@ where
         }
         match ready_receiver.try_recv() {
             #[cfg(all(windows, target_arch = "x86_64"))]
-            Ok(OwnerReady::Ready { wake, flows }) => {
+            Ok(OwnerReady::Ready {
+                wake,
+                flows,
+                datagrams,
+            }) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(prepare_failure(guard, errors.startup, errors.cleanup).await);
                 }
@@ -263,8 +281,11 @@ where
                     runtime: Some(errors.runtime),
                     cleanup: Some(errors.cleanup),
                     flows,
+                    datagrams,
                     flow_count: control.flow_count,
+                    mapping_count: control.mapping_count,
                     handle_tcp,
+                    handle_udp,
                 }));
             }
             Ok(OwnerReady::Failed) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -283,9 +304,10 @@ where
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-async fn cancel_prepare<E>(guard: OwnerThread, cleanup: E) -> Result<Option<TunRoot<E>>, E>
+async fn cancel_prepare<E, T>(guard: OwnerThread, cleanup: E) -> Result<Option<TunRoot<E, T>>, E>
 where
     E: Copy + Send + 'static,
+    T: Send + 'static,
 {
     if guard.reap().await == OwnerExit::CleanupFailed {
         Err(cleanup)
@@ -315,10 +337,11 @@ enum OwnerExit {
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-enum OwnerReady {
+enum OwnerReady<T> {
     Ready {
         wake: ferrum2_wintun::StopSignal,
         flows: tokio::sync::mpsc::Receiver<TcpFlow>,
+        datagrams: tokio::sync::mpsc::Receiver<UdpCandidate<T>>,
     },
     Failed,
 }
@@ -331,6 +354,8 @@ struct OwnerControl {
     admitting: Arc<AtomicBool>,
     #[cfg(all(windows, target_arch = "x86_64"))]
     flow_count: Arc<AtomicUsize>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    mapping_count: Arc<AtomicUsize>,
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -342,6 +367,8 @@ impl OwnerControl {
             admitting: Arc::new(AtomicBool::new(false)),
             #[cfg(all(windows, target_arch = "x86_64"))]
             flow_count: Arc::new(AtomicUsize::new(0)),
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            mapping_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -398,14 +425,17 @@ impl Drop for OwnerThread {
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-struct TunRoot<E> {
+struct TunRoot<E, T = ()> {
     owner: OwnerThread,
     done: tokio::sync::oneshot::Receiver<OwnerExit>,
     runtime: Option<E>,
     cleanup: Option<E>,
     flows: tokio::sync::mpsc::Receiver<TcpFlow>,
+    datagrams: tokio::sync::mpsc::Receiver<UdpCandidate<T>>,
     flow_count: Arc<AtomicUsize>,
+    mapping_count: Arc<AtomicUsize>,
     handle_tcp: TcpHandler,
+    handle_udp: UdpHandler<T>,
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -413,9 +443,14 @@ type TcpHandler =
     Arc<dyn Fn(TcpFlow, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static>;
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-impl<E> PreparedProcessRoot<E> for TunRoot<E>
+type UdpHandler<T> =
+    Arc<dyn Fn(UdpCandidate<T>, ProcessCancellation) -> ProcessFuture<()> + Send + Sync + 'static>;
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+impl<E, T> PreparedProcessRoot<E> for TunRoot<E, T>
 where
     E: Send + 'static,
+    T: Send + 'static,
 {
     fn activate(&mut self) -> Result<(), E> {
         self.owner.control.admitting.store(true, Ordering::Release);
@@ -441,6 +476,7 @@ where
                 if cancellation.is_cancelled()
                     && tasks.is_empty()
                     && self.flow_count.load(Ordering::Acquire) == 0
+                    && self.mapping_count.load(Ordering::Acquire) == 0
                 {
                     break OwnerExit::Stopped;
                 }
@@ -454,6 +490,16 @@ where
                                 }
                             }
                             tasks.spawn((self.handle_tcp)(flow, cancellation.clone()));
+                        }
+                    }
+                    candidate = self.datagrams.recv() => {
+                        if let Some(candidate) = candidate {
+                            while let Some(result) = tasks.try_join_next() {
+                                if result.is_err() {
+                                    break 'required OwnerExit::RuntimeFailed;
+                                }
+                            }
+                            tasks.spawn((self.handle_udp)(candidate, cancellation.clone()));
                         }
                     }
                     result = tasks.join_next(), if !tasks.is_empty() => {
@@ -535,10 +581,10 @@ fn finish_stack_setup<T, A, C>(
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-fn owner_main(
+fn owner_main<T: Send + 'static>(
     config: Config,
     control: OwnerControl,
-    ready: std::sync::mpsc::SyncSender<OwnerReady>,
+    ready: std::sync::mpsc::SyncSender<OwnerReady<T>>,
     deadline: std::time::Instant,
     metrics: PacketMetrics,
 ) -> OwnerExit {
@@ -570,7 +616,7 @@ fn owner_main(
         }
     };
     let wake = adapter.stop_signal();
-    let stack = Stack::new(
+    let stack = Stack::new_with_udp(
         (
             config.ipv4,
             config.ipv4_prefix,
@@ -582,8 +628,11 @@ fn owner_main(
         config.tcp_buffer_bytes,
         config.tcp_timeout,
         Arc::clone(&control.flow_count),
+        config.max_udp_mappings,
+        config.max_udp_buffered_bytes,
+        config.tcp_timeout,
     );
-    let ((mut stack, flows), mut adapter) =
+    let ((mut stack, flows, datagrams), mut adapter) =
         match finish_stack_setup(stack, adapter, |adapter| adapter.cleanup()) {
             Ok(stack) => stack,
             Err(exit) => {
@@ -591,7 +640,6 @@ fn owner_main(
                 return exit;
             }
         };
-    let _mapping_generations = GenerationTable::new(config.max_udp_mappings);
     if std::time::Instant::now() >= deadline {
         let _ = ready.send(OwnerReady::Failed);
         return match adapter.cleanup() {
@@ -599,7 +647,14 @@ fn owner_main(
             Err(_) => OwnerExit::CleanupFailed,
         };
     }
-    if ready.send(OwnerReady::Ready { wake, flows }).is_err() {
+    if ready
+        .send(OwnerReady::Ready {
+            wake,
+            flows,
+            datagrams,
+        })
+        .is_err()
+    {
         control.stop.store(true, Ordering::Release);
     }
 
@@ -610,6 +665,7 @@ fn owner_main(
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
+        let elapsed = i64::try_from(clock_origin.elapsed().as_millis()).unwrap_or(i64::MAX);
         for _ in 0..PACKET_QUANTUM {
             let received = match adapter.receive() {
                 Ok(Some(packet)) => packet,
@@ -619,11 +675,18 @@ fn owner_main(
                     break;
                 }
             };
-            if stack.enqueue(&received, control.admitting.load(Ordering::Acquire)) {
+            if stack.enqueue_at(
+                &received,
+                control.admitting.load(Ordering::Acquire),
+                elapsed,
+            ) {
                 (metrics.accepted)();
             }
         }
-        let elapsed = i64::try_from(clock_origin.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let _udp = stack.poll_udp_events(elapsed);
+        control
+            .mapping_count
+            .store(stack.live_udp_mappings(), Ordering::Release);
         for _ in 0..PACKET_QUANTUM {
             for _ in 0..stack.poll_quantum(Instant::from_millis(elapsed)) {
                 (metrics.foundation_dropped)();
@@ -640,7 +703,11 @@ fn owner_main(
         if fatal {
             break;
         }
-        let wait = if stack.live_tcp_flows() == 0 { 50 } else { 1 };
+        let wait = if stack.live_tcp_flows() == 0 && stack.live_udp_mappings() == 0 {
+            50
+        } else {
+            1
+        };
         match adapter.wait(Duration::from_millis(wait)) {
             Ok(_) => {}
             Err(_) => {
@@ -653,52 +720,6 @@ fn owner_main(
         Err(_) => OwnerExit::CleanupFailed,
         Ok(()) if fatal => OwnerExit::RuntimeFailed,
         Ok(()) => OwnerExit::Stopped,
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
-#[allow(dead_code)] // Reserved IDs are allocated now; T04/T05 are the first admission users.
-struct GenerationId {
-    slot: usize,
-    generation: u32,
-}
-
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
-struct GenerationTable {
-    slots: Box<[u32]>,
-}
-
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
-impl GenerationTable {
-    fn new(capacity: usize) -> Self {
-        Self {
-            slots: vec![0; capacity].into_boxed_slice(),
-        }
-    }
-
-    #[allow(dead_code)] // Exercised by the generation mutation test before flow admission exists.
-    fn current(&self, slot: usize) -> Option<GenerationId> {
-        self.slots
-            .get(slot)
-            .copied()
-            .filter(|generation| *generation != u32::MAX)
-            .map(|generation| GenerationId { slot, generation })
-    }
-
-    #[allow(dead_code)] // Exercised by the generation mutation test before flow admission exists.
-    fn recycle(&mut self, id: GenerationId) -> bool {
-        let Some(generation) = self.slots.get_mut(id.slot) else {
-            return false;
-        };
-        if *generation != id.generation {
-            return false;
-        }
-        let Some(next) = generation.checked_add(1) else {
-            return false;
-        };
-        *generation = next;
-        true
     }
 }
 
@@ -856,6 +877,42 @@ fn checksum(parts: &[&[u8]]) -> u16 {
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+fn udp_datagram(packet: &[u8], mtu: usize) -> Option<(UdpTuple, &[u8], usize)> {
+    let (source, target, offset, payload_bound) = match packet.first()? >> 4 {
+        4 if packet.get(9) == Some(&17) => (
+            IpAddr::V4(Ipv4Addr::new(
+                packet[12], packet[13], packet[14], packet[15],
+            )),
+            IpAddr::V4(Ipv4Addr::new(
+                packet[16], packet[17], packet[18], packet[19],
+            )),
+            20,
+            mtu.checked_sub(28)?,
+        ),
+        6 if packet.get(6) == Some(&17) => (
+            IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?)),
+            IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).ok()?)),
+            40,
+            mtu.checked_sub(48)?,
+        ),
+        _ => return None,
+    };
+    let source = SocketAddr::new(
+        source,
+        u16::from_be_bytes(packet[offset..offset + 2].try_into().ok()?),
+    );
+    let target = SocketAddr::new(
+        target,
+        u16::from_be_bytes(packet[offset + 2..offset + 4].try_into().ok()?),
+    );
+    Some((
+        UdpTuple::new(source, target),
+        packet.get(offset + 8..)?,
+        payload_bound,
+    ))
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct MemoryDevice {
     ingress: [PacketSlot; INGRESS_SLOTS],
     ingress_head: usize,
@@ -925,6 +982,92 @@ impl MemoryDevice {
         self.output_len = 0;
         OutputResult::Sent
     }
+
+    fn inject_udp_response(&mut self, tuple: UdpTuple, payload: &[u8]) -> bool {
+        if self.output_len != 0 {
+            return false;
+        }
+        let Some(length) = write_udp_response(&mut self.output, tuple, payload) else {
+            return false;
+        };
+        if !self.validator.accepts(&self.output[..length]) {
+            self.rejected_output += 1;
+            return false;
+        }
+        self.discarded_output += 1;
+        self.output_len = length;
+        true
+    }
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+fn write_udp_response(output: &mut [u8], tuple: UdpTuple, payload: &[u8]) -> Option<usize> {
+    let (header, source, target) = match (tuple.target().ip(), tuple.source().ip()) {
+        (IpAddr::V4(source), IpAddr::V4(target)) => {
+            let length = 28_usize.checked_add(payload.len())?;
+            let packet = output.get_mut(..length)?;
+            packet.fill(0);
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&u16::try_from(length).ok()?.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = 17;
+            packet[12..16].copy_from_slice(&source.octets());
+            packet[16..20].copy_from_slice(&target.octets());
+            (20, IpAddr::V4(source), IpAddr::V4(target))
+        }
+        (IpAddr::V6(source), IpAddr::V6(target)) => {
+            let udp_len = 8_usize.checked_add(payload.len())?;
+            let length = 40_usize.checked_add(udp_len)?;
+            let packet = output.get_mut(..length)?;
+            packet.fill(0);
+            packet[0] = 0x60;
+            packet[4..6].copy_from_slice(&u16::try_from(udp_len).ok()?.to_be_bytes());
+            packet[6] = 17;
+            packet[7] = 64;
+            packet[8..24].copy_from_slice(&source.octets());
+            packet[24..40].copy_from_slice(&target.octets());
+            (40, IpAddr::V6(source), IpAddr::V6(target))
+        }
+        _ => return None,
+    };
+    let udp_len = 8_usize.checked_add(payload.len())?;
+    output[header..header + 2].copy_from_slice(&tuple.target().port().to_be_bytes());
+    output[header + 2..header + 4].copy_from_slice(&tuple.source().port().to_be_bytes());
+    output[header + 4..header + 6].copy_from_slice(&u16::try_from(udp_len).ok()?.to_be_bytes());
+    output[header + 8..header + udp_len].copy_from_slice(payload);
+    let length = udp_len as u32;
+    let length_bytes = length.to_be_bytes();
+    let next = [0_u8, 0, 0, 17];
+    let udp_checksum = match (source, target) {
+        (IpAddr::V4(source), IpAddr::V4(target)) => checksum(&[
+            &source.octets(),
+            &target.octets(),
+            &next[2..],
+            &length_bytes[2..],
+            &output[header..header + udp_len],
+        ]),
+        (IpAddr::V6(source), IpAddr::V6(target)) => checksum(&[
+            &source.octets(),
+            &target.octets(),
+            &length_bytes,
+            &next,
+            &output[header..header + udp_len],
+        ]),
+        _ => return None,
+    };
+    output[header + 6..header + 8].copy_from_slice(
+        &if udp_checksum == 0 {
+            u16::MAX
+        } else {
+            udp_checksum
+        }
+        .to_be_bytes(),
+    );
+    if header == 20 {
+        let header_checksum = checksum(&[&output[..20]]);
+        output[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+    }
+    Some(header + udp_len)
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -1021,7 +1164,7 @@ impl Device for MemoryDevice {
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-struct Stack {
+struct Stack<T = ()> {
     interface: Interface,
     sockets: SocketSet<'static>,
     device: MemoryDevice,
@@ -1033,7 +1176,15 @@ struct Stack {
     bridge_capacity: usize,
     flow_sender: tokio::sync::mpsc::Sender<TcpFlow>,
     flow_count: Arc<AtomicUsize>,
+    udp: UdpTable<T>,
 }
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+type StackReady<T> = (
+    Stack<T>,
+    tokio::sync::mpsc::Receiver<TcpFlow>,
+    tokio::sync::mpsc::Receiver<UdpCandidate<T>>,
+);
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1055,15 +1206,19 @@ struct TcpFlowEntry {
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-impl Stack {
-    fn new(
+impl<T: Send + 'static> Stack<T> {
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_udp(
         addresses: (Ipv4Addr, u8, Ipv6Addr, u8),
         mtu: usize,
         max_tcp_flows: usize,
         tcp_buffer_bytes: usize,
         tcp_timeout: Duration,
         flow_count: Arc<AtomicUsize>,
-    ) -> Result<(Self, tokio::sync::mpsc::Receiver<TcpFlow>), ()> {
+        max_udp_mappings: usize,
+        max_udp_buffered_bytes: usize,
+        udp_timeout: Duration,
+    ) -> Result<StackReady<T>, ()> {
         let (ipv4, ipv4_prefix, ipv6, ipv6_prefix) = addresses;
         let mut device = MemoryDevice::new(mtu);
         let mut interface = Interface::new(
@@ -1096,6 +1251,7 @@ impl Stack {
             return Err(());
         }
         let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(max_tcp_flows);
+        let (udp, datagrams) = UdpTable::new(max_udp_mappings, max_udp_buffered_bytes, udp_timeout);
         let tcp_timeout_millis = u64::try_from(tcp_timeout.as_millis()).map_err(|_| ())?;
         Ok((
             Self {
@@ -1113,13 +1269,26 @@ impl Stack {
                 bridge_capacity: mtu / 2,
                 flow_sender,
                 flow_count,
+                udp,
             },
             flow_receiver,
+            datagrams,
         ))
     }
 
-    fn enqueue(&mut self, packet: &[u8], admitting: bool) -> bool {
-        if self.device.ingress_len == INGRESS_SLOTS || !self.device.validator.accepts(packet) {
+    fn enqueue_at(&mut self, packet: &[u8], admitting: bool, now_millis: i64) -> bool {
+        if !self.device.validator.accepts(packet) {
+            return false;
+        }
+        if let Some((tuple, payload, payload_bound)) =
+            udp_datagram(packet, self.device.validator.mtu)
+        {
+            return self
+                .udp
+                .admit(tuple, payload, payload_bound, now_millis, admitting)
+                != UdpAdmission::Dropped;
+        }
+        if self.device.ingress_len == INGRESS_SLOTS {
             return false;
         }
         match initial_tcp_tuple(packet) {
@@ -1173,6 +1342,17 @@ impl Stack {
 
     fn live_tcp_flows(&self) -> usize {
         self.flows.iter().flatten().count()
+    }
+
+    fn live_udp_mappings(&self) -> usize {
+        self.udp.live_mappings()
+    }
+
+    fn poll_udp_events(&mut self, now_millis: i64) -> udp::EventOutcome {
+        let device = &mut self.device;
+        self.udp.process_events(now_millis, |tuple, payload| {
+            device.inject_udp_response(tuple, payload)
+        })
     }
 
     fn poll_quantum(&mut self, now: Instant) -> usize {
@@ -1291,6 +1471,35 @@ impl Stack {
     fn has_exact_routes(&self) -> bool {
         self.interface.routes().get_default_ipv4_route().is_some()
             && self.interface.routes().get_default_ipv6_route().is_some()
+    }
+}
+
+#[cfg(test)]
+impl Stack<()> {
+    fn new(
+        addresses: (Ipv4Addr, u8, Ipv6Addr, u8),
+        mtu: usize,
+        max_tcp_flows: usize,
+        tcp_buffer_bytes: usize,
+        tcp_timeout: Duration,
+        flow_count: Arc<AtomicUsize>,
+    ) -> Result<(Self, tokio::sync::mpsc::Receiver<TcpFlow>), ()> {
+        let (stack, flows, _) = Stack::<()>::new_with_udp(
+            addresses,
+            mtu,
+            max_tcp_flows,
+            tcp_buffer_bytes,
+            tcp_timeout,
+            flow_count,
+            1,
+            65_536,
+            tcp_timeout,
+        )?;
+        Ok((stack, flows))
+    }
+
+    fn enqueue(&mut self, packet: &[u8], admitting: bool) -> bool {
+        self.enqueue_at(packet, admitting, 0)
     }
 }
 
@@ -2291,9 +2500,75 @@ mod tests {
         assert_eq!(flow_count.load(Ordering::Acquire), 0);
     }
 
+    #[tokio::test]
+    async fn udp_ipv4_ipv6_candidates_commit_and_inject_through_the_real_stack() {
+        for (packet, expected_source, expected_target, response) in [
+            (
+                ipv4_udp(),
+                "198.18.0.1:10000".parse().expect("IPv4 source"),
+                "192.0.2.1:53".parse().expect("IPv4 target"),
+                b"v4".as_slice(),
+            ),
+            (
+                ipv6_udp(),
+                "[::2]:10000".parse().expect("IPv6 source"),
+                "[2001:db8::1]:53".parse().expect("IPv6 target"),
+                b"v6".as_slice(),
+            ),
+        ] {
+            let (mut stack, _flows, mut candidates) = Stack::<&'static str>::new_with_udp(
+                (
+                    Ipv4Addr::new(198, 18, 0, 2),
+                    30,
+                    Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                    126,
+                ),
+                1420,
+                1,
+                4096,
+                Duration::from_secs(60),
+                Arc::new(AtomicUsize::new(0)),
+                1,
+                65_536,
+                Duration::from_secs(60),
+            )
+            .expect("UDP stack");
+            assert!(stack.enqueue_at(&packet, true, 0));
+            assert_eq!(stack.live_udp_mappings(), 0, "provisional is not live");
+            let candidate = candidates.try_recv().expect("candidate");
+            assert_eq!(candidate.tuple().source(), expected_source);
+            assert_eq!(candidate.tuple().target(), expected_target);
+            assert_eq!(candidate.payload(), &packet[packet.len() - 4..]);
+            let commit = tokio::spawn(candidate.commit("route", 32));
+            tokio::task::yield_now().await;
+            assert_eq!(stack.poll_udp_events(1).committed, 1);
+            let mut mapping = commit.await.expect("commit task").expect("mapping");
+            assert_eq!(mapping.terminal(), &"route");
+            assert_eq!(
+                mapping.receive().await.expect("first datagram").payload(),
+                &packet[packet.len() - 4..]
+            );
+            assert!(mapping.send_response(expected_target, response));
+            assert_eq!(stack.poll_udp_events(2).injected, 1);
+            let mut emitted = Vec::new();
+            assert_eq!(
+                stack.take_output(|packet| {
+                    emitted.extend_from_slice(packet);
+                    true
+                }),
+                OutputResult::Sent
+            );
+            assert!(PacketValidator::new(1420).accepts(&emitted));
+            let (reverse, payload, _) = crate::udp_datagram(&emitted, 1420).expect("UDP response");
+            assert_eq!(reverse.source(), expected_target);
+            assert_eq!(reverse.target(), expected_source);
+            assert_eq!(payload, response);
+        }
+    }
+
     #[test]
-    fn stack_route_and_quantum_are_exact_and_output_is_foundation_dropped() {
-        let (mut stack, _flows) = Stack::new(
+    fn stack_routes_are_exact_and_udp_candidates_bypass_foundation_drop() {
+        let (mut stack, _flows, _datagrams) = Stack::<()>::new_with_udp(
             (
                 Ipv4Addr::new(198, 18, 0, 2),
                 30,
@@ -2305,20 +2580,28 @@ mod tests {
             4096,
             Duration::from_secs(60),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            1,
+            65_536,
+            Duration::from_secs(60),
         )
         .expect("bounded stack");
         assert!(stack.has_exact_routes());
         let packet = ipv4_udp();
-        for _ in 0..7 {
-            assert!(stack.enqueue(&packet, true));
-        }
+        assert!(
+            stack.enqueue(&packet, true),
+            "first UDP packet becomes a provisional candidate"
+        );
         assert!(
             !stack.enqueue(&packet, true),
-            "seven ingress plus one TX slot is the exact eight-slot pool"
+            "a pending candidate is bounded and not duplicated"
         );
-        assert_eq!(stack.poll_quantum(Instant::ZERO), 7);
+        assert_eq!(stack.poll_quantum(Instant::ZERO), 0);
         assert_eq!(stack.pending(), 0);
-        assert_eq!(stack.discarded_packets(), 7);
+        assert_eq!(
+            stack.discarded_packets(),
+            0,
+            "T05 UDP no longer reaches the foundation drop"
+        );
 
         let valid_foundation_drops = stack.discarded_packets();
         let valid_egress = stack.validated_egress_packets();
@@ -2430,6 +2713,8 @@ mod tests {
                     admitting: Arc::new(AtomicBool::new(false)),
                     #[cfg(all(windows, target_arch = "x86_64"))]
                     flow_count: Arc::new(AtomicUsize::new(0)),
+                    #[cfg(all(windows, target_arch = "x86_64"))]
+                    mapping_count: Arc::new(AtomicUsize::new(0)),
                 },
                 #[cfg(all(windows, target_arch = "x86_64"))]
                 wake: None,
@@ -2450,6 +2735,8 @@ mod tests {
                 admitting: Arc::new(AtomicBool::new(false)),
                 #[cfg(all(windows, target_arch = "x86_64"))]
                 flow_count: Arc::new(AtomicUsize::new(0)),
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                mapping_count: Arc::new(AtomicUsize::new(0)),
             },
             #[cfg(all(windows, target_arch = "x86_64"))]
             wake: None,
@@ -2496,6 +2783,7 @@ mod tests {
         use ferrum2_runtime::{ProcessCause, ProcessRootExit, ProcessSupervisor};
 
         let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
+        let (_udp, datagram_receiver) = tokio::sync::mpsc::channel::<crate::UdpCandidate<()>>(1);
         let control = OwnerControl::new();
         let active = Arc::clone(&control.active);
         let owner_control = control.clone();
@@ -2521,7 +2809,9 @@ mod tests {
                 runtime: Some("runtime"),
                 cleanup: Some("cleanup"),
                 flows: flow_receiver,
+                datagrams: datagram_receiver,
                 flow_count: Arc::new(AtomicUsize::new(0)),
+                mapping_count: Arc::new(AtomicUsize::new(0)),
                 handle_tcp: Arc::new(move |flow, _| {
                     let calls = Arc::clone(&handler_calls);
                     Box::pin(async move {
@@ -2531,6 +2821,7 @@ mod tests {
                         }
                     })
                 }),
+                handle_udp: Arc::new(|_: crate::UdpCandidate<()>, _| Box::pin(async {})),
             })
         });
         let supervisor = ProcessSupervisor::new(

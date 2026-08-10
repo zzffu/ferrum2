@@ -199,7 +199,14 @@ where
     metrics.set_udp_sessions_active(Role::Client, 0);
     metrics.set_udp_buffered_bytes(Role::Client, 0);
     let public_udp_enabled = config.udp.is_some_and(|udp| udp.enabled);
-    let internal_udp_needed = dns.as_ref().is_some_and(|dns| dns.6);
+    let tun_udp_limits = tun_config.as_ref().map(|tun| {
+        (
+            tun.max_udp_mappings,
+            tun.max_udp_buffered_bytes,
+            config.runtime.idle_timeout,
+        )
+    });
+    let internal_udp_needed = dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_limits.is_some();
     let runtime = config.runtime;
     let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)?;
     let shutdown_grace = config.runtime.shutdown_grace;
@@ -209,13 +216,19 @@ where
         let (max_sessions, max_buffered_bytes, idle_timeout) = match config.udp {
             Some(udp) => (udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout),
             None => {
-                let dns = dns.as_ref().expect("internal UDP requires DNS config");
-                let sessions = usize::from(dns.5.get());
-                let bytes = sessions
-                    .checked_mul(3 * MAX_UDP_WIRE_LEN)
-                    .ok_or(RunError::StartupProtocol)?
-                    .clamp(MIN_UDP_MAX_BUFFERED_BYTES, MAX_UDP_MAX_BUFFERED_BYTES);
-                (sessions, bytes, dns.4.max(MIN_UDP_IDLE_TIMEOUT))
+                if let Some(tun) = tun_udp_limits {
+                    tun
+                } else {
+                    let dns = dns
+                        .as_ref()
+                        .expect("internal UDP requires DNS or TUN config");
+                    let sessions = usize::from(dns.5.get());
+                    let bytes = sessions
+                        .checked_mul(3 * MAX_UDP_WIRE_LEN)
+                        .ok_or(RunError::StartupProtocol)?
+                        .clamp(MIN_UDP_MAX_BUFFERED_BYTES, MAX_UDP_MAX_BUFFERED_BYTES);
+                    (sessions, bytes, dns.4.max(MIN_UDP_IDLE_TIMEOUT))
+                }
             }
         };
         Some(ClientUdpContext {

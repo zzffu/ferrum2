@@ -2148,12 +2148,16 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     let tun_production = tun.split("#[cfg(test)]").next().expect("TUN production");
     let tun_tcp = fs::read_to_string(root.join("crates/ferrum2-tun/src/tcp.rs"))
         .expect("TUN TCP flow source");
+    let tun_udp = fs::read_to_string(root.join("crates/ferrum2-tun/src/udp.rs"))
+        .expect("TUN UDP mapping source");
     let client_tun = fs::read_to_string(root.join("bins/ferrum2-client/src/run/tun.rs"))
         .expect("client TUN adapter");
     let client_routing = fs::read_to_string(root.join("bins/ferrum2-client/src/run/routing.rs"))
         .expect("shared client terminal routing");
     let client_socks = fs::read_to_string(root.join("bins/ferrum2-client/src/run/socks.rs"))
         .expect("client SOCKS adapter");
+    let client_udp = fs::read_to_string(root.join("bins/ferrum2-client/src/run/egress/udp.rs"))
+        .expect("shared client UDP association");
     for required in [
         "#![forbid(unsafe_code)]",
         "poll_ingress_single",
@@ -2162,7 +2166,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         "add_default_ipv4_route",
         "add_default_ipv6_route",
         "ferrum2-tun-owner",
-        "impl<E> PreparedProcessRoot<E>",
+        "impl<E, T> PreparedProcessRoot<E>",
     ] {
         assert!(
             tun.contains(required),
@@ -2447,11 +2451,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             Some(&tcp[start..end])
         });
         let cleanup = source.rsplit_once("\nfinally {").map(|(_, body)| body);
-        source.contains("[ValidateSet(\"lifecycle\", \"tcp\")]")
+        source.contains("[ValidateSet(\"lifecycle\", \"tcp\", \"udp\")]")
             && !source.to_ascii_lowercase().contains("pktmon")
             && source.matches("$tcpRows++").count() == 8
-            && source.matches("Add-TunRoute $").count() == 3
-            && source.matches("Add-TargetAddress $").count() == 1
+            && source.matches("Add-TunRoute $").count() == 4
+            && source.matches("Add-TargetAddress $").count() == 2
             && !source.contains("Remove-OwnedRoute")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"2001:db8::200/128\")")
@@ -3117,6 +3121,85 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "TCP controller mutation {index} must remove the eight-row production proof"
         );
     }
+
+    let has_udp_controller = |source: &str| {
+        let gate = source
+            .split_once("public sealed class Ferrum2UdpGate")
+            .and_then(|(_, tail)| tail.split_once("public sealed class Ferrum2UdpProbe"))
+            .map(|(body, _)| body);
+        let probe = source
+            .split_once("public sealed class Ferrum2UdpProbe")
+            .and_then(|(_, tail)| tail.split_once("public sealed class Ferrum2DnsResponder"))
+            .map(|(body, _)| body);
+        let rows = source
+            .split_once("        # UDP-01")
+            .and_then(|(_, tail)| tail.split_once("        Assert-True ($udpRows -eq 8)"))
+            .map(|(body, _)| body);
+        source.contains("[ValidateSet(\"lifecycle\", \"tcp\", \"udp\")]")
+            && source.matches("$udpRows++").count() == 8
+            && source.contains("function Open-TunUdp(")
+            && source.contains("$client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))")
+            && source.contains("function Invoke-UdpEchoRow(")
+            && source.contains("max_udp_mappings = 4")
+            && source.contains("max_udp_buffered_bytes = 4194304")
+            && source.contains("tag = \"udp-two-hop\"")
+            && source.contains("tag = \"udp-manual\"")
+            && source.contains("network = \"udp\"")
+            && source.contains("action = \"hijack-dns\"")
+            && source.contains("profile=transport functional=16/16 cleanup=PASS")
+            && gate.is_some_and(|gate| {
+                gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
+                    && gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))")
+                    && gate.contains("await upstream.ReceiveAsync()")
+                    && gate.contains("ReplayFirstToLatest")
+            })
+            && probe.is_some_and(|probe| {
+                probe.contains("new UdpClient(new IPEndPoint(IPAddress.Parse(address), port))")
+                    && probe.contains("await socket.ReceiveAsync()")
+                    && probe.contains("await socket.SendAsync(request.Buffer")
+            })
+            && rows.is_some_and(|rows| {
+                for id in 2..=8 {
+                    if !rows.contains(&format!("# UDP-{id:02}")) {
+                        return false;
+                    }
+                }
+                rows.contains("$udpGateB.Requests -eq $beforeGateB + 1")
+                && rows.contains("Start-Sleep -Milliseconds 2500")
+                && rows.contains("$dnsResponder.Requests -eq $beforeDns + 1")
+                && rows.contains(
+                    "$udpGateA.Requests -eq $beforeGateA -and $udpGateB.Requests -eq $beforeGateB",
+                )
+                && rows.contains("[byte[]]::new(2000)")
+                && rows.contains("$saturatedClients.Count -eq 4")
+                && rows.contains("$udpGateA.ReplayFirstToLatest()")
+            })
+    };
+    assert!(
+        has_udp_controller(&controller),
+        "privileged UDP controller must retain all eight real-process rows and cleanup"
+    );
+    for mutation in [
+        controller.replacen("$udpRows++", "", 1),
+        controller.replace(
+            "await upstream.ReceiveAsync()",
+            "await socket.ReceiveAsync()",
+        ),
+        controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
+        controller.replace(
+            "Start-Sleep -Milliseconds 2500",
+            "Start-Sleep -Milliseconds 1",
+        ),
+        controller.replace(
+            "profile=transport functional=16/16 cleanup=PASS",
+            "profile=transport functional=8/8 cleanup=PASS",
+        ),
+    ] {
+        assert!(
+            !has_udp_controller(&mutation),
+            "UDP controller mutation must remove the sixteen-row transport proof"
+        );
+    }
     let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
         .expect("client composition");
     let composes_tun_tcp = |composition: &str, adapter: &str, routing: &str| {
@@ -3177,6 +3260,114 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         "the public TUN TCP flow must remain one non-cloneable bounded stream"
     );
 
+    let tun_udp_is_opaque_and_client_owned = |owner: &str, adapter: &str, association: &str| {
+        owner.contains("pub struct UdpCandidate<T>")
+            && owner.contains("pub async fn commit(")
+            && owner.contains("terminal: T")
+            && owner.contains("selected_payload_bound")
+            && owner.contains("enum OwnerEvent<T>")
+            && !owner.contains("pub enum OwnerEvent")
+            && !owner.contains("ClientTerminalRoute")
+            && !owner.contains("DnsProxy")
+            && owner
+                .find("self.slots[id.slot] = Some(Slot::Mapping")
+                .zip(owner.find("sender.try_send(first)"))
+                .is_some_and(|(mapping, first)| mapping < first)
+            && owner.contains("self.generations.current(id.slot) != Some(id)")
+            && owner.contains("source != tuple.target")
+            && adapter.contains("enum TunUdpTerminal")
+            && adapter.contains("move |candidate, cancellation|")
+            && adapter.contains("select_udp_terminal(")
+            && adapter.contains("candidate.commit(terminal, selected_bound).await")
+            && adapter.contains("run_udp_route(")
+            && adapter.contains("run_udp_dns(")
+            && adapter.contains("run_udp_reject(")
+            && association.contains("fn prepare_application_request(")
+            && association.contains("fn prepare_application_response(")
+            && adapter.contains("association.prepare_application_request(")
+            && adapter.contains("association.prepare_application_response(")
+            && client_socks.contains("prepared.prepare_application_request(")
+            && client_socks.contains("prepared.prepare_application_response(")
+    };
+    assert!(
+        tun_udp_is_opaque_and_client_owned(&tun_udp, &client_tun, &client_udp),
+        "TUN UDP must expose only an opaque commit/mapping flow and reuse client-owned policy/DNS/association paths"
+    );
+    for (owner, adapter, association) in [
+        (
+            tun_udp.replace("terminal: T", "terminal: ClientTerminalRoute"),
+            client_tun.clone(),
+            client_udp.clone(),
+        ),
+        (
+            tun_udp.replace(
+                "self.slots[id.slot] = Some(Slot::Mapping",
+                "// mapping commit bypassed",
+            ),
+            client_tun.clone(),
+            client_udp.clone(),
+        ),
+        (
+            tun_udp.replace("self.generations.current(id.slot) != Some(id)", "false"),
+            client_tun.clone(),
+            client_udp.clone(),
+        ),
+        (
+            tun_udp.clone(),
+            client_tun.replace(
+                "candidate.commit(terminal, selected_bound).await",
+                "Err(ferrum2_tun::UdpCommitError::Rejected)",
+            ),
+            client_udp.clone(),
+        ),
+        (
+            tun_udp.clone(),
+            client_tun.replace("run_udp_dns(", "run_udp_route("),
+            client_udp.clone(),
+        ),
+        (
+            tun_udp.clone(),
+            client_tun.clone(),
+            client_udp.replace(
+                "fn prepare_application_response(",
+                "fn prepare_other_response(",
+            ),
+        ),
+    ] {
+        assert!(
+            !tun_udp_is_opaque_and_client_owned(&owner, &adapter, &association),
+            "TUN UDP mutation must sever opaque owner/client composition evidence"
+        );
+    }
+
+    let composes_private_tun_udp_owner = |composition: &str| {
+        composition.contains("let tun_udp_limits = tun_config.as_ref().map(")
+            && composition
+                .contains("dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_limits.is_some()")
+            && composition.contains("if public_udp_enabled || internal_udp_needed")
+            && composition.contains("if let Some(tun) = tun_udp_limits")
+            && composition.contains("udp_associate_enabled: public_udp_enabled")
+    };
+    assert!(
+        composes_private_tun_udp_owner(&client),
+        "TUN UDP must construct its private owner without enabling public SOCKS UDP"
+    );
+    for mutation in [
+        client.replace(
+            "dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_limits.is_some()",
+            "dns.as_ref().is_some_and(|dns| dns.6)",
+        ),
+        client.replace(
+            "udp_associate_enabled: public_udp_enabled",
+            "udp_associate_enabled: internal_udp_needed",
+        ),
+    ] {
+        assert!(
+            !composes_private_tun_udp_owner(&mutation),
+            "TUN UDP composition mutation must remove private-owner/public-inbound separation"
+        );
+    }
+
     let runtime = fs::read_to_string(root.join("crates/ferrum2-runtime/src/process.rs"))
         .expect("process lifecycle");
     let cancellation_reap = |source: &str| {
@@ -3196,8 +3387,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         )),
         "dropped preparation mutation must remove explicit reap proof"
     );
-    assert!(tun.contains("generation.checked_add(1)"));
-    assert!(!tun_production.contains("generation.wrapping_add(1)"));
+    assert!(tun_udp.contains("generation.checked_add(1)"));
+    assert!(!tun_udp.contains("generation.wrapping_add(1)"));
     assert!(tun.contains("if self.validator.accepts(&self.output[..len])"));
     let tcp_owner_path_is_bounded = |source: &str| {
         source.contains("entry.owner.stack_buffered() != 0")
@@ -3239,7 +3430,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     let owner_failures_are_production_connected = |source: &str| {
         source.contains("let thread = map_owner_spawn(")
             && source.contains("match finish_stack_setup(stack, adapter")
-            && source.contains("Stack::new(")
+            && source.contains("Stack::new_with_udp(")
             && source.contains("|adapter| adapter.cleanup())")
     };
     assert!(
@@ -3261,8 +3452,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     }
     let packet_witness_path = |source: &str| {
         source.contains("!self.validator.accepts(packet)")
-            && source
-                .contains("if stack.enqueue(&received, control.admitting.load(Ordering::Acquire))")
+            && source.contains("if stack.enqueue_at(")
             && source.contains("(metrics.accepted)();")
             && source.contains("stack.poll_quantum(Instant::from_millis(elapsed))")
             && source.contains("(metrics.foundation_dropped)();")
@@ -3274,10 +3464,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     );
     for mutation in [
         tun.replace("!self.validator.accepts(packet)", "false"),
-        tun.replace(
-            "if stack.enqueue(&received,",
-            "if true || stack.enqueue(&received,",
-        ),
+        tun.replace("if stack.enqueue_at(", "if true || stack.enqueue_at("),
         tun.replace("stack.poll_quantum(Instant::from_millis(elapsed))", "0..0"),
         tun.replace(
             "match stack.take_output(|packet| adapter.send(packet).is_ok())",

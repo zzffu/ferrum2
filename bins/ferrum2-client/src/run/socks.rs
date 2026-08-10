@@ -5,16 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 
 use ferrum2_core::route::Network;
-use ferrum2_core::{
-    ConnectErrorKind, Datagram, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr,
-};
+use ferrum2_core::{ConnectErrorKind, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr};
 use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Outcome, Reason, Role, Stage, TraceRecord, emit,
 };
 use ferrum2_runtime::{
     AcceptListener, BoundedSupervisor, CancellationToken, PreparedProcessRoot, ProcessCancellation,
-    ProcessFuture, UdpDirection, relay_lifecycle,
+    ProcessFuture, relay_lifecycle,
 };
 use ferrum2_shadowsocks::ShadowsocksError;
 use ferrum2_socks5::{
@@ -735,12 +733,12 @@ async fn relay_udp_association<IO>(
                         return;
                     }
                 };
-                let payload_len = match prepared.accept_response(
+                let (target, payload) = match prepared.prepare_application_response(
                     &context.egress,
                     &routing.outbounds,
                     length,
                 ) {
-                    Ok(payload_len) => payload_len,
+                    Ok(response) => response,
                     Err(UdpPlanResponseError::Packet(error)) => {
                         if record_udp_packet_error(
                             context,
@@ -759,12 +757,9 @@ async fn relay_udp_association<IO>(
                         return;
                     }
                 };
-                let Some(datagram) = prepared.pop(UdpDirection::ToClient).ok().flatten() else {
-                    return;
-                };
                 let Ok(send_deadline) = prepared.idle_deadline() else { return };
                 match send_with_lifecycle(
-                        endpoint.send(datagram.datagram().target(), datagram.datagram().payload()),
+                        endpoint.send(&target, &payload),
                         cancellation,
                         &mut session_cancellation,
                         send_deadline,
@@ -784,7 +779,7 @@ async fn relay_udp_association<IO>(
                     }
                 }
                 context.metrics.udp_datagram(Role::Client, Direction::TargetToClient, Outcome::Accepted);
-                context.metrics.add_udp_bytes(Role::Client, Direction::TargetToClient, payload_len as u64);
+                context.metrics.add_udp_bytes(Role::Client, Direction::TargetToClient, payload.len() as u64);
             }
         }
     }
@@ -943,34 +938,26 @@ async fn forward_udp_request(
     payload: Vec<u8>,
 ) -> bool {
     let payload_len = payload.len();
-    let reservation = match prepared.reserve_application_datagram(payload_len) {
-        Ok(reservation) => reservation,
-        Err(error) => {
+    let wire_len = match prepared.prepare_application_request(
+        &context.egress,
+        &routing.outbounds,
+        target,
+        &payload,
+        Instant::now(),
+    ) {
+        Ok(length) => length,
+        Err(UdpPlanResponseError::Packet(error)) => {
+            return record_udp_packet_error(
+                context,
+                Direction::ClientToTarget,
+                UdpPacketPhase::RequestEncode,
+                error,
+            );
+        }
+        Err(UdpPlanResponseError::Runtime(error)) => {
             return record_udp_runtime_error(context, Direction::ClientToTarget, error);
         }
     };
-    let datagram = Datagram::new(target, payload.as_slice().into(), payload_len)
-        .expect("validated borrowed SOCKS payload");
-    if let Err(error) = prepared.commit_application_datagram(reservation, datagram, Instant::now())
-    {
-        return record_udp_runtime_error(context, Direction::ClientToTarget, error);
-    }
-    let Some(datagram) = prepared.pop(UdpDirection::ToTarget).ok().flatten() else {
-        return false;
-    };
-    let wire_len =
-        match prepared.encode_request(&context.egress, &routing.outbounds, datagram.datagram()) {
-            Ok(length) => length,
-            Err(error) => {
-                return record_udp_packet_error(
-                    context,
-                    Direction::ClientToTarget,
-                    UdpPacketPhase::RequestEncode,
-                    error,
-                );
-            }
-        };
-    drop(datagram);
     let Ok(send_deadline) = prepared.idle_deadline() else {
         return false;
     };
