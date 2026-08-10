@@ -3191,12 +3191,16 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && gate.contains("public int SelfTests")
                     && gate.contains("private int socketProbes;")
                     && gate.contains("public int SocketProbes")
+                    && gate.contains("private int stdProbes;")
+                    && gate.contains("public int StdProbes")
                     && gate.contains("public bool WaitSelfTest(int milliseconds)")
                     && gate.contains("request.Buffer.Length == 0")
                     && gate.contains("Interlocked.Increment(ref selfTests)")
                     && gate.contains("request.Buffer.Length == 8")
                     && gate.contains("Interlocked.Increment(ref socketProbes)")
                     && gate.contains("socketProbe.Set()")
+                    && gate.contains("Interlocked.Increment(ref stdProbes)")
+                    && gate.contains("stdProbe.Set()")
                     && gate.contains("await upstream.ReceiveAsync()")
                     && gate.contains("ReplayFirstToLatest")
                     && !gate.contains("public bool SelfTest()")
@@ -3211,6 +3215,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && self_test.contains("$Gate.WaitSelfTest(1000)")
                     && self_test.contains("$Gate.SelfTests -eq 1")
                     && self_test.contains("$Gate.SocketProbes -eq 0")
+                    && self_test.contains("$Gate.StdProbes -eq 0")
             })
             && probe.is_some_and(|probe| {
                 probe.contains("new UdpClient(new IPEndPoint(IPAddress.Parse(address), port))")
@@ -3229,12 +3234,17 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("$maxActiveSessions")
                     && echo.contains("$selfTestsBefore = $Gate.SelfTests")
                     && echo.contains("$socketProbesBefore = $Gate.SocketProbes")
+                    && echo.contains("$stdProbesBefore = $Gate.StdProbes")
                     && echo.contains("$socketProbesBefore -eq 0")
+                    && echo.contains("$stdProbesBefore -eq 0")
                     && echo.contains("socket_probes=$($Gate.SocketProbes)")
+                    && echo.contains("std_probes=$($Gate.StdProbes)")
                     && echo.contains("self_tests=$($Gate.SelfTests)")
                     && echo.contains("self_test_delta=$selfTestDelta")
                     && echo.contains("socket_probe_delta=$socketProbeDelta")
+                    && echo.contains("std_probe_delta=$stdProbeDelta")
                     && echo.contains("socket_probe=$socketProbe")
+                    && echo.contains("std_probe=$stdProbe")
                     && echo.contains("gate_state=$($Gate.State)")
                     && echo.contains("gate_fault=$($Gate.Fault)")
                     && echo.contains("probe_fault=$($probe.Fault)")
@@ -3301,19 +3311,24 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("$Gate.WaitSelfTest(1000)", "$true"),
         controller.replace("$Gate.SelfTests -eq 1", "$true"),
         controller.replace("$Gate.SocketProbes -eq 0", "$true"),
+        controller.replace("$Gate.StdProbes -eq 0", "$true"),
         controller.replace("Interlocked.Increment(ref selfTests)", ""),
         controller.replace("Interlocked.Increment(ref socketProbes)", ""),
+        controller.replace("Interlocked.Increment(ref stdProbes)", ""),
         controller.replace("$selfTestsBefore = $Gate.SelfTests", "$selfTestsBefore = 0"),
         controller.replace(
             "$socketProbesBefore = $Gate.SocketProbes",
             "$socketProbesBefore = 0",
         ),
+        controller.replace("$stdProbesBefore = $Gate.StdProbes", "$stdProbesBefore = 0"),
         controller.replace("$socketProbesBefore -eq 0", "$true"),
+        controller.replace("$stdProbesBefore -eq 0", "$true"),
         controller.replace(
             "socket_probes=$($Gate.SocketProbes)",
             "socket_probes=hidden",
         ),
         controller.replace("socket_probe=$socketProbe", "socket_probe=bypassed"),
+        controller.replace("std_probe=$stdProbe", "std_probe=bypassed"),
         controller.replace(
             "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
             "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"0\"",
@@ -3439,11 +3454,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && association.contains("upstream.local_addr()")
             && association.contains("upstream.peer_addr()")
             && association
-                .contains("m15_udp_socket_diag local={local_category} peer={peer_category}")
+                .contains("m15_udp_socket_diag local={local_category} local_port={local_port_category} peer={peer_category} tokio_send={tokio_send_category} std_send={std_send_category}")
             && association.contains("peer_category == \"gate_a\"")
             && association.contains("peer.port() == gate_port")
             && association.contains("first_server.port() == gate_port")
             && association.contains("upstream.send(b\"f2-probe\").await")
+            && association.contains("std::net::UdpSocket::bind")
+            && association.contains("socket.send(b\"f2-std!!\")")
+            && association.contains("local.port() == peer.port()")
             && association.contains("Ok(8)")
             && !association.contains("upstream.send(&[]).await")
             && !association.contains("local={local}")
@@ -3528,7 +3546,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             tun_udp.clone(),
             client_tun.clone(),
             client_udp.replace(
-                "m15_udp_socket_diag local={local_category} peer={peer_category}",
+                "m15_udp_socket_diag local={local_category} local_port={local_port_category} peer={peer_category} tokio_send={tokio_send_category} std_send={std_send_category}",
                 "m15_udp_socket_diag local={local} peer={peer}",
             ),
         ),

@@ -578,8 +578,37 @@ where
         } else {
             "other"
         };
-        eprintln!("m15_udp_socket_diag local={local_category} peer={peer_category}");
-        if peer_category == "gate_a" && !matches!(upstream.send(b"f2-probe").await, Ok(8)) {
+        let local_port_category = if local.port() == peer.port() {
+            "same_as_peer"
+        } else {
+            "other"
+        };
+        let mut tokio_send_category = "disabled";
+        let mut std_send_category = "disabled";
+        if peer_category == "gate_a" {
+            tokio_send_category = if matches!(upstream.send(b"f2-probe").await, Ok(8)) {
+                "exact"
+            } else {
+                "other"
+            };
+            std_send_category =
+                match std::net::UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)) {
+                    Ok(socket)
+                        if socket.connect(peer).is_ok()
+                            && socket.set_nonblocking(true).is_ok()
+                            && matches!(socket.send(b"f2-std!!"), Ok(8)) =>
+                    {
+                        "exact"
+                    }
+                    _ => "other",
+                };
+        }
+        eprintln!(
+            "m15_udp_socket_diag local={local_category} local_port={local_port_category} peer={peer_category} tokio_send={tokio_send_category} std_send={std_send_category}"
+        );
+        if peer_category == "gate_a"
+            && (tokio_send_category != "exact" || std_send_category != "exact")
+        {
             return Err(());
         }
     }

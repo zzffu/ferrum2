@@ -663,11 +663,13 @@ public sealed class Ferrum2UdpGate : IDisposable {
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
     private readonly ManualResetEventSlim selfTest = new ManualResetEventSlim(false);
     private readonly ManualResetEventSlim socketProbe = new ManualResetEventSlim(false);
+    private readonly ManualResetEventSlim stdProbe = new ManualResetEventSlim(false);
     private readonly Task worker;
     private byte[] firstResponse;
     private IPEndPoint latestClient;
     private int selfTests;
     private int socketProbes;
+    private int stdProbes;
     private int requests;
     private int responses;
     private string fault;
@@ -682,6 +684,7 @@ public sealed class Ferrum2UdpGate : IDisposable {
     public int Responses { get { return Volatile.Read(ref responses); } }
     public int SelfTests { get { return Volatile.Read(ref selfTests); } }
     public int SocketProbes { get { return Volatile.Read(ref socketProbes); } }
+    public int StdProbes { get { return Volatile.Read(ref stdProbes); } }
     public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
     public string State { get { return worker.IsFaulted ? "faulted" : worker.IsCompleted ? "completed" : "running"; } }
 
@@ -727,6 +730,14 @@ public sealed class Ferrum2UdpGate : IDisposable {
                     socketProbe.Set();
                     continue;
                 }
+                if (request.Buffer.Length == 8 && request.Buffer[0] == 102 && request.Buffer[1] == 50 &&
+                    request.Buffer[2] == 45 && request.Buffer[3] == 115 && request.Buffer[4] == 116 &&
+                    request.Buffer[5] == 100 && request.Buffer[6] == 33 && request.Buffer[7] == 33 &&
+                    request.RemoteEndPoint.Address.Equals(IPAddress.Loopback)) {
+                    Interlocked.Increment(ref stdProbes);
+                    stdProbe.Set();
+                    continue;
+                }
                 lock (sync) { latestClient = request.RemoteEndPoint; }
                 Interlocked.Increment(ref requests);
                 using (var upstream = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))) {
@@ -750,6 +761,7 @@ public sealed class Ferrum2UdpGate : IDisposable {
         socket.Dispose();
         selfTest.Dispose();
         socketProbe.Dispose();
+        stdProbe.Dispose();
         stopped.Dispose();
     }
 }
@@ -1008,6 +1020,7 @@ try {
         Assert-True ($Gate.WaitSelfTest(1000)) "UDP gate cross-process self-test failed"
         Assert-True ($Gate.SelfTests -eq 1) "UDP gate self-test count mismatch"
         Assert-True ($Gate.SocketProbes -eq 0) "UDP socket probe baseline mismatch"
+        Assert-True ($Gate.StdProbes -eq 0) "UDP std probe baseline mismatch"
     } finally {
         if (-not $process.HasExited) { $process.Kill($true); $process.WaitForExit() }
         $process.Dispose()
@@ -1049,10 +1062,11 @@ function Invoke-UdpEchoRow(
         $acceptedLabels = 'role="client",direction="client_to_target",outcome="accepted"'
         $selfTestsBefore = $Gate.SelfTests
         $socketProbesBefore = $Gate.SocketProbes
+        $stdProbesBefore = $Gate.StdProbes
         $beforeMetrics = Get-Metrics $script:metricsPort
         $tunAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_accepted"
         $udpAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_udp_datagrams" $acceptedLabels $true
-        Assert-True ($socketProbesBefore -eq 0) "UDP socket probe baseline contaminated"
+        Assert-True ($socketProbesBefore -eq 0 -and $stdProbesBefore -eq 0) "UDP socket probe baseline contaminated"
         [void]$client.Send($Payload, $Payload.Length)
         $firstTunAcceptedDelta = $null
         $firstUdpAcceptedDelta = $null
@@ -1077,15 +1091,21 @@ function Invoke-UdpEchoRow(
         $udpAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
         $selfTestDelta = $Gate.SelfTests - $selfTestsBefore
         $socketProbeDelta = $Gate.SocketProbes - $socketProbesBefore
+        $stdProbeDelta = $Gate.StdProbes - $stdProbesBefore
         $socketProbe = if (-not $DiagnosticOnly) { "disabled" }
             elseif ($socketProbeDelta -eq 1) { "arrived" }
             elseif ($socketProbeDelta -eq 0) { "absent" }
             else { "unexpected" }
+        $stdProbe = if (-not $DiagnosticOnly) { "disabled" }
+            elseif ($stdProbeDelta -eq 1) { "arrived" }
+            elseif ($stdProbeDelta -eq 0) { "absent" }
+            else { "unexpected" }
         if ($null -eq $firstUdpAcceptedDelta) { $firstTunAcceptedDelta = $tunAcceptedDelta; $firstUdpAcceptedDelta = $udpAcceptedDelta }
-        Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta socket_probes=$($Gate.SocketProbes) socket_probe=$socketProbe socket_probe_delta=$socketProbeDelta gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
+        Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta socket_probes=$($Gate.SocketProbes) socket_probe=$socketProbe socket_probe_delta=$socketProbeDelta std_probes=$($Gate.StdProbes) std_probe=$stdProbe std_probe_delta=$stdProbeDelta gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
         Assert-True ($selfTestDelta -eq 0) "UDP self-test count changed after baseline"
         $expectedSocketProbeDelta = if ($DiagnosticOnly) { 1 } else { 0 }
         Assert-True ($socketProbeDelta -eq $expectedSocketProbeDelta) "UDP socket probe count mismatch"
+        Assert-True ($stdProbeDelta -eq $expectedSocketProbeDelta) "UDP std probe count mismatch"
         Assert-True ($tunAcceptedDelta -gt 0 -and $udpAcceptedDelta -eq 1) "UDP ingress/association witness mismatch"
         $response = Receive-TunUdp $client
         Assert-True (($response -join ",") -eq ($Payload -join ",")) "UDP echo mismatch"
