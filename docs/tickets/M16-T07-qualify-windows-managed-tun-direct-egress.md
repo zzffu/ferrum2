@@ -21,7 +21,7 @@ owns:
 
 ## Outcome
 
-Freeze one exact integration SHA，run the complete local、platform、interop、current-VM privileged and
+Freeze one exact integration SHA，run the complete local、platform、interop、current-VM IPv4 privileged and
 independent performance evidence ledger，obtain bounded final Architect/QA review，and only then mark M16
 closed and write the durable handoff/history。
 
@@ -36,14 +36,19 @@ closed and write the durable handoff/history。
       candidate；the identity-bound full marker reports `cycles=100/100`，and both unique TEST-0017 markers
       report zero owned or sentinel residue。No second Windows build or standalone cycles ledger is required
       or credited。
+- [ ] Full/qualification markers retain M15 `m15_transport=16/16` including IPv6 regressions and report only
+      the M16 IPv4 additions as `direct_tcp=1/1`、`direct_udp=1/1`、`dns=2/2`、
+      `network_change=3/3` and `address_change=1/1`；no preflight observation or hash is credited as PASS。
 - [ ] After explicit remote authorization only，required push/hosted jobs and independent Windows TUN
       performance run execute against the same candidate SHA and succeed；each distinct workflow binds its own
       run ID/attempt，while each current-VM profile binds its own run token。Failed attempts remain recorded and
       are not rerun/combined as evidence。
 - [ ] One fresh full Architect review and one fresh full QA review report zero blocking findings；fixes receive
       only bounded targeted re-review and cause all affected validation to rerun。
-- [ ] Closure docs state compatible routing、single-default direct、resolver steering and no strict/anti-leak/
-      multihomed/performance-improvement claims exactly；ADR status changes only after evidence is complete。
+- [ ] Closure docs state IPv4 compatible routing、single-IPv4-default direct、IPv4 resolver steering、Windows
+      TUN-selected direct IPv6 pre-socket refusal，preserved M15/manual-route and non-managed IPv6，and no
+      strict/anti-leak/multihomed/performance-improvement claims exactly；ADR status changes only after evidence
+      is complete。
 - [ ] No force-push、PR、tag、package、release、publication or Wintun redistribution occurs without separate
       authorization/decision。
 

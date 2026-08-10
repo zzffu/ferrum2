@@ -15,18 +15,24 @@ Windows route、DNS and process-termination APIs also impose non-obvious ownersh
 are not process-scoped，per-interface DNS is not globally exclusive，and `TerminateProcess` does not run
 Rust cleanup。The milestone needs a capability probe before it can promise lifecycle cleanup。
 
+An exact restored-VM preflight found one usable IPv4 physical default but no IPv6 physical default，no
+non-link-local physical IPv6 address and no owned off-link dual-stack endpoint。That preflight is a planning
+input，not PASS evidence。M16 therefore narrows only its new managed-network contract to IPv4 instead of
+inventing another VM、endpoint or configuration knob；the accepted M15 manual-route IPv6 data plane remains。
+
 ## Decision
 
 ### Compatible and opt-in ownership
 
 `[tun].auto_route` and `[tun].auto_dns` default to `false`。With both false or absent，M15 route/DNS host
 state remains unchanged。A graph combining TUN with a reachable client direct outbound still takes a
-read-only capture-before physical-default snapshot and publishes its socket binder before Ready；this is
+read-only capture-before IPv4 physical-default snapshot and publishes its socket binder before Ready；this is
 required direct-egress behavior，not product route ownership，and an external controller adds capture only
-after Ready。`auto_route = true` makes the existing Wintun owner additionally own its compiled capture rows、
-binding for every proxy/DNS physical first hop、notifications and rollback journal。`auto_dns = true`
-additionally owns only DNS settings on that newly created Wintun interface and exact synthetic DNS handling；
-it requires auto-route and the existing `[dns]` graph。
+after Ready。`auto_route = true` makes the existing Wintun owner additionally own its compiled IPv4 capture
+rows、IPv4 binding for every reachable proxy/DNS physical first hop、IPv4 underlay notifications and rollback
+journal。`auto_dns = true` additionally owns only IPv4 DNS settings on that newly created Wintun interface
+and exact synthetic IPv4 DNS handling；it requires auto-route and the existing `[dns]` graph。The existing
+M15 `ipv6_address` adapter address and manual-route IPv6 behavior are preserved rather than managed by M16。
 
 This is compatible routing，not strict routing：Ferrum2 does not delete or rewrite third-party routes，does
 not add physical bypass routes，does not modify physical-interface DNS，and does not add WFP filters or a
@@ -35,9 +41,10 @@ operator explicitly includes an equally or more specific prefix。
 
 ### Capture plan and exact journal
 
-The capture compiler produces a bounded canonical set from `route_address − route_exclude_address`，then
-splits any remaining IPv4/IPv6 `/0` into `/1` rows。It never creates a `/0`，never creates an exclude/bypass
-row，and rejects an empty or over-limit result。Each intended row is absent before create，has every mutable
+The capture compiler produces a bounded canonical IPv4 set from
+`route_address − route_exclude_address`，then splits any remaining `0.0.0.0/0` into its two `/1` rows。
+Both input lists reject IPv6 prefixes。It never creates a `/0`，never creates an exclude/bypass row，and
+rejects an empty or over-limit result。Each intended row is absent before create，has every mutable
 `MIB_IPFORWARD_ROW2` field explicitly initialized，is read back from ActiveStore，and enters the journal only
 after an exact match。Rollback deletes journaled rows in reverse order only while their owned identity still
 matches；Windows address-derived connected/local rows are never journaled。
@@ -52,25 +59,29 @@ exposing an unproved operator knob。
 
 ### Immutable physical underlay policy
 
-Before any capture row exists，M16 snapshots eligible up、non-loopback、non-Wintun physical interfaces and
-routes。Each fixed Shadowsocks first-hop and direct DNS bootstrap is resolved to its exact best physical
-interface with `GetBestInterfaceEx` followed by interface-constrained `GetBestRoute2`。For dynamic direct
-targets，M16 selects and freezes one unambiguous physical default interface per address family。Every TCP
-socket is bound with the family-correct unicast-interface option before connect；every UDP socket is bound
-before first send。
+Before any capture row exists，M16 snapshots eligible up、non-loopback、non-Wintun IPv4 physical interfaces
+and routes。Each reachable fixed Shadowsocks first hop and direct/no-detour DNS bootstrap must resolve to
+IPv4，then uses `GetBestInterfaceEx` followed by interface-constrained `GetBestRoute2`。An IPv6 concrete proxy
+endpoint or IPv6 DNS bootstrap reached physically through absent/direct detour fails validation or prepare
+before mutation。A logical IPv6 DNS bootstrap behind an IPv4 concrete proxy first hop remains allowed because
+only the proxy first hop is a physical endpoint。For dynamic direct targets，M16 selects and freezes one
+unambiguous IPv4 physical default interface。Every applicable TCP socket is bound with `IP_UNICAST_IF` before
+connect；every applicable UDP socket is bound before first send。
 
-Missing、ambiguous、changed or failed binding rejects the selected socket；there is no unpinned fallback and
-no per-flow bypass route。This bounded policy deliberately does not preserve arbitrary target-specific
-multi-interface routing。Prefixes that must continue through a non-default LAN、enterprise VPN or other
-interface belong in `route_exclude_address`。Per-target route fidelity and live underlay migration are
-deferred。
+Missing、ambiguous、changed or failed IPv4 binding rejects the selected socket；there is no unpinned fallback
+and no per-flow bypass route。A Windows TUN-selected direct IPv6 target fails before physical socket creation
+whether auto-route is on or off。This bounded policy deliberately does not preserve arbitrary target-specific
+multi-interface routing。IPv4 prefixes that must continue through a non-default LAN、enterprise VPN or other
+interface belong in `route_exclude_address`。Per-target route fidelity、managed IPv6 and live underlay
+migration are deferred。
 
 ### DNS steering, not DNS exclusivity
 
-Auto-DNS snapshots、sets and reads back only the new Wintun interface's IPv4/IPv6 DNS settings，using the
-validated synthetic addresses。TUN TCP/UDP whose exact destination is either synthetic address on port 53
-enters the existing `DnsProxy` before ordinary routing；other port-53 traffic follows ordinary policy。Direct
-and detoured UDP/TCP/DoT/DoH upstream sockets use the same physical binding boundary。
+Auto-DNS snapshots、sets and reads back only the new Wintun interface's IPv4 DNS settings，using the
+validated synthetic IPv4 address。TUN TCP/UDP whose exact destination is that address on port 53 enters the
+existing `DnsProxy` before ordinary routing；other port-53 traffic follows ordinary policy。The existing M15
+IPv6 adapter address remains configured but is not a managed DNS address。Direct and detoured UDP/TCP/DoT/
+DoH upstreams use the same IPv4 binding boundary at their actual physical first hop。
 
 Cleanup restores the prior Wintun DNS state only if current state still equals the owned applied value；an
 external mutation is reported and never overwritten。The product makes no claim about other interfaces、
@@ -86,8 +97,9 @@ any intervening relevant generation change or mismatch rolls the transaction bac
 only opens admission。M16-T01 must prove that the bounded capture-before-admission interval is acceptable；
 otherwise the plan stops for a lifecycle amendment。
 
-Route、interface and address notifications are treated as invalidation signals。If revalidation changes any
-frozen underlay or owned-row invariant，the process rejects new sockets、removes capture/DNS steering and
+IPv4 route、interface and unicast-address notifications are treated as invalidation signals。If revalidation
+changes any frozen underlay or owned-row invariant，the process rejects new sockets、removes capture/DNS
+steering and
 terminates through the existing supervised shutdown。Existing flows are not migrated and the milestone does
 not claim fail-closed behavior during the transition。
 
@@ -108,6 +120,8 @@ another build later requires a separate evidence amendment，not a hidden expans
   boundary may deepen instead of adding a second shallow Windows-network crate。
 - Compatible routing preserves third-party more-specific routes but cannot promise strict capture、DNS
   anti-leak or per-target multi-interface fidelity。
+- M16's new capture、pinning、DNS and physical-change contract is IPv4-only；M15 manual-route IPv6 adapter and
+  transport evidence and existing non-managed IPv6 egress guarantees remain separate and unchanged。
 - Real capability and hard-kill cleanup on the exact current VM/checkpoint are entry gates。Other Windows
   builds remain unqualified by M16 rather than being inferred from that single result。
 

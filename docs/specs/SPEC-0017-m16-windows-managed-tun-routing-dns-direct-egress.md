@@ -8,11 +8,14 @@
 ## Outcome
 
 On Windows NT 10.0 build 19041+ AMD64，an opt-in schema-v2 TUN client can transactionally capture configured
-prefixes，steer the Windows resolver through its Wintun interface，and send each selected TUN TCP flow or UDP
-mapping either through its existing Shadowsocks plan or through a new client direct outbound。Every physical
-client socket is pinned before network use so product-owned capture cannot recurse。M16 privileged evidence
-is intentionally limited to the exact current VM/checkpoint named by TEST-0017 and does not establish
-independent Windows-release coverage。
+IPv4 prefixes，steer the Windows IPv4 resolver path through its Wintun interface，and send selected IPv4 TUN
+TCP flows or UDP mappings either through an existing Shadowsocks plan or through a new client direct outbound。
+Every applicable IPv4 physical client socket is pinned before network use so product-owned capture cannot
+recurse。M16-new managed capture、DNS、pinning、change and privileged evidence is IPv4-only because exact
+restored-VM preflight found no usable IPv6 physical-default/off-link evidence boundary；that preflight is not
+PASS evidence。Existing M15 manual-route IPv6 TUN behavior、SIP022 IPv6 and non-managed/SOCKS direct IPv6
+remain unchanged。M16 privileged evidence is intentionally limited to the exact current VM/checkpoint named
+by TEST-0017 and does not establish independent Windows-release coverage。
 
 The words MUST、MUST NOT、SHOULD and MAY are normative。
 
@@ -28,11 +31,10 @@ ipv4_address = "198.18.0.2/30"
 ipv6_address = "fd00:46:6572:7275::2/126"
 mtu = 1420
 auto_route = true
-route_address = ["0.0.0.0/0", "::/0"]
-route_exclude_address = ["10.0.0.0/8", "fc00::/7"]
+route_address = ["0.0.0.0/0"]
+route_exclude_address = ["10.0.0.0/8"]
 auto_dns = true
 ipv4_dns_address = "198.18.0.1"
-ipv6_dns_address = "fd00:46:6572:7275::1"
 
 [[outbounds]]
 tag = "proxy"
@@ -63,9 +65,10 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw==" # documentation-only test key
 ```
 
-The route example is exact-target syntax，not an internet recommendation。A prefix in
+The retained `ipv6_address` is the existing M15 adapter address；M16 does not use it for managed capture、DNS
+or physical pinning。The route example is exact-target syntax，not an internet recommendation。A prefix in
 `route_exclude_address` never enters TUN；a route selecting `direct` has already entered TUN and then leaves
-through the frozen physical default interface。These are different policies。
+through the frozen IPv4 physical default interface。These are different policies。
 
 ## Requirements
 
@@ -73,6 +76,9 @@ through the frozen physical default interface。These are different policies。
 
 - Every M15-accepted document that omits all M16 fields MUST preserve normalized config、`--check-config`、
   route/sniff/DNS action、wire、resource and lifecycle behavior。`auto_route` and `auto_dns` default to false。
+- M15 manual-route IPv6 TUN adapter/data-plane behavior and its `16/16` transport regression evidence，plus
+  existing SIP022 IPv6 and non-managed/SOCKS direct IPv6，MUST remain unchanged。M16 MUST NOT credit those
+  preserved rows as proof of managed IPv6 capture、DNS、binding or physical-network change handling。
 - Client direct outbound is additive schema-v2 behavior and MUST work through the shared SOCKS/TUN/DNS
   client egress on every existing build target。Managed route/DNS mutation MUST run only for Windows NT
   10.0 build 19041+ AMD64；unsupported runtime targets fail before public service and without OS mutation。
@@ -117,9 +123,11 @@ through the frozen physical default interface。These are different policies。
   MUST end the flow without selector、rule、final or proxy fallback。
 - SOCKS and TUN callers MUST use the same client egress dispatch and MUST NOT inspect outbound kind or create
   a raw physical socket themselves。
-- A Windows graph containing TUN plus a reachable direct outbound MUST freeze/publish its physical-default
-  binder before TUN Ready even when auto-route is false。An external manual-route controller MUST add capture
-  only after Ready。SOCKS-only and non-Windows direct retain normal system routing。
+- A Windows graph containing TUN plus a reachable direct outbound MUST freeze/publish its IPv4 physical-
+  default binder before TUN Ready even when auto-route is false。An external manual-route controller MUST add
+  capture only after Ready。If that TUN-selected direct plan's immutable original target is IPv6，the product
+  MUST fail before physical socket creation for both auto-route states and MUST NOT retry unpinned。SOCKS
+  and non-Windows direct retain normal IPv4/IPv6 system routing。
 
 ### M16-MUST-04 — immutable selection and direct UDP
 
@@ -132,49 +140,55 @@ through the frozen physical default interface。These are different policies。
 - Direct payload admission MUST use raw transport limits rather than subtracting Shadowsocks overhead。The
   existing first-classification-eligible-datagram commit、over-limit-no-state and expiry/reselection rules
   remain unchanged。
+- A Windows TUN-selected direct UDP mapping whose original target is IPv6 MUST fail before physical socket
+  creation for both `auto_route = false` and `auto_route = true`；M15 proxy/reject/DNS-hijack IPv6 mappings and
+  non-managed/SOCKS direct IPv6 remain unchanged。
 
 ### M16-MUST-05 — managed TUN configuration
 
 - `[tun].auto_route` MUST be boolean default false。When true，`route_address` is an optional non-empty list
-  of at most 64 canonical IPv4/IPv6 prefixes，defaulting to both `/0` prefixes；
-  `route_exclude_address` is an optional list of at most 64 canonical prefixes，default empty。Either list
-  MUST be rejected when auto-route is false。
+  of at most 64 canonical IPv4 prefixes，defaulting to `0.0.0.0/0`；`route_exclude_address` is an optional list
+  of at most 64 canonical IPv4 prefixes，default empty。Either list MUST reject every IPv6 prefix and MUST be
+  rejected when auto-route is false。
 - `[tun].auto_dns` MUST be boolean default false and MUST require `auto_route = true` plus an existing client
-  `[dns]` graph。When true，`ipv4_dns_address` and `ipv6_dns_address` are both required；otherwise they are
-  forbidden。Each MUST be a usable unicast address inside the corresponding TUN prefix，distinct from the
-  local interface address and from each other。
-- M16 fields MUST be rejected for schema v1、server configuration、missing TUN or unsupported address
-  families。All prefix/address/count/result bounds and cross-field constraints MUST validate before runtime
-  side effects。
+  `[dns]` graph。When true，`ipv4_dns_address` is required and MUST be a usable unicast address inside the TUN
+  IPv4 prefix and distinct from the local IPv4 interface address；otherwise it is forbidden。
+  `ipv6_dns_address` MUST be rejected and is not part of the M16 schema。The existing M15 `ipv6_address`
+  adapter field remains valid and unchanged。
+- M16 fields MUST be rejected for schema v1、server configuration、missing TUN or unsupported managed IPv4
+  shape。All prefix/address/count/result bounds and cross-field constraints MUST validate before runtime side
+  effects。
 
 ### M16-MUST-06 — bounded capture-prefix compilation
 
-- The compiler MUST compute canonical disjoint `route_address − route_exclude_address` by address family。
-  Overlapping input may collapse，but output MUST be independent of input order。An exclusion outside all
-  includes has no effect。
-- Every remaining `/0` MUST split into its two canonical `/1` children；the product MUST create no `/0`
-  capture row。The final combined row count MUST be `1..=256` or validation fails。
+- The compiler MUST compute canonical disjoint IPv4 `route_address − route_exclude_address`。Overlapping input
+  may collapse，but output MUST be independent of input order。An exclusion outside all includes has no
+  effect；any IPv6 input is a validation error。
+- Every remaining `0.0.0.0/0` MUST split into its two canonical IPv4 `/1` children；the product MUST create no
+  `/0` capture row。The final IPv4 row count MUST be `1..=256` or validation fails。
 - The compiler MUST create no physical bypass/exclude row and MUST not enumerate third-party routes as owned。
   Existing more-specific routes remain untouched and win by longest prefix；an exact owned-key conflict
   fails before the first create rather than being modified or adopted。
 
 ### M16-MUST-07 — physical underlay snapshot and socket pinning
 
-- Before any capture row exists，the product MUST identify eligible up、non-loopback、non-Wintun physical
-  interfaces and route state。For each numeric fixed Shadowsocks first-hop and each DNS bootstrap reached by
-  absent/direct detour，it MUST call `GetBestInterfaceEx(destination)`，validate/convert the interface identity，
-  then call interface-constrained `GetBestRoute2` and freeze its route/source fingerprint。For a proxy-detoured
-  DNS server，the physical endpoint is the selected plan's first concrete Shadowsocks server；the logical DNS
-  bootstrap MUST NOT be pinned as a separate physical endpoint。
-- Dynamic direct targets MUST bind to one unambiguous capture-before physical default interface per family。
+- Before any capture row exists，the product MUST identify eligible up、non-loopback、non-Wintun IPv4 physical
+  interfaces and route state。Each reachable fixed Shadowsocks first hop and each DNS bootstrap reached by
+  absent/direct detour MUST resolve to IPv4，then call `GetBestInterfaceEx(destination)`，validate/convert the
+  interface identity，call interface-constrained `GetBestRoute2` and freeze its route/source fingerprint。An
+  IPv6 concrete proxy endpoint or IPv6 direct/no-detour DNS physical endpoint MUST fail validation or prepare
+  before mutation。For a proxy-detoured DNS server，the physical endpoint is the selected plan's first
+  concrete Shadowsocks server；a logical IPv6 DNS bootstrap behind an IPv4 proxy first hop remains allowed and
+  MUST NOT be pinned as a separate physical endpoint。
+- Dynamic direct IPv4 targets MUST bind to one unambiguous capture-before IPv4 physical default interface。
   Missing or ambiguous policy MUST fail prepare before capture。This policy does not preserve target-specific
-  non-default LAN/VPN routing；operators MUST exclude those prefixes when that fidelity is required。
-- IPv4 sockets MUST set `IP_UNICAST_IF` with the required network-byte-order index；IPv6 sockets MUST set
-  `IPV6_UNICAST_IF` with the required host-byte-order index。The setting MUST precede TCP connect or UDP first
-  send。Failure MUST close the socket and MUST NOT retry unpinned。
-- Every TUN-capable Windows direct socket MUST cross this binding boundary regardless of capture ownership。
-  While auto-route is active，every proxy and actual DNS physical first hop MUST also cross it。No caller-local
-  `TcpStream::connect` or `UdpSocket::bind` may bypass the applicable boundary。
+  non-default LAN/VPN routing；operators MUST exclude those IPv4 prefixes when that fidelity is required。
+- Applicable IPv4 sockets MUST set `IP_UNICAST_IF` with the required network-byte-order index before TCP
+  connect or UDP first send。Failure MUST close the socket and MUST NOT retry unpinned。M16 MUST NOT publish an
+  IPv6 binder；Windows TUN-selected direct IPv6 fails before socket creation instead。
+- Every IPv4 TUN-capable Windows direct socket MUST cross this binding boundary regardless of capture
+  ownership。While auto-route is active，every IPv4 proxy and actual DNS physical first hop MUST also cross it。
+  No caller-local `TcpStream::connect` or `UdpSocket::bind` may bypass the applicable boundary。
 
 ### M16-MUST-08 — exact route ownership
 
@@ -191,17 +205,18 @@ through the frozen physical default interface。These are different policies。
   cleanup-conflict outcome without deleting a third-party replacement。
 - Address-derived connected/local rows remain OS-managed and MUST never be recorded as product capture rows。
 - If T01 proves no interface-metric mutation is needed，product source and VM sentinels MUST prove none occurs。
-  If T01 selects a Wintun-only metric lease，that lease MUST snapshot、apply、read back and conditionally restore
-  each family；partial failure and an external replacement MUST preserve third-party state and report a fixed
-  cleanup conflict。It MUST enter every setup/rollback/residue matrix below。
+  If T01 selects a Wintun-only IPv4 metric lease，that lease MUST snapshot、apply、read back and conditionally
+  restore IPv4 state；partial failure and an external replacement MUST preserve third-party state and report
+  a fixed cleanup conflict。It MUST enter every setup/rollback/residue matrix below。
 
 ### M16-MUST-09 — Wintun DNS steering and synthetic fast path
 
-- Auto-DNS MUST snapshot、apply and read back DNS settings only on the newly created Wintun interface for
-  both families。It MUST NOT modify any physical interface or claim global resolver exclusivity。
-- Exact TUN TCP/UDP destination `(ipv4_dns_address|ipv6_dns_address):53` MUST enter the existing `DnsProxy`
-  before ordinary route evaluation。No other destination or port is synthetic-hijacked。`auto_dns = false`
-  MUST preserve existing explicit route `hijack-dns` behavior and add no synthetic fast path。
+- Auto-DNS MUST snapshot、apply and read back only IPv4 DNS settings on the newly created Wintun interface。
+  It MUST NOT modify any physical interface、remove/change the M15 IPv6 adapter address or claim global
+  resolver exclusivity。
+- Exact TUN TCP/UDP destination `ipv4_dns_address:53` MUST enter the existing `DnsProxy` before ordinary route
+  evaluation。No other destination or port is synthetic-hijacked。`auto_dns = false` MUST preserve existing
+  explicit route `hijack-dns` behavior and add no synthetic fast path。
 - An upstream with no detour and one whose detour resolves to direct MUST use the same pinned physical direct
   implementation；a proxy detour retains its selected plan。UDP、TCP、DoT and DoH keep existing validation、
   authentication、deadline、admission and no-fallback behavior。
@@ -212,7 +227,7 @@ through the frozen physical default interface。These are different policies。
 ### M16-MUST-10 — preparation, rollback and network change
 
 - All non-TUN roots MUST prepare before the managed TUN root。Before its underlay snapshot，the existing owner
-  thread MUST establish route/interface/address notifications and record an invalidation generation。It MUST
+  thread MUST establish IPv4 route/interface/address notifications and record an invalidation generation。It MUST
   then perform Wintun setup、optional DNS apply and capture-row transaction；capture rows are the last host
   mutation。After exact readback it MUST revalidate the frozen physical fingerprint while excluding its own
   Wintun rows/settings；an intervening relevant event or mismatch rolls back before ready。Synchronous activate
@@ -222,7 +237,7 @@ through the frozen physical default interface。These are different policies。
 - Every setup failure ordinal、later composition failure、graceful stop and forced supervised stop MUST run one
   reverse transaction and await the owner thread before completion。One hundred cycles MUST return adapter、
   address、route、DNS、handle、callback、thread、flow、mapping and protocol owners to baseline。
-- Route、interface and address notifications MUST only signal owner-thread revalidation。A change affecting
+- IPv4 route、interface and unicast-address notifications MUST only signal owner-thread revalidation。A change affecting
   frozen underlay or owned route identity MUST stop new sockets，remove capture/DNS steering and terminate
   the process through the existing supervisor。No live flow migration or uninterrupted fail-closed claim is
   made。
@@ -251,10 +266,11 @@ through the frozen physical default interface。These are different policies。
 - The same SHA MUST pass fresh-restore privileged full and hard-kill profiles on the exact current
   qualification VM/checkpoint；the identity-bound full marker MUST itself include `cycles=100/100` alongside
   pinned and unpinned TCP/UDP controls、resolver steering、network invalidation and exact residue snapshots。
-  Network invalidation MUST include distinct real route、
-  interface、IPv4 unicast-address and IPv6 unicast-address mutations through the corresponding Windows
-  callbacks；each row revokes admission/capture/DNS and terminates cleanly。An unavailable or mismatched asset
-  is BLOCKED，not replaced by a second VM or waived。
+  Network invalidation MUST include distinct real IPv4 route、physical interface and IPv4 unicast-address
+  mutations through the corresponding Windows callbacks；each row revokes admission/capture/DNS and
+  terminates cleanly。The existing M15 IPv6 transport rows remain required regression evidence but are not
+  credited as M16 managed-change proof。An unavailable or mismatched asset is BLOCKED，not replaced by a
+  second VM or waived。
 - An independent same-SHA Windows performance/resource profile is required because socket creation and TUN
   lifecycle hot paths change。It is regression evidence only and creates no throughput threshold or
   improvement claim。Remote push/dispatch still requires explicit authorization。
@@ -271,3 +287,6 @@ through the frozen physical default interface。These are different policies。
   claim、Wintun redistribution、package、release or publication。
 - Independent Windows 10/11、release-to-release or multi-build privileged qualification；hosted Windows jobs
   remain regression gates and MUST NOT be credited as a second OS compatibility baseline。
+- M16-managed IPv6 capture、DNS steering、physical pinning or physical-network change qualification。This
+  non-goal does not weaken M15 manual-route IPv6 TUN behavior、existing SIP022 IPv6 or non-managed/SOCKS
+  direct IPv6。

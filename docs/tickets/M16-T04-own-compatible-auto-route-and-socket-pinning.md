@@ -21,23 +21,27 @@ owns:
 
 ## Outcome
 
-Add the compatible auto-route vertical to the existing Wintun lifetime：capture-before underlay snapshot，
-endpoint/default physical policy，pre-connect/pre-send binding and an exact journaled `/1` capture transaction，
+Add the IPv4 compatible auto-route vertical to the existing Wintun lifetime：capture-before underlay snapshot，
+IPv4 endpoint/default physical policy，pre-connect/pre-send binding and an exact journaled `/1` capture
+transaction，
 then compose the managed TUN root last without changing `ProcessSupervisor` or synchronous activation。
 
 ## Acceptance
 
 - [ ] Existing `ferrum2-wintun` remains the sole unsafe Windows Adapter；route/binding ABI details、handles and
       callback-ready identities stay private and no new crate/package identity appears。
-- [ ] Fixed Shadowsocks endpoints and direct/no-detour DNS bootstraps use exact GetBestInterfaceEx→validated
-      identity→constrained GetBestRoute2；proxy-detoured DNS pins only its selected concrete Shadowsocks first
-      hop。Dynamic direct uses the unique per-family default accepted by T01。Missing/ambiguous/changed policy
-      fails before capture or rejects the flow，never unpinned。
-- [ ] IPv4/IPv6 socket options use correct byte order and precede TCP connect/UDP send for proxy、direct and
-      DNS physical sockets；fake recorders and VM A/B prove the boundary。
-- [ ] Windows TUN+direct publishes its read-only default binder before Ready with auto-route off；a controller-
-      added post-Ready manual capture route cannot recapture direct。No-direct manual mode performs no new
-      network query/mutation and preserves M15。
+- [ ] Reachable physical first hops must resolve to IPv4。Fixed Shadowsocks endpoints and direct/no-detour DNS
+      bootstraps use exact GetBestInterfaceEx→validated identity→constrained GetBestRoute2；an IPv6 concrete
+      proxy or direct/no-detour DNS physical endpoint fails validation/prepare before mutation，while an IPv6
+      logical bootstrap behind an IPv4 proxy first hop remains allowed。Dynamic IPv4 direct uses the unique
+      IPv4 default accepted by T01。Missing/ambiguous/changed policy fails before capture or rejects the flow，
+      never unpinned。
+- [ ] IPv4 `IP_UNICAST_IF` uses correct network byte order and precedes TCP connect/UDP send for proxy、direct
+      and DNS physical sockets；fake recorders and VM A/B prove the boundary。No IPv6 binder is published。
+- [ ] Windows TUN+direct publishes its read-only IPv4 default binder before Ready with auto-route off；a
+      controller-added post-Ready manual capture route cannot recapture IPv4 direct。TUN-selected direct IPv6
+      fails pre-socket for auto-route off/on。No-direct manual mode performs no new network query/mutation and
+      preserves M15，including its IPv6 adapter/data plane。
 - [ ] Every capture row uses the T01-frozen values，full initializer override，absent precheck，ActiveStore exact
       readback and reverse conditional journal delete；no `/0`、physical bypass、route flush/adopt or system-row
       ownership exists。
@@ -46,8 +50,8 @@ then compose the managed TUN root last without changing `ProcessSupervisor` or s
       only，and every prepare ordinal or composition failure reverses owned state。
 - [ ] `auto_route = false` always preserves M15 host state；except for the required TUN+direct binder above，
       existing socket behavior is unchanged。Non-Windows targets build with no managed-network execution path。
-- [ ] The T01 interface-metric disposition is closed：either source/VM guards prove no mutation，or the selected
-      Wintun-only per-family lease passes snapshot/apply/readback/partial failure/external replacement/
+- [ ] The T01 IPv4 interface-metric disposition is closed：either source/VM guards prove no mutation，or the
+      selected Wintun-only IPv4 lease passes snapshot/apply/readback/partial failure/external replacement/
       conditional restore and residue rows。
 - [ ] Planned Wintun `m16_redaction` tests prove route/prefix、interface index/LUID/GUID/name、adapter and endpoint
       sentinels never escape fixed error/outcome categories。

@@ -96,13 +96,14 @@ adapter. Ferrum2 does not create, own, restore, or delete it in M15.
 _Avoid_: Product-owned capture route, TUN inbound, interface address
 
 **Managed TUN policy**:
-The opt-in Windows lifetime that owns compatible capture routes, physical socket binding, Wintun DNS
-steering and change detection around one TUN inbound. It is not a strict-route or kill-switch claim.
+The opt-in Windows lifetime that owns IPv4 capture routes, IPv4 physical socket binding, IPv4 Wintun DNS
+steering and IPv4 underlay change detection around one TUN inbound. It does not replace the TUN inbound's
+existing manual-route IPv6 data plane and is not a strict-route or kill-switch claim.
 _Avoid_: TUN inbound, external capture route, system-wide DNS ownership
 
 **Product-owned capture route**:
-One exact Windows route row created, read back, journaled and removed by the managed TUN policy to deliver
-an included prefix to its Wintun interface.
+One exact IPv4 Windows route row created, read back, journaled and removed by the managed TUN policy to
+deliver an included prefix to its Wintun interface.
 _Avoid_: External capture route, OS-managed connected route, physical bypass route
 
 **OS-managed connected route**:
@@ -111,13 +112,15 @@ an address side effect and disappears with owned interface cleanup; Ferrum2 neve
 _Avoid_: External capture route, product-owned capture route
 
 **Physical underlay binding**:
-The immutable physical-interface choice applied to a client socket before connect or first send so managed
-capture cannot recursively return that socket to Wintun.
+The immutable IPv4 physical-interface choice applied to a client socket before connect or first send so
+managed capture cannot recursively return that socket to Wintun. M16 publishes no IPv6 underlay binding;
+a Windows TUN-selected direct IPv6 target fails before physical socket creation.
 _Avoid_: Capture prefix, bypass route, application target
 
 **Wintun DNS steering**:
-Per-interface Windows DNS settings that direct ordinary resolver traffic toward the TUN synthetic DNS
-address. It is neither global resolver exclusivity nor DNS anti-leak enforcement.
+Per-interface Windows IPv4 DNS settings that direct ordinary resolver traffic toward the TUN synthetic
+IPv4 DNS address. It neither removes the adapter's existing IPv6 address nor provides global resolver
+exclusivity or DNS anti-leak enforcement.
 _Avoid_: DNS proxy inbound, physical adapter DNS, WFP strict routing
 
 **Outbound**:

@@ -3,7 +3,8 @@
 - **Status:** Planning research baseline
 - **Date / access date:** 2026-08-10
 - **Milestone:** M16
-- **Scope:** Windows TUN 自动路由、socket 防回环、per-interface DNS、网络变化与新增 client `direct` outbound
+- **Scope:** IPv4-only Windows managed TUN 自动路由、socket 防回环、per-interface DNS、网络变化与新增
+  client `direct` outbound；M15 manual-route IPv6 保持不变
 - **Pinned upstream:**
   [`sing-box@411df0183a114a249eeeed8da029349ae0189b5c`](https://github.com/SagerNet/sing-box/commit/411df0183a114a249eeeed8da029349ae0189b5c)、
   [`sing-tun@909ab10ad507c93f3024554d6e6d1f81dd7aff0f`](https://github.com/SagerNet/sing-tun/commit/909ab10ad507c93f3024554d6e6d1f81dd7aff0f)、
@@ -24,6 +25,11 @@
 5. `ActiveStore` 只表示重启后丢失，不表示进程退出自动删除。`TerminateProcess` 也不给 Rust owner、
    termination handler 或 DLL 正常清理机会；硬杀零残留必须由 VM 证据、外部 watchdog/service，或
    OS 对 owned ephemeral adapter 的级联删除合同承担。
+6. Exact restored-VM preflight 只发现一个可用 IPv4 physical default，没有 IPv6 physical default、
+   non-link-local physical IPv6 address 或 owned off-link dual-stack endpoint。这个结果只支持规划改界，
+   不是 PASS，也不应把本地 identifier、address 或 credential 写入仓库。M16-new managed capture、DNS、
+   pinning、change evidence 与 privileged qualification 因此改为 IPv4-only；M15 manual-route IPv6 adapter/
+   transport、SIP022 IPv6 和 non-managed/SOCKS direct IPv6 不变。
 
 ## 1. sing-box Windows 行为
 
@@ -165,43 +171,50 @@ type = "direct"
 ```
 
 路由规则选择该 action 后，TUN 中已接管的 TCP/UDP flow 应直连原 destination，不经过
-Shadowsocks。与 concrete proxy outbound 不同，direct destination 在启动时未知且可能覆盖任意
-IPv4/IPv6 target；因此“只预先 pin 全部 proxy endpoint”已不足以防回环。
+Shadowsocks。与 concrete proxy outbound 不同，direct destination 在启动时未知。M16 的 Windows
+TUN-selected direct 只给 IPv4 target 发布 physical binder；原 target 为 IPv6 时，不论
+`auto_route` true/false，都必须在 physical socket 前 fail closed。SOCKS/non-Windows direct IPv6
+保持。对 IPv4 而言，“只预先 pin 全部 proxy endpoint”仍不足以防回环。
 
 M16 计划应冻结以下不变量：
 
-1. 在添加任何 capture route 前，建立并发布可验证的 physical-interface policy；至少分 IPv4/IPv6。
-   如果产品要保留多宿主/目标特定 route 语义，snapshot 必须包含足以按 destination 选择 interface
-   的物理 route 信息，不能退化为一个偶然 default NIC。
-2. 每次 direct TCP connect、UDP association/socket、无 detour DNS bootstrap，以及 concrete proxy
-   first-hop 的 socket 创建都经过同一 Windows binder；先设置 `IP_UNICAST_IF`/
-   `IPV6_UNICAST_IF`，再 connect 或首次 send。
+1. 在添加任何 capture route 前，建立并发布可验证的 IPv4 physical-interface policy。M16 只选择
+   一个 pre-capture IPv4 default；需要多宿主/目标特定 route 语义的 IPv4 prefix 必须 exclude。
+2. 每次 IPv4 direct TCP connect、UDP association/socket、无 detour DNS bootstrap，以及 concrete
+   proxy first-hop 的 socket 创建都经过同一 Windows binder；先设置 `IP_UNICAST_IF`，再 connect 或
+   首次 send。IPv6 concrete proxy 或 direct/no-detour DNS physical endpoint 在 mutation 前拒绝；
+   IPv4 proxy first hop 后的 logical IPv6 DNS bootstrap 仍可通过 tunnel 传递。
 3. direct flow 的 route action snapshot 与 socket pin snapshot 都是 per-flow immutable；运行中 selector
    或网络状态变化不改写已建立 flow。
-4. route/interface/address notification 使 physical policy 失效时，先拒绝新 socket；M16 选择重新
+4. IPv4 route/interface/address notification 使 physical policy 失效时，先拒绝新 socket；M16 选择重新
    验证并原子发布，或撤销 capture 后终止。不得让新 direct socket 无 pin fallback。
-5. VM A/B 必须使用物理默认路由可达的 off-link TCP/UDP target：unpinned negative control 应重新进入
-   Wintun，pinned case 不得进入 Wintun；IPv4/IPv6 与代理 first-hop/direct target 都要覆盖。
+5. VM A/B 必须使用 IPv4 物理默认路由可达的 owned off-link TCP/UDP target：unpinned negative control
+   应重新进入 Wintun，pinned case 不得进入 Wintun；fixed proxy first-hop 与 dynamic direct 各覆盖
+   TCP/UDP pinned/unpinned。Resolver 只需 IPv4 UDP/TCP 两行。既有 M15 `16/16` 继续覆盖 IPv6 回归，
+   但不算 managed IPv6 proof。
 
 ### 3.1 M16 选择的有界 underlay 语义
 
-M16 不复制完整的 capture 前逐目标 Windows route table。固定 Shadowsocks first-hop 与 DNS bootstrap
-仍按各自 numeric endpoint 冻结 exact physical interface；启动后才出现的任意 direct target 则按地址族
-统一绑定到 capture 前选定的一个 physical default interface。缺少该族 interface、interface 失效或
-binding 失败都使 selected flow 失败，绝不退回 unpinned socket。
+M16 不复制完整的 capture 前逐目标 Windows route table。固定 IPv4 Shadowsocks first-hop 与物理 DNS
+bootstrap 仍按各自 endpoint 冻结 exact physical interface；启动后才出现的 IPv4 direct target 统一
+绑定到 capture 前选定的一个 IPv4 physical default interface。缺少该 interface、interface 失效或
+binding 失败都使 selected flow 失败，绝不退回 unpinned socket。Reachable physical first hop 必须
+resolve 为 IPv4；IPv6 concrete proxy/direct-no-detour DNS physical endpoint 在 validation/prepare 且
+host mutation 前失败，logical IPv6 DNS bootstrap behind an IPv4 proxy first hop 则仍允许。
 
 这个选择刻意不保持多网卡环境下每个目标原有的 LAN、企业 VPN 或非默认 interface 路由语义。需要
 这些路径的 prefix 必须通过 `route_exclude_address` 留在 TUN 外。逐目标 physical route fidelity、
 live underlay migration 和可配置 interface policy 留给后续独立决策。
 
-同一 dynamic-direct binder 也适用于 `auto_route = false` 的 Windows TUN+direct graph：产品在 Ready
-前做只读 physical snapshot，M15 external controller 只能在 Ready 后添加 manual capture。这样 direct
-不依赖 controller 为任意目标枚举 physical bypass；没有 direct 的 manual-route 配置仍保持 M15 exact。
+同一 IPv4 dynamic-direct binder 也适用于 `auto_route = false` 的 Windows TUN+direct graph：产品在
+Ready 前做只读 physical snapshot，M15 external controller 只能在 Ready 后添加 manual capture。这样
+IPv4 direct 不依赖 controller 为任意目标枚举 physical bypass；Windows TUN-selected direct IPv6 在
+socket 前失败；没有 direct 的 manual-route 配置仍保持 M15 exact，包括 IPv6 adapter/data plane。
 
 ## 4. 不复制 sing-box 的项目
 
 - 不复制 Windows `/0 + interface metric 0 + route metric 0`；Ferrum2 使用自己的 split `/1` 与实测
-  metric/next-hop 合同。
+  IPv4 metric/next-hop 合同，也不从 upstream dual-stack 行为推导 M16 managed IPv6 support。
 - 不复制同名 adapter 创建失败后 `OpenAdapter`；Ferrum2 保持 exclusive owned adapter identity。
 - 不复制 `DadTransmits = 0`；继续 session/media up 后等待自然 `Preferred`。
 - 不复制更新时 `FlushRoutes(AF_UNSPEC)`；只删除 exact journaled rows。

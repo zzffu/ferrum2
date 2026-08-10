@@ -36,6 +36,9 @@ socket seam established here。
       admits only bound responses and preserves TUN mapping/SOCKS association selection lifetime and limits。
 - [ ] Direct payload bounds do not subtract SIP022 overhead；invalid/over-limit first datagrams commit no
       mapping/session/activity and a later valid candidate reselects as specified by M15。
+- [ ] Windows TUN-selected direct whose immutable original target is IPv6 fails before resolver/socket creation
+      for TCP and UDP with auto-route off or on，and never falls back unpinned。SOCKS/non-Windows direct
+      IPv6 and M15 manual-route IPv6 proxy/reject/DNS behavior remain unchanged。
 - [ ] DNS no-detour and direct detour normalize to the same direct socket path；proxy detours remain exact。
       No caller retains a raw system connect/bind path that would bypass the future binder。
 - [ ] Static/rule/final/selector process witnesses cover direct and proxy for SOCKS and memory-device TUN

@@ -35,11 +35,15 @@ direct rejection，and a fully bounded canonical managed-TUN capture/DNS plan re
       TCP/UDP；it MUST NOT be represented by a dummy server/key or reach resolver、socket、TUN or OS setup。
 - [ ] Static/rule/final/selector/DNS detour can resolve singleton direct；every direct chain position and
       defensive mixed/empty invalidity fails before runtime。
-- [ ] Auto-route/DNS defaults、relations、prefix/address/count/output bounds and canonical include-minus-exclude
-      `/1` plan match SPEC-0017，including empty and 257-row rejection。
-- [ ] TUN prefix overlap checks enumerate only actual physical endpoints：direct/no-detour DNS uses its numeric
-      bootstrap，while proxy-detoured DNS uses the selected concrete Shadowsocks first hop and does not treat
-      its logical bootstrap as a physical socket；both synthetic DNS addresses validate exactly。
+- [ ] Auto-route/DNS defaults、relations、IPv4 prefix/address/count/output bounds and canonical include-minus-
+      exclude `/1` plan match SPEC-0017，including default `0.0.0.0/0`、IPv6 route-prefix rejection、empty and
+      257-row rejection。Auto-DNS requires only `ipv4_dns_address` and rejects `ipv6_dns_address` while retaining
+      the existing M15 `ipv6_address` adapter field。
+- [ ] TUN prefix overlap checks enumerate only actual physical endpoints：reachable physical first hops must
+      resolve to IPv4；IPv6 concrete proxy and direct/no-detour DNS physical endpoints fail before OS calls，
+      while proxy-detoured DNS uses the selected IPv4 concrete Shadowsocks first hop and may retain a logical
+      IPv6 bootstrap without treating it as a separate physical socket；the synthetic IPv4 DNS address
+      validates exactly。
 - [ ] `--check-config` makes zero Windows/DLL/socket/thread calls。
 - [ ] Table-driven config/selector/CLI evidence passes and test-footprint result is recorded。
 

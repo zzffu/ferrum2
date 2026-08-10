@@ -22,9 +22,11 @@
 验收的 M16：operator 可声明 `[[outbounds]] type = "direct"`，现有 static/ordered route/selector/DNS
 detour 选择后，TUN 或 SOCKS TCP/UDP 直接访问原 target 而不创建 SIP022 state；显式 opt-in 的
 `auto_route` 以 bounded include-minus-exclude `/1` capture rows 把流量导入既有 M15 Wintun data plane，
-并在每个 proxy/direct/DNS physical socket connect/send 前绑定 capture 前冻结的 underlay；可选
-`auto_dns` 只给该 Wintun interface 设置 synthetic resolver address，并把 exact TCP/UDP port 53 交给
-既有 `DnsProxy`。所有 owned route/DNS/interface state 与 adapter 同生命周期回读、回滚和审计。
+并在每个 IPv4 proxy/direct/DNS physical socket connect/send 前绑定 capture 前冻结的 underlay；可选
+`auto_dns` 只给该 Wintun interface 设置 synthetic IPv4 resolver address，并把 exact TCP/UDP port 53
+交给既有 `DnsProxy`。M16-new managed route、DNS、pinning、change evidence and privileged qualification are
+IPv4-only；既有 M15 manual-route IPv6 adapter/data plane、SIP022 IPv6 与 non-managed/SOCKS direct IPv6
+保持不变。所有 owned route/DNS/interface state 与 adapter 同生命周期回读、回滚和审计。
 
 This plan supersedes the owner-provided discussion draft
 `C:\Users\ZZZ\Downloads\ferrum2-M16-windows-routing-dns-plan-draft-v1.md`，uses
@@ -47,21 +49,26 @@ source corrections and sing-box comparison are recorded in
 - Direct means “traffic entered TUN，then physical egress without SIP022”。`route_exclude_address` means the
   prefix never entered TUN。`CONTEXT.md` replaces the ambiguous historical “direct action” with one-hop proxy
   plan and client direct outbound。
-- Fixed Shadowsocks/DNS endpoints retain endpoint-specific capture-before interface binding。Arbitrary direct
-  targets use one frozen physical default interface per address family。This is intentionally not full
+- Fixed IPv4 Shadowsocks/DNS physical endpoints retain endpoint-specific capture-before interface binding。
+  Arbitrary IPv4 direct targets use one frozen physical default interface。This is intentionally not full
   per-target multihomed Windows route fidelity；LAN/VPN/non-default prefixes must be excluded from capture。
-- TUN+direct also publishes the read-only physical-default binder when `auto_route = false`；the M15 external
-  controller adds its manual capture only after Ready。No-direct/manual-route configurations retain exact M15
-  socket and host-state behavior。
-- `GetBestRoute2` cannot discover an interface by destination alone。Fixed endpoints use
+- TUN+direct also publishes only the read-only IPv4 physical-default binder when `auto_route = false`；the M15
+  external controller adds its manual capture only after Ready。Windows TUN-selected direct IPv6 fails before
+  physical socket creation for either auto-route state，with no unpinned fallback。No-direct/manual-route
+  configurations retain exact M15 socket and host-state behavior。
+- `GetBestRoute2` cannot discover an interface by destination alone。Fixed IPv4 endpoints use
   `GetBestInterfaceEx`，then validated index/LUID，then interface-constrained `GetBestRoute2`。Every direct
   socket uses the already frozen policy after capture；there is no unpinned fallback or per-flow bypass route。
-- Capture is canonical bounded `route_address − route_exclude_address`，with any `/0` split to `/1`。Ferrum2
+- Capture is canonical bounded IPv4 `route_address − route_exclude_address`，with `0.0.0.0/0` split to two `/1`
+  rows and all IPv6 inputs rejected。Ferrum2
   creates only Wintun capture rows，prechecks absence，sets every required row field，reads ActiveStore back，
   journals only exact success and reverses only still-owned rows。It never flushes routes or records
   address-derived rows。
 - Auto-DNS is Wintun per-interface resolver steering，not global DNS ownership or anti-leak。No physical DNS、
   WFP、off-TUN port-53 block、browser DoH/DoQ claim or strict-route mode is included。
+- Exact restored-VM preflight found one usable IPv4 physical default but no IPv6 physical default、non-link-
+  local physical IPv6 address or owned off-link dual-stack endpoint。This is a planning input，not PASS。It
+  narrows the new managed contract without adding a VM、endpoint、knob or weakening M15 IPv6 regressions。
 - `ferrum2-wintun` remains the single audited Windows unsafe Adapter。Route/DNS/socket/notification operations
   share the owned adapter lifetime，so the draft's new `ferrum2-windows-net` crate is not justified yet。
 - Existing `ProcessSupervisor` and synchronous non-blocking activation remain。Non-TUN roots prepare first；
@@ -75,8 +82,9 @@ source corrections and sing-box comparison are recorded in
 
 M16-T01 is a product stop gate，not implementation scaffolding。After restoring the exact current qualification
 VM/checkpoint above，the probe must record its actual product、edition、architecture and full version/build，
-freeze exact route next-hop/metric/interface-metric disposition，prove IPv4/IPv6 pinned TCP/UDP positive
-versus unpinned Wintun-captured negative controls，prove Wintun resolver steering and the capture-before-
+freeze exact IPv4 route next-hop/metric/interface-metric disposition，prove fixed-first-hop and dynamic-direct
+IPv4 pinned TCP/UDP positive versus unpinned Wintun-captured negative controls，prove IPv4 Wintun resolver UDP/
+TCP steering and the capture-before-
 admission interval，and externally prove zero residue
 after partial apply、normal stop and `TerminateProcess`。An inaccessible/mismatched asset or any failed
 capability leaves M16 blocked for contract replanning；T02 cannot paper over it with another VM、fakes、new
@@ -85,8 +93,9 @@ knobs、a service or watchdog。M16 makes no independent cross-version Windows q
 ## Planning/control isolation
 
 The isolated control-plus-Markdown M16 plan is accepted at
-`a9619ef8269424fd345403de8d3bb033b0d5f9d8`。This single-VM evidence-scope amendment is Markdown-only and must
-be accepted as its single-parent descendant before T01 starts。T01 binds the amended exact commit as its base
+`a9619ef8269424fd345403de8d3bb033b0d5f9d8`，and its single-VM evidence-scope amendment is accepted at
+`a8205c2bee31283294fdd5ca47349c74b3195cad`。This IPv4 contract amendment is Markdown-only and must be accepted
+as its single-parent descendant before T01 starts。T01 binds the amended exact commit as its base
 and may add only the existing qualifier probe plus Markdown evidence amendments；it does not reopen the
 protected footprint control。
 
@@ -115,6 +124,8 @@ protected footprint control。
   Geo/rule-set routing、DoQ/DoH3、QUIC sniff、ICMP、fragments/options/extensions unsupported by M15。
 - Independent Windows release/build qualification beyond the exact current VM/checkpoint；no Windows
   10-versus-11 compatibility claim is inferred from the single privileged evidence asset。
+- M16-managed IPv6 capture、DNS steering、physical pinning or physical-network change qualification；this
+  does not remove the M15 IPv6 adapter address/manual-route data plane or existing IPv6 regression rows。
 - A new crate/dependency/endpoint registry/public egress trait，performance improvement threshold，Wintun
   redistribution，package、release or publication。
 - The unrelated M15 Wintun ring-full observability repair from the external draft；it remains a separate
@@ -127,23 +138,29 @@ protected footprint control。
       pass，or the milestone stops before product work。
 - [ ] `--check-config` remains side-effect-free；old outbounds default to Shadowsocks；direct closed fields、
       direct-only credentials、chain rejection and every managed-TUN bound/relationship fail closed correctly。
-- [ ] Static/rule/final/selector can choose direct for SOCKS and TUN IPv4/IPv6 TCP/UDP；DNS detour/no-detour can
-      use the same direct mode；raw application payload returns and no SIP022 owner exists。
+- [ ] Static/rule/final/selector can choose direct for SOCKS and non-Windows TUN IPv4/IPv6 TCP/UDP；Windows
+      TUN-selected direct qualifies IPv4 only and rejects original IPv6 before any physical socket。DNS
+      detour/no-detour can use the same direct mode；raw application payload returns and no SIP022 owner exists。
 - [ ] Direct/proxy selected failure retains current no-fallback and selector snapshot semantics；TUN original
       target and UDP mapping selection lifetime remain unchanged。
-- [ ] Auto-route compiles exact bounded prefix subtraction，creates no `/0` or physical bypass row，performs
+- [ ] Auto-route rejects IPv6 prefixes，compiles exact bounded IPv4 prefix subtraction，creates no `/0` or
+      physical bypass row，performs
       absent precheck/exact readback/reverse conditional cleanup and never adopts OS/third-party rows。
-- [ ] Every proxy、direct and DNS physical socket is bound before connect/first send；negative unpinned sockets
-      are captured while positive pinned sockets do not enter Wintun。
-- [ ] Manual-route TUN+direct publishes binding before Ready and survives a controller route added afterward；
+- [ ] Every reachable IPv4 proxy、direct and DNS physical socket is bound before connect/first send；negative
+      unpinned sockets are captured while positive pinned sockets do not enter Wintun。IPv6 concrete proxy or
+      direct/no-detour DNS physical endpoints fail before mutation；an IPv6 logical bootstrap behind an IPv4
+      proxy first hop remains allowed。
+- [ ] Manual-route TUN+direct publishes the IPv4 binding before Ready and survives a controller route added afterward；
       no-direct `auto_route=false` makes no new query/mutation and preserves M15 exactly。
-- [ ] Auto-DNS changes only the owned Wintun interface；system resolver UDP/TCP reaches exact synthetic
-      addresses and existing DnsProxy；direct/proxy UDP/TCP/DoT/DoH upstreams use the correct pinned egress。
+- [ ] Auto-DNS requires only `ipv4_dns_address`、rejects `ipv6_dns_address` and changes only owned Wintun IPv4
+      DNS；system resolver UDP/TCP reaches the exact synthetic IPv4 address and existing DnsProxy；direct/proxy
+      UDP/TCP/DoT/DoH upstreams use the correct pinned IPv4 first hop，while the M15 IPv6 adapter address remains。
 - [ ] All setup ordinals、change invalidation、later composition failure、graceful/forced stop and 100 cycles
       return OS and process-private owners to baseline。External hard kill separately proves process absence
       and zero adapter/address/route/DNS residue before controller remediation，without claiming internal drain。
-- [ ] The current qualification VM proves the real route、interface and IPv4/IPv6 unicast-address callback
-      paths independently revoke admission/capture/DNS，terminate and leave zero owned residue。
+- [ ] The current qualification VM proves the real IPv4 route、physical interface and IPv4 unicast-address
+      callback paths independently revoke admission/capture/DNS，terminate and leave zero owned residue；M15
+      `16/16` transport and its IPv6 rows remain regression evidence。
 - [ ] New errors/logs/traces/metrics use fixed redacted categories and contain no target、endpoint、prefix、
       interface/adapter identity、DNS name、tag、packet or secret。
 - [ ] One exact SHA passes focused、Full、Rust 1.97.1、three non-driver targets、existing interop、footprint、
@@ -154,7 +171,7 @@ protected footprint control。
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M16-T01 | Prove Windows host-network capabilities and freeze measured contracts | accepted Markdown-only single-VM scope amendment atop `a9619ef…` | ready |
+| M16-T01 | Prove IPv4 Windows host-network capabilities and freeze measured contracts | accepted Markdown-only IPv4 scope amendment atop `a8205c2…` | ready |
 | M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | planned |
 | M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | planned |
 | M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | planned |
@@ -190,8 +207,8 @@ user authorization and must bind the accepted exact SHA。
 
 ## Blocker / next action
 
-First accept this Markdown-only single-VM scope amendment atop `a9619ef…`。Then execute M16-T01 only：bind that
+First accept this Markdown-only IPv4 scope amendment atop `a8205c2…`。Then execute M16-T01 only：bind that
 exact amended base，restore `Windows 10 MSIX packaging environment` from
 `M15-T04-before-2b0c25b-20260810`，record the actual guest identity，extend the existing qualifier with the
-bounded capability mode，and freeze the route/metric/hard-kill results in ADR-0036、SPEC-0017 and TEST-0017。
+bounded IPv4 capability mode，and freeze the route/metric/hard-kill results in ADR-0036、SPEC-0017 and TEST-0017。
 Do not begin product implementation until every entry capability row passes。

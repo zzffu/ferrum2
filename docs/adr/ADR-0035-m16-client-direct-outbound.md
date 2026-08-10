@@ -74,11 +74,15 @@ lookup does not create an unpinned fallback。Resolution failure ends the select
 deadline。
 
 On Windows，when a client graph contains both TUN and a reachable direct outbound，the TUN root freezes and
-publishes the physical default binding before Ready even if `auto_route = false`。A manual-route controller
-must retain M15 ordering and add external capture only after Ready；the resulting direct socket is pinned and
-does not depend on the controller enumerating arbitrary target bypass routes。A SOCKS-only direct client and
-non-Windows clients retain normal system routing。Auto-route additionally requires every proxy and DNS
-physical first hop to use the same binding boundary。
+publishes the IPv4 physical-default binding before Ready even if `auto_route = false`。A manual-route controller
+must retain M15 ordering and add external capture only after Ready；the resulting IPv4 direct socket is pinned
+and does not depend on the controller enumerating arbitrary target bypass routes。A Windows TUN-selected
+direct plan whose immutable original target is IPv6 fails before physical socket creation for both
+`auto_route = false` and `auto_route = true`；there is no unpinned fallback。SOCKS direct and
+non-Windows direct clients retain normal IPv4/IPv6 system routing。Auto-route additionally requires every
+reachable proxy and DNS physical first hop to resolve to IPv4 and use the same binding boundary；a logical
+IPv6 DNS bootstrap behind an IPv4 concrete proxy first hop remains valid because the bootstrap is not a
+separate physical socket endpoint。
 
 ## Consequences
 
@@ -90,6 +94,8 @@ physical first hop to use the same binding boundary。
   graphs retain their existing credential requirements。
 - Allowing direct through a selector or DNS detour costs no second semantic path；both resolve to the same
   singleton plan and retain no-fallback behavior。
+- The Windows TUN composition deliberately rejects selected direct IPv6 before a socket，without weakening
+  SOCKS/non-Windows direct IPv6、existing SIP022 IPv6 or M15 manual-route IPv6 regression evidence。
 
 ## Rejected alternatives
 

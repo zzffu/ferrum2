@@ -18,14 +18,14 @@ owns:
 
 ## Outcome
 
-Close the integrated failure/lifecycle boundary：route/interface/address invalidation revokes capture and
+Close the integrated failure/lifecycle boundary：IPv4 route/interface/address invalidation revokes capture and
 terminates，every setup/cleanup ordinal is mutation-tested，and fresh-restore current-VM full（including its
 identity-bound 100-cycle row）and hard-kill profiles prove zero owned residue without a new harness or widened
 security claim。
 
 ## Acceptance
 
-- [ ] Route/interface/address callbacks only signal the owner，cannot use freed context or perform blocking/
+- [ ] IPv4 route/interface/address callbacks only signal the owner，cannot use freed context or perform blocking/
       logging/policy work，and cancellation completes before callback state is released。
 - [ ] Any change that invalidates frozen underlay or owned route identity rejects new sockets，removes capture
       and DNS steering，then uses existing supervised termination；established flows are not migrated and no
@@ -33,9 +33,11 @@ security claim。
 - [ ] Fake failure injection covers every underlay/adapter/address/session/DNS/route/notification/ack ordinal，
       the conditional interface-metric lease when selected，owner panic，external replacement conflicts and
       repeated/coalesced invalidation with exact cleanup order。
-- [ ] After restoring the exact current qualification VM/checkpoint，the full profile covers direct/proxy
-      IPv4/IPv6 TCP/UDP，system DNS UDP/TCP，one real route mutation、one real interface mutation and real IPv4
-      plus IPv6 unicast-address mutations，graceful/forced stop and sentinels on one exact candidate。Every
+- [ ] After restoring the exact current qualification VM/checkpoint，the full profile preserves M15 transport
+      `16/16` including its existing IPv6 rows，then covers M16 IPv4 direct TCP `1/1`、direct UDP `1/1`、system
+      DNS UDP/TCP `2/2`，one real IPv4 route mutation、one real interface mutation and one real IPv4 unicast-
+      address mutation for `network_change=3/3` and `address_change=1/1`，plus graceful/forced stop and sentinels
+      on one exact candidate。Every
       network-change row proves callback observation、new-admission rejection、capture/DNS removal、supervised
       termination and residue cleanup。
 - [ ] The same qualification asset completes 100 cycles with zero OS and process-private owner counters。
@@ -44,6 +46,9 @@ security claim。
       hard-kill marker bound to the identity ledger、candidate SHA、probe SHA-256 and its own unique run token。
 - [ ] Existing M0～M15 Full、interop、platform and lifecycle behavior remains green；footprint numeric findings
       are dispositioned，not hidden by deleting independent evidence。
+- [ ] The full/qualification markers retain `m15_transport=16/16` and use exactly `direct_tcp=1/1`、
+      `direct_udp=1/1`、`dns=2/2`、`network_change=3/3`、`route_change=1/1`、
+      `interface_change=1/1` and `address_change=1/1`；preflight hashes or observations are never PASS rows。
 - [ ] Ticket-level Architect/QA review reports zero blocking findings。
 
 ## Validation
