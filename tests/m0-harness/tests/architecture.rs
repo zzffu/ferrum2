@@ -3154,6 +3154,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("[string]$Labels = \"\"")
             && source.contains("[bool]$MissingIsZero = $false")
             && source.contains("$udpGateA.SelfTest() -and $udpGateB.SelfTest()")
+            && source.contains(
+                "$udp01DiagnosticOnly = $Mode -eq \"udp\" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq \"1\"",
+            )
             && gate.is_some_and(|gate| {
                 gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
                     && gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))")
@@ -3181,6 +3184,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("gate_state=$($Gate.State)")
                     && echo.contains("gate_fault=$($Gate.Fault)")
                     && echo.contains("probe_fault=$($probe.Fault)")
+                    && echo.contains("[bool]$DiagnosticOnly = $false")
+                    && echo.contains("m15_windows_tun_udp01_diag status=OBSERVED")
+                    && echo.contains("throw \"UDP-01 diagnostic sentinel\"")
             })
             && rows.is_some_and(|rows| {
                 for id in 2..=8 {
@@ -3197,6 +3203,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 && rows.contains("[byte[]]::new(2000)")
                 && rows.contains("$saturatedClients.Count -eq 4")
                 && rows.contains("$udpGateA.ReplayFirstToLatest()")
+                && rows.contains(
+                    "Invoke-UdpEchoRow $targets[0] $ports[0] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes(\"udp-01-one-hop\")) $udp01DiagnosticOnly",
+                )
+                && rows
+                    .find("throw \"UDP-01 diagnostic sentinel\"")
+                    .is_none()
             })
     };
     assert!(
@@ -3217,6 +3229,15 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "Start-Sleep -Milliseconds 1",
         ),
         controller.replace("$udpAcceptedDelta", "$ignoredUdpDelta"),
+        controller.replace(
+            "[bool]$DiagnosticOnly = $false",
+            "[bool]$DiagnosticOnly = $true",
+        ),
+        controller.replace(
+            "m15_windows_tun_udp01_diag status=OBSERVED",
+            "m15_windows_tun_udp01_diag status=BYPASSED",
+        ),
+        controller.replace("throw \"UDP-01 diagnostic sentinel\"", "return"),
         controller.replace(
             "profile=transport functional=16/16 cleanup=PASS",
             "profile=transport functional=8/8 cleanup=PASS",

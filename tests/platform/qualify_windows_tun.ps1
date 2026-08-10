@@ -50,6 +50,7 @@ $createdSiblingDll = $false
 $completed = $false
 $primaryError = $null
 $outerCleanupError = $null
+$udp01DiagnosticOnly = $Mode -eq "udp" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq "1"
 $tcp01Diagnostic = $null
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -992,7 +993,8 @@ function Invoke-UdpEchoRow(
     [int]$Port,
     [int]$InterfaceIndex,
     [Ferrum2UdpGate]$Gate,
-    [byte[]]$Payload
+    [byte[]]$Payload,
+    [bool]$DiagnosticOnly = $false
 ) {
     $expectedGate = $Gate.Requests + 1
     $probe = [Ferrum2UdpProbe]::new($Address, $Port)
@@ -1026,6 +1028,14 @@ function Invoke-UdpEchoRow(
         $tunAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_tun_packets_accepted") - $tunAcceptedBefore
         $udpAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
         if ($null -eq $firstUdpAcceptedDelta) { $firstTunAcceptedDelta = $tunAcceptedDelta; $firstUdpAcceptedDelta = $udpAcceptedDelta }
+        if ($DiagnosticOnly) {
+            $sourceCategory = if ($udpAcceptedDelta -gt 1) { "exact_source_recurrence" }
+                elseif ($tunAcceptedDelta -gt 1 -and $udpAcceptedDelta -eq 1) { "non_exact_source_recurrence" }
+                elseif ($tunAcceptedDelta -eq 1 -and $udpAcceptedDelta -eq 1) { "single" }
+                else { "unresolved" }
+            [Console]::Error.WriteLine("m15_windows_tun_udp01_diag status=OBSERVED source=$sourceCategory first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)")
+            throw "UDP-01 diagnostic sentinel"
+        }
         Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
         Assert-True ($tunAcceptedDelta -gt 0 -and $udpAcceptedDelta -eq 1) "UDP ingress/association witness mismatch"
         $response = Receive-TunUdp $client
@@ -1522,6 +1532,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [void](Add-TargetAddress $targets[$targetIndex])
         }
 
+        if (-not $udp01DiagnosticOnly) {
         $tcp01Target = $targets[0]
         $tcp01Port = $ports[0]
         $tcp01Payload = [Text.Encoding]::ASCII.GetBytes("tcp-01-half-close")
@@ -1682,6 +1693,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         }
         $tcpRows++
         Assert-True ($tcpRows -eq 8) "TCP row count mismatch"
+        }
 
         if ($Mode -eq "udp") {
             foreach ($targetIndex in @(4, 5, 6)) {
@@ -1689,7 +1701,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             }
 
             # UDP-01 IPv4 one-hop route and authenticated response binding.
-            Invoke-UdpEchoRow $targets[0] $ports[0] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes("udp-01-one-hop"))
+            Invoke-UdpEchoRow $targets[0] $ports[0] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes("udp-01-one-hop")) $udp01DiagnosticOnly
             $udpRows++
 
             # UDP-02 IPv6 fixed two-hop chain.
