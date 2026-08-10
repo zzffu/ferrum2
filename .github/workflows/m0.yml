@@ -888,7 +888,9 @@ jobs:
   windows-tun-e2e:
     name: windows-tun-e2e
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 90
+    outputs:
+      profile: ${{ steps.tun-profile.outputs.profile }}
     steps:
       - name: Checkout exact current SHA
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -915,9 +917,12 @@ jobs:
           Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $archive
           if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51") { throw "ZIP hash mismatch" }
       - name: Qualify privileged Wintun selected profile with always-run cleanup
+        id: tun-profile
+        timeout-minutes: 75
         shell: pwsh
         env:
           FERRUM2_WINTUN_ZIP: ${{ runner.temp }}\wintun-0.14.1.zip
+          FERRUM2_TUN_RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-e2e
           DISPATCH_TARGET: ${{ inputs.dispatch_target }}
         run: |
           $ErrorActionPreference = "Stop"
@@ -929,32 +934,103 @@ jobs:
           }
           switch ($dispatchTarget) {
             "foundation" {
+              if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") { throw "dispatch target invalid" }
               $mode = "lifecycle"
+              $closedProfile = "foundation"
               $expectedMarker = "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
             }
             "performance" {
               $mode = "lifecycle"
+              $closedProfile = "foundation"
               $expectedMarker = "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
             }
             "windows-tun-tcp" {
               $mode = "tcp"
+              $closedProfile = "tcp"
               $expectedMarker = "m15_windows_tun_e2e status=PASS profile=tcp tcp=8/8 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
             }
             "windows-tun-transport" {
               $mode = "udp"
+              $closedProfile = "transport"
               $expectedMarker = "m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
             }
             "windows-tun-full" {
               $mode = "full"
+              $closedProfile = "full"
               $expectedMarker = "m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
             }
             default { throw "dispatch target invalid" }
           }
-          $output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode $mode
+          $output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode $mode -RunToken $env:FERRUM2_TUN_RUN_TOKEN
           if ($LASTEXITCODE -ne 0) { throw "$mode controller failed" }
           $output | Write-Output
           $markers = @($output | Where-Object { $_ -like "m15_windows_tun_e2e status=PASS *" })
           if ($markers.Count -ne 1 -or $markers[0] -ne $expectedMarker) { throw "Wintun marker mismatch" }
+          "profile=$closedProfile" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Reap and assert controller-owned Windows TUN residue
+        if: ${{ always() }}
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          FERRUM2_TUN_RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-e2e
+        run: |
+          $ErrorActionPreference = "Stop"
+          & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode cleanup -RunToken $env:FERRUM2_TUN_RUN_TOKEN
+          if ($LASTEXITCODE -ne 0) { throw "controller cleanup failed" }
+
+  windows-tun-performance:
+    name: windows-tun-performance
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dispatch_target == 'performance' }}
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify runner, install exact Rust and download official Wintun
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (git status --porcelain) { throw "dirty checkout" }
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw "SHA mismatch" }
+          if ($env:RUNNER_OS -ne "Windows" -or $env:RUNNER_ARCH -ne "X64") { throw "runner mismatch" }
+          rustup toolchain install 1.97.1 --profile minimal
+          rustc +1.97.1 --version --verbose
+          $archive = Join-Path $env:RUNNER_TEMP "wintun-performance-0.14.1.zip"
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51") { throw "ZIP hash mismatch" }
+      - name: Record independent Windows TUN performance and resource witnesses
+        timeout-minutes: 45
+        shell: pwsh
+        env:
+          FERRUM2_WINTUN_ZIP: ${{ runner.temp }}\wintun-performance-0.14.1.zip
+          FERRUM2_TUN_RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-performance
+        run: |
+          $ErrorActionPreference = "Stop"
+          $output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode performance -RunToken $env:FERRUM2_TUN_RUN_TOKEN
+          if ($LASTEXITCODE -ne 0) { throw "performance controller failed" }
+          $output | Write-Output
+          $resources = @($output | Where-Object { $_ -like "m15_windows_tun_performance_resource *" })
+          if ($resources.Count -ne 1) { throw "Wintun performance resource count mismatch" }
+          $resourcePattern = '^m15_windows_tun_performance_resource adapter_rx_bytes=[0-9]+ adapter_tx_bytes=[0-9]+ adapter_rx_packets=[0-9]+ adapter_tx_packets=[0-9]+ adapter_rx_errors=[0-9]+ adapter_tx_errors=[0-9]+ adapter_rx_discards=[0-9]+ adapter_tx_discards=[0-9]+ tun_accepted_delta=[0-9]+ cpu_ms_delta=[0-9]+ rss_bytes=[0-9]+ handles_peak=[0-9]+ threads_peak=[0-9]+ udp_sessions_peak=[0-9]+ udp_buffered_bytes_peak=[0-9]+ controller_inflight_peak=[0-9]+ queues=bounded bounds_ring_bytes=8388608 bounds_tcp_flows=8 bounds_tcp_buffer_bytes=4096 bounds_udp_mappings=4 bounds_udp_buffered_bytes=4194304 adapter_churn=[0-9]+ grace_drain=PASS force_drain=PASS sha=' + [regex]::Escape($env:GITHUB_SHA) + ' run_id=' + [regex]::Escape($env:GITHUB_RUN_ID) + ' run_attempt=' + [regex]::Escape($env:GITHUB_RUN_ATTEMPT) + '$'
+          if ($resources[0] -notmatch $resourcePattern) { throw "Wintun performance resource schema mismatch" }
+          $expectedMarker = "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
+          $markers = @($output | Where-Object { $_ -like "m15_windows_tun_performance status=PASS *" })
+          if ($markers.Count -ne 1 -or $markers[0] -ne $expectedMarker) { throw "Wintun performance marker mismatch" }
+      - name: Reap and assert performance controller-owned Windows TUN residue
+        if: ${{ always() }}
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          FERRUM2_TUN_RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-performance
+        run: |
+          $ErrorActionPreference = "Stop"
+          & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode cleanup -RunToken $env:FERRUM2_TUN_RUN_TOKEN
+          if ($LASTEXITCODE -ne 0) { throw "controller cleanup failed" }
 
   qualification:
     name: qualification
@@ -985,6 +1061,8 @@ jobs:
           PLATFORM_RESULT: ${{ needs.platform.result }}
           INTEROP_RESULT: ${{ needs.interop.result }}
           WINDOWS_TUN_RESULT: ${{ needs['windows-tun-e2e'].result }}
+          WINDOWS_TUN_PROFILE: ${{ needs['windows-tun-e2e'].outputs.profile }}
+          DISPATCH_TARGET: ${{ inputs.dispatch_target }}
         run: |
           set -euo pipefail
           test "$(git status --porcelain)" = ""
@@ -995,5 +1073,21 @@ jobs:
           test "$PLATFORM_RESULT" = "success"
           test "$INTEROP_RESULT" = "success"
           test "$WINDOWS_TUN_RESULT" = "success"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            case "$DISPATCH_TARGET" in
+              performance) expected_windows_tun_profile=foundation ;;
+              windows-tun-tcp) expected_windows_tun_profile=tcp ;;
+              windows-tun-transport) expected_windows_tun_profile=transport ;;
+              windows-tun-full) expected_windows_tun_profile=full ;;
+              *) exit 1 ;;
+            esac
+          else
+            expected_windows_tun_profile=foundation
+          fi
+          test "$WINDOWS_TUN_PROFILE" = "$expected_windows_tun_profile"
           printf 'm3_qualification_completion status=PASS full=PASS security=PASS process=PASS msrv=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS platforms=3/3 test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          if [ "$WINDOWS_TUN_PROFILE" = "full" ]; then
+            printf 'm15_windows_tun_qualification status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=%s run_id=%s run_attempt=%s\n' \
+              "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          fi
