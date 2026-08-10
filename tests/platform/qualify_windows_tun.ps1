@@ -76,7 +76,7 @@ if ($Mode -eq "cleanup") {
             Remove-Item -LiteralPath $siblingDll -Force
         }
     }
-    if ((Get-ExactRunProcesses $work).Count -ne 0) { throw "controller process residue" }
+    if (@(Get-ExactRunProcesses $work).Count -ne 0) { throw "controller process residue" }
     if (Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue) { throw "controller adapter residue" }
     foreach ($address in $journaledAddresses) {
         $prefix = if ($address.Contains(":")) { "$address/128" } else { "$address/32" }
@@ -1166,7 +1166,7 @@ function Invoke-AdapterCycles([string]$Executable, [string]$Configuration) {
 
 try {
     Assert-True (-not (Test-Path -LiteralPath $work)) "run work baseline not absent"
-    Assert-True ((Get-ExactRunProcesses $work).Count -eq 0) "run process baseline not absent"
+    Assert-True (@(Get-ExactRunProcesses $work).Count -eq 0) "run process baseline not absent"
     Assert-True (-not (Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue)) "run adapter baseline not absent"
     Assert-True ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq $expectedZipHash) "ZIP hash mismatch"
     New-Item -ItemType Directory -Path $work | Out-Null

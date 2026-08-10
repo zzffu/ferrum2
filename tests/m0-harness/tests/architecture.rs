@@ -3409,6 +3409,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("$_.CommandLine.IndexOf($WorkPath, [StringComparison]::OrdinalIgnoreCase)")
             && source.contains("$addressJournal")
             && source.contains("$dllJournal")
+            && source
+                .matches("@(Get-ExactRunProcesses $work).Count")
+                .count()
+                == 2
             && source.contains("run work baseline not absent")
             && source.contains("run process baseline not absent")
             && source.contains("run adapter baseline not absent")
@@ -3518,6 +3522,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         "integrated full/cycle/performance controller contract missing"
     );
     for mutation in [
+        controller.replacen(
+            "@(Get-ExactRunProcesses $work).Count",
+            "(Get-ExactRunProcesses $work).Count",
+            1,
+        ),
         controller.replace("Ferrum2-M15-$runIdentity", "Ferrum2-M15-*"),
         controller.replace("$executables -contains $_.ExecutablePath", "$true"),
         controller.replace("run work baseline not absent", "run work ignored"),
