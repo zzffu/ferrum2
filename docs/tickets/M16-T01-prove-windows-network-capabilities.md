@@ -66,7 +66,7 @@ footprint/workflow control，claim managed IPv6 or claim another Windows build�
       listener helper or endpoint is committed。
 - [x] Only a complete PASS may change ADR-0035/0036 to Accepted and SPEC/TEST-0017 to Approved，record the
       measured route/metric formulas and make T02 ready；otherwise their proposed/draft state remains。
-- [ ] Focused control/architecture validation and independent Architect/QA review pass with zero blocker。
+- [x] Focused control/architecture validation and independent Architect/QA review pass with zero blocker。
 
 ## Validation
 
@@ -120,7 +120,11 @@ only host process allowed is the ledger-bound transient listener above，and its
   `29771/50323`、ratio `1.690336`、case/support/fixture `44574/5152/597`；workspace policy `25/25`、
   architecture `19/19`、`cargo fmt --all -- --check` and `git diff --check` all exit `0`。The normal commit
   hook and exact post-commit ticket-footprint readback bind the evidence amendment itself。
-- Review: independent Architect/QA review pending；the acceptance review checkbox remains open。
+- Review: exact evidence candidate `1d7968ea10289dd1dab61873c571058a37df7ef2` received Architect
+  `PASS_WITH_NOTES` and QA `PASS_WITH_NOTES`，both with zero blocker/major/minor。Accepted notes are the existing
+  oversized `architecture.rs` at `4605` semantic test LOC（case/support/fixture delta `+112/+0/+0`，numeric
+  `REVIEW_REQUIRED` with integrity/category/ratio PASS）and qualifier net `+1153/-20` beyond the original
+  non-Rust forecast while remaining one existing mode with no duplicate harness or helper。Review is complete。
 - Notes: T01 is done and T02 is ready because every capability row passed。This is single-asset IPv4 evidence，
   not managed IPv6 or cross-build qualification；no raw local endpoint、interface、process or credential value
   is repository evidence。

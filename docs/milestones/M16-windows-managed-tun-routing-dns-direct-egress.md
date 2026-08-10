@@ -224,14 +224,19 @@ qualifier growth is `+450..850` non-Rust lines。No second harness or fixture is
 existing helpers are mandatory first choices。Ticket/file numeric `REVIEW_REQUIRED` findings need an explicit
 review disposition，while integrity remains a hard gate。
 
-No push、workflow dispatch、PR、tag、package、release or publication is authorized by this plan。T01 VM work is
-local isolated-guest evidence。Any later hosted push or independent performance dispatch requires explicit
-user authorization and must bind the accepted exact SHA。
+T01 review accepted the existing oversized `architecture.rs` at `4605` semantic test LOC with
+case/support/fixture delta `+112/+0/+0` and numeric `REVIEW_REQUIRED` because integrity、category sum and ratio
+all pass。It also accepted qualifier net `+1153/-20` beyond the original non-Rust forecast because the work
+remains one mode in the existing qualifier with no duplicate harness or helper。
+
+The user explicitly authorizes required non-force pushes，including performance-related pushes；none has
+occurred yet。This does not authorize workflow dispatch or rerun、force-push、PR、tag、package、release or
+publication without separate explicit authority。Every remote action must still bind its accepted exact SHA。
 
 ## Blocker / next action
 
 The M16-T01 capability gate is complete and its frozen IPv4 route、metric、binding、DNS、capture-window and
 hard-kill results are recorded。M16-T02 is the next serial frontier and may compile the approved closed direct/
-managed-TUN configuration from the accepted T01 descendant。Independent T01 Architect/QA evidence review is
-still pending；it must not be reported as passed until completed。No push、dispatch or product work beyond T02
-is authorized by this status transition。
+managed-TUN configuration from the accepted T01 descendant。Architect and QA both returned
+`PASS_WITH_NOTES` on exact candidate `1d7968ea10289dd1dab61873c571058a37df7ef2` with zero
+blocker/major/minor；the notes above are accepted and review bookkeeping is complete。T02 remains ready。
