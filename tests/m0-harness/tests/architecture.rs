@@ -2455,7 +2455,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && !source.to_ascii_lowercase().contains("pktmon")
             && source.matches("$tcpRows++").count() == 8
             && source.matches("Add-TunRoute $").count() == 4
-            && source.matches("Add-TargetAddress $").count() == 2
+            && source.matches("Add-TargetAddress $").count() == 3
             && !source.contains("Remove-OwnedRoute")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"2001:db8::200/128\")")
@@ -2791,8 +2791,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             })
             && source.contains("-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)")
             && !source.contains("Wait-ProcessExit $activeProcess 300")
-            && source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore")
-            && !source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore PersistentStore")
+            && source.contains("[bool]$SkipAsSource = $true")
+            && source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $SkipAsSource -PolicyStore ActiveStore")
+            && !source.contains("New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $SkipAsSource -PolicyStore PersistentStore")
             && source
                 .find("$localRoute = Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefixText -PolicyStore ActiveStore -ErrorAction SilentlyContinue")
                 .zip(source.find("$localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PassThru"))
@@ -2901,12 +2902,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "Wait-ProcessExit $activeProcess 300\nAssert-True (-not $pressureWrite.IsCompleted)",
         ),
         controller.replace(
-            "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore",
-            "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true",
+            "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $SkipAsSource -PolicyStore ActiveStore",
+            "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $SkipAsSource",
         ),
         controller.replace(
             "Assert-True (-not $pressureWrite.IsCompleted)",
-            "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore PersistentStore\nAssert-True (-not $pressureWrite.IsCompleted)",
+            "New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $SkipAsSource -PolicyStore PersistentStore\nAssert-True (-not $pressureWrite.IsCompleted)",
         ),
         controller.replace(
             "$localRoute = Set-NetRoute -InputObject $localRoute -RouteMetric 1 -PassThru",
@@ -3131,24 +3132,20 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("public sealed class Ferrum2UdpProbe")
             .and_then(|(_, tail)| tail.split_once("public sealed class Ferrum2DnsResponder"))
             .map(|(body, _)| body);
-        let cross_process_self_test = source
-            .split_once("function Assert-UdpGateCrossProcess(")
-            .and_then(|(_, tail)| tail.split_once("function Open-TunUdp("))
-            .map(|(body, _)| body);
         let rows = source
             .split_once("        # UDP-01")
             .and_then(|(_, tail)| tail.split_once("        Assert-True ($udpRows -eq 8)"))
             .map(|(body, _)| body);
-        let udp_transport_setup = source
-            .split_once("TCP config marker mismatch")
-            .and_then(|(_, tail)| tail.split_once("        if (-not $udp01DiagnosticOnly) {"))
-            .map(|(body, _)| body);
-        let echo = source
-            .split_once("function Invoke-UdpEchoRow(")
-            .and_then(|(_, tail)| tail.split_once("\ntry {"))
+        let target_address = source
+            .split_once("function Add-TargetAddress(")
+            .and_then(|(_, tail)| tail.split_once("Add-Type -TypeDefinition"))
             .map(|(body, _)| body);
         source.contains("[ValidateSet(\"lifecycle\", \"tcp\", \"udp\")]")
             && source.matches("$udpRows++").count() == 8
+            && !source.contains("FERRUM2_T05_")
+            && !source.contains("m15_udp_")
+            && !source.contains("DiagnosticOnly")
+            && !source.contains("Assert-UdpGateCrossProcess")
             && source.contains("function Open-TunUdp(")
             && source.contains("$client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))")
             && source.contains("function Invoke-UdpEchoRow(")
@@ -3156,152 +3153,46 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("max_udp_buffered_bytes = 4194304")
             && source.contains("tag = \"udp-two-hop\"")
             && source.contains("tag = \"udp-manual\"")
+            && source.contains("tag = \"udp-one\"")
+            && source.contains("server = \"${udpGateAddress}:$gatePortA\"")
+            && source.contains("server = \"${udpGateAddress}:$gatePortB\"")
+            && source.contains("hops = [\"udp-one\", \"udp-inner\"]")
+            && source.contains("outbounds = [\"udp-one\", \"udp-inner\"]")
+            && source.contains("default = \"udp-one\"")
+            && source.matches("outbound = \"udp-one\"").count() == 2
             && source.contains("network = \"udp\"")
             && source.contains("action = \"hijack-dns\"")
             && source.contains("profile=transport functional=16/16 cleanup=PASS")
-            && source.contains("[string]$Labels = \"\"")
-            && source.contains("[bool]$MissingIsZero = $false")
-            && source.contains("Assert-UdpGateCrossProcess $udpGateA $gatePortA")
-            && source.contains("Assert-UdpGateCrossProcess $udpGateB $gatePortB")
-            && source
-                .matches("Assert-UdpGateCrossProcess $udpGateA $gatePortA")
-                .count()
-                == 2
-            && source.contains("Assert-UdpGateCrossProcess $udpGateA $gatePortA 2")
-            && source.contains(
-                "$udp01DiagnosticOnly = $Mode -eq \"udp\" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq \"1\"",
-            )
-            && source
-                .matches("$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"")
-                .count()
-                == 1
-            && source
-                .matches("$env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA")
-                .count()
-                == 1
-            && udp_transport_setup.is_some_and(|setup| {
-                setup
-                    .find("$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"")
-                    .zip(setup.find(
-                        "$env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA",
-                    ))
-                    .zip(setup.find("$activeProcess = Start-Candidate $binary $config"))
-                    .zip(setup.find("$adapter = Wait-AdapterReady $adapterName"))
-                    .zip(setup.find("Assert-UdpGateCrossProcess $udpGateA $gatePortA 2"))
-                    .is_some_and(|((((probe, gate), start), ready), post_wintun)| {
-                        probe < gate && gate < start && start < ready && ready < post_wintun
-                    })
-                    && setup.contains("$udpGateA.WaitEarlyProbe(1000)")
-                    && setup.contains("$udpGateA.EarlyProbes -eq 1")
-                    && setup.contains("$udpGateA.Requests -eq 0")
-                    && setup.contains("$udpGateA.State -eq \"running\"")
-                    && setup.contains("$udpGateA.Fault -eq \"none\"")
-                    && !setup.contains("Stop-Candidate $activeProcess")
-            })
             && gate.is_some_and(|gate| {
-                gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
+                gate.contains(
+                    "public Ferrum2UdpGate(string listenAddress, int listenPort, int upstreamPort)",
+                ) && gate.contains(
+                    "new UdpClient(new IPEndPoint(IPAddress.Parse(listenAddress), listenPort))",
+                ) && !gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
                     && gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))")
-                    && gate.contains("private readonly Task worker;")
-                    && gate.contains("private int selfTests;")
-                    && gate.contains("public int SelfTests")
-                    && gate.contains("private int socketProbes;")
-                    && gate.contains("public int SocketProbes")
-                    && gate.contains("private int stdProbes;")
-                    && gate.contains("public int StdProbes")
-                    && gate.contains("private int earlyProbes;")
-                    && gate.contains("public int EarlyProbes")
-                    && gate.contains("public bool WaitEarlyProbe(int milliseconds)")
-                    && gate.contains("public bool WaitSelfTest(int milliseconds)")
-                    && gate.contains("request.Buffer.Length == 0")
-                    && gate.contains("Interlocked.Increment(ref selfTests)")
-                    && gate.contains("request.Buffer.Length == 8")
-                    && gate.contains("Interlocked.Increment(ref socketProbes)")
-                    && gate.contains("socketProbe.Set()")
-                    && gate.contains("Interlocked.Increment(ref stdProbes)")
-                    && gate.contains("stdProbe.Set()")
-                    && gate.contains("Interlocked.Increment(ref earlyProbes)")
-                    && gate.contains("earlyProbe.Set()")
                     && gate.contains("await upstream.ReceiveAsync()")
                     && gate.contains("ReplayFirstToLatest")
-                    && !gate.contains("public bool SelfTest()")
             })
-            && cross_process_self_test.is_some_and(|self_test| {
-                self_test.contains("[int]$ExpectedSelfTests = 1")
-                    && self_test.contains("[Diagnostics.ProcessStartInfo]::new()")
-                    && self_test.contains("(Get-Process -Id $PID).Path")
-                    && self_test.contains("[byte[]]::new(0)")
-                    && self_test.contains("[Net.IPAddress]::Loopback")
-                    && self_test.contains("$process.WaitForExit(5000)")
-                    && self_test.contains("$process.Kill($true)")
-                    && self_test.contains("$Gate.SelfTests -lt $ExpectedSelfTests")
-                    && self_test.contains("$Gate.SelfTests -eq $ExpectedSelfTests")
-                    && self_test.contains("$Gate.SocketProbes -eq 0")
-                    && self_test.contains("$Gate.StdProbes -eq 0")
-                    && self_test.contains("$ExpectedSelfTests -eq 1")
-                    && self_test.contains("$Gate.EarlyProbes -eq 0")
+            && target_address.is_some_and(|target| {
+                target.contains("[bool]$SkipAsSource = $true")
+                    && target.contains("-SkipAsSource $SkipAsSource -PolicyStore ActiveStore")
             })
+            && source
+                .find("$udpGateAddress = \"192.0.2.250\"")
+                .zip(source.find("[void](Add-TargetAddress $udpGateAddress $false)"))
+                .zip(source.find(
+                    "$udpGateA = [Ferrum2UdpGate]::new($udpGateAddress, $gatePortA, $serverPortA)",
+                ))
+                .zip(source.find(
+                    "$udpGateB = [Ferrum2UdpGate]::new($udpGateAddress, $gatePortB, $serverPortB)",
+                ))
+                .is_some_and(|(((declared, address), gate_a), gate_b)| {
+                    declared < address && address < gate_a && gate_a < gate_b
+                })
             && probe.is_some_and(|probe| {
                 probe.contains("new UdpClient(new IPEndPoint(IPAddress.Parse(address), port))")
                     && probe.contains("await socket.ReceiveAsync()")
                     && probe.contains("await socket.SendAsync(request.Buffer")
-            })
-            && echo.is_some_and(|echo| {
-                echo.contains("ferrum2_tun_packets_accepted")
-                    && echo.contains("ferrum2_udp_datagrams")
-                    && echo.contains(
-                        "role=\"client\",direction=\"client_to_target\",outcome=\"accepted\"",
-                    )
-                    && echo.contains("$tunAcceptedDelta")
-                    && echo.contains("$udpAcceptedDelta")
-                    && echo.contains("$firstUdpAcceptedDelta")
-                    && echo.contains("$maxActiveSessions")
-                    && echo.contains("$selfTestsBefore = $Gate.SelfTests")
-                    && echo.contains("$socketProbesBefore = $Gate.SocketProbes")
-                    && echo.contains("$stdProbesBefore = $Gate.StdProbes")
-                    && echo.contains("$earlyProbesBefore = $Gate.EarlyProbes")
-                    && echo.contains("$Gate.WaitEarlyProbe(1000)")
-                    && echo.contains("$socketProbesBefore -eq 0")
-                    && echo.contains("$stdProbesBefore -eq 0")
-                    && echo.contains("$expectedEarlyProbes = if ($DiagnosticOnly) { 1 } else { 0 }")
-                    && echo.contains("$earlyProbesBefore -eq $expectedEarlyProbes")
-                    && echo.contains("socket_probes=$($Gate.SocketProbes)")
-                    && echo.contains("std_probes=$($Gate.StdProbes)")
-                    && echo.contains("early_probes=$($Gate.EarlyProbes)")
-                    && echo.contains("early_probe=$earlyProbe")
-                    && echo.contains("self_tests=$($Gate.SelfTests)")
-                    && echo.contains("self_test_delta=$selfTestDelta")
-                    && echo.contains("socket_probe_delta=$socketProbeDelta")
-                    && echo.contains("std_probe_delta=$stdProbeDelta")
-                    && echo.contains("socket_probe=$socketProbe")
-                    && echo.contains("std_probe=$stdProbe")
-                    && echo.contains("gate_state=$($Gate.State)")
-                    && echo.contains("gate_fault=$($Gate.Fault)")
-                    && echo.contains("probe_fault=$($probe.Fault)")
-                    && echo
-                        .find("$socketProbesBefore -eq 0")
-                        .zip(echo.find("[void]$client.Send($Payload, $Payload.Length)"))
-                        .is_some_and(|(baseline, send)| baseline < send)
-                    && echo
-                        .find("$earlyProbesBefore -eq $expectedEarlyProbes")
-                        .zip(echo.find("[void]$client.Send($Payload, $Payload.Length)"))
-                        .is_some_and(|(baseline, send)| baseline < send)
-                    && echo.contains("[bool]$DiagnosticOnly = $false")
-                    && echo.contains(
-                        "m15_windows_tun_udp01_diag status=OBSERVED result=complete",
-                    )
-                    && echo.contains("throw \"UDP-01 diagnostic sentinel\"")
-                    && echo
-                        .find("Assert-True $gateOpened")
-                        .zip(echo.find("m15_windows_tun_udp01_diag status=OBSERVED"))
-                        .is_some_and(|(gate, marker)| gate < marker)
-                    && echo
-                        .find("UDP echo mismatch")
-                        .zip(echo.find("m15_windows_tun_udp01_diag status=OBSERVED"))
-                        .is_some_and(|(response, marker)| response < marker)
-                    && echo
-                        .find("UDP witness faulted")
-                        .zip(echo.find("m15_windows_tun_udp01_diag status=OBSERVED"))
-                        .is_some_and(|(witness, marker)| witness < marker)
             })
             && rows.is_some_and(|rows| {
                 for id in 2..=8 {
@@ -3318,12 +3209,6 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 && rows.contains("[byte[]]::new(2000)")
                 && rows.contains("$saturatedClients.Count -eq 4")
                 && rows.contains("$udpGateA.ReplayFirstToLatest()")
-                && rows.contains(
-                    "Invoke-UdpEchoRow $targets[0] $ports[0] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes(\"udp-01-one-hop\")) $udp01DiagnosticOnly",
-                )
-                && rows
-                    .find("throw \"UDP-01 diagnostic sentinel\"")
-                    .is_none()
             })
     };
     assert!(
@@ -3337,78 +3222,27 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "await socket.ReceiveAsync()",
         ),
         controller.replace(
-            "public bool WaitSelfTest(int milliseconds)",
-            "public bool WaitSelfTestBypassed(int milliseconds)",
-        ),
-        controller.replace("$process.WaitForExit(5000)", "$true"),
-        controller.replace("[int]$ExpectedSelfTests = 1", "[int]$ExpectedSelfTests = 2"),
-        controller.replace("$Gate.SelfTests -lt $ExpectedSelfTests", "$false"),
-        controller.replace("$Gate.SelfTests -eq $ExpectedSelfTests", "$true"),
-        controller.replace("$Gate.SocketProbes -eq 0", "$true"),
-        controller.replace("$Gate.StdProbes -eq 0", "$true"),
-        controller.replace("$Gate.EarlyProbes -eq 0", "$true"),
-        controller.replace("$udpGateA.EarlyProbes -eq 1", "$true"),
-        controller.replace(
-            "Assert-UdpGateCrossProcess $udpGateA $gatePortA 2",
-            "Assert-UdpGateCrossProcess $udpGateA $gatePortA 1",
+            "$udpGateAddress = \"192.0.2.250\"",
+            "$udpGateAddress = \"127.0.0.1\"",
         ),
         controller.replace(
-            "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
-            "$activeProcess = Start-Candidate $binary $config\n            $env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
+            "[void](Add-TargetAddress $udpGateAddress $false)",
+            "[void](Add-TargetAddress $udpGateAddress $true)",
         ),
         controller.replace(
-            "Assert-UdpGateCrossProcess $udpGateA $gatePortA 2",
-            "Stop-Candidate $activeProcess\n            Assert-UdpGateCrossProcess $udpGateA $gatePortA 2",
-        ),
-        controller.replace("Interlocked.Increment(ref selfTests)", ""),
-        controller.replace("Interlocked.Increment(ref socketProbes)", ""),
-        controller.replace("Interlocked.Increment(ref stdProbes)", ""),
-        controller.replace("Interlocked.Increment(ref earlyProbes)", ""),
-        controller.replace("$Gate.WaitEarlyProbe(1000)", "$true"),
-        controller.replace("$selfTestsBefore = $Gate.SelfTests", "$selfTestsBefore = 0"),
-        controller.replace(
-            "$socketProbesBefore = $Gate.SocketProbes",
-            "$socketProbesBefore = 0",
-        ),
-        controller.replace("$stdProbesBefore = $Gate.StdProbes", "$stdProbesBefore = 0"),
-        controller.replace(
-            "$earlyProbesBefore = $Gate.EarlyProbes",
-            "$earlyProbesBefore = 0",
-        ),
-        controller.replace("$socketProbesBefore -eq 0", "$true"),
-        controller.replace("$stdProbesBefore -eq 0", "$true"),
-        controller.replace("$earlyProbesBefore -eq $expectedEarlyProbes", "$true"),
-        controller.replace(
-            "socket_probes=$($Gate.SocketProbes)",
-            "socket_probes=hidden",
-        ),
-        controller.replace("socket_probe=$socketProbe", "socket_probe=bypassed"),
-        controller.replace("std_probe=$stdProbe", "std_probe=bypassed"),
-        controller.replace("early_probe=$earlyProbe", "early_probe=bypassed"),
-        controller.replace(
-            "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
-            "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"0\"",
+            "IPAddress.Parse(listenAddress), listenPort",
+            "IPAddress.Loopback, listenPort",
         ),
         controller.replace(
-            "$env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA",
-            "$env:FERRUM2_T05_UDP_GATE_PORT = \"0\"",
+            "server = \"${udpGateAddress}:$gatePortA\"",
+            "server = \"127.0.0.1:$gatePortA\"",
         ),
-        controller.replace("$firstUdpAcceptedDelta", "$ignoredFirstUdpDelta"),
+        controller.replace("outbound = \"udp-one\"", "outbound = \"one\""),
         controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
         controller.replace(
             "Start-Sleep -Milliseconds 2500",
             "Start-Sleep -Milliseconds 1",
         ),
-        controller.replace("$udpAcceptedDelta", "$ignoredUdpDelta"),
-        controller.replace(
-            "[bool]$DiagnosticOnly = $false",
-            "[bool]$DiagnosticOnly = $true",
-        ),
-        controller.replace(
-            "m15_windows_tun_udp01_diag status=OBSERVED result=complete",
-            "m15_windows_tun_udp01_diag status=BYPASSED",
-        ),
-        controller.replace("throw \"UDP-01 diagnostic sentinel\"", "return"),
         controller.replace(
             "profile=transport functional=16/16 cleanup=PASS",
             "profile=transport functional=8/8 cleanup=PASS",
@@ -3421,43 +3255,6 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     }
     let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
         .expect("client composition");
-    let has_pre_runtime_udp_probe = |composition: &str| {
-        let run = composition
-            .split_once("pub(crate) fn run(config: ValidatedClientConfig)")
-            .and_then(|(_, tail)| tail.split_once("async fn run_async("))
-            .map(|(body, _)| body);
-        run.is_some_and(|run| {
-            run.contains("FERRUM2_T05_UDP_SOCKET_PROBE")
-                && run.contains("FERRUM2_T05_UDP_GATE_PORT")
-                && run.contains("std::net::UdpSocket::bind")
-                && run.contains("socket.send(b\"f2-early\")")
-                && run.contains("m15_udp_early_diag send={send_category}")
-                && run
-                    .find("socket.send(b\"f2-early\")")
-                    .zip(run.find("tokio::runtime::Builder::new_multi_thread()"))
-                    .is_some_and(|(probe, runtime)| probe < runtime)
-        })
-    };
-    assert!(
-        has_pre_runtime_udp_probe(&client),
-        "the diagnostic same-executable UDP witness must run before Tokio and every process root"
-    );
-    for mutation in [
-        client.replace("socket.send(b\"f2-early\")", "Ok(8)"),
-        client.replace(
-            "if std::env::var_os(\"FERRUM2_T05_UDP_SOCKET_PROBE\")",
-            "let _early_runtime_boundary = tokio::runtime::Builder::new_multi_thread();\n    if std::env::var_os(\"FERRUM2_T05_UDP_SOCKET_PROBE\")",
-        ),
-        client.replace(
-            "m15_udp_early_diag send={send_category}",
-            "m15_udp_early_diag send={sent:?}",
-        ),
-    ] {
-        assert!(
-            !has_pre_runtime_udp_probe(&mutation),
-            "early same-executable UDP mutation must sever the pre-runtime witness"
-        );
-    }
     let composes_tun_tcp = |composition: &str, adapter: &str, routing: &str| {
         composition.contains("roots.push(tun::process_root(")
             && composition.contains("Arc::clone(&context)")
@@ -3533,8 +3330,6 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && owner.contains("source != tuple.target")
             && adapter.contains("enum TunUdpTerminal")
             && adapter.contains("move |candidate, cancellation|")
-            && adapter.contains("udp_sources.contains(&tuple.source().ip())")
-            && !adapter.contains("server.ip().is_loopback()")
             && adapter.contains("select_udp_terminal(")
             && adapter.contains("candidate.commit(terminal, selected_bound).await")
             && adapter.contains("run_udp_route(")
@@ -3542,29 +3337,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && adapter.contains("run_udp_reject(")
             && association.contains("fn prepare_application_request(")
             && association.contains("fn prepare_application_response(")
-            && association.contains("FERRUM2_T05_UDP_SOCKET_PROBE")
-            && association.contains("FERRUM2_T05_UDP_GATE_PORT")
-            && association.contains("upstream.local_addr()")
-            && association.contains("upstream.peer_addr()")
-            && association
-                .contains("m15_udp_socket_diag local={local_category} local_port={local_port_category} peer={peer_category} tokio_send={tokio_send_category} std_send={std_send_category}")
-            && association.contains("peer_category == \"gate_a\"")
-            && association.contains("peer.port() == gate_port")
-            && association.contains("first_server.port() == gate_port")
-            && association.contains("upstream.send(b\"f2-probe\").await")
-            && association.contains("std::net::UdpSocket::bind")
-            && association.contains("socket.send(b\"f2-std!!\")")
-            && association.contains("local.port() == peer.port()")
-            && association.contains("Ok(8)")
-            && !association.contains("upstream.send(&[]).await")
-            && !association.contains("local={local}")
-            && !association.contains("peer={peer}")
             && adapter.contains("association.prepare_application_request(")
             && adapter.contains("association.prepare_application_response(")
-            && adapter.contains("m15_udp_wire_diag wire={wire_category} send={send_category}")
-            && adapter.contains("wire_len == 0")
-            && adapter.contains("Ok(sent) if *sent == wire_len")
-            && !adapter.contains("wire={wire_len}")
             && client_socks.contains("prepared.prepare_application_request(")
             && client_socks.contains("prepared.prepare_application_response(")
     };
@@ -3594,22 +3368,6 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         (
             tun_udp.clone(),
             client_tun.replace(
-                "m15_udp_wire_diag wire={wire_category} send={send_category}",
-                "m15_udp_wire_diag wire={wire_len} send={sent:?}",
-            ),
-            client_udp.clone(),
-        ),
-        (
-            tun_udp.clone(),
-            client_tun.replace(
-                "udp_sources.contains(&tuple.source().ip())",
-                "udp_sources.is_empty()",
-            ),
-            client_udp.clone(),
-        ),
-        (
-            tun_udp.clone(),
-            client_tun.replace(
                 "candidate.commit(terminal, selected_bound).await",
                 "Err(ferrum2_tun::UdpCommitError::Rejected)",
             ),
@@ -3619,29 +3377,6 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             tun_udp.clone(),
             client_tun.replace("run_udp_dns(", "run_udp_route("),
             client_udp.clone(),
-        ),
-        (
-            tun_udp.clone(),
-            client_tun.clone(),
-            client_udp.replace("peer.port() == gate_port", "true"),
-        ),
-        (
-            tun_udp.clone(),
-            client_tun.clone(),
-            client_udp.replace("first_server.port() == gate_port", "false"),
-        ),
-        (
-            tun_udp.clone(),
-            client_tun.clone(),
-            client_udp.replace("upstream.send(b\"f2-probe\").await", "Ok(8)"),
-        ),
-        (
-            tun_udp.clone(),
-            client_tun.clone(),
-            client_udp.replace(
-                "m15_udp_socket_diag local={local_category} local_port={local_port_category} peer={peer_category} tokio_send={tokio_send_category} std_send={std_send_category}",
-                "m15_udp_socket_diag local={local} peer={peer}",
-            ),
         ),
         (
             tun_udp.clone(),

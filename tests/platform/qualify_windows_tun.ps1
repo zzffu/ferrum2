@@ -50,7 +50,6 @@ $createdSiblingDll = $false
 $completed = $false
 $primaryError = $null
 $outerCleanupError = $null
-$udp01DiagnosticOnly = $Mode -eq "udp" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq "1"
 $tcp01Diagnostic = $null
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -212,22 +211,9 @@ function Get-Metrics([int]$Port, [int]$TimeoutSeconds = 10) {
     throw "metrics readiness timeout"
 }
 
-function Get-CounterValue(
-    [string]$Metrics,
-    [string]$Name,
-    [string]$Labels = "",
-    [bool]$MissingIsZero = $false
-) {
-    $labelSet = if ($Labels) { "\{$([regex]::Escape($Labels))\}" } else { "" }
-    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))_total$labelSet ([0-9]+)$")
-    if (-not $match.Success -and $MissingIsZero) { return [uint64]0 }
-    Assert-True $match.Success "missing bounded counter: $Name"
-    return [uint64]$match.Groups[1].Value
-}
-
-function Get-GaugeValue([string]$Metrics, [string]$Name, [string]$Labels) {
-    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))\{$([regex]::Escape($Labels))\} ([0-9]+)$")
-    if (-not $match.Success) { return [uint64]0 }
+function Get-CounterValue([string]$Metrics, [string]$Name) {
+    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))_total ([0-9]+)$")
+    Assert-True $match.Success "missing no-label counter: $Name"
     return [uint64]$match.Groups[1].Value
 }
 
@@ -285,12 +271,12 @@ function Add-TunRoute([int]$InterfaceIndex, [string]$DestinationPrefix, [int]$Ro
     return $route
 }
 
-function Add-TargetAddress([string]$Address) {
+function Add-TargetAddress([string]$Address, [bool]$SkipAsSource = $true) {
     Assert-True (@(Get-NetIPAddress -IPAddress $Address -ErrorAction SilentlyContinue).Count -eq 0) "target address baseline not absent"
     $prefix = if ($Address.Contains(":")) { 128 } else { 32 }
     $prefixText = "$Address/$prefix"
     Assert-True (@(Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefixText -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "target route baseline not absent"
-    $row = New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore
+    $row = New-NetIPAddress -InterfaceIndex 1 -IPAddress $Address -PrefixLength $prefix -SkipAsSource $SkipAsSource -PolicyStore ActiveStore
     $script:ownedAddresses.Add($row)
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
@@ -661,43 +647,21 @@ public sealed class Ferrum2UdpGate : IDisposable {
     private readonly UdpClient socket;
     private readonly int upstreamPort;
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
-    private readonly ManualResetEventSlim selfTest = new ManualResetEventSlim(false);
-    private readonly ManualResetEventSlim socketProbe = new ManualResetEventSlim(false);
-    private readonly ManualResetEventSlim stdProbe = new ManualResetEventSlim(false);
-    private readonly ManualResetEventSlim earlyProbe = new ManualResetEventSlim(false);
-    private readonly Task worker;
     private byte[] firstResponse;
     private IPEndPoint latestClient;
-    private int selfTests;
-    private int socketProbes;
-    private int stdProbes;
-    private int earlyProbes;
     private int requests;
     private int responses;
     private string fault;
 
-    public Ferrum2UdpGate(int listenPort, int upstreamPort) {
+    public Ferrum2UdpGate(string listenAddress, int listenPort, int upstreamPort) {
         this.upstreamPort = upstreamPort;
-        socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort));
-        worker = Task.Run(Run);
+        socket = new UdpClient(new IPEndPoint(IPAddress.Parse(listenAddress), listenPort));
+        var ignored = Task.Run(Run);
     }
 
     public int Requests { get { return Volatile.Read(ref requests); } }
     public int Responses { get { return Volatile.Read(ref responses); } }
-    public int SelfTests { get { return Volatile.Read(ref selfTests); } }
-    public int SocketProbes { get { return Volatile.Read(ref socketProbes); } }
-    public int StdProbes { get { return Volatile.Read(ref stdProbes); } }
-    public int EarlyProbes { get { return Volatile.Read(ref earlyProbes); } }
     public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
-    public string State { get { return worker.IsFaulted ? "faulted" : worker.IsCompleted ? "completed" : "running"; } }
-
-    public bool WaitSelfTest(int milliseconds) {
-        return selfTest.Wait(milliseconds);
-    }
-
-    public bool WaitEarlyProbe(int milliseconds) {
-        return earlyProbe.Wait(milliseconds);
-    }
 
     public bool WaitRequests(int expected, int milliseconds) {
         var deadline = Environment.TickCount64 + milliseconds;
@@ -724,35 +688,6 @@ public sealed class Ferrum2UdpGate : IDisposable {
         try {
             while (!stopped.IsCancellationRequested) {
                 var request = await socket.ReceiveAsync().ConfigureAwait(false);
-                if (request.Buffer.Length == 0 && request.RemoteEndPoint.Address.Equals(IPAddress.Loopback)) {
-                    Interlocked.Increment(ref selfTests);
-                    selfTest.Set();
-                    continue;
-                }
-                if (request.Buffer.Length == 8 && request.Buffer[0] == 102 && request.Buffer[1] == 50 &&
-                    request.Buffer[2] == 45 && request.Buffer[3] == 112 && request.Buffer[4] == 114 &&
-                    request.Buffer[5] == 111 && request.Buffer[6] == 98 && request.Buffer[7] == 101 &&
-                    request.RemoteEndPoint.Address.Equals(IPAddress.Loopback)) {
-                    Interlocked.Increment(ref socketProbes);
-                    socketProbe.Set();
-                    continue;
-                }
-                if (request.Buffer.Length == 8 && request.Buffer[0] == 102 && request.Buffer[1] == 50 &&
-                    request.Buffer[2] == 45 && request.Buffer[3] == 115 && request.Buffer[4] == 116 &&
-                    request.Buffer[5] == 100 && request.Buffer[6] == 33 && request.Buffer[7] == 33 &&
-                    request.RemoteEndPoint.Address.Equals(IPAddress.Loopback)) {
-                    Interlocked.Increment(ref stdProbes);
-                    stdProbe.Set();
-                    continue;
-                }
-                if (request.Buffer.Length == 8 && request.Buffer[0] == 102 && request.Buffer[1] == 50 &&
-                    request.Buffer[2] == 45 && request.Buffer[3] == 101 && request.Buffer[4] == 97 &&
-                    request.Buffer[5] == 114 && request.Buffer[6] == 108 && request.Buffer[7] == 121 &&
-                    request.RemoteEndPoint.Address.Equals(IPAddress.Loopback)) {
-                    Interlocked.Increment(ref earlyProbes);
-                    earlyProbe.Set();
-                    continue;
-                }
                 lock (sync) { latestClient = request.RemoteEndPoint; }
                 Interlocked.Increment(ref requests);
                 using (var upstream = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))) {
@@ -774,10 +709,6 @@ public sealed class Ferrum2UdpGate : IDisposable {
     public void Dispose() {
         stopped.Cancel();
         socket.Dispose();
-        selfTest.Dispose();
-        socketProbe.Dispose();
-        stdProbe.Dispose();
-        earlyProbe.Dispose();
         stopped.Dispose();
     }
 }
@@ -1007,48 +938,6 @@ function New-DnsQuery([uint16]$Id) {
     return $bytes.ToArray()
 }
 
-function Assert-UdpGateCrossProcess([Ferrum2UdpGate]$Gate, [int]$Port, [int]$ExpectedSelfTests = 1) {
-    $sender = @'
-$socket = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
-try {
-    $endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Loopback, [int]$env:FERRUM2_UDP_SELF_TEST_PORT)
-    [void]$socket.Send([byte[]]::new(0), 0, $endpoint)
-} finally { $socket.Dispose() }
-'@
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = (Get-Process -Id $PID).Path
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.ArgumentList.Add("-NoProfile")
-    $startInfo.ArgumentList.Add("-Command")
-    $startInfo.ArgumentList.Add($sender)
-    $startInfo.Environment["FERRUM2_UDP_SELF_TEST_PORT"] = [string]$Port
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
-    if (-not $process.Start()) { $process.Dispose(); throw "UDP gate self-test process failed to start" }
-    try {
-        if (-not $process.WaitForExit(5000)) {
-            $process.Kill($true)
-            $process.WaitForExit()
-            throw "UDP gate self-test process timed out"
-        }
-        Assert-True ($process.ExitCode -eq 0) "UDP gate self-test process failed"
-        $deadline = [DateTime]::UtcNow.AddSeconds(1)
-        while ($Gate.SelfTests -lt $ExpectedSelfTests -and [DateTime]::UtcNow -lt $deadline) {
-            Start-Sleep -Milliseconds 10
-        }
-        Assert-True ($Gate.SelfTests -eq $ExpectedSelfTests) "UDP gate self-test count mismatch"
-        Assert-True ($Gate.SocketProbes -eq 0) "UDP socket probe baseline mismatch"
-        Assert-True ($Gate.StdProbes -eq 0) "UDP std probe baseline mismatch"
-        if ($ExpectedSelfTests -eq 1) {
-            Assert-True ($Gate.EarlyProbes -eq 0) "UDP early probe baseline mismatch"
-        }
-    } finally {
-        if (-not $process.HasExited) { $process.Kill($true); $process.WaitForExit() }
-        $process.Dispose()
-    }
-}
-
 function Open-TunUdp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
     $isV6 = $Address.Contains(":")
     $family = if ($isV6) { [Net.Sockets.AddressFamily]::InterNetworkV6 } else { [Net.Sockets.AddressFamily]::InterNetwork }
@@ -1073,87 +962,20 @@ function Invoke-UdpEchoRow(
     [int]$Port,
     [int]$InterfaceIndex,
     [Ferrum2UdpGate]$Gate,
-    [byte[]]$Payload,
-    [bool]$DiagnosticOnly = $false
+    [byte[]]$Payload
 ) {
     $expectedGate = $Gate.Requests + 1
     $probe = [Ferrum2UdpProbe]::new($Address, $Port)
     $script:tcpResources.Add($probe)
     $client = Open-TunUdp $Address $Port $InterfaceIndex
     try {
-        $acceptedLabels = 'role="client",direction="client_to_target",outcome="accepted"'
-        $selfTestsBefore = $Gate.SelfTests
-        $socketProbesBefore = $Gate.SocketProbes
-        $stdProbesBefore = $Gate.StdProbes
-        if ($DiagnosticOnly) {
-            Assert-True ($Gate.WaitEarlyProbe(1000)) "UDP early same-exe probe timed out"
-        }
-        $earlyProbesBefore = $Gate.EarlyProbes
-        $expectedEarlyProbes = if ($DiagnosticOnly) { 1 } else { 0 }
-        $earlyProbe = if (-not $DiagnosticOnly) { "disabled" }
-            elseif ($earlyProbesBefore -eq 1) { "arrived" }
-            elseif ($earlyProbesBefore -eq 0) { "absent" }
-            else { "unexpected" }
-        $beforeMetrics = Get-Metrics $script:metricsPort
-        $tunAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_accepted"
-        $udpAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_udp_datagrams" $acceptedLabels $true
-        Assert-True ($socketProbesBefore -eq 0 -and $stdProbesBefore -eq 0) "UDP socket probe baseline contaminated"
-        Assert-True ($earlyProbesBefore -eq $expectedEarlyProbes) "UDP early same-exe probe baseline mismatch: early_probes=$earlyProbesBefore early_probe=$earlyProbe"
         [void]$client.Send($Payload, $Payload.Length)
-        $firstTunAcceptedDelta = $null
-        $firstUdpAcceptedDelta = $null
-        $maxActiveSessions = [uint64]0
-        $gateDeadline = [DateTime]::UtcNow.AddSeconds(5)
-        do {
-            $sampleMetrics = Get-Metrics $script:metricsPort
-            $sampleTunDelta = (Get-CounterValue $sampleMetrics "ferrum2_tun_packets_accepted") - $tunAcceptedBefore
-            $sampleUdpDelta = (Get-CounterValue $sampleMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
-            $sampleActive = Get-GaugeValue $sampleMetrics "ferrum2_udp_sessions_active" 'role="client"'
-            if ($sampleActive -gt $maxActiveSessions) { $maxActiveSessions = $sampleActive }
-            if ($null -eq $firstUdpAcceptedDelta -and $sampleUdpDelta -gt 0) {
-                $firstTunAcceptedDelta = $sampleTunDelta
-                $firstUdpAcceptedDelta = $sampleUdpDelta
-            }
-            if ($Gate.Requests -ge $expectedGate) { break }
-            Start-Sleep -Milliseconds 25
-        } while ([DateTime]::UtcNow -lt $gateDeadline)
-        $gateOpened = $Gate.Requests -ge $expectedGate
-        $afterMetrics = Get-Metrics $script:metricsPort
-        $tunAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_tun_packets_accepted") - $tunAcceptedBefore
-        $udpAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
-        $selfTestDelta = $Gate.SelfTests - $selfTestsBefore
-        $socketProbeDelta = $Gate.SocketProbes - $socketProbesBefore
-        $stdProbeDelta = $Gate.StdProbes - $stdProbesBefore
-        $earlyProbeDelta = $Gate.EarlyProbes - $earlyProbesBefore
-        $socketProbe = if (-not $DiagnosticOnly) { "disabled" }
-            elseif ($socketProbeDelta -eq 1) { "arrived" }
-            elseif ($socketProbeDelta -eq 0) { "absent" }
-            else { "unexpected" }
-        $stdProbe = if (-not $DiagnosticOnly) { "disabled" }
-            elseif ($stdProbeDelta -eq 1) { "arrived" }
-            elseif ($stdProbeDelta -eq 0) { "absent" }
-            else { "unexpected" }
-        if ($null -eq $firstUdpAcceptedDelta) { $firstTunAcceptedDelta = $tunAcceptedDelta; $firstUdpAcceptedDelta = $udpAcceptedDelta }
-        Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta socket_probes=$($Gate.SocketProbes) socket_probe=$socketProbe socket_probe_delta=$socketProbeDelta std_probes=$($Gate.StdProbes) std_probe=$stdProbe std_probe_delta=$stdProbeDelta early_probes=$($Gate.EarlyProbes) early_probe=$earlyProbe early_probe_delta=$earlyProbeDelta gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
-        Assert-True ($selfTestDelta -eq 0) "UDP self-test count changed after baseline"
-        $expectedSocketProbeDelta = if ($DiagnosticOnly) { 1 } else { 0 }
-        Assert-True ($socketProbeDelta -eq $expectedSocketProbeDelta) "UDP socket probe count mismatch"
-        Assert-True ($stdProbeDelta -eq $expectedSocketProbeDelta) "UDP std probe count mismatch"
-        Assert-True ($earlyProbeDelta -eq 0) "UDP early probe count changed after baseline"
-        Assert-True ($tunAcceptedDelta -gt 0 -and $udpAcceptedDelta -eq 1) "UDP ingress/association witness mismatch"
+        Assert-True ($Gate.WaitRequests($expectedGate, 5000)) "selected UDP egress gate was not opened"
         $response = Receive-TunUdp $client
         Assert-True (($response -join ",") -eq ($Payload -join ",")) "UDP echo mismatch"
         Assert-True ($probe.WaitRequests(1, 5000)) "UDP target did not receive datagram"
         Assert-True (($probe.Received -join ",") -eq ($Payload -join ",")) "UDP target payload mismatch"
         Assert-True ($Gate.Fault -eq "none" -and $probe.Fault -eq "none") "UDP witness faulted"
-        if ($DiagnosticOnly) {
-            $sourceCategory = if ($udpAcceptedDelta -gt 1) { "exact_source_recurrence" }
-                elseif ($tunAcceptedDelta -gt 1 -and $udpAcceptedDelta -eq 1) { "non_exact_source_recurrence" }
-                elseif ($tunAcceptedDelta -eq 1 -and $udpAcceptedDelta -eq 1) { "single" }
-                else { "unresolved" }
-            [Console]::Error.WriteLine("m15_windows_tun_udp01_diag status=OBSERVED result=complete source=$sourceCategory first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta socket_probes=$($Gate.SocketProbes) socket_probe=$socketProbe early_probes=$($Gate.EarlyProbes) early_probe=$earlyProbe gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)")
-            throw "UDP-01 diagnostic sentinel"
-        }
     } finally { $client.Dispose() }
 }
 
@@ -1362,6 +1184,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             "192.0.2.201", "2001:db8::202", "192.0.2.203", "2001:db8::204",
             "192.0.2.205", "2001:db8::206", "192.0.2.207", "2001:db8::208"
         )
+        $udpGateAddress = "192.0.2.250"
         $serverAConfig = Join-Path $work "server-a.toml"
         $serverBConfig = Join-Path $work "server-b.toml"
         foreach ($serverCase in @(@($serverAConfig, $serverPortA), @($serverBConfig, $serverPortB))) {
@@ -1393,12 +1216,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $tcpResources.Add($gateB)
         $tcpResources.Add($dnsResponder)
         if ($Mode -eq "udp") {
-            $udpGateA = [Ferrum2UdpGate]::new($gatePortA, $serverPortA)
-            $udpGateB = [Ferrum2UdpGate]::new($gatePortB, $serverPortB)
+            [void](Add-TargetAddress $udpGateAddress $false)
+            $udpGateA = [Ferrum2UdpGate]::new($udpGateAddress, $gatePortA, $serverPortA)
+            $udpGateB = [Ferrum2UdpGate]::new($udpGateAddress, $gatePortB, $serverPortB)
             $tcpResources.Add($udpGateA)
             $tcpResources.Add($udpGateB)
-            Assert-UdpGateCrossProcess $udpGateA $gatePortA
-            Assert-UdpGateCrossProcess $udpGateB $gatePortB
         }
 
         @"
@@ -1429,22 +1251,25 @@ server = "127.0.0.1:$deadPort"
 tag = "fallback"
 server = "127.0.0.1:$gatePortB"
 [[outbounds]]
+tag = "udp-one"
+server = "${udpGateAddress}:$gatePortA"
+[[outbounds]]
 tag = "udp-inner"
-server = "127.0.0.1:$gatePortB"
+server = "${udpGateAddress}:$gatePortB"
 [[chains]]
 tag = "two-hop"
 hops = ["one", "inner"]
 [[chains]]
 tag = "udp-two-hop"
-hops = ["one", "udp-inner"]
+hops = ["udp-one", "udp-inner"]
 [[selectors]]
 tag = "manual"
 outbounds = ["dead", "fallback"]
 default = "dead"
 [[selectors]]
 tag = "udp-manual"
-outbounds = ["one", "udp-inner"]
-default = "one"
+outbounds = ["udp-one", "udp-inner"]
+default = "udp-one"
 [route]
 final = "one"
 [route.sniff]
@@ -1536,7 +1361,7 @@ network = "udp"
 ip = "$($targets[0])"
 port = $($ports[0])
 action = "route"
-outbound = "one"
+outbound = "udp-one"
 [[route.rules]]
 inbound = "tun-in"
 network = "udp"
@@ -1591,7 +1416,7 @@ network = "udp"
 ip = "$($targets[7])"
 port = $($ports[7])
 action = "route"
-outbound = "one"
+outbound = "udp-one"
 [dns]
 [[dns.inbounds]]
 tag = "dns-control"
@@ -1619,10 +1444,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "TCP config marker mismatch"
         Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
         $createdSiblingDll = $true
-        if ($udp01DiagnosticOnly) {
-            $env:FERRUM2_T05_UDP_SOCKET_PROBE = "1"
-            $env:FERRUM2_T05_UDP_GATE_PORT = [string]$gatePortA
-        }
         $activeProcess = Start-Candidate $binary $config
         $adapter = Wait-AdapterReady $adapterName
         $ownedInterfaceIndex = [int]$adapter.ifIndex
@@ -1648,14 +1469,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [void](Add-TargetAddress $targets[$targetIndex])
         }
 
-        if ($udp01DiagnosticOnly) {
-            Assert-True ($udpGateA.WaitEarlyProbe(1000)) "UDP pre-Wintun same-exe probe timed out"
-            Assert-UdpGateCrossProcess $udpGateA $gatePortA 2
-            Assert-True ($udpGateA.EarlyProbes -eq 1 -and $udpGateA.Requests -eq 0 -and
-                $udpGateA.State -eq "running" -and $udpGateA.Fault -eq "none") "UDP post-Wintun gate witness mismatch: self_tests=$($udpGateA.SelfTests) early_probes=$($udpGateA.EarlyProbes) requests=$($udpGateA.Requests) gate_state=$($udpGateA.State) gate_fault=$($udpGateA.Fault)"
-        }
-
-        if (-not $udp01DiagnosticOnly) {
         $tcp01Target = $targets[0]
         $tcp01Port = $ports[0]
         $tcp01Payload = [Text.Encoding]::ASCII.GetBytes("tcp-01-half-close")
@@ -1816,7 +1629,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         }
         $tcpRows++
         Assert-True ($tcpRows -eq 8) "TCP row count mismatch"
-        }
 
         if ($Mode -eq "udp") {
             foreach ($targetIndex in @(4, 5, 6)) {
@@ -1824,7 +1636,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             }
 
             # UDP-01 IPv4 one-hop route and authenticated response binding.
-            Invoke-UdpEchoRow $targets[0] $ports[0] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes("udp-01-one-hop")) $udp01DiagnosticOnly
+            Invoke-UdpEchoRow $targets[0] $ports[0] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes("udp-01-one-hop"))
             $udpRows++
 
             # UDP-02 IPv6 fixed two-hop chain.

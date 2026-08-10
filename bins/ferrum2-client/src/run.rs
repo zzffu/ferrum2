@@ -89,26 +89,6 @@ pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
     let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|_| RunError::StartupObservability)?;
-    if std::env::var_os("FERRUM2_T05_UDP_SOCKET_PROBE").is_some_and(|value| value == "1") {
-        let sent = (|| -> Result<usize, ()> {
-            let port = std::env::var("FERRUM2_T05_UDP_GATE_PORT")
-                .map_err(|_| ())?
-                .parse::<u16>()
-                .map_err(|_| ())?;
-            let socket =
-                std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|_| ())?;
-            socket
-                .connect((std::net::Ipv4Addr::LOCALHOST, port))
-                .map_err(|_| ())?;
-            socket.send(b"f2-early").map_err(|_| ())
-        })();
-        let send_category = if matches!(sent, Ok(8)) {
-            "exact"
-        } else {
-            "other"
-        };
-        eprintln!("m15_udp_early_diag send={send_category}");
-    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
