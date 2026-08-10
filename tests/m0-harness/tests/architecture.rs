@@ -2695,6 +2695,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && cleanup.contains("Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup)")
                     && cleanup.contains("Start-Sleep -Milliseconds 50")
                     && cleanup.contains("} while ([DateTime]::UtcNow -lt $routeCleanupDeadline)")
+                    && cleanup.contains("$routeCleanupDifference = @(Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup))")
+                    && cleanup.contains("if ($routeCleanupDifference.Count -gt 0)")
+                    && cleanup.contains("Select-Object InputObject,SideIndicator")
+                    && cleanup.contains("ConvertTo-Json -InputObject $routeCleanupDiagnostic -Compress")
                     && !cleanup.contains("$expectedRoutesAfterCaptureCleanup")
                     && !cleanup.contains("-cnotcontains")
                     && [
@@ -2705,7 +2709,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         "$routesAfterCaptureCleanup = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)",
                         "if (@(Compare-Object -ReferenceObject @($routeBaseline)",
                         "Start-Sleep -Milliseconds 50",
-                        "Assert-SnapshotEqual $routeBaseline $routesAfterCaptureCleanup",
+                        "$routeCleanupDifference = @(Compare-Object",
+                        "$routeCleanupLabel = \"capture route exact rollback\"",
+                        "if ($routeCleanupDifference.Count -gt 0)",
+                        "$routeCleanupDiagnostic = @(",
+                        "$routeCleanupLabel += \" difference=",
+                        "Assert-SnapshotEqual $routeBaseline $routesAfterCaptureCleanup $routeCleanupLabel",
                     ]
                     .iter()
                     .map(|needle| cleanup.find(needle))

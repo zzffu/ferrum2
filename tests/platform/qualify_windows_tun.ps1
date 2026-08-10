@@ -2228,7 +2228,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             if (@(Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup)).Count -eq 0) { break }
             Start-Sleep -Milliseconds 50
         } while ([DateTime]::UtcNow -lt $routeCleanupDeadline)
-        Assert-SnapshotEqual $routeBaseline $routesAfterCaptureCleanup "capture route exact rollback"
+        $routeCleanupDifference = @(Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup))
+        $routeCleanupLabel = "capture route exact rollback"
+        if ($routeCleanupDifference.Count -gt 0) {
+            $routeCleanupDiagnostic = @($routeCleanupDifference | Select-Object InputObject,SideIndicator)
+            $routeCleanupLabel += " difference=$(ConvertTo-Json -InputObject $routeCleanupDiagnostic -Compress)"
+        }
+        Assert-SnapshotEqual $routeBaseline $routesAfterCaptureCleanup $routeCleanupLabel
         Restore-CapabilityDns $ownedInterfaceIndex
         Restore-CapabilityInterfaceMetric $ownedInterfaceIndex
         Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "physical DNS normal cleanup sentinel"
