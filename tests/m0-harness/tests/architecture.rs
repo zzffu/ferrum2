@@ -2589,6 +2589,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("function Get-Tcp01Boundary(")
             .and_then(|(_, tail)| tail.split_once("function Get-PeExportNames"))
             .map(|(body, _)| body);
+        let tun_counter_quiescence = source
+            .split_once("function Wait-TunAcceptedQuiescent(")
+            .and_then(|(_, tail)| tail.split_once("function Invoke-UnpinnedTcpCapture("))
+            .map(|(body, _)| body);
         let gate = source
             .split_once("public sealed class Ferrum2TcpGateObservation")
             .and_then(|(_, tail)| tail.split_once("public sealed class Ferrum2TcpProbe"))
@@ -2622,6 +2626,33 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("$exports = @(Get-PeExportNames $pe)")
             && !source.to_ascii_lowercase().contains("dumpbin.exe")
             && !source.to_ascii_lowercase().contains("vswhere")
+            && tun_counter_quiescence.is_some_and(|quiet| {
+                quiet.contains("$quietMilliseconds = 500")
+                    && quiet.contains("$timeoutMilliseconds = 5000")
+                    && quiet.contains("while ($timeout.ElapsedMilliseconds -lt $timeoutMilliseconds)")
+                    && quiet.contains("Assert-True ($current -ge $last)")
+                    && quiet.contains("$quiet.Restart()")
+                    && quiet.contains("$quiet.ElapsedMilliseconds -ge $quietMilliseconds")
+                    && quiet.contains("throw \"TUN accepted counter did not quiesce\"")
+            })
+            && source
+                .matches("$accepted = Wait-TunAcceptedAfter $MetricsPort $before")
+                .count()
+                == 2
+            && source
+                .matches("return Wait-TunAcceptedQuiescent $MetricsPort $accepted")
+                .count()
+                == 2
+            && source.matches("$acceptedBefore = Invoke-Unpinned").count() == 2
+            && source
+                .matches("$acceptedAfter = Wait-TunAcceptedQuiescent $metricsPort $acceptedBefore")
+                .count()
+                == 2
+            && source
+                .matches("Assert-True ($acceptedAfter -eq $acceptedBefore)")
+                .count()
+                == 2
+            && source.contains("[void](Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort")
             && source.matches("$tcpRows++").count() == 8
             && source.matches("Add-TunRoute $").count() == 5
             && source.matches("Add-TargetAddress $").count() == 3

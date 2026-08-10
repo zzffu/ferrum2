@@ -1470,6 +1470,26 @@ function Wait-TunAcceptedAfter([int]$MetricsPort, [uint64]$Before) {
     throw "unpinned packet did not enter Wintun"
 }
 
+function Wait-TunAcceptedQuiescent([int]$MetricsPort, [uint64]$Expected) {
+    $quietMilliseconds = 500
+    $timeoutMilliseconds = 5000
+    $timeout = [Diagnostics.Stopwatch]::StartNew()
+    $quiet = [Diagnostics.Stopwatch]::StartNew()
+    $last = $Expected
+    while ($timeout.ElapsedMilliseconds -lt $timeoutMilliseconds) {
+        $current = Get-TunAccepted $MetricsPort
+        Assert-True ($current -ge $last) "TUN accepted counter regressed"
+        if ($current -ne $last) {
+            $last = $current
+            $quiet.Restart()
+        } elseif ($quiet.ElapsedMilliseconds -ge $quietMilliseconds) {
+            return $last
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    throw "TUN accepted counter did not quiesce"
+}
+
 function Invoke-UnpinnedTcpCapture([string]$Address, [int]$Port, [int]$MetricsPort, [byte[]]$Payload) {
     $before = Get-TunAccepted $MetricsPort
     $client = [Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
@@ -1489,7 +1509,8 @@ function Invoke-UnpinnedTcpCapture([string]$Address, [int]$Port, [int]$MetricsPo
         if ($_.Exception.Flatten().InnerExceptions | Where-Object { $_ -isnot [Net.Sockets.SocketException] -and $_ -isnot [IO.IOException] }) { throw }
     } catch [Net.Sockets.SocketException] { } catch [IO.IOException] { }
     finally { $client.Dispose() }
-    [void](Wait-TunAcceptedAfter $MetricsPort $before)
+    $accepted = Wait-TunAcceptedAfter $MetricsPort $before
+    return Wait-TunAcceptedQuiescent $MetricsPort $accepted
 }
 
 function Invoke-UnpinnedUdpCapture([string]$Address, [int]$Port, [int]$MetricsPort, [byte[]]$Payload) {
@@ -1507,7 +1528,8 @@ function Invoke-UnpinnedUdpCapture([string]$Address, [int]$Port, [int]$MetricsPo
         if ($_.Exception.Flatten().InnerExceptions | Where-Object { $_ -isnot [Net.Sockets.SocketException] -and $_ -isnot [IO.IOException] }) { throw }
     } catch [Net.Sockets.SocketException] { } catch [IO.IOException] { }
     finally { $client.Dispose() }
-    [void](Wait-TunAcceptedAfter $MetricsPort $before)
+    $accepted = Wait-TunAcceptedAfter $MetricsPort $before
+    return Wait-TunAcceptedQuiescent $MetricsPort $accepted
 }
 
 function Invoke-SystemDnsWitness([string]$Name, [bool]$TcpOnly, [Ferrum2DnsResponder]$Responder) {
@@ -1884,7 +1906,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $secondPrefix = if ($firstPrefix -eq "0.0.0.0/1") { "128.0.0.0/1" } else { "0.0.0.0/1" }
         $firstRoute = [Ferrum2NetworkFeasibility]::CreateCaptureRoute([uint32]$ownedInterfaceIndex, $firstPrefix, 1)
         $capabilityRoutes.Add($firstRoute)
-        Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort ([Text.Encoding]::ASCII.GetBytes("m16-capture-window"))
+        [void](Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort ([Text.Encoding]::ASCII.GetBytes("m16-capture-window")))
         $secondRoute = [Ferrum2NetworkFeasibility]::CreateCaptureRoute([uint32]$ownedInterfaceIndex, $secondPrefix, 1)
         $capabilityRoutes.Add($secondRoute)
         $captureWindow.Stop()
@@ -1903,12 +1925,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             @{ Name = "dynamic"; Underlay = $dynamicUnderlay }
         )) {
             $payload = [Text.Encoding]::ASCII.GetBytes("m16-$($row.Name)-tcp")
-            Invoke-UnpinnedTcpCapture $supportAddress $supportTcpPort $metricsPort $payload
+            $acceptedBefore = Invoke-UnpinnedTcpCapture $supportAddress $supportTcpPort $metricsPort $payload
             $capabilityTcpRows++
-            $acceptedBefore = Get-TunAccepted $metricsPort
             [Ferrum2NetworkFeasibility]::TcpEcho($supportAddress, $supportTcpPort, $row.Underlay.InterfaceIndex, $row.Underlay.SourceAddress, $payload)
-            Start-Sleep -Milliseconds 100
-            Assert-True ((Get-TunAccepted $metricsPort) -eq $acceptedBefore) "pinned TCP entered Wintun"
+            $acceptedAfter = Wait-TunAcceptedQuiescent $metricsPort $acceptedBefore
+            Assert-True ($acceptedAfter -eq $acceptedBefore) "pinned TCP entered Wintun"
             $capabilityTcpRows++
         }
         foreach ($row in @(
@@ -1916,12 +1937,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             @{ Name = "dynamic"; Underlay = $dynamicUnderlay }
         )) {
             $payload = [Text.Encoding]::ASCII.GetBytes("m16-$($row.Name)-udp")
-            Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort $payload
+            $acceptedBefore = Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort $payload
             $capabilityUdpRows++
-            $acceptedBefore = Get-TunAccepted $metricsPort
             [Ferrum2NetworkFeasibility]::UdpEcho($supportAddress, $supportUdpPort, $row.Underlay.InterfaceIndex, $row.Underlay.SourceAddress, $payload)
-            Start-Sleep -Milliseconds 100
-            Assert-True ((Get-TunAccepted $metricsPort) -eq $acceptedBefore) "pinned UDP entered Wintun"
+            $acceptedAfter = Wait-TunAcceptedQuiescent $metricsPort $acceptedBefore
+            Assert-True ($acceptedAfter -eq $acceptedBefore) "pinned UDP entered Wintun"
             $capabilityUdpRows++
         }
         Assert-True ($capabilityTcpRows -eq 4 -and $capabilityUdpRows -eq 4) "socket pin row count mismatch"
