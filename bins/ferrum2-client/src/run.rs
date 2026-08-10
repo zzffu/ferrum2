@@ -203,7 +203,7 @@ where
         (
             tun.max_udp_mappings,
             tun.max_udp_buffered_bytes,
-            config.runtime.idle_timeout,
+            config.runtime.idle_timeout.max(MIN_UDP_IDLE_TIMEOUT),
         )
     });
     let internal_udp_needed = dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_limits.is_some();

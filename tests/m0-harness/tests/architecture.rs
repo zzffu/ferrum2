@@ -3342,6 +3342,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
 
     let composes_private_tun_udp_owner = |composition: &str| {
         composition.contains("let tun_udp_limits = tun_config.as_ref().map(")
+            && composition.contains("config.runtime.idle_timeout.max(MIN_UDP_IDLE_TIMEOUT)")
             && composition
                 .contains("dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_limits.is_some()")
             && composition.contains("if public_udp_enabled || internal_udp_needed")
@@ -3356,6 +3357,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         client.replace(
             "dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_limits.is_some()",
             "dns.as_ref().is_some_and(|dns| dns.6)",
+        ),
+        client.replace(
+            "config.runtime.idle_timeout.max(MIN_UDP_IDLE_TIMEOUT)",
+            "config.runtime.idle_timeout",
         ),
         client.replace(
             "udp_associate_enabled: public_udp_enabled",
