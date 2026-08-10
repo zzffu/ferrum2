@@ -412,6 +412,7 @@ impl<T: Send + 'static> UdpTable<T> {
     pub(crate) fn process_events(
         &mut self,
         now_millis: i64,
+        admitting: bool,
         mut inject: impl FnMut(UdpTuple, &[u8]) -> bool,
     ) -> EventOutcome {
         self.expire(now_millis);
@@ -432,7 +433,8 @@ impl<T: Send + 'static> UdpTable<T> {
                     reply,
                 } => {
                     let current = self.slots.get(id.slot).and_then(Option::as_ref);
-                    let valid = self.generations.current(id.slot) == Some(id)
+                    let valid = admitting
+                        && self.generations.current(id.slot) == Some(id)
                         && matches!(current, Some(Slot::Candidate { tuple: current, .. }) if *current == tuple)
                         && payload.len() <= selected_payload_bound
                         && selected_payload_bound <= payload_bound;
@@ -591,7 +593,7 @@ mod tests {
 
         let commit = tokio::spawn(candidate.commit("route-a", 32));
         tokio::task::yield_now().await;
-        let outcome = table.process_events(1, |_, _| true);
+        let outcome = table.process_events(1, true, |_, _| true);
         assert_eq!(outcome.committed, 1);
         let mut mapping = commit.await.expect("decision task").expect("owner commit");
         assert_eq!(mapping.terminal(), &"route-a");
@@ -600,6 +602,32 @@ mod tests {
         assert_eq!(first.tuple(), tuple(10_000));
         assert_eq!(first.payload(), b"query");
         assert!(mapping.receiver.try_recv().is_err(), "first released once");
+    }
+
+    #[tokio::test]
+    async fn udp_quiesce_rejects_a_preexisting_provisional_commit() {
+        let (mut table, mut candidates) =
+            UdpTable::<&'static str>::new(1, 64, Duration::from_secs(60));
+        assert_eq!(
+            table.admit(tuple(10_001), b"query", 1_392, 0, true),
+            Admission::Provisional
+        );
+        let commit = tokio::spawn(
+            candidates
+                .try_recv()
+                .expect("provisional candidate")
+                .commit("route-a", 32),
+        );
+        tokio::task::yield_now().await;
+        let outcome = table.process_events(1, false, |_, _| true);
+        assert_eq!(outcome.committed, 0);
+        assert_eq!(outcome.dropped, 1);
+        assert!(matches!(
+            commit.await.expect("decision task"),
+            Err(UdpCommitError::Rejected)
+        ));
+        assert_eq!(table.live_mappings(), 0);
+        assert_eq!(table.buffered_bytes(), 0);
     }
 
     #[tokio::test]
@@ -619,7 +647,7 @@ mod tests {
             matches!(candidate.commit(1, 4).await, Err(UdpCommitError::Rejected)),
             "selected bound rejects without a mapping"
         );
-        table.process_events(1, |_, _| true);
+        table.process_events(1, true, |_, _| true);
         assert_eq!(table.live_mappings(), 0);
         assert_eq!(table.buffered_bytes(), 0);
 
@@ -630,7 +658,7 @@ mod tests {
         let candidate = candidates.try_recv().expect("new generation candidate");
         let commit = tokio::spawn(candidate.commit(2, 8));
         tokio::task::yield_now().await;
-        table.process_events(3, |_, _| true);
+        table.process_events(3, true, |_, _| true);
         let mut mapping = commit.await.expect("commit task").expect("mapping");
         drop(mapping.receive().await.expect("first"));
         for _ in 0..MAPPING_QUEUE_PACKETS {
@@ -642,7 +670,7 @@ mod tests {
             "full mapping queue drops one complete datagram"
         );
         drop(mapping);
-        table.process_events(5, |_, _| true);
+        table.process_events(5, true, |_, _| true);
         assert_eq!(table.live_mappings(), 0);
         assert_eq!(table.buffered_bytes(), 0);
 
@@ -662,14 +690,14 @@ mod tests {
         );
         let commit = tokio::spawn(candidates.try_recv().expect("candidate").commit((), 8));
         tokio::task::yield_now().await;
-        table.process_events(1, |_, _| true);
+        table.process_events(1, true, |_, _| true);
         let mapping = commit.await.expect("task").expect("mapping");
         assert!(!mapping.send_response("192.0.2.2:53".parse().unwrap(), b"bad"));
         assert!(mapping.send_response(tuple(1).target(), b"answer"));
         let mut observed = Vec::new();
         assert_eq!(
             table
-                .process_events(2, |mapped, payload| {
+                .process_events(2, true, |mapped, payload| {
                     observed.push((mapped, payload.to_vec()));
                     true
                 })
@@ -680,7 +708,7 @@ mod tests {
         assert!(mapping.send_response(tuple(1).target(), b"late"));
         drop(mapping);
         assert_eq!(
-            table.process_events(1_003, |_, _| true).dropped,
+            table.process_events(1_003, true, |_, _| true).dropped,
             1,
             "queued stale generation response cannot inject after close"
         );

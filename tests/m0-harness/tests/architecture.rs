@@ -3151,6 +3151,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("function Invoke-UdpEchoRow(")
             && source.contains("max_udp_mappings = 4")
             && source.contains("max_udp_buffered_bytes = 4194304")
+            && source.contains("[udp]\nenabled = false\nmax_sessions = 32\nmax_buffered_bytes = 4194304\nidle_timeout_ms = 60000")
             && source.contains("tag = \"udp-two-hop\"")
             && source.contains("tag = \"udp-manual\"")
             && source.contains("tag = \"udp-one\"")
@@ -3204,7 +3205,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     }
                 }
                 rows.contains("$udpGateB.Requests -eq $beforeGateB + 1")
-                && rows.contains("Start-Sleep -Milliseconds 2500")
+                && rows.contains("Start-Sleep -Milliseconds 60500")
                 && rows.contains("$dnsResponder.Requests -eq $beforeDns + 1")
                 && rows.contains(
                     "$udpGateA.Requests -eq $beforeGateA -and $udpGateB.Requests -eq $beforeGateB",
@@ -3213,7 +3214,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 && rows.contains("$saturatedClients.Count -eq 4")
                 && rows.contains("$udpGateA.ReplayFirstToLatest()")
                 && rows.contains(
-                    "Start-Sleep -Milliseconds 2500\n                [void]$overflowClient.Send($overflow, $overflow.Length)\n                Assert-True ($overflowResponse.Wait(5000)) \"UDP-08 expired response timeout\"\n                if ($overflowResponse.IsFaulted) { throw \"UDP-08 expired response failed\" }\n                Assert-True (($overflowResponse.Result.Buffer -join \",\") -eq ($overflow -join \",\")) \"UDP-08 expired slot was not reusable\"\n                Assert-True ($udpGateA.ReplayFirstToLatest()) \"UDP-08 stale response replay was unavailable\"\n                $staleResponse = $overflowClient.ReceiveAsync()",
+                    "Start-Sleep -Milliseconds 60500\n                [void]$overflowClient.Send($overflow, $overflow.Length)\n                Assert-True ($overflowResponse.Wait(5000)) \"UDP-08 expired response timeout\"\n                if ($overflowResponse.IsFaulted) { throw \"UDP-08 expired response failed\" }\n                Assert-True (($overflowResponse.Result.Buffer -join \",\") -eq ($overflow -join \",\")) \"UDP-08 expired slot was not reusable\"\n                Assert-True ($udpGateA.ReplayFirstToLatest()) \"UDP-08 stale response replay was unavailable\"\n                $staleResponse = $overflowClient.ReceiveAsync()",
                 )
             })
     };
@@ -3254,7 +3255,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "(Receive-TunUdp $overflowClient)",
         ),
         controller.replace(
-            "Start-Sleep -Milliseconds 2500",
+            "Start-Sleep -Milliseconds 60500",
             "Start-Sleep -Milliseconds 1",
         ),
         controller.replace(
@@ -3341,6 +3342,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .zip(owner.find("sender.try_send(first)"))
                 .is_some_and(|(mapping, first)| mapping < first)
             && owner.contains("self.generations.current(id.slot) != Some(id)")
+            && owner.contains("let valid = admitting")
             && owner.contains("source != tuple.target")
             && adapter.contains("enum TunUdpTerminal")
             && adapter.contains("move |candidate, cancellation|")
@@ -3380,6 +3382,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             client_udp.clone(),
         ),
         (
+            tun_udp.replace("let valid = admitting", "let valid = true"),
+            client_tun.clone(),
+            client_udp.clone(),
+        ),
+        (
             tun_udp.clone(),
             client_tun.replace(
                 "candidate.commit(terminal, selected_bound).await",
@@ -3408,12 +3415,19 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     }
 
     let composes_private_tun_udp_owner = |composition: &str| {
-        composition.contains("let tun_udp_limits = tun_config.as_ref().map(")
-            && composition.contains("config.runtime.idle_timeout.max(MIN_UDP_IDLE_TIMEOUT)")
+        composition.contains("let tun_udp_defaults = tun_config.as_ref().map(|_| {")
+            && composition.contains("let defaults = UdpRuntimeLimits::default();")
+            && composition.contains("defaults.max_sessions()")
+            && composition.contains("defaults.max_buffered_bytes()")
+            && composition.contains("defaults.idle_timeout()")
             && composition
-                .contains("dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_limits.is_some()")
+                .contains("dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_defaults.is_some()")
             && composition.contains("if public_udp_enabled || internal_udp_needed")
-            && composition.contains("if let Some(tun) = tun_udp_limits")
+            && composition.contains("if let Some(defaults) = tun_udp_defaults")
+            && composition.contains("let tun_udp_idle_timeout = tun_config")
+            && composition
+                .contains(".map(|_| udp_limits.expect(\"TUN UDP requires internal limits\").2)")
+            && composition.contains("tun_udp_idle_timeout.expect(\"TUN UDP idle retained\")")
             && composition.contains("udp_associate_enabled: public_udp_enabled")
     };
     assert!(
@@ -3422,11 +3436,15 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     );
     for mutation in [
         client.replace(
-            "dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_limits.is_some()",
+            "dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_defaults.is_some()",
             "dns.as_ref().is_some_and(|dns| dns.6)",
         ),
         client.replace(
-            "config.runtime.idle_timeout.max(MIN_UDP_IDLE_TIMEOUT)",
+            "let defaults = UdpRuntimeLimits::default();",
+            "let defaults = UdpRuntimeLimits::new(1, 1, config.runtime.idle_timeout).expect(\"limits\");",
+        ),
+        client.replace(
+            "tun_udp_idle_timeout.expect(\"TUN UDP idle retained\")",
             "config.runtime.idle_timeout",
         ),
         client.replace(
@@ -3437,6 +3455,34 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         assert!(
             !composes_private_tun_udp_owner(&mutation),
             "TUN UDP composition mutation must remove private-owner/public-inbound separation"
+        );
+    }
+
+    let tun_udp_idle_is_exact = |owner: &str, adapter: &str| {
+        owner.contains("pub udp_timeout: Duration")
+            && owner.contains("config.udp_timeout,")
+            && adapter.contains("udp_timeout: udp_idle_timeout")
+    };
+    assert!(
+        tun_udp_idle_is_exact(&tun, &client_tun),
+        "TUN mapping and the shared UDP manager must use one validated idle lifetime"
+    );
+    for (owner, adapter) in [
+        (
+            tun.replace("config.udp_timeout,", "config.tcp_timeout,"),
+            client_tun.clone(),
+        ),
+        (
+            tun.clone(),
+            client_tun.replace(
+                "udp_timeout: udp_idle_timeout",
+                "udp_timeout: context.runtime.idle_timeout",
+            ),
+        ),
+    ] {
+        assert!(
+            !tun_udp_idle_is_exact(&owner, &adapter),
+            "TUN UDP idle mutation must sever the shared lifetime proof"
         );
     }
 

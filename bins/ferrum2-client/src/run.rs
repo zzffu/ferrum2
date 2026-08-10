@@ -198,39 +198,42 @@ where
     let ordinary_dns = dns.as_ref().map(|_| Arc::new(std::sync::OnceLock::new()));
     metrics.set_udp_sessions_active(Role::Client, 0);
     metrics.set_udp_buffered_bytes(Role::Client, 0);
-    let public_udp_enabled = config.udp.is_some_and(|udp| udp.enabled);
-    let tun_udp_limits = tun_config.as_ref().map(|tun| {
+    let configured_udp = config.udp;
+    let public_udp_enabled = configured_udp.is_some_and(|udp| udp.enabled);
+    let tun_udp_defaults = tun_config.as_ref().map(|_| {
+        let defaults = UdpRuntimeLimits::default();
         (
-            tun.max_udp_mappings,
-            tun.max_udp_buffered_bytes,
-            config.runtime.idle_timeout.max(MIN_UDP_IDLE_TIMEOUT),
+            defaults.max_sessions(),
+            defaults.max_buffered_bytes(),
+            defaults.idle_timeout(),
         )
     });
-    let internal_udp_needed = dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_limits.is_some();
+    let internal_udp_needed = dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_defaults.is_some();
+    let udp_limits = if let Some(udp) = configured_udp {
+        Some((udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout))
+    } else if let Some(defaults) = tun_udp_defaults {
+        Some(defaults)
+    } else if let Some(dns) = dns.as_ref().filter(|dns| dns.6) {
+        let sessions = usize::from(dns.5.get());
+        let bytes = sessions
+            .checked_mul(3 * MAX_UDP_WIRE_LEN)
+            .ok_or(RunError::StartupProtocol)?
+            .clamp(MIN_UDP_MAX_BUFFERED_BYTES, MAX_UDP_MAX_BUFFERED_BYTES);
+        Some((sessions, bytes, dns.4.max(MIN_UDP_IDLE_TIMEOUT)))
+    } else {
+        None
+    };
+    let tun_udp_idle_timeout = tun_config
+        .as_ref()
+        .map(|_| udp_limits.expect("TUN UDP requires internal limits").2);
     let runtime = config.runtime;
     let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)?;
     let shutdown_grace = config.runtime.shutdown_grace;
     let listen_backlog = u32::from(config.runtime.listen_backlog.get());
     let max_connections = usize::from(config.runtime.max_connections.get());
     let udp = if public_udp_enabled || internal_udp_needed {
-        let (max_sessions, max_buffered_bytes, idle_timeout) = match config.udp {
-            Some(udp) => (udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout),
-            None => {
-                if let Some(tun) = tun_udp_limits {
-                    tun
-                } else {
-                    let dns = dns
-                        .as_ref()
-                        .expect("internal UDP requires DNS or TUN config");
-                    let sessions = usize::from(dns.5.get());
-                    let bytes = sessions
-                        .checked_mul(3 * MAX_UDP_WIRE_LEN)
-                        .ok_or(RunError::StartupProtocol)?
-                        .clamp(MIN_UDP_MAX_BUFFERED_BYTES, MAX_UDP_MAX_BUFFERED_BYTES);
-                    (sessions, bytes, dns.4.max(MIN_UDP_IDLE_TIMEOUT))
-                }
-            }
-        };
+        let (max_sessions, max_buffered_bytes, idle_timeout) =
+            udp_limits.expect("enabled UDP requires validated limits");
         Some(ClientUdpContext {
             manager: UdpSessionManager::new(
                 UdpRuntimeLimits::new(max_sessions, max_buffered_bytes, idle_timeout)
@@ -313,6 +316,7 @@ where
     if let Some(tun_config) = tun_config {
         roots.push(tun::process_root(
             tun_config,
+            tun_udp_idle_timeout.expect("TUN UDP idle retained"),
             Arc::clone(&context),
             routing,
             tun_inbound,

@@ -59,6 +59,7 @@ pub struct Config {
     pub max_tcp_flows: usize,
     pub tcp_buffer_bytes: usize,
     pub tcp_timeout: Duration,
+    pub udp_timeout: Duration,
     pub max_udp_mappings: usize,
     pub max_udp_buffered_bytes: usize,
     pub owned_buffer_bytes: u64,
@@ -190,6 +191,8 @@ fn config_is_exact(config: &Config) -> bool {
         || !(1..=4096).contains(&config.max_tcp_flows)
         || !(4096..=262_144).contains(&config.tcp_buffer_bytes)
         || !(Duration::from_secs(1)..=Duration::from_secs(86_400)).contains(&config.tcp_timeout)
+        || !(ferrum2_runtime::MIN_UDP_IDLE_TIMEOUT..=ferrum2_runtime::MAX_UDP_IDLE_TIMEOUT)
+            .contains(&config.udp_timeout)
         || !(1..=8192).contains(&config.max_udp_mappings)
         || !(65_536..=134_217_728).contains(&config.max_udp_buffered_bytes)
     {
@@ -630,7 +633,7 @@ fn owner_main<T: Send + 'static>(
         Arc::clone(&control.flow_count),
         config.max_udp_mappings,
         config.max_udp_buffered_bytes,
-        config.tcp_timeout,
+        config.udp_timeout,
     );
     let ((mut stack, flows, datagrams), mut adapter) =
         match finish_stack_setup(stack, adapter, |adapter| adapter.cleanup()) {
@@ -683,7 +686,7 @@ fn owner_main<T: Send + 'static>(
                 (metrics.accepted)();
             }
         }
-        let _udp = stack.poll_udp_events(elapsed);
+        let _udp = stack.poll_udp_events(elapsed, control.admitting.load(Ordering::Acquire));
         control
             .mapping_count
             .store(stack.live_udp_mappings(), Ordering::Release);
@@ -1348,11 +1351,12 @@ impl<T: Send + 'static> Stack<T> {
         self.udp.live_mappings()
     }
 
-    fn poll_udp_events(&mut self, now_millis: i64) -> udp::EventOutcome {
+    fn poll_udp_events(&mut self, now_millis: i64, admitting: bool) -> udp::EventOutcome {
         let device = &mut self.device;
-        self.udp.process_events(now_millis, |tuple, payload| {
-            device.inject_udp_response(tuple, payload)
-        })
+        self.udp
+            .process_events(now_millis, admitting, |tuple, payload| {
+                device.inject_udp_response(tuple, payload)
+            })
     }
 
     fn poll_quantum(&mut self, now: Instant) -> usize {
@@ -2541,7 +2545,7 @@ mod tests {
             assert_eq!(candidate.payload(), &packet[packet.len() - 4..]);
             let commit = tokio::spawn(candidate.commit("route", 32));
             tokio::task::yield_now().await;
-            assert_eq!(stack.poll_udp_events(1).committed, 1);
+            assert_eq!(stack.poll_udp_events(1, true).committed, 1);
             let mut mapping = commit.await.expect("commit task").expect("mapping");
             assert_eq!(mapping.terminal(), &"route");
             assert_eq!(
@@ -2549,7 +2553,7 @@ mod tests {
                 &packet[packet.len() - 4..]
             );
             assert!(mapping.send_response(expected_target, response));
-            assert_eq!(stack.poll_udp_events(2).injected, 1);
+            assert_eq!(stack.poll_udp_events(2, true).injected, 1);
             let mut emitted = Vec::new();
             assert_eq!(
                 stack.take_output(|packet| {

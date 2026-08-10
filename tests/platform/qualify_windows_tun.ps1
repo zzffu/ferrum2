@@ -1424,6 +1424,11 @@ ip = "$($targets[7])"
 port = $($ports[7])
 action = "route"
 outbound = "udp-one"
+[udp]
+enabled = false
+max_sessions = 32
+max_buffered_bytes = 4194304
+idle_timeout_ms = 60000
 [dns]
 [[dns.inbounds]]
 tag = "dns-control"
@@ -1687,7 +1692,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 [void]$expiryClient.Send($query, $query.Length)
                 Assert-True (((Receive-TunUdp $expiryClient) -join ",") -eq ($query -join ",")) "UDP-04 live snapshot response mismatch"
                 Assert-True ($udpGateA.Requests -eq $beforeGateA + 2 -and $udpGateB.Requests -eq $beforeGateB) "UDP-04 live mapping re-entered policy"
-                Start-Sleep -Milliseconds 2500
+                Start-Sleep -Milliseconds 60500
                 [void]$expiryClient.Send($query, $query.Length)
                 Assert-True (((Receive-TunUdp $expiryClient) -join ",") -eq ($query -join ",")) "UDP-04 expired response mismatch"
                 Assert-True ($udpGateA.Requests -eq $beforeGateA + 3 -and $udpGateB.Requests -eq $beforeGateB + 1) "UDP-04 did not reselect after expiry"
@@ -1742,7 +1747,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             $udpRows++
 
             # UDP-08 IPv6 mapping saturation, generation reuse and wrong-response drop.
-            Start-Sleep -Milliseconds 2500
+            Start-Sleep -Milliseconds 60500
             $saturationProbe = [Ferrum2UdpProbe]::new($targets[7], $ports[7])
             $tcpResources.Add($saturationProbe)
             $saturatedClients = [System.Collections.Generic.List[Net.Sockets.UdpClient]]::new()
@@ -1763,7 +1768,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 [void]$overflowClient.Send($overflow, $overflow.Length)
                 $overflowResponse = $overflowClient.ReceiveAsync()
                 Assert-True (-not $overflowResponse.Wait(500) -and $udpGateA.Requests -eq $beforeGateA + 4) "UDP-08 evicted a live mapping"
-                Start-Sleep -Milliseconds 2500
+                Start-Sleep -Milliseconds 60500
                 [void]$overflowClient.Send($overflow, $overflow.Length)
                 Assert-True ($overflowResponse.Wait(5000)) "UDP-08 expired response timeout"
                 if ($overflowResponse.IsFaulted) { throw "UDP-08 expired response failed" }

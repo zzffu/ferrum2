@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ferrum2_config::TunConfig;
 use ferrum2_core::TargetAddr;
@@ -19,6 +20,7 @@ use super::tokio_io::TokioFramed;
 
 pub(super) fn process_root(
     config: TunConfig,
+    udp_idle_timeout: Duration,
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
     inbound: usize,
@@ -41,6 +43,7 @@ pub(super) fn process_root(
             max_tcp_flows: config.max_tcp_flows,
             tcp_buffer_bytes: config.tcp_buffer_bytes,
             tcp_timeout: context.runtime.idle_timeout,
+            udp_timeout: udp_idle_timeout,
             max_udp_mappings: config.max_udp_mappings,
             max_udp_buffered_bytes: config.max_udp_buffered_bytes,
             owned_buffer_bytes: config.owned_buffer_bytes,
