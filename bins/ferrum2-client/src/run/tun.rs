@@ -159,6 +159,9 @@ async fn run_udp_route(
     else {
         return;
     };
+    if !server.ip().is_loopback() || mapping.tuple().target().ip().is_loopback() {
+        return;
+    }
     let mut force = cancellation.clone();
     let prepared = tokio::select! {
         () = force.forced() => return,
