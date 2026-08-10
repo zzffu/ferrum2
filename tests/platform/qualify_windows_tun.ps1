@@ -1765,7 +1765,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 Assert-True (-not $overflowResponse.Wait(500) -and $udpGateA.Requests -eq $beforeGateA + 4) "UDP-08 evicted a live mapping"
                 Start-Sleep -Milliseconds 2500
                 [void]$overflowClient.Send($overflow, $overflow.Length)
-                Assert-True (((Receive-TunUdp $overflowClient) -join ",") -eq ($overflow -join ",")) "UDP-08 expired slot was not reusable"
+                Assert-True ($overflowResponse.Wait(5000)) "UDP-08 expired response timeout"
+                if ($overflowResponse.IsFaulted) { throw "UDP-08 expired response failed" }
+                Assert-True (($overflowResponse.Result.Buffer -join ",") -eq ($overflow -join ",")) "UDP-08 expired slot was not reusable"
                 Assert-True ($udpGateA.ReplayFirstToLatest()) "UDP-08 stale response replay was unavailable"
                 $staleResponse = $overflowClient.ReceiveAsync()
                 Assert-True (-not $staleResponse.Wait(500)) "UDP-08 stale response crossed the new generation"

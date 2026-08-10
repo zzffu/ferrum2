@@ -3212,6 +3212,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 && rows.contains("[byte[]]::new(2000)")
                 && rows.contains("$saturatedClients.Count -eq 4")
                 && rows.contains("$udpGateA.ReplayFirstToLatest()")
+                && rows.contains(
+                    "Start-Sleep -Milliseconds 2500\n                [void]$overflowClient.Send($overflow, $overflow.Length)\n                Assert-True ($overflowResponse.Wait(5000)) \"UDP-08 expired response timeout\"\n                if ($overflowResponse.IsFaulted) { throw \"UDP-08 expired response failed\" }\n                Assert-True (($overflowResponse.Result.Buffer -join \",\") -eq ($overflow -join \",\")) \"UDP-08 expired slot was not reusable\"\n                Assert-True ($udpGateA.ReplayFirstToLatest()) \"UDP-08 stale response replay was unavailable\"\n                $staleResponse = $overflowClient.ReceiveAsync()",
+                )
             })
     };
     assert!(
@@ -3246,6 +3249,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "",
         ),
         controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
+        controller.replace(
+            "$overflowResponse.Result.Buffer",
+            "(Receive-TunUdp $overflowClient)",
+        ),
         controller.replace(
             "Start-Sleep -Milliseconds 2500",
             "Start-Sleep -Milliseconds 1",
