@@ -1,7 +1,7 @@
 ---
 id: M15-T05
 milestone: M15
-status: planned
+status: active
 depends_on:
   - M15-T04
 owns:
@@ -66,7 +66,9 @@ git diff --check
 
 - Commit: —
 - Review: —
-- Notes: hosted execution requires a later exact-ref authorization。
+- Notes: required non-force push and exact-ref hosted execution are authorized。To avoid repeated review
+  churn，the Engineer first obtains one clean exact-candidate VM PASS；final Architect/QA review starts only
+  after that evidence exists。
 
 ## Rollback / risk
 

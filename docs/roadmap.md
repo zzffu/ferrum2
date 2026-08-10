@@ -71,13 +71,13 @@ route/reject/hijack、schema-v2 association routing及schema-v1 migration reject
 automatic run `31282591585/1`保留为FAIL且未rerun；其qualification generator schema缺陷在三文件
 test/tool descendant修复。Final Architect/QA均`PASS_WITH_NOTES`且zero finding；schema-3 integrity/
 ratio PASS，`+5377/0/0` numeric advisory已接受。未force-push、PR、tag、package、release或publish。
-M15现为`executing`：T01/T02 done；T03 exact integration `2eb6db6…`交付schema-v2 TUN config、唯一
-Wintun unsafe/RAII owner、bounded smoltcp foundation、自然双Preferred DAD、反向rollback和真实packet
-witness。Local full与hosted `31304175220/1`均PASS，exact marker为`foundation=4/4 cleanup=PASS`；最终
-Architect/QA均`PASS_WITH_NOTES`且全部correctness finding关闭。Numeric `+2310/+0/+0`已作为必要私有
-failure/mutation证据接受。T04 active；后续按T04→T05→T06→T07串行drain。本次execute已授权所需
-non-force push、direct hosted probe及same-SHA performance dispatch，未授权rerun、force-push、PR、tag、
-package、release或publication。
+M15现为`executing`：T01～T04 done。T04 exact integration `a7d25a2…`交付bounded TUN TCP、shared
+route/sniff/DNS/egress/relay composition和8-row privileged controller。Fresh isolated VM先通过
+`tcp=8/8 cleanup=PASS`且零残留，随后final Architect/QA均`PASS`；hosted
+[`31344321422/1`](https://github.com/zzffu/ferrum2/actions/runs/31344321422)亦全绿并输出exact marker。
+Numeric `+1750/+0/+0`已作为必要mutation/platform证据接受。T05 active；后续按T05→T06→T07串行
+drain，VM-backed候选先通过VM再做final review。本次execute已授权所需non-force push、direct hosted
+probe及same-SHA performance dispatch，未授权rerun、force-push、PR、tag、package、release或publication。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1152,11 +1152,12 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 - **Deferred/out of scope:** explicit/automatic/default/bypass route、system DNS、WFP、network monitoring、
   fragments、ICMP、Fake-IP、process routing、non-Windows/non-AMD64 TUN、multi-stack/sharding、installer、
   service、DLL redistribution、package/release/publication。
-- **Next/remote boundary:** T01～T03 done and T04 active on exact accepted base `2eb6db6…`。Direct hosted run
-  `31304175220/1` passed foundation、three platforms and aggregate qualification。Required non-force pushes
-  and the later same-SHA performance dispatch are authorized；rerun、force-push、PR、tag、package、release
-  and publication are not。Hyper-V/self-hosted remains fallback only after a recorded direct capability
-  failure。Combined Wintun/Ferrum2 redistribution remains blocked pending the responsible license decision。
+- **Next/remote boundary:** T01～T04 done and T05 active on exact accepted base `a7d25a2…`。Fresh VM and
+  hosted [`31344321422/1`](https://github.com/zzffu/ferrum2/actions/runs/31344321422) passed exact T04 TCP
+  `8/8` with cleanup。Required non-force pushes and the later same-SHA performance dispatch are authorized；
+  rerun、force-push、PR、tag、package、release and publication are not。VM-backed candidates must pass one
+  fresh VM run before final review。Combined Wintun/Ferrum2 redistribution remains blocked pending the
+  responsible license decision。
 
 ## 决策登记
 
@@ -1405,3 +1406,4 @@ system DNS/WFP；external owner负责窄route。Schema v2、smoltcp 0.13.1、Rus
 | 2026-08-09 | M15-T02 integrate | Exact `fc617cda…` proves rejected plan-bound UDP candidates commit nothing，the next valid candidate re-reads selector state，and a live association retains its accepted snapshot | Existing regression performs A→over-limit drop→B valid and B→A after commit；runtime unchanged。Architect/QA both `PASS_WITH_NOTES`，zero blocker/major/minor | Focused、architecture、workspace and footprint integrity PASS；numeric `+3/0/0` existing-file signal and one outer timeout/exact rerun note accepted；T03 ready，no remote action |
 | 2026-08-09 | M15-T03 F05 contract erratum | Correct Wintun setup to MTU/address → StartSession/media up → natural dual-family DAD → stack/Ready；optimistic DAD remains forbidden and exact Preferred remains mandatory | Exact 0.14.1 driver registers rings before reporting connected media；local elevated Windows 10.0.26200.0 showed pre-session Disconnected/non-ready rows，then post-session IPv4/IPv6 Tentative→Preferred within one deadline | Contract Architect `M15-T03-CONTRACT-001` required the narrow in-place ADR/SPEC/TEST/ticket/milestone/research correction；no new seam、ADR、dependency、product route API or readiness weakening |
 | 2026-08-09 | M15-T03 integrate | Exact `2eb6db6…` integrates schema-v2 TUN identity、single Wintun owner/unsafe RAII、bounded smoltcp foundation、dual-Preferred DAD、packet validation and complete rollback；T03 done，T04 active | Initial Architect/QA review found cancellation cleanup、partial transaction、real packet、route snapshot、config/packet/dependency evidence gaps；one repair plus blocked targeted review triggered two independent xhigh diagnoses，whose private-transaction repair closed the remaining QA-002/004 | Local focused/full/MSRV/Windows/Clippy/privileged and hosted `31304175220/1` PASS；final Architect/QA `PASS_WITH_NOTES` with zero blocker/major/minor；integrity/ratio PASS and numeric `+2310/+0/+0` accepted；normal non-force probe pushes only，no rerun/force-push/PR/release/publication |
+| 2026-08-10 | M15-T04 integrate | Exact `a7d25a2…` integrates bounded IPv4/IPv6 TUN TCP through shared route/sniff、DNS、egress and relay seams；T04 done，T05 active | Fresh isolated VM first passed all eight TCP rows with zero residue；final Architect/QA then both returned `PASS` with zero blocker/major/minor | Local full/MSRV/Windows/Clippy、VM and hosted `31344321422/1` PASS with exact `tcp=8/8 cleanup=PASS` marker；footprint integrity/ratio PASS and numeric `+1750/+0/+0` accepted；one non-force exact push/dispatch，no rerun/force-push/PR/release/publication |

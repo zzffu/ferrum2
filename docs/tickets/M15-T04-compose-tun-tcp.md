@@ -1,7 +1,7 @@
 ---
 id: M15-T04
 milestone: M15
-status: active
+status: done
 depends_on:
   - M15-T03
 owns:
@@ -40,18 +40,18 @@ The product Engineer keeps workflow/policy files read-only；unknown targets and
 
 ## Acceptance
 
-- [ ] One TUN TCP five-tuple creates at most one bounded stream；local handshake semantics、flow ceiling、
+- [x] One TUN TCP five-tuple creates at most one bounded stream；local handshake semantics、flow ceiling、
       timeout、generation and owner accounting match SPEC-0016。
-- [ ] Client terminal mapping moves rather than copies；SOCKS behavior and visibility stay exact，and TUN
+- [x] Client terminal mapping moves rather than copies；SOCKS behavior and visibility stay exact，and TUN
       TCP sniff rules are accepted only for TUN-only inbound sets。
-- [ ] Route direct/one-hop/two-hop/selector snapshots use `ClientEgressEngine::open_tcp` and one existing
+- [x] Route direct/one-hop/two-hop/selector snapshots use `ClientEgressEngine::open_tcp` and one existing
       relay path；selected open/handshake/I/O failure never evaluates later policy/member/final。
-- [ ] TLS/HTTP/DNS sniff uses the one parser and one absolute bounded prefix，and every byte is replayed once。
-- [ ] DNS hijack uses one generalized existing framing loop plus `DnsProxy::answer`，creates no Shadowsocks
+- [x] TLS/HTTP/DNS sniff uses the one parser and one absolute bounded prefix，and every byte is replayed once。
+- [x] DNS hijack uses one generalized existing framing loop plus `DnsProxy::answer`，creates no Shadowsocks
       owner and never falls back；reject creates no egress owner。
-- [ ] Queue saturation closes the advertised receive window without accepted-byte loss；reverse partial
+- [x] Queue saturation closes the advertised receive window without accepted-byte loss；reverse partial
       writes retain bytes；FIN/reset/half-close/idle/grace/force order is deterministic and bounded。
-- [ ] Real privileged IPv4/IPv6 route、fixed chain、selector snapshot、TLS/HTTP sniff、DNS hijack、reject and
+- [x] Real privileged IPv4/IPv6 route、fixed chain、selector snapshot、TLS/HTTP sniff、DNS hijack、reject and
       selected-failure rows pass with exact cleanup/rebind。Hosted `windows-tun-e2e` emits the exact
       `profile=tcp tcp=8/8 cleanup=PASS` SHA/run/attempt marker；a local controller run is diagnostic only。
 
@@ -72,10 +72,18 @@ git diff --check
 
 ## Result
 
-- Commit: —
-- Review: —
-- Notes: hosted execution requires the candidate to descend from the reviewed primary control checkpoint，
-  then a later exact-ref `dispatch_target=windows-tun-tcp` authorization。
+- Commit: `a7d25a21009a7d2ced6e2c68f8f8b957e389300b` / tree
+  `0d428e9abe8c8c78ccd26efbdeb7a49bbd64e141` / parent
+  `594eed6a0a3a730d3aab3ceeaabb567fa9f90b7e`。
+- Review: fresh isolated-VM `tcp=8/8` passed first；the subsequent exact-candidate Architect and QA reviews
+  both returned `PASS` with zero blocker、major or minor finding。
+- Notes: local focused、workspace、MSRV、Windows-target、Clippy and architecture gates passed。The exact VM
+  marker was `profile=tcp tcp=8/8 cleanup=PASS sha=a7d25a2… run_id=vm run_attempt=1` with zero residue。
+  Hosted run [`31344321422/1`](https://github.com/zzffu/ferrum2/actions/runs/31344321422) then passed every
+  required job and emitted the same exact marker with its hosted run identity。Footprint integrity and ratio
+  passed；numeric `REVIEW_REQUIRED` `+1750/+0/+0` was accepted as necessary mutation/platform evidence in
+  existing files，with the oversized architecture test file retained as debt。No force-push、rerun、PR、tag、
+  package、release or publication occurred。
 
 ## Rollback / risk
 
