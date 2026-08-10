@@ -2499,11 +2499,19 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .is_some_and(|(pressure, _)| {
                     pressure
                         .find("$gateA.WaitAccepted($pressureGate, 5000)")
+                        .zip(pressure.find("$pressureChunk = [byte[]]::new(1024 * 1024)"))
+                        .zip(pressure.find("for ($attempt = 0; $attempt -lt 128; $attempt++)"))
                         .zip(pressure.find("$pressureWrite = $pressure.Client.GetStream().WriteAsync("))
-                        .zip(pressure.find("-not $pressureWrite.Wait(500)"))
+                        .zip(pressure.find("if (-not $pressureWrite.Wait(100)) { break }"))
+                        .zip(pressure.find("$pressureWrite -and -not $pressureWrite.IsCompleted"))
                         .zip(pressure.find("$stall = [Ferrum2TcpProbe]::new($targets[7]"))
-                        .is_some_and(|(((accepted, write), pending), probe)| {
-                            accepted < write && write < pending && pending < probe
+                        .is_some_and(|((((((accepted, chunk), loop_start), write), pending), asserted), probe)| {
+                            accepted < chunk
+                                && chunk < loop_start
+                                && loop_start < write
+                                && write < pending
+                                && pending < asserted
+                                && asserted < probe
                         })
                         && !pressure.contains("Add-TargetAddress")
                 })
@@ -2813,7 +2821,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("[byte]($Id -band 0xff)", "[byte]$Id"),
         controller.replace("[byte]($id -band 0xff)", "[byte]$id"),
         controller.replace("$ports[4] = 53", "$ports[4] = 54"),
-        controller.replace("-not $pressureWrite.Wait(500)", "$true"),
+        controller.replace("$attempt -lt 128", "$attempt -lt 1"),
+        controller.replace("if (-not $pressureWrite.Wait(100)) { break }", "if ($false) { break }"),
         controller.replace(
             "$client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))",
             "",

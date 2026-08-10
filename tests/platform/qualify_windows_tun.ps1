@@ -1334,9 +1334,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $pressureGate = $gateA.Accepted + 1
         $pressure = Open-TunTcp $targets[7] $ports[7] $ownedInterfaceIndex
         Assert-True ($gateA.WaitAccepted($pressureGate, 5000)) "backpressure route did not open"
-        $pressureBytes = [byte[]]::new(8 * 1024 * 1024)
-        $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureBytes, 0, $pressureBytes.Length)
-        Assert-True (-not $pressureWrite.Wait(500)) "backpressure write unexpectedly drained"
+        $pressureChunk = [byte[]]::new(1024 * 1024)
+        $pressureWrite = $null
+        for ($attempt = 0; $attempt -lt 128; $attempt++) {
+            $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureChunk, 0, $pressureChunk.Length)
+            if (-not $pressureWrite.Wait(100)) { break }
+        }
+        Assert-True ($pressureWrite -and -not $pressureWrite.IsCompleted) "backpressure write unexpectedly drained"
         $stall = [Ferrum2TcpProbe]::new($targets[7], $ports[7], "stall")
         $tcpResources.Add($stall)
         $gateA.Release($pressureGate)
