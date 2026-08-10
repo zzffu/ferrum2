@@ -558,6 +558,26 @@ where
         .connect(SocketAddr::V4(first_server))
         .await
         .map_err(|_| ())?;
+    if std::env::var_os("FERRUM2_T05_UDP_SOCKET_PROBE").is_some_and(|value| value == "1") {
+        let local = upstream.local_addr().map_err(|_| ())?;
+        let peer = upstream.peer_addr().map_err(|_| ())?;
+        let local_category = if local.ip().is_loopback() {
+            "loopback"
+        } else if local.ip().is_unspecified() {
+            "unspecified"
+        } else {
+            "other"
+        };
+        let peer_category = if peer == SocketAddr::V4(first_server) {
+            "expected"
+        } else {
+            "other"
+        };
+        eprintln!("m15_udp_socket_diag local={local_category} peer={peer_category}");
+        if !matches!(upstream.send(&[]).await, Ok(0)) {
+            return Err(());
+        }
+    }
     Ok(ClientUdpAssociation {
         plan,
         first_server,

@@ -51,6 +51,7 @@ $completed = $false
 $primaryError = $null
 $outerCleanupError = $null
 $udp01DiagnosticOnly = $Mode -eq "udp" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq "1"
+if ($udp01DiagnosticOnly) { $env:FERRUM2_T05_UDP_SOCKET_PROBE = "1" }
 $tcp01Diagnostic = $null
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -1061,9 +1062,14 @@ function Invoke-UdpEchoRow(
         $tunAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_tun_packets_accepted") - $tunAcceptedBefore
         $udpAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
         $selfTestDelta = $Gate.SelfTests - $selfTestsBefore
+        $socketProbe = if (-not $DiagnosticOnly) { "disabled" }
+            elseif ($selfTestDelta -eq 1) { "arrived" }
+            elseif ($selfTestDelta -eq 0) { "absent" }
+            else { "unexpected" }
         if ($null -eq $firstUdpAcceptedDelta) { $firstTunAcceptedDelta = $tunAcceptedDelta; $firstUdpAcceptedDelta = $udpAcceptedDelta }
-        Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
-        Assert-True ($selfTestDelta -eq 0) "UDP request was misclassified as a self-test"
+        Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta socket_probe=$socketProbe gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
+        $expectedSelfTestDelta = if ($DiagnosticOnly) { 1 } else { 0 }
+        Assert-True ($selfTestDelta -eq $expectedSelfTestDelta) "UDP socket probe count mismatch"
         Assert-True ($tunAcceptedDelta -gt 0 -and $udpAcceptedDelta -eq 1) "UDP ingress/association witness mismatch"
         $response = Receive-TunUdp $client
         Assert-True (($response -join ",") -eq ($Payload -join ",")) "UDP echo mismatch"
@@ -1075,7 +1081,7 @@ function Invoke-UdpEchoRow(
                 elseif ($tunAcceptedDelta -gt 1 -and $udpAcceptedDelta -eq 1) { "non_exact_source_recurrence" }
                 elseif ($tunAcceptedDelta -eq 1 -and $udpAcceptedDelta -eq 1) { "single" }
                 else { "unresolved" }
-            [Console]::Error.WriteLine("m15_windows_tun_udp01_diag status=OBSERVED result=complete source=$sourceCategory first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)")
+            [Console]::Error.WriteLine("m15_windows_tun_udp01_diag status=OBSERVED result=complete source=$sourceCategory first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta socket_probe=$socketProbe gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)")
             throw "UDP-01 diagnostic sentinel"
         }
     } finally { $client.Dispose() }

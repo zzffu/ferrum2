@@ -3162,6 +3162,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains(
                 "$udp01DiagnosticOnly = $Mode -eq \"udp\" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq \"1\"",
             )
+            && source.contains(
+                "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
+            )
             && gate.is_some_and(|gate| {
                 gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
                     && gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))")
@@ -3203,6 +3206,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("$selfTestsBefore = $Gate.SelfTests")
                     && echo.contains("self_tests=$($Gate.SelfTests)")
                     && echo.contains("self_test_delta=$selfTestDelta")
+                    && echo.contains("socket_probe=$socketProbe")
                     && echo.contains("gate_state=$($Gate.State)")
                     && echo.contains("gate_fault=$($Gate.Fault)")
                     && echo.contains("probe_fault=$($probe.Fault)")
@@ -3266,6 +3270,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("$Gate.SelfTests -eq 1", "$true"),
         controller.replace("Interlocked.Increment(ref selfTests)", ""),
         controller.replace("$selfTestsBefore = $Gate.SelfTests", "$selfTestsBefore = 0"),
+        controller.replace("socket_probe=$socketProbe", "socket_probe=bypassed"),
         controller.replace("$firstUdpAcceptedDelta", "$ignoredFirstUdpDelta"),
         controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
         controller.replace(
@@ -3378,6 +3383,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && adapter.contains("run_udp_reject(")
             && association.contains("fn prepare_application_request(")
             && association.contains("fn prepare_application_response(")
+            && association.contains("FERRUM2_T05_UDP_SOCKET_PROBE")
+            && association.contains("upstream.local_addr()")
+            && association.contains("upstream.peer_addr()")
+            && association
+                .contains("m15_udp_socket_diag local={local_category} peer={peer_category}")
+            && association.contains("upstream.send(&[]).await")
+            && !association.contains("local={local}")
+            && !association.contains("peer={peer}")
             && adapter.contains("association.prepare_application_request(")
             && adapter.contains("association.prepare_application_response(")
             && client_socks.contains("prepared.prepare_application_request(")
@@ -3426,6 +3439,19 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             tun_udp.clone(),
             client_tun.replace("run_udp_dns(", "run_udp_route("),
             client_udp.clone(),
+        ),
+        (
+            tun_udp.clone(),
+            client_tun.clone(),
+            client_udp.replace("upstream.send(&[]).await", "Ok(0)"),
+        ),
+        (
+            tun_udp.clone(),
+            client_tun.clone(),
+            client_udp.replace(
+                "m15_udp_socket_diag local={local_category} peer={peer_category}",
+                "m15_udp_socket_diag local={local} peer={peer}",
+            ),
         ),
         (
             tun_udp.clone(),
