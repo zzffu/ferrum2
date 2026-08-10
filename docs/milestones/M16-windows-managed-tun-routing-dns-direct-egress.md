@@ -1,0 +1,187 @@
+# M16 — Windows managed TUN routing, DNS and direct egress
+
+- **Status:** planned
+- **Qualified M15 product:** `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9`
+- **Qualified M15 product tree:** `72a3cfb5c881a35b1416cbf9ffea593973cc3570`
+- **Planning baseline:** `fcef80dcc7e62bbca63ffbf7832df369dd418abd`
+- **Planning tree / parent:** `ddeb8afba64729f08a334d9c8a56e17e92c1d224` /
+  `ba637e08287cbb623d4b604123f27e9e8b2df537`
+- **Strategy:** drain；all tickets integrate serially
+- **Owner:** primary thread
+- **Target:** Windows 10 build 19041+ and Windows 11 AMD64 through `x86_64-pc-windows-msvc`
+- **MSRV:** exact Rust `1.97.1` unchanged
+- **Performance:** required — client socket creation and TUN route/DNS/lifecycle ownership enter transport and
+  resource paths
+
+## Outcome
+
+在 schema-v2 Windows client 中，把原先分开的“自动路由/DNS”和“direct outbound”合成一个可独立
+验收的 M16：operator 可声明 `[[outbounds]] type = "direct"`，现有 static/ordered route/selector/DNS
+detour 选择后，TUN 或 SOCKS TCP/UDP 直接访问原 target 而不创建 SIP022 state；显式 opt-in 的
+`auto_route` 以 bounded include-minus-exclude `/1` capture rows 把流量导入既有 M15 Wintun data plane，
+并在每个 proxy/direct/DNS physical socket connect/send 前绑定 capture 前冻结的 underlay；可选
+`auto_dns` 只给该 Wintun interface 设置 synthetic resolver address，并把 exact TCP/UDP port 53 交给
+既有 `DnsProxy`。所有 owned route/DNS/interface state 与 adapter 同生命周期回读、回滚和审计。
+
+This plan supersedes the owner-provided discussion draft
+`C:\Users\ZZZ\Downloads\ferrum2-M16-windows-routing-dns-plan-draft-v1.md`，uses
+`C:\Users\ZZZ\Desktop\Windows-TUN-路由配置经验.md` and
+`C:\Users\ZZZ\Desktop\Hyper-V-VM-测试经验总结.md` as operational input，and incorporates the separate
+direct-egress milestone request。Those external files are design input，not repository evidence。Primary-
+source corrections and sing-box comparison are recorded in
+[`M16-windows-auto-route-dns-direct-reference.md`](../research/M16-windows-auto-route-dns-direct-reference.md)。
+
+## Planning decisions and corrections
+
+- Existing missing outbound `type` remains Shadowsocks；explicit `shadowsocks` is accepted。Direct is a
+  client-only closed variant with no server/method/PSK，can be selected by static/rule/final/selector/DNS
+  detour，and is rejected inside a fixed proxy chain。Direct-only tagged clients may omit meaningless global
+  Shadowsocks credentials。
+- Core keeps one opaque `EgressPlanSnapshot` of concrete indices。A direct snapshot is singleton；client
+  egress，not TUN/route/core callers，dispatches Direct versus Shadowsocks。TCP reuses the existing dialer；UDP
+  reuses the existing bounded resolver/socket/session owners。No new route action、crate、registry or public
+  factory is planned。
+- Direct means “traffic entered TUN，then physical egress without SIP022”。`route_exclude_address` means the
+  prefix never entered TUN。`CONTEXT.md` replaces the ambiguous historical “direct action” with one-hop proxy
+  plan and client direct outbound。
+- Fixed Shadowsocks/DNS endpoints retain endpoint-specific capture-before interface binding。Arbitrary direct
+  targets use one frozen physical default interface per address family。This is intentionally not full
+  per-target multihomed Windows route fidelity；LAN/VPN/non-default prefixes must be excluded from capture。
+- TUN+direct also publishes the read-only physical-default binder when `auto_route = false`；the M15 external
+  controller adds its manual capture only after Ready。No-direct/manual-route configurations retain exact M15
+  socket and host-state behavior。
+- `GetBestRoute2` cannot discover an interface by destination alone。Fixed endpoints use
+  `GetBestInterfaceEx`，then validated index/LUID，then interface-constrained `GetBestRoute2`。Every direct
+  socket uses the already frozen policy after capture；there is no unpinned fallback or per-flow bypass route。
+- Capture is canonical bounded `route_address − route_exclude_address`，with any `/0` split to `/1`。Ferrum2
+  creates only Wintun capture rows，prechecks absence，sets every required row field，reads ActiveStore back，
+  journals only exact success and reverses only still-owned rows。It never flushes routes or records
+  address-derived rows。
+- Auto-DNS is Wintun per-interface resolver steering，not global DNS ownership or anti-leak。No physical DNS、
+  WFP、off-TUN port-53 block、browser DoH/DoQ claim or strict-route mode is included。
+- `ferrum2-wintun` remains the single audited Windows unsafe Adapter。Route/DNS/socket/notification operations
+  share the owned adapter lifetime，so the draft's new `ferrum2-windows-net` crate is not justified yet。
+- Existing `ProcessSupervisor` and synchronous non-blocking activation remain。Non-TUN roots prepare first；
+  managed TUN prepares last，subscribes before snapshot，adds capture as its last host mutation and revalidates
+  the physical generation before ready。Network invalidation removes capture and terminates；no live flow
+  migration or fail-closed claim。
+- The current planning baseline includes the post-M15 test-only DNS cancellation commit `fcef80d…`。It is the
+  exact M16 footprint/comparison base；the qualified M15 product identity remains unchanged。
+
+## Entry feasibility gate
+
+M16-T01 is a product stop gate，not implementation scaffolding。Fresh isolated Windows 10 and Windows 11 VM
+probes must freeze exact route next-hop/metric/interface-metric disposition，prove IPv4/IPv6 pinned TCP/UDP
+positive versus unpinned Wintun-captured negative controls，prove Wintun resolver steering and the
+capture-before-admission interval，and externally prove zero residue after partial apply、normal stop and
+`TerminateProcess`。Missing Win11 assets or any failed capability leaves M16 blocked for contract replanning；
+T02 cannot paper over it with fakes、new knobs、a service or watchdog。
+
+## Planning/control isolation
+
+The current M16 bundle is one isolated control-plus-Markdown planning change：`ci/test-budget-baseline.txt`
+and Markdown only，with no platform probe、product、manifest、lock or workflow edit。It must be accepted as one
+single-parent commit before T01 starts。T01 binds that exact commit as its base and may add only the existing
+qualifier probe plus Markdown evidence amendments；it does not reopen the protected footprint control。
+
+## Existing seams and minimum deepening
+
+- Keep `EgressPlanSnapshot`、route/final/static/selector compilation and selection lifetime unchanged。
+- Change private `ClientOutboundContext` into the Direct/Shadowsocks sum and deepen `ClientEgressEngine` once；
+  TUN、SOCKS and `ClientDnsEgress` remain callers，not socket owners。
+- Reuse runtime `TcpDialer`/bounded resolver and `DirectUdpSocketFactory`/`DirectUdpRuntime` ownership。Do not
+  retain the current DNS no-detour raw system connect/bind path when auto-route is active。
+- Extend the existing `ferrum2-wintun::Adapter` owner with safe route/DNS/binding/notification operations;
+  raw NetIO/Winsock values remain private to its Windows module。Split a private source file only if file
+  review needs it；do not create a crate boundary without a second lifetime/consumer。
+- Reuse the existing TUN owner thread and `tests/platform/qualify_windows_tun.ps1`。No second stack、DNS
+  responder、UDP association engine、process supervisor or equivalent platform harness is added。
+
+## Non-goals
+
+- WFP strict-route、kill switch、DNS anti-leak/global exclusivity、physical adapter DNS or deleting/adopting
+  third-party routes。
+- Target-specific multi-interface direct routing、live underlay recomputation/migration、hot reload、active
+  flow migration or automatic failover。
+- Physical endpoint bypass routes as the recursion mechanism、`/0` capture rows、opening/reusing an existing
+  Wintun adapter or broad route flush/delete。
+- Linux/macOS managed TUN、Windows ARM64/x86、service/watchdog/installer/UAC automation、Fake-IP、process/
+  Geo/rule-set routing、DoQ/DoH3、QUIC sniff、ICMP、fragments/options/extensions unsupported by M15。
+- A new crate/dependency/endpoint registry/public egress trait，performance improvement threshold，Wintun
+  redistribution，package、release or publication。
+- The unrelated M15 Wintun ring-full observability repair from the external draft；it remains a separate
+  maintenance item unless T01 proves it blocks M16 capability evidence。
+
+## Exit criteria
+
+- [ ] T01 records exact Windows 10/11 capability evidence and freezes route values；pinned/unpinned、DNS、
+      capture interval and hard-kill cleanup all pass，or the milestone stops before product work。
+- [ ] `--check-config` remains side-effect-free；old outbounds default to Shadowsocks；direct closed fields、
+      direct-only credentials、chain rejection and every managed-TUN bound/relationship fail closed correctly。
+- [ ] Static/rule/final/selector can choose direct for SOCKS and TUN IPv4/IPv6 TCP/UDP；DNS detour/no-detour can
+      use the same direct mode；raw application payload returns and no SIP022 owner exists。
+- [ ] Direct/proxy selected failure retains current no-fallback and selector snapshot semantics；TUN original
+      target and UDP mapping selection lifetime remain unchanged。
+- [ ] Auto-route compiles exact bounded prefix subtraction，creates no `/0` or physical bypass row，performs
+      absent precheck/exact readback/reverse conditional cleanup and never adopts OS/third-party rows。
+- [ ] Every proxy、direct and DNS physical socket is bound before connect/first send；negative unpinned sockets
+      are captured while positive pinned sockets do not enter Wintun。
+- [ ] Manual-route TUN+direct publishes binding before Ready and survives a controller route added afterward；
+      no-direct `auto_route=false` makes no new query/mutation and preserves M15 exactly。
+- [ ] Auto-DNS changes only the owned Wintun interface；system resolver UDP/TCP reaches exact synthetic
+      addresses and existing DnsProxy；direct/proxy UDP/TCP/DoT/DoH upstreams use the correct pinned egress。
+- [ ] All setup ordinals、change invalidation、later composition failure、graceful/forced stop and 100 cycles
+      return OS and process-private owners to baseline。External hard kill separately proves process absence
+      and zero adapter/address/route/DNS residue before controller remediation，without claiming internal drain。
+- [ ] Each supported Windows baseline proves the real route、interface and IPv4/IPv6 unicast-address callback
+      paths independently revoke admission/capture/DNS，terminate and leave zero owned residue。
+- [ ] New errors/logs/traces/metrics use fixed redacted categories and contain no target、endpoint、prefix、
+      interface/adapter identity、DNS name、tag、packet or secret。
+- [ ] One exact SHA passes focused、Full、Rust 1.97.1、three non-driver targets、existing interop、footprint、
+      Windows 10/11 privileged full/cleanup、independent performance and bounded Architect/QA review with zero
+      blocking findings。
+
+## Tickets
+
+| Ticket | Outcome | Depends on | Status |
+|---|---|---|---|
+| M16-T01 | Prove Windows host-network capabilities and freeze measured contracts | accepted M16 planning/control | ready |
+| M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | planned |
+| M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | planned |
+| M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | planned |
+| M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | planned |
+| M16-T06 | Close network-change、failure、hard-kill and Win10/Win11 lifecycle evidence | M16-T05 | planned |
+| M16-T07 | Qualify and close one exact M16 integration SHA | M16-T06 | planned |
+
+```text
+M16-T01 capability/contracts/control
+  -> M16-T02 config and compiled graph
+  -> M16-T03 direct TCP/UDP egress
+  -> M16-T04 capture routes and socket pinning
+  -> M16-T05 Wintun DNS steering
+  -> M16-T06 integrated lifecycle/VM evidence
+  -> M16-T07 exact-SHA qualification
+```
+
+The graph drains serially。T02～T06 overlap config、client egress、Wintun ownership and composition，so the
+plan does not claim false parallelism。Each ticket uses one branch、one worktree、one writer and the accepted
+exact integration base；workflow/control files remain read-only during product tickets。
+
+## Test-footprint and remote boundary
+
+Planning baseline is code/tests `29771/50323`，ratio `1.690336`，case/support/fixture
+`44574/5152/597`。Forecast Rust test growth is `+2250..3650 / +160..460 / +0` and existing PowerShell
+qualifier growth is `+450..850` non-Rust lines。No second harness or fixture is planned；table-driven cases and
+existing helpers are mandatory first choices。Ticket/file numeric `REVIEW_REQUIRED` findings need an explicit
+review disposition，while integrity remains a hard gate。
+
+No push、workflow dispatch、PR、tag、package、release or publication is authorized by this plan。T01 VM work is
+local isolated-guest evidence。Any later hosted push or independent performance dispatch requires explicit
+user authorization and must bind the accepted exact SHA。
+
+## Blocker / next action
+
+First accept the current isolated planning/control commit。Then execute M16-T01 only：bind that exact base，
+confirm Windows 10 and Windows 11 VM/checkpoint assets，extend the existing qualifier with the bounded
+capability mode，and freeze the route/metric/hard-kill results in ADR-0036、SPEC-0017 and TEST-0017。Do not
+begin product implementation until every entry capability row passes。

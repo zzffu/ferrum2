@@ -1,0 +1,119 @@
+# ADR-0036 — M16 Windows managed TUN policy
+
+- **Status:** Proposed
+- **Date:** 2026-08-10
+- **Related:** `ADR-0034`、`ADR-0035`、`SPEC-0017`、`TEST-0017`、M16-T01～T07
+
+## Context
+
+M15 owns a Wintun adapter and bounded TCP/UDP data plane but deliberately leaves capture routes and Windows
+DNS outside the product。M16 must add an opt-in compatible capture policy while preventing the client's own
+proxy、direct and DNS sockets from re-entering Wintun。The new direct outbound makes the destination set
+unbounded at startup，so endpoint host routes alone cannot solve recursion。
+
+Windows route、DNS and process-termination APIs also impose non-obvious ownership limits：ActiveStore rows
+are not process-scoped，per-interface DNS is not globally exclusive，and `TerminateProcess` does not run
+Rust cleanup。The milestone needs a capability probe before it can promise lifecycle cleanup。
+
+## Decision
+
+### Compatible and opt-in ownership
+
+`[tun].auto_route` and `[tun].auto_dns` default to `false`。With both false or absent，M15 route/DNS host
+state remains unchanged。A graph combining TUN with a reachable client direct outbound still takes a
+read-only capture-before physical-default snapshot and publishes its socket binder before Ready；this is
+required direct-egress behavior，not product route ownership，and an external controller adds capture only
+after Ready。`auto_route = true` makes the existing Wintun owner additionally own its compiled capture rows、
+binding for every proxy/DNS physical first hop、notifications and rollback journal。`auto_dns = true`
+additionally owns only DNS settings on that newly created Wintun interface and exact synthetic DNS handling；
+it requires auto-route and the existing `[dns]` graph。
+
+This is compatible routing，not strict routing：Ferrum2 does not delete or rewrite third-party routes，does
+not add physical bypass routes，does not modify physical-interface DNS，and does not add WFP filters or a
+kill switch。More-specific LAN、VPN and operator routes retain Windows longest-prefix precedence unless the
+operator explicitly includes an equally or more specific prefix。
+
+### Capture plan and exact journal
+
+The capture compiler produces a bounded canonical set from `route_address − route_exclude_address`，then
+splits any remaining IPv4/IPv6 `/0` into `/1` rows。It never creates a `/0`，never creates an exclude/bypass
+row，and rejects an empty or over-limit result。Each intended row is absent before create，has every mutable
+`MIB_IPFORWARD_ROW2` field explicitly initialized，is read back from ActiveStore，and enters the journal only
+after an exact match。Rollback deletes journaled rows in reverse order only while their owned identity still
+matches；Windows address-derived connected/local rows are never journaled。
+
+Route next-hop derivation、row metric and any need for Wintun interface-metric mutation are physical-world
+values。M16-T01 must freeze them from independent Windows 10 and Windows 11 positive/negative readback before
+product implementation。If one bounded rule does not work on both supported builds，the contract stops for
+replanning rather than exposing an unproved operator knob。
+
+### Immutable physical underlay policy
+
+Before any capture row exists，M16 snapshots eligible up、non-loopback、non-Wintun physical interfaces and
+routes。Each fixed Shadowsocks first-hop and direct DNS bootstrap is resolved to its exact best physical
+interface with `GetBestInterfaceEx` followed by interface-constrained `GetBestRoute2`。For dynamic direct
+targets，M16 selects and freezes one unambiguous physical default interface per address family。Every TCP
+socket is bound with the family-correct unicast-interface option before connect；every UDP socket is bound
+before first send。
+
+Missing、ambiguous、changed or failed binding rejects the selected socket；there is no unpinned fallback and
+no per-flow bypass route。This bounded policy deliberately does not preserve arbitrary target-specific
+multi-interface routing。Prefixes that must continue through a non-default LAN、enterprise VPN or other
+interface belong in `route_exclude_address`。Per-target route fidelity and live underlay migration are
+deferred。
+
+### DNS steering, not DNS exclusivity
+
+Auto-DNS snapshots、sets and reads back only the new Wintun interface's IPv4/IPv6 DNS settings，using the
+validated synthetic addresses。TUN TCP/UDP whose exact destination is either synthetic address on port 53
+enters the existing `DnsProxy` before ordinary routing；other port-53 traffic follows ordinary policy。Direct
+and detoured UDP/TCP/DoT/DoH upstream sockets use the same physical binding boundary。
+
+Cleanup restores the prior Wintun DNS state only if current state still equals the owned applied value；an
+external mutation is reported and never overwritten。The product makes no claim about other interfaces、
+browser DoH/DoQ or global DNS anti-leak behavior。No WFP enforcement is added。
+
+### Existing lifecycle, final preparation and change handling
+
+No async activation interface or new process supervisor is introduced。All non-TUN roots are prepared first；
+the managed TUN root is last。Its owner establishes notifications before the physical snapshot，records a
+generation，performs Win32 mutation/readback during async prepare，and adds capture rows as the last host
+mutation。It then revalidates the frozen physical fingerprint while excluding its own exact Wintun state；
+any intervening relevant generation change or mismatch rolls the transaction back。Synchronous activation
+only opens admission。M16-T01 must prove that the bounded capture-before-admission interval is acceptable；
+otherwise the plan stops for a lifecycle amendment。
+
+Route、interface and address notifications are treated as invalidation signals。If revalidation changes any
+frozen underlay or owned-row invariant，the process rejects new sockets、removes capture/DNS steering and
+terminates through the existing supervised shutdown。Existing flows are not migrated and the milestone does
+not claim fail-closed behavior during the transition。
+
+M16-T01 must also prove that `TerminateProcess` leaves process absence and no adapter、address、capture-route
+or Wintun-DNS residue on both supported Windows baselines before controller remediation。This external row
+does not claim in-process owner drain。If adapter teardown does not provide the OS-state cascade，M16 stops
+and replans；a service、watchdog or persistent recovery ledger is not silently added。
+
+## Consequences
+
+- Socket pinning，not target host routes，solves recursion for both fixed proxy endpoints and arbitrary
+  direct targets。
+- One adapter lifetime continues to own all Wintun Win32 state；the existing audited `ferrum2-wintun`
+  boundary may deepen instead of adding a second shallow Windows-network crate。
+- Compatible routing preserves third-party more-specific routes but cannot promise strict capture、DNS
+  anti-leak or per-target multi-interface fidelity。
+- Real Windows 10/11 capability and hard-kill cleanup are entry gates，not assumptions hidden in final
+  qualification。
+
+## Rejected alternatives
+
+- **Physical `/32`/`/128` bypass rows:** cannot enumerate arbitrary direct destinations and adds route-table
+  ownership for every flow。
+- **Choose best interface after capture:** the capture route can make Wintun the answer and reintroduce the
+  loop。
+- **Copy sing-box `/0` plus metric-zero behavior:** upstream behavior is evidence，not Ferrum2's readback and
+  ownership contract。
+- **WFP strict route or DNS block filters:** materially different security、interop and cleanup scope。
+- **Live underlay recomputation/migration:** changes established-flow semantics and is not required for a
+  first compatible mode。
+- **A new `ferrum2-windows-net` crate:** route/DNS/pinning share the owned Wintun lifetime and currently have
+  no second consumer；split only if implementation evidence proves the existing Adapter cannot remain deep。

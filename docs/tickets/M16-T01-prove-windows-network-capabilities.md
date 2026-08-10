@@ -1,0 +1,79 @@
+---
+id: M16-T01
+milestone: M16
+status: ready
+depends_on: []
+owns:
+  - docs/adr/ADR-0035-m16-client-direct-outbound.md
+  - docs/adr/ADR-0036-m16-windows-managed-tun-policy.md
+  - docs/milestones/M16-windows-managed-tun-routing-dns-direct-egress.md
+  - docs/research/M16-windows-auto-route-dns-direct-reference.md
+  - docs/roadmap.md
+  - docs/specs/SPEC-0017-m16-windows-managed-tun-routing-dns-direct-egress.md
+  - docs/test-plans/TEST-0017-m16-windows-managed-tun-routing-dns-direct-egress.md
+  - docs/tickets/M16-T*.md
+  - tests/platform/qualify_windows_tun.ps1
+---
+
+# M16-T01 — Prove Windows network capabilities and freeze contracts
+
+## Outcome
+
+Starting from the accepted exact M16 planning/control commit，accept one platform-probe plus Markdown-evidence
+commit that proves，on isolated Windows 10 and Windows 11 guests，that the selected capture rows、socket
+binding、Wintun DNS steering、capture-before-admission interval and hard-kill cleanup are physically viable
+before any product implementation begins。This ticket does not modify protected footprint/workflow control。
+
+## Acceptance
+
+- [ ] The parent is the accepted exact M16 planning/control commit；qualified M15 and planning SHA/tree/parent
+      resolve，and inherited schema-3 verification reports M16 base `fcef80d…` with `29771/50323`。
+- [ ] ADR-0035/0036、SPEC/TEST-0017、CONTEXT、roadmap and all tickets agree on direct singleton plans、chain
+      rejection、single-default-per-family dynamic direct、endpoint-specific fixed binding、compatible `/1`
+      capture、Wintun-only DNS steering、no WFP and no live migration。
+- [ ] The existing Windows TUN qualifier gains one bounded `network-feasibility` mode rather than a second
+      controller；host execution is forbidden and exact guest/checkpoint/build/probe hashes are recorded。
+- [ ] Windows 10 build 19041+ and Windows 11 AMD64 both prove fully initialized capture create/readback/exact
+      delete and freeze the same next-hop derivation、route metric and interface-metric disposition。
+- [ ] Both families prove unpinned off-link TCP/UDP enters Wintun while pre-connect/pre-send pinned traffic
+      reaches its owned endpoint with zero Wintun ingress；fixed-endpoint GetBest API order and dynamic default
+      selection are observable。
+- [ ] Both guests prove Wintun per-interface DNS drives Windows resolver UDP and TCP to the exact synthetic
+      addresses without changing physical DNS，and prove the capture-before-admission interval remains bounded。
+- [ ] Partial apply and normal supervised stop leave zero OS and in-process owners。External `TerminateProcess`
+      separately proves process absence plus zero adapter/address/route/DNS residue before controller cleanup；
+      it does not claim process-private drain counters。
+- [ ] Any failed/missing row leaves this ticket BLOCKED，records the evidence and stops T02；no product knob、
+      service/watchdog、WFP or unit-fake waiver is added。
+- [ ] Only a complete PASS may change ADR-0035/0036 to Accepted and SPEC/TEST-0017 to Approved，record the
+      measured route/metric formulas and make T02 ready；otherwise their proposed/draft state remains。
+- [ ] Focused control/architecture validation and independent Architect/QA review pass with zero blocker。
+
+## Validation
+
+```powershell
+git rev-parse HEAD 'HEAD^{tree}' 'HEAD^'
+& 'C:\Program Files\Git\bin\bash.exe' scripts/test-budget.sh verify
+cargo test -p ferrum2-m0-harness --test workspace_policy --locked
+cargo test -p ferrum2-m0-harness --test architecture --locked
+pwsh tests/platform/qualify_windows_tun.ps1 -Mode network-feasibility -WintunZip <exact-zip> -RunToken <unique>
+cargo fmt --all -- --check
+git diff --check
+```
+
+Run the feasibility command separately inside each approved guest workflow and preserve exact before/active/
+after evidence；never run it on the host TUN environment。
+
+## Result
+
+- Commit: —
+- Windows 10 evidence: —
+- Windows 11 evidence: —
+- Review: —
+- Notes: —
+
+## Rollback / risk
+
+Rollback removes only T01 probe/evidence amendments and leaves the accepted M16 planning/control commit
+intact。The dominant risk is mistaking fake or one-build behavior for a durable Windows contract；two
+independent build baselines and pinned/unpinned controls are mandatory。

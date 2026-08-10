@@ -76,10 +76,9 @@ A named traffic-entry identity supplied to static binding or route selection.
 _Avoid_: Listener, route, endpoint
 
 **TUN inbound**:
-A client traffic-entry that consumes complete IP packets delivered to a Ferrum2-owned virtual adapter by
-routes owned outside the product. Ferrum2 owns adapter and data-plane lifetime, not explicit capture routes
-or system DNS.
-_Avoid_: Auto-route, full-tunnel owner, SOCKS listener
+A client traffic-entry that consumes complete IP packets delivered to a Ferrum2-owned virtual adapter.
+Delivery is either manual through external capture routes or opt-in through one managed TUN policy.
+_Avoid_: Managed TUN policy, full-tunnel owner, SOCKS listener
 
 **TUN TCP flow**:
 One bounded local userspace TCP connection keyed by application source and immutable original numeric
@@ -94,27 +93,58 @@ _Avoid_: SOCKS UDP association, SIP022 UDP session, per-datagram route
 **External capture route**:
 A Windows route created and removed by a controller or operator to deliver selected traffic to the TUN
 adapter. Ferrum2 does not create, own, restore, or delete it in M15.
-_Avoid_: TUN inbound, interface address, Ferrum2 rollback state
+_Avoid_: Product-owned capture route, TUN inbound, interface address
+
+**Managed TUN policy**:
+The opt-in Windows lifetime that owns compatible capture routes, physical socket binding, Wintun DNS
+steering and change detection around one TUN inbound. It is not a strict-route or kill-switch claim.
+_Avoid_: TUN inbound, external capture route, system-wide DNS ownership
+
+**Product-owned capture route**:
+One exact Windows route row created, read back, journaled and removed by the managed TUN policy to deliver
+an included prefix to its Wintun interface.
+_Avoid_: External capture route, OS-managed connected route, physical bypass route
 
 **OS-managed connected route**:
 A local/on-link route row materialized by Windows from an interface address and prefix. It is observed as
 an address side effect and disappears with owned interface cleanup; Ferrum2 never mutates it directly.
-_Avoid_: External capture route, product-owned bypass route
+_Avoid_: External capture route, product-owned capture route
+
+**Physical underlay binding**:
+The immutable physical-interface choice applied to a client socket before connect or first send so managed
+capture cannot recursively return that socket to Wintun.
+_Avoid_: Capture prefix, bypass route, application target
+
+**Wintun DNS steering**:
+Per-interface Windows DNS settings that direct ordinary resolver traffic toward the TUN synthetic DNS
+address. It is neither global resolver exclusivity nor DNS anti-leak enforcement.
+_Avoid_: DNS proxy inbound, physical adapter DNS, WFP strict routing
 
 **Outbound**:
 A named egress action accepted by static binding or route selection. It resolves to one immutable
-direct or chained egress plan before network work.
+concrete or chained egress plan before network work.
 _Avoid_: Route, upstream group, endpoint, retry candidate
+
+**Client direct outbound**:
+A tagged client `[[outbounds]]` entry that opens the selected application target through the physical
+network without creating SIP022 protocol state.
+_Avoid_: One-hop proxy plan, route exclusion, server direct outbound
 
 **Concrete Shadowsocks outbound**:
 A tagged client `[[outbounds]]` entry with one server endpoint and one effective method/PSK pair. The
 pair is either declared together on that outbound or inherited together from global `[shadowsocks]`.
-_Avoid_: Chain, selector, server direct outbound, multi-user identity
+_Avoid_: Client direct outbound, chain, selector, multi-user identity
 
 **Egress plan**:
-The owned, immutable ordered concrete-outbound snapshot returned by one client selection call. A direct
-action has one hop; a proxy chain has two or more，and later selector switches never change that snapshot.
+The owned, immutable snapshot returned by one client selection call. It is either one client direct
+outbound, one concrete Shadowsocks outbound, or `2..=8` ordered Shadowsocks hops；later selector switches
+never change that snapshot.
 _Avoid_: Route, selector current state, retry sequence
+
+**One-hop proxy plan**:
+An egress plan containing exactly one concrete Shadowsocks outbound. Pre-M16 documents may call this a
+“direct action”；that historical phrase never means a client direct outbound.
+_Avoid_: Client direct outbound, fixed proxy chain, retry candidate
 
 **Fixed proxy chain**:
 A tagged client egress plan containing `2..=8` ordered, unique concrete Shadowsocks outbound hops. Its
@@ -193,7 +223,8 @@ _Avoid_: Outbound action, fallback list, retry policy
 
 **DNS detour**:
 An optional DNS-server reference to one existing egress action whose immutable plan carries traffic to
-that server's bootstrap address. Absence means direct egress；it never selects another DNS server.
+that server's bootstrap address. Absence and a client direct outbound both mean physical direct egress；
+neither selects another DNS server.
 _Avoid_: DNS action, DNS server tag, fallback, ordinary route
 
 **DNS bootstrap address**:
