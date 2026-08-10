@@ -3193,6 +3193,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && gate.contains("public int SocketProbes")
                     && gate.contains("private int stdProbes;")
                     && gate.contains("public int StdProbes")
+                    && gate.contains("private int earlyProbes;")
+                    && gate.contains("public int EarlyProbes")
+                    && gate.contains("public bool WaitEarlyProbe(int milliseconds)")
                     && gate.contains("public bool WaitSelfTest(int milliseconds)")
                     && gate.contains("request.Buffer.Length == 0")
                     && gate.contains("Interlocked.Increment(ref selfTests)")
@@ -3201,6 +3204,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && gate.contains("socketProbe.Set()")
                     && gate.contains("Interlocked.Increment(ref stdProbes)")
                     && gate.contains("stdProbe.Set()")
+                    && gate.contains("Interlocked.Increment(ref earlyProbes)")
+                    && gate.contains("earlyProbe.Set()")
                     && gate.contains("await upstream.ReceiveAsync()")
                     && gate.contains("ReplayFirstToLatest")
                     && !gate.contains("public bool SelfTest()")
@@ -3216,6 +3221,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && self_test.contains("$Gate.SelfTests -eq 1")
                     && self_test.contains("$Gate.SocketProbes -eq 0")
                     && self_test.contains("$Gate.StdProbes -eq 0")
+                    && self_test.contains("$Gate.EarlyProbes -eq 0")
             })
             && probe.is_some_and(|probe| {
                 probe.contains("new UdpClient(new IPEndPoint(IPAddress.Parse(address), port))")
@@ -3235,10 +3241,16 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("$selfTestsBefore = $Gate.SelfTests")
                     && echo.contains("$socketProbesBefore = $Gate.SocketProbes")
                     && echo.contains("$stdProbesBefore = $Gate.StdProbes")
+                    && echo.contains("$earlyProbesBefore = $Gate.EarlyProbes")
+                    && echo.contains("$Gate.WaitEarlyProbe(1000)")
                     && echo.contains("$socketProbesBefore -eq 0")
                     && echo.contains("$stdProbesBefore -eq 0")
+                    && echo.contains("$expectedEarlyProbes = if ($DiagnosticOnly) { 1 } else { 0 }")
+                    && echo.contains("$earlyProbesBefore -eq $expectedEarlyProbes")
                     && echo.contains("socket_probes=$($Gate.SocketProbes)")
                     && echo.contains("std_probes=$($Gate.StdProbes)")
+                    && echo.contains("early_probes=$($Gate.EarlyProbes)")
+                    && echo.contains("early_probe=$earlyProbe")
                     && echo.contains("self_tests=$($Gate.SelfTests)")
                     && echo.contains("self_test_delta=$selfTestDelta")
                     && echo.contains("socket_probe_delta=$socketProbeDelta")
@@ -3250,6 +3262,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("probe_fault=$($probe.Fault)")
                     && echo
                         .find("$socketProbesBefore -eq 0")
+                        .zip(echo.find("[void]$client.Send($Payload, $Payload.Length)"))
+                        .is_some_and(|(baseline, send)| baseline < send)
+                    && echo
+                        .find("$earlyProbesBefore -eq $expectedEarlyProbes")
                         .zip(echo.find("[void]$client.Send($Payload, $Payload.Length)"))
                         .is_some_and(|(baseline, send)| baseline < send)
                     && echo.contains("[bool]$DiagnosticOnly = $false")
@@ -3312,23 +3328,32 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("$Gate.SelfTests -eq 1", "$true"),
         controller.replace("$Gate.SocketProbes -eq 0", "$true"),
         controller.replace("$Gate.StdProbes -eq 0", "$true"),
+        controller.replace("$Gate.EarlyProbes -eq 0", "$true"),
         controller.replace("Interlocked.Increment(ref selfTests)", ""),
         controller.replace("Interlocked.Increment(ref socketProbes)", ""),
         controller.replace("Interlocked.Increment(ref stdProbes)", ""),
+        controller.replace("Interlocked.Increment(ref earlyProbes)", ""),
+        controller.replace("$Gate.WaitEarlyProbe(1000)", "$true"),
         controller.replace("$selfTestsBefore = $Gate.SelfTests", "$selfTestsBefore = 0"),
         controller.replace(
             "$socketProbesBefore = $Gate.SocketProbes",
             "$socketProbesBefore = 0",
         ),
         controller.replace("$stdProbesBefore = $Gate.StdProbes", "$stdProbesBefore = 0"),
+        controller.replace(
+            "$earlyProbesBefore = $Gate.EarlyProbes",
+            "$earlyProbesBefore = 0",
+        ),
         controller.replace("$socketProbesBefore -eq 0", "$true"),
         controller.replace("$stdProbesBefore -eq 0", "$true"),
+        controller.replace("$earlyProbesBefore -eq $expectedEarlyProbes", "$true"),
         controller.replace(
             "socket_probes=$($Gate.SocketProbes)",
             "socket_probes=hidden",
         ),
         controller.replace("socket_probe=$socketProbe", "socket_probe=bypassed"),
         controller.replace("std_probe=$stdProbe", "std_probe=bypassed"),
+        controller.replace("early_probe=$earlyProbe", "early_probe=bypassed"),
         controller.replace(
             "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
             "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"0\"",
@@ -3365,6 +3390,43 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     }
     let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
         .expect("client composition");
+    let has_pre_runtime_udp_probe = |composition: &str| {
+        let run = composition
+            .split_once("pub(crate) fn run(config: ValidatedClientConfig)")
+            .and_then(|(_, tail)| tail.split_once("async fn run_async("))
+            .map(|(body, _)| body);
+        run.is_some_and(|run| {
+            run.contains("FERRUM2_T05_UDP_SOCKET_PROBE")
+                && run.contains("FERRUM2_T05_UDP_GATE_PORT")
+                && run.contains("std::net::UdpSocket::bind")
+                && run.contains("socket.send(b\"f2-early\")")
+                && run.contains("m15_udp_early_diag send={send_category}")
+                && run
+                    .find("socket.send(b\"f2-early\")")
+                    .zip(run.find("tokio::runtime::Builder::new_multi_thread()"))
+                    .is_some_and(|(probe, runtime)| probe < runtime)
+        })
+    };
+    assert!(
+        has_pre_runtime_udp_probe(&client),
+        "the diagnostic same-executable UDP witness must run before Tokio and every process root"
+    );
+    for mutation in [
+        client.replace("socket.send(b\"f2-early\")", "Ok(8)"),
+        client.replace(
+            "if std::env::var_os(\"FERRUM2_T05_UDP_SOCKET_PROBE\")",
+            "let _early_runtime_boundary = tokio::runtime::Builder::new_multi_thread();\n    if std::env::var_os(\"FERRUM2_T05_UDP_SOCKET_PROBE\")",
+        ),
+        client.replace(
+            "m15_udp_early_diag send={send_category}",
+            "m15_udp_early_diag send={sent:?}",
+        ),
+    ] {
+        assert!(
+            !has_pre_runtime_udp_probe(&mutation),
+            "early same-executable UDP mutation must sever the pre-runtime witness"
+        );
+    }
     let composes_tun_tcp = |composition: &str, adapter: &str, routing: &str| {
         composition.contains("roots.push(tun::process_root(")
             && composition.contains("Arc::clone(&context)")
