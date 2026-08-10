@@ -6,6 +6,7 @@ depends_on:
   - M15-T04
 owns:
   - crates/ferrum2-tun/src/**
+  - bins/ferrum2-client/src/run.rs
   - bins/ferrum2-client/src/run/tun.rs
   - bins/ferrum2-client/src/run/socks.rs
   - bins/ferrum2-client/src/run/egress/udp.rs
