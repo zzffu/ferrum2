@@ -143,6 +143,71 @@ fn tun_check_config_is_offline_and_has_a_pure_target_gate() {
 }
 
 #[test]
+fn m16_direct_check_config_is_offline_and_runtime_rejects_before_bind() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let (listener, listen) = reserve_loopback();
+    let direct = directory.path().join("direct-client.toml");
+    std::fs::write(
+        &direct,
+        format!(
+            "schema_version = 2\n[[inbounds]]\ntag = \"socks\"\nlisten = \"{listen}\"\noutbound = \"exit\"\n[[outbounds]]\ntag = \"exit\"\ntype = \"direct\"\n"
+        ),
+    )
+    .expect("direct config");
+
+    let checked = run_binary(
+        "ferrum2-client",
+        &["--config", direct.to_str().unwrap(), "--check-config"],
+    );
+    assert_eq!(checked.status.code(), Some(0));
+    assert_eq!(checked.stdout, b"configuration valid\n");
+    assert!(checked.stderr.is_empty());
+
+    let run = run_binary("ferrum2-client", &["--config", direct.to_str().unwrap()]);
+    assert_eq!(run.status.code(), Some(1));
+    assert!(run.stdout.is_empty());
+    assert_eq!(
+        run.stderr,
+        b"error[startup.direct_unsupported] process: direct execution is not available\n"
+    );
+    assert!(
+        TcpStream::connect_timeout(
+            &listener.local_addr().expect("occupied listener"),
+            std::time::Duration::from_secs(1)
+        )
+        .is_ok(),
+        "direct validation/runtime refusal disturbed the occupied endpoint"
+    );
+
+    for (name, binary, source, expected) in [
+        (
+            "schema-v1-direct",
+            "ferrum2-client",
+            std::fs::read_to_string(&direct)
+                .unwrap()
+                .replacen("schema_version = 2", "schema_version = 1", 1),
+            b"error[config.semantic] outbounds.type: configuration value is invalid\n".as_slice(),
+        ),
+        (
+            "server-direct",
+            "ferrum2-server",
+            "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"127.0.0.1:8388\"\n[[outbounds]]\ntag = \"out\"\ntype = \"direct\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(),
+            b"error[config.syntax] config: configuration is not valid TOML\n".as_slice(),
+        ),
+    ] {
+        let path = directory.path().join(format!("{name}.toml"));
+        std::fs::write(&path, source).expect(name);
+        let output = run_binary(
+            binary,
+            &["--config", path.to_str().unwrap(), "--check-config"],
+        );
+        assert_eq!(output.status.code(), Some(2), "{name}");
+        assert!(output.stdout.is_empty(), "{name}");
+        assert_eq!(output.stderr, expected, "{name}");
+    }
+}
+
+#[test]
 fn no_side_effects_even_when_all_configured_ports_are_occupied() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (client_listener, client_address) = reserve_loopback();

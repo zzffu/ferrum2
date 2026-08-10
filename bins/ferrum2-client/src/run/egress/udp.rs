@@ -2,7 +2,7 @@ use std::collections::HashSet;
 #[cfg(test)]
 use std::collections::VecDeque;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use ferrum2_core::route::EgressPlanSnapshot;
@@ -95,7 +95,7 @@ impl UdpIoFaultPlan {
 
 pub(in crate::run) struct ClientUdpAssociation {
     plan: EgressPlanSnapshot,
-    first_server: SocketAddrV4,
+    first_server: SocketAddr,
     protocol: Option<ClientUdpPlan>,
     pending_session: Option<PendingUdpSession>,
     manager: UdpSessionManager,
@@ -185,7 +185,7 @@ impl ClientUdpAssociation {
             let target = if layer + 1 == hops.len() {
                 datagram.target()
             } else {
-                intermediate = TargetAddr::ipv4(
+                intermediate = TargetAddr::ip(
                     outbounds
                         .get(hops[layer + 1])
                         .ok_or(UdpPacketError::StateUnavailable)?
@@ -270,7 +270,7 @@ impl ClientUdpAssociation {
                 &egress.clock,
             );
         }
-        let expected = TargetAddr::ipv4(
+        let expected = TargetAddr::ip(
             outbounds
                 .get(hops[1])
                 .ok_or(UdpPlanResponseError::Packet(
@@ -314,7 +314,7 @@ impl ClientUdpAssociation {
                     &egress.clock,
                 );
             }
-            let expected = TargetAddr::ipv4(
+            let expected = TargetAddr::ip(
                 outbounds
                     .get(hops[layer + 1])
                     .ok_or(UdpPlanResponseError::Packet(
@@ -478,14 +478,15 @@ impl ClientUdpAssociation {
         self.io_fault = fault;
     }
 
-    pub(in crate::run) async fn relay(
+    pub(in crate::run) async fn relay<A: Into<SocketAddr>>(
         &mut self,
         engine: &ClientEgressEngine,
         plan: &EgressPlanSnapshot,
-        first_server: SocketAddrV4,
+        first_server: A,
         destination: SocketAddr,
         packet: Vec<u8>,
     ) -> io::Result<((Vec<u8>, SocketAddr), bool)> {
+        let first_server = first_server.into();
         if packet.len() > MAX_UDP_WIRE_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -527,11 +528,11 @@ impl ClientUdpAssociation {
 pub(in crate::run) async fn prepare<F, Fut>(
     egress: &ClientEgressEngine,
     plan: EgressPlanSnapshot,
-    first_server: SocketAddrV4,
+    first_server: SocketAddr,
     mut bind: F,
 ) -> Result<ClientUdpAssociation, ()>
 where
-    F: FnMut(SocketAddrV4) -> Fut,
+    F: FnMut(SocketAddr) -> Fut,
     Fut: std::future::Future<Output = io::Result<UdpSocket>>,
 {
     let udp = egress.udp.as_ref().ok_or(())?;
@@ -551,13 +552,13 @@ where
     let inner_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
     let upstream_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
     let scratch = UdpPacketScratch::new();
-    let upstream = bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .map_err(|_| ())?;
-    upstream
-        .connect(SocketAddr::V4(first_server))
-        .await
-        .map_err(|_| ())?;
+    let bind_address = if first_server.is_ipv4() {
+        SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
+    } else {
+        SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
+    };
+    let upstream = bind(bind_address).await.map_err(|_| ())?;
+    upstream.connect(first_server).await.map_err(|_| ())?;
     Ok(ClientUdpAssociation {
         plan,
         first_server,

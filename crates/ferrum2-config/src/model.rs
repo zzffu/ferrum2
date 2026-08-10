@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroU16;
 use std::time::Duration;
 
@@ -15,7 +15,6 @@ use ipnet::{Ipv4Net, Ipv6Net};
 pub struct ValidatedClientConfig {
     pub schema_version: SchemaVersion,
     pub listen: SocketAddrV4,
-    pub server: SocketAddrV4,
     pub inbounds: Vec<ClientInboundConfig>,
     pub outbounds: Vec<ClientOutboundConfig>,
     pub route: RouteTable,
@@ -23,8 +22,6 @@ pub struct ValidatedClientConfig {
     pub tun: Option<TunConfig>,
     pub dns: Option<DnsConfig>,
     pub dns_route: Option<ClientDnsRoute>,
-    pub psk: MethodPsk,
-    pub outbound_psks: Vec<MethodPsk>,
     pub runtime: RuntimeConfig,
     pub udp: Option<UdpConfig>,
     pub logging: LoggingConfig,
@@ -37,6 +34,11 @@ pub struct TunConfig {
     pub adapter_name: Box<str>,
     pub ipv4_address: Ipv4Net,
     pub ipv6_address: Ipv6Net,
+    pub auto_route: bool,
+    pub capture_routes: Vec<Ipv4Net>,
+    pub auto_dns: bool,
+    pub ipv4_dns_address: Option<Ipv4Addr>,
+    pub physical_endpoints: Vec<SocketAddrV4>,
     pub mtu: u16,
     pub ring_capacity: u32,
     pub ready_timeout: Duration,
@@ -53,18 +55,38 @@ pub struct ClientInboundConfig {
     pub listen: SocketAddrV4,
 }
 
-/// One validated Shadowsocks client destination.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ClientOutboundConfig {
-    pub server: SocketAddrV4,
+/// One validated client egress identity.
+pub enum ClientOutboundConfig {
+    Shadowsocks { server: SocketAddr, psk: MethodPsk },
+    Direct,
+}
+
+impl ClientOutboundConfig {
+    pub const fn server(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Shadowsocks { server, .. } => Some(*server),
+            Self::Direct => None,
+        }
+    }
+
+    pub fn method(&self) -> Option<TcpMethodProfile> {
+        match self {
+            Self::Shadowsocks { psk, .. } => Some(psk.profile()),
+            Self::Direct => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for ClientOutboundConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Shadowsocks { .. } => "ClientOutboundConfig::Shadowsocks([redacted])",
+            Self::Direct => "ClientOutboundConfig::Direct",
+        })
+    }
 }
 
 impl ValidatedClientConfig {
-    /// Returns the immutable TCP method bound to the validated PSK.
-    pub const fn method(&self) -> TcpMethodProfile {
-        self.psk.profile()
-    }
-
     /// Returns a control handle sharing the route table's selector state.
     pub fn selector_control(&self) -> SelectorControl {
         self.route.selector_control()

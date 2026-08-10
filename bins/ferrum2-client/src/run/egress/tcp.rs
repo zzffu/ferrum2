@@ -713,7 +713,7 @@ mod tests {
         let engine = ClientEgressEngine::new(
             vec![ClientOutboundContext {
                 tcp_server: server,
-                udp_server: server_address,
+                udp_server: server_address.into(),
                 keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
                     ferrum2_crypto::MethodPsk::aes128([key; 16]),
                 )),
@@ -862,7 +862,7 @@ mod tests {
         let engine = ClientEgressEngine::new(
             vec![ClientOutboundContext {
                 tcp_server: TargetAddr::ipv4(server).expect("server"),
-                udp_server: server,
+                udp_server: server.into(),
                 keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
                     ferrum2_crypto::MethodPsk::aes128([0x15; 16]),
                 )),
@@ -917,10 +917,10 @@ mod tests {
         let dead = reserve_address();
         config
             .outbounds
-            .push(ferrum2_config::ClientOutboundConfig { server: dead });
-        config
-            .outbound_psks
-            .push(psk_for_method(MethodProfile::Blake3Aes128Gcm2022));
+            .push(ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                server: dead.into(),
+                psk: psk_for_method(MethodProfile::Blake3Aes128Gcm2022),
+            });
         let rule = |inbound, target, outbound| {
             TaggedRouteRule::new(inbound, Some(Network::Tcp), target, Some(outbound))
         };

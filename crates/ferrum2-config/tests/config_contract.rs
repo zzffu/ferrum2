@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -12,7 +12,7 @@ use ferrum2_config::{
 };
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{Network, RouteMetadata, RouteProgramAction, RouteTable};
-use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
+use ferrum2_crypto::TcpMethodProfile;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -288,19 +288,23 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
         match case.role {
             ConfigRole::Client => {
                 let config = load_client(&path).expect(case.name);
+                let outbound = &config.outbounds[0];
                 let actual = (
                     config.listen,
-                    config.server,
-                    config.method(),
-                    format!("{:?}", config.psk),
+                    outbound.server(),
+                    outbound.method(),
+                    format!("{outbound:?}"),
                     config.logging.level,
                     config.metrics.map(|metrics| metrics.listen.port()),
                 );
                 let expected = (
                     SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1_080),
-                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388),
-                    case.method,
-                    "MethodPsk([REDACTED])".to_owned(),
+                    Some(SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::LOCALHOST,
+                        8_388,
+                    ))),
+                    Some(case.method),
+                    "ClientOutboundConfig::Shadowsocks([redacted])".to_owned(),
                     case.logging,
                     case.metrics_port,
                 );
@@ -313,8 +317,8 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
                 assert_eq!(config.outbounds.len(), 1, "{}", case.name);
                 assert_eq!(config.inbounds[0].listen, config.listen, "{}", case.name);
                 assert_eq!(
-                    config.outbounds[selected(&config.route, 0)].server,
-                    config.server
+                    config.outbounds[selected(&config.route, 0)].server(),
+                    outbound.server()
                 );
             }
             ConfigRole::Server => {
@@ -433,15 +437,16 @@ fn client_credentials_and_fixed_plans_compile_in_order_with_redacted_secret_owne
         .replacen("[shadowsocks]", "[[chains]]\ntag = \"three-hop\"\nhops = [\"o0\", \"o1\", \"o2\"]\n[shadowsocks]", 1);
     let config = load_client(TempConfig::text(&source).path()).expect("mixed credentials");
     #[rustfmt::skip]
-    assert_eq!(config.outbound_psks.iter().map(MethodPsk::profile).collect::<Vec<_>>(), [TcpMethodProfile::Blake3Aes128Gcm2022, TcpMethodProfile::Blake3Aes256Gcm2022, TcpMethodProfile::Blake3ChaCha20Poly13052022]);
+    assert_eq!(config.outbounds.iter().map(|outbound| outbound.method().unwrap()).collect::<Vec<_>>(), [TcpMethodProfile::Blake3Aes128Gcm2022, TcpMethodProfile::Blake3Aes256Gcm2022, TcpMethodProfile::Blake3ChaCha20Poly13052022]);
     let target = TargetAddr::domain("chain.test", 443).expect("target");
     #[rustfmt::skip]
-    assert_eq!((config.route.select_plan(0, Network::Tcp, &target).hops(), config.route.final_plan().hops(), config.server), (&[0, 1, 2][..], &[0, 1, 2][..], SocketAddrV4::new(Ipv4Addr::LOCALHOST, 20_000)));
+    assert_eq!((config.route.select_plan(0, Network::Tcp, &target).hops(), config.route.final_plan().hops(), config.outbounds[0].server()), (&[0, 1, 2][..], &[0, 1, 2][..], Some(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 20_000)))));
     assert!(
         config
-            .outbound_psks
+            .outbounds
             .iter()
-            .all(|psk| format!("{psk:?}") == "MethodPsk([REDACTED])")
+            .all(|outbound| format!("{outbound:?}")
+                == "ClientOutboundConfig::Shadowsocks([redacted])")
     );
 }
 
@@ -500,13 +505,17 @@ fn selector_graphs_compile_for_both_roles_and_share_live_route_state() {
     };
     let client = load_client(TempConfig::text(&static_source(tagged_client(2, 2))).path())
         .expect("client static");
-    let snapshot = client.server;
+    let snapshot = client.outbounds[selected(&client.route, 0)].server();
     client.selector_control().switch("manual", "o1").unwrap();
     assert_eq!(
         (selected(&client.route, 0), selected(&client.route, 1)),
         (1, 1)
     );
-    assert_eq!(client.server, snapshot);
+    assert_eq!(snapshot, Some("127.0.0.1:20000".parse().unwrap()));
+    assert_eq!(
+        client.outbounds[selected(&client.route, 0)].server(),
+        Some("127.0.0.1:20001".parse().unwrap())
+    );
     let server = load_server(TempConfig::text(&static_source(tagged_server(2, 2))).path())
         .expect("server static");
     server.selector_control().switch("manual", "o1").unwrap();
@@ -519,18 +528,27 @@ fn selector_graphs_compile_for_both_roles_and_share_live_route_state() {
     let routed_source = |source| with_selectors(routed(source, route), selectors);
     let client = load_client(TempConfig::text(&routed_source(tagged_client(2, 2))).path())
         .expect("client route");
-    let configured_default = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 20_000);
+    let configured_default = Some(SocketAddr::V4(SocketAddrV4::new(
+        Ipv4Addr::LOCALHOST,
+        20_000,
+    )));
     assert_eq!(client.selector_control().selected("manual"), Ok("o0"));
     #[rustfmt::skip]
     assert_eq!((selected(&client.route, 0), selected(&client.route, 1), client.route.final_outbound()), (0, 0, 0));
-    assert_eq!(client.server, configured_default);
+    assert_eq!(
+        client.outbounds[client.route.final_outbound()].server(),
+        configured_default
+    );
     client.selector_control().switch("manual", "o1").unwrap();
     assert_eq!(
         (selected(&client.route, 0), selected(&client.route, 1)),
         (1, 1)
     );
     assert_eq!(client.route.final_outbound(), 0);
-    assert_eq!(client.server, configured_default);
+    assert_eq!(
+        client.outbounds[client.route.final_outbound()].server(),
+        configured_default
+    );
     let server = load_server(TempConfig::text(&routed_source(tagged_server(2, 2))).path())
         .expect("server route");
     server.selector_control().switch("manual", "o1").unwrap();
@@ -2459,26 +2477,23 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
         }
     }
 
-    for (name, mutation, field) in [
-        (
-            "unknown route mutation",
-            "auto_route = true",
-            ConfigField::Config,
-        ),
-        ("proxy inside v4 prefix", "", ConfigField::TunIpv4Address),
-    ] {
-        let mut source =
-            tun_client(&base.replace("outbound =", &format!("{mutation}\noutbound =")));
-        if name.contains("inside") {
-            source = source.replace("192.0.2.10:8388", "198.18.0.1:8388");
-        }
-        let file = TempConfig::text(&source);
-        assert_eq!(
-            load_client(file.path()).err().expect(name).field(),
-            field,
-            "{name}"
-        );
-    }
+    load_client(
+        TempConfig::text(&tun_client(
+            &base.replace("outbound =", "auto_route = true\noutbound ="),
+        ))
+        .path(),
+    )
+    .expect("managed auto-route is recognized");
+    let inside = tun_client(base).replace("192.0.2.10:8388", "198.18.0.1:8388");
+    load_client(TempConfig::text(&inside).path()).expect("manual route preserves M15 overlap");
+    let managed_inside = inside.replace("outbound =", "auto_route = true\noutbound =");
+    assert_eq!(
+        load_client(TempConfig::text(&managed_inside).path())
+            .err()
+            .expect("managed proxy inside prefix")
+            .field(),
+        ConfigField::TunIpv4Address
+    );
 
     let chain_collision = tun_client(&base.replace("outbound = \"proxy\"", "outbound = \"tun-in\""))
         .replacen(
@@ -2562,4 +2577,357 @@ fn tun_tcp_sniff_is_narrowly_capable_only_for_the_tun_inbound() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn m16_direct_only_client_omits_global_credentials_and_compiles_static_plan() {
+    let source = "schema_version = 2\n[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"exit\"\n[[outbounds]]\ntag = \"exit\"\ntype = \"direct\"\n";
+    let config = load_client(TempConfig::text(source).path()).expect("direct-only client");
+
+    assert_eq!(config.outbounds.len(), 1);
+    assert_eq!(config.route.final_plan().hops(), &[0]);
+    load_client(
+        TempConfig::text(&format!(
+            "{source}[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+        ))
+        .path(),
+    )
+    .expect("direct-only client may retain valid compatibility credentials");
+}
+
+#[test]
+fn m16_client_outbound_shape_and_direct_plan_roots_are_closed() {
+    let credentials =
+        "[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+    for outbound_type in ["", "type = \"shadowsocks\"\n"] {
+        let source = format!(
+            "schema_version = 2\n[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\n{outbound_type}server = \"[::1]:8388\"\n{credentials}"
+        );
+        let config = load_client(TempConfig::text(&source).path()).expect("proxy shape");
+        assert_eq!(
+            config.outbounds[0].server(),
+            Some("[::1]:8388".parse().unwrap())
+        );
+        assert_eq!(
+            config.outbounds[0].method(),
+            Some(TcpMethodProfile::Blake3Aes128Gcm2022)
+        );
+    }
+
+    for (name, extra, field) in [
+        (
+            "server",
+            "server = \"127.0.0.1:8388\"\n",
+            ConfigField::OutboundsServer,
+        ),
+        (
+            "method",
+            "method = \"2022-blake3-aes-128-gcm\"\n",
+            ConfigField::OutboundsMethod,
+        ),
+        (
+            "psk",
+            "psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
+            ConfigField::OutboundsPsk,
+        ),
+        ("unknown", "type = \"DIRECT\"\n", ConfigField::OutboundsType),
+    ] {
+        let type_line = if name == "unknown" {
+            ""
+        } else {
+            "type = \"direct\"\n"
+        };
+        let source = format!(
+            "schema_version = 2\n[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"exit\"\n[[outbounds]]\ntag = \"exit\"\n{type_line}{extra}"
+        );
+        let error = load_client(TempConfig::text(&source).path())
+            .err()
+            .expect(name);
+        assert_eq!(
+            (error.kind(), error.field()),
+            (ConfigErrorKind::Semantic, field),
+            "{name}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "error[config.semantic] {}: configuration value is invalid",
+                field.as_str()
+            )
+        );
+    }
+
+    let missing_server = format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\n{credentials}"
+    );
+    let error = load_client(TempConfig::text(&missing_server).path())
+        .err()
+        .expect("missing server");
+    assert_eq!(error.field(), ConfigField::OutboundsServer);
+
+    let explicit_without_global = "schema_version = 2\n[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\ntype = \"shadowsocks\"\nserver = \"127.0.0.1:8388\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+    let error = load_client(TempConfig::text(explicit_without_global).path())
+        .err()
+        .expect("proxy graph still requires global credentials");
+    assert_eq!(
+        (error.kind(), error.field()),
+        (ConfigErrorKind::Syntax, ConfigField::Config)
+    );
+
+    for schema in [1, 2] {
+        for hops in [["exit", "proxy"], ["proxy", "exit"]] {
+            let source = format!(
+                "schema_version = {schema}\n[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"chain\"\n[[outbounds]]\ntag = \"exit\"\ntype = \"direct\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"127.0.0.1:8388\"\n[[chains]]\ntag = \"chain\"\nhops = [\"{}\", \"{}\"]\n{credentials}",
+                hops[0], hops[1]
+            );
+            let error = load_client(TempConfig::text(&source).path())
+                .err()
+                .expect("direct chain hop");
+            assert_eq!(
+                error.field(),
+                if schema == 1 {
+                    ConfigField::OutboundsType
+                } else {
+                    ConfigField::ChainsHops
+                }
+            );
+        }
+    }
+
+    #[rustfmt::skip]
+    let source = format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"static\"\nlisten = \"127.0.0.1:1080\"\n[[inbounds]]\ntag = \"routed\"\nlisten = \"127.0.0.1:1081\"\n[[outbounds]]\ntag = \"exit\"\ntype = \"direct\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"127.0.0.1:8388\"\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"exit\", \"proxy\"]\ndefault = \"exit\"\n[route]\nfinal = \"manual\"\n[[route.rules]]\ninbound = \"routed\"\nnetwork = \"tcp\"\noutbound = \"exit\"\n[dns]\n[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"dns-up\"\ntransport = \"udp\"\naddress = \"1.1.1.1:53\"\ndetour = \"exit\"\n[dns.route]\nfinal = \"dns-up\"\n{credentials}"
+    );
+    let config = load_client(TempConfig::text(&source).path()).expect("all direct roots");
+    let target = TargetAddr::domain("direct.test", 443).unwrap();
+    assert_eq!(
+        config.route.select_plan(1, Network::Tcp, &target).hops(),
+        &[0]
+    );
+    assert_eq!(config.route.final_plan().hops(), &[0]);
+    assert_eq!(
+        config.dns.as_ref().unwrap().servers[0]
+            .detour
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .hops(),
+        &[0]
+    );
+    config.selector_control().switch("manual", "proxy").unwrap();
+    assert_eq!(
+        config.route.select_plan(0, Network::Udp, &target).hops(),
+        &[1]
+    );
+}
+
+#[test]
+fn m16_managed_tun_compiles_bounded_canonical_capture_and_dns_plan() {
+    let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"";
+    let unmanaged = load_client(TempConfig::text(&tun_client(base)).path()).expect("unmanaged");
+    let tun = unmanaged.tun.unwrap();
+    assert!(!tun.auto_route);
+    assert!(!tun.auto_dns);
+    assert!(tun.capture_routes.is_empty());
+    assert!(tun.ipv4_dns_address.is_none());
+    assert!(tun.physical_endpoints.is_empty());
+
+    let managed = tun_client(&base.replace("outbound =", "auto_route = true\noutbound ="));
+    let tun = load_client(TempConfig::text(&managed).path())
+        .expect("managed defaults")
+        .tun
+        .unwrap();
+    assert_eq!(
+        tun.capture_routes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["0.0.0.0/1", "128.0.0.0/1"]
+    );
+    assert_eq!(tun.physical_endpoints, ["192.0.2.10:8388".parse().unwrap()]);
+
+    let ordered = base.replace(
+        "outbound =",
+        "auto_route = true\nroute_address = [\"192.168.0.0/16\", \"10.0.0.0/8\"]\nroute_exclude_address = [\"10.0.0.0/9\", \"203.0.113.0/24\"]\noutbound =",
+    );
+    let reversed = ordered
+        .replace(
+            "[\"192.168.0.0/16\", \"10.0.0.0/8\"]",
+            "[\"10.0.0.0/8\", \"192.168.0.0/16\"]",
+        )
+        .replace(
+            "[\"10.0.0.0/9\", \"203.0.113.0/24\"]",
+            "[\"203.0.113.0/24\", \"10.0.0.0/9\"]",
+        );
+    for source in [ordered, reversed] {
+        let tun = load_client(TempConfig::text(&tun_client(&source)).path())
+            .expect("canonical plan")
+            .tun
+            .unwrap();
+        assert_eq!(
+            tun.capture_routes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["10.128.0.0/9", "192.168.0.0/16"]
+        );
+    }
+
+    let dns = "[dns]\n[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"resolver\"\ntransport = \"udp\"\naddress = \"1.1.1.1:53\"\n[dns.route]\nfinal = \"resolver\"";
+    let auto_dns = tun_client(&base.replace(
+        "outbound =",
+        &format!(
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"198.18.0.1\"\noutbound = \"proxy\"\n{dns}\n#"
+        ),
+    ));
+    let tun = load_client(TempConfig::text(&auto_dns).path())
+        .expect("auto DNS")
+        .tun
+        .unwrap();
+    assert!(tun.auto_dns);
+    assert_eq!(tun.ipv4_dns_address, Some("198.18.0.1".parse().unwrap()));
+}
+
+#[test]
+fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
+    let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"";
+    let managed =
+        |fields: &str| tun_client(&base.replace("outbound =", &format!("{fields}\noutbound =")));
+    for (name, fields, expected) in [
+        (
+            "route while disabled",
+            "route_address = [\"0.0.0.0/0\"]",
+            ConfigField::TunRouteAddress,
+        ),
+        (
+            "exclude while disabled",
+            "route_exclude_address = []",
+            ConfigField::TunRouteExcludeAddress,
+        ),
+        (
+            "empty include",
+            "auto_route = true\nroute_address = []",
+            ConfigField::TunRouteAddress,
+        ),
+        (
+            "IPv6 include",
+            "auto_route = true\nroute_address = [\"::/0\"]",
+            ConfigField::TunRouteAddress,
+        ),
+        (
+            "noncanonical include",
+            "auto_route = true\nroute_address = [\"10.1.0.0/8\"]",
+            ConfigField::TunRouteAddress,
+        ),
+        (
+            "empty result",
+            "auto_route = true\nroute_address = [\"10.0.0.0/8\"]\nroute_exclude_address = [\"10.0.0.0/8\"]",
+            ConfigField::TunRouteAddress,
+        ),
+        (
+            "DNS without route",
+            "auto_dns = true\nipv4_dns_address = \"198.18.0.1\"",
+            ConfigField::TunAutoDns,
+        ),
+        (
+            "DNS missing address",
+            "auto_route = true\nauto_dns = true",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+        (
+            "DNS graph missing",
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"198.18.0.1\"",
+            ConfigField::TunAutoDns,
+        ),
+        (
+            "address while DNS disabled",
+            "auto_route = true\nipv4_dns_address = \"198.18.0.1\"",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+        (
+            "IPv6 DNS",
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"198.18.0.1\"\nipv6_dns_address = \"fd00::1\"",
+            ConfigField::TunIpv6DnsAddress,
+        ),
+        (
+            "DNS local",
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"198.18.0.2\"",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+        (
+            "DNS outside",
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"198.18.1.1\"",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+    ] {
+        let error = load_client(TempConfig::text(&managed(fields)).path())
+            .err()
+            .unwrap_or_else(|| panic!("{name} passed"));
+        assert_eq!(error.field(), expected, "{name}");
+        assert!(!format!("{error:?}").contains("198.18"), "{name}");
+    }
+
+    let includes = (0..65)
+        .map(|index| format!("\"10.{index}.0.0/16\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let error = load_client(
+        TempConfig::text(&managed(&format!(
+            "auto_route = true\nroute_address = [{includes}]"
+        )))
+        .path(),
+    )
+    .err()
+    .expect("65 includes");
+    assert_eq!(error.field(), ConfigField::TunRouteAddress);
+
+    let excludes = (0..64)
+        .map(|index| format!("\"{index}.0.0.1/32\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let error = load_client(
+        TempConfig::text(&managed(&format!(
+            "auto_route = true\nroute_exclude_address = [{excludes}]"
+        )))
+        .path(),
+    )
+    .err()
+    .expect("more than 256 compiled rows");
+    assert_eq!(error.field(), ConfigField::TunRouteAddress);
+
+    let ipv6_proxy = tun_client(base).replace("192.0.2.10:8388", "[2001:db8::10]:8388");
+    let config = load_client(TempConfig::text(&ipv6_proxy).path()).expect("manual IPv6 proxy");
+    assert!(config.tun.unwrap().physical_endpoints.is_empty());
+    let error = load_client(
+        TempConfig::text(&ipv6_proxy.replace("outbound =", "auto_route = true\noutbound =")).path(),
+    )
+    .err()
+    .expect("managed IPv6 proxy");
+    assert_eq!(error.field(), ConfigField::OutboundsServer);
+
+    let dns = "[dns]\n[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"resolver\"\ntransport = \"udp\"\naddress = \"[2001:db8::53]:53\"\n[dns.route]\nfinal = \"resolver\"";
+    let manual_dns = tun_client(&format!("{base}\n{dns}"));
+    load_client(TempConfig::text(&manual_dns).path()).expect("manual IPv6 DNS");
+    let managed_dns = manual_dns.replace("outbound =", "auto_route = true\noutbound =");
+    let error = load_client(TempConfig::text(&managed_dns).path())
+        .err()
+        .expect("managed direct IPv6 DNS");
+    assert_eq!(error.field(), ConfigField::DnsServersAddress);
+
+    let detoured = managed_dns.replace(
+        "address = \"[2001:db8::53]:53\"",
+        "address = \"[2001:db8::53]:53\"\ndetour = \"proxy\"",
+    );
+    let tun = load_client(TempConfig::text(&detoured).path())
+        .expect("logical IPv6 DNS behind IPv4 proxy")
+        .tun
+        .unwrap();
+    assert_eq!(tun.physical_endpoints, ["192.0.2.10:8388".parse().unwrap()]);
+
+    let chained = "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\noutbound = \"chain\"\n[[outbounds]]\ntag = \"outer\"\nserver = \"192.0.2.10:8388\"\n[[outbounds]]\ntag = \"inner\"\nserver = \"[2001:db8::10]:8388\"\n[[chains]]\ntag = \"chain\"\nhops = [\"outer\", \"inner\"]\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+    let tun = load_client(TempConfig::text(chained).path())
+        .expect("logical IPv6 inner hop behind IPv4 first hop")
+        .tun
+        .unwrap();
+    assert_eq!(tun.physical_endpoints, ["192.0.2.10:8388".parse().unwrap()]);
 }

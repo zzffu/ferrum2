@@ -52,6 +52,7 @@ pub(crate) enum RunError {
     StartupRuntime,
     StartupBind,
     StartupProtocol,
+    StartupDirectUnsupported,
     RuntimeListener,
     RuntimeChild,
     RuntimeRoot,
@@ -71,6 +72,9 @@ impl std::fmt::Display for RunError {
             Self::StartupProtocol => {
                 "error[startup.protocol] process: unable to prepare protocol resources"
             }
+            Self::StartupDirectUnsupported => {
+                "error[startup.direct_unsupported] process: direct execution is not available"
+            }
             Self::RuntimeListener => "error[runtime.listener] process: required listener failed",
             Self::RuntimeChild => "error[runtime.child] process: required child failed",
             Self::RuntimeRoot => "error[runtime.root] process: required root stopped",
@@ -82,6 +86,13 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
+    if config
+        .outbounds
+        .iter()
+        .any(|outbound| matches!(outbound, ferrum2_config::ClientOutboundConfig::Direct))
+    {
+        return Err(RunError::StartupDirectUnsupported);
+    }
     let dns_specs = config
         .dns
         .as_ref()
@@ -166,6 +177,13 @@ async fn run_with_registry_and_metrics_inner<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
+    if config
+        .outbounds
+        .iter()
+        .any(|outbound| matches!(outbound, ferrum2_config::ClientOutboundConfig::Direct))
+    {
+        return Err(RunError::StartupDirectUnsupported);
+    }
     let tun_config = config.tun;
     let dns = match (config.dns, config.dns_route, dns_specs) {
         (
@@ -227,7 +245,12 @@ where
         .as_ref()
         .map(|_| udp_limits.expect("TUN UDP requires internal limits").2);
     let runtime = config.runtime;
-    let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)?;
+    #[cfg(test)]
+    let test_udp_server = match config.outbounds[0].server().expect("proxy-only runtime") {
+        std::net::SocketAddr::V4(server) => server,
+        std::net::SocketAddr::V6(_) => panic!("IPv4-only legacy test context"),
+    };
+    let outbounds = prepare_client_outbounds(config.outbounds)?;
     let shutdown_grace = config.runtime.shutdown_grace;
     let listen_backlog = u32::from(config.runtime.listen_backlog.get());
     let max_connections = usize::from(config.runtime.max_connections.get());
@@ -262,14 +285,16 @@ where
         inbound: Socks5Inbound::new(),
         egress: Arc::clone(&egress),
         #[cfg(test)]
-        keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
+        keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
+            test_support::default_test_psk(),
+        )),
         runtime: config.runtime,
         udp_associate_enabled: public_udp_enabled,
         registry: registry.clone(),
         metrics: Arc::clone(&metrics),
         dns: ordinary_dns.as_ref().map(Arc::clone),
         #[cfg(test)]
-        test_udp_server: config.server,
+        test_udp_server,
     });
     let mut listens = Vec::with_capacity(config.inbounds.len());
     let tun_inbound = config.inbounds.len();

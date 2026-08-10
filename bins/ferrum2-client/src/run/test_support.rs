@@ -355,9 +355,15 @@ pub(in crate::run) fn chain_test_setup(
     });
     let outbounds = prepare_client_outbounds(
         servers
-            .map(|server| ferrum2_config::ClientOutboundConfig { server })
-            .into(),
-        psks.into(),
+            .into_iter()
+            .zip(psks)
+            .map(
+                |(server, psk)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                    server: server.into(),
+                    psk,
+                },
+            )
+            .collect(),
     )
     .expect("checked runtime outbounds");
     let (route, selector) = compile_selector_plans(
@@ -488,9 +494,15 @@ pub(in crate::run) fn client_udp_chain_test_config(
 ) -> (PathBuf, ValidatedClientConfig) {
     let (path, mut config) = client_udp_test_config(listen, servers[0]);
     config.outbounds = servers
-        .map(|server| ferrum2_config::ClientOutboundConfig { server })
-        .into();
-    config.outbound_psks = methods.map(psk_for_method).into();
+        .into_iter()
+        .zip(methods)
+        .map(
+            |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                server: server.into(),
+                psk: psk_for_method(method),
+            },
+        )
+        .collect();
     config.route = compile_selector_plans(
         &[TaggedInbound::new("entry", 0)],
         &[
@@ -521,10 +533,12 @@ pub(in crate::run) fn tagged_client_test_config(
         .collect();
     config.outbounds = mappings
         .iter()
-        .map(|(_, server)| ferrum2_config::ClientOutboundConfig { server: *server })
-        .collect();
-    config.outbound_psks = (0..mappings.len())
-        .map(|_| psk_for_method(MethodProfile::Blake3Aes128Gcm2022))
+        .map(
+            |(_, server)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                server: (*server).into(),
+                psk: psk_for_method(MethodProfile::Blake3Aes128Gcm2022),
+            },
+        )
         .collect();
     config.route = ferrum2_core::route::RouteTable::static_bindings((0..mappings.len()).collect())
         .expect("bounded test mappings");
@@ -544,7 +558,7 @@ pub(in crate::run) fn test_routing(
         program: None,
         outbounds: vec![ClientOutboundContext {
             tcp_server: TargetAddr::ipv4(server).expect("server target"),
-            udp_server: server,
+            udp_server: server.into(),
             keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
         }]
         .into(),
@@ -678,15 +692,15 @@ pub(in crate::run) fn udp_test_context_for_psk(
     server: SocketAddrV4,
     psk: Option<ferrum2_crypto::MethodPsk>,
 ) -> (PathBuf, Arc<ClientContext>) {
-    let (path, mut config) = client_udp_test_config(reserve_address(), server);
-    if let Some(psk) = psk {
-        config.psk = psk;
-    }
+    let (path, config) = client_udp_test_config(reserve_address(), server);
+    let server_psk = psk.unwrap_or_else(default_test_psk);
     let udp = config.udp.expect("enabled UDP");
-    let server = config.server;
+    let server = match config.outbounds[0].server().unwrap() {
+        std::net::SocketAddr::V4(server) => server,
+        std::net::SocketAddr::V6(_) => panic!("IPv4 test server"),
+    };
     let runtime = config.runtime;
-    let outbounds =
-        prepare_client_outbounds(config.outbounds, config.outbound_psks).expect("test outbounds");
+    let outbounds = prepare_client_outbounds(config.outbounds).expect("test outbounds");
     let udp = ClientUdpContext {
         manager: UdpSessionManager::new(
             UdpRuntimeLimits::new(udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout)
@@ -706,7 +720,7 @@ pub(in crate::run) fn udp_test_context_for_psk(
             Some(udp),
             None,
         )),
-        keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
+        keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(server_psk)),
         runtime,
         udp_associate_enabled: true,
         registry,

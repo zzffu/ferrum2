@@ -26,7 +26,7 @@ pub(super) struct RawClientRoot {
     pub(super) route: Option<RawRoute>,
     pub(super) dns: Option<RawDns>,
     pub(super) tun: Option<RawTun>,
-    pub(super) shadowsocks: RawShadowsocks,
+    pub(super) shadowsocks: Option<RawShadowsocks>,
     #[serde(default)]
     pub(super) runtime: RawRuntime,
     pub(super) udp: Option<RawUdp>,
@@ -67,6 +67,14 @@ pub(super) struct RawTun {
     pub(super) ipv4_address: String,
     pub(super) ipv6_address: String,
     pub(super) outbound: Option<String>,
+    #[serde(default)]
+    pub(super) auto_route: bool,
+    pub(super) route_address: Option<Vec<String>>,
+    pub(super) route_exclude_address: Option<Vec<String>>,
+    #[serde(default)]
+    pub(super) auto_dns: bool,
+    pub(super) ipv4_dns_address: Option<String>,
+    pub(super) ipv6_dns_address: Option<String>,
     #[serde(default = "default_tun_mtu")]
     pub(super) mtu: u64,
     #[serde(default = "default_tun_ring_capacity")]
@@ -132,7 +140,9 @@ pub(super) struct RawClientInbound {
 #[serde(deny_unknown_fields)]
 pub(super) struct RawClientOutbound {
     pub(super) tag: String,
-    pub(super) server: String,
+    #[serde(rename = "type")]
+    pub(super) outbound_type: Option<String>,
+    pub(super) server: Option<String>,
     pub(super) method: Option<String>,
     pub(super) psk: Option<SecretString>,
 }

@@ -511,8 +511,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let config = ferrum2_config::load_client(&path).expect("validated TUN UDP modes");
         std::fs::remove_file(path).expect("remove TUN UDP modes config");
         let inbound = config.inbounds.len();
-        let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)
-            .expect("outbound contexts");
+        let outbounds = prepare_client_outbounds(config.outbounds).expect("outbound contexts");
         let routing = ClientRouting {
             legacy: config.route,
             program: config.route_program,
@@ -613,9 +612,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let config = ferrum2_config::load_client(&path).expect("validated TUN DNS config");
         std::fs::remove_file(&path).expect("remove TUN DNS config");
         let runtime = config.runtime;
-        let test_server = config.server;
-        let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)
-            .expect("test outbounds");
+        let test_server = match config.outbounds[0].server().unwrap() {
+            SocketAddr::V4(server) => server,
+            SocketAddr::V6(_) => panic!("IPv4 test server"),
+        };
+        let outbounds = prepare_client_outbounds(config.outbounds).expect("test outbounds");
         let routing = Arc::new(ClientRouting {
             legacy: config.route,
             program: config.route_program,
@@ -647,7 +648,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 None,
                 None,
             )),
-            keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(config.psk)),
+            keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(default_test_psk())),
             runtime,
             udp_associate_enabled: false,
             registry: registry.clone(),

@@ -1,7 +1,7 @@
 mod tcp;
 mod udp;
 
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,25 +27,31 @@ pub(super) use udp::{
 
 pub(super) struct ClientOutboundContext {
     pub(super) tcp_server: TargetAddr,
-    pub(super) udp_server: SocketAddrV4,
+    pub(super) udp_server: SocketAddr,
     pub(super) keys: MethodKeyAdapter<MethodSinglePskProvider>,
 }
 
 pub(super) fn prepare_client_outbounds(
     outbounds: Vec<ferrum2_config::ClientOutboundConfig>,
-    psks: Vec<ferrum2_crypto::MethodPsk>,
 ) -> Result<Arc<[ClientOutboundContext]>, RunError> {
-    if outbounds.len() != psks.len() {
+    if outbounds.is_empty() {
         return Err(RunError::StartupProtocol);
+    }
+    if outbounds
+        .iter()
+        .any(|outbound| matches!(outbound, ferrum2_config::ClientOutboundConfig::Direct))
+    {
+        return Err(RunError::StartupDirectUnsupported);
     }
     outbounds
         .into_iter()
-        .zip(psks)
-        .map(|(outbound, psk)| {
+        .map(|outbound| {
+            let ferrum2_config::ClientOutboundConfig::Shadowsocks { server, psk } = outbound else {
+                unreachable!("direct outbounds were rejected before protocol preparation")
+            };
             Ok(ClientOutboundContext {
-                tcp_server: TargetAddr::ipv4(outbound.server)
-                    .map_err(|_| RunError::StartupProtocol)?,
-                udp_server: outbound.server,
+                tcp_server: TargetAddr::ip(server).map_err(|_| RunError::StartupProtocol)?,
+                udp_server: server,
                 keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
             })
         })
@@ -126,17 +132,18 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
 }
 
 impl ClientEgressEngine {
-    pub(super) async fn prepare_udp<F, Fut>(
+    pub(super) async fn prepare_udp<A, F, Fut>(
         &self,
         plan: EgressPlanSnapshot,
-        first_server: SocketAddrV4,
+        first_server: A,
         bind: F,
     ) -> Result<ClientUdpAssociation, ()>
     where
-        F: FnMut(SocketAddrV4) -> Fut,
+        A: Into<SocketAddr>,
+        F: FnMut(SocketAddr) -> Fut,
         Fut: std::future::Future<Output = std::io::Result<tokio::net::UdpSocket>>,
     {
-        udp::prepare(self, plan, first_server, bind).await
+        udp::prepare(self, plan, first_server.into(), bind).await
     }
 }
 
@@ -144,4 +151,39 @@ impl ClientEgressEngine {
 pub(super) enum ClientOpenFailure {
     Protocol(ShadowsocksError),
     HandshakeTimeout,
+}
+
+#[cfg(test)]
+mod m16_tests {
+    use super::*;
+
+    fn proxy() -> ferrum2_config::ClientOutboundConfig {
+        ferrum2_config::ClientOutboundConfig::Shadowsocks {
+            server: "127.0.0.1:8388".parse().unwrap(),
+            psk: ferrum2_crypto::MethodPsk::aes128([0; 16]),
+        }
+    }
+
+    #[test]
+    fn m16_direct_pre_socket_rejects_empty_mixed_and_multi_direct_plans() {
+        assert_eq!(
+            prepare_client_outbounds(Vec::new()).err().unwrap(),
+            RunError::StartupProtocol
+        );
+        for outbounds in [
+            vec![ferrum2_config::ClientOutboundConfig::Direct],
+            vec![proxy(), ferrum2_config::ClientOutboundConfig::Direct],
+            vec![
+                ferrum2_config::ClientOutboundConfig::Direct,
+                ferrum2_config::ClientOutboundConfig::Direct,
+            ],
+        ] {
+            let error = prepare_client_outbounds(outbounds).err().unwrap();
+            assert_eq!(error, RunError::StartupDirectUnsupported);
+            assert_eq!(
+                error.to_string(),
+                "error[startup.direct_unsupported] process: direct execution is not available"
+            );
+        }
+    }
 }

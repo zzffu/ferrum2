@@ -71,11 +71,11 @@ impl SocksUdpEndpoint {
         mut bind: F,
     ) -> io::Result<Self>
     where
-        F: FnMut(SocketAddrV4) -> Fut,
+        F: FnMut(SocketAddr) -> Fut,
         Fut: std::future::Future<Output = io::Result<UdpSocket>>,
     {
         Ok(Self {
-            socket: bind(SocketAddrV4::new(local_ip, 0)).await?,
+            socket: bind(SocketAddrV4::new(local_ip, 0).into()).await?,
             peer_ip,
             port: (requested_port != 0).then_some(requested_port),
             wire: vec![0; MAX_SOCKS_UDP_DATAGRAM_BYTES],
@@ -449,7 +449,7 @@ async fn run_udp_association<IO, F, Fut>(
     mut bind: F,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send,
-    F: FnMut(SocketAddrV4) -> Fut,
+    F: FnMut(SocketAddr) -> Fut,
     Fut: std::future::Future<Output = io::Result<UdpSocket>>,
 {
     let requested_port = association.source_port();
@@ -795,7 +795,7 @@ async fn classify_udp_association<IO, F, Fut>(
     mut bind: F,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
-    F: FnMut(SocketAddrV4) -> Fut,
+    F: FnMut(SocketAddr) -> Fut,
     Fut: std::future::Future<Output = io::Result<UdpSocket>>,
 {
     let mut control_byte = [0; 1];
@@ -1147,7 +1147,7 @@ pub(in crate::run) mod tests {
         bind: F,
     ) where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-        F: FnMut(SocketAddrV4) -> Fut + Send + 'static,
+        F: FnMut(SocketAddr) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = io::Result<UdpSocket>> + Send + 'static,
     {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -1346,8 +1346,8 @@ pub(in crate::run) mod tests {
         assert_eq!(
             *calls.lock().expect("bind calls"),
             [
-                SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 0),
-                SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
+                SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 0).into(),
+                SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into(),
             ]
         );
         assert_eq!(
@@ -2008,8 +2008,7 @@ pub(in crate::run) mod tests {
         std::fs::write(&path, source).expect("schema v2 client config");
         let config = ferrum2_config::load_client(&path).expect("schema v2 route");
         let selector = config.selector_control();
-        let outbounds = prepare_client_outbounds(config.outbounds, config.outbound_psks)
-            .expect("schema v2 outbounds");
+        let outbounds = prepare_client_outbounds(config.outbounds).expect("schema v2 outbounds");
         Arc::get_mut(&mut Arc::get_mut(&mut context).expect("unique context").egress)
             .expect("unique egress")
             .outbounds = Arc::clone(&outbounds);
@@ -2763,9 +2762,15 @@ pub(in crate::run) mod tests {
         let static_listen = reserve_address();
         let (static_path, mut static_config) = client_udp_test_config(static_listen, servers[0]);
         static_config.outbounds = servers
-            .map(|server| ferrum2_config::ClientOutboundConfig { server })
-            .into();
-        static_config.outbound_psks = methods.map(psk_for_method).into();
+            .into_iter()
+            .zip(methods)
+            .map(
+                |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                    server: server.into(),
+                    psk: psk_for_method(method),
+                },
+            )
+            .collect();
         let (static_route, static_selector) = compile_selector_plans(
             &[TaggedInbound::new("entry", 0)],
             &tagged,
@@ -2837,9 +2842,15 @@ pub(in crate::run) mod tests {
         );
         let outbounds = prepare_client_outbounds(
             servers
-                .map(|server| ferrum2_config::ClientOutboundConfig { server })
-                .into(),
-            methods.map(psk_for_method).into(),
+                .into_iter()
+                .zip(methods)
+                .map(
+                    |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                        server: server.into(),
+                        psk: psk_for_method(method),
+                    },
+                )
+                .collect(),
         )
         .expect("routed chain outbounds");
         let (route, selector) = compile_selector_plans(
@@ -2992,9 +3003,14 @@ pub(in crate::run) mod tests {
             servers
                 .iter()
                 .copied()
-                .map(|server| ferrum2_config::ClientOutboundConfig { server })
+                .zip(methods.iter().copied())
+                .map(
+                    |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                        server: server.into(),
+                        psk: psk_for_method(method),
+                    },
+                )
                 .collect(),
-            methods.iter().copied().map(psk_for_method).collect(),
         )
         .expect("eight-hop outbounds");
         let tags = ["o0", "o1", "o2", "o3", "o4", "o5", "o6", "o7"];
@@ -3215,9 +3231,15 @@ pub(in crate::run) mod tests {
         let (path, config) = client_udp_chain_test_config(listen, servers, methods);
         let bound_outbounds = prepare_client_outbounds(
             servers
-                .map(|server| ferrum2_config::ClientOutboundConfig { server })
-                .into(),
-            methods.map(psk_for_method).into(),
+                .into_iter()
+                .zip(methods)
+                .map(
+                    |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                        server: server.into(),
+                        psk: psk_for_method(method),
+                    },
+                )
+                .collect(),
         )
         .expect("bound outbounds");
         let keys = methods.map(|method| {

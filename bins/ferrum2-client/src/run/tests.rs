@@ -970,7 +970,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
                 outbounds: listens
                     .map(|_| ClientOutboundContext {
                         tcp_server: TargetAddr::ipv4(server).expect("server target"),
-                        udp_server: server,
+                        udp_server: server.into(),
                         keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk_for_method(
                             MethodProfile::Blake3Aes128Gcm2022,
                         ))),

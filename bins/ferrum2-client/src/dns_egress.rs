@@ -2,7 +2,9 @@ use std::future::Future;
 use std::io;
 #[cfg(test)]
 use std::net::Ipv4Addr;
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
+#[cfg(test)]
+use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -95,7 +97,7 @@ impl ClientDnsEgress {
 
 #[derive(Eq, PartialEq)]
 struct DnsUdpPoolKey {
-    first_server: std::net::SocketAddrV4,
+    first_server: SocketAddr,
     plan: EgressPlanSnapshot,
 }
 
@@ -115,16 +117,17 @@ impl PooledDnsUdp {
         self.reusable = false;
     }
 
-    async fn relay_request(
+    async fn relay_request<A: Into<SocketAddr>>(
         &mut self,
         engine: &ClientEgressEngine,
         plan: &EgressPlanSnapshot,
-        first_server: SocketAddrV4,
+        first_server: A,
         destination: SocketAddr,
         packet: Vec<u8>,
         responses: &mpsc::Sender<Packet>,
     ) -> io::Result<bool> {
         self.begin_request();
+        let first_server = first_server.into();
         let (response, fully_reusable) = self
             .idle
             .as_mut()
@@ -628,7 +631,7 @@ mod tests {
             (
                 "same server/equal snapshot",
                 DnsUdpPoolKey {
-                    first_server,
+                    first_server: first_server.into(),
                     plan: selected.clone(),
                 },
                 true,
@@ -636,7 +639,7 @@ mod tests {
             (
                 "different first server",
                 DnsUdpPoolKey {
-                    first_server: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_002),
+                    first_server: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_002).into(),
                     plan: selected.clone(),
                 },
                 false,
@@ -644,7 +647,7 @@ mod tests {
             (
                 "different hop order",
                 DnsUdpPoolKey {
-                    first_server,
+                    first_server: first_server.into(),
                     plan: reversed,
                 },
                 false,
@@ -652,7 +655,7 @@ mod tests {
             (
                 "selector switched plan",
                 DnsUdpPoolKey {
-                    first_server,
+                    first_server: first_server.into(),
                     plan: later,
                 },
                 false,
@@ -670,13 +673,12 @@ mod tests {
         let baseline = registry.snapshot();
         let (path, mut context) = udp_test_context_for_server(registry.clone(), first_server);
         let outbounds = prepare_client_outbounds(
-            vec![
-                ferrum2_config::ClientOutboundConfig {
-                    server: first_server,
-                };
-                3
-            ],
-            (0..3).map(|_| default_test_psk()).collect(),
+            (0..3)
+                .map(|_| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                    server: first_server.into(),
+                    psk: default_test_psk(),
+                })
+                .collect(),
         )
         .expect("pool outbounds");
         Arc::get_mut(
@@ -704,7 +706,7 @@ mod tests {
                 .expect("key association");
             let pool = Arc::new(Mutex::new(vec![IdleDnsUdp {
                 key: DnsUdpPoolKey {
-                    first_server: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_001),
+                    first_server: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_001).into(),
                     plan: selected.clone(),
                 },
                 association,
@@ -739,7 +741,7 @@ mod tests {
             let mut pooled = PooledDnsUdp {
                 idle: Some(IdleDnsUdp {
                     key: DnsUdpPoolKey {
-                        first_server,
+                        first_server: first_server.into(),
                         plan: plan.clone(),
                     },
                     association,
@@ -799,7 +801,7 @@ mod tests {
                 "{case} healthy mutation session"
             );
             let key = DnsUdpPoolKey {
-                first_server,
+                first_server: first_server.into(),
                 plan: plan.clone(),
             };
             let (matched, stale) = take_dns_udp(&pool, &key).expect("mutation exact reuse");
@@ -944,7 +946,7 @@ mod tests {
                 .expect("following valid association");
             let mut initial = Some(IdleDnsUdp {
                 key: DnsUdpPoolKey {
-                    first_server,
+                    first_server: first_server.into(),
                     plan: plan.clone(),
                 },
                 association,
@@ -954,7 +956,7 @@ mod tests {
                     Some(idle) => (idle, false),
                     None => {
                         let key = DnsUdpPoolKey {
-                            first_server,
+                            first_server: first_server.into(),
                             plan: plan.clone(),
                         };
                         let (matched, stale) = take_dns_udp(&pool, &key).expect("healthy reuse");
@@ -1171,9 +1173,12 @@ mod tests {
         let [outer, inner, later, dead] = detours;
         let (path, mut config) = client_test_config(socks, detour_addresses[3]);
         config.outbounds = detour_addresses
-            .map(|server| ferrum2_config::ClientOutboundConfig { server })
-            .into();
-        config.outbound_psks = (0..4).map(|_| default_test_psk()).collect();
+            .into_iter()
+            .map(|server| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                server: server.into(),
+                psk: default_test_psk(),
+            })
+            .collect();
         let (route, selector, mut dns_roots) = compile_selector_plans_with_roots(
             &[TaggedInbound::new("entry", 0)],
             &[
