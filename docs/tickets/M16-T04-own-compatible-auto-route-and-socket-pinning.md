@@ -69,8 +69,8 @@ sh scripts/test-budget.sh ticket --base <accepted-M16-T03-sha> --candidate <cand
 git diff --check <accepted-M16-T03-sha>..<candidate-sha>
 ```
 
-Privileged pinned/unpinned rows are rerun in the accepted Windows guests before integration；they are not
-replaced by the fake recorder。
+Privileged pinned/unpinned rows are rerun after restoring the exact current qualification VM/checkpoint before
+integration；they are not replaced by the fake recorder or another guest。
 
 ## Result
 

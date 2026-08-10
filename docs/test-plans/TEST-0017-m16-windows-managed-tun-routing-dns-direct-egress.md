@@ -3,14 +3,41 @@
 - **Status:** Planned
 - **Milestone:** M16
 - **Baseline:** `fcef80dcc7e62bbca63ffbf7832df369dd418abd`
+- **Qualification VM:** `Windows 10 MSIX packaging environment`
+- **Qualification checkpoint:** `M15-T04-before-2b0c25b-20260810`
 - **Performance:** required；regression/resource evidence only，no minimum throughput or improvement claim
 
 ## Entry capability gate
 
-M16-T01 runs before product implementation and is blocking。It MUST use isolated Hyper-V guests/checkpoints，
-never the host currently running a TUN product，and MUST record guest build、candidate/probe hashes、before/
-active/after snapshots and one cleanup-complete marker。Both Windows 10 build 19041+ and Windows 11 AMD64
-assets are required。
+M16-T01 runs before product implementation and is blocking。It MUST restore the exact qualification VM/
+checkpoint above，never run on the host currently using a TUN product，and MUST record the guest's actual
+product、edition、architecture、full version/build、candidate/probe hashes、before/active/after snapshots and
+one cleanup-complete marker。No second VM or independent Windows-release baseline is required or credited。
+
+Before any guest mutation，the host workflow MUST write one canonical JSON identity ledger with exactly these
+ordered keys and no extras。Canonical encoding is one-line PowerShell `ConvertTo-Json -Compress` output from
+an ordered map，UTF-8 without BOM，terminated by one LF：
+
+```json
+{
+  "schema": 1,
+  "vm_name": "Windows 10 MSIX packaging environment",
+  "vm_id": "<exact-hyper-v-vm-guid>",
+  "checkpoint_name": "M15-T04-before-2b0c25b-20260810",
+  "checkpoint_id": "<exact-hyper-v-checkpoint-guid>",
+  "guest_product": "<observed-product-name>",
+  "guest_edition": "<observed-edition-id>",
+  "guest_architecture": "AMD64",
+  "guest_version": "<observed-full-version>",
+  "guest_build": "<observed-build-and-ubr>",
+  "candidate_sha": "<exact-candidate-git-sha>",
+  "probe_sha256": "<exact-qualifier-sha256>"
+}
+```
+
+The host obtains VM/checkpoint IDs through exact Hyper-V readback and obtains guest fields through PowerShell
+Direct after restore；it MUST NOT infer any field from the VM display name。The ledger SHA-256 binds every
+local marker below。The raw ledger is local evidence，not product telemetry or a committed fixture。
 
 The existing `tests/platform/qualify_windows_tun.ps1` is extended with one `network-feasibility` mode；M16
 does not add a third equivalent controller。The mode MUST prove all of the following：
@@ -30,15 +57,15 @@ does not add a third equivalent controller。The mode MUST prove all of the foll
    `TerminateProcess` separately leaves process absence plus zero adapter、address、route and DNS residue
    before controller remediation。
 
-Each guest emits exactly one successful capability marker only after audit：
+The restored qualification VM emits exactly one successful capability marker only after audit：
 
 ```text
-m16_windows_network_feasibility status=PASS routes=2/2 tcp_pin=4/4 udp_pin=4/4 dns=4/4 capture_window=1/1 hard_kill=1/1 interface_metric=<unchanged|leased> cleanup=PASS build=<exact-build> sha=<exact-sha>
+m16_windows_network_feasibility status=PASS routes=2/2 tcp_pin=4/4 udp_pin=4/4 dns=4/4 capture_window=1/1 hard_kill=1/1 interface_metric=<unchanged|leased> cleanup=PASS guest_build=<exact-build-and-ubr> run_token=<unique> candidate_sha=<exact-candidate-sha> probe_sha256=<exact-probe-sha256> identity_sha256=<exact-ledger-sha256>
 ```
 
-Missing Windows 11 assets，an ambiguous/no default underlay，a failed pinned/unpinned distinction，unreliable
-DNS steering，capture-window overflow or hard-kill residue makes T01 `BLOCKED` and stops T02～T07。It is not
-waived by unit fakes or ordinary RAII evidence。
+An inaccessible/mismatched VM or checkpoint，an ambiguous/no default underlay，a failed pinned/unpinned
+distinction，unreliable DNS steering，capture-window overflow or hard-kill residue makes T01 `BLOCKED` and
+stops T02～T07。It is not replaced by another VM or waived by unit fakes or ordinary RAII evidence。
 
 ## Evidence map
 
@@ -54,15 +81,15 @@ waived by unit fakes or ordinary RAII evidence。
 | Prefix subtraction、collapse、order independence、dual `/1` split、empty/257-row failure | Pure table-driven compiler tests in existing Windows Adapter module | `cargo test -p ferrum2-wintun capture_prefix --locked` |
 | Fully initialized Win32 rows、precheck/readback/journal/reverse conditional delete | One fake ABI failure-position table | `cargo test -p ferrum2-wintun managed_route --locked` |
 | Correct API order and IPv4/IPv6 byte order、no unpinned fallback | Fake socket-option recorder + source guard | `cargo test -p ferrum2-wintun underlay --locked` |
-| Win10/Win11 route values、pinned positive/unpinned negative、capture interval、hard kill | Blocking isolated-VM capability mode | `pwsh tests/platform/qualify_windows_tun.ps1 -Mode network-feasibility ...` |
+| Current-VM route values、pinned positive/unpinned negative、capture interval、hard kill | Blocking exact-asset capability mode | `pwsh tests/platform/qualify_windows_tun.ps1 -Mode network-feasibility ...` |
 | Product capture routes do not change third-party/default/LAN/VPN rows | Before/active/after exact route snapshots and sentinels | same capability/full VM profile |
 | Synthetic IPv4/IPv6 UDP/TCP 53 enters existing DnsProxy before ordinary route | Client TUN composition counter table | `cargo test -p ferrum2-client tun_auto_dns --locked` |
 | Wintun-only DNS apply/readback/conditional restore and external-change conflict | Fake DNS lease table + VM resolver witnesses | `cargo test -p ferrum2-wintun managed_dns --locked`；VM full profile |
 | Direct/no-detour bootstrap and proxy-detoured first-hop UDP/TCP/DoT/DoH use the correct pinned endpoint | Existing DNS transport tests with binding recorder | `cargo test -p ferrum2-client dns_egress --locked` |
 | TUN root prepares last；capture last；activation remains admission-only | Process-root call-order mutation table | `cargo test -p ferrum2-client managed_tun_lifecycle --locked` |
 | Every partial/later failure and graceful/forced stop reverses exact owned state | Fake failure-position table + existing lifecycle harness | focused crate tests；repository lifecycle command below |
-| Route/interface/address invalidation removes capture and terminates；no live migration | Notification callback/owner ordering tests + real VM route、interface and IPv4/IPv6 unicast-address mutations on each baseline | `cargo test -p ferrum2-wintun network_change --locked`；VM full profile |
-| 100 cycles and exact adapter/listener rebind with zero owners | Existing qualifier and lifecycle harness | VM `-Mode cycles`；repository lifecycle command below |
+| Route/interface/address invalidation removes capture and terminates；no live migration | Notification callback/owner ordering tests + real route、interface and IPv4/IPv6 unicast-address mutations on the exact current VM | `cargo test -p ferrum2-wintun network_change --locked`；VM full profile |
+| 100 cycles and exact adapter/listener rebind with zero owners | Identity-bound full marker plus existing lifecycle harness | VM full profile `cycles=100/100`；repository lifecycle command below |
 | No target/tag/interface/route/DNS/secret cardinality | Error/log/trace/metrics sentinel scans | `cargo test -p ferrum2-client m16_redaction --locked`；`cargo test -p ferrum2-wintun m16_redaction --locked`；`cargo test -p ferrum2-m0-harness --test architecture m16_observability --locked` |
 | TUN omission/non-Windows builds/SIP022/DNS interop preserve M0～M15 | Existing Full、platform and interop profiles | repository/hosted gates below |
 | Hot-path/resource regression on one exact SHA | Independent Windows TUN performance profile | authorized existing workflow dispatch after exact candidate is fixed |
@@ -123,10 +150,10 @@ waived by unit fakes or ordinary RAII evidence。
   TUN teardown。
 - Route/interface/address notification callback performs no blocking/logging/allocation/product policy work，
   cannot race context free，and repeated/coalesced notifications still trigger one bounded shutdown。
-- On each Windows baseline，the full VM profile separately mutates one relevant route、one physical-interface
-  state、one IPv4 unicast address and one IPv6 unicast address。Each row MUST observe the corresponding real
-  callback ABI，reject new admission，remove capture/DNS steering，terminate under supervision and leave zero
-  owned residue；unit injection cannot replace any of these four rows。
+- On the exact current qualification VM，the full profile separately mutates one relevant route、one physical-
+  interface state、one IPv4 unicast address and one IPv6 unicast address。Each row MUST observe the
+  corresponding real callback ABI，reject new admission，remove capture/DNS steering，terminate under
+  supervision and leave zero owned residue；unit injection cannot replace any of these four rows。
 - Graceful、forced supervised、panic and 100-cycle rows inspect adapter、address、route、DNS、process、HANDLE、
   callback、thread、flow、mapping、UDP live-ID and crypto owners。`TerminateProcess` rows inspect only process
   absence plus externally observable adapter/address/route/DNS state before cleanup。PASS marker is emitted
@@ -160,23 +187,28 @@ sh scripts/test-budget.sh milestone --candidate <accepted-integration-sha>
 git diff --check <accepted-M16-base>..<accepted-integration-sha>
 ```
 
-Required hosted/VM evidence must bind one exact SHA/run/attempt and report unique markers for Windows 10、
-Windows 11、functional full、cycles、cleanup and independent performance。A failed candidate/attempt remains
-recorded and is never rerun or combined with another SHA to create a pass。
+All required ledgers MUST bind one exact candidate SHA。Each current-VM profile binds its own unique
+`RunToken`；each hosted qualification or performance workflow binds its own run ID and attempt。Distinct
+dispatches are not required or allowed to share a run ID。Hosted Windows jobs remain regression/resource gates
+and are not a second OS qualification baseline。A failed candidate/attempt remains recorded and is never
+rerun or combined with another SHA to create a pass。
 
 The existing qualifier adds exact `network-feasibility` and `hard-kill` modes。Hard-kill runs exactly three
 externally observed cases：active auto-route only，active auto-route+auto-DNS，and active mixed direct/proxy/DNS
 traffic。It emits exactly one marker after pre-remediation audit：
 
 ```text
-m16_windows_hard_kill status=PASS cases=3/3 process_absent=PASS adapter=ABSENT addresses=ABSENT routes=ABSENT dns=ABSENT cleanup=PASS build=<exact-build> sha=<exact-sha>
+m16_windows_hard_kill status=PASS cases=3/3 process_absent=PASS adapter=ABSENT addresses=ABSENT routes=ABSENT dns=ABSENT cleanup=PASS guest_build=<exact-build-and-ubr> run_token=<unique> candidate_sha=<exact-candidate-sha> probe_sha256=<exact-probe-sha256> identity_sha256=<exact-ledger-sha256>
 ```
 
 The full controller and hosted wrappers require these exact schemas，with concrete values replacing angle
 placeholders：
 
 ```text
-m16_windows_tun_full status=PASS m15_transport=16/16 direct_tcp=2/2 direct_udp=2/2 dns=4/4 network_change=4/4 route_change=1/1 interface_change=1/1 address_change=2/2 cycles=100/100 hard_kill=3/3 cleanup=PASS build=<exact-build> sha=<exact-sha>
-m16_windows_tun_qualification status=PASS profile=full m15_transport=16/16 direct_tcp=2/2 direct_udp=2/2 dns=4/4 network_change=4/4 route_change=1/1 interface_change=1/1 address_change=2/2 cycles=100/100 hard_kill=3/3 cleanup=PASS sha=<GITHUB_SHA> run_id=<GITHUB_RUN_ID> run_attempt=<GITHUB_RUN_ATTEMPT>
-m16_windows_tun_performance status=PASS proxy=PASS direct=PASS dns=PASS cleanup=PASS sha=<GITHUB_SHA> run_id=<GITHUB_RUN_ID> run_attempt=<GITHUB_RUN_ATTEMPT>
+m16_windows_tun_full status=PASS m15_transport=16/16 direct_tcp=2/2 direct_udp=2/2 dns=4/4 network_change=4/4 route_change=1/1 interface_change=1/1 address_change=2/2 cycles=100/100 hard_kill=3/3 cleanup=PASS guest_build=<exact-build-and-ubr> run_token=<unique> candidate_sha=<exact-candidate-sha> probe_sha256=<exact-probe-sha256> identity_sha256=<exact-ledger-sha256>
+m16_windows_tun_qualification status=PASS profile=full m15_transport=16/16 direct_tcp=2/2 direct_udp=2/2 dns=4/4 network_change=4/4 route_change=1/1 interface_change=1/1 address_change=2/2 cycles=100/100 hard_kill=3/3 cleanup=PASS candidate_sha=<GITHUB_SHA> run_id=<GITHUB_RUN_ID> run_attempt=<GITHUB_RUN_ATTEMPT>
+m16_windows_tun_performance status=PASS proxy=PASS direct=PASS dns=PASS cleanup=PASS candidate_sha=<GITHUB_SHA> run_id=<GITHUB_RUN_ID> run_attempt=<GITHUB_RUN_ATTEMPT>
 ```
+
+The identity-bound full marker is the sole privileged VM cycle evidence for M16。No separate `-Mode cycles`
+run or independently mergeable cycles marker is required。

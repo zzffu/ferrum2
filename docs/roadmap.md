@@ -85,8 +85,8 @@ independent read-only diagnoses选定canonical exact-job-name ledger correction�
 tag、package、release或publication；combined Wintun redistribution仍需responsible legal decision。
 M16现为`planned`，planning baseline是
 `fcef80dcc7e62bbca63ffbf7832df369dd418abd`。它把client `type = "direct"`与Windows compatible
-auto-route/Wintun DNS steering合成一个里程碑；首个frontier只有M16-T01 Windows 10/11 capability
-gate，任何route/pinning/DNS/hard-kill关键行失败即停止product implementation。
+auto-route/Wintun DNS steering合成一个里程碑；首个frontier只有M16-T01 current-VM capability gate，
+exact VM/checkpoint identity或任何route/pinning/DNS/hard-kill关键行失败即停止product implementation。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -166,7 +166,8 @@ route/selector决定TUN或SOCKS TCP/UDP是否走SIP022；Windows auto-route只�
 Wintun `/1` capture rows，并用capture前physical policy pin每个proxy/direct/DNS socket。任意direct
 target按family使用一个冻结的physical default interface；其它LAN/VPN path通过exclude留在TUN外。
 Auto-DNS只steer owned Wintun interface并exact hijack synthetic port 53，不承诺WFP/anti-leak。T01先以
-Win10/Win11真实probe冻结route values并证明hard-kill zero residue；失败即replan。
+当前exact VM/checkpoint真实probe冻结route values并证明hard-kill zero residue；失败即replan，不从单
+build结果推断Windows跨版本兼容。
 
 ## M0 — AES-128-GCM TCP 安全纵切
 
@@ -1205,19 +1206,23 @@ Win10/Win11真实probe冻结route values并证明hard-kill zero residue；失败
 - **Underlay limit:** fixed proxy/DNS endpoints use endpoint-specific capture-before binding；dynamic direct
   uses one frozen physical default interface per family。Target-specific multihomed fidelity/live migration
   are out；required non-default paths are excluded before capture。
-- **Tickets:** isolated planning/control → T01 capability/measured contracts → T02 config graph → T03 direct TCP/UDP → T04 capture/binding →
-  T05 DNS steering → T06 lifecycle/VM evidence → T07 exact qualification；serial drain。
-- **Entry gate:** both Windows 10 build 19041+ and Windows 11 must prove route values、pinned positive/unpinned
-  negative、resolver steering、capture interval and external hard-kill zero residue before T02。Unavailable or
-  failed evidence is BLOCKED。
+- **Tickets:** planning/control `a9619ef…` → accepted Markdown-only single-VM scope amendment → T01
+  capability/measured contracts → T02 config graph → T03 direct TCP/UDP → T04 capture/binding → T05 DNS
+  steering → T06 lifecycle/VM evidence → T07 exact qualification；serial drain。
+- **Entry gate:** exact VM `Windows 10 MSIX packaging environment` restored from checkpoint
+  `M15-T04-before-2b0c25b-20260810` must record its actual product、edition、architecture and full version/build，
+  then prove route values、pinned positive/
+  unpinned negative、resolver steering、capture interval and external hard-kill zero residue before T02。
+  Unavailable、mismatched or failed evidence is BLOCKED；no second VM or cross-version claim is required。
 - **Footprint/performance:** baseline code/tests `29771/50323`、case/support/fixture `44574/5152/597`；forecast
   `+2250..3650 / +160..460 / +0` Rust tests plus existing qualifier growth。Performance is required without a
   threshold/improvement claim。
 - **Deferred/out of scope:** WFP/kill switch/DNS anti-leak、physical bypass rows、per-target multihomed routing、
   live migration、service/watchdog/installer、non-Windows managed TUN、new crate/dependency、ring-full
   maintenance unrelated to a proven blocker、release/publication。
-- **Next/remote boundary:** accept the isolated planning/control commit，then M16-T01 only。No product work、
-  push、dispatch、PR、tag、package、release or publication is authorized by planning。
+- **Next/remote boundary:** planning/control `a9619ef…` is accepted；accept the Markdown-only current-VM scope
+  amendment，then M16-T01 only。No product work、push、dispatch、PR、tag、package、release or publication is
+  authorized by planning。
 
 ## 决策登记
 
@@ -1267,7 +1272,7 @@ Win10/Win11真实probe冻结route values并证明hard-kill zero residue；失败
 | DEC-042 | resolved in M14 plan；client UDP amended | generic core ordered program从private monotonic cursor继续；concrete DNS/TLS/HTTP metadata留在config/sniff并由binary exhaustive adapter映射；pure sniff只使用Hickory/rustls/httparse；client TCP不sniff，server认证后sniff，client DNS hijack复用existing `DnsProxy::answer`；schema-v2 client UDP首个合法包填metadata并只选一次terminal action/outbound，后续target逐包保留；v1 routed+UDP配置拒绝且无旧数据面；terminal selection后no fallback | ADR-0033、SPEC/TEST-0015、M14 research、M14-T01～T09 |
 | DEC-043 | resolved in M15 plan；dependency/MSRV amended by owner | Windows NT 10.0+ AMD64 manual-route TUN uses additive schema-v2 `[tun]`、one audited Wintun/Win32 FFI module and one safe flow-level TUN module；exact no-default smoltcp 0.13.1 omits positive auto echo，workspace/toolchain/CI MSRV pin planning-date latest stable Rust 1.97.1；ProcessRoot prepare first starts one final owner thread，which creates、uses and reverses Wintun/smoltcp state before caller join，while activate only gates admission；IPv4 bare-header / IPv6 direct TCP/UDP only，all options/extensions/fragments/ICMP rejected；external routes stay externally owned，address-derived connected rows are OS-managed；existing policy/DNS/egress remains unique | CONTEXT.md、ADR-0034、M15 upstream research、SPEC/TEST-0016、M15-T01～T07 |
 | DEC-044 | proposed in M16 plan | Client schema-v2 outbound is a closed Direct/Shadowsocks sum；missing type remains Shadowsocks，direct has no endpoint/credentials and is a singleton terminal plan usable by static/route/final/selector/DNS detour but never a chain hop；one private client egress dispatcher serves SOCKS/TUN/DNS，selected failure never falls back and core plan identity stays unchanged | CONTEXT.md、ADR-0035、SPEC/TEST-0017、M16-T01～T07 |
-| DEC-045 | proposed in M16 plan；T01 capability-gated | Opt-in compatible Windows auto-route owns bounded include-minus-exclude split capture rows and pins every physical socket before use；fixed endpoints use exact interface selection，dynamic direct uses one frozen default interface per family；auto-DNS steers only Wintun and exact synthetic port 53；network invalidation removes capture and terminates，with no WFP、strict/anti-leak、per-target multihomed or live migration claim | ADR-0036、M16 research、SPEC/TEST-0017、M16-T01～T07 |
+| DEC-045 | proposed in M16 plan；T01 capability-gated；single-VM evidence scope amended by owner | Opt-in compatible Windows auto-route owns bounded include-minus-exclude split capture rows and pins every physical socket before use；fixed endpoints use exact interface selection，dynamic direct uses one frozen default interface per family；auto-DNS steers only Wintun and exact synthetic port 53；network invalidation removes capture and terminates。Privileged proof is limited to exact current VM/checkpoint and makes no independent Windows 10/11、cross-build、WFP、strict/anti-leak、per-target multihomed or live migration claim | ADR-0036、M16 research、SPEC/TEST-0017、M16-T01～T07 |
 
 ## 风险登记
 
@@ -1328,7 +1333,7 @@ Win10/Win11真实probe冻结route values并证明hard-kill zero residue；失败
 | fragment/ICMP/unknown extension绕过bounds，或smoltcp dynamic allocation/queue pressure扩大内存 | P0 | M15 | ingress+egress TCP/UDP-only filters、all fragments rejected、checked 64-MiB default/256-MiB hard plan、private bounded fake mutations |
 | TUN TCP/UDP复制M14 policy/DNS/SIP022或在selected failure/后续datagram重新进入policy | P0 | M15 | binary-private shared terminal Adapter、existing DnsProxy/egress/association/relay symbols、source guards、selector/no-fallback/no-reentry mutations |
 | privileged evidence不可用、cleanup触碰第三方adapter/route或不同SHA拼接 | P0 | M15 | direct fresh hosted runner first、unique name/prefix、always exact cleanup、unavailable=BLOCKED、same-SHA functional+manual performance+review ledger |
-| direct/proxy/DNS socket在capture后未pin或byte-order错误而递归进入Wintun | P0 | M16-T01 | Win10/Win11 off-link unpinned-negative/pinned-positive A/B；single不可绕过dialer/socket factory；bind-before-connect/send mutation；无unpinned fallback |
+| direct/proxy/DNS socket在capture后未pin或byte-order错误而递归进入Wintun | P0 | M16-T01 | exact current VM/checkpoint off-link unpinned-negative/pinned-positive A/B；single不可绕过dialer/socket factory；bind-before-connect/send mutation；无unpinned fallback |
 | capture/DNS ownership覆盖第三方state、partial rollback或hard kill残留造成host blackhole | P0 | M16-T01 | exact absent precheck/readback/journal/conditional reverse、sentinel snapshots、TerminateProcess external residue gate；任一失败stop/replan |
 | per-interface DNS被误称全局ownership，或single-default direct误称保留多宿主逐目标route | P0 | M16-T01 | CONTEXT/ADR/SPEC bounded terminology、resolver正反证据、route_exclude operational boundary、no WFP/anti-leak/multihomed claim |
 
@@ -1475,4 +1480,5 @@ Win10/Win11真实probe冻结route values并证明hard-kill zero residue；失败
 | 2026-08-10 | M15-T05 integrate | Exact `da38170…` integrates IPv4/IPv6 TUN UDP route/chain/selector/DNS/reject through the existing association seam；T05 done，T06 active | VM transport `16/16` passed with zero residue。`31360038841/1` retained its Linux-only cfg failure although Windows transport passed；descendant repair qualified normally in `31360570556/1` | Focused/full/MSRV/three-target/VM/hosted gates PASS；numeric evidence accepted；failed hosted attempt not remotely rerun or credited |
 | 2026-08-10 | M15-T06 integrate | Exact `7ba6268…` closes failure/lifecycle/architecture/full/performance evidence through the existing controller/workflow | Three fresh VM candidates failed the empty count、quiet prerequisite and obsolete counter oracles with zero residue；descendant repairs produced full attempt 4 and performance attempt 5 PASS | Hosted `31368732658/1`、`31368750439/1`、`31368752781/1` bind exact SHA/attempt 1 and required markers；T06 `+475/0/0` accepted；no failed hosted run was remotely rerun |
 | 2026-08-10 | M15 close | Exact product `7ba6268…` passes all product/evidence gates；T01-T07 and M15 are closed by this docs-only closeout | Final Architect `PASS_WITH_NOTES`，zero blocker/major/minor；initial and first targeted QA retained `QA-M15-T07-001`；dual read-only diagnoses selected canonical exact-job-name ledgers，and second targeted QA returned `PASS`、closed the finding and reported zero blocker/major/minor | Serial local gate and schema-3 integrity/ratio PASS；milestone `+5303/0/0` accepted；authorized pushes/dispatches consumed；no force-push/PR/tag/package/release/publication；combined Wintun redistribution remains legally blocked |
-| 2026-08-10 | M16 combined plan | Combine route-selectable client direct egress with compatible Windows auto-route and Wintun DNS steering in one serial milestone；T01 is a hard Win10/Win11 feasibility gate | Existing core plan/client egress/Wintun owner/qualifier are sufficient seams；sing-box/Microsoft comparison corrects `/0`、best-route、DNS and ActiveStore assumptions；dynamic direct selects one frozen physical default per family and defers per-target multihomed fidelity | qualified `7ba6268…`、planning `fcef80d…`；CONTEXT、ADR-0035/0036、SPEC/TEST-0017、M16 research、T01→T07；performance required；plan-only，no product/push/dispatch/release/publication |
+| 2026-08-10 | M16 combined plan | Combine route-selectable client direct egress with compatible Windows auto-route and Wintun DNS steering in one serial milestone；the initial plan used a dual-build feasibility gate superseded by the next amendment | Existing core plan/client egress/Wintun owner/qualifier are sufficient seams；sing-box/Microsoft comparison corrects `/0`、best-route、DNS and ActiveStore assumptions；dynamic direct selects one frozen physical default per family and defers per-target multihomed fidelity | qualified `7ba6268…`、planning `fcef80d…`；CONTEXT、ADR-0035/0036、SPEC/TEST-0017、M16 research、T01→T07；performance required；plan-only，no product/push/dispatch/release/publication |
+| 2026-08-10 | M16 single-VM evidence amendment | Owner narrows every privileged M16 capability/full-with-100-cycles/hard-kill proof to current VM `Windows 10 MSIX packaging environment` and checkpoint `M15-T04-before-2b0c25b-20260810` | Actual guest product、edition、architecture and full version/build are recorded after restore；one result proves only that asset，not independent Windows 10/11 or cross-build compatibility；hosted jobs remain regression/resource gates；the bound full marker is the sole VM cycles evidence | Markdown-only descendant of planning/control `a9619ef…`；T01 remains the sole frontier；no product/control/push/dispatch/release/publication |

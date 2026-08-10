@@ -43,9 +43,12 @@ after an exact match。Rollback deletes journaled rows in reverse order only whi
 matches；Windows address-derived connected/local rows are never journaled。
 
 Route next-hop derivation、row metric and any need for Wintun interface-metric mutation are physical-world
-values。M16-T01 must freeze them from independent Windows 10 and Windows 11 positive/negative readback before
-product implementation。If one bounded rule does not work on both supported builds，the contract stops for
-replanning rather than exposing an unproved operator knob。
+values。M16-T01 must freeze them from positive/negative readback on the current approved Hyper-V asset，VM
+`Windows 10 MSIX packaging environment` restored from checkpoint
+`M15-T04-before-2b0c25b-20260810`，before product implementation。The guest's actual product、edition、
+architecture and full version/build are recorded after restore；the VM label is not treated as OS-version
+evidence。If one bounded rule does not work on that exact asset，the contract stops for replanning rather than
+exposing an unproved operator knob。
 
 ### Immutable physical underlay policy
 
@@ -89,9 +92,13 @@ terminates through the existing supervised shutdown。Existing flows are not mig
 not claim fail-closed behavior during the transition。
 
 M16-T01 must also prove that `TerminateProcess` leaves process absence and no adapter、address、capture-route
-or Wintun-DNS residue on both supported Windows baselines before controller remediation。This external row
+or Wintun-DNS residue on the same restored qualification VM before controller remediation。This external row
 does not claim in-process owner drain。If adapter teardown does not provide the OS-state cascade，M16 stops
 and replans；a service、watchdog or persistent recovery ledger is not silently added。
+
+M16 deliberately qualifies privileged managed-network behavior on this one current VM/checkpoint only。It
+does not claim independent Windows 10-versus-Windows 11、release-to-release or multi-build coverage；adding
+another build later requires a separate evidence amendment，not a hidden expansion of this milestone。
 
 ## Consequences
 
@@ -101,8 +108,8 @@ and replans；a service、watchdog or persistent recovery ledger is not silently
   boundary may deepen instead of adding a second shallow Windows-network crate。
 - Compatible routing preserves third-party more-specific routes but cannot promise strict capture、DNS
   anti-leak or per-target multi-interface fidelity。
-- Real Windows 10/11 capability and hard-kill cleanup are entry gates，not assumptions hidden in final
-  qualification。
+- Real capability and hard-kill cleanup on the exact current VM/checkpoint are entry gates。Other Windows
+  builds remain unqualified by M16 rather than being inferred from that single result。
 
 ## Rejected alternatives
 

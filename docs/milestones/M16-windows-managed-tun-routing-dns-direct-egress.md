@@ -8,7 +8,10 @@
   `ba637e08287cbb623d4b604123f27e9e8b2df537`
 - **Strategy:** drain；all tickets integrate serially
 - **Owner:** primary thread
-- **Target:** Windows 10 build 19041+ and Windows 11 AMD64 through `x86_64-pc-windows-msvc`
+- **Runtime target:** Windows NT 10.0 build 19041+ AMD64 through `x86_64-pc-windows-msvc`
+- **Privileged qualification VM:** `Windows 10 MSIX packaging environment`
+- **Qualification checkpoint:** `M15-T04-before-2b0c25b-20260810`；actual guest product、edition、architecture
+  and full version/build recorded after restore
 - **MSRV:** exact Rust `1.97.1` unchanged
 - **Performance:** required — client socket creation and TUN route/DNS/lifecycle ownership enter transport and
   resource paths
@@ -70,19 +73,22 @@ source corrections and sing-box comparison are recorded in
 
 ## Entry feasibility gate
 
-M16-T01 is a product stop gate，not implementation scaffolding。Fresh isolated Windows 10 and Windows 11 VM
-probes must freeze exact route next-hop/metric/interface-metric disposition，prove IPv4/IPv6 pinned TCP/UDP
-positive versus unpinned Wintun-captured negative controls，prove Wintun resolver steering and the
-capture-before-admission interval，and externally prove zero residue after partial apply、normal stop and
-`TerminateProcess`。Missing Win11 assets or any failed capability leaves M16 blocked for contract replanning；
-T02 cannot paper over it with fakes、new knobs、a service or watchdog。
+M16-T01 is a product stop gate，not implementation scaffolding。After restoring the exact current qualification
+VM/checkpoint above，the probe must record its actual product、edition、architecture and full version/build，
+freeze exact route next-hop/metric/interface-metric disposition，prove IPv4/IPv6 pinned TCP/UDP positive
+versus unpinned Wintun-captured negative controls，prove Wintun resolver steering and the capture-before-
+admission interval，and externally prove zero residue
+after partial apply、normal stop and `TerminateProcess`。An inaccessible/mismatched asset or any failed
+capability leaves M16 blocked for contract replanning；T02 cannot paper over it with another VM、fakes、new
+knobs、a service or watchdog。M16 makes no independent cross-version Windows qualification claim。
 
 ## Planning/control isolation
 
-The current M16 bundle is one isolated control-plus-Markdown planning change：`ci/test-budget-baseline.txt`
-and Markdown only，with no platform probe、product、manifest、lock or workflow edit。It must be accepted as one
-single-parent commit before T01 starts。T01 binds that exact commit as its base and may add only the existing
-qualifier probe plus Markdown evidence amendments；it does not reopen the protected footprint control。
+The isolated control-plus-Markdown M16 plan is accepted at
+`a9619ef8269424fd345403de8d3bb033b0d5f9d8`。This single-VM evidence-scope amendment is Markdown-only and must
+be accepted as its single-parent descendant before T01 starts。T01 binds the amended exact commit as its base
+and may add only the existing qualifier probe plus Markdown evidence amendments；it does not reopen the
+protected footprint control。
 
 ## Existing seams and minimum deepening
 
@@ -107,6 +113,8 @@ qualifier probe plus Markdown evidence amendments；it does not reopen the prote
   Wintun adapter or broad route flush/delete。
 - Linux/macOS managed TUN、Windows ARM64/x86、service/watchdog/installer/UAC automation、Fake-IP、process/
   Geo/rule-set routing、DoQ/DoH3、QUIC sniff、ICMP、fragments/options/extensions unsupported by M15。
+- Independent Windows release/build qualification beyond the exact current VM/checkpoint；no Windows
+  10-versus-11 compatibility claim is inferred from the single privileged evidence asset。
 - A new crate/dependency/endpoint registry/public egress trait，performance improvement threshold，Wintun
   redistribution，package、release or publication。
 - The unrelated M15 Wintun ring-full observability repair from the external draft；it remains a separate
@@ -114,8 +122,9 @@ qualifier probe plus Markdown evidence amendments；it does not reopen the prote
 
 ## Exit criteria
 
-- [ ] T01 records exact Windows 10/11 capability evidence and freezes route values；pinned/unpinned、DNS、
-      capture interval and hard-kill cleanup all pass，or the milestone stops before product work。
+- [ ] T01 restores the exact current VM/checkpoint，records actual product、edition、architecture and full
+      version/build，and freezes route values；pinned/unpinned、DNS、capture interval and hard-kill cleanup all
+      pass，or the milestone stops before product work。
 - [ ] `--check-config` remains side-effect-free；old outbounds default to Shadowsocks；direct closed fields、
       direct-only credentials、chain rejection and every managed-TUN bound/relationship fail closed correctly。
 - [ ] Static/rule/final/selector can choose direct for SOCKS and TUN IPv4/IPv6 TCP/UDP；DNS detour/no-detour can
@@ -133,24 +142,24 @@ qualifier probe plus Markdown evidence amendments；it does not reopen the prote
 - [ ] All setup ordinals、change invalidation、later composition failure、graceful/forced stop and 100 cycles
       return OS and process-private owners to baseline。External hard kill separately proves process absence
       and zero adapter/address/route/DNS residue before controller remediation，without claiming internal drain。
-- [ ] Each supported Windows baseline proves the real route、interface and IPv4/IPv6 unicast-address callback
+- [ ] The current qualification VM proves the real route、interface and IPv4/IPv6 unicast-address callback
       paths independently revoke admission/capture/DNS，terminate and leave zero owned residue。
 - [ ] New errors/logs/traces/metrics use fixed redacted categories and contain no target、endpoint、prefix、
       interface/adapter identity、DNS name、tag、packet or secret。
 - [ ] One exact SHA passes focused、Full、Rust 1.97.1、three non-driver targets、existing interop、footprint、
-      Windows 10/11 privileged full/cleanup、independent performance and bounded Architect/QA review with zero
-      blocking findings。
+      current-VM privileged full/cleanup、independent performance and bounded Architect/QA review with zero
+      blocking findings；hosted results are regression evidence，not a second OS qualification baseline。
 
 ## Tickets
 
 | Ticket | Outcome | Depends on | Status |
 |---|---|---|---|
-| M16-T01 | Prove Windows host-network capabilities and freeze measured contracts | accepted M16 planning/control | ready |
+| M16-T01 | Prove Windows host-network capabilities and freeze measured contracts | accepted Markdown-only single-VM scope amendment atop `a9619ef…` | ready |
 | M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | planned |
 | M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | planned |
 | M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | planned |
 | M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | planned |
-| M16-T06 | Close network-change、failure、hard-kill and Win10/Win11 lifecycle evidence | M16-T05 | planned |
+| M16-T06 | Close network-change、failure、hard-kill and current-VM lifecycle evidence | M16-T05 | planned |
 | M16-T07 | Qualify and close one exact M16 integration SHA | M16-T06 | planned |
 
 ```text
@@ -181,7 +190,8 @@ user authorization and must bind the accepted exact SHA。
 
 ## Blocker / next action
 
-First accept the current isolated planning/control commit。Then execute M16-T01 only：bind that exact base，
-confirm Windows 10 and Windows 11 VM/checkpoint assets，extend the existing qualifier with the bounded
-capability mode，and freeze the route/metric/hard-kill results in ADR-0036、SPEC-0017 and TEST-0017。Do not
-begin product implementation until every entry capability row passes。
+First accept this Markdown-only single-VM scope amendment atop `a9619ef…`。Then execute M16-T01 only：bind that
+exact amended base，restore `Windows 10 MSIX packaging environment` from
+`M15-T04-before-2b0c25b-20260810`，record the actual guest identity，extend the existing qualifier with the
+bounded capability mode，and freeze the route/metric/hard-kill results in ADR-0036、SPEC-0017 and TEST-0017。
+Do not begin product implementation until every entry capability row passes。

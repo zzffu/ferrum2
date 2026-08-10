@@ -33,8 +33,8 @@ selected upstream through the existing DNS proxy and pinned client egress owners
       retain ordinary/M15 behavior。
 - [ ] No-detour/direct-detour and proxy-detoured UDP/TCP/DoT/DoH upstreams all use the T04 physical binding
       seam and preserve existing deadline、TLS/HTTP identity、admission and no-fallback rules。
-- [ ] Windows resolver UDP and TCP witnesses pass on both accepted guest baselines；evidence is described as
-      steering，with no other-interface、DoH/DoQ、WFP or anti-leak claim。
+- [ ] Windows resolver UDP and TCP witnesses pass on the exact current qualification VM/checkpoint；evidence
+      is described as steering，with no other-interface、DoH/DoQ、WFP、anti-leak or cross-version claim。
 - [ ] Failure-position、redaction、architecture、focused DNS/process and footprint checks pass。
 
 ## Validation

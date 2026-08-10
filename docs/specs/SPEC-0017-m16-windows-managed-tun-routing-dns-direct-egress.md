@@ -7,10 +7,12 @@
 
 ## Outcome
 
-On Windows 10 build 19041+ and Windows 11 AMD64，an opt-in schema-v2 TUN client can transactionally capture
-configured prefixes，steer the Windows resolver through its Wintun interface，and send each selected TUN
-TCP flow or UDP mapping either through its existing Shadowsocks plan or through a new client direct
-outbound。Every physical client socket is pinned before network use so product-owned capture cannot recurse。
+On Windows NT 10.0 build 19041+ AMD64，an opt-in schema-v2 TUN client can transactionally capture configured
+prefixes，steer the Windows resolver through its Wintun interface，and send each selected TUN TCP flow or UDP
+mapping either through its existing Shadowsocks plan or through a new client direct outbound。Every physical
+client socket is pinned before network use so product-owned capture cannot recurse。M16 privileged evidence
+is intentionally limited to the exact current VM/checkpoint named by TEST-0017 and does not establish
+independent Windows-release coverage。
 
 The words MUST、MUST NOT、SHOULD and MAY are normative。
 
@@ -74,6 +76,9 @@ through the frozen physical default interface。These are different policies。
 - Client direct outbound is additive schema-v2 behavior and MUST work through the shared SOCKS/TUN/DNS
   client egress on every existing build target。Managed route/DNS mutation MUST run only for Windows NT
   10.0 build 19041+ AMD64；unsupported runtime targets fail before public service and without OS mutation。
+- M16 privileged qualification MUST use only VM `Windows 10 MSIX packaging environment` restored from
+  checkpoint `M15-T04-before-2b0c25b-20260810`。The runner MUST record actual guest edition、build and
+  architecture after restore；the asset label MUST NOT be used as OS-version evidence。
 - `--check-config` MUST perform no DLL load、adapter access、route/interface/DNS query or mutation、socket
   creation、thread spawn or privilege check。
 - M16 MUST keep exact Rust `1.97.1` and existing dependency identities unless a ticket records an explicit
@@ -174,9 +179,9 @@ through the frozen physical default interface。These are different policies。
 ### M16-MUST-08 — exact route ownership
 
 - M16-T01 MUST freeze one next-hop derivation、route-metric and interface-metric disposition that passes
-  independent Windows 10 and Windows 11 positive/negative readback。Until that amendment is accepted，M16-T02
-  and later product tickets remain blocked。These values MUST NOT become operator knobs merely to avoid the
-  probe。
+  positive/negative readback on the exact current qualification VM/checkpoint。Until that evidence amendment
+  is accepted，M16-T02 and later product tickets remain blocked。These values MUST NOT become operator knobs
+  merely to avoid the probe。
 - Every route row MUST begin with `InitializeIpForwardEntry` and then explicitly set every field required by
   the accepted contract，including fields whose initializer value is true or illegal。Create success alone
   is insufficient：ActiveStore readback MUST exactly match the owned identity and allowed system-derived
@@ -222,7 +227,7 @@ through the frozen physical default interface。These are different policies。
   the process through the existing supervisor。No live flow migration or uninterrupted fail-closed claim is
   made。
 - T01 MUST prove external `TerminateProcess` produces process absence and zero adapter/address/route/DNS
-  residue on both supported Windows baselines before controller remediation。It MUST NOT claim process-private
+  residue on the exact current qualification VM before controller remediation。It MUST NOT claim process-private
   flow/mapping/protocol drain from an unobservable killed process。If OS residue remains，M16 stops for
   replanning；normal RAII is not accepted as hard-kill proof。
 
@@ -243,11 +248,13 @@ through the frozen physical default interface。These are different policies。
 - One exact integration SHA MUST pass focused config/core/runtime/client tests，repository Full，exact MSRV，
   Windows/GNU/musl non-driver gates，existing SIP022/DNS interoperability，test-footprint integrity，and
   bounded Architect/QA review with zero blocking findings。
-- The same SHA MUST pass fresh isolated Windows 10 and Windows 11 privileged full profiles with pinned and
-  unpinned TCP/UDP controls、resolver steering、network invalidation、100 cycles、hard kill and exact residue
-  snapshots。On each baseline，network invalidation MUST include distinct real route、interface、IPv4
-  unicast-address and IPv6 unicast-address mutations through the corresponding Windows callbacks；each row
-  revokes admission/capture/DNS and terminates cleanly。Unavailable required VM evidence is BLOCKED，not waived。
+- The same SHA MUST pass fresh-restore privileged full and hard-kill profiles on the exact current
+  qualification VM/checkpoint；the identity-bound full marker MUST itself include `cycles=100/100` alongside
+  pinned and unpinned TCP/UDP controls、resolver steering、network invalidation and exact residue snapshots。
+  Network invalidation MUST include distinct real route、
+  interface、IPv4 unicast-address and IPv6 unicast-address mutations through the corresponding Windows
+  callbacks；each row revokes admission/capture/DNS and terminates cleanly。An unavailable or mismatched asset
+  is BLOCKED，not replaced by a second VM or waived。
 - An independent same-SHA Windows performance/resource profile is required because socket creation and TUN
   lifecycle hot paths change。It is regression evidence only and creates no throughput threshold or
   improvement claim。Remote push/dispatch still requires explicit authorization。
@@ -262,3 +269,5 @@ through the frozen physical default interface。These are different policies。
   fragments/extensions、process/Geo/rule-set routing、DoQ/DoH3 or QUIC sniffing。
 - A new public endpoint abstraction、new Windows-network crate、new dependency identity、performance gain
   claim、Wintun redistribution、package、release or publication。
+- Independent Windows 10/11、release-to-release or multi-build privileged qualification；hosted Windows jobs
+  remain regression gates and MUST NOT be credited as a second OS compatibility baseline。

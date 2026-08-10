@@ -21,7 +21,7 @@ owns:
 
 ## Outcome
 
-Freeze one exact integration SHA，run the complete local、platform、interop、Windows 10/11 privileged and
+Freeze one exact integration SHA，run the complete local、platform、interop、current-VM privileged and
 independent performance evidence ledger，obtain bounded final Architect/QA review，and only then mark M16
 closed and write the durable handoff/history。
 
@@ -32,11 +32,14 @@ closed and write the durable handoff/history。
 - [ ] Focused and repository Full，Rust 1.97.1，Windows/GNU/musl non-driver，SIP022/DNS interop，100+ lifecycle，
       architecture and milestone footprint all pass on the same candidate；every numeric footprint finding has
       an explicit disposition。
-- [ ] Fresh Windows 10 and Windows 11 full/cycles/hard-kill ledgers match the candidate and report unique
-      TEST-0017 full/hard-kill markers with zero owned or sentinel residue。
+- [ ] Fresh-restore full and hard-kill ledgers from the exact current qualification VM/checkpoint match the
+      candidate；the identity-bound full marker reports `cycles=100/100`，and both unique TEST-0017 markers
+      report zero owned or sentinel residue。No second Windows build or standalone cycles ledger is required
+      or credited。
 - [ ] After explicit remote authorization only，required push/hosted jobs and independent Windows TUN
-      performance run execute against the same SHA/run/attempt and succeed；failed attempts remain recorded
-      and are not rerun/combined as evidence。
+      performance run execute against the same candidate SHA and succeed；each distinct workflow binds its own
+      run ID/attempt，while each current-VM profile binds its own run token。Failed attempts remain recorded and
+      are not rerun/combined as evidence。
 - [ ] One fresh full Architect review and one fresh full QA review report zero blocking findings；fixes receive
       only bounded targeted re-review and cause all affected validation to rerun。
 - [ ] Closure docs state compatible routing、single-default direct、resolver steering and no strict/anti-leak/
@@ -61,12 +64,11 @@ git diff --check <accepted-M16-base>..<accepted-integration-sha>
 The exact VM/hosted commands and run/job IDs are recorded in the ticket result and handoff after authorization；
 placeholders are never reported as evidence。
 
-Run the following independently in each accepted Windows 10/11 guest before hosted evidence：
+Run the following in the exact restored current qualification VM before hosted evidence：
 
 ```powershell
-pwsh tests/platform/qualify_windows_tun.ps1 -Mode full -WintunZip <exact-zip> -RunToken <unique>
-pwsh tests/platform/qualify_windows_tun.ps1 -Mode cycles -WintunZip <exact-zip> -RunToken <unique>
-pwsh tests/platform/qualify_windows_tun.ps1 -Mode hard-kill -WintunZip <exact-zip> -RunToken <unique>
+pwsh tests/platform/qualify_windows_tun.ps1 -Mode full -IdentityLedger <exact-json> -WintunZip <exact-zip> -RunToken <unique>
+pwsh tests/platform/qualify_windows_tun.ps1 -Mode hard-kill -IdentityLedger <exact-json> -WintunZip <exact-zip> -RunToken <unique>
 ```
 
 Only after explicit remote authorization，use the existing workflow and a unique integration ref：
@@ -86,12 +88,13 @@ The automatic/full ledgers require `quality`、`test-footprint`、`msrv`、`plat
 `platform / linux-gnu`、`platform / linux-musl`、`interop`、`windows-tun-e2e` and `qualification` success。
 The performance dispatch additionally requires `performance` and `windows-tun-performance` success。Logs
 must contain exactly one matching TEST-0017 qualification/performance marker and the exact SHA/run/attempt。
+These hosted jobs are regression/resource gates，not a second privileged OS qualification baseline。
 
 ## Result
 
 - Qualified commit/tree/parent: —
 - Local Full/MSRV/footprint: —
-- Windows 10/11 evidence: —
+- Current qualification VM/checkpoint/guest-identity evidence: —
 - Hosted/performance evidence: —
 - Architect/QA review: —
 - Remote actions: —
