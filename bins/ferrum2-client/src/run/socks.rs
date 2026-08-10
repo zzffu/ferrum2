@@ -382,6 +382,14 @@ async fn client_connection(
     };
     let flow = match opened {
         Ok(flow) => flow,
+        Err(ClientOpenFailure::Plan(failure)) => {
+            let kind = match failure {
+                super::egress::ClientPlanFailure::DirectUnsupported
+                | super::egress::ClientPlanFailure::Invalid => ConnectErrorKind::Other,
+            };
+            let _ = reply.failed(kind).await;
+            return;
+        }
         Err(ClientOpenFailure::Protocol(error)) => {
             let (stage, outcome, reason) = observation_for_error(error);
             record_failure(&context, stage, reason, outcome);
@@ -463,12 +471,7 @@ async fn run_udp_association<IO, F, Fut>(
         let plan = routing
             .legacy
             .select_plan_snapshot(inbound, Network::Udp, &placeholder);
-        let server = plan
-            .hops()
-            .first()
-            .and_then(|hop| routing.outbounds.get(*hop))
-            .map(|outbound| outbound.udp_server);
-        server.map(|server| (plan, server))
+        Some(plan)
     } else {
         None
     };
@@ -494,14 +497,14 @@ async fn run_udp_association<IO, F, Fut>(
             return;
         }
     };
-    let mut static_association = if let Some((plan, server)) = static_plan {
+    let mut static_association = if let Some(plan) = static_plan {
         let prepared = tokio::select! {
             _ = cancellation.cancelled() => return,
-            prepared = context.egress.prepare_udp(plan, server, &mut bind) => prepared,
+            prepared = context.egress.prepare_udp(plan, &mut bind) => prepared,
         };
         match prepared {
             Ok(prepared) => Some(prepared),
-            Err(()) => {
+            Err(_) => {
                 let _ = reply.failed(ConnectErrorKind::Other).await;
                 return;
             }
@@ -876,17 +879,9 @@ async fn classify_udp_association<IO, F, Fut>(
 
     match terminal {
         ClientTerminalRoute::Route(plan) => {
-            let Some(server) = plan
-                .hops()
-                .first()
-                .and_then(|hop| routing.outbounds.get(*hop))
-                .map(|outbound| outbound.udp_server)
-            else {
-                return;
-            };
             let prepared = tokio::select! {
                 _ = cancellation.cancelled() => return,
-                prepared = context.egress.prepare_udp(plan, server, &mut bind) => prepared,
+                prepared = context.egress.prepare_udp(plan, &mut bind) => prepared,
             };
             let Ok(mut prepared) = prepared else {
                 record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
@@ -1296,7 +1291,6 @@ pub(in crate::run) mod tests {
             .egress
             .prepare_udp(
                 ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
-                context.test_udp_server,
                 UdpSocket::bind,
             )
             .await
@@ -1337,7 +1331,6 @@ pub(in crate::run) mod tests {
             .egress
             .prepare_udp(
                 ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
-                context.test_udp_server,
                 &mut bind,
             )
             .await
@@ -2258,7 +2251,6 @@ pub(in crate::run) mod tests {
                 .egress
                 .prepare_udp(
                     ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
-                    server_address,
                     UdpSocket::bind,
                 )
                 .await
@@ -2429,7 +2421,6 @@ pub(in crate::run) mod tests {
                     .egress
                     .prepare_udp(
                         ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
-                        server_address,
                         UdpSocket::bind,
                     )
                     .await
@@ -2899,7 +2890,7 @@ pub(in crate::run) mod tests {
         let relay = endpoint.local_addr().expect("routed relay");
         let prepared = context
             .egress
-            .prepare_udp(selected, servers[0], UdpSocket::bind)
+            .prepare_udp(selected, UdpSocket::bind)
             .await
             .expect("routed chain preparation");
         let (association, peer) = parsed_udp_association().await;
@@ -2915,7 +2906,8 @@ pub(in crate::run) mod tests {
         let application = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("routed application");
-        let routed_outer = UdpServer::new(&routing.outbounds[0].keys).expect("outer protocol");
+        let routed_outer = UdpServer::new(&routing.outbounds[0].shadowsocks().unwrap().keys)
+            .expect("outer protocol");
         let random = SystemRandom;
 
         for label in ["before switch", "after switch"] {
@@ -3061,7 +3053,7 @@ pub(in crate::run) mod tests {
         let relay = endpoint.local_addr().expect("relay");
         let prepared = context
             .egress
-            .prepare_udp(plan, servers[0], UdpSocket::bind)
+            .prepare_udp(plan, UdpSocket::bind)
             .await
             .expect("eight-hop preparation");
         let manager = context.egress.udp.as_ref().expect("UDP").manager.clone();
@@ -3143,7 +3135,8 @@ pub(in crate::run) mod tests {
         let random = SystemRandom;
         let mut nested = wire[..wire_len].to_vec();
         for layer in 0..MAX_UDP_PLAN_HOPS {
-            let server = UdpServer::new(&routing.outbounds[layer].keys).expect("hop server");
+            let server = UdpServer::new(&routing.outbounds[layer].shadowsocks().unwrap().keys)
+                .expect("hop server");
             let mut scratch = UdpPacketScratch::new();
             let pending = server
                 .prepare_request(&clock, &nested, &mut scratch)

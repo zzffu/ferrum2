@@ -714,12 +714,6 @@ pub(super) fn validate_client(
         .iter()
         .map(|inbound| inbound.tag.clone())
         .collect::<Vec<_>>();
-    let outbound_credentials = validate_client_credentials(
-        schema_version,
-        raw.client.is_some(),
-        raw.outbounds.as_deref(),
-        raw.shadowsocks.as_ref(),
-    )?;
     let route_draft = if schema_version == SchemaVersion::V2 {
         v2::compile_route_draft(
             raw.route.as_ref(),
@@ -745,10 +739,11 @@ pub(super) fn validate_client(
     };
     let (listen, inbounds, outbounds, route, mut roots, physical_first_hops, direct_detours) =
         validate_client_graph(
+            schema_version,
+            raw.shadowsocks,
             raw.client,
             raw.inbounds,
             raw.outbounds,
-            outbound_credentials,
             raw.chains,
             raw.selectors,
             graph_route,
@@ -962,10 +957,11 @@ type ValidatedClientGraph = (
 );
 
 fn validate_client_graph(
+    schema_version: SchemaVersion,
+    global: Option<RawShadowsocks>,
     legacy: Option<RawClient>,
     tagged_inbounds: Option<Vec<RawClientInbound>>,
     tagged_outbounds: Option<Vec<RawClientOutbound>>,
-    outbound_credentials: Vec<Option<MethodPsk>>,
     chains: Option<Vec<RawChain>>,
     selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
@@ -977,6 +973,15 @@ fn validate_client_graph(
         source,
         retained_client_inbounds: socks_inbound_count,
     } = validation;
+    let global_method = global
+        .as_ref()
+        .map(|global| parse_method(&global.method, ConfigField::ShadowsocksMethod))
+        .transpose()?;
+    let mut global_psk = global
+        .as_ref()
+        .zip(global_method)
+        .map(|(global, method)| parse_psk(method, &global.psk, ConfigField::ShadowsocksPsk))
+        .transpose()?;
     if chains.is_some()
         && (legacy.is_some() || tagged_inbounds.is_none() || tagged_outbounds.is_none())
     {
@@ -994,6 +999,9 @@ fn validate_client_graph(
     }
     match (legacy, tagged_inbounds, tagged_outbounds) {
         (Some(legacy), None, None) => {
+            let psk = global_psk
+                .take()
+                .ok_or_else(|| ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config))?;
             let listen = parse_endpoint(&legacy.listen, ConfigField::ClientListen)?;
             let server = parse_endpoint(&legacy.server, ConfigField::ClientServer)?;
             if listen == server {
@@ -1004,11 +1012,7 @@ fn validate_client_graph(
                 vec![ClientInboundConfig { listen }],
                 vec![ClientOutboundConfig::Shadowsocks {
                     server: SocketAddr::V4(server),
-                    psk: outbound_credentials
-                        .into_iter()
-                        .next()
-                        .flatten()
-                        .expect("legacy credential was validated"),
+                    psk,
                 }],
                 RouteTable::static_bindings(vec![0])
                     .ok_or_else(|| ConfigError::semantic(ConfigField::Inbounds))?,
@@ -1048,7 +1052,7 @@ fn validate_client_graph(
             }
 
             let mut validated_outbounds = Vec::with_capacity(outbounds.len());
-            for (index, (outbound, psk)) in outbounds.iter().zip(outbound_credentials).enumerate() {
+            for (index, outbound) in outbounds.iter().enumerate() {
                 validate_tag(&outbound.tag, ConfigField::OutboundsTag)?;
                 if inbounds.iter().any(|inbound| inbound.tag == outbound.tag)
                     || outbounds[..index]
@@ -1057,8 +1061,46 @@ fn validate_client_graph(
                 {
                     return Err(ConfigError::semantic(ConfigField::OutboundsTag));
                 }
-                match psk {
-                    Some(psk) => {
+                if schema_version == SchemaVersion::V1 && outbound.outbound_type.is_some() {
+                    return Err(ConfigError::semantic(ConfigField::OutboundsType));
+                }
+                match outbound.outbound_type.as_deref().unwrap_or("shadowsocks") {
+                    "direct" => {
+                        if outbound.server.is_some() {
+                            return Err(ConfigError::semantic(ConfigField::OutboundsServer));
+                        }
+                        if outbound.method.is_some() {
+                            return Err(ConfigError::semantic(ConfigField::OutboundsMethod));
+                        }
+                        if outbound.psk.is_some() {
+                            return Err(ConfigError::semantic(ConfigField::OutboundsPsk));
+                        }
+                        validated_outbounds.push(ClientOutboundConfig::Direct);
+                    }
+                    "shadowsocks" => {
+                        let global = global.as_ref().ok_or_else(|| {
+                            ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config)
+                        })?;
+                        let psk = match (&outbound.method, &outbound.psk) {
+                            (None, None) => match global_psk.take() {
+                                Some(psk) => psk,
+                                None => parse_psk(
+                                    global_method.expect("global method was validated"),
+                                    &global.psk,
+                                    ConfigField::ShadowsocksPsk,
+                                )?,
+                            },
+                            (Some(_), None) => {
+                                return Err(ConfigError::semantic(ConfigField::OutboundsPsk));
+                            }
+                            (None, Some(_)) => {
+                                return Err(ConfigError::semantic(ConfigField::OutboundsMethod));
+                            }
+                            (Some(method), Some(psk)) => {
+                                let method = parse_method(method, ConfigField::OutboundsMethod)?;
+                                parse_psk(method, psk, ConfigField::OutboundsPsk)?
+                            }
+                        };
                         let server = parse_socket(
                             outbound.server.as_deref().ok_or_else(|| {
                                 ConfigError::semantic(ConfigField::OutboundsServer)
@@ -1073,7 +1115,7 @@ fn validate_client_graph(
                         }
                         validated_outbounds.push(ClientOutboundConfig::Shadowsocks { server, psk });
                     }
-                    None => validated_outbounds.push(ClientOutboundConfig::Direct),
+                    _ => return Err(ConfigError::semantic(ConfigField::OutboundsType)),
                 }
             }
 
@@ -1081,6 +1123,7 @@ fn validate_client_graph(
                 chains.as_deref(),
                 &inbounds,
                 &outbounds,
+                &validated_outbounds,
                 selectors.as_deref(),
             )?;
             for (index, tag) in route_roots.iter().copied().enumerate() {
@@ -1230,80 +1273,11 @@ fn validate_client_graph(
     }
 }
 
-fn validate_client_credentials(
-    schema_version: SchemaVersion,
-    legacy: bool,
-    outbounds: Option<&[RawClientOutbound]>,
-    global: Option<&RawShadowsocks>,
-) -> Result<Vec<Option<MethodPsk>>, ConfigError> {
-    if let Some(global) = global {
-        let method = parse_method(&global.method, ConfigField::ShadowsocksMethod)?;
-        let _ = parse_psk(method, &global.psk, ConfigField::ShadowsocksPsk)?;
-    }
-    if legacy {
-        let global =
-            global.ok_or_else(|| ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config))?;
-        let method = parse_method(&global.method, ConfigField::ShadowsocksMethod)?;
-        return Ok(vec![Some(parse_psk(
-            method,
-            &global.psk,
-            ConfigField::ShadowsocksPsk,
-        )?)]);
-    }
-
-    outbounds
-        .unwrap_or(&[])
-        .iter()
-        .map(|outbound| {
-            if schema_version == SchemaVersion::V1 && outbound.outbound_type.is_some() {
-                return Err(ConfigError::semantic(ConfigField::OutboundsType));
-            }
-            match outbound.outbound_type.as_deref().unwrap_or("shadowsocks") {
-                "direct" => {
-                    if outbound.server.is_some() {
-                        return Err(ConfigError::semantic(ConfigField::OutboundsServer));
-                    }
-                    if outbound.method.is_some() {
-                        return Err(ConfigError::semantic(ConfigField::OutboundsMethod));
-                    }
-                    if outbound.psk.is_some() {
-                        return Err(ConfigError::semantic(ConfigField::OutboundsPsk));
-                    }
-                    Ok(None)
-                }
-                "shadowsocks" => {
-                    let global = global.ok_or_else(|| {
-                        ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config)
-                    })?;
-                    let psk = match (&outbound.method, &outbound.psk) {
-                        (None, None) => {
-                            let method =
-                                parse_method(&global.method, ConfigField::ShadowsocksMethod)?;
-                            parse_psk(method, &global.psk, ConfigField::ShadowsocksPsk)?
-                        }
-                        (Some(_), None) => {
-                            return Err(ConfigError::semantic(ConfigField::OutboundsPsk));
-                        }
-                        (None, Some(_)) => {
-                            return Err(ConfigError::semantic(ConfigField::OutboundsMethod));
-                        }
-                        (Some(method), Some(psk)) => {
-                            let method = parse_method(method, ConfigField::OutboundsMethod)?;
-                            parse_psk(method, psk, ConfigField::OutboundsPsk)?
-                        }
-                    };
-                    Ok(Some(psk))
-                }
-                _ => Err(ConfigError::semantic(ConfigField::OutboundsType)),
-            }
-        })
-        .collect()
-}
-
 fn validate_chains<'a>(
     chains: Option<&'a [RawChain]>,
     inbounds: &[RawClientInbound],
     outbounds: &[RawClientOutbound],
+    validated_outbounds: &[ClientOutboundConfig],
     selectors: Option<&[RawSelector]>,
 ) -> Result<Vec<TaggedPlan<'a>>, ConfigError> {
     let Some(chains) = chains else {
@@ -1344,7 +1318,7 @@ fn validate_chains<'a>(
                 .iter()
                 .position(|outbound| outbound.tag == *outbound_tag)
                 .ok_or_else(|| ConfigError::semantic(ConfigField::ChainsHops))?;
-            if outbounds[outbound].outbound_type.as_deref() == Some("direct") {
+            if matches!(validated_outbounds[outbound], ClientOutboundConfig::Direct) {
                 return Err(ConfigError::semantic(ConfigField::ChainsHops));
             }
             hops.push(outbound);

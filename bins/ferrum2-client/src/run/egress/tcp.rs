@@ -28,12 +28,9 @@ where
     T: Clock + Sync,
     R: SecureRandom,
 {
-    if plan.is_empty() || plan.iter().any(|index| *index >= outbounds.len()) {
-        return Err(ClientOpenFailure::Protocol(ShadowsocksError::Connect(
-            ConnectErrorKind::Other,
-        )));
-    }
-    let first = &outbounds[plan[0]];
+    let first = outbounds[plan[0]]
+        .shadowsocks()
+        .expect("classified Shadowsocks plan");
     let outbound = ClientTcpOutbound::new(
         first.tcp_server.clone(),
         &first.keys,
@@ -53,15 +50,23 @@ where
         })?
         .map_err(ClientOpenFailure::Protocol)?;
     tokio::time::timeout(deadlines.1, async {
-        let first_target = plan
-            .get(1)
-            .map_or(application_target, |next| &outbounds[*next].tcp_server);
+        let first_target = plan.get(1).map_or(application_target, |next| {
+            &outbounds[*next]
+                .shadowsocks()
+                .expect("classified Shadowsocks plan")
+                .tcp_server
+        });
         let mut flow = connected.write_request(first_target).await?.into_boxed();
         for (position, index) in plan.iter().copied().enumerate().skip(1) {
-            let hop = &outbounds[index];
-            let next_target = plan
-                .get(position + 1)
-                .map_or(application_target, |next| &outbounds[*next].tcp_server);
+            let hop = outbounds[index]
+                .shadowsocks()
+                .expect("classified Shadowsocks plan");
+            let next_target = plan.get(position + 1).map_or(application_target, |next| {
+                &outbounds[*next]
+                    .shadowsocks()
+                    .expect("classified Shadowsocks plan")
+                    .tcp_server
+            });
             let outbound =
                 ClientTcpOutbound::new(hop.tcp_server.clone(), &hop.keys, connector, clock, random);
             #[cfg(test)]
@@ -180,7 +185,7 @@ mod tests {
                         .lock()
                         .expect("dial targets")
                         .as_slice(),
-                    &[outbounds[first].tcp_server.clone()],
+                    &[outbounds[first].shadowsocks().unwrap().tcp_server.clone()],
                     "sole {label} raw dial: rotation {case}"
                 );
                 assert_two_layer_buffers(&observer, format_args!("{label}: rotation {case}"));
@@ -191,7 +196,7 @@ mod tests {
 
                 let outer_replay = TcpReplayStore::new(1024).expect("outer replay");
                 let outer_inbound = ShadowsocksTcpInbound::new(
-                    &outbounds[first].keys,
+                    &outbounds[first].shadowsocks().unwrap().keys,
                     &clock,
                     &random,
                     &outer_replay,
@@ -201,7 +206,8 @@ mod tests {
                     .await
                     .expect("configured outer credential");
                 assert_eq!(
-                    outer.target, outbounds[second].tcp_server,
+                    outer.target,
+                    outbounds[second].shadowsocks().unwrap().tcp_server,
                     "{label} first targets second: rotation {case}"
                 );
                 assert!(outer.initial_payload.is_empty(), "{label}: rotation {case}");
@@ -214,7 +220,7 @@ mod tests {
 
                 let inner_replay = TcpReplayStore::new(1024).expect("inner replay");
                 let inner_inbound = ShadowsocksTcpInbound::new(
-                    &outbounds[second].keys,
+                    &outbounds[second].shadowsocks().unwrap().keys,
                     &clock,
                     &random,
                     &inner_replay,
@@ -230,7 +236,7 @@ mod tests {
                     let wrong_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
                         ferrum2_crypto::MethodPsk::aes128([0x91; 16]),
                     ));
-                    for keys in [&outbounds[second].keys, &wrong_keys] {
+                    for keys in [&outbounds[second].shadowsocks().unwrap().keys, &wrong_keys] {
                         let replay = TcpReplayStore::new(1024).expect("invalid replay");
                         let inbound = ShadowsocksTcpInbound::new(keys, &clock, &random, &replay);
                         assert!(
@@ -245,7 +251,7 @@ mod tests {
                     truncated.pop().expect("nonempty wire");
                     let replay = TcpReplayStore::new(1024).expect("truncated replay");
                     let inbound = ShadowsocksTcpInbound::new(
-                        &outbounds[first].keys,
+                        &outbounds[first].shadowsocks().unwrap().keys,
                         &clock,
                         &random,
                         &replay,
@@ -377,7 +383,7 @@ mod tests {
                     .lock()
                     .expect("dial targets")
                     .as_slice(),
-                &[outbounds[0].tcp_server.clone()],
+                &[outbounds[0].shadowsocks().unwrap().tcp_server.clone()],
                 "cancel={cancel}"
             );
             assert_eq!(selector.selected("manual"), Ok("a-b"));
@@ -440,7 +446,7 @@ mod tests {
                 .lock()
                 .expect("write-zero targets")
                 .as_slice(),
-            &[outbounds[0].tcp_server.clone()]
+            &[outbounds[0].shadowsocks().unwrap().tcp_server.clone()]
         );
         assert_eq!(selector.selected("manual"), Ok("a-b"));
 
@@ -507,16 +513,21 @@ mod tests {
                 .lock()
                 .expect("partial targets")
                 .as_slice(),
-            &[outbounds[0].tcp_server.clone()]
+            &[outbounds[0].shadowsocks().unwrap().tcp_server.clone()]
         );
         assert_eq!(selector.selected("manual"), Ok("a-b"));
         let raw = partial_wire.lock().expect("partial wire").clone();
         let outer_replay = TcpReplayStore::new(1024).expect("partial outer replay");
-        let outer = ShadowsocksTcpInbound::new(&outbounds[0].keys, &clock, &random, &outer_replay)
-            .accept_stream(scripted_input(&raw).await)
-            .await
-            .expect("partial outer wire");
-        assert_eq!(outer.target, outbounds[1].tcp_server);
+        let outer = ShadowsocksTcpInbound::new(
+            &outbounds[0].shadowsocks().unwrap().keys,
+            &clock,
+            &random,
+            &outer_replay,
+        )
+        .accept_stream(scripted_input(&raw).await)
+        .await
+        .expect("partial outer wire");
+        assert_eq!(outer.target, outbounds[1].shadowsocks().unwrap().tcp_server);
         let mut outer_stream = TokioFramed::new(outer.stream);
         let mut inner_wire = [0_u8; 4_096];
         let inner_len = outer_stream
@@ -524,10 +535,15 @@ mod tests {
             .await
             .expect("partial inner wire");
         let inner_replay = TcpReplayStore::new(1024).expect("partial inner replay");
-        let inner = ShadowsocksTcpInbound::new(&outbounds[1].keys, &clock, &random, &inner_replay)
-            .accept_stream(scripted_input(&inner_wire[..inner_len]).await)
-            .await
-            .expect("partial complete inner wire");
+        let inner = ShadowsocksTcpInbound::new(
+            &outbounds[1].shadowsocks().unwrap().keys,
+            &clock,
+            &random,
+            &inner_replay,
+        )
+        .accept_stream(scripted_input(&inner_wire[..inner_len]).await)
+        .await
+        .expect("partial complete inner wire");
         assert_eq!(inner.target, application);
         assert!(inner.initial_payload.is_empty());
 
@@ -560,18 +576,26 @@ mod tests {
             )
             .await
             .expect("opened detection chain");
-        let request_salt =
-            MethodTcpSalt::try_from_slice(outbounds[0].keys.tcp_profile(), &[0x42; 32])
-                .expect("outer request salt");
-        let inner_request_salt =
-            MethodTcpSalt::try_from_slice(outbounds[1].keys.tcp_profile(), &[0x42; 32])
-                .expect("inner request salt");
-        let response_salt =
-            MethodTcpSalt::try_from_slice(outbounds[0].keys.tcp_profile(), &[0x43; 32])
-                .expect("outer response salt");
-        let inner_response_salt =
-            MethodTcpSalt::try_from_slice(outbounds[1].keys.tcp_profile(), &[0x44; 32])
-                .expect("inner response salt");
+        let request_salt = MethodTcpSalt::try_from_slice(
+            outbounds[0].shadowsocks().unwrap().keys.tcp_profile(),
+            &[0x42; 32],
+        )
+        .expect("outer request salt");
+        let inner_request_salt = MethodTcpSalt::try_from_slice(
+            outbounds[1].shadowsocks().unwrap().keys.tcp_profile(),
+            &[0x42; 32],
+        )
+        .expect("inner request salt");
+        let response_salt = MethodTcpSalt::try_from_slice(
+            outbounds[0].shadowsocks().unwrap().keys.tcp_profile(),
+            &[0x43; 32],
+        )
+        .expect("outer response salt");
+        let inner_response_salt = MethodTcpSalt::try_from_slice(
+            outbounds[1].shadowsocks().unwrap().keys.tcp_profile(),
+            &[0x44; 32],
+        )
+        .expect("inner response salt");
         let wrong_inner_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
             ferrum2_crypto::MethodPsk::chacha20_poly1305([0x99; 32]),
         ));
@@ -584,7 +608,7 @@ mod tests {
         )
         .expect("wrong-key inner response");
         let authenticated_outer = encode_response_first_write(
-            &outbounds[0].keys,
+            &outbounds[0].shadowsocks().unwrap().keys,
             &response_salt,
             clock.unix_seconds().expect("response time"),
             &request_salt,
@@ -623,7 +647,7 @@ mod tests {
                 .lock()
                 .expect("detection targets")
                 .as_slice(),
-            &[outbounds[0].tcp_server.clone()]
+            &[outbounds[0].shadowsocks().unwrap().tcp_server.clone()]
         );
         assert_eq!(selector.selected("manual"), Ok("a-b"));
 
@@ -673,7 +697,7 @@ mod tests {
                 .lock()
                 .expect("valid targets")
                 .as_slice(),
-            &[outbounds[0].tcp_server.clone()]
+            &[outbounds[0].shadowsocks().unwrap().tcp_server.clone()]
         );
         assert_eq!(selector.selected("manual"), Ok("a-b"));
     }
@@ -711,13 +735,15 @@ mod tests {
         let server_address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41_002);
         let server = TargetAddr::ipv4(server_address).expect(label);
         let engine = ClientEgressEngine::new(
-            vec![ClientOutboundContext {
-                tcp_server: server,
-                udp_server: server_address.into(),
-                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
-                    ferrum2_crypto::MethodPsk::aes128([key; 16]),
-                )),
-            }]
+            vec![ClientOutboundContext::Shadowsocks(
+                ClientShadowsocksContext {
+                    tcp_server: server,
+                    udp_server: server_address.into(),
+                    keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                        ferrum2_crypto::MethodPsk::aes128([key; 16]),
+                    )),
+                },
+            )]
             .into(),
             connector,
             SystemClock::new(),
@@ -860,13 +886,15 @@ mod tests {
         };
         let server = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41_002);
         let engine = ClientEgressEngine::new(
-            vec![ClientOutboundContext {
-                tcp_server: TargetAddr::ipv4(server).expect("server"),
-                udp_server: server.into(),
-                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
-                    ferrum2_crypto::MethodPsk::aes128([0x15; 16]),
-                )),
-            }]
+            vec![ClientOutboundContext::Shadowsocks(
+                ClientShadowsocksContext {
+                    tcp_server: TargetAddr::ipv4(server).expect("server"),
+                    udp_server: server.into(),
+                    keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                        ferrum2_crypto::MethodPsk::aes128([0x15; 16]),
+                    )),
+                },
+            )]
             .into(),
             connector,
             SystemClock::new(),

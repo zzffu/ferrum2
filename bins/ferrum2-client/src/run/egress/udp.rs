@@ -188,6 +188,7 @@ impl ClientUdpAssociation {
                 intermediate = TargetAddr::ip(
                     outbounds
                         .get(hops[layer + 1])
+                        .and_then(ClientOutboundContext::shadowsocks)
                         .ok_or(UdpPacketError::StateUnavailable)?
                         .udp_server,
                 )
@@ -273,6 +274,7 @@ impl ClientUdpAssociation {
         let expected = TargetAddr::ip(
             outbounds
                 .get(hops[1])
+                .and_then(ClientOutboundContext::shadowsocks)
                 .ok_or(UdpPlanResponseError::Packet(
                     UdpPacketError::StateUnavailable,
                 ))?
@@ -317,6 +319,7 @@ impl ClientUdpAssociation {
             let expected = TargetAddr::ip(
                 outbounds
                     .get(hops[layer + 1])
+                    .and_then(ClientOutboundContext::shadowsocks)
                     .ok_or(UdpPlanResponseError::Packet(
                         UdpPacketError::StateUnavailable,
                     ))?
@@ -525,8 +528,8 @@ impl ClientUdpAssociation {
     }
 }
 
-pub(in crate::run) async fn prepare<F, Fut>(
-    egress: &ClientEgressEngine,
+pub(in crate::run) async fn prepare<C, T, R, F, Fut>(
+    egress: &ClientEgressEngine<C, T, R>,
     plan: EgressPlanSnapshot,
     first_server: SocketAddr,
     mut bind: F,
@@ -536,9 +539,6 @@ where
     Fut: std::future::Future<Output = io::Result<UdpSocket>>,
 {
     let udp = egress.udp.as_ref().ok_or(())?;
-    if plan.hops().is_empty() || plan.hops().len() > MAX_UDP_PLAN_HOPS {
-        return Err(());
-    }
     let pending_session = udp
         .manager
         .reserve_session(Instant::now())
@@ -587,6 +587,12 @@ fn register_udp_plan(
     let mut legs: Vec<ClientUdpLeg> = Vec::with_capacity(hops.len());
     for hop in hops {
         let Some(outbound) = outbounds.get(*hop) else {
+            for leg in &legs {
+                live_ids.remove(&leg.id);
+            }
+            return Err(());
+        };
+        let Some(outbound) = outbound.shadowsocks() else {
             for leg in &legs {
                 live_ids.remove(&leg.id);
             }
@@ -729,7 +735,7 @@ pub(in crate::run) fn composed_udp_plan_limit(
         .iter()
         .enumerate()
         .try_fold(0_usize, |total, (layer, hop)| {
-            let profile = outbounds.get(*hop)?.keys.profile();
+            let profile = outbounds.get(*hop)?.shadowsocks()?.keys.profile();
             let target_len = if layer + 1 == hops.len() {
                 encoded_target_len
             } else {

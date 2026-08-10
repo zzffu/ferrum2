@@ -25,10 +25,24 @@ pub(super) use udp::{
     composed_udp_request_limit, composed_udp_response_limit,
 };
 
-pub(super) struct ClientOutboundContext {
+pub(super) enum ClientOutboundContext {
+    Shadowsocks(ClientShadowsocksContext),
+    Direct,
+}
+
+pub(super) struct ClientShadowsocksContext {
     pub(super) tcp_server: TargetAddr,
     pub(super) udp_server: SocketAddr,
     pub(super) keys: MethodKeyAdapter<MethodSinglePskProvider>,
+}
+
+impl ClientOutboundContext {
+    pub(super) fn shadowsocks(&self) -> Option<&ClientShadowsocksContext> {
+        match self {
+            Self::Shadowsocks(outbound) => Some(outbound),
+            Self::Direct => None,
+        }
+    }
 }
 
 pub(super) fn prepare_client_outbounds(
@@ -37,22 +51,19 @@ pub(super) fn prepare_client_outbounds(
     if outbounds.is_empty() {
         return Err(RunError::StartupProtocol);
     }
-    if outbounds
-        .iter()
-        .any(|outbound| matches!(outbound, ferrum2_config::ClientOutboundConfig::Direct))
-    {
-        return Err(RunError::StartupDirectUnsupported);
-    }
     outbounds
         .into_iter()
         .map(|outbound| {
-            let ferrum2_config::ClientOutboundConfig::Shadowsocks { server, psk } = outbound else {
-                unreachable!("direct outbounds were rejected before protocol preparation")
-            };
-            Ok(ClientOutboundContext {
-                tcp_server: TargetAddr::ip(server).map_err(|_| RunError::StartupProtocol)?,
-                udp_server: server,
-                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
+            Ok(match outbound {
+                ferrum2_config::ClientOutboundConfig::Shadowsocks { server, psk } => {
+                    ClientOutboundContext::Shadowsocks(ClientShadowsocksContext {
+                        tcp_server: TargetAddr::ip(server)
+                            .map_err(|_| RunError::StartupProtocol)?,
+                        udp_server: server,
+                        keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
+                    })
+                }
+                ferrum2_config::ClientOutboundConfig::Direct => ClientOutboundContext::Direct,
             })
         })
         .collect::<Result<Vec<_>, _>>()
@@ -97,6 +108,34 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         }
     }
 
+    pub(super) fn classify_selected_hops(
+        &self,
+        hops: &[usize],
+    ) -> Result<SocketAddr, ClientPlanFailure> {
+        if hops.is_empty() || hops.len() > udp::MAX_UDP_PLAN_HOPS {
+            return Err(ClientPlanFailure::Invalid);
+        }
+        let mut direct = 0;
+        for hop in hops {
+            match self.outbounds.get(*hop) {
+                Some(ClientOutboundContext::Shadowsocks(_)) => {}
+                Some(ClientOutboundContext::Direct) => direct += 1,
+                None => return Err(ClientPlanFailure::Invalid),
+            }
+        }
+        if direct != 0 {
+            return Err(if direct == 1 && hops.len() == 1 {
+                ClientPlanFailure::DirectUnsupported
+            } else {
+                ClientPlanFailure::Invalid
+            });
+        }
+        Ok(self.outbounds[hops[0]]
+            .shadowsocks()
+            .expect("classified Shadowsocks plan")
+            .udp_server)
+    }
+
     pub(super) async fn open_tcp<'a>(
         &'a self,
         plan: EgressPlanSnapshot,
@@ -110,6 +149,8 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         T: Clock + Sync,
         R: SecureRandom,
     {
+        self.classify_selected_hops(plan.hops())
+            .map_err(ClientOpenFailure::Plan)?;
         let deadlines = timeout_limit.map_or(self.phase_deadlines, |limit| {
             (
                 limit.min(self.phase_deadlines.0),
@@ -129,33 +170,48 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         )
         .await
     }
-}
 
-impl ClientEgressEngine {
-    pub(super) async fn prepare_udp<A, F, Fut>(
+    pub(super) async fn prepare_udp<F, Fut>(
         &self,
         plan: EgressPlanSnapshot,
-        first_server: A,
         bind: F,
-    ) -> Result<ClientUdpAssociation, ()>
+    ) -> Result<ClientUdpAssociation, ClientUdpPrepareFailure>
     where
-        A: Into<SocketAddr>,
         F: FnMut(SocketAddr) -> Fut,
         Fut: std::future::Future<Output = std::io::Result<tokio::net::UdpSocket>>,
     {
-        udp::prepare(self, plan, first_server.into(), bind).await
+        let first_server = self
+            .classify_selected_hops(plan.hops())
+            .map_err(ClientUdpPrepareFailure::Plan)?;
+        udp::prepare(self, plan, first_server, bind)
+            .await
+            .map_err(|()| ClientUdpPrepareFailure::Unavailable)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ClientPlanFailure {
+    DirectUnsupported,
+    Invalid,
 }
 
 #[derive(Debug)]
 pub(super) enum ClientOpenFailure {
+    Plan(ClientPlanFailure),
     Protocol(ShadowsocksError),
     HandshakeTimeout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ClientUdpPrepareFailure {
+    Plan(ClientPlanFailure),
+    Unavailable,
 }
 
 #[cfg(test)]
 mod m16_tests {
     use super::*;
+    use crate::run::test_support::*;
 
     fn proxy() -> ferrum2_config::ClientOutboundConfig {
         ferrum2_config::ClientOutboundConfig::Shadowsocks {
@@ -164,26 +220,108 @@ mod m16_tests {
         }
     }
 
-    #[test]
-    fn m16_direct_pre_socket_rejects_empty_mixed_and_multi_direct_plans() {
+    fn selected(hops: Vec<usize>) -> EgressPlanSnapshot {
+        let route = compile_selector_plans_with_roots(
+            &[TaggedInbound::new("entry", 0)],
+            &[
+                TaggedOutbound::new("direct-a", 0),
+                TaggedOutbound::new("direct-b", 1),
+                TaggedOutbound::new("proxy", 2),
+            ],
+            &[TaggedPlan::new("selected", hops)],
+            &[],
+            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "selected")]),
+            &["direct-a", "direct-b", "proxy"],
+        )
+        .expect("selected plan")
+        .0;
+        route.select_plan_snapshot(
+            0,
+            ferrum2_core::route::Network::Tcp,
+            &TargetAddr::domain("snapshot.invalid", 443).unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn m16_direct_pre_socket_classifies_actual_snapshot_without_side_effects() {
         assert_eq!(
             prepare_client_outbounds(Vec::new()).err().unwrap(),
             RunError::StartupProtocol
         );
-        for outbounds in [
-            vec![ferrum2_config::ClientOutboundConfig::Direct],
-            vec![proxy(), ferrum2_config::ClientOutboundConfig::Direct],
-            vec![
-                ferrum2_config::ClientOutboundConfig::Direct,
-                ferrum2_config::ClientOutboundConfig::Direct,
-            ],
+        let outbounds = prepare_client_outbounds(vec![
+            ferrum2_config::ClientOutboundConfig::Direct,
+            ferrum2_config::ClientOutboundConfig::Direct,
+            proxy(),
+        ])
+        .expect("closed outbound catalog");
+        let connector_calls = Arc::new(AtomicUsize::new(0));
+        let bind_calls = Arc::new(AtomicUsize::new(0));
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let engine = ClientEgressEngine::new(
+            outbounds,
+            TokioConnector::new(FailingConnector {
+                calls: Arc::clone(&connector_calls),
+            }),
+            SystemClock::new(),
+            FixedRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some(ClientUdpContext {
+                manager: UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone()),
+                live_ids: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            None,
+        );
+        assert_eq!(
+            engine.classify_selected_hops(&[]),
+            Err(ClientPlanFailure::Invalid)
+        );
+        assert_eq!(
+            engine.classify_selected_hops(&[2]),
+            Ok("127.0.0.1:8388".parse().unwrap())
+        );
+
+        let target = TargetAddr::domain("application.invalid", 443).unwrap();
+        for (name, plan, expected) in [
+            (
+                "singleton direct",
+                ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                ClientPlanFailure::DirectUnsupported,
+            ),
+            ("mixed", selected(vec![0, 2]), ClientPlanFailure::Invalid),
+            (
+                "multi direct",
+                selected(vec![0, 1]),
+                ClientPlanFailure::Invalid,
+            ),
+            (
+                "out of range",
+                ferrum2_core::route::EgressPlanHandle::direct(3).snapshot_owned(),
+                ClientPlanFailure::Invalid,
+            ),
         ] {
-            let error = prepare_client_outbounds(outbounds).err().unwrap();
-            assert_eq!(error, RunError::StartupDirectUnsupported);
-            assert_eq!(
-                error.to_string(),
-                "error[startup.direct_unsupported] process: direct execution is not available"
+            assert!(
+                matches!(
+                    engine.open_tcp(plan.clone(), &target, None, None).await,
+                    Err(ClientOpenFailure::Plan(actual)) if actual == expected
+                ),
+                "TCP {name}"
             );
+            let calls = Arc::clone(&bind_calls);
+            assert_eq!(
+                engine
+                    .prepare_udp(plan, move |_| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async { Err(io::Error::other("binder must not run")) }
+                    })
+                    .await
+                    .err(),
+                Some(ClientUdpPrepareFailure::Plan(expected)),
+                "UDP {name}"
+            );
+            assert_eq!(connector_calls.load(Ordering::SeqCst), 0, "TCP {name}");
+            assert_eq!(bind_calls.load(Ordering::SeqCst), 0, "UDP {name}");
+            assert_eq!(registry.snapshot(), baseline, "owners {name}");
         }
     }
 }

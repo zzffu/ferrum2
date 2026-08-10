@@ -2630,6 +2630,11 @@ fn m16_client_outbound_shape_and_direct_plan_roots_are_closed() {
             "psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
             ConfigField::OutboundsPsk,
         ),
+        (
+            "all direct fields",
+            "server = \"127.0.0.1:8388\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
+            ConfigField::OutboundsServer,
+        ),
         ("unknown", "type = \"DIRECT\"\n", ConfigField::OutboundsType),
     ] {
         let type_line = if name == "unknown" {
@@ -2815,6 +2820,11 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
             ConfigField::TunRouteAddress,
         ),
         (
+            "IPv6 exclude",
+            "auto_route = true\nroute_exclude_address = [\"::1/128\"]",
+            ConfigField::TunRouteExcludeAddress,
+        ),
+        (
             "noncanonical include",
             "auto_route = true\nroute_address = [\"10.1.0.0/8\"]",
             ConfigField::TunRouteAddress,
@@ -2855,6 +2865,31 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
             ConfigField::TunIpv4DnsAddress,
         ),
         (
+            "DNS unspecified",
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"0.0.0.0\"",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+        (
+            "DNS loopback",
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"127.0.0.1\"",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+        (
+            "DNS multicast",
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"224.0.0.1\"",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+        (
+            "DNS network",
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"198.18.0.0\"",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+        (
+            "DNS broadcast",
+            "auto_route = true\nauto_dns = true\nipv4_dns_address = \"198.18.0.3\"",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+        (
             "DNS outside",
             "auto_route = true\nauto_dns = true\nipv4_dns_address = \"198.18.1.1\"",
             ConfigField::TunIpv4DnsAddress,
@@ -2879,6 +2914,40 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
     )
     .err()
     .expect("65 includes");
+    assert_eq!(error.field(), ConfigField::TunRouteAddress);
+
+    for count in [1, 64] {
+        let includes = (0..count)
+            .map(|index| format!("\"10.{index}.0.0/16\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        load_client(
+            TempConfig::text(&managed(&format!(
+                "auto_route = true\nroute_address = [{includes}]"
+            )))
+            .path(),
+        )
+        .unwrap_or_else(|error| panic!("{count} includes failed: {error}"));
+    }
+
+    let exact_output = |extra: &str| {
+        let mut excludes = (0..10)
+            .map(|index| format!("\"{index}.0.0.1/32\""))
+            .collect::<Vec<_>>();
+        excludes.push(format!("\"{extra}\""));
+        managed(&format!(
+            "auto_route = true\nroute_exclude_address = [{}]",
+            excludes.join(", ")
+        ))
+    };
+    let tun = load_client(TempConfig::text(&exact_output("0.32.0.0/32")).path())
+        .expect("exactly 256 compiled rows")
+        .tun
+        .unwrap();
+    assert_eq!(tun.capture_routes.len(), 256);
+    let error = load_client(TempConfig::text(&exact_output("0.64.0.0/32")).path())
+        .err()
+        .expect("257 compiled rows");
     assert_eq!(error.field(), ConfigField::TunRouteAddress);
 
     let excludes = (0..64)
@@ -2923,6 +2992,22 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
         .tun
         .unwrap();
     assert_eq!(tun.physical_endpoints, ["192.0.2.10:8388".parse().unwrap()]);
+
+    let selector_detoured = detoured.replace(
+        "detour = \"proxy\"\n[dns.route]",
+        "detour = \"manual\"\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"proxy\"]\ndefault = \"proxy\"\n[dns.route]",
+    );
+    let tun = load_client(TempConfig::text(&selector_detoured).path())
+        .expect("logical IPv6 DNS behind IPv4 proxy selector")
+        .tun
+        .unwrap();
+    assert_eq!(tun.physical_endpoints, ["192.0.2.10:8388".parse().unwrap()]);
+
+    let selector_ipv6 = "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\noutbound = \"manual\"\n[[outbounds]]\ntag = \"v4\"\nserver = \"192.0.2.10:8388\"\n[[outbounds]]\ntag = \"v6\"\nserver = \"[2001:db8::10]:8388\"\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"v4\", \"v6\"]\ndefault = \"v4\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+    let error = load_client(TempConfig::text(selector_ipv6).path())
+        .err()
+        .expect("selector IPv6 physical first hop");
+    assert_eq!(error.field(), ConfigField::OutboundsServer);
 
     let chained = "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\noutbound = \"chain\"\n[[outbounds]]\ntag = \"outer\"\nserver = \"192.0.2.10:8388\"\n[[outbounds]]\ntag = \"inner\"\nserver = \"[2001:db8::10]:8388\"\n[[chains]]\ntag = \"chain\"\nhops = [\"outer\", \"inner\"]\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
     let tun = load_client(TempConfig::text(chained).path())

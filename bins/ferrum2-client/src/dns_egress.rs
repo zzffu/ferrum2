@@ -227,12 +227,9 @@ impl DnsEgress for ClientDnsEgress {
         let pool = Arc::clone(&self.udp_pool);
         Box::pin(async move {
             let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
-            let first_server = plan
-                .hops()
-                .first()
-                .and_then(|hop| engine.outbounds.get(*hop))
-                .map(|outbound| outbound.udp_server)
-                .ok_or_else(invalid_target)?;
+            let first_server = engine
+                .classify_selected_hops(plan.hops())
+                .map_err(|_| invalid_target())?;
             let key = DnsUdpPoolKey {
                 first_server,
                 plan: plan.clone(),
@@ -245,7 +242,7 @@ impl DnsEgress for ClientDnsEgress {
                 None => IdleDnsUdp {
                     key,
                     association: engine
-                        .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
+                        .prepare_udp(plan.clone(), UdpSocket::bind)
                         .await
                         .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
                 },
@@ -701,7 +698,7 @@ mod tests {
         for (case, candidate, reusable) in key_cases {
             let association = context
                 .egress
-                .prepare_udp(selected.clone(), first_server, UdpSocket::bind)
+                .prepare_udp(selected.clone(), UdpSocket::bind)
                 .await
                 .expect("key association");
             let pool = Arc::new(Mutex::new(vec![IdleDnsUdp {
@@ -730,7 +727,7 @@ mod tests {
                 .expect("mutation session baseline");
             let mut association = context
                 .egress
-                .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
+                .prepare_udp(plan.clone(), UdpSocket::bind)
                 .await
                 .expect("mutation association");
             association
@@ -921,7 +918,7 @@ mod tests {
                     assert!(
                         context
                             .egress
-                            .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
+                            .prepare_udp(plan.clone(), UdpSocket::bind)
                             .await
                             .is_err(),
                         "saturation admitted a second association"
@@ -941,7 +938,7 @@ mod tests {
                 .expect("healthy session baseline");
             let association = context
                 .egress
-                .prepare_udp(plan.clone(), first_server, UdpSocket::bind)
+                .prepare_udp(plan.clone(), UdpSocket::bind)
                 .await
                 .expect("following valid association");
             let mut initial = Some(IdleDnsUdp {

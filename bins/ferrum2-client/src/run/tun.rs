@@ -154,18 +154,10 @@ async fn run_udp_route(
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
 ) {
-    let Some(server) = plan
-        .hops()
-        .first()
-        .and_then(|hop| routing.outbounds.get(*hop))
-        .map(|outbound| outbound.udp_server)
-    else {
-        return;
-    };
     let mut force = cancellation.clone();
     let prepared = tokio::select! {
         () = force.forced() => return,
-        prepared = context.egress.prepare_udp(plan, server, UdpSocket::bind) => prepared,
+        prepared = context.egress.prepare_udp(plan, UdpSocket::bind) => prepared,
     };
     let Ok(mut association) = prepared else {
         return;

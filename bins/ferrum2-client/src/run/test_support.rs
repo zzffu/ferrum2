@@ -51,8 +51,8 @@ pub(in crate::run) use tokio::time::Instant;
 pub(in crate::run) use super::RunError;
 pub(in crate::run) use super::context::{ClientContext, ClientRouting};
 pub(in crate::run) use super::egress::{
-    ClientEgressEngine, ClientOpenFailure, ClientOutboundContext, ClientUdpContext,
-    prepare_client_outbounds,
+    ClientEgressEngine, ClientOpenFailure, ClientOutboundContext, ClientShadowsocksContext,
+    ClientUdpContext, prepare_client_outbounds,
 };
 pub(in crate::run) use super::tokio_io::{TokioConnector, TokioFramed, TokioTransport};
 use super::{dns_egress, run_with_registry, run_with_registry_and_metrics_inner};
@@ -556,11 +556,13 @@ pub(in crate::run) fn test_routing(
     ClientRouting {
         legacy: ferrum2_core::route::RouteTable::static_bindings(vec![0]).expect("test route"),
         program: None,
-        outbounds: vec![ClientOutboundContext {
-            tcp_server: TargetAddr::ipv4(server).expect("server target"),
-            udp_server: server.into(),
-            keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
-        }]
+        outbounds: vec![ClientOutboundContext::Shadowsocks(
+            ClientShadowsocksContext {
+                tcp_server: TargetAddr::ipv4(server).expect("server target"),
+                udp_server: server.into(),
+                keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
+            },
+        )]
         .into(),
     }
 }
