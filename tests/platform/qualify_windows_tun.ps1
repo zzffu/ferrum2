@@ -288,15 +288,47 @@ foreach ($row in @(
     Assert-True ((Get-Tcp01Boundary $state) -eq $row.Expected) "TCP-01 boundary table mismatch"
 }
 
-function Find-Dumpbin {
-    $command = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
-    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    if (Test-Path -LiteralPath $vswhere) {
-        $candidate = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
-        if ($candidate) { return $candidate }
+function Get-PeExportNames([byte[]]$Bytes) {
+    Assert-True ($Bytes.Length -ge 64) "PE image is truncated"
+    $stream = [IO.MemoryStream]::new($Bytes, $false)
+    $reader = [Reflection.PortableExecutable.PEReader]::new($stream)
+    try {
+        $peHeader = $reader.PEHeaders.PEHeader
+        Assert-True ($null -ne $peHeader) "PE optional header is missing"
+        $directory = $peHeader.ExportTableDirectory
+        Assert-True ($directory.RelativeVirtualAddress -gt 0 -and $directory.Size -ge 40) "PE export directory is missing"
+        $directoryBlock = $reader.GetSectionData($directory.RelativeVirtualAddress)
+        Assert-True ($directoryBlock.Length -ge 40) "PE export directory is truncated"
+        [byte[]]$directoryBytes = $directoryBlock.GetContent(0, 40)
+        [uint32]$functionCount = [BitConverter]::ToUInt32($directoryBytes, 20)
+        [uint32]$nameCount = [BitConverter]::ToUInt32($directoryBytes, 24)
+        Assert-True ($functionCount -eq $nameCount -and $nameCount -ge 1 -and $nameCount -le 256) "PE export count is invalid"
+        [uint32]$nameTableRva = [BitConverter]::ToUInt32($directoryBytes, 32)
+        Assert-True ($nameTableRva -gt 0 -and $nameTableRva -le [int]::MaxValue) "PE export name table RVA is invalid"
+        $nameTableLength = [int]$nameCount * 4
+        $nameTableBlock = $reader.GetSectionData([int]$nameTableRva)
+        Assert-True ($nameTableBlock.Length -ge $nameTableLength) "PE export name table is truncated"
+        [byte[]]$nameTableBytes = $nameTableBlock.GetContent(0, $nameTableLength)
+        $utf8 = [Text.UTF8Encoding]::new($false, $true)
+        $names = [Collections.Generic.List[string]]::new()
+        for ($index = 0; $index -lt [int]$nameCount; $index++) {
+            [uint32]$nameRva = [BitConverter]::ToUInt32($nameTableBytes, $index * 4)
+            Assert-True ($nameRva -gt 0 -and $nameRva -le [int]::MaxValue) "PE export name RVA is invalid"
+            $nameBlock = $reader.GetSectionData([int]$nameRva)
+            $boundedLength = [Math]::Min(257, $nameBlock.Length)
+            Assert-True ($boundedLength -ge 2) "PE export name is truncated"
+            [byte[]]$nameBytes = $nameBlock.GetContent(0, $boundedLength)
+            $terminator = [Array]::IndexOf($nameBytes, [byte]0)
+            Assert-True ($terminator -ge 1 -and $terminator -le 256) "PE export name is not bounded"
+            $names.Add($utf8.GetString($nameBytes, 0, $terminator))
+        }
+        $sorted = @($names | Sort-Object -Unique)
+        Assert-True ($sorted.Count -eq [int]$nameCount) "PE export names are not unique"
+        return $sorted
+    } finally {
+        $reader.Dispose()
+        $stream.Dispose()
     }
-    throw "dumpbin.exe is required for the exact export check"
 }
 
 function Wait-AdapterReady([string]$Name, [int]$TimeoutSeconds = 20) {
@@ -1706,8 +1738,7 @@ try {
     $peOffset = [BitConverter]::ToInt32($pe, 0x3c)
     Assert-True ([BitConverter]::ToUInt16($pe, $peOffset + 4) -eq 0x8664) "DLL is not AMD64 PE"
     Assert-True ((Get-AuthenticodeSignature -LiteralPath $sourceDll).Status -eq "Valid") "Authenticode trust invalid"
-    $exportsText = & (Find-Dumpbin) /nologo /exports $sourceDll | Out-String
-    $exports = @([regex]::Matches($exportsText, '\bWintun[A-Za-z0-9]+\b') | ForEach-Object Value | Sort-Object -Unique)
+    $exports = @(Get-PeExportNames $pe)
     Assert-True (($exports -join "|") -eq ($expectedExports -join "|")) "DLL export set mismatch"
     $foundation++
 

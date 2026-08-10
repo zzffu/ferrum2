@@ -2587,7 +2587,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .map(|(body, _)| body);
         let classifier = source
             .split_once("function Get-Tcp01Boundary(")
-            .and_then(|(_, tail)| tail.split_once("function Find-Dumpbin"))
+            .and_then(|(_, tail)| tail.split_once("function Get-PeExportNames"))
             .map(|(body, _)| body);
         let gate = source
             .split_once("public sealed class Ferrum2TcpGateObservation")
@@ -2618,6 +2618,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "[ValidateSet(\"lifecycle\", \"tcp\", \"udp\", \"cycles\", \"full\", \"performance\", \"cleanup\")]",
         )
             && !source.to_ascii_lowercase().contains("pktmon")
+            && source.contains("[Reflection.PortableExecutable.PEReader]::new($stream)")
+            && source.contains("$exports = @(Get-PeExportNames $pe)")
+            && !source.to_ascii_lowercase().contains("dumpbin.exe")
+            && !source.to_ascii_lowercase().contains("vswhere")
             && source.matches("$tcpRows++").count() == 8
             && source.matches("Add-TunRoute $").count() == 5
             && source.matches("Add-TargetAddress $").count() == 3
