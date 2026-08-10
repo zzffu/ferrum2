@@ -3189,9 +3189,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && gate.contains("private readonly Task worker;")
                     && gate.contains("private int selfTests;")
                     && gate.contains("public int SelfTests")
+                    && gate.contains("private int socketProbes;")
+                    && gate.contains("public int SocketProbes")
                     && gate.contains("public bool WaitSelfTest(int milliseconds)")
                     && gate.contains("request.Buffer.Length == 0")
                     && gate.contains("Interlocked.Increment(ref selfTests)")
+                    && gate.contains("request.Buffer.Length == 8")
+                    && gate.contains("Interlocked.Increment(ref socketProbes)")
+                    && gate.contains("socketProbe.Set()")
                     && gate.contains("await upstream.ReceiveAsync()")
                     && gate.contains("ReplayFirstToLatest")
                     && !gate.contains("public bool SelfTest()")
@@ -3205,6 +3210,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && self_test.contains("$process.Kill($true)")
                     && self_test.contains("$Gate.WaitSelfTest(1000)")
                     && self_test.contains("$Gate.SelfTests -eq 1")
+                    && self_test.contains("$Gate.SocketProbes -eq 0")
             })
             && probe.is_some_and(|probe| {
                 probe.contains("new UdpClient(new IPEndPoint(IPAddress.Parse(address), port))")
@@ -3222,8 +3228,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("$firstUdpAcceptedDelta")
                     && echo.contains("$maxActiveSessions")
                     && echo.contains("$selfTestsBefore = $Gate.SelfTests")
+                    && echo.contains("$socketProbesBefore = $Gate.SocketProbes")
                     && echo.contains("self_tests=$($Gate.SelfTests)")
                     && echo.contains("self_test_delta=$selfTestDelta")
+                    && echo.contains("socket_probe_delta=$socketProbeDelta")
                     && echo.contains("socket_probe=$socketProbe")
                     && echo.contains("gate_state=$($Gate.State)")
                     && echo.contains("gate_fault=$($Gate.Fault)")
@@ -3286,8 +3294,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         controller.replace("$process.WaitForExit(5000)", "$true"),
         controller.replace("$Gate.WaitSelfTest(1000)", "$true"),
         controller.replace("$Gate.SelfTests -eq 1", "$true"),
+        controller.replace("$Gate.SocketProbes -eq 0", "$true"),
         controller.replace("Interlocked.Increment(ref selfTests)", ""),
+        controller.replace("Interlocked.Increment(ref socketProbes)", ""),
         controller.replace("$selfTestsBefore = $Gate.SelfTests", "$selfTestsBefore = 0"),
+        controller.replace(
+            "$socketProbesBefore = $Gate.SocketProbes",
+            "$socketProbesBefore = 0",
+        ),
         controller.replace("socket_probe=$socketProbe", "socket_probe=bypassed"),
         controller.replace(
             "$env:FERRUM2_T05_UDP_SOCKET_PROBE = \"1\"",
@@ -3418,11 +3432,17 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && association.contains("peer_category == \"gate_a\"")
             && association.contains("peer.port() == gate_port")
             && association.contains("first_server.port() == gate_port")
-            && association.contains("upstream.send(&[]).await")
+            && association.contains("upstream.send(b\"f2-probe\").await")
+            && association.contains("Ok(8)")
+            && !association.contains("upstream.send(&[]).await")
             && !association.contains("local={local}")
             && !association.contains("peer={peer}")
             && adapter.contains("association.prepare_application_request(")
             && adapter.contains("association.prepare_application_response(")
+            && adapter.contains("m15_udp_wire_diag wire={wire_category} send={send_category}")
+            && adapter.contains("wire_len == 0")
+            && adapter.contains("Ok(sent) if *sent == wire_len")
+            && !adapter.contains("wire={wire_len}")
             && client_socks.contains("prepared.prepare_application_request(")
             && client_socks.contains("prepared.prepare_application_response(")
     };
@@ -3447,6 +3467,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         (
             tun_udp.replace("self.generations.current(id.slot) != Some(id)", "false"),
             client_tun.clone(),
+            client_udp.clone(),
+        ),
+        (
+            tun_udp.clone(),
+            client_tun.replace(
+                "m15_udp_wire_diag wire={wire_category} send={send_category}",
+                "m15_udp_wire_diag wire={wire_len} send={sent:?}",
+            ),
             client_udp.clone(),
         ),
         (
@@ -3483,7 +3511,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         (
             tun_udp.clone(),
             client_tun.clone(),
-            client_udp.replace("upstream.send(&[]).await", "Ok(0)"),
+            client_udp.replace("upstream.send(b\"f2-probe\").await", "Ok(8)"),
         ),
         (
             tun_udp.clone(),

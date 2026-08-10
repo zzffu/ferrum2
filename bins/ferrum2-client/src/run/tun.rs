@@ -229,6 +229,19 @@ async fn run_udp_route(
                     }
                     result = association.send_encoded_request(wire_len) => result,
                 };
+                if std::env::var_os("FERRUM2_T05_UDP_SOCKET_PROBE")
+                    .is_some_and(|value| value == "1")
+                {
+                    let wire_category = if wire_len == 0 { "zero" } else { "nonzero" };
+                    let send_category = if matches!(&sent, Ok(sent) if *sent == wire_len) {
+                        "exact"
+                    } else {
+                        "other"
+                    };
+                    eprintln!(
+                        "m15_udp_wire_diag wire={wire_category} send={send_category}"
+                    );
+                }
                 if !matches!(sent, Ok(sent) if sent == wire_len) {
                     return;
                 }

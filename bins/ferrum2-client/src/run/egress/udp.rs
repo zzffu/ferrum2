@@ -579,7 +579,7 @@ where
             "other"
         };
         eprintln!("m15_udp_socket_diag local={local_category} peer={peer_category}");
-        if peer_category == "gate_a" && !matches!(upstream.send(&[]).await, Ok(0)) {
+        if peer_category == "gate_a" && !matches!(upstream.send(b"f2-probe").await, Ok(8)) {
             return Err(());
         }
     }
