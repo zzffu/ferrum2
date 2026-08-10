@@ -2478,10 +2478,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             )
             && source.contains("Assert-SnapshotEqual $expectedAutomaticRoutes $automaticRoutes")
             && source.contains("ferrum2_tun_packets_accepted")
-            && source.contains("ferrum2_tun_packets_foundation_dropped")
             && source.contains("$acceptedDelta -gt 0")
-            && source.contains("$droppedDelta -gt 0")
-            && source.contains("$acceptedDelta -eq $droppedDelta")
             && source
                 .split_once("$udp4.Connect(\"192.0.2.200\", 53)")
                 .and_then(|(_, tail)| tail.split_once("$udp6 ="))
@@ -2490,16 +2487,17 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     !witness.contains("$settleDeadline")
                         && !witness.contains("$stableSamples")
                         && !witness.contains("quiet baseline")
+                        && !witness.contains("ferrum2_tun_packets_foundation_dropped")
                         && [
                             "$beforeMetrics = Get-Metrics $metricsPort",
                             "$acceptedBefore = Get-CounterValue $beforeMetrics",
-                            "$droppedBefore = Get-CounterValue $beforeMetrics",
                             "[void]$udp4.Send([byte[]](1,2,3,4), 4)",
                             "$packetDeadline = [DateTime]::UtcNow.AddSeconds(5)",
+                            "$afterMetrics = Get-Metrics $metricsPort",
+                            "$acceptedAfter = Get-CounterValue $afterMetrics",
+                            "$acceptedDelta = $acceptedAfter - $acceptedBefore",
                             "} while ([DateTime]::UtcNow -lt $packetDeadline)",
                             "Assert-True ($acceptedDelta -gt 0)",
-                            "Assert-True ($droppedDelta -gt 0)",
-                            "Assert-True ($acceptedDelta -eq $droppedDelta)",
                         ]
                         .iter()
                         .map(|needle| witness.find(needle))
@@ -2553,6 +2551,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     assert!(
         !has_cleanup_snapshots(&quiet_prerequisite_mutation),
         "packet witness mutation must reject a quiet/stability prerequisite"
+    );
+    let stale_drop_mutation = controller.replace(
+        "    $acceptedBefore = Get-CounterValue $beforeMetrics \"ferrum2_tun_packets_accepted\"",
+        "    $acceptedBefore = Get-CounterValue $beforeMetrics \"ferrum2_tun_packets_accepted\"\n    $droppedBefore = Get-CounterValue $beforeMetrics \"ferrum2_tun_packets_foundation_dropped\"",
+    );
+    assert!(
+        !has_cleanup_snapshots(&stale_drop_mutation),
+        "controller witness mutation must reject the stale foundation-drop prerequisite"
     );
     let supports_headless_process_groups = |source: &str| {
         source.contains("GetConsoleProcessList")

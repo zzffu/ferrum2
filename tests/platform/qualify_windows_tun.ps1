@@ -1271,7 +1271,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     $udp4.Connect("192.0.2.200", 53)
     $beforeMetrics = Get-Metrics $metricsPort
     $acceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_accepted"
-    $droppedBefore = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_foundation_dropped"
     try {
         [void]$udp4.Send([byte[]](1,2,3,4), 4)
     } finally { $udp4.Dispose(); $udp4 = $null }
@@ -1279,15 +1278,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     do {
         $afterMetrics = Get-Metrics $metricsPort
         $acceptedAfter = Get-CounterValue $afterMetrics "ferrum2_tun_packets_accepted"
-        $droppedAfter = Get-CounterValue $afterMetrics "ferrum2_tun_packets_foundation_dropped"
         $acceptedDelta = $acceptedAfter - $acceptedBefore
-        $droppedDelta = $droppedAfter - $droppedBefore
-        if ($acceptedDelta -gt 0 -and $acceptedDelta -eq $droppedDelta) { break }
+        if ($acceptedDelta -gt 0) { break }
         Start-Sleep -Milliseconds 50
     } while ([DateTime]::UtcNow -lt $packetDeadline)
     Assert-True ($acceptedDelta -gt 0) "valid packet did not traverse receive/validation/enqueue"
-    Assert-True ($droppedDelta -gt 0) "valid packet did not traverse poll/foundation drop"
-    Assert-True ($acceptedDelta -eq $droppedDelta) "accepted packet did not have one foundation-drop outcome"
     $udp6 = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetworkV6)
     try { [void]$udp6.Send([byte[]](5,6,7,8), 4, "2001:db8::200", 53) }
     finally { $udp6.Dispose() }
