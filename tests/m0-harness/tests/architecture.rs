@@ -3159,7 +3159,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("hops = [\"udp-one\", \"udp-inner\"]")
             && source.contains("outbounds = [\"udp-one\", \"udp-inner\"]")
             && source.contains("default = \"udp-one\"")
-            && source.matches("outbound = \"udp-one\"").count() == 2
+            && source.matches("outbound = \"udp-one\"").count() == 3
+            && source.contains(
+                "protocol = \"dns\"\naction = \"route\"\noutbound = \"udp-two-hop\"\n[[route.rules]]\ninbound = \"tun-in\"\nnetwork = \"udp\"\nip = \"$($targets[3])\"\nport = $($ports[3])\naction = \"route\"\noutbound = \"udp-one\"",
+            )
             && source.contains("network = \"udp\"")
             && source.contains("action = \"hijack-dns\"")
             && source.contains("profile=transport functional=16/16 cleanup=PASS")
@@ -3238,6 +3241,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "server = \"127.0.0.1:$gatePortA\"",
         ),
         controller.replace("outbound = \"udp-one\"", "outbound = \"one\""),
+        controller.replace(
+            "[[route.rules]]\ninbound = \"tun-in\"\nnetwork = \"udp\"\nip = \"$($targets[3])\"\nport = $($ports[3])\naction = \"route\"\noutbound = \"udp-one\"",
+            "",
+        ),
         controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
         controller.replace(
             "Start-Sleep -Milliseconds 2500",

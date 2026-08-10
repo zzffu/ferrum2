@@ -1394,6 +1394,13 @@ outbound = "udp-two-hop"
 [[route.rules]]
 inbound = "tun-in"
 network = "udp"
+ip = "$($targets[3])"
+port = $($ports[3])
+action = "route"
+outbound = "udp-one"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
 ip = "$($targets[4])"
 port = $($ports[4])
 action = "hijack-dns"
