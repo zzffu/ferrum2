@@ -2518,10 +2518,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && !open.contains("Add-TunRoute")
             })
             && add_tun_route.is_some_and(|route| {
-                route
+                route.contains("[int]$RouteMetric = 1")
+                    && route
                     .find("Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $DestinationPrefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue")
                     .zip(route.find("New-NetRoute -DestinationPrefix $DestinationPrefix -InterfaceIndex $InterfaceIndex"))
                     .is_some_and(|(baseline, create)| baseline < create)
+                    && route.contains("-RouteMetric $RouteMetric -PolicyStore ActiveStore")
                     && route.contains("controller route baseline not absent")
             })
             && tcp_mode.is_some_and(|tcp| {
@@ -2531,7 +2533,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     .zip(tcp.find("$_.WeakHostSend -ne \"Disabled\" -or $_.WeakHostReceive -ne \"Disabled\""))
                     .zip(tcp.find("foreach ($target in $targets) {"))
                     .zip(tcp.find("$prefixLength = if ($target.Contains(\":\")) { 128 } else { 32 }"))
-                    .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\")"))
+                    .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\" 500)"))
                     .zip(tcp.find("foreach ($targetIndex in @(0, 1, 2, 3, 7)) {"))
                     .zip(tcp.find("[void](Add-TargetAddress $targets[$targetIndex])"))
                     .zip(tcp.find("Invoke-EchoRow $tcp01Target $tcp01Port"))
@@ -2546,7 +2548,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                             && provision < first_flow
                     })
                     && tcp.contains(
-                        "foreach ($target in $targets) {\n            $prefixLength = if ($target.Contains(\":\")) { 128 } else { 32 }\n            [void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\")\n        }",
+                        "foreach ($target in $targets) {\n            $prefixLength = if ($target.Contains(\":\")) { 128 } else { 32 }\n            [void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\" 500)\n        }",
                     )
                     && tcp.contains(
                         "foreach ($targetIndex in @(0, 1, 2, 3, 7)) {\n            [void](Add-TargetAddress $targets[$targetIndex])\n        }",
@@ -2850,8 +2852,16 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "$prefixLength = 32",
         ),
         controller.replace(
-            "[void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\")",
-            "[void](Add-TunRoute $ownedInterfaceIndex \"$target/24\")",
+            "[void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\" 500)",
+            "[void](Add-TunRoute $ownedInterfaceIndex \"$target/24\" 500)",
+        ),
+        controller.replace(
+            "[void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\" 500)",
+            "[void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\" 1)",
+        ),
+        controller.replace(
+            "-RouteMetric $RouteMetric -PolicyStore ActiveStore",
+            "-RouteMetric 1 -PolicyStore ActiveStore",
         ),
         controller.replace(
             "[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")",

@@ -260,10 +260,10 @@ function Start-Server([string]$Executable, [string]$Configuration) {
     return $process
 }
 
-function Add-TunRoute([int]$InterfaceIndex, [string]$DestinationPrefix) {
+function Add-TunRoute([int]$InterfaceIndex, [string]$DestinationPrefix, [int]$RouteMetric = 1) {
     Assert-True (@(Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $DestinationPrefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "controller route baseline not absent"
     $nextHop = if ($DestinationPrefix.Contains(":")) { "::" } else { "0.0.0.0" }
-    $route = New-NetRoute -DestinationPrefix $DestinationPrefix -InterfaceIndex $InterfaceIndex -NextHop $nextHop -RouteMetric 1 -PolicyStore ActiveStore
+    $route = New-NetRoute -DestinationPrefix $DestinationPrefix -InterfaceIndex $InterfaceIndex -NextHop $nextHop -RouteMetric $RouteMetric -PolicyStore ActiveStore
     $script:ownedRoutes.Add($route)
     return $route
 }
@@ -1210,7 +1210,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-True ($weakHostInterfaces.Count -eq 0) "weak-host forwarding is unsupported"
         foreach ($target in $targets) {
             $prefixLength = if ($target.Contains(":")) { 128 } else { 32 }
-            [void](Add-TunRoute $ownedInterfaceIndex "$target/$prefixLength")
+            [void](Add-TunRoute $ownedInterfaceIndex "$target/$prefixLength" 500)
         }
         foreach ($targetIndex in @(0, 1, 2, 3, 7)) {
             [void](Add-TargetAddress $targets[$targetIndex])
