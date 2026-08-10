@@ -2691,16 +2691,21 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 cleanup.contains("\"IPv4|0.0.0.0/1|0.0.0.0\"")
                     && cleanup.contains("\"IPv4|128.0.0.0/1|0.0.0.0\"")
                     && cleanup.contains("@($routesBeforeCaptureCleanup | Where-Object { $_ -ceq $captureRouteRow }).Count -eq 1")
-                    && cleanup.contains("$captureRouteRows -cnotcontains $_")
-                    && cleanup.contains("$expectedRoutesAfterCaptureCleanup.Count -eq $routesBeforeCaptureCleanup.Count - 2")
-                    && !cleanup.contains("$routeBaseline")
+                    && cleanup.contains("$routeCleanupDeadline = [DateTime]::UtcNow.AddSeconds(5)")
+                    && cleanup.contains("Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup)")
+                    && cleanup.contains("Start-Sleep -Milliseconds 50")
+                    && cleanup.contains("} while ([DateTime]::UtcNow -lt $routeCleanupDeadline)")
+                    && !cleanup.contains("$expectedRoutesAfterCaptureCleanup")
+                    && !cleanup.contains("-cnotcontains")
                     && [
                         "$captureRouteRows = @(",
                         "foreach ($captureRouteRow in $captureRouteRows)",
-                        "$expectedRoutesAfterCaptureCleanup = @(",
-                        "Assert-True ($expectedRoutesAfterCaptureCleanup.Count",
                         "Remove-CapabilityRoutes",
-                        "Assert-SnapshotEqual $expectedRoutesAfterCaptureCleanup",
+                        "$routeCleanupDeadline = [DateTime]::UtcNow.AddSeconds(5)",
+                        "$routesAfterCaptureCleanup = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)",
+                        "if (@(Compare-Object -ReferenceObject @($routeBaseline)",
+                        "Start-Sleep -Milliseconds 50",
+                        "Assert-SnapshotEqual $routeBaseline $routesAfterCaptureCleanup",
                     ]
                     .iter()
                     .map(|needle| cleanup.find(needle))

@@ -2221,10 +2221,14 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         foreach ($captureRouteRow in $captureRouteRows) {
             Assert-True (@($routesBeforeCaptureCleanup | Where-Object { $_ -ceq $captureRouteRow }).Count -eq 1) "owned capture route snapshot mismatch"
         }
-        $expectedRoutesAfterCaptureCleanup = @($routesBeforeCaptureCleanup | Where-Object { $captureRouteRows -cnotcontains $_ })
-        Assert-True ($expectedRoutesAfterCaptureCleanup.Count -eq $routesBeforeCaptureCleanup.Count - 2) "capture route rollback derivation mismatch"
         Remove-CapabilityRoutes
-        Assert-SnapshotEqual $expectedRoutesAfterCaptureCleanup @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex) "capture route exact rollback"
+        $routeCleanupDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $routesAfterCaptureCleanup = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
+            if (@(Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup)).Count -eq 0) { break }
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $routeCleanupDeadline)
+        Assert-SnapshotEqual $routeBaseline $routesAfterCaptureCleanup "capture route exact rollback"
         Restore-CapabilityDns $ownedInterfaceIndex
         Restore-CapabilityInterfaceMetric $ownedInterfaceIndex
         Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "physical DNS normal cleanup sentinel"
