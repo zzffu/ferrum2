@@ -1208,8 +1208,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-True ($strongHostInterfaces.Count -eq 4) "strong-host interface rows missing"
         $weakHostInterfaces = @($strongHostInterfaces | Where-Object { $_.WeakHostSend -ne "Disabled" -or $_.WeakHostReceive -ne "Disabled" })
         Assert-True ($weakHostInterfaces.Count -eq 0) "weak-host forwarding is unsupported"
-        [void](Add-TunRoute $ownedInterfaceIndex "192.0.2.200/29")
-        [void](Add-TunRoute $ownedInterfaceIndex "2001:db8::200/120")
+        foreach ($target in $targets) {
+            $prefixLength = if ($target.Contains(":")) { 128 } else { 32 }
+            [void](Add-TunRoute $ownedInterfaceIndex "$target/$prefixLength")
+        }
         foreach ($targetIndex in @(0, 1, 2, 3, 7)) {
             [void](Add-TargetAddress $targets[$targetIndex])
         }

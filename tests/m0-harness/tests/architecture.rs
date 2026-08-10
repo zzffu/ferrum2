@@ -2450,7 +2450,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         source.contains("[ValidateSet(\"lifecycle\", \"tcp\")]")
             && !source.to_ascii_lowercase().contains("pktmon")
             && source.matches("$tcpRows++").count() == 8
-            && source.matches("Add-TunRoute $").count() == 4
+            && source.matches("Add-TunRoute $").count() == 3
             && source.matches("Add-TargetAddress $").count() == 1
             && !source.contains("Remove-OwnedRoute")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")")
@@ -2529,20 +2529,25 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && tcp.find("$strongHostInterfaces = @(Get-NetIPInterface -InterfaceIndex @($ownedInterfaceIndex, 1) -PolicyStore ActiveStore -ErrorAction Stop)")
                     .zip(tcp.find("$strongHostInterfaces.Count -eq 4"))
                     .zip(tcp.find("$_.WeakHostSend -ne \"Disabled\" -or $_.WeakHostReceive -ne \"Disabled\""))
-                    .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"192.0.2.200/29\")"))
-                    .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"2001:db8::200/120\")"))
+                    .zip(tcp.find("foreach ($target in $targets) {"))
+                    .zip(tcp.find("$prefixLength = if ($target.Contains(\":\")) { 128 } else { 32 }"))
+                    .zip(tcp.find("[void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\")"))
                     .zip(tcp.find("foreach ($targetIndex in @(0, 1, 2, 3, 7)) {"))
                     .zip(tcp.find("[void](Add-TargetAddress $targets[$targetIndex])"))
                     .zip(tcp.find("Invoke-EchoRow $tcp01Target $tcp01Port"))
-                    .is_some_and(|(((((((interfaces, count), strong), ipv4), ipv6), targets), provision), first_flow)| {
+                    .is_some_and(|((((((((interfaces, count), strong), targets), prefix), route), local_targets), provision), first_flow)| {
                         interfaces < count
                             && count < strong
-                            && strong < ipv4
-                            && ipv4 < ipv6
-                            && ipv6 < targets
-                            && targets < provision
+                            && strong < targets
+                            && targets < prefix
+                            && prefix < route
+                            && route < local_targets
+                            && local_targets < provision
                             && provision < first_flow
                     })
+                    && tcp.contains(
+                        "foreach ($target in $targets) {\n            $prefixLength = if ($target.Contains(\":\")) { 128 } else { 32 }\n            [void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\")\n        }",
+                    )
                     && tcp.contains(
                         "foreach ($targetIndex in @(0, 1, 2, 3, 7)) {\n            [void](Add-TargetAddress $targets[$targetIndex])\n        }",
                     )
@@ -2839,13 +2844,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "@(0, 1, 2, 3, 7)",
             "@(0, 1, 2, 3, 6)",
         ),
+        controller.replace("foreach ($target in $targets) {", "foreach ($target in $targets[0..6]) {"),
         controller.replace(
-            "192.0.2.200/29",
-            "192.0.2.201/32",
+            "$prefixLength = if ($target.Contains(\":\")) { 128 } else { 32 }",
+            "$prefixLength = 32",
         ),
         controller.replace(
-            "2001:db8::200/120",
-            "2001:db8::202/128",
+            "[void](Add-TunRoute $ownedInterfaceIndex \"$target/$prefixLength\")",
+            "[void](Add-TunRoute $ownedInterfaceIndex \"$target/24\")",
         ),
         controller.replace(
             "[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")",
