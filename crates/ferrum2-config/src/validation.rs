@@ -956,6 +956,7 @@ type ValidatedClientGraph = (
     Vec<bool>,
 );
 
+#[allow(clippy::too_many_arguments)]
 fn validate_client_graph(
     schema_version: SchemaVersion,
     global: Option<RawShadowsocks>,
@@ -1245,8 +1246,8 @@ fn validate_client_graph(
             let mut physical_first_hops = ordinary_roots
                 .iter()
                 .map(String::as_str)
-                .chain(detour_tags.iter().map(|tag| *tag))
-                .flat_map(|tag| first_hops(tag))
+                .chain(detour_tags.iter().copied())
+                .flat_map(first_hops)
                 .collect::<Vec<_>>();
             physical_first_hops.sort_unstable();
             physical_first_hops.dedup();
