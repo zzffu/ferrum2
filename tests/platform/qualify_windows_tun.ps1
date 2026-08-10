@@ -660,7 +660,6 @@ public sealed class Ferrum2UdpGate : IDisposable {
     private readonly object sync = new object();
     private readonly UdpClient socket;
     private readonly int upstreamPort;
-    private readonly int listenPort;
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
     private readonly ManualResetEventSlim selfTest = new ManualResetEventSlim(false);
     private readonly Task worker;
@@ -671,7 +670,6 @@ public sealed class Ferrum2UdpGate : IDisposable {
     private string fault;
 
     public Ferrum2UdpGate(int listenPort, int upstreamPort) {
-        this.listenPort = listenPort;
         this.upstreamPort = upstreamPort;
         socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort));
         worker = Task.Run(Run);
@@ -682,11 +680,8 @@ public sealed class Ferrum2UdpGate : IDisposable {
     public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
     public string State { get { return worker.IsFaulted ? "faulted" : worker.IsCompleted ? "completed" : "running"; } }
 
-    public bool SelfTest() {
-        using (var sender = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))) {
-            sender.Send(new byte[0], 0, new IPEndPoint(IPAddress.Loopback, listenPort));
-        }
-        return selfTest.Wait(1000);
+    public bool WaitSelfTest(int milliseconds) {
+        return selfTest.Wait(milliseconds);
     }
 
     public bool WaitRequests(int expected, int milliseconds) {
@@ -967,6 +962,39 @@ function New-DnsQuery([uint16]$Id) {
     }
     $bytes.AddRange([byte[]](0, 0, 1, 0, 1))
     return $bytes.ToArray()
+}
+
+function Assert-UdpGateCrossProcess([Ferrum2UdpGate]$Gate, [int]$Port) {
+    $sender = @'
+$socket = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+try {
+    $endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Loopback, [int]$env:FERRUM2_UDP_SELF_TEST_PORT)
+    [void]$socket.Send([byte[]]::new(0), 0, $endpoint)
+} finally { $socket.Dispose() }
+'@
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = (Get-Process -Id $PID).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.ArgumentList.Add("-NoProfile")
+    $startInfo.ArgumentList.Add("-Command")
+    $startInfo.ArgumentList.Add($sender)
+    $startInfo.Environment["FERRUM2_UDP_SELF_TEST_PORT"] = [string]$Port
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { $process.Dispose(); throw "UDP gate self-test process failed to start" }
+    try {
+        if (-not $process.WaitForExit(5000)) {
+            $process.Kill($true)
+            $process.WaitForExit()
+            throw "UDP gate self-test process timed out"
+        }
+        Assert-True ($process.ExitCode -eq 0) "UDP gate self-test process failed"
+        Assert-True ($Gate.WaitSelfTest(1000)) "UDP gate cross-process self-test failed"
+    } finally {
+        if (-not $process.HasExited) { $process.Kill($true); $process.WaitForExit() }
+        $process.Dispose()
+    }
 }
 
 function Open-TunUdp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
@@ -1286,7 +1314,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             $udpGateB = [Ferrum2UdpGate]::new($gatePortB, $serverPortB)
             $tcpResources.Add($udpGateA)
             $tcpResources.Add($udpGateB)
-            Assert-True ($udpGateA.SelfTest() -and $udpGateB.SelfTest()) "UDP gate loopback self-test failed"
+            Assert-UdpGateCrossProcess $udpGateA $gatePortA
+            Assert-UdpGateCrossProcess $udpGateB $gatePortB
         }
 
         @"

@@ -3131,6 +3131,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .split_once("public sealed class Ferrum2UdpProbe")
             .and_then(|(_, tail)| tail.split_once("public sealed class Ferrum2DnsResponder"))
             .map(|(body, _)| body);
+        let cross_process_self_test = source
+            .split_once("function Assert-UdpGateCrossProcess(")
+            .and_then(|(_, tail)| tail.split_once("function Open-TunUdp("))
+            .map(|(body, _)| body);
         let rows = source
             .split_once("        # UDP-01")
             .and_then(|(_, tail)| tail.split_once("        Assert-True ($udpRows -eq 8)"))
@@ -3153,7 +3157,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("profile=transport functional=16/16 cleanup=PASS")
             && source.contains("[string]$Labels = \"\"")
             && source.contains("[bool]$MissingIsZero = $false")
-            && source.contains("$udpGateA.SelfTest() -and $udpGateB.SelfTest()")
+            && source.contains("Assert-UdpGateCrossProcess $udpGateA $gatePortA")
+            && source.contains("Assert-UdpGateCrossProcess $udpGateB $gatePortB")
             && source.contains(
                 "$udp01DiagnosticOnly = $Mode -eq \"udp\" -and $env:FERRUM2_T05_UDP01_DIAGNOSTIC -eq \"1\"",
             )
@@ -3161,10 +3166,20 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
                     && gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))")
                     && gate.contains("private readonly Task worker;")
-                    && gate.contains("public bool SelfTest()")
+                    && gate.contains("public bool WaitSelfTest(int milliseconds)")
                     && gate.contains("request.Buffer.Length == 0")
                     && gate.contains("await upstream.ReceiveAsync()")
                     && gate.contains("ReplayFirstToLatest")
+                    && !gate.contains("public bool SelfTest()")
+            })
+            && cross_process_self_test.is_some_and(|self_test| {
+                self_test.contains("[Diagnostics.ProcessStartInfo]::new()")
+                    && self_test.contains("(Get-Process -Id $PID).Path")
+                    && self_test.contains("[byte[]]::new(0)")
+                    && self_test.contains("[Net.IPAddress]::Loopback")
+                    && self_test.contains("$process.WaitForExit(5000)")
+                    && self_test.contains("$process.Kill($true)")
+                    && self_test.contains("$Gate.WaitSelfTest(1000)")
             })
             && probe.is_some_and(|probe| {
                 probe.contains("new UdpClient(new IPEndPoint(IPAddress.Parse(address), port))")
@@ -3235,7 +3250,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "await upstream.ReceiveAsync()",
             "await socket.ReceiveAsync()",
         ),
-        controller.replace("public bool SelfTest()", "public bool SelfTestBypassed()"),
+        controller.replace(
+            "public bool WaitSelfTest(int milliseconds)",
+            "public bool WaitSelfTestBypassed(int milliseconds)",
+        ),
+        controller.replace("$process.WaitForExit(5000)", "$true"),
+        controller.replace("$Gate.WaitSelfTest(1000)", "$true"),
         controller.replace("$firstUdpAcceptedDelta", "$ignoredFirstUdpDelta"),
         controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
         controller.replace(
