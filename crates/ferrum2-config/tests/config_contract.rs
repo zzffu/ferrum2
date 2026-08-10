@@ -2921,13 +2921,27 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
             .map(|index| format!("\"10.{index}.0.0/16\""))
             .collect::<Vec<_>>()
             .join(", ");
-        load_client(
+        let tun = load_client(
             TempConfig::text(&managed(&format!(
                 "auto_route = true\nroute_address = [{includes}]"
             )))
             .path(),
         )
-        .unwrap_or_else(|error| panic!("{count} includes failed: {error}"));
+        .unwrap_or_else(|error| panic!("{count} includes failed: {error}"))
+        .tun
+        .unwrap();
+        assert_eq!(
+            tun.capture_routes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            [if count == 1 {
+                "10.0.0.0/16"
+            } else {
+                "10.0.0.0/10"
+            }],
+            "{count} includes"
+        );
     }
 
     let exact_output = |extra: &str| {
@@ -2950,8 +2964,32 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
         .expect("257 compiled rows");
     assert_eq!(error.field(), ConfigField::TunRouteAddress);
 
-    let excludes = (0..64)
-        .map(|index| format!("\"{index}.0.0.1/32\""))
+    for count in [0, 1, 64] {
+        let excludes = (0..count)
+            .map(|index| format!("\"192.0.2.{index}/32\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tun = load_client(
+            TempConfig::text(&managed(&format!(
+                "auto_route = true\nroute_address = [\"10.0.0.0/8\"]\nroute_exclude_address = [{excludes}]"
+            )))
+            .path(),
+        )
+        .unwrap_or_else(|error| panic!("{count} excludes failed: {error}"))
+        .tun
+        .unwrap();
+        assert_eq!(
+            tun.capture_routes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["10.0.0.0/8"],
+            "{count} excludes"
+        );
+    }
+
+    let excludes = (0..65)
+        .map(|index| format!("\"192.0.2.{index}/32\""))
         .collect::<Vec<_>>()
         .join(", ");
     let error = load_client(
@@ -2961,8 +2999,8 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
         .path(),
     )
     .err()
-    .expect("more than 256 compiled rows");
-    assert_eq!(error.field(), ConfigField::TunRouteAddress);
+    .expect("65 excludes");
+    assert_eq!(error.field(), ConfigField::TunRouteExcludeAddress);
 
     let ipv6_proxy = tun_client(base).replace("192.0.2.10:8388", "[2001:db8::10]:8388");
     let config = load_client(TempConfig::text(&ipv6_proxy).path()).expect("manual IPv6 proxy");
