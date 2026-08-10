@@ -29,9 +29,10 @@ state remains unchanged。A graph combining TUN with a reachable client direct o
 read-only capture-before IPv4 physical-default snapshot and publishes its socket binder before Ready；this is
 required direct-egress behavior，not product route ownership，and an external controller adds capture only
 after Ready。`auto_route = true` makes the existing Wintun owner additionally own its compiled IPv4 capture
-rows、IPv4 binding for every reachable proxy/DNS physical first hop、IPv4 underlay notifications and rollback
-journal。`auto_dns = true` additionally owns only IPv4 DNS settings on that newly created Wintun interface
-and exact synthetic IPv4 DNS handling；it requires auto-route and the existing `[dns]` graph。The existing
+rows、IPv4 binding for SOCKS-origin direct and every reachable proxy/DNS physical first hop、IPv4 underlay
+notifications and rollback journal。`auto_dns = true` additionally owns only IPv4 DNS settings on that newly
+created Wintun interface and exact synthetic IPv4 DNS handling；it requires auto-route and the existing `[dns]`
+graph。The existing
 M15 `ipv6_address` adapter address and manual-route IPv6 behavior are preserved rather than managed by M16。
 
 This is compatible routing，not strict routing：Ferrum2 does not delete or rewrite third-party routes，does
@@ -59,29 +60,38 @@ exposing an unproved operator knob。
 
 ### Immutable physical underlay policy
 
-Before any capture row exists，M16 snapshots eligible up、non-loopback、non-Wintun IPv4 physical interfaces
-and routes。Each reachable fixed Shadowsocks first hop and direct/no-detour DNS bootstrap must resolve to
-IPv4，then uses `GetBestInterfaceEx` followed by interface-constrained `GetBestRoute2`。An IPv6 concrete proxy
-endpoint or IPv6 DNS bootstrap reached physically through absent/direct detour fails validation or prepare
-before mutation。A logical IPv6 DNS bootstrap behind an IPv4 concrete proxy first hop remains allowed because
-only the proxy first hop is a physical endpoint。For dynamic direct targets，M16 selects and freezes one
-unambiguous IPv4 physical default interface。Every applicable TCP socket is bound with `IP_UNICAST_IF` before
-connect；every applicable UDP socket is bound before first send。
+Only when `auto_route = true`，before any capture row exists，M16 snapshots eligible up、non-loopback、non-
+Wintun IPv4 physical interfaces and routes。Each reachable fixed Shadowsocks first hop and direct/no-detour
+DNS bootstrap must resolve to IPv4，then uses `GetBestInterfaceEx` followed by interface-constrained
+`GetBestRoute2`。Under managed capture，an IPv6 concrete proxy endpoint or IPv6 DNS bootstrap reached
+physically through absent/direct detour fails validation or prepare before mutation。A logical IPv6 DNS
+bootstrap behind an IPv4 concrete proxy first hop remains allowed because only the proxy first hop is a
+physical endpoint。While managed capture is active，dynamic direct targets use one unambiguous frozen IPv4
+physical default interface，and every applicable TCP/UDP socket is bound before connect/first send。
 
-Missing、ambiguous、changed or failed IPv4 binding rejects the selected socket；there is no unpinned fallback
+Independently，a Windows graph with TUN-origin client direct selects and publishes that IPv4 physical-default
+binder before Ready for both auto-route states；with auto-route off，only TUN-origin direct uses it。
+
+Missing、ambiguous、changed or failed applicable IPv4 binding rejects the selected socket；there is no unpinned fallback
 and no per-flow bypass route。A Windows TUN-selected direct IPv6 target fails before physical socket creation
 whether auto-route is on or off。This bounded policy deliberately does not preserve arbitrary target-specific
 multi-interface routing。IPv4 prefixes that must continue through a non-default LAN、enterprise VPN or other
 interface belong in `route_exclude_address`。Per-target route fidelity、managed IPv6 and live underlay
 migration are deferred。
 
+With `auto_route = false`，the managed physical-first-hop restriction does not run。An M15-compatible TUN graph
+that omits M16 managed fields and has no TUN-origin client-direct operation retains existing IPv6 proxy and
+absent/direct-detour DNS physical egress without a new managed-network state query or mutation。The separate
+TUN-origin client-direct rule still rejects an original IPv6 target before resolver/socket for both auto-route states；
+SOCKS origin using the same direct tag remains allowed。
+
 ### DNS steering, not DNS exclusivity
 
 Auto-DNS snapshots、sets and reads back only the new Wintun interface's IPv4 DNS settings，using the
 validated synthetic IPv4 address。TUN TCP/UDP whose exact destination is that address on port 53 enters the
 existing `DnsProxy` before ordinary routing；other port-53 traffic follows ordinary policy。The existing M15
-IPv6 adapter address remains configured but is not a managed DNS address。Direct and detoured UDP/TCP/DoT/
-DoH upstreams use the same IPv4 binding boundary at their actual physical first hop。
+IPv6 adapter address remains configured but is not a managed DNS address。While auto-route is active，direct
+and detoured UDP/TCP/DoT/DoH upstreams use the same IPv4 binding boundary at their actual physical first hop。
 
 Cleanup restores the prior Wintun DNS state only if current state still equals the owned applied value；an
 external mutation is reported and never overwritten。The product makes no claim about other interfaces、

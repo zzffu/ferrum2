@@ -53,8 +53,11 @@ or proxy fallback。
 ### One client egress boundary
 
 `ClientEgressEngine` remains the sole client physical-egress dispatcher。Its private outbound context becomes
-the closed Direct/Shadowsocks sum；TUN、SOCKS and DNS callers pass the selected plan plus original target and
-do not inspect its kind。
+the closed Direct/Shadowsocks sum，and its existing binary-private request boundary gains one closed
+`ClientRequestOrigin::{Socks,Tun,Dns}` value。TUN、SOCKS and DNS callers pass that origin plus the selected plan
+and original target；they remain outbound-kind agnostic and never create a raw physical socket。The engine，
+not a process-wide “TUN exists” check，dispatches outbound kind and applies the binding obligation for that
+request origin。No public trait、core variant or second dispatcher is added。
 
 TCP direct reuses the existing dialer/resolver boundary and returns a raw relay stream through a small
 client-local flow sum。UDP direct reuses the existing bounded resolver、direct socket factory、session
@@ -78,11 +81,14 @@ publishes the IPv4 physical-default binding before Ready even if `auto_route = f
 must retain M15 ordering and add external capture only after Ready；the resulting IPv4 direct socket is pinned
 and does not depend on the controller enumerating arbitrary target bypass routes。A Windows TUN-selected
 direct plan whose immutable original target is IPv6 fails before physical socket creation for both
-`auto_route = false` and `auto_route = true`；there is no unpinned fallback。SOCKS direct and
-non-Windows direct clients retain normal IPv4/IPv6 system routing。Auto-route additionally requires every
-reachable proxy and DNS physical first hop to resolve to IPv4 and use the same binding boundary；a logical
-IPv6 DNS bootstrap behind an IPv4 concrete proxy first hop remains valid because the bootstrap is not a
-separate physical socket endpoint。
+`auto_route = false` and `auto_route = true`；the engine rejects only `Tun` origin before resolver/socket and
+there is no unpinned fallback。`Socks` origin using the same direct tag retains IPv6 system routing，including
+in a mixed Windows TUN graph；non-Windows direct clients also retain normal IPv4/IPv6 routing。Only while
+auto-route is active，`Socks`-origin IPv4 direct，`Dns` origin and reachable proxy physical first hops use the
+binding boundary，and the latter two physical-first-hop classes must resolve to IPv4；a logical IPv6 DNS
+bootstrap behind an IPv4 concrete proxy first hop remains valid because the bootstrap is not a separate
+physical socket endpoint。With auto-route off，IPv6 absent/direct-detour DNS physical egress retains its
+existing behavior。
 
 ## Consequences
 
@@ -90,6 +96,8 @@ separate physical socket endpoint。
   route engine or changes to the core plan representation。
 - The central egress dispatch makes SOCKS、TUN and DNS behavior consistent and prevents caller-local raw
   socket paths from bypassing Windows underlay binding。
+- The closed request origin prevents a process-wide TUN-presence check from rejecting SOCKS IPv6 or applying
+  managed first-hop policy to DNS when auto-route is off。
 - Direct-only tagged clients no longer need meaningless Shadowsocks credentials；legacy and proxy-bearing
   graphs retain their existing credential requirements。
 - Allowing direct through a selector or DNS detour costs no second semantic path；both resolve to the same

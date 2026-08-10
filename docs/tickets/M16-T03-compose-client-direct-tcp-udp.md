@@ -28,8 +28,10 @@ socket seam established here。
 
 ## Acceptance
 
-- [ ] Extend the T02 closed `ClientOutboundContext` Direct branch from its pre-socket refusal to raw execution；
-      `ClientEgressEngine` alone dispatches kind，while core plan identity and callers remain kind-agnostic。
+- [ ] Extend the T02 closed `ClientOutboundContext` Direct branch from its pre-socket refusal to raw execution。
+      `ClientEgressEngine` alone receives the binary-private closed SOCKS/TUN/DNS request origin plus selected
+      plan/original target，dispatches kind and applies binding policy；callers remain kind-agnostic and never
+      resolve/bind/create raw sockets。No process-wide TUN-presence check、public trait or second dispatcher exists。
 - [ ] TUN numeric and SOCKS numeric/domain direct TCP reaches the original target，relays exact bytes and
       half-close，and creates zero SIP022 flow/crypto owner；selected failures never fallback。
 - [ ] Direct UDP reuses existing bounded resolver/socket/session/cancellation ownership，sends raw payload，
@@ -39,6 +41,11 @@ socket seam established here。
 - [ ] Windows TUN-selected direct whose immutable original target is IPv6 fails before resolver/socket creation
       for TCP and UDP with auto-route off or on，and never falls back unpinned。SOCKS/non-Windows direct
       IPv6 and M15 manual-route IPv6 proxy/reject/DNS behavior remain unchanged。
+- [ ] In one mixed Windows graph，SOCKS and TUN use the same direct tag for IPv6 TCP and UDP under both auto-
+      route states：SOCKS succeeds，TUN fails before resolver/socket，and neither selected failure inspects a
+      sibling selector、later rule/final or fallback。DNS origin applies the IPv4 physical-first-hop rule only
+      with auto-route on；the exact auto-route-off M15-compatible IPv6 proxy/absent/direct-detour DNS omission
+      row retains zero new managed-network state query or mutation。
 - [ ] DNS no-detour and direct detour normalize to the same direct socket path；proxy detours remain exact。
       No caller retains a raw system connect/bind path that would bypass the future binder。
 - [ ] Static/rule/final/selector process witnesses cover direct and proxy for SOCKS and memory-device TUN

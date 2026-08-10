@@ -34,8 +34,13 @@ footprint/workflow control，claim managed IPv6 or claim another Windows build�
       rejection、one IPv4 default for dynamic direct、IPv4 endpoint-specific fixed binding、IPv4 `/1` capture、
       Wintun-only IPv4 DNS steering、Windows TUN direct IPv6 pre-socket refusal、no WFP and no live migration。
 - [ ] The existing Windows TUN qualifier gains one bounded `network-feasibility` mode rather than a second
-      controller；host execution is forbidden and exact VM/checkpoint identity、actual guest OS identity and
-      build/probe hashes are recorded。
+      controller；the host never runs the qualifier/product or mutates route、address、firewall、adapter or TUN
+      state，and exact VM/checkpoint identity、actual guest OS identity and build/probe hashes are recorded。
+- [ ] The host may start only one bounded TCP+UDP echo listener on a runtime-discovered eligible physical IPv4
+      as the off-link support endpoint。Its exact chosen ports、PID and owner extend the existing ordered local
+      identity ledger/hash；it auto-exits or is explicitly stopped and is audited absent after every attempt。
+      No firewall exception is added：if existing policy does not admit it，this ticket is `BLOCKED`。The prior
+      successful reachability/absence audit is preflight only，not PASS。
 - [ ] Before mutation，the host records the exact TEST-0017 canonical identity ledger from Hyper-V readback and
       PowerShell Direct，hashes it，and requires the capability marker's distinct candidate、probe、identity and
       run-token fields to match；the VM display name is never accepted as guest OS evidence。
@@ -57,7 +62,8 @@ footprint/workflow control，claim managed IPv6 or claim another Windows build�
       service/watchdog、WFP or unit-fake waiver is added。
 - [ ] The existing qualifier and its route/socket/resolver/cleanup tables/helpers are the cheapest sufficient
       layer；no second harness or third equivalent helper is added。The preflight rationale is never recorded
-      as PASS or expanded with raw local IDs、addresses or credentials。
+      as PASS or expanded with raw local IDs、addresses、ports、credentials、PIDs or owner identifiers；no
+      listener helper or endpoint is committed。
 - [ ] Only a complete PASS may change ADR-0035/0036 to Accepted and SPEC/TEST-0017 to Approved，record the
       measured route/metric formulas and make T02 ready；otherwise their proposed/draft state remains。
 - [ ] Focused control/architecture validation and independent Architect/QA review pass with zero blocker。
@@ -75,7 +81,8 @@ git diff --check
 ```
 
 Run the feasibility command inside the exact restored qualification VM and preserve exact before/active/after
-evidence；never run it on the host TUN environment or substitute another VM without a plan amendment。
+evidence；never run the qualifier/product on the host or substitute another VM without a plan amendment。The
+only host process allowed is the ledger-bound transient listener above，and its absence audit is mandatory。
 
 ## Result
 

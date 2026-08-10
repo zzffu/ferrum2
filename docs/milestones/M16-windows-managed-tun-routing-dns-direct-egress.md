@@ -49,8 +49,8 @@ source corrections and sing-box comparison are recorded in
 - Direct means “traffic entered TUN，then physical egress without SIP022”。`route_exclude_address` means the
   prefix never entered TUN。`CONTEXT.md` replaces the ambiguous historical “direct action” with one-hop proxy
   plan and client direct outbound。
-- Fixed IPv4 Shadowsocks/DNS physical endpoints retain endpoint-specific capture-before interface binding。
-  Arbitrary IPv4 direct targets use one frozen physical default interface。This is intentionally not full
+- While auto-route is active，fixed IPv4 Shadowsocks/DNS physical endpoints use endpoint-specific capture-
+  before interface binding，and arbitrary IPv4 direct targets use one frozen physical default interface。This is intentionally not full
   per-target multihomed Windows route fidelity；LAN/VPN/non-default prefixes must be excluded from capture。
 - TUN+direct also publishes only the read-only IPv4 physical-default binder when `auto_route = false`；the M15
   external controller adds its manual capture only after Ready。Windows TUN-selected direct IPv6 fails before
@@ -68,7 +68,14 @@ source corrections and sing-box comparison are recorded in
   WFP、off-TUN port-53 block、browser DoH/DoQ claim or strict-route mode is included。
 - Exact restored-VM preflight found one usable IPv4 physical default but no IPv6 physical default、non-link-
   local physical IPv6 address or owned off-link dual-stack endpoint。This is a planning input，not PASS。It
-  narrows the new managed contract without adding a VM、endpoint、knob or weakening M15 IPv6 regressions。
+  narrows the new managed contract without adding a VM、committed endpoint、knob or weakening M15 IPv6 regressions。
+- A later planning preflight proved guest reachability to one transient host-owned IPv4 TCP/UDP echo listener
+  and audited its process absent afterward without host network mutation。T01 may reproduce only that bounded
+  support endpoint：the qualifier/product and every route、address、firewall、adapter、TUN、capture、DNS and
+  pinning mutation stay in the restored guest；the listener's exact address、ports、PID and owner extend the
+  existing local identity ledger/hash，and it auto-exits or is stopped and audited absent after every attempt。
+  Existing host policy must admit it without a firewall exception or T01 is blocked。This is not PASS and adds
+  no second VM、harness、helper or committed endpoint；the pinned/unpinned Wintun A/B remains mandatory。
 - `ferrum2-wintun` remains the single audited Windows unsafe Adapter。Route/DNS/socket/notification operations
   share the owned adapter lifetime，so the draft's new `ferrum2-windows-net` crate is not justified yet。
 - Existing `ProcessSupervisor` and synchronous non-blocking activation remain。Non-TUN roots prepare first；
@@ -86,7 +93,9 @@ freeze exact IPv4 route next-hop/metric/interface-metric disposition，prove fix
 IPv4 pinned TCP/UDP positive versus unpinned Wintun-captured negative controls，prove IPv4 Wintun resolver UDP/
 TCP steering and the capture-before-
 admission interval，and externally prove zero residue
-after partial apply、normal stop and `TerminateProcess`。An inaccessible/mismatched asset or any failed
+after partial apply、normal stop and `TerminateProcess`。The host may run only the identity-ledger-bound transient
+TCP/UDP echo listener above，never the qualifier/product or any host network mutation；listener residue or a
+required firewall exception blocks T01。An inaccessible/mismatched asset or any failed
 capability leaves M16 blocked for contract replanning；T02 cannot paper over it with another VM、fakes、new
 knobs、a service or watchdog。M16 makes no independent cross-version Windows qualification claim。
 
@@ -102,8 +111,10 @@ protected footprint control。
 ## Existing seams and minimum deepening
 
 - Keep `EgressPlanSnapshot`、route/final/static/selector compilation and selection lifetime unchanged。
-- Change private `ClientOutboundContext` into the Direct/Shadowsocks sum and deepen `ClientEgressEngine` once；
-  TUN、SOCKS and `ClientDnsEgress` remain callers，not socket owners。
+- Change private `ClientOutboundContext` into the Direct/Shadowsocks sum and deepen `ClientEgressEngine` once。
+  Its closed binary-private `Socks`/`Tun`/`Dns` request origin plus selected plan/original target controls the
+  binding obligation；callers remain outbound-kind agnostic and are not socket owners。Do not infer policy
+  from process-wide TUN presence。
 - Reuse runtime `TcpDialer`/bounded resolver and `DirectUdpSocketFactory`/`DirectUdpRuntime` ownership。Do not
   retain the current DNS no-detour raw system connect/bind path when auto-route is active。
 - Extend the existing `ferrum2-wintun::Adapter` owner with safe route/DNS/binding/notification operations;
@@ -146,12 +157,14 @@ protected footprint control。
 - [ ] Auto-route rejects IPv6 prefixes，compiles exact bounded IPv4 prefix subtraction，creates no `/0` or
       physical bypass row，performs
       absent precheck/exact readback/reverse conditional cleanup and never adopts OS/third-party rows。
-- [ ] Every reachable IPv4 proxy、direct and DNS physical socket is bound before connect/first send；negative
-      unpinned sockets are captured while positive pinned sockets do not enter Wintun。IPv6 concrete proxy or
-      direct/no-detour DNS physical endpoints fail before mutation；an IPv6 logical bootstrap behind an IPv4
-      proxy first hop remains allowed。
+- [ ] While auto-route is active，every reachable IPv4 proxy、direct and DNS physical socket is bound before
+      connect/first send；negative unpinned sockets are captured while positive pinned sockets do not enter
+      Wintun。IPv6 concrete proxy or direct/no-detour DNS physical endpoints fail before mutation；an IPv6
+      logical bootstrap behind an IPv4 proxy first hop remains allowed。With auto-route off，the exact M15-
+      compatible IPv6 no-detour/direct DNS omission case remains unchanged。
 - [ ] Manual-route TUN+direct publishes the IPv4 binding before Ready and survives a controller route added afterward；
-      no-direct `auto_route=false` makes no new query/mutation and preserves M15 exactly。
+      no-direct `auto_route=false` makes no new managed-network state query/mutation and preserves M15 exactly，
+      including IPv6 proxy and absent/direct-detour DNS egress。
 - [ ] Auto-DNS requires only `ipv4_dns_address`、rejects `ipv6_dns_address` and changes only owned Wintun IPv4
       DNS；system resolver UDP/TCP reaches the exact synthetic IPv4 address and existing DnsProxy；direct/proxy
       UDP/TCP/DoT/DoH upstreams use the correct pinned IPv4 first hop，while the M15 IPv6 adapter address remains。

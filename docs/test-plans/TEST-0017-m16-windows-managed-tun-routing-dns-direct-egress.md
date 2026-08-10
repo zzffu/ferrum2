@@ -10,7 +10,7 @@
 ## Entry capability gate
 
 M16-T01 runs before product implementation and is blocking。It MUST restore the exact qualification VM/
-checkpoint above，never run on the host currently using a TUN product，and MUST record the guest's actual
+checkpoint above，run the qualifier and product only inside that guest，and MUST record the guest's actual
 product、edition、architecture、full version/build、candidate/probe hashes、before/active/after snapshots and
 one cleanup-complete marker。No second VM or independent Windows-release baseline is required or credited。
 
@@ -20,6 +20,14 @@ this IPv4 contract replan but is not a capability PASS，and no local identifier
 repository evidence。The unique failure mode is an unprovable IPv6 managed socket escaping the required pinned/
 unpinned distinction。The cheapest sufficient layer remains the existing qualifier：reuse its route、socket、
 resolver and cleanup helpers with table rows，not a new harness or third equivalent helper。
+
+A separate reachability preflight proved that the restored guest can reach a transient TCP/UDP echo listener
+on a runtime-discovered eligible host physical IPv4，and audited the endpoint process absent afterward，without
+host firewall、route、address、adapter or TUN mutation。This is planning input only，not PASS；the full Wintun
+pinned/unpinned A/B remains required。The host MUST NOT run the qualifier or product or mutate that network
+state，but MAY own that one bounded listener solely as the off-link support endpoint。It uses exact chosen ports，
+has one exact PID/owner，auto-exits or is explicitly stopped，and is audited absent after every attempt。No
+firewall exception may be added；if existing host policy does not admit the listener，T01 is `BLOCKED`。
 
 Before any guest mutation，the host workflow MUST write one canonical JSON identity ledger with exactly these
 ordered keys and no extras。Canonical encoding is one-line PowerShell `ConvertTo-Json -Compress` output from
@@ -38,13 +46,22 @@ an ordered map，UTF-8 without BOM，terminated by one LF：
   "guest_version": "<observed-full-version>",
   "guest_build": "<observed-build-and-ubr>",
   "candidate_sha": "<exact-candidate-git-sha>",
-  "probe_sha256": "<exact-qualifier-sha256>"
+  "probe_sha256": "<exact-qualifier-sha256>",
+  "support_listener": {
+    "ipv4": "<runtime-discovered-eligible-host-physical-ipv4>",
+    "tcp_port": "<exact-chosen-port>",
+    "udp_port": "<exact-chosen-port>",
+    "pid": "<exact-host-pid>",
+    "owner": "<exact-process-owner>"
+  }
 }
 ```
 
 The host obtains VM/checkpoint IDs through exact Hyper-V readback and obtains guest fields through PowerShell
-Direct after restore；it MUST NOT infer any field from the VM display name。The ledger SHA-256 binds every
-local marker below。The raw ledger is local evidence，not product telemetry or a committed fixture。
+Direct after restore；it MUST NOT infer any field from the VM display name。The nested listener map is ordered
+as shown。The ledger SHA-256 binds every local marker below，including the exact support endpoint identity；the
+raw ledger is local evidence，not product telemetry or a committed fixture。No second harness、helper or
+committed endpoint is added。
 
 The existing `tests/platform/qualify_windows_tun.ps1` is extended with one `network-feasibility` mode；M16
 does not add a third equivalent controller。The mode MUST prove all of the following：
@@ -55,8 +72,9 @@ does not add a third equivalent controller。The mode MUST prove all of the foll
 2. before capture，`GetBestInterfaceEx` → validated interface → constrained `GetBestRoute2` yields the
    expected IPv4 physical interface/source for one fixed proxy first hop，and one eligible IPv4 physical
    default interface can be frozen for dynamic direct；
-3. after capture，the fixed-first-hop and dynamic-direct tables each prove unpinned off-link TCP and UDP enter
-   Wintun while pre-connect/pre-send IPv4-pinned controls reach the owned endpoint with zero Wintun ingress；
+3. after capture，the fixed-first-hop and dynamic-direct tables each use the ledger-bound support listener to
+   prove unpinned off-link TCP and UDP enter Wintun while pre-connect/pre-send IPv4-pinned controls reach the
+   exact chosen ports with zero Wintun ingress；
 4. Wintun per-interface IPv4 DNS plus the configured synthetic IPv4 address makes Windows resolver UDP and
    TCP queries reach the local DNS answer path，without modifying physical-interface DNS or the M15 IPv6
    adapter address；
@@ -72,7 +90,8 @@ m16_windows_network_feasibility status=PASS routes=2/2 tcp_pin=4/4 udp_pin=4/4 d
 ```
 
 An inaccessible/mismatched VM or checkpoint，an ambiguous/no IPv4 default underlay，a failed pinned/unpinned
-distinction，unreliable DNS steering，capture-window overflow or hard-kill residue makes T01 `BLOCKED` and
+distinction，an inadmissible or residual support listener，unreliable DNS steering，capture-window overflow or
+hard-kill residue makes T01 `BLOCKED` and
 stops T02～T07。It is not replaced by another VM or waived by unit fakes or ordinary RAII evidence。
 
 ## Evidence map
@@ -81,19 +100,21 @@ stops T02～T07。It is not replaced by another VM or waived by unit fakes or or
 |---|---|---|
 | Exact planning SHA/tree/parent and isolated M16 footprint control | Git identity + schema-3 control verification | `git rev-parse HEAD 'HEAD^{tree}' 'HEAD^'`；`sh scripts/test-budget.sh verify` |
 | Legacy omission、direct closed shape、direct-only graph、server/v1/chain negatives | Extend existing table-driven config contract | `cargo test -p ferrum2-config --test config_contract --locked m16_` |
+| Every managed default/relation、IPv4 prefix/address/count/output bound、schema/role/platform rejection and pre-side-effect failure | Extend the existing config-contract and config-CLI tables；no runtime seam | `cargo test -p ferrum2-config --test config_contract --locked m16_`；`cargo test -p ferrum2-m0-harness --test config_cli --locked m16_` |
 | Static/rule/final/selector/DNS-detour direct plan snapshots and no core protocol variant | Existing selector/route contract + architecture mutation guard | `cargo test -p ferrum2-core --locked`；`cargo test -p ferrum2-m0-harness --test architecture --locked` |
 | Direct TCP raw target、bounded domain resolve、half-close、selected failure/no fallback、zero SIP022 owner | Client egress focused table and real process echo | `cargo test -p ferrum2-client direct_tcp --locked`；focused local E2E row |
 | Direct UDP numeric/domain、raw payload、response binding、bounds/expiry/cancel、zero SIP022 owner | Reuse existing client association/direct-runtime tables | `cargo test -p ferrum2-client direct_udp --locked`；`cargo test -p ferrum2-runtime direct_udp --locked` |
 | Manual-route TUN+direct binder is ready before controller capture and avoids re-entry | VM post-Ready narrow-route A/B；no product route mutation | qualifier full/manual-direct row |
-| TUN and SOCKS share one dispatch and callers create no physical socket | Composition tests + source mutation guards | `cargo test -p ferrum2-client direct_ --locked`；architecture test |
+| Closed SOCKS/TUN/DNS request origin at one engine；mixed Windows graph uses the same direct tag for TCP/UDP with SOCKS IPv6 success and TUN IPv6 pre-socket failure under both auto-route states，with no fallback | Existing client composition tables + source mutation guards | `cargo test -p ferrum2-client direct_ --locked`；architecture test |
+| Auto-route absent/false M15-compatible TUN omission retains IPv6 proxy and absent/direct-detour DNS physical egress without new managed-network state query/mutation | Existing config omission and client DNS-egress tables | `cargo test -p ferrum2-config --test config_contract --locked m16_`；`cargo test -p ferrum2-client dns_egress --locked` |
 | IPv4 prefix subtraction、collapse、order independence、`/0`→two `/1` split、IPv6 rejection、empty/257-row failure | Pure table-driven compiler tests in existing Windows Adapter module | `cargo test -p ferrum2-wintun capture_prefix --locked` |
 | Fully initialized Win32 rows、precheck/readback/journal/reverse conditional delete | One fake ABI failure-position table | `cargo test -p ferrum2-wintun managed_route --locked` |
-| Correct IPv4 API order/network byte order、managed IPv6 endpoint rejection、no unpinned fallback | Fake socket-option recorder + source guard | `cargo test -p ferrum2-wintun underlay --locked` |
+| Correct IPv4 API order/network byte order、auto-route-scoped IPv6 physical-first-hop rejection、no unpinned fallback | Fake socket-option recorder + source guard | `cargo test -p ferrum2-wintun underlay --locked` |
 | Current-VM route values、pinned positive/unpinned negative、capture interval、hard kill | Blocking exact-asset capability mode | `pwsh tests/platform/qualify_windows_tun.ps1 -Mode network-feasibility ...` |
 | Product capture routes do not change third-party/default/LAN/VPN rows | Before/active/after exact route snapshots and sentinels | same capability/full VM profile |
-| Synthetic IPv4 UDP/TCP 53 enters existing DnsProxy before ordinary route；IPv6 DNS field rejected | Client TUN composition counter table | `cargo test -p ferrum2-client tun_auto_dns --locked` |
+| Synthetic IPv4 UDP/TCP 53 enters existing DnsProxy before ordinary route；wrong address/port and auto-DNS-off stay ordinary | Client TUN composition counter table | `cargo test -p ferrum2-client tun_auto_dns --locked` |
 | Wintun-only DNS apply/readback/conditional restore and external-change conflict | Fake DNS lease table + VM resolver witnesses | `cargo test -p ferrum2-wintun managed_dns --locked`；VM full profile |
-| Direct/no-detour bootstrap and proxy-detoured first-hop UDP/TCP/DoT/DoH use the correct pinned endpoint | Existing DNS transport tests with binding recorder | `cargo test -p ferrum2-client dns_egress --locked` |
+| With auto-route active，direct/no-detour bootstrap and proxy-detoured first-hop UDP/TCP/DoT/DoH use the correct pinned IPv4 endpoint | Existing DNS transport tests with binding recorder | `cargo test -p ferrum2-client dns_egress --locked` |
 | TUN root prepares last；capture last；activation remains admission-only | Process-root call-order mutation table | `cargo test -p ferrum2-client managed_tun_lifecycle --locked` |
 | Every partial/later failure and graceful/forced stop reverses exact owned state | Fake failure-position table + existing lifecycle harness | focused crate tests；repository lifecycle command below |
 | IPv4 route/interface/address invalidation removes capture and terminates；no live migration | Notification callback/owner ordering tests + real IPv4 route、interface and unicast-address mutations on the exact current VM | `cargo test -p ferrum2-wintun network_change --locked`；VM full profile |
@@ -132,6 +153,10 @@ stops T02～T07。It is not replaced by another VM or waived by unit fakes or or
   resolver failure and forced cancellation。Every direct row proves zero SIP022 session/live-ID/crypto owner。
 - Windows TUN-selected direct IPv6 UDP fails before physical socket creation for both auto-route states and
   never retries unpinned；existing M15 IPv6 proxy/reject/DNS-hijack mapping rows remain in the `16/16` matrix。
+- One mixed Windows graph routes TCP and UDP from SOCKS and TUN through the same direct tag with auto-route off
+  and on：SOCKS-origin IPv6 succeeds，TUN-origin IPv6 fails before resolver/socket，and neither failure inspects
+  a sibling selector、later rule or final or retries another/unpinned path。A source mutation must fail if this
+  is implemented as a process-wide TUN-presence check instead of the closed engine request origin。
 - TUN original target is invariant under DNS/TLS/HTTP sniff metadata。Ordinary direct port 53 is not synthetic
   hijack unless the exact configured address also matches。
 
@@ -143,13 +168,14 @@ stops T02～T07。It is not replaced by another VM or waived by unit fakes or or
 - Route fake injects failure before/after every query/init/create/readback/journal/delete，initializer booleans
   and illegal values，duplicate/conflicting row，readback mismatch，third-party replacement and cleanup error。
   It must fail if any broad delete/flush/adopt or address-derived-row journal is introduced。
-- Underlay rows cover IPv4 fixed endpoints on different physical interfaces，one unique IPv4 default，missing/
+- Auto-route-on underlay rows cover IPv4 fixed endpoints on different physical interfaces，one unique IPv4 default，missing/
   down/loopback/Wintun/ambiguous default，index/LUID conversion，wrong IPv4 byte order，option failure and a
   mutation that connects/sends before bind。IPv6 concrete proxy and direct/no-detour DNS physical endpoints
   fail validation/prepare before mutation，while a logical IPv6 DNS bootstrap behind an IPv4 proxy first hop
   remains valid。No path may retry without a binding。
 - VM negative control must be observably captured；a positive that merely succeeds without proving zero Wintun
-  ingress is insufficient。Off-link targets must be owned test endpoints，not production/public services。
+  ingress is insufficient。The sole off-link support target is the ledger-bound transient host listener，not a
+  production/public service；the host audit proves its PID absent after every attempt without network mutation。
 
 ### DNS and lifecycle
 
@@ -157,6 +183,9 @@ stops T02～T07。It is not replaced by another VM or waived by unit fakes or or
   cleanup conflict。Physical-interface settings and the M15 IPv6 adapter address are read-only sentinels。
 - Resolver witnesses cover UDP truncation/TCP upgrade，direct and proxy-detoured UDP/TCP/DoT/DoH，upstream
   failure no fallback，synthetic wrong address/port/family and auto-DNS-off exact M15 behavior。
+- The cheapest auto-route-off omission regression extends the existing config/DNS tables with one exact
+  M15-compatible TUN graph that omits managed fields and performs IPv6 proxy plus absent/direct-detour DNS
+  egress；it observes zero new managed-network state query or mutation and adds no helper or harness。
 - Setup ordinal covers notification-before-snapshot、generation change at every interval、underlay、adapter、
   address、DAD、session、IPv4 DNS、each capture row、post-capture physical revalidation，the conditional
   IPv4 interface-metric snapshot/apply/readback/conflict/restore path when T01 selects it，owner panic and

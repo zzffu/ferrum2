@@ -39,11 +39,12 @@ direct rejection，and a fully bounded canonical managed-TUN capture/DNS plan re
       exclude `/1` plan match SPEC-0017，including default `0.0.0.0/0`、IPv6 route-prefix rejection、empty and
       257-row rejection。Auto-DNS requires only `ipv4_dns_address` and rejects `ipv6_dns_address` while retaining
       the existing M15 `ipv6_address` adapter field。
-- [ ] TUN prefix overlap checks enumerate only actual physical endpoints：reachable physical first hops must
-      resolve to IPv4；IPv6 concrete proxy and direct/no-detour DNS physical endpoints fail before OS calls，
-      while proxy-detoured DNS uses the selected IPv4 concrete Shadowsocks first hop and may retain a logical
-      IPv6 bootstrap without treating it as a separate physical socket；the synthetic IPv4 DNS address
-      validates exactly。
+- [ ] Only with auto-route true，TUN prefix overlap checks enumerate actual physical endpoints：reachable first
+      hops must resolve to IPv4；IPv6 concrete proxy and direct/no-detour DNS physical endpoints fail before OS
+      calls，while proxy-detoured DNS uses the selected IPv4 concrete Shadowsocks first hop and may retain a
+      logical IPv6 bootstrap without treating it as a separate physical socket。With auto-route false/omitted，
+      the M15-compatible IPv6 proxy and absent/direct-detour DNS shape remains accepted without a managed
+      physical-first-hop query；the synthetic IPv4 DNS address validates exactly when enabled。
 - [ ] `--check-config` makes zero Windows/DLL/socket/thread calls。
 - [ ] Table-driven config/selector/CLI evidence passes and test-footprint result is recorded。
 

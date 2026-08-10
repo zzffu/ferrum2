@@ -79,6 +79,9 @@ through the frozen IPv4 physical default interface。These are different policie
 - M15 manual-route IPv6 TUN adapter/data-plane behavior and its `16/16` transport regression evidence，plus
   existing SIP022 IPv6 and non-managed/SOCKS direct IPv6，MUST remain unchanged。M16 MUST NOT credit those
   preserved rows as proof of managed IPv6 capture、DNS、binding or physical-network change handling。
+- With `auto_route = false` or omitted，an M15-compatible Windows TUN graph that omits M16 managed fields and
+  has no TUN-origin client-direct operation MUST retain existing IPv6 proxy and absent/direct-detour DNS
+  physical egress with no new managed-network state query or mutation。
 - Client direct outbound is additive schema-v2 behavior and MUST work through the shared SOCKS/TUN/DNS
   client egress on every existing build target。Managed route/DNS mutation MUST run only for Windows NT
   10.0 build 19041+ AMD64；unsupported runtime targets fail before public service and without OS mutation。
@@ -121,8 +124,13 @@ through the frozen IPv4 physical default interface。These are different policie
 - Direct TCP MUST carry raw application bytes and half-close through the existing relay lifecycle，and MUST
   create no SIP022 flow、cipher、nonce、salt or server connection。Selected resolution/connect/I/O failure
   MUST end the flow without selector、rule、final or proxy fallback。
-- SOCKS and TUN callers MUST use the same client egress dispatch and MUST NOT inspect outbound kind or create
-  a raw physical socket themselves。
+- The existing `ClientEgressEngine` boundary MUST accept one closed binary-private request origin with exactly
+  SOCKS、TUN and DNS cases，plus the selected plan and original target，for both TCP and UDP。Callers MUST remain
+  outbound-kind agnostic and MUST NOT resolve、bind or create a raw physical socket themselves。The engine，
+  not a process-wide TUN-presence check，MUST use TUN origin to reject selected direct IPv6 before resolver/
+  socket creation，MUST preserve SOCKS-origin direct IPv6，and MUST apply the DNS-origin physical-first-hop
+  restriction only while auto-route is active。No public trait、core variant、second dispatcher or fallback is
+  permitted。
 - A Windows graph containing TUN plus a reachable direct outbound MUST freeze/publish its IPv4 physical-
   default binder before TUN Ready even when auto-route is false。An external manual-route controller MUST add
   capture only after Ready。If that TUN-selected direct plan's immutable original target is IPv6，the product
@@ -172,23 +180,25 @@ through the frozen IPv4 physical default interface。These are different policie
 
 ### M16-MUST-07 — physical underlay snapshot and socket pinning
 
-- Before any capture row exists，the product MUST identify eligible up、non-loopback、non-Wintun IPv4 physical
-  interfaces and route state。Each reachable fixed Shadowsocks first hop and each DNS bootstrap reached by
-  absent/direct detour MUST resolve to IPv4，then call `GetBestInterfaceEx(destination)`，validate/convert the
-  interface identity，call interface-constrained `GetBestRoute2` and freeze its route/source fingerprint。An
-  IPv6 concrete proxy endpoint or IPv6 direct/no-detour DNS physical endpoint MUST fail validation or prepare
-  before mutation。For a proxy-detoured DNS server，the physical endpoint is the selected plan's first
-  concrete Shadowsocks server；a logical IPv6 DNS bootstrap behind an IPv4 proxy first hop remains allowed and
-  MUST NOT be pinned as a separate physical endpoint。
+- Only when auto-route is active，before any capture row exists，the product MUST identify eligible up、non-
+  loopback、non-Wintun IPv4 physical interfaces and route state。Each reachable fixed Shadowsocks first hop and
+  each DNS bootstrap reached by absent/direct detour MUST resolve to IPv4，then call
+  `GetBestInterfaceEx(destination)`，validate/convert the interface identity，call interface-constrained
+  `GetBestRoute2` and freeze its route/source fingerprint。Under managed capture，an IPv6 concrete proxy
+  endpoint or IPv6 direct/no-detour DNS physical endpoint MUST fail validation or prepare before mutation。
+  For a proxy-detoured DNS server，the physical endpoint is the selected plan's first concrete Shadowsocks
+  server；a logical IPv6 DNS bootstrap behind an IPv4 proxy first hop remains allowed and MUST NOT be pinned as
+  a separate physical endpoint。
 - Dynamic direct IPv4 targets MUST bind to one unambiguous capture-before IPv4 physical default interface。
   Missing or ambiguous policy MUST fail prepare before capture。This policy does not preserve target-specific
   non-default LAN/VPN routing；operators MUST exclude those IPv4 prefixes when that fidelity is required。
 - Applicable IPv4 sockets MUST set `IP_UNICAST_IF` with the required network-byte-order index before TCP
   connect or UDP first send。Failure MUST close the socket and MUST NOT retry unpinned。M16 MUST NOT publish an
   IPv6 binder；Windows TUN-selected direct IPv6 fails before socket creation instead。
-- Every IPv4 TUN-capable Windows direct socket MUST cross this binding boundary regardless of capture
-  ownership。While auto-route is active，every IPv4 proxy and actual DNS physical first hop MUST also cross it。
-  No caller-local `TcpStream::connect` or `UdpSocket::bind` may bypass the applicable boundary。
+- Every TUN-origin IPv4 Windows direct socket MUST cross this binding boundary regardless of capture
+  ownership。While auto-route is active，every applicable SOCKS-origin IPv4 direct socket and every IPv4 proxy
+  or actual DNS physical first hop MUST also cross it。No caller-local `TcpStream::connect` or
+  `UdpSocket::bind` may bypass the applicable boundary。
 
 ### M16-MUST-08 — exact route ownership
 
