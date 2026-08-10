@@ -3166,8 +3166,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, listenPort))")
                     && gate.contains("new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))")
                     && gate.contains("private readonly Task worker;")
+                    && gate.contains("private int selfTests;")
+                    && gate.contains("public int SelfTests")
                     && gate.contains("public bool WaitSelfTest(int milliseconds)")
                     && gate.contains("request.Buffer.Length == 0")
+                    && gate.contains("Interlocked.Increment(ref selfTests)")
                     && gate.contains("await upstream.ReceiveAsync()")
                     && gate.contains("ReplayFirstToLatest")
                     && !gate.contains("public bool SelfTest()")
@@ -3180,6 +3183,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && self_test.contains("$process.WaitForExit(5000)")
                     && self_test.contains("$process.Kill($true)")
                     && self_test.contains("$Gate.WaitSelfTest(1000)")
+                    && self_test.contains("$Gate.SelfTests -eq 1")
             })
             && probe.is_some_and(|probe| {
                 probe.contains("new UdpClient(new IPEndPoint(IPAddress.Parse(address), port))")
@@ -3196,6 +3200,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && echo.contains("$udpAcceptedDelta")
                     && echo.contains("$firstUdpAcceptedDelta")
                     && echo.contains("$maxActiveSessions")
+                    && echo.contains("$selfTestsBefore = $Gate.SelfTests")
+                    && echo.contains("self_tests=$($Gate.SelfTests)")
+                    && echo.contains("self_test_delta=$selfTestDelta")
                     && echo.contains("gate_state=$($Gate.State)")
                     && echo.contains("gate_fault=$($Gate.Fault)")
                     && echo.contains("probe_fault=$($probe.Fault)")
@@ -3256,6 +3263,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         ),
         controller.replace("$process.WaitForExit(5000)", "$true"),
         controller.replace("$Gate.WaitSelfTest(1000)", "$true"),
+        controller.replace("$Gate.SelfTests -eq 1", "$true"),
+        controller.replace("Interlocked.Increment(ref selfTests)", ""),
+        controller.replace("$selfTestsBefore = $Gate.SelfTests", "$selfTestsBefore = 0"),
         controller.replace("$firstUdpAcceptedDelta", "$ignoredFirstUdpDelta"),
         controller.replace("$udpGateA.ReplayFirstToLatest()", ""),
         controller.replace(

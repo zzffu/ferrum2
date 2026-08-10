@@ -665,6 +665,7 @@ public sealed class Ferrum2UdpGate : IDisposable {
     private readonly Task worker;
     private byte[] firstResponse;
     private IPEndPoint latestClient;
+    private int selfTests;
     private int requests;
     private int responses;
     private string fault;
@@ -677,6 +678,7 @@ public sealed class Ferrum2UdpGate : IDisposable {
 
     public int Requests { get { return Volatile.Read(ref requests); } }
     public int Responses { get { return Volatile.Read(ref responses); } }
+    public int SelfTests { get { return Volatile.Read(ref selfTests); } }
     public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
     public string State { get { return worker.IsFaulted ? "faulted" : worker.IsCompleted ? "completed" : "running"; } }
 
@@ -710,6 +712,7 @@ public sealed class Ferrum2UdpGate : IDisposable {
             while (!stopped.IsCancellationRequested) {
                 var request = await socket.ReceiveAsync().ConfigureAwait(false);
                 if (request.Buffer.Length == 0 && request.RemoteEndPoint.Address.Equals(IPAddress.Loopback)) {
+                    Interlocked.Increment(ref selfTests);
                     selfTest.Set();
                     continue;
                 }
@@ -991,6 +994,7 @@ try {
         }
         Assert-True ($process.ExitCode -eq 0) "UDP gate self-test process failed"
         Assert-True ($Gate.WaitSelfTest(1000)) "UDP gate cross-process self-test failed"
+        Assert-True ($Gate.SelfTests -eq 1) "UDP gate self-test count mismatch"
     } finally {
         if (-not $process.HasExited) { $process.Kill($true); $process.WaitForExit() }
         $process.Dispose()
@@ -1030,6 +1034,7 @@ function Invoke-UdpEchoRow(
     $client = Open-TunUdp $Address $Port $InterfaceIndex
     try {
         $acceptedLabels = 'role="client",direction="client_to_target",outcome="accepted"'
+        $selfTestsBefore = $Gate.SelfTests
         $beforeMetrics = Get-Metrics $script:metricsPort
         $tunAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_tun_packets_accepted"
         $udpAcceptedBefore = Get-CounterValue $beforeMetrics "ferrum2_udp_datagrams" $acceptedLabels $true
@@ -1055,8 +1060,10 @@ function Invoke-UdpEchoRow(
         $afterMetrics = Get-Metrics $script:metricsPort
         $tunAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_tun_packets_accepted") - $tunAcceptedBefore
         $udpAcceptedDelta = (Get-CounterValue $afterMetrics "ferrum2_udp_datagrams" $acceptedLabels $true) - $udpAcceptedBefore
+        $selfTestDelta = $Gate.SelfTests - $selfTestsBefore
         if ($null -eq $firstUdpAcceptedDelta) { $firstTunAcceptedDelta = $tunAcceptedDelta; $firstUdpAcceptedDelta = $udpAcceptedDelta }
-        Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
+        Assert-True $gateOpened "selected UDP egress gate was not opened: first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)"
+        Assert-True ($selfTestDelta -eq 0) "UDP request was misclassified as a self-test"
         Assert-True ($tunAcceptedDelta -gt 0 -and $udpAcceptedDelta -eq 1) "UDP ingress/association witness mismatch"
         $response = Receive-TunUdp $client
         Assert-True (($response -join ",") -eq ($Payload -join ",")) "UDP echo mismatch"
@@ -1068,7 +1075,7 @@ function Invoke-UdpEchoRow(
                 elseif ($tunAcceptedDelta -gt 1 -and $udpAcceptedDelta -eq 1) { "non_exact_source_recurrence" }
                 elseif ($tunAcceptedDelta -eq 1 -and $udpAcceptedDelta -eq 1) { "single" }
                 else { "unresolved" }
-            [Console]::Error.WriteLine("m15_windows_tun_udp01_diag status=OBSERVED result=complete source=$sourceCategory first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)")
+            [Console]::Error.WriteLine("m15_windows_tun_udp01_diag status=OBSERVED result=complete source=$sourceCategory first_tun=$firstTunAcceptedDelta first_udp=$firstUdpAcceptedDelta final_tun=$tunAcceptedDelta final_udp=$udpAcceptedDelta max_active=$maxActiveSessions self_tests=$($Gate.SelfTests) self_test_delta=$selfTestDelta gate_state=$($Gate.State) gate_fault=$($Gate.Fault) probe_fault=$($probe.Fault)")
             throw "UDP-01 diagnostic sentinel"
         }
     } finally { $client.Dispose() }
