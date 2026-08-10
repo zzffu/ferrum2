@@ -1,3 +1,6 @@
+// Public bridge types still compile on unsupported hosts; their owner half is unreachable there.
+#![cfg_attr(not(any(all(windows, target_arch = "x86_64"), test)), allow(dead_code))]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

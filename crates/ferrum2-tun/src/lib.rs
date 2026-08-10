@@ -40,7 +40,8 @@ use smoltcp::wire::{
     TcpPacket, TcpRepr,
 };
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+// Unsupported roots type-check bridge callbacks but never own a packet loop.
+#[cfg_attr(not(any(all(windows, target_arch = "x86_64"), test)), allow(dead_code))]
 const PACKET_QUANTUM: usize = 8;
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const INGRESS_SLOTS: usize = PACKET_QUANTUM - 1;
