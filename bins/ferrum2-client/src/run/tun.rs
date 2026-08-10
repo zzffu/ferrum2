@@ -159,6 +159,13 @@ async fn run_udp_route(
     else {
         return;
     };
+    tracing::info!(
+        event = "tun_udp_route_diag",
+        selected_loopback = server.ip().is_loopback(),
+        target_loopback = mapping.tuple().target().ip().is_loopback(),
+        selected_equals_target = SocketAddr::V4(server) == mapping.tuple().target(),
+        "bounded TUN UDP route diagnostic"
+    );
     let mut force = cancellation.clone();
     let prepared = tokio::select! {
         () = force.forced() => return,
