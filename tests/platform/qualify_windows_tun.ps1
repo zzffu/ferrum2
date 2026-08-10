@@ -2214,6 +2214,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
         Stop-CapabilityPktMon
         $routesBeforeCaptureCleanup = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
+        $limitedBroadcastRoute = "IPv4|255.255.255.255/32|0.0.0.0"
+        Assert-True (@($routeBaseline | Where-Object { $_ -ceq $limitedBroadcastRoute }).Count -eq 1) "limited broadcast route baseline mismatch"
+        $routeCleanupBaseline = @($routeBaseline | Where-Object { $_ -cne $limitedBroadcastRoute })
+        Assert-True ($routeCleanupBaseline.Count -eq $routeBaseline.Count - 1) "limited broadcast cleanup baseline mismatch"
         $captureRouteRows = @(
             "IPv4|0.0.0.0/1|0.0.0.0",
             "IPv4|128.0.0.0/1|0.0.0.0"
@@ -2225,16 +2229,16 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $routeCleanupDeadline = [DateTime]::UtcNow.AddSeconds(5)
         do {
             $routesAfterCaptureCleanup = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
-            if (@(Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup)).Count -eq 0) { break }
+            if (@(Compare-Object -ReferenceObject @($routeCleanupBaseline) -DifferenceObject @($routesAfterCaptureCleanup)).Count -eq 0) { break }
             Start-Sleep -Milliseconds 50
         } while ([DateTime]::UtcNow -lt $routeCleanupDeadline)
-        $routeCleanupDifference = @(Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup))
+        $routeCleanupDifference = @(Compare-Object -ReferenceObject @($routeCleanupBaseline) -DifferenceObject @($routesAfterCaptureCleanup))
         $routeCleanupLabel = "capture route exact rollback"
         if ($routeCleanupDifference.Count -gt 0) {
             $routeCleanupDiagnostic = @($routeCleanupDifference | Select-Object InputObject,SideIndicator)
             $routeCleanupLabel += " difference=$(ConvertTo-Json -InputObject $routeCleanupDiagnostic -Compress)"
         }
-        Assert-SnapshotEqual $routeBaseline $routesAfterCaptureCleanup $routeCleanupLabel
+        Assert-SnapshotEqual $routeCleanupBaseline $routesAfterCaptureCleanup $routeCleanupLabel
         Restore-CapabilityDns $ownedInterfaceIndex
         Restore-CapabilityInterfaceMetric $ownedInterfaceIndex
         Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "physical DNS normal cleanup sentinel"

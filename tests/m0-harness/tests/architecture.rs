@@ -2690,31 +2690,39 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && capture_route_cleanup.is_some_and(|cleanup| {
                 cleanup.contains("\"IPv4|0.0.0.0/1|0.0.0.0\"")
                     && cleanup.contains("\"IPv4|128.0.0.0/1|0.0.0.0\"")
+                    && cleanup.contains("$limitedBroadcastRoute = \"IPv4|255.255.255.255/32|0.0.0.0\"")
+                    && cleanup.contains("@($routeBaseline | Where-Object { $_ -ceq $limitedBroadcastRoute }).Count -eq 1")
+                    && cleanup.contains("$routeCleanupBaseline = @($routeBaseline | Where-Object { $_ -cne $limitedBroadcastRoute })")
+                    && cleanup.contains("$routeCleanupBaseline.Count -eq $routeBaseline.Count - 1")
                     && cleanup.contains("@($routesBeforeCaptureCleanup | Where-Object { $_ -ceq $captureRouteRow }).Count -eq 1")
                     && cleanup.contains("$routeCleanupDeadline = [DateTime]::UtcNow.AddSeconds(5)")
-                    && cleanup.contains("Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup)")
+                    && cleanup.contains("Compare-Object -ReferenceObject @($routeCleanupBaseline) -DifferenceObject @($routesAfterCaptureCleanup)")
                     && cleanup.contains("Start-Sleep -Milliseconds 50")
                     && cleanup.contains("} while ([DateTime]::UtcNow -lt $routeCleanupDeadline)")
-                    && cleanup.contains("$routeCleanupDifference = @(Compare-Object -ReferenceObject @($routeBaseline) -DifferenceObject @($routesAfterCaptureCleanup))")
+                    && cleanup.contains("$routeCleanupDifference = @(Compare-Object -ReferenceObject @($routeCleanupBaseline) -DifferenceObject @($routesAfterCaptureCleanup))")
                     && cleanup.contains("if ($routeCleanupDifference.Count -gt 0)")
                     && cleanup.contains("Select-Object InputObject,SideIndicator")
                     && cleanup.contains("ConvertTo-Json -InputObject $routeCleanupDiagnostic -Compress")
                     && !cleanup.contains("$expectedRoutesAfterCaptureCleanup")
                     && !cleanup.contains("-cnotcontains")
+                    && !cleanup.contains("-like")
+                    && !cleanup.contains("-match")
                     && [
+                        "$limitedBroadcastRoute = \"IPv4|255.255.255.255/32|0.0.0.0\"",
+                        "$routeCleanupBaseline = @(",
                         "$captureRouteRows = @(",
                         "foreach ($captureRouteRow in $captureRouteRows)",
                         "Remove-CapabilityRoutes",
                         "$routeCleanupDeadline = [DateTime]::UtcNow.AddSeconds(5)",
                         "$routesAfterCaptureCleanup = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)",
-                        "if (@(Compare-Object -ReferenceObject @($routeBaseline)",
+                        "if (@(Compare-Object -ReferenceObject @($routeCleanupBaseline)",
                         "Start-Sleep -Milliseconds 50",
                         "$routeCleanupDifference = @(Compare-Object",
                         "$routeCleanupLabel = \"capture route exact rollback\"",
                         "if ($routeCleanupDifference.Count -gt 0)",
                         "$routeCleanupDiagnostic = @(",
                         "$routeCleanupLabel += \" difference=",
-                        "Assert-SnapshotEqual $routeBaseline $routesAfterCaptureCleanup $routeCleanupLabel",
+                        "Assert-SnapshotEqual $routeCleanupBaseline $routesAfterCaptureCleanup $routeCleanupLabel",
                     ]
                     .iter()
                     .map(|needle| cleanup.find(needle))
