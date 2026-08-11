@@ -259,6 +259,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ClientPlanFailure {
+    #[cfg(windows)]
     DirectIpv6Unsupported,
     Invalid,
 }

@@ -385,8 +385,9 @@ async fn client_connection(
         Ok(flow) => flow,
         Err(ClientOpenFailure::Plan(failure)) => {
             let kind = match failure {
-                super::egress::ClientPlanFailure::DirectIpv6Unsupported
-                | super::egress::ClientPlanFailure::Invalid => ConnectErrorKind::Other,
+                #[cfg(windows)]
+                super::egress::ClientPlanFailure::DirectIpv6Unsupported => ConnectErrorKind::Other,
+                super::egress::ClientPlanFailure::Invalid => ConnectErrorKind::Other,
             };
             let _ = reply.failed(kind).await;
             return;
