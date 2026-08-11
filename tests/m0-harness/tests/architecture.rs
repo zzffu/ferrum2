@@ -364,6 +364,11 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         .nth(1)
         .and_then(|body| body.split("try {").next())
         .expect("bounded adapter cycles");
+    let managed_cycle_metrics = adapter_cycles
+        .split("if ($Managed) {")
+        .nth(1)
+        .and_then(|body| body.split('}').next())
+        .expect("bounded managed cycle metrics");
     assert!(
         integrated.contains("Invoke-TunProductTcp $supportAddress $supportTcpPort")
             && integrated.contains("Invoke-TunProductUdp $supportAddress $supportUdpPort")
@@ -438,6 +443,19 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && adapter_cycles.contains("Wait-AdapterReady $ExpectedAdapter 20 $Managed")
             && !adapter_cycles.contains("managed cycle capture route mismatch"),
         "managed cycles must await exact capture and DNS state through one bounded process-aware readiness seam"
+    );
+    assert!(
+        adapter_cycles.contains("[Nullable[int]]$MetricsPort = $null")
+            && managed_cycle_metrics.contains(
+                "Assert-True ($null -ne $MetricsPort) \"managed cycles require metrics port\"",
+            )
+            && managed_cycle_metrics.contains("$owners = Get-Metrics ([int]$MetricsPort)")
+            && managed_cycle_metrics
+                .find("managed cycles require metrics port")
+                .unwrap()
+                < managed_cycle_metrics.find("Get-Metrics").unwrap()
+            && !adapter_cycles.contains("$MetricsPort.Value"),
+        "managed cycles must reject a null metrics port and pass the concrete PowerShell integer directly"
     );
     assert!(
         qualifier.contains("\"hard-kill\"")

@@ -2223,7 +2223,8 @@ function Invoke-AdapterCycles(
         $adapter = Wait-AdapterReady $ExpectedAdapter 20 $Managed
         $script:ownedInterfaceIndex = [int]$adapter.ifIndex
         if ($Managed) {
-            $owners = Get-Metrics $MetricsPort.Value
+            Assert-True ($null -ne $MetricsPort) "managed cycles require metrics port"
+            $owners = Get-Metrics ([int]$MetricsPort)
             Assert-True ((Get-ClientGaugeValue $owners "ferrum2_udp_sessions_active") -eq 0 -and
                 (Get-ClientGaugeValue $owners "ferrum2_udp_buffered_bytes") -eq 0) "managed cycle process-private owner baseline changed"
         }
