@@ -25,7 +25,7 @@ use ferrum2_socks5::MAX_SOCKS_UDP_DATAGRAM_BYTES;
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
-use super::{ClientEgressEngine, ClientOutboundContext, SelectedEgress};
+use super::{ClientEgressEngine, ClientOutboundContext, ClientRequestOrigin, SelectedEgress};
 
 pub(in crate::run) struct ClientUdpContext {
     pub(in crate::run) manager: UdpSessionManager,
@@ -117,7 +117,59 @@ pub(in crate::run) struct ClientUdpAssociation {
 
 enum ClientUdpUpstream {
     Shadowsocks(UdpSocket),
-    Direct(SystemDirectUdpSocket),
+    Direct(ClientDirectUdpSocket),
+}
+
+enum ClientDirectUdpSocket {
+    System(SystemDirectUdpSocket),
+    Managed {
+        ipv4: UdpSocket,
+        ipv6: Option<UdpSocket>,
+    },
+}
+
+#[cfg(windows)]
+pub(super) const fn managed_direct_udp_ipv6_allowed(origin: ClientRequestOrigin) -> bool {
+    matches!(origin, ClientRequestOrigin::Socks)
+}
+
+impl DirectUdpSocket for ClientDirectUdpSocket {
+    async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
+        match self {
+            Self::System(socket) => socket.send_to(payload, target).await,
+            Self::Managed { ipv4, .. } if target.is_ipv4() => ipv4.send_to(payload, target).await,
+            Self::Managed {
+                ipv6: Some(ipv6), ..
+            } => ipv6.send_to(payload, target).await,
+            Self::Managed { ipv6: None, .. } => Err(io::Error::other("managed IPv4 required")),
+        }
+    }
+
+    async fn recv_from(&self, payload: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        match self {
+            Self::System(socket) => socket.recv_from(payload).await,
+            Self::Managed {
+                ipv4,
+                ipv6: Some(ipv6),
+            } => loop {
+                let ready = tokio::select! {
+                    result = ipv4.readable() => {
+                        result?;
+                        ipv4
+                    }
+                    result = ipv6.readable() => {
+                        result?;
+                        ipv6
+                    }
+                };
+                match ready.try_recv_from(payload) {
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    result => break result,
+                }
+            },
+            Self::Managed { ipv4, ipv6: None } => ipv4.recv_from(payload).await,
+        }
+    }
 }
 
 pub(in crate::run) struct ClientUdpLeg {
@@ -625,6 +677,7 @@ impl ClientUdpAssociation {
 
 pub(in crate::run) async fn prepare<C, T, R, F, Fut>(
     egress: &ClientEgressEngine<C, T, R>,
+    origin: ClientRequestOrigin,
     plan: Option<EgressPlanSnapshot>,
     selected: SelectedEgress,
     mut bind: F,
@@ -659,11 +712,54 @@ where
                 SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
             };
             let upstream = bind(bind_address).await.map_err(|_| ())?;
+            #[cfg(windows)]
+            if egress.auto_route {
+                let SocketAddr::V4(endpoint) = first_server else {
+                    return Err(());
+                };
+                #[cfg(not(test))]
+                egress
+                    .underlay
+                    .bind_fixed(&upstream, endpoint)
+                    .map_err(|_| ())?;
+                #[cfg(test)]
+                {
+                    let _ = endpoint;
+                    egress.record_managed_binding();
+                }
+            }
             upstream.connect(first_server).await.map_err(|_| ())?;
             ClientUdpUpstream::Shadowsocks(upstream)
         }
         SelectedEgress::Direct => {
-            ClientUdpUpstream::Direct(SystemDirectUdpSocketFactory.open().await.map_err(|_| ())?)
+            #[cfg(windows)]
+            if egress.auto_route || origin == ClientRequestOrigin::Tun {
+                let ipv4 = bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))
+                    .await
+                    .map_err(|_| ())?;
+                #[cfg(not(test))]
+                egress.underlay.bind_default(&ipv4).map_err(|_| ())?;
+                #[cfg(test)]
+                egress.record_managed_binding();
+                let ipv6 = if managed_direct_udp_ipv6_allowed(origin) {
+                    Some(
+                        bind(SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0))
+                            .await
+                            .map_err(|_| ())?,
+                    )
+                } else {
+                    None
+                };
+                ClientUdpUpstream::Direct(ClientDirectUdpSocket::Managed { ipv4, ipv6 })
+            } else {
+                ClientUdpUpstream::Direct(ClientDirectUdpSocket::System(
+                    SystemDirectUdpSocketFactory.open().await.map_err(|_| ())?,
+                ))
+            }
+            #[cfg(not(windows))]
+            ClientUdpUpstream::Direct(ClientDirectUdpSocket::System(
+                SystemDirectUdpSocketFactory.open().await.map_err(|_| ())?,
+            ))
         }
     };
     Ok(ClientUdpAssociation {

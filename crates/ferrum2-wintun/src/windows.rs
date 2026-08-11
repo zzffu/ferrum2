@@ -5,29 +5,36 @@ use std::io::Read;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::os::windows::io::{AsRawHandle, AsRawSocket, FromRawHandle};
 use std::path::{Path, PathBuf, Prefix};
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BUFFER_OVERFLOW,
-    ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, FreeLibrary, GetLastError, HANDLE,
-    HMODULE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
+    ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, ERROR_NOT_FOUND, ERROR_SUCCESS, FreeLibrary,
+    GetLastError, HANDLE, HMODULE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CreateUnicastIpAddressEntry, DeleteUnicastIpAddressEntry, GetIpInterfaceEntry,
-    GetUnicastIpAddressEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
-    MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, SetIpInterfaceEntry,
+    CancelMibChangeNotify2, ConvertInterfaceLuidToIndex, CreateIpForwardEntry2,
+    CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeMibTable,
+    GetBestInterfaceEx, GetBestRoute2, GetIfTable2, GetIpForwardEntry2, GetIpForwardTable2,
+    GetIpInterfaceEntry, GetUnicastIpAddressEntry, InitializeIpForwardEntry,
+    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IF_TABLE2,
+    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
+    NotifyIpInterfaceChange, NotifyRouteChange2, NotifyUnicastIpAddressChange, SetIpInterfaceEntry,
 };
-use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+use windows_sys::Win32::NetworkManagement::Ndis::{
+    IfOperStatusUp, MediaConnectStateConnected, NET_IF_ADMIN_STATUS_UP, NET_LUID_LH,
+};
 use windows_sys::Win32::Networking::WinSock::{
-    AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, IpDadStateDeprecated,
-    IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative, NL_DAD_STATE,
-    SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0,
+    AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, IP_UNICAST_IF, IPPROTO_IP,
+    IpDadStateDeprecated, IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred,
+    IpDadStateTentative, MIB_IPPROTO_NETMGMT, NL_DAD_STATE, NlroManual, SOCKADDR, SOCKADDR_IN,
+    SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_INET, setsockopt,
 };
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptHash,
@@ -44,7 +51,7 @@ use windows_sys::Win32::System::LibraryLoader::{
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 
-use crate::{ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error};
+use crate::{ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, Ipv4Prefix};
 
 type WintunAdapter = *mut c_void;
 type WintunSession = *mut c_void;
@@ -292,17 +299,154 @@ impl Drop for WaitGuard<'_> {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct RouteFingerprint {
+    interface_index: u32,
+    destination: u32,
+    prefix_length: u8,
+    next_hop: u32,
+    metric: u32,
+    source: Option<u32>,
+}
+
+/// Immutable, redacted IPv4 socket-binding policy frozen before capture.
+#[derive(Clone)]
+pub struct UnderlayPolicy {
+    fixed: Arc<[(std::net::SocketAddrV4, RouteFingerprint)]>,
+    default: Option<RouteFingerprint>,
+}
+
+impl UnderlayPolicy {
+    pub fn bind_fixed<T: AsRawSocket>(
+        &self,
+        socket: &T,
+        endpoint: std::net::SocketAddrV4,
+    ) -> Result<(), Error> {
+        let route = self
+            .fixed
+            .iter()
+            .find_map(|(candidate, route)| (*candidate == endpoint).then_some(*route))
+            .ok_or(Error)?;
+        bind_ipv4_socket(socket, route.interface_index)
+    }
+
+    pub fn bind_default<T: AsRawSocket>(&self, socket: &T) -> Result<(), Error> {
+        bind_ipv4_socket(socket, self.default.ok_or(Error)?.interface_index)
+    }
+}
+
+fn bind_ipv4_socket<T: AsRawSocket>(socket: &T, interface_index: u32) -> Result<(), Error> {
+    let network_order = interface_index_option_value(interface_index);
+    let status = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            IPPROTO_IP,
+            IP_UNICAST_IF,
+            (&raw const network_order).cast(),
+            i32::try_from(std::mem::size_of_val(&network_order)).map_err(|_| Error)?,
+        )
+    };
+    if status == 0 { Ok(()) } else { Err(Error) }
+}
+
+const fn interface_index_option_value(interface_index: u32) -> u32 {
+    interface_index.to_be()
+}
+
+struct NotificationContext {
+    generation: AtomicU64,
+    owned_luid: AtomicU64,
+}
+
+struct NotificationOwners {
+    handles: Vec<HANDLE>,
+    context: Box<NotificationContext>,
+}
+
+impl NotificationOwners {
+    fn generation(&self) -> u64 {
+        self.context.generation.load(Ordering::Acquire)
+    }
+
+    fn set_owned_luid(&self, luid: NET_LUID_LH) {
+        self.context
+            .owned_luid
+            .store(unsafe { luid.Value }, Ordering::Release);
+    }
+
+    fn cancel_all(&mut self) -> bool {
+        let mut failed = false;
+        while let Some(handle) = self.handles.pop() {
+            failed |= unsafe { CancelMibChangeNotify2(handle) } != ERROR_SUCCESS;
+        }
+        failed
+    }
+}
+
+impl Drop for NotificationOwners {
+    fn drop(&mut self) {
+        let _ = self.cancel_all();
+    }
+}
+
+unsafe extern "system" fn route_changed(
+    context: *const c_void,
+    row: *const MIB_IPFORWARD_ROW2,
+    _: i32,
+) {
+    let context = unsafe { &*context.cast::<NotificationContext>() };
+    let own = context.owned_luid.load(Ordering::Acquire);
+    if row.is_null() || own == 0 || unsafe { (*row).InterfaceLuid.Value } != own {
+        context.generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+unsafe extern "system" fn interface_changed(
+    context: *const c_void,
+    row: *const MIB_IPINTERFACE_ROW,
+    _: i32,
+) {
+    let context = unsafe { &*context.cast::<NotificationContext>() };
+    let own = context.owned_luid.load(Ordering::Acquire);
+    if row.is_null() || own == 0 || unsafe { (*row).InterfaceLuid.Value } != own {
+        context.generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+unsafe extern "system" fn address_changed(
+    context: *const c_void,
+    row: *const MIB_UNICASTIPADDRESS_ROW,
+    _: i32,
+) {
+    let context = unsafe { &*context.cast::<NotificationContext>() };
+    let own = context.owned_luid.load(Ordering::Acquire);
+    if row.is_null() || own == 0 || unsafe { (*row).InterfaceLuid.Value } != own {
+        context.generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+struct ManagedState {
+    notifications: NotificationOwners,
+    snapshot_generation: u64,
+    policy: UnderlayPolicy,
+    capture_routes: Vec<Ipv4Prefix>,
+    pending_route: Option<MIB_IPFORWARD_ROW2>,
+    routes: Vec<MIB_IPFORWARD_ROW2>,
+}
+
 /// Safe RAII owner of the exact Wintun adapter, address, MTU, session and DLL transaction.
 pub struct Adapter {
     config: AdapterConfig,
     library: Library,
     adapter: Option<WintunAdapter>,
     luid: NET_LUID_LH,
+    interface_index: u32,
     mtus: [Option<MtuState>; 2],
     addresses: Vec<MIB_UNICASTIPADDRESS_ROW>,
     session: Option<SessionState>,
     session_journal: SessionJournal,
     stop: StopSignal,
+    managed: Option<ManagedState>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -325,18 +469,25 @@ impl Adapter {
             library,
             adapter: None,
             luid: NET_LUID_LH::default(),
+            interface_index: 0,
             mtus: [None, None],
             addresses: Vec::with_capacity(2),
             session: None,
             session_journal: SessionJournal::default(),
             stop,
+            managed: None,
             _not_send: PhantomData,
         };
-        let setup = setup_transaction(&mut PlatformSetup {
-            owner: &mut owner,
-            deadline,
-            cancelled,
-        });
+        let setup = owner
+            .prepare_managed()
+            .and_then(|()| {
+                setup_transaction(&mut PlatformSetup {
+                    owner: &mut owner,
+                    deadline,
+                    cancelled,
+                })
+            })
+            .and_then(|()| owner.finish_managed());
         match finish_setup_transaction(setup, || owner.cleanup_inner()) {
             Ok(()) => Ok(owner),
             Err(error) => Err(error),
@@ -345,6 +496,10 @@ impl Adapter {
 
     pub fn stop_signal(&self) -> StopSignal {
         self.stop.clone()
+    }
+
+    pub fn underlay_policy(&self) -> Option<UnderlayPolicy> {
+        self.managed.as_ref().map(|state| state.policy.clone())
     }
 
     pub fn receive(&mut self) -> Result<Option<ReceivedPacket<'_>>, Error> {
@@ -509,8 +664,357 @@ impl Adapter {
         }
     }
 
+    fn prepare_managed(&mut self) -> Result<(), Error> {
+        let Some(config) = self.config.managed_ipv4().cloned() else {
+            return Ok(());
+        };
+        let notifications = subscribe_network_changes()?;
+        let snapshot_generation = notifications.generation();
+        let policy = snapshot_underlay(&config)?;
+        self.managed = Some(ManagedState {
+            notifications,
+            snapshot_generation,
+            policy,
+            capture_routes: config.capture_routes().to_vec(),
+            pending_route: None,
+            routes: Vec::with_capacity(config.capture_routes().len()),
+        });
+        Ok(())
+    }
+
+    fn finish_managed(&mut self) -> Result<(), Error> {
+        let Some(state) = self.managed.as_mut() else {
+            return Ok(());
+        };
+        state.notifications.set_owned_luid(self.luid);
+        for prefix in state.capture_routes.clone() {
+            let row = capture_route_row(self.luid, self.interface_index, prefix);
+            require_route_absent(&row)?;
+            if unsafe { CreateIpForwardEntry2(&row) } != ERROR_SUCCESS {
+                return Err(Error);
+            }
+            state.pending_route = Some(row);
+            let current = read_owned_route(&row)?;
+            if !route_matches(&row, &current) {
+                return Err(Error);
+            }
+            state.routes.push(state.pending_route.take().ok_or(Error)?);
+        }
+        if state.notifications.generation() != state.snapshot_generation
+            || !underlay_matches(&state.policy)?
+        {
+            return Err(Error);
+        }
+        Ok(())
+    }
+
     fn cleanup_inner(&mut self) -> bool {
         cleanup_transaction(&mut PlatformCleanup(self))
+    }
+}
+
+fn subscribe_network_changes() -> Result<NotificationOwners, Error> {
+    let context = Box::new(NotificationContext {
+        generation: AtomicU64::new(0),
+        owned_luid: AtomicU64::new(0),
+    });
+    let context_pointer = (&raw const *context).cast::<c_void>();
+    let mut owners = NotificationOwners {
+        handles: Vec::with_capacity(3),
+        context,
+    };
+    let mut handle = null_mut();
+    if unsafe {
+        NotifyRouteChange2(
+            AF_INET,
+            Some(route_changed),
+            context_pointer,
+            false,
+            &mut handle,
+        )
+    } != ERROR_SUCCESS
+        || handle.is_null()
+    {
+        return Err(Error);
+    }
+    owners.handles.push(handle);
+    handle = null_mut();
+    if unsafe {
+        NotifyIpInterfaceChange(
+            AF_INET,
+            Some(interface_changed),
+            context_pointer,
+            false,
+            &mut handle,
+        )
+    } != ERROR_SUCCESS
+        || handle.is_null()
+    {
+        return Err(Error);
+    }
+    owners.handles.push(handle);
+    handle = null_mut();
+    if unsafe {
+        NotifyUnicastIpAddressChange(
+            AF_INET,
+            Some(address_changed),
+            context_pointer,
+            false,
+            &mut handle,
+        )
+    } != ERROR_SUCCESS
+        || handle.is_null()
+    {
+        return Err(Error);
+    }
+    owners.handles.push(handle);
+    Ok(owners)
+}
+
+fn snapshot_underlay(config: &crate::ManagedIpv4Config) -> Result<UnderlayPolicy, Error> {
+    let interfaces = eligible_interfaces()?;
+    let mut fixed = Vec::with_capacity(config.physical_endpoints().len());
+    for endpoint in config.physical_endpoints() {
+        let destination = ipv4_sockaddr(*endpoint.ip());
+        let mut index = 0;
+        if unsafe { GetBestInterfaceEx((&raw const destination).cast::<SOCKADDR>(), &mut index) }
+            != ERROR_SUCCESS
+            || !interfaces
+                .iter()
+                .any(|candidate| candidate.InterfaceIndex == index)
+        {
+            return Err(Error);
+        }
+        fixed.push((*endpoint, constrained_route(*endpoint.ip(), index, true)?));
+    }
+    let default = if config.needs_default_binder() {
+        Some(unique_default_route(&interfaces)?)
+    } else {
+        None
+    };
+    Ok(UnderlayPolicy {
+        fixed: fixed.into(),
+        default,
+    })
+}
+
+fn underlay_matches(policy: &UnderlayPolicy) -> Result<bool, Error> {
+    let interfaces = eligible_interfaces()?;
+    for (endpoint, expected) in policy.fixed.iter() {
+        let destination = ipv4_sockaddr(*endpoint.ip());
+        let mut index = 0;
+        if unsafe { GetBestInterfaceEx((&raw const destination).cast::<SOCKADDR>(), &mut index) }
+            != ERROR_SUCCESS
+            || index != expected.interface_index
+            || constrained_route(*endpoint.ip(), index, true)? != *expected
+        {
+            return Ok(false);
+        }
+    }
+    if let Some(expected) = policy.default
+        && unique_default_route(&interfaces)? != expected
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn eligible_interfaces() -> Result<Vec<MIB_IF_ROW2>, Error> {
+    let mut table: *mut MIB_IF_TABLE2 = null_mut();
+    if unsafe { GetIfTable2(&mut table) } != ERROR_SUCCESS || table.is_null() {
+        return Err(Error);
+    }
+    let owner = MibTable(table.cast());
+    let count = unsafe { (*table).NumEntries as usize };
+    let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
+    let result = rows
+        .iter()
+        .copied()
+        .filter(|row| {
+            row.InterfaceIndex != 0
+                && row.Type
+                    != windows_sys::Win32::NetworkManagement::IpHelper::IF_TYPE_SOFTWARE_LOOPBACK
+                && row.OperStatus == IfOperStatusUp
+                && row.AdminStatus == NET_IF_ADMIN_STATUS_UP
+                && row.MediaConnectState == MediaConnectStateConnected
+                && row.InterfaceAndOperStatusFlags._bitfield & 1 == 1
+        })
+        .collect();
+    drop(owner);
+    Ok(result)
+}
+
+struct MibTable(*mut c_void);
+
+impl Drop for MibTable {
+    fn drop(&mut self) {
+        unsafe { FreeMibTable(self.0) };
+    }
+}
+
+fn unique_default_route(interfaces: &[MIB_IF_ROW2]) -> Result<RouteFingerprint, Error> {
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = null_mut();
+    if unsafe { GetIpForwardTable2(AF_INET, &mut table) } != ERROR_SUCCESS || table.is_null() {
+        return Err(Error);
+    }
+    let owner = MibTable(table.cast());
+    let count = unsafe { (*table).NumEntries as usize };
+    let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
+    let mut defaults = rows.iter().filter(|row| {
+        interfaces
+            .iter()
+            .any(|candidate| candidate.InterfaceIndex == row.InterfaceIndex)
+            && row.DestinationPrefix.PrefixLength == 0
+            && unsafe { row.DestinationPrefix.Prefix.si_family } == AF_INET
+            && unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr } == 0
+    });
+    let row = defaults.next().copied().ok_or(Error)?;
+    if defaults.next().is_some() {
+        return Err(Error);
+    }
+    let fingerprint = route_fingerprint(&row, None)?;
+    drop(owner);
+    Ok(fingerprint)
+}
+
+fn constrained_route(
+    destination: std::net::Ipv4Addr,
+    interface_index: u32,
+    require_source: bool,
+) -> Result<RouteFingerprint, Error> {
+    let destination = ipv4_sockaddr(destination);
+    let mut route = MIB_IPFORWARD_ROW2::default();
+    let mut source = SOCKADDR_INET::default();
+    if unsafe {
+        GetBestRoute2(
+            null(),
+            interface_index,
+            null(),
+            &destination,
+            0,
+            &mut route,
+            &mut source,
+        )
+    } != ERROR_SUCCESS
+        || route.InterfaceIndex != interface_index
+        || unsafe { source.si_family } != AF_INET
+    {
+        return Err(Error);
+    }
+    let source = unsafe { source.Ipv4.sin_addr.S_un.S_addr };
+    if require_source && source == 0 {
+        return Err(Error);
+    }
+    route_fingerprint(&route, require_source.then_some(source))
+}
+
+fn route_fingerprint(
+    row: &MIB_IPFORWARD_ROW2,
+    source: Option<u32>,
+) -> Result<RouteFingerprint, Error> {
+    if unsafe { row.DestinationPrefix.Prefix.si_family } != AF_INET
+        || unsafe { row.NextHop.si_family } != AF_INET
+    {
+        return Err(Error);
+    }
+    Ok(RouteFingerprint {
+        interface_index: row.InterfaceIndex,
+        destination: unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr },
+        prefix_length: row.DestinationPrefix.PrefixLength,
+        next_hop: unsafe { row.NextHop.Ipv4.sin_addr.S_un.S_addr },
+        metric: row.Metric,
+        source,
+    })
+}
+
+fn ipv4_sockaddr(address: std::net::Ipv4Addr) -> SOCKADDR_INET {
+    SOCKADDR_INET {
+        Ipv4: SOCKADDR_IN {
+            sin_family: AF_INET,
+            sin_port: 0,
+            sin_addr: IN_ADDR {
+                S_un: IN_ADDR_0 {
+                    S_addr: u32::from_ne_bytes(address.octets()),
+                },
+            },
+            sin_zero: [0; 8],
+        },
+    }
+}
+
+fn capture_route_row(
+    luid: NET_LUID_LH,
+    interface_index: u32,
+    prefix: Ipv4Prefix,
+) -> MIB_IPFORWARD_ROW2 {
+    let mut row = MIB_IPFORWARD_ROW2::default();
+    unsafe { InitializeIpForwardEntry(&mut row) };
+    row.InterfaceLuid = luid;
+    row.InterfaceIndex = interface_index;
+    row.DestinationPrefix.Prefix = ipv4_sockaddr(prefix.address());
+    row.DestinationPrefix.PrefixLength = prefix.length();
+    row.NextHop = ipv4_sockaddr(std::net::Ipv4Addr::UNSPECIFIED);
+    row.SitePrefixLength = 0;
+    row.ValidLifetime = u32::MAX;
+    row.PreferredLifetime = u32::MAX;
+    row.Metric = 1;
+    row.Protocol = MIB_IPPROTO_NETMGMT;
+    row.Loopback = false;
+    row.AutoconfigureAddress = false;
+    row.Publish = false;
+    row.Immortal = false;
+    row.Age = 0;
+    row.Origin = NlroManual;
+    row
+}
+
+fn route_key(intended: &MIB_IPFORWARD_ROW2) -> MIB_IPFORWARD_ROW2 {
+    let mut key = MIB_IPFORWARD_ROW2::default();
+    unsafe { InitializeIpForwardEntry(&mut key) };
+    key.InterfaceLuid = intended.InterfaceLuid;
+    key.InterfaceIndex = intended.InterfaceIndex;
+    key.DestinationPrefix = intended.DestinationPrefix;
+    key.NextHop = intended.NextHop;
+    key
+}
+
+fn require_route_absent(row: &MIB_IPFORWARD_ROW2) -> Result<(), Error> {
+    let mut current = route_key(row);
+    match unsafe { GetIpForwardEntry2(&mut current) } {
+        ERROR_NOT_FOUND => Ok(()),
+        _ => Err(Error),
+    }
+}
+
+fn read_owned_route(row: &MIB_IPFORWARD_ROW2) -> Result<MIB_IPFORWARD_ROW2, Error> {
+    let mut current = route_key(row);
+    if unsafe { GetIpForwardEntry2(&mut current) } == ERROR_SUCCESS {
+        Ok(current)
+    } else {
+        Err(Error)
+    }
+}
+
+fn route_matches(expected: &MIB_IPFORWARD_ROW2, actual: &MIB_IPFORWARD_ROW2) -> bool {
+    unsafe {
+        actual.InterfaceLuid.Value == expected.InterfaceLuid.Value
+            && actual.InterfaceIndex == expected.InterfaceIndex
+            && actual.DestinationPrefix.Prefix.si_family == AF_INET
+            && actual.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr
+                == expected.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr
+            && actual.DestinationPrefix.PrefixLength == expected.DestinationPrefix.PrefixLength
+            && actual.NextHop.si_family == AF_INET
+            && actual.NextHop.Ipv4.sin_addr.S_un.S_addr == 0
+            && actual.SitePrefixLength == 0
+            && actual.ValidLifetime == u32::MAX
+            && actual.PreferredLifetime == u32::MAX
+            && actual.Metric == 1
+            && actual.Protocol == MIB_IPPROTO_NETMGMT
+            && !actual.Loopback
+            && !actual.AutoconfigureAddress
+            && !actual.Publish
+            && !actual.Immortal
+            && actual.Origin == NlroManual
     }
 }
 
@@ -532,6 +1036,12 @@ fn finish_setup_transaction(
 
 trait CleanupOperations {
     fn session_is_idle(&mut self) -> bool;
+    fn cancel_notifications(&mut self) -> Option<bool> {
+        None
+    }
+    fn delete_last_route(&mut self) -> Option<bool> {
+        None
+    }
     fn end_session(&mut self) -> Option<bool>;
     fn delete_last_address(&mut self) -> Option<bool>;
     fn restore_ipv6_mtu(&mut self) -> Option<bool>;
@@ -543,7 +1053,11 @@ fn cleanup_transaction(cleanup: &mut impl CleanupOperations) -> bool {
     if !cleanup.session_is_idle() {
         return true;
     }
-    let mut failed = cleanup.end_session().unwrap_or(false);
+    let mut failed = cleanup.cancel_notifications().unwrap_or(false);
+    while let Some(step_failed) = cleanup.delete_last_route() {
+        failed |= step_failed;
+    }
+    failed |= cleanup.end_session().unwrap_or(false);
     while let Some(step_failed) = cleanup.delete_last_address() {
         failed |= step_failed;
     }
@@ -577,6 +1091,32 @@ impl PlatformCleanup<'_> {
 impl CleanupOperations for PlatformCleanup<'_> {
     fn session_is_idle(&mut self) -> bool {
         self.0.session_journal.cleanup_is_safe()
+    }
+
+    fn cancel_notifications(&mut self) -> Option<bool> {
+        self.0
+            .managed
+            .as_mut()
+            .map(|state| state.notifications.cancel_all())
+    }
+
+    fn delete_last_route(&mut self) -> Option<bool> {
+        let state = self.0.managed.as_mut()?;
+        let intended = state.pending_route.take().or_else(|| state.routes.pop())?;
+        let mut current = route_key(&intended);
+        match unsafe { GetIpForwardEntry2(&mut current) } {
+            ERROR_NOT_FOUND => Some(false),
+            ERROR_SUCCESS if route_matches(&intended, &current) => {
+                let deleted = unsafe { DeleteIpForwardEntry2(&current) };
+                let mut absent = route_key(&intended);
+                let readback = unsafe { GetIpForwardEntry2(&mut absent) };
+                Some(
+                    deleted != ERROR_SUCCESS && deleted != ERROR_NOT_FOUND
+                        || readback != ERROR_NOT_FOUND,
+                )
+            }
+            _ => Some(true),
+        }
     }
 
     fn end_session(&mut self) -> Option<bool> {
@@ -730,6 +1270,15 @@ impl SetupOperations for PlatformSetup<'_> {
         }
         self.owner.adapter = Some(adapter);
         unsafe { (self.owner.library.exports.get_adapter_luid)(adapter, &mut self.owner.luid) };
+        if unsafe { ConvertInterfaceLuidToIndex(&self.owner.luid, &mut self.owner.interface_index) }
+            != ERROR_SUCCESS
+            || self.owner.interface_index == 0
+        {
+            return Err(Error);
+        }
+        if let Some(state) = &self.owner.managed {
+            state.notifications.set_owned_luid(self.owner.luid);
+        }
         Ok(())
     }
 
@@ -1031,10 +1580,12 @@ mod tests {
         ABI_EXPORTS, AdapterCreateFailure, CleanupOperations, DLL_BYTES, DLL_SHA256, DadProgress,
         ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, Error, IpDadStateDeprecated,
         IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative,
-        LoaderOperations, SessionJournal, SetupOperations, classify_adapter_create_failure,
-        cleanup_transaction, dad_snapshot, finish_setup_transaction, load_transaction,
-        require_exports, setup_transaction, validate_artifact,
+        LoaderOperations, SessionJournal, SetupOperations, capture_route_row,
+        classify_adapter_create_failure, cleanup_transaction, dad_snapshot,
+        finish_setup_transaction, interface_index_option_value, load_transaction, require_exports,
+        route_matches, setup_transaction, validate_artifact,
     };
+    use crate::Ipv4Prefix;
 
     struct InjectedSetup {
         fail_at: Option<usize>,
@@ -1042,6 +1593,8 @@ mod tests {
         idle: bool,
         calls: Vec<&'static str>,
         resources: Vec<&'static str>,
+        notifications: bool,
+        routes: Vec<&'static str>,
         cleanup_calls: Vec<&'static str>,
     }
 
@@ -1120,6 +1673,22 @@ mod tests {
     impl CleanupOperations for InjectedSetup {
         fn session_is_idle(&mut self) -> bool {
             self.idle
+        }
+
+        fn cancel_notifications(&mut self) -> Option<bool> {
+            if !std::mem::take(&mut self.notifications) {
+                return None;
+            }
+            let position = self.cleanup_calls.len();
+            self.cleanup_calls.push("notifications");
+            Some(self.cleanup_fail_at == Some(position))
+        }
+
+        fn delete_last_route(&mut self) -> Option<bool> {
+            let route = self.routes.pop()?;
+            let position = self.cleanup_calls.len();
+            self.cleanup_calls.push(route);
+            Some(self.cleanup_fail_at == Some(position))
         }
 
         fn end_session(&mut self) -> Option<bool> {
@@ -1308,6 +1877,8 @@ mod tests {
                 idle: true,
                 calls: Vec::new(),
                 resources: Vec::new(),
+                notifications: false,
+                routes: Vec::new(),
                 cleanup_calls: Vec::new(),
             };
             assert!(setup_transaction(&mut setup).is_err(), "step {failed}");
@@ -1322,6 +1893,8 @@ mod tests {
             idle: true,
             calls: Vec::new(),
             resources: Vec::new(),
+            notifications: false,
+            routes: Vec::new(),
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut setup).expect("complete setup");
@@ -1389,6 +1962,8 @@ mod tests {
                 idle: true,
                 calls: Vec::new(),
                 resources: Vec::new(),
+                notifications: false,
+                routes: Vec::new(),
                 cleanup_calls: Vec::new(),
             };
             setup_transaction(&mut cleanup).expect("complete setup");
@@ -1403,6 +1978,8 @@ mod tests {
             idle: true,
             calls: Vec::new(),
             resources: Vec::new(),
+            notifications: false,
+            routes: Vec::new(),
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut cleanup).expect("complete setup");
@@ -1421,6 +1998,8 @@ mod tests {
             calls: Vec::new(),
             cleanup_fail_at: None,
             resources: Vec::new(),
+            notifications: false,
+            routes: Vec::new(),
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut overlap).expect("complete setup");
@@ -1446,5 +2025,69 @@ mod tests {
         })
         .expect("successful setup");
         assert!(!cleanup_called, "successful setup retains the journal");
+    }
+
+    #[test]
+    fn managed_route_initializer_and_exact_ownership_are_closed() {
+        let low = Ipv4Prefix::new("0.0.0.0".parse().unwrap(), 1).unwrap();
+        let high = Ipv4Prefix::new("128.0.0.0".parse().unwrap(), 1).unwrap();
+        let luid = windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH { Value: 7 };
+        let low = capture_route_row(luid, 11, low);
+        let high = capture_route_row(luid, 11, high);
+        assert!(route_matches(&low, &low));
+        assert!(route_matches(&high, &high));
+        assert_ne!(
+            unsafe { low.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr },
+            unsafe { high.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr }
+        );
+        let mut replacement = low;
+        replacement.Metric = 2;
+        assert!(!route_matches(&low, &replacement));
+
+        let mut cleanup = InjectedSetup {
+            fail_at: None,
+            cleanup_fail_at: Some(1),
+            idle: true,
+            calls: Vec::new(),
+            resources: Vec::new(),
+            notifications: false,
+            routes: Vec::new(),
+            cleanup_calls: Vec::new(),
+        };
+        setup_transaction(&mut cleanup).expect("complete adapter setup");
+        cleanup.notifications = true;
+        cleanup.routes.extend(["low-route", "high-route"]);
+        assert!(
+            cleanup_transaction(&mut cleanup),
+            "route conflict is surfaced"
+        );
+        assert_eq!(
+            cleanup.cleanup_calls,
+            [
+                "notifications",
+                "high-route",
+                "low-route",
+                "end-session",
+                "ipv6-address",
+                "ipv4-address",
+                "ipv6-mtu",
+                "ipv4-mtu",
+                "adapter",
+            ],
+            "route conflict cannot short-circuit reverse cleanup"
+        );
+        assert!(cleanup.resources.is_empty());
+        assert_eq!(low.Metric, 1);
+        assert_eq!(low.DestinationPrefix.PrefixLength, 1);
+        assert_eq!(unsafe { low.NextHop.Ipv4.sin_addr.S_un.S_addr }, 0);
+    }
+
+    #[test]
+    fn underlay_interface_option_is_exact_network_byte_order() {
+        assert_eq!(
+            interface_index_option_value(0x0102_0304).to_ne_bytes(),
+            [1, 2, 3, 4]
+        );
+        assert_ne!(interface_index_option_value(0x0102_0304), 0x0102_0304);
     }
 }

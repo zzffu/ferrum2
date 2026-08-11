@@ -23,6 +23,8 @@ pub(super) fn process_root(
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
     inbound: usize,
+    underlay: ferrum2_tun::UnderlayPublisher,
+    direct_binder: bool,
 ) -> ProcessRoot<RunError> {
     let metrics = Arc::clone(&context.metrics);
     let accepted_metrics = Arc::clone(&metrics);
@@ -46,7 +48,15 @@ pub(super) fn process_root(
             max_udp_mappings: config.max_udp_mappings,
             max_udp_buffered_bytes: config.max_udp_buffered_bytes,
             owned_buffer_bytes: config.owned_buffer_bytes,
+            capture_routes: config
+                .capture_routes
+                .into_iter()
+                .map(|route| (route.network(), route.prefix_len()))
+                .collect(),
+            physical_endpoints: config.physical_endpoints,
+            default_binder: direct_binder,
         },
+        underlay,
         RunError::StartupProtocol,
         RunError::RuntimeRoot,
         RunError::ShutdownCleanup,
@@ -528,6 +538,7 @@ mod tests {
             )
             .await
             .expect("direct TUN UDP association");
+        assert_eq!(engine.managed_binding_calls(), 1);
         association.activate(&engine).expect("direct activation");
         let length = association
             .prepare_application_request(
@@ -626,7 +637,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     }
 
     #[tokio::test]
-    async fn cancelled_prepare_cleanup_failure_maps_to_shutdown_cleanup() {
+    async fn managed_tun_lifecycle_cancelled_prepare_cleanup_failure_maps_to_shutdown_cleanup() {
         let entered = Arc::new(Notify::new());
         let prepare_entered = Arc::clone(&entered);
         let root = ProcessRoot::new_cancellable(move |mut cancellation| async move {

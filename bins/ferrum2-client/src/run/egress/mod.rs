@@ -43,6 +43,103 @@ enum SelectedEgress {
     Shadowsocks { first_server: SocketAddr },
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TcpBinding {
+    None,
+    Fixed,
+    DefaultIfIpv4,
+    DefaultIpv4Only,
+}
+
+#[cfg(windows)]
+const fn direct_tcp_binding(origin: ClientRequestOrigin, auto_route: bool) -> TcpBinding {
+    match (origin, auto_route) {
+        (ClientRequestOrigin::Tun, _) | (ClientRequestOrigin::Dns, true) => {
+            TcpBinding::DefaultIpv4Only
+        }
+        (ClientRequestOrigin::Socks, true) => TcpBinding::DefaultIfIpv4,
+        (ClientRequestOrigin::Socks | ClientRequestOrigin::Dns, false) => TcpBinding::None,
+    }
+}
+
+#[cfg(windows)]
+const fn proxy_tcp_binding(auto_route: bool) -> TcpBinding {
+    if auto_route {
+        TcpBinding::Fixed
+    } else {
+        TcpBinding::None
+    }
+}
+
+#[cfg(windows)]
+const fn managed_direct_ipv6_is_unsupported(origin: ClientRequestOrigin, auto_route: bool) -> bool {
+    matches!(origin, ClientRequestOrigin::Tun)
+        || auto_route && matches!(origin, ClientRequestOrigin::Dns)
+}
+
+#[cfg(all(windows, not(test)))]
+tokio::task_local! {
+    static TCP_BINDING: TcpBinding;
+}
+
+#[cfg(all(windows, not(test)))]
+#[derive(Clone)]
+pub(super) struct ManagedTcpDialer {
+    underlay: ferrum2_tun::UnderlayPublisher,
+}
+
+#[cfg(all(windows, not(test)))]
+impl ManagedTcpDialer {
+    pub(super) const fn new(underlay: ferrum2_tun::UnderlayPublisher) -> Self {
+        Self { underlay }
+    }
+}
+
+#[cfg(all(windows, not(test)))]
+impl ferrum2_runtime::TcpDialer for ManagedTcpDialer {
+    async fn connect(&self, address: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
+        let binding = TCP_BINDING
+            .try_with(|binding| *binding)
+            .map_err(|_| std::io::Error::other("managed TCP binding context missing"))?;
+        let socket = match address {
+            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+            SocketAddr::V6(_)
+                if matches!(binding, TcpBinding::None | TcpBinding::DefaultIfIpv4) =>
+            {
+                tokio::net::TcpSocket::new_v6()?
+            }
+            SocketAddr::V6(_) => return Err(std::io::Error::other("managed IPv4 required")),
+        };
+        match (binding, address) {
+            (TcpBinding::Fixed, SocketAddr::V4(endpoint)) => self
+                .underlay
+                .bind_fixed(&socket, endpoint)
+                .map_err(|_| std::io::Error::other("managed TCP binding failed"))?,
+            (TcpBinding::DefaultIfIpv4 | TcpBinding::DefaultIpv4Only, SocketAddr::V4(_)) => self
+                .underlay
+                .bind_default(&socket)
+                .map_err(|_| std::io::Error::other("managed TCP binding failed"))?,
+            (TcpBinding::None, _) => {}
+            (TcpBinding::DefaultIfIpv4, SocketAddr::V6(_)) => {}
+            (_, SocketAddr::V6(_)) => unreachable!("managed IPv6 rejected before socket"),
+        }
+        socket.connect(address).await
+    }
+}
+
+#[cfg(all(windows, not(test)))]
+type DefaultClientConnector = TokioConnector<
+    ferrum2_runtime::TcpConnector<
+        ferrum2_runtime::SystemSocketInspector,
+        ManagedTcpDialer,
+        ferrum2_runtime::SystemTcpResolver,
+    >,
+>;
+
+#[cfg(any(not(windows), test))]
+type DefaultClientConnector = TokioConnector<ferrum2_runtime::TcpConnector>;
+
 pub(super) struct ClientShadowsocksContext {
     pub(super) tcp_server: TargetAddr,
     pub(super) udp_server: SocketAddr,
@@ -84,7 +181,7 @@ pub(super) fn prepare_client_outbounds(
 }
 
 pub(super) struct ClientEgressEngine<
-    C = TokioConnector<ferrum2_runtime::TcpConnector>,
+    C = DefaultClientConnector,
     T = ferrum2_crypto::SystemClock,
     R = ferrum2_crypto::SystemRandom,
 > {
@@ -94,6 +191,10 @@ pub(super) struct ClientEgressEngine<
     pub(super) random: R,
     phase_deadlines: (Duration, Duration),
     pub(super) udp: Option<ClientUdpContext>,
+    underlay: ferrum2_tun::UnderlayPublisher,
+    auto_route: bool,
+    #[cfg(test)]
+    managed_binding_calls: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(super) udp_id_random: Option<Arc<dyn SecureRandom>>,
 }
@@ -116,9 +217,35 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             random,
             phase_deadlines,
             udp,
+            underlay: ferrum2_tun::UnderlayPublisher::new(),
+            auto_route: false,
+            #[cfg(test)]
+            managed_binding_calls: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             udp_id_random,
         }
+    }
+
+    pub(super) fn with_underlay(
+        mut self,
+        underlay: ferrum2_tun::UnderlayPublisher,
+        auto_route: bool,
+    ) -> Self {
+        self.underlay = underlay;
+        self.auto_route = auto_route;
+        self
+    }
+
+    #[cfg(test)]
+    fn record_managed_binding(&self) {
+        self.managed_binding_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(super) fn managed_binding_calls(&self) -> usize {
+        self.managed_binding_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn classify_selected(
@@ -151,7 +278,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         }
         if direct == 1 && hops.len() == 1 {
             #[cfg(windows)]
-            if origin == ClientRequestOrigin::Tun
+            if managed_direct_ipv6_is_unsupported(origin, self.auto_route)
                 && target
                     .and_then(TargetAddr::as_socket_addr)
                     .is_some_and(|target| target.is_ipv6())
@@ -192,9 +319,14 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             let deadline = timeout_limit
                 .unwrap_or(self.phase_deadlines.0)
                 .min(self.phase_deadlines.0);
-            return match tokio::time::timeout(deadline, self.connector.connect(application_target))
-                .await
-            {
+            #[cfg(all(windows, not(test)))]
+            let connect = TCP_BINDING.scope(
+                direct_tcp_binding(origin, self.auto_route),
+                self.connector.connect(application_target),
+            );
+            #[cfg(any(not(windows), test))]
+            let connect = self.connector.connect(application_target);
+            return match tokio::time::timeout(deadline, connect).await {
                 Ok(Ok(stream)) => Ok(tcp::ClientTcpFlow::Direct(stream)),
                 Ok(Err(error)) => Err(ClientOpenFailure::Connect(error.kind())),
                 Err(_) => Err(ClientOpenFailure::Connect(
@@ -209,7 +341,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
                 limit.min(self.phase_deadlines.1),
             )
         });
-        tcp::open(
+        let open = tcp::open(
             &self.outbounds,
             plan.hops(),
             &self.connector,
@@ -219,9 +351,10 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             deadlines,
             #[cfg(test)]
             observers,
-        )
-        .await
-        .map(tcp::ClientTcpFlow::Proxy)
+        );
+        #[cfg(all(windows, not(test)))]
+        let open = TCP_BINDING.scope(proxy_tcp_binding(self.auto_route), open);
+        open.await.map(tcp::ClientTcpFlow::Proxy)
     }
 
     pub(super) async fn prepare_udp(
@@ -233,7 +366,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         let selected = self
             .classify_selected(origin, plan.as_ref(), target)
             .map_err(ClientUdpPrepareFailure::Plan)?;
-        udp::prepare(self, plan, selected, tokio::net::UdpSocket::bind)
+        udp::prepare(self, origin, plan, selected, tokio::net::UdpSocket::bind)
             .await
             .map_err(|()| ClientUdpPrepareFailure::Unavailable)
     }
@@ -251,7 +384,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         let selected = self
             .classify_selected(ClientRequestOrigin::Socks, Some(&plan), None)
             .map_err(ClientUdpPrepareFailure::Plan)?;
-        udp::prepare(self, Some(plan), selected, bind)
+        udp::prepare(self, ClientRequestOrigin::Socks, Some(plan), selected, bind)
             .await
             .map_err(|()| ClientUdpPrepareFailure::Unavailable)
     }
@@ -552,6 +685,49 @@ mod m16_tests {
 
         #[cfg(windows)]
         {
+            assert_eq!(
+                direct_tcp_binding(ClientRequestOrigin::Socks, true),
+                TcpBinding::DefaultIfIpv4
+            );
+            assert_eq!(
+                direct_tcp_binding(ClientRequestOrigin::Tun, false),
+                TcpBinding::DefaultIpv4Only
+            );
+            assert_eq!(
+                direct_tcp_binding(ClientRequestOrigin::Dns, true),
+                TcpBinding::DefaultIpv4Only
+            );
+            assert_eq!(
+                direct_tcp_binding(ClientRequestOrigin::Dns, false),
+                TcpBinding::None
+            );
+            assert_eq!(proxy_tcp_binding(true), TcpBinding::Fixed);
+            assert_eq!(proxy_tcp_binding(false), TcpBinding::None);
+            assert!(managed_direct_ipv6_is_unsupported(
+                ClientRequestOrigin::Tun,
+                false
+            ));
+            assert!(managed_direct_ipv6_is_unsupported(
+                ClientRequestOrigin::Dns,
+                true
+            ));
+            assert!(!managed_direct_ipv6_is_unsupported(
+                ClientRequestOrigin::Dns,
+                false
+            ));
+            assert!(!managed_direct_ipv6_is_unsupported(
+                ClientRequestOrigin::Socks,
+                true
+            ));
+            assert!(super::udp::managed_direct_udp_ipv6_allowed(
+                ClientRequestOrigin::Socks
+            ));
+            assert!(!super::udp::managed_direct_udp_ipv6_allowed(
+                ClientRequestOrigin::Tun
+            ));
+            assert!(!super::udp::managed_direct_udp_ipv6_allowed(
+                ClientRequestOrigin::Dns
+            ));
             let ipv6 = TargetAddr::ip("[2001:db8::1]:443".parse().unwrap()).unwrap();
             let plan = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
             let tcp = engine

@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4};
 use std::time::Duration;
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -37,6 +37,82 @@ pub struct AdapterConfig {
     pub mtu: u16,
     pub ring_capacity: u32,
     pub ready_timeout: Duration,
+    managed_ipv4: Option<ManagedIpv4Config>,
+}
+
+/// One canonical IPv4 capture prefix. Platform route fields remain private.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ipv4Prefix {
+    address: Ipv4Addr,
+    length: u8,
+}
+
+impl Ipv4Prefix {
+    pub fn new(address: Ipv4Addr, length: u8) -> Result<Self, Error> {
+        if length == 0 || length > 32 {
+            return Err(Error);
+        }
+        let mask = u32::MAX.checked_shl(u32::from(32 - length)).unwrap_or(0);
+        if u32::from(address) & mask != u32::from(address) {
+            return Err(Error);
+        }
+        Ok(Self { address, length })
+    }
+
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    pub(crate) const fn address(self) -> Ipv4Addr {
+        self.address
+    }
+
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    pub(crate) const fn length(self) -> u8 {
+        self.length
+    }
+}
+
+/// Bounded managed IPv4 intent consumed by the existing Adapter transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedIpv4Config {
+    capture_routes: Vec<Ipv4Prefix>,
+    physical_endpoints: Vec<SocketAddrV4>,
+    default_binder: bool,
+}
+
+impl ManagedIpv4Config {
+    pub fn new(
+        capture_routes: Vec<Ipv4Prefix>,
+        mut physical_endpoints: Vec<SocketAddrV4>,
+        default_binder: bool,
+    ) -> Result<Self, Error> {
+        if capture_routes.len() > 256 || physical_endpoints.len() > 256 {
+            return Err(Error);
+        }
+        physical_endpoints.sort_unstable();
+        physical_endpoints.dedup();
+        if capture_routes.is_empty() && physical_endpoints.is_empty() && !default_binder {
+            return Err(Error);
+        }
+        Ok(Self {
+            capture_routes,
+            physical_endpoints,
+            default_binder,
+        })
+    }
+
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    pub(crate) fn capture_routes(&self) -> &[Ipv4Prefix] {
+        &self.capture_routes
+    }
+
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    pub(crate) fn physical_endpoints(&self) -> &[SocketAddrV4] {
+        &self.physical_endpoints
+    }
+
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    pub(crate) const fn needs_default_binder(&self) -> bool {
+        self.default_binder
+    }
 }
 
 impl AdapterConfig {
@@ -73,7 +149,19 @@ impl AdapterConfig {
             mtu,
             ring_capacity,
             ready_timeout,
+            managed_ipv4: None,
         })
+    }
+
+    /// Adds the already-validated managed IPv4 plan without touching the OS.
+    pub fn with_managed_ipv4(mut self, managed: ManagedIpv4Config) -> Self {
+        self.managed_ipv4 = Some(managed);
+        self
+    }
+
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    pub(crate) fn managed_ipv4(&self) -> Option<&ManagedIpv4Config> {
+        self.managed_ipv4.as_ref()
     }
 }
 
@@ -127,12 +215,12 @@ impl std::error::Error for Error {}
 #[allow(unsafe_code)]
 mod windows;
 #[cfg(all(windows, target_arch = "x86_64"))]
-pub use windows::{Adapter, ReceivedPacket, StopSignal};
+pub use windows::{Adapter, ReceivedPacket, StopSignal, UnderlayPolicy};
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 mod unsupported;
 #[cfg(not(all(windows, target_arch = "x86_64")))]
-pub use unsupported::{Adapter, ReceivedPacket, StopSignal};
+pub use unsupported::{Adapter, ReceivedPacket, StopSignal, UnderlayPolicy};
 
 #[cfg(test)]
 mod tests {
@@ -158,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_config_rejects_ring_and_name_mutations_without_os_work() {
+    fn safe_config_and_m16_redaction_reject_mutations_without_os_work() {
         let make = |name: &str, ring| {
             AdapterConfig::new(
                 name.into(),

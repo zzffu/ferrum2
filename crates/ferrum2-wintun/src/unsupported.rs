@@ -5,6 +5,8 @@ use crate::{AdapterConfig, CreateError, Error};
 pub struct Adapter;
 pub struct StopSignal;
 pub struct ReceivedPacket<'a>(&'a [u8]);
+#[derive(Clone)]
+pub struct UnderlayPolicy;
 
 impl Adapter {
     pub fn create(
@@ -16,6 +18,9 @@ impl Adapter {
     }
     pub fn stop_signal(&self) -> StopSignal {
         StopSignal
+    }
+    pub fn underlay_policy(&self) -> Option<UnderlayPolicy> {
+        None
     }
     pub fn receive(&mut self) -> Result<Option<ReceivedPacket<'_>>, Error> {
         Err(Error)

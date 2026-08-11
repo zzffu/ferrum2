@@ -64,6 +64,52 @@ pub struct Config {
     pub max_udp_mappings: usize,
     pub max_udp_buffered_bytes: usize,
     pub owned_buffer_bytes: u64,
+    pub capture_routes: Vec<(Ipv4Addr, u8)>,
+    pub physical_endpoints: Vec<std::net::SocketAddrV4>,
+    pub default_binder: bool,
+}
+
+/// Publish-once bridge from the private Wintun owner to client egress.
+#[derive(Clone, Default)]
+pub struct UnderlayPublisher {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    policy: Arc<std::sync::OnceLock<Option<ferrum2_wintun::UnderlayPolicy>>>,
+}
+
+impl UnderlayPublisher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    fn publish(&self, policy: Option<ferrum2_wintun::UnderlayPolicy>) -> Result<(), ()> {
+        self.policy.set(policy).map_err(|_| ())
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    pub fn bind_fixed<T: std::os::windows::io::AsRawSocket>(
+        &self,
+        socket: &T,
+        endpoint: std::net::SocketAddrV4,
+    ) -> Result<(), ferrum2_wintun::Error> {
+        self.policy
+            .get()
+            .and_then(Option::as_ref)
+            .ok_or(ferrum2_wintun::Error)?
+            .bind_fixed(socket, endpoint)
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    pub fn bind_default<T: std::os::windows::io::AsRawSocket>(
+        &self,
+        socket: &T,
+    ) -> Result<(), ferrum2_wintun::Error> {
+        self.policy
+            .get()
+            .and_then(Option::as_ref)
+            .ok_or(ferrum2_wintun::Error)?
+            .bind_default(socket)
+    }
 }
 
 /// Builds one required process root around the private owner-thread implementation.
@@ -71,8 +117,10 @@ pub struct Config {
 /// Error values are supplied by the binary so this deep module does not depend on
 /// configuration, policy, DNS, protocol, or observability crates.
 #[cfg(all(windows, target_arch = "x86_64"))]
+#[allow(clippy::too_many_arguments)]
 pub fn process_root<E, T, H, U, A, D>(
     config: Config,
+    underlay: UnderlayPublisher,
     startup: E,
     runtime: E,
     cleanup: E,
@@ -95,6 +143,7 @@ where
         }
         prepare(
             config,
+            underlay,
             RootErrors {
                 startup,
                 runtime,
@@ -114,8 +163,10 @@ where
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 /// Builds a required root that fails during preparation on unsupported targets.
+#[allow(clippy::too_many_arguments)]
 pub fn process_root<E, T, H, U, A, D>(
     _config: Config,
+    _underlay: UnderlayPublisher,
     startup: E,
     _runtime: E,
     _cleanup: E,
@@ -196,6 +247,14 @@ fn config_is_exact(config: &Config) -> bool {
             .contains(&config.udp_timeout)
         || !(1..=8192).contains(&config.max_udp_mappings)
         || !(65_536..=134_217_728).contains(&config.max_udp_buffered_bytes)
+        || config.capture_routes.len() > 256
+        || config.physical_endpoints.len() > 256
+        || config.capture_routes.iter().any(|(address, length)| {
+            *length == 0
+                || *length > 32
+                || u32::from(*address) & u32::MAX.checked_shl(u32::from(32 - *length)).unwrap_or(0)
+                    != u32::from(*address)
+        })
     {
         return false;
     }
@@ -225,6 +284,7 @@ fn config_is_exact(config: &Config) -> bool {
 #[cfg(all(windows, target_arch = "x86_64"))]
 async fn prepare<E, T>(
     config: Config,
+    underlay: UnderlayPublisher,
     errors: RootErrors<E>,
     mut cancellation: ProcessCancellation,
     handle_tcp: TcpHandler,
@@ -274,8 +334,12 @@ where
                 wake,
                 flows,
                 datagrams,
+                underlay: policy,
             }) => {
                 if std::time::Instant::now() >= deadline {
+                    return Err(prepare_failure(guard, errors.startup, errors.cleanup).await);
+                }
+                if underlay.publish(policy).is_err() {
                     return Err(prepare_failure(guard, errors.startup, errors.cleanup).await);
                 }
                 guard.wake = Some(wake);
@@ -346,6 +410,7 @@ enum OwnerReady<T> {
         wake: ferrum2_wintun::StopSignal,
         flows: tokio::sync::mpsc::Receiver<TcpFlow>,
         datagrams: tokio::sync::mpsc::Receiver<UdpCandidate<T>>,
+        underlay: Option<ferrum2_wintun::UnderlayPolicy>,
     },
     Failed,
 }
@@ -602,7 +667,34 @@ fn owner_main<T: Send + 'static>(
         config.ring_capacity,
         config.ready_timeout,
     ) {
-        Ok(config) => config,
+        Ok(adapter) => {
+            if config.capture_routes.is_empty()
+                && config.physical_endpoints.is_empty()
+                && !config.default_binder
+            {
+                adapter
+            } else {
+                let routes = config
+                    .capture_routes
+                    .iter()
+                    .map(|(address, length)| ferrum2_wintun::Ipv4Prefix::new(*address, *length))
+                    .collect::<Result<Vec<_>, _>>();
+                let managed = routes.and_then(|routes| {
+                    ferrum2_wintun::ManagedIpv4Config::new(
+                        routes,
+                        config.physical_endpoints.clone(),
+                        config.default_binder,
+                    )
+                });
+                match managed {
+                    Ok(managed) => adapter.with_managed_ipv4(managed),
+                    Err(_) => {
+                        let _ = ready.send(OwnerReady::Failed);
+                        return OwnerExit::RuntimeFailed;
+                    }
+                }
+            }
+        }
         Err(_) => {
             let _ = ready.send(OwnerReady::Failed);
             return OwnerExit::RuntimeFailed;
@@ -620,6 +712,7 @@ fn owner_main<T: Send + 'static>(
         }
     };
     let wake = adapter.stop_signal();
+    let underlay = adapter.underlay_policy();
     let stack = Stack::new_with_udp(
         (
             config.ipv4,
@@ -656,6 +749,7 @@ fn owner_main<T: Send + 'static>(
             wake,
             flows,
             datagrams,
+            underlay,
         })
         .is_err()
     {

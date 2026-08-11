@@ -29,6 +29,117 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+#[test]
+fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
+    let root = workspace_root();
+    let wintun = fs::read_to_string(root.join("crates/ferrum2-wintun/src/windows.rs"))
+        .expect("Wintun Windows owner");
+    let tun = fs::read_to_string(root.join("crates/ferrum2-tun/src/lib.rs")).expect("TUN owner");
+    let client = fs::read_to_string(root.join("bins/ferrum2-client/src/run.rs"))
+        .expect("client composition");
+    let egress = fs::read_to_string(root.join("bins/ferrum2-client/src/run/egress/mod.rs"))
+        .expect("client egress");
+    let udp = fs::read_to_string(root.join("bins/ferrum2-client/src/run/egress/udp.rs"))
+        .expect("client UDP egress");
+
+    assert!(
+        wintun.contains("GetBestInterfaceEx")
+            && wintun.contains("GetBestRoute2")
+            && wintun.contains("InitializeIpForwardEntry")
+            && wintun.contains("CreateIpForwardEntry2")
+            && wintun.contains("GetIpForwardEntry2")
+            && wintun.contains("DeleteIpForwardEntry2")
+            && wintun.contains("state.pending_route = Some(row)")
+            && wintun.contains("state.pending_route.take().or_else(|| state.routes.pop())")
+            && wintun.contains("IP_UNICAST_IF")
+            && wintun.contains("to_be()"),
+        "the sole unsafe Wintun owner must retain route discovery, exact route journal and network-order socket binding"
+    );
+    assert!(
+        tun.contains("let underlay = adapter.underlay_policy();")
+            && tun.contains("underlay.publish(policy)")
+            && tun.find("underlay.publish(policy)").unwrap()
+                < tun.find("return Ok(Some(TunRoot").unwrap(),
+        "the Wintun owner must publish its immutable underlay policy before Ready"
+    );
+    assert!(
+        client.rfind("roots.push(tun::process_root(")
+            > client.rfind("roots.push(ProcessRoot::new("),
+        "the managed TUN root must be composed last"
+    );
+    let tcp_binding_precedes_connect = |source: &str| {
+        let source = source.split_whitespace().collect::<String>();
+        let connect = source.find("socket.connect(address).await")?;
+        let fixed = source.find(
+            ".bind_fixed(&socket,endpoint).map_err(|_|std::io::Error::other(\"managedTCPbindingfailed\"))?",
+        )?;
+        let default = source.find(
+            ".bind_default(&socket).map_err(|_|std::io::Error::other(\"managedTCPbindingfailed\"))?",
+        )?;
+        (fixed < connect
+            && default < connect
+            && source.contains(
+                "TCP_BINDING.try_with(|binding|*binding).map_err(|_|std::io::Error::other(\"managedTCPbindingcontextmissing\"))?",
+            )
+            && !source.contains("unwrap_or(TcpBinding::None)")
+            && source.matches("socket.connect(address).await").count() == 1)
+            .then_some(())
+    };
+    let udp_binding_precedes_io = |source: &str| {
+        let source = source.split_whitespace().collect::<String>();
+        let connect = source.find("upstream.connect(first_server).await")?;
+        let fixed = source.find(".bind_fixed(&upstream,endpoint).map_err(|_|())?")?;
+        let managed = source.find("ClientDirectUdpSocket::Managed{ipv4,ipv6}")?;
+        let default = source.find("underlay.bind_default(&ipv4).map_err(|_|())?")?;
+        (fixed < connect
+            && default < managed
+            && source.contains("iftarget.is_ipv4()=>ipv4.send_to(payload,target).await")
+            && source.contains("ipv6:Some(ipv6),..}=>ipv6.send_to(payload,target).await")
+            && source.contains("Self::Managed{ipv6:None,..}=>")
+            && source.contains("managed_direct_udp_ipv6_allowed(origin)"))
+        .then_some(())
+    };
+    assert!(
+        tcp_binding_precedes_connect(&egress).is_some() && udp_binding_precedes_io(&udp).is_some(),
+        "the existing client egress engine must bind before connect/send and never retry unpinned"
+    );
+    for mutation in [
+        egress.replace(
+            ".bind_fixed(&socket, endpoint)",
+            ".bind_fixed_after_connect(endpoint)",
+        ),
+        egress.replace(
+            ".bind_default(&socket)",
+            ".bind_default_after_connect(&socket)",
+        ),
+        egress.replace(
+            "socket.connect(address).await",
+            "unbound_connect(address).await",
+        ),
+    ] {
+        assert!(
+            tcp_binding_precedes_connect(&mutation).is_none(),
+            "TCP bind/connect mutation survived"
+        );
+    }
+    for mutation in [
+        udp.replace(
+            ".bind_fixed(&upstream, endpoint)",
+            ".bind_fixed_after_send(endpoint)",
+        ),
+        udp.replace("underlay.bind_default(&ipv4)", "bind_after_send(&ipv4)"),
+        udp.replace(
+            "ipv4.send_to(payload, target)",
+            "ipv6.send_to(payload, target)",
+        ),
+    ] {
+        assert!(
+            udp_binding_precedes_io(&mutation).is_none(),
+            "UDP bind/send mutation survived"
+        );
+    }
+}
+
 fn metadata() -> Value {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--locked", "--format-version", "1"])
@@ -2324,9 +2435,15 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         sources.iter().all(|source| {
             source.production_tokens().is_ok_and(|tokens| {
                 tokens.iter().all(|token| {
-                    forbidden_platform_prefixes
+                    let forbidden = forbidden_platform_prefixes
                         .iter()
-                        .all(|prefix| !token.starts_with(prefix))
+                        .any(|prefix| token.starts_with(prefix));
+                    !forbidden
+                        || source.path == "crates/ferrum2-wintun/src/windows.rs"
+                            && matches!(
+                                token.as_str(),
+                                "CreateIpForwardEntry2" | "DeleteIpForwardEntry2"
+                            )
                 })
             })
         })
@@ -2457,7 +2574,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         "WintunOpenAdapter",
         "WintunDeleteDriver",
         "WintunSetLogger",
-        "CreateIpForwardEntry",
+        "SetIpForwardEntry",
         "SetInterfaceDnsSettings",
         "Fwpm",
     ] {
@@ -2466,6 +2583,15 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "forbidden platform surface {forbidden}"
         );
     }
+    assert!(
+        !wintun_windows
+            .replace("CreateIpForwardEntry2", "")
+            .contains("CreateIpForwardEntry")
+            && !wintun_windows
+                .replace("DeleteIpForwardEntry2", "")
+                .contains("DeleteIpForwardEntry"),
+        "Wintun route mutation must use only the exact M16 Create/DeleteIpForwardEntry2 surface"
+    );
 
     let controller = fs::read_to_string(root.join("tests/platform/qualify_windows_tun.ps1"))
         .expect("Windows TUN qualification controller");
@@ -3902,7 +4028,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .all(|required| adapter.contains(required))
                 && [
                     "async fn m16_direct_pre_socket_and_m16_redaction_classify_without_side_effects()",
-                    "origin == ClientRequestOrigin::Tun",
+                    "matches!(origin, ClientRequestOrigin::Tun)",
                     "ClientRequestOrigin::Socks",
                     "ClientPlanFailure::DirectIpv6Unsupported",
                 ]
@@ -3950,7 +4076,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         (
             tun.clone(),
             client_tun.clone(),
-            client_egress.replace("origin == ClientRequestOrigin::Tun", "origin.is_tun()"),
+            client_egress.replace(
+                "matches!(origin, ClientRequestOrigin::Tun)",
+                "origin.is_tun()",
+            ),
             config_contract.clone(),
         ),
         (

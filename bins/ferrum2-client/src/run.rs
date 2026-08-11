@@ -15,7 +15,7 @@ use ferrum2_observability::{Metrics, Role, json_subscriber};
 use ferrum2_runtime::{
     BoundedSupervisor, MAX_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT,
     MIN_UDP_MAX_BUFFERED_BYTES, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot,
-    ProcessRootExit, ProcessSupervisor, TcpConnector, UdpRuntimeLimits, UdpSessionManager,
+    ProcessRootExit, ProcessSupervisor, UdpRuntimeLimits, UdpSessionManager,
 };
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 #[cfg(test)]
@@ -167,6 +167,13 @@ where
     S: std::future::Future<Output = ()> + Send,
 {
     let tun_config = config.tun;
+    let tun_auto_route = tun_config.as_ref().is_some_and(|tun| tun.auto_route);
+    let tun_direct = tun_config.is_some()
+        && config
+            .outbounds
+            .iter()
+            .any(|outbound| matches!(outbound, ferrum2_config::ClientOutboundConfig::Direct));
+    let underlay = ferrum2_tun::UnderlayPublisher::new();
     let dns = match (config.dns, config.dns_route, dns_specs) {
         (
             Some(DnsConfig {
@@ -250,19 +257,32 @@ where
     } else {
         None
     };
-    let egress = Arc::new(ClientEgressEngine::new(
-        Arc::clone(&outbounds),
-        TokioConnector::new(TcpConnector::new(config.runtime.connect_timeout)),
-        SystemClock::new(),
-        SystemRandom,
-        (
-            config.runtime.connect_timeout,
-            config.runtime.handshake_timeout,
-        ),
-        udp,
-        #[cfg(test)]
-        _udp_id_random,
+    #[cfg(all(windows, not(test)))]
+    let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::with_adapters(
+        ferrum2_runtime::SystemSocketInspector,
+        egress::ManagedTcpDialer::new(underlay.clone()),
+        config.runtime.connect_timeout,
     ));
+    #[cfg(any(not(windows), test))]
+    let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::new(
+        config.runtime.connect_timeout,
+    ));
+    let egress = Arc::new(
+        ClientEgressEngine::new(
+            Arc::clone(&outbounds),
+            connector,
+            SystemClock::new(),
+            SystemRandom,
+            (
+                config.runtime.connect_timeout,
+                config.runtime.handshake_timeout,
+            ),
+            udp,
+            #[cfg(test)]
+            _udp_id_random,
+        )
+        .with_underlay(underlay.clone(), tun_auto_route),
+    );
     let context = Arc::new(ClientContext {
         inbound: Socks5Inbound::new(),
         egress: Arc::clone(&egress),
@@ -319,15 +339,6 @@ where
                 routing: tcp_routing,
             })
         }));
-    }
-    if let Some(tun_config) = tun_config {
-        roots.push(tun::process_root(
-            tun_config,
-            tun_udp_idle_timeout.expect("TUN UDP idle retained"),
-            Arc::clone(&context),
-            routing,
-            tun_inbound,
-        ));
     }
     if let Some((inbounds, servers, route, policy, timeout, max_inflight, _)) = dns {
         let ordinary_dns = ordinary_dns.expect("validated DNS graph has an ordinary handle");
@@ -398,6 +409,17 @@ where
                 registry: metrics_registry,
             })
         }));
+    }
+    if let Some(tun_config) = tun_config {
+        roots.push(tun::process_root(
+            tun_config,
+            tun_udp_idle_timeout.expect("TUN UDP idle retained"),
+            Arc::clone(&context),
+            routing,
+            tun_inbound,
+            underlay,
+            tun_direct,
+        ));
     }
     let supervisor = ProcessSupervisor::new(roots, shutdown_grace, registry)
         .map_err(|_| RunError::StartupProtocol)?;
