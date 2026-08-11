@@ -365,6 +365,8 @@ struct NotificationContext {
     owned_luid: AtomicU64,
     provisional_luid: AtomicU64,
     callbacks_in_flight: AtomicU64,
+    #[cfg(test)]
+    drain_wait_observed: AtomicBool,
 }
 
 impl NotificationContext {
@@ -390,6 +392,8 @@ impl NotificationContext {
             }
         }
         while self.callbacks_in_flight.load(Ordering::SeqCst) != 0 {
+            #[cfg(test)]
+            self.drain_wait_observed.store(true, Ordering::SeqCst);
             if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
                 return Err(Error);
             }
@@ -967,6 +971,8 @@ fn subscribe_network_changes() -> Result<NotificationOwners, Error> {
         owned_luid: AtomicU64::new(0),
         provisional_luid: AtomicU64::new(0),
         callbacks_in_flight: AtomicU64::new(0),
+        #[cfg(test)]
+        drain_wait_observed: AtomicBool::new(false),
     });
     let context_pointer = (&raw const *context).cast::<c_void>();
     let (handles, context) = subscribe_notification_sequence(
@@ -1991,6 +1997,62 @@ mod tests {
     };
     use crate::Ipv4Prefix;
 
+    enum PublicationObservation<T> {
+        Blocked,
+        Early(T),
+        Disconnected,
+        Timeout,
+    }
+
+    fn observe_publication<T>(
+        context: &NotificationContext,
+        receiver: &std::sync::mpsc::Receiver<T>,
+        expected_luid: u64,
+        deadline: std::time::Instant,
+    ) -> (bool, bool, PublicationObservation<T>) {
+        let mut owner_observed = false;
+        let mut drain_observed = false;
+        loop {
+            owner_observed |=
+                context.owned_luid.load(std::sync::atomic::Ordering::SeqCst) == expected_luid;
+            drain_observed |= context
+                .drain_wait_observed
+                .load(std::sync::atomic::Ordering::SeqCst);
+            match receiver.try_recv() {
+                Ok(result) => {
+                    return (
+                        owner_observed,
+                        drain_observed,
+                        PublicationObservation::Early(result),
+                    );
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return (
+                        owner_observed,
+                        drain_observed,
+                        PublicationObservation::Disconnected,
+                    );
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if owner_observed && drain_observed {
+                return (
+                    owner_observed,
+                    drain_observed,
+                    PublicationObservation::Blocked,
+                );
+            }
+            if std::time::Instant::now() >= deadline {
+                return (
+                    owner_observed,
+                    drain_observed,
+                    PublicationObservation::Timeout,
+                );
+            }
+            std::thread::yield_now();
+        }
+    }
+
     #[test]
     fn notification_publication_waits_for_inflight_classifier() {
         const OWN_LUID: u64 = 0x1020_3040;
@@ -2005,16 +2067,19 @@ mod tests {
                 owned_luid: std::sync::atomic::AtomicU64::new(0),
                 provisional_luid: std::sync::atomic::AtomicU64::new(0),
                 callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
+                drain_wait_observed: std::sync::atomic::AtomicBool::new(false),
             };
             let entered = std::sync::Barrier::new(2);
-            let release = std::sync::Barrier::new(2);
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
             let (publisher_tx, publisher_rx) = std::sync::mpsc::sync_channel(1);
 
-            let (completed_while_paused, generation_at_publication) = std::thread::scope(|scope| {
-                let callback = scope.spawn(|| {
-                    classify_notification_luid(&context, notified_luid, || {
-                        entered.wait();
-                        release.wait();
+            let outcome = std::thread::scope(|scope| {
+                let callback_context = &context;
+                let callback_entered = &entered;
+                let callback = scope.spawn(move || {
+                    classify_notification_luid(callback_context, notified_luid, || {
+                        callback_entered.wait();
+                        let _ = release_rx.recv();
                     });
                 });
                 entered.wait();
@@ -2033,38 +2098,55 @@ mod tests {
                         ))
                         .unwrap();
                 });
-                let publication_deadline =
-                    std::time::Instant::now() + std::time::Duration::from_secs(1);
-                while context.owned_luid.load(std::sync::atomic::Ordering::SeqCst) != OWN_LUID {
-                    assert!(
-                        std::time::Instant::now() < publication_deadline,
-                        "publisher did not publish owner before callback release"
-                    );
-                    std::thread::yield_now();
-                }
-                std::thread::yield_now();
-                let early = match publisher_rx.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        panic!("publisher result channel disconnected")
-                    }
+                let (owner_observed, drain_observed, observation) = observe_publication(
+                    &context,
+                    &publisher_rx,
+                    OWN_LUID,
+                    std::time::Instant::now() + std::time::Duration::from_secs(1),
+                );
+                let (early, disconnected, timed_out) = match observation {
+                    PublicationObservation::Blocked => (None, false, false),
+                    PublicationObservation::Early(result) => (Some(result), false, false),
+                    PublicationObservation::Disconnected => (None, true, false),
+                    PublicationObservation::Timeout => (None, false, true),
                 };
-                release.wait();
-                callback.join().unwrap();
-                publisher.join().unwrap();
-                let result = early.unwrap_or_else(|| {
+                let released = release_tx.send(()).is_ok();
+                drop(release_tx);
+                let callback_joined = callback.join().is_ok();
+                let publisher_joined = publisher.join().is_ok();
+                let completed_while_paused = early.is_some();
+                let result = early.or_else(|| {
                     publisher_rx
                         .recv_timeout(std::time::Duration::from_secs(1))
-                        .unwrap()
+                        .ok()
                 });
-                (early.is_some(), result)
+                (
+                    owner_observed,
+                    drain_observed,
+                    completed_while_paused,
+                    disconnected,
+                    timed_out,
+                    released,
+                    callback_joined,
+                    publisher_joined,
+                    result,
+                )
             });
 
+            assert!(outcome.0, "{name}: owner publication was not observed");
+            assert!(outcome.1, "{name}: drain wait was not observed");
             assert!(
-                !completed_while_paused,
+                !outcome.2,
                 "{name}: owner publication completed before the callback classified its LUID"
             );
+            assert!(!outcome.3, "{name}: publisher result channel disconnected");
+            assert!(!outcome.4, "{name}: publisher observation timed out");
+            assert!(outcome.5, "{name}: callback release failed");
+            assert!(outcome.6, "{name}: callback thread failed");
+            assert!(outcome.7, "{name}: publisher thread failed");
+            let generation_at_publication = outcome
+                .8
+                .expect("publisher result missing after callback release");
             assert_eq!(
                 generation_at_publication.1, expected_generation,
                 "{name}: callback classification was not reflected before publication returned"
@@ -2084,6 +2166,61 @@ mod tests {
     }
 
     #[test]
+    fn notification_publication_observer_bounds_failure_paths() {
+        const OWN_LUID: u64 = 0x1020_3040;
+        let context = NotificationContext {
+            generation: std::sync::atomic::AtomicU64::new(0),
+            owned_luid: std::sync::atomic::AtomicU64::new(0),
+            provisional_luid: std::sync::atomic::AtomicU64::new(0),
+            callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
+            drain_wait_observed: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        let (publisher_tx, publisher_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let timeout =
+            observe_publication(&context, &publisher_rx, OWN_LUID, std::time::Instant::now());
+        assert!(matches!(timeout.2, PublicationObservation::Timeout));
+        drop(publisher_tx);
+        let disconnected = observe_publication(
+            &context,
+            &publisher_rx,
+            OWN_LUID,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        assert!(matches!(
+            disconnected.2,
+            PublicationObservation::Disconnected
+        ));
+
+        let (publisher_tx, publisher_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let publisher = std::thread::spawn(move || {
+            let _publisher_tx = publisher_tx;
+            let _release_tx = release_tx;
+            panic!("synthetic publisher panic");
+        });
+        let panic_observation = observe_publication(
+            &context,
+            &publisher_rx,
+            OWN_LUID,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        let release_disconnected = release_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_err();
+        let publisher_panicked = publisher.join().is_err();
+        assert!(matches!(
+            panic_observation.2,
+            PublicationObservation::Disconnected
+        ));
+        assert!(
+            release_disconnected,
+            "panic did not release callback channel"
+        );
+        assert!(publisher_panicked, "synthetic publisher did not panic");
+    }
+
+    #[test]
     fn notification_publication_deadline_and_cancellation_fail_closed() {
         const OWN_LUID: u64 = 0x1020_3040;
 
@@ -2100,6 +2237,7 @@ mod tests {
                 owned_luid: std::sync::atomic::AtomicU64::new(0),
                 provisional_luid: std::sync::atomic::AtomicU64::new(0),
                 callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
+                drain_wait_observed: std::sync::atomic::AtomicBool::new(false),
             };
             let entered = std::sync::Barrier::new(2);
             let release = std::sync::Barrier::new(2);
@@ -2277,6 +2415,7 @@ mod tests {
                         owned_luid: std::sync::atomic::AtomicU64::new(0),
                         provisional_luid: std::sync::atomic::AtomicU64::new(0),
                         callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
+                        drain_wait_observed: std::sync::atomic::AtomicBool::new(false),
                     })),
                 };
                 let context = (notifications.context.as_deref().unwrap()

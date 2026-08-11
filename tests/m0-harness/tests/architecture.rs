@@ -173,10 +173,9 @@ fn m16_managed_tun_pre_snapshot_generation_is_authoritative() {
     let source = fs::read_to_string(workspace_root().join("crates/ferrum2-wintun/src/windows.rs"))
         .expect("Wintun Windows owner");
     let compact = source.split_whitespace().collect::<String>();
-    let product = compact
-        .split("#[cfg(test)]")
-        .next()
-        .expect("Wintun product source");
+    let (product, _) = compact
+        .split_once("#[cfg(test)]modtests{")
+        .expect("exact Wintun test module boundary");
     let finish = source
         .split("fn finish_managed")
         .nth(1)
@@ -2483,10 +2482,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         fs::read_to_string(root.join("crates/ferrum2-wintun/src/lib.rs")).expect("Wintun root");
     let wintun_windows = fs::read_to_string(root.join("crates/ferrum2-wintun/src/windows.rs"))
         .expect("Wintun FFI module");
-    let wintun_production = wintun_windows
-        .split("#[cfg(test)]")
-        .next()
-        .expect("Wintun production");
+    let (wintun_production, _) = wintun_windows
+        .split_once("#[cfg(test)]\nmod tests {")
+        .expect("exact Wintun test module boundary");
     assert!(wintun_root.contains("#[allow(unsafe_code)]\nmod windows;"));
     assert_eq!(
         token_sources_under(&root, &["crates/ferrum2-wintun/src"])
