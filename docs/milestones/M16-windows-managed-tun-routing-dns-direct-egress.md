@@ -164,15 +164,15 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
       detour/no-detour can use the same direct mode；raw application payload returns and no SIP022 owner exists。
 - [x] Direct/proxy selected failure retains current no-fallback and selector snapshot semantics；TUN original
       target and UDP mapping selection lifetime remain unchanged。
-- [ ] Auto-route rejects IPv6 prefixes，compiles exact bounded IPv4 prefix subtraction，creates no `/0` or
+- [x] Auto-route rejects IPv6 prefixes，compiles exact bounded IPv4 prefix subtraction，creates no `/0` or
       physical bypass row，performs
       absent precheck/exact readback/reverse conditional cleanup and never adopts OS/third-party rows。
-- [ ] While auto-route is active，every reachable IPv4 proxy、direct and DNS physical socket is bound before
+- [x] While auto-route is active，every reachable IPv4 proxy、direct and DNS physical socket is bound before
       connect/first send；negative unpinned sockets are captured while positive pinned sockets do not enter
       Wintun。IPv6 concrete proxy or direct/no-detour DNS physical endpoints fail before mutation；an IPv6
       logical bootstrap behind an IPv4 proxy first hop remains allowed。With auto-route off，the exact M15-
       compatible IPv6 no-detour/direct DNS omission case remains unchanged。
-- [ ] Manual-route TUN+direct publishes the IPv4 binding before Ready and survives a controller route added afterward；
+- [x] Manual-route TUN+direct publishes the IPv4 binding before Ready and survives a controller route added afterward；
       no-direct `auto_route=false` makes no new managed-network state query/mutation and preserves M15 exactly，
       including IPv6 proxy and absent/direct-detour DNS egress。
 - [ ] Auto-DNS requires only `ipv4_dns_address`、rejects `ipv6_dns_address` and changes only owned Wintun IPv4
@@ -197,8 +197,8 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
 | M16-T01 | Prove IPv4 Windows host-network capabilities and freeze measured contracts | accepted Markdown-only IPv4 scope amendment atop `a8205c2…` | done |
 | M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | done |
 | M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | done |
-| M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | ready |
-| M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | planned |
+| M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | done |
+| M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | ready |
 | M16-T06 | Close network-change、failure、hard-kill and current-VM lifecycle evidence | M16-T05 | planned |
 | M16-T07 | Qualify and close one exact M16 integration SHA | M16-T06 | planned |
 
@@ -253,6 +253,18 @@ Footprint integrity passes；numeric `REVIEW_REQUIRED` is accepted for necessary
 code/tests `30341/52324`、ratio `1.724531 PASS`、case/support/fixture `46575/5152/597`、ticket deltas
 `+1133/0/0` and code growth `+245`，with no support/fixture/new harness。
 
+T04 exact candidate `2fdfbc7d0106e90e61739b810896f2feb17295cd`（tree
+`a4b2cc02bbd7dbc8a03a0256b266be4792d1f65d`，parent
+`2c770b7a3ef4f7896e24aea25d32b88df29cae48`）passes the restored-VM managed-product A/B：one marker and
+`before|auto-active|auto-cleanup|manual-active|after` phases，listener TCP/UDP `4/4`，PktMon unpinned TCP/UDP
+`5/1` with all six pinned rows at zero，auto cleanup `0/0/0/0/0`，manual routes `2` and TCP/UDP `1/1`，zero
+guest residue，unchanged host fingerprints and pristine final restore。This is scoped only to Windows 10
+Enterprise Evaluation `19044.1288`。Final Architect and QA both return `PASS_WITH_NOTES` with zero
+blocker/major/minor and one accepted note each。Footprint integrity passes；numeric `REVIEW_REQUIRED` is
+accepted at code/tests `31688/54418`、ratio `1.717306 PASS`、case/support/fixture delta `+2094/0/0` and code
+growth `+1347`；the existing `architecture.rs` is `4975` semantic test LOC（`+270`）。Controller-only failures
+remain uncredited and do not alter the product PASS。
+
 The first T02 non-force push moved `master` from `5630cf4…` to `5782c08…` with exact remote readback。
 Automatic push run `31443577764/1` is preserved as failed and was not rerun。MSRV、interop、test-footprint、
 Linux musl、Windows MSVC、Linux GNU and Windows TUN E2E succeeded；quality failed only at authoritative Full
@@ -280,9 +292,9 @@ must still bind its accepted exact SHA。
 
 ## Blocker / next action
 
-M16-T03 is done on final hosted product `85bf3fcc2a12bc1aaa2753bf56023c7850c25d2f`。Initial
-`M16-T03-ARCH-001` and `QA-M16-T03-001` are closed；final targeted Architect/QA report zero blocker/major/
-minor。M16-T04 is ready and is the current serial frontier；it owns managed capture and physical socket binding
-that T03 deliberately did not implement。The failed `31443577764/1` was not rerun；final T02
+M16-T04 is done at exact `2fdfbc7d0106e90e61739b810896f2feb17295cd`；both final reviews have zero
+blocker/major/minor，and the accepted footprint notes remain visible above。M16-T05 is ready and is the current
+serial frontier；DNS steering、performance/full qualification and 100-cycle claims remain pending。The failed
+`31443577764/1` was not rerun；final T02
 `master@bf0a3cb…` and automatic `31445081351/1` are hosted PASS。T03 failed run `31454190132/1` was not
 rerun；replacement `master@85bf3fcc…` and automatic `31454813712/1` are hosted PASS。

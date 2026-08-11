@@ -1235,7 +1235,7 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   amendment `451edcb…` → T01 capability/measured contracts `cc26aba…` done → T02 config graph
   `13b6d681…` repaired and final `master@bf0a3cb…` hosted-PASS/done → T03 direct TCP/UDP `9f05d94…` plus
   portability repair `master@85bf3fcc…` hosted-PASS/done → T04 capture/binding
-  ready → T05 DNS
+  `2fdfbc7…` VM-PASS/done → T05 DNS ready
   steering → T06 lifecycle/VM evidence → T07 exact qualification；serial drain。
 - **Entry gate:** exact VM `Windows 10 MSIX packaging environment` restored from checkpoint
   `M15-T04-before-2b0c25b-20260810` must record its actual product、edition、architecture and full version/build，
@@ -1252,12 +1252,16 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   `REVIEW_REQUIRED` at code/tests `30341/52324`、ratio `1.724531 PASS`、case/support/fixture
   `46575/5152/597`、ticket delta `+1133/0/0` and code growth `+245`；the required evidence remains in existing
   seams with no support/fixture/new harness。Performance is required without a threshold/improvement claim。
+  T04 reports integrity `PASS` and accepted numeric `REVIEW_REQUIRED` at code/tests `31688/54418`、ratio
+  `1.717306 PASS`、case/support/fixture delta `+2094/0/0` and code growth `+1347`；the existing
+  `architecture.rs` is `4975` semantic test LOC（`+270`）。
 - **Deferred/out of scope:** WFP/kill switch/DNS anti-leak、physical bypass rows、per-target multihomed routing、
   live migration、service/watchdog/installer、non-Windows managed TUN、new crate/dependency、ring-full
   maintenance unrelated to a proven blocker、M16-managed IPv6、release/publication。The IPv6 deferral does not
   weaken M15 manual-route IPv6、SIP022 IPv6 or non-managed/SOCKS direct IPv6。
-- **Next/remote boundary:** M16-T03 is done on final hosted `master@85bf3fcc…` and M16-T04 is ready /
-  current serial frontier。The first T02 non-force push integrated `5782c08…` to `master` with exact readback；
+- **Next/remote boundary:** M16-T04 is done on exact `2fdfbc7…` after restored-VM product PASS and dual final
+  `PASS_WITH_NOTES` reviews with zero blocker/major/minor；M16-T05 is ready / current serial frontier。The first
+  T02 non-force push integrated `5782c08…` to `master` with exact readback；
   automatic `31443577764/1` is preserved failed and was not rerun。Its MSRV、interop、test-footprint、three
   platforms and Windows TUN E2E passed；quality failed only at the three known Clippy lints，qualification failed
   closed，and push-event performance jobs were skipped。No hidden second failure exists。A subsequent non-force
@@ -1537,3 +1541,4 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 | 2026-08-11 | M16-T02 post-push Clippy repair / final hosted PASS | First T02 non-force push moved `master` `5630cf4…` → `5782c08…` with exact readback；automatic `31443577764/1` is preserved failed and was not rerun | That run passed MSRV、interop、footprint、three platforms and Windows TUN E2E but failed only at deterministic Full Clippy lints；one-file mechanical `13b6d681…`（`+3/-2`）closed them。A later non-force push integrated final descendant `bf0a3cb…`（tree `648de184…`，parent `13b6d681…`）to `master`；automatic `31445081351/1` passed quality、MSRV、interop、footprint、three platforms、Windows TUN E2E and qualification，with push-event performance jobs skipped as designed | Package/workspace Clippy、focused `4/4`、full config `33`、architecture `19`、workspace/fmt/hook/diff and Architect/QA `PASS` with zero findings；integrity PASS，numeric `30096/51191`、`1.700924`、`+756/0/0` advisory；no failed-run rerun、dispatch、force-push、PR/tag/package/release/publication |
 | 2026-08-11 | M16-T03 review closeout | Initial `30f0a6d…` composes the one private SOCKS/TUN/DNS Direct TCP/UDP engine；bounded three-file repair `9f05d94…`（tree `417337db…`，parent `30f0a6d…`，`+286/-8`）closes Direct UDP bounds and MemoryDevice/binary TUN process evidence；T03 done、T04 ready/current frontier | Initial Architect/QA `PASS_WITH_NOTES` retained `M16-T03-ARCH-001` and `QA-M16-T03-001` plus two QA notes；targeted Architect `PASS` and QA `PASS_WITH_NOTES` both report `0/0/0`，with only accepted non-Cartesian evidence/footprint notes | Runtime/client focused `4/4`、Direct UDP/TCP/DNS/redaction `1/1/7/1`、full TUN/client `15/53`、Direct E2E `1+1`、architecture `19` and warning-free workspace/Clippy/fmt/diff/hook PASS；first parallel full-client `WSAEACCES 10013` is uncredited，isolated and serial rerun passed with zero residue；integrity PASS，`30340/52323` ratio `1.724555` and `+1132/0/0` advisory accepted；this pre-push local closeout is superseded for remote state by the next row |
 | 2026-08-11 | M16-T03 post-hosted Clippy repair / final hosted PASS | Initial automatic run `31454190132/1` on `52beb463…` is preserved failed and was not rerun；quality alone found the non-Windows dead-code variant and qualification failed derivatively，while every other substantive job passed | Root's exact two-file `+4/-2` repair `85bf3fcc…` cfg-gates the Windows-only variant and SOCKS arm；Architect and QA both `PASS_WITH_NOTES` with `0/0/0` and one local Linux cross-Clippy availability note each | Authorized non-force push advanced `master` `52beb463…` → `85bf3fcc…` with exact readback；replacement `31454813712/1` passed quality、qualification、interop、footprint、MSRV、Linux GNU/musl、Windows MSVC and Windows TUN E2E；push-event performance skipped by design；integrity PASS、`30341/52324` ratio `1.724531`、`+1133/0/0` advisory accepted；no dispatch/rerun、force-push、PR/tag/package/release/publication |
+| 2026-08-11 | M16-T04 review closeout | Exact `2fdfbc7…` owns compatible IPv4 `/1` capture、fixed/dynamic physical pinning and the pre-Ready manual-route binder；T04 done、T05 ready/current frontier | Restored Windows 10 Enterprise Evaluation `19044.1288` product qualifier exited `0` with one marker、five ordered phases、listener TCP/UDP `4/4`、unpinned PktMon `5/1`、all six pinned rows zero、manual routes `2` and TCP/UDP `1/1`；guest/host/final cleanup passed。Controller-only failures remain uncredited | Final Architect/QA both `PASS_WITH_NOTES` with `0/0/0/1`；integrity PASS、numeric `REVIEW_REQUIRED` accepted at `31688/54418` ratio `1.717306`、`+2094/0/0`、code `+1347` and `architecture.rs` `4975/+270`；performance/full/100-cycle claims remain pending，no remote action |
