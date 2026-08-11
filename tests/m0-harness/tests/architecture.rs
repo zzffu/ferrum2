@@ -49,7 +49,7 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
             && wintun.contains("CreateIpForwardEntry2")
             && wintun.contains("GetIpForwardEntry2")
             && wintun.contains("DeleteIpForwardEntry2")
-            && wintun.contains("state.pending_route = Some(row)")
+            && wintun.contains("self.0.pending_route = Some(row)")
             && wintun.contains("state.pending_route.take().or_else(|| state.routes.pop())")
             && wintun.contains("IP_UNICAST_IF")
             && wintun.contains("to_be()"),
@@ -69,30 +69,27 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
     );
     let tcp_binding_precedes_connect = |source: &str| {
         let source = source.split_whitespace().collect::<String>();
-        let connect = source.find("socket.connect(address).await")?;
-        let fixed = source.find(
-            ".bind_fixed(&socket,endpoint).map_err(|_|std::io::Error::other(\"managedTCPbindingfailed\"))?",
-        )?;
-        let default = source.find(
-            ".bind_default(&socket).map_err(|_|std::io::Error::other(\"managedTCPbindingfailed\"))?",
-        )?;
+        let connect = source.find("operations.connect(socket,address).await")?;
+        let fixed = source.find("operations.bind_fixed(&socket,endpoint)?")?;
+        let default = source.find("operations.bind_default(&socket)?")?;
         (fixed < connect
             && default < connect
             && source.contains(
                 "TCP_BINDING.try_with(|binding|*binding).map_err(|_|std::io::Error::other(\"managedTCPbindingcontextmissing\"))?",
             )
             && !source.contains("unwrap_or(TcpBinding::None)")
-            && source.matches("socket.connect(address).await").count() == 1)
+            && source.matches("operations.connect(socket,address).await").count() == 1)
             .then_some(())
     };
     let udp_binding_precedes_io = |source: &str| {
         let source = source.split_whitespace().collect::<String>();
-        let connect = source.find("upstream.connect(first_server).await")?;
-        let fixed = source.find(".bind_fixed(&upstream,endpoint).map_err(|_|())?")?;
+        let connect = source.find("operations.connect(&socket,endpoint).await.map_err(|_|())?")?;
+        let fixed = source.find("operations.bind_fixed(&socket,endpoint)?")?;
+        let default = source.find("operations.bind_default(&socket)?")?;
         let managed = source.find("ClientDirectUdpSocket::Managed{ipv4,ipv6}")?;
-        let default = source.find("underlay.bind_default(&ipv4).map_err(|_|())?")?;
         (fixed < connect
-            && default < managed
+            && default < connect
+            && connect < managed
             && source.contains("iftarget.is_ipv4()=>ipv4.send_to(payload,target).await")
             && source.contains("ipv6:Some(ipv6),..}=>ipv6.send_to(payload,target).await")
             && source.contains("Self::Managed{ipv6:None,..}=>")
@@ -105,15 +102,15 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
     );
     for mutation in [
         egress.replace(
-            ".bind_fixed(&socket, endpoint)",
+            "operations.bind_fixed(&socket, endpoint)",
             ".bind_fixed_after_connect(endpoint)",
         ),
         egress.replace(
-            ".bind_default(&socket)",
+            "operations.bind_default(&socket)",
             ".bind_default_after_connect(&socket)",
         ),
         egress.replace(
-            "socket.connect(address).await",
+            "operations.connect(socket, address).await",
             "unbound_connect(address).await",
         ),
     ] {
@@ -124,10 +121,13 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
     }
     for mutation in [
         udp.replace(
-            ".bind_fixed(&upstream, endpoint)",
+            "operations.bind_fixed(&socket, endpoint)",
             ".bind_fixed_after_send(endpoint)",
         ),
-        udp.replace("underlay.bind_default(&ipv4)", "bind_after_send(&ipv4)"),
+        udp.replace(
+            "operations.bind_default(&socket)",
+            "bind_after_send(&socket)",
+        ),
         udp.replace(
             "ipv4.send_to(payload, target)",
             "ipv6.send_to(payload, target)",
@@ -138,6 +138,30 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
             "UDP bind/send mutation survived"
         );
     }
+
+    let wintun = wintun.split_whitespace().collect::<String>();
+    let preflight = wintun
+        .find("forrowinrows{operations.require_absent(row)?;}forrowinrows{operations.create_pending(*row)?;")
+        .is_some();
+    let post_capture = wintun
+        .split("fnunderlay_matches_with")
+        .nth(1)
+        .and_then(|body| body.split("structPlatformUnderlay").next())
+        .is_some_and(|body| {
+            body.contains("eligible_interfaces(Some(owned))")
+                && body.contains("constrained_route(*endpoint.ip(),expected.interface_index,true)")
+                && !body.contains("best_interface(")
+        });
+    assert!(
+        preflight
+            && post_capture
+            && wintun.contains("failed.push(handle)")
+            && wintun.contains("handles.append(&mutfailed)")
+            && wintun.contains("ifself.cancel_all(){leak_notification_owners")
+            && egress.contains("(ClientRequestOrigin::Dns, true) => TcpBinding::Fixed")
+            && udp.contains("ManagedUdpBinding::Fixed(endpoint)"),
+        "notification lifetime, all-key route preflight, frozen underlay and fixed DNS binding must stay closed"
+    );
 }
 
 fn metadata() -> Value {

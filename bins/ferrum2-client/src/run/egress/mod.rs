@@ -43,7 +43,7 @@ enum SelectedEgress {
     Shadowsocks { first_server: SocketAddr },
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TcpBinding {
     None,
@@ -52,18 +52,17 @@ enum TcpBinding {
     DefaultIpv4Only,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const fn direct_tcp_binding(origin: ClientRequestOrigin, auto_route: bool) -> TcpBinding {
     match (origin, auto_route) {
-        (ClientRequestOrigin::Tun, _) | (ClientRequestOrigin::Dns, true) => {
-            TcpBinding::DefaultIpv4Only
-        }
+        (ClientRequestOrigin::Tun, _) => TcpBinding::DefaultIpv4Only,
+        (ClientRequestOrigin::Dns, true) => TcpBinding::Fixed,
         (ClientRequestOrigin::Socks, true) => TcpBinding::DefaultIfIpv4,
         (ClientRequestOrigin::Socks | ClientRequestOrigin::Dns, false) => TcpBinding::None,
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const fn proxy_tcp_binding(auto_route: bool) -> TcpBinding {
     if auto_route {
         TcpBinding::Fixed
@@ -72,15 +71,64 @@ const fn proxy_tcp_binding(auto_route: bool) -> TcpBinding {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const fn managed_direct_ipv6_is_unsupported(origin: ClientRequestOrigin, auto_route: bool) -> bool {
     matches!(origin, ClientRequestOrigin::Tun)
         || auto_route && matches!(origin, ClientRequestOrigin::Dns)
 }
 
-#[cfg(all(windows, not(test)))]
+#[cfg(any(windows, test))]
 tokio::task_local! {
     static TCP_BINDING: TcpBinding;
+}
+
+#[cfg(any(windows, test))]
+trait ManagedTcpOperations {
+    type Socket;
+    type Stream;
+
+    fn new_v4(&self) -> std::io::Result<Self::Socket>;
+    fn new_v6(&self) -> std::io::Result<Self::Socket>;
+    fn bind_fixed(
+        &self,
+        socket: &Self::Socket,
+        endpoint: std::net::SocketAddrV4,
+    ) -> std::io::Result<()>;
+    fn bind_default(&self, socket: &Self::Socket) -> std::io::Result<()>;
+    async fn connect(
+        &self,
+        socket: Self::Socket,
+        address: SocketAddr,
+    ) -> std::io::Result<Self::Stream>;
+}
+
+#[cfg(any(windows, test))]
+async fn connect_managed_tcp<O: ManagedTcpOperations>(
+    operations: &O,
+    address: SocketAddr,
+) -> std::io::Result<O::Stream> {
+    let binding = TCP_BINDING
+        .try_with(|binding| *binding)
+        .map_err(|_| std::io::Error::other("managed TCP binding context missing"))?;
+    let socket = match address {
+        SocketAddr::V4(_) => operations.new_v4()?,
+        SocketAddr::V6(_) if matches!(binding, TcpBinding::None | TcpBinding::DefaultIfIpv4) => {
+            operations.new_v6()?
+        }
+        SocketAddr::V6(_) => return Err(std::io::Error::other("managed IPv4 required")),
+    };
+    match (binding, address) {
+        (TcpBinding::Fixed, SocketAddr::V4(endpoint)) => {
+            operations.bind_fixed(&socket, endpoint)?
+        }
+        (TcpBinding::DefaultIfIpv4 | TcpBinding::DefaultIpv4Only, SocketAddr::V4(_)) => {
+            operations.bind_default(&socket)?
+        }
+        (TcpBinding::None, _) => {}
+        (TcpBinding::DefaultIfIpv4, SocketAddr::V6(_)) => {}
+        (_, SocketAddr::V6(_)) => unreachable!("managed IPv6 rejected before socket"),
+    }
+    operations.connect(socket, address).await
 }
 
 #[cfg(all(windows, not(test)))]
@@ -97,34 +145,47 @@ impl ManagedTcpDialer {
 }
 
 #[cfg(all(windows, not(test)))]
+impl ManagedTcpOperations for ManagedTcpDialer {
+    type Socket = tokio::net::TcpSocket;
+    type Stream = tokio::net::TcpStream;
+
+    fn new_v4(&self) -> std::io::Result<Self::Socket> {
+        tokio::net::TcpSocket::new_v4()
+    }
+
+    fn new_v6(&self) -> std::io::Result<Self::Socket> {
+        tokio::net::TcpSocket::new_v6()
+    }
+
+    fn bind_fixed(
+        &self,
+        socket: &Self::Socket,
+        endpoint: std::net::SocketAddrV4,
+    ) -> std::io::Result<()> {
+        self.underlay
+            .bind_fixed(socket, endpoint)
+            .map_err(|_| std::io::Error::other("managed TCP binding failed"))
+    }
+
+    fn bind_default(&self, socket: &Self::Socket) -> std::io::Result<()> {
+        self.underlay
+            .bind_default(socket)
+            .map_err(|_| std::io::Error::other("managed TCP binding failed"))
+    }
+
+    async fn connect(
+        &self,
+        socket: Self::Socket,
+        address: SocketAddr,
+    ) -> std::io::Result<Self::Stream> {
+        socket.connect(address).await
+    }
+}
+
+#[cfg(all(windows, not(test)))]
 impl ferrum2_runtime::TcpDialer for ManagedTcpDialer {
     async fn connect(&self, address: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
-        let binding = TCP_BINDING
-            .try_with(|binding| *binding)
-            .map_err(|_| std::io::Error::other("managed TCP binding context missing"))?;
-        let socket = match address {
-            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
-            SocketAddr::V6(_)
-                if matches!(binding, TcpBinding::None | TcpBinding::DefaultIfIpv4) =>
-            {
-                tokio::net::TcpSocket::new_v6()?
-            }
-            SocketAddr::V6(_) => return Err(std::io::Error::other("managed IPv4 required")),
-        };
-        match (binding, address) {
-            (TcpBinding::Fixed, SocketAddr::V4(endpoint)) => self
-                .underlay
-                .bind_fixed(&socket, endpoint)
-                .map_err(|_| std::io::Error::other("managed TCP binding failed"))?,
-            (TcpBinding::DefaultIfIpv4 | TcpBinding::DefaultIpv4Only, SocketAddr::V4(_)) => self
-                .underlay
-                .bind_default(&socket)
-                .map_err(|_| std::io::Error::other("managed TCP binding failed"))?,
-            (TcpBinding::None, _) => {}
-            (TcpBinding::DefaultIfIpv4, SocketAddr::V6(_)) => {}
-            (_, SocketAddr::V6(_)) => unreachable!("managed IPv6 rejected before socket"),
-        }
-        socket.connect(address).await
+        connect_managed_tcp(self, address).await
     }
 }
 
@@ -194,7 +255,9 @@ pub(super) struct ClientEgressEngine<
     underlay: ferrum2_tun::UnderlayPublisher,
     auto_route: bool,
     #[cfg(test)]
-    managed_binding_calls: std::sync::atomic::AtomicUsize,
+    managed_udp_events: std::sync::Mutex<Vec<udp::ManagedUdpEvent>>,
+    #[cfg(test)]
+    managed_udp_binding_fails: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub(super) udp_id_random: Option<Arc<dyn SecureRandom>>,
 }
@@ -220,7 +283,9 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             underlay: ferrum2_tun::UnderlayPublisher::new(),
             auto_route: false,
             #[cfg(test)]
-            managed_binding_calls: std::sync::atomic::AtomicUsize::new(0),
+            managed_udp_events: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            managed_udp_binding_fails: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             udp_id_random,
         }
@@ -237,15 +302,45 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
     }
 
     #[cfg(test)]
-    fn record_managed_binding(&self) {
-        self.managed_binding_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn record_managed_udp_event(&self, event: udp::ManagedUdpEvent) -> Result<(), ()> {
+        self.managed_udp_events.lock().unwrap().push(event);
+        if matches!(
+            event,
+            udp::ManagedUdpEvent::BindFixed(_) | udp::ManagedUdpEvent::BindDefault
+        ) && self
+            .managed_udp_binding_fails
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            Err(())
+        } else {
+            Ok(())
+        }
     }
 
     #[cfg(test)]
     pub(super) fn managed_binding_calls(&self) -> usize {
-        self.managed_binding_calls
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.managed_udp_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    udp::ManagedUdpEvent::BindFixed(_) | udp::ManagedUdpEvent::BindDefault
+                )
+            })
+            .count()
+    }
+
+    #[cfg(test)]
+    fn managed_udp_events(&self) -> Vec<udp::ManagedUdpEvent> {
+        self.managed_udp_events.lock().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    fn fail_managed_udp_binding(&self) {
+        self.managed_udp_binding_fails
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn classify_selected(
@@ -319,12 +414,12 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             let deadline = timeout_limit
                 .unwrap_or(self.phase_deadlines.0)
                 .min(self.phase_deadlines.0);
-            #[cfg(all(windows, not(test)))]
+            #[cfg(any(windows, test))]
             let connect = TCP_BINDING.scope(
                 direct_tcp_binding(origin, self.auto_route),
                 self.connector.connect(application_target),
             );
-            #[cfg(any(not(windows), test))]
+            #[cfg(not(any(windows, test)))]
             let connect = self.connector.connect(application_target);
             return match tokio::time::timeout(deadline, connect).await {
                 Ok(Ok(stream)) => Ok(tcp::ClientTcpFlow::Direct(stream)),
@@ -352,7 +447,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             #[cfg(test)]
             observers,
         );
-        #[cfg(all(windows, not(test)))]
+        #[cfg(any(windows, test))]
         let open = TCP_BINDING.scope(proxy_tcp_binding(self.auto_route), open);
         open.await.map(tcp::ClientTcpFlow::Proxy)
     }
@@ -366,9 +461,16 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         let selected = self
             .classify_selected(origin, plan.as_ref(), target)
             .map_err(ClientUdpPrepareFailure::Plan)?;
-        udp::prepare(self, origin, plan, selected, tokio::net::UdpSocket::bind)
-            .await
-            .map_err(|()| ClientUdpPrepareFailure::Unavailable)
+        udp::prepare(
+            self,
+            origin,
+            plan,
+            selected,
+            target,
+            tokio::net::UdpSocket::bind,
+        )
+        .await
+        .map_err(|()| ClientUdpPrepareFailure::Unavailable)
     }
 
     #[cfg(test)]
@@ -384,9 +486,16 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         let selected = self
             .classify_selected(ClientRequestOrigin::Socks, Some(&plan), None)
             .map_err(ClientUdpPrepareFailure::Plan)?;
-        udp::prepare(self, ClientRequestOrigin::Socks, Some(plan), selected, bind)
-            .await
-            .map_err(|()| ClientUdpPrepareFailure::Unavailable)
+        udp::prepare(
+            self,
+            ClientRequestOrigin::Socks,
+            Some(plan),
+            selected,
+            None,
+            bind,
+        )
+        .await
+        .map_err(|()| ClientUdpPrepareFailure::Unavailable)
     }
 }
 
@@ -415,6 +524,267 @@ pub(super) enum ClientUdpPrepareFailure {
 mod m16_tests {
     use super::*;
     use crate::run::test_support::*;
+
+    #[derive(Default)]
+    struct InjectedManagedTcp {
+        events: std::sync::Mutex<Vec<&'static str>>,
+        fail_binding: bool,
+    }
+
+    #[derive(Clone)]
+    struct RecordedTcpDialer {
+        events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        fail_binding: bool,
+    }
+
+    impl ManagedTcpOperations for RecordedTcpDialer {
+        type Socket = tokio::net::TcpSocket;
+        type Stream = tokio::net::TcpStream;
+
+        fn new_v4(&self) -> std::io::Result<Self::Socket> {
+            self.events.lock().unwrap().push("socket-v4");
+            tokio::net::TcpSocket::new_v4()
+        }
+
+        fn new_v6(&self) -> std::io::Result<Self::Socket> {
+            self.events.lock().unwrap().push("socket-v6");
+            tokio::net::TcpSocket::new_v6()
+        }
+
+        fn bind_fixed(
+            &self,
+            _socket: &Self::Socket,
+            _endpoint: std::net::SocketAddrV4,
+        ) -> std::io::Result<()> {
+            self.events.lock().unwrap().push("bind-fixed");
+            if self.fail_binding {
+                Err(std::io::Error::other("injected binding failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn bind_default(&self, _socket: &Self::Socket) -> std::io::Result<()> {
+            self.events.lock().unwrap().push("bind-default");
+            if self.fail_binding {
+                Err(std::io::Error::other("injected binding failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn connect(
+            &self,
+            socket: Self::Socket,
+            address: SocketAddr,
+        ) -> std::io::Result<Self::Stream> {
+            self.events.lock().unwrap().push("connect");
+            socket.connect(address).await
+        }
+    }
+
+    impl ferrum2_runtime::TcpDialer for RecordedTcpDialer {
+        async fn connect(&self, address: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
+            connect_managed_tcp(self, address).await
+        }
+    }
+
+    impl ManagedTcpOperations for InjectedManagedTcp {
+        type Socket = ();
+        type Stream = ();
+
+        fn new_v4(&self) -> std::io::Result<Self::Socket> {
+            self.events.lock().unwrap().push("socket-v4");
+            Ok(())
+        }
+
+        fn new_v6(&self) -> std::io::Result<Self::Socket> {
+            self.events.lock().unwrap().push("socket-v6");
+            Ok(())
+        }
+
+        fn bind_fixed(
+            &self,
+            _socket: &Self::Socket,
+            _endpoint: std::net::SocketAddrV4,
+        ) -> std::io::Result<()> {
+            self.events.lock().unwrap().push("bind-fixed");
+            if self.fail_binding {
+                Err(std::io::Error::other("injected binding failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn bind_default(&self, _socket: &Self::Socket) -> std::io::Result<()> {
+            self.events.lock().unwrap().push("bind-default");
+            if self.fail_binding {
+                Err(std::io::Error::other("injected binding failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn connect(
+            &self,
+            _socket: Self::Socket,
+            _address: SocketAddr,
+        ) -> std::io::Result<Self::Stream> {
+            self.events.lock().unwrap().push("connect");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_tcp_binding_is_task_local_and_precedes_the_only_connect() {
+        let target: SocketAddr = "198.51.100.8:443".parse().unwrap();
+        let missing = InjectedManagedTcp::default();
+        assert!(connect_managed_tcp(&missing, target).await.is_err());
+        assert!(missing.events.lock().unwrap().is_empty());
+
+        let fixed = InjectedManagedTcp::default();
+        TCP_BINDING
+            .scope(TcpBinding::Fixed, connect_managed_tcp(&fixed, target))
+            .await
+            .unwrap();
+        assert_eq!(
+            *fixed.events.lock().unwrap(),
+            ["socket-v4", "bind-fixed", "connect"]
+        );
+
+        let failed = InjectedManagedTcp {
+            fail_binding: true,
+            ..Default::default()
+        };
+        assert!(
+            TCP_BINDING
+                .scope(
+                    TcpBinding::DefaultIpv4Only,
+                    connect_managed_tcp(&failed, target)
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            *failed.events.lock().unwrap(),
+            ["socket-v4", "bind-default"]
+        );
+
+        let default = InjectedManagedTcp::default();
+        let none = InjectedManagedTcp::default();
+        let (default_result, none_result) = tokio::join!(
+            TCP_BINDING.scope(
+                TcpBinding::DefaultIfIpv4,
+                connect_managed_tcp(&default, target)
+            ),
+            TCP_BINDING.scope(TcpBinding::None, connect_managed_tcp(&none, target)),
+        );
+        default_result.unwrap();
+        none_result.unwrap();
+        assert_eq!(
+            *default.events.lock().unwrap(),
+            ["socket-v4", "bind-default", "connect"]
+        );
+        assert_eq!(*none.events.lock().unwrap(), ["socket-v4", "connect"]);
+    }
+
+    #[tokio::test]
+    async fn managed_tcp_binding_runs_in_the_real_egress_connector_path() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let target = TargetAddr::ip(endpoint).unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dialer = RecordedTcpDialer {
+            events: events.clone(),
+            fail_binding: false,
+        };
+        let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::with_adapters(
+            ferrum2_runtime::SystemSocketInspector,
+            dialer,
+            Duration::from_secs(1),
+        ));
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext::Direct].into(),
+            connector,
+            ferrum2_crypto::SystemClock::new(),
+            ferrum2_crypto::SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            None,
+            None,
+        )
+        .with_underlay(ferrum2_tun::UnderlayPublisher::new(), true);
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let flow = engine
+            .open_tcp(ClientRequestOrigin::Dns, None, &target, None, None)
+            .await
+            .unwrap();
+        drop(flow);
+        drop(accept.await.unwrap());
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["socket-v4", "bind-fixed", "connect"]
+        );
+
+        let failed_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let failed = RecordedTcpDialer {
+            events: failed_events.clone(),
+            fail_binding: true,
+        };
+        let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::with_adapters(
+            ferrum2_runtime::SystemSocketInspector,
+            failed.clone(),
+            Duration::from_secs(1),
+        ));
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext::Direct].into(),
+            connector,
+            ferrum2_crypto::SystemClock::new(),
+            ferrum2_crypto::SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            None,
+            None,
+        )
+        .with_underlay(ferrum2_tun::UnderlayPublisher::new(), true);
+        assert!(
+            engine
+                .open_tcp(ClientRequestOrigin::Dns, None, &target, None, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(*failed_events.lock().unwrap(), ["socket-v4", "bind-fixed"]);
+
+        failed_events.lock().unwrap().clear();
+        assert!(
+            ferrum2_runtime::TcpDialer::connect(&failed, endpoint)
+                .await
+                .is_err()
+        );
+        assert!(failed_events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dns_direct_fixed_binding_maps_actual_bootstrap_as_fixed() {
+        assert_eq!(
+            direct_tcp_binding(ClientRequestOrigin::Dns, true),
+            TcpBinding::Fixed
+        );
+        assert_eq!(
+            direct_tcp_binding(ClientRequestOrigin::Dns, false),
+            TcpBinding::None
+        );
+        assert_eq!(proxy_tcp_binding(true), TcpBinding::Fixed);
+        assert_eq!(proxy_tcp_binding(false), TcpBinding::None);
+        assert_eq!(
+            direct_tcp_binding(ClientRequestOrigin::Socks, true),
+            TcpBinding::DefaultIfIpv4
+        );
+        assert_eq!(
+            direct_tcp_binding(ClientRequestOrigin::Tun, false),
+            TcpBinding::DefaultIpv4Only
+        );
+    }
 
     #[derive(Clone, Default)]
     struct TraceCapture(Arc<Mutex<Vec<u8>>>);
@@ -695,7 +1065,7 @@ mod m16_tests {
             );
             assert_eq!(
                 direct_tcp_binding(ClientRequestOrigin::Dns, true),
-                TcpBinding::DefaultIpv4Only
+                TcpBinding::Fixed
             );
             assert_eq!(
                 direct_tcp_binding(ClientRequestOrigin::Dns, false),

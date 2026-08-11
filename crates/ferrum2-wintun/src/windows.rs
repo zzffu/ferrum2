@@ -23,9 +23,9 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeMibTable,
     GetBestInterfaceEx, GetBestRoute2, GetIfTable2, GetIpForwardEntry2, GetIpForwardTable2,
     GetIpInterfaceEntry, GetUnicastIpAddressEntry, InitializeIpForwardEntry,
-    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IF_TABLE2,
-    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
-    NotifyIpInterfaceChange, NotifyRouteChange2, NotifyUnicastIpAddressChange, SetIpInterfaceEntry,
+    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2,
+    MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, NotifyIpInterfaceChange,
+    NotifyRouteChange2, NotifyUnicastIpAddressChange, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::{
     IfOperStatusUp, MediaConnectStateConnected, NET_IF_ADMIN_STATUS_UP, NET_LUID_LH,
@@ -301,12 +301,19 @@ impl Drop for WaitGuard<'_> {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct RouteFingerprint {
+    interface_luid: u64,
     interface_index: u32,
     destination: u32,
     prefix_length: u8,
     next_hop: u32,
     metric: u32,
     source: Option<u32>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct InterfaceIdentity {
+    luid: u64,
+    index: u32,
 }
 
 /// Immutable, redacted IPv4 socket-binding policy frozen before capture.
@@ -360,32 +367,62 @@ struct NotificationContext {
 
 struct NotificationOwners {
     handles: Vec<HANDLE>,
-    context: Box<NotificationContext>,
+    context: Option<Box<NotificationContext>>,
 }
 
 impl NotificationOwners {
     fn generation(&self) -> u64 {
-        self.context.generation.load(Ordering::Acquire)
+        self.context
+            .as_ref()
+            .expect("live notifications retain their callback context")
+            .generation
+            .load(Ordering::Acquire)
     }
 
     fn set_owned_luid(&self, luid: NET_LUID_LH) {
         self.context
+            .as_ref()
+            .expect("live notifications retain their callback context")
             .owned_luid
             .store(unsafe { luid.Value }, Ordering::Release);
     }
 
     fn cancel_all(&mut self) -> bool {
-        let mut failed = false;
-        while let Some(handle) = self.handles.pop() {
-            failed |= unsafe { CancelMibChangeNotify2(handle) } != ERROR_SUCCESS;
-        }
-        failed
+        cancel_notification_handles(&mut self.handles, &mut self.context, |handle| unsafe {
+            CancelMibChangeNotify2(*handle) == ERROR_SUCCESS
+        })
     }
+}
+
+fn cancel_notification_handles<T, C>(
+    handles: &mut Vec<T>,
+    context: &mut Option<C>,
+    mut cancel: impl FnMut(&T) -> bool,
+) -> bool {
+    let mut failed = Vec::new();
+    while let Some(handle) = handles.pop() {
+        if !cancel(&handle) {
+            failed.push(handle);
+        }
+    }
+    failed.reverse();
+    handles.append(&mut failed);
+    if handles.is_empty() {
+        context.take();
+    }
+    !handles.is_empty()
+}
+
+fn leak_notification_owners<T, C>(handles: &mut Vec<T>, context: &mut Option<C>) {
+    std::mem::forget(std::mem::take(handles));
+    std::mem::forget(context.take());
 }
 
 impl Drop for NotificationOwners {
     fn drop(&mut self) {
-        let _ = self.cancel_all();
+        if self.cancel_all() {
+            leak_notification_owners(&mut self.handles, &mut self.context);
+        }
     }
 }
 
@@ -687,22 +724,35 @@ impl Adapter {
             return Ok(());
         };
         state.notifications.set_owned_luid(self.luid);
-        for prefix in state.capture_routes.clone() {
-            let row = capture_route_row(self.luid, self.interface_index, prefix);
-            require_route_absent(&row)?;
-            if unsafe { CreateIpForwardEntry2(&row) } != ERROR_SUCCESS {
-                return Err(Error);
-            }
-            state.pending_route = Some(row);
-            let current = read_owned_route(&row)?;
-            if !route_matches(&row, &current) {
-                return Err(Error);
-            }
-            state.routes.push(state.pending_route.take().ok_or(Error)?);
+        let owned = InterfaceIdentity {
+            luid: unsafe { self.luid.Value },
+            index: self.interface_index,
+        };
+        let settled_generation = state.notifications.generation();
+        if !underlay_snapshot_matches(
+            &state.policy,
+            owned,
+            settled_generation,
+            || state.notifications.generation(),
+            &mut PlatformUnderlay,
+        )? {
+            return Err(Error);
         }
-        if state.notifications.generation() != state.snapshot_generation
-            || !underlay_matches(&state.policy)?
-        {
+        state.snapshot_generation = settled_generation;
+        let rows = state
+            .capture_routes
+            .iter()
+            .copied()
+            .map(|prefix| capture_route_row(self.luid, self.interface_index, prefix))
+            .collect::<Vec<_>>();
+        install_managed_routes(&rows, &mut PlatformManagedRoutes(state))?;
+        if !underlay_snapshot_matches(
+            &state.policy,
+            owned,
+            state.snapshot_generation,
+            || state.notifications.generation(),
+            &mut PlatformUnderlay,
+        )? {
             return Err(Error);
         }
         Ok(())
@@ -710,6 +760,61 @@ impl Adapter {
 
     fn cleanup_inner(&mut self) -> bool {
         cleanup_transaction(&mut PlatformCleanup(self))
+    }
+}
+
+trait ManagedRouteOperations {
+    type Row: Copy;
+
+    fn require_absent(&mut self, row: &Self::Row) -> Result<(), Error>;
+    fn create_pending(&mut self, row: Self::Row) -> Result<(), Error>;
+    fn readback_exact(&mut self, row: &Self::Row) -> Result<bool, Error>;
+    fn commit_pending(&mut self) -> Result<(), Error>;
+}
+
+fn install_managed_routes<O: ManagedRouteOperations>(
+    rows: &[O::Row],
+    operations: &mut O,
+) -> Result<(), Error> {
+    for row in rows {
+        operations.require_absent(row)?;
+    }
+    for row in rows {
+        operations.create_pending(*row)?;
+        if !operations.readback_exact(row)? {
+            return Err(Error);
+        }
+        operations.commit_pending()?;
+    }
+    Ok(())
+}
+
+struct PlatformManagedRoutes<'a>(&'a mut ManagedState);
+
+impl ManagedRouteOperations for PlatformManagedRoutes<'_> {
+    type Row = MIB_IPFORWARD_ROW2;
+
+    fn require_absent(&mut self, row: &Self::Row) -> Result<(), Error> {
+        require_route_absent(row)
+    }
+
+    fn create_pending(&mut self, row: Self::Row) -> Result<(), Error> {
+        if unsafe { CreateIpForwardEntry2(&row) } != ERROR_SUCCESS {
+            return Err(Error);
+        }
+        self.0.pending_route = Some(row);
+        Ok(())
+    }
+
+    fn readback_exact(&mut self, row: &Self::Row) -> Result<bool, Error> {
+        Ok(route_matches(row, &read_owned_route(row)?))
+    }
+
+    fn commit_pending(&mut self) -> Result<(), Error> {
+        self.0
+            .routes
+            .push(self.0.pending_route.take().ok_or(Error)?);
+        Ok(())
     }
 }
 
@@ -721,7 +826,7 @@ fn subscribe_network_changes() -> Result<NotificationOwners, Error> {
     let context_pointer = (&raw const *context).cast::<c_void>();
     let mut owners = NotificationOwners {
         handles: Vec::with_capacity(3),
-        context,
+        context: Some(context),
     };
     let mut handle = null_mut();
     if unsafe {
@@ -772,23 +877,47 @@ fn subscribe_network_changes() -> Result<NotificationOwners, Error> {
 }
 
 fn snapshot_underlay(config: &crate::ManagedIpv4Config) -> Result<UnderlayPolicy, Error> {
-    let interfaces = eligible_interfaces()?;
+    snapshot_underlay_with(config, &mut PlatformUnderlay)
+}
+
+trait UnderlayOperations {
+    fn eligible_interfaces(
+        &mut self,
+        excluded: Option<InterfaceIdentity>,
+    ) -> Result<Vec<InterfaceIdentity>, Error>;
+    fn best_interface(&mut self, destination: std::net::Ipv4Addr) -> Result<u32, Error>;
+    fn constrained_route(
+        &mut self,
+        destination: std::net::Ipv4Addr,
+        interface_index: u32,
+        require_source: bool,
+    ) -> Result<RouteFingerprint, Error>;
+    fn unique_default_route(
+        &mut self,
+        interfaces: &[InterfaceIdentity],
+    ) -> Result<RouteFingerprint, Error>;
+}
+
+fn snapshot_underlay_with(
+    config: &crate::ManagedIpv4Config,
+    operations: &mut impl UnderlayOperations,
+) -> Result<UnderlayPolicy, Error> {
+    let interfaces = operations.eligible_interfaces(None)?;
     let mut fixed = Vec::with_capacity(config.physical_endpoints().len());
     for endpoint in config.physical_endpoints() {
-        let destination = ipv4_sockaddr(*endpoint.ip());
-        let mut index = 0;
-        if unsafe { GetBestInterfaceEx((&raw const destination).cast::<SOCKADDR>(), &mut index) }
-            != ERROR_SUCCESS
-            || !interfaces
-                .iter()
-                .any(|candidate| candidate.InterfaceIndex == index)
-        {
+        let index = operations.best_interface(*endpoint.ip())?;
+        let identity = interfaces
+            .iter()
+            .find(|candidate| candidate.index == index)
+            .ok_or(Error)?;
+        let route = operations.constrained_route(*endpoint.ip(), index, true)?;
+        if route.interface_luid != identity.luid || route.interface_index != identity.index {
             return Err(Error);
         }
-        fixed.push((*endpoint, constrained_route(*endpoint.ip(), index, true)?));
+        fixed.push((*endpoint, route));
     }
     let default = if config.needs_default_binder() {
-        Some(unique_default_route(&interfaces)?)
+        Some(operations.unique_default_route(&interfaces)?)
     } else {
         None
     };
@@ -798,28 +927,86 @@ fn snapshot_underlay(config: &crate::ManagedIpv4Config) -> Result<UnderlayPolicy
     })
 }
 
-fn underlay_matches(policy: &UnderlayPolicy) -> Result<bool, Error> {
-    let interfaces = eligible_interfaces()?;
+fn underlay_snapshot_matches(
+    policy: &UnderlayPolicy,
+    owned: InterfaceIdentity,
+    expected_generation: u64,
+    mut generation: impl FnMut() -> u64,
+    operations: &mut impl UnderlayOperations,
+) -> Result<bool, Error> {
+    let before = generation();
+    if before != expected_generation || !underlay_matches_with(policy, owned, operations)? {
+        return Ok(false);
+    }
+    Ok(generation() == before)
+}
+
+fn underlay_matches_with(
+    policy: &UnderlayPolicy,
+    owned: InterfaceIdentity,
+    operations: &mut impl UnderlayOperations,
+) -> Result<bool, Error> {
+    let interfaces = operations.eligible_interfaces(Some(owned))?;
     for (endpoint, expected) in policy.fixed.iter() {
-        let destination = ipv4_sockaddr(*endpoint.ip());
-        let mut index = 0;
-        if unsafe { GetBestInterfaceEx((&raw const destination).cast::<SOCKADDR>(), &mut index) }
-            != ERROR_SUCCESS
-            || index != expected.interface_index
-            || constrained_route(*endpoint.ip(), index, true)? != *expected
+        if !interfaces.iter().any(|candidate| {
+            candidate.index == expected.interface_index && candidate.luid == expected.interface_luid
+        }) || operations.constrained_route(*endpoint.ip(), expected.interface_index, true)?
+            != *expected
         {
             return Ok(false);
         }
     }
     if let Some(expected) = policy.default
-        && unique_default_route(&interfaces)? != expected
+        && operations.unique_default_route(&interfaces)? != expected
     {
         return Ok(false);
     }
     Ok(true)
 }
 
-fn eligible_interfaces() -> Result<Vec<MIB_IF_ROW2>, Error> {
+struct PlatformUnderlay;
+
+impl UnderlayOperations for PlatformUnderlay {
+    fn eligible_interfaces(
+        &mut self,
+        excluded: Option<InterfaceIdentity>,
+    ) -> Result<Vec<InterfaceIdentity>, Error> {
+        eligible_interfaces(excluded)
+    }
+
+    fn best_interface(&mut self, destination: std::net::Ipv4Addr) -> Result<u32, Error> {
+        let destination = ipv4_sockaddr(destination);
+        let mut index = 0;
+        if unsafe { GetBestInterfaceEx((&raw const destination).cast::<SOCKADDR>(), &mut index) }
+            != ERROR_SUCCESS
+            || index == 0
+        {
+            Err(Error)
+        } else {
+            Ok(index)
+        }
+    }
+
+    fn constrained_route(
+        &mut self,
+        destination: std::net::Ipv4Addr,
+        interface_index: u32,
+        require_source: bool,
+    ) -> Result<RouteFingerprint, Error> {
+        constrained_route(destination, interface_index, require_source)
+    }
+
+    fn unique_default_route(
+        &mut self,
+        interfaces: &[InterfaceIdentity],
+    ) -> Result<RouteFingerprint, Error> {
+        unique_default_route(interfaces)
+    }
+}
+
+fn eligible_interfaces(
+    excluded: Option<InterfaceIdentity>,
+) -> Result<Vec<InterfaceIdentity>, Error> {
     let mut table: *mut MIB_IF_TABLE2 = null_mut();
     if unsafe { GetIfTable2(&mut table) } != ERROR_SUCCESS || table.is_null() {
         return Err(Error);
@@ -830,14 +1017,20 @@ fn eligible_interfaces() -> Result<Vec<MIB_IF_ROW2>, Error> {
     let result = rows
         .iter()
         .copied()
-        .filter(|row| {
-            row.InterfaceIndex != 0
+        .filter_map(|row| {
+            let identity = InterfaceIdentity {
+                luid: unsafe { row.InterfaceLuid.Value },
+                index: row.InterfaceIndex,
+            };
+            (row.InterfaceIndex != 0
                 && row.Type
                     != windows_sys::Win32::NetworkManagement::IpHelper::IF_TYPE_SOFTWARE_LOOPBACK
                 && row.OperStatus == IfOperStatusUp
                 && row.AdminStatus == NET_IF_ADMIN_STATUS_UP
                 && row.MediaConnectState == MediaConnectStateConnected
                 && row.InterfaceAndOperStatusFlags._bitfield & 1 == 1
+                && excluded != Some(identity))
+            .then_some(identity)
         })
         .collect();
     drop(owner);
@@ -852,7 +1045,7 @@ impl Drop for MibTable {
     }
 }
 
-fn unique_default_route(interfaces: &[MIB_IF_ROW2]) -> Result<RouteFingerprint, Error> {
+fn unique_default_route(interfaces: &[InterfaceIdentity]) -> Result<RouteFingerprint, Error> {
     let mut table: *mut MIB_IPFORWARD_TABLE2 = null_mut();
     if unsafe { GetIpForwardTable2(AF_INET, &mut table) } != ERROR_SUCCESS || table.is_null() {
         return Err(Error);
@@ -861,10 +1054,10 @@ fn unique_default_route(interfaces: &[MIB_IF_ROW2]) -> Result<RouteFingerprint, 
     let count = unsafe { (*table).NumEntries as usize };
     let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
     let mut defaults = rows.iter().filter(|row| {
-        interfaces
-            .iter()
-            .any(|candidate| candidate.InterfaceIndex == row.InterfaceIndex)
-            && row.DestinationPrefix.PrefixLength == 0
+        interfaces.iter().any(|candidate| {
+            candidate.index == row.InterfaceIndex
+                && candidate.luid == unsafe { row.InterfaceLuid.Value }
+        }) && row.DestinationPrefix.PrefixLength == 0
             && unsafe { row.DestinationPrefix.Prefix.si_family } == AF_INET
             && unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr } == 0
     });
@@ -918,6 +1111,7 @@ fn route_fingerprint(
         return Err(Error);
     }
     Ok(RouteFingerprint {
+        interface_luid: unsafe { row.InterfaceLuid.Value },
         interface_index: row.InterfaceIndex,
         destination: unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr },
         prefix_length: row.DestinationPrefix.PrefixLength,
@@ -1578,14 +1772,304 @@ fn wide(path: &Path) -> Vec<u16> {
 mod tests {
     use super::{
         ABI_EXPORTS, AdapterCreateFailure, CleanupOperations, DLL_BYTES, DLL_SHA256, DadProgress,
-        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, Error, IpDadStateDeprecated,
+        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, Error, InterfaceIdentity, IpDadStateDeprecated,
         IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative,
-        LoaderOperations, SessionJournal, SetupOperations, capture_route_row,
+        LoaderOperations, ManagedRouteOperations, RouteFingerprint, SessionJournal,
+        SetupOperations, UnderlayOperations, cancel_notification_handles, capture_route_row,
         classify_adapter_create_failure, cleanup_transaction, dad_snapshot,
-        finish_setup_transaction, interface_index_option_value, load_transaction, require_exports,
-        route_matches, setup_transaction, validate_artifact,
+        finish_setup_transaction, install_managed_routes, interface_index_option_value,
+        leak_notification_owners, load_transaction, require_exports, route_matches,
+        setup_transaction, snapshot_underlay_with, underlay_matches_with,
+        underlay_snapshot_matches, validate_artifact,
     };
     use crate::Ipv4Prefix;
+
+    #[test]
+    fn notification_cancel_retains_only_failed_handles_for_safe_retry() {
+        struct Context(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Context {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        for failed in [1_u8, 2, 3] {
+            let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut handles = vec![1_u8, 2, 3];
+            let mut context = Some(Context(drops.clone()));
+            let mut calls = Vec::new();
+            assert!(cancel_notification_handles(
+                &mut handles,
+                &mut context,
+                |handle| {
+                    calls.push(*handle);
+                    *handle != failed
+                }
+            ));
+            assert_eq!(calls, [3, 2, 1]);
+            assert_eq!(handles, [failed], "only the live callback owner survives");
+            assert!(context.is_some());
+            assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+            calls.clear();
+            assert!(!cancel_notification_handles(
+                &mut handles,
+                &mut context,
+                |handle| {
+                    calls.push(*handle);
+                    true
+                }
+            ));
+            assert_eq!(calls, [failed]);
+            assert!(handles.is_empty());
+            assert!(context.is_none());
+            assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = vec![4_u8];
+        let mut context = Some(Context(drops.clone()));
+        assert!(cancel_notification_handles(
+            &mut handles,
+            &mut context,
+            |_| false
+        ));
+        leak_notification_owners(&mut handles, &mut context);
+        assert!(handles.is_empty());
+        assert!(context.is_none());
+        assert_eq!(
+            drops.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "persistent callback ownership is intentionally retained"
+        );
+    }
+
+    struct InjectedManagedRoutes {
+        occupied: Option<u8>,
+        create_conflict: Option<u8>,
+        readback_mismatch: Option<u8>,
+        calls: Vec<(&'static str, u8)>,
+        pending: Option<u8>,
+        journal: Vec<u8>,
+    }
+
+    impl ManagedRouteOperations for InjectedManagedRoutes {
+        type Row = u8;
+
+        fn require_absent(&mut self, row: &Self::Row) -> Result<(), Error> {
+            self.calls.push(("absent", *row));
+            if self.occupied == Some(*row) {
+                Err(Error)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn create_pending(&mut self, row: Self::Row) -> Result<(), Error> {
+            self.calls.push(("create", row));
+            if self.create_conflict == Some(row) {
+                return Err(Error);
+            }
+            self.pending = Some(row);
+            Ok(())
+        }
+
+        fn readback_exact(&mut self, row: &Self::Row) -> Result<bool, Error> {
+            self.calls.push(("readback", *row));
+            Ok(self.readback_mismatch != Some(*row))
+        }
+
+        fn commit_pending(&mut self) -> Result<(), Error> {
+            self.journal.push(self.pending.take().ok_or(Error)?);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn managed_route_preflights_every_key_before_first_create() {
+        let mut routes = InjectedManagedRoutes {
+            occupied: Some(2),
+            create_conflict: None,
+            readback_mismatch: None,
+            calls: Vec::new(),
+            pending: None,
+            journal: Vec::new(),
+        };
+        assert!(install_managed_routes(&[1, 2], &mut routes).is_err());
+        assert_eq!(routes.calls, [("absent", 1), ("absent", 2)]);
+        assert!(routes.pending.is_none());
+        assert!(routes.journal.is_empty());
+
+        let mut late_conflict = InjectedManagedRoutes {
+            occupied: None,
+            create_conflict: Some(2),
+            readback_mismatch: None,
+            calls: Vec::new(),
+            pending: None,
+            journal: Vec::new(),
+        };
+        assert!(install_managed_routes(&[1, 2], &mut late_conflict).is_err());
+        assert_eq!(late_conflict.journal, [1]);
+        assert!(late_conflict.pending.is_none());
+
+        let mut mismatched = InjectedManagedRoutes {
+            occupied: None,
+            create_conflict: None,
+            readback_mismatch: Some(2),
+            calls: Vec::new(),
+            pending: None,
+            journal: Vec::new(),
+        };
+        assert!(install_managed_routes(&[1, 2], &mut mismatched).is_err());
+        assert_eq!(mismatched.journal, [1]);
+        assert_eq!(mismatched.pending, Some(2));
+    }
+
+    #[derive(Clone)]
+    struct InjectedUnderlay {
+        interfaces: Vec<InterfaceIdentity>,
+        best_index: u32,
+        route: RouteFingerprint,
+        default: RouteFingerprint,
+        best_calls: usize,
+    }
+
+    impl UnderlayOperations for InjectedUnderlay {
+        fn eligible_interfaces(
+            &mut self,
+            excluded: Option<InterfaceIdentity>,
+        ) -> Result<Vec<InterfaceIdentity>, Error> {
+            Ok(self
+                .interfaces
+                .iter()
+                .copied()
+                .filter(|identity| Some(*identity) != excluded)
+                .collect())
+        }
+
+        fn best_interface(&mut self, _destination: std::net::Ipv4Addr) -> Result<u32, Error> {
+            self.best_calls += 1;
+            Ok(self.best_index)
+        }
+
+        fn constrained_route(
+            &mut self,
+            _destination: std::net::Ipv4Addr,
+            _interface_index: u32,
+            _require_source: bool,
+        ) -> Result<RouteFingerprint, Error> {
+            Ok(self.route)
+        }
+
+        fn unique_default_route(
+            &mut self,
+            _interfaces: &[InterfaceIdentity],
+        ) -> Result<RouteFingerprint, Error> {
+            Ok(self.default)
+        }
+    }
+
+    #[test]
+    fn underlay_post_capture_uses_only_frozen_constrained_physical_route() {
+        let physical = InterfaceIdentity { luid: 7, index: 17 };
+        let wintun = InterfaceIdentity { luid: 9, index: 19 };
+        let route = RouteFingerprint {
+            interface_luid: physical.luid,
+            interface_index: physical.index,
+            destination: u32::from_ne_bytes([198, 51, 100, 8]),
+            prefix_length: 0,
+            next_hop: u32::from_ne_bytes([192, 0, 2, 1]),
+            metric: 4,
+            source: Some(u32::from_ne_bytes([192, 0, 2, 2])),
+        };
+        let endpoint = "198.51.100.8:443".parse().unwrap();
+        let config = crate::ManagedIpv4Config::new(Vec::new(), vec![endpoint], true).unwrap();
+        let mut operations = InjectedUnderlay {
+            interfaces: vec![physical],
+            best_index: physical.index,
+            route,
+            default: route,
+            best_calls: 0,
+        };
+        let policy = snapshot_underlay_with(&config, &mut operations).unwrap();
+        assert_eq!(
+            operations.best_calls, 1,
+            "unrestricted lookup is pre-capture"
+        );
+
+        operations.interfaces.push(wintun);
+        operations.best_index = wintun.index;
+        assert!(underlay_matches_with(&policy, wintun, &mut operations).unwrap());
+        assert_eq!(
+            operations.best_calls, 1,
+            "post-capture cannot re-run best-interface"
+        );
+
+        for changed in [
+            RouteFingerprint {
+                interface_luid: physical.luid + 1,
+                ..route
+            },
+            RouteFingerprint {
+                interface_index: physical.index + 1,
+                ..route
+            },
+            RouteFingerprint {
+                source: Some(u32::from_ne_bytes([192, 0, 2, 3])),
+                ..route
+            },
+            RouteFingerprint {
+                next_hop: u32::from_ne_bytes([192, 0, 2, 9]),
+                ..route
+            },
+            RouteFingerprint { metric: 5, ..route },
+        ] {
+            let mut changed_operations = operations.clone();
+            changed_operations.route = changed;
+            assert!(!underlay_matches_with(&policy, wintun, &mut changed_operations).unwrap());
+        }
+
+        let mut changed_identity = operations.clone();
+        changed_identity.interfaces[0].luid += 1;
+        assert!(!underlay_matches_with(&policy, wintun, &mut changed_identity).unwrap());
+
+        let mut changed_default = operations.clone();
+        changed_default.default.metric += 1;
+        assert!(!underlay_matches_with(&policy, wintun, &mut changed_default).unwrap());
+
+        let mut stable = [4_u64, 4].into_iter();
+        assert!(
+            underlay_snapshot_matches(
+                &policy,
+                wintun,
+                4,
+                || stable.next().unwrap(),
+                &mut operations.clone(),
+            )
+            .unwrap()
+        );
+        let mut changed_before = [5_u64].into_iter();
+        assert!(
+            !underlay_snapshot_matches(
+                &policy,
+                wintun,
+                4,
+                || changed_before.next().unwrap(),
+                &mut operations.clone(),
+            )
+            .unwrap()
+        );
+        let mut changed_during = [4_u64, 5].into_iter();
+        assert!(
+            !underlay_snapshot_matches(
+                &policy,
+                wintun,
+                4,
+                || changed_during.next().unwrap(),
+                &mut operations,
+            )
+            .unwrap()
+        );
+    }
 
     struct InjectedSetup {
         fail_at: Option<usize>,
