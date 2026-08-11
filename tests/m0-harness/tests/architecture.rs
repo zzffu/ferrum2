@@ -354,6 +354,16 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         .nth(1)
         .and_then(|body| body.split("function Open-TunTcp").next())
         .expect("bounded system DNS witness");
+    let adapter_readiness = qualifier
+        .split("function Wait-AdapterReady")
+        .nth(1)
+        .and_then(|body| body.split("function Wait-AdapterAbsent").next())
+        .expect("bounded adapter readiness");
+    let adapter_cycles = qualifier
+        .split("function Invoke-AdapterCycles")
+        .nth(1)
+        .and_then(|body| body.split("try {").next())
+        .expect("bounded adapter cycles");
     assert!(
         integrated.contains("Invoke-TunProductTcp $supportAddress $supportTcpPort")
             && integrated.contains("Invoke-TunProductUdp $supportAddress $supportUdpPort")
@@ -401,6 +411,33 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && !integrated.contains("system_dns_udp_immediate_requests")
             && !integrated.contains("system_dns_tcp_settled_requests"),
         "system DNS rows must prove two unique A answers without a responder-global request oracle"
+    );
+    assert!(
+        adapter_readiness.contains("[bool]$Managed = $false")
+            && adapter_readiness
+                .contains("$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)")
+            && adapter_readiness.contains("Start-Sleep -Milliseconds 100")
+            && adapter_readiness.contains("while ([DateTime]::UtcNow -lt $deadline)")
+            && adapter_readiness
+                .contains("($capturePrefixes -join \"|\") -ceq \"0.0.0.0/1|128.0.0.0/1\"",)
+            && adapter_readiness.contains("($dnsAddresses -join \"|\") -ceq \"198.18.0.1\"")
+            && adapter_readiness.contains("$finalCapturePrefixes")
+            && adapter_readiness.contains("-ErrorAction Stop")
+            && adapter_readiness
+                .contains("Assert-SnapshotEqual @(\"0.0.0.0/1\", \"128.0.0.0/1\")",)
+            && adapter_readiness
+                .contains("Assert-SnapshotEqual @(\"198.18.0.1\") $finalDnsAddresses")
+            && adapter_readiness
+                .matches("$script:activeProcess.Refresh()")
+                .count()
+                >= 2
+            && adapter_readiness.contains("throw \"managed state readiness readback failed\"")
+            && adapter_readiness.contains("throw \"managed state readiness timeout\"")
+            && !adapter_readiness.contains("throw \"managed state readiness readback failed:")
+            && !adapter_readiness.contains("throw \"managed state readiness timeout:")
+            && adapter_cycles.contains("Wait-AdapterReady $ExpectedAdapter 20 $Managed")
+            && !adapter_cycles.contains("managed cycle capture route mismatch"),
+        "managed cycles must await exact capture and DNS state through one bounded process-aware readiness seam"
     );
     assert!(
         qualifier.contains("\"hard-kill\"")

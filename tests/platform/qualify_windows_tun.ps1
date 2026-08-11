@@ -421,7 +421,7 @@ function Get-PeExportNames([byte[]]$Bytes) {
     }
 }
 
-function Wait-AdapterReady([string]$Name, [int]$TimeoutSeconds = 20) {
+function Wait-AdapterReady([string]$Name, [int]$TimeoutSeconds = 20, [bool]$Managed = $false) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         if ($script:activeProcess) {
@@ -433,10 +433,44 @@ function Wait-AdapterReady([string]$Name, [int]$TimeoutSeconds = 20) {
             $addresses = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue)
             $v4 = @($addresses | Where-Object { $_.IPAddress -eq "198.18.0.2" -and $_.PrefixLength -eq 30 -and $_.AddressState -eq "Preferred" })
             $v6 = @($addresses | Where-Object { $_.IPAddress -eq "fd00::2" -and $_.PrefixLength -eq 126 -and $_.AddressState -eq "Preferred" })
-            if ($v4.Count -eq 1 -and $v6.Count -eq 1) { return $adapter }
+            if ($v4.Count -eq 1 -and $v6.Count -eq 1) {
+                if (-not $Managed) { return $adapter }
+                $capturePrefixes = @(
+                    Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+                        Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") } |
+                        Sort-Object DestinationPrefix |
+                        ForEach-Object { $_.DestinationPrefix }
+                )
+                $dnsRows = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+                $dnsAddresses = @($dnsRows.ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if (($capturePrefixes -join "|") -ceq "0.0.0.0/1|128.0.0.0/1" -and
+                    ($dnsAddresses -join "|") -ceq "198.18.0.1") {
+                    try {
+                        $finalCapturePrefixes = @(
+                            Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
+                                Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") } |
+                                Sort-Object DestinationPrefix |
+                                ForEach-Object { $_.DestinationPrefix }
+                        )
+                        $finalDnsAddresses = @(Get-TunIpv4Dns $adapter.ifIndex)
+                        Assert-SnapshotEqual @("0.0.0.0/1", "128.0.0.0/1") $finalCapturePrefixes "managed state readiness capture"
+                        Assert-SnapshotEqual @("198.18.0.1") $finalDnsAddresses "managed state readiness DNS"
+                    } catch { throw "managed state readiness readback failed" }
+                    if ($script:activeProcess) {
+                        $script:activeProcess.Refresh()
+                        if ($script:activeProcess.HasExited) { throw "candidate failed during prepare" }
+                    }
+                    return $adapter
+                }
+            }
         }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
+    if ($script:activeProcess) {
+        $script:activeProcess.Refresh()
+        if ($script:activeProcess.HasExited) { throw "candidate failed during prepare" }
+    }
+    if ($Managed) { throw "managed state readiness timeout" }
     throw "adapter readiness timeout"
 }
 
@@ -2186,13 +2220,9 @@ function Invoke-AdapterCycles(
         Assert-True ($candidateBaseline.Count -eq 0) "cycle candidate baseline not absent"
         Assert-InterfaceGone $ExpectedAdapter $null
         $script:activeProcess = Start-Candidate $Executable $Configuration
-        $adapter = Wait-AdapterReady $ExpectedAdapter
+        $adapter = Wait-AdapterReady $ExpectedAdapter 20 $Managed
         $script:ownedInterfaceIndex = [int]$adapter.ifIndex
         if ($Managed) {
-            $capture = @(Get-NetRoute -InterfaceIndex $script:ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
-                Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") })
-            Assert-True ($capture.Count -eq 2) "managed cycle capture route mismatch"
-            Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $script:ownedInterfaceIndex) "managed cycle DNS readback"
             $owners = Get-Metrics $MetricsPort.Value
             Assert-True ((Get-ClientGaugeValue $owners "ferrum2_udp_sessions_active") -eq 0 -and
                 (Get-ClientGaugeValue $owners "ferrum2_udp_buffered_bytes") -eq 0) "managed cycle process-private owner baseline changed"
