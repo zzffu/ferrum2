@@ -229,24 +229,28 @@ case/support/fixture delta `+112/+0/+0` and numeric `REVIEW_REQUIRED` because in
 all pass。It also accepted qualifier net `+1153/-20` beyond the original non-Rust forecast because the work
 remains one mode in the existing qualifier with no duplicate harness or helper。
 
-T02 final candidate `136dbe280a242c0a93fcc122f1c70ad58294158f` passed final Architect and QA
-`PASS_WITH_NOTES` with zero blocker/major/minor。Its integrity gate passes；the numeric `REVIEW_REQUIRED`
-advisory is accepted at code/tests `30095/51191`、ratio `1.700980 PASS`、case/support/fixture
-`45442/5152/597`、ticket delta `+756/0/0` and code growth `+324` because it is distinct contract evidence in
-existing seams with no support/fixture growth or duplicate helper/harness。
+T02 final local repaired candidate `13b6d681d282cdd054c0c52f4fded01d7e5b2124`（tree `c8cf7df…`，parent
+`5782c08…`）adds only the mechanical one-file Clippy repair（`+3/-2`）。Architect and QA both return `PASS`
+with zero blocker/major/minor，QA has zero note，and all prior findings remain closed。Its integrity gate passes；
+the numeric `REVIEW_REQUIRED` advisory is accepted at code/tests `30096/51191`、ratio `1.700924 PASS`、
+case/support/fixture `45442/5152/597`、ticket delta `+756/0/0` and code growth `+325` because it is distinct
+contract evidence in existing seams with no support/fixture growth or duplicate helper/harness。
 
-The T01 non-force push and automatic Actions run remain historical evidence already recorded；no T02 remote
-action has occurred。The user explicitly authorizes required non-force pushes，including performance-related
+The first T02 non-force push moved `master` from `5630cf4…` to `5782c08…` with exact remote readback。
+Automatic push run `31443577764/1` is preserved as failed and was not rerun。MSRV、interop、test-footprint、
+Linux musl、Windows MSVC、Linux GNU and Windows TUN E2E succeeded；quality failed only at authoritative Full
+Clippy on the deterministic `too_many_arguments`、`map_clone` and `redundant_closure` lints，so qualification
+failed closed。Performance and Windows TUN performance were skipped by the push event；there was no hidden
+second failure。`13b6d681…` passes package/workspace Clippy warning-free but is not yet integrated、pushed or
+hosted-PASS。The user explicitly authorizes required future non-force pushes，including performance-related
 pushes。This does not authorize workflow dispatch or rerun、force-push、PR、tag、package、release or publication
 without separate explicit authority。Every remote action must still bind its accepted exact SHA。
 
 ## Blocker / next action
 
-M16-T02 is done on exact reviewed candidate `136dbe280a242c0a93fcc122f1c70ad58294158f`。Initial Architect
-`BLOCK` findings on sentinel credentials and catalog-level Direct rejection were resolved by `6edba670…`；the
-remaining targeted test-evidence gap was diagnosed as test-only and resolved by `136dbe280…`。Focused config
-`4/4`、client Direct `1/1`、CLI `1/1`、full config `33`、full client `50`、full CLI `8`、architecture `19`、
-warning-free workspace all-target、format/diff/hook and QA full workspace regression all pass。Final Architect
-and QA are both `PASS_WITH_NOTES` with zero blocker/major/minor；only the accepted footprint advisory remains。
-M16-T03 is ready and is the current serial frontier。T02 is not yet claimed integrated or pushed；the primary
-thread performs integration after this documentation review。
+M16-T02 remains done on final local repaired candidate `13b6d681d282cdd054c0c52f4fded01d7e5b2124`。The original
+review findings remain closed，and the hosted Clippy-only failure is mechanically repaired using the existing
+convention。Package/workspace Clippy are warning-free；focused config `4/4`、full config `33`、architecture
+`19`、workspace all-target、format/diff/hook all pass。Architect and QA both return `PASS` with zero blocker/
+major/minor；QA also reports zero note。M16-T03 remains ready and is the current serial frontier。The failed
+`31443577764/1` was not rerun，and `13b6d681…` is not yet claimed integrated、pushed or hosted-PASS。

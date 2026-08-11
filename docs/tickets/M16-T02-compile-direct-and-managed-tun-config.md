@@ -67,9 +67,13 @@ git diff --check <accepted-M16-T01-sha>..<candidate-sha>
   `6aff6cb33a29cf61cf483a26f45c80defbffbf26`（tree
   `38fc134774a2d31648e377f5c1505dc0a9bf5f2b`，parent `5630cf48…`）compiled the closed config model。
   Bounded product repair `6edba67068fecdb815dfd51bc321d50e924f16bc`（tree
-  `554cc07f823eb489b8a708893e785caf4bb8fd01`，parent `6aff6cb…`）and final test-only candidate
+  `554cc07f823eb489b8a708893e785caf4bb8fd01`，parent `6aff6cb…`）and final reviewed test-only candidate
   `136dbe280a242c0a93fcc122f1c70ad58294158f`（tree
-  `5720b1752024c025c098b3fb5273a6a49d7fe4dd`，parent `6edba670…`）close the ticket。
+  `5720b1752024c025c098b3fb5273a6a49d7fe4dd`，parent `6edba670…`）close the product/test work。Docs
+  closeout `5782c08c443a5ed8adfc81841beeaec345611811` was the first pushed T02 integration；final local repaired
+  candidate `13b6d681d282cdd054c0c52f4fded01d7e5b2124`（tree
+  `c8cf7dfc13d1e6ae56d6aa12167907fa807ae1c3`，parent `5782c08…`）contains only the mechanical one-file
+  Clippy repair（`+3/-2`）。
 - Review history: initial Architect `BLOCK` identified the sentinel/parallel credential vector and catalog-level
   Direct rejection instead of selected-plan classification（`ARCH-001/002`）；Architect/QA also requested the
   compact boundary and real zero-side-effect snapshot evidence（`ARCH-003`、`QA-001/002`）。`6edba670…`
@@ -78,16 +82,26 @@ git diff --check <accepted-M16-T01-sha>..<candidate-sha>
   deterministic include rows were not independently asserted。Root diagnosed this as test-only；`136dbe280…`
   extends the existing table without product、helper or harness changes。Final Architect and QA reviews of exact
   `136dbe280…` are both `PASS_WITH_NOTES` with zero blocker/major/minor；the sole accepted note is the numeric
-  footprint advisory。
+  footprint advisory。Architect and QA reviews of exact repaired candidate `13b6d681…` are both `PASS` with
+  zero blocker/major/minor；QA also reports zero note，and all prior findings remain closed。
 - Validation: focused config `4/4`、client Direct pre-socket `1/1`、side-effect-free CLI `1/1`；full config
   `33`、full client `50`、full CLI `8`、architecture `19`；workspace all-target check was warning-free and
-  formatting、diff、normal hook all passed。QA's full workspace regression also passed。
-- Footprint: integrity `PASS`，numeric `REVIEW_REQUIRED` advisory；code/tests `30095/51191`，ratio
-  `1.700980 PASS`；case/support/fixture `45442/5152/597`，ticket deltas `+756/0/0` and code growth `+324`。
+  formatting、diff、normal hook all passed。QA's full workspace regression also passed。For `13b6d681…`，exact
+  package and authoritative workspace Clippy are warning-free；focused config `4/4`、full config `33`、
+  architecture `19`、format、workspace all-target、hook and diff all pass。
+- Footprint: integrity `PASS`，numeric `REVIEW_REQUIRED` advisory；code/tests `30096/51191`，ratio
+  `1.700924 PASS`；case/support/fixture `45442/5152/597`，ticket deltas `+756/0/0` and code growth `+325`。
   The advisory is accepted because the growth is distinct contract evidence in existing tables/seams with zero
   support/fixture growth and no duplicate helper or harness。
-- Remote/integration: no T02 remote action has occurred，and this candidate is not yet claimed integrated or
-  pushed；the primary thread performs those steps after documentation review。
+- Hosted evidence: the first T02 non-force push moved `master` from `5630cf4…` to `5782c08…` with exact remote
+  readback。Automatic push run `31443577764/1` is preserved as `failure` and was not rerun。MSRV、interop、
+  test-footprint、Linux musl、Windows MSVC、Linux GNU and Windows TUN E2E succeeded；quality failed only at
+  authoritative Full Clippy on the three deterministic `validation.rs` lints（`too_many_arguments`、
+  `map_clone`、`redundant_closure`），so qualification failed closed。Performance and Windows TUN performance
+  were skipped by the push event；there was no hidden second failure。
+- Remote/integration: `13b6d681…` is not claimed integrated、pushed or hosted-PASS。The failed run was not
+  rerun，and no dispatch、force-push、PR、tag、package、release or publication occurred。Required future
+  non-force pushes，including performance-related pushes，remain explicitly authorized。
 
 ## Rollback / risk
 
