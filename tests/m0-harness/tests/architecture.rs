@@ -374,6 +374,50 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         .nth(1)
         .and_then(|body| body.split("Assert-True ($managedNetworkChangeRows").next())
         .expect("bounded managed network changes");
+    let has_stable_physical_restore = |body: &str| {
+        let Some(restore_start) = body.rfind("if ($change -eq \"route\") {") else {
+            return false;
+        };
+        let restore = &body[restore_start..];
+        let Some(stable_start) =
+            restore.find("$stableDeadline = [DateTime]::UtcNow.AddSeconds(20)")
+        else {
+            return false;
+        };
+        restore
+            .find("Set-NetRoute -InputObject $changedRoute -RouteMetric $routeMetric")
+            .is_some_and(|position| position < stable_start)
+            && restore
+                .find("Enable-NetAdapter -Name $physicalAdapter.Name")
+                .is_some_and(|position| position < stable_start)
+            && restore
+                .find("-SkipAsSource $skipAsSource -ErrorAction Stop")
+                .is_some_and(|position| position < stable_start)
+            && restore.contains("$currentSystemRoutes = @(Get-Ipv4SystemRouteSnapshot)")
+            && restore.contains("$currentPhysicalDns = @(Get-PhysicalDnsSnapshot 0)")
+            && restore.contains("@(Compare-Object -ReferenceObject @($systemRouteBaseline) -DifferenceObject $currentSystemRoutes).Count -eq 0")
+            && restore.contains("@(Compare-Object -ReferenceObject @($physicalDnsBaseline) -DifferenceObject $currentPhysicalDns).Count -eq 0")
+            && restore.contains("$currentUnderlay = Get-Ipv4DefaultUnderlay")
+            && restore.contains("$currentPreferredSource.Count -eq 1")
+            && restore.contains("$currentUnderlay.InterfaceIndex -eq $physicalUnderlayBaseline.InterfaceIndex")
+            && restore.contains("$currentUnderlay.Row.Route.NextHop -ceq $physicalUnderlayBaseline.Gateway")
+            && restore.contains("$currentUnderlay.Row.Route.RouteMetric -eq $physicalUnderlayBaseline.RouteMetric")
+            && restore.contains("$currentUnderlay.Row.Interface.InterfaceMetric -eq $physicalUnderlayBaseline.InterfaceMetric")
+            && restore.contains("$currentUnderlay.Row.Interface.AutomaticMetric -eq $physicalUnderlayBaseline.AutomaticMetric")
+            && restore.contains("$currentSourceRow.SkipAsSource -eq $physicalUnderlayBaseline.SkipAsSource")
+            && restore.contains("$stableSamples = 0")
+            && restore.contains("$stableSamples++")
+            && restore.contains("else { $stableSamples = 0 }")
+            && restore.contains("if ($stableSamples -ge 4) { break }")
+            && restore.contains("Start-Sleep -Milliseconds 500")
+            && restore.contains("while ([DateTime]::UtcNow -lt $stableDeadline)")
+            && restore.contains("catch { $baselineMatches = $false }")
+            && restore.contains(
+                "Assert-True ($stableSamples -ge 4) \"physical baseline did not stabilize after controller restore\"",
+            )
+            && !restore.contains("physical interface restore failed")
+            && !restore.contains("Wait-Ipv4SystemRouteSnapshot")
+    };
     let hard_kills = integrated
         .split("foreach ($hardKill in @(")
         .nth(1)
@@ -399,6 +443,47 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && integrated.contains("[Ferrum2ProcessGroup]::Terminate([uint32]$activeProcess.Id)"),
         "integrated rows must execute direct TUN, system DNS, invalidation, cycles and hard-kill evidence"
     );
+    assert!(
+        integrated
+            .find("$systemRouteBaseline = @(Get-Ipv4SystemRouteSnapshot)")
+            .zip(integrated.find("$physicalUnderlayBaseline = [pscustomobject]@{"))
+            .zip(integrated.find("foreach ($change in @(\"route\", \"interface\", \"address\"))"))
+            .is_some_and(|((routes, underlay), changes)| routes < changes && underlay < changes)
+            && has_stable_physical_restore(network_changes),
+        "every controller restore must await one exact stable physical baseline before the next process"
+    );
+    for (failure, broken) in [
+        (
+            "first matching sample",
+            network_changes.replace("$stableSamples -ge 4", "$stableSamples -ge 1"),
+        ),
+        (
+            "adapter Status Up without underlay readback",
+            network_changes.replace(
+                "$currentUnderlay = Get-Ipv4DefaultUnderlay",
+                "$currentUnderlay = $physicalDefault",
+            ),
+        ),
+        (
+            "missing post-restore system route readback",
+            network_changes.replace(
+                "@(Compare-Object -ReferenceObject @($systemRouteBaseline) -DifferenceObject $currentSystemRoutes).Count -eq 0",
+                "$true",
+            ),
+        ),
+        (
+            "missing post-restore physical DNS readback",
+            network_changes.replace(
+                "@(Compare-Object -ReferenceObject @($physicalDnsBaseline) -DifferenceObject $currentPhysicalDns).Count -eq 0",
+                "$true",
+            ),
+        ),
+    ] {
+        assert!(
+            !has_stable_physical_restore(&broken),
+            "stable physical restore contract accepted {failure}"
+        );
+    }
     assert!(
         system_dns_witness.contains("([string]$Name, [bool]$TcpOnly)")
             && system_dns_witness.contains("Clear-DnsClientCache -ErrorAction Stop")

@@ -2652,6 +2652,16 @@ listen = "127.0.0.1:$manualMetricsPort"
         $physicalDefault = Get-Ipv4DefaultUnderlay
         $managedDnsAddress = [string]$physicalDefault.Sources[0].IPAddress
         $physicalDnsBaseline = @(Get-PhysicalDnsSnapshot 0)
+        $systemRouteBaseline = @(Get-Ipv4SystemRouteSnapshot)
+        $physicalUnderlayBaseline = [pscustomobject]@{
+            InterfaceIndex = [uint32]$physicalDefault.InterfaceIndex
+            SourceAddress = $managedDnsAddress
+            Gateway = [string]$physicalDefault.Row.Route.NextHop
+            RouteMetric = [uint32]$physicalDefault.Row.Route.RouteMetric
+            InterfaceMetric = [uint32]$physicalDefault.Row.Interface.InterfaceMetric
+            AutomaticMetric = $physicalDefault.Row.Interface.AutomaticMetric
+            SkipAsSource = [bool]$physicalDefault.Sources[0].SkipAsSource
+        }
 
         @"
 schema_version = 2
@@ -2888,20 +2898,49 @@ listen = "127.0.0.1:$managedMetricsPort"
                             Set-NetRoute -InputObject $changedRoute -RouteMetric $routeMetric -ErrorAction Stop
                         } elseif ($change -eq "interface") {
                             Enable-NetAdapter -Name $physicalAdapter.Name -Confirm:$false -ErrorAction Stop
-                            $restoreDeadline = [DateTime]::UtcNow.AddSeconds(20)
-                            do {
-                                $restoredAdapter = Get-NetAdapter -Name $physicalAdapter.Name -IncludeHidden -ErrorAction SilentlyContinue
-                                if ($restoredAdapter -and $restoredAdapter.Status -eq "Up") { break }
-                                Start-Sleep -Milliseconds 100
-                            } while ([DateTime]::UtcNow -lt $restoreDeadline)
-                            Assert-True ($restoredAdapter -and $restoredAdapter.Status -eq "Up") "physical interface restore failed"
+                        } else {
+                            Set-NetIPAddress -InterfaceIndex $physicalDefault.InterfaceIndex -IPAddress $sourceAddress `
+                                -SkipAsSource $skipAsSource -ErrorAction Stop
+                        }
+
+                        $stableDeadline = [DateTime]::UtcNow.AddSeconds(20)
+                        $stableSamples = 0
+                        do {
+                            $baselineMatches = $false
+                            try {
+                                $currentSystemRoutes = @(Get-Ipv4SystemRouteSnapshot)
+                                $currentPhysicalDns = @(Get-PhysicalDnsSnapshot 0)
+                                $currentUnderlay = Get-Ipv4DefaultUnderlay
+                                $currentPreferredSource = @($currentUnderlay.Sources | Where-Object {
+                                    $_.IPAddress -ceq $physicalUnderlayBaseline.SourceAddress
+                                })
+                                $currentSourceRows = @(Get-NetIPAddress -InterfaceIndex $currentUnderlay.InterfaceIndex `
+                                    -AddressFamily IPv4 -IPAddress $physicalUnderlayBaseline.SourceAddress -ErrorAction Stop)
+                                $currentSourceRow = if ($currentSourceRows.Count -eq 1) { $currentSourceRows[0] } else { $null }
+                                $baselineMatches =
+                                    @(Compare-Object -ReferenceObject @($systemRouteBaseline) -DifferenceObject $currentSystemRoutes).Count -eq 0 -and
+                                    @(Compare-Object -ReferenceObject @($physicalDnsBaseline) -DifferenceObject $currentPhysicalDns).Count -eq 0 -and
+                                    $currentUnderlay.InterfaceIndex -eq $physicalUnderlayBaseline.InterfaceIndex -and
+                                    $currentPreferredSource.Count -eq 1 -and
+                                    $null -ne $currentSourceRow -and
+                                    $currentUnderlay.Row.Route.NextHop -ceq $physicalUnderlayBaseline.Gateway -and
+                                    $currentUnderlay.Row.Route.RouteMetric -eq $physicalUnderlayBaseline.RouteMetric -and
+                                    $currentUnderlay.Row.Interface.InterfaceMetric -eq $physicalUnderlayBaseline.InterfaceMetric -and
+                                    $currentUnderlay.Row.Interface.AutomaticMetric -eq $physicalUnderlayBaseline.AutomaticMetric -and
+                                    $currentSourceRow.SkipAsSource -eq $physicalUnderlayBaseline.SkipAsSource
+                            } catch { $baselineMatches = $false }
+                            if ($baselineMatches) { $stableSamples++ }
+                            else { $stableSamples = 0 }
+                            if ($stableSamples -ge 4) { break }
+                            Start-Sleep -Milliseconds 500
+                        } while ([DateTime]::UtcNow -lt $stableDeadline)
+                        Assert-True ($stableSamples -ge 4) "physical baseline did not stabilize after controller restore"
+
+                        if ($change -eq "interface") {
                             Assert-True $tcpResources.Remove($dnsResponder) "DNS responder ownership mismatch"
                             $dnsResponder.Dispose()
                             $dnsResponder = [Ferrum2DnsResponder]::new($managedDnsAddress, $managedDnsPort)
                             $tcpResources.Add($dnsResponder)
-                        } else {
-                            Set-NetIPAddress -InterfaceIndex $physicalDefault.InterfaceIndex -IPAddress $sourceAddress `
-                                -SkipAsSource $skipAsSource -ErrorAction Stop
                         }
                     }
                 } finally {
