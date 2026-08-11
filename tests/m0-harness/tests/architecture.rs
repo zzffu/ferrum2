@@ -374,24 +374,33 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         "integrated rows must execute direct TUN, system DNS, invalidation, cycles and hard-kill evidence"
     );
     assert!(
-        system_dns_witness.contains("$answer.Count -eq 1")
-            && system_dns_witness.contains("$deadline = [DateTime]::UtcNow.AddSeconds(5)")
-            && system_dns_witness.contains("$quiet.ElapsedMilliseconds -ge 1500")
-            && system_dns_witness.contains("if ($after -gt $before)")
-            && system_dns_witness.contains("ImmediateRequests = $immediateRequests")
-            && system_dns_witness.contains("SettledRequests = $after")
+        system_dns_witness.contains("([string]$Name, [bool]$TcpOnly)")
+            && system_dns_witness.contains("Clear-DnsClientCache -ErrorAction Stop")
+            && system_dns_witness.contains(
+                "$parameters = @{ Name = $Name; Type = \"A\"; DnsOnly = $true; NoHostsFile = $true; ErrorAction = \"Stop\" }"
+            )
+            && system_dns_witness.contains("if ($TcpOnly) { $parameters.TcpOnly = $true }")
+            && system_dns_witness.contains(
+                "Where-Object { $_.Type -eq \"A\" -and $_.IPAddress -eq \"192.0.2.55\" }"
+            )
+            && system_dns_witness.contains("$answer.Count -eq 1")
             && !system_dns_witness.contains("Write-Output")
-            && !system_dns_witness.contains("$Responder.Requests -eq $before + 1")
-            && integrated.contains("$managedUdpDnsWitness = Invoke-SystemDnsWitness")
-            && integrated.contains("$managedTcpDnsWitness = Invoke-SystemDnsWitness")
-            && integrated.contains("$managedSystemDnsRows = 2")
+            && !system_dns_witness.contains("Requests")
+            && !system_dns_witness.contains("$deadline")
+            && !system_dns_witness.contains("$quiet")
+            && !system_dns_witness.contains("[pscustomobject]")
             && integrated.contains(
-                "system_dns_udp_immediate_requests = $managedUdpDnsWitness.ImmediateRequests"
+                "Invoke-SystemDnsWitness \"m16-$runIdentity-udp.tun.test\" $false"
             )
             && integrated.contains(
-                "system_dns_tcp_settled_requests = $managedTcpDnsWitness.SettledRequests"
-            ),
-        "system DNS rows must prove one unique answer after a bounded positive quiescent request delta"
+                "Invoke-SystemDnsWitness \"m16-$runIdentity-tcp.tun.test\" $true"
+            )
+            && integrated.matches("$managedSystemDnsRows++").count() == 2
+            && !integrated.contains("$managedUdpDnsWitness")
+            && !integrated.contains("$managedTcpDnsWitness")
+            && !integrated.contains("system_dns_udp_immediate_requests")
+            && !integrated.contains("system_dns_tcp_settled_requests"),
+        "system DNS rows must prove two unique A answers without a responder-global request oracle"
     );
     assert!(
         qualifier.contains("\"hard-kill\"")
