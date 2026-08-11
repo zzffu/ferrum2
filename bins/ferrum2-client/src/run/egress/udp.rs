@@ -522,6 +522,7 @@ impl ClientUdpAssociation {
                     .ok_or_else(|| io::Error::other("direct UDP target unavailable"))?;
                 let (length, peer) = send_direct_target(
                     socket,
+                    &SystemUdpResolver,
                     target,
                     &self.upstream_wire[..wire_len],
                     self.direct_timeout,
@@ -688,7 +689,8 @@ where
 }
 
 async fn send_direct_target(
-    socket: &SystemDirectUdpSocket,
+    socket: &impl DirectUdpSocket,
+    resolver: &impl UdpResolver,
     target: &TargetAddr,
     payload: &[u8],
     timeout: std::time::Duration,
@@ -703,12 +705,9 @@ async fn send_direct_target(
     let TargetHostRef::Domain(host) = target.host() else {
         return Err(io::Error::other("direct UDP target unavailable"));
     };
-    let candidates = tokio::time::timeout_at(
-        deadline,
-        SystemUdpResolver.resolve(host, target.port().get()),
-    )
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "direct UDP resolve timeout"))??;
+    let candidates = tokio::time::timeout_at(deadline, resolver.resolve(host, target.port().get()))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "direct UDP resolve timeout"))??;
     let mut last = None;
     for candidate in candidates.into_iter().take(MAX_UDP_RESOLVED_CANDIDATES) {
         match tokio::time::timeout_at(deadline, socket.send_to(payload, candidate)).await {
@@ -923,6 +922,8 @@ fn runtime_error(_error: impl Sized) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use ferrum2_crypto::{
         KeySelector, MethodKeyProvider, MethodPsk, MethodSecretKeyRef, MethodSinglePskProvider,
@@ -932,9 +933,47 @@ mod tests {
     use super::*;
     use crate::run::test_support::*;
 
+    struct DirectTestResolver {
+        candidates: Option<Vec<SocketAddr>>,
+        calls: AtomicUsize,
+    }
+
+    impl UdpResolver for DirectTestResolver {
+        type Candidates = Vec<SocketAddr>;
+
+        async fn resolve(&self, _host: &str, _port: u16) -> io::Result<Self::Candidates> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.candidates
+                .clone()
+                .ok_or_else(|| io::Error::other("injected resolver failure"))
+        }
+    }
+
+    struct DirectTestSocket {
+        attempts: Mutex<Vec<SocketAddr>>,
+        succeed_at: Option<usize>,
+    }
+
+    impl DirectUdpSocket for DirectTestSocket {
+        async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
+            let mut attempts = self.attempts.lock().expect("direct send attempts");
+            attempts.push(target);
+            if self.succeed_at == Some(attempts.len()) {
+                Ok(payload.len())
+            } else {
+                Err(io::Error::other("injected direct send failure"))
+            }
+        }
+
+        async fn recv_from(&self, _payload: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+            Err(io::Error::other("receive is unused"))
+        }
+    }
+
     #[tokio::test]
     async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
         let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
         let manager = UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone());
         let live_ids = Arc::new(Mutex::new(HashSet::new()));
         let engine = ClientEgressEngine::new(
@@ -968,6 +1007,19 @@ mod tests {
             .expect("direct association");
         association.activate(&engine).expect("direct activation");
         let provisional = registry.snapshot();
+        let maximum = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+        assert_eq!(
+            association
+                .prepare_application_request(
+                    &engine,
+                    &engine.outbounds,
+                    target.clone(),
+                    &maximum,
+                    Instant::now(),
+                )
+                .unwrap_or_else(|_| panic!("exact raw maximum")),
+            MAX_UDP_WIRE_DATAGRAM_BYTES
+        );
         assert!(matches!(
             association.prepare_application_request(
                 &engine,
@@ -1008,6 +1060,8 @@ mod tests {
         assert_eq!(source, TargetAddr::ip(echo.local_addr().unwrap()).unwrap());
         assert_eq!(payload, b"raw-reply");
         assert!(live_ids.lock().expect("live IDs").is_empty());
+        drop(association);
+        assert_eq!(registry.snapshot(), baseline);
 
         for (case, plan) in [
             ("absent", None),
@@ -1122,7 +1176,10 @@ mod tests {
             .await
             .unwrap();
         association.activate(&engine).unwrap();
-        for (target, payload) in [(target_a, b"A".as_slice()), (target_b, b"B".as_slice())] {
+        for (target, payload) in [
+            (target_a.clone(), b"A".as_slice()),
+            (target_b, b"B".as_slice()),
+        ] {
             let length = association
                 .prepare_application_request(
                     &engine,
@@ -1158,6 +1215,123 @@ mod tests {
             assert_eq!(source, TargetAddr::ip(expected_source).unwrap());
             assert_eq!(payload, expected_payload);
         }
+
+        for _ in 0..UDP_SESSION_QUEUE_DEPTH {
+            let length = association
+                .prepare_application_request(
+                    &engine,
+                    &engine.outbounds,
+                    target_a.clone(),
+                    b"queued",
+                    Instant::now(),
+                )
+                .unwrap_or_else(|_| panic!("queued direct request"));
+            association.send_encoded_request(length).await.unwrap();
+        }
+        assert_eq!(association.direct_peers.len(), UDP_SESSION_QUEUE_DEPTH);
+        let length = association
+            .prepare_application_request(
+                &engine,
+                &engine.outbounds,
+                target_a,
+                b"overflow",
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("depth+1 request encoding"));
+        assert_eq!(
+            association
+                .send_encoded_request(length)
+                .await
+                .expect_err("depth+1 rejected before send")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(association.direct_peers.len(), UDP_SESSION_QUEUE_DEPTH);
+        for _ in 0..UDP_SESSION_QUEUE_DEPTH {
+            echo_a.recv_from(&mut wire).await.expect("queued datagram");
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), echo_a.recv_from(&mut wire))
+                .await
+                .is_err(),
+            "depth+1 never reaches the socket"
+        );
+        assert_eq!(registry.snapshot(), provisional);
+        assert!(live_ids.lock().expect("live IDs").is_empty());
+        drop(association);
+        assert_eq!(registry.snapshot(), baseline);
+
+        let domain = TargetAddr::domain("direct-candidates.invalid", 53).unwrap();
+        for (name, candidate_count, succeed_at, expected_attempts, expected_ok) in [
+            ("zero", 0, None, 0, false),
+            ("one", 1, Some(1), 1, true),
+            ("sixteen", 16, Some(16), 16, true),
+            ("seventeen", 17, None, 16, false),
+        ] {
+            let candidates = (1..=candidate_count)
+                .map(|octet| SocketAddr::from(([192, 0, 2, octet as u8], 53)))
+                .collect::<Vec<_>>();
+            let resolver = DirectTestResolver {
+                candidates: Some(candidates.clone()),
+                calls: AtomicUsize::new(0),
+            };
+            let socket = DirectTestSocket {
+                attempts: Mutex::new(Vec::new()),
+                succeed_at,
+            };
+            let result = send_direct_target(
+                &socket,
+                &resolver,
+                &domain,
+                b"candidate",
+                Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(result.is_ok(), expected_ok, "{name}");
+            assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "{name}");
+            let attempts = socket.attempts.lock().expect("candidate attempts");
+            assert_eq!(attempts.len(), expected_attempts, "{name}");
+            assert_eq!(&attempts[..], &candidates[..expected_attempts], "{name}");
+        }
+
+        let resolver = DirectTestResolver {
+            candidates: None,
+            calls: AtomicUsize::new(0),
+        };
+        let socket = DirectTestSocket {
+            attempts: Mutex::new(Vec::new()),
+            succeed_at: Some(1),
+        };
+        assert!(
+            send_direct_target(
+                &socket,
+                &resolver,
+                &domain,
+                b"resolver-error",
+                Duration::from_secs(1),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            socket
+                .attempts
+                .lock()
+                .expect("resolver attempts")
+                .is_empty()
+        );
+        assert_eq!(registry.snapshot(), baseline);
+        assert_eq!(
+            engine
+                .udp
+                .as_ref()
+                .expect("UDP context")
+                .manager
+                .session_count(),
+            0
+        );
+        assert!(live_ids.lock().expect("live IDs").is_empty());
     }
 
     #[test]

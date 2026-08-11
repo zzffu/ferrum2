@@ -2221,6 +2221,9 @@ mod tests {
         .expect("IPv6 stack");
         assert!(ipv6_stack.enqueue(&ipv6_tcp(), true));
         assert_eq!(ipv6_stack.live_tcp_flows(), 1, "IPv6 has the same ceiling");
+        let ipv6_flow = ipv6_stack.flows[0].as_ref().expect("IPv6 flow");
+        assert_eq!(ipv6_flow.tuple.source, "[fd00::2]:10000".parse().unwrap());
+        assert_eq!(ipv6_flow.tuple.target, "[2001:db8::1]:443".parse().unwrap());
     }
 
     #[tokio::test]

@@ -2158,6 +2158,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         .expect("client SOCKS adapter");
     let client_udp = fs::read_to_string(root.join("bins/ferrum2-client/src/run/egress/udp.rs"))
         .expect("shared client UDP association");
+    let client_egress = fs::read_to_string(root.join("bins/ferrum2-client/src/run/egress/mod.rs"))
+        .expect("shared client egress engine");
+    let config_contract =
+        fs::read_to_string(root.join("crates/ferrum2-config/tests/config_contract.rs"))
+            .expect("config contract tests");
     for required in [
         "#![forbid(unsafe_code)]",
         "poll_ingress_single",
@@ -3865,6 +3870,102 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         assert!(
             !tun_udp_is_opaque_and_client_owned(&owner, &adapter, &association),
             "TUN UDP mutation must sever opaque owner/client composition evidence"
+        );
+    }
+
+    let has_t03_memory_carrier_composition =
+        |foundation: &str, adapter: &str, egress: &str, config_tests: &str| {
+            [
+                "fn tcp_five_tuple_admission_is_bounded_before_socket_or_buffer_creation()",
+                "async fn tcp_handshake_publishes_once_and_preserves_both_byte_directions()",
+                "async fn udp_ipv4_ipv6_candidates_commit_and_inject_through_the_real_stack()",
+                "let ipv6_flow = ipv6_stack.flows[0].as_ref().expect(\"IPv6 flow\");",
+                "assert_eq!(ipv6_flow.tuple.source, \"[fd00::2]:10000\".parse().unwrap());",
+                "assert_eq!(ipv6_flow.tuple.target, \"[2001:db8::1]:443\".parse().unwrap());",
+                "Arc::new(handle_tcp)",
+                "Arc::new(handle_udp)",
+                "tasks.spawn((self.handle_tcp)(flow, cancellation.clone()))",
+                "tasks.spawn((self.handle_udp)(candidate, cancellation.clone()))",
+            ]
+            .iter()
+            .all(|required| foundation.contains(required))
+                && [
+                    "ferrum2_tun::process_root(",
+                    "async fn tun_udp_over_limit_is_mapping_free_then_selector_snapshot_is_fixed()",
+                    "async fn tun_tcp_dns_answer_failure_closes_flow_without_route_or_fallback_attempt()",
+                    "ClientRequestOrigin::Tun",
+                    "context.egress.open_tcp(",
+                    "context.egress.prepare_udp(",
+                    "candidate.commit(terminal, selected_bound).await",
+                ]
+                .iter()
+                .all(|required| adapter.contains(required))
+                && [
+                    "async fn m16_direct_pre_socket_and_m16_redaction_classify_without_side_effects()",
+                    "origin == ClientRequestOrigin::Tun",
+                    "ClientRequestOrigin::Socks",
+                    "ClientPlanFailure::DirectIpv6Unsupported",
+                ]
+                .iter()
+                .all(|required| egress.contains(required))
+                && [
+                    "fn m16_direct_only_client_omits_global_credentials_and_compiles_static_plan()",
+                    "fn m16_client_outbound_shape_and_direct_plan_roots_are_closed()",
+                    "config.route.select_plan(1, Network::Tcp, &target).hops()",
+                    "config.route.final_plan().hops()",
+                    "config.selector_control().switch(\"manual\", \"proxy\").unwrap()",
+                ]
+                .iter()
+                .all(|required| config_tests.contains(required))
+        };
+    assert!(
+        has_t03_memory_carrier_composition(&tun, &client_tun, &client_egress, &config_contract),
+        "MemoryDevice family carriers must hand off through the one binary TUN composition into the shared Direct/proxy route forms"
+    );
+    for (foundation, adapter, egress, config_tests) in [
+        (
+            tun.replace(
+                "tasks.spawn((self.handle_tcp)(flow, cancellation.clone()))",
+                "drop(flow)",
+            ),
+            client_tun.clone(),
+            client_egress.clone(),
+            config_contract.clone(),
+        ),
+        (
+            tun.replace(
+                "assert_eq!(ipv6_flow.tuple.target, \"[2001:db8::1]:443\".parse().unwrap());",
+                "assert!(true);",
+            ),
+            client_tun.clone(),
+            client_egress.clone(),
+            config_contract.clone(),
+        ),
+        (
+            tun.clone(),
+            client_tun.replace("context.egress.prepare_udp(", "prepare_other_udp("),
+            client_egress.clone(),
+            config_contract.clone(),
+        ),
+        (
+            tun.clone(),
+            client_tun.clone(),
+            client_egress.replace("origin == ClientRequestOrigin::Tun", "origin.is_tun()"),
+            config_contract.clone(),
+        ),
+        (
+            tun.clone(),
+            client_tun.clone(),
+            client_egress.clone(),
+            config_contract.replace(
+                "config.selector_control().switch(\"manual\", \"proxy\").unwrap()",
+                "Ok(())",
+            ),
+        ),
+    ] {
+        assert!(
+            !has_t03_memory_carrier_composition(&foundation, &adapter, &egress, &config_tests),
+            "T03 MemoryDevice/composition/route-form mutation survived"
         );
     }
 
