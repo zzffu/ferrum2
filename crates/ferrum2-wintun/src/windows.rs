@@ -363,6 +363,7 @@ const fn interface_index_option_value(interface_index: u32) -> u32 {
 struct NotificationContext {
     generation: AtomicU64,
     owned_luid: AtomicU64,
+    provisional_luid: AtomicU64,
 }
 
 struct NotificationOwners {
@@ -380,11 +381,30 @@ impl NotificationOwners {
     }
 
     fn set_owned_luid(&self, luid: NET_LUID_LH) {
-        self.context
+        let context = self
+            .context
             .as_ref()
-            .expect("live notifications retain their callback context")
+            .expect("live notifications retain their callback context");
+        let luid = unsafe { luid.Value };
+        if luid == 0 {
+            context.generation.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        match context
             .owned_luid
-            .store(unsafe { luid.Value }, Ordering::Release);
+            .compare_exchange(0, luid, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => {}
+            Err(current) if current == luid => {}
+            Err(_) => {
+                context.generation.fetch_add(1, Ordering::AcqRel);
+                return;
+            }
+        }
+        let provisional = context.provisional_luid.swap(0, Ordering::SeqCst);
+        if provisional != 0 && provisional != luid {
+            context.generation.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     fn cancel_all(&mut self) -> bool {
@@ -453,10 +473,14 @@ unsafe extern "system" fn route_changed(
     _: i32,
 ) {
     let context = unsafe { &*context.cast::<NotificationContext>() };
-    let own = context.owned_luid.load(Ordering::Acquire);
-    if row.is_null() || own == 0 || unsafe { (*row).InterfaceLuid.Value } != own {
-        context.generation.fetch_add(1, Ordering::AcqRel);
-    }
+    classify_notification_luid(
+        context,
+        if row.is_null() {
+            0
+        } else {
+            unsafe { (*row).InterfaceLuid.Value }
+        },
+    );
 }
 
 unsafe extern "system" fn interface_changed(
@@ -465,10 +489,14 @@ unsafe extern "system" fn interface_changed(
     _: i32,
 ) {
     let context = unsafe { &*context.cast::<NotificationContext>() };
-    let own = context.owned_luid.load(Ordering::Acquire);
-    if row.is_null() || own == 0 || unsafe { (*row).InterfaceLuid.Value } != own {
-        context.generation.fetch_add(1, Ordering::AcqRel);
-    }
+    classify_notification_luid(
+        context,
+        if row.is_null() {
+            0
+        } else {
+            unsafe { (*row).InterfaceLuid.Value }
+        },
+    );
 }
 
 unsafe extern "system" fn address_changed(
@@ -477,8 +505,38 @@ unsafe extern "system" fn address_changed(
     _: i32,
 ) {
     let context = unsafe { &*context.cast::<NotificationContext>() };
-    let own = context.owned_luid.load(Ordering::Acquire);
-    if row.is_null() || own == 0 || unsafe { (*row).InterfaceLuid.Value } != own {
+    classify_notification_luid(
+        context,
+        if row.is_null() {
+            0
+        } else {
+            unsafe { (*row).InterfaceLuid.Value }
+        },
+    );
+}
+
+fn classify_notification_luid(context: &NotificationContext, luid: u64) {
+    if luid == 0 {
+        context.generation.fetch_add(1, Ordering::AcqRel);
+        return;
+    }
+    let owned = context.owned_luid.load(Ordering::SeqCst);
+    if owned != 0 {
+        if owned != luid {
+            context.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        return;
+    }
+    let provisional_mismatch =
+        match context
+            .provisional_luid
+            .compare_exchange(0, luid, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => false,
+            Err(current) => current != luid,
+        };
+    let published = context.owned_luid.load(Ordering::SeqCst);
+    if provisional_mismatch || (published != 0 && published != luid) {
         context.generation.fetch_add(1, Ordering::AcqRel);
     }
 }
@@ -858,6 +916,7 @@ fn subscribe_network_changes() -> Result<NotificationOwners, Error> {
     let context = Box::new(NotificationContext {
         generation: AtomicU64::new(0),
         owned_luid: AtomicU64::new(0),
+        provisional_luid: AtomicU64::new(0),
     });
     let context_pointer = (&raw const *context).cast::<c_void>();
     let (handles, context) = subscribe_notification_sequence(
@@ -1865,17 +1924,193 @@ mod tests {
         ABI_EXPORTS, AdapterCreateFailure, CleanupOperations, DLL_BYTES, DLL_SHA256, DadProgress,
         ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, Error, InterfaceIdentity, IpDadStateDeprecated,
         IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative,
-        LoaderOperations, MIB_IF_ROW2, MIB_IPFORWARD_ROW2, ManagedRouteCleanupOperations,
-        ManagedRouteOperations, ManagedRouteRead, RouteFingerprint, SessionJournal,
-        SetupOperations, UnderlayOperations, cancel_notification_handles, capture_route_row,
-        classify_adapter_create_failure, cleanup_transaction, dad_snapshot, delete_managed_route,
-        eligible_interface_identity, finish_setup_transaction, install_managed_routes,
+        LoaderOperations, MIB_IF_ROW2, MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW,
+        MIB_UNICASTIPADDRESS_ROW, ManagedRouteCleanupOperations, ManagedRouteOperations,
+        ManagedRouteRead, NET_LUID_LH, NotificationContext, NotificationOwners, RouteFingerprint,
+        SessionJournal, SetupOperations, UnderlayOperations, address_changed,
+        cancel_notification_handles, capture_route_row, classify_adapter_create_failure,
+        cleanup_transaction, dad_snapshot, delete_managed_route, eligible_interface_identity,
+        finish_setup_transaction, install_managed_routes, interface_changed,
         interface_index_option_value, leak_notification_owners, load_transaction,
-        prepare_managed_intent, require_exports, route_matches, select_unique_default_route,
-        setup_transaction, snapshot_underlay_with, subscribe_notification_sequence,
-        take_last_owned_route, underlay_matches_with, underlay_snapshot_matches, validate_artifact,
+        prepare_managed_intent, require_exports, route_changed, route_matches,
+        select_unique_default_route, setup_transaction, snapshot_underlay_with,
+        subscribe_notification_sequence, take_last_owned_route, underlay_matches_with,
+        underlay_snapshot_matches, validate_artifact,
     };
     use crate::Ipv4Prefix;
+
+    #[test]
+    fn notification_prepublication_exact_owner_is_reconciled_without_invalidation() {
+        const OWN_LUID: u64 = 0x1020_3040;
+        const FOREIGN_LUID: u64 = 0x5060_7080;
+
+        #[derive(Clone, Copy, Debug)]
+        enum Callback {
+            Route,
+            Interface,
+            Address,
+        }
+
+        #[derive(Clone, Copy)]
+        enum Action {
+            Notify(Option<u64>),
+            Publish(u64),
+        }
+
+        unsafe fn notify(callback: Callback, context: *const std::ffi::c_void, luid: Option<u64>) {
+            match callback {
+                Callback::Route => {
+                    let mut row = unsafe { std::mem::zeroed::<MIB_IPFORWARD_ROW2>() };
+                    row.InterfaceLuid.Value = luid.unwrap_or_default();
+                    unsafe {
+                        route_changed(
+                            context,
+                            if luid.is_some() {
+                                &raw const row
+                            } else {
+                                std::ptr::null()
+                            },
+                            0,
+                        )
+                    };
+                }
+                Callback::Interface => {
+                    let mut row = unsafe { std::mem::zeroed::<MIB_IPINTERFACE_ROW>() };
+                    row.InterfaceLuid.Value = luid.unwrap_or_default();
+                    unsafe {
+                        interface_changed(
+                            context,
+                            if luid.is_some() {
+                                &raw const row
+                            } else {
+                                std::ptr::null()
+                            },
+                            0,
+                        )
+                    };
+                }
+                Callback::Address => {
+                    let mut row = unsafe { std::mem::zeroed::<MIB_UNICASTIPADDRESS_ROW>() };
+                    row.InterfaceLuid.Value = luid.unwrap_or_default();
+                    unsafe {
+                        address_changed(
+                            context,
+                            if luid.is_some() {
+                                &raw const row
+                            } else {
+                                std::ptr::null()
+                            },
+                            0,
+                        )
+                    };
+                }
+            }
+        }
+
+        fn luid(value: u64) -> NET_LUID_LH {
+            let mut luid = unsafe { std::mem::zeroed::<NET_LUID_LH>() };
+            luid.Value = value;
+            luid
+        }
+
+        let cases: &[(&str, &[Action], bool)] = &[
+            (
+                "repeated own before publication",
+                &[
+                    Action::Notify(Some(OWN_LUID)),
+                    Action::Notify(Some(OWN_LUID)),
+                    Action::Publish(OWN_LUID),
+                ],
+                false,
+            ),
+            (
+                "foreign before publication",
+                &[
+                    Action::Notify(Some(FOREIGN_LUID)),
+                    Action::Publish(OWN_LUID),
+                ],
+                true,
+            ),
+            (
+                "own then foreign before publication",
+                &[
+                    Action::Notify(Some(OWN_LUID)),
+                    Action::Notify(Some(FOREIGN_LUID)),
+                    Action::Publish(OWN_LUID),
+                ],
+                true,
+            ),
+            (
+                "foreign then own before publication",
+                &[
+                    Action::Notify(Some(FOREIGN_LUID)),
+                    Action::Notify(Some(OWN_LUID)),
+                    Action::Publish(OWN_LUID),
+                ],
+                true,
+            ),
+            (
+                "null row",
+                &[Action::Notify(None), Action::Publish(OWN_LUID)],
+                true,
+            ),
+            (
+                "zero row LUID",
+                &[Action::Notify(Some(0)), Action::Publish(OWN_LUID)],
+                true,
+            ),
+            (
+                "own after publication",
+                &[Action::Publish(OWN_LUID), Action::Notify(Some(OWN_LUID))],
+                false,
+            ),
+            (
+                "foreign after publication",
+                &[
+                    Action::Publish(OWN_LUID),
+                    Action::Notify(Some(FOREIGN_LUID)),
+                ],
+                true,
+            ),
+            (
+                "same owner republished",
+                &[Action::Publish(OWN_LUID), Action::Publish(OWN_LUID)],
+                false,
+            ),
+            (
+                "different owner republished",
+                &[Action::Publish(OWN_LUID), Action::Publish(FOREIGN_LUID)],
+                true,
+            ),
+            ("zero owner published", &[Action::Publish(0)], true),
+        ];
+        for callback in [Callback::Route, Callback::Interface, Callback::Address] {
+            for (name, actions, changed) in cases {
+                let notifications = NotificationOwners {
+                    handles: Vec::new(),
+                    context: Some(Box::new(NotificationContext {
+                        generation: std::sync::atomic::AtomicU64::new(0),
+                        owned_luid: std::sync::atomic::AtomicU64::new(0),
+                        provisional_luid: std::sync::atomic::AtomicU64::new(0),
+                    })),
+                };
+                let context = (notifications.context.as_deref().unwrap()
+                    as *const NotificationContext)
+                    .cast();
+                for action in *actions {
+                    match action {
+                        Action::Notify(value) => unsafe { notify(callback, context, *value) },
+                        Action::Publish(value) => notifications.set_owned_luid(luid(*value)),
+                    }
+                }
+                assert_eq!(
+                    notifications.generation() != 0,
+                    *changed,
+                    "{callback:?}: {name}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn notification_cancel_retains_only_failed_handles_for_safe_retry() {

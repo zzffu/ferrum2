@@ -172,6 +172,7 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
 fn m16_managed_tun_pre_snapshot_generation_is_authoritative() {
     let source = fs::read_to_string(workspace_root().join("crates/ferrum2-wintun/src/windows.rs"))
         .expect("Wintun Windows owner");
+    let compact = source.split_whitespace().collect::<String>();
     let finish = source
         .split("fn finish_managed")
         .nth(1)
@@ -194,6 +195,33 @@ fn m16_managed_tun_pre_snapshot_generation_is_authoritative() {
             && finish.rfind("underlay_snapshot_matches(").unwrap()
                 > finish.find("install_managed_routes(").unwrap(),
         "the authoritative generation cannot be rebased or omit either validation"
+    );
+    let publisher = compact
+        .split("fnset_owned_luid")
+        .nth(1)
+        .and_then(|body| body.split("fncancel_all").next())
+        .expect("notification owner publisher");
+    let classifier = compact
+        .split("fnclassify_notification_luid")
+        .nth(1)
+        .and_then(|body| body.split("structManagedState").next())
+        .expect("notification LUID classifier");
+    assert!(
+        compact.contains("provisional_luid:AtomicU64")
+            && compact.matches("classify_notification_luid(").count() == 4
+            && publisher
+                .contains("owned_luid.compare_exchange(0,luid,Ordering::SeqCst,Ordering::SeqCst)",)
+            && publisher.contains("provisional_luid.swap(0,Ordering::SeqCst)")
+            && publisher.contains("provisional!=0&&provisional!=luid")
+            && classifier
+                .matches("owned_luid.load(Ordering::SeqCst)")
+                .count()
+                == 2
+            && classifier.contains(
+                "provisional_luid.compare_exchange(0,luid,Ordering::SeqCst,Ordering::SeqCst)",
+            )
+            && classifier.contains("provisional_mismatch||(published!=0&&published!=luid)"),
+        "prepublication callbacks and owner publication must share the SeqCst provisional-LUID handshake"
     );
 }
 
