@@ -50,7 +50,9 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
             && wintun.contains("GetIpForwardEntry2")
             && wintun.contains("DeleteIpForwardEntry2")
             && wintun.contains("self.0.pending_route = Some(row)")
-            && wintun.contains("state.pending_route.take().or_else(|| state.routes.pop())")
+            && wintun
+                .contains("take_last_owned_route(&mut state.pending_route, &mut state.routes)",)
+            && wintun.contains("pending.take().or_else(|| journal.pop())")
             && wintun.contains("IP_UNICAST_IF")
             && wintun.contains("to_be()"),
         "the sole unsafe Wintun owner must retain route discovery, exact route journal and network-order socket binding"
@@ -155,12 +157,43 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
     assert!(
         preflight
             && post_capture
+            && wintun.contains("prepare_managed_intent(self.config.managed_ipv4()")
+            && wintun.contains("let(handles,context)=subscribe_notification_sequence(")
             && wintun.contains("failed.push(handle)")
             && wintun.contains("handles.append(&mutfailed)")
             && wintun.contains("ifself.cancel_all(){leak_notification_owners")
             && egress.contains("(ClientRequestOrigin::Dns, true) => TcpBinding::Fixed")
             && udp.contains("ManagedUdpBinding::Fixed(endpoint)"),
         "notification lifetime, all-key route preflight, frozen underlay and fixed DNS binding must stay closed"
+    );
+}
+
+#[test]
+fn m16_managed_tun_pre_snapshot_generation_is_authoritative() {
+    let source = fs::read_to_string(workspace_root().join("crates/ferrum2-wintun/src/windows.rs"))
+        .expect("Wintun Windows owner");
+    let finish = source
+        .split("fn finish_managed")
+        .nth(1)
+        .and_then(|source| source.split("fn cleanup_inner").next())
+        .expect("managed finish caller path")
+        .split_whitespace()
+        .collect::<String>();
+    assert_eq!(
+        finish
+            .matches("owned,state.snapshot_generation,||state.notifications.generation()")
+            .count(),
+        2,
+        "both pre/post-capture checks must use the generation stored before snapshot"
+    );
+    assert!(
+        !finish.contains("settled_generation")
+            && !finish.contains("state.snapshot_generation=")
+            && finish.find("underlay_snapshot_matches(").unwrap()
+                < finish.find("install_managed_routes(").unwrap()
+            && finish.rfind("underlay_snapshot_matches(").unwrap()
+                > finish.find("install_managed_routes(").unwrap(),
+        "the authoritative generation cannot be rebased or omit either validation"
     );
 }
 
