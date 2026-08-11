@@ -2704,6 +2704,14 @@ tag = "direct"
 type = "direct"
 [route]
 final = "direct"
+[[route.rules]]
+inbound = "tun-in"
+network = "tcp"
+action = "reject"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+action = "reject"
 [udp]
 enabled = true
 max_sessions = 8

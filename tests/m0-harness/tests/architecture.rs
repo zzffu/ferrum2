@@ -478,6 +478,21 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         "route-only owner cycles must retain independent managed DNS activation, invalidation and cleanup evidence"
     );
     assert!(
+        integrated.contains(
+            "[route]\nfinal = \"direct\"\n[[route.rules]]\ninbound = \"tun-in\"\nnetwork = \"tcp\"\naction = \"reject\"\n[[route.rules]]\ninbound = \"tun-in\"\nnetwork = \"udp\"\naction = \"reject\"\n[udp]",
+        )
+            && integrated.matches("auto_route = true").count() == 2
+            && integrated
+                .matches("inbound = \"tun-in\"\nnetwork = \"tcp\"\naction = \"reject\"")
+                .count()
+                == 1
+            && integrated
+                .matches("inbound = \"tun-in\"\nnetwork = \"udp\"\naction = \"reject\"")
+                .count()
+                == 1,
+        "route-only owner cycles must reject all captured TUN traffic before it creates TCP or UDP owners"
+    );
+    assert!(
         qualifier.contains("\"hard-kill\"")
             && qualifier.contains("network_change=3/3")
             && qualifier.contains("route_change=1/1")
