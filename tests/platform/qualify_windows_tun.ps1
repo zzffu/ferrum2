@@ -484,7 +484,7 @@ function Wait-AdapterReady(
     throw "adapter readiness timeout"
 }
 
-function Wait-AdapterAbsent([string]$Name, [int]$TimeoutSeconds = 20) {
+function Wait-AdapterAbsent([string]$Name, [int]$TimeoutSeconds = 20, [int]$RequiredSamples = 4) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $stableSamples = 0
     do {
@@ -495,7 +495,7 @@ function Wait-AdapterAbsent([string]$Name, [int]$TimeoutSeconds = 20) {
         } catch { $absent = $false }
         if ($absent) { $stableSamples++ }
         else { $stableSamples = 0 }
-        if ($stableSamples -ge 4) { return }
+        if ($stableSamples -ge $RequiredSamples) { return }
         Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "adapter cleanup timeout"
@@ -3062,7 +3062,7 @@ listen = "127.0.0.1:$managedMetricsPort"
                     Assert-True $tcpResources.Remove($heldHardKillUdp) "hard-kill UDP witness ownership mismatch"
                     $heldHardKillUdp.Dispose()
                 }
-                Wait-AdapterAbsent $managedAutoAdapterName
+                Wait-AdapterAbsent $managedAutoAdapterName 20 11
                 Assert-InterfaceGone $managedAutoAdapterName $ownedInterfaceIndex
                 Assert-True (@(Get-ExactRunProcesses -WorkPath $work).Count -eq 0) "hard-kill process residue"
                 Assert-True (@(Get-NetIPAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "hard-kill address residue"

@@ -594,13 +594,14 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         "managed cycles must await exact capture and DNS state through one bounded process-aware readiness seam"
     );
     let has_stable_adapter_absence = |body: &str| {
-        body.contains("$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)")
+        body.contains("[int]$RequiredSamples = 4")
+            && body.contains("$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)")
             && body.contains("$stableSamples = 0")
             && body.contains("Get-NetAdapter -IncludeHidden -ErrorAction Stop")
             && body.contains("catch { $absent = $false }")
             && body.contains("if ($absent) { $stableSamples++ }")
             && body.contains("else { $stableSamples = 0 }")
-            && body.contains("if ($stableSamples -ge 4) { return }")
+            && body.contains("if ($stableSamples -ge $RequiredSamples) { return }")
             && body.contains("Start-Sleep -Milliseconds 500")
             && body.contains("while ([DateTime]::UtcNow -lt $deadline)")
             && body.contains("throw \"adapter cleanup timeout\"")
@@ -613,7 +614,7 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
     for (failure, broken) in [
         (
             "first absent sample",
-            adapter_absence.replace("$stableSamples -ge 4", "$stableSamples -ge 1"),
+            adapter_absence.replace("[int]$RequiredSamples = 4", "[int]$RequiredSamples = 1"),
         ),
         (
             "query failure counted as absence",
@@ -625,6 +626,16 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             "adapter absence contract accepted {failure}"
         );
     }
+    let hard_kill_absence_calls = hard_kills
+        .lines()
+        .filter(|line| line.contains("Wait-AdapterAbsent $managedAutoAdapterName"))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hard_kill_absence_calls,
+        ["Wait-AdapterAbsent $managedAutoAdapterName 20 11"],
+        "hard-kill teardown must converge longer than graceful cleanup before same-name rebind"
+    );
     assert!(
         adapter_cycles.contains("[Nullable[int]]$MetricsPort = $null")
             && managed_cycle_metrics.contains(
