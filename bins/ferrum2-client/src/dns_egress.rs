@@ -16,13 +16,13 @@ use ferrum2_core::route::EgressPlanSnapshot;
 use ferrum2_dns::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
     DnsEgressTaskKind, DnsIoFuture, DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport,
-    SystemDnsEgress,
 };
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
+#[cfg(test)]
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use super::egress::{ClientEgressEngine, ClientUdpAssociation};
+use super::egress::{ClientEgressEngine, ClientRequestOrigin, ClientUdpAssociation};
 use super::tokio_io::TokioFramed;
 
 type Packet = (Vec<u8>, SocketAddr);
@@ -97,8 +97,7 @@ impl ClientDnsEgress {
 
 #[derive(Eq, PartialEq)]
 struct DnsUdpPoolKey {
-    first_server: SocketAddr,
-    plan: EgressPlanSnapshot,
+    plan: Option<EgressPlanSnapshot>,
 }
 
 struct IdleDnsUdp {
@@ -117,23 +116,21 @@ impl PooledDnsUdp {
         self.reusable = false;
     }
 
-    async fn relay_request<A: Into<SocketAddr>>(
+    async fn relay_request(
         &mut self,
         engine: &ClientEgressEngine,
-        plan: &EgressPlanSnapshot,
-        first_server: A,
+        plan: Option<&EgressPlanSnapshot>,
         destination: SocketAddr,
         packet: Vec<u8>,
         responses: &mpsc::Sender<Packet>,
     ) -> io::Result<bool> {
         self.begin_request();
-        let first_server = first_server.into();
         let (response, fully_reusable) = self
             .idle
             .as_mut()
             .expect("pooled DNS UDP owner")
             .association
-            .relay(engine, plan, first_server, destination, packet)
+            .relay(engine, plan, destination, packet)
             .await?;
         responses
             .send(response)
@@ -177,15 +174,9 @@ impl DnsEgress for ClientDnsEgress {
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
-        let Some(plan) = plan else {
-            return SystemDnsEgress.connect_tcp(target, None, timeout, tasks);
-        };
         let engine = Arc::clone(&self.engine);
         Box::pin(async move {
             let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
-            if plan.hops().iter().any(|hop| *hop >= engine.outbounds.len()) {
-                return Err(invalid_target());
-            }
             let queue = tasks.own(DnsEgressResourceKind::Queue);
             let buffer = tasks.own(DnsEgressResourceKind::Buffer);
             let (client, mut bridge_front) = tokio::io::duplex(2_048);
@@ -197,6 +188,7 @@ impl DnsEgress for ClientDnsEgress {
             tasks.spawn(DnsEgressTaskKind::Session, async move {
                 let Ok(flow) = engine
                     .open_tcp(
+                        ClientRequestOrigin::Dns,
                         plan,
                         &target,
                         Some(timeout),
@@ -220,20 +212,11 @@ impl DnsEgress for ClientDnsEgress {
         plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
-        let Some(plan) = plan else {
-            return SystemDnsEgress.bind_udp(target, None, tasks);
-        };
         let engine = Arc::clone(&self.engine);
         let pool = Arc::clone(&self.udp_pool);
         Box::pin(async move {
             let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
-            let first_server = engine
-                .classify_selected_hops(plan.hops())
-                .map_err(|_| invalid_target())?;
-            let key = DnsUdpPoolKey {
-                first_server,
-                plan: plan.clone(),
-            };
+            let key = DnsUdpPoolKey { plan: plan.clone() };
             let (idle, stale) = take_dns_udp(&pool, &key)?;
             let reusable = idle.is_some();
             drop(stale);
@@ -242,7 +225,7 @@ impl DnsEgress for ClientDnsEgress {
                 None => IdleDnsUdp {
                     key,
                     association: engine
-                        .prepare_udp(plan.clone(), UdpSocket::bind)
+                        .prepare_udp(ClientRequestOrigin::Dns, plan.clone(), Some(&target))
                         .await
                         .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
                 },
@@ -289,8 +272,7 @@ impl DnsEgress for ClientDnsEgress {
                     let reusable = prepared
                         .relay_request(
                             &engine,
-                            &plan,
-                            first_server,
+                            plan.as_ref(),
                             destination,
                             packet,
                             &session_responses,
@@ -623,38 +605,25 @@ mod tests {
         let reversed = route.select_plan_snapshot(0, Network::Udp, &target);
         selector.switch("manual", "c").expect("later plan");
         let later = route.select_plan_snapshot(0, Network::Udp, &target);
-        let first_server = std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_001);
         let key_cases = [
             (
-                "same server/equal snapshot",
+                "equal snapshot",
                 DnsUdpPoolKey {
-                    first_server: first_server.into(),
-                    plan: selected.clone(),
+                    plan: Some(selected.clone()),
                 },
                 true,
             ),
-            (
-                "different first server",
-                DnsUdpPoolKey {
-                    first_server: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_002).into(),
-                    plan: selected.clone(),
-                },
-                false,
-            ),
+            ("absent plan", DnsUdpPoolKey { plan: None }, false),
             (
                 "different hop order",
                 DnsUdpPoolKey {
-                    first_server: first_server.into(),
-                    plan: reversed,
+                    plan: Some(reversed),
                 },
                 false,
             ),
             (
                 "selector switched plan",
-                DnsUdpPoolKey {
-                    first_server: first_server.into(),
-                    plan: later,
-                },
+                DnsUdpPoolKey { plan: Some(later) },
                 false,
             ),
         ];
@@ -698,13 +667,12 @@ mod tests {
         for (case, candidate, reusable) in key_cases {
             let association = context
                 .egress
-                .prepare_udp(selected.clone(), UdpSocket::bind)
+                .prepare_udp_with(selected.clone(), UdpSocket::bind)
                 .await
                 .expect("key association");
             let pool = Arc::new(Mutex::new(vec![IdleDnsUdp {
                 key: DnsUdpPoolKey {
-                    first_server: std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53_001).into(),
-                    plan: selected.clone(),
+                    plan: Some(selected.clone()),
                 },
                 association,
             }]));
@@ -727,7 +695,7 @@ mod tests {
                 .expect("mutation session baseline");
             let mut association = context
                 .egress
-                .prepare_udp(plan.clone(), UdpSocket::bind)
+                .prepare_udp_with(plan.clone(), UdpSocket::bind)
                 .await
                 .expect("mutation association");
             association
@@ -738,8 +706,7 @@ mod tests {
             let mut pooled = PooledDnsUdp {
                 idle: Some(IdleDnsUdp {
                     key: DnsUdpPoolKey {
-                        first_server: first_server.into(),
-                        plan: plan.clone(),
+                        plan: Some(plan.clone()),
                     },
                     association,
                 }),
@@ -767,8 +734,7 @@ mod tests {
             let (reusable, (), ()) = tokio::join!(
                 pooled.relay_request(
                     &context.egress,
-                    &plan,
-                    first_server,
+                    Some(&plan),
                     destination,
                     payload.clone(),
                     &session_responses,
@@ -798,8 +764,7 @@ mod tests {
                 "{case} healthy mutation session"
             );
             let key = DnsUdpPoolKey {
-                first_server: first_server.into(),
-                plan: plan.clone(),
+                plan: Some(plan.clone()),
             };
             let (matched, stale) = take_dns_udp(&pool, &key).expect("mutation exact reuse");
             assert!(stale.is_none(), "{case} healthy exact key was discarded");
@@ -828,8 +793,7 @@ mod tests {
                         pooled
                             .relay_request(
                                 &context.egress,
-                                &plan,
-                                first_server,
+                                Some(&plan),
                                 destination,
                                 vec![0x21],
                                 &session_responses,
@@ -862,8 +826,7 @@ mod tests {
                     let (result, (), ()) = tokio::join!(
                         pooled.relay_request(
                             &context.egress,
-                            &plan,
-                            first_server,
+                            Some(&plan),
                             destination,
                             payload.clone(),
                             &session_responses,
@@ -896,8 +859,7 @@ mod tests {
                             Duration::from_millis(20),
                             pooled.relay_request(
                                 &context.egress,
-                                &plan,
-                                first_server,
+                                Some(&plan),
                                 destination,
                                 vec![0x23],
                                 &session_responses,
@@ -918,7 +880,7 @@ mod tests {
                     assert!(
                         context
                             .egress
-                            .prepare_udp(plan.clone(), UdpSocket::bind)
+                            .prepare_udp_with(plan.clone(), UdpSocket::bind)
                             .await
                             .is_err(),
                         "saturation admitted a second association"
@@ -938,13 +900,12 @@ mod tests {
                 .expect("healthy session baseline");
             let association = context
                 .egress
-                .prepare_udp(plan.clone(), UdpSocket::bind)
+                .prepare_udp_with(plan.clone(), UdpSocket::bind)
                 .await
                 .expect("following valid association");
             let mut initial = Some(IdleDnsUdp {
                 key: DnsUdpPoolKey {
-                    first_server: first_server.into(),
-                    plan: plan.clone(),
+                    plan: Some(plan.clone()),
                 },
                 association,
             });
@@ -953,8 +914,7 @@ mod tests {
                     Some(idle) => (idle, false),
                     None => {
                         let key = DnsUdpPoolKey {
-                            first_server: first_server.into(),
-                            plan: plan.clone(),
+                            plan: Some(plan.clone()),
                         };
                         let (matched, stale) = take_dns_udp(&pool, &key).expect("healthy reuse");
                         assert!(stale.is_none(), "healthy exact key was discarded");
@@ -981,8 +941,7 @@ mod tests {
                 let (reusable, (), ()) = tokio::join!(
                     healthy.relay_request(
                         &context.egress,
-                        &plan,
-                        first_server,
+                        Some(&plan),
                         destination,
                         payload.clone(),
                         &session_responses,
@@ -1610,7 +1569,11 @@ mod tests {
             assert_eq!(response.metadata.id, id);
             assert_eq!(response.metadata.message_type, MessageType::Response);
             assert_eq!(response.metadata.op_code, OpCode::Query);
-            assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+            assert_eq!(
+                response.metadata.response_code,
+                ResponseCode::NoError,
+                "query {id:#06x}",
+            );
             assert_eq!(response.queries.len(), 1);
             assert_eq!(
                 response.answers.first().map(|record| &record.data),

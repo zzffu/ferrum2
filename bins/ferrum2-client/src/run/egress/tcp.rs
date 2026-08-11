@@ -1,15 +1,112 @@
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ferrum2_core::{ConnectErrorKind, Connector, LocalEndpoint, TargetAddr};
 use ferrum2_crypto::{Clock, SecureRandom};
 use ferrum2_shadowsocks::{
-    BoxedClientFlow, ClientTcpOutbound, PlainDuplex, ShadowsocksError, TransportIo,
+    BoxedClientFlow, ClientTcpOutbound, FlowTerminal, PlainDuplex, ShadowsocksError, TransportIo,
+    TransportPhase,
 };
 #[cfg(test)]
 use ferrum2_shadowsocks::{BufferObserver, FlowObserver};
 
 use super::{ClientOpenFailure, ClientOutboundContext};
+
+pub(in crate::run) enum ClientTcpFlow<'a, S> {
+    Direct(S),
+    Proxy(BoxedClientFlow<'a>),
+}
+
+impl<S> LocalEndpoint for ClientTcpFlow<'_, S>
+where
+    S: LocalEndpoint,
+{
+    fn local_endpoint(&self) -> std::net::SocketAddrV4 {
+        match self {
+            Self::Direct(stream) => stream.local_endpoint(),
+            Self::Proxy(flow) => flow.local_endpoint(),
+        }
+    }
+
+    fn local_socket_addr(&self) -> std::net::SocketAddr {
+        match self {
+            Self::Direct(stream) => stream.local_socket_addr(),
+            Self::Proxy(flow) => flow.local_socket_addr(),
+        }
+    }
+}
+
+impl<S> PlainDuplex for ClientTcpFlow<'_, S>
+where
+    S: TransportIo + LocalEndpoint,
+{
+    fn poll_read_plain(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        match &mut *self {
+            Self::Direct(stream) => Pin::new(stream)
+                .poll_read(context, destination)
+                .map_err(|_| ShadowsocksError::Transport(TransportPhase::Read)),
+            Self::Proxy(flow) => Pin::new(flow).poll_read_plain(context, destination),
+        }
+    }
+
+    fn poll_write_plain(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        match &mut *self {
+            Self::Direct(stream) => Pin::new(stream)
+                .poll_write(context, source)
+                .map_err(|_| ShadowsocksError::Transport(TransportPhase::Write)),
+            Self::Proxy(flow) => Pin::new(flow).poll_write_plain(context, source),
+        }
+    }
+
+    fn poll_flush_plain(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        match &mut *self {
+            Self::Direct(stream) => Pin::new(stream)
+                .poll_flush(context)
+                .map_err(|_| ShadowsocksError::Transport(TransportPhase::Flush)),
+            Self::Proxy(flow) => Pin::new(flow).poll_flush_plain(context),
+        }
+    }
+
+    fn poll_shutdown_plain(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        match &mut *self {
+            Self::Direct(stream) => Pin::new(stream)
+                .poll_shutdown(context)
+                .map_err(|_| ShadowsocksError::Transport(TransportPhase::Shutdown)),
+            Self::Proxy(flow) => Pin::new(flow).poll_shutdown_plain(context),
+        }
+    }
+
+    fn mark_abortive_plain(&mut self) -> Result<(), ShadowsocksError> {
+        match self {
+            Self::Direct(stream) => stream
+                .mark_abortive()
+                .map_err(|_| ShadowsocksError::Transport(TransportPhase::Shutdown)),
+            Self::Proxy(flow) => flow.mark_abortive_plain(),
+        }
+    }
+
+    fn terminal(&self) -> Option<FlowTerminal> {
+        match self {
+            Self::Direct(_) => None,
+            Self::Proxy(flow) => flow.terminal(),
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn open<'a, C, T, R>(
@@ -91,6 +188,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::ClientRequestOrigin;
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -108,6 +206,51 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use crate::run::test_support::*;
+
+    #[tokio::test]
+    async fn direct_tcp_socks_uses_the_original_target_and_raw_half_close() {
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let (stream, mut peer) = tokio::io::duplex(1_024);
+        let target = TargetAddr::domain("direct-target.invalid", 443).expect("target");
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext::Direct].into(),
+            DeadlineConnector {
+                delay: Duration::ZERO,
+                targets: Mutex::new(Vec::new()),
+                stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
+                    stream,
+                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                    Arc::clone(&aborts),
+                )))),
+            },
+            SystemClock::new(),
+            FixedRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            None,
+            None,
+        );
+        let opened = engine
+            .open_tcp(
+                ClientRequestOrigin::Socks,
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                &target,
+                None,
+                None,
+            )
+            .await
+            .expect("direct open");
+        let mut opened = TokioFramed::new(opened);
+        opened.write_all(b"raw-direct").await.expect("raw write");
+        opened.shutdown().await.expect("raw half-close");
+        let mut raw = Vec::new();
+        peer.read_to_end(&mut raw).await.expect("raw EOF");
+        assert_eq!(raw, b"raw-direct");
+        assert_eq!(
+            engine.connector.targets.lock().expect("targets").as_slice(),
+            &[target]
+        );
+        assert_eq!(aborts.load(Ordering::SeqCst), 0);
+    }
 
     #[tokio::test]
     async fn tcp_chain_opens_hops_in_order_with_distinct_credentials_and_no_fallback() {
@@ -171,7 +314,8 @@ mod tests {
                 let observer = ChainObserver::default();
                 let flow = engine
                     .open_tcp(
-                        plan.clone(),
+                        ClientRequestOrigin::Socks,
+                        Some(plan.clone()),
                         &application,
                         None,
                         Some((&observer, &observer)),
@@ -306,7 +450,8 @@ mod tests {
         assert!(matches!(
             unavailable_engine
                 .open_tcp(
-                    snapshot.clone(),
+                    ClientRequestOrigin::Socks,
+                    Some(snapshot.clone()),
                     &application,
                     None,
                     Some((&unavailable_observer, &unavailable_observer)),
@@ -349,7 +494,8 @@ mod tests {
                 None,
             );
             let mut opened = Box::pin(engine.open_tcp(
-                snapshot.clone(),
+                ClientRequestOrigin::Socks,
+                Some(snapshot.clone()),
                 &application,
                 None,
                 Some((&observer, &observer)),
@@ -417,7 +563,8 @@ mod tests {
         assert!(matches!(
             write_zero
                 .open_tcp(
-                    snapshot.clone(),
+                    ClientRequestOrigin::Socks,
+                    Some(snapshot.clone()),
                     &application,
                     None,
                     Some((&write_zero_observer, &write_zero_observer)),
@@ -477,7 +624,8 @@ mod tests {
         );
         let partial_flow = partial
             .open_tcp(
-                snapshot.clone(),
+                ClientRequestOrigin::Socks,
+                Some(snapshot.clone()),
                 &application,
                 None,
                 Some((&partial_observer, &partial_observer)),
@@ -569,7 +717,8 @@ mod tests {
         );
         let detection_flow = detection_engine
             .open_tcp(
-                snapshot.clone(),
+                ClientRequestOrigin::Socks,
+                Some(snapshot.clone()),
                 &application,
                 None,
                 Some((&detection_observer, &detection_observer)),
@@ -672,7 +821,8 @@ mod tests {
         );
         let valid_flow = valid_engine
             .open_tcp(
-                snapshot.clone(),
+                ClientRequestOrigin::Socks,
+                Some(snapshot.clone()),
                 &application,
                 None,
                 Some((&valid_observer, &valid_observer)),
@@ -754,7 +904,8 @@ mod tests {
         );
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect(label);
         let mut opened = Box::pin(engine.open_tcp(
-            ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+            ClientRequestOrigin::Socks,
+            Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
             &target,
             timeout_limit,
             None,
@@ -906,7 +1057,8 @@ mod tests {
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
         let flow = engine
             .open_tcp(
-                ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned(),
+                ClientRequestOrigin::Socks,
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
                 &target,
                 None,
                 None,

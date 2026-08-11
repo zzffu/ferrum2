@@ -1,6 +1,4 @@
-use std::collections::HashSet;
-#[cfg(test)]
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -11,8 +9,11 @@ use ferrum2_core::{Datagram, TargetAddr, TargetHostRef};
 use ferrum2_crypto::MethodProfile;
 use ferrum2_crypto::{Clock, MethodKeyProvider, SecureRandom, UdpSessionId};
 use ferrum2_runtime::{
-    PendingUdpDatagram, PendingUdpSession, UdpBufferReservation, UdpCommitError, UdpDirection,
-    UdpRuntimeError, UdpSessionHandle, UdpSessionManager,
+    DirectUdpSocket, DirectUdpSocketFactory, MAX_UDP_RESOLVED_CANDIDATES,
+    MAX_UDP_WIRE_DATAGRAM_BYTES, PendingUdpDatagram, PendingUdpSession, SystemDirectUdpSocket,
+    SystemDirectUdpSocketFactory, SystemUdpResolver, UDP_SESSION_QUEUE_DEPTH, UdpBufferReservation,
+    UdpCommitError, UdpDirection, UdpResolver, UdpRuntimeError, UdpSessionHandle,
+    UdpSessionManager,
 };
 #[cfg(test)]
 use ferrum2_shadowsocks::MethodKeyAdapter;
@@ -24,7 +25,7 @@ use ferrum2_socks5::MAX_SOCKS_UDP_DATAGRAM_BYTES;
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
-use super::{ClientEgressEngine, ClientOutboundContext};
+use super::{ClientEgressEngine, ClientOutboundContext, SelectedEgress};
 
 pub(in crate::run) struct ClientUdpContext {
     pub(in crate::run) manager: UdpSessionManager,
@@ -94,20 +95,29 @@ impl UdpIoFaultPlan {
 }
 
 pub(in crate::run) struct ClientUdpAssociation {
-    plan: EgressPlanSnapshot,
-    first_server: SocketAddr,
+    plan: Option<EgressPlanSnapshot>,
+    first_server: Option<SocketAddr>,
     protocol: Option<ClientUdpPlan>,
     pending_session: Option<PendingUdpSession>,
     manager: UdpSessionManager,
     handle: UdpSessionHandle,
     live_ids: Arc<Mutex<HashSet<UdpSessionId>>>,
-    upstream: UdpSocket,
+    upstream: ClientUdpUpstream,
+    direct_target: Option<TargetAddr>,
+    direct_source: Option<SocketAddr>,
+    direct_peers: VecDeque<SocketAddr>,
+    direct_timeout: std::time::Duration,
     inner_wire: Vec<u8>,
     upstream_wire: Vec<u8>,
     scratch: UdpPacketScratch,
     _fixed_capacity: Vec<UdpBufferReservation>,
     #[cfg(test)]
     io_fault: Option<Arc<UdpIoFaultPlan>>,
+}
+
+enum ClientUdpUpstream {
+    Shadowsocks(UdpSocket),
+    Direct(SystemDirectUdpSocket),
 }
 
 pub(in crate::run) struct ClientUdpLeg {
@@ -134,6 +144,9 @@ impl Drop for ClientUdpAssociation {
 
 impl ClientUdpAssociation {
     pub(in crate::run) fn activate(&mut self, egress: &ClientEgressEngine) -> Result<(), ()> {
+        if matches!(self.upstream, ClientUdpUpstream::Direct(_)) {
+            return Ok(());
+        }
         if self.protocol.is_some() {
             return Ok(());
         }
@@ -141,7 +154,12 @@ impl ClientUdpAssociation {
         let random = egress.udp_id_random.as_deref().unwrap_or(&egress.random);
         #[cfg(not(test))]
         let random = &egress.random;
-        let legs = register_udp_plan(&egress.outbounds, self.plan.hops(), random, &self.live_ids)?;
+        let legs = register_udp_plan(
+            &egress.outbounds,
+            self.plan.as_ref().ok_or(())?.hops(),
+            random,
+            &self.live_ids,
+        )?;
         self.protocol = Some(ClientUdpPlan { legs });
         Ok(())
     }
@@ -174,7 +192,7 @@ impl ClientUdpAssociation {
             scratch,
             ..
         } = self;
-        let hops = plan.hops();
+        let hops = plan.as_ref().expect("proxy UDP plan").hops();
         let plan = protocol
             .as_mut()
             .expect("client UDP protocol is activated before encode");
@@ -250,7 +268,7 @@ impl ClientUdpAssociation {
             scratch,
             ..
         } = self;
-        let hops = plan.hops();
+        let hops = plan.as_ref().expect("proxy UDP plan").hops();
         let plan = protocol
             .as_ref()
             .expect("client UDP protocol is activated before response");
@@ -378,7 +396,15 @@ impl ClientUdpAssociation {
         response: bool,
         encoded_target_len: usize,
     ) -> usize {
-        composed_udp_plan_limit(outbounds, self.plan.hops(), response, encoded_target_len)
+        match &self.upstream {
+            ClientUdpUpstream::Direct(_) => MAX_UDP_WIRE_DATAGRAM_BYTES,
+            ClientUdpUpstream::Shadowsocks(_) => composed_udp_plan_limit(
+                outbounds,
+                self.plan.as_ref().expect("proxy UDP plan").hops(),
+                response,
+                encoded_target_len,
+            ),
+        }
     }
 
     pub(in crate::run) fn prepare_application_request(
@@ -410,9 +436,15 @@ impl ClientUdpAssociation {
             .pop(UdpDirection::ToTarget)
             .map_err(UdpPlanResponseError::Runtime)?
             .ok_or(UdpPlanResponseError::Runtime(UdpRuntimeError::Bounds))?;
-        let wire_len = self
-            .encode_request(engine, outbounds, datagram.datagram())
-            .map_err(UdpPlanResponseError::Packet)?;
+        let wire_len = if matches!(self.upstream, ClientUdpUpstream::Direct(_)) {
+            self.direct_target = Some(datagram.datagram().target().clone());
+            let payload = datagram.datagram().payload();
+            self.upstream_wire[..payload.len()].copy_from_slice(payload);
+            payload.len()
+        } else {
+            self.encode_request(engine, outbounds, datagram.datagram())
+                .map_err(UdpPlanResponseError::Packet)?
+        };
         drop(datagram);
         Ok(wire_len)
     }
@@ -423,12 +455,31 @@ impl ClientUdpAssociation {
         outbounds: &[ClientOutboundContext],
         wire_len: usize,
     ) -> Result<(TargetAddr, Vec<u8>), UdpPlanResponseError> {
-        let payload_len = self
-            .accept_response(engine, outbounds, wire_len)
-            .map_err(|error| match error {
-                UdpPlanResponseError::Packet(error) => UdpPlanResponseError::Packet(error),
-                UdpPlanResponseError::Runtime(error) => UdpPlanResponseError::Runtime(error),
-            })?;
+        let payload_len = if matches!(self.upstream, ClientUdpUpstream::Direct(_)) {
+            if wire_len > MAX_UDP_WIRE_DATAGRAM_BYTES {
+                return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
+            }
+            let source = self
+                .direct_source
+                .take()
+                .ok_or(UdpPlanResponseError::Packet(
+                    UdpPacketError::StateUnavailable,
+                ))?;
+            let reservation = self
+                .manager
+                .reserve_datagram(self.handle, UdpDirection::ToClient, wire_len)
+                .map_err(UdpPlanResponseError::Runtime)?;
+            let target = TargetAddr::ip(source)
+                .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))?;
+            let datagram = Datagram::new(target, self.upstream_wire[..wire_len].into(), wire_len)
+                .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))?;
+            reservation
+                .commit(datagram, Instant::now())
+                .map_err(UdpPlanResponseError::Runtime)?;
+            wire_len
+        } else {
+            self.accept_response(engine, outbounds, wire_len)?
+        };
         let response = self
             .pop(UdpDirection::ToClient)
             .map_err(UdpPlanResponseError::Runtime)?
@@ -442,7 +493,10 @@ impl ClientUdpAssociation {
         ))
     }
 
-    pub(in crate::run) async fn send_encoded_request(&self, wire_len: usize) -> io::Result<usize> {
+    pub(in crate::run) async fn send_encoded_request(
+        &mut self,
+        wire_len: usize,
+    ) -> io::Result<usize> {
         #[cfg(test)]
         if self
             .io_fault
@@ -451,7 +505,32 @@ impl ClientUdpAssociation {
         {
             return Err(io::Error::other("injected upstream send failure"));
         }
-        self.upstream.send(&self.upstream_wire[..wire_len]).await
+        match &self.upstream {
+            ClientUdpUpstream::Shadowsocks(socket) => {
+                socket.send(&self.upstream_wire[..wire_len]).await
+            }
+            ClientUdpUpstream::Direct(socket) => {
+                if self.direct_peers.len() >= UDP_SESSION_QUEUE_DEPTH {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "direct UDP outstanding queue is full",
+                    ));
+                }
+                let target = self
+                    .direct_target
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("direct UDP target unavailable"))?;
+                let (length, peer) = send_direct_target(
+                    socket,
+                    target,
+                    &self.upstream_wire[..wire_len],
+                    self.direct_timeout,
+                )
+                .await?;
+                self.direct_peers.push_back(peer);
+                Ok(length)
+            }
+        }
     }
 
     pub(in crate::run) async fn receive_response_wire(&mut self) -> io::Result<usize> {
@@ -463,12 +542,29 @@ impl ClientUdpAssociation {
         {
             return Err(io::Error::other("injected upstream receive failure"));
         }
-        self.upstream.recv(&mut self.upstream_wire).await
+        match &self.upstream {
+            ClientUdpUpstream::Shadowsocks(socket) => socket.recv(&mut self.upstream_wire).await,
+            ClientUdpUpstream::Direct(socket) => loop {
+                let (length, source) = socket.recv_from(&mut self.upstream_wire).await?;
+                if let Some(position) = self
+                    .direct_peers
+                    .iter()
+                    .position(|expected| *expected == source)
+                {
+                    self.direct_peers.remove(position);
+                    self.direct_source = Some(source);
+                    return Ok(length);
+                }
+            },
+        }
     }
 
     #[cfg(test)]
     pub(in crate::run) fn upstream_local_addr(&self) -> io::Result<SocketAddr> {
-        self.upstream.local_addr()
+        match &self.upstream {
+            ClientUdpUpstream::Shadowsocks(socket) => socket.local_addr(),
+            ClientUdpUpstream::Direct(_) => Err(io::Error::other("direct UDP socket is opaque")),
+        }
     }
 
     #[cfg(test)]
@@ -481,22 +577,20 @@ impl ClientUdpAssociation {
         self.io_fault = fault;
     }
 
-    pub(in crate::run) async fn relay<A: Into<SocketAddr>>(
+    pub(in crate::run) async fn relay(
         &mut self,
         engine: &ClientEgressEngine,
-        plan: &EgressPlanSnapshot,
-        first_server: A,
+        plan: Option<&EgressPlanSnapshot>,
         destination: SocketAddr,
         packet: Vec<u8>,
     ) -> io::Result<((Vec<u8>, SocketAddr), bool)> {
-        let first_server = first_server.into();
         if packet.len() > MAX_UDP_WIRE_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "DNS UDP packet too large",
             ));
         }
-        if self.plan != *plan || self.first_server != first_server {
+        if self.plan.as_ref() != plan {
             return Err(invalid_dns_target());
         }
         let target = TargetAddr::ip(destination).map_err(|_| invalid_dns_target())?;
@@ -511,7 +605,7 @@ impl ClientUdpAssociation {
                 "short DNS UDP send",
             ));
         }
-        let mut reusable = true;
+        let mut reusable = self.first_server.is_some();
         loop {
             let length = self.receive_response_wire().await?;
             let (source, payload) =
@@ -530,8 +624,8 @@ impl ClientUdpAssociation {
 
 pub(in crate::run) async fn prepare<C, T, R, F, Fut>(
     egress: &ClientEgressEngine<C, T, R>,
-    plan: EgressPlanSnapshot,
-    first_server: SocketAddr,
+    plan: Option<EgressPlanSnapshot>,
+    selected: SelectedEgress,
     mut bind: F,
 ) -> Result<ClientUdpAssociation, ()>
 where
@@ -552,13 +646,25 @@ where
     let inner_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
     let upstream_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
     let scratch = UdpPacketScratch::new();
-    let bind_address = if first_server.is_ipv4() {
-        SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
-    } else {
-        SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
+    let first_server = match selected {
+        SelectedEgress::Shadowsocks { first_server } => Some(first_server),
+        SelectedEgress::Direct => None,
     };
-    let upstream = bind(bind_address).await.map_err(|_| ())?;
-    upstream.connect(first_server).await.map_err(|_| ())?;
+    let upstream = match selected {
+        SelectedEgress::Shadowsocks { first_server } => {
+            let bind_address = if first_server.is_ipv4() {
+                SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
+            } else {
+                SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
+            };
+            let upstream = bind(bind_address).await.map_err(|_| ())?;
+            upstream.connect(first_server).await.map_err(|_| ())?;
+            ClientUdpUpstream::Shadowsocks(upstream)
+        }
+        SelectedEgress::Direct => {
+            ClientUdpUpstream::Direct(SystemDirectUdpSocketFactory.open().await.map_err(|_| ())?)
+        }
+    };
     Ok(ClientUdpAssociation {
         plan,
         first_server,
@@ -568,6 +674,10 @@ where
         handle,
         live_ids: Arc::clone(&udp.live_ids),
         upstream,
+        direct_target: None,
+        direct_source: None,
+        direct_peers: VecDeque::with_capacity(UDP_SESSION_QUEUE_DEPTH),
+        direct_timeout: egress.phase_deadlines.0,
         inner_wire,
         upstream_wire,
         scratch,
@@ -575,6 +685,44 @@ where
         #[cfg(test)]
         io_fault: None,
     })
+}
+
+async fn send_direct_target(
+    socket: &SystemDirectUdpSocket,
+    target: &TargetAddr,
+    payload: &[u8],
+    timeout: std::time::Duration,
+) -> io::Result<(usize, SocketAddr)> {
+    let deadline = Instant::now() + timeout;
+    if let Some(target) = target.as_socket_addr() {
+        let length = tokio::time::timeout_at(deadline, socket.send_to(payload, target))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "direct UDP send timeout"))??;
+        return Ok((length, target));
+    }
+    let TargetHostRef::Domain(host) = target.host() else {
+        return Err(io::Error::other("direct UDP target unavailable"));
+    };
+    let candidates = tokio::time::timeout_at(
+        deadline,
+        SystemUdpResolver.resolve(host, target.port().get()),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "direct UDP resolve timeout"))??;
+    let mut last = None;
+    for candidate in candidates.into_iter().take(MAX_UDP_RESOLVED_CANDIDATES) {
+        match tokio::time::timeout_at(deadline, socket.send_to(payload, candidate)).await {
+            Ok(Ok(length)) => return Ok((length, candidate)),
+            Ok(Err(error)) => last = Some(error),
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "direct UDP send timeout",
+                ));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("direct UDP resolution was empty")))
 }
 
 fn register_udp_plan(
@@ -731,6 +879,14 @@ pub(in crate::run) fn composed_udp_plan_limit(
     if hops.is_empty() || hops.len() > MAX_UDP_PLAN_HOPS {
         return 0;
     }
+    let socks = MAX_SOCKS_UDP_DATAGRAM_BYTES.saturating_sub(3 + encoded_target_len);
+    if hops.len() == 1
+        && outbounds
+            .get(hops[0])
+            .is_some_and(|outbound| matches!(outbound, ClientOutboundContext::Direct))
+    {
+        return socks;
+    }
     let overhead = hops
         .iter()
         .enumerate()
@@ -745,7 +901,6 @@ pub(in crate::run) fn composed_udp_plan_limit(
                 max_udp_payload_len_for_encoded_target(profile, response, target_len, 0).ok()?;
             total.checked_add(MAX_UDP_WIRE_LEN.checked_sub(payload)?)
         });
-    let socks = MAX_SOCKS_UDP_DATAGRAM_BYTES.saturating_sub(3 + encoded_target_len);
     overhead
         .and_then(|overhead| MAX_UDP_WIRE_LEN.checked_sub(overhead))
         .unwrap_or(0)
@@ -776,6 +931,234 @@ mod tests {
 
     use super::*;
     use crate::run::test_support::*;
+
+    #[tokio::test]
+    async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
+        let registry = OwnerRegistry::new();
+        let manager = UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone());
+        let live_ids = Arc::new(Mutex::new(HashSet::new()));
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext::Direct].into(),
+            TokioConnector::new(ferrum2_runtime::TcpConnector::new(
+                std::time::Duration::from_secs(1),
+            )),
+            ferrum2_crypto::SystemClock::new(),
+            ferrum2_crypto::SystemRandom,
+            (
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            ),
+            Some(ClientUdpContext {
+                manager,
+                live_ids: Arc::clone(&live_ids),
+            }),
+            None,
+        );
+        let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("echo bind");
+        let target = TargetAddr::ip(echo.local_addr().expect("echo address")).expect("target");
+        let mut association = engine
+            .prepare_udp(
+                super::super::ClientRequestOrigin::Socks,
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                Some(&target),
+            )
+            .await
+            .expect("direct association");
+        association.activate(&engine).expect("direct activation");
+        let provisional = registry.snapshot();
+        assert!(matches!(
+            association.prepare_application_request(
+                &engine,
+                &engine.outbounds,
+                target.clone(),
+                &vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES + 1],
+                Instant::now(),
+            ),
+            Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds))
+        ));
+        assert_eq!(registry.snapshot(), provisional);
+        assert!(live_ids.lock().expect("live IDs").is_empty());
+        let wire_len = association
+            .prepare_application_request(
+                &engine,
+                &engine.outbounds,
+                target,
+                b"raw-udp",
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("direct request"));
+        assert_eq!(association.send_encoded_request(wire_len).await.unwrap(), 7);
+        let mut raw = [0_u8; 32];
+        let (length, peer) = echo.recv_from(&mut raw).await.expect("echo receive");
+        assert_eq!(&raw[..length], b"raw-udp");
+        let spoof = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("spoof bind");
+        spoof.send_to(b"spoof", peer).await.expect("spoof response");
+        echo.send_to(b"raw-reply", peer).await.expect("echo reply");
+        let response_len = association
+            .receive_response_wire()
+            .await
+            .expect("direct receive");
+        let (source, payload) = association
+            .prepare_application_response(&engine, &engine.outbounds, response_len)
+            .unwrap_or_else(|_| panic!("direct response"));
+        assert_eq!(source, TargetAddr::ip(echo.local_addr().unwrap()).unwrap());
+        assert_eq!(payload, b"raw-reply");
+        assert!(live_ids.lock().expect("live IDs").is_empty());
+
+        for (case, plan) in [
+            ("absent", None),
+            (
+                "explicit direct",
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+            ),
+        ] {
+            let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("DNS echo bind");
+            let target = TargetAddr::ip(echo.local_addr().unwrap()).unwrap();
+            let mut association = engine
+                .prepare_udp(super::super::ClientRequestOrigin::Dns, plan, Some(&target))
+                .await
+                .unwrap_or_else(|_| panic!("{case} direct association"));
+            association.activate(&engine).unwrap();
+            let length = association
+                .prepare_application_request(
+                    &engine,
+                    &engine.outbounds,
+                    target,
+                    case.as_bytes(),
+                    Instant::now(),
+                )
+                .unwrap_or_else(|_| panic!("{case} request"));
+            association.send_encoded_request(length).await.unwrap();
+            let mut raw = [0_u8; 32];
+            let (length, peer) = echo.recv_from(&mut raw).await.unwrap();
+            assert_eq!(&raw[..length], case.as_bytes());
+            echo.send_to(case.as_bytes(), peer).await.unwrap();
+            let length = association.receive_response_wire().await.unwrap();
+            let (_, payload) = association
+                .prepare_application_response(&engine, &engine.outbounds, length)
+                .unwrap_or_else(|_| panic!("{case} response"));
+            assert_eq!(payload, case.as_bytes());
+        }
+        assert!(live_ids.lock().expect("live IDs").is_empty());
+
+        if let Ok(echo) = UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, 0)).await {
+            let echo_address = echo.local_addr().unwrap();
+            let mut wire = [0_u8; 16];
+            let ipv6_ready =
+                if let Ok(probe) = UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)).await {
+                    probe.send_to(b"probe", echo_address).await.is_ok()
+                        && matches!(
+                            tokio::time::timeout(
+                                std::time::Duration::from_millis(200),
+                                echo.recv_from(&mut wire),
+                            )
+                            .await,
+                            Ok(Ok((5, _))) if &wire[..5] == b"probe"
+                        )
+                } else {
+                    false
+                };
+            if ipv6_ready {
+                let target = TargetAddr::ip(echo_address).unwrap();
+                let mut association = engine
+                    .prepare_udp(
+                        super::super::ClientRequestOrigin::Socks,
+                        Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                        Some(&target),
+                    )
+                    .await
+                    .expect("SOCKS IPv6 direct association");
+                association.activate(&engine).unwrap();
+                let length = association
+                    .prepare_application_request(
+                        &engine,
+                        &engine.outbounds,
+                        target,
+                        b"ipv6",
+                        Instant::now(),
+                    )
+                    .unwrap_or_else(|_| panic!("SOCKS IPv6 request"));
+                association.send_encoded_request(length).await.unwrap();
+                let (length, peer) = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    echo.recv_from(&mut wire),
+                )
+                .await
+                .expect("SOCKS IPv6 raw receive timeout")
+                .unwrap();
+                assert_eq!(&wire[..length], b"ipv6");
+                echo.send_to(b"ipv6-reply", peer).await.unwrap();
+                let length = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    association.receive_response_wire(),
+                )
+                .await
+                .expect("SOCKS IPv6 response timeout")
+                .unwrap();
+                let (source, payload) = association
+                    .prepare_application_response(&engine, &engine.outbounds, length)
+                    .unwrap_or_else(|_| panic!("SOCKS IPv6 response"));
+                assert!(source.as_socket_addr().unwrap().is_ipv6());
+                assert_eq!(payload, b"ipv6-reply");
+            }
+        }
+
+        let echo_a = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let echo_b = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let target_a = TargetAddr::ip(echo_a.local_addr().unwrap()).unwrap();
+        let target_b = TargetAddr::ip(echo_b.local_addr().unwrap()).unwrap();
+        let mut association = engine
+            .prepare_udp(
+                super::super::ClientRequestOrigin::Socks,
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                None,
+            )
+            .await
+            .unwrap();
+        association.activate(&engine).unwrap();
+        for (target, payload) in [(target_a, b"A".as_slice()), (target_b, b"B".as_slice())] {
+            let length = association
+                .prepare_application_request(
+                    &engine,
+                    &engine.outbounds,
+                    target,
+                    payload,
+                    Instant::now(),
+                )
+                .unwrap_or_else(|_| panic!("outstanding request"));
+            association.send_encoded_request(length).await.unwrap();
+        }
+        let mut wire = [0_u8; 8];
+        let (_, peer_a) = echo_a.recv_from(&mut wire).await.unwrap();
+        let (_, peer_b) = echo_b.recv_from(&mut wire).await.unwrap();
+        let spoof = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        spoof.send_to(b"spoof", peer_a).await.unwrap();
+        echo_b.send_to(b"B", peer_b).await.unwrap();
+        echo_a.send_to(b"A", peer_a).await.unwrap();
+        for (expected_source, expected_payload) in [
+            (echo_b.local_addr().unwrap(), b"B".as_slice()),
+            (echo_a.local_addr().unwrap(), b"A".as_slice()),
+        ] {
+            let length = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                association.receive_response_wire(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("out-of-order response"))
+            .unwrap();
+            let (source, payload) = association
+                .prepare_application_response(&engine, &engine.outbounds, length)
+                .unwrap_or_else(|_| panic!("outstanding response"));
+            assert_eq!(source, TargetAddr::ip(expected_source).unwrap());
+            assert_eq!(payload, expected_payload);
+        }
+    }
 
     #[test]
     fn live_udp_registry_accepts_zero_through_seven_collisions_and_rejects_eight() {

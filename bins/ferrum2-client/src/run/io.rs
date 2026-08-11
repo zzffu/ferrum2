@@ -90,6 +90,10 @@ where
     fn local_endpoint(&self) -> std::net::SocketAddrV4 {
         self.inner.local_endpoint()
     }
+
+    fn local_socket_addr(&self) -> SocketAddr {
+        self.inner.local_socket_addr()
+    }
 }
 
 impl<T> AbortiveClose for TokioTransport<T>
@@ -236,6 +240,7 @@ fn framed_error(error: ShadowsocksError) -> io::Error {
 
 #[cfg(test)]
 pub(in crate::run) mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::Mutex;
 
     use ferrum2_shadowsocks::TransportPhase;
@@ -244,6 +249,26 @@ pub(in crate::run) mod tests {
 
     use super::*;
     use crate::run::test_support::*;
+
+    #[test]
+    fn tokio_transport_preserves_full_ipv6_local_endpoint() {
+        struct FullEndpoint;
+
+        impl LocalEndpoint for FullEndpoint {
+            fn local_endpoint(&self) -> std::net::SocketAddrV4 {
+                std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)
+            }
+
+            fn local_socket_addr(&self) -> SocketAddr {
+                SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 49_152)
+            }
+        }
+
+        assert_eq!(
+            TokioTransport::new(FullEndpoint).local_socket_addr(),
+            "[::1]:49152".parse().expect("IPv6 endpoint")
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

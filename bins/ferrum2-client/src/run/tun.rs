@@ -9,12 +9,11 @@ use ferrum2_dns::{ProxyIngress, ProxyTransport};
 use ferrum2_observability::{Direction, Outcome, Role};
 use ferrum2_runtime::{ProcessCancellation, ProcessRoot, relay_lifecycle};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
 use super::RunError;
 use super::context::{ClientContext, ClientRouting};
-use super::egress::{UdpPlanResponseError, composed_udp_plan_limit};
+use super::egress::{ClientRequestOrigin, UdpPlanResponseError, composed_udp_plan_limit};
 use super::routing::{ClientTerminalRoute, ReplayIo, relay_hijacked_tcp};
 use super::tokio_io::TokioFramed;
 
@@ -155,9 +154,16 @@ async fn run_udp_route(
     routing: Arc<ClientRouting>,
 ) {
     let mut force = cancellation.clone();
+    let Ok(original_target) = TargetAddr::ip(mapping.tuple().target()) else {
+        return;
+    };
     let prepared = tokio::select! {
         () = force.forced() => return,
-        prepared = context.egress.prepare_udp(plan, UdpSocket::bind) => prepared,
+        prepared = context.egress.prepare_udp(
+            ClientRequestOrigin::Tun,
+            Some(plan),
+            Some(&original_target),
+        ) => prepared,
     };
     let Ok(mut association) = prepared else {
         return;
@@ -352,7 +358,8 @@ async fn run_tcp<IO>(
             let opened = tokio::select! {
                 _ = cancellation.forced() => return,
                 opened = context.egress.open_tcp(
-                    plan,
+                    ClientRequestOrigin::Tun,
+                    Some(plan),
                     &target,
                     None,
                     #[cfg(test)]
@@ -411,8 +418,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tun_udp_over_limit_is_mapping_free_then_selector_snapshot_is_fixed() {
+    #[tokio::test]
+    async fn tun_udp_over_limit_is_mapping_free_then_selector_snapshot_is_fixed() {
         let (outbounds, route, selector) = chain_test_setup(
             [
                 ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022,
@@ -454,6 +461,98 @@ mod tests {
             &[2, 3],
             "committed terminal token owns an immutable plan snapshot"
         );
+
+        let registry = OwnerRegistry::new();
+        let live_ids = Arc::new(Mutex::new(HashSet::new()));
+        let outbounds = prepare_client_outbounds(vec![
+            ferrum2_config::ClientOutboundConfig::Direct,
+            ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                server: "192.0.2.77:8388".parse().unwrap(),
+                psk: default_test_psk(),
+            },
+        ])
+        .expect("direct and proxy outbounds");
+        let (route, direct_selector) = compile_selector_plans(
+            &[TaggedInbound::new("tun", 0)],
+            &[
+                TaggedOutbound::new("direct", 0),
+                TaggedOutbound::new("proxy", 1),
+            ],
+            &[],
+            &[SelectorDefinition::new(
+                "manual",
+                vec!["direct", "proxy"],
+                Some("direct"),
+            )],
+            TaggedRoute::Static(vec![TaggedStaticBinding::new("tun", "manual")]),
+        )
+        .expect("direct selector route");
+        let routing = ClientRouting {
+            legacy: route,
+            program: None,
+            outbounds: Arc::clone(&outbounds),
+        };
+        let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("direct TUN UDP target");
+        let target = TargetAddr::ip(echo.local_addr().unwrap()).unwrap();
+        let (terminal, bound) =
+            select_udp_terminal(&routing, 0, &target, b"tun-direct", 1_392, &Metrics::new())
+                .expect("direct TUN UDP selection");
+        assert_eq!(bound, 1_392, "Direct does not subtract SIP022 overhead");
+        let TunUdpTerminal::Route(direct) = terminal else {
+            panic!("direct route terminal");
+        };
+        assert_eq!(direct.hops(), &[0]);
+        direct_selector
+            .switch("manual", "proxy")
+            .expect("switch after direct snapshot");
+        assert_eq!(direct.hops(), &[0], "Direct TUN mapping is immutable");
+        let engine = ClientEgressEngine::new(
+            outbounds,
+            TokioConnector::new(TcpConnector::new(Duration::from_secs(1))),
+            SystemClock::new(),
+            SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some(ClientUdpContext {
+                manager: UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone()),
+                live_ids: Arc::clone(&live_ids),
+            }),
+            None,
+        );
+        let mut association = engine
+            .prepare_udp(
+                super::super::egress::ClientRequestOrigin::Tun,
+                Some(direct),
+                Some(&target),
+            )
+            .await
+            .expect("direct TUN UDP association");
+        association.activate(&engine).expect("direct activation");
+        let length = association
+            .prepare_application_request(
+                &engine,
+                &routing.outbounds,
+                target.clone(),
+                b"tun-direct",
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("direct TUN request"));
+        association
+            .send_encoded_request(length)
+            .await
+            .expect("direct TUN send");
+        let mut raw = [0_u8; 32];
+        let (length, peer) = echo.recv_from(&mut raw).await.expect("direct TUN receive");
+        assert_eq!(&raw[..length], b"tun-direct");
+        echo.send_to(b"tun-reply", peer).await.unwrap();
+        let length = association.receive_response_wire().await.unwrap();
+        let (source, payload) = association
+            .prepare_application_response(&engine, &routing.outbounds, length)
+            .unwrap_or_else(|_| panic!("direct TUN response"));
+        assert_eq!(source, target);
+        assert_eq!(payload, b"tun-reply");
+        assert!(live_ids.lock().expect("live SIP022 IDs").is_empty());
     }
 
     #[test]
@@ -676,7 +775,15 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .await
             .expect("malformed DNS frame");
         peer.shutdown().await.expect("DNS request half-close");
-        run_tcp(target, flow, cancellation, Arc::clone(&context), routing, 0).await;
+        run_tcp(
+            target,
+            flow,
+            cancellation.clone(),
+            Arc::clone(&context),
+            routing,
+            0,
+        )
+        .await;
         assert_eq!(peer.read(&mut [0; 1]).await.expect("terminal close"), 0);
         assert!(
             tokio::time::timeout(Duration::from_millis(50), fallback.accept())
@@ -685,6 +792,84 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             "DNS failure evaluated the final route or fallback egress"
         );
         assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
+
+        let direct_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("direct TUN TCP target");
+        let direct_target = direct_listener.local_addr().expect("direct TUN target");
+        let direct_registry = OwnerRegistry::new();
+        let direct_outbounds =
+            prepare_client_outbounds(vec![ferrum2_config::ClientOutboundConfig::Direct])
+                .expect("direct TUN outbound");
+        let direct_routing = Arc::new(ClientRouting {
+            legacy: ferrum2_core::route::RouteTable::static_bindings(vec![0])
+                .expect("direct TUN route"),
+            program: None,
+            outbounds: Arc::clone(&direct_outbounds),
+        });
+        let direct_context = Arc::new(ClientContext {
+            inbound: Socks5Inbound::new(),
+            egress: Arc::new(ClientEgressEngine::new(
+                direct_outbounds,
+                TokioConnector::new(TcpConnector::new(context.runtime.connect_timeout)),
+                SystemClock::new(),
+                SystemRandom,
+                (
+                    context.runtime.connect_timeout,
+                    context.runtime.handshake_timeout,
+                ),
+                None,
+                None,
+            )),
+            keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(default_test_psk())),
+            runtime: context.runtime,
+            udp_associate_enabled: false,
+            registry: direct_registry.clone(),
+            metrics: Arc::new(Metrics::new()),
+            dns: None,
+            test_udp_server: reserve_address(),
+        });
+        let target = tokio::spawn(async move {
+            let (mut stream, _) = direct_listener.accept().await.expect("direct TUN accept");
+            let mut request = Vec::new();
+            stream
+                .read_to_end(&mut request)
+                .await
+                .expect("direct TUN target read");
+            stream
+                .write_all(b"tun-reply")
+                .await
+                .expect("direct TUN target reply");
+            stream
+                .shutdown()
+                .await
+                .expect("direct TUN target half close");
+            request
+        });
+        let (flow, mut peer) = tokio::io::duplex(64);
+        let direct = tokio::spawn(run_tcp(
+            direct_target,
+            flow,
+            cancellation.clone(),
+            direct_context,
+            direct_routing,
+            0,
+        ));
+        peer.write_all(b"tun-direct")
+            .await
+            .expect("direct TUN write");
+        peer.shutdown().await.expect("direct TUN half close");
+        let mut response = Vec::new();
+        peer.read_to_end(&mut response)
+            .await
+            .expect("direct TUN response");
+        assert_eq!(response, b"tun-reply");
+        assert_eq!(
+            target.await.expect("direct TUN target owner"),
+            b"tun-direct"
+        );
+        direct.await.expect("direct TUN relay owner");
+        assert_eq!(active(direct_registry.snapshot()), OwnerSnapshot::default());
 
         shutdown_sender.send(()).expect("stop cancellation root");
         assert_eq!(

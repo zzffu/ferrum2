@@ -52,7 +52,6 @@ pub(crate) enum RunError {
     StartupRuntime,
     StartupBind,
     StartupProtocol,
-    StartupDirectUnsupported,
     RuntimeListener,
     RuntimeChild,
     RuntimeRoot,
@@ -72,9 +71,6 @@ impl std::fmt::Display for RunError {
             Self::StartupProtocol => {
                 "error[startup.protocol] process: unable to prepare protocol resources"
             }
-            Self::StartupDirectUnsupported => {
-                "error[startup.direct_unsupported] process: direct execution is not available"
-            }
             Self::RuntimeListener => "error[runtime.listener] process: required listener failed",
             Self::RuntimeChild => "error[runtime.child] process: required child failed",
             Self::RuntimeRoot => "error[runtime.root] process: required root stopped",
@@ -86,13 +82,6 @@ impl std::fmt::Display for RunError {
 }
 
 pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
-    if config
-        .outbounds
-        .iter()
-        .any(|outbound| matches!(outbound, ferrum2_config::ClientOutboundConfig::Direct))
-    {
-        return Err(RunError::StartupDirectUnsupported);
-    }
     let dns_specs = config
         .dns
         .as_ref()
@@ -177,13 +166,6 @@ async fn run_with_registry_and_metrics_inner<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
-    if config
-        .outbounds
-        .iter()
-        .any(|outbound| matches!(outbound, ferrum2_config::ClientOutboundConfig::Direct))
-    {
-        return Err(RunError::StartupDirectUnsupported);
-    }
     let tun_config = config.tun;
     let dns = match (config.dns, config.dns_route, dns_specs) {
         (
@@ -197,9 +179,9 @@ where
             policy,
             Some(specs),
         ) => {
-            let internal_udp_needed = servers.iter().any(|server| {
-                server.transport == ferrum2_config::DnsTransport::Udp && server.detour.is_some()
-            });
+            let internal_udp_needed = servers
+                .iter()
+                .any(|server| server.transport == ferrum2_config::DnsTransport::Udp);
             Some((
                 inbounds,
                 specs,

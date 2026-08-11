@@ -143,7 +143,7 @@ fn tun_check_config_is_offline_and_has_a_pure_target_gate() {
 }
 
 #[test]
-fn m16_direct_check_config_is_offline_and_runtime_rejects_before_bind() {
+fn m16_direct_check_config_is_offline_and_runtime_reaches_bind() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (listener, listen) = reserve_loopback();
     let direct = directory.path().join("direct-client.toml");
@@ -168,7 +168,7 @@ fn m16_direct_check_config_is_offline_and_runtime_rejects_before_bind() {
     assert!(run.stdout.is_empty());
     assert_eq!(
         run.stderr,
-        b"error[startup.direct_unsupported] process: direct execution is not available\n"
+        b"error[startup.bind] process: unable to prepare required endpoint\n"
     );
     assert!(
         TcpStream::connect_timeout(
@@ -176,7 +176,7 @@ fn m16_direct_check_config_is_offline_and_runtime_rejects_before_bind() {
             std::time::Duration::from_secs(1)
         )
         .is_ok(),
-        "direct validation/runtime refusal disturbed the occupied endpoint"
+        "direct runtime bind failure disturbed the occupied endpoint"
     );
 
     for (name, binary, source, expected) in [

@@ -2,7 +2,9 @@
 mod local_support;
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
+use std::net::{
+    Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket,
+};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -858,6 +860,108 @@ fn echo_worker_drop_joins_and_releases_listener() {
     let (address, worker) = start_echo();
     drop(worker);
     drop(TcpListener::bind(address).expect("dropped echo listener rebind"));
+}
+
+#[test]
+fn direct_tcp_real_process_preserves_raw_bytes_and_half_close() {
+    for form in ["static", "rule", "final", "selector"] {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let client_address = unused_loopback();
+        let (target, echo) = start_echo();
+        let fallback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("fallback sentinel");
+        fallback
+            .set_nonblocking(true)
+            .expect("nonblocking fallback sentinel");
+        let fallback_address = fallback.local_addr().expect("fallback address");
+        let root = match form {
+            "static" => "outbound = \"exit\"\n".to_owned(),
+            "rule" => format!(
+                "[route]\nfinal = \"fallback\"\n[[route.rules]]\ninbound = \"m16-tag-sentinel\"\nnetwork = \"tcp\"\nip = \"{}\"\nport = {}\noutbound = \"exit\"\n",
+                target.ip(),
+                target.port()
+            ),
+            "final" => "[route]\nfinal = \"exit\"\n".to_owned(),
+            "selector" => "outbound = \"manual\"\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"exit\", \"fallback\"]\ndefault = \"exit\"\n".to_owned(),
+            _ => unreachable!(),
+        };
+        let proxy = matches!(form, "rule" | "selector").then(|| {
+            format!(
+                "[[outbounds]]\ntag = \"fallback\"\nserver = \"{fallback_address}\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"bTE2LXNlY3JldC1rZXkhIQ==\"\n"
+            )
+        });
+        let config = directory
+            .path()
+            .join(format!("m16-direct-{form}-client.toml"));
+        std::fs::write(
+            &config,
+            format!(
+                "schema_version = 2\n[[inbounds]]\ntag = \"m16-tag-sentinel\"\nlisten = \"{client_address}\"\n{root}[[outbounds]]\ntag = \"exit\"\ntype = \"direct\"\n{}",
+                proxy.as_deref().unwrap_or_default(),
+            ),
+        )
+        .expect("direct client config");
+        let mut client = ChildGuard::spawn("ferrum2-client", &config);
+        wait_for_listener(&mut client, client_address);
+
+        let (mut socks, reply) = socks_connect(client_address, target);
+        assert_eq!(&reply[..2], &[5, 0], "{form}");
+        socks.write_all(form.as_bytes()).expect("direct payload");
+        socks.shutdown(Shutdown::Write).expect("direct half close");
+        let mut response = Vec::new();
+        socks.read_to_end(&mut response).expect("direct response");
+        assert_eq!(response, form.as_bytes(), "{form}");
+        assert_eq!(echo.join().expect("direct echo"), form.as_bytes(), "{form}");
+        assert!(
+            matches!(fallback.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "{form} selected the proxy fallback"
+        );
+        let exit = client.terminate_and_reap_with_exit(Duration::from_secs(5));
+        exit.assert_stderr_excludes(&[
+            "m16-tag-sentinel",
+            &fallback_address.to_string(),
+            "bTE2LXNlY3JldC1rZXkhIQ==",
+            "m16-secret-key!!",
+        ]);
+    }
+
+    let ipv6_loopback = TcpListener::bind("[::1]:0").is_ok_and(|listener| {
+        TcpStream::connect(listener.local_addr().expect("IPv6 probe address")).is_ok()
+    });
+    if ipv6_loopback {
+        let directory = tempfile::tempdir().expect("IPv6 temporary directory");
+        let client_address = unused_loopback();
+        let config = directory.path().join("m16-direct-ipv6-client.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "schema_version = 2\n[[inbounds]]\ntag = \"socks\"\nlisten = \"{client_address}\"\noutbound = \"exit\"\n[[outbounds]]\ntag = \"exit\"\ntype = \"direct\"\n"
+            ),
+        )
+        .expect("IPv6 direct config");
+        let (target, echo) = start_echo_at("[::1]:0".parse().expect("IPv6 bind"));
+        let mut client = ChildGuard::spawn("ferrum2-client", &config);
+        wait_for_listener(&mut client, client_address);
+        let mut socks = TcpStream::connect(client_address).expect("IPv6 SOCKS client");
+        socks
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("IPv6 SOCKS timeout");
+        socks.write_all(&[5, 1, 0]).expect("IPv6 SOCKS greeting");
+        let mut method = [0_u8; 2];
+        socks.read_exact(&mut method).expect("IPv6 SOCKS method");
+        let mut request = vec![5, 1, 0];
+        request.extend_from_slice(&address_wire(target));
+        socks.write_all(&request).expect("IPv6 SOCKS request");
+        let mut reply = [0_u8; 22];
+        socks.read_exact(&mut reply).expect("IPv6 SOCKS reply");
+        assert_eq!(&reply[..4], &[5, 0, 0, 4]);
+        assert_eq!(&reply[4..20], &Ipv6Addr::LOCALHOST.octets());
+        socks.write_all(b"ipv6-direct").expect("IPv6 payload");
+        socks.shutdown(Shutdown::Write).expect("IPv6 half close");
+        let mut response = Vec::new();
+        socks.read_to_end(&mut response).expect("IPv6 response");
+        assert_eq!(response, b"ipv6-direct");
+        assert_eq!(echo.join().expect("IPv6 direct echo"), b"ipv6-direct");
+    }
 }
 
 #[test]
