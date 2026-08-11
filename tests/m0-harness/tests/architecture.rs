@@ -417,9 +417,9 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && restore.contains("$currentPreferredSource.Count -eq 1")
             && restore.contains("$currentUnderlay.InterfaceIndex -eq $physicalUnderlayBaseline.InterfaceIndex")
             && restore.contains("$currentPhysicalAdapter.NetLuid -eq $physicalInterfaceBaseline.NetLuid")
-            && restore.contains("$currentPhysicalAdapter.InterfaceAdminStatus -eq $physicalInterfaceBaseline.InterfaceAdminStatus")
-            && restore.contains("$currentPhysicalAdapter.InterfaceOperationalStatus -eq $physicalInterfaceBaseline.InterfaceOperationalStatus")
-            && restore.contains("$currentPhysicalAdapter.MediaConnectState -eq $physicalInterfaceBaseline.MediaConnectState")
+            && restore.contains("[uint32]$currentPhysicalAdapter.InterfaceAdminStatus -eq [uint32]$physicalInterfaceBaseline.InterfaceAdminStatus")
+            && restore.contains("[uint32]$currentPhysicalAdapter.InterfaceOperationalStatus -eq [uint32]$physicalInterfaceBaseline.InterfaceOperationalStatus")
+            && restore.contains("[uint32]$currentPhysicalAdapter.MediaConnectState -eq [uint32]$physicalInterfaceBaseline.MediaConnectState")
             && restore.contains("$currentPhysicalAdapter.HardwareInterface -eq $physicalInterfaceBaseline.HardwareInterface")
             && restore.contains("$currentUnderlay.Row.Route.NextHop -ceq $physicalUnderlayBaseline.Gateway")
             && restore.contains("$currentUnderlay.Row.Route.RouteMetric -eq $physicalUnderlayBaseline.RouteMetric")
@@ -474,14 +474,9 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             .is_some_and(|((((routes, interface), fixed), underlay), changes)| {
                 routes < changes && interface < changes && fixed < changes && underlay < changes
             })
-            && integrated
-                .contains("[string]$physicalInterfaceBaseline.InterfaceAdminStatus -ceq \"Up\"",)
-            && integrated.contains(
-                "[string]$physicalInterfaceBaseline.InterfaceOperationalStatus -ceq \"Up\"",
-            )
-            && integrated.contains(
-                "[string]$physicalInterfaceBaseline.MediaConnectState -ceq \"Connected\"",
-            )
+            && integrated.contains("[uint32]$physicalInterfaceBaseline.InterfaceAdminStatus -eq 1")
+            && integrated.contains("[uint32]$physicalInterfaceBaseline.InterfaceOperationalStatus -eq 1")
+            && integrated.contains("[uint32]$physicalInterfaceBaseline.MediaConnectState -eq 1")
             && integrated.contains("[bool]$physicalInterfaceBaseline.HardwareInterface")
             && integrated.contains("$route.InterfaceLuid -eq $physicalInterfaceBaseline.NetLuid")
             && integrated.contains("$route.InterfaceIndex -eq $physicalDefault.InterfaceIndex")

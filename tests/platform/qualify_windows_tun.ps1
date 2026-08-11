@@ -2667,9 +2667,9 @@ listen = "127.0.0.1:$manualMetricsPort"
         $systemRouteBaseline = @(Get-Ipv4SystemRouteSnapshot)
         $physicalInterfaceBaseline = Get-NetAdapter -InterfaceIndex $physicalDefault.InterfaceIndex -IncludeHidden -ErrorAction Stop
         Assert-True ([uint64]$physicalInterfaceBaseline.NetLuid -ne 0 -and
-            [string]$physicalInterfaceBaseline.InterfaceAdminStatus -ceq "Up" -and
-            [string]$physicalInterfaceBaseline.InterfaceOperationalStatus -ceq "Up" -and
-            [string]$physicalInterfaceBaseline.MediaConnectState -ceq "Connected" -and
+            [uint32]$physicalInterfaceBaseline.InterfaceAdminStatus -eq 1 -and
+            [uint32]$physicalInterfaceBaseline.InterfaceOperationalStatus -eq 1 -and
+            [uint32]$physicalInterfaceBaseline.MediaConnectState -eq 1 -and
             [bool]$physicalInterfaceBaseline.HardwareInterface) "eligible physical interface baseline mismatch"
         $physicalFixedRouteDestinations = @(@($supportAddress, $managedDnsAddress) | Sort-Object -Unique)
         $physicalFixedRouteBaseline = @(
@@ -2958,9 +2958,9 @@ listen = "127.0.0.1:$managedMetricsPort"
                                     @(Compare-Object -ReferenceObject @($physicalFixedRouteBaseline) -DifferenceObject $currentFixedRoutes).Count -eq 0 -and
                                     $currentUnderlay.InterfaceIndex -eq $physicalUnderlayBaseline.InterfaceIndex -and
                                     $currentPhysicalAdapter.NetLuid -eq $physicalInterfaceBaseline.NetLuid -and
-                                    $currentPhysicalAdapter.InterfaceAdminStatus -eq $physicalInterfaceBaseline.InterfaceAdminStatus -and
-                                    $currentPhysicalAdapter.InterfaceOperationalStatus -eq $physicalInterfaceBaseline.InterfaceOperationalStatus -and
-                                    $currentPhysicalAdapter.MediaConnectState -eq $physicalInterfaceBaseline.MediaConnectState -and
+                                    [uint32]$currentPhysicalAdapter.InterfaceAdminStatus -eq [uint32]$physicalInterfaceBaseline.InterfaceAdminStatus -and
+                                    [uint32]$currentPhysicalAdapter.InterfaceOperationalStatus -eq [uint32]$physicalInterfaceBaseline.InterfaceOperationalStatus -and
+                                    [uint32]$currentPhysicalAdapter.MediaConnectState -eq [uint32]$physicalInterfaceBaseline.MediaConnectState -and
                                     $currentPhysicalAdapter.HardwareInterface -eq $physicalInterfaceBaseline.HardwareInterface -and
                                     $currentPreferredSource.Count -eq 1 -and
                                     $null -ne $currentSourceRow -and
