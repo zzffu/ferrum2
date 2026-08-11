@@ -1,11 +1,14 @@
 ---
 id: M16-T07
 milestone: M16
-status: ready
+status: active
 depends_on:
   - M16-T06
 owns:
   - .github/workflows/m0.yml
+  - tests/m0-harness/tests/architecture.rs
+  - tests/m0-harness/tests/workspace_policy.rs
+  - tests/platform/qualify_windows_tun.ps1
   - docs/adr/ADR-0035-m16-client-direct-outbound.md
   - docs/adr/ADR-0036-m16-windows-managed-tun-policy.md
   - docs/handoffs/HANDOFF-M16-*.md

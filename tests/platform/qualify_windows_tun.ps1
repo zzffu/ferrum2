@@ -156,6 +156,8 @@ $outerCleanupError = $null
 $tcp01Diagnostic = $null
 $cycleRows = 0
 $performanceWitnesses = 0
+$performanceDirectRows = 0
+$performanceDnsRows = 0
 $performanceAdapterRxBytes = [uint64]0
 $performanceAdapterTxBytes = [uint64]0
 $performanceAdapterRxPackets = [uint64]0
@@ -3594,6 +3596,16 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $dnsPort = Get-UniqueTcpPort
         $dnsInboundPort = Get-UniqueTcpPort
         $metricsPort = Get-UniqueTcpPort
+        $performanceDirectInbound = ""
+        $performanceDirectOutbound = ""
+        $performanceDirectRule = ""
+        if ($Mode -eq "performance") {
+            $performanceDirectSocksPort = Get-UniqueTcpPort
+            $performanceDirectTargetPort = Get-UniqueTcpPort
+            $performanceDirectInbound = "[[inbounds]]`ntag = `"performance-direct-socks`"`nlisten = `"127.0.0.1:$performanceDirectSocksPort`"`n"
+            $performanceDirectOutbound = "[[outbounds]]`ntag = `"performance-direct`"`ntype = `"direct`"`n"
+            $performanceDirectRule = "[[route.rules]]`ninbound = `"performance-direct-socks`"`nnetwork = `"tcp`"`naction = `"route`"`noutbound = `"performance-direct`"`n"
+        }
         $ports = 1..8 | ForEach-Object { Get-UniqueTcpPort }
         $ports[4] = 53
         $targets = @(
@@ -3641,7 +3653,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
         @"
 schema_version = 2
-[tun]
+${performanceDirectInbound}[tun]
 tag = "tun-in"
 adapter_name = "$adapterName"
 ipv4_address = "198.18.0.2/30"
@@ -3673,7 +3685,7 @@ server = "${udpGateAddress}:$gatePortA"
 [[outbounds]]
 tag = "udp-inner"
 server = "${udpGateAddress}:$gatePortB"
-[[chains]]
+${performanceDirectOutbound}[[chains]]
 tag = "two-hop"
 hops = ["one", "inner"]
 [[chains]]
@@ -3692,7 +3704,7 @@ final = "one"
 [route.sniff]
 timeout_ms = 1000
 max_bytes = 8192
-[[route.rules]]
+${performanceDirectRule}[[route.rules]]
 inbound = "tun-in"
 network = "tcp"
 ip = "$($targets[0])"
@@ -3966,6 +3978,14 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         if ($Mode -eq "performance") {
             $performanceWitnesses++
             Update-PerformancePeaks $activeProcess $metricsPort
+            $directProbe = [Ferrum2TcpProbe]::new("127.0.0.1", $performanceDirectTargetPort, "echo")
+            $tcpResources.Add($directProbe)
+            $directGateCounts = @($gateA.Accepted, $gateB.Accepted)
+            Invoke-ProductSocksTcp $performanceDirectSocksPort "127.0.0.1" $performanceDirectTargetPort ([Text.Encoding]::ASCII.GetBytes("m16-performance-direct")) $true
+            Assert-True ($directProbe.WaitCompleted(5000)) "performance direct target did not complete"
+            Assert-True ($gateA.Accepted -eq $directGateCounts[0] -and $gateB.Accepted -eq $directGateCounts[1]) "performance direct row opened Shadowsocks"
+            $performanceDirectRows++
+            Update-PerformancePeaks $activeProcess $metricsPort
         }
         Invoke-EchoRow $targets[1] $ports[1] $ownedInterfaceIndex $gateA ([Text.Encoding]::ASCII.GetBytes("tcp-02-two-hop"))
         $tcpRows++
@@ -4022,6 +4042,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             $dnsFlow.Client.Dispose()
         }
         $tcpRows++
+        if ($Mode -eq "performance") { $performanceDnsRows++ }
 
         Assert-ResetWithoutEgress $targets[5] $ports[5] $ownedInterfaceIndex @($gateA, $gateB)
         $tcpRows++
@@ -4158,6 +4179,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 Assert-True ($udpGateA.Requests -eq $beforeGateA -and $udpGateB.Requests -eq $beforeGateB) "UDP-05 DNS hijack opened Shadowsocks"
             } finally { $dnsClient.Dispose() }
             $udpRows++
+            if ($Mode -eq "performance") { $performanceDnsRows++ }
 
             # UDP-06 IPv6 reject tombstone and no policy re-entry.
             $beforeGateA = $udpGateA.Requests
@@ -4245,6 +4267,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             if ($Mode -eq "performance") {
                 Assert-True $performanceFieldsCollected "performance fields were not collected"
                 Assert-True ($performanceWitnesses -eq 2) "performance witness count mismatch"
+                Assert-True ($performanceDirectRows -eq 1) "performance direct row count mismatch"
+                Assert-True ($performanceDnsRows -eq 2) "performance DNS row count mismatch"
                 Assert-True ($performanceAdapterRxBytes -gt 0 -and $performanceAdapterTxBytes -gt 0) "adapter byte witnesses missing"
                 Assert-True ($performanceAdapterRxPackets -gt 0 -and $performanceAdapterTxPackets -gt 0) "adapter packet witnesses missing"
                 Assert-True ($performanceTunAcceptedDelta -gt 0) "TUN accepted witness missing"
@@ -4369,6 +4393,7 @@ if ($completed) {
     } elseif ($Mode -eq "performance") {
         Write-Output "m15_windows_tun_performance_resource adapter_rx_bytes=$performanceAdapterRxBytes adapter_tx_bytes=$performanceAdapterTxBytes adapter_rx_packets=$performanceAdapterRxPackets adapter_tx_packets=$performanceAdapterTxPackets adapter_rx_errors=$performanceAdapterRxErrors adapter_tx_errors=$performanceAdapterTxErrors adapter_rx_discards=$performanceAdapterRxDiscards adapter_tx_discards=$performanceAdapterTxDiscards tun_accepted_delta=$performanceTunAcceptedDelta cpu_ms_delta=$performanceCpuMilliseconds rss_bytes=$performanceRssBytes handles_peak=$performanceHandlesPeak threads_peak=$performanceThreadsPeak udp_sessions_peak=$performanceUdpSessionsPeak udp_buffered_bytes_peak=$performanceUdpBufferedBytesPeak controller_inflight_peak=$performanceControllerInflightPeak queues=bounded bounds_ring_bytes=8388608 bounds_tcp_flows=8 bounds_tcp_buffer_bytes=4096 bounds_udp_mappings=4 bounds_udp_buffered_bytes=4194304 adapter_churn=$performanceAdapterChurn grace_drain=PASS force_drain=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
         Write-Output "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+        Write-Output "m16_windows_tun_performance status=PASS proxy=PASS direct=PASS dns=PASS cleanup=PASS candidate_sha=$sha run_id=$runId run_attempt=$runAttempt"
     } elseif ($Mode -eq "network-feasibility") {
         Assert-True ($capabilityRouteRows -eq 2 -and $capabilityTcpRows -eq 4 -and $capabilityUdpRows -eq 4 -and
             $capabilityDnsRows -eq 2 -and $capabilityWindowRows -eq 1 -and $capabilityHardKillRows -eq 1 -and

@@ -2699,6 +2699,9 @@ fn performance_is_manual_and_decoupled_from_qualification() {
         "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT",
         "$markers = @($output | Where-Object { $_ -like \"m15_windows_tun_performance status=PASS *\" })",
         "$markers.Count -ne 1 -or $markers[0] -ne $expectedMarker",
+        "m16_windows_tun_performance status=PASS proxy=PASS direct=PASS dns=PASS cleanup=PASS candidate_sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT",
+        "$managedMarkers = @($output | Where-Object { $_ -like \"m16_windows_tun_performance status=PASS *\" })",
+        "$managedMarkers.Count -ne 1 -or $managedMarkers[0] -ne $expectedManagedMarker",
     ];
     let has_windows_contract = |source: &str| {
         windows_contract

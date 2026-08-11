@@ -4479,9 +4479,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("queues=bounded bounds_ring_bytes=8388608 bounds_tcp_flows=8 bounds_tcp_buffer_bytes=4096 bounds_udp_mappings=4 bounds_udp_buffered_bytes=4194304")
             && source.contains("adapter_churn=$performanceAdapterChurn grace_drain=PASS force_drain=PASS")
             && source.contains("$performanceAdapterChurn -ge 2")
+            && source.contains("$performanceDirectRows -eq 1")
+            && source.contains("$performanceDnsRows -eq 2")
+            && source.contains("Invoke-ProductSocksTcp $performanceDirectSocksPort")
             && completion.is_some_and(|completion| {
                 completion.contains(
                     "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS",
+                ) && completion.contains(
+                    "m16_windows_tun_performance status=PASS proxy=PASS direct=PASS dns=PASS cleanup=PASS",
                 ) && completion.contains(
                     "m16_windows_tun_full status=PASS m15_transport=16/16 direct_tcp=1/1 direct_udp=1/1 dns=2/2 network_change=3/3 route_change=1/1 interface_change=1/1 address_change=1/1 cycles=100/100 hard_kill=3/3 cleanup=PASS",
                 ) && completion
@@ -4490,6 +4495,12 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS",
                     ))
                     .is_some_and(|(resource, marker)| resource < marker)
+                    && completion
+                        .find("m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS")
+                        .zip(completion.find(
+                            "m16_windows_tun_performance status=PASS proxy=PASS direct=PASS dns=PASS cleanup=PASS",
+                        ))
+                        .is_some_and(|(legacy, managed)| legacy < managed)
             })
             && !source.contains("m15_windows_tun_performance threshold=")
             && !source.contains("m15_windows_tun_performance ratio=")
