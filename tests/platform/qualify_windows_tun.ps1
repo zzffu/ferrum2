@@ -486,9 +486,17 @@ function Wait-AdapterReady(
 
 function Wait-AdapterAbsent([string]$Name, [int]$TimeoutSeconds = 20) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $stableSamples = 0
     do {
-        if (-not (Get-NetAdapter -Name $Name -ErrorAction SilentlyContinue)) { return }
-        Start-Sleep -Milliseconds 100
+        $absent = $false
+        try {
+            $absent = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop |
+                Where-Object { $_.Name -ceq $Name }).Count -eq 0
+        } catch { $absent = $false }
+        if ($absent) { $stableSamples++ }
+        else { $stableSamples = 0 }
+        if ($stableSamples -ge 4) { return }
+        Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "adapter cleanup timeout"
 }

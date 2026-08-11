@@ -359,6 +359,11 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         .nth(1)
         .and_then(|body| body.split("function Wait-AdapterAbsent").next())
         .expect("bounded adapter readiness");
+    let adapter_absence = qualifier
+        .split("function Wait-AdapterAbsent")
+        .nth(1)
+        .and_then(|body| body.split("function Get-InterfaceAddressSnapshot").next())
+        .expect("bounded adapter absence");
     let adapter_cycles = qualifier
         .split("function Invoke-AdapterCycles")
         .nth(1)
@@ -545,6 +550,38 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && !adapter_cycles.contains("managed cycle capture route mismatch"),
         "managed cycles must await exact capture and DNS state through one bounded process-aware readiness seam"
     );
+    let has_stable_adapter_absence = |body: &str| {
+        body.contains("$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)")
+            && body.contains("$stableSamples = 0")
+            && body.contains("Get-NetAdapter -IncludeHidden -ErrorAction Stop")
+            && body.contains("catch { $absent = $false }")
+            && body.contains("if ($absent) { $stableSamples++ }")
+            && body.contains("else { $stableSamples = 0 }")
+            && body.contains("if ($stableSamples -ge 4) { return }")
+            && body.contains("Start-Sleep -Milliseconds 500")
+            && body.contains("while ([DateTime]::UtcNow -lt $deadline)")
+            && body.contains("throw \"adapter cleanup timeout\"")
+            && !body.contains("if (-not (Get-NetAdapter")
+    };
+    assert!(
+        has_stable_adapter_absence(adapter_absence),
+        "adapter cleanup must converge before exact same-name lifecycle rebind"
+    );
+    for (failure, broken) in [
+        (
+            "first absent sample",
+            adapter_absence.replace("$stableSamples -ge 4", "$stableSamples -ge 1"),
+        ),
+        (
+            "query failure counted as absence",
+            adapter_absence.replace("catch { $absent = $false }", "catch { $absent = $true }"),
+        ),
+    ] {
+        assert!(
+            !has_stable_adapter_absence(&broken),
+            "adapter absence contract accepted {failure}"
+        );
+    }
     assert!(
         adapter_cycles.contains("[Nullable[int]]$MetricsPort = $null")
             && managed_cycle_metrics.contains(
