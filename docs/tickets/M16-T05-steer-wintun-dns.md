@@ -1,7 +1,7 @@
 ---
 id: M16-T05
 milestone: M16
-status: planned
+status: done
 depends_on:
   - M16-T04
 owns:
@@ -24,19 +24,19 @@ selected upstream through the existing DNS proxy and pinned client egress owners
 
 ## Acceptance
 
-- [ ] Auto-DNS snapshots、applies and reads back IPv4 settings only on the new Wintun interface；physical DNS
+- [x] Auto-DNS snapshots、applies and reads back IPv4 settings only on the new Wintun interface；physical DNS
       sentinels and the M15 IPv6 adapter address never change，and partial apply reverses exactly。
-- [ ] Cleanup restores the snapshot only if current state still equals the owned applied value；an external
+- [x] Cleanup restores the snapshot only if current state still equals the owned applied value；an external
       replacement is preserved and reported as a fixed cleanup conflict。
-- [ ] Exact synthetic IPv4 address:53 TCP/UDP enters existing `DnsProxy` before ordinary route and creates no
+- [x] Exact synthetic IPv4 address:53 TCP/UDP enters existing `DnsProxy` before ordinary route and creates no
       Shadowsocks owner unless the selected DNS server uses a proxy detour；wrong address/port and auto-DNS-off
       retain ordinary/M15 behavior。
-- [ ] No-detour/direct-detour and proxy-detoured UDP/TCP/DoT/DoH upstreams all use the T04 physical binding
+- [x] No-detour/direct-detour and proxy-detoured UDP/TCP/DoT/DoH upstreams all use the T04 physical binding
       seam and preserve existing deadline、TLS/HTTP identity、admission and no-fallback rules。
-- [ ] Windows resolver UDP and TCP witnesses pass on the exact current qualification VM/checkpoint；evidence
+- [x] Windows resolver UDP and TCP witnesses pass on the exact current qualification VM/checkpoint；evidence
       reports `dns=2/2` and is described as IPv4 steering，with no managed-IPv6、other-interface、DoH/DoQ、
       WFP、anti-leak or cross-version claim。
-- [ ] Failure-position、redaction、architecture、focused DNS/process and footprint checks pass。
+- [x] Failure-position、redaction、architecture、focused DNS/process and footprint checks pass。
 
 ## Validation
 
@@ -55,10 +55,16 @@ git diff --check <accepted-M16-T04-sha>..<candidate-sha>
 
 ## Result
 
-- Commit: —
-- Review: —
-- Footprint: —
-- Notes: —
+- Commit: `54f06a40b871f39911c583c327b4ba33c12a9646`（tree
+  `debb88be678043fdad76773dc9259787dd60582d`，parent `430bc4ceb9a1d64c25945cca0a9dc8f676e80984`）。
+- Review: Final root Architect/QA audit on descendant `d76268b…` is `PASS` with zero blocker、major or minor；
+  the earlier focused Architect review's two scope notes remain non-findings。
+- Footprint: Integrity/category/ratio `PASS`；numeric `REVIEW_REQUIRED` is accepted at code/tests
+  `31932/54626`、ratio `1.710698`、case/support/fixture delta `+197/0/0` and code growth `+224`。The
+  growth stays in the existing inline tables/architecture file with no helper、fixture、harness or dependency。
+- Notes: Focused managed-DNS/TUN/DNS-egress/proxy/local-E2E rows pass `1/2/7/5/2`。The exact restored-VM
+  descendant `d76268b…` supplies the required Windows resolver `dns=2/2` witness while preserving M15 IPv6；
+  no global DNS、anti-leak or managed-IPv6 claim is made。
 
 ## Rollback / risk
 

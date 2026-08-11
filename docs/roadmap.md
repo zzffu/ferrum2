@@ -1208,7 +1208,7 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 
 ## M16 — Windows managed TUN routing, DNS and direct egress
 
-- **Status:** executing
+- **Status:** validating
 - **Objective:** Add client `[[outbounds]] type = "direct"` as one terminal singleton egress plan and let
   existing static/ordered route/selector/DNS detour choose raw direct or existing Shadowsocks TCP/UDP；when
   explicitly enabled on Windows，own IPv4-only compatible Wintun capture rows、physical socket pinning and
@@ -1235,8 +1235,8 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   amendment `451edcb…` → T01 capability/measured contracts `cc26aba…` done → T02 config graph
   `13b6d681…` repaired and final `master@bf0a3cb…` hosted-PASS/done → T03 direct TCP/UDP `9f05d94…` plus
   portability repair `master@85bf3fcc…` hosted-PASS/done → T04 capture/binding
-  `2fdfbc7…` VM-PASS plus hosted repair `master@d791f01…` PASS/done → T05 DNS ready
-  steering → T06 lifecycle/VM evidence → T07 exact qualification；serial drain。
+  `2fdfbc7…` VM-PASS plus hosted repair `master@d791f01…` PASS/done → T05 DNS
+  `54f06a4…` done → T06 lifecycle/VM `d76268b…` done → T07 exact qualification ready；serial drain。
 - **Entry gate:** exact VM `Windows 10 MSIX packaging environment` restored from checkpoint
   `M15-T04-before-2b0c25b-20260810` must record its actual product、edition、architecture and full version/build，
   then prove IPv4 route values、fixed/dynamic pinned positive/
@@ -1254,17 +1254,22 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   seams with no support/fixture/new harness。Performance is required without a threshold/improvement claim。
   T04 final hosted descendant reports integrity `PASS` and accepted numeric `REVIEW_REQUIRED` at code/tests
   `31708/54429`、ratio `1.716570 PASS`、case/support/fixture delta `+2105/0/0` and code growth `+1367`；the
-  existing `architecture.rs` is `4996` semantic test LOC（`+291`）。
+  existing `architecture.rs` is `4996` semantic test LOC（`+291`）。T05 reports `31932/54626`、ratio
+  `1.710698 PASS` and `+197/0/0`；T06 ticket reports `30395/56913`、ratio `1.872446 PASS` and
+  `+2287/0/0`。Both retain integrity/category PASS and add no support/fixture/new harness。Milestone candidate
+  `d76268b…` reports `30395/56913`、ratio `1.872446 PASS` and cumulative `+6590/0/0`；the large-file advisory
+  is accepted because the existing architecture/qualifier carry distinct required platform evidence。
 - **Deferred/out of scope:** WFP/kill switch/DNS anti-leak、physical bypass rows、per-target multihomed routing、
   live migration、service/watchdog/installer、non-Windows managed TUN、new crate/dependency、ring-full
   maintenance unrelated to a proven blocker、M16-managed IPv6、release/publication。The IPv6 deferral does not
   weaken M15 manual-route IPv6、SIP022 IPv6 or non-managed/SOCKS direct IPv6。
-- **Next/remote boundary:** M16-T04 is root-closed with restored-VM product PASS on exact `2fdfbc7…` and final
-  hosted-integrated `master@d791f01…`；all product and hosted-repair reviews are `PASS_WITH_NOTES` with zero
-  blocker/major/minor。The failed T04 run `31485931514/1` is preserved and was not rerun；replacement
-  `31488588010/1` passed quality、MSRV、interop、test-footprint、Linux GNU/musl、Windows MSVC、Windows TUN
-  E2E and qualification。Push-event performance jobs skipped by design and are not claimed；M16-T05 is ready /
-  current serial frontier。The first
+- **Next/remote boundary:** M16-T05/T06 are root-closed locally；T06 exact `d76268b…` has fresh restored-VM
+  `full` and independent `hard-kill` PASS with M15 `16/16`、M16 Direct `1/1 + 1/1`、DNS `2/2`、network
+  change `3/3`、cycles `100/100`、hard kill `3/3` and zero residue。T07 is ready/current frontier。An ordinary
+  non-force push is authorized；workflow dispatch/rerun remains unauthorized，so independent performance is
+  still a close prerequisite requiring separate authority。The failed T04 run `31485931514/1` is preserved
+  and was not rerun；replacement `31488588010/1` passed quality、MSRV、interop、test-footprint、Linux GNU/musl、
+  Windows MSVC、Windows TUN E2E and qualification。The first
   T02 non-force push integrated `5782c08…` to `master` with exact readback；
   automatic `31443577764/1` is preserved failed and was not rerun。Its MSRV、interop、test-footprint、three
   platforms and Windows TUN E2E passed；quality failed only at the three known Clippy lints，qualification failed
@@ -1547,3 +1552,5 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 | 2026-08-11 | M16-T03 post-hosted Clippy repair / final hosted PASS | Initial automatic run `31454190132/1` on `52beb463…` is preserved failed and was not rerun；quality alone found the non-Windows dead-code variant and qualification failed derivatively，while every other substantive job passed | Root's exact two-file `+4/-2` repair `85bf3fcc…` cfg-gates the Windows-only variant and SOCKS arm；Architect and QA both `PASS_WITH_NOTES` with `0/0/0` and one local Linux cross-Clippy availability note each | Authorized non-force push advanced `master` `52beb463…` → `85bf3fcc…` with exact readback；replacement `31454813712/1` passed quality、qualification、interop、footprint、MSRV、Linux GNU/musl、Windows MSVC and Windows TUN E2E；push-event performance skipped by design；integrity PASS、`30341/52324` ratio `1.724531`、`+1133/0/0` advisory accepted；no dispatch/rerun、force-push、PR/tag/package/release/publication |
 | 2026-08-11 | M16-T04 review closeout | Exact `2fdfbc7…` owns compatible IPv4 `/1` capture、fixed/dynamic physical pinning and the pre-Ready manual-route binder；T04 done、T05 ready/current frontier | Restored Windows 10 Enterprise Evaluation `19044.1288` product qualifier exited `0` with one marker、five ordered phases、listener TCP/UDP `4/4`、unpinned PktMon `5/1`、all six pinned rows zero、manual routes `2` and TCP/UDP `1/1`；guest/host/final cleanup passed。Controller-only failures remain uncredited | Final Architect/QA both `PASS_WITH_NOTES` with `0/0/0/1`；integrity PASS、numeric `REVIEW_REQUIRED` accepted at `31688/54418` ratio `1.717306`、`+2094/0/0`、code `+1347` and `architecture.rs` `4975/+270`；performance/full/100-cycle claims remain pending，no remote action |
 | 2026-08-11 | M16-T04 hosted repair / final remote PASS | Initial `master@c13215b…` run `31485931514/1` is preserved failed and was not rerun；its Linux cfg/test and occupied-metrics oracle failures were bounded test/platform defects，not a product binder regression | Exact six-file `+53/-39` repair `d791f01…` passed root checks plus targeted Architect/QA `PASS_WITH_NOTES` with zero blocker/major/minor；normal non-force push and exact readback advanced `master` | Replacement `31488588010/1` passed quality、MSRV、interop、test-footprint、Linux GNU/musl、Windows MSVC、Windows TUN E2E and qualification；push-event performance skipped by design and is not claimed；final integrity PASS、`31708/54429` ratio `1.716570`、`+2105/0/0` advisory accepted；T04 root-closed，T05 frontier |
+| 2026-08-12 | M16-T05 root closeout | Exact `54f06a4…` owns only the Wintun IPv4 DNS lease and exact synthetic TCP/UDP `:53` interception through the existing DNS proxy/egress owners；T05 done | Focused managed-DNS/TUN/DNS-egress/proxy/local-E2E rows pass `1/2/7/5/2`；T06 descendant VM evidence supplies system resolver `dns=2/2` and preserves M15 IPv6。Root Architect/QA audit reports zero blocker/major/minor | Footprint integrity/category/ratio PASS；`31932/54626`、ratio `1.710698`、`+197/0/0` and code `+224` advisory accepted；no global DNS、anti-leak、managed-IPv6、helper、fixture、harness or dependency claim |
+| 2026-08-12 | M16-T06 root closeout / privileged PASS | Exact `d76268b…` closes callback-owned invalidation、policy revocation、supervised cleanup and same-name Wintun/PnP lifecycle；T06 done、T07 ready | Fresh full token `m16t06-full-20260811211853-fd65dd5d` passes M15 `16/16`、Direct `1/1 + 1/1`、DNS `2/2`、network change `3/3`、cycles `100/100` and cleanup；fresh independent hard-kill token `m16t06-hardkill-20260811213654-58010a25` passes `3/3`，both with exact listener counts、zero pre-remediation residue and pristine final restore | Root Architect/QA audits and all local Full/MSRV/lifecycle gates PASS；ticket integrity/category/ratio PASS and `+2287/0/0` advisory accepted。Earlier failed VM/controller attempts remain uncredited；ordinary push is authorized，workflow dispatch remains unauthorized，so T07 performance is pending |

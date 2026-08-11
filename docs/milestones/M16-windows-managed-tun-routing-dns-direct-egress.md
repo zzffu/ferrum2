@@ -1,6 +1,6 @@
 # M16 — Windows managed TUN routing, DNS and direct egress
 
-- **Status:** executing
+- **Status:** validating
 - **Qualified M15 product:** `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9`
 - **Qualified M15 product tree:** `72a3cfb5c881a35b1416cbf9ffea593973cc3570`
 - **Planning baseline:** `fcef80dcc7e62bbca63ffbf7832df369dd418abd`
@@ -175,16 +175,16 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
 - [x] Manual-route TUN+direct publishes the IPv4 binding before Ready and survives a controller route added afterward；
       no-direct `auto_route=false` makes no new managed-network state query/mutation and preserves M15 exactly，
       including IPv6 proxy and absent/direct-detour DNS egress。
-- [ ] Auto-DNS requires only `ipv4_dns_address`、rejects `ipv6_dns_address` and changes only owned Wintun IPv4
+- [x] Auto-DNS requires only `ipv4_dns_address`、rejects `ipv6_dns_address` and changes only owned Wintun IPv4
       DNS；system resolver UDP/TCP reaches the exact synthetic IPv4 address and existing DnsProxy；direct/proxy
       UDP/TCP/DoT/DoH upstreams use the correct pinned IPv4 first hop，while the M15 IPv6 adapter address remains。
-- [ ] All setup ordinals、change invalidation、later composition failure、graceful/forced stop and 100 cycles
+- [x] All setup ordinals、change invalidation、later composition failure、graceful/forced stop and 100 cycles
       return OS and process-private owners to baseline。External hard kill separately proves process absence
       and zero adapter/address/route/DNS residue before controller remediation，without claiming internal drain。
-- [ ] The current qualification VM proves the real IPv4 route、physical interface and IPv4 unicast-address
+- [x] The current qualification VM proves the real IPv4 route、physical interface and IPv4 unicast-address
       callback paths independently revoke admission/capture/DNS，terminate and leave zero owned residue；M15
       `16/16` transport and its IPv6 rows remain regression evidence。
-- [ ] New errors/logs/traces/metrics use fixed redacted categories and contain no target、endpoint、prefix、
+- [x] New errors/logs/traces/metrics use fixed redacted categories and contain no target、endpoint、prefix、
       interface/adapter identity、DNS name、tag、packet or secret。
 - [ ] One exact SHA passes focused、Full、Rust 1.97.1、three non-driver targets、existing interop、footprint、
       current-VM privileged full/cleanup、independent performance and bounded Architect/QA review with zero
@@ -198,9 +198,9 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
 | M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | done |
 | M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | done |
 | M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | done |
-| M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | ready |
-| M16-T06 | Close network-change、failure、hard-kill and current-VM lifecycle evidence | M16-T05 | planned |
-| M16-T07 | Qualify and close one exact M16 integration SHA | M16-T06 | planned |
+| M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | done |
+| M16-T06 | Close network-change、failure、hard-kill and current-VM lifecycle evidence | M16-T05 | done |
+| M16-T07 | Qualify and close one exact M16 integration SHA | M16-T06 | ready |
 
 ```text
 M16-T01 capability/contracts/control
@@ -280,6 +280,24 @@ claimed。Footprint integrity/category/ratio pass；numeric `REVIEW_REQUIRED` is
 `31708/54429`、ratio `1.716570 PASS`、case/support/fixture delta `+2105/0/0`、code growth `+1367` and
 `architecture.rs` `4996/+291`。
 
+T05 product `54f06a40b871f39911c583c327b4ba33c12a9646` deepens the existing Wintun transaction with an
+exact conditional IPv4 DNS lease and routes only the configured synthetic IPv4 `:53` TCP/UDP terminal into
+the existing `DnsProxy`。Focused managed-DNS/TUN/DNS-egress/proxy/local-E2E evidence passes `1/2/7/5/2`；
+the T06 descendant's fresh VM full supplies the real system resolver UDP/TCP `2/2` witness。Final root
+Architect/QA audit has zero blocker/major/minor。Footprint integrity/category/ratio pass；the accepted numeric
+advisory is code/tests `31932/54626`、ratio `1.710698`、case/support/fixture `+197/0/0` and code growth `+224`。
+
+T06 exact product/evidence candidate `d76268b61c4b6ce47ba48dcf4e306e0b2917ef3a`（tree
+`15f5897d4ed05765531b2e65c550dde91f32cb30`）closes callback-owned network invalidation、policy revocation、
+supervised termination、conditional cleanup and exact same-name Wintun/PnP rebind。Fresh restored-VM full
+token `m16t06-full-20260811211853-fd65dd5d` passed M15 `16/16`、Direct TCP/UDP `1/1`、DNS `2/2`、network
+change `3/3`、cycles `100/100`、hard kill `3/3` and cleanup；fresh independent hard-kill token
+`m16t06-hardkill-20260811213654-58010a25` passed `cases=3/3`。Both have exact listener counts、zero guest
+pre-remediation residue and a four-sample pristine final restore。Root Architect/QA audits are `PASS` with
+zero blocker/major/minor。Ticket footprint integrity/category/ratio pass；numeric advisory is accepted at
+code/tests `30395/56913`、ratio `1.872446` and case/support/fixture `+2287/0/0` because distinct callback、
+ordinal、cycle and controller evidence reuses the two existing large files without support/fixture/new harness。
+
 The first T02 non-force push moved `master` from `5630cf4…` to `5782c08…` with exact remote readback。
 Automatic push run `31443577764/1` is preserved as failed and was not rerun。MSRV、interop、test-footprint、
 Linux musl、Windows MSVC、Linux GNU and Windows TUN E2E succeeded；quality failed only at authoritative Full
@@ -307,12 +325,9 @@ must still bind its accepted exact SHA。
 
 ## Blocker / next action
 
-M16-T04 is root-closed：privileged product evidence remains bound to exact
-`2fdfbc7d0106e90e61739b810896f2feb17295cd`，and final hosted-integrated `master` is exact
-`d791f01c51cd2cbc0482c739b928eaac26ed9f82` with replacement run `31488588010/1` SUCCESS。All final reviews
-have zero blocker/major/minor，and the accepted footprint notes remain visible above。M16-T05 is ready and is
-the current serial frontier；DNS steering、performance/full qualification and 100-cycle claims remain pending。
-The failed T04 run `31485931514/1` was not rerun。The failed
-`31443577764/1` was not rerun；final T02
-`master@bf0a3cb…` and automatic `31445081351/1` are hosted PASS。T03 failed run `31454190132/1` was not
-rerun；replacement `master@85bf3fcc…` and automatic `31454813712/1` are hosted PASS。
+M16-T05 and T06 are root-closed locally。The current exact candidate is `d76268b…` with both required fresh
+VM profiles and every local Full/MSRV/lifecycle gate passing；T07 is ready and is the sole frontier。Its next
+step is a dedicated closeout/integration commit followed by the already-authorized ordinary non-force push and
+automatic hosted regression run。The independently required performance workflow remains blocked on separate
+workflow-dispatch authority；no dispatch/rerun、force-push、PR、tag、package、release or publication is implied。
+All earlier failed hosted and controller attempts remain preserved and uncredited。
