@@ -122,6 +122,7 @@ enum ClientUdpUpstream {
 
 enum ClientDirectUdpSocket {
     System(SystemDirectUdpSocket),
+    #[cfg(windows)]
     Managed {
         ipv4: UdpSocket,
         ipv6: Option<UdpSocket>,
@@ -140,7 +141,7 @@ enum ManagedUdpBinding {
     Default,
 }
 
-#[cfg(test)]
+#[cfg(all(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ManagedUdpEvent {
     OpenV4,
@@ -215,10 +216,13 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
     async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
         match self {
             Self::System(socket) => socket.send_to(payload, target).await,
+            #[cfg(windows)]
             Self::Managed { ipv4, .. } if target.is_ipv4() => ipv4.send_to(payload, target).await,
+            #[cfg(windows)]
             Self::Managed {
                 ipv6: Some(ipv6), ..
             } => ipv6.send_to(payload, target).await,
+            #[cfg(windows)]
             Self::Managed { ipv6: None, .. } => Err(io::Error::other("managed IPv4 required")),
         }
     }
@@ -226,6 +230,7 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
     async fn recv_from(&self, payload: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         match self {
             Self::System(socket) => socket.recv_from(payload).await,
+            #[cfg(windows)]
             Self::Managed {
                 ipv4,
                 ipv6: Some(ipv6),
@@ -245,6 +250,7 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
                     result => break result,
                 }
             },
+            #[cfg(windows)]
             Self::Managed { ipv4, ipv6: None } => ipv4.recv_from(payload).await,
         }
     }
@@ -753,14 +759,14 @@ impl ClientUdpAssociation {
     }
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 struct ClientManagedUdpOperations<'a, C, T, R, F, Fut> {
     egress: &'a ClientEgressEngine<C, T, R>,
     bind: &'a mut F,
     _future: std::marker::PhantomData<fn() -> Fut>,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 impl<C, T, R, F, Fut> ManagedUdpOperations for ClientManagedUdpOperations<'_, C, T, R, F, Fut>
 where
     F: FnMut(SocketAddr) -> Fut,
@@ -824,6 +830,8 @@ where
 {
     #[cfg(windows)]
     let managed_binding = managed_udp_binding(origin, selected, egress.auto_route, target)?;
+    #[cfg(not(windows))]
+    let _ = (origin, target);
     let udp = egress.udp.as_ref().ok_or(())?;
     let pending_session = udp
         .manager
@@ -1301,6 +1309,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[tokio::test]
     async fn dns_direct_fixed_binding_runs_in_the_real_prepare_order() {
         let make_engine = |auto_route| {

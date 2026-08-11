@@ -71,7 +71,7 @@ const fn proxy_tcp_binding(auto_route: bool) -> TcpBinding {
     }
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 const fn managed_direct_ipv6_is_unsupported(origin: ClientRequestOrigin, auto_route: bool) -> bool {
     matches!(origin, ClientRequestOrigin::Tun)
         || auto_route && matches!(origin, ClientRequestOrigin::Dns)
@@ -254,9 +254,9 @@ pub(super) struct ClientEgressEngine<
     pub(super) udp: Option<ClientUdpContext>,
     underlay: ferrum2_tun::UnderlayPublisher,
     auto_route: bool,
-    #[cfg(test)]
+    #[cfg(all(windows, test))]
     managed_udp_events: std::sync::Mutex<Vec<udp::ManagedUdpEvent>>,
-    #[cfg(test)]
+    #[cfg(all(windows, test))]
     managed_udp_binding_fails: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub(super) udp_id_random: Option<Arc<dyn SecureRandom>>,
@@ -282,9 +282,9 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             udp,
             underlay: ferrum2_tun::UnderlayPublisher::new(),
             auto_route: false,
-            #[cfg(test)]
+            #[cfg(all(windows, test))]
             managed_udp_events: std::sync::Mutex::new(Vec::new()),
-            #[cfg(test)]
+            #[cfg(all(windows, test))]
             managed_udp_binding_fails: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             udp_id_random,
@@ -301,7 +301,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(windows, test))]
     fn record_managed_udp_event(&self, event: udp::ManagedUdpEvent) -> Result<(), ()> {
         self.managed_udp_events.lock().unwrap().push(event);
         if matches!(
@@ -317,7 +317,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(windows, test))]
     pub(super) fn managed_binding_calls(&self) -> usize {
         self.managed_udp_events
             .lock()
@@ -332,12 +332,12 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             .count()
     }
 
-    #[cfg(test)]
+    #[cfg(all(windows, test))]
     fn managed_udp_events(&self) -> Vec<udp::ManagedUdpEvent> {
         self.managed_udp_events.lock().unwrap().clone()
     }
 
-    #[cfg(test)]
+    #[cfg(all(windows, test))]
     fn fail_managed_udp_binding(&self) {
         self.managed_udp_binding_fails
             .store(true, std::sync::atomic::Ordering::SeqCst);

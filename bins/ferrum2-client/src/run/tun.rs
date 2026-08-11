@@ -538,6 +538,7 @@ mod tests {
             )
             .await
             .expect("direct TUN UDP association");
+        #[cfg(windows)]
         assert_eq!(engine.managed_binding_calls(), 1);
         association.activate(&engine).expect("direct activation");
         let length = association

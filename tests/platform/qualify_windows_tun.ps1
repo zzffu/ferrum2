@@ -405,20 +405,6 @@ function Wait-AdapterAbsent([string]$Name, [int]$TimeoutSeconds = 20) {
     throw "adapter cleanup timeout"
 }
 
-function Wait-AdapterAppeared([string]$Name, [int]$TimeoutSeconds = 20) {
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    do {
-        $adapter = Get-NetAdapter -Name $Name -IncludeHidden -ErrorAction SilentlyContinue
-        if ($adapter) { return $adapter }
-        if ($script:activeProcess) {
-            $script:activeProcess.Refresh()
-            if ($script:activeProcess.HasExited) { throw "candidate failed before adapter creation was observed" }
-        }
-        Start-Sleep -Milliseconds 25
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw "adapter creation was not observed"
-}
-
 function Get-InterfaceAddressSnapshot([int]$InterfaceIndex) {
     return @(
         Get-NetIPAddress -InterfaceIndex $InterfaceIndex -ErrorAction SilentlyContinue |
@@ -2959,15 +2945,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     (Get-Content -LiteralPath $config -Raw).Replace("127.0.0.1:$metricsPort", "127.0.0.1:$heldPort") |
         Set-Content -LiteralPath $failureConfig -Encoding utf8NoBOM
     $activeProcess = Start-Candidate $binary $failureConfig
-    $failedAdapter = Wait-AdapterAppeared $adapterName
-    $ownedInterfaceIndex = [int]$failedAdapter.ifIndex
-    Assert-True (Wait-ProcessExit $activeProcess 20) "later-root failure candidate did not exit"
+    Assert-True (Wait-ProcessExit $activeProcess 20) "pre-TUN failure candidate did not exit"
     $failureExit = [Ferrum2ProcessGroup]::ExitCode([uint32]$activeProcess.Id)
-    Assert-True ($failureExit -ne 0) "later-root failure candidate unexpectedly succeeded"
+    Assert-True ($failureExit -ne 0) "pre-TUN failure candidate unexpectedly succeeded"
     [Ferrum2ProcessGroup]::Close([uint32]$activeProcess.Id)
     $activeProcess = $null
-    Wait-AdapterAbsent $adapterName
-    Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+    Assert-InterfaceGone $adapterName $null
     $heldMetrics.Stop()
     $heldMetrics = $null
 

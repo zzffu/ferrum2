@@ -59,12 +59,12 @@ impl Ipv4Prefix {
         Ok(Self { address, length })
     }
 
-    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn address(self) -> Ipv4Addr {
         self.address
     }
 
-    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn length(self) -> u8 {
         self.length
     }
@@ -99,17 +99,17 @@ impl ManagedIpv4Config {
         })
     }
 
-    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) fn capture_routes(&self) -> &[Ipv4Prefix] {
         &self.capture_routes
     }
 
-    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) fn physical_endpoints(&self) -> &[SocketAddrV4] {
         &self.physical_endpoints
     }
 
-    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn needs_default_binder(&self) -> bool {
         self.default_binder
     }
@@ -159,7 +159,7 @@ impl AdapterConfig {
         self
     }
 
-    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) fn managed_ipv4(&self) -> Option<&ManagedIpv4Config> {
         self.managed_ipv4.as_ref()
     }

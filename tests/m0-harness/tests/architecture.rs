@@ -2747,7 +2747,28 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("Assert-InterfaceGone $adapterName $ownedInterfaceIndex")
             && source.contains("Stop-Process -InputObject $activeProcess -Force")
             && source.contains("$binary --config $config --check-config")
-            && source.contains("Wait-AdapterAppeared $adapterName")
+            && source
+                .split_once("$activeProcess = Start-Candidate $binary $failureConfig")
+                .and_then(|(_, tail)| tail.split_once("$heldMetrics.Stop()"))
+                .map(|(failure, _)| {
+                    !failure.contains("Wait-AdapterAppeared")
+                        && !failure.contains("$failedAdapter")
+                        && [
+                            "Assert-True (Wait-ProcessExit $activeProcess 20)",
+                            "$failureExit = [Ferrum2ProcessGroup]::ExitCode([uint32]$activeProcess.Id)",
+                            "Assert-True ($failureExit -ne 0)",
+                            "[Ferrum2ProcessGroup]::Close([uint32]$activeProcess.Id)",
+                            "$activeProcess = $null",
+                            "Assert-InterfaceGone $adapterName $null",
+                        ]
+                        .iter()
+                        .map(|needle| failure.find(needle))
+                        .collect::<Option<Vec<_>>>()
+                        .is_some_and(|positions| {
+                            positions.windows(2).all(|pair| pair[0] < pair[1])
+                        })
+                })
+                .unwrap_or(false)
             && source.contains("$failureExit -ne 0")
             && source.contains(
                 "Assert-SnapshotEqual $expectedAddressDerivedRoutes $addressDerivedRoutes",
