@@ -97,12 +97,16 @@ integration；they are not replaced by the fake recorder or another guest。
   unpinned TCP/UDP `5/1` and zero packets for all six pinned rows；auto cleanup was `0/0/0/0/0`。Manual capture
   owned two routes and TCP/UDP `1/1` round-tripped；guest residue was zero，host fingerprints were unchanged，
   and final restored baseline was `1/1/1/1` with four stable samples and a pristine audit。
-- Notes: interface metric remained unchanged。The official controller SHA-256 was
-  `5e2b9f8d5d91c6ea00456347e5d80b7c39d14a30fae2d41854618c5f5f32d7cc`；its post-attempt
-  array-tokenization-only repair `08d6396c6d792bc83fa6f59b42c079eec70118aeb9d7d7e6b721662594cc62fd`
-  passed offline replay but is not credited as another VM run。Earlier controller/staging/test-only failed
-  attempts remain uncredited and do not contribute to PASS；they performed no successful product qualification
-  and left no residue。This result is limited to the exact guest build and makes no cross-build claim。
+- Notes: interface metric remained unchanged。Controller SHA-256
+  `5e2b9f8d5d91c6ea00456347e5d80b7c39d14a30fae2d41854618c5f5f32d7cc` was the predecessor used by an
+  uncredited VM attempt；its product qualifier exited `0`，but the controller rejected that evidence through a
+  false support-identity leak result。Final official controller
+  `08d6396c6d792bc83fa6f59b42c079eec70118aeb9d7d7e6b721662594cc62fd` was used by the credited fresh VM
+  PASS above；its array-tokenization repair passed offline replay before that final attempt，and the offline
+  replay itself is not another VM run。The first host/runtime attempt
+  never invoked the qualifier。Neither that attempt nor the predecessor-controller attempt produced an accepted
+  controller PASS or contributes to the credited PASS；all cleanup and residue audits remained clean。This
+  result is limited to the exact guest build and makes no cross-build claim。
 
 ## Rollback / risk
 

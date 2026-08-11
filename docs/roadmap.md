@@ -103,7 +103,7 @@ two-file `+4/-2` repair `85bf3fcc…` received Architect/QA `PASS_WITH_NOTES`、
 Linux cross-Clippy availability notes。An authorized non-force push advanced `master` to exact `85bf3fcc…`；
 replacement `31454813712/1` passed quality、qualification、interop、footprint、MSRV、Linux GNU/musl、Windows
 MSVC and Windows TUN E2E，while push-event performance jobs skipped by design。Final integrity passes and
-numeric `+1133/0/0` advisory is accepted。T03 done，T04 ready / current serial frontier；仍不从该单一 build
+numeric `+1133/0/0` advisory is accepted。T04 done，T05 ready / current serial frontier；仍不从该单一 build
 推断跨版本兼容。Required future non-force pushes，including performance-related pushes，remain authorized；
 dispatch/rerun、force-push、PR、tag、package、release and publication remain unauthorized。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
