@@ -159,10 +159,10 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
       pass，or the milestone stops before product work。
 - [x] `--check-config` remains side-effect-free；old outbounds default to Shadowsocks；direct closed fields、
       direct-only credentials、chain rejection and every managed-TUN bound/relationship fail closed correctly。
-- [ ] Static/rule/final/selector can choose direct for SOCKS and non-Windows TUN IPv4/IPv6 TCP/UDP；Windows
+- [x] Static/rule/final/selector can choose direct for SOCKS and non-Windows TUN IPv4/IPv6 TCP/UDP；Windows
       TUN-selected direct qualifies IPv4 only and rejects original IPv6 before any physical socket。DNS
       detour/no-detour can use the same direct mode；raw application payload returns and no SIP022 owner exists。
-- [ ] Direct/proxy selected failure retains current no-fallback and selector snapshot semantics；TUN original
+- [x] Direct/proxy selected failure retains current no-fallback and selector snapshot semantics；TUN original
       target and UDP mapping selection lifetime remain unchanged。
 - [ ] Auto-route rejects IPv6 prefixes，compiles exact bounded IPv4 prefix subtraction，creates no `/0` or
       physical bypass row，performs
@@ -196,8 +196,8 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
 |---|---|---|---|
 | M16-T01 | Prove IPv4 Windows host-network capabilities and freeze measured contracts | accepted Markdown-only IPv4 scope amendment atop `a8205c2…` | done |
 | M16-T02 | Compile the closed direct outbound and managed-TUN configuration | M16-T01 | done |
-| M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | ready |
-| M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | planned |
+| M16-T03 | Compose shared client direct TCP/UDP egress without managed capture | M16-T02 | done |
+| M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | ready |
 | M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | planned |
 | M16-T06 | Close network-change、failure、hard-kill and current-VM lifecycle evidence | M16-T05 | planned |
 | M16-T07 | Qualify and close one exact M16 integration SHA | M16-T06 | planned |
@@ -229,28 +229,49 @@ case/support/fixture delta `+112/+0/+0` and numeric `REVIEW_REQUIRED` because in
 all pass。It also accepted qualifier net `+1153/-20` beyond the original non-Rust forecast because the work
 remains one mode in the existing qualifier with no duplicate harness or helper。
 
-T02 final local repaired candidate `13b6d681d282cdd054c0c52f4fded01d7e5b2124`（tree `c8cf7df…`，parent
-`5782c08…`）adds only the mechanical one-file Clippy repair（`+3/-2`）。Architect and QA both return `PASS`
+T02 local repair `13b6d681d282cdd054c0c52f4fded01d7e5b2124`（tree `c8cf7df…`，parent
+`5782c08…`）adds only the mechanical one-file Clippy repair（`+3/-2`）；its accepted docs descendant and final
+T02 master product is `bf0a3cb5dc72611952e6874fa7a619d47de3dc0c`（tree
+`648de184f55ee305027859fddfe6d46cae448747`，parent `13b6d681…`）。Architect and QA both return `PASS`
 with zero blocker/major/minor，QA has zero note，and all prior findings remain closed。Its integrity gate passes；
 the numeric `REVIEW_REQUIRED` advisory is accepted at code/tests `30096/51191`、ratio `1.700924 PASS`、
 case/support/fixture `45442/5152/597`、ticket delta `+756/0/0` and code growth `+325` because it is distinct
 contract evidence in existing seams with no support/fixture growth or duplicate helper/harness。
+
+T03 initial candidate `30f0a6dc9f45ce1d573e8310f081fa2ab1660dea` passed full Architect/QA review with
+`PASS_WITH_NOTES` and one minor each：`M16-T03-ARCH-001` required the concrete MemoryDevice-to-binary TUN
+process-evidence join，and `QA-M16-T03-001` required deterministic Direct UDP max、queue and resolver rows；
+QA also recorded two non-finding notes。The bounded exact three-file `+286/-8` repair
+`9f05d94fb143bc37728c7386a628b1216d8c4106`（tree `417337dbf48bb88ee06598f3e7d0ea3562762212`，
+parent `30f0a6d…`）closed both findings。Targeted Architect returned `PASS` with `0/0/0` and accepted the
+non-Cartesian private MemoryDevice/binary composition note；targeted QA returned `PASS_WITH_NOTES` with
+`0/0/0` and only the footprint note。Runtime/client/Direct UDP/Direct TCP/DNS/redaction focused counts are
+`4/4/1/1/7/1`；full TUN/client、Direct TCP+UDP E2E and architecture are `15/53/1+1/19`。Workspace check、
+Clippy `-D warnings`、format、diff and hook pass。One first parallel full-client attempt hit existing Windows UDP bind
+`WSAEACCES 10013`；the isolated row and credited serial `53/53` rerun passed with zero process residue。
+Footprint integrity passes；numeric `REVIEW_REQUIRED` is accepted for necessary existing-seam evidence at
+code/tests `30340/52323`、ratio `1.724555 PASS`、case/support/fixture `46574/5152/597`、ticket deltas
+`+1132/0/0` and code growth `+244`，with no support/fixture/new harness。
 
 The first T02 non-force push moved `master` from `5630cf4…` to `5782c08…` with exact remote readback。
 Automatic push run `31443577764/1` is preserved as failed and was not rerun。MSRV、interop、test-footprint、
 Linux musl、Windows MSVC、Linux GNU and Windows TUN E2E succeeded；quality failed only at authoritative Full
 Clippy on the deterministic `too_many_arguments`、`map_clone` and `redundant_closure` lints，so qualification
 failed closed。Performance and Windows TUN performance were skipped by the push event；there was no hidden
-second failure。`13b6d681…` passes package/workspace Clippy warning-free but is not yet integrated、pushed or
-hosted-PASS。The user explicitly authorizes required future non-force pushes，including performance-related
+second failure。A subsequent required non-force push integrated final T02 descendant `bf0a3cb…` to `master`
+with exact remote readback。Automatic run `31445081351/1` on exact `bf0a3cb…` completed SUCCESS：quality、
+MSRV、interop、test-footprint、Linux GNU、Linux musl、Windows MSVC、Windows TUN E2E and qualification all
+passed；push-event performance and Windows TUN performance skipped as designed。T03 repair `9f05d94…` remains
+local and is not claimed integrated、pushed or hosted-PASS。The user
+explicitly authorizes required future non-force pushes，including performance-related
 pushes。This does not authorize workflow dispatch or rerun、force-push、PR、tag、package、release or publication
 without separate explicit authority。Every remote action must still bind its accepted exact SHA。
 
 ## Blocker / next action
 
-M16-T02 remains done on final local repaired candidate `13b6d681d282cdd054c0c52f4fded01d7e5b2124`。The original
-review findings remain closed，and the hosted Clippy-only failure is mechanically repaired using the existing
-convention。Package/workspace Clippy are warning-free；focused config `4/4`、full config `33`、architecture
-`19`、workspace all-target、format/diff/hook all pass。Architect and QA both return `PASS` with zero blocker/
-major/minor；QA also reports zero note。M16-T03 remains ready and is the current serial frontier。The failed
-`31443577764/1` was not rerun，and `13b6d681…` is not yet claimed integrated、pushed or hosted-PASS。
+M16-T03 is done on final local repaired candidate `9f05d94fb143bc37728c7386a628b1216d8c4106`。Initial
+`M16-T03-ARCH-001` and `QA-M16-T03-001` are closed；final targeted Architect/QA report zero blocker/major/
+minor。M16-T04 is ready and is the current serial frontier；it owns managed capture and physical socket binding
+that T03 deliberately did not implement。The failed `31443577764/1` was not rerun；final T02
+`master@bf0a3cb…` and automatic `31445081351/1` are hosted PASS。T03 `9f05d94…` remains local and is not
+claimed integrated、pushed or hosted-PASS。

@@ -90,9 +90,17 @@ evidence只覆盖IPv4，M15 manual-route IPv6与existing IPv6 regressions保持�
 capability gate 已由 exact candidate `cc26aba…` 全行通过并冻结 route/metric/binding 公式；T01 done，
 M16-T02 first push 已把 `master` 从 `5630cf4…` 移到 `5782c08…`；automatic run `31443577764/1` 仅在
 authoritative Full Clippy 的三个 deterministic lint 上失败并保留未 rerun。Exact local repair
-`13b6d681…` 已通过 Architect/QA `PASS` 和 warning-free package/workspace Clippy，T02 remains done，
-M16-T03 ready / current frontier；仍不从该单一 build 推断跨版本兼容，也不声称该 repair 已集成、
-推送或 hosted-PASS。
+`13b6d681…` 已通过 Architect/QA `PASS` 和 warning-free package/workspace Clippy；final T02 descendant
+`bf0a3cb…` 已由后续 non-force push 集成到 `master`，automatic `31445081351/1` 的 quality、MSRV、interop、
+test-footprint、three platforms、Windows TUN E2E 和 qualification 全部 success，push-event performance
+jobs 按设计 skip。M16-T03 initial `30f0a6d…` 的 Architect/QA 各保留一个 minor；
+exact three-file `+286/-8` repair `9f05d94…` 关闭 Direct UDP boundary 与 MemoryDevice/binary TUN evidence
+findings。Final targeted Architect `PASS`、QA `PASS_WITH_NOTES`，均为 zero blocker/major/minor；local focused、
+full client/TUN、Direct E2E、architecture、workspace check/Clippy/format/diff/hook 和 footprint integrity
+通过，numeric `+1132/0/0` advisory 已接受。T03 done，T04 ready / current serial frontier；仍不从该单一
+build 推断跨版本兼容，也不声称 `9f05d94…` 已集成、推送或 hosted-PASS。Required future non-force pushes，
+including performance-related pushes，remain authorized；dispatch/rerun、force-push、PR、tag、package、
+release and publication remain unauthorized。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -1220,7 +1228,9 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   Target-specific fidelity is out。
 - **Tickets:** planning/control `a9619ef…` → single-VM amendment `a8205c2…` → accepted Markdown-only IPv4 scope
   amendment `451edcb…` → T01 capability/measured contracts `cc26aba…` done → T02 config graph
-  `13b6d681…` locally repaired/done → T03 direct TCP/UDP ready → T04 capture/binding → T05 DNS
+  `13b6d681…` repaired and final `master@bf0a3cb…` hosted-PASS/done → T03 direct TCP/UDP `9f05d94…` locally
+  repaired/done → T04 capture/binding
+  ready → T05 DNS
   steering → T06 lifecycle/VM evidence → T07 exact qualification；serial drain。
 - **Entry gate:** exact VM `Windows 10 MSIX packaging environment` restored from checkpoint
   `M15-T04-before-2b0c25b-20260810` must record its actual product、edition、architecture and full version/build，
@@ -1233,17 +1243,23 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   `+2250..3650 / +160..460 / +0` Rust tests plus existing qualifier growth。T02 reports integrity `PASS` and
   numeric `REVIEW_REQUIRED` advisory at code/tests `30096/51191`、ratio `1.700924 PASS`、case/support/fixture
   `45442/5152/597`、ticket delta `+756/0/0` and code growth `+325`；final reviews accept the distinct existing-
-  seam evidence with no support/fixture growth。Performance is required without a threshold/improvement claim。
+  seam evidence with no support/fixture growth。T03 reports integrity PASS and accepted numeric
+  `REVIEW_REQUIRED` at code/tests `30340/52323`、ratio `1.724555 PASS`、case/support/fixture
+  `46574/5152/597`、ticket delta `+1132/0/0` and code growth `+244`；the required evidence remains in existing
+  seams with no support/fixture/new harness。Performance is required without a threshold/improvement claim。
 - **Deferred/out of scope:** WFP/kill switch/DNS anti-leak、physical bypass rows、per-target multihomed routing、
   live migration、service/watchdog/installer、non-Windows managed TUN、new crate/dependency、ring-full
   maintenance unrelated to a proven blocker、M16-managed IPv6、release/publication。The IPv6 deferral does not
   weaken M15 manual-route IPv6、SIP022 IPv6 or non-managed/SOCKS direct IPv6。
-- **Next/remote boundary:** M16-T02 remains done and M16-T03 is ready / current frontier on exact local repaired
-  candidate `13b6d681…`。The first T02 non-force push integrated `5782c08…` to `master` with exact readback；
+- **Next/remote boundary:** M16-T03 is done on exact local repaired candidate `9f05d94…` and M16-T04 is ready /
+  current serial frontier。The first T02 non-force push integrated `5782c08…` to `master` with exact readback；
   automatic `31443577764/1` is preserved failed and was not rerun。Its MSRV、interop、test-footprint、three
   platforms and Windows TUN E2E passed；quality failed only at the three known Clippy lints，qualification failed
-  closed，and push-event performance jobs were skipped。No hidden second failure exists。`13b6d681…` is not
-  integrated、pushed or hosted-PASS。Required future non-force pushes，including performance-related pushes，
+  closed，and push-event performance jobs were skipped。No hidden second failure exists。A subsequent non-force
+  push integrated final T02 descendant `bf0a3cb…` to `master`；automatic `31445081351/1` passed quality、MSRV、
+  interop、test-footprint、three platforms、Windows TUN E2E and qualification，while push-event performance
+  jobs skipped as designed。`9f05d94…` is not claimed integrated、pushed or hosted-PASS。
+  Required future non-force pushes，including performance-related pushes，
   remain explicitly authorized。Workflow dispatch/rerun、force-push、PR、tag、package、release or publication
   remains unauthorized without separate explicit authority。
 
@@ -1509,4 +1525,5 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 | 2026-08-11 | M16 IPv4 managed-network amendment / review repair | Narrow only M16-new Windows managed capture、DNS、pinning、change evidence and privileged qualification to IPv4；TUN-origin direct IPv6 fails pre-socket for auto-route on/off，while SOCKS origin using the same tag and auto-route-off M15-compatible IPv6 DNS remain | Restored-VM preflight found one IPv4 default but no usable IPv6 evidence boundary；review required managed first-hop restriction only under auto-route and one closed engine request-origin obligation。Transient host-listener reachability is also preflight，not PASS；existing IPv6 remains | Markdown-only descendants of `a8205c2…`；config evidence maps to existing tables；one local-ledger-bound transient support listener is permitted，but no knob、VM、committed endpoint、helper/harness、public seam、product/control/remote expansion；performance remains required |
 | 2026-08-11 | M16-T01 accept / execute | M16 becomes `executing`；exact candidate `cc26aba…` passes the restored-VM IPv4 capability gate，T01 is done and T02 ready | Exact `/1` capture、fixed/dynamic pinned versus unpinned、DNS UDP/TCP、`768 ms` capture window、hard-kill and cleanup evidence all passed；the frozen formula uses `GetBestInterfaceEx` then constrained `GetBestRoute2` for fixed endpoints and one pre-capture IPv4 default for dynamic direct | Evidence commit `1d7968e…` Architect/QA both `PASS_WITH_NOTES` with zero blocker/major/minor；accepted notes are `architecture.rs` `4605` LOC、`+112/+0/+0` numeric `REVIEW_REQUIRED` with integrity/category/ratio PASS，and qualifier `+1153/-20` while retaining one existing mode/no duplicate harness/helper；required non-force pushes including performance-related pushes are authorized，none occurred；no workflow dispatch/rerun、force-push、PR/tag/package/release/publication authority |
 | 2026-08-11 | M16-T02 review closeout | Exact candidate chain `6aff6cb…` → bounded product repair `6edba670…` → test-only evidence repair `136dbe280…` compiles the closed Direct/Shadowsocks config and bounded managed-TUN plan；T02 done、T03 ready | Initial Architect `BLOCK` on sentinel credentials/catalog-level rejection was closed in `6edba670…`；targeted raw include/exclude evidence gap was correctly diagnosed as test-only and closed in `136dbe280…` with no product/helper/harness change。Final Architect/QA both `PASS_WITH_NOTES`，zero blocker/major/minor | Focused `4/4 + 1/1 + 1/1`、full config/client/CLI `33/50/8`、architecture `19`、warning-free workspace and QA full regression PASS；integrity PASS、numeric `+756/0/0` advisory accepted；this was the pre-push local closeout，superseded for remote state by the next row |
-| 2026-08-11 | M16-T02 post-push Clippy repair | First T02 non-force push moved `master` `5630cf4…` → `5782c08…` with exact readback；automatic `31443577764/1` is preserved failed and was not rerun | MSRV、interop、footprint、three platforms and Windows TUN E2E passed；quality failed only at deterministic `too_many_arguments`、`map_clone` and `redundant_closure` lints，qualification failed closed，push-event performance jobs skipped，no hidden second failure | One-file mechanical `13b6d681…`（tree `c8cf7df…`，parent `5782c08…`，`+3/-2`）passes package/workspace Clippy、focused `4/4`、full config `33`、architecture `19`、workspace/fmt/hook/diff and Architect/QA `PASS` with zero findings；integrity PASS，numeric `30096/51191`、`1.700924`、`+756/0/0` advisory；repair not integrated/pushed/hosted-PASS，no rerun/dispatch/force-push/PR/tag/package/release/publication |
+| 2026-08-11 | M16-T02 post-push Clippy repair / final hosted PASS | First T02 non-force push moved `master` `5630cf4…` → `5782c08…` with exact readback；automatic `31443577764/1` is preserved failed and was not rerun | That run passed MSRV、interop、footprint、three platforms and Windows TUN E2E but failed only at deterministic Full Clippy lints；one-file mechanical `13b6d681…`（`+3/-2`）closed them。A later non-force push integrated final descendant `bf0a3cb…`（tree `648de184…`，parent `13b6d681…`）to `master`；automatic `31445081351/1` passed quality、MSRV、interop、footprint、three platforms、Windows TUN E2E and qualification，with push-event performance jobs skipped as designed | Package/workspace Clippy、focused `4/4`、full config `33`、architecture `19`、workspace/fmt/hook/diff and Architect/QA `PASS` with zero findings；integrity PASS，numeric `30096/51191`、`1.700924`、`+756/0/0` advisory；no failed-run rerun、dispatch、force-push、PR/tag/package/release/publication |
+| 2026-08-11 | M16-T03 review closeout | Initial `30f0a6d…` composes the one private SOCKS/TUN/DNS Direct TCP/UDP engine；bounded three-file repair `9f05d94…`（tree `417337db…`，parent `30f0a6d…`，`+286/-8`）closes Direct UDP bounds and MemoryDevice/binary TUN process evidence；T03 done、T04 ready/current frontier | Initial Architect/QA `PASS_WITH_NOTES` retained `M16-T03-ARCH-001` and `QA-M16-T03-001` plus two QA notes；targeted Architect `PASS` and QA `PASS_WITH_NOTES` both report `0/0/0`，with only accepted non-Cartesian evidence/footprint notes | Runtime/client focused `4/4`、Direct UDP/TCP/DNS/redaction `1/1/7/1`、full TUN/client `15/53`、Direct E2E `1+1`、architecture `19` and warning-free workspace/Clippy/fmt/diff/hook PASS；first parallel full-client `WSAEACCES 10013` is uncredited，isolated and serial rerun passed with zero residue；integrity PASS，`30340/52323` ratio `1.724555` and `+1132/0/0` advisory accepted；not integrated/pushed/hosted-PASS，authorized future non-force pushes unchanged，no dispatch/rerun/force-push/PR/tag/package/release/publication |
