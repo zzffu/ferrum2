@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     # Legacy M15 mode contract: [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
-    [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "network-feasibility", "cleanup")]
+    [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "cleanup")]
     [string]$Mode,
     [string]$WintunZip,
     [string]$RunToken,
@@ -30,14 +30,26 @@ $runIdentity = if ($RunToken) { $RunToken } elseif ($Mode -eq "cleanup") { throw
 if ($runIdentity -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,47}$') { throw "RunToken is invalid" }
 $work = if ($Mode -eq "network-feasibility") {
     Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-network-$runIdentity"
+} elseif ($Mode -eq "managed-product") {
+    Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-product-$runIdentity"
 } else {
     Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$runIdentity"
 }
 $binary = Join-Path $workspace "target\debug\ferrum2-client.exe"
 $serverBinary = Join-Path $workspace "target\debug\ferrum2-server.exe"
 $siblingDll = Join-Path (Split-Path -Parent $binary) "wintun.dll"
-$adapterName = if ($Mode -eq "network-feasibility") { "Ferrum2-M16-$runIdentity" } else { "Ferrum2-M15-$runIdentity" }
+$managedAutoAdapterName = "F2-M16P-A-$runIdentity"
+$managedManualAdapterName = "F2-M16P-M-$runIdentity"
+$adapterName = if ($Mode -eq "network-feasibility") {
+    "Ferrum2-M16-$runIdentity"
+} elseif ($Mode -eq "managed-product") {
+    $managedAutoAdapterName
+} else {
+    "Ferrum2-M15-$runIdentity"
+}
 $config = Join-Path $work "client.toml"
+$managedAutoConfig = Join-Path $work "client-managed-auto.toml"
+$managedManualConfig = Join-Path $work "client-managed-manual.toml"
 $failureConfig = Join-Path $work "client-failure.toml"
 $addressJournal = Join-Path $work "owned-target-addresses.txt"
 $dllJournal = Join-Path $work "owned-wintun-dll.txt"
@@ -157,6 +169,25 @@ $capabilityUdpRows = 0
 $capabilityDnsRows = 0
 $capabilityWindowRows = 0
 $capabilityHardKillRows = 0
+$managedFixedTcpRows = 0
+$managedFixedUdpRows = 0
+$managedDynamicTcpRows = 0
+$managedDynamicUdpRows = 0
+$managedManualTcpRows = 0
+$managedManualUdpRows = 0
+$managedUnpinnedRows = 0
+$managedRouteRows = 0
+$managedInterfaceMetric = $null
+$managedFilteredPackets = [ordered]@{
+    unpinned_tcp = $null
+    unpinned_udp = $null
+    proxy_tcp = $null
+    proxy_udp = $null
+    direct_tcp = $null
+    direct_udp = $null
+    dns_tcp = $null
+    dns_udp = $null
+}
 $pktmonStarted = $false
 $pktmonStartAttempted = $false
 $pktmonTcpFilterOwned = $false
@@ -242,7 +273,7 @@ function Get-NetworkFeasibilityIdentity([string]$Path) {
     }
 }
 
-if ($Mode -eq "network-feasibility") {
+if ($Mode -in @("network-feasibility", "managed-product")) {
     $capabilityIdentity = Get-NetworkFeasibilityIdentity $IdentityLedger
     $capabilityIdentityHash = $capabilityIdentity.IdentitySha256
     $capabilityEvidence = "$($capabilityIdentity.Path).evidence-$runIdentity.jsonl"
@@ -1411,6 +1442,24 @@ function Get-PhysicalDnsSnapshot([int]$TunInterfaceIndex) {
     )
 }
 
+function Get-Ipv4SystemRouteSnapshot {
+    return @(
+        Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
+            Sort-Object InterfaceIndex, DestinationPrefix, NextHop, RouteMetric, Protocol |
+            ForEach-Object { "$($_.InterfaceIndex)|$($_.DestinationPrefix)|$($_.NextHop)|$($_.RouteMetric)|$($_.Protocol)" }
+    )
+}
+
+function Wait-Ipv4SystemRouteSnapshot([string[]]$Expected) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $actual = @(Get-Ipv4SystemRouteSnapshot)
+        if (@(Compare-Object -ReferenceObject @($Expected) -DifferenceObject $actual).Count -eq 0) { return }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    Assert-SnapshotEqual $Expected $actual "system IPv4 route cleanup"
+}
+
 function Get-TunIpv4Dns([int]$InterfaceIndex) {
     $row = Get-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop
     return @($row.ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -1677,6 +1726,15 @@ function Wait-PktMonFlowPacketsAfter([uint64]$Before) {
     throw "filtered unpinned flow did not enter Wintun"
 }
 
+function Invoke-ProductPinnedRow([scriptblock]$Action, [string]$Failure) {
+    $before = Get-PktMonFlowPackets
+    & $Action
+    Start-Sleep -Milliseconds 500
+    $delta = Get-PktMonFlowPacketDelta -Before $before
+    Assert-True ($delta -eq 0) $Failure
+    return $delta
+}
+
 function Stop-CapabilityPktMon {
     $cleanupFailures = [Collections.Generic.List[string]]::new()
     if ($script:pktmonStarted -or $script:pktmonStartAttempted) {
@@ -1883,6 +1941,167 @@ function New-DnsQuery([uint16]$Id) {
     return $bytes.ToArray()
 }
 
+function New-SocksRequest([byte]$Command, [string]$Address, [int]$Port) {
+    $parsed = [Net.IPAddress]::Parse($Address)
+    Assert-True ($parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) "SOCKS target family mismatch"
+    $request = [Collections.Generic.List[byte]]::new()
+    $request.AddRange([byte[]](5, $Command, 0, 1))
+    $request.AddRange($parsed.GetAddressBytes())
+    $request.Add([byte]($Port -shr 8))
+    $request.Add([byte]($Port -band 0xff))
+    return $request.ToArray()
+}
+
+function Open-ProductSocks([int]$Port) {
+    $client = [Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+    try {
+        $connected = $client.ConnectAsync([Net.IPAddress]::Loopback, $Port)
+        Assert-True ($connected.Wait(5000) -and -not $connected.IsFaulted) "SOCKS control connect failed"
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = 5000
+        $greeting = [byte[]](5, 1, 0)
+        $stream.Write($greeting, 0, $greeting.Length)
+        $response = Read-ExactBytes $stream 2
+        Assert-True ($response[0] -eq 5 -and $response[1] -eq 0) "SOCKS greeting failed"
+        return [pscustomobject]@{ Client = $client; Stream = $stream }
+    } catch {
+        $client.Dispose()
+        throw
+    }
+}
+
+function Read-SocksReply([Net.Sockets.NetworkStream]$Stream) {
+    $header = Read-ExactBytes $Stream 4
+    Assert-True ($header[0] -eq 5 -and $header[2] -eq 0) "SOCKS reply header mismatch"
+    $address = switch ($header[3]) {
+        1 { [Net.IPAddress]::new((Read-ExactBytes $Stream 4)) }
+        3 {
+            $length = (Read-ExactBytes $Stream 1)[0]
+            Assert-True ($length -gt 0) "SOCKS reply domain is empty"
+            [Text.Encoding]::ASCII.GetString((Read-ExactBytes $Stream $length))
+        }
+        4 { [Net.IPAddress]::new((Read-ExactBytes $Stream 16)) }
+        default { throw "SOCKS reply address family mismatch" }
+    }
+    $portBytes = Read-ExactBytes $Stream 2
+    $port = ([int]$portBytes[0] -shl 8) -bor [int]$portBytes[1]
+    return [pscustomobject]@{ Reply = [int]$header[1]; Address = $address; Port = $port; Type = [int]$header[3] }
+}
+
+function Invoke-ProductSocksTcp(
+    [int]$SocksPort,
+    [string]$Address,
+    [int]$Port,
+    [byte[]]$Payload,
+    [bool]$ExpectEcho
+) {
+    $session = Open-ProductSocks $SocksPort
+    try {
+        $request = New-SocksRequest 1 $Address $Port
+        $session.Stream.Write($request, 0, $request.Length)
+        if ($ExpectEcho) {
+            $reply = Read-SocksReply $session.Stream
+            Assert-True ($reply.Reply -eq 0) "SOCKS direct TCP request failed"
+            $session.Stream.Write($Payload, 0, $Payload.Length)
+            $echo = Read-ExactBytes $session.Stream $Payload.Length
+            Assert-True (($echo -join ",") -eq ($Payload -join ",")) "SOCKS direct TCP echo mismatch"
+        } else {
+            $session.Stream.ReadTimeout = 1500
+            try {
+                $reply = Read-SocksReply $session.Stream
+                if ($reply.Reply -eq 0) { $session.Stream.Write($Payload, 0, $Payload.Length) }
+            } catch { }
+        }
+    } finally { $session.Client.Dispose() }
+}
+
+function Invoke-ProductSocksUdp(
+    [int]$SocksPort,
+    [string]$Address,
+    [int]$Port,
+    [byte[]]$Payload,
+    [bool]$ExpectEcho
+) {
+    $session = Open-ProductSocks $SocksPort
+    $client = $null
+    try {
+        $request = New-SocksRequest 3 "0.0.0.0" 0
+        $session.Stream.Write($request, 0, $request.Length)
+        $reply = Read-SocksReply $session.Stream
+        Assert-True ($reply.Reply -eq 0 -and $reply.Type -eq 1) "SOCKS UDP association failed"
+        $relayAddress = [Net.IPAddress]$reply.Address
+        if ($relayAddress.Equals([Net.IPAddress]::Any)) { $relayAddress = [Net.IPAddress]::Loopback }
+        Assert-True ([Net.IPAddress]::IsLoopback($relayAddress)) "SOCKS UDP relay was not loopback"
+        $client = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+        $client.Connect($relayAddress, $reply.Port)
+        $datagram = [Collections.Generic.List[byte]]::new()
+        $datagram.AddRange([byte[]](0, 0, 0, 1))
+        $datagram.AddRange([Net.IPAddress]::Parse($Address).GetAddressBytes())
+        $datagram.Add([byte]($Port -shr 8))
+        $datagram.Add([byte]($Port -band 0xff))
+        $datagram.AddRange($Payload)
+        [void]$client.Send($datagram.ToArray(), $datagram.Count)
+        $receive = $client.ReceiveAsync()
+        if ($ExpectEcho) {
+            Assert-True ($receive.Wait(5000) -and -not $receive.IsFaulted) "SOCKS direct UDP response failed"
+            $response = $receive.Result.Buffer
+            Assert-True ($response.Length -eq $Payload.Length + 10 -and
+                $response[0] -eq 0 -and $response[1] -eq 0 -and $response[2] -eq 0 -and $response[3] -eq 1) "SOCKS direct UDP frame mismatch"
+            Assert-True (($response[4..7] -join ",") -eq ([Net.IPAddress]::Parse($Address).GetAddressBytes() -join ",") -and
+                ((([int]$response[8] -shl 8) -bor [int]$response[9]) -eq $Port) -and
+                (($response[10..($response.Length - 1)] -join ",") -eq ($Payload -join ","))) "SOCKS direct UDP echo mismatch"
+        } else {
+            [void]$receive.Wait(750)
+        }
+    } finally {
+        if ($client) { $client.Dispose() }
+        $session.Client.Dispose()
+    }
+}
+
+function Invoke-ProductDns([int]$ListenPort, [bool]$Tcp, [byte[]]$Query) {
+    if ($Tcp) {
+        $client = [Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+        try {
+            $connected = $client.ConnectAsync([Net.IPAddress]::Loopback, $ListenPort)
+            Assert-True ($connected.Wait(5000) -and -not $connected.IsFaulted) "local DNS TCP connect failed"
+            $stream = $client.GetStream()
+            $frame = [byte[]]::new($Query.Length + 2)
+            $frame[0] = [byte]($Query.Length -shr 8)
+            $frame[1] = [byte]($Query.Length -band 0xff)
+            [Array]::Copy($Query, 0, $frame, 2, $Query.Length)
+            $stream.Write($frame, 0, $frame.Length)
+            Start-Sleep -Milliseconds 500
+        } finally { $client.Dispose() }
+    } else {
+        $client = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+        try {
+            $client.Connect([Net.IPAddress]::Loopback, $ListenPort)
+            [void]$client.Send($Query, $Query.Length)
+            Start-Sleep -Milliseconds 500
+        } finally { $client.Dispose() }
+    }
+}
+
+function Invoke-TunProductTcp([string]$Address, [int]$Port, [int]$InterfaceIndex, [byte[]]$Payload) {
+    $session = Open-TunTcp $Address $Port $InterfaceIndex
+    try {
+        $stream = $session.Client.GetStream()
+        $stream.Write($Payload, 0, $Payload.Length)
+        $echo = Read-ExactBytes $stream $Payload.Length
+        Assert-True (($echo -join ",") -eq ($Payload -join ",")) "manual TUN TCP echo mismatch"
+    } finally { $session.Client.Dispose() }
+}
+
+function Invoke-TunProductUdp([string]$Address, [int]$Port, [int]$InterfaceIndex, [byte[]]$Payload) {
+    $client = Open-TunUdp $Address $Port $InterfaceIndex
+    try {
+        [void]$client.Send($Payload, $Payload.Length)
+        $echo = Receive-TunUdp $client
+        Assert-True (($echo -join ",") -eq ($Payload -join ",")) "manual TUN UDP echo mismatch"
+    } finally { $client.Dispose() }
+}
+
 function Open-TunUdp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
     $isV6 = $Address.Contains(":")
     $family = if ($isV6) { [Net.Sockets.AddressFamily]::InterNetworkV6 } else { [Net.Sockets.AddressFamily]::InterNetwork }
@@ -1957,6 +2176,9 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $work)) "run work baseline not absent"
     Assert-True (@(Get-ExactRunProcesses $work).Count -eq 0) "run process baseline not absent"
     Assert-True (-not (Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue)) "run adapter baseline not absent"
+    if ($Mode -eq "managed-product") {
+        Assert-True (-not (Get-NetAdapter -Name $managedManualAdapterName -IncludeHidden -ErrorAction SilentlyContinue)) "manual product adapter baseline not absent"
+    }
     Assert-True ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq $expectedZipHash) "ZIP hash mismatch"
     New-Item -ItemType Directory -Path $work | Out-Null
     Expand-Archive -LiteralPath $zip -DestinationPath $work
@@ -1972,7 +2194,7 @@ try {
     Assert-True (($exports -join "|") -eq ($expectedExports -join "|")) "DLL export set mismatch"
     $foundation++
 
-    if ($Mode -eq "network-feasibility") {
+    if ($Mode -in @("network-feasibility", "managed-product")) {
         Assert-True (Test-Path -LiteralPath $binary) "staged candidate binary is missing"
     } else {
         Push-Location $workspace
@@ -1982,6 +2204,323 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "candidate build failed" }
         }
         finally { Pop-Location }
+    }
+    if ($Mode -eq "managed-product") {
+        Assert-PktMonAbsent
+        $supportAddress = $capabilityIdentity.SupportAddress
+        $supportTcpPort = $capabilityIdentity.TcpPort
+        $supportUdpPort = $capabilityIdentity.UdpPort
+        $physicalDnsBaseline = @(Get-PhysicalDnsSnapshot 0)
+        $systemRouteBaseline = @(Get-Ipv4SystemRouteSnapshot)
+        $physicalDefault = Get-Ipv4DefaultUnderlay
+        Write-CapabilityEvidence "before" ([ordered]@{
+            candidate_sha = $capabilityIdentity.Ledger.candidate_sha
+            probe_sha256 = $capabilityIdentity.Ledger.probe_sha256
+            identity_sha256 = $capabilityIdentityHash
+            guest_build = $capabilityIdentity.GuestBuild
+            physical_defaults = 1
+            physical_dns_rows = $physicalDnsBaseline.Count
+            ferrum2_processes = @(Get-ExactRunProcesses -WorkPath $work).Count
+            ferrum2_adapters = 0
+        })
+
+        $proxySocksPort = Get-UniqueTcpPort
+        $directSocksPort = Get-UniqueTcpPort
+        $dnsInboundPort = Get-UniqueTcpPort
+        $autoMetricsPort = Get-UniqueTcpPort
+        $manualMetricsPort = Get-UniqueTcpPort
+        @"
+schema_version = 2
+[[inbounds]]
+tag = "proxy-socks"
+listen = "127.0.0.1:$proxySocksPort"
+[[inbounds]]
+tag = "direct-socks"
+listen = "127.0.0.1:$directSocksPort"
+[tun]
+tag = "tun-in"
+adapter_name = "$managedAutoAdapterName"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+ready_timeout_ms = 15000
+ring_capacity = 8388608
+[[outbounds]]
+tag = "proxy-tcp"
+server = "${supportAddress}:$supportTcpPort"
+[[outbounds]]
+tag = "proxy-udp"
+server = "${supportAddress}:$supportUdpPort"
+[[outbounds]]
+tag = "direct"
+type = "direct"
+[route]
+final = "direct"
+[[route.rules]]
+inbound = "tun-in"
+network = "tcp"
+ip = "$supportAddress"
+port = $supportTcpPort
+action = "reject"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$supportAddress"
+port = $supportUdpPort
+action = "reject"
+[[route.rules]]
+inbound = "proxy-socks"
+network = "tcp"
+action = "route"
+outbound = "proxy-tcp"
+[[route.rules]]
+inbound = "proxy-socks"
+network = "udp"
+action = "route"
+outbound = "proxy-udp"
+[udp]
+enabled = true
+max_sessions = 8
+max_buffered_bytes = 1048576
+idle_timeout_ms = 60000
+[dns]
+timeout_ms = 1000
+max_inflight = 8
+[[dns.inbounds]]
+tag = "dns-product"
+listen = "127.0.0.1:$dnsInboundPort"
+[[dns.servers]]
+tag = "dns-udp"
+transport = "udp"
+address = "${supportAddress}:$supportUdpPort"
+[[dns.servers]]
+tag = "dns-tcp"
+transport = "tcp"
+address = "${supportAddress}:$supportTcpPort"
+detour = "direct"
+[dns.route]
+final = "dns-udp"
+[[dns.route.rules]]
+inbound = "dns-product"
+network = "tcp"
+server = "dns-tcp"
+[runtime]
+shutdown_grace_ms = 1000
+idle_timeout_ms = 2000
+[metrics]
+listen = "127.0.0.1:$autoMetricsPort"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"@ | Set-Content -LiteralPath $managedAutoConfig -Encoding utf8NoBOM
+
+        @"
+schema_version = 2
+[tun]
+tag = "tun-in"
+adapter_name = "$managedManualAdapterName"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = false
+outbound = "direct"
+ready_timeout_ms = 15000
+ring_capacity = 8388608
+[[outbounds]]
+tag = "direct"
+type = "direct"
+[udp]
+enabled = true
+max_sessions = 8
+max_buffered_bytes = 1048576
+idle_timeout_ms = 60000
+[runtime]
+shutdown_grace_ms = 1000
+idle_timeout_ms = 2000
+[metrics]
+listen = "127.0.0.1:$manualMetricsPort"
+"@ | Set-Content -LiteralPath $managedManualConfig -Encoding utf8NoBOM
+
+        foreach ($managedConfig in @($managedAutoConfig, $managedManualConfig)) {
+            $offlineOutput = @(& $binary --config $managedConfig --check-config 2>&1)
+            Assert-True ($LASTEXITCODE -eq 0) "managed product config validation failed"
+            Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "managed product config marker mismatch"
+        }
+        Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "sibling DLL baseline not absent"
+        Assert-InterfaceGone $managedAutoAdapterName $null
+        Assert-InterfaceGone $managedManualAdapterName $null
+        Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+        Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
+        $createdSiblingDll = $true
+
+        $activeProcess = Start-Candidate $binary $managedAutoConfig
+        $adapter = Wait-AdapterReady $managedAutoAdapterName
+        $ownedInterfaceIndex = [int]$adapter.ifIndex
+        [void](Get-Metrics $autoMetricsPort)
+        $autoAddressSnapshot = @(Get-InterfaceAddressSnapshot $ownedInterfaceIndex)
+        Assert-True ($autoAddressSnapshot -contains "IPv4|198.18.0.2|30|Preferred" -and
+            $autoAddressSnapshot -contains "IPv6|fd00::2|126|Preferred") "managed product address baseline mismatch"
+        $autoMetricBaseline = Get-NetIPInterface -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+        $productRoutes = @(
+            Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
+                Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") }
+        )
+        Assert-True ($productRoutes.Count -eq 2) "managed product capture route count mismatch"
+        foreach ($prefix in @("0.0.0.0/1", "128.0.0.0/1")) {
+            $row = @($productRoutes | Where-Object { $_.DestinationPrefix -ceq $prefix })
+            Assert-True ($row.Count -eq 1 -and $row[0].NextHop -ceq "0.0.0.0" -and
+                [uint32]$row[0].RouteMetric -eq 1) "managed product capture route readback mismatch"
+        }
+        $productRouteSnapshot = @($productRoutes | Sort-Object DestinationPrefix |
+            ForEach-Object { "$($_.DestinationPrefix)|$($_.NextHop)|$($_.RouteMetric)" })
+        $managedRouteRows = 2
+
+        $pktmonComponentId = Get-PktMonComponentId $adapter
+        $pktmonTcpFilterOwned = $true
+        [void](Invoke-PktMon @("filter", "add", "M16ProductTcp", "-i", $supportAddress, "-t", "TCP", "-p", [string]$supportTcpPort))
+        $pktmonUdpFilterOwned = $true
+        [void](Invoke-PktMon @("filter", "add", "M16ProductUdp", "-i", $supportAddress, "-t", "UDP", "-p", [string]$supportUdpPort))
+        $pktmonStartAttempted = $true
+        [void](Invoke-PktMon @("start", "--capture", "--counters-only", "--comp", [string]$pktmonComponentId, "--type", "flow"))
+        $pktmonStarted = $true
+        $pktmonStartAttempted = $false
+        [void](Get-PktMonFlowPackets)
+
+        $filteredBefore = Get-PktMonFlowPackets
+        Invoke-UnpinnedTcpCapture $supportAddress $supportTcpPort $autoMetricsPort ([Text.Encoding]::ASCII.GetBytes("m16-product-unpinned-tcp"))
+        $managedFilteredPackets.unpinned_tcp = Wait-PktMonFlowPacketsAfter -Before $filteredBefore
+        $managedUnpinnedRows++
+        $filteredBefore = Get-PktMonFlowPackets
+        Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $autoMetricsPort ([Text.Encoding]::ASCII.GetBytes("m16-product-unpinned-udp"))
+        $managedFilteredPackets.unpinned_udp = Wait-PktMonFlowPacketsAfter -Before $filteredBefore
+        $managedUnpinnedRows++
+
+        $managedFilteredPackets.proxy_tcp = Invoke-ProductPinnedRow {
+            Invoke-ProductSocksTcp $proxySocksPort $supportAddress $supportTcpPort ([Text.Encoding]::ASCII.GetBytes("m16-product-proxy-tcp")) $false
+        } "managed proxy TCP entered Wintun"
+        $managedFixedTcpRows++
+        $managedFilteredPackets.proxy_udp = Invoke-ProductPinnedRow {
+            Invoke-ProductSocksUdp $proxySocksPort $supportAddress $supportUdpPort ([Text.Encoding]::ASCII.GetBytes("m16-product-proxy-udp")) $false
+        } "managed proxy UDP entered Wintun"
+        $managedFixedUdpRows++
+        $managedFilteredPackets.direct_tcp = Invoke-ProductPinnedRow {
+            Invoke-ProductSocksTcp $directSocksPort $supportAddress $supportTcpPort ([Text.Encoding]::ASCII.GetBytes("m16-product-direct-tcp")) $true
+        } "managed direct TCP entered Wintun"
+        $managedDynamicTcpRows++
+        $managedFilteredPackets.direct_udp = Invoke-ProductPinnedRow {
+            Invoke-ProductSocksUdp $directSocksPort $supportAddress $supportUdpPort ([Text.Encoding]::ASCII.GetBytes("m16-product-direct-udp")) $true
+        } "managed direct UDP entered Wintun"
+        $managedDynamicUdpRows++
+        $managedFilteredPackets.dns_tcp = Invoke-ProductPinnedRow {
+            Invoke-ProductDns $dnsInboundPort $true (New-DnsQuery 0x1601)
+        } "managed DNS TCP entered Wintun"
+        $managedFixedTcpRows++
+        $managedFilteredPackets.dns_udp = Invoke-ProductPinnedRow {
+            Invoke-ProductDns $dnsInboundPort $false (New-DnsQuery 0x1602)
+        } "managed DNS UDP entered Wintun"
+        $managedFixedUdpRows++
+        $activeProcess.Refresh()
+        Assert-True (-not $activeProcess.HasExited) "managed auto-route candidate exited during product rows"
+
+        $activeMetric = Get-NetIPInterface -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+        Assert-True ([string]$activeMetric.AutomaticMetric -eq [string]$autoMetricBaseline.AutomaticMetric -and
+            [uint32]$activeMetric.InterfaceMetric -eq [uint32]$autoMetricBaseline.InterfaceMetric) "managed product interface metric changed"
+        $activeProductRoutes = @(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
+            Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") } |
+            Sort-Object DestinationPrefix |
+            ForEach-Object { "$($_.DestinationPrefix)|$($_.NextHop)|$($_.RouteMetric)" })
+        Assert-SnapshotEqual $productRouteSnapshot $activeProductRoutes "managed product capture ownership"
+        $managedInterfaceMetric = "unchanged"
+        Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "managed product physical DNS sentinel"
+        Write-CapabilityEvidence "auto-active" ([ordered]@{
+            route_rows = $managedRouteRows
+            interface_metric = $managedInterfaceMetric
+            fixed_tcp_rows = $managedFixedTcpRows
+            fixed_udp_rows = $managedFixedUdpRows
+            dynamic_tcp_rows = $managedDynamicTcpRows
+            dynamic_udp_rows = $managedDynamicUdpRows
+            unpinned_rows = $managedUnpinnedRows
+            pktmon_filtered_flow_packets = $managedFilteredPackets
+        })
+
+        Stop-CapabilityPktMon
+        Stop-Candidate $activeProcess
+        $activeProcess = $null
+        Wait-AdapterAbsent $managedAutoAdapterName
+        Assert-InterfaceGone $managedAutoAdapterName $ownedInterfaceIndex
+        Assert-True (@(Get-ExactRunProcesses -WorkPath $work).Count -eq 0) "managed auto-route process residue"
+        Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "managed auto-route DNS residue"
+        Wait-Ipv4SystemRouteSnapshot $systemRouteBaseline
+        Write-CapabilityEvidence "auto-cleanup" ([ordered]@{
+            processes = @(Get-ExactRunProcesses -WorkPath $work).Count
+            adapters = @(Get-NetAdapter -Name $managedAutoAdapterName -IncludeHidden -ErrorAction SilentlyContinue).Count
+            addresses = @(Get-NetIPAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count
+            routes = @(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count
+            dns = @(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count
+        })
+
+        $adapterName = $managedManualAdapterName
+        $activeProcess = Start-Candidate $binary $managedManualConfig
+        $adapter = Wait-AdapterReady $managedManualAdapterName
+        $ownedInterfaceIndex = [int]$adapter.ifIndex
+        $manualInterfaceIndex = $ownedInterfaceIndex
+        [void](Get-Metrics $manualMetricsPort)
+        $manualRouteBaseline = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
+        Assert-True (@($manualRouteBaseline | Where-Object { $_ -in @("IPv4|0.0.0.0/1|0.0.0.0", "IPv4|128.0.0.0/1|0.0.0.0") }).Count -eq 0) "manual product capture baseline changed"
+        $manualMetricBaseline = Get-NetIPInterface -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+        [void](Add-TunRoute $manualInterfaceIndex "0.0.0.0/1" 1)
+        [void](Add-TunRoute $manualInterfaceIndex "128.0.0.0/1" 1)
+        $manualCaptureRoutes = @(
+            Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
+                Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") }
+        )
+        Assert-True ($manualCaptureRoutes.Count -eq 2) "manual capture route readback mismatch"
+        foreach ($prefix in @("0.0.0.0/1", "128.0.0.0/1")) {
+            $row = @($manualCaptureRoutes | Where-Object { $_.DestinationPrefix -ceq $prefix })
+            Assert-True ($row.Count -eq 1 -and $row[0].NextHop -ceq "0.0.0.0" -and
+                [uint32]$row[0].RouteMetric -eq 1) "manual capture route readback mismatch"
+        }
+        Invoke-TunProductTcp $supportAddress $supportTcpPort $ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m16-product-manual-tcp"))
+        $managedManualTcpRows++
+        Invoke-TunProductUdp $supportAddress $supportUdpPort $ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m16-product-manual-udp"))
+        $managedManualUdpRows++
+        $manualMetric = Get-NetIPInterface -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+        Assert-True ([string]$manualMetric.AutomaticMetric -eq [string]$manualMetricBaseline.AutomaticMetric -and
+            [uint32]$manualMetric.InterfaceMetric -eq [uint32]$manualMetricBaseline.InterfaceMetric) "manual product interface metric changed"
+        Write-CapabilityEvidence "manual-active" ([ordered]@{
+            controller_capture_rows = $manualCaptureRoutes.Count
+            manual_tcp_rows = $managedManualTcpRows
+            manual_udp_rows = $managedManualUdpRows
+            interface_metric = "unchanged"
+        })
+        foreach ($route in @($ownedRoutes)) { Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction Stop }
+        $ownedRoutes.Clear()
+        Assert-True (@(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") }).Count -eq 0) "manual capture route residue"
+        Stop-Candidate $activeProcess
+        $activeProcess = $null
+        Wait-AdapterAbsent $managedManualAdapterName
+        Assert-InterfaceGone $managedManualAdapterName $ownedInterfaceIndex
+        Assert-True (@(Get-ExactRunProcesses -WorkPath $work).Count -eq 0) "managed manual process residue"
+        Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "managed manual DNS residue"
+        Wait-Ipv4SystemRouteSnapshot $systemRouteBaseline
+        Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot 0) "managed product final physical DNS sentinel"
+        Assert-PktMonAbsent
+
+        Remove-Item -LiteralPath $siblingDll -Force
+        $createdSiblingDll = $false
+        Remove-Item -LiteralPath $work -Recurse -Force
+        Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "managed product sibling DLL residue"
+        Assert-True (-not (Test-Path -LiteralPath $work)) "managed product work residue"
+        Assert-True (-not (Get-NetAdapter -Name $managedAutoAdapterName -IncludeHidden -ErrorAction SilentlyContinue) -and
+            -not (Get-NetAdapter -Name $managedManualAdapterName -IncludeHidden -ErrorAction SilentlyContinue)) "managed product adapter residue"
+        Write-CapabilityEvidence "after" ([ordered]@{
+            processes = @(Get-ExactRunProcesses -WorkPath $work).Count
+            adapters = 0
+            work = 0
+            sibling_dll = 0
+            pktmon = "absent"
+            physical_dns_rows = @(Get-PhysicalDnsSnapshot 0).Count
+        })
     }
     if ($Mode -eq "network-feasibility") {
         Assert-PktMonAbsent
@@ -3163,9 +3702,11 @@ finally {
     foreach ($route in $ownedRoutes) {
         Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue
     }
-    if ($Mode -eq "network-feasibility") {
+    if ($Mode -in @("network-feasibility", "managed-product")) {
         try { Stop-CapabilityPktMon }
         catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
+    }
+    if ($Mode -eq "network-feasibility") {
         try { Remove-CapabilityRoutes }
         catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
         $capabilityAdapter = Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue
@@ -3204,6 +3745,16 @@ finally {
         Wait-AdapterAbsent $adapterName 20
     }
     Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+    if ($Mode -eq "managed-product") {
+        if (Get-NetAdapter -Name $managedAutoAdapterName -IncludeHidden -ErrorAction SilentlyContinue) {
+            Wait-AdapterAbsent $managedAutoAdapterName 20
+        }
+        if (Get-NetAdapter -Name $managedManualAdapterName -IncludeHidden -ErrorAction SilentlyContinue) {
+            Wait-AdapterAbsent $managedManualAdapterName 20
+        }
+        Assert-InterfaceGone $managedAutoAdapterName $null
+        Assert-InterfaceGone $managedManualAdapterName $null
+    }
     foreach ($route in $ownedTargetRoutes) {
         Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue
     }
@@ -3257,6 +3808,18 @@ if ($completed) {
             $capabilityInterfaceMetric -in @("unchanged", "leased")) "network feasibility marker prerequisites mismatch"
         Assert-True (Test-Path -LiteralPath $capabilityEvidence) "network feasibility evidence is missing"
         Write-Output "m16_windows_network_feasibility status=PASS routes=2/2 tcp_pin=4/4 udp_pin=4/4 dns=2/2 capture_window=1/1 hard_kill=1/1 interface_metric=$capabilityInterfaceMetric cleanup=PASS guest_build=$($capabilityIdentity.GuestBuild) run_token=$runIdentity candidate_sha=$($capabilityIdentity.Ledger.candidate_sha) probe_sha256=$($capabilityIdentity.Ledger.probe_sha256) identity_sha256=$capabilityIdentityHash"
+    } elseif ($Mode -eq "managed-product") {
+        Assert-True ($managedFixedTcpRows -eq 2 -and $managedFixedUdpRows -eq 2 -and
+            $managedDynamicTcpRows -eq 1 -and $managedDynamicUdpRows -eq 1 -and
+            $managedManualTcpRows -eq 1 -and $managedManualUdpRows -eq 1 -and
+            $managedUnpinnedRows -eq 2 -and $managedRouteRows -eq 2 -and
+            $managedInterfaceMetric -ceq "unchanged") "managed product marker prerequisites mismatch"
+        Assert-True ($managedFilteredPackets.unpinned_tcp -gt 0 -and $managedFilteredPackets.unpinned_udp -gt 0 -and
+            $managedFilteredPackets.proxy_tcp -eq 0 -and $managedFilteredPackets.proxy_udp -eq 0 -and
+            $managedFilteredPackets.direct_tcp -eq 0 -and $managedFilteredPackets.direct_udp -eq 0 -and
+            $managedFilteredPackets.dns_tcp -eq 0 -and $managedFilteredPackets.dns_udp -eq 0) "managed product PktMon prerequisites mismatch"
+        Assert-True (Test-Path -LiteralPath $capabilityEvidence) "managed product evidence is missing"
+        Write-Output "m16_windows_managed_product status=PASS fixed_tcp=2/2 fixed_udp=2/2 dynamic_tcp=1/1 dynamic_udp=1/1 manual_tcp=1/1 manual_udp=1/1 unpinned=2/2 routes=2/2 interface_metric=unchanged cleanup=PASS guest_build=$($capabilityIdentity.GuestBuild) run_token=$runIdentity candidate_sha=$($capabilityIdentity.Ledger.candidate_sha) probe_sha256=$($capabilityIdentity.Ledger.probe_sha256) identity_sha256=$capabilityIdentityHash"
     } elseif ($Mode -eq "full") {
         Write-Output "m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
     } else {

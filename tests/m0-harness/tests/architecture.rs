@@ -197,6 +197,45 @@ fn m16_managed_tun_pre_snapshot_generation_is_authoritative() {
     );
 }
 
+#[test]
+fn m16_managed_product_qualification_is_candidate_bound_and_additive() {
+    let source =
+        fs::read_to_string(workspace_root().join("tests/platform/qualify_windows_tun.ps1"))
+            .expect("Windows TUN qualifier");
+    let compact = source.split_whitespace().collect::<String>();
+
+    assert!(
+        source.contains("\"managed-product\"")
+            && source.contains("if ($Mode -eq \"managed-product\")")
+            && compact.contains("Get-NetworkFeasibilityIdentity$IdentityLedger")
+            && source.contains("auto_route = true")
+            && source.contains("auto_route = false")
+            && compact.contains("Start-Candidate$binary$managedAutoConfig")
+            && compact.contains("Start-Candidate$binary$managedManualConfig")
+            && compact.contains("Wait-AdapterReady$managedManualAdapterName")
+            && compact.contains("Add-TunRoute$manualInterfaceIndex\"0.0.0.0/1\"1")
+            && compact.contains("Add-TunRoute$manualInterfaceIndex\"128.0.0.0/1\"1")
+            && source.contains(
+                "m16_windows_managed_product status=PASS fixed_tcp=2/2 fixed_udp=2/2 dynamic_tcp=1/1 dynamic_udp=1/1 manual_tcp=1/1 manual_udp=1/1 unpinned=2/2 routes=2/2 interface_metric=unchanged cleanup=PASS",
+            ),
+        "the additive managed-product qualifier must execute both candidate-bound route modes"
+    );
+    assert_eq!(
+        source
+            .matches("m16_windows_network_feasibility status=PASS")
+            .count(),
+        1,
+        "the historical network-feasibility marker must remain unique"
+    );
+    assert_eq!(
+        source
+            .matches("m16_windows_managed_product status=PASS")
+            .count(),
+        1,
+        "the managed-product marker must remain unique"
+    );
+}
+
 fn metadata() -> Value {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--locked", "--format-version", "1"])
@@ -2919,7 +2958,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             })
             && source.contains("[void](Invoke-UnpinnedUdpCapture $supportAddress $supportUdpPort $metricsPort")
             && source.matches("$tcpRows++").count() == 8
-            && source.matches("Add-TunRoute $").count() == 5
+            && source.matches("Add-TunRoute $").count() == 7
             && source.matches("Add-TargetAddress $").count() == 3
             && !source.contains("Remove-OwnedRoute")
             && source.contains("[void](Add-TunRoute $adapter.ifIndex \"192.0.2.200/32\")")
