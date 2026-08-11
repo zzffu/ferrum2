@@ -379,6 +379,13 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         .nth(1)
         .and_then(|body| body.split("Assert-True ($managedNetworkChangeRows").next())
         .expect("bounded managed network changes");
+    assert!(
+        qualifier.contains("public ulong InterfaceLuid { get; internal set; }")
+            && qualifier.contains("public string DestinationPrefix { get; internal set; }")
+            && qualifier.contains("InterfaceLuid = route.InterfaceLuid")
+            && qualifier.contains("DestinationPrefix = Address(route.DestinationPrefix.Prefix)",),
+        "the existing underlay probe must expose the exact route identity frozen by the product"
+    );
     let has_stable_physical_restore = |body: &str| {
         let Some(restore_start) = body.rfind("if ($change -eq \"route\") {") else {
             return false;
@@ -400,11 +407,20 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
                 .is_some_and(|position| position < stable_start)
             && restore.contains("$currentSystemRoutes = @(Get-Ipv4SystemRouteSnapshot)")
             && restore.contains("$currentPhysicalDns = @(Get-PhysicalDnsSnapshot 0)")
+            && restore.contains("$currentPhysicalAdapter = Get-NetAdapter")
+            && restore.contains("$currentFixedRoutes = @(")
+            && restore.contains("[Ferrum2NetworkFeasibility]::GetFixedRoute($_)")
             && restore.contains("@(Compare-Object -ReferenceObject @($systemRouteBaseline) -DifferenceObject $currentSystemRoutes).Count -eq 0")
             && restore.contains("@(Compare-Object -ReferenceObject @($physicalDnsBaseline) -DifferenceObject $currentPhysicalDns).Count -eq 0")
+            && restore.contains("@(Compare-Object -ReferenceObject @($physicalFixedRouteBaseline) -DifferenceObject $currentFixedRoutes).Count -eq 0")
             && restore.contains("$currentUnderlay = Get-Ipv4DefaultUnderlay")
             && restore.contains("$currentPreferredSource.Count -eq 1")
             && restore.contains("$currentUnderlay.InterfaceIndex -eq $physicalUnderlayBaseline.InterfaceIndex")
+            && restore.contains("$currentPhysicalAdapter.NetLuid -eq $physicalInterfaceBaseline.NetLuid")
+            && restore.contains("$currentPhysicalAdapter.InterfaceAdminStatus -eq $physicalInterfaceBaseline.InterfaceAdminStatus")
+            && restore.contains("$currentPhysicalAdapter.InterfaceOperationalStatus -eq $physicalInterfaceBaseline.InterfaceOperationalStatus")
+            && restore.contains("$currentPhysicalAdapter.MediaConnectState -eq $physicalInterfaceBaseline.MediaConnectState")
+            && restore.contains("$currentPhysicalAdapter.HardwareInterface -eq $physicalInterfaceBaseline.HardwareInterface")
             && restore.contains("$currentUnderlay.Row.Route.NextHop -ceq $physicalUnderlayBaseline.Gateway")
             && restore.contains("$currentUnderlay.Row.Route.RouteMetric -eq $physicalUnderlayBaseline.RouteMetric")
             && restore.contains("$currentUnderlay.Row.Interface.InterfaceMetric -eq $physicalUnderlayBaseline.InterfaceMetric")
@@ -451,9 +467,27 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
     assert!(
         integrated
             .find("$systemRouteBaseline = @(Get-Ipv4SystemRouteSnapshot)")
+            .zip(integrated.find("$physicalInterfaceBaseline = Get-NetAdapter"))
+            .zip(integrated.find("$physicalFixedRouteBaseline = @("))
             .zip(integrated.find("$physicalUnderlayBaseline = [pscustomobject]@{"))
             .zip(integrated.find("foreach ($change in @(\"route\", \"interface\", \"address\"))"))
-            .is_some_and(|((routes, underlay), changes)| routes < changes && underlay < changes)
+            .is_some_and(|((((routes, interface), fixed), underlay), changes)| {
+                routes < changes && interface < changes && fixed < changes && underlay < changes
+            })
+            && integrated
+                .contains("[string]$physicalInterfaceBaseline.InterfaceAdminStatus -ceq \"Up\"",)
+            && integrated.contains(
+                "[string]$physicalInterfaceBaseline.InterfaceOperationalStatus -ceq \"Up\"",
+            )
+            && integrated.contains(
+                "[string]$physicalInterfaceBaseline.MediaConnectState -ceq \"Connected\"",
+            )
+            && integrated.contains("[bool]$physicalInterfaceBaseline.HardwareInterface")
+            && integrated.contains("$route.InterfaceLuid -eq $physicalInterfaceBaseline.NetLuid")
+            && integrated.contains("$route.InterfaceIndex -eq $physicalDefault.InterfaceIndex")
+            && integrated.contains(
+                "@($physicalDefault.Sources | Where-Object { $_.IPAddress -ceq $route.SourceAddress }).Count -eq 1",
+            )
             && has_stable_physical_restore(network_changes),
         "every controller restore must await one exact stable physical baseline before the next process"
     );
@@ -480,6 +514,20 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             "missing post-restore physical DNS readback",
             network_changes.replace(
                 "@(Compare-Object -ReferenceObject @($physicalDnsBaseline) -DifferenceObject $currentPhysicalDns).Count -eq 0",
+                "$true",
+            ),
+        ),
+        (
+            "missing fixed-endpoint route readback",
+            network_changes.replace(
+                "@(Compare-Object -ReferenceObject @($physicalFixedRouteBaseline) -DifferenceObject $currentFixedRoutes).Count -eq 0",
+                "$true",
+            ),
+        ),
+        (
+            "missing raw interface eligibility readback",
+            network_changes.replace(
+                "$currentPhysicalAdapter.NetLuid -eq $physicalInterfaceBaseline.NetLuid",
                 "$true",
             ),
         ),

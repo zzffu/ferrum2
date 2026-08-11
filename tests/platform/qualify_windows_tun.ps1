@@ -1249,7 +1249,9 @@ internal struct Ferrum2IpForwardRow2 {
 }
 
 public sealed class Ferrum2UnderlayProbe {
+    public ulong InterfaceLuid { get; internal set; }
     public uint InterfaceIndex { get; internal set; }
+    public string DestinationPrefix { get; internal set; }
     public string SourceAddress { get; internal set; }
     public string NextHop { get; internal set; }
     public byte PrefixLength { get; internal set; }
@@ -1414,7 +1416,9 @@ public static class Ferrum2NetworkFeasibility {
         if (route.InterfaceIndex != interfaceIndex || source.Family != AF_INET || source.Address == 0)
             throw new InvalidOperationException("constrained best route identity mismatch");
         return new Ferrum2UnderlayProbe {
+            InterfaceLuid = route.InterfaceLuid,
             InterfaceIndex = interfaceIndex,
+            DestinationPrefix = Address(route.DestinationPrefix.Prefix),
             SourceAddress = Address(source),
             NextHop = Address(route.NextHop),
             PrefixLength = route.DestinationPrefix.PrefixLength,
@@ -2661,6 +2665,22 @@ listen = "127.0.0.1:$manualMetricsPort"
         $managedDnsAddress = [string]$physicalDefault.Sources[0].IPAddress
         $physicalDnsBaseline = @(Get-PhysicalDnsSnapshot 0)
         $systemRouteBaseline = @(Get-Ipv4SystemRouteSnapshot)
+        $physicalInterfaceBaseline = Get-NetAdapter -InterfaceIndex $physicalDefault.InterfaceIndex -IncludeHidden -ErrorAction Stop
+        Assert-True ([uint64]$physicalInterfaceBaseline.NetLuid -ne 0 -and
+            [string]$physicalInterfaceBaseline.InterfaceAdminStatus -ceq "Up" -and
+            [string]$physicalInterfaceBaseline.InterfaceOperationalStatus -ceq "Up" -and
+            [string]$physicalInterfaceBaseline.MediaConnectState -ceq "Connected" -and
+            [bool]$physicalInterfaceBaseline.HardwareInterface) "eligible physical interface baseline mismatch"
+        $physicalFixedRouteDestinations = @(@($supportAddress, $managedDnsAddress) | Sort-Object -Unique)
+        $physicalFixedRouteBaseline = @(
+            $physicalFixedRouteDestinations | ForEach-Object {
+                $route = [Ferrum2NetworkFeasibility]::GetFixedRoute($_)
+                Assert-True ($route.InterfaceLuid -eq $physicalInterfaceBaseline.NetLuid -and
+                    $route.InterfaceIndex -eq $physicalDefault.InterfaceIndex -and
+                    @($physicalDefault.Sources | Where-Object { $_.IPAddress -ceq $route.SourceAddress }).Count -eq 1) "fixed physical underlay baseline mismatch"
+                "$_|$($route.InterfaceLuid)|$($route.InterfaceIndex)|$($route.DestinationPrefix)|$($route.PrefixLength)|$($route.NextHop)|$($route.RouteMetric)|$($route.SourceAddress)"
+            }
+        )
         $physicalUnderlayBaseline = [pscustomobject]@{
             InterfaceIndex = [uint32]$physicalDefault.InterfaceIndex
             SourceAddress = $managedDnsAddress
@@ -2919,6 +2939,13 @@ listen = "127.0.0.1:$managedMetricsPort"
                                 $currentSystemRoutes = @(Get-Ipv4SystemRouteSnapshot)
                                 $currentPhysicalDns = @(Get-PhysicalDnsSnapshot 0)
                                 $currentUnderlay = Get-Ipv4DefaultUnderlay
+                                $currentPhysicalAdapter = Get-NetAdapter -InterfaceIndex $currentUnderlay.InterfaceIndex -IncludeHidden -ErrorAction Stop
+                                $currentFixedRoutes = @(
+                                    $physicalFixedRouteDestinations | ForEach-Object {
+                                        $route = [Ferrum2NetworkFeasibility]::GetFixedRoute($_)
+                                        "$_|$($route.InterfaceLuid)|$($route.InterfaceIndex)|$($route.DestinationPrefix)|$($route.PrefixLength)|$($route.NextHop)|$($route.RouteMetric)|$($route.SourceAddress)"
+                                    }
+                                )
                                 $currentPreferredSource = @($currentUnderlay.Sources | Where-Object {
                                     $_.IPAddress -ceq $physicalUnderlayBaseline.SourceAddress
                                 })
@@ -2928,7 +2955,13 @@ listen = "127.0.0.1:$managedMetricsPort"
                                 $baselineMatches =
                                     @(Compare-Object -ReferenceObject @($systemRouteBaseline) -DifferenceObject $currentSystemRoutes).Count -eq 0 -and
                                     @(Compare-Object -ReferenceObject @($physicalDnsBaseline) -DifferenceObject $currentPhysicalDns).Count -eq 0 -and
+                                    @(Compare-Object -ReferenceObject @($physicalFixedRouteBaseline) -DifferenceObject $currentFixedRoutes).Count -eq 0 -and
                                     $currentUnderlay.InterfaceIndex -eq $physicalUnderlayBaseline.InterfaceIndex -and
+                                    $currentPhysicalAdapter.NetLuid -eq $physicalInterfaceBaseline.NetLuid -and
+                                    $currentPhysicalAdapter.InterfaceAdminStatus -eq $physicalInterfaceBaseline.InterfaceAdminStatus -and
+                                    $currentPhysicalAdapter.InterfaceOperationalStatus -eq $physicalInterfaceBaseline.InterfaceOperationalStatus -and
+                                    $currentPhysicalAdapter.MediaConnectState -eq $physicalInterfaceBaseline.MediaConnectState -and
+                                    $currentPhysicalAdapter.HardwareInterface -eq $physicalInterfaceBaseline.HardwareInterface -and
                                     $currentPreferredSource.Count -eq 1 -and
                                     $null -ne $currentSourceRow -and
                                     $currentUnderlay.Row.Route.NextHop -ceq $physicalUnderlayBaseline.Gateway -and
