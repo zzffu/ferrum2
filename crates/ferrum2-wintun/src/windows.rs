@@ -19,13 +19,16 @@ use windows_sys::Win32::Foundation::{
     GetLastError, HANDLE, HMODULE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CancelMibChangeNotify2, ConvertInterfaceLuidToIndex, CreateIpForwardEntry2,
-    CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeMibTable,
-    GetBestInterfaceEx, GetBestRoute2, GetIfTable2, GetIpForwardEntry2, GetIpForwardTable2,
+    CancelMibChangeNotify2, ConvertInterfaceLuidToGuid, ConvertInterfaceLuidToIndex,
+    CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DNS_INTERFACE_SETTINGS,
+    DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_NAMESERVER, DeleteIpForwardEntry2,
+    DeleteUnicastIpAddressEntry, FreeInterfaceDnsSettings, FreeMibTable, GetBestInterfaceEx,
+    GetBestRoute2, GetIfTable2, GetInterfaceDnsSettings, GetIpForwardEntry2, GetIpForwardTable2,
     GetIpInterfaceEntry, GetUnicastIpAddressEntry, InitializeIpForwardEntry,
     InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IF_TABLE2,
     MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
-    NotifyIpInterfaceChange, NotifyRouteChange2, NotifyUnicastIpAddressChange, SetIpInterfaceEntry,
+    NotifyIpInterfaceChange, NotifyRouteChange2, NotifyUnicastIpAddressChange,
+    SetInterfaceDnsSettings, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::{
     IfOperStatusUp, MediaConnectStateConnected, NET_IF_ADMIN_STATUS_UP, NET_LUID_LH,
@@ -50,6 +53,7 @@ use windows_sys::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
+use windows_sys::core::GUID;
 
 use crate::{ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, Ipv4Prefix};
 
@@ -599,6 +603,9 @@ struct ManagedState {
     capture_routes: Vec<Ipv4Prefix>,
     pending_route: Option<MIB_IPFORWARD_ROW2>,
     routes: Vec<MIB_IPFORWARD_ROW2>,
+    ipv4_dns_address: Option<std::net::Ipv4Addr>,
+    dns_interface: Option<GUID>,
+    dns: Option<ManagedDnsLease<Ipv4DnsSettings>>,
 }
 
 /// Safe RAII owner of the exact Wintun adapter, address, MTU, session and DLL transaction.
@@ -832,7 +839,7 @@ impl Adapter {
     }
 
     fn prepare_managed(&mut self) -> Result<(), Error> {
-        let Some((notifications, snapshot_generation, policy, capture_routes)) =
+        let Some((notifications, snapshot_generation, policy, capture_routes, ipv4_dns_address)) =
             prepare_managed_intent(self.config.managed_ipv4(), |config| {
                 let notifications = subscribe_network_changes()?;
                 let snapshot_generation = notifications.generation();
@@ -842,6 +849,7 @@ impl Adapter {
                     snapshot_generation,
                     policy,
                     config.capture_routes().to_vec(),
+                    config.ipv4_dns_address(),
                 ))
             })?
         else {
@@ -855,6 +863,9 @@ impl Adapter {
             capture_routes,
             pending_route: None,
             routes: Vec::with_capacity(route_capacity),
+            ipv4_dns_address,
+            dns_interface: None,
+            dns: None,
         });
         Ok(())
     }
@@ -878,6 +889,14 @@ impl Adapter {
             &mut PlatformUnderlay,
         )? {
             return Err(Error);
+        }
+        if let Some(address) = state.ipv4_dns_address {
+            let mut interface = GUID::default();
+            if unsafe { ConvertInterfaceLuidToGuid(&self.luid, &mut interface) } != ERROR_SUCCESS {
+                return Err(Error);
+            }
+            state.dns_interface = Some(interface);
+            install_managed_dns(address, &mut PlatformManagedDns(interface), &mut state.dns)?;
         }
         let rows = state
             .capture_routes
@@ -908,6 +927,131 @@ fn prepare_managed_intent<T>(
     prepare: impl FnOnce(&crate::ManagedIpv4Config) -> Result<T, Error>,
 ) -> Result<Option<T>, Error> {
     config.map(prepare).transpose()
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct Ipv4DnsSettings(Option<Box<[u16]>>);
+
+struct ManagedDnsLease<S> {
+    previous: S,
+    applied: S,
+}
+
+trait ManagedDnsOperations {
+    type Settings: Clone + Eq;
+
+    fn snapshot(&mut self) -> Result<Self::Settings, Error>;
+    fn apply(&mut self, address: std::net::Ipv4Addr) -> Result<Self::Settings, Error>;
+    fn readback(&mut self) -> Result<Self::Settings, Error>;
+    fn restore(&mut self, settings: &Self::Settings) -> Result<(), Error>;
+}
+
+fn install_managed_dns<O: ManagedDnsOperations>(
+    address: std::net::Ipv4Addr,
+    operations: &mut O,
+    lease: &mut Option<ManagedDnsLease<O::Settings>>,
+) -> Result<(), Error> {
+    let previous = operations.snapshot()?;
+    let applied = operations.apply(address)?;
+    *lease = Some(ManagedDnsLease { previous, applied });
+    if operations.readback()? == lease.as_ref().ok_or(Error)?.applied {
+        Ok(())
+    } else {
+        Err(Error)
+    }
+}
+
+fn restore_managed_dns<O: ManagedDnsOperations>(
+    operations: &mut O,
+    lease: &ManagedDnsLease<O::Settings>,
+) -> bool {
+    let Ok(current) = operations.readback() else {
+        return true;
+    };
+    if current != lease.applied {
+        return true;
+    }
+    if operations.restore(&lease.previous).is_err() {
+        return true;
+    }
+    !matches!(operations.readback(), Ok(current) if current == lease.previous)
+}
+
+struct PlatformManagedDns(GUID);
+
+impl ManagedDnsOperations for PlatformManagedDns {
+    type Settings = Ipv4DnsSettings;
+
+    fn snapshot(&mut self) -> Result<Self::Settings, Error> {
+        read_ipv4_dns_settings(self.0)
+    }
+
+    fn apply(&mut self, address: std::net::Ipv4Addr) -> Result<Self::Settings, Error> {
+        let settings = Ipv4DnsSettings(Some(
+            address.to_string().encode_utf16().collect::<Box<[_]>>(),
+        ));
+        set_ipv4_dns_settings(self.0, &settings)?;
+        Ok(settings)
+    }
+
+    fn readback(&mut self) -> Result<Self::Settings, Error> {
+        read_ipv4_dns_settings(self.0)
+    }
+
+    fn restore(&mut self, settings: &Self::Settings) -> Result<(), Error> {
+        set_ipv4_dns_settings(self.0, settings)
+    }
+}
+
+fn read_ipv4_dns_settings(interface: GUID) -> Result<Ipv4DnsSettings, Error> {
+    let mut settings = DNS_INTERFACE_SETTINGS {
+        Version: DNS_INTERFACE_SETTINGS_VERSION1,
+        ..DNS_INTERFACE_SETTINGS::default()
+    };
+    if unsafe { GetInterfaceDnsSettings(interface, &mut settings) } != ERROR_SUCCESS {
+        return Err(Error);
+    }
+    let result = copy_bounded_wide(settings.NameServer).map(Ipv4DnsSettings);
+    unsafe { FreeInterfaceDnsSettings(&mut settings) };
+    result
+}
+
+fn set_ipv4_dns_settings(interface: GUID, settings: &Ipv4DnsSettings) -> Result<(), Error> {
+    let mut name_server = settings.0.as_ref().map(|value| {
+        let mut terminated = Vec::with_capacity(value.len() + 1);
+        terminated.extend_from_slice(value);
+        terminated.push(0);
+        terminated
+    });
+    let raw = DNS_INTERFACE_SETTINGS {
+        Version: DNS_INTERFACE_SETTINGS_VERSION1,
+        Flags: u64::from(DNS_SETTING_NAMESERVER),
+        NameServer: name_server
+            .as_mut()
+            .map_or(null_mut(), |value| value.as_mut_ptr()),
+        ..DNS_INTERFACE_SETTINGS::default()
+    };
+    if unsafe { SetInterfaceDnsSettings(interface, &raw) } == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(Error)
+    }
+}
+
+fn copy_bounded_wide(value: *mut u16) -> Result<Option<Box<[u16]>>, Error> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    for length in 0..=4096 {
+        if unsafe { *value.add(length) } == 0 {
+            if length == 0 {
+                return Ok(None);
+            }
+            let value = unsafe { std::slice::from_raw_parts(value, length) };
+            return Ok(Some(value.to_vec().into_boxed_slice()));
+        }
+    }
+    Err(Error)
 }
 
 trait ManagedRouteOperations {
@@ -1452,6 +1596,9 @@ trait CleanupOperations {
     fn delete_last_route(&mut self) -> Option<bool> {
         None
     }
+    fn restore_dns(&mut self) -> Option<bool> {
+        None
+    }
     fn end_session(&mut self) -> Option<bool>;
     fn delete_last_address(&mut self) -> Option<bool>;
     fn restore_ipv6_mtu(&mut self) -> Option<bool>;
@@ -1467,6 +1614,7 @@ fn cleanup_transaction(cleanup: &mut impl CleanupOperations) -> bool {
     while let Some(step_failed) = cleanup.delete_last_route() {
         failed |= step_failed;
     }
+    failed |= cleanup.restore_dns().unwrap_or(false);
     failed |= cleanup.end_session().unwrap_or(false);
     while let Some(step_failed) = cleanup.delete_last_address() {
         failed |= step_failed;
@@ -1516,6 +1664,18 @@ impl CleanupOperations for PlatformCleanup<'_> {
         Some(delete_managed_route(
             &mut PlatformManagedRouteCleanup,
             &intended,
+        ))
+    }
+
+    fn restore_dns(&mut self) -> Option<bool> {
+        let state = self.0.managed.as_mut()?;
+        let lease = state.dns.take()?;
+        let Some(interface) = state.dns_interface.take() else {
+            return Some(true);
+        };
+        Some(restore_managed_dns(
+            &mut PlatformManagedDns(interface),
+            &lease,
         ))
     }
 
@@ -1983,14 +2143,15 @@ mod tests {
         ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, Error, InterfaceIdentity, IpDadStateDeprecated,
         IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative,
         LoaderOperations, MIB_IF_ROW2, MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW,
-        MIB_UNICASTIPADDRESS_ROW, ManagedRouteCleanupOperations, ManagedRouteOperations,
-        ManagedRouteRead, NET_LUID_LH, NotificationContext, NotificationOwners, RouteFingerprint,
-        SessionJournal, SetupOperations, UnderlayOperations, address_changed,
-        cancel_notification_handles, capture_route_row, classify_adapter_create_failure,
-        classify_notification_luid, cleanup_transaction, dad_snapshot, delete_managed_route,
-        eligible_interface_identity, finish_setup_transaction, install_managed_routes,
-        interface_changed, interface_index_option_value, leak_notification_owners,
-        load_transaction, prepare_managed_intent, require_exports, route_changed, route_matches,
+        MIB_UNICASTIPADDRESS_ROW, ManagedDnsOperations, ManagedRouteCleanupOperations,
+        ManagedRouteOperations, ManagedRouteRead, NET_LUID_LH, NotificationContext,
+        NotificationOwners, RouteFingerprint, SessionJournal, SetupOperations, UnderlayOperations,
+        address_changed, cancel_notification_handles, capture_route_row,
+        classify_adapter_create_failure, classify_notification_luid, cleanup_transaction,
+        copy_bounded_wide, dad_snapshot, delete_managed_route, eligible_interface_identity,
+        finish_setup_transaction, install_managed_dns, install_managed_routes, interface_changed,
+        interface_index_option_value, leak_notification_owners, load_transaction,
+        prepare_managed_intent, require_exports, restore_managed_dns, route_changed, route_matches,
         select_unique_default_route, setup_transaction, snapshot_underlay_with,
         subscribe_notification_sequence, take_last_owned_route, underlay_matches_with,
         underlay_snapshot_matches, validate_artifact,
@@ -2821,7 +2982,7 @@ mod tests {
             source: Some(u32::from_ne_bytes([192, 0, 2, 2])),
         };
         let endpoint = "198.51.100.8:443".parse().unwrap();
-        let config = crate::ManagedIpv4Config::new(Vec::new(), vec![endpoint], true).unwrap();
+        let config = crate::ManagedIpv4Config::new(Vec::new(), vec![endpoint], true, None).unwrap();
         let mut operations = InjectedUnderlay {
             interfaces: vec![physical],
             best_index: physical.index,
@@ -2924,7 +3085,7 @@ mod tests {
             source: Some(u32::from_ne_bytes([192, 0, 2, 2])),
         };
         let endpoint = "198.51.100.8:443".parse().unwrap();
-        let config = crate::ManagedIpv4Config::new(Vec::new(), vec![endpoint], true).unwrap();
+        let config = crate::ManagedIpv4Config::new(Vec::new(), vec![endpoint], true, None).unwrap();
         let operations = InjectedUnderlay {
             interfaces: vec![physical],
             best_index: physical.index,
@@ -3027,7 +3188,8 @@ mod tests {
         );
         assert!(calls.is_empty());
 
-        let manual_direct = crate::ManagedIpv4Config::new(Vec::new(), Vec::new(), true).unwrap();
+        let manual_direct =
+            crate::ManagedIpv4Config::new(Vec::new(), Vec::new(), true, None).unwrap();
         assert_eq!(
             prepare_managed_intent(Some(&manual_direct), |config| {
                 calls.extend(["subscribe", "generation", "default-snapshot"]);
@@ -3045,8 +3207,11 @@ mod tests {
         let adapter_name = "m16-adapter-sentinel";
         let interface_name = "m16-interface-sentinel";
         let endpoint: std::net::SocketAddrV4 = "203.0.113.211:49153".parse().unwrap();
+        let dns_address = "198.18.0.1".parse().unwrap();
         let prefix = Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24).unwrap();
-        let managed = crate::ManagedIpv4Config::new(vec![prefix], vec![endpoint], true).unwrap();
+        let managed =
+            crate::ManagedIpv4Config::new(vec![prefix], vec![endpoint], true, Some(dns_address))
+                .unwrap();
         let config = crate::AdapterConfig::new(
             adapter_name.into(),
             "198.18.0.2".parse().unwrap(),
@@ -3108,6 +3273,7 @@ mod tests {
             adapter_name.to_owned(),
             interface_name.to_owned(),
             endpoint.to_string(),
+            dns_address.to_string(),
             "203.0.113.0/24".to_owned(),
             identity.index.to_string(),
             identity.luid.to_string(),
@@ -3125,6 +3291,134 @@ mod tests {
         assert!(leaks(&[format!("synthetic leak: {endpoint}")]));
     }
 
+    struct InjectedManagedDns {
+        current: u8,
+        fail_at: Option<&'static str>,
+        replace_on_read: Option<(usize, u8)>,
+        readbacks: usize,
+        calls: Vec<&'static str>,
+    }
+
+    impl ManagedDnsOperations for InjectedManagedDns {
+        type Settings = u8;
+
+        fn snapshot(&mut self) -> Result<Self::Settings, Error> {
+            self.calls.push("snapshot");
+            (self.fail_at != Some("snapshot"))
+                .then_some(self.current)
+                .ok_or(Error)
+        }
+
+        fn apply(&mut self, _address: std::net::Ipv4Addr) -> Result<Self::Settings, Error> {
+            self.calls.push("apply");
+            if self.fail_at == Some("apply") {
+                return Err(Error);
+            }
+            self.current = 2;
+            Ok(2)
+        }
+
+        fn readback(&mut self) -> Result<Self::Settings, Error> {
+            self.calls.push("readback");
+            self.readbacks += 1;
+            if self.fail_at == Some("readback") {
+                return Err(Error);
+            }
+            if self
+                .replace_on_read
+                .is_some_and(|(read, _)| read == self.readbacks)
+            {
+                self.current = self.replace_on_read.take().unwrap().1;
+            }
+            Ok(self.current)
+        }
+
+        fn restore(&mut self, settings: &Self::Settings) -> Result<(), Error> {
+            self.calls.push("restore");
+            if self.fail_at == Some("restore") {
+                return Err(Error);
+            }
+            self.current = *settings;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn managed_dns_snapshots_reads_back_and_conditionally_restores() {
+        let address = "198.18.0.1".parse().unwrap();
+        let make = || InjectedManagedDns {
+            current: 1,
+            fail_at: None,
+            replace_on_read: None,
+            readbacks: 0,
+            calls: Vec::new(),
+        };
+
+        let mut complete = make();
+        let mut lease = None;
+        install_managed_dns(address, &mut complete, &mut lease).unwrap();
+        assert_eq!(complete.calls, ["snapshot", "apply", "readback"]);
+        assert!(!restore_managed_dns(&mut complete, lease.as_ref().unwrap()));
+        assert_eq!(complete.current, 1);
+        assert_eq!(
+            complete.calls,
+            [
+                "snapshot", "apply", "readback", "readback", "restore", "readback"
+            ]
+        );
+
+        for failure in ["snapshot", "apply", "readback"] {
+            let mut injected = make();
+            injected.fail_at = Some(failure);
+            let mut lease = None;
+            assert!(install_managed_dns(address, &mut injected, &mut lease).is_err());
+            if failure == "readback" {
+                assert!(lease.is_some(), "successful apply must be journaled");
+                injected.fail_at = None;
+                assert!(!restore_managed_dns(&mut injected, lease.as_ref().unwrap()));
+                assert_eq!(injected.current, 1);
+            } else {
+                assert!(lease.is_none());
+                assert_eq!(injected.current, 1);
+            }
+        }
+
+        let mut replaced = make();
+        let mut lease = None;
+        install_managed_dns(address, &mut replaced, &mut lease).unwrap();
+        replaced.current = 3;
+        assert!(restore_managed_dns(&mut replaced, lease.as_ref().unwrap()));
+        assert_eq!(replaced.current, 3, "external replacement is preserved");
+        assert_eq!(replaced.calls.last(), Some(&"readback"));
+
+        for (failure, replacement) in [(Some("restore"), None), (None, Some((3, 4)))] {
+            let mut injected = make();
+            let mut lease = None;
+            install_managed_dns(address, &mut injected, &mut lease).unwrap();
+            injected.fail_at = failure;
+            injected.replace_on_read = replacement;
+            assert!(restore_managed_dns(&mut injected, lease.as_ref().unwrap()));
+        }
+
+        assert_eq!(copy_bounded_wide(std::ptr::null_mut()).unwrap(), None);
+        let mut empty = [0_u16];
+        assert_eq!(copy_bounded_wide(empty.as_mut_ptr()).unwrap(), None);
+        let mut value = [
+            b'1' as u16,
+            b'.' as u16,
+            b'1' as u16,
+            b'.' as u16,
+            b'1' as u16,
+            0,
+        ];
+        assert_eq!(
+            copy_bounded_wide(value.as_mut_ptr()).unwrap().as_deref(),
+            Some(&value[..5])
+        );
+        let mut unterminated = vec![1_u16; 4097];
+        assert!(copy_bounded_wide(unterminated.as_mut_ptr()).is_err());
+    }
+
     struct InjectedSetup {
         fail_at: Option<usize>,
         cleanup_fail_at: Option<usize>,
@@ -3133,6 +3427,7 @@ mod tests {
         resources: Vec<&'static str>,
         notifications: bool,
         routes: Vec<&'static str>,
+        dns: bool,
         cleanup_calls: Vec<&'static str>,
     }
 
@@ -3226,6 +3521,15 @@ mod tests {
             let route = self.routes.pop()?;
             let position = self.cleanup_calls.len();
             self.cleanup_calls.push(route);
+            Some(self.cleanup_fail_at == Some(position))
+        }
+
+        fn restore_dns(&mut self) -> Option<bool> {
+            if !std::mem::take(&mut self.dns) {
+                return None;
+            }
+            let position = self.cleanup_calls.len();
+            self.cleanup_calls.push("dns");
             Some(self.cleanup_fail_at == Some(position))
         }
 
@@ -3417,6 +3721,7 @@ mod tests {
                 resources: Vec::new(),
                 notifications: false,
                 routes: Vec::new(),
+                dns: false,
                 cleanup_calls: Vec::new(),
             };
             assert!(setup_transaction(&mut setup).is_err(), "step {failed}");
@@ -3433,6 +3738,7 @@ mod tests {
             resources: Vec::new(),
             notifications: false,
             routes: Vec::new(),
+            dns: false,
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut setup).expect("complete setup");
@@ -3502,6 +3808,7 @@ mod tests {
                 resources: Vec::new(),
                 notifications: false,
                 routes: Vec::new(),
+                dns: false,
                 cleanup_calls: Vec::new(),
             };
             setup_transaction(&mut cleanup).expect("complete setup");
@@ -3518,6 +3825,7 @@ mod tests {
             resources: Vec::new(),
             notifications: false,
             routes: Vec::new(),
+            dns: false,
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut cleanup).expect("complete setup");
@@ -3538,6 +3846,7 @@ mod tests {
             resources: Vec::new(),
             notifications: false,
             routes: Vec::new(),
+            dns: false,
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut overlap).expect("complete setup");
@@ -3627,11 +3936,13 @@ mod tests {
             resources: Vec::new(),
             notifications: false,
             routes: Vec::new(),
+            dns: false,
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut cleanup).expect("complete adapter setup");
         cleanup.notifications = true;
         cleanup.routes.extend(["low-route", "high-route"]);
+        cleanup.dns = true;
         assert!(
             cleanup_transaction(&mut cleanup),
             "route conflict is surfaced"
@@ -3642,6 +3953,7 @@ mod tests {
                 "notifications",
                 "high-route",
                 "low-route",
+                "dns",
                 "end-session",
                 "ipv6-address",
                 "ipv4-address",

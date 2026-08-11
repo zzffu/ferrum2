@@ -67,6 +67,7 @@ pub struct Config {
     pub capture_routes: Vec<(Ipv4Addr, u8)>,
     pub physical_endpoints: Vec<std::net::SocketAddrV4>,
     pub default_binder: bool,
+    pub ipv4_dns_address: Option<Ipv4Addr>,
 }
 
 /// Publish-once bridge from the private Wintun owner to client egress.
@@ -236,6 +237,21 @@ fn config_is_exact(config: &Config) -> bool {
     let Ok(udp_buffer) = u64::try_from(config.max_udp_buffered_bytes) else {
         return false;
     };
+    let ipv4_mask = u32::MAX
+        .checked_shl(u32::from(32 - config.ipv4_prefix.min(32)))
+        .unwrap_or(0);
+    let ipv4_network = u32::from(config.ipv4) & ipv4_mask;
+    let dns_is_exact = config.ipv4_dns_address.is_none_or(|address| {
+        let numeric = u32::from(address);
+        !address.is_unspecified()
+            && !address.is_loopback()
+            && !address.is_multicast()
+            && !config.capture_routes.is_empty()
+            && numeric & ipv4_mask == ipv4_network
+            && numeric != u32::from(config.ipv4)
+            && numeric != ipv4_network
+            && numeric != (ipv4_network | !ipv4_mask)
+    });
     if !(1280..=1500).contains(&config.mtu)
         || !(131_072..=67_108_864).contains(&config.ring_capacity)
         || !config.ring_capacity.is_power_of_two()
@@ -249,6 +265,7 @@ fn config_is_exact(config: &Config) -> bool {
         || !(65_536..=134_217_728).contains(&config.max_udp_buffered_bytes)
         || config.capture_routes.len() > 256
         || config.physical_endpoints.len() > 256
+        || !dns_is_exact
         || config.capture_routes.iter().any(|(address, length)| {
             *length == 0
                 || *length > 32
@@ -671,6 +688,7 @@ fn owner_main<T: Send + 'static>(
             if config.capture_routes.is_empty()
                 && config.physical_endpoints.is_empty()
                 && !config.default_binder
+                && config.ipv4_dns_address.is_none()
             {
                 adapter
             } else {
@@ -684,6 +702,7 @@ fn owner_main<T: Send + 'static>(
                         routes,
                         config.physical_endpoints.clone(),
                         config.default_binder,
+                        config.ipv4_dns_address,
                     )
                 });
                 match managed {

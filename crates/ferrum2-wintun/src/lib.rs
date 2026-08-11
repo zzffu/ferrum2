@@ -76,6 +76,7 @@ pub struct ManagedIpv4Config {
     capture_routes: Vec<Ipv4Prefix>,
     physical_endpoints: Vec<SocketAddrV4>,
     default_binder: bool,
+    ipv4_dns_address: Option<Ipv4Addr>,
 }
 
 impl ManagedIpv4Config {
@@ -83,19 +84,25 @@ impl ManagedIpv4Config {
         capture_routes: Vec<Ipv4Prefix>,
         mut physical_endpoints: Vec<SocketAddrV4>,
         default_binder: bool,
+        ipv4_dns_address: Option<Ipv4Addr>,
     ) -> Result<Self, Error> {
         if capture_routes.len() > 256 || physical_endpoints.len() > 256 {
             return Err(Error);
         }
         physical_endpoints.sort_unstable();
         physical_endpoints.dedup();
-        if capture_routes.is_empty() && physical_endpoints.is_empty() && !default_binder {
+        if capture_routes.is_empty()
+            && physical_endpoints.is_empty()
+            && !default_binder
+            && ipv4_dns_address.is_none()
+        {
             return Err(Error);
         }
         Ok(Self {
             capture_routes,
             physical_endpoints,
             default_binder,
+            ipv4_dns_address,
         })
     }
 
@@ -112,6 +119,11 @@ impl ManagedIpv4Config {
     #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn needs_default_binder(&self) -> bool {
         self.default_binder
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    pub(crate) const fn ipv4_dns_address(&self) -> Option<Ipv4Addr> {
+        self.ipv4_dns_address
     }
 }
 

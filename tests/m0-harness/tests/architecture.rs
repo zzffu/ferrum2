@@ -49,6 +49,8 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
             && wintun.contains("CreateIpForwardEntry2")
             && wintun.contains("GetIpForwardEntry2")
             && wintun.contains("DeleteIpForwardEntry2")
+            && wintun.contains("install_managed_dns(")
+            && wintun.contains("restore_managed_dns(")
             && wintun.contains("self.0.pending_route = Some(row)")
             && wintun
                 .contains("take_last_owned_route(&mut state.pending_route, &mut state.routes)",)
@@ -165,6 +167,23 @@ fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
             && egress.contains("(ClientRequestOrigin::Dns, true) => TcpBinding::Fixed")
             && udp.contains("ManagedUdpBinding::Fixed(endpoint)"),
         "notification lifetime, all-key route preflight, frozen underlay and fixed DNS binding must stay closed"
+    );
+    let finish = wintun
+        .split("fnfinish_managed")
+        .nth(1)
+        .and_then(|body| body.split("fncleanup_inner").next())
+        .expect("managed finish transaction");
+    let cleanup = wintun
+        .split("fncleanup_transaction")
+        .nth(1)
+        .and_then(|body| body.split("structPlatformCleanup").next())
+        .expect("managed cleanup transaction");
+    assert!(
+        finish.find("install_managed_dns(").unwrap()
+            < finish.find("install_managed_routes(").unwrap()
+            && cleanup.find("cleanup.delete_last_route()").unwrap()
+                < cleanup.find("cleanup.restore_dns()").unwrap(),
+        "IPv4 DNS must apply before capture and restore after capture removal"
     );
 }
 
@@ -2587,7 +2606,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         || source.path == "crates/ferrum2-wintun/src/windows.rs"
                             && matches!(
                                 token.as_str(),
-                                "CreateIpForwardEntry2" | "DeleteIpForwardEntry2"
+                                "CreateIpForwardEntry2"
+                                    | "DeleteIpForwardEntry2"
+                                    | "SetInterfaceDnsSettings"
                             )
                 })
             })
@@ -2720,7 +2741,6 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
         "WintunDeleteDriver",
         "WintunSetLogger",
         "SetIpForwardEntry",
-        "SetInterfaceDnsSettings",
         "Fwpm",
     ] {
         assert!(
@@ -2736,6 +2756,14 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 .replace("DeleteIpForwardEntry2", "")
                 .contains("DeleteIpForwardEntry"),
         "Wintun route mutation must use only the exact M16 Create/DeleteIpForwardEntry2 surface"
+    );
+    assert!(
+        wintun_windows.contains("GetInterfaceDnsSettings")
+            && wintun_windows.contains("SetInterfaceDnsSettings")
+            && wintun_windows.contains("FreeInterfaceDnsSettings")
+            && wintun_windows.contains("DNS_SETTING_NAMESERVER")
+            && !wintun_windows.contains("DNS_SETTING_IPV6"),
+        "Wintun DNS mutation must remain the exact IPv4-only snapshot/set/free surface"
     );
 
     let controller = fs::read_to_string(root.join("tests/platform/qualify_windows_tun.ps1"))
@@ -4184,7 +4212,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 && [
                     "ferrum2_tun::process_root(",
                     "async fn tun_udp_over_limit_is_mapping_free_then_selector_snapshot_is_fixed()",
-                    "async fn tun_tcp_dns_answer_failure_closes_flow_without_route_or_fallback_attempt()",
+                    "async fn tun_auto_dns_tcp_answer_failure_closes_flow_before_ordinary_route()",
                     "ClientRequestOrigin::Tun",
                     "context.egress.open_tcp(",
                     "context.egress.prepare_udp(",

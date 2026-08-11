@@ -26,6 +26,7 @@ pub(super) fn process_root(
     underlay: ferrum2_tun::UnderlayPublisher,
     direct_binder: bool,
 ) -> ProcessRoot<RunError> {
+    let ipv4_dns_address = config.ipv4_dns_address;
     let metrics = Arc::clone(&context.metrics);
     let accepted_metrics = Arc::clone(&metrics);
     let handler_context = Arc::clone(&context);
@@ -55,6 +56,7 @@ pub(super) fn process_root(
                 .collect(),
             physical_endpoints: config.physical_endpoints,
             default_binder: direct_binder,
+            ipv4_dns_address,
         },
         underlay,
         RunError::StartupProtocol,
@@ -70,12 +72,20 @@ pub(super) fn process_root(
                 context,
                 routing,
                 inbound,
+                ipv4_dns_address,
             ))
         },
         move |candidate, cancellation| {
             let context = Arc::clone(&udp_context);
             let routing = Arc::clone(&routing);
-            Box::pin(run_udp(candidate, cancellation, context, routing, inbound))
+            Box::pin(run_udp(
+                candidate,
+                cancellation,
+                context,
+                routing,
+                inbound,
+                ipv4_dns_address,
+            ))
         },
         (
             move || accepted_metrics.tun_packet_accepted(),
@@ -97,6 +107,7 @@ async fn run_udp(
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
     inbound: usize,
+    ipv4_dns_address: Option<std::net::Ipv4Addr>,
 ) {
     let tuple = candidate.tuple();
     let Ok(target) = TargetAddr::ip(tuple.target()) else {
@@ -105,6 +116,7 @@ async fn run_udp(
     let Some((terminal, selected_bound)) = select_udp_terminal(
         &routing,
         inbound,
+        ipv4_dns_address,
         &target,
         candidate.payload(),
         candidate.packet_payload_bound(),
@@ -129,11 +141,16 @@ async fn run_udp(
 fn select_udp_terminal(
     routing: &ClientRouting,
     inbound: usize,
+    ipv4_dns_address: Option<std::net::Ipv4Addr>,
     target: &TargetAddr,
     payload: &[u8],
     packet_payload_bound: usize,
     metrics: &ferrum2_observability::Metrics,
 ) -> Option<(TunUdpTerminal, usize)> {
+    if is_synthetic_dns_target(target, ipv4_dns_address) {
+        return (payload.len() <= packet_payload_bound)
+            .then_some((TunUdpTerminal::HijackDns, packet_payload_bound));
+    }
     let terminal = routing.select_terminal(inbound, Network::Udp, target, Some(payload), metrics);
     let selected = match terminal {
         ClientTerminalRoute::Route(plan) => {
@@ -324,9 +341,29 @@ async fn run_tcp<IO>(
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
     inbound: usize,
+    ipv4_dns_address: Option<std::net::Ipv4Addr>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    if is_synthetic_dns_socket(target, ipv4_dns_address) {
+        let Some(proxy) = context
+            .dns
+            .as_ref()
+            .and_then(|proxy| proxy.get())
+            .map(Arc::clone)
+        else {
+            return;
+        };
+        relay_hijacked_tcp(
+            &mut flow,
+            inbound,
+            &proxy,
+            context.runtime.idle_timeout,
+            cancellation.forced(),
+        )
+        .await;
+        return;
+    }
     let Ok(target) = TargetAddr::ip(target) else {
         return;
     };
@@ -392,6 +429,22 @@ async fn run_tcp<IO>(
     }
 }
 
+fn is_synthetic_dns_target(
+    target: &TargetAddr,
+    ipv4_dns_address: Option<std::net::Ipv4Addr>,
+) -> bool {
+    target
+        .as_socket_addr()
+        .is_some_and(|target| is_synthetic_dns_socket(target, ipv4_dns_address))
+}
+
+fn is_synthetic_dns_socket(
+    target: SocketAddr,
+    ipv4_dns_address: Option<std::net::Ipv4Addr>,
+) -> bool {
+    matches!(target, SocketAddr::V4(target) if target.port() == 53 && Some(*target.ip()) == ipv4_dns_address)
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU16;
@@ -446,19 +499,28 @@ mod tests {
         };
         let target = TargetAddr::ip("192.0.2.1:53".parse().expect("target")).expect("target");
         let metrics = ferrum2_observability::Metrics::new();
-        let (_, bound) = select_udp_terminal(&routing, 0, &target, b"first", 1_392, &metrics)
+        let (_, bound) = select_udp_terminal(&routing, 0, None, &target, b"first", 1_392, &metrics)
             .expect("first selector snapshot");
         assert!(
-            select_udp_terminal(&routing, 0, &target, &vec![0; bound + 1], 1_392, &metrics)
-                .is_none(),
+            select_udp_terminal(
+                &routing,
+                0,
+                None,
+                &target,
+                &vec![0; bound + 1],
+                1_392,
+                &metrics,
+            )
+            .is_none(),
             "selected-plan maximum+1 creates no terminal token"
         );
 
         selector
             .switch("manual", "c-d")
             .expect("switch after rejected candidate");
-        let (terminal, _) = select_udp_terminal(&routing, 0, &target, b"valid", 1_392, &metrics)
-            .expect("current selector after no-commit");
+        let (terminal, _) =
+            select_udp_terminal(&routing, 0, None, &target, b"valid", 1_392, &metrics)
+                .expect("current selector after no-commit");
         let TunUdpTerminal::Route(snapshot) = terminal else {
             panic!("route terminal");
         };
@@ -506,9 +568,16 @@ mod tests {
             .await
             .expect("direct TUN UDP target");
         let target = TargetAddr::ip(echo.local_addr().unwrap()).unwrap();
-        let (terminal, bound) =
-            select_udp_terminal(&routing, 0, &target, b"tun-direct", 1_392, &Metrics::new())
-                .expect("direct TUN UDP selection");
+        let (terminal, bound) = select_udp_terminal(
+            &routing,
+            0,
+            None,
+            &target,
+            b"tun-direct",
+            1_392,
+            &Metrics::new(),
+        )
+        .expect("direct TUN UDP selection");
         assert_eq!(bound, 1_392, "Direct does not subtract SIP022 overhead");
         let TunUdpTerminal::Route(direct) = terminal else {
             panic!("direct route terminal");
@@ -568,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn tun_dns_and_reject_are_client_owned_terminal_modes_without_route_fallback() {
+    fn tun_auto_dns_and_explicit_terminals_precede_ordinary_route_fallback() {
         let (path, _) = client_test_config(reserve_address(), reserve_address());
         std::fs::write(
             &path,
@@ -624,7 +693,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         for (address, expected) in [("192.0.2.53:53", "dns"), ("192.0.2.54:53", "reject")] {
             let target = TargetAddr::ip(address.parse().expect("target")).expect("target");
             let (terminal, bound) =
-                select_udp_terminal(&routing, inbound, &target, b"query", 1_392, &metrics)
+                select_udp_terminal(&routing, inbound, None, &target, b"query", 1_392, &metrics)
                     .expect("terminal mode");
             assert_eq!(bound, 1_392);
             assert!(
@@ -633,6 +702,26 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                     (TunUdpTerminal::HijackDns, "dns") | (TunUdpTerminal::Reject, "reject")
                 ),
                 "ordinary route fallback did not replace the terminal mode"
+            );
+        }
+
+        let synthetic = Ipv4Addr::new(198, 18, 0, 1);
+        for (target, configured, hijacked) in [
+            ("198.18.0.1:53", Some(synthetic), true),
+            ("198.18.0.1:54", Some(synthetic), false),
+            ("198.18.0.2:53", Some(synthetic), false),
+            ("198.18.0.1:53", None, false),
+            ("[fd00::1]:53", Some(synthetic), false),
+        ] {
+            let target = TargetAddr::ip(target.parse().unwrap()).unwrap();
+            let (terminal, _) = select_udp_terminal(
+                &routing, inbound, configured, &target, b"query", 1_392, &metrics,
+            )
+            .expect("bounded synthetic candidate");
+            assert_eq!(
+                matches!(terminal, TunUdpTerminal::HijackDns),
+                hijacked,
+                "synthetic target {target:?}"
             );
         }
     }
@@ -661,7 +750,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     }
 
     #[tokio::test]
-    async fn tun_tcp_dns_answer_failure_closes_flow_without_route_or_fallback_attempt() {
+    async fn tun_auto_dns_tcp_answer_failure_closes_flow_before_ordinary_route() {
         let fallback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("fallback listener");
@@ -689,12 +778,6 @@ tag = "fallback"
 server = "{fallback_address}"
 [route]
 final = "fallback"
-[[route.rules]]
-inbound = "tun-in"
-network = "tcp"
-ip = "192.0.2.53"
-port = 53
-action = "hijack-dns"
 [dns]
 [[dns.inbounds]]
 tag = "dns-control"
@@ -794,6 +877,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             Arc::clone(&context),
             routing,
             0,
+            Some(Ipv4Addr::new(192, 0, 2, 53)),
         )
         .await;
         assert_eq!(peer.read(&mut [0; 1]).await.expect("terminal close"), 0);
@@ -866,6 +950,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             direct_context,
             direct_routing,
             0,
+            None,
         ));
         peer.write_all(b"tun-direct")
             .await
