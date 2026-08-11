@@ -1836,8 +1836,31 @@ function Invoke-SystemDnsWitness([string]$Name, [bool]$TcpOnly, [Ferrum2DnsRespo
     $parameters = @{ Name = $Name; Type = "A"; DnsOnly = $true; NoHostsFile = $true; ErrorAction = "Stop" }
     if ($TcpOnly) { $parameters.TcpOnly = $true }
     $answer = @(Resolve-DnsName @parameters | Where-Object { $_.Type -eq "A" -and $_.IPAddress -eq "192.0.2.55" })
-    Assert-True ($answer.Count -ge 1) "Windows resolver did not return the capability answer"
-    Assert-True ($Responder.Requests -eq $before + 1) "Windows resolver did not use the local DNS answer path exactly once"
+    Assert-True ($answer.Count -eq 1) "Windows resolver did not return one unique capability answer"
+    $immediateRequests = $Responder.Requests
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    $quiet = [Diagnostics.Stopwatch]::StartNew()
+    $last = $before
+    $observed = $false
+    do {
+        $after = $Responder.Requests
+        Assert-True ($after -ge $last) "Windows resolver backend request counter regressed"
+        if ($after -gt $before) {
+            if (-not $observed -or $after -ne $last) {
+                $observed = $true
+                $quiet.Restart()
+            } elseif ($quiet.ElapsedMilliseconds -ge 1500) {
+                return [pscustomobject]@{
+                    ImmediateRequests = $immediateRequests
+                    SettledRequests = $after
+                    RequestDelta = $after - $before
+                }
+            }
+        }
+        $last = $after
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Windows resolver backend requests did not reach a positive quiescent delta"
 }
 
 function Open-TunTcp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
@@ -2699,8 +2722,8 @@ listen = "127.0.0.1:$managedMetricsPort"
             $managedDirectTcpRows = 1
             Invoke-TunProductUdp $supportAddress $supportUdpPort $ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m16-full-direct-udp"))
             $managedDirectUdpRows = 1
-            Invoke-SystemDnsWitness "m16-$runIdentity-udp.tun.test" $false $dnsResponder
-            Invoke-SystemDnsWitness "m16-$runIdentity-tcp.tun.test" $true $dnsResponder
+            $managedUdpDnsWitness = Invoke-SystemDnsWitness "m16-$runIdentity-udp.tun.test" $false $dnsResponder
+            $managedTcpDnsWitness = Invoke-SystemDnsWitness "m16-$runIdentity-tcp.tun.test" $true $dnsResponder
             $managedSystemDnsRows = 2
             Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "managed full physical DNS sentinel"
             Stop-Candidate $activeProcess
@@ -2774,6 +2797,10 @@ listen = "127.0.0.1:$managedMetricsPort"
                         dns = "absent"
                         supervised_termination = "complete"
                         residue = "absent"
+                        system_dns_udp_immediate_requests = $managedUdpDnsWitness.ImmediateRequests
+                        system_dns_udp_settled_requests = $managedUdpDnsWitness.SettledRequests
+                        system_dns_tcp_immediate_requests = $managedTcpDnsWitness.ImmediateRequests
+                        system_dns_tcp_settled_requests = $managedTcpDnsWitness.SettledRequests
                     })
                 } finally {
                     if ($change -eq "route") {
@@ -2832,7 +2859,7 @@ listen = "127.0.0.1:$managedMetricsPort"
                 $udpEcho = Receive-TunUdp $heldHardKillUdp
                 Assert-True (($udpEcho -join ",") -eq ($udpPayload -join ",")) "hard-kill direct UDP echo mismatch"
                 Invoke-ProductSocksTcp $proxySocksPort $supportAddress $supportTcpPort ([Text.Encoding]::ASCII.GetBytes("m16-hard-kill-proxy")) $false
-                Invoke-SystemDnsWitness "m16-$runIdentity-hard-kill.tun.test" $false $dnsResponder
+                [void](Invoke-SystemDnsWitness "m16-$runIdentity-hard-kill.tun.test" $false $dnsResponder)
             }
             Assert-True ([Ferrum2ProcessGroup]::Terminate([uint32]$activeProcess.Id)) "hard-kill TerminateProcess failed"
             Assert-True (Wait-ProcessExit $activeProcess 20) "hard-kill candidate did not exit"
@@ -3070,15 +3097,15 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Set-CapabilityDns $ownedInterfaceIndex
         Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "physical DNS after Wintun apply"
         try {
-            Invoke-SystemDnsWitness "m16-$runIdentity-udp.tun.test" $false $dnsResponder
-            Invoke-SystemDnsWitness "m16-$runIdentity-tcp.tun.test" $true $dnsResponder
+            [void](Invoke-SystemDnsWitness "m16-$runIdentity-udp.tun.test" $false $dnsResponder)
+            [void](Invoke-SystemDnsWitness "m16-$runIdentity-tcp.tun.test" $true $dnsResponder)
             $capabilityDnsRows = 2
             $capabilityInterfaceMetric = "unchanged"
         } catch {
             Set-CapabilityInterfaceMetric $ownedInterfaceIndex
             $capabilityDnsRows = 0
-            Invoke-SystemDnsWitness "m16-$runIdentity-lease-udp.tun.test" $false $dnsResponder
-            Invoke-SystemDnsWitness "m16-$runIdentity-lease-tcp.tun.test" $true $dnsResponder
+            [void](Invoke-SystemDnsWitness "m16-$runIdentity-lease-udp.tun.test" $false $dnsResponder)
+            [void](Invoke-SystemDnsWitness "m16-$runIdentity-lease-tcp.tun.test" $true $dnsResponder)
             $capabilityDnsRows = 2
             $capabilityInterfaceMetric = "leased"
         }

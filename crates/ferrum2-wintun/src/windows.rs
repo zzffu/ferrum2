@@ -1117,21 +1117,21 @@ fn read_ipv4_dns_settings(interface: GUID) -> Result<Ipv4DnsSettings, Error> {
     result
 }
 
-fn set_ipv4_dns_settings(interface: GUID, settings: &Ipv4DnsSettings) -> Result<(), Error> {
-    let mut name_server = settings.0.as_ref().map(|value| {
-        let mut terminated = Vec::with_capacity(value.len() + 1);
-        terminated.extend_from_slice(value);
-        terminated.push(0);
-        terminated
-    });
+fn ipv4_dns_settings_input(settings: &Ipv4DnsSettings) -> (Box<[u16]>, DNS_INTERFACE_SETTINGS) {
+    let mut name_server = settings.0.as_deref().unwrap_or_default().to_vec();
+    name_server.push(0);
+    let mut name_server = name_server.into_boxed_slice();
     let raw = DNS_INTERFACE_SETTINGS {
         Version: DNS_INTERFACE_SETTINGS_VERSION1,
         Flags: u64::from(DNS_SETTING_NAMESERVER),
-        NameServer: name_server
-            .as_mut()
-            .map_or(null_mut(), |value| value.as_mut_ptr()),
+        NameServer: name_server.as_mut_ptr(),
         ..DNS_INTERFACE_SETTINGS::default()
     };
+    (name_server, raw)
+}
+
+fn set_ipv4_dns_settings(interface: GUID, settings: &Ipv4DnsSettings) -> Result<(), Error> {
+    let (_name_server, raw) = ipv4_dns_settings_input(settings);
     if unsafe { SetInterfaceDnsSettings(interface, &raw) } == ERROR_SUCCESS {
         Ok(())
     } else {
@@ -2277,22 +2277,22 @@ fn wide(path: &Path) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ABI_EXPORTS, AdapterCreateFailure, CleanupOperations, DLL_BYTES, DLL_SHA256, DadProgress,
-        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, Error, InterfaceIdentity, IpDadStateDeprecated,
-        IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative,
-        LoaderOperations, MIB_IF_ROW2, MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW,
-        MIB_UNICASTIPADDRESS_ROW, ManagedDnsOperations, ManagedRouteCleanupOperations,
-        ManagedRouteOperations, ManagedRouteRead, NET_LUID_LH, NotificationContext,
-        NotificationOwners, RouteFingerprint, SessionJournal, SetupOperations, UnderlayOperations,
-        address_changed, cancel_notification_handles, capture_route_row,
+        ABI_EXPORTS, AdapterCreateFailure, CleanupOperations, DLL_BYTES, DLL_SHA256,
+        DNS_SETTING_NAMESERVER, DadProgress, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, Error,
+        InterfaceIdentity, IpDadStateDeprecated, IpDadStateDuplicate, IpDadStateInvalid,
+        IpDadStatePreferred, IpDadStateTentative, Ipv4DnsSettings, LoaderOperations, MIB_IF_ROW2,
+        MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, ManagedDnsOperations,
+        ManagedRouteCleanupOperations, ManagedRouteOperations, ManagedRouteRead, NET_LUID_LH,
+        NotificationContext, NotificationOwners, RouteFingerprint, SessionJournal, SetupOperations,
+        UnderlayOperations, address_changed, cancel_notification_handles, capture_route_row,
         classify_adapter_create_failure, classify_notification_luid, cleanup_transaction,
         copy_bounded_wide, dad_snapshot, delete_managed_route, eligible_interface_identity,
         finish_setup_transaction, install_managed_dns, install_managed_routes, interface_changed,
-        interface_index_option_value, leak_notification_owners, load_transaction,
-        prepare_managed_intent, require_exports, restore_managed_dns, revalidate_managed_network,
-        route_changed, route_matches, select_unique_default_route, setup_transaction,
-        snapshot_underlay_with, subscribe_notification_sequence, take_last_owned_route,
-        underlay_matches_with, underlay_snapshot_matches, validate_artifact,
+        interface_index_option_value, ipv4_dns_settings_input, leak_notification_owners,
+        load_transaction, prepare_managed_intent, require_exports, restore_managed_dns,
+        revalidate_managed_network, route_changed, route_matches, select_unique_default_route,
+        setup_transaction, snapshot_underlay_with, subscribe_notification_sequence,
+        take_last_owned_route, underlay_matches_with, underlay_snapshot_matches, validate_artifact,
     };
     use crate::Ipv4Prefix;
 
@@ -3657,6 +3657,20 @@ mod tests {
             injected.fail_at = failure;
             injected.replace_on_read = replacement;
             assert!(restore_managed_dns(&mut injected, lease.as_ref().unwrap()));
+        }
+
+        for (settings, expected) in [
+            (Ipv4DnsSettings(None), &[0_u16][..]),
+            (
+                Ipv4DnsSettings(Some(Box::from([b'1' as u16, b'.' as u16, b'1' as u16]))),
+                &[b'1' as u16, b'.' as u16, b'1' as u16, 0][..],
+            ),
+        ] {
+            let (name_server, raw) = ipv4_dns_settings_input(&settings);
+            assert_eq!(raw.Flags, u64::from(DNS_SETTING_NAMESERVER));
+            assert!(!raw.NameServer.is_null());
+            assert_eq!(raw.NameServer, name_server.as_ptr().cast_mut());
+            assert_eq!(name_server.as_ref(), expected);
         }
 
         assert_eq!(copy_bounded_wide(std::ptr::null_mut()).unwrap(), None);

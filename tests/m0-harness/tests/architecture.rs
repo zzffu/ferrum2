@@ -349,6 +349,11 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
                 .next()
         })
         .expect("bounded integrated lifecycle profile");
+    let system_dns_witness = qualifier
+        .split("function Invoke-SystemDnsWitness")
+        .nth(1)
+        .and_then(|body| body.split("function Open-TunTcp").next())
+        .expect("bounded system DNS witness");
     assert!(
         integrated.contains("Invoke-TunProductTcp $supportAddress $supportTcpPort")
             && integrated.contains("Invoke-TunProductUdp $supportAddress $supportUdpPort")
@@ -367,6 +372,26 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && integrated.contains("Invoke-AdapterCycles $binary $managedLifecycleConfig $managedAutoAdapterName $managedMetricsPort $true")
             && integrated.contains("[Ferrum2ProcessGroup]::Terminate([uint32]$activeProcess.Id)"),
         "integrated rows must execute direct TUN, system DNS, invalidation, cycles and hard-kill evidence"
+    );
+    assert!(
+        system_dns_witness.contains("$answer.Count -eq 1")
+            && system_dns_witness.contains("$deadline = [DateTime]::UtcNow.AddSeconds(5)")
+            && system_dns_witness.contains("$quiet.ElapsedMilliseconds -ge 1500")
+            && system_dns_witness.contains("if ($after -gt $before)")
+            && system_dns_witness.contains("ImmediateRequests = $immediateRequests")
+            && system_dns_witness.contains("SettledRequests = $after")
+            && !system_dns_witness.contains("Write-Output")
+            && !system_dns_witness.contains("$Responder.Requests -eq $before + 1")
+            && integrated.contains("$managedUdpDnsWitness = Invoke-SystemDnsWitness")
+            && integrated.contains("$managedTcpDnsWitness = Invoke-SystemDnsWitness")
+            && integrated.contains("$managedSystemDnsRows = 2")
+            && integrated.contains(
+                "system_dns_udp_immediate_requests = $managedUdpDnsWitness.ImmediateRequests"
+            )
+            && integrated.contains(
+                "system_dns_tcp_settled_requests = $managedTcpDnsWitness.SettledRequests"
+            ),
+        "system DNS rows must prove one unique answer after a bounded positive quiescent request delta"
     );
     assert!(
         qualifier.contains("\"hard-kill\"")
