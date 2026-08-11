@@ -421,7 +421,12 @@ function Get-PeExportNames([byte[]]$Bytes) {
     }
 }
 
-function Wait-AdapterReady([string]$Name, [int]$TimeoutSeconds = 20, [bool]$Managed = $false) {
+function Wait-AdapterReady(
+    [string]$Name,
+    [int]$TimeoutSeconds = 20,
+    [bool]$Managed = $false,
+    [bool]$ManagedDns = $false
+) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         if ($script:activeProcess) {
@@ -441,10 +446,13 @@ function Wait-AdapterReady([string]$Name, [int]$TimeoutSeconds = 20, [bool]$Mana
                         Sort-Object DestinationPrefix |
                         ForEach-Object { $_.DestinationPrefix }
                 )
-                $dnsRows = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue)
-                $dnsAddresses = @($dnsRows.ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-                if (($capturePrefixes -join "|") -ceq "0.0.0.0/1|128.0.0.0/1" -and
-                    ($dnsAddresses -join "|") -ceq "198.18.0.1") {
+                $dnsReady = -not $ManagedDns
+                if ($ManagedDns) {
+                    $dnsRows = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+                    $dnsAddresses = @($dnsRows.ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    $dnsReady = ($dnsAddresses -join "|") -ceq "198.18.0.1"
+                }
+                if (($capturePrefixes -join "|") -ceq "0.0.0.0/1|128.0.0.0/1" -and $dnsReady) {
                     try {
                         $finalCapturePrefixes = @(
                             Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
@@ -452,9 +460,11 @@ function Wait-AdapterReady([string]$Name, [int]$TimeoutSeconds = 20, [bool]$Mana
                                 Sort-Object DestinationPrefix |
                                 ForEach-Object { $_.DestinationPrefix }
                         )
-                        $finalDnsAddresses = @(Get-TunIpv4Dns $adapter.ifIndex)
                         Assert-SnapshotEqual @("0.0.0.0/1", "128.0.0.0/1") $finalCapturePrefixes "managed state readiness capture"
-                        Assert-SnapshotEqual @("198.18.0.1") $finalDnsAddresses "managed state readiness DNS"
+                        if ($ManagedDns) {
+                            $finalDnsAddresses = @(Get-TunIpv4Dns $adapter.ifIndex)
+                            Assert-SnapshotEqual @("198.18.0.1") $finalDnsAddresses "managed state readiness DNS"
+                        }
                     } catch { throw "managed state readiness readback failed" }
                     if ($script:activeProcess) {
                         $script:activeProcess.Refresh()
@@ -2243,6 +2253,9 @@ function Invoke-AdapterCycles(
         Assert-True ($candidateAfterStop.Count -eq 0) "cycle candidate remained after stop"
         Wait-AdapterAbsent $ExpectedAdapter
         Assert-InterfaceGone $ExpectedAdapter $script:ownedInterfaceIndex
+        if ($Managed) {
+            Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $script:ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "managed cycle DNS residue"
+        }
         $script:cycleRows++
     }
     Assert-True ($script:cycleRows -eq 100) "adapter cycle count mismatch"
@@ -2717,7 +2730,7 @@ listen = "127.0.0.1:$managedMetricsPort"
 
         if ($Mode -eq "full") {
             $activeProcess = Start-Candidate $binary $managedLifecycleConfig
-            $adapter = Wait-AdapterReady $managedAutoAdapterName
+            $adapter = Wait-AdapterReady $managedAutoAdapterName 20 $true $true
             $ownedInterfaceIndex = [int]$adapter.ifIndex
             [void](Get-Metrics $managedMetricsPort)
             Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $ownedInterfaceIndex) "managed full DNS steering"
@@ -2739,7 +2752,7 @@ listen = "127.0.0.1:$managedMetricsPort"
             Assert-InterfaceGone $managedAutoAdapterName $ownedInterfaceIndex
             Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "managed full graceful DNS residue"
 
-            Invoke-AdapterCycles $binary $managedLifecycleConfig $managedAutoAdapterName $managedMetricsPort $true
+            Invoke-AdapterCycles $binary $managedRouteOnlyConfig $managedAutoAdapterName $managedMetricsPort $true
 
             foreach ($change in @("route", "interface", "address")) {
                 $physicalDefault = Get-Ipv4DefaultUnderlay
@@ -2751,7 +2764,7 @@ listen = "127.0.0.1:$managedMetricsPort"
                 $skipAsSource = [bool]$sourceRow.SkipAsSource
 
                 $activeProcess = Start-Candidate $binary $managedLifecycleConfig
-                $adapter = Wait-AdapterReady $managedAutoAdapterName
+                $adapter = Wait-AdapterReady $managedAutoAdapterName 20 $true $true
                 $ownedInterfaceIndex = [int]$adapter.ifIndex
                 Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $ownedInterfaceIndex) "network-change DNS active"
                 try {
@@ -2843,7 +2856,7 @@ listen = "127.0.0.1:$managedMetricsPort"
             $heldHardKillTcp = $null
             $heldHardKillUdp = $null
             $activeProcess = Start-Candidate $binary $hardKill.Config
-            $adapter = Wait-AdapterReady $managedAutoAdapterName
+            $adapter = Wait-AdapterReady $managedAutoAdapterName 20 $true ($hardKill.Config -eq $managedLifecycleConfig)
             $ownedInterfaceIndex = [int]$adapter.ifIndex
             if ($hardKill.Config -eq $managedLifecycleConfig) {
                 Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $ownedInterfaceIndex) "hard-kill DNS active"

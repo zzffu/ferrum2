@@ -384,7 +384,8 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && integrated.contains("$captureRemaining -eq 0 -and $dnsRemaining -eq 0")
             && integrated.contains("$admissionRejected")
             && integrated.contains("[Ferrum2ProcessGroup]::ExitCode([uint32]$activeProcess.Id) -ne 0")
-            && integrated.contains("Invoke-AdapterCycles $binary $managedLifecycleConfig $managedAutoAdapterName $managedMetricsPort $true")
+            && integrated.contains("Invoke-AdapterCycles $binary $managedRouteOnlyConfig $managedAutoAdapterName $managedMetricsPort $true")
+            && !integrated.contains("Invoke-AdapterCycles $binary $managedLifecycleConfig")
             && integrated.contains("[Ferrum2ProcessGroup]::Terminate([uint32]$activeProcess.Id)"),
         "integrated rows must execute direct TUN, system DNS, invalidation, cycles and hard-kill evidence"
     );
@@ -419,13 +420,17 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
     );
     assert!(
         adapter_readiness.contains("[bool]$Managed = $false")
+            && adapter_readiness.contains("[bool]$ManagedDns = $false")
             && adapter_readiness
                 .contains("$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)")
             && adapter_readiness.contains("Start-Sleep -Milliseconds 100")
             && adapter_readiness.contains("while ([DateTime]::UtcNow -lt $deadline)")
             && adapter_readiness
                 .contains("($capturePrefixes -join \"|\") -ceq \"0.0.0.0/1|128.0.0.0/1\"",)
+            && adapter_readiness.contains("$dnsReady = -not $ManagedDns")
+            && adapter_readiness.contains("if ($ManagedDns) {")
             && adapter_readiness.contains("($dnsAddresses -join \"|\") -ceq \"198.18.0.1\"")
+            && adapter_readiness.contains("$dnsReady")
             && adapter_readiness.contains("$finalCapturePrefixes")
             && adapter_readiness.contains("-ErrorAction Stop")
             && adapter_readiness
@@ -441,6 +446,7 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && !adapter_readiness.contains("throw \"managed state readiness readback failed:")
             && !adapter_readiness.contains("throw \"managed state readiness timeout:")
             && adapter_cycles.contains("Wait-AdapterReady $ExpectedAdapter 20 $Managed")
+            && adapter_cycles.contains("managed cycle DNS residue")
             && !adapter_cycles.contains("managed cycle capture route mismatch"),
         "managed cycles must await exact capture and DNS state through one bounded process-aware readiness seam"
     );
@@ -456,6 +462,20 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
                 < managed_cycle_metrics.find("Get-Metrics").unwrap()
             && !adapter_cycles.contains("$MetricsPort.Value"),
         "managed cycles must reject a null metrics port and pass the concrete PowerShell integer directly"
+    );
+    assert!(
+        integrated
+            .matches("Wait-AdapterReady $managedAutoAdapterName 20 $true $true")
+            .count()
+            == 2
+            && integrated.contains(
+                "Wait-AdapterReady $managedAutoAdapterName 20 $true ($hardKill.Config -eq $managedLifecycleConfig)",
+            )
+            && integrated.contains("managed full DNS steering")
+            && integrated.contains("managed full graceful DNS residue")
+            && integrated.contains("network-change DNS active")
+            && integrated.contains("hard-kill DNS active"),
+        "route-only owner cycles must retain independent managed DNS activation, invalidation and cleanup evidence"
     );
     assert!(
         qualifier.contains("\"hard-kill\"")
