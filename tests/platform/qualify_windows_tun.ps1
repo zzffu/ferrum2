@@ -2624,6 +2624,9 @@ idle_timeout_ms = 60000
 [dns]
 timeout_ms = 1000
 max_inflight = 8
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "127.0.0.1:$managedDnsPort"
 [[dns.servers]]
 tag = "resolver"
 transport = "udp"

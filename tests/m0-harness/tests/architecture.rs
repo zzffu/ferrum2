@@ -353,6 +353,10 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         integrated.contains("Invoke-TunProductTcp $supportAddress $supportTcpPort")
             && integrated.contains("Invoke-TunProductUdp $supportAddress $supportUdpPort")
             && integrated.matches("Invoke-SystemDnsWitness").count() == 3
+            && integrated.contains("[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:$managedDnsPort\"")
+            && integrated.matches("[[dns.inbounds]]").count() == 1
+            && integrated.contains("foreach ($managedConfig in @($managedLifecycleConfig, $managedRouteOnlyConfig))")
+            && integrated.contains("& $binary --config $managedConfig --check-config")
             && integrated.contains("foreach ($change in @(\"route\", \"interface\", \"address\"))")
             && integrated.contains("Set-NetRoute -InputObject $physicalRoute")
             && integrated.contains("Disable-NetAdapter -InputObject $physicalAdapter")
