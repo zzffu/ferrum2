@@ -2033,9 +2033,23 @@ mod tests {
                         ))
                         .unwrap();
                 });
-                let early = publisher_rx
-                    .recv_timeout(std::time::Duration::from_millis(100))
-                    .ok();
+                let publication_deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(1);
+                while context.owned_luid.load(std::sync::atomic::Ordering::SeqCst) != OWN_LUID {
+                    assert!(
+                        std::time::Instant::now() < publication_deadline,
+                        "publisher did not publish owner before callback release"
+                    );
+                    std::thread::yield_now();
+                }
+                std::thread::yield_now();
+                let early = match publisher_rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("publisher result channel disconnected")
+                    }
+                };
                 release.wait();
                 callback.join().unwrap();
                 publisher.join().unwrap();
