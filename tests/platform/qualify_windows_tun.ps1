@@ -493,7 +493,7 @@ function Wait-AdapterAbsent([string]$Name, [int]$TimeoutSeconds = 20, [int]$Requ
             $absent = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop |
                 Where-Object { $_.Name -ceq $Name }).Count -eq 0 -and
                 @(Get-CimInstance Win32_NetworkAdapter -ErrorAction Stop |
-                    Where-Object { $_.NetConnectionID -ceq $Name }).Count -eq 0
+                    Where-Object { $_.PNPDeviceID -like 'SWD\Wintun\*' }).Count -eq 0
         } catch { $absent = $false }
         if ($absent) { $stableSamples++ }
         else { $stableSamples = 0 }

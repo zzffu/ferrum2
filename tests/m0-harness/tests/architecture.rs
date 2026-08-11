@@ -599,7 +599,7 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && body.contains("$stableSamples = 0")
             && body.contains("Get-NetAdapter -IncludeHidden -ErrorAction Stop")
             && body.contains("Get-CimInstance Win32_NetworkAdapter -ErrorAction Stop")
-            && body.contains("Where-Object { $_.NetConnectionID -ceq $Name }")
+            && body.contains("Where-Object { $_.PNPDeviceID -like 'SWD\\Wintun\\*' }")
             && body.contains("catch { $absent = $false }")
             && body.contains("if ($absent) { $stableSamples++ }")
             && body.contains("else { $stableSamples = 0 }")
