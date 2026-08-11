@@ -250,8 +250,8 @@ non-Cartesian private MemoryDevice/binary composition note；targeted QA returne
 Clippy `-D warnings`、format、diff and hook pass。One first parallel full-client attempt hit existing Windows UDP bind
 `WSAEACCES 10013`；the isolated row and credited serial `53/53` rerun passed with zero process residue。
 Footprint integrity passes；numeric `REVIEW_REQUIRED` is accepted for necessary existing-seam evidence at
-code/tests `30340/52323`、ratio `1.724555 PASS`、case/support/fixture `46574/5152/597`、ticket deltas
-`+1132/0/0` and code growth `+244`，with no support/fixture/new harness。
+code/tests `30341/52324`、ratio `1.724531 PASS`、case/support/fixture `46575/5152/597`、ticket deltas
+`+1133/0/0` and code growth `+245`，with no support/fixture/new harness。
 
 The first T02 non-force push moved `master` from `5630cf4…` to `5782c08…` with exact remote readback。
 Automatic push run `31443577764/1` is preserved as failed and was not rerun。MSRV、interop、test-footprint、
@@ -262,16 +262,27 @@ second failure。A subsequent required non-force push integrated final T02 desce
 with exact remote readback。Automatic run `31445081351/1` on exact `bf0a3cb…` completed SUCCESS：quality、
 MSRV、interop、test-footprint、Linux GNU、Linux musl、Windows MSVC、Windows TUN E2E and qualification all
 passed；push-event performance and Windows TUN performance skipped as designed。T03 repair `9f05d94…` remains
-local and is not claimed integrated、pushed or hosted-PASS。The user
-explicitly authorizes required future non-force pushes，including performance-related
-pushes。This does not authorize workflow dispatch or rerun、force-push、PR、tag、package、release or publication
-without separate explicit authority。Every remote action must still bind its accepted exact SHA。
+the accepted product repair before hosted validation。Its first authorized push placed closeout descendant
+`52beb463…` on `master`，but automatic run `31454190132/1` failed solely because quality Linux Clippy found
+the Windows-only `DirectIpv6Unsupported` variant declared unconditionally；qualification was derivative with
+`QUALITY_RESULT=failure`，while all other substantive jobs passed。The run is preserved and was not rerun。
+Root's exact two-file `+4/-2` portability repair `85bf3fcc2a12bc1aaa2753bf56023c7850c25d2f`（tree
+`535faddde4d020681655528c3c9eedbd170eb1b4`，parent `52beb463…`）cfg-gates the variant and SOCKS arm。
+Architect and QA each returned `PASS_WITH_NOTES` with `0/0/0` and one note that local Linux cross-Clippy was
+unavailable；local Direct `4/4`、full client serial `53/53`、architecture `19/19`、workspace check/Clippy、
+format、diff and hook passed。An ordinary authorized push advanced `master` from `52beb463…` to `85bf3fcc…`
+with exact readback；replacement automatic run `31454813712/1` completed SUCCESS with quality、qualification、
+interop、test-footprint、MSRV、Linux GNU/musl、Windows MSVC and Windows TUN E2E all passing。Push-event
+performance jobs skipped by design and are not claimed。The user explicitly authorizes required future
+non-force pushes，including performance-related pushes。This does not authorize workflow dispatch or rerun、
+force-push、PR、tag、package、release or publication without separate explicit authority。Every remote action
+must still bind its accepted exact SHA。
 
 ## Blocker / next action
 
-M16-T03 is done on final local repaired candidate `9f05d94fb143bc37728c7386a628b1216d8c4106`。Initial
+M16-T03 is done on final hosted product `85bf3fcc2a12bc1aaa2753bf56023c7850c25d2f`。Initial
 `M16-T03-ARCH-001` and `QA-M16-T03-001` are closed；final targeted Architect/QA report zero blocker/major/
 minor。M16-T04 is ready and is the current serial frontier；it owns managed capture and physical socket binding
 that T03 deliberately did not implement。The failed `31443577764/1` was not rerun；final T02
-`master@bf0a3cb…` and automatic `31445081351/1` are hosted PASS。T03 `9f05d94…` remains local and is not
-claimed integrated、pushed or hosted-PASS。
+`master@bf0a3cb…` and automatic `31445081351/1` are hosted PASS。T03 failed run `31454190132/1` was not
+rerun；replacement `master@85bf3fcc…` and automatic `31454813712/1` are hosted PASS。

@@ -88,18 +88,33 @@ git diff --check <accepted-M16-T02-sha>..<candidate-sha>
 - Targeted review: Architect `PASS` with `0/0/0` and one accepted note that the non-Cartesian private
   MemoryDevice/binary composition proof is the correct boundary；QA `PASS_WITH_NOTES` with `0/0/0` and only
   the accepted footprint note。Both prior minor findings are closed。
+- The first authorized push placed docs-closeout descendant `52beb46368e9baebb1b9757b3d07b446a2d9fab3`
+  on `master`。Automatic run `31454190132/1` is preserved failed and was not rerun：quality alone failed on
+  Linux Clippy because the Windows-only `DirectIpv6Unsupported` construction left its enum variant
+  unconditional；qualification then failed derivatively with `QUALITY_RESULT=failure`，while every other
+  substantive job passed。
+- Root diagnosed this as a test/gate portability issue。Exact repair
+  `85bf3fcc2a12bc1aaa2753bf56023c7850c25d2f`（tree
+  `535faddde4d020681655528c3c9eedbd170eb1b4`，parent `52beb463…`）changes exactly two client files、
+  `+4/-2`，cfg-gating the variant and its exhaustive SOCKS arm without changing behavior。Architect and QA
+  both returned `PASS_WITH_NOTES` with `0/0/0` and one note each：the local Windows host lacked the Linux
+  cross-Clippy C toolchain，so hosted Linux Clippy remained authoritative。
 - Validation: runtime `direct_` `4`；client `direct_` `4`、`direct_udp` `1`、`direct_tcp` `1`、DNS `7`、
   redaction `1`；full `ferrum2-tun` `15`；full client serial `53`；Direct TCP/UDP real-process E2E `1+1`；
   architecture `19`；workspace all-target check、workspace Clippy `-D warnings`、format、diff and normal hook
   all PASS。The first parallel full-client attempt hit a transient existing Windows UDP bind `WSAEACCES 10013`；
   its row then passed in isolation and the credited serial full run passed `53/53` with zero client/server/
-  Cargo/Rust residue。
+  Cargo/Rust residue。The portability repair retained Direct `4/4`、full client serial `53/53` and architecture
+  `19/19`，and passed local workspace check、workspace Clippy `-D warnings`、format、diff and normal hook。
 - Footprint: integrity PASS；numeric `REVIEW_REQUIRED` is accepted for necessary mutation-sensitive evidence
-  in existing seams，with no support/fixture/new harness。Code/tests `30340/52323`，ratio `1.724555 PASS`，
-  case/support/fixture `46574/5152/597`，ticket deltas `+1132/0/0` and code growth `+244`。
-- Remote boundary: this local closeout does not claim `9f05d94…` integrated、pushed or hosted-PASS。Required
-  future non-force pushes，including performance-related pushes，remain authorized；dispatch/rerun、force-push、
-  PR、tag、package、release and publication remain unauthorized without separate explicit authority。
+  in existing seams，with no support/fixture/new harness。Final code/tests `30341/52324`，ratio
+  `1.724531 PASS`，case/support/fixture `46575/5152/597`，ticket deltas `+1133/0/0` and code growth `+245`。
+- Remote boundary: an ordinary authorized non-force push advanced `master` from `52beb463…` to `85bf3fcc…`
+  with exact readback。Replacement automatic run `31454813712/1` on exact `85bf3fcc…` completed SUCCESS：
+  quality、qualification、interop、test-footprint、MSRV、Linux GNU/musl、Windows MSVC and Windows TUN E2E
+  all passed；push-event performance jobs skipped by design and are not claimed。Required future non-force
+  pushes，including performance-related pushes，remain authorized；dispatch/rerun、force-push、PR、tag、
+  package、release and publication remain unauthorized without separate explicit authority。
 
 ## Rollback / risk
 
