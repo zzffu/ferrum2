@@ -362,18 +362,28 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
     let adapter_cycles = qualifier
         .split("function Invoke-AdapterCycles")
         .nth(1)
-        .and_then(|body| body.split("try {").next())
+        .and_then(|body| body.split("\n}\n\ntry {").next())
         .expect("bounded adapter cycles");
     let managed_cycle_metrics = adapter_cycles
         .split("if ($Managed) {")
         .nth(1)
         .and_then(|body| body.split('}').next())
         .expect("bounded managed cycle metrics");
+    let network_changes = integrated
+        .split("foreach ($change in @(\"route\", \"interface\", \"address\"))")
+        .nth(1)
+        .and_then(|body| body.split("Assert-True ($managedNetworkChangeRows").next())
+        .expect("bounded managed network changes");
+    let hard_kills = integrated
+        .split("foreach ($hardKill in @(")
+        .nth(1)
+        .and_then(|body| body.split("Assert-True ($managedHardKillRows").next())
+        .expect("bounded managed hard kills");
     assert!(
         integrated.contains("Invoke-TunProductTcp $supportAddress $supportTcpPort")
             && integrated.contains("Invoke-TunProductUdp $supportAddress $supportUdpPort")
             && integrated.matches("Invoke-SystemDnsWitness").count() == 3
-            && integrated.contains("[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:$managedDnsPort\"")
+            && integrated.contains("[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:$managedDnsInboundPort\"")
             && integrated.matches("[[dns.inbounds]]").count() == 1
             && integrated.contains("foreach ($managedConfig in @($managedLifecycleConfig, $managedRouteOnlyConfig))")
             && integrated.contains("& $binary --config $managedConfig --check-config")
@@ -455,22 +465,70 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && managed_cycle_metrics.contains(
                 "Assert-True ($null -ne $MetricsPort) \"managed cycles require metrics port\"",
             )
-            && managed_cycle_metrics.contains("$owners = Get-Metrics ([int]$MetricsPort)")
-            && managed_cycle_metrics
+            && managed_cycle_metrics.contains(
+                "Assert-True ($null -ne $SocksPort) \"managed cycles require SOCKS port\"",
+            )
+            && adapter_cycles
                 .find("managed cycles require metrics port")
                 .unwrap()
-                < managed_cycle_metrics.find("Get-Metrics").unwrap()
+                < adapter_cycles
+                    .find("Get-Metrics ([int]$cycleMetricsPort)")
+                    .unwrap()
             && !adapter_cycles.contains("$MetricsPort.Value"),
-        "managed cycles must reject a null metrics port and pass the concrete PowerShell integer directly"
+        "managed cycles must reject null listener ports and pass the fresh concrete metrics integer directly"
+    );
+    assert!(
+        adapter_cycles.contains("[Nullable[int]]$SocksPort = $null")
+            && adapter_cycles.contains("$cycleSocksPort = Get-UniqueTcpPort")
+            && adapter_cycles.contains("$cycleMetricsPort = Get-UniqueTcpPort")
+            && adapter_cycles.contains("client-managed-route-only-cycle-{0:D3}.toml")
+            && adapter_cycles.contains("$configurationTemplate.Replace(")
+            && adapter_cycles.contains("Set-Content -LiteralPath $cycleConfiguration")
+            && adapter_cycles.contains("& $Executable --config $cycleConfiguration --check-config")
+            && adapter_cycles.contains("Start-Candidate $Executable $cycleConfiguration")
+            && adapter_cycles.contains("Get-Metrics ([int]$cycleMetricsPort)")
+            && adapter_cycles.contains("managed cycle failure ordinal=$($cycle + 1)")
+            && adapter_cycles.contains("Remove-Item -LiteralPath $cycleConfiguration -Force")
+            && adapter_cycles.contains("managed cycle generated config leaked")
+            && !adapter_cycles.contains("Start-Candidate $Executable $Configuration")
+            && !adapter_cycles.contains("Get-Metrics ([int]$MetricsPort)"),
+        "managed owner cycles must validate, consume and remove one fresh-listener config per process"
+    );
+    assert!(
+        integrated.contains("$managedDnsInboundPort = Get-UniqueTcpPort")
+            && integrated.contains(
+                "[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:$managedDnsInboundPort\"",
+            )
+            && integrated.contains("address = \"${managedDnsAddress}:$managedDnsPort\"",)
+            && network_changes.matches("= Get-UniqueTcpPort").count() == 4
+            && network_changes.contains("client-managed-network-change-$change.toml")
+            && network_changes.contains("$managedLifecycleTemplate.Replace(")
+            && network_changes.contains("& $binary --config $changeConfiguration --check-config")
+            && network_changes.contains("Start-Candidate $binary $changeConfiguration")
+            && network_changes.contains("Open-ProductSocks $changeDirectSocksPort")
+            && network_changes.contains("Remove-Item -LiteralPath $changeConfiguration -Force")
+            && network_changes.contains("managed network-change generated config leaked")
+            && !network_changes.contains("Start-Candidate $binary $managedLifecycleConfig")
+            && hard_kills.contains("Dns = $false")
+            && hard_kills.matches("Dns = $true").count() == 2
+            && hard_kills.contains("client-managed-hard-kill-$($hardKill.Name).toml")
+            && hard_kills.contains("$managedLifecycleTemplate.Replace(")
+            && hard_kills.contains("$managedRouteOnlyTemplate.Replace(")
+            && hard_kills.contains("& $binary --config $hardKillConfiguration --check-config")
+            && hard_kills.contains("Start-Candidate $binary $hardKillConfiguration")
+            && hard_kills.contains("Invoke-ProductSocksTcp $hardKillProxySocksPort")
+            && hard_kills.contains("Remove-Item -LiteralPath $hardKillConfiguration -Force")
+            && hard_kills.contains("managed hard-kill generated config leaked")
+            && !hard_kills.contains("Start-Candidate $binary $hardKill.Config"),
+        "every repeated managed process must own fresh loopback listeners while the physical DNS responder keeps one stable upstream port"
     );
     assert!(
         integrated
             .matches("Wait-AdapterReady $managedAutoAdapterName 20 $true $true")
             .count()
             == 2
-            && integrated.contains(
-                "Wait-AdapterReady $managedAutoAdapterName 20 $true ($hardKill.Config -eq $managedLifecycleConfig)",
-            )
+            && integrated
+                .contains("Wait-AdapterReady $managedAutoAdapterName 20 $true $hardKill.Dns",)
             && integrated.contains("managed full DNS steering")
             && integrated.contains("managed full graceful DNS residue")
             && integrated.contains("network-change DNS active")
