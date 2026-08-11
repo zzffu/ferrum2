@@ -429,12 +429,12 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && restore.contains("$stableSamples = 0")
             && restore.contains("$stableSamples++")
             && restore.contains("else { $stableSamples = 0 }")
-            && restore.contains("if ($stableSamples -ge 4) { break }")
+            && restore.contains("if ($stableSamples -ge 11) { break }")
             && restore.contains("Start-Sleep -Milliseconds 500")
             && restore.contains("while ([DateTime]::UtcNow -lt $stableDeadline)")
             && restore.contains("catch { $baselineMatches = $false }")
             && restore.contains(
-                "Assert-True ($stableSamples -ge 4) \"physical baseline did not stabilize after controller restore\"",
+                "Assert-True ($stableSamples -ge 11) \"physical baseline did not stabilize after controller restore\"",
             )
             && !restore.contains("physical interface restore failed")
             && !restore.contains("Wait-Ipv4SystemRouteSnapshot")
@@ -489,7 +489,7 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
     for (failure, broken) in [
         (
             "first matching sample",
-            network_changes.replace("$stableSamples -ge 4", "$stableSamples -ge 1"),
+            network_changes.replace("$stableSamples -ge 11", "$stableSamples -ge 1"),
         ),
         (
             "adapter Status Up without underlay readback",

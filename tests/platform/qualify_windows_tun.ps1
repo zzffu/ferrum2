@@ -2972,10 +2972,10 @@ listen = "127.0.0.1:$managedMetricsPort"
                             } catch { $baselineMatches = $false }
                             if ($baselineMatches) { $stableSamples++ }
                             else { $stableSamples = 0 }
-                            if ($stableSamples -ge 4) { break }
+                            if ($stableSamples -ge 11) { break }
                             Start-Sleep -Milliseconds 500
                         } while ([DateTime]::UtcNow -lt $stableDeadline)
-                        Assert-True ($stableSamples -ge 4) "physical baseline did not stabilize after controller restore"
+                        Assert-True ($stableSamples -ge 11) "physical baseline did not stabilize after controller restore"
 
                         if ($change -eq "interface") {
                             Assert-True $tcpResources.Remove($dnsResponder) "DNS responder ownership mismatch"
