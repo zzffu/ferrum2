@@ -173,6 +173,10 @@ fn m16_managed_tun_pre_snapshot_generation_is_authoritative() {
     let source = fs::read_to_string(workspace_root().join("crates/ferrum2-wintun/src/windows.rs"))
         .expect("Wintun Windows owner");
     let compact = source.split_whitespace().collect::<String>();
+    let product = compact
+        .split("#[cfg(test)]")
+        .next()
+        .expect("Wintun product source");
     let finish = source
         .split("fn finish_managed")
         .nth(1)
@@ -197,9 +201,9 @@ fn m16_managed_tun_pre_snapshot_generation_is_authoritative() {
         "the authoritative generation cannot be rebased or omit either validation"
     );
     let publisher = compact
-        .split("fnset_owned_luid")
+        .split("fnpublish_owned_luid")
         .nth(1)
-        .and_then(|body| body.split("fncancel_all").next())
+        .and_then(|body| body.split("structNotificationCallbackGuard").next())
         .expect("notification owner publisher");
     let classifier = compact
         .split("fnclassify_notification_luid")
@@ -208,20 +212,39 @@ fn m16_managed_tun_pre_snapshot_generation_is_authoritative() {
         .expect("notification LUID classifier");
     assert!(
         compact.contains("provisional_luid:AtomicU64")
-            && compact.matches("classify_notification_luid(").count() == 4
+            && compact.contains("callbacks_in_flight:AtomicU64")
+            && product.matches("classify_notification_luid(").count() == 4
             && publisher
                 .contains("owned_luid.compare_exchange(0,luid,Ordering::SeqCst,Ordering::SeqCst)",)
+            && publisher.find("owned_luid.compare_exchange").unwrap()
+                < publisher
+                    .find("whileself.callbacks_in_flight.load")
+                    .unwrap()
+            && publisher
+                .find("whileself.callbacks_in_flight.load")
+                .unwrap()
+                < publisher.find("provisional_luid.swap").unwrap()
+            && publisher.contains("cancelled.load(Ordering::Acquire)||Instant::now()>=deadline")
             && publisher.contains("provisional_luid.swap(0,Ordering::SeqCst)")
             && publisher.contains("provisional!=0&&provisional!=luid")
             && classifier
+                .find("NotificationCallbackGuard::enter(context)")
+                .unwrap()
+                < classifier
+                    .find("owned_luid.load(Ordering::SeqCst)")
+                    .unwrap()
+            && classifier
                 .matches("owned_luid.load(Ordering::SeqCst)")
                 .count()
-                == 2
+                == 1
+            && classifier.contains("ifowned!=0{ifowned!=luid")
             && classifier.contains(
                 "provisional_luid.compare_exchange(0,luid,Ordering::SeqCst,Ordering::SeqCst)",
             )
-            && classifier.contains("provisional_mismatch||(published!=0&&published!=luid)"),
-        "prepublication callbacks and owner publication must share the SeqCst provisional-LUID handshake"
+            && classifier.contains("ifprovisional_mismatch")
+            && compact.contains("set_owned_luid(self.luid,deadline,cancelled)?")
+            && compact.contains("set_owned_luid(self.owner.luid,self.deadline,self.cancelled)?",),
+        "callback entry, owner publication, drain and provisional reconciliation must remain ordered and fallible"
     );
 }
 

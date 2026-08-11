@@ -364,6 +364,59 @@ struct NotificationContext {
     generation: AtomicU64,
     owned_luid: AtomicU64,
     provisional_luid: AtomicU64,
+    callbacks_in_flight: AtomicU64,
+}
+
+impl NotificationContext {
+    fn publish_owned_luid(
+        &self,
+        luid: u64,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<(), Error> {
+        if luid == 0 {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+            return Err(Error);
+        }
+        match self
+            .owned_luid
+            .compare_exchange(0, luid, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => {}
+            Err(current) if current == luid => {}
+            Err(_) => {
+                self.generation.fetch_add(1, Ordering::AcqRel);
+                return Err(Error);
+            }
+        }
+        while self.callbacks_in_flight.load(Ordering::SeqCst) != 0 {
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err(Error);
+            }
+            std::thread::yield_now();
+        }
+        let provisional = self.provisional_luid.swap(0, Ordering::SeqCst);
+        if provisional != 0 && provisional != luid {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+            return Err(Error);
+        }
+        Ok(())
+    }
+}
+
+struct NotificationCallbackGuard<'a>(&'a AtomicU64);
+
+impl<'a> NotificationCallbackGuard<'a> {
+    fn enter(context: &'a NotificationContext) -> Self {
+        context.callbacks_in_flight.fetch_add(1, Ordering::SeqCst);
+        Self(&context.callbacks_in_flight)
+    }
+}
+
+impl Drop for NotificationCallbackGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct NotificationOwners {
@@ -380,31 +433,17 @@ impl NotificationOwners {
             .load(Ordering::Acquire)
     }
 
-    fn set_owned_luid(&self, luid: NET_LUID_LH) {
+    fn set_owned_luid(
+        &self,
+        luid: NET_LUID_LH,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<(), Error> {
         let context = self
             .context
             .as_ref()
             .expect("live notifications retain their callback context");
-        let luid = unsafe { luid.Value };
-        if luid == 0 {
-            context.generation.fetch_add(1, Ordering::AcqRel);
-            return;
-        }
-        match context
-            .owned_luid
-            .compare_exchange(0, luid, Ordering::SeqCst, Ordering::SeqCst)
-        {
-            Ok(_) => {}
-            Err(current) if current == luid => {}
-            Err(_) => {
-                context.generation.fetch_add(1, Ordering::AcqRel);
-                return;
-            }
-        }
-        let provisional = context.provisional_luid.swap(0, Ordering::SeqCst);
-        if provisional != 0 && provisional != luid {
-            context.generation.fetch_add(1, Ordering::AcqRel);
-        }
+        context.publish_owned_luid(unsafe { luid.Value }, deadline, cancelled)
     }
 
     fn cancel_all(&mut self) -> bool {
@@ -480,6 +519,7 @@ unsafe extern "system" fn route_changed(
         } else {
             unsafe { (*row).InterfaceLuid.Value }
         },
+        || {},
     );
 }
 
@@ -496,6 +536,7 @@ unsafe extern "system" fn interface_changed(
         } else {
             unsafe { (*row).InterfaceLuid.Value }
         },
+        || {},
     );
 }
 
@@ -512,10 +553,16 @@ unsafe extern "system" fn address_changed(
         } else {
             unsafe { (*row).InterfaceLuid.Value }
         },
+        || {},
     );
 }
 
-fn classify_notification_luid(context: &NotificationContext, luid: u64) {
+fn classify_notification_luid(
+    context: &NotificationContext,
+    luid: u64,
+    after_unpublished_load: impl FnOnce(),
+) {
+    let _in_flight = NotificationCallbackGuard::enter(context);
     if luid == 0 {
         context.generation.fetch_add(1, Ordering::AcqRel);
         return;
@@ -527,6 +574,7 @@ fn classify_notification_luid(context: &NotificationContext, luid: u64) {
         }
         return;
     }
+    after_unpublished_load();
     let provisional_mismatch =
         match context
             .provisional_luid
@@ -535,8 +583,7 @@ fn classify_notification_luid(context: &NotificationContext, luid: u64) {
             Ok(_) => false,
             Err(current) => current != luid,
         };
-    let published = context.owned_luid.load(Ordering::SeqCst);
-    if provisional_mismatch || (published != 0 && published != luid) {
+    if provisional_mismatch {
         context.generation.fetch_add(1, Ordering::AcqRel);
     }
 }
@@ -603,7 +650,7 @@ impl Adapter {
                     cancelled,
                 })
             })
-            .and_then(|()| owner.finish_managed());
+            .and_then(|()| owner.finish_managed(deadline, cancelled));
         match finish_setup_transaction(setup, || owner.cleanup_inner()) {
             Ok(()) => Ok(owner),
             Err(error) => Err(error),
@@ -808,11 +855,13 @@ impl Adapter {
         Ok(())
     }
 
-    fn finish_managed(&mut self) -> Result<(), Error> {
+    fn finish_managed(&mut self, deadline: Instant, cancelled: &AtomicBool) -> Result<(), Error> {
         let Some(state) = self.managed.as_mut() else {
             return Ok(());
         };
-        state.notifications.set_owned_luid(self.luid);
+        state
+            .notifications
+            .set_owned_luid(self.luid, deadline, cancelled)?;
         let owned = InterfaceIdentity {
             luid: unsafe { self.luid.Value },
             index: self.interface_index,
@@ -917,6 +966,7 @@ fn subscribe_network_changes() -> Result<NotificationOwners, Error> {
         generation: AtomicU64::new(0),
         owned_luid: AtomicU64::new(0),
         provisional_luid: AtomicU64::new(0),
+        callbacks_in_flight: AtomicU64::new(0),
     });
     let context_pointer = (&raw const *context).cast::<c_void>();
     let (handles, context) = subscribe_notification_sequence(
@@ -1621,7 +1671,9 @@ impl SetupOperations for PlatformSetup<'_> {
             return Err(Error);
         }
         if let Some(state) = &self.owner.managed {
-            state.notifications.set_owned_luid(self.owner.luid);
+            state
+                .notifications
+                .set_owned_luid(self.owner.luid, self.deadline, self.cancelled)?;
         }
         Ok(())
     }
@@ -1929,15 +1981,133 @@ mod tests {
         ManagedRouteRead, NET_LUID_LH, NotificationContext, NotificationOwners, RouteFingerprint,
         SessionJournal, SetupOperations, UnderlayOperations, address_changed,
         cancel_notification_handles, capture_route_row, classify_adapter_create_failure,
-        cleanup_transaction, dad_snapshot, delete_managed_route, eligible_interface_identity,
-        finish_setup_transaction, install_managed_routes, interface_changed,
-        interface_index_option_value, leak_notification_owners, load_transaction,
-        prepare_managed_intent, require_exports, route_changed, route_matches,
+        classify_notification_luid, cleanup_transaction, dad_snapshot, delete_managed_route,
+        eligible_interface_identity, finish_setup_transaction, install_managed_routes,
+        interface_changed, interface_index_option_value, leak_notification_owners,
+        load_transaction, prepare_managed_intent, require_exports, route_changed, route_matches,
         select_unique_default_route, setup_transaction, snapshot_underlay_with,
         subscribe_notification_sequence, take_last_owned_route, underlay_matches_with,
         underlay_snapshot_matches, validate_artifact,
     };
     use crate::Ipv4Prefix;
+
+    #[test]
+    fn notification_publication_waits_for_inflight_classifier() {
+        const OWN_LUID: u64 = 0x1020_3040;
+        const FOREIGN_LUID: u64 = 0x5060_7080;
+
+        for (name, notified_luid, expected_generation, expected_ok) in [
+            ("exact own", OWN_LUID, 0, true),
+            ("foreign", FOREIGN_LUID, 1, false),
+        ] {
+            let context = NotificationContext {
+                generation: std::sync::atomic::AtomicU64::new(0),
+                owned_luid: std::sync::atomic::AtomicU64::new(0),
+                provisional_luid: std::sync::atomic::AtomicU64::new(0),
+                callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
+            };
+            let entered = std::sync::Barrier::new(2);
+            let release = std::sync::Barrier::new(2);
+            let (publisher_tx, publisher_rx) = std::sync::mpsc::sync_channel(1);
+
+            let (completed_while_paused, generation_at_publication) = std::thread::scope(|scope| {
+                let callback = scope.spawn(|| {
+                    classify_notification_luid(&context, notified_luid, || {
+                        entered.wait();
+                        release.wait();
+                    });
+                });
+                entered.wait();
+                let publisher = scope.spawn(|| {
+                    let result = context.publish_owned_luid(
+                        OWN_LUID,
+                        std::time::Instant::now() + std::time::Duration::from_secs(1),
+                        &std::sync::atomic::AtomicBool::new(false),
+                    );
+                    publisher_tx
+                        .send((
+                            result.is_ok(),
+                            context
+                                .generation
+                                .load(std::sync::atomic::Ordering::Acquire),
+                        ))
+                        .unwrap();
+                });
+                let early = publisher_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .ok();
+                release.wait();
+                callback.join().unwrap();
+                publisher.join().unwrap();
+                let result = early.unwrap_or_else(|| {
+                    publisher_rx
+                        .recv_timeout(std::time::Duration::from_secs(1))
+                        .unwrap()
+                });
+                (early.is_some(), result)
+            });
+
+            assert!(
+                !completed_while_paused,
+                "{name}: owner publication completed before the callback classified its LUID"
+            );
+            assert_eq!(
+                generation_at_publication.1, expected_generation,
+                "{name}: callback classification was not reflected before publication returned"
+            );
+            assert_eq!(
+                generation_at_publication.0, expected_ok,
+                "{name}: publication result"
+            );
+            assert_eq!(
+                context
+                    .generation
+                    .load(std::sync::atomic::Ordering::Acquire),
+                expected_generation,
+                "{name}: final notification generation"
+            );
+        }
+    }
+
+    #[test]
+    fn notification_publication_deadline_and_cancellation_fail_closed() {
+        const OWN_LUID: u64 = 0x1020_3040;
+
+        for (name, cancelled, deadline) in [
+            (
+                "cancelled",
+                true,
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            ),
+            ("expired", false, std::time::Instant::now()),
+        ] {
+            let context = NotificationContext {
+                generation: std::sync::atomic::AtomicU64::new(0),
+                owned_luid: std::sync::atomic::AtomicU64::new(0),
+                provisional_luid: std::sync::atomic::AtomicU64::new(0),
+                callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
+            };
+            let entered = std::sync::Barrier::new(2);
+            let release = std::sync::Barrier::new(2);
+            let cancelled = std::sync::atomic::AtomicBool::new(cancelled);
+
+            let result = std::thread::scope(|scope| {
+                let callback = scope.spawn(|| {
+                    classify_notification_luid(&context, OWN_LUID, || {
+                        entered.wait();
+                        release.wait();
+                    });
+                });
+                entered.wait();
+                let result = context.publish_owned_luid(OWN_LUID, deadline, &cancelled);
+                release.wait();
+                callback.join().unwrap();
+                result
+            });
+
+            assert!(result.is_err(), "{name}: publication did not fail closed");
+        }
+    }
 
     #[test]
     fn notification_prepublication_exact_owner_is_reconciled_without_invalidation() {
@@ -2092,6 +2262,7 @@ mod tests {
                         generation: std::sync::atomic::AtomicU64::new(0),
                         owned_luid: std::sync::atomic::AtomicU64::new(0),
                         provisional_luid: std::sync::atomic::AtomicU64::new(0),
+                        callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
                     })),
                 };
                 let context = (notifications.context.as_deref().unwrap()
@@ -2100,7 +2271,13 @@ mod tests {
                 for action in *actions {
                     match action {
                         Action::Notify(value) => unsafe { notify(callback, context, *value) },
-                        Action::Publish(value) => notifications.set_owned_luid(luid(*value)),
+                        Action::Publish(value) => {
+                            let _ = notifications.set_owned_luid(
+                                luid(*value),
+                                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                                &std::sync::atomic::AtomicBool::new(false),
+                            );
+                        }
                     }
                 }
                 assert_eq!(
