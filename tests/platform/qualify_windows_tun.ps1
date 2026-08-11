@@ -491,7 +491,9 @@ function Wait-AdapterAbsent([string]$Name, [int]$TimeoutSeconds = 20, [int]$Requ
         $absent = $false
         try {
             $absent = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop |
-                Where-Object { $_.Name -ceq $Name }).Count -eq 0
+                Where-Object { $_.Name -ceq $Name }).Count -eq 0 -and
+                @(Get-CimInstance Win32_NetworkAdapter -ErrorAction Stop |
+                    Where-Object { $_.NetConnectionID -ceq $Name }).Count -eq 0
         } catch { $absent = $false }
         if ($absent) { $stableSamples++ }
         else { $stableSamples = 0 }
@@ -2284,7 +2286,7 @@ function Invoke-AdapterCycles(
             $script:activeProcess = $null
             $candidateAfterStop = @(Get-ExactRunProcesses $script:work | Where-Object { $_.ExecutablePath -eq $script:binary })
             Assert-True ($candidateAfterStop.Count -eq 0) "cycle candidate remained after stop"
-            Wait-AdapterAbsent $ExpectedAdapter 20 11
+            Wait-AdapterAbsent $ExpectedAdapter
             Assert-InterfaceGone $ExpectedAdapter $script:ownedInterfaceIndex
             if ($Managed) {
                 Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $script:ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "managed cycle DNS residue"
