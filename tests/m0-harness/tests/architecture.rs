@@ -267,6 +267,92 @@ fn m16_managed_tun_pre_snapshot_generation_is_authoritative() {
 }
 
 #[test]
+fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven() {
+    let root = workspace_root();
+    let source = fs::read_to_string(root.join("crates/ferrum2-wintun/src/windows.rs"))
+        .expect("Wintun Windows owner");
+    let compact = source.split_whitespace().collect::<String>();
+    let callbacks = compact
+        .split("unsafeextern\"system\"fnroute_changed")
+        .nth(1)
+        .and_then(|body| body.split("structManagedState").next())
+        .expect("bounded notification callback region");
+    assert!(
+        callbacks.matches("classify_notification_luid(").count() == 4
+            && callbacks.contains(
+                "ifcontext.monitor_runtime.load(Ordering::Acquire){context.signal_owner();return;"
+            )
+            && compact.contains("ifletSome(wake)=&self.wake{let_=wake.signal();}")
+            && !callbacks.contains("tracing::")
+            && !callbacks.contains("format!(")
+            && !callbacks.contains("println!(")
+            && !callbacks.contains("Vec::")
+            && !callbacks.contains("Box::"),
+        "callbacks may only classify and signal their owner"
+    );
+    assert!(
+        compact.contains("ResetEvent(self.network_change.0.0)")
+            && compact.contains("self.revalidate_managed_network().unwrap_or(false)")
+            && compact.contains("state.policy.invalidate()")
+            && compact.contains("self.valid.load(Ordering::Acquire)")
+            && compact.contains("managed_routes_match(&state.routes")
+            && compact.contains("cleanup.cancel_notifications()")
+            && compact.find("cleanup.delete_last_route()").unwrap()
+                < compact.find("cleanup.restore_dns()").unwrap(),
+        "the owner must revoke binding, revalidate exact state and clean capture before DNS"
+    );
+
+    let qualifier = fs::read_to_string(root.join("tests/platform/qualify_windows_tun.ps1"))
+        .expect("Windows TUN qualifier");
+    let integrated = qualifier
+        .split("if ($Mode -in @(\"full\", \"hard-kill\")) {")
+        .nth(1)
+        .and_then(|body| {
+            body.split("if ($Mode -eq \"network-feasibility\") {")
+                .next()
+        })
+        .expect("bounded integrated lifecycle profile");
+    assert!(
+        integrated.contains("Invoke-TunProductTcp $supportAddress $supportTcpPort")
+            && integrated.contains("Invoke-TunProductUdp $supportAddress $supportUdpPort")
+            && integrated.matches("Invoke-SystemDnsWitness").count() == 3
+            && integrated.contains("foreach ($change in @(\"route\", \"interface\", \"address\"))")
+            && integrated.contains("Set-NetRoute -InputObject $physicalRoute")
+            && integrated.contains("Disable-NetAdapter -InputObject $physicalAdapter")
+            && integrated.contains("Set-NetIPAddress -InputObject $sourceRow")
+            && integrated.contains("$captureRemaining -eq 0 -and $dnsRemaining -eq 0")
+            && integrated.contains("$admissionRejected")
+            && integrated.contains("[Ferrum2ProcessGroup]::ExitCode([uint32]$activeProcess.Id) -ne 0")
+            && integrated.contains("Invoke-AdapterCycles $binary $managedLifecycleConfig $managedAutoAdapterName $managedMetricsPort $true")
+            && integrated.contains("[Ferrum2ProcessGroup]::Terminate([uint32]$activeProcess.Id)"),
+        "integrated rows must execute direct TUN, system DNS, invalidation, cycles and hard-kill evidence"
+    );
+    assert!(
+        qualifier.contains("\"hard-kill\"")
+            && qualifier.contains("network_change=3/3")
+            && qualifier.contains("route_change=1/1")
+            && qualifier.contains("interface_change=1/1")
+            && qualifier.contains("address_change=1/1")
+            && qualifier.contains("m15_transport=16/16")
+            && qualifier.contains("direct_tcp=1/1")
+            && qualifier.contains("direct_udp=1/1")
+            && qualifier.contains("dns=2/2")
+            && qualifier.contains("hard_kill=3/3")
+            && qualifier.contains("m16_windows_hard_kill status=PASS cases=3/3")
+            && qualifier.contains("m16_windows_tun_full status=PASS")
+            && qualifier
+                .matches("m16_windows_hard_kill status=PASS")
+                .count()
+                == 1
+            && qualifier
+                .matches("m16_windows_tun_full status=PASS")
+                .count()
+                == 1,
+        "one identity-bound qualifier must retain the exact T06 marker schemas"
+    );
+}
+
+#[test]
 fn m16_managed_product_qualification_is_candidate_bound_and_additive() {
     let source =
         fs::read_to_string(workspace_root().join("tests/platform/qualify_windows_tun.ps1"))
@@ -3882,7 +3968,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             .rsplit_once("\nif ($completed) {")
             .map(|(_, body)| body);
         source.contains(
-            "[ValidateSet(\"lifecycle\", \"tcp\", \"udp\", \"cycles\", \"full\", \"performance\", \"cleanup\")]",
+            "[ValidateSet(\"lifecycle\", \"tcp\", \"udp\", \"cycles\", \"full\", \"performance\", \"network-feasibility\", \"managed-product\", \"hard-kill\", \"cleanup\")]",
         ) && source.matches("Get-FileHash -LiteralPath $zip -Algorithm SHA256").count() == 1
             && source.contains("if ($Mode -eq \"cleanup\")")
             && source.contains("ferrum2-m15-tun-$runIdentity")
@@ -3892,12 +3978,10 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("$_.CommandLine.IndexOf($WorkPath, [StringComparison]::OrdinalIgnoreCase)")
             && source.contains("$addressJournal")
             && source.contains("$dllJournal")
-            && source
-                .matches("@(Get-ExactRunProcesses $work).Count")
-                .count()
-                == 2
             && source.contains("run work baseline not absent")
-            && source.contains("run process baseline not absent")
+            && source.contains(
+                "Assert-True (@(Get-ExactRunProcesses $work).Count -eq 0) \"run process baseline not absent\"",
+            )
             && source.contains("run adapter baseline not absent")
             && !source.contains("Ferrum2-M15-*")
             && !source.contains("ferrum2-m15-tun-*")
@@ -3919,7 +4003,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     && cycles
                         .find("Assert-True $cycleProcess.HasExited")
                         .zip(cycles.find("$candidateAfterStop = @(Get-ExactRunProcesses $script:work"))
-                        .zip(cycles.find("Wait-AdapterAbsent $script:adapterName"))
+                        .zip(cycles.find("Wait-AdapterAbsent $ExpectedAdapter"))
                         .is_some_and(|((stopped, process_absent), adapter_absent)| {
                             stopped < process_absent && process_absent < adapter_absent
                         })
@@ -3930,9 +4014,9 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                         .zip(cycles.find("\"cycle route leaked\""))
                         .zip(cycles.find("Stop-Candidate $cycleProcess"))
                         .zip(cycles.find("Assert-True $cycleProcess.HasExited"))
-                        .zip(cycles.find("Wait-AdapterAbsent $script:adapterName"))
+                        .zip(cycles.find("Wait-AdapterAbsent $ExpectedAdapter"))
                         .zip(cycles.find(
-                            "Assert-InterfaceGone $script:adapterName $script:ownedInterfaceIndex",
+                            "Assert-InterfaceGone $ExpectedAdapter $script:ownedInterfaceIndex",
                         ))
                         .zip(cycles.find("$script:cycleRows++"))
                         .is_some_and(|((((((((created, readback), removed), route_absent), stop), process), absent), interface), counted)| {
@@ -3988,7 +4072,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                 completion.contains(
                     "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS",
                 ) && completion.contains(
-                    "m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS",
+                    "m16_windows_tun_full status=PASS m15_transport=16/16 direct_tcp=1/1 direct_udp=1/1 dns=2/2 network_change=3/3 route_change=1/1 interface_change=1/1 address_change=1/1 cycles=100/100 hard_kill=3/3 cleanup=PASS",
                 ) && completion
                     .find("m15_windows_tun_performance_resource adapter_rx_bytes=")
                     .zip(completion.find(
@@ -4006,8 +4090,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
     );
     for mutation in [
         controller.replacen(
-            "@(Get-ExactRunProcesses $work).Count",
-            "(Get-ExactRunProcesses $work).Count",
+            "Assert-True (@(Get-ExactRunProcesses $work).Count -eq 0) \"run process baseline not absent\"",
+            "Assert-True ($true) \"run process baseline not absent\"",
             1,
         ),
         controller.replace("Ferrum2-M15-$runIdentity", "Ferrum2-M15-*"),
@@ -4037,8 +4121,8 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             "adapter_churn=unknown",
         ),
         controller.replace(
-            "profile=full functional=16/16 cycles=100/100 cleanup=PASS",
-            "profile=full cleanup=PASS",
+            "m15_transport=16/16 direct_tcp=1/1 direct_udp=1/1 dns=2/2 network_change=3/3",
+            "m15_transport=16/16",
         ),
         controller.replace("witnesses=2/2 cleanup=PASS", "witnesses=1/2 cleanup=PASS"),
     ] {

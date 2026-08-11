@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     # Legacy M15 mode contract: [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
-    [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "cleanup")]
+    [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "cleanup")]
     [string]$Mode,
     [string]$WintunZip,
     [string]$RunToken,
@@ -30,7 +30,7 @@ $runIdentity = if ($RunToken) { $RunToken } elseif ($Mode -eq "cleanup") { throw
 if ($runIdentity -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,47}$') { throw "RunToken is invalid" }
 $work = if ($Mode -eq "network-feasibility") {
     Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-network-$runIdentity"
-} elseif ($Mode -eq "managed-product") {
+} elseif ($Mode -in @("managed-product", "full", "hard-kill")) {
     Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-product-$runIdentity"
 } else {
     Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$runIdentity"
@@ -50,6 +50,8 @@ $adapterName = if ($Mode -eq "network-feasibility") {
 $config = Join-Path $work "client.toml"
 $managedAutoConfig = Join-Path $work "client-managed-auto.toml"
 $managedManualConfig = Join-Path $work "client-managed-manual.toml"
+$managedLifecycleConfig = Join-Path $work "client-managed-lifecycle.toml"
+$managedRouteOnlyConfig = Join-Path $work "client-managed-route-only.toml"
 $failureConfig = Join-Path $work "client-failure.toml"
 $addressJournal = Join-Path $work "owned-target-addresses.txt"
 $dllJournal = Join-Path $work "owned-wintun-dll.txt"
@@ -65,21 +67,37 @@ function Get-ExactRunProcesses([string]$WorkPath) {
 }
 
 if ($Mode -eq "cleanup") {
-    foreach ($process in @(Get-ExactRunProcesses $work)) {
-        Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+    $cleanupWorks = @(
+        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$runIdentity"
+        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-network-$runIdentity"
+        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-product-$runIdentity"
+    )
+    $cleanupAdapterNames = @(
+        "Ferrum2-M15-$runIdentity", "Ferrum2-M16-$runIdentity",
+        $managedAutoAdapterName, $managedManualAdapterName
+    )
+    foreach ($cleanupWork in $cleanupWorks) {
+        foreach ($process in @(Get-ExactRunProcesses $cleanupWork)) {
+            Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+        }
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
-        $processes = @(Get-ExactRunProcesses $work)
-        $adapter = Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue
-        if ($processes.Count -eq 0 -and -not $adapter) { break }
+        $processes = @($cleanupWorks | ForEach-Object { Get-ExactRunProcesses $_ })
+        $adapters = @($cleanupAdapterNames | ForEach-Object {
+            Get-NetAdapter -Name $_ -IncludeHidden -ErrorAction SilentlyContinue
+        })
+        if ($processes.Count -eq 0 -and $adapters.Count -eq 0) { break }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
     $allowedAddresses = @(
         "192.0.2.201", "2001:db8::202", "192.0.2.203", "2001:db8::204",
         "192.0.2.205", "2001:db8::206", "192.0.2.207", "2001:db8::208", "192.0.2.250"
     )
-    $journaledAddresses = if (Test-Path -LiteralPath $addressJournal) { @(Get-Content -LiteralPath $addressJournal) } else { @() }
+    $journaledAddresses = @($cleanupWorks | ForEach-Object {
+        $cleanupAddressJournal = Join-Path $_ "owned-target-addresses.txt"
+        if (Test-Path -LiteralPath $cleanupAddressJournal) { Get-Content -LiteralPath $cleanupAddressJournal }
+    })
     foreach ($address in $journaledAddresses) {
         if ($allowedAddresses -notcontains $address) { throw "target address journal is invalid" }
         $prefix = if ($address.Contains(":")) { "$address/128" } else { "$address/32" }
@@ -88,22 +106,29 @@ if ($Mode -eq "cleanup") {
         Get-NetIPAddress -InterfaceIndex 1 -IPAddress $address -ErrorAction SilentlyContinue |
             Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
     }
-    if (Test-Path -LiteralPath $dllJournal) {
+    $ownsSiblingDll = @($cleanupWorks | Where-Object {
+        Test-Path -LiteralPath (Join-Path $_ "owned-wintun-dll.txt")
+    }).Count -ne 0
+    if ($ownsSiblingDll) {
         if (Test-Path -LiteralPath $siblingDll) {
             if ((Get-FileHash -LiteralPath $siblingDll -Algorithm SHA256).Hash -ne $expectedDllHash) { throw "owned sibling DLL hash mismatch" }
             Remove-Item -LiteralPath $siblingDll -Force
         }
     }
-    if (@(Get-ExactRunProcesses $work).Count -ne 0) { throw "controller process residue" }
-    if (Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue) { throw "controller adapter residue" }
+    if (@($cleanupWorks | ForEach-Object { Get-ExactRunProcesses $_ }).Count -ne 0) { throw "controller process residue" }
+    if (@($cleanupAdapterNames | ForEach-Object {
+        Get-NetAdapter -Name $_ -IncludeHidden -ErrorAction SilentlyContinue
+    }).Count -ne 0) { throw "controller adapter residue" }
     foreach ($address in $journaledAddresses) {
         $prefix = if ($address.Contains(":")) { "$address/128" } else { "$address/32" }
         if (Get-NetIPAddress -InterfaceIndex 1 -IPAddress $address -ErrorAction SilentlyContinue) { throw "controller address residue" }
         if (Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue) { throw "controller route residue" }
     }
-    if ((Test-Path -LiteralPath $dllJournal) -and (Test-Path -LiteralPath $siblingDll)) { throw "controller DLL residue" }
-    if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
-    if (Test-Path -LiteralPath $work) { throw "controller temp residue" }
+    if ($ownsSiblingDll -and (Test-Path -LiteralPath $siblingDll)) { throw "controller DLL residue" }
+    foreach ($cleanupWork in $cleanupWorks) {
+        if (Test-Path -LiteralPath $cleanupWork) { Remove-Item -LiteralPath $cleanupWork -Recurse -Force }
+        if (Test-Path -LiteralPath $cleanupWork) { throw "controller temp residue" }
+    }
     return
 }
 
@@ -178,6 +203,14 @@ $managedManualUdpRows = 0
 $managedUnpinnedRows = 0
 $managedRouteRows = 0
 $managedInterfaceMetric = $null
+$managedDirectTcpRows = 0
+$managedDirectUdpRows = 0
+$managedSystemDnsRows = 0
+$managedNetworkChangeRows = 0
+$managedRouteChangeRows = 0
+$managedInterfaceChangeRows = 0
+$managedAddressChangeRows = 0
+$managedHardKillRows = 0
 $managedFilteredPackets = [ordered]@{
     unpinned_tcp = $null
     unpinned_udp = $null
@@ -240,6 +273,8 @@ function Get-NetworkFeasibilityIdentity([string]$Path) {
     $probePath = Join-Path $PSScriptRoot "qualify_windows_tun.ps1"
     $probeHash = (Get-FileHash -LiteralPath $probePath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-True ($ledger.probe_sha256 -ceq $probeHash) "identity ledger probe hash mismatch"
+    $candidate = (& git -C $workspace rev-parse HEAD 2>$null).Trim()
+    Assert-True ($LASTEXITCODE -eq 0 -and $candidate -ceq [string]$ledger.candidate_sha) "identity ledger candidate SHA mismatch"
 
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
     $version = [Environment]::OSVersion.Version.ToString()
@@ -273,7 +308,7 @@ function Get-NetworkFeasibilityIdentity([string]$Path) {
     }
 }
 
-if ($Mode -in @("network-feasibility", "managed-product")) {
+if ($Mode -in @("network-feasibility", "managed-product", "full", "hard-kill")) {
     $capabilityIdentity = Get-NetworkFeasibilityIdentity $IdentityLedger
     $capabilityIdentityHash = $capabilityIdentity.IdentitySha256
     $capabilityEvidence = "$($capabilityIdentity.Path).evidence-$runIdentity.jsonl"
@@ -1080,8 +1115,10 @@ public sealed class Ferrum2DnsResponder : IDisposable {
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
     private int requests;
 
-    public Ferrum2DnsResponder(int port) {
-        socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, port));
+    public Ferrum2DnsResponder(int port) : this("127.0.0.1", port) { }
+
+    public Ferrum2DnsResponder(string address, int port) {
+        socket = new UdpClient(new IPEndPoint(IPAddress.Parse(address), port));
         var ignored = Task.Run(Run);
     }
 
@@ -2129,15 +2166,30 @@ function Invoke-UdpEchoRow(
     } finally { $client.Dispose() }
 }
 
-function Invoke-AdapterCycles([string]$Executable, [string]$Configuration) {
+function Invoke-AdapterCycles(
+    [string]$Executable,
+    [string]$Configuration,
+    [string]$ExpectedAdapter = $script:adapterName,
+    [Nullable[int]]$MetricsPort = $null,
+    [bool]$Managed = $false
+) {
     for ($cycle = 0; $cycle -lt 100; $cycle++) {
         Assert-True (-not $script:activeProcess) "cycle candidate state was not empty"
         $candidateBaseline = @(Get-ExactRunProcesses $script:work | Where-Object { $_.ExecutablePath -eq $script:binary })
         Assert-True ($candidateBaseline.Count -eq 0) "cycle candidate baseline not absent"
-        Assert-InterfaceGone $script:adapterName $null
+        Assert-InterfaceGone $ExpectedAdapter $null
         $script:activeProcess = Start-Candidate $Executable $Configuration
-        $adapter = Wait-AdapterReady $script:adapterName
+        $adapter = Wait-AdapterReady $ExpectedAdapter
         $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+        if ($Managed) {
+            $capture = @(Get-NetRoute -InterfaceIndex $script:ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
+                Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") })
+            Assert-True ($capture.Count -eq 2) "managed cycle capture route mismatch"
+            Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $script:ownedInterfaceIndex) "managed cycle DNS readback"
+            $owners = Get-Metrics $MetricsPort.Value
+            Assert-True ((Get-ClientGaugeValue $owners "ferrum2_udp_sessions_active") -eq 0 -and
+                (Get-ClientGaugeValue $owners "ferrum2_udp_buffered_bytes") -eq 0) "managed cycle process-private owner baseline changed"
+        }
         $cycleRoute = Add-TunRoute $script:ownedInterfaceIndex "192.0.2.200/32"
         $cycleRouteReadback = @(Get-NetRoute -InterfaceIndex $script:ownedInterfaceIndex -DestinationPrefix "192.0.2.200/32" -PolicyStore ActiveStore -ErrorAction Stop)
         Assert-True ($cycleRouteReadback.Count -eq 1) "cycle route readback mismatch"
@@ -2151,8 +2203,8 @@ function Invoke-AdapterCycles([string]$Executable, [string]$Configuration) {
         $script:activeProcess = $null
         $candidateAfterStop = @(Get-ExactRunProcesses $script:work | Where-Object { $_.ExecutablePath -eq $script:binary })
         Assert-True ($candidateAfterStop.Count -eq 0) "cycle candidate remained after stop"
-        Wait-AdapterAbsent $script:adapterName
-        Assert-InterfaceGone $script:adapterName $script:ownedInterfaceIndex
+        Wait-AdapterAbsent $ExpectedAdapter
+        Assert-InterfaceGone $ExpectedAdapter $script:ownedInterfaceIndex
         $script:cycleRows++
     }
     Assert-True ($script:cycleRows -eq 100) "adapter cycle count mismatch"
@@ -2162,8 +2214,9 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $work)) "run work baseline not absent"
     Assert-True (@(Get-ExactRunProcesses $work).Count -eq 0) "run process baseline not absent"
     Assert-True (-not (Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue)) "run adapter baseline not absent"
-    if ($Mode -eq "managed-product") {
+    if ($Mode -in @("managed-product", "full", "hard-kill")) {
         Assert-True (-not (Get-NetAdapter -Name $managedManualAdapterName -IncludeHidden -ErrorAction SilentlyContinue)) "manual product adapter baseline not absent"
+        Assert-True (-not (Get-NetAdapter -Name $managedAutoAdapterName -IncludeHidden -ErrorAction SilentlyContinue)) "managed lifecycle adapter baseline not absent"
     }
     Assert-True ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq $expectedZipHash) "ZIP hash mismatch"
     New-Item -ItemType Directory -Path $work | Out-Null
@@ -2507,6 +2560,306 @@ listen = "127.0.0.1:$manualMetricsPort"
             pktmon = "absent"
             physical_dns_rows = @(Get-PhysicalDnsSnapshot 0).Count
         })
+    }
+    if ($Mode -in @("full", "hard-kill")) {
+        $supportAddress = $capabilityIdentity.SupportAddress
+        $supportTcpPort = $capabilityIdentity.TcpPort
+        $supportUdpPort = $capabilityIdentity.UdpPort
+        $directSocksPort = Get-UniqueTcpPort
+        $proxySocksPort = Get-UniqueTcpPort
+        $managedMetricsPort = Get-UniqueTcpPort
+        $managedDnsPort = Get-UniqueTcpPort
+        $physicalDefault = Get-Ipv4DefaultUnderlay
+        $managedDnsAddress = [string]$physicalDefault.Sources[0].IPAddress
+        $physicalDnsBaseline = @(Get-PhysicalDnsSnapshot 0)
+
+        @"
+schema_version = 2
+[[inbounds]]
+tag = "direct-socks"
+listen = "127.0.0.1:$directSocksPort"
+[[inbounds]]
+tag = "proxy-socks"
+listen = "127.0.0.1:$proxySocksPort"
+[tun]
+tag = "tun-in"
+adapter_name = "$managedAutoAdapterName"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ready_timeout_ms = 15000
+ring_capacity = 8388608
+[[outbounds]]
+tag = "direct"
+type = "direct"
+[[outbounds]]
+tag = "proxy"
+server = "${supportAddress}:$supportTcpPort"
+[route]
+final = "direct"
+[[route.rules]]
+inbound = "proxy-socks"
+network = "tcp"
+action = "route"
+outbound = "proxy"
+[[route.rules]]
+inbound = "proxy-socks"
+network = "udp"
+action = "route"
+outbound = "proxy"
+[udp]
+enabled = true
+max_sessions = 8
+max_buffered_bytes = 1048576
+idle_timeout_ms = 60000
+[dns]
+timeout_ms = 1000
+max_inflight = 8
+[[dns.servers]]
+tag = "resolver"
+transport = "udp"
+address = "${managedDnsAddress}:$managedDnsPort"
+detour = "direct"
+[dns.route]
+final = "resolver"
+[runtime]
+shutdown_grace_ms = 1000
+idle_timeout_ms = 2000
+[metrics]
+listen = "127.0.0.1:$managedMetricsPort"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"@ | Set-Content -LiteralPath $managedLifecycleConfig -Encoding utf8NoBOM
+
+        @"
+schema_version = 2
+[[inbounds]]
+tag = "direct-socks"
+listen = "127.0.0.1:$directSocksPort"
+[tun]
+tag = "tun-in"
+adapter_name = "$managedAutoAdapterName"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+ready_timeout_ms = 15000
+ring_capacity = 8388608
+[[outbounds]]
+tag = "direct"
+type = "direct"
+[route]
+final = "direct"
+[udp]
+enabled = true
+max_sessions = 8
+max_buffered_bytes = 1048576
+idle_timeout_ms = 60000
+[runtime]
+shutdown_grace_ms = 1000
+idle_timeout_ms = 2000
+[metrics]
+listen = "127.0.0.1:$managedMetricsPort"
+"@ | Set-Content -LiteralPath $managedRouteOnlyConfig -Encoding utf8NoBOM
+
+        foreach ($managedConfig in @($managedLifecycleConfig, $managedRouteOnlyConfig)) {
+            $offlineOutput = @(& $binary --config $managedConfig --check-config 2>&1)
+            Assert-True ($LASTEXITCODE -eq 0) "managed lifecycle config validation failed"
+            Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "managed lifecycle config marker mismatch"
+        }
+        Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "managed lifecycle sibling DLL baseline not absent"
+        Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+        Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
+        $createdSiblingDll = $true
+        $dnsResponder = [Ferrum2DnsResponder]::new($managedDnsAddress, $managedDnsPort)
+        $tcpResources.Add($dnsResponder)
+
+        if ($Mode -eq "full") {
+            $activeProcess = Start-Candidate $binary $managedLifecycleConfig
+            $adapter = Wait-AdapterReady $managedAutoAdapterName
+            $ownedInterfaceIndex = [int]$adapter.ifIndex
+            [void](Get-Metrics $managedMetricsPort)
+            Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $ownedInterfaceIndex) "managed full DNS steering"
+            $capture = @(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
+                Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") })
+            Assert-True ($capture.Count -eq 2) "managed full capture route count mismatch"
+            Invoke-TunProductTcp $supportAddress $supportTcpPort $ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m16-full-direct-tcp"))
+            $managedDirectTcpRows = 1
+            Invoke-TunProductUdp $supportAddress $supportUdpPort $ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m16-full-direct-udp"))
+            $managedDirectUdpRows = 1
+            Invoke-SystemDnsWitness "m16-$runIdentity-udp.tun.test" $false $dnsResponder
+            Invoke-SystemDnsWitness "m16-$runIdentity-tcp.tun.test" $true $dnsResponder
+            $managedSystemDnsRows = 2
+            Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot $ownedInterfaceIndex) "managed full physical DNS sentinel"
+            Stop-Candidate $activeProcess
+            $activeProcess = $null
+            Wait-AdapterAbsent $managedAutoAdapterName
+            Assert-InterfaceGone $managedAutoAdapterName $ownedInterfaceIndex
+            Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "managed full graceful DNS residue"
+
+            Invoke-AdapterCycles $binary $managedLifecycleConfig $managedAutoAdapterName $managedMetricsPort $true
+
+            foreach ($change in @("route", "interface", "address")) {
+                $physicalDefault = Get-Ipv4DefaultUnderlay
+                $physicalRoute = $physicalDefault.Row.Route
+                $physicalAdapter = Get-NetAdapter -InterfaceIndex $physicalDefault.InterfaceIndex -IncludeHidden -ErrorAction Stop
+                $sourceAddress = [string]$physicalDefault.Sources[0].IPAddress
+                $sourceRow = Get-NetIPAddress -InterfaceIndex $physicalDefault.InterfaceIndex -AddressFamily IPv4 -IPAddress $sourceAddress -ErrorAction Stop
+                $routeMetric = [uint32]$physicalRoute.RouteMetric
+                $skipAsSource = [bool]$sourceRow.SkipAsSource
+
+                $activeProcess = Start-Candidate $binary $managedLifecycleConfig
+                $adapter = Wait-AdapterReady $managedAutoAdapterName
+                $ownedInterfaceIndex = [int]$adapter.ifIndex
+                Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $ownedInterfaceIndex) "network-change DNS active"
+                try {
+                    if ($change -eq "route") {
+                        Set-NetRoute -InputObject $physicalRoute -RouteMetric ($routeMetric + 1) -ErrorAction Stop
+                    } elseif ($change -eq "interface") {
+                        Disable-NetAdapter -InputObject $physicalAdapter -Confirm:$false -ErrorAction Stop
+                    } else {
+                        Set-NetIPAddress -InputObject $sourceRow -SkipAsSource (-not $skipAsSource) -ErrorAction Stop
+                    }
+
+                    $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(20)
+                    do {
+                        $captureRemaining = @(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+                            Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") }).Count
+                        $dnsRemaining = @(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count
+                        if ($captureRemaining -eq 0 -and $dnsRemaining -eq 0) { break }
+                        Start-Sleep -Milliseconds 50
+                    } while ([DateTime]::UtcNow -lt $cleanupDeadline)
+                    Assert-True ($captureRemaining -eq 0 -and $dnsRemaining -eq 0) "$change change did not remove capture and DNS"
+
+                    $admissionRejected = $activeProcess.HasExited
+                    if (-not $admissionRejected) {
+                        try {
+                            $probe = Open-ProductSocks $directSocksPort
+                            try {
+                                $request = New-SocksRequest 1 $supportAddress $supportTcpPort
+                                $probe.Stream.Write($request, 0, $request.Length)
+                                $reply = Read-SocksReply $probe.Stream
+                                $admissionRejected = $reply.Reply -ne 0
+                            } finally { $probe.Client.Dispose() }
+                        } catch { $admissionRejected = $true }
+                    }
+                    Assert-True $admissionRejected "$change change admitted a new socket"
+                    Assert-True (Wait-ProcessExit $activeProcess 20) "$change change did not terminate the candidate"
+                    Assert-True ([Ferrum2ProcessGroup]::ExitCode([uint32]$activeProcess.Id) -ne 0) "$change change candidate exited cleanly"
+                    [Ferrum2ProcessGroup]::Close([uint32]$activeProcess.Id)
+                    $activeProcess = $null
+                    Wait-AdapterAbsent $managedAutoAdapterName
+                    Assert-InterfaceGone $managedAutoAdapterName $ownedInterfaceIndex
+                    Assert-True (@(Get-ExactRunProcesses -WorkPath $work).Count -eq 0) "$change change process residue"
+                    $managedNetworkChangeRows++
+                    if ($change -eq "route") { $managedRouteChangeRows++ }
+                    elseif ($change -eq "interface") { $managedInterfaceChangeRows++ }
+                    else { $managedAddressChangeRows++ }
+                    Write-CapabilityEvidence "network-change-$change" ([ordered]@{
+                        callback = "observed"
+                        admission = "rejected"
+                        capture = "absent"
+                        dns = "absent"
+                        supervised_termination = "complete"
+                        residue = "absent"
+                    })
+                } finally {
+                    if ($change -eq "route") {
+                        $changedRoute = Get-NetRoute -InterfaceIndex $physicalDefault.InterfaceIndex `
+                            -DestinationPrefix $physicalRoute.DestinationPrefix -PolicyStore ActiveStore -ErrorAction Stop |
+                            Where-Object { $_.NextHop -ceq $physicalRoute.NextHop }
+                        Assert-True (@($changedRoute).Count -eq 1) "physical route restore identity mismatch"
+                        Set-NetRoute -InputObject $changedRoute -RouteMetric $routeMetric -ErrorAction Stop
+                    } elseif ($change -eq "interface") {
+                        Enable-NetAdapter -Name $physicalAdapter.Name -Confirm:$false -ErrorAction Stop
+                        $restoreDeadline = [DateTime]::UtcNow.AddSeconds(20)
+                        do {
+                            $restoredAdapter = Get-NetAdapter -Name $physicalAdapter.Name -IncludeHidden -ErrorAction SilentlyContinue
+                            if ($restoredAdapter -and $restoredAdapter.Status -eq "Up") { break }
+                            Start-Sleep -Milliseconds 100
+                        } while ([DateTime]::UtcNow -lt $restoreDeadline)
+                        Assert-True ($restoredAdapter -and $restoredAdapter.Status -eq "Up") "physical interface restore failed"
+                        Assert-True $tcpResources.Remove($dnsResponder) "DNS responder ownership mismatch"
+                        $dnsResponder.Dispose()
+                        $dnsResponder = [Ferrum2DnsResponder]::new($managedDnsAddress, $managedDnsPort)
+                        $tcpResources.Add($dnsResponder)
+                    } else {
+                        Set-NetIPAddress -InterfaceIndex $physicalDefault.InterfaceIndex -IPAddress $sourceAddress `
+                            -SkipAsSource $skipAsSource -ErrorAction Stop
+                    }
+                }
+            }
+            Assert-True ($managedNetworkChangeRows -eq 3 -and $managedRouteChangeRows -eq 1 -and
+                $managedInterfaceChangeRows -eq 1 -and $managedAddressChangeRows -eq 1) "managed network-change row count mismatch"
+        }
+
+        foreach ($hardKill in @(
+            @{ Name = "auto-route"; Config = $managedRouteOnlyConfig; Traffic = $false },
+            @{ Name = "auto-dns"; Config = $managedLifecycleConfig; Traffic = $false },
+            @{ Name = "mixed"; Config = $managedLifecycleConfig; Traffic = $true }
+        )) {
+            $heldHardKillTcp = $null
+            $heldHardKillUdp = $null
+            $activeProcess = Start-Candidate $binary $hardKill.Config
+            $adapter = Wait-AdapterReady $managedAutoAdapterName
+            $ownedInterfaceIndex = [int]$adapter.ifIndex
+            if ($hardKill.Config -eq $managedLifecycleConfig) {
+                Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $ownedInterfaceIndex) "hard-kill DNS active"
+            }
+            if ($hardKill.Traffic) {
+                $heldHardKillTcp = (Open-TunTcp $supportAddress $supportTcpPort $ownedInterfaceIndex).Client
+                $tcpResources.Add($heldHardKillTcp)
+                $tcpPayload = [Text.Encoding]::ASCII.GetBytes("m16-hard-kill-tcp")
+                $heldHardKillTcp.GetStream().Write($tcpPayload, 0, $tcpPayload.Length)
+                $tcpEcho = Read-ExactBytes $heldHardKillTcp.GetStream() $tcpPayload.Length
+                Assert-True (($tcpEcho -join ",") -eq ($tcpPayload -join ",")) "hard-kill direct TCP echo mismatch"
+                $heldHardKillUdp = Open-TunUdp $supportAddress $supportUdpPort $ownedInterfaceIndex
+                $tcpResources.Add($heldHardKillUdp)
+                $udpPayload = [Text.Encoding]::ASCII.GetBytes("m16-hard-kill-udp")
+                [void]$heldHardKillUdp.Send($udpPayload, $udpPayload.Length)
+                $udpEcho = Receive-TunUdp $heldHardKillUdp
+                Assert-True (($udpEcho -join ",") -eq ($udpPayload -join ",")) "hard-kill direct UDP echo mismatch"
+                Invoke-ProductSocksTcp $proxySocksPort $supportAddress $supportTcpPort ([Text.Encoding]::ASCII.GetBytes("m16-hard-kill-proxy")) $false
+                Invoke-SystemDnsWitness "m16-$runIdentity-hard-kill.tun.test" $false $dnsResponder
+            }
+            Assert-True ([Ferrum2ProcessGroup]::Terminate([uint32]$activeProcess.Id)) "hard-kill TerminateProcess failed"
+            Assert-True (Wait-ProcessExit $activeProcess 20) "hard-kill candidate did not exit"
+            Assert-True ([Ferrum2ProcessGroup]::ExitCode([uint32]$activeProcess.Id) -ne 0) "hard-kill candidate exited cleanly"
+            [Ferrum2ProcessGroup]::Close([uint32]$activeProcess.Id)
+            $activeProcess = $null
+            if ($heldHardKillTcp) {
+                Assert-True $tcpResources.Remove($heldHardKillTcp) "hard-kill TCP witness ownership mismatch"
+                $heldHardKillTcp.Dispose()
+            }
+            if ($heldHardKillUdp) {
+                Assert-True $tcpResources.Remove($heldHardKillUdp) "hard-kill UDP witness ownership mismatch"
+                $heldHardKillUdp.Dispose()
+            }
+            Wait-AdapterAbsent $managedAutoAdapterName
+            Assert-InterfaceGone $managedAutoAdapterName $ownedInterfaceIndex
+            Assert-True (@(Get-ExactRunProcesses -WorkPath $work).Count -eq 0) "hard-kill process residue"
+            Assert-True (@(Get-NetIPAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "hard-kill address residue"
+            Assert-True (@(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "hard-kill route residue"
+            Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "hard-kill DNS residue"
+            $managedHardKillRows++
+            Write-CapabilityEvidence "hard-kill-$($hardKill.Name)" ([ordered]@{
+                process = "absent"
+                adapter = "absent"
+                addresses = "absent"
+                routes = "absent"
+                dns = "absent"
+            })
+        }
+        Assert-True ($managedHardKillRows -eq 3) "hard-kill row count mismatch"
+        Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot 0) "managed lifecycle final physical DNS sentinel"
+        Assert-True $tcpResources.Remove($dnsResponder) "managed lifecycle DNS responder ownership mismatch"
+        $dnsResponder.Dispose()
+        $dnsResponder = $null
+        Remove-Item -LiteralPath $siblingDll -Force
+        $createdSiblingDll = $false
+        Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "managed lifecycle sibling DLL residue"
     }
     if ($Mode -eq "network-feasibility") {
         Assert-PktMonAbsent
@@ -3673,7 +4026,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     }
     if ($Mode -eq "full") {
         Assert-True ($foundation -eq 4 -and $tcpRows -eq 8 -and $udpRows -eq 8) "full profile prerequisite count mismatch"
-        Invoke-AdapterCycles $binary $config
+        if ($cycleRows -eq 0) { Invoke-AdapterCycles $binary $config }
     }
     $completed = $true
 }
@@ -3728,7 +4081,7 @@ finally {
         Wait-AdapterAbsent $adapterName 20
     }
     Assert-InterfaceGone $adapterName $ownedInterfaceIndex
-    if ($Mode -eq "managed-product") {
+    if ($Mode -in @("managed-product", "full", "hard-kill")) {
         if (Get-NetAdapter -Name $managedAutoAdapterName -IncludeHidden -ErrorAction SilentlyContinue) {
             Wait-AdapterAbsent $managedAutoAdapterName 20
         }
@@ -3803,8 +4156,18 @@ if ($completed) {
             $managedFilteredPackets.dns_tcp -eq 0 -and $managedFilteredPackets.dns_udp -eq 0) "managed product PktMon prerequisites mismatch"
         Assert-True (Test-Path -LiteralPath $capabilityEvidence) "managed product evidence is missing"
         Write-Output "m16_windows_managed_product status=PASS fixed_tcp=2/2 fixed_udp=2/2 dynamic_tcp=1/1 dynamic_udp=1/1 manual_tcp=1/1 manual_udp=1/1 unpinned=2/2 routes=2/2 interface_metric=unchanged cleanup=PASS guest_build=$($capabilityIdentity.GuestBuild) run_token=$runIdentity candidate_sha=$($capabilityIdentity.Ledger.candidate_sha) probe_sha256=$($capabilityIdentity.Ledger.probe_sha256) identity_sha256=$capabilityIdentityHash"
+    } elseif ($Mode -eq "hard-kill") {
+        Assert-True ($managedHardKillRows -eq 3) "hard-kill marker prerequisites mismatch"
+        Assert-True (Test-Path -LiteralPath $capabilityEvidence) "hard-kill evidence is missing"
+        Write-Output "m16_windows_hard_kill status=PASS cases=3/3 process_absent=PASS adapter=ABSENT addresses=ABSENT routes=ABSENT dns=ABSENT cleanup=PASS guest_build=$($capabilityIdentity.GuestBuild) run_token=$runIdentity candidate_sha=$($capabilityIdentity.Ledger.candidate_sha) probe_sha256=$($capabilityIdentity.Ledger.probe_sha256) identity_sha256=$capabilityIdentityHash"
     } elseif ($Mode -eq "full") {
-        Write-Output "m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+        Assert-True ($foundation -eq 4 -and $tcpRows -eq 8 -and $udpRows -eq 8 -and $cycleRows -eq 100 -and
+            $managedDirectTcpRows -eq 1 -and $managedDirectUdpRows -eq 1 -and $managedSystemDnsRows -eq 2 -and
+            $managedNetworkChangeRows -eq 3 -and $managedRouteChangeRows -eq 1 -and
+            $managedInterfaceChangeRows -eq 1 -and $managedAddressChangeRows -eq 1 -and
+            $managedHardKillRows -eq 3) "managed full marker prerequisites mismatch"
+        Assert-True (Test-Path -LiteralPath $capabilityEvidence) "managed full evidence is missing"
+        Write-Output "m16_windows_tun_full status=PASS m15_transport=16/16 direct_tcp=1/1 direct_udp=1/1 dns=2/2 network_change=3/3 route_change=1/1 interface_change=1/1 address_change=1/1 cycles=100/100 hard_kill=3/3 cleanup=PASS guest_build=$($capabilityIdentity.GuestBuild) run_token=$runIdentity candidate_sha=$($capabilityIdentity.Ledger.candidate_sha) probe_sha256=$($capabilityIdentity.Ledger.probe_sha256) identity_sha256=$capabilityIdentityHash"
     } else {
         Write-Output "m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
     }

@@ -52,7 +52,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
-use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects,
+};
 use windows_sys::core::GUID;
 
 use crate::{ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, Ipv4Prefix};
@@ -325,6 +327,7 @@ struct InterfaceIdentity {
 pub struct UnderlayPolicy {
     fixed: Arc<[(std::net::SocketAddrV4, RouteFingerprint)]>,
     default: Option<RouteFingerprint>,
+    valid: Arc<AtomicBool>,
 }
 
 impl UnderlayPolicy {
@@ -333,16 +336,34 @@ impl UnderlayPolicy {
         socket: &T,
         endpoint: std::net::SocketAddrV4,
     ) -> Result<(), Error> {
+        if !self.valid.load(Ordering::Acquire) {
+            return Err(Error);
+        }
         let route = self
             .fixed
             .iter()
             .find_map(|(candidate, route)| (*candidate == endpoint).then_some(*route))
             .ok_or(Error)?;
-        bind_ipv4_socket(socket, route.interface_index)
+        bind_ipv4_socket(socket, route.interface_index)?;
+        self.valid
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or(Error)
     }
 
     pub fn bind_default<T: AsRawSocket>(&self, socket: &T) -> Result<(), Error> {
-        bind_ipv4_socket(socket, self.default.ok_or(Error)?.interface_index)
+        if !self.valid.load(Ordering::Acquire) {
+            return Err(Error);
+        }
+        bind_ipv4_socket(socket, self.default.ok_or(Error)?.interface_index)?;
+        self.valid
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or(Error)
+    }
+
+    fn invalidate(&self) {
+        self.valid.store(false, Ordering::Release);
     }
 }
 
@@ -369,11 +390,33 @@ struct NotificationContext {
     owned_luid: AtomicU64,
     provisional_luid: AtomicU64,
     callbacks_in_flight: AtomicU64,
+    monitor_runtime: AtomicBool,
+    wake: Option<StopSignal>,
     #[cfg(test)]
     drain_wait_observed: AtomicBool,
 }
 
 impl NotificationContext {
+    fn new(wake: Option<StopSignal>) -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            owned_luid: AtomicU64::new(0),
+            provisional_luid: AtomicU64::new(0),
+            callbacks_in_flight: AtomicU64::new(0),
+            monitor_runtime: AtomicBool::new(false),
+            wake,
+            #[cfg(test)]
+            drain_wait_observed: AtomicBool::new(false),
+        }
+    }
+
+    fn signal_owner(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(wake) = &self.wake {
+            let _ = wake.signal();
+        }
+    }
+
     fn publish_owned_luid(
         &self,
         luid: u64,
@@ -452,6 +495,14 @@ impl NotificationOwners {
             .as_ref()
             .expect("live notifications retain their callback context");
         context.publish_owned_luid(unsafe { luid.Value }, deadline, cancelled)
+    }
+
+    fn monitor_runtime(&self) {
+        self.context
+            .as_ref()
+            .expect("live notifications retain their callback context")
+            .monitor_runtime
+            .store(true, Ordering::Release);
     }
 
     fn cancel_all(&mut self) -> bool {
@@ -571,14 +622,18 @@ fn classify_notification_luid(
     after_unpublished_load: impl FnOnce(),
 ) {
     let _in_flight = NotificationCallbackGuard::enter(context);
+    if context.monitor_runtime.load(Ordering::Acquire) {
+        context.signal_owner();
+        return;
+    }
     if luid == 0 {
-        context.generation.fetch_add(1, Ordering::AcqRel);
+        context.signal_owner();
         return;
     }
     let owned = context.owned_luid.load(Ordering::SeqCst);
     if owned != 0 {
         if owned != luid {
-            context.generation.fetch_add(1, Ordering::AcqRel);
+            context.signal_owner();
         }
         return;
     }
@@ -592,13 +647,14 @@ fn classify_notification_luid(
             Err(current) => current != luid,
         };
     if provisional_mismatch {
-        context.generation.fetch_add(1, Ordering::AcqRel);
+        context.signal_owner();
     }
 }
 
 struct ManagedState {
     notifications: NotificationOwners,
     snapshot_generation: u64,
+    validated_generation: u64,
     policy: UnderlayPolicy,
     capture_routes: Vec<Ipv4Prefix>,
     pending_route: Option<MIB_IPFORWARD_ROW2>,
@@ -620,6 +676,7 @@ pub struct Adapter {
     session: Option<SessionState>,
     session_journal: SessionJournal,
     stop: StopSignal,
+    network_change: StopSignal,
     managed: Option<ManagedState>,
     _not_send: PhantomData<Rc<()>>,
 }
@@ -638,6 +695,9 @@ impl Adapter {
         let stop = StopSignal(Arc::new(OwnedHandle(
             create_event().map_err(|_| CreateError::operation())?,
         )));
+        let network_change = StopSignal(Arc::new(OwnedHandle(
+            create_event().map_err(|_| CreateError::operation())?,
+        )));
         let mut owner = Self {
             config,
             library,
@@ -649,6 +709,7 @@ impl Adapter {
             session: None,
             session_journal: SessionJournal::default(),
             stop,
+            network_change,
             managed: None,
             _not_send: PhantomData,
         };
@@ -702,14 +763,29 @@ impl Adapter {
     }
 
     /// Returns `true` for readable session data and `false` for stop/timeout.
-    pub fn wait(&self, timeout: Duration) -> Result<bool, Error> {
-        let _wait = self.session_journal.begin_wait()?;
+    pub fn wait(&mut self, timeout: Duration) -> Result<bool, Error> {
         let read = self.session.as_ref().ok_or(Error)?.read_event;
-        let handles = [self.stop.0.0, read];
+        let handles = [self.stop.0.0, self.network_change.0.0, read];
         let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
-        match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, millis) } {
+        let result = {
+            let _wait = self.session_journal.begin_wait()?;
+            unsafe { WaitForMultipleObjects(3, handles.as_ptr(), 0, millis) }
+        };
+        match result {
             WAIT_OBJECT_0 => Ok(false),
-            value if value == WAIT_OBJECT_0 + 1 => Ok(true),
+            value if value == WAIT_OBJECT_0 + 1 => {
+                let valid = unsafe { ResetEvent(self.network_change.0.0) } != 0
+                    && self.revalidate_managed_network().unwrap_or(false);
+                if !valid {
+                    if let Some(state) = &self.managed {
+                        state.policy.invalidate();
+                    }
+                    Err(Error)
+                } else {
+                    Ok(false)
+                }
+            }
+            value if value == WAIT_OBJECT_0 + 2 => Ok(true),
             WAIT_FAILED => Err(Error),
             _ => Ok(false),
         }
@@ -841,7 +917,7 @@ impl Adapter {
     fn prepare_managed(&mut self) -> Result<(), Error> {
         let Some((notifications, snapshot_generation, policy, capture_routes, ipv4_dns_address)) =
             prepare_managed_intent(self.config.managed_ipv4(), |config| {
-                let notifications = subscribe_network_changes()?;
+                let notifications = subscribe_network_changes(self.network_change.clone())?;
                 let snapshot_generation = notifications.generation();
                 let policy = snapshot_underlay(config)?;
                 Ok((
@@ -859,6 +935,7 @@ impl Adapter {
         self.managed = Some(ManagedState {
             notifications,
             snapshot_generation,
+            validated_generation: snapshot_generation,
             policy,
             capture_routes,
             pending_route: None,
@@ -914,7 +991,31 @@ impl Adapter {
         )? {
             return Err(Error);
         }
+        state.notifications.monitor_runtime();
+        if !managed_routes_match(&state.routes, &mut PlatformManagedRouteCleanup) {
+            return Err(Error);
+        }
+        state.validated_generation = state.notifications.generation();
         Ok(())
+    }
+
+    fn revalidate_managed_network(&mut self) -> Result<bool, Error> {
+        let Some(state) = self.managed.as_mut() else {
+            return Ok(true);
+        };
+        let owned = InterfaceIdentity {
+            luid: unsafe { self.luid.Value },
+            index: self.interface_index,
+        };
+        revalidate_managed_network(
+            &state.policy,
+            owned,
+            &state.routes,
+            &mut state.validated_generation,
+            || state.notifications.generation(),
+            &mut PlatformUnderlay,
+            &mut PlatformManagedRouteCleanup,
+        )
     }
 
     fn cleanup_inner(&mut self) -> bool {
@@ -1109,15 +1210,8 @@ impl ManagedRouteOperations for PlatformManagedRoutes<'_> {
     }
 }
 
-fn subscribe_network_changes() -> Result<NotificationOwners, Error> {
-    let context = Box::new(NotificationContext {
-        generation: AtomicU64::new(0),
-        owned_luid: AtomicU64::new(0),
-        provisional_luid: AtomicU64::new(0),
-        callbacks_in_flight: AtomicU64::new(0),
-        #[cfg(test)]
-        drain_wait_observed: AtomicBool::new(false),
-    });
+fn subscribe_network_changes(wake: StopSignal) -> Result<NotificationOwners, Error> {
+    let context = Box::new(NotificationContext::new(Some(wake)));
     let context_pointer = (&raw const *context).cast::<c_void>();
     let (handles, context) = subscribe_notification_sequence(
         context,
@@ -1215,6 +1309,7 @@ fn snapshot_underlay_with(
     Ok(UnderlayPolicy {
         fixed: fixed.into(),
         default,
+        valid: Arc::new(AtomicBool::new(true)),
     })
 }
 
@@ -1540,6 +1635,49 @@ fn delete_managed_route<O: ManagedRouteCleanupOperations>(
         }
         ManagedRouteRead::Present(_) | ManagedRouteRead::Failed => true,
     }
+}
+
+fn managed_routes_match<O: ManagedRouteCleanupOperations>(
+    intended: &[O::Row],
+    operations: &mut O,
+) -> bool {
+    intended.iter().all(|row| {
+        matches!(
+            operations.read(row),
+            ManagedRouteRead::Present(current) if operations.matches(row, &current)
+        )
+    })
+}
+
+fn revalidate_managed_network<U: UnderlayOperations, O: ManagedRouteCleanupOperations>(
+    policy: &UnderlayPolicy,
+    owned: InterfaceIdentity,
+    routes: &[O::Row],
+    validated_generation: &mut u64,
+    mut generation: impl FnMut() -> u64,
+    underlay: &mut U,
+    route_operations: &mut O,
+) -> Result<bool, Error> {
+    let mut before = generation();
+    if before == *validated_generation {
+        return Ok(true);
+    }
+    for _ in 0..2 {
+        if !underlay_matches_with(policy, owned, underlay)?
+            || !managed_routes_match(routes, route_operations)
+        {
+            policy.invalidate();
+            return Ok(false);
+        }
+        let after = generation();
+        if after == before {
+            *validated_generation = after;
+            return Ok(true);
+        }
+        before = after;
+    }
+    policy.invalidate();
+    Ok(false)
 }
 
 struct PlatformManagedRouteCleanup;
@@ -2151,10 +2289,10 @@ mod tests {
         copy_bounded_wide, dad_snapshot, delete_managed_route, eligible_interface_identity,
         finish_setup_transaction, install_managed_dns, install_managed_routes, interface_changed,
         interface_index_option_value, leak_notification_owners, load_transaction,
-        prepare_managed_intent, require_exports, restore_managed_dns, route_changed, route_matches,
-        select_unique_default_route, setup_transaction, snapshot_underlay_with,
-        subscribe_notification_sequence, take_last_owned_route, underlay_matches_with,
-        underlay_snapshot_matches, validate_artifact,
+        prepare_managed_intent, require_exports, restore_managed_dns, revalidate_managed_network,
+        route_changed, route_matches, select_unique_default_route, setup_transaction,
+        snapshot_underlay_with, subscribe_notification_sequence, take_last_owned_route,
+        underlay_matches_with, underlay_snapshot_matches, validate_artifact,
     };
     use crate::Ipv4Prefix;
 
@@ -2223,13 +2361,7 @@ mod tests {
             ("exact own", OWN_LUID, 0, true),
             ("foreign", FOREIGN_LUID, 1, false),
         ] {
-            let context = NotificationContext {
-                generation: std::sync::atomic::AtomicU64::new(0),
-                owned_luid: std::sync::atomic::AtomicU64::new(0),
-                provisional_luid: std::sync::atomic::AtomicU64::new(0),
-                callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
-                drain_wait_observed: std::sync::atomic::AtomicBool::new(false),
-            };
+            let context = NotificationContext::new(None);
             let entered = std::sync::Barrier::new(2);
             let (release_tx, release_rx) = std::sync::mpsc::channel();
             let (publisher_tx, publisher_rx) = std::sync::mpsc::sync_channel(1);
@@ -2329,13 +2461,7 @@ mod tests {
     #[test]
     fn notification_publication_observer_bounds_failure_paths() {
         const OWN_LUID: u64 = 0x1020_3040;
-        let context = NotificationContext {
-            generation: std::sync::atomic::AtomicU64::new(0),
-            owned_luid: std::sync::atomic::AtomicU64::new(0),
-            provisional_luid: std::sync::atomic::AtomicU64::new(0),
-            callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
-            drain_wait_observed: std::sync::atomic::AtomicBool::new(false),
-        };
+        let context = NotificationContext::new(None);
 
         let (publisher_tx, publisher_rx) = std::sync::mpsc::sync_channel::<()>(1);
         let timeout =
@@ -2393,13 +2519,7 @@ mod tests {
             ),
             ("expired", false, std::time::Instant::now()),
         ] {
-            let context = NotificationContext {
-                generation: std::sync::atomic::AtomicU64::new(0),
-                owned_luid: std::sync::atomic::AtomicU64::new(0),
-                provisional_luid: std::sync::atomic::AtomicU64::new(0),
-                callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
-                drain_wait_observed: std::sync::atomic::AtomicBool::new(false),
-            };
+            let context = NotificationContext::new(None);
             let entered = std::sync::Barrier::new(2);
             let release = std::sync::Barrier::new(2);
             let cancelled = std::sync::atomic::AtomicBool::new(cancelled);
@@ -2423,7 +2543,7 @@ mod tests {
     }
 
     #[test]
-    fn notification_prepublication_exact_owner_is_reconciled_without_invalidation() {
+    fn network_change_notifications_cover_each_callback_and_runtime_owned_events() {
         const OWN_LUID: u64 = 0x1020_3040;
         const FOREIGN_LUID: u64 = 0x5060_7080;
 
@@ -2438,6 +2558,7 @@ mod tests {
         enum Action {
             Notify(Option<u64>),
             Publish(u64),
+            Monitor,
         }
 
         unsafe fn notify(callback: Callback, context: *const std::ffi::c_void, luid: Option<u64>) {
@@ -2566,18 +2687,21 @@ mod tests {
                 true,
             ),
             ("zero owner published", &[Action::Publish(0)], true),
+            (
+                "owned runtime mutation",
+                &[
+                    Action::Publish(OWN_LUID),
+                    Action::Monitor,
+                    Action::Notify(Some(OWN_LUID)),
+                ],
+                true,
+            ),
         ];
         for callback in [Callback::Route, Callback::Interface, Callback::Address] {
             for (name, actions, changed) in cases {
                 let notifications = NotificationOwners {
                     handles: Vec::new(),
-                    context: Some(Box::new(NotificationContext {
-                        generation: std::sync::atomic::AtomicU64::new(0),
-                        owned_luid: std::sync::atomic::AtomicU64::new(0),
-                        provisional_luid: std::sync::atomic::AtomicU64::new(0),
-                        callbacks_in_flight: std::sync::atomic::AtomicU64::new(0),
-                        drain_wait_observed: std::sync::atomic::AtomicBool::new(false),
-                    })),
+                    context: Some(Box::new(NotificationContext::new(None))),
                 };
                 let context = (notifications.context.as_deref().unwrap()
                     as *const NotificationContext)
@@ -2592,6 +2716,7 @@ mod tests {
                                 &std::sync::atomic::AtomicBool::new(false),
                             );
                         }
+                        Action::Monitor => notifications.monitor_runtime(),
                     }
                 }
                 assert_eq!(
@@ -2916,6 +3041,140 @@ mod tests {
         default: RouteFingerprint,
         best_calls: usize,
         fail_at: Option<&'static str>,
+    }
+
+    #[test]
+    fn network_change_revalidates_underlay_and_owned_routes_before_shutdown() {
+        let physical = InterfaceIdentity { luid: 7, index: 17 };
+        let wintun = InterfaceIdentity { luid: 9, index: 19 };
+        let route = RouteFingerprint {
+            interface_luid: physical.luid,
+            interface_index: physical.index,
+            destination: u32::from_ne_bytes([198, 51, 100, 8]),
+            prefix_length: 0,
+            next_hop: u32::from_ne_bytes([192, 0, 2, 1]),
+            metric: 4,
+            source: Some(u32::from_ne_bytes([192, 0, 2, 2])),
+        };
+        let endpoint = "198.51.100.8:443".parse().unwrap();
+        let config = crate::ManagedIpv4Config::new(Vec::new(), vec![endpoint], true, None).unwrap();
+        let underlay = InjectedUnderlay {
+            interfaces: vec![physical],
+            best_index: physical.index,
+            route,
+            default: route,
+            best_calls: 0,
+            fail_at: None,
+        };
+        let policy = snapshot_underlay_with(&config, &mut underlay.clone()).unwrap();
+
+        let mut generation = [1, 1].into_iter();
+        let mut validated_generation = 0;
+        let mut owned_routes = InjectedRouteCleanup {
+            reads: [ManagedRouteRead::Present(1)].into(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        assert!(
+            revalidate_managed_network(
+                &policy,
+                wintun,
+                &[1],
+                &mut validated_generation,
+                || generation.next().unwrap(),
+                &mut underlay.clone(),
+                &mut owned_routes,
+            )
+            .unwrap()
+        );
+        assert_eq!(validated_generation, 1);
+        assert_eq!(owned_routes.calls, ["get"]);
+
+        for (name, changed_underlay, route_readback) in [
+            ("underlay", true, ManagedRouteRead::Present(1)),
+            ("owned route", false, ManagedRouteRead::Present(2)),
+            ("replacement query", false, ManagedRouteRead::Failed),
+        ] {
+            let mut changed = underlay.clone();
+            if changed_underlay {
+                changed.route.metric += 1;
+            }
+            let mut owned_routes = InjectedRouteCleanup {
+                reads: [route_readback].into(),
+                delete_error: false,
+                calls: Vec::new(),
+            };
+            let mut observed = 1;
+            let mut generation = [2, 2].into_iter();
+            assert!(
+                !revalidate_managed_network(
+                    &policy,
+                    wintun,
+                    &[1],
+                    &mut observed,
+                    || generation.next().unwrap(),
+                    &mut changed,
+                    &mut owned_routes,
+                )
+                .unwrap(),
+                "{name}"
+            );
+            assert!(!policy.valid.load(std::sync::atomic::Ordering::Acquire));
+            assert!(policy.bind_fixed(&NeverSocket, endpoint).is_err());
+        }
+
+        let policy = snapshot_underlay_with(&config, &mut underlay.clone()).unwrap();
+        let mut generation = [2, 3, 3].into_iter();
+        let mut observed = 1;
+        let mut owned_routes = InjectedRouteCleanup {
+            reads: [ManagedRouteRead::Present(1), ManagedRouteRead::Present(1)].into(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        assert!(
+            revalidate_managed_network(
+                &policy,
+                wintun,
+                &[1],
+                &mut observed,
+                || generation.next().unwrap(),
+                &mut underlay.clone(),
+                &mut owned_routes,
+            )
+            .unwrap(),
+            "one repeated/coalesced signal gets one bounded retry"
+        );
+        assert_eq!(observed, 3);
+
+        let mut generation = [4, 5, 6].into_iter();
+        let mut owned_routes = InjectedRouteCleanup {
+            reads: [ManagedRouteRead::Present(1), ManagedRouteRead::Present(1)].into(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        assert!(
+            !revalidate_managed_network(
+                &policy,
+                wintun,
+                &[1],
+                &mut observed,
+                || generation.next().unwrap(),
+                &mut underlay.clone(),
+                &mut owned_routes,
+            )
+            .unwrap(),
+            "repeated changes exhaust the bounded retry"
+        );
+        assert!(!policy.valid.load(std::sync::atomic::Ordering::Acquire));
+        assert!(policy.bind_default(&NeverSocket).is_err());
+    }
+
+    struct NeverSocket;
+
+    impl std::os::windows::io::AsRawSocket for NeverSocket {
+        fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+            panic!("revoked policy must reject before reading the socket")
+        }
     }
 
     impl UnderlayOperations for InjectedUnderlay {
