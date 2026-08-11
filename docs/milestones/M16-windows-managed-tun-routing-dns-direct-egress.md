@@ -265,6 +265,21 @@ accepted at code/tests `31688/54418`、ratio `1.717306 PASS`、case/support/fixt
 growth `+1347`；the existing `architecture.rs` is `4975` semantic test LOC（`+270`）。Controller-only failures
 remain uncredited and do not alter the product PASS。
 
+The first authorized T04 push placed closeout descendant `c13215b…` on `master` with exact readback。
+Automatic run `31485931514/1` is preserved failed and was not rerun：quality exposed Linux compilation of
+Windows-only managed UDP test state，MSRV exposed two Windows-only expectations，and Windows TUN E2E exposed
+an occupied-metrics oracle that incorrectly waited for an adapter although metrics prepares before the final
+TUN root。The six-file `+53/-39` repair `d791f01c51cd2cbc0482c739b928eaac26ed9f82`（tree
+`1fa073ec620e46768613d9d6590f6977656715b2`，parent `c13215b…`）retains the portable injected binding seam，
+cfg-gates only concrete Windows state and changes the occupied-metrics row to bounded nonzero exit plus exact
+adapter absence。Targeted Architect and QA both return `PASS_WITH_NOTES` with zero blocker/major/minor。
+An ordinary authorized push advanced `master` to exact `d791f01…`；replacement automatic run
+`31488588010/1` completed SUCCESS with quality、MSRV、interop、test-footprint、Linux GNU/musl、Windows MSVC、
+Windows TUN E2E and qualification all passing。Push-event performance jobs skipped by design and are not
+claimed。Footprint integrity/category/ratio pass；numeric `REVIEW_REQUIRED` is accepted at code/tests
+`31708/54429`、ratio `1.716570 PASS`、case/support/fixture delta `+2105/0/0`、code growth `+1367` and
+`architecture.rs` `4996/+291`。
+
 The first T02 non-force push moved `master` from `5630cf4…` to `5782c08…` with exact remote readback。
 Automatic push run `31443577764/1` is preserved as failed and was not rerun。MSRV、interop、test-footprint、
 Linux musl、Windows MSVC、Linux GNU and Windows TUN E2E succeeded；quality failed only at authoritative Full
@@ -292,9 +307,12 @@ must still bind its accepted exact SHA。
 
 ## Blocker / next action
 
-M16-T04 is done at exact `2fdfbc7d0106e90e61739b810896f2feb17295cd`；both final reviews have zero
-blocker/major/minor，and the accepted footprint notes remain visible above。M16-T05 is ready and is the current
-serial frontier；DNS steering、performance/full qualification and 100-cycle claims remain pending。The failed
+M16-T04 is root-closed：privileged product evidence remains bound to exact
+`2fdfbc7d0106e90e61739b810896f2feb17295cd`，and final hosted-integrated `master` is exact
+`d791f01c51cd2cbc0482c739b928eaac26ed9f82` with replacement run `31488588010/1` SUCCESS。All final reviews
+have zero blocker/major/minor，and the accepted footprint notes remain visible above。M16-T05 is ready and is
+the current serial frontier；DNS steering、performance/full qualification and 100-cycle claims remain pending。
+The failed T04 run `31485931514/1` was not rerun。The failed
 `31443577764/1` was not rerun；final T02
 `master@bf0a3cb…` and automatic `31445081351/1` are hosted PASS。T03 failed run `31454190132/1` was not
 rerun；replacement `master@85bf3fcc…` and automatic `31454813712/1` are hosted PASS。

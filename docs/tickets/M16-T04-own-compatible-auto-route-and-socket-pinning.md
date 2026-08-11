@@ -79,14 +79,18 @@ integration；they are not replaced by the fake recorder or another guest。
 
 ## Result
 
-- Commit: `2fdfbc7d0106e90e61739b810896f2feb17295cd`（tree
+- Privileged product commit: `2fdfbc7d0106e90e61739b810896f2feb17295cd`（tree
   `a4b2cc02bbd7dbc8a03a0256b266be4792d1f65d`，parent
   `2c770b7a3ef4f7896e24aea25d32b88df29cae48`）。
-- Review: final Architect and QA both `PASS_WITH_NOTES`，each with zero blocker/major/minor and one accepted
-  footprint-size note；T04 may close。
-- Footprint: integrity `PASS`；numeric `REVIEW_REQUIRED` is accepted at code/tests `31688/54418`、ratio
-  `1.717306 PASS`、case/support/fixture delta `+2094/0/0` and code growth `+1347`。The existing
-  `architecture.rs` reaches `4975` semantic test LOC（`+270`）；the evidence remains in existing seams with no
+- Hosted-integrated descendant: `d791f01c51cd2cbc0482c739b928eaac26ed9f82`（tree
+  `1fa073ec620e46768613d9d6590f6977656715b2`，parent
+  `c13215b1b90c38d06ce4b16edca85c4b812ce80c`）。Its six-file `+53/-39` repair changes only platform cfg、
+  test expectations and the occupied-metrics qualification oracle；Windows product behavior is unchanged。
+- Review: the product and targeted hosted-repair Architect/QA reviews all report `PASS_WITH_NOTES` with zero
+  blocker/major/minor。Root accepts the notes and closes T04。
+- Footprint: integrity `PASS`；numeric `REVIEW_REQUIRED` is accepted at code/tests `31708/54429`、ratio
+  `1.716570 PASS`、case/support/fixture delta `+2105/0/0` and code growth `+1367`。The existing
+  `architecture.rs` reaches `4996` semantic test LOC（`+291`）；the evidence remains in existing seams with no
   support/fixture growth or second harness。
 - Evidence: the candidate-bound probe/client SHA-256 values are
   `b6d118321e19def01f5bcc6b10bacc55948025e9a88515ce4d8c7447e86ee35d` and
@@ -107,6 +111,13 @@ integration；they are not replaced by the fake recorder or another guest。
   never invoked the qualifier。Neither that attempt nor the predecessor-controller attempt produced an accepted
   controller PASS or contributes to the credited PASS；all cleanup and residue audits remained clean。This
   result is limited to the exact guest build and makes no cross-build claim。
+- Hosted evidence: automatic push run `31485931514/1` on `c13215b…` is preserved failed and was not rerun。
+  Its three failures were Linux-only Windows dead-code/test expectations and a Windows TUN occupied-metrics
+  oracle that incorrectly waited for an adapter even though metrics prepares before the final TUN root。The
+  bounded `d791f01…` repair passed dual targeted review and was pushed by normal non-force fast-forward with
+  exact readback。Replacement run `31488588010/1` completed SUCCESS：quality、MSRV、interop、test-footprint、
+  Linux GNU/musl、Windows MSVC、Windows TUN E2E and qualification all passed。Push-event performance jobs
+  skipped by design and are not claimed；independent performance/full/100-cycle evidence remains T06/T07 work。
 
 ## Rollback / risk
 
