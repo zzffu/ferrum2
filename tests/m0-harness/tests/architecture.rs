@@ -636,6 +636,16 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         ["Wait-AdapterAbsent $managedAutoAdapterName 20 11"],
         "hard-kill teardown must converge longer than graceful cleanup before same-name rebind"
     );
+    let cycle_absence_calls = adapter_cycles
+        .lines()
+        .filter(|line| line.contains("Wait-AdapterAbsent $ExpectedAdapter"))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cycle_absence_calls,
+        ["Wait-AdapterAbsent $ExpectedAdapter 20 11"],
+        "repeated managed cycles must converge before same-name adapter recreation"
+    );
     assert!(
         adapter_cycles.contains("[Nullable[int]]$MetricsPort = $null")
             && managed_cycle_metrics.contains(

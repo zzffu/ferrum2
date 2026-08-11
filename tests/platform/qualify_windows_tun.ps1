@@ -2284,7 +2284,7 @@ function Invoke-AdapterCycles(
             $script:activeProcess = $null
             $candidateAfterStop = @(Get-ExactRunProcesses $script:work | Where-Object { $_.ExecutablePath -eq $script:binary })
             Assert-True ($candidateAfterStop.Count -eq 0) "cycle candidate remained after stop"
-            Wait-AdapterAbsent $ExpectedAdapter
+            Wait-AdapterAbsent $ExpectedAdapter 20 11
             Assert-InterfaceGone $ExpectedAdapter $script:ownedInterfaceIndex
             if ($Managed) {
                 Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $script:ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "managed cycle DNS residue"
