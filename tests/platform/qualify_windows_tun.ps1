@@ -2093,6 +2093,7 @@ function Invoke-ProductSocksTcp(
             $reply = Read-SocksReply $session.Stream
             Assert-True ($reply.Reply -eq 0) "SOCKS direct TCP request failed"
             $session.Stream.Write($Payload, 0, $Payload.Length)
+            $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
             $echo = Read-ExactBytes $session.Stream $Payload.Length
             Assert-True (($echo -join ",") -eq ($Payload -join ",")) "SOCKS direct TCP echo mismatch"
         } else {

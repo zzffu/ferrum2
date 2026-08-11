@@ -4482,6 +4482,7 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
             && source.contains("$performanceDirectRows -eq 1")
             && source.contains("$performanceDnsRows -eq 2")
             && source.contains("Invoke-ProductSocksTcp $performanceDirectSocksPort")
+            && source.contains("$session.Stream.Write($Payload, 0, $Payload.Length)\n            $session.Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)\n            $echo = Read-ExactBytes $session.Stream $Payload.Length")
             && completion.is_some_and(|completion| {
                 completion.contains(
                     "m15_windows_tun_performance status=PASS witnesses=2/2 cleanup=PASS",
