@@ -304,6 +304,43 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
 
     let qualifier = fs::read_to_string(root.join("tests/platform/qualify_windows_tun.ps1"))
         .expect("Windows TUN qualifier");
+    let identity = qualifier
+        .split("function Get-NetworkFeasibilityIdentity")
+        .nth(1)
+        .and_then(|body| body.split("function Get-Tcp01Boundary").next())
+        .expect("bounded canonical identity loader");
+    let artifact_checks = identity
+        .find("Get-FileHash -LiteralPath $binary")
+        .zip(identity.find("Get-FileHash -LiteralPath $serverBinary"))
+        .zip(identity.find("Get-CimInstance Win32_OperatingSystem"));
+    assert!(
+        identity.contains("[bool]$RequireServer")
+            && identity.contains("\"client_sha256\", \"server_sha256\"")
+            && identity.contains("$ledger.client_sha256 -cmatch '^[0-9a-f]{64}$'")
+            && identity.contains("$ledger.server_sha256 -cmatch '^[0-9a-f]{64}$'")
+            && identity.contains("Test-Path -LiteralPath $binary")
+            && identity.contains("if (Test-Path -LiteralPath $serverBinary)")
+            && identity.contains("Assert-True (-not $RequireServer)")
+            && artifact_checks.is_some_and(|((client, server), os)| client < server && server < os)
+            && !identity.contains("git -C $workspace"),
+        "one canonical ledger must bind required staged artifacts before guest identity or product work"
+    );
+    let build_dispatch = qualifier
+        .split(
+            "if ($Mode -notin @(\"network-feasibility\", \"managed-product\", \"full\", \"hard-kill\"))",
+        )
+        .nth(1)
+        .and_then(|body| body.split("if ($Mode -eq \"managed-product\")").next())
+        .expect("bounded staged/legacy build dispatch");
+    assert!(
+        qualifier.contains(
+            "Get-NetworkFeasibilityIdentity $IdentityLedger ($Mode -eq \"full\")",
+        ) && qualifier.contains(
+            "if ($Mode -notin @(\"network-feasibility\", \"managed-product\", \"full\", \"hard-kill\"))",
+        ) && build_dispatch.contains("if ($Mode -in @(\"tcp\", \"udp\", \"performance\"))")
+            && !build_dispatch.contains("\"full\""),
+        "identity-bound modes must consume staged artifacts while legacy M15 modes retain local builds"
+    );
     let integrated = qualifier
         .split("if ($Mode -in @(\"full\", \"hard-kill\")) {")
         .nth(1)

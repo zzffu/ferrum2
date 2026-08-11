@@ -241,7 +241,7 @@ function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
-function Get-NetworkFeasibilityIdentity([string]$Path) {
+function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
     Assert-True (-not [string]::IsNullOrWhiteSpace($Path)) "network feasibility requires IdentityLedger"
     $resolved = (Resolve-Path -LiteralPath $Path).Path
     $bytes = [IO.File]::ReadAllBytes($resolved)
@@ -255,7 +255,7 @@ function Get-NetworkFeasibilityIdentity([string]$Path) {
     $keys = @(
         "schema", "vm_name", "vm_id", "checkpoint_name", "checkpoint_id", "guest_product",
         "guest_edition", "guest_architecture", "guest_version", "guest_build", "candidate_sha",
-        "probe_sha256", "support_listener"
+        "probe_sha256", "client_sha256", "server_sha256", "support_listener"
     )
     Assert-True ((@($ledger.PSObject.Properties.Name) -join "|") -ceq ($keys -join "|")) "identity ledger keys are invalid"
     $listenerKeys = @("ipv4", "tcp_port", "udp_port", "pid", "owner")
@@ -270,11 +270,20 @@ function Get-NetworkFeasibilityIdentity([string]$Path) {
     Assert-True ([Guid]::TryParseExact([string]$ledger.checkpoint_id, "D", [ref]$parsedGuid) -and $parsedGuid -ne [Guid]::Empty) "identity ledger checkpoint ID is invalid"
     Assert-True ([string]$ledger.candidate_sha -cmatch '^[0-9a-f]{40}$') "identity ledger candidate SHA is invalid"
     Assert-True ([string]$ledger.probe_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger probe hash is invalid"
+    Assert-True ([string]$ledger.client_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger client hash is invalid"
+    Assert-True ([string]$ledger.server_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger server hash is invalid"
     $probePath = Join-Path $PSScriptRoot "qualify_windows_tun.ps1"
     $probeHash = (Get-FileHash -LiteralPath $probePath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-True ($ledger.probe_sha256 -ceq $probeHash) "identity ledger probe hash mismatch"
-    $candidate = (& git -C $workspace rev-parse HEAD 2>$null).Trim()
-    Assert-True ($LASTEXITCODE -eq 0 -and $candidate -ceq [string]$ledger.candidate_sha) "identity ledger candidate SHA mismatch"
+    Assert-True (Test-Path -LiteralPath $binary) "staged candidate binary is missing"
+    $clientHash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ($ledger.client_sha256 -ceq $clientHash) "staged client hash mismatch"
+    if (Test-Path -LiteralPath $serverBinary) {
+        $serverHash = (Get-FileHash -LiteralPath $serverBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+        Assert-True ($ledger.server_sha256 -ceq $serverHash) "staged server hash mismatch"
+    } else {
+        Assert-True (-not $RequireServer) "staged server binary is missing"
+    }
 
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
     $version = [Environment]::OSVersion.Version.ToString()
@@ -309,7 +318,7 @@ function Get-NetworkFeasibilityIdentity([string]$Path) {
 }
 
 if ($Mode -in @("network-feasibility", "managed-product", "full", "hard-kill")) {
-    $capabilityIdentity = Get-NetworkFeasibilityIdentity $IdentityLedger
+    $capabilityIdentity = Get-NetworkFeasibilityIdentity $IdentityLedger ($Mode -eq "full")
     $capabilityIdentityHash = $capabilityIdentity.IdentitySha256
     $capabilityEvidence = "$($capabilityIdentity.Path).evidence-$runIdentity.jsonl"
     Assert-True (-not (Test-Path -LiteralPath $capabilityEvidence)) "network feasibility evidence baseline not absent"
@@ -2233,12 +2242,10 @@ try {
     Assert-True (($exports -join "|") -eq ($expectedExports -join "|")) "DLL export set mismatch"
     $foundation++
 
-    if ($Mode -in @("network-feasibility", "managed-product")) {
-        Assert-True (Test-Path -LiteralPath $binary) "staged candidate binary is missing"
-    } else {
+    if ($Mode -notin @("network-feasibility", "managed-product", "full", "hard-kill")) {
         Push-Location $workspace
         try {
-            if ($Mode -in @("tcp", "udp", "full", "performance")) { & cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --locked }
+            if ($Mode -in @("tcp", "udp", "performance")) { & cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --locked }
             else { & cargo +1.97.1 build -p ferrum2-client --locked }
             if ($LASTEXITCODE -ne 0) { throw "candidate build failed" }
         }
