@@ -3,6 +3,14 @@
 This context names the contracts used to distinguish ferrum2 product guarantees
 from the evidence and mechanics used to prove them.
 
+## Qualified platform checkpoint
+
+M16 is closed on exact product `98800a77877de7e5b16491df9a65c635393c91f0`。Its selected Windows profile
+adds compatible managed IPv4 Wintun capture、physical first-hop binding、owned IPv4 DNS steering and
+route-selectable Direct egress。Windows TUN-selected Direct IPv6 remains a pre-socket refusal；M15 manual-route
+and non-managed IPv6 behavior remain supported。This checkpoint does not claim strict anti-leak、managed IPv6、
+per-target multihomed dynamic binding or a performance improvement。
+
 ## Language
 
 **Normative invariant**:

@@ -1,6 +1,9 @@
 # M16 — Windows managed TUN routing, DNS and direct egress
 
-- **Status:** validating
+- **Status:** closed
+- **Qualified M16 product:** `98800a77877de7e5b16491df9a65c635393c91f0`
+- **Qualified M16 product tree / parent:** `92c6da7c7b23fd5ce348881325e3cc4b5c7b9bb0` /
+  `a2ba4da191b642fef852d104df335dcea1224eaa`
 - **Qualified M15 product:** `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9`
 - **Qualified M15 product tree:** `72a3cfb5c881a35b1416cbf9ffea593973cc3570`
 - **Planning baseline:** `fcef80dcc7e62bbca63ffbf7832df369dd418abd`
@@ -186,7 +189,7 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
       `16/16` transport and its IPv6 rows remain regression evidence。
 - [x] New errors/logs/traces/metrics use fixed redacted categories and contain no target、endpoint、prefix、
       interface/adapter identity、DNS name、tag、packet or secret。
-- [ ] One exact SHA passes focused、Full、Rust 1.97.1、three non-driver targets、existing interop、footprint、
+- [x] One exact SHA passes focused、Full、Rust 1.97.1、three non-driver targets、existing interop、footprint、
       current-VM privileged full/cleanup、independent performance and bounded Architect/QA review with zero
       blocking findings；hosted results are regression evidence，not a second OS qualification baseline。
 
@@ -200,7 +203,7 @@ existing qualifier probe plus Markdown evidence amendments；it did not reopen t
 | M16-T04 | Own compatible capture routes and pre-connect physical socket binding | M16-T03 | done |
 | M16-T05 | Steer Wintun DNS and exact synthetic TCP/UDP DNS traffic | M16-T04 | done |
 | M16-T06 | Close network-change、failure、hard-kill and current-VM lifecycle evidence | M16-T05 | done |
-| M16-T07 | Qualify and close one exact M16 integration SHA | M16-T06 | ready |
+| M16-T07 | Qualify and close one exact M16 integration SHA | M16-T06 | done |
 
 ```text
 M16-T01 capability/contracts/control
@@ -318,16 +321,17 @@ unavailable；local Direct `4/4`、full client serial `53/53`、architecture `19
 format、diff and hook passed。An ordinary authorized push advanced `master` from `52beb463…` to `85bf3fcc…`
 with exact readback；replacement automatic run `31454813712/1` completed SUCCESS with quality、qualification、
 interop、test-footprint、MSRV、Linux GNU/musl、Windows MSVC and Windows TUN E2E all passing。Push-event
-performance jobs skipped by design and are not claimed。The user explicitly authorizes required future
-non-force pushes，including performance-related pushes。This does not authorize workflow dispatch or rerun、
-force-push、PR、tag、package、release or publication without separate explicit authority。Every remote action
-must still bind its accepted exact SHA。
+performance jobs skipped by design and are not claimed。Later T07 authorization and its consumed exact-SHA
+push/dispatch ledger are recorded in the close result below；no earlier result is promoted or combined。
 
-## Blocker / next action
+## Close result
 
-M16-T05 and T06 are root-closed locally。The current exact candidate is `d76268b…` with both required fresh
-VM profiles and every local Full/MSRV/lifecycle gate passing；T07 is ready and is the sole frontier。Its next
-step is a dedicated closeout/integration commit followed by the already-authorized ordinary non-force push and
-automatic hosted regression run。The independently required performance workflow remains blocked on separate
-workflow-dispatch authority；no dispatch/rerun、force-push、PR、tag、package、release or publication is implied。
-All earlier failed hosted and controller attempts remain preserved and uncredited。
+Exact product `98800a77877de7e5b16491df9a65c635393c91f0` passed the fresh current-VM full and hard-kill profiles，
+serial local Full/Rust 1.97.1/lifecycle gates，automatic hosted run `31567846180/1`，full hosted run
+`31567877969/1` and independent performance run `31567880517/1`。Final Architect and QA both returned `PASS`
+with `0/0/0/0` findings。Milestone footprint integrity/category/ratio passed at code/tests `30395/56993`，
+ratio `1.875078` and case/support/fixture delta `+6673/-3/0`；the numeric `REVIEW_REQUIRED` is accepted for
+distinct required product/platform/lifecycle/mutation evidence in existing seams，with no fixture、dependency or
+second harness。The product is on `origin/codex/integration/m16` and `origin/master`；this documentation-only
+closeout does not replace it。Earlier failed VM/controller and hosted attempts remain preserved and uncredited。
+No force-push、PR、tag、package、release、publication or Wintun redistribution occurred。

@@ -183,3 +183,14 @@ lifecycle and mutation case evidence；integrity and ratio pass，support/fixtur
 third helper or second harness exists。`queues=bounded` means configured bounds，not measured internal
 queue depth。Combined Wintun/Ferrum2 redistribution remains a blocked release/legal boundary rather than
 review debt；the source candidate and ephemeral/operator-supplied exact DLL path are qualified。
+
+## M16 close audit
+
+No M16 review debt remains。Every product、platform、lifecycle and control finding was closed before
+qualification。The bounded T07 contract correction closed `ARCH-M16-T07-001` and
+`QA-M16-T07-DOCS-001`；final Architect and QA both returned `PASS` with blocker/major/minor/note `0/0/0/0`
+on the exact qualified product/evidence projection。The milestone numeric `REVIEW_REQUIRED` is accepted at
+code/tests `30395/56993`，ratio `1.875078` and case/support/fixture delta `+6673/-3/0` because it is distinct
+required product/platform/lifecycle/mutation evidence in existing seams；support shrank by three lines and no
+fixture、dependency、third helper or second harness was added。Strict anti-leak、managed IPv6、per-target
+multihomed dynamic binding and performance improvement remain explicit scope boundaries，not review debt。

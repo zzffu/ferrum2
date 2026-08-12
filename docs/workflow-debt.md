@@ -67,3 +67,13 @@ without deleting evidence or adding a second Rust harness。All failed attempt-1
 uncredited and were repaired only on new descendant SHAs，never remotely rerun。No control-plane package、provider、
 policy or helper gap remains。Combined Wintun/Ferrum2 redistribution is a release/legal decision，not a
 workflow capability request。
+
+## M16 close audit
+
+No M16 workflow debt remains。The existing workflow produced exact-SHA automatic/full/performance evidence in
+`31567846180/1`、`31567877969/1` and `31567880517/1`；all required jobs and qualification aggregates passed。
+The current-VM full/hard-kill profiles remain the sole M16 privileged capability evidence，while hosted full is
+the retained M15 regression and hosted performance is the M16 resource witness。The schema-3 footprint integrity/
+category/ratio gates passed and the `+6673/-3/0` numeric advisory is accepted without deleting evidence or adding
+a workflow、job、provider、policy、helper or second harness。Failed attempts remain uncredited and were not
+remotely rerun；no control-plane capability gap remains。

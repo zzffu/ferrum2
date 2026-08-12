@@ -1,5 +1,27 @@
 # CI 与验证状态
 
+## M16 closed — Windows managed IPv4 routing, DNS and Direct egress qualified
+
+- **Exact identity:** product `98800a77877de7e5b16491df9a65c635393c91f0`，tree
+  `92c6da7c7b23fd5ce348881325e3cc4b5c7b9bb0`，parent
+  `a2ba4da191b642fef852d104df335dcea1224eaa`。The closeout is documentation-only and does not replace it。
+- **Local and current-VM:** serial format、strict Clippy、bins、all-features Full、docs、Rust 1.97.1、
+  architecture `24/24` and ignored lifecycle `1/1` passed。Fresh exact-candidate full/hard-kill profiles passed
+  retained M15 transport `16/16`、Direct TCP/UDP `1/1`、DNS `2/2`、network change `3/3`、cycles `100/100`、
+  hard kill `3/3` and cleanup with zero pre-remediation residue and pristine final restore。
+- **Hosted:** automatic [`31567846180/1`](https://github.com/zzffu/ferrum2/actions/runs/31567846180)，full
+  [`31567877969/1`](https://github.com/zzffu/ferrum2/actions/runs/31567877969) and performance
+  [`31567880517/1`](https://github.com/zzffu/ferrum2/actions/runs/31567880517) all completed SUCCESS on the exact
+  product。Supplemental master run [`31571017229/1`](https://github.com/zzffu/ferrum2/actions/runs/31571017229)
+  also passed。
+- **Review/footprint:** final Architect and QA returned `PASS` with `0/0/0/0` findings。Integrity/category/
+  ratio passed at `30395/56993`，ratio `1.875078` and case/support/fixture delta `+6673/-3/0`。The numeric
+  advisory is accepted for required evidence in existing seams；no fixture、dependency or second harness was added。
+- **Boundary:** `origin/codex/integration/m16` and `origin/master` both read back as the exact product。Earlier
+  failed VM/controller attempts and hosted runs `31549650201/1` and `31561724060/1` remain uncredited。All
+  authorized ordinary pushes/dispatches are consumed；no rerun、force-push、PR、tag、package、release、
+  publication or Wintun redistribution occurred。
+
 ## M15 closed — Windows Wintun TUN qualified on one exact product
 
 - **Exact identity:** product `7ba6268ffa3c5ecc7ba2b91e3ebcae8f596ecbb9`，tree

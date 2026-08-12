@@ -83,29 +83,16 @@ independent read-only diagnoses选定canonical exact-job-name ledger correction�
 `+475/0/0`与milestone `+5303/0/0`已接受。
 所有失败VM候选和15个hosted attempt-1均保留且未remotely rerun/credited。无force-push、PR、
 tag、package、release或publication；combined Wintun redistribution仍需responsible legal decision。
-M16现为`executing`，planning baseline是
-`fcef80dcc7e62bbca63ffbf7832df369dd418abd`。它把client `type = "direct"`与Windows compatible
-IPv4 auto-route/Wintun DNS steering合成一个里程碑；M16-new managed route/DNS/pinning/change/privileged
-evidence只覆盖IPv4，M15 manual-route IPv6与existing IPv6 regressions保持。M16-T01 current-VM IPv4
-capability gate 已由 exact candidate `cc26aba…` 全行通过并冻结 route/metric/binding 公式；T01 done，
-M16-T02 first push 已把 `master` 从 `5630cf4…` 移到 `5782c08…`；automatic run `31443577764/1` 仅在
-authoritative Full Clippy 的三个 deterministic lint 上失败并保留未 rerun。Exact local repair
-`13b6d681…` 已通过 Architect/QA `PASS` 和 warning-free package/workspace Clippy；final T02 descendant
-`bf0a3cb…` 已由后续 non-force push 集成到 `master`，automatic `31445081351/1` 的 quality、MSRV、interop、
-test-footprint、three platforms、Windows TUN E2E 和 qualification 全部 success，push-event performance
-jobs 按设计 skip。M16-T03 initial `30f0a6d…` 的 Architect/QA 各保留一个 minor；
-exact three-file `+286/-8` repair `9f05d94…` 关闭 Direct UDP boundary 与 MemoryDevice/binary TUN evidence
-findings。Final targeted Architect `PASS`、QA `PASS_WITH_NOTES`，均为 zero blocker/major/minor；local focused、
-full client/TUN、Direct E2E、architecture、workspace check/Clippy/format/diff/hook 和 footprint integrity
-通过。First hosted run `31454190132/1` on `52beb463…` failed only at quality Linux Clippy dead-code，with
-qualification derivative and all other substantive jobs passing；it is preserved and was not rerun。Exact
-two-file `+4/-2` repair `85bf3fcc…` received Architect/QA `PASS_WITH_NOTES`、both `0/0/0` with only local
-Linux cross-Clippy availability notes。An authorized non-force push advanced `master` to exact `85bf3fcc…`；
-replacement `31454813712/1` passed quality、qualification、interop、footprint、MSRV、Linux GNU/musl、Windows
-MSVC and Windows TUN E2E，while push-event performance jobs skipped by design。Final integrity passes and
-numeric `+1133/0/0` advisory is accepted。T04 done，T05 ready / current serial frontier；仍不从该单一 build
-推断跨版本兼容。Required future non-force pushes，including performance-related pushes，remain authorized；
-dispatch/rerun、force-push、PR、tag、package、release and publication remain unauthorized。
+M16已由exact product `98800a77877de7e5b16491df9a65c635393c91f0`关闭。它交付route-selectable
+Direct/Shadowsocks egress、compatible managed IPv4 Wintun capture、physical first-hop binding与owned IPv4
+DNS steering；Windows TUN-selected Direct IPv6保持pre-socket refusal，M15 manual-route和non-managed IPv6
+保持。Fresh current-VM full/hard-kill、serial local Full/MSRV/lifecycle、automatic
+[`31567846180/1`](https://github.com/zzffu/ferrum2/actions/runs/31567846180)、hosted full
+[`31567877969/1`](https://github.com/zzffu/ferrum2/actions/runs/31567877969)与independent performance
+[`31567880517/1`](https://github.com/zzffu/ferrum2/actions/runs/31567880517)全部PASS。Final Architect/QA
+均为`PASS 0/0/0/0`；footprint integrity/category/ratio PASS，numeric `+6673/-3/0` advisory已接受。
+严格anti-leak、managed IPv6、per-target multihomed dynamic binding和performance improvement未声明。
+所有授权ordinary push/dispatch已消费；无rerun、force-push、PR、tag、package、release或publication。
 durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M1-2026-07-28.md`；M2 handoff 位于
 `docs/handoffs/HANDOFF-M2-2026-07-29.md`，M3 handoff 位于
@@ -120,8 +107,9 @@ durable handoff 位于 `docs/handoffs/HANDOFF-M0-2026-07-28.md` 和
 `docs/handoffs/HANDOFF-M11-2026-08-05.md`、
 `docs/handoffs/HANDOFF-M12-2026-08-07.md`、
 `docs/handoffs/HANDOFF-M13-2026-08-08.md`、
-`docs/handoffs/HANDOFF-M14-2026-08-09.md`和
-`docs/handoffs/HANDOFF-M15-2026-08-10.md`。
+`docs/handoffs/HANDOFF-M14-2026-08-09.md`、
+`docs/handoffs/HANDOFF-M15-2026-08-10.md`和
+`docs/handoffs/HANDOFF-M16-2026-08-12.md`。
 
 ## 依赖顺序
 
@@ -1208,7 +1196,7 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 
 ## M16 — Windows managed TUN routing, DNS and direct egress
 
-- **Status:** validating
+- **Status:** closed
 - **Objective:** Add client `[[outbounds]] type = "direct"` as one terminal singleton egress plan and let
   existing static/ordered route/selector/DNS detour choose raw direct or existing Shadowsocks TCP/UDP；when
   explicitly enabled on Windows，own IPv4-only compatible Wintun capture rows、physical socket pinning and
@@ -1236,7 +1224,7 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   `13b6d681…` repaired and final `master@bf0a3cb…` hosted-PASS/done → T03 direct TCP/UDP `9f05d94…` plus
   portability repair `master@85bf3fcc…` hosted-PASS/done → T04 capture/binding
   `2fdfbc7…` VM-PASS plus hosted repair `master@d791f01…` PASS/done → T05 DNS
-  `54f06a4…` done → T06 lifecycle/VM `d76268b…` done → T07 exact qualification ready；serial drain。
+  `54f06a4…` done → T06 lifecycle/VM `d76268b…` done → T07 exact qualification `98800a7…` done；serial drain。
 - **Entry gate:** exact VM `Windows 10 MSIX packaging environment` restored from checkpoint
   `M15-T04-before-2b0c25b-20260810` must record its actual product、edition、architecture and full version/build，
   then prove IPv4 route values、fixed/dynamic pinned positive/
@@ -1256,34 +1244,18 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   `31708/54429`、ratio `1.716570 PASS`、case/support/fixture delta `+2105/0/0` and code growth `+1367`；the
   existing `architecture.rs` is `4996` semantic test LOC（`+291`）。T05 reports `31932/54626`、ratio
   `1.710698 PASS` and `+197/0/0`；T06 ticket reports `30395/56913`、ratio `1.872446 PASS` and
-  `+2287/0/0`。Both retain integrity/category PASS and add no support/fixture/new harness。Milestone candidate
-  `d76268b…` reports `30395/56913`、ratio `1.872446 PASS` and cumulative `+6590/0/0`；the large-file advisory
-  is accepted because the existing architecture/qualifier carry distinct required platform evidence。
+  `+2287/0/0`。Both retain integrity/category PASS and add no support/fixture/new harness。Qualified milestone
+  product `98800a7…` reports `30395/56993`、ratio `1.875078 PASS` and cumulative `+6673/-3/0`；the large-file
+  advisory is accepted because the existing architecture/qualifier carry distinct required platform evidence。
 - **Deferred/out of scope:** WFP/kill switch/DNS anti-leak、physical bypass rows、per-target multihomed routing、
   live migration、service/watchdog/installer、non-Windows managed TUN、new crate/dependency、ring-full
   maintenance unrelated to a proven blocker、M16-managed IPv6、release/publication。The IPv6 deferral does not
   weaken M15 manual-route IPv6、SIP022 IPv6 or non-managed/SOCKS direct IPv6。
-- **Next/remote boundary:** M16-T05/T06 are root-closed locally；T06 exact `d76268b…` has fresh restored-VM
-  `full` and independent `hard-kill` PASS with M15 `16/16`、M16 Direct `1/1 + 1/1`、DNS `2/2`、network
-  change `3/3`、cycles `100/100`、hard kill `3/3` and zero residue。T07 is ready/current frontier。An ordinary
-  non-force push is authorized；workflow dispatch/rerun remains unauthorized，so independent performance is
-  still a close prerequisite requiring separate authority。The failed T04 run `31485931514/1` is preserved
-  and was not rerun；replacement `31488588010/1` passed quality、MSRV、interop、test-footprint、Linux GNU/musl、
-  Windows MSVC、Windows TUN E2E and qualification。The first
-  T02 non-force push integrated `5782c08…` to `master` with exact readback；
-  automatic `31443577764/1` is preserved failed and was not rerun。Its MSRV、interop、test-footprint、three
-  platforms and Windows TUN E2E passed；quality failed only at the three known Clippy lints，qualification failed
-  closed，and push-event performance jobs were skipped。No hidden second failure exists。A subsequent non-force
-  push integrated final T02 descendant `bf0a3cb…` to `master`；automatic `31445081351/1` passed quality、MSRV、
-  interop、test-footprint、three platforms、Windows TUN E2E and qualification，while push-event performance
-  jobs skipped as designed。T03 automatic `31454190132/1` on `52beb463…` is preserved failed and was not
-  rerun：quality alone failed on Linux Clippy dead code and qualification was derivative，while all other
-  substantive jobs passed。The two-file `85bf3fcc…` repair was pushed normally；replacement
-  `31454813712/1` passed quality、qualification、interop、test-footprint、MSRV、Linux GNU/musl、Windows MSVC
-  and Windows TUN E2E，with push-event performance skipped as designed。
-  Required future non-force pushes，including performance-related pushes，
-  remain explicitly authorized。Workflow dispatch/rerun、force-push、PR、tag、package、release or publication
-  remains unauthorized without separate explicit authority。
+- **Next/remote boundary:** none for M16。Exact product `98800a7…` passed the fresh current-VM full/hard-kill，
+  serial local Full/MSRV/lifecycle，automatic `31567846180/1`，hosted full `31567877969/1` and independent
+  performance `31567880517/1` gates。It is on `origin/codex/integration/m16` and `origin/master` with exact
+  readback。All authorized ordinary pushes and dispatches are consumed；failed attempts remain preserved and
+  uncredited。No rerun、force-push、PR、tag、package、release or publication occurred。
 
 ## 决策登记
 
@@ -1554,3 +1526,4 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
 | 2026-08-11 | M16-T04 hosted repair / final remote PASS | Initial `master@c13215b…` run `31485931514/1` is preserved failed and was not rerun；its Linux cfg/test and occupied-metrics oracle failures were bounded test/platform defects，not a product binder regression | Exact six-file `+53/-39` repair `d791f01…` passed root checks plus targeted Architect/QA `PASS_WITH_NOTES` with zero blocker/major/minor；normal non-force push and exact readback advanced `master` | Replacement `31488588010/1` passed quality、MSRV、interop、test-footprint、Linux GNU/musl、Windows MSVC、Windows TUN E2E and qualification；push-event performance skipped by design and is not claimed；final integrity PASS、`31708/54429` ratio `1.716570`、`+2105/0/0` advisory accepted；T04 root-closed，T05 frontier |
 | 2026-08-12 | M16-T05 root closeout | Exact `54f06a4…` owns only the Wintun IPv4 DNS lease and exact synthetic TCP/UDP `:53` interception through the existing DNS proxy/egress owners；T05 done | Focused managed-DNS/TUN/DNS-egress/proxy/local-E2E rows pass `1/2/7/5/2`；T06 descendant VM evidence supplies system resolver `dns=2/2` and preserves M15 IPv6。Root Architect/QA audit reports zero blocker/major/minor | Footprint integrity/category/ratio PASS；`31932/54626`、ratio `1.710698`、`+197/0/0` and code `+224` advisory accepted；no global DNS、anti-leak、managed-IPv6、helper、fixture、harness or dependency claim |
 | 2026-08-12 | M16-T06 root closeout / privileged PASS | Exact `d76268b…` closes callback-owned invalidation、policy revocation、supervised cleanup and same-name Wintun/PnP lifecycle；T06 done、T07 ready | Fresh full token `m16t06-full-20260811211853-fd65dd5d` passes M15 `16/16`、Direct `1/1 + 1/1`、DNS `2/2`、network change `3/3`、cycles `100/100` and cleanup；fresh independent hard-kill token `m16t06-hardkill-20260811213654-58010a25` passes `3/3`，both with exact listener counts、zero pre-remediation residue and pristine final restore | Root Architect/QA audits and all local Full/MSRV/lifecycle gates PASS；ticket integrity/category/ratio PASS and `+2287/0/0` advisory accepted。Earlier failed VM/controller attempts remain uncredited；ordinary push is authorized，workflow dispatch remains unauthorized，so T07 performance is pending |
+| 2026-08-12 | M16 close | Exact product `98800a7…` passes fresh current-VM full/hard-kill、serial local Full/MSRV/lifecycle、automatic/full hosted and independent performance gates；T01-T07 and M16 closed | Final bounded contract correction distinguishes current-VM M16 capability from hosted M15 regression；Architect and QA both return `PASS 0/0/0/0`。Earlier failed VM/controller and hosted attempts remain uncredited | Runs `31567846180/1`、`31567877969/1`、`31567880517/1` PASS；footprint integrity/category/ratio PASS and `+6673/-3/0` advisory accepted；ordinary pushes/dispatches consumed，no rerun/force-push/PR/tag/package/release/publication |
