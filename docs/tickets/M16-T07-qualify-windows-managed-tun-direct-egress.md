@@ -42,10 +42,11 @@ replace that qualified product/control SHA or require candidate-bound evidence t
       candidate；the identity-bound full marker reports `cycles=100/100`，and both unique TEST-0017 markers
       report zero owned or sentinel residue。No second Windows build or standalone cycles ledger is required
       or credited。
-- [ ] Full/qualification markers retain M15 `m15_transport=16/16` including IPv6 regressions and report only
+- [ ] The current-VM full marker retains M15 `m15_transport=16/16` including IPv6 regressions and reports only
       the M16 IPv4 additions as `direct_tcp=1/1`、`direct_udp=1/1`、`dns=2/2`、
-      `network_change=3/3`、`route_change=1/1`、`interface_change=1/1` and `address_change=1/1`；no preflight
-      observation or hash is credited as PASS。
+      `network_change=3/3`、`route_change=1/1`、`interface_change=1/1` and `address_change=1/1`。The hosted full
+      regression separately reports M15 `functional=16/16` and `cycles=100/100`；no preflight observation or
+      hash is credited as PASS。
 - [ ] After explicit remote authorization only，required push/hosted jobs and independent Windows TUN
       performance run execute against the same candidate SHA and succeed；each distinct workflow binds its own
       run ID/attempt，while each current-VM profile binds its own run token。Failed attempts remain recorded and
