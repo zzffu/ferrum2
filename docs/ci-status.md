@@ -17,8 +17,9 @@
 - **Review/footprint:** final Architect and QA returned `PASS` with `0/0/0/0` findings。Integrity/category/
   ratio passed at `30395/56993`，ratio `1.875078` and case/support/fixture delta `+6673/-3/0`。The numeric
   advisory is accepted for required evidence in existing seams；no fixture、dependency or second harness was added。
-- **Boundary:** `origin/codex/integration/m16` and `origin/master` both read back as the exact product。Earlier
-  failed VM/controller attempts and hosted runs `31549650201/1` and `31561724060/1` remain uncredited。All
+- **Boundary:** the exact product remains on `origin/codex/integration/m16` and is the qualified ancestor of the
+  documentation-only closeout on `origin/master`。Earlier failed VM/controller attempts and hosted runs
+  `31549650201/1` and `31561724060/1` remain uncredited。All
   authorized ordinary pushes/dispatches are consumed；no rerun、force-push、PR、tag、package、release、
   publication or Wintun redistribution occurred。
 

@@ -1253,8 +1253,8 @@ zero residue；失败即replan，不从单build结果推断Windows跨版本兼�
   weaken M15 manual-route IPv6、SIP022 IPv6 or non-managed/SOCKS direct IPv6。
 - **Next/remote boundary:** none for M16。Exact product `98800a7…` passed the fresh current-VM full/hard-kill，
   serial local Full/MSRV/lifecycle，automatic `31567846180/1`，hosted full `31567877969/1` and independent
-  performance `31567880517/1` gates。It is on `origin/codex/integration/m16` and `origin/master` with exact
-  readback。All authorized ordinary pushes and dispatches are consumed；failed attempts remain preserved and
+  performance `31567880517/1` gates。It remains on `origin/codex/integration/m16` and is the qualified ancestor
+  of the documentation-only closeout on `origin/master`。All authorized ordinary pushes and dispatches are consumed；failed attempts remain preserved and
   uncredited。No rerun、force-push、PR、tag、package、release or publication occurred。
 
 ## 决策登记

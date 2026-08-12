@@ -332,6 +332,7 @@ serial local Full/Rust 1.97.1/lifecycle gates，automatic hosted run `3156784618
 with `0/0/0/0` findings。Milestone footprint integrity/category/ratio passed at code/tests `30395/56993`，
 ratio `1.875078` and case/support/fixture delta `+6673/-3/0`；the numeric `REVIEW_REQUIRED` is accepted for
 distinct required product/platform/lifecycle/mutation evidence in existing seams，with no fixture、dependency or
-second harness。The product is on `origin/codex/integration/m16` and `origin/master`；this documentation-only
-closeout does not replace it。Earlier failed VM/controller and hosted attempts remain preserved and uncredited。
+second harness。The product remains on `origin/codex/integration/m16` and is the qualified ancestor of
+`origin/master`；the documentation-only closeout on `master` does not replace it。Earlier failed VM/controller
+and hosted attempts remain preserved and uncredited。
 No force-push、PR、tag、package、release、publication or Wintun redistribution occurred。

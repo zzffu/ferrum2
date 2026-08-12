@@ -134,9 +134,10 @@ hosted jobs are regression/resource gates，not a second privileged OS qualifica
   [`31571017229/1`](https://github.com/zzffu/ferrum2/actions/runs/31571017229) also passed and is supplemental。
 - Architect/QA review: final targeted Architect and QA both returned `PASS` with blocker/major/minor/note
   `0/0/0/0`；`ARCH-M16-T07-001` and `QA-M16-T07-DOCS-001` are closed by the bounded TEST/T07 wording repair。
-- Remote actions: authorized ordinary non-force pushes placed the exact SHA on
-  `codex/integration/m16` and `master` with exact readback；the full and performance dispatches above were
-  consumed。No rerun、force-push、PR、tag、package、release、publication or Wintun redistribution occurred。
+- Remote actions: authorized ordinary non-force pushes placed the exact product on
+  `codex/integration/m16` and then `master` with exact readback；the documentation-only closeout later advanced
+  `master` without replacing that qualified identity。The full and performance dispatches above were consumed。
+  No rerun、force-push、PR、tag、package、release、publication or Wintun redistribution occurred。
 - Notes: earlier failed VM/controller attempts and hosted runs `31549650201/1` and `31561724060/1` remain
   preserved and uncredited；no result was combined across candidates。
 
