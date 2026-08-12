@@ -28,7 +28,8 @@ owns:
 
 Freeze one exact integration SHA，run the complete local、platform、interop、current-VM IPv4 privileged and
 independent performance evidence ledger，obtain bounded final Architect/QA review，and only then mark M16
-closed and write the durable handoff/history。
+closed and write the durable handoff/history。The final status commit is documentation-only and does not
+replace that qualified product/control SHA or require candidate-bound evidence to be relabelled。
 
 ## Acceptance
 
@@ -98,8 +99,10 @@ gh run view <performance-run-id> --log
 The automatic/full ledgers require `quality`、`test-footprint`、`msrv`、`platform / windows-msvc`、
 `platform / linux-gnu`、`platform / linux-musl`、`interop`、`windows-tun-e2e` and `qualification` success。
 The performance dispatch additionally requires `performance` and `windows-tun-performance` success。Logs
-must contain exactly one matching TEST-0017 qualification/performance marker and the exact SHA/run/attempt。
-These hosted jobs are regression/resource gates，not a second privileged OS qualification baseline。
+must bind the exact SHA/run/attempt：the hosted full job contains one exact M15 transport、cycles and aggregate
+full marker，while the performance job contains the existing M4 marker and one TEST-0017 M16 performance
+marker。The identity-bound current-VM full/hard-kill markers remain the sole M16 capability evidence；these
+hosted jobs are regression/resource gates，not a second privileged OS qualification baseline。
 
 ## Result
 

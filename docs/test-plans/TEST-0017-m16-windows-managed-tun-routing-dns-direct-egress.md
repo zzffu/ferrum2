@@ -250,6 +250,11 @@ dispatches are not required or allowed to share a run ID。Hosted Windows jobs r
 and are not a second OS qualification baseline。A failed candidate/attempt remains recorded and is never
 rerun or combined with another SHA to create a pass。
 
+After every candidate-bound gate succeeds，a dedicated documentation-only closeout commit MAY record the
+accepted result without becoming a new qualified candidate。Its product、workflow and executable-test diff
+from the qualified SHA MUST be empty；it cannot add、replace or repair evidence，and every ledger continues to
+name the qualified SHA rather than the closeout commit。
+
 The existing qualifier adds exact `network-feasibility` and `hard-kill` modes。Hard-kill runs exactly three
 externally observed cases：active auto-route only，active auto-route+auto-DNS，and active mixed direct/proxy/DNS
 traffic。It emits exactly one marker after pre-remediation audit：
@@ -258,14 +263,15 @@ traffic。It emits exactly one marker after pre-remediation audit：
 m16_windows_hard_kill status=PASS cases=3/3 process_absent=PASS adapter=ABSENT addresses=ABSENT routes=ABSENT dns=ABSENT cleanup=PASS guest_build=<exact-build-and-ubr> run_token=<unique> candidate_sha=<exact-candidate-sha> probe_sha256=<exact-probe-sha256> identity_sha256=<exact-ledger-sha256>
 ```
 
-The full controller and hosted wrappers require these exact schemas，with concrete values replacing angle
-placeholders：
+The current-VM controllers and hosted performance wrapper require these exact schemas，with concrete values
+replacing angle placeholders：
 
 ```text
 m16_windows_tun_full status=PASS m15_transport=16/16 direct_tcp=1/1 direct_udp=1/1 dns=2/2 network_change=3/3 route_change=1/1 interface_change=1/1 address_change=1/1 cycles=100/100 hard_kill=3/3 cleanup=PASS guest_build=<exact-build-and-ubr> run_token=<unique> candidate_sha=<exact-candidate-sha> probe_sha256=<exact-probe-sha256> identity_sha256=<exact-ledger-sha256>
-m16_windows_tun_qualification status=PASS profile=full m15_transport=16/16 direct_tcp=1/1 direct_udp=1/1 dns=2/2 network_change=3/3 route_change=1/1 interface_change=1/1 address_change=1/1 cycles=100/100 hard_kill=3/3 cleanup=PASS candidate_sha=<GITHUB_SHA> run_id=<GITHUB_RUN_ID> run_attempt=<GITHUB_RUN_ATTEMPT>
 m16_windows_tun_performance status=PASS proxy=PASS direct=PASS dns=PASS cleanup=PASS candidate_sha=<GITHUB_SHA> run_id=<GITHUB_RUN_ID> run_attempt=<GITHUB_RUN_ATTEMPT>
 ```
 
 The identity-bound full marker is the sole privileged VM cycle evidence for M16。No separate `-Mode cycles`
-run or independently mergeable cycles marker is required。
+run or independently mergeable cycles marker is required。The hosted `windows-tun-full` profile is a regression
+gate only：one run/attempt must contain exact M15 transport `16/16`、cycles `100/100` and aggregate full
+markers with cleanup PASS；it does not synthesize or claim the current-VM M16 full rows。
