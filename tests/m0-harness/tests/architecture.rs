@@ -386,6 +386,11 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         .nth(1)
         .and_then(|body| body.split("function Wait-AdapterAbsent").next())
         .expect("bounded adapter readiness");
+    let tun_ipv4_dns = qualifier
+        .split("function Get-TunIpv4Dns")
+        .nth(1)
+        .and_then(|body| body.split("function Set-CapabilityDns").next())
+        .expect("bounded TUN IPv4 DNS readback");
     let adapter_absence = qualifier
         .split("function Wait-AdapterAbsent")
         .nth(1)
@@ -599,7 +604,9 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
                 .contains("($capturePrefixes -join \"|\") -ceq \"0.0.0.0/1|128.0.0.0/1\"",)
             && adapter_readiness.contains("$dnsReady = -not $ManagedDns")
             && adapter_readiness.contains("if ($ManagedDns) {")
+            && adapter_readiness.contains("$dnsAddresses = @(Get-TunIpv4Dns $adapter.ifIndex)")
             && adapter_readiness.contains("($dnsAddresses -join \"|\") -ceq \"198.18.0.1\"")
+            && !adapter_readiness.contains("$dnsRows.ServerAddresses")
             && adapter_readiness.contains("$dnsReady")
             && adapter_readiness.contains("$finalCapturePrefixes")
             && adapter_readiness.contains("-ErrorAction Stop")
@@ -619,6 +626,14 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
             && adapter_cycles.contains("managed cycle DNS residue")
             && !adapter_cycles.contains("managed cycle capture route mismatch"),
         "managed cycles must await exact capture and DNS state through one bounded process-aware readiness seam"
+    );
+    assert!(
+        tun_ipv4_dns.contains("$rows = @(Get-DnsClientServerAddress")
+            && tun_ipv4_dns.contains("$rows | ForEach-Object")
+            && tun_ipv4_dns.contains("@($_.ServerAddresses)")
+            && tun_ipv4_dns.contains("Where-Object { -not [string]::IsNullOrWhiteSpace($_) }")
+            && !tun_ipv4_dns.contains("$row.ServerAddresses"),
+        "TUN DNS readback must normalize every zero/one/many cmdlet row before strict matching"
     );
     let has_stable_adapter_absence = |body: &str| {
         body.contains("[int]$RequiredSamples = 4")

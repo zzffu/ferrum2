@@ -450,8 +450,7 @@ function Wait-AdapterReady(
                 )
                 $dnsReady = -not $ManagedDns
                 if ($ManagedDns) {
-                    $dnsRows = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue)
-                    $dnsAddresses = @($dnsRows.ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    $dnsAddresses = @(Get-TunIpv4Dns $adapter.ifIndex)
                     $dnsReady = ($dnsAddresses -join "|") -ceq "198.18.0.1"
                 }
                 if (($capturePrefixes -join "|") -ceq "0.0.0.0/1|128.0.0.0/1" -and $dnsReady) {
@@ -1553,8 +1552,11 @@ function Wait-Ipv4SystemRouteSnapshot([string[]]$Expected) {
 }
 
 function Get-TunIpv4Dns([int]$InterfaceIndex) {
-    $row = Get-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop
-    return @($row.ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $rows = @(Get-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop)
+    return @(
+        $rows | ForEach-Object { @($_.ServerAddresses) } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
 }
 
 function Set-CapabilityDns([int]$InterfaceIndex) {
