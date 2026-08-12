@@ -4472,6 +4472,11 @@ fn tun_foundation_is_deep_safe_and_composed_as_one_required_root() {
                     )
             })
             && source.contains("if ($Mode -in @(\"udp\", \"full\", \"performance\"))")
+            && source.contains("if ($Mode -ne \"performance\") {\n                # UDP-02")
+            && source.contains("if ($Mode -ne \"performance\") {\n                # UDP-06")
+            && source.contains(
+                "Assert-True ($udpRows -eq 2) \"performance UDP witness row count mismatch\"",
+            )
             && source.contains("Get-NetAdapterStatistics -Name $Name")
             && source.contains("TotalProcessorTime.TotalMilliseconds")
             && source.contains("WorkingSet64")

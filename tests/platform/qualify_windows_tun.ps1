@@ -4118,12 +4118,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 Update-PerformancePeaks $activeProcess $metricsPort
             }
 
-            # UDP-02 IPv6 fixed two-hop chain.
-            $beforeGateA = $udpGateA.Requests
-            $beforeGateB = $udpGateB.Requests
-            Invoke-UdpEchoRow $targets[1] $ports[1] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes("udp-02-two-hop"))
-            Assert-True ($udpGateA.Requests -eq $beforeGateA + 1 -and $udpGateB.Requests -eq $beforeGateB + 1) "UDP-02 did not traverse both exact hops"
-            $udpRows++
+            if ($Mode -ne "performance") {
+                # UDP-02 IPv6 fixed two-hop chain.
+                $beforeGateA = $udpGateA.Requests
+                $beforeGateB = $udpGateB.Requests
+                Invoke-UdpEchoRow $targets[1] $ports[1] $ownedInterfaceIndex $udpGateA ([Text.Encoding]::ASCII.GetBytes("udp-02-two-hop"))
+                Assert-True ($udpGateA.Requests -eq $beforeGateA + 1 -and $udpGateB.Requests -eq $beforeGateB + 1) "UDP-02 did not traverse both exact hops"
+                $udpRows++
 
             # UDP-03 IPv4 selector snapshot unchanged for a live mapping.
             $selectorProbe = [Ferrum2UdpProbe]::new($targets[2], $ports[2])
@@ -4165,6 +4166,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 Assert-True ($udpGateA.Requests -eq $beforeGateA + 3 -and $udpGateB.Requests -eq $beforeGateB + 1) "UDP-04 did not reselect after expiry"
             } finally { $expiryClient.Dispose() }
             $udpRows++
+            }
 
             # UDP-05 IPv4 DNS hijack with zero Shadowsocks owner.
             $beforeGateA = $udpGateA.Requests
@@ -4182,19 +4184,20 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             $udpRows++
             if ($Mode -eq "performance") { $performanceDnsRows++ }
 
-            # UDP-06 IPv6 reject tombstone and no policy re-entry.
-            $beforeGateA = $udpGateA.Requests
-            $beforeGateB = $udpGateB.Requests
-            $rejectClient = Open-TunUdp $targets[5] $ports[5] $ownedInterfaceIndex
-            try {
-                $rejected = [Text.Encoding]::ASCII.GetBytes("udp-06-reject")
-                [void]$rejectClient.Send($rejected, $rejected.Length)
-                [void]$rejectClient.Send($rejected, $rejected.Length)
-                $rejectedResponse = $rejectClient.ReceiveAsync()
-                Assert-True (-not $rejectedResponse.Wait(500)) "UDP-06 reject returned a datagram"
-                Assert-True ($udpGateA.Requests -eq $beforeGateA -and $udpGateB.Requests -eq $beforeGateB) "UDP-06 reject opened an egress"
-            } finally { $rejectClient.Dispose() }
-            $udpRows++
+            if ($Mode -ne "performance") {
+                # UDP-06 IPv6 reject tombstone and no policy re-entry.
+                $beforeGateA = $udpGateA.Requests
+                $beforeGateB = $udpGateB.Requests
+                $rejectClient = Open-TunUdp $targets[5] $ports[5] $ownedInterfaceIndex
+                try {
+                    $rejected = [Text.Encoding]::ASCII.GetBytes("udp-06-reject")
+                    [void]$rejectClient.Send($rejected, $rejected.Length)
+                    [void]$rejectClient.Send($rejected, $rejected.Length)
+                    $rejectedResponse = $rejectClient.ReceiveAsync()
+                    Assert-True (-not $rejectedResponse.Wait(500)) "UDP-06 reject returned a datagram"
+                    Assert-True ($udpGateA.Requests -eq $beforeGateA -and $udpGateB.Requests -eq $beforeGateB) "UDP-06 reject opened an egress"
+                } finally { $rejectClient.Dispose() }
+                $udpRows++
 
             # UDP-07 IPv4 over-limit no-commit then selector re-read.
             $overLimitClient = Open-TunUdp $targets[6] $ports[6] $ownedInterfaceIndex
@@ -4248,8 +4251,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 if ($overflowClient) { $overflowClient.Dispose() }
                 foreach ($client in $saturatedClients) { $client.Dispose() }
             }
-            $udpRows++
-            Assert-True ($udpRows -eq 8) "UDP row count mismatch"
+                $udpRows++
+            }
+            if ($Mode -eq "performance") {
+                Assert-True ($udpRows -eq 2) "performance UDP witness row count mismatch"
+            } else {
+                Assert-True ($udpRows -eq 8) "UDP row count mismatch"
+            }
 
             if ($Mode -eq "performance") { Complete-PerformanceSample $activeProcess $metricsPort }
             Stop-Candidate $activeProcess
