@@ -53,7 +53,12 @@ fn start_echo() -> (SocketAddrV4, EchoWorker) {
 }
 
 fn start_echo_at(bind: SocketAddr) -> (SocketAddr, EchoWorker) {
-    let listener = TcpListener::bind(bind).expect("echo listener");
+    let listener = match bind {
+        SocketAddr::V4(address) if address.port() == 0 => {
+            bind_loopback_listener(address).expect("echo listener")
+        }
+        _ => TcpListener::bind(bind).expect("echo listener"),
+    };
     let address = listener.local_addr().expect("echo address");
     listener
         .set_nonblocking(true)
@@ -99,7 +104,8 @@ fn start_recording_bridge(
     mpsc::Receiver<SocketAddrV4>,
     thread::JoinHandle<()>,
 ) {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bridge listener");
+    let listener =
+        bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("bridge listener");
     let address = match listener.local_addr().expect("bridge address") {
         std::net::SocketAddr::V4(address) => address,
         std::net::SocketAddr::V6(_) => unreachable!("IPv4 listener"),
@@ -233,7 +239,8 @@ fn m14_server_tcp_sniff_routes_rejects_and_replays_prefix() {
     let server_metrics = unused_loopback();
     let (route_target, route_echo) = start_echo();
     let (malformed_target, malformed_echo) = start_echo();
-    let rejected = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("rejected target");
+    let rejected =
+        bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("rejected target");
     rejected
         .set_nonblocking(true)
         .expect("rejected target nonblocking");
@@ -380,7 +387,8 @@ fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
         reply: DnsReply::Addresses(vec![Ipv4Addr::new(127, 0, 0, 12)]),
     }]);
     let dns_addresses = [selected_dns.address(), final_dns.address()];
-    let protected = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("protected upstream");
+    let protected = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .expect("protected upstream");
     protected
         .set_nonblocking(true)
         .expect("protected upstream nonblocking");
@@ -565,7 +573,8 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
     let (final_target, final_echo) =
         start_echo_at("127.0.0.2:0".parse().expect("final target address"));
     let (bypass_target, bypass_echo) = start_echo();
-    let protected = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("protected target");
+    let protected = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .expect("protected target");
     protected
         .set_nonblocking(true)
         .expect("protected target nonblocking");
@@ -573,8 +582,8 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
         .local_addr()
         .expect("protected target address")
         .port();
-    let many_target =
-        TcpListener::bind((Ipv4Addr::new(127, 0, 0, 17), 0)).expect("seventeenth candidate target");
+    let many_target = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 17), 0))
+        .expect("seventeenth candidate target");
     many_target
         .set_nonblocking(true)
         .expect("seventeenth candidate nonblocking");
@@ -868,7 +877,8 @@ fn direct_tcp_real_process_preserves_raw_bytes_and_half_close() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let client_address = unused_loopback();
         let (target, echo) = start_echo();
-        let fallback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("fallback sentinel");
+        let fallback = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("fallback sentinel");
         fallback
             .set_nonblocking(true)
             .expect("nonblocking fallback sentinel");
@@ -1067,7 +1077,8 @@ fn failures_unauthenticated_request_never_connects_target() {
     const DIFFERENT_SYNTHETIC_PSK: &str = "EBESExQVFhcYGRobHB0eHw==";
 
     let directory = tempfile::tempdir().expect("temporary directory");
-    let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("recording target");
+    let target = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .expect("recording target");
     target
         .set_nonblocking(true)
         .expect("nonblocking recording target");
@@ -1557,7 +1568,8 @@ fn fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps() {
         let servers = [unused_loopback(), unused_loopback()];
         let client_address = unused_loopback();
         let metrics = [unused_loopback(), unused_loopback(), unused_loopback()];
-        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("recording target");
+        let target = bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("recording target");
         target.set_nonblocking(true).expect("nonblocking target");
         let target_address = match target.local_addr().expect("target address") {
             SocketAddr::V4(address) => address,

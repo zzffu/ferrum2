@@ -30,6 +30,33 @@ fn workspace_root() -> PathBuf {
 }
 
 #[test]
+fn m16_hosted_loopback_listeners_share_one_port_registry() {
+    let root = workspace_root();
+    let support = fs::read_to_string(root.join("tests/m0-harness/src/local_support/mod.rs"))
+        .expect("shared local support");
+    let local_e2e = fs::read_to_string(root.join("tests/m0-harness/tests/local_e2e.rs"))
+        .expect("local E2E tests");
+
+    let shared_bind = support
+        .split_once("pub fn bind_loopback_listener(")
+        .and_then(|(_, tail)| tail.split_once("pub fn reserve_unused_loopback("))
+        .map(|(body, _)| body)
+        .expect("shared bind function");
+    assert!(
+        shared_bind.find("if address.port() != 0") < shared_bind.find("ISSUED_PORTS")
+            && shared_bind.contains(".insert(port)"),
+        "port-zero binds must register while exact rebinds bypass the registry"
+    );
+    assert!(
+        support.contains("bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))")
+            && local_e2e.contains("bind_loopback_listener(address).expect(\"echo listener\")")
+            && !local_e2e.contains("TcpListener::bind((Ipv4Addr::")
+            && !local_e2e.contains("let listener = TcpListener::bind(bind)"),
+        "local E2E IPv4 port-zero listeners must not bypass the shared registry"
+    );
+}
+
+#[test]
 fn m16_managed_tun_route_and_binding_have_one_owner_and_fail_closed_order() {
     let root = workspace_root();
     let wintun = fs::read_to_string(root.join("crates/ferrum2-wintun/src/windows.rs"))

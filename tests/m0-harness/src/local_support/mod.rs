@@ -787,26 +787,31 @@ pub fn reserve_loopback() -> (TcpListener, SocketAddrV4) {
 }
 
 pub fn bind_loopback_listener(address: SocketAddrV4) -> io::Result<TcpListener> {
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-    #[cfg(unix)]
-    socket.set_reuse_address(true)?;
-    socket.bind(&SocketAddr::V4(address).into())?;
-    socket.listen(128)?;
-    Ok(socket.into())
-}
-
-pub fn reserve_unused_loopback() -> LoopbackReservation {
     loop {
-        let (listener, address) = reserve_loopback();
-        let inserted = ISSUED_PORTS
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        #[cfg(unix)]
+        socket.set_reuse_address(true)?;
+        socket.bind(&SocketAddr::V4(address).into())?;
+        socket.listen(128)?;
+        let listener: TcpListener = socket.into();
+        if address.port() != 0 {
+            return Ok(listener);
+        }
+        let port = listener.local_addr()?.port();
+        if ISSUED_PORTS
             .get_or_init(|| Mutex::new(HashSet::new()))
             .lock()
             .expect("issued-port registry")
-            .insert(address.port());
-        if inserted {
-            return LoopbackReservation { listener, address };
+            .insert(port)
+        {
+            return Ok(listener);
         }
     }
+}
+
+pub fn reserve_unused_loopback() -> LoopbackReservation {
+    let (listener, address) = reserve_loopback();
+    LoopbackReservation { listener, address }
 }
 
 pub fn unused_loopback() -> SocketAddrV4 {
@@ -820,15 +825,8 @@ pub fn unused_tcp_udp_loopback() -> SocketAddrV4 {
             drop(tcp);
             continue;
         };
-        let inserted = ISSUED_PORTS
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .expect("issued-port registry")
-            .insert(address.port());
         drop((tcp, udp));
-        if inserted {
-            return address;
-        }
+        return address;
     }
 }
 
