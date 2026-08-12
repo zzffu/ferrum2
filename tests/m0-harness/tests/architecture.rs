@@ -672,8 +672,8 @@ fn m16_observability_and_network_change_lifecycle_stay_redacted_and_owner_driven
         .collect::<Vec<_>>();
     assert_eq!(
         cycle_absence_calls,
-        ["Wait-AdapterAbsent $ExpectedAdapter"],
-        "repeated managed cycles must converge before same-name adapter recreation"
+        ["Wait-AdapterAbsent $ExpectedAdapter 20 11"],
+        "repeated managed cycles must converge longer before same-name adapter recreation"
     );
     assert!(
         adapter_cycles.contains("[Nullable[int]]$MetricsPort = $null")
