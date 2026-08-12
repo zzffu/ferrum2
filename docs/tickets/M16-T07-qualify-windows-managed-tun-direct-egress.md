@@ -7,7 +7,9 @@ depends_on:
 owns:
   - .github/workflows/m0.yml
   - tests/m0-harness/tests/architecture.rs
+  - tests/m0-harness/tests/local_e2e.rs
   - tests/m0-harness/tests/workspace_policy.rs
+  - tests/m0-harness/src/local_support/mod.rs
   - tests/platform/qualify_windows_tun.ps1
   - docs/adr/ADR-0035-m16-client-direct-outbound.md
   - docs/adr/ADR-0036-m16-windows-managed-tun-policy.md
