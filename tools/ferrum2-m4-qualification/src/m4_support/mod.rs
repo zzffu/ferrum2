@@ -631,6 +631,7 @@ fn run_profile_scenario(arguments: &ProfileArgs) -> Result<ProfileOutcome, Strin
 
 fn run_profile_workload(mut arguments: ProfileArgs) -> Result<String, String> {
     let raw = arguments.raw.take();
+    let raw_identity = raw.as_ref().map(ProfileRawIdentity::load);
     let mut evidence = if let Some(raw) = &raw {
         let output = resolve_profile_ready_file(&raw.output)?;
         if output.extension() != Some(OsStr::new("jsonl")) {
@@ -640,23 +641,22 @@ fn run_profile_workload(mut arguments: ProfileArgs) -> Result<String, String> {
     } else {
         None
     };
-    let raw_identity = match &raw {
-        Some(raw) => match ProfileRawIdentity::load(raw) {
-            Ok(identity) => Some(identity),
-            Err(error) => {
-                evidence
-                    .as_mut()
-                    .expect("raw evidence owner")
-                    .line(format!(
-                        "{{{},\"correctness\":\"FAIL\",\"status\":\"FAIL\",\"error\":{}}}",
-                        profile_raw_prefix(&arguments, raw),
-                        json(&error),
-                    ))?;
-                evidence.take().expect("raw evidence owner").finish()?;
-                return Err(error);
-            }
-        },
-        None => None,
+    let raw_identity = match (raw.as_ref(), raw_identity) {
+        (Some(_), Some(Ok(identity))) => Some(identity),
+        (Some(raw), Some(Err(error))) => {
+            evidence
+                .as_mut()
+                .expect("raw evidence owner")
+                .line(format!(
+                    "{{{},\"correctness\":\"FAIL\",\"status\":\"FAIL\",\"error\":{}}}",
+                    profile_raw_prefix(&arguments, raw),
+                    json(&error),
+                ))?;
+            evidence.take().expect("raw evidence owner").finish()?;
+            return Err(error);
+        }
+        (None, None) => None,
+        _ => unreachable!("raw identity follows raw arguments"),
     };
     let result = run_profile_scenario(&arguments);
     let owners = assert_no_owners();
