@@ -122,6 +122,8 @@ jobs:
             (
               cd "$repository"
               test "$(git status --porcelain)" = ""
+              cargo +1.97.1 build \
+                -p ferrum2-client -p ferrum2-server --bins --locked
               cargo +1.97.1 test --workspace --locked
               cargo +1.97.1 build --profile profiling \
                 -p ferrum2-client -p ferrum2-server -p ferrum2-m4-qualification --bins --locked

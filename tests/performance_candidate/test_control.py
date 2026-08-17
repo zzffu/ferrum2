@@ -939,8 +939,31 @@ class EvidenceSummaryTests(unittest.TestCase):
         )()
         self.assertEqual(CONTROL.run_summary_command(arguments), 0)
         summary = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(summary["schema_version"], 4)
         self.assertEqual(summary["status"], "MEASURED")
-        self.assertIn("| tcp-bulk |", markdown.read_text(encoding="utf-8"))
+        self.assertEqual(
+            summary["build_identities"],
+            {
+                "parent": {
+                    "sha": self.PARENT_SHA,
+                    "tree": "3" * 40,
+                    "runner_sha256": "a" * 64,
+                    "client_sha256": "c" * 64,
+                    "server_sha256": "e" * 64,
+                },
+                "candidate": {
+                    "sha": self.CANDIDATE_SHA,
+                    "tree": "4" * 40,
+                    "runner_sha256": "b" * 64,
+                    "client_sha256": "d" * 64,
+                    "server_sha256": "f" * 64,
+                },
+            },
+        )
+        rendered = markdown.read_text(encoding="utf-8")
+        self.assertIn("| parent |", rendered)
+        self.assertIn("| candidate |", rendered)
+        self.assertIn("| tcp-bulk |", rendered)
 
     def test_summary_command_keeps_uncalibrated_decline_non_failing(self) -> None:
         plan = self.plan("qualification", "tcp-stream-64k")

@@ -903,6 +903,13 @@ def summarize_evidence(
     planned = {entry["scenario"]: entry for entry in plan["scenarios"]}
     rows: dict[tuple[str, int, str], dict[str, object]] = {}
     evidence_files: list[dict[str, str]] = []
+    identity_fields = (
+        "sha",
+        "tree",
+        "runner_sha256",
+        "client_sha256",
+        "server_sha256",
+    )
     member_identity: dict[str, tuple[object, ...]] = {}
     environment_identity: tuple[object, ...] | None = None
     for member, root in (("parent", parent_root), ("candidate", candidate_root)):
@@ -933,16 +940,7 @@ def summarize_evidence(
                     f"duplicate evidence row for scenario={scenario}, pair={pair}, member={row_member}"
                 )
             rows[key] = row
-            identity = tuple(
-                row[field]
-                for field in (
-                    "sha",
-                    "tree",
-                    "runner_sha256",
-                    "client_sha256",
-                    "server_sha256",
-                )
-            )
+            identity = tuple(row[field] for field in identity_fields)
             if member in member_identity and member_identity[member] != identity:
                 raise CandidateControlError(
                     f"{member} build identity changed between trials"
@@ -1097,8 +1095,12 @@ def summarize_evidence(
         for result in scenario_summaries
         if result["role"] == "guard"
     ]
+    build_identities = {
+        member: dict(zip(identity_fields, member_identity[member], strict=True))
+        for member in ("parent", "candidate")
+    }
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "performance_candidate_summary",
         "mode": plan["mode"],
         "selection": plan["selection"],
@@ -1106,6 +1108,7 @@ def summarize_evidence(
         "scenario_group": plan["scenario_group"],
         "parent_sha": parent_sha,
         "candidate_sha": candidate_sha,
+        "build_identities": build_identities,
         "pairs": plan["pairs"],
         "decision_policy": plan["decision_policy"],
         "warning_policy": dict(WARNING_POLICY),
@@ -1141,7 +1144,7 @@ def invalid_summary(
         [entry["scenario"] for entry in plan["scenarios"]] if plan is not None else []
     )
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "performance_candidate_summary",
         "mode": plan["mode"] if plan is not None else None,
         "selection": plan["selection"] if plan is not None else None,
@@ -1149,6 +1152,7 @@ def invalid_summary(
         "scenario_group": plan["scenario_group"] if plan is not None else None,
         "parent_sha": parent_sha,
         "candidate_sha": candidate_sha,
+        "build_identities": {},
         "decision_policy": copy.deepcopy(
             plan["decision_policy"]
             if plan is not None
@@ -1204,6 +1208,20 @@ def summary_markdown(summary: dict[str, object]) -> str:
             f"- Threshold availability: `{summary['threshold_availability']}`",
             f"- Decision: {summary['decision_reason']}",
             "- Warnings are descriptive only and never change status or exit code.",
+            "",
+            "| Member | Commit | Tree | Runner SHA-256 | Client SHA-256 | Server SHA-256 |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
+    for member in ("parent", "candidate"):
+        identity = summary["build_identities"][member]
+        lines.append(
+            f"| {member} | `{identity['sha']}` | `{identity['tree']}` | "
+            f"`{identity['runner_sha256']}` | `{identity['client_sha256']}` | "
+            f"`{identity['server_sha256']}` |"
+        )
+    lines.extend(
+        [
             "",
             "| Scenario | Role | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Spread % | Warnings | Threshold decision | Status |",
             "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
