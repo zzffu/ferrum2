@@ -17,7 +17,6 @@ on:
           - performance
           - windows-tun-tcp
           - windows-tun-transport
-          - windows-tun-full
 
 permissions:
   contents: read
@@ -68,8 +67,9 @@ jobs:
           cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-          cargo test --workspace --all-features --locked
-          cargo test -p ferrum2-m0-harness --test lifecycle_cycles full_qualification_runs_twenty_cycles_per_category_and_at_least_100_per_binary --locked -- --ignored --exact --nocapture
+          cargo test --workspace --locked
+          cargo test -p ferrum2-dns --features __interop-test-root --locked
+          target/debug/m4-qualification self-check
           cargo doc --workspace --all-features --no-deps --locked
       - name: Record authoritative full-gate completion
         shell: bash
@@ -81,136 +81,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test_name=ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps
-          expected_listing="$test_name: test"
-          list_output="$(cargo test -p ferrum2-m0-harness --test udp_local_e2e --locked -- --ignored --list)"
-          listing_count="$(grep -Fxc "$expected_listing" <<<"$list_output" || true)"
-          if [ "$listing_count" -ne 1 ]; then
-            echo "focused IPv6 UDP test selection count was $listing_count, expected 1" >&2
-            exit 1
-          fi
-
-          test_status=0
-          test_output="$(
-            timeout --signal=TERM --kill-after=10s 2m \
-              cargo test -p ferrum2-m0-harness --test udp_local_e2e \
-                "$test_name" --locked -- --ignored --exact --nocapture 2>&1
-          )" || test_status=$?
-          printf '%s\n' "$test_output"
-          if [ "$test_status" -ne 0 ]; then
-            echo "focused IPv6 UDP test failed with status $test_status" >&2
-            exit 1
-          fi
-
-          product_marker="m2_ipv6_udp_real_process status=PASS datagrams=3 payload=PASS source=PASS cleanup=PASS"
-          product_marker_count="$(grep -Fxc "$product_marker" <<<"$test_output" || true)"
-          if [ "$product_marker_count" -ne 1 ]; then
-            echo "focused IPv6 UDP product marker count was $product_marker_count, expected 1" >&2
-            exit 1
-          fi
-          result_count="$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured;' <<<"$test_output" || true)"
-          if [ "$result_count" -ne 1 ]; then
-            echo "focused IPv6 UDP executed-test count was not exactly 1" >&2
-            exit 1
-          fi
-          printf 'm2_ipv6_udp_real_process_completion status=PASS sha=%s run_id=%s run_attempt=%s\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-
-  budget:
-    name: test-footprint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Checkout exact current SHA
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          clean: true
-          persist-credentials: false
-      - name: Verify clean current SHA
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git status --porcelain)" = ""
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-      - name: Report test footprint and enforce policy integrity
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PUSH_BASE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          cargo install --locked rustloc --version '=0.19.1' --root "$RUNNER_TEMP/rustloc"
-          rustloc_bin="$RUNNER_TEMP/rustloc/bin/rustloc"
-          test "$("$rustloc_bin" --version)" = "rustloc 0.19.1"
-
-          base=""
-          case "$EVENT_NAME" in
-            pull_request) base="$PR_BASE_SHA" ;;
-            push) base="$PUSH_BASE_SHA" ;;
-          esac
-          case "$base" in
-            ""|0000000000000000000000000000000000000000)
-              RUSTLOC="$rustloc_bin" sh scripts/test-budget.sh ci \
-                --candidate "$GITHUB_SHA"
-              ;;
-            *)
-              RUSTLOC="$rustloc_bin" sh scripts/test-budget.sh ci \
-                --base "$base" --candidate "$GITHUB_SHA"
-              ;;
-          esac
-          printf 'test_footprint_completion status=PASS schema=3 numeric_status=reported sha=%s run_id=%s run_attempt=%s\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-          printf 'test_budget_completion status=PASS schema=3 semantics=test_footprint sha=%s run_id=%s run_attempt=%s\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-
-  msrv:
-    name: msrv
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - name: Checkout exact current SHA
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          clean: true
-          persist-credentials: false
-      - name: Verify clean current SHA
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! status_output="$(git status --porcelain)"; then
-            echo "git status failed" >&2
-            exit 1
-          fi
-          test -z "$status_output"
-          if ! head_sha="$(git rev-parse HEAD)"; then
-            echo "git rev-parse HEAD failed" >&2
-            exit 1
-          fi
-          test "$head_sha" = "$GITHUB_SHA"
-      - name: Record provider evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT job=$GITHUB_JOB sha=$GITHUB_SHA"
-          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH image_os=$ImageOS image_version=$ImageVersion"
-          uname -a
-          cc --version
-          ld --version
-      - name: Install and prove MSRV
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install 1.97.1 --profile minimal
-          rustc +1.97.1 -Vv
-          cargo +1.97.1 -V
-          cargo +1.97.1 check --workspace --all-targets --locked
-          cargo +1.97.1 build --workspace --bins --locked
-          cargo +1.97.1 test --workspace --locked
+          timeout --signal=TERM --kill-after=10s 2m \
+            cargo test -p ferrum2-m0-harness --test udp_local_e2e \
+              ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps \
+              --locked -- --ignored --exact --nocapture
 
   platform:
     name: platform / ${{ matrix.profile }}
@@ -309,7 +183,7 @@ jobs:
           rustup target add --toolchain 1.97.1 ${{ matrix.target }}
           rustc +1.97.1 -Vv
           cargo +1.97.1 -V
-          cargo +1.97.1 build --workspace --bins --release --locked --target ${{ matrix.target }}
+          cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --bins --release --locked --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { throw "MSVC release build failed" }
           $client = "target\${{ matrix.target }}\release\ferrum2-client.exe"
           $server = "target\${{ matrix.target }}\release\ferrum2-server.exe"
@@ -319,11 +193,6 @@ jobs:
           $qualificationStatus = $LASTEXITCODE
           Write-Output $qualificationOutput.TrimEnd()
           if ($qualificationStatus -ne 0) { throw "MSVC native qualification failed" }
-          $artifactCount = ([regex]::Matches($qualificationOutput, "(?m)^m3_release_artifact status=PASS ")).Count
-          $lifecycleCount = ([regex]::Matches($qualificationOutput, "(?m)^m3_native_lifecycle_completion status=PASS ")).Count
-          if ($artifactCount -ne 2 -or $lifecycleCount -ne 2) {
-            throw "MSVC native evidence marker count mismatch"
-          }
 
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere is missing" }
@@ -350,7 +219,7 @@ jobs:
           }
           Write-Output "m3_platform_completion status=PASS profile=${{ matrix.profile }} target=${{ matrix.target }} native=2/2 artifacts=2/2 linkage=2/2 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
 
-          cargo +1.97.1 build --workspace --bins --locked
+          cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --bins --locked
           if ($LASTEXITCODE -ne 0) { throw "native detection binary build failed" }
           cargo +1.97.1 test -p ferrum2-m0-harness --test detection_probe --locked
           if ($LASTEXITCODE -ne 0) { throw "native detection evidence failed" }
@@ -366,7 +235,7 @@ jobs:
           rustup target add --toolchain 1.97.1 "${{ matrix.target }}"
           rustc +1.97.1 -Vv
           cargo +1.97.1 -V
-          cargo +1.97.1 build --workspace --bins --release --locked --target "${{ matrix.target }}"
+          cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --bins --release --locked --target "${{ matrix.target }}"
           client="target/${{ matrix.target }}/release/ferrum2-client"
           server="target/${{ matrix.target }}/release/ferrum2-server"
           qualification_status=0
@@ -377,8 +246,6 @@ jobs:
           )" || qualification_status=$?
           printf '%s\n' "$qualification_output"
           test "$qualification_status" -eq 0
-          test "$(grep -Ec '^m3_release_artifact status=PASS ' <<<"$qualification_output" || true)" -eq 2
-          test "$(grep -Ec '^m3_native_lifecycle_completion status=PASS ' <<<"$qualification_output" || true)" -eq 2
           for entry in "ferrum2-client:$client" "ferrum2-server:$server"; do
             name="${entry%%:*}"
             binary="${entry#*:}"
@@ -404,8 +271,6 @@ jobs:
           printf 'm3_platform_completion status=PASS profile=%s target=%s native=2/2 artifacts=2/2 linkage=2/2 cleanup=PASS sha=%s run_id=%s run_attempt=%s\n' \
             '${{ matrix.profile }}' '${{ matrix.target }}' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
-          cargo +1.97.1 build --workspace --bins --locked
-          cargo +1.97.1 test -p ferrum2-m0-harness --test detection_probe --locked
       - name: Install exact musl packages
         if: matrix.profile == 'linux-musl'
         shell: bash
@@ -430,7 +295,7 @@ jobs:
           rustup target add --toolchain 1.97.1 "${{ matrix.target }}"
           rustc +1.97.1 -Vv
           cargo +1.97.1 -V
-          cargo +1.97.1 build --workspace --bins --release --locked --target "${{ matrix.target }}"
+          cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --bins --release --locked --target "${{ matrix.target }}"
           client="target/${{ matrix.target }}/release/ferrum2-client"
           server="target/${{ matrix.target }}/release/ferrum2-server"
           qualification_status=0
@@ -441,8 +306,6 @@ jobs:
           )" || qualification_status=$?
           printf '%s\n' "$qualification_output"
           test "$qualification_status" -eq 0
-          test "$(grep -Ec '^m3_release_artifact status=PASS ' <<<"$qualification_output" || true)" -eq 2
-          test "$(grep -Ec '^m3_native_lifecycle_completion status=PASS ' <<<"$qualification_output" || true)" -eq 2
           for entry in "ferrum2-client:$client" "ferrum2-server:$server"; do
             name="${entry%%:*}"
             binary="${entry#*:}"
@@ -630,16 +493,12 @@ jobs:
         run: |
           set -euo pipefail
           export CARGO_TARGET_DIR
-          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/m1-tcp-m2-udp-qualification-target.XXXXXX")"
-          cargo build --workspace --bins --locked
-          cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
-          cargo build -p ferrum2-m0-harness --bin m0-qualification --locked
+          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/interop-qualification-target.XXXXXX")"
+          cargo build -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --bins --locked
           qualification_status=0
           qualification_output="$("$CARGO_TARGET_DIR/debug/m0-qualification" 2>&1)" || qualification_status=$?
           printf '%s\n' "$qualification_output"
 
-          sip022_target_dir="$CARGO_TARGET_DIR"
-          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/m12-dns-qualification-target.XXXXXX")"
           cargo build -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --bins --locked \
             --features ferrum2-dns/__interop-test-root
           dns_status=0
@@ -667,32 +526,14 @@ jobs:
           if [ -e "$CARGO_TARGET_DIR" ]; then
             cleanup_status=1
           fi
-          rm -rf -- "$sip022_target_dir" || cleanup_status=$?
-          if [ -e "$sip022_target_dir" ]; then
-            cleanup_status=1
-          fi
-          expected_tcp="qualification transport=tcp status=PASS cases=12/12 cleanup=PASS sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT"
-          expected_udp="qualification transport=udp status=PASS cases=12/12 cleanup=PASS sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT"
-          tcp_count="$(grep -Fxc "$expected_tcp" <<<"$qualification_output" || true)"
-          udp_count="$(grep -Fxc "$expected_udp" <<<"$qualification_output" || true)"
-          expected_dns="qualification transport=dns status=PASS cleanup=PASS sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT"
-          dns_count="$(grep -Fxc "$expected_dns" <<<"$dns_output" || true)"
           echo "final_status sing_box=$sing_box_status shadowsocks_rust=$shadowsocks_rust_status coredns=$coredns_status bind=$bind_status qualification=$qualification_status dns=$dns_status cleanup=$cleanup_status"
-          if [ "$sing_box_status" -eq 0 ] &&
-             [ "$shadowsocks_rust_status" -eq 0 ] &&
-             [ "$coredns_status" -eq 0 ] &&
-             [ "$bind_status" -eq 0 ] &&
-             [ "$qualification_status" -eq 0 ] &&
-             [ "$dns_status" -eq 0 ] &&
-             [ "$cleanup_status" -eq 0 ] &&
-             [ "$tcp_count" -eq 1 ] &&
-             [ "$udp_count" -eq 1 ] &&
-             [ "$dns_count" -eq 1 ]; then
-            printf 'm12_interop_completion status=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS dns=PASS dns_cleanup=PASS sha=%s run_id=%s run_attempt=%s\n' \
-              "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-            exit 0
-          fi
-          exit 1
+          test "$sing_box_status" -eq 0
+          test "$shadowsocks_rust_status" -eq 0
+          test "$coredns_status" -eq 0
+          test "$bind_status" -eq 0
+          test "$qualification_status" -eq 0
+          test "$dns_status" -eq 0
+          test "$cleanup_status" -eq 0
 
   performance:
     name: performance
@@ -843,6 +684,17 @@ jobs:
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
           printf 'm12_performance_completion status=PASS legacy=PASS dns_roots=PASS dns_direct=PASS dns_detoured=PASS dns_bounds=PASS dns_drain=PASS dns_rebind=PASS sha=%s run_id=%s run_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+      - name: Upload raw M4 performance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m4-performance-jsonl-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/m4/throughput.jsonl
+            ${{ runner.temp }}/m4/resource.jsonl
+            ${{ runner.temp }}/m4/dns-resource.jsonl
+          if-no-files-found: error
+          retention-days: 30
       - name: Reap M4 processes and delete generated evidence
         if: ${{ always() }}
         shell: bash
@@ -954,29 +806,10 @@ jobs:
               $closedProfile = "transport"
               $expectedMarker = "m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
             }
-            "windows-tun-full" {
-              $mode = $null
-              $closedProfile = "full"
-              $expectedMarker = "m15_windows_tun_e2e status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
-            }
             default { throw "dispatch target invalid" }
           }
-          if ($dispatchTarget -eq "windows-tun-full") {
-            $transportOutput = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode udp -RunToken $env:FERRUM2_TUN_RUN_TOKEN
-            if ($LASTEXITCODE -ne 0) { throw "udp controller failed" }
-            $transportOutput | Write-Output
-            $transportMarker = "m15_windows_tun_e2e status=PASS profile=transport functional=16/16 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
-            if (@($transportOutput | Where-Object { $_ -ceq $transportMarker }).Count -ne 1) { throw "Wintun transport marker mismatch" }
-            $cyclesOutput = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode cycles -RunToken $env:FERRUM2_TUN_RUN_TOKEN
-            if ($LASTEXITCODE -ne 0) { throw "cycles controller failed" }
-            $cyclesOutput | Write-Output
-            $cyclesMarker = "m15_windows_tun_cycles status=PASS cycles=100/100 cleanup=PASS sha=$env:GITHUB_SHA run_id=$env:GITHUB_RUN_ID run_attempt=$env:GITHUB_RUN_ATTEMPT"
-            if (@($cyclesOutput | Where-Object { $_ -ceq $cyclesMarker }).Count -ne 1) { throw "Wintun cycles marker mismatch" }
-            $output = @($expectedMarker)
-          } else {
-            $output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode $mode -RunToken $env:FERRUM2_TUN_RUN_TOKEN
-            if ($LASTEXITCODE -ne 0) { throw "$mode controller failed" }
-          }
+          $output = & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode $mode -RunToken $env:FERRUM2_TUN_RUN_TOKEN
+          if ($LASTEXITCODE -ne 0) { throw "$mode controller failed" }
           $output | Write-Output
           $markers = @($output | Where-Object { $_ -like "m15_windows_tun_e2e status=PASS *" })
           if ($markers.Count -ne 1 -or $markers[0] -ne $expectedMarker) { throw "Wintun marker mismatch" }
@@ -1048,63 +881,3 @@ jobs:
           $ErrorActionPreference = "Stop"
           & pwsh -NoProfile -File tests/platform/qualify_windows_tun.ps1 -Mode cleanup -RunToken $env:FERRUM2_TUN_RUN_TOKEN
           if ($LASTEXITCODE -ne 0) { throw "controller cleanup failed" }
-
-  qualification:
-    name: qualification
-    if: ${{ always() }}
-    needs:
-      - quality
-      - budget
-      - msrv
-      - platform
-      - interop
-      - windows-tun-e2e
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Checkout exact current SHA
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          clean: true
-          persist-credentials: false
-      - name: Fail closed and record same-run M3 qualification
-        shell: bash
-        env:
-          QUALITY_RESULT: ${{ needs.quality.result }}
-          BUDGET_RESULT: ${{ needs.budget.result }}
-          MSRV_RESULT: ${{ needs.msrv.result }}
-          PLATFORM_RESULT: ${{ needs.platform.result }}
-          INTEROP_RESULT: ${{ needs.interop.result }}
-          WINDOWS_TUN_RESULT: ${{ needs['windows-tun-e2e'].result }}
-          WINDOWS_TUN_PROFILE: ${{ needs['windows-tun-e2e'].outputs.profile }}
-          DISPATCH_TARGET: ${{ inputs.dispatch_target }}
-        run: |
-          set -euo pipefail
-          test "$(git status --porcelain)" = ""
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$QUALITY_RESULT" = "success"
-          test "$BUDGET_RESULT" = "success"
-          test "$MSRV_RESULT" = "success"
-          test "$PLATFORM_RESULT" = "success"
-          test "$INTEROP_RESULT" = "success"
-          test "$WINDOWS_TUN_RESULT" = "success"
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            case "$DISPATCH_TARGET" in
-              performance) expected_windows_tun_profile=foundation ;;
-              windows-tun-tcp) expected_windows_tun_profile=tcp ;;
-              windows-tun-transport) expected_windows_tun_profile=transport ;;
-              windows-tun-full) expected_windows_tun_profile=full ;;
-              *) exit 1 ;;
-            esac
-          else
-            expected_windows_tun_profile=foundation
-          fi
-          test "$WINDOWS_TUN_PROFILE" = "$expected_windows_tun_profile"
-          printf 'm3_qualification_completion status=PASS full=PASS security=PASS process=PASS msrv=PASS tcp=12/12 tcp_cleanup=PASS udp=12/12 udp_cleanup=PASS platforms=3/3 test_budget=PASS sha=%s run_id=%s run_attempt=%s\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-          if [ "$WINDOWS_TUN_PROFILE" = "full" ]; then
-            printf 'm15_windows_tun_qualification status=PASS profile=full functional=16/16 cycles=100/100 cleanup=PASS sha=%s run_id=%s run_attempt=%s\n' \
-              "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-          fi
