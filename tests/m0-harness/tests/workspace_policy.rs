@@ -79,6 +79,29 @@ fn workspace_members_share_the_declared_release_policy() {
         .filter(|package| member_ids.contains(package["id"].as_str().expect("package id")))
         .collect();
     assert_eq!(members.len(), member_ids.len());
+    let member_names: BTreeSet<_> = members
+        .iter()
+        .map(|package| package["name"].as_str().expect("package name"))
+        .collect();
+    for required in [
+        "ferrum2-client",
+        "ferrum2-server",
+        "ferrum2-core",
+        "ferrum2-crypto",
+        "ferrum2-dns",
+        "ferrum2-runtime",
+        "ferrum2-shadowsocks",
+        "ferrum2-socks5",
+        "ferrum2-tun",
+        "ferrum2-wintun",
+        "ferrum2-m0-harness",
+        "ferrum2-m4-qualification",
+    ] {
+        assert!(
+            member_names.contains(required),
+            "missing required member {required}"
+        );
+    }
 
     let root_source = fs::read_to_string(workspace_root().join("Cargo.toml"))
         .expect("workspace Cargo.toml")
@@ -108,6 +131,18 @@ fn workspace_members_share_the_declared_release_policy() {
             package["publish"],
             serde_json::json!([]),
             "{} publish policy",
+            package["name"]
+        );
+        assert!(
+            package["targets"]
+                .as_array()
+                .expect("package targets")
+                .iter()
+                .all(|target| !target["kind"]
+                    .as_array()
+                    .expect("target kinds")
+                    .contains(&serde_json::json!("custom-build"))),
+            "{} must not execute a workspace build script",
             package["name"]
         );
 
@@ -165,11 +200,10 @@ fn workspace_members_share_the_declared_release_policy() {
                     package["name"],
                     dependency["name"]
                 );
-                assert!(
-                    source.starts_with("registry+"),
+                assert_eq!(
+                    source, "registry+https://github.com/rust-lang/crates.io-index",
                     "{} dependency {} has a non-registry source",
-                    package["name"],
-                    dependency["name"]
+                    package["name"], dependency["name"]
                 );
             }
         }
@@ -187,25 +221,7 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
         .filter(|dependency| dependency["kind"].is_null())
         .map(|dependency| dependency["name"].as_str().expect("dependency name"))
         .collect();
-    for forbidden in [
-        "tokio",
-        "socket2",
-        "hickory-proto",
-        "hickory-resolver",
-        "rustls",
-        "ferrum2-runtime",
-        "ferrum2-crypto",
-        "ferrum2-shadowsocks",
-        "ferrum2-socks5",
-        "ferrum2-dns",
-        "ferrum2-tun",
-        "ferrum2-wintun",
-    ] {
-        assert!(
-            !core_dependencies.contains(forbidden),
-            "core acquired runtime or protocol dependency {forbidden}"
-        );
-    }
+    assert_eq!(core_dependencies, BTreeSet::from(["bytes", "ipnet"]));
 
     let harness = package(metadata, "ferrum2-m0-harness");
     let harness_node = metadata["resolve"]["nodes"]
@@ -247,6 +263,38 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
     assert_eq!(
         wintun_edges,
         vec![("ferrum2-tun", "cfg(all(windows, target_arch = \"x86_64\"))")]
+    );
+    let mut wintun_sources = Vec::new();
+    rust_sources(
+        &PathBuf::from(
+            package(metadata, "ferrum2-wintun")["manifest_path"]
+                .as_str()
+                .expect("Wintun manifest path"),
+        )
+        .parent()
+        .expect("Wintun package directory")
+        .join("src"),
+        &mut wintun_sources,
+    );
+    let mut unsafe_owner_found = false;
+    for source in wintun_sources {
+        let tokens = fs::read_to_string(&source)
+            .expect("Wintun Rust source")
+            .parse::<TokenStream>()
+            .expect("valid Wintun Rust tokens");
+        if source.file_name().is_some_and(|name| name == "windows.rs") {
+            unsafe_owner_found = has_unsafe_token(tokens);
+        } else {
+            assert!(
+                !has_unsafe_token(tokens),
+                "unsafe Rust escaped the Windows ABI owner into {}",
+                source.display()
+            );
+        }
+    }
+    assert!(
+        unsafe_owner_found,
+        "the declared Windows ABI owner disappeared"
     );
 
     let mut qualification_targets = 0;
@@ -294,7 +342,11 @@ fn production_features_preserve_security_and_resource_boundaries() {
         );
     }
 
-    for target in ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"] {
+    for target in [
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+    ] {
         let output = Command::new(env!("CARGO"))
             .current_dir(workspace_root())
             .args([
@@ -412,6 +464,67 @@ fn vendored_crypto_is_v2_only_and_contains_no_unsafe_tokens() {
         .join("vendor/shadowsocks-crypto")
         .canonicalize()
         .expect("vendored backend");
+    let vendor_manifest_source =
+        fs::read_to_string(vendor.join("Cargo.toml")).expect("vendored backend manifest");
+    let vendor_manifest: toml::Value =
+        toml::from_str(&vendor_manifest_source).expect("structured backend manifest");
+    assert_eq!(vendor_manifest["package"]["build"].as_bool(), Some(false));
+    let v2_features: BTreeSet<_> = vendor_manifest["features"]["v2"]
+        .as_array()
+        .expect("v2 feature mapping")
+        .iter()
+        .map(|feature| feature.as_str().expect("v2 feature"))
+        .collect();
+    assert_eq!(
+        v2_features,
+        BTreeSet::from([
+            "dep:aes-v2",
+            "dep:aes-gcm-v2",
+            "dep:blake3-v2",
+            "dep:chacha20poly1305-v2",
+            "dep:ghash-v2",
+            "dep:zeroize",
+        ])
+    );
+    for dependency in [
+        "aes-v2",
+        "aes-gcm-v2",
+        "blake3-v2",
+        "chacha20poly1305-v2",
+        "ghash-v2",
+    ] {
+        let specification = &vendor_manifest["dependencies"][dependency];
+        assert_eq!(
+            specification["default-features"].as_bool(),
+            Some(false),
+            "{dependency} default features"
+        );
+        assert!(
+            specification["features"]
+                .as_array()
+                .expect("backend dependency features")
+                .iter()
+                .any(|feature| feature.as_str() == Some("zeroize")),
+            "{dependency} lost zeroization"
+        );
+        assert!(
+            !specification["features"]
+                .as_array()
+                .expect("backend dependency features")
+                .iter()
+                .any(|feature| feature.as_str() == Some("reduced-round")),
+            "{dependency} enabled reduced-round crypto"
+        );
+    }
+    let zeroize = &vendor_manifest["dependencies"]["zeroize"];
+    assert_eq!(zeroize["default-features"].as_bool(), Some(false));
+    assert!(
+        zeroize["features"]
+            .as_array()
+            .expect("zeroize features")
+            .iter()
+            .any(|feature| feature.as_str() == Some("alloc"))
+    );
     let manifest = PathBuf::from(
         resolved["manifest_path"]
             .as_str()
