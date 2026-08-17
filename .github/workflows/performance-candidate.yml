@@ -74,13 +74,10 @@ jobs:
             tcp-bulk|tcp-stream-64k|tcp-request-1k|tcp-request-4k|tcp-request-16k|udp-small-high|udp-mtu-1200) ;;
             *) exit 2 ;;
           esac
-          case "$WARMUP_SECONDS:$ACTIVE_SECONDS:$PAIRS" in
-            1:15:3|1:15:5|1:30:3|1:30:5|1:60:3|1:60:5|
-            3:15:3|3:15:5|3:30:3|3:30:5|3:60:3|3:60:5|
-            5:15:3|5:15:5|5:30:3|5:30:5|5:60:3|5:60:5|
-            10:15:3|10:15:5|10:30:3|10:30:5|10:60:3|10:60:5) ;;
-            *) exit 2 ;;
-          esac
+          python3 -B tools/performance_candidate.py validate-inputs \
+            --warmup-seconds "$WARMUP_SECONDS" \
+            --active-seconds "$ACTIVE_SECONDS" \
+            --pairs "$PAIRS"
           for process in ferrum2-client ferrum2-server; do
             ! pgrep -x "$process" >/dev/null
           done

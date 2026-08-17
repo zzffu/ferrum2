@@ -67,6 +67,7 @@ jobs:
           cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          python3 -B -m unittest discover -s tests/performance_candidate -v
           cargo test --workspace --locked
           cargo test -p ferrum2-dns --features __interop-test-root --locked
           target/debug/m4-qualification self-check
