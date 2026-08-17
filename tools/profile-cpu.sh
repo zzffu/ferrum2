@@ -85,6 +85,14 @@ single_line() {
     [[ -n "$1" && "$1" != *$'\n'* && "$1" != *$'\r'* ]]
 }
 
+has_private_mode() {
+    local path=$1
+    local expected=$2
+    local actual
+    actual=$(stat -Lc '%a' -- "$path") || return 1
+    [[ $actual == "$expected" ]]
+}
+
 scenario=
 role=
 pid=
@@ -149,6 +157,11 @@ profiles_root=$(realpath -e -- "$expected_profiles_root") || exit 1
     printf 'profile-cpu: profiles/ canonical path mismatch\n' >&2
     exit 1
 }
+chmod 700 -- "$profiles_root" || exit 1
+has_private_mode "$profiles_root" 700 || {
+    printf 'profile-cpu: profiles/ cannot enforce private permissions\n' >&2
+    exit 1
+}
 case "$output" in
     /*) output_candidate=$output ;;
     *) output_candidate=$repo_root/$output ;;
@@ -163,9 +176,21 @@ output_dir=$(realpath -m -- "$output_candidate") || exit 1
     exit 1
 }
 mkdir -m 700 -- "$output_dir" || exit 1
+chmod 700 -- "$output_dir" || exit 1
+has_private_mode "$output_dir" 700 || {
+    printf 'profile-cpu: output cannot enforce private permissions\n' >&2
+    exit 1
+}
 
 metadata_file=$output_dir/metadata.txt
 stage_file=$output_dir/stage-status.txt
+: >"$metadata_file"
+: >"$stage_file"
+chmod 600 -- "$metadata_file" "$stage_file" || exit 1
+has_private_mode "$metadata_file" 600 && has_private_mode "$stage_file" 600 || {
+    printf 'profile-cpu: evidence files cannot enforce private permissions\n' >&2
+    exit 1
+}
 output_created=1
 {
     printf 'build_profile=profiling\n'
@@ -176,7 +201,6 @@ output_created=1
     printf 'role=%s\n' "$role"
     printf 'pid=%s\n' "$pid"
 } >"$metadata_file"
-: >"$stage_file"
 record_stage arguments PASS
 record_stage preflight STARTED
 
@@ -285,6 +309,7 @@ if ! run_with_bounded_stderr "$output_dir/perf-stat.stderr.txt" perf stat -x ';'
 fi
 verify_target || die perf_stat "target identity changed during perf stat"
 [[ -s $output_dir/perf-stat.txt ]] || die perf_stat "perf stat produced no evidence"
+has_private_mode "$output_dir/perf-stat.txt" 600 || die perf_stat "perf evidence is not private"
 if grep -Eq '<not supported>|<not counted>' "$output_dir/perf-stat.txt"; then
     die perf_stat "perf reported unsupported or not-counted evidence"
 fi
@@ -297,5 +322,6 @@ if ! run_with_bounded_stderr "$output_dir/samply.stderr.txt" timeout --preserve-
 fi
 verify_target || die samply "target identity changed during Samply"
 [[ -s $output_dir/samply.json.gz ]] || die samply "Samply produced no evidence"
+has_private_mode "$output_dir/samply.json.gz" 600 || die samply "Samply evidence is not private"
 record_stage samply PASS
 exit 0
