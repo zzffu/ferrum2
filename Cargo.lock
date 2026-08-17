@@ -490,6 +490,7 @@ dependencies = [
  "hex",
  "serde_json",
  "shadowsocks-crypto",
+ "toml",
  "zeroize",
 ]
 

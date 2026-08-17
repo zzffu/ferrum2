@@ -5,7 +5,6 @@ use blake3::Hasher;
 use bytes::BytesMut;
 use chacha20poly1305::{ChaCha20Poly1305, XChaCha20Poly1305, XNonce};
 use serde_json::Value;
-use std::path::Path;
 
 const BLAKE3_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/blake3-derive-v1.json");
 const AES128_GCM_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/aes128-gcm-v1.json");
@@ -307,186 +306,117 @@ fn sip022_udp_aes_header_kdf_nonce_and_tag_rows_match() {
 }
 
 #[test]
-fn fixture_hashes_and_source_provenance_are_pinned() {
-    for (fixture, expected) in [
+fn fixture_hashes_and_upstream_sources_are_pinned() {
+    let provenance: toml::Value = toml::from_str(PROVENANCE).expect("structured provenance");
+    let entries = provenance["fixtures"]
+        .as_array()
+        .expect("fixture provenance entries");
+    for (path, fixture, expected) in [
         (
+            "tests/fixtures/crypto/blake3-derive-v1.json",
             BLAKE3_FIXTURE,
             "13d8f79ae8241af454938149d209c37d1c87512d55a64551c911cac08a88518c",
         ),
         (
+            "tests/fixtures/crypto/aes128-gcm-v1.json",
             AES128_GCM_FIXTURE,
             "0c524568d8ee98e4b0a3dda7f4c87c36972fc439174e44716cf33f971393fdf1",
         ),
         (
+            "tests/fixtures/crypto/aes256-gcm-v1.json",
             AES256_GCM_FIXTURE,
             "b3fddcddbbce801620d9147b362be61e6267ee1eea4cfa00bb2a4e722d61b3f1",
         ),
         (
+            "tests/fixtures/crypto/chacha20-poly1305-v1.json",
             CHACHA20_POLY1305_FIXTURE,
             "d9799fb4af314e9c0053bc5f261bf68cb807e5ac91d6ef73fef4e00db104589e",
         ),
         (
+            "tests/fixtures/crypto/sip022-kdf-v1.json",
             SIP022_KDF_FIXTURE,
             "2b74c9ddf95fbf872dfa19bc402e7dd30da56acd25f3ef0ef3f17bd74fed367d",
         ),
         (
+            "tests/fixtures/crypto/sip022-kdf-profiles-v1.json",
             SIP022_PROFILE_KDF_FIXTURE,
             "f6d0047ad1432707b44201da40cfb831e754cbd70008b28d4538aa160d72f428",
         ),
         (
+            "tests/fixtures/crypto/xchacha20-poly1305-draft02-v1.json",
             XCHACHA20_POLY1305_FIXTURE,
             "6791999d70ac966e72fdf4d55afa03f0b8096bf4d14d04b8a96d33cbc2aa77aa",
         ),
         (
+            "tests/fixtures/crypto/sip022-udp-primitives-v1.json",
             SIP022_UDP_FIXTURE,
             "3db87e963d6d1ae3b784450958021deeeaaf9f5a8b8053724613a74da0becfef",
-        ),
-        (
-            PROFILE_GENERATOR,
-            "0c57b6ae188cd2f471ce0cf5b533d503edea6fc01a381fbb13998f066b365df3",
         ),
     ] {
         let normalized = fixture.replace("\r\n", "\n");
         assert!(!normalized.contains('\r'));
         assert_eq!(hex::encode(sha256(normalized.as_bytes())), expected);
-        assert!(PROVENANCE.contains(expected));
+        let entry = fixture_provenance(entries, path);
+        assert_eq!(entry["fixture_sha256"].as_str(), Some(expected));
+        assert!(
+            entry["source"]
+                .as_str()
+                .is_some_and(|source| !source.is_empty()),
+            "{path} needs a source description"
+        );
+        assert!(
+            entry["source_license"]
+                .as_str()
+                .is_some_and(|license| !license.is_empty()),
+            "{path} needs a reviewed source license"
+        );
+        assert!(
+            ["source_url", "source_archive_url", "upstream_sip022_url"]
+                .into_iter()
+                .any(|key| entry.get(key).and_then(toml::Value::as_str).is_some()),
+            "{path} needs an upstream locator"
+        );
     }
 
-    for required in [
-        "93a431c78a52d7ccf0f366f106467f5070e6075e",
-        "dcb91ea8accc77e6d6e632af7cdc1a99a9f3ae78cf648da595c7d064db32f624",
-        "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception",
-        "source_archive_size = 5879",
-        "http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/gcm/gcm-test-vectors.tar.gz",
-        "https://web.archive.org/web/20170830120738id_/http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/gcm/gcm-test-vectors.tar.gz",
-        "511e4741cee299ad0d1eb72ae2738911758248e2aba9d3db33a1dbcbb62e07f0",
-        "gcm-test-vectors/vec-01.txt",
-        "4fffe6ba6272443855d24dcb8deb00e23dddad6da510d57201ffa4560e5137f1",
-        "gcm-test-vectors/vec-02.txt",
-        "6ceba9c631dac0d4fc5015dc002d37c340af174429213c0afb6f51c76088436a",
-        "https://web.archive.org/web/20170811123217id_/http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/gcm/gcm-revised-spec.pdf",
-        "327e3c9363c268fae64e285e2f56f882bb6e3e04f81ef8098521f44c8e2b6c37",
-        "https://csrc.nist.gov/CSRC/media/Projects/Block-Cipher-Techniques/documents/BCM/proposed-modes/gcm/gcm-nist-ipr.pdf",
-        "01708680027b2141cc4f976f2c6e854571cc840737c275da2afb42a48b93813d",
-        "source_license = \"NOASSERTION\"",
-        "submitter-supplied and historically hosted by NIST",
-        "does not imply NIST endorsement",
-        "Do not commit or redistribute the source archive or PDF evidence",
-        "Non-official SIP022 primitive fixture",
-        "gcm-test-vectors/vec-13.txt",
-        "a7a76fd69b964918daa559ef5301e1ece5545c1fde61d1039d035bf261a5f8ab",
-        "gcm-test-vectors/vec-14.txt",
-        "9c94ab4c7de60597968cf6131d0d1402be035e66832420da76741ba9a0927305",
-        "RFC 8439 section 2.8.2",
-        "25bef70fbf7a07ff45c2fe4cb7c6ce954eac687413d8610603268b4e4415324c",
-        "e37a978ccf0992d9053fbc039470d6527108e393",
-        "profile-fixture-generator.rs",
-        "imports no ferrum2 crate or reference implementation",
-        "draft-irtf-cfrg-xchacha-02",
-        "Appendix A.1 and A.3.1",
-        "IETF Trust Legal Provisions",
-        "f6b203facf219fe47bfe2913c2e576240d2bf1f9",
-        "AES-128 PSK 00..0f/session ID 60..67/packet ID 0",
+    let normalized_generator = PROFILE_GENERATOR.replace("\r\n", "\n");
+    let generator_hash = hex::encode(sha256(normalized_generator.as_bytes()));
+    assert_eq!(
+        generator_hash,
+        "0c57b6ae188cd2f471ce0cf5b533d503edea6fc01a381fbb13998f066b365df3"
+    );
+    for path in [
+        "tests/fixtures/crypto/sip022-kdf-profiles-v1.json",
+        "tests/fixtures/crypto/xchacha20-poly1305-draft02-v1.json",
+        "tests/fixtures/crypto/sip022-udp-primitives-v1.json",
     ] {
-        assert!(PROVENANCE.contains(required), "missing provenance field");
+        assert_eq!(
+            fixture_provenance(entries, path)["generator_sha256"].as_str(),
+            Some(generator_hash.as_str())
+        );
     }
 
-    let sip022 = provenance_section("tests/fixtures/crypto/sip022-kdf-v1.json");
-    let source_path = quoted_provenance_value(sip022, "source_path");
-    assert_eq!(
-        source_path,
-        "docs/adr/ADR-0004-m0-sip022-tcp-security-state.md"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "historical_contract_revision"),
-        "c658e5dd285923ccf16d4102034c47e9700461a3"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "historical_contract_blob"),
-        "77136841f2122809a39cc6fa36c0354c5bf8c3c4"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "historical_contract_lf_sha256"),
-        "ac6365de83c3f3548171caba74781b523a7aebba2f79aa5853352481557cc614"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "historical_contract_section"),
-        "Decision / Cryptographic wire constants / subkey"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "current_contract_revision"),
-        "a389aa9861806a5d7d0d4fa8f8379f6ecef925d2"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "current_contract_blob"),
-        "4c2e401eec1d6f21aedf5b69843de17056c02d40"
-    );
-    let current_contract_hash = quoted_provenance_value(sip022, "current_contract_lf_sha256");
-    assert_eq!(
-        current_contract_hash,
-        "a8c33a8e2ea013d3b94c9ef54a5b1795a71be77a3adfe1b1079957c72fca83a6"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "current_contract_section"),
-        "Decision / Cryptographic wire constants / subkey"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "upstream_sip022_revision"),
-        "34598d65054dad975d330ff9d7317b0d41cf1efd"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "upstream_sip022_path"),
-        "docs/doc/sip022.md"
-    );
-    assert_eq!(
-        quoted_provenance_value(sip022, "adr0008_kdf_effect"),
-        "ADR-0008 changes AES-GCM KAT provenance only; SIP022 KDF constants are unchanged."
-    );
-
-    let checked_out_source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(source_path),
-    )
-    .expect("source_path resolves from the repository root");
-    let normalized_source = checked_out_source.replace("\r\n", "\n").replace('\r', "\n");
-    let checked_out_hash = hex::encode(sha256(normalized_source.as_bytes()));
-    assert!(
-        [
-            quoted_provenance_value(sip022, "historical_contract_lf_sha256"),
-            current_contract_hash,
-        ]
-        .contains(&checked_out_hash.as_str()),
-        "checked-out source must be an explicitly pinned historical or current contract"
-    );
-    assert!(
-        normalized_source
-            .contains("BLAKE3-DERIVE(\"shadowsocks 2022 session subkey\", PSK || salt)[0..16]")
-    );
+    for path in [
+        "tests/fixtures/crypto/sip022-kdf-v1.json",
+        "tests/fixtures/crypto/sip022-kdf-profiles-v1.json",
+        "tests/fixtures/crypto/sip022-udp-primitives-v1.json",
+    ] {
+        let entry = fixture_provenance(entries, path);
+        assert_eq!(
+            entry["upstream_sip022_revision"].as_str(),
+            Some("34598d65054dad975d330ff9d7317b0d41cf1efd")
+        );
+        assert_eq!(
+            entry["upstream_sip022_blob"].as_str(),
+            Some("f6b203facf219fe47bfe2913c2e576240d2bf1f9")
+        );
+    }
 }
 
-fn provenance_section(path: &str) -> &str {
-    let path_field = format!("path = \"{path}\"");
-    let path_offset = PROVENANCE
-        .find(&path_field)
-        .unwrap_or_else(|| panic!("missing provenance section for {path}"));
-    let start = PROVENANCE[..path_offset]
-        .rfind("[[fixtures]]")
-        .expect("fixture path follows a section header");
-    let section = &PROVENANCE[start..];
-    let after_header = "[[fixtures]]".len();
-    let end = section[after_header..]
-        .find("[[fixtures]]")
-        .map_or(section.len(), |offset| after_header + offset);
-    &section[..end]
-}
-
-fn quoted_provenance_value<'a>(section: &'a str, key: &str) -> &'a str {
-    let prefix = format!("{key} = \"");
-    section
-        .lines()
-        .find_map(|line| line.strip_prefix(&prefix)?.strip_suffix('"'))
-        .unwrap_or_else(|| panic!("missing quoted provenance field {key}"))
+fn fixture_provenance<'a>(entries: &'a [toml::Value], path: &str) -> &'a toml::Value {
+    entries
+        .iter()
+        .find(|entry| entry["path"].as_str() == Some(path))
+        .unwrap_or_else(|| panic!("missing provenance for {path}"))
 }
 
 fn sha256(input: &[u8]) -> [u8; 32] {

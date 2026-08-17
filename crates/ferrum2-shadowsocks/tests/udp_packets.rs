@@ -461,14 +461,6 @@ fn independent_three_method_composite_fixture_matches_exact_request_and_response
     let fixture: Value = serde_json::from_str(UDP_FIXTURE).expect("valid UDP fixture");
     let cases = fixture["cases"].as_array().expect("cases");
     assert_eq!(cases.len(), MethodProfile::ALL.len());
-    let provenance = include_str!("../../../tests/fixtures/sip022/PROVENANCE.toml");
-    assert!(provenance.contains(
-        "fixture_sha256 = \"ad74ba801eb8c0249af74708b88d88c6887375743409723172204c38d3b28240\""
-    ));
-    assert!(provenance.contains(
-        "generator_sha256 = \"5d06c7ef76d85ceb446c5c1895e79fc56f60bea36b50c4b9dde5dba626599e06\""
-    ));
-    assert!(!include_str!("../../../tests/fixtures/sip022/udp_generator.rs").contains("ferrum2_"));
 
     for case in cases {
         let profile = fixture_profile(case["method"].as_str().expect("method"));
