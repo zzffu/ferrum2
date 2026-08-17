@@ -78,11 +78,13 @@ jobs:
           PERFORMANCE_PLAN="$RUNNER_TEMP/performance-plan.json"
           PERFORMANCE_SUMMARY="$RUNNER_TEMP/performance-summary.json"
           PERFORMANCE_MARKDOWN="$RUNNER_TEMP/performance-summary.md"
+          PERFORMANCE_POLICY="$GITHUB_WORKSPACE/tools/performance_candidate_policy.json"
           {
             printf 'PARENT_DIR=%s\n' "$PARENT_DIR"
             printf 'PERFORMANCE_PLAN=%s\n' "$PERFORMANCE_PLAN"
             printf 'PERFORMANCE_SUMMARY=%s\n' "$PERFORMANCE_SUMMARY"
             printf 'PERFORMANCE_MARKDOWN=%s\n' "$PERFORMANCE_MARKDOWN"
+            printf 'PERFORMANCE_POLICY=%s\n' "$PERFORMANCE_POLICY"
           } >>"$GITHUB_ENV"
           [[ "$PARENT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
           PARENT_SHA="${PARENT_SHA,,}"
@@ -100,6 +102,7 @@ jobs:
             --warmup-seconds "$WARMUP_SECONDS" \
             --active-seconds "$ACTIVE_SECONDS" \
             --pairs "$PAIRS" \
+            --policy "$PERFORMANCE_POLICY" \
             --output "$PERFORMANCE_PLAN"
           for process in ferrum2-client ferrum2-server; do
             ! pgrep -x "$process" >/dev/null
@@ -155,7 +158,9 @@ jobs:
             )
           }
           mapfile -t scenarios < <(
-            python3 -B tools/performance_candidate.py scenarios --plan "$PERFORMANCE_PLAN"
+            python3 -B tools/performance_candidate.py scenarios \
+              --plan "$PERFORMANCE_PLAN" \
+              --policy "$PERFORMANCE_POLICY"
           )
           test "${#scenarios[@]}" -gt 0
           for scenario in "${scenarios[@]}"; do
@@ -181,6 +186,7 @@ jobs:
             --candidate-root "$GITHUB_WORKSPACE/profiles/paired" \
             --parent-sha "$PARENT_SHA" \
             --candidate-sha "$GITHUB_SHA" \
+            --policy "$PERFORMANCE_POLICY" \
             --output "$PERFORMANCE_SUMMARY" \
             --markdown "$PERFORMANCE_MARKDOWN" || summary_status=$?
           if [ -f "$PERFORMANCE_MARKDOWN" ]; then
@@ -206,6 +212,7 @@ jobs:
             ${{ runner.temp }}/performance-plan.json
             ${{ runner.temp }}/performance-summary.json
             ${{ runner.temp }}/performance-summary.md
+            ${{ github.workspace }}/tools/performance_candidate_policy.json
           if-no-files-found: error
           retention-days: 30
       - name: Reap processes and remove parent worktree

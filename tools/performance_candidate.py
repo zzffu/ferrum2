@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -75,15 +76,59 @@ PROFILE_FIELDS = frozenset(
 )
 SHA256 = re.compile(r"[0-9a-f]{64}")
 U64_MAX = (1 << 64) - 1
+MEASUREMENT_ENVIRONMENT = {
+    "runner_image": "ubuntu-24.04",
+    "runner_os": "Linux",
+    "runner_arch": "X64",
+    "rust_toolchain": "1.97.1",
+    "cargo_profile": "profiling",
+    "evidence_build_profile": "current",
+    "pair_schedule": "alternating-parent-candidate",
+}
+POLICY_DOCUMENT_FIELDS = frozenset({"schema_version", "policy_id", "scenarios"})
+POLICY_RUNTIME_FIELDS = frozenset(
+    {"schema_version", "policy_id", "policy_sha256", "scenarios"}
+)
+THRESHOLD_FIELDS = frozenset(
+    {
+        "metric",
+        "direction",
+        "noise_band_percent",
+        "regression_threshold_percent",
+        "adoption_threshold_percent",
+        "minimum_pairs",
+        "minimum_wins",
+        "minimum_losses",
+        "calibration_source",
+        "calibration_environment",
+    }
+)
+CALIBRATION_ENVIRONMENT_FIELDS = frozenset(
+    {
+        *MEASUREMENT_ENVIRONMENT,
+        "warmup_seconds",
+        "active_seconds",
+    }
+)
 UNCALIBRATED_POLICY = {
     "schema_version": 1,
-    "name": "uncalibrated-hosted-runner",
-    "decision_enabled": False,
-    "decision_reason": "no calibrated noise or adoption threshold",
-    "noise_threshold_percent": None,
-    "regression_threshold_percent": None,
-    "adoption_threshold_percent": None,
-    "threshold_source": None,
+    "policy_id": "in-memory-uncalibrated-policy",
+    "policy_sha256": None,
+    "scenarios": {
+        scenario: {
+            "metric": metric,
+            "direction": direction,
+            "noise_band_percent": None,
+            "regression_threshold_percent": None,
+            "adoption_threshold_percent": None,
+            "minimum_pairs": None,
+            "minimum_wins": None,
+            "minimum_losses": None,
+            "calibration_source": None,
+            "calibration_environment": None,
+        }
+        for scenario, (metric, direction, _family) in SCENARIO_CATALOG.items()
+    },
 }
 
 
@@ -201,6 +246,7 @@ def create_plan(
     warmup_seconds: str,
     active_seconds: str,
     pairs: str,
+    decision_policy: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the authoritative scenario plan for one manual workflow run."""
 
@@ -211,20 +257,32 @@ def create_plan(
     warmup, active, pair_count = validate_measurement_inputs(
         warmup_seconds, active_seconds, pairs
     )
+    policy = copy.deepcopy(
+        UNCALIBRATED_POLICY if decision_policy is None else decision_policy
+    )
+    validate_decision_policy(policy)
     scenarios = (
         [_scenario_entry(scenario, "diagnostic")]
         if mode == "diagnostic"
         else _qualification_scenarios(scenario)
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": mode,
         "selected_scenario": scenario,
         "warmup_seconds": warmup,
         "active_seconds": active,
         "pairs": pair_count,
-        "decision_policy": dict(UNCALIBRATED_POLICY),
-        "adoption_eligible": False,
+        "measurement_environment": dict(MEASUREMENT_ENVIRONMENT),
+        "decision_policy": policy,
+        "adoption_eligible": mode == "qualification"
+        and _plan_has_complete_applicable_policy(
+            scenarios=scenarios,
+            policy=policy,
+            warmup_seconds=warmup,
+            active_seconds=active,
+            pairs=pair_count,
+        ),
         "scenarios": scenarios,
     }
 
@@ -263,17 +321,213 @@ def _strict_json(text: str, *, source: str) -> object:
         raise CandidateControlError(f"{source} is not valid JSON") from error
 
 
-def load_plan(path: pathlib.Path) -> dict[str, object]:
+def _exact_fields(
+    value: dict[str, object], expected: frozenset[str], name: str
+) -> None:
+    if set(value) != expected:
+        missing = sorted(expected - set(value))
+        unexpected = sorted(set(value) - expected)
+        raise CandidateControlError(
+            f"{name} schema mismatch: missing={missing}, unexpected={unexpected}"
+        )
+
+
+def _policy_percent(value: object, field: str) -> Decimal:
+    if type(value) not in {int, float}:
+        raise CandidateControlError(f"{field} must be a finite JSON number")
+    parsed = Decimal(str(value))
+    if not parsed.is_finite():
+        raise CandidateControlError(f"{field} must be finite")
+    return parsed
+
+
+def _calibration_environment_matches(
+    environment: dict[str, object], *, warmup_seconds: int, active_seconds: int
+) -> bool:
+    expected = {
+        **MEASUREMENT_ENVIRONMENT,
+        "warmup_seconds": warmup_seconds,
+        "active_seconds": active_seconds,
+    }
+    return environment == expected
+
+
+def validate_decision_policy(policy: dict[str, object]) -> None:
+    if type(policy) is not dict:
+        raise CandidateControlError("decision policy must be a JSON object")
+    _exact_fields(policy, POLICY_RUNTIME_FIELDS, "decision policy")
+    if type(policy["schema_version"]) is not int or policy["schema_version"] != 1:
+        raise CandidateControlError("decision policy schema_version must be 1")
+    if type(policy["policy_id"]) is not str or not policy["policy_id"].strip():
+        raise CandidateControlError("decision policy_id must be a non-empty string")
+    digest = policy["policy_sha256"]
+    if digest is not None and (
+        type(digest) is not str or SHA256.fullmatch(digest) is None
+    ):
+        raise CandidateControlError("decision policy_sha256 must be a SHA-256 digest")
+    scenarios = policy["scenarios"]
+    if type(scenarios) is not dict or set(scenarios) != set(SCENARIO_CATALOG):
+        raise CandidateControlError(
+            "decision policy scenarios must exactly match the scenario catalog"
+        )
+    for scenario, entry in scenarios.items():
+        if type(entry) is not dict:
+            raise CandidateControlError(f"policy scenario {scenario} must be an object")
+        _exact_fields(entry, THRESHOLD_FIELDS, f"policy scenario {scenario}")
+        metric, direction, _family = SCENARIO_CATALOG[scenario]
+        if entry["metric"] != metric or entry["direction"] != direction:
+            raise CandidateControlError(
+                f"policy scenario {scenario} metric or direction does not match the catalog"
+            )
+        calibrated_fields = (
+            "noise_band_percent",
+            "regression_threshold_percent",
+            "adoption_threshold_percent",
+            "minimum_pairs",
+            "minimum_wins",
+            "minimum_losses",
+            "calibration_source",
+            "calibration_environment",
+        )
+        values = [entry[field] for field in calibrated_fields]
+        if all(value is None for value in values):
+            continue
+        if any(value is None for value in values):
+            raise CandidateControlError(
+                f"policy scenario {scenario} calibration must be complete or entirely null"
+            )
+        noise = _policy_percent(entry["noise_band_percent"], "noise_band_percent")
+        regression = _policy_percent(
+            entry["regression_threshold_percent"],
+            "regression_threshold_percent",
+        )
+        adoption = _policy_percent(
+            entry["adoption_threshold_percent"], "adoption_threshold_percent"
+        )
+        if noise < 0 or regression >= -noise or adoption <= noise:
+            raise CandidateControlError(
+                f"policy scenario {scenario} thresholds must lie outside the noise band"
+            )
+        minimum_pairs = entry["minimum_pairs"]
+        minimum_wins = entry["minimum_wins"]
+        minimum_losses = entry["minimum_losses"]
+        if (
+            type(minimum_pairs) is not int
+            or minimum_pairs not in PAIR_COUNTS
+            or type(minimum_wins) is not int
+            or not 1 <= minimum_wins <= minimum_pairs
+            or type(minimum_losses) is not int
+            or not 1 <= minimum_losses <= minimum_pairs
+        ):
+            raise CandidateControlError(
+                f"policy scenario {scenario} minimum pair/win/loss counts are invalid"
+            )
+        if (
+            type(entry["calibration_source"]) is not str
+            or not entry["calibration_source"].strip()
+            or re.fullmatch(r"(?:artifact|commit):\S+", entry["calibration_source"])
+            is None
+        ):
+            raise CandidateControlError(
+                f"policy scenario {scenario} calibration_source is required"
+            )
+        environment = entry["calibration_environment"]
+        if type(environment) is not dict:
+            raise CandidateControlError(
+                f"policy scenario {scenario} calibration_environment is required"
+            )
+        _exact_fields(
+            environment,
+            CALIBRATION_ENVIRONMENT_FIELDS,
+            f"policy scenario {scenario} calibration_environment",
+        )
+        for field, expected in MEASUREMENT_ENVIRONMENT.items():
+            if environment[field] != expected:
+                raise CandidateControlError(
+                    f"policy scenario {scenario} calibration_environment {field} is unsupported"
+                )
+        if (
+            type(environment["warmup_seconds"]) is not int
+            or environment["warmup_seconds"] not in WARMUP_SECONDS
+            or type(environment["active_seconds"]) is not int
+            or environment["active_seconds"] not in ACTIVE_SECONDS
+        ):
+            raise CandidateControlError(
+                f"policy scenario {scenario} calibration recipe is unsupported"
+            )
+
+
+def load_decision_policy(path: pathlib.Path) -> dict[str, object]:
+    try:
+        raw = path.read_bytes()
+        document = _strict_json(raw.decode("utf-8"), source="decision policy")
+    except (OSError, UnicodeError) as error:
+        raise CandidateControlError("unable to read decision policy") from error
+    if type(document) is not dict:
+        raise CandidateControlError("decision policy must be a JSON object")
+    _exact_fields(document, POLICY_DOCUMENT_FIELDS, "decision policy document")
+    policy = {
+        **document,
+        "policy_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    validate_decision_policy(policy)
+    return policy
+
+
+def _scenario_policy_is_applicable(
+    *,
+    entry: dict[str, object],
+    warmup_seconds: int,
+    active_seconds: int,
+    pairs: int,
+) -> bool:
+    environment = entry["calibration_environment"]
+    return (
+        environment is not None
+        and pairs >= entry["minimum_pairs"]
+        and _calibration_environment_matches(
+            environment,
+            warmup_seconds=warmup_seconds,
+            active_seconds=active_seconds,
+        )
+    )
+
+
+def _plan_has_complete_applicable_policy(
+    *,
+    scenarios: list[dict[str, object]],
+    policy: dict[str, object],
+    warmup_seconds: int,
+    active_seconds: int,
+    pairs: int,
+) -> bool:
+    return all(
+        _scenario_policy_is_applicable(
+            entry=policy["scenarios"][scenario["scenario"]],
+            warmup_seconds=warmup_seconds,
+            active_seconds=active_seconds,
+            pairs=pairs,
+        )
+        for scenario in scenarios
+    )
+
+
+def load_plan(
+    path: pathlib.Path, decision_policy: dict[str, object] | None = None
+) -> dict[str, object]:
     try:
         plan = _strict_json(path.read_text(encoding="utf-8"), source="performance plan")
         if type(plan) is not dict:
             raise CandidateControlError("performance plan must be a JSON object")
+        policy = plan["decision_policy"] if decision_policy is None else decision_policy
+        validate_decision_policy(policy)
         expected = create_plan(
             mode=plan["mode"],
             scenario=plan["selected_scenario"],
             warmup_seconds=str(plan["warmup_seconds"]),
             active_seconds=str(plan["active_seconds"]),
             pairs=str(plan["pairs"]),
+            decision_policy=policy,
         )
     except (OSError, KeyError, TypeError) as error:
         raise CandidateControlError("performance plan is invalid") from error
@@ -426,6 +680,125 @@ def _observed_direction(*, wins: int, losses: int) -> str:
     return "neutral"
 
 
+def _scenario_threshold_decision(
+    *,
+    plan: dict[str, object],
+    scenario_plan: dict[str, object],
+    wins: int,
+    losses: int,
+    median_improvement: Decimal,
+) -> dict[str, object]:
+    entry = plan["decision_policy"]["scenarios"][scenario_plan["scenario"]]
+    common = {
+        "noise_band_percent": entry["noise_band_percent"],
+        "regression_threshold_percent": entry["regression_threshold_percent"],
+        "adoption_threshold_percent": entry["adoption_threshold_percent"],
+        "minimum_pairs": entry["minimum_pairs"],
+        "minimum_wins": entry["minimum_wins"],
+        "minimum_losses": entry["minimum_losses"],
+        "threshold_source": entry["calibration_source"],
+        "calibration_environment": entry["calibration_environment"],
+    }
+    if plan["mode"] == "diagnostic":
+        return {
+            **common,
+            "decision_enabled": False,
+            "decision_reason": "diagnostic mode reports measurements only",
+            "threshold_decision": "DIAGNOSTIC_ONLY",
+            "guard_passed": None,
+            "status": "MEASURED",
+        }
+    if entry["calibration_environment"] is None:
+        return {
+            **common,
+            "decision_enabled": False,
+            "decision_reason": "no calibrated threshold for this scenario",
+            "threshold_decision": "NO_CALIBRATION",
+            "guard_passed": None,
+            "status": "INCONCLUSIVE",
+        }
+    if not _scenario_policy_is_applicable(
+        entry=entry,
+        warmup_seconds=plan["warmup_seconds"],
+        active_seconds=plan["active_seconds"],
+        pairs=plan["pairs"],
+    ):
+        return {
+            **common,
+            "decision_enabled": False,
+            "decision_reason": "calibration recipe or minimum pair count does not match",
+            "threshold_decision": "CALIBRATION_NOT_APPLICABLE",
+            "guard_passed": None,
+            "status": "INCONCLUSIVE",
+        }
+    noise = _policy_percent(entry["noise_band_percent"], "noise_band_percent")
+    regression = _policy_percent(
+        entry["regression_threshold_percent"], "regression_threshold_percent"
+    )
+    adoption = _policy_percent(
+        entry["adoption_threshold_percent"], "adoption_threshold_percent"
+    )
+    if median_improvement <= regression:
+        if losses >= entry["minimum_losses"]:
+            return {
+                **common,
+                "decision_enabled": True,
+                "decision_reason": "median and loss count confirm calibrated regression",
+                "threshold_decision": "CONFIRMED_REGRESSION",
+                "guard_passed": False,
+                "status": "REGRESSION",
+            }
+        return {
+            **common,
+            "decision_enabled": True,
+            "decision_reason": "regression threshold crossed without enough confirming losses",
+            "threshold_decision": "INSUFFICIENT_LOSSES",
+            "guard_passed": False,
+            "status": "INCONCLUSIVE",
+        }
+    if scenario_plan["role"] == "guard":
+        return {
+            **common,
+            "decision_enabled": True,
+            "decision_reason": "guard remains above its calibrated regression threshold",
+            "threshold_decision": "GUARD_CLEAR",
+            "guard_passed": True,
+            "status": "INCONCLUSIVE",
+        }
+    if median_improvement >= adoption:
+        if wins >= entry["minimum_wins"]:
+            return {
+                **common,
+                "decision_enabled": True,
+                "decision_reason": "adoption threshold and minimum wins are satisfied",
+                "threshold_decision": "CANDIDATE_IMPROVEMENT",
+                "guard_passed": None,
+                "status": "CANDIDATE_WIN",
+            }
+        return {
+            **common,
+            "decision_enabled": True,
+            "decision_reason": "adoption threshold crossed without enough wins",
+            "threshold_decision": "INSUFFICIENT_WINS",
+            "guard_passed": None,
+            "status": "INCONCLUSIVE",
+        }
+    if -noise <= median_improvement <= noise:
+        reason = "median remains inside the calibrated noise band"
+        threshold_decision = "WITHIN_NOISE"
+    else:
+        reason = "median does not cross a calibrated decision threshold"
+        threshold_decision = "BETWEEN_THRESHOLDS"
+    return {
+        **common,
+        "decision_enabled": True,
+        "decision_reason": reason,
+        "threshold_decision": threshold_decision,
+        "guard_passed": None,
+        "status": "INCONCLUSIVE",
+    }
+
+
 def summarize_evidence(
     *,
     plan: dict[str, object],
@@ -558,7 +931,13 @@ def summarize_evidence(
         losses = sum(value < 0 for value in improvements)
         ties = len(improvements) - wins - losses
         median_improvement = _median(improvements)
-        scenario_status = "MEASURED" if plan["mode"] == "diagnostic" else "INCONCLUSIVE"
+        threshold_decision = _scenario_threshold_decision(
+            plan=plan,
+            scenario_plan=scenario_plan,
+            wins=wins,
+            losses=losses,
+            median_improvement=median_improvement,
+        )
         scenario_summaries.append(
             {
                 "scenario": scenario,
@@ -573,19 +952,45 @@ def summarize_evidence(
                 "median_improvement_percent": _display_decimal(median_improvement),
                 "minimum_improvement_percent": _display_decimal(min(improvements)),
                 "maximum_improvement_percent": _display_decimal(max(improvements)),
-                "noise_band_percent": None,
-                "regression_threshold_percent": None,
-                "adoption_threshold_percent": None,
-                "threshold_source": None,
-                "decision_enabled": False,
-                "decision_reason": "no calibrated noise or adoption threshold",
-                "threshold_decision": "UNAVAILABLE",
                 "observed_direction": _observed_direction(wins=wins, losses=losses),
                 "warnings": [],
-                "status": scenario_status,
+                **threshold_decision,
             }
         )
-    status = "MEASURED" if plan["mode"] == "diagnostic" else "INCONCLUSIVE"
+    enabled_count = sum(result["decision_enabled"] for result in scenario_summaries)
+    if enabled_count == 0:
+        threshold_availability = "none"
+    elif enabled_count == len(scenario_summaries):
+        threshold_availability = "complete"
+    else:
+        threshold_availability = "partial"
+    if plan["mode"] == "diagnostic":
+        status = "MEASURED"
+        decision_reason = "diagnostic mode reports measurements only"
+    elif any(result["status"] == "REGRESSION" for result in scenario_summaries):
+        status = "REGRESSION"
+        decision_reason = "at least one calibrated mandatory scenario regressed"
+    else:
+        primary_summaries = [
+            result for result in scenario_summaries if result["role"] == "primary"
+        ]
+        guard_summaries = [
+            result for result in scenario_summaries if result["role"] == "guard"
+        ]
+        if (
+            threshold_availability == "complete"
+            and all(result["status"] == "CANDIDATE_WIN" for result in primary_summaries)
+            and all(result["guard_passed"] is True for result in guard_summaries)
+        ):
+            status = "CANDIDATE_WIN"
+            decision_reason = (
+                "all calibrated primaries and guards satisfy the adoption policy"
+            )
+        else:
+            status = "INCONCLUSIVE"
+            decision_reason = (
+                "calibrated thresholds are unavailable or adoption conditions are unmet"
+            )
     primary_results = [
         {"scenario": result["scenario"], "status": result["status"]}
         for result in scenario_summaries
@@ -597,7 +1002,7 @@ def summarize_evidence(
         if result["role"] == "guard"
     ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "performance_candidate_summary",
         "mode": plan["mode"],
         "selected_scenario": plan["selected_scenario"],
@@ -605,12 +1010,15 @@ def summarize_evidence(
         "candidate_sha": candidate_sha,
         "pairs": plan["pairs"],
         "decision_policy": plan["decision_policy"],
-        "decision_enabled": False,
-        "decision_reason": "no calibrated noise or adoption threshold",
-        "threshold_availability": "none",
-        "adoption_claim": False,
+        "decision_enabled": enabled_count > 0,
+        "candidate_win_enabled": threshold_availability == "complete",
+        "decision_reason": decision_reason,
+        "threshold_availability": threshold_availability,
+        "adoption_claim": status == "CANDIDATE_WIN",
         "status": status,
-        "workflow_failure_reason": None,
+        "workflow_failure_reason": (
+            decision_reason if status == "REGRESSION" else None
+        ),
         "mandatory_scenarios": list(planned),
         "missing_scenarios": [],
         "primary_results": primary_results,
@@ -623,22 +1031,37 @@ def summarize_evidence(
 
 
 def invalid_summary(
-    *, parent_sha: str, candidate_sha: str, error: CandidateControlError
+    *,
+    parent_sha: str,
+    candidate_sha: str,
+    error: CandidateControlError,
+    plan: dict[str, object] | None = None,
+    decision_policy: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    mandatory = (
+        [entry["scenario"] for entry in plan["scenarios"]] if plan is not None else []
+    )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "performance_candidate_summary",
+        "mode": plan["mode"] if plan is not None else None,
+        "selected_scenario": plan["selected_scenario"] if plan is not None else None,
         "parent_sha": parent_sha,
         "candidate_sha": candidate_sha,
-        "decision_policy": dict(UNCALIBRATED_POLICY),
+        "decision_policy": copy.deepcopy(
+            plan["decision_policy"]
+            if plan is not None
+            else (UNCALIBRATED_POLICY if decision_policy is None else decision_policy)
+        ),
         "decision_enabled": False,
+        "candidate_win_enabled": False,
         "decision_reason": "invalid evidence",
         "threshold_availability": "none",
         "adoption_claim": False,
         "status": "INVALID_EVIDENCE",
         "workflow_failure_reason": str(error),
-        "mandatory_scenarios": [],
-        "missing_scenarios": [],
+        "mandatory_scenarios": mandatory,
+        "missing_scenarios": mandatory,
         "primary_results": [],
         "guard_results": [],
         "error": str(error),
@@ -654,7 +1077,7 @@ def summary_markdown(summary: dict[str, object]) -> str:
         f"- Status: **{summary['status']}**",
         f"- Parent: `{summary['parent_sha']}`",
         f"- Candidate: `{summary['candidate_sha']}`",
-        "- Adoption claim: **false**",
+        f"- Adoption claim: **{str(summary['adoption_claim']).lower()}**",
         "",
     ]
     if summary["status"] == "INVALID_EVIDENCE":
@@ -662,12 +1085,14 @@ def summary_markdown(summary: dict[str, object]) -> str:
         return "\n".join(lines)
     lines.extend(
         [
-            f"Mode: `{summary['mode']}`. No hosted-runner noise, regression, or adoption "
-            "threshold is calibrated. Qualification results are `INCONCLUSIVE`; observed "
-            "direction is descriptive and cannot fail the workflow.",
+            f"- Mode: `{summary['mode']}`",
+            f"- Policy: `{summary['decision_policy']['policy_id']}` "
+            f"(`{summary['decision_policy']['policy_sha256'] or 'in-memory'}`)",
+            f"- Threshold availability: `{summary['threshold_availability']}`",
+            f"- Decision: {summary['decision_reason']}",
             "",
-            "| Scenario | Role | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Status |",
-            "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+            "| Scenario | Role | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Threshold decision | Status |",
+            "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|",
         ]
     )
     for scenario in summary["scenarios"]:
@@ -677,7 +1102,8 @@ def summary_markdown(summary: dict[str, object]) -> str:
             f"{scenario['wins']} | {scenario['losses']} | "
             f"{scenario['ties']} | {scenario['median_improvement_percent']:.6f} | "
             f"{scenario['minimum_improvement_percent']:.6f} | "
-            f"{scenario['maximum_improvement_percent']:.6f} | {scenario['status']} |"
+            f"{scenario['maximum_improvement_percent']:.6f} | "
+            f"{scenario['threshold_decision']} | {scenario['status']} |"
         )
     lines.extend(
         [
@@ -732,8 +1158,11 @@ def write_summary_outputs(
 
 
 def run_summary_command(parsed: argparse.Namespace) -> int:
+    plan = None
+    decision_policy = None
     try:
-        plan = load_plan(parsed.plan)
+        decision_policy = load_decision_policy(parsed.policy)
+        plan = load_plan(parsed.plan, decision_policy=decision_policy)
         summary = summarize_evidence(
             plan=plan,
             parent_root=parsed.parent_root,
@@ -746,18 +1175,23 @@ def run_summary_command(parsed: argparse.Namespace) -> int:
             parent_sha=parsed.parent_sha,
             candidate_sha=parsed.candidate_sha,
             error=error,
+            plan=plan,
+            decision_policy=decision_policy,
         )
         write_summary_outputs(summary, output=parsed.output, markdown=parsed.markdown)
         print(f"performance-candidate: {error}", file=sys.stderr)
         return 2
     write_summary_outputs(summary, output=parsed.output, markdown=parsed.markdown)
+    if summary["status"] in {"MEASURED", "INCONCLUSIVE", "CANDIDATE_WIN"}:
+        return 0
     if summary["status"] == "REGRESSION":
         print(
-            "performance-candidate: mandatory scenario median regressed",
+            "performance-candidate: calibrated mandatory scenario regressed",
             file=sys.stderr,
         )
         return 3
-    return 0
+    print("performance-candidate: unknown summary status", file=sys.stderr)
+    return 4
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -781,11 +1215,13 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--warmup-seconds", required=True)
     plan.add_argument("--active-seconds", required=True)
     plan.add_argument("--pairs", required=True)
+    plan.add_argument("--policy", required=True, type=pathlib.Path)
     plan.add_argument("--output", required=True, type=pathlib.Path)
     scenarios = commands.add_parser(
         "scenarios", help="emit planned scenario names, one per line"
     )
     scenarios.add_argument("--plan", required=True, type=pathlib.Path)
+    scenarios.add_argument("--policy", required=True, type=pathlib.Path)
     summary = commands.add_parser(
         "summarize", help="validate paired evidence and write machine/human summaries"
     )
@@ -794,6 +1230,7 @@ def _parser() -> argparse.ArgumentParser:
     summary.add_argument("--candidate-root", required=True, type=pathlib.Path)
     summary.add_argument("--parent-sha", required=True)
     summary.add_argument("--candidate-sha", required=True)
+    summary.add_argument("--policy", required=True, type=pathlib.Path)
     summary.add_argument("--output", required=True, type=pathlib.Path)
     summary.add_argument("--markdown", required=True, type=pathlib.Path)
     return parser
@@ -810,17 +1247,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             return 0
         if parsed.command == "plan":
+            decision_policy = load_decision_policy(parsed.policy)
             plan = create_plan(
                 mode=parsed.mode,
                 scenario=parsed.scenario,
                 warmup_seconds=parsed.warmup_seconds,
                 active_seconds=parsed.active_seconds,
                 pairs=parsed.pairs,
+                decision_policy=decision_policy,
             )
             write_plan(parsed.output, plan)
             return 0
         if parsed.command == "scenarios":
-            plan = load_plan(parsed.plan)
+            decision_policy = load_decision_policy(parsed.policy)
+            plan = load_plan(parsed.plan, decision_policy=decision_policy)
             for scenario in plan["scenarios"]:
                 print(scenario["scenario"])
             return 0

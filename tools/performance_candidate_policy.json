@@ -1,0 +1,90 @@
+{
+  "policy_id": "github-hosted-ubuntu-24.04-profiling-v1-uncalibrated",
+  "scenarios": {
+    "tcp-bulk": {
+      "adoption_threshold_percent": null,
+      "calibration_environment": null,
+      "calibration_source": null,
+      "direction": "higher_is_better",
+      "metric": "bytes_per_second",
+      "minimum_losses": null,
+      "minimum_pairs": null,
+      "minimum_wins": null,
+      "noise_band_percent": null,
+      "regression_threshold_percent": null
+    },
+    "tcp-request-16k": {
+      "adoption_threshold_percent": null,
+      "calibration_environment": null,
+      "calibration_source": null,
+      "direction": "lower_is_better",
+      "metric": "p99_nanoseconds",
+      "minimum_losses": null,
+      "minimum_pairs": null,
+      "minimum_wins": null,
+      "noise_band_percent": null,
+      "regression_threshold_percent": null
+    },
+    "tcp-request-1k": {
+      "adoption_threshold_percent": null,
+      "calibration_environment": null,
+      "calibration_source": null,
+      "direction": "lower_is_better",
+      "metric": "p99_nanoseconds",
+      "minimum_losses": null,
+      "minimum_pairs": null,
+      "minimum_wins": null,
+      "noise_band_percent": null,
+      "regression_threshold_percent": null
+    },
+    "tcp-request-4k": {
+      "adoption_threshold_percent": null,
+      "calibration_environment": null,
+      "calibration_source": null,
+      "direction": "lower_is_better",
+      "metric": "p99_nanoseconds",
+      "minimum_losses": null,
+      "minimum_pairs": null,
+      "minimum_wins": null,
+      "noise_band_percent": null,
+      "regression_threshold_percent": null
+    },
+    "tcp-stream-64k": {
+      "adoption_threshold_percent": null,
+      "calibration_environment": null,
+      "calibration_source": null,
+      "direction": "higher_is_better",
+      "metric": "bytes_per_second",
+      "minimum_losses": null,
+      "minimum_pairs": null,
+      "minimum_wins": null,
+      "noise_band_percent": null,
+      "regression_threshold_percent": null
+    },
+    "udp-mtu-1200": {
+      "adoption_threshold_percent": null,
+      "calibration_environment": null,
+      "calibration_source": null,
+      "direction": "higher_is_better",
+      "metric": "datagrams_per_second",
+      "minimum_losses": null,
+      "minimum_pairs": null,
+      "minimum_wins": null,
+      "noise_band_percent": null,
+      "regression_threshold_percent": null
+    },
+    "udp-small-high": {
+      "adoption_threshold_percent": null,
+      "calibration_environment": null,
+      "calibration_source": null,
+      "direction": "higher_is_better",
+      "metric": "datagrams_per_second",
+      "minimum_losses": null,
+      "minimum_pairs": null,
+      "minimum_wins": null,
+      "noise_band_percent": null,
+      "regression_threshold_percent": null
+    }
+  },
+  "schema_version": 1
+}

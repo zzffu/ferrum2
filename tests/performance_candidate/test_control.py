@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -14,10 +15,48 @@ from decimal import Decimal
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tools" / "performance_candidate.py"
+POLICY_PATH = ROOT / "tools" / "performance_candidate_policy.json"
 SPEC = importlib.util.spec_from_file_location("performance_candidate", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 CONTROL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CONTROL)
+
+
+def synthetic_policy(
+    *,
+    calibrated_scenarios: set[str] | None = None,
+    noise: float = 2.0,
+    regression: float = -5.0,
+    adoption: float = 5.0,
+    minimum_pairs: int = 3,
+    minimum_wins: int = 2,
+    minimum_losses: int = 2,
+    warmup_seconds: int = 3,
+    active_seconds: int = 30,
+) -> dict[str, object]:
+    policy = copy.deepcopy(CONTROL.UNCALIBRATED_POLICY)
+    policy["policy_id"] = "synthetic-test-calibration"
+    calibrated_scenarios = calibrated_scenarios or set(CONTROL.SCENARIO_CATALOG)
+    environment = {
+        **CONTROL.MEASUREMENT_ENVIRONMENT,
+        "warmup_seconds": warmup_seconds,
+        "active_seconds": active_seconds,
+    }
+    for scenario in calibrated_scenarios:
+        policy["scenarios"][scenario].update(
+            {
+                "noise_band_percent": noise,
+                "regression_threshold_percent": regression,
+                "adoption_threshold_percent": adoption,
+                "minimum_pairs": minimum_pairs,
+                "minimum_wins": minimum_wins,
+                "minimum_losses": minimum_losses,
+                "calibration_source": "artifact:synthetic-test-only",
+                "calibration_environment": dict(environment),
+            }
+        )
+    CONTROL.validate_decision_policy(policy)
+    return policy
 
 
 class MeasurementInputTests(unittest.TestCase):
@@ -52,6 +91,7 @@ class ScenarioPlanTests(unittest.TestCase):
             warmup_seconds="3",
             active_seconds="30",
             pairs="3",
+            decision_policy=CONTROL.load_decision_policy(POLICY_PATH),
         )
 
     def entries(self, mode: str, scenario: str) -> list[tuple[str, str]]:
@@ -69,8 +109,9 @@ class ScenarioPlanTests(unittest.TestCase):
                     [(scenario, "diagnostic")],
                 )
                 self.assertFalse(plan["adoption_eligible"])
-                self.assertFalse(plan["decision_policy"]["decision_enabled"])
-                self.assertIsNone(plan["decision_policy"]["noise_threshold_percent"])
+                self.assertIsNone(
+                    plan["decision_policy"]["scenarios"][scenario]["noise_band_percent"]
+                )
 
     def test_tcp_throughput_qualification_adds_the_other_guard(self) -> None:
         self.assertEqual(
@@ -107,6 +148,96 @@ class ScenarioPlanTests(unittest.TestCase):
             self.plan("qualification", "tcp-unknown")
 
 
+class DecisionPolicyTests(unittest.TestCase):
+    def test_repository_policy_is_explicitly_uncalibrated_and_hashed(self) -> None:
+        policy = CONTROL.load_decision_policy(POLICY_PATH)
+        self.assertRegex(policy["policy_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(set(policy["scenarios"]), set(CONTROL.SCENARIO_CATALOG))
+        for scenario, entry in policy["scenarios"].items():
+            with self.subTest(scenario=scenario):
+                self.assertIsNone(entry["noise_band_percent"])
+                self.assertIsNone(entry["regression_threshold_percent"])
+                self.assertIsNone(entry["adoption_threshold_percent"])
+                self.assertIsNone(entry["calibration_source"])
+
+    def test_policy_schema_rejects_shape_identity_and_partial_calibration_errors(
+        self,
+    ) -> None:
+        mutations = {
+            "missing scenario": lambda policy: policy["scenarios"].pop("tcp-bulk"),
+            "wrong metric": lambda policy: policy["scenarios"]["tcp-bulk"].update(
+                metric="p99_nanoseconds"
+            ),
+            "partial calibration": lambda policy: policy["scenarios"][
+                "tcp-bulk"
+            ].update(calibration_source=None),
+            "threshold inside noise": lambda policy: policy["scenarios"][
+                "tcp-bulk"
+            ].update(regression_threshold_percent=-1.0),
+            "boolean count": lambda policy: policy["scenarios"]["tcp-bulk"].update(
+                minimum_wins=True
+            ),
+            "boolean recipe": lambda policy: policy["scenarios"]["tcp-bulk"][
+                "calibration_environment"
+            ].update(warmup_seconds=True),
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name):
+                policy = synthetic_policy()
+                mutation(policy)
+                with self.assertRaises(CONTROL.CandidateControlError):
+                    CONTROL.validate_decision_policy(policy)
+
+    def test_policy_loader_rejects_duplicate_keys_and_non_finite_numbers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ferrum2-policy-json-") as directory:
+            root = pathlib.Path(directory)
+            for name, text in (
+                ("duplicate", '{"schema_version":1,"schema_version":1}'),
+                (
+                    "non-finite",
+                    '{"schema_version":1,"policy_id":"x","scenarios":NaN}',
+                ),
+            ):
+                with self.subTest(name=name):
+                    path = root / f"{name}.json"
+                    path.write_text(text, encoding="utf-8")
+                    with self.assertRaises(CONTROL.CandidateControlError):
+                        CONTROL.load_decision_policy(path)
+
+    def test_canonical_plan_rejects_policy_digest_or_threshold_tampering(self) -> None:
+        policy = CONTROL.load_decision_policy(POLICY_PATH)
+        plan = CONTROL.create_plan(
+            mode="qualification",
+            scenario="tcp-stream-64k",
+            warmup_seconds="3",
+            active_seconds="30",
+            pairs="3",
+            decision_policy=policy,
+        )
+        with tempfile.TemporaryDirectory(prefix="ferrum2-policy-plan-") as directory:
+            path = pathlib.Path(directory) / "plan.json"
+            for name, mutate in (
+                (
+                    "digest",
+                    lambda value: value["decision_policy"].update(
+                        policy_sha256="0" * 64
+                    ),
+                ),
+                (
+                    "threshold",
+                    lambda value: value["decision_policy"]["scenarios"][
+                        "tcp-bulk"
+                    ].update(noise_band_percent=2.0),
+                ),
+            ):
+                with self.subTest(name=name):
+                    tampered = copy.deepcopy(plan)
+                    mutate(tampered)
+                    CONTROL.write_plan(path, tampered)
+                    with self.assertRaises(CONTROL.CandidateControlError):
+                        CONTROL.load_plan(path, decision_policy=policy)
+
+
 class EvidenceSummaryTests(unittest.TestCase):
     PARENT_SHA = "1" * 40
     CANDIDATE_SHA = "2" * 40
@@ -118,13 +249,24 @@ class EvidenceSummaryTests(unittest.TestCase):
         for owner in reversed(self.owners):
             owner.cleanup()
 
-    def plan(self, mode: str, scenario: str) -> dict[str, object]:
+    def plan(
+        self,
+        mode: str,
+        scenario: str,
+        *,
+        decision_policy: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         return CONTROL.create_plan(
             mode=mode,
             scenario=scenario,
             warmup_seconds="3",
             active_seconds="30",
             pairs="3",
+            decision_policy=(
+                CONTROL.load_decision_policy(POLICY_PATH)
+                if decision_policy is None
+                else decision_policy
+            ),
         )
 
     def roots(self) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
@@ -229,6 +371,22 @@ class EvidenceSummaryTests(unittest.TestCase):
             json.dumps(row, sort_keys=True, allow_nan=True) + "\n",
             encoding="utf-8",
         )
+
+    @staticmethod
+    def materialize_policy(
+        root: pathlib.Path, policy: dict[str, object]
+    ) -> tuple[pathlib.Path, dict[str, object]]:
+        path = root / "decision-policy.json"
+        document = {
+            "schema_version": policy["schema_version"],
+            "policy_id": policy["policy_id"],
+            "scenarios": policy["scenarios"],
+        }
+        path.write_text(
+            json.dumps(document, sort_keys=True, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        return path, CONTROL.load_decision_policy(path)
 
     def fresh_diagnostic(self) -> tuple[dict[str, object], pathlib.Path, pathlib.Path]:
         plan = self.plan("diagnostic", "tcp-bulk")
@@ -388,6 +546,111 @@ class EvidenceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["status"], "INCONCLUSIVE")
         self.assertFalse(summary["adoption_claim"])
 
+    def test_calibrated_noise_band_is_inconclusive(self) -> None:
+        plan = self.plan(
+            "qualification",
+            "tcp-stream-64k",
+            decision_policy=synthetic_policy(),
+        )
+        _root, parent, candidate = self.roots()
+        values = {
+            (entry["scenario"], pair, "candidate"): 101
+            for entry in plan["scenarios"]
+            for pair in range(1, plan["pairs"] + 1)
+        }
+        self.populate(plan, parent, candidate, values)
+        summary = self.summarize(plan, parent, candidate)
+        self.assertEqual(summary["status"], "INCONCLUSIVE")
+        primary = next(
+            item for item in summary["scenarios"] if item["role"] == "primary"
+        )
+        self.assertEqual(primary["threshold_decision"], "WITHIN_NOISE")
+
+    def test_calibrated_primary_improvement_and_clear_guard_is_candidate_win(
+        self,
+    ) -> None:
+        plan = self.plan(
+            "qualification",
+            "tcp-stream-64k",
+            decision_policy=synthetic_policy(),
+        )
+        _root, parent, candidate = self.roots()
+        self.populate(plan, parent, candidate)
+        summary = self.summarize(plan, parent, candidate)
+        self.assertEqual(summary["status"], "CANDIDATE_WIN")
+        self.assertTrue(summary["adoption_claim"])
+        self.assertEqual(summary["threshold_availability"], "complete")
+
+    def test_calibrated_guard_regression_overrides_primary_improvement(self) -> None:
+        plan = self.plan(
+            "qualification",
+            "tcp-stream-64k",
+            decision_policy=synthetic_policy(),
+        )
+        _root, parent, candidate = self.roots()
+        values = {
+            ("tcp-bulk", pair, "candidate"): 90 for pair in range(1, plan["pairs"] + 1)
+        }
+        self.populate(plan, parent, candidate, values)
+        summary = self.summarize(plan, parent, candidate)
+        self.assertEqual(summary["status"], "REGRESSION")
+        guard = next(item for item in summary["scenarios"] if item["role"] == "guard")
+        self.assertEqual(guard["threshold_decision"], "CONFIRMED_REGRESSION")
+
+    def test_adoption_threshold_without_minimum_wins_is_inconclusive(self) -> None:
+        plan = self.plan(
+            "qualification",
+            "tcp-stream-64k",
+            decision_policy=synthetic_policy(minimum_wins=3),
+        )
+        _root, parent, candidate = self.roots()
+        values = {
+            ("tcp-stream-64k", pair, "candidate"): value
+            for pair, value in enumerate((110, 90, 110), start=1)
+        }
+        self.populate(plan, parent, candidate, values)
+        summary = self.summarize(plan, parent, candidate)
+        self.assertEqual(summary["status"], "INCONCLUSIVE")
+        primary = next(
+            item for item in summary["scenarios"] if item["role"] == "primary"
+        )
+        self.assertEqual(primary["threshold_decision"], "INSUFFICIENT_WINS")
+
+    def test_partial_or_recipe_mismatched_calibration_cannot_claim_a_win(self) -> None:
+        cases = (
+            synthetic_policy(calibrated_scenarios={"tcp-stream-64k"}),
+            synthetic_policy(warmup_seconds=5),
+        )
+        for policy in cases:
+            with self.subTest(policy=policy["policy_id"]):
+                plan = self.plan(
+                    "qualification",
+                    "tcp-stream-64k",
+                    decision_policy=policy,
+                )
+                _root, parent, candidate = self.roots()
+                self.populate(plan, parent, candidate)
+                summary = self.summarize(plan, parent, candidate)
+                self.assertEqual(summary["status"], "INCONCLUSIVE")
+                self.assertFalse(summary["adoption_claim"])
+
+    def test_regression_threshold_without_minimum_losses_is_inconclusive(self) -> None:
+        plan = self.plan(
+            "qualification",
+            "tcp-stream-64k",
+            decision_policy=synthetic_policy(minimum_losses=3),
+        )
+        _root, parent, candidate = self.roots()
+        values = {
+            ("tcp-bulk", pair, "candidate"): value
+            for pair, value in enumerate((90, 90, 120), start=1)
+        }
+        self.populate(plan, parent, candidate, values)
+        summary = self.summarize(plan, parent, candidate)
+        self.assertEqual(summary["status"], "INCONCLUSIVE")
+        guard = next(item for item in summary["scenarios"] if item["role"] == "guard")
+        self.assertEqual(guard["threshold_decision"], "INSUFFICIENT_LOSSES")
+
     def test_missing_mandatory_guard_is_invalid(self) -> None:
         plan = self.plan("qualification", "udp-small-high")
         _root, parent, candidate = self.roots()
@@ -506,6 +769,7 @@ class EvidenceSummaryTests(unittest.TestCase):
                 "candidate_root": candidate,
                 "parent_sha": self.PARENT_SHA,
                 "candidate_sha": self.CANDIDATE_SHA,
+                "policy": POLICY_PATH,
                 "output": output,
                 "markdown": markdown,
             },
@@ -531,6 +795,7 @@ class EvidenceSummaryTests(unittest.TestCase):
                 "candidate_root": candidate,
                 "parent_sha": self.PARENT_SHA,
                 "candidate_sha": self.CANDIDATE_SHA,
+                "policy": POLICY_PATH,
                 "output": output,
                 "markdown": markdown,
             },
@@ -560,6 +825,7 @@ class EvidenceSummaryTests(unittest.TestCase):
                 "candidate_root": candidate,
                 "parent_sha": self.PARENT_SHA,
                 "candidate_sha": self.CANDIDATE_SHA,
+                "policy": POLICY_PATH,
                 "output": output,
                 "markdown": markdown,
             },
@@ -569,6 +835,48 @@ class EvidenceSummaryTests(unittest.TestCase):
             json.loads(output.read_text(encoding="utf-8"))["status"],
             "INCONCLUSIVE",
         )
+
+    def test_summary_command_exit_codes_follow_calibrated_decisions(self) -> None:
+        for expected_status, guard_value, expected_exit in (
+            ("CANDIDATE_WIN", 110, 0),
+            ("REGRESSION", 90, 3),
+        ):
+            with self.subTest(status=expected_status):
+                root, parent, candidate = self.roots()
+                policy_path, policy = self.materialize_policy(root, synthetic_policy())
+                plan = self.plan(
+                    "qualification",
+                    "tcp-stream-64k",
+                    decision_policy=policy,
+                )
+                values = {
+                    ("tcp-bulk", pair, "candidate"): guard_value
+                    for pair in range(1, plan["pairs"] + 1)
+                }
+                self.populate(plan, parent, candidate, values)
+                plan_path = root / "plan.json"
+                output = root / "performance-summary.json"
+                markdown = root / "performance-summary.md"
+                CONTROL.write_plan(plan_path, plan)
+                arguments = type(
+                    "Arguments",
+                    (),
+                    {
+                        "plan": plan_path,
+                        "parent_root": parent,
+                        "candidate_root": candidate,
+                        "parent_sha": self.PARENT_SHA,
+                        "candidate_sha": self.CANDIDATE_SHA,
+                        "policy": policy_path,
+                        "output": output,
+                        "markdown": markdown,
+                    },
+                )()
+                self.assertEqual(CONTROL.run_summary_command(arguments), expected_exit)
+                self.assertEqual(
+                    json.loads(output.read_text(encoding="utf-8"))["status"],
+                    expected_status,
+                )
 
 
 class GitRelationTests(unittest.TestCase):
