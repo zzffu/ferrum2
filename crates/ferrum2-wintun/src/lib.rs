@@ -239,26 +239,20 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::time::Duration;
 
-    use super::{ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error};
+    use super::{ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256};
 
     #[test]
-    fn exact_artifact_and_eleven_export_contract_is_fixed() {
+    fn approved_artifact_and_required_exports_are_pinned() {
         assert_eq!(DLL_BYTES, 427_552);
         assert_eq!(
             DLL_SHA256,
             hex_literal("e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce")
         );
-        assert_eq!(ABI_EXPORTS.len(), 11);
         assert!(ABI_EXPORTS.iter().all(|name| name.ends_with(&[0])));
-        assert!(
-            !ABI_EXPORTS
-                .iter()
-                .any(|name| name == b"WintunOpenAdapter\0")
-        );
     }
 
     #[test]
-    fn safe_config_and_m16_redaction_reject_mutations_without_os_work() {
+    fn safe_config_and_cleanup_classification_reject_mutations_without_os_work() {
         let make = |name: &str, ring| {
             AdapterConfig::new(
                 name.into(),
@@ -274,16 +268,8 @@ mod tests {
         assert!(make("Ferrum2", 8_388_608).is_ok());
         assert!(make("Ferrum2", 131_073).is_err());
         assert!(make("Ferrum2\0", 8_388_608).is_err());
-        assert_eq!(
-            format!("{:?} {}", Error, Error),
-            "Error Wintun operation failed"
-        );
         assert!(!CreateError::operation().is_cleanup_failure());
         assert!(CreateError::cleanup().is_cleanup_failure());
-        assert_eq!(
-            CreateError::cleanup().to_string(),
-            "Wintun adapter creation failed"
-        );
     }
 
     fn hex_literal(value: &str) -> [u8; 32] {

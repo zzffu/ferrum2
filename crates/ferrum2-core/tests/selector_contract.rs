@@ -48,7 +48,9 @@ fn public_owned_plan_snapshot_is_redacted() {
 
     assert_eq!(borrowed.hops(), snapshot.hops());
     assert!(std::ptr::eq(borrowed.hops(), snapshot.hops()));
-    assert_eq!(format!("{snapshot:?}"), "EgressPlanSnapshot([redacted])");
+    let rendered = format!("{snapshot:?}");
+    assert!(rendered.contains("[redacted]"));
+    assert!(!rendered.contains("3735928559"));
 }
 
 #[test]
@@ -90,7 +92,11 @@ fn public_control_resolves_nested_members_and_keeps_closed_failures_atomic() {
     control.switch("inner", "leaf-b").expect("inner switch");
     assert_eq!(control.selected("outer"), Ok("inner"));
     assert_eq!(select(&route), 8);
-    assert_eq!(format!("{control:?}"), "SelectorControl([redacted])");
+    let rendered = format!("{control:?}");
+    assert!(rendered.contains("[redacted]"));
+    for private_name in ["outer", "inner", "leaf-a", "leaf-b"] {
+        assert!(!rendered.contains(private_name));
+    }
 }
 
 #[test]

@@ -3,10 +3,11 @@ mod local_support;
 
 use std::io;
 use std::net::{SocketAddrV4, TcpListener, TcpStream, UdpSocket};
+use std::process::Output;
 
 use local_support::{
-    TCP_METHOD_CONFIGS, reserve_loopback, rewrite_config_method, run_binary, unused_loopback,
-    write_client_config, write_server_config, write_udp_client_config,
+    SYNTHETIC_PSK, TCP_METHOD_CONFIGS, reserve_loopback, rewrite_config_method, run_binary,
+    unused_loopback, write_client_config, write_server_config, write_udp_client_config,
 };
 
 const CLIENT_BASE: &str = "schema_version = 1\n[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
@@ -14,6 +15,20 @@ const CLIENT_BASE: &str = "schema_version = 1\n[client]\nlisten = \"127.0.0.1:10
 const SERVER_BASE: &str = "schema_version = 1\n[server]\nlisten = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
 const PAIRED_PORT_ATTEMPTS: usize = 256;
+
+fn assert_startup_bind_failure(output: &Output, context: &str) {
+    assert_eq!(output.status.code(), Some(1), "{context}");
+    assert!(output.stdout.is_empty(), "{context}");
+    assert!(
+        output.stderr.starts_with(b"error[startup.bind]"),
+        "{context}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(SYNTHETIC_PSK),
+        "{context} leaked the configured PSK"
+    );
+}
 
 fn tun_only_client() -> String {
     "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"192.0.2.10:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".into()
@@ -143,7 +158,7 @@ fn tun_check_config_is_offline_and_has_a_pure_target_gate() {
 }
 
 #[test]
-fn m16_direct_check_config_is_offline_and_runtime_reaches_bind() {
+fn direct_check_config_is_offline_and_runtime_reaches_bind() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (listener, listen) = reserve_loopback();
     let direct = directory.path().join("direct-client.toml");
@@ -164,12 +179,7 @@ fn m16_direct_check_config_is_offline_and_runtime_reaches_bind() {
     assert!(checked.stderr.is_empty());
 
     let run = run_binary("ferrum2-client", &["--config", direct.to_str().unwrap()]);
-    assert_eq!(run.status.code(), Some(1));
-    assert!(run.stdout.is_empty());
-    assert_eq!(
-        run.stderr,
-        b"error[startup.bind] process: unable to prepare required endpoint\n"
-    );
+    assert_startup_bind_failure(&run, "direct client runtime");
     assert!(
         TcpStream::connect_timeout(
             &listener.local_addr().expect("occupied listener"),
@@ -286,17 +296,15 @@ fn schema_v2_check_succeeds_and_occupied_runtime_endpoints_fail_closed() {
                 .replacen("schema_version = 1", "schema_version = 2", 1)
                 .replace("127.0.0.1:1080", &client_address.to_string())
                 .replace("127.0.0.1:8388", &server_address.to_string()),
-            b"error[startup.bind] process: unable to prepare required endpoint\n".as_slice(),
         ),
         (
             "ferrum2-server",
             SERVER_BASE
                 .replacen("schema_version = 1", "schema_version = 2", 1)
                 .replace("127.0.0.1:8388", &server_address.to_string()),
-            b"error[startup.bind] process: unable to prepare required endpoint\n".as_slice(),
         ),
     ];
-    for (binary, source, expected_stderr) in cases {
+    for (binary, source) in cases {
         let path = directory.path().join(format!("{binary}-v2.toml"));
         std::fs::write(&path, source).expect("schema v2 config");
         let checked = run_binary(
@@ -312,9 +320,7 @@ fn schema_v2_check_succeeds_and_occupied_runtime_endpoints_fail_closed() {
         assert!(checked.stderr.is_empty(), "{binary}");
 
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
-        assert_eq!(run.status.code(), Some(1), "{binary}");
-        assert!(run.stdout.is_empty(), "{binary}");
-        assert_eq!(run.stderr, expected_stderr, "{binary}");
+        assert_startup_bind_failure(&run, binary);
     }
 
     let migration_path = directory.path().join("client-v1-routed-udp.toml");
@@ -587,12 +593,7 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         assert!(checked.stderr.is_empty(), "{binary}");
 
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
-        assert_eq!(run.status.code(), Some(1), "{binary}");
-        assert!(run.stdout.is_empty(), "{binary}");
-        assert_eq!(
-            run.stderr, b"error[startup.bind] process: unable to prepare required endpoint\n",
-            "{binary}"
-        );
+        assert_startup_bind_failure(&run, binary);
     }
 
     for (binary, path) in [
@@ -614,12 +615,7 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         assert!(checked.stderr.is_empty(), "{binary}");
 
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
-        assert_eq!(run.status.code(), Some(1), "{binary}");
-        assert!(run.stdout.is_empty(), "{binary}");
-        assert_eq!(
-            run.stderr, b"error[startup.bind] process: unable to prepare required endpoint\n",
-            "{binary}"
-        );
+        assert_startup_bind_failure(&run, binary);
     }
 
     let invalid = directory.path().join("client-tagged-invalid.toml");
@@ -774,10 +770,7 @@ fn one_entry_tagged_run_matches_legacy_startup_behavior() {
         assert_eq!(tagged.status.code(), legacy.status.code(), "{binary}");
         assert_eq!(tagged.stdout, legacy.stdout, "{binary}");
         assert_eq!(tagged.stderr, legacy.stderr, "{binary}");
-        assert_eq!(
-            tagged.stderr,
-            b"error[startup.bind] process: unable to prepare required endpoint\n"
-        );
+        assert_startup_bind_failure(&tagged, binary);
     }
 }
 

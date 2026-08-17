@@ -5,6 +5,7 @@ use blake3::Hasher;
 use bytes::BytesMut;
 use chacha20poly1305::{ChaCha20Poly1305, XChaCha20Poly1305, XNonce};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 const BLAKE3_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/blake3-derive-v1.json");
 const AES128_GCM_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/aes128-gcm-v1.json");
@@ -35,10 +36,13 @@ fn blake3_official_derive_mode_rows_match() {
     let context = fixture["context_string"].as_str().expect("context string");
     let cases = fixture["cases"].as_array().expect("cases");
 
-    assert_eq!(cases.len(), 3);
+    let input_lengths: BTreeSet<_> = cases
+        .iter()
+        .map(|case| case["input_len"].as_u64().expect("input length") as usize)
+        .collect();
+    assert_eq!(input_lengths, BTreeSet::from([0, 1, 1024]));
     for case in cases {
         let input_len = case["input_len"].as_u64().expect("input length") as usize;
-        assert!(matches!(input_len, 0 | 1 | 1024));
         let input: Vec<u8> = (0..input_len).map(|index| (index % 251) as u8).collect();
         let expected = hex::decode(case["derive_key"].as_str().expect("derive output"))
             .expect("hexadecimal derive output");
@@ -183,8 +187,10 @@ fn pinned_xchacha_draft02_row_and_corrupted_tag_match() {
     let fixture: Value =
         serde_json::from_str(XCHACHA20_POLY1305_FIXTURE).expect("valid XChaCha fixture");
     let cases = fixture["cases"].as_array().expect("cases");
-    assert_eq!(cases.len(), 1);
-    let case = &cases[0];
+    let case = cases
+        .iter()
+        .find(|case| case["id"] == "xchacha20-poly1305-draft02-a.3.1")
+        .expect("pinned XChaCha draft row");
     let key = hex::decode(case["key"].as_str().expect("key")).expect("key");
     let nonce = decode_array::<24>(case["nonce"].as_str().expect("nonce"));
     let aad = hex::decode(case["aad"].as_str().expect("AAD")).expect("AAD");

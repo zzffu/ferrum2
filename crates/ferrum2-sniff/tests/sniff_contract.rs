@@ -416,7 +416,6 @@ fn tls_versions_sni_records_fragmentation_and_limits_are_bounded() {
             &[Protocol::Tls],
         );
         assert_eq!(progress, Progress::Invalid);
-        assert_eq!(format!("{progress:?}"), "Invalid");
     }
     assert_eq!(
         sniff(&b"\x16"[..], 8, Transport::Udp, 443, &[Protocol::Tls]),

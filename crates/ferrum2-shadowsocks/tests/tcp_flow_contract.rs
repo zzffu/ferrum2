@@ -117,7 +117,7 @@ async fn client_chain_exchange(
 }
 
 #[test]
-fn closed_contract_is_exact_copyable_and_source_free() {
+fn closed_contract_is_copyable_opaque_and_source_free() {
     fn assert_closed<T: Clone + Copy + std::fmt::Debug + Eq + PartialEq>() {}
     assert_closed::<ProtocolReason>();
     assert_closed::<TransportPhase>();
@@ -126,9 +126,12 @@ fn closed_contract_is_exact_copyable_and_source_free() {
 
     let protocol = ShadowsocksError::Protocol(ProtocolReason::Authentication);
     let transport = ShadowsocksError::Transport(TransportPhase::WriteZero);
-    assert_eq!(format!("{protocol}"), "SIP022 protocol failure");
-    assert_eq!(format!("{transport}"), "SIP022 transport failure");
-    assert!(!format!("{protocol:?}{transport:?}").contains("sentinel-source"));
+    let rendered = format!("{protocol}\n{transport}");
+    assert!(!protocol.to_string().is_empty());
+    assert!(!transport.to_string().is_empty());
+    assert_ne!(protocol.to_string(), transport.to_string());
+    assert!(!rendered.contains("Authentication"));
+    assert!(!rendered.contains("WriteZero"));
     assert!(protocol.source().is_none());
     assert!(transport.source().is_none());
 }

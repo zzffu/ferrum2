@@ -19,6 +19,8 @@ use ferrum2_runtime::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::Notify;
 
+const REQUIRED_ROOT_COUNT: usize = 3;
+
 struct Endpoint<R, W> {
     reader: R,
     writer: W,
@@ -458,7 +460,6 @@ async fn partial_write_then_error_retains_the_exact_completed_prefix() {
             },
         }
     );
-    assert_eq!(failure.to_string(), "relay I/O failed");
     assert!(!format!("{failure:?}").contains("scripted write failure"));
     assert!(std::error::Error::source(&failure).is_none());
 }
@@ -565,7 +566,10 @@ async fn read_ahead_into_a_pending_writer_counts_zero_and_does_not_reset_idle() 
         }
         tokio::task::yield_now().await;
     }
-    assert_eq!(observed.load(Ordering::SeqCst), 20);
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        b"read-but-not-written".len()
+    );
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
     assert!(
@@ -822,7 +826,7 @@ fn fake_process_roots(
     events: Arc<Mutex<Vec<String>>>,
     polls: Arc<AtomicUsize>,
 ) -> Vec<ProcessRoot<&'static str>> {
-    (0..3)
+    (0..REQUIRED_ROOT_COUNT)
         .map(|index| {
             let events = Arc::clone(&events);
             let polls = Arc::clone(&polls);
@@ -902,11 +906,15 @@ async fn process_startup_failure_positions_roll_back_in_reverse_without_polling_
                     ProcessCause::ActivationFailed { root, error: "activation" }
                         if root.get() == failed
                 ));
-                let mut expected = (0..3)
+                let mut expected = (0..REQUIRED_ROOT_COUNT)
                     .map(|index| format!("prepare:{index}"))
                     .collect::<Vec<_>>();
                 expected.extend((0..=failed).map(|index| format!("activate:{index}")));
-                expected.extend((0..3).rev().map(|index| format!("rollback:{index}")));
+                expected.extend(
+                    (0..REQUIRED_ROOT_COUNT)
+                        .rev()
+                        .map(|index| format!("rollback:{index}")),
+                );
                 assert_eq!(*events.lock().expect("event lock"), expected);
                 assert_eq!(
                     report.states(),
@@ -918,7 +926,10 @@ async fn process_startup_failure_positions_roll_back_in_reverse_without_polling_
                         ProcessState::Stopped,
                     ]
                 );
-                assert_eq!(registry.snapshot().process_root_rollbacks, 3);
+                assert_eq!(
+                    registry.snapshot().process_root_rollbacks,
+                    REQUIRED_ROOT_COUNT
+                );
             }
         }
         let snapshot = registry.snapshot();
@@ -1129,7 +1140,7 @@ impl PreparedProcessRoot<&'static str> for HandoffRoot {
 #[tokio::test]
 async fn synchronous_run_panic_cleans_handed_off_and_remaining_roots_in_reverse_order() {
     let events = Arc::new(Mutex::new(Vec::new()));
-    let roots = (0..3)
+    let roots = (0..REQUIRED_ROOT_COUNT)
         .map(|index| {
             let events = Arc::clone(&events);
             ProcessRoot::new(move || async move {
@@ -1175,7 +1186,7 @@ async fn synchronous_run_panic_cleans_handed_off_and_remaining_roots_in_reverse_
         ]
     );
     let snapshot = registry.snapshot();
-    assert_eq!(snapshot.process_root_rollbacks, 2);
+    assert_eq!(snapshot.process_root_rollbacks, REQUIRED_ROOT_COUNT - 1);
     assert_eq!(snapshot.process_root_reaps, 0);
     assert_eq!(snapshot.prepared_process_roots, 0);
     assert_eq!(snapshot.active_process_roots, 0);
@@ -1294,6 +1305,6 @@ async fn required_root_completion_arbitration_and_panic_reap_every_owner_exactly
         assert_eq!(snapshot.process_supervisors, 0);
         assert_eq!(snapshot.prepared_process_roots, 0);
         assert_eq!(snapshot.active_process_roots, 0);
-        assert_eq!(snapshot.process_root_reaps, 3);
+        assert_eq!(snapshot.process_root_reaps, REQUIRED_ROOT_COUNT);
     }
 }

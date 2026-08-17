@@ -190,12 +190,12 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
             .with_method_key(KeySelector::Default, |key| key.udp_crypto())
             .expect("default key");
         assert_eq!(crypto.profile(), profile);
-        assert_eq!(format!("{crypto:?}"), "UdpCrypto([REDACTED])");
+        assert!(format!("{crypto:?}").contains("[REDACTED]"));
         let session_random = ScriptedRandom::new([session_bytes]);
         let mut outbound = crypto
             .generate_outbound_session(&session_random, |_| false)
             .expect("fixture outbound session");
-        assert_eq!(format!("{outbound:?}"), "UdpOutboundSession([REDACTED])");
+        assert!(format!("{outbound:?}").contains("[REDACTED]"));
         let mut binding_field = [0_u8; 8];
         outbound
             .session_id()

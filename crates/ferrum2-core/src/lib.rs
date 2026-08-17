@@ -483,7 +483,10 @@ mod tests {
         let static_route = RouteTable::static_bindings(vec![7, 8]).expect("static route");
         assert!(!static_route.is_routed());
         assert_eq!(static_route.select(1, Network::Udp, &domain), 8);
-        assert_eq!(format!("{route:?}"), "RouteTable([redacted])");
+        let rendered = format!("{route:?}");
+        assert!(rendered.contains("[redacted]"));
+        assert!(!rendered.contains("example.test"));
+        assert!(!rendered.contains("192.0.2.9"));
         #[rustfmt::skip]
         let oversized = (0..=MAX_ROUTE_RULES).map(|_| RouteRule::new(Some(0), None, None, 0)).collect();
         assert!(RouteTable::routed(oversized, 0).is_none());

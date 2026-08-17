@@ -1,6 +1,6 @@
 use ferrum2_core::route::{
-    Network, OrderedRouteProgram, OrderedRouteRule, PortRange, RouteMatchField, RouteMatcher,
-    RouteMetadata, RouteProgramAction, RouteRuleAction,
+    MAX_ROUTE_RULES, MAX_ROUTE_VALUES, Network, OrderedRouteProgram, OrderedRouteRule, PortRange,
+    RouteMatchField, RouteMatcher, RouteMetadata, RouteProgramAction, RouteRuleAction,
 };
 use ferrum2_core::{DomainName, TargetAddr};
 use ipnet::IpNet;
@@ -307,7 +307,7 @@ fn address_port_legacy_and_conjunctive_matchers_use_only_the_original_target() {
 #[test]
 fn public_bounds_limit_rules_values_and_monotonic_visits() {
     struct Probe<'a> {
-        value: u8,
+        value: usize,
         visits: &'a Cell<usize>,
     }
 
@@ -320,7 +320,7 @@ fn public_bounds_limit_rules_values_and_monotonic_visits() {
     impl Eq for Probe<'_> {}
 
     let visits = Cell::new(0);
-    let rules = (0..64)
+    let rules = (0..MAX_ROUTE_RULES)
         .map(|value| {
             OrderedRouteRule::new(
                 RouteMatcher::new(vec![RouteMatchField::Protocol(vec![Probe {
@@ -345,11 +345,15 @@ fn public_bounds_limit_rules_values_and_monotonic_visits() {
         )),
         Some(RouteProgramAction::Final(action)) if action == "mandatory final"
     ));
-    assert_eq!(visits.get(), 64);
+    assert_eq!(visits.get(), MAX_ROUTE_RULES);
     assert_eq!(evaluation.next(RouteMetadata::new(None, None)), None);
-    assert_eq!(visits.get(), 64, "finished evaluation restarted");
+    assert_eq!(
+        visits.get(),
+        MAX_ROUTE_RULES,
+        "finished evaluation restarted"
+    );
 
-    let oversized_rules = (0..65)
+    let oversized_rules = (0..=MAX_ROUTE_RULES)
         .map(|_| {
             OrderedRouteRule::new(
                 RouteMatcher::<()>::new(Vec::new()).unwrap(),
@@ -360,14 +364,14 @@ fn public_bounds_limit_rules_values_and_monotonic_visits() {
     assert!(OrderedRouteProgram::new(oversized_rules, ()).is_none());
     assert!(
         RouteMatcher::<()>::new(vec![
-            RouteMatchField::Inbound((0..63).collect()),
+            RouteMatchField::Inbound((0..MAX_ROUTE_VALUES - 1).collect()),
             RouteMatchField::Network(vec![Network::Tcp]),
         ])
         .is_some()
     );
     assert!(
         RouteMatcher::<()>::new(vec![
-            RouteMatchField::Inbound((0..64).collect()),
+            RouteMatchField::Inbound((0..MAX_ROUTE_VALUES).collect()),
             RouteMatchField::Network(vec![Network::Tcp]),
         ])
         .is_none()

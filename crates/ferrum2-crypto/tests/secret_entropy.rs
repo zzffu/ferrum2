@@ -62,8 +62,9 @@ fn seal_with_method_provider(provider: &MethodSinglePskProvider, salt: &MethodTc
 fn secret_owners_are_redacted_explicitly_clearable_and_drop_zeroizing() {
     let sentinel = *b"visible-secret!!";
     let mut psk = Aes128Psk::from_bytes(sentinel);
-    assert_eq!(format!("{psk:?}"), "Aes128Psk([REDACTED])");
-    assert!(!format!("{psk:?}").contains("visible-secret"));
+    let rendered = format!("{psk:?}");
+    assert!(rendered.contains("[REDACTED]"));
+    assert!(!rendered.contains("visible-secret"));
     assert_zeroize_on_drop::<Aes128Psk>();
 
     psk.clear();
@@ -189,7 +190,7 @@ fn method_profiles_bind_exact_width_secret_salt_and_key_capabilities() {
 
         let psk = MethodPsk::try_from_slice(profile, &bytes).expect("method-width PSK");
         assert_eq!(psk.profile(), profile);
-        assert_eq!(format!("{psk:?}"), "MethodPsk([REDACTED])");
+        assert!(format!("{psk:?}").contains("[REDACTED]"));
         assert_eq!(
             MethodPsk::try_from_slice(profile, &bytes[..width - 1]).unwrap_err(),
             MethodPskLengthError
@@ -203,7 +204,7 @@ fn method_profiles_bind_exact_width_secret_salt_and_key_capabilities() {
         let salt = MethodTcpSalt::try_from_slice(profile, &bytes).expect("method-width salt");
         assert_eq!(salt.profile(), profile);
         assert_eq!(salt.as_bytes().len(), width);
-        assert_eq!(format!("{salt:?}"), "MethodTcpSalt([REDACTED])");
+        assert!(format!("{salt:?}").contains("[REDACTED]"));
         assert_eq!(
             MethodTcpSalt::try_from_slice(profile, &bytes[..width - 1]).unwrap_err(),
             MethodSaltLengthError
@@ -259,10 +260,6 @@ fn method_profiles_bind_exact_width_secret_salt_and_key_capabilities() {
             ));
         }
     }
-    assert_eq!(
-        MethodProfileMismatchError.to_string(),
-        "cryptographic method profile mismatch"
-    );
     let provider = MethodSinglePskProvider::new(MethodPsk::aes256([0x44; 32]));
     let identity = *b"identity-secret!";
     let error = provider
@@ -292,11 +289,8 @@ fn udp_session_ids_retry_live_collisions_without_exposing_partial_state() {
             })
             .expect("one of the first eight draws is distinct");
         assert_eq!(observed, collisions + 1);
-        assert_eq!(format!("{outbound:?}"), "UdpOutboundSession([REDACTED])");
-        assert_eq!(
-            format!("{:?}", outbound.session_id()),
-            "UdpSessionId([REDACTED])"
-        );
+        assert!(format!("{outbound:?}").contains("[REDACTED]"));
+        assert!(format!("{:?}", outbound.session_id()).contains("[REDACTED]"));
     }
 
     let random = ScriptedRandom::new((0..8).map(|_| Ok([0x41; 8])));

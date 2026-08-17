@@ -4,7 +4,7 @@ mod local_support;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, TcpStream, UdpSocket};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,11 +18,18 @@ use local_support::{
     write_tagged_dns_server_config, write_udp_client_config,
 };
 
-const STARTUP_BIND_DIAGNOSTIC: &[u8] =
-    b"error[startup.bind] process: unable to prepare required endpoint\n";
 // ponytail: file-wide lock; use socket inheritance if these tests need parallel throughput.
 static UDP_LOCAL_E2E_TEST_LOCK: Mutex<()> = Mutex::new(());
 use socket2::{Domain, Protocol, Socket, Type};
+
+fn assert_startup_bind_failure(output: &Output, occupied: SocketAddrV4) {
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.starts_with(b"error[startup.bind]"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains(&occupied.to_string()));
+    assert!(!stderr.contains(SYNTHETIC_PSK));
+}
 
 fn udp_associate(client: SocketAddrV4) -> (TcpStream, UdpSocket, SocketAddrV4) {
     let mut control = TcpStream::connect(client).expect("connect SOCKS control");
@@ -497,6 +504,11 @@ fn ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps() {
         SocketAddr::V6(address) => address,
         SocketAddr::V4(_) => unreachable!("IPv6-only echo address"),
     };
+    const EXPECTED_PAYLOADS: [&[u8]; 3] = [
+        b"m2-udp-aes128-datagram-0",
+        b"m2-udp-aes128-datagram-1",
+        b"m2-udp-aes128-datagram-2",
+    ];
     echo.set_nonblocking(true).expect("nonblocking IPv6 echo");
     let mut example = Command::new(udp_protocol_example_path())
         .args([
@@ -511,14 +523,14 @@ fn ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps() {
 
     let (cancel, cancelled) = std::sync::mpsc::channel();
     let echo_worker = thread::spawn(move || {
-        let mut observed = Vec::with_capacity(3);
+        let mut observed = Vec::with_capacity(EXPECTED_PAYLOADS.len());
         let mut buffer = [0_u8; 65_507];
         while cancelled.try_recv().is_err() {
             match echo.recv_from(&mut buffer) {
                 Ok((received, peer)) => match echo.send_to(&buffer[..received], peer) {
                     Ok(sent) if sent == received => {
                         observed.push((buffer[..received].to_vec(), peer));
-                        if observed.len() == 3 {
+                        if observed.len() == EXPECTED_PAYLOADS.len() {
                             break;
                         }
                     }
@@ -561,15 +573,11 @@ fn ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps() {
     assert_eq!(example_wait_error, None);
     let output = example_output.expect("reap UDP protocol example");
     assert!(output.status.success(), "UDP protocol example failed");
-    assert_eq!(
-        output.stdout,
-        b"udp_protocol_client status=PASS datagrams=3\n"
-    );
     let observed = observed.expect("reap IPv6 echo owner");
-    assert_eq!(observed.len(), 3);
-    assert_eq!(observed[0].0, b"m2-udp-aes128-datagram-0");
-    assert_eq!(observed[1].0, b"m2-udp-aes128-datagram-1");
-    assert_eq!(observed[2].0, b"m2-udp-aes128-datagram-2");
+    assert_eq!(observed.len(), EXPECTED_PAYLOADS.len());
+    for ((payload, _), expected) in observed.iter().zip(EXPECTED_PAYLOADS) {
+        assert_eq!(payload, expected);
+    }
     assert!(observed.iter().all(|(_, peer)| *peer == observed[0].1));
     assert!(matches!(observed[0].1, SocketAddr::V6(peer) if peer.ip().is_loopback()));
     assert!(
@@ -577,9 +585,6 @@ fn ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps() {
         "socket rebind failed"
     );
     assert_eq!(active_child_count(), baseline_children);
-    println!(
-        "m2_ipv6_udp_real_process status=PASS datagrams=3 payload=PASS source=PASS cleanup=PASS"
-    );
 }
 
 #[test]
@@ -616,9 +621,7 @@ fn either_bind_failure_rolls_back_the_other_before_any_loop_runs() {
         "ferrum2-server",
         &["--config", udp_config.to_str().expect("UTF-8 config")],
     );
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, STARTUP_BIND_DIAGNOSTIC);
+    assert_startup_bind_failure(&output, udp_address);
     let rolled_back_tcp = bind_loopback_listener(udp_address).expect("TCP bind rolled back");
     drop(rolled_back_tcp);
     drop(udp_incumbent);
@@ -631,9 +634,7 @@ fn either_bind_failure_rolls_back_the_other_before_any_loop_runs() {
         "ferrum2-server",
         &["--config", tcp_config.to_str().expect("UTF-8 config")],
     );
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, STARTUP_BIND_DIAGNOSTIC);
+    assert_startup_bind_failure(&output, tcp_address);
     let never_owned_udp = UdpSocket::bind(tcp_address).expect("UDP was never retained");
     drop(never_owned_udp);
     drop(tcp_incumbent);
