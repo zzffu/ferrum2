@@ -15,8 +15,8 @@ on:
         description: "Exact ancestor commit SHA"
         required: true
         type: string
-      scenario:
-        description: "Primary or diagnostic workload"
+      selection:
+        description: "Diagnostic workload or qualification group"
         required: true
         type: choice
         default: tcp-stream-64k
@@ -28,6 +28,7 @@ on:
           - tcp-request-16k
           - udp-small-high
           - udp-mtu-1200
+          - tcp-frame-capacity
       warmup_seconds:
         description: "Warmup seconds"
         required: true
@@ -54,11 +55,11 @@ jobs:
   paired-profile:
     name: paired-profile
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       PARENT_SHA: ${{ inputs.parent_sha }}
       MODE: ${{ inputs.mode }}
-      SELECTED_SCENARIO: ${{ inputs.scenario }}
+      SELECTION: ${{ inputs.selection }}
       WARMUP_SECONDS: ${{ inputs.warmup_seconds }}
       ACTIVE_SECONDS: ${{ inputs.active_seconds }}
       PAIRS: ${{ inputs.pairs }}
@@ -98,7 +99,7 @@ jobs:
           test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
           python3 -B tools/performance_candidate.py plan \
             --mode "$MODE" \
-            --scenario "$SELECTED_SCENARIO" \
+            --selection "$SELECTION" \
             --warmup-seconds "$WARMUP_SECONDS" \
             --active-seconds "$ACTIVE_SECONDS" \
             --pairs "$PAIRS" \
@@ -205,7 +206,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: paired-profile-${{ inputs.mode }}-${{ inputs.scenario }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: paired-profile-${{ inputs.mode }}-${{ inputs.selection }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ github.workspace }}/profiles/paired/*.jsonl
             ${{ runner.temp }}/ferrum2-parent/profiles/paired/*.jsonl

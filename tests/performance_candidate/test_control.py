@@ -87,7 +87,7 @@ class ScenarioPlanTests(unittest.TestCase):
     def plan(self, mode: str, scenario: str) -> dict[str, object]:
         return CONTROL.create_plan(
             mode=mode,
-            scenario=scenario,
+            selection=scenario,
             warmup_seconds="3",
             active_seconds="30",
             pairs="3",
@@ -141,11 +141,34 @@ class ScenarioPlanTests(unittest.TestCase):
             [("udp-small-high", "primary"), ("udp-mtu-1200", "guard")],
         )
 
-    def test_invalid_mode_and_scenario_are_rejected(self) -> None:
+    def test_tcp_frame_capacity_group_has_two_primaries_and_three_latency_guards(
+        self,
+    ) -> None:
+        plan = self.plan("qualification", "tcp-frame-capacity")
+        self.assertEqual(plan["scenario_group"], "tcp-frame-capacity")
+        self.assertIsNone(plan["selected_scenario"])
+        self.assertEqual(
+            [
+                (entry["scenario"], entry["role"], entry["direction"])
+                for entry in plan["scenarios"]
+            ],
+            [
+                ("tcp-stream-64k", "primary", "higher_is_better"),
+                ("tcp-bulk", "primary", "higher_is_better"),
+                ("tcp-request-1k", "guard", "lower_is_better"),
+                ("tcp-request-4k", "guard", "lower_is_better"),
+                ("tcp-request-16k", "guard", "lower_is_better"),
+            ],
+        )
+        self.assertTrue(all(entry["mandatory"] for entry in plan["scenarios"]))
+
+    def test_invalid_mode_or_selection_and_diagnostic_group_are_rejected(self) -> None:
         with self.assertRaisesRegex(CONTROL.CandidateControlError, "mode"):
             self.plan("adopt", "tcp-bulk")
-        with self.assertRaisesRegex(CONTROL.CandidateControlError, "scenario"):
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "selection"):
             self.plan("qualification", "tcp-unknown")
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "diagnostic"):
+            self.plan("diagnostic", "tcp-frame-capacity")
 
 
 class DecisionPolicyTests(unittest.TestCase):
@@ -208,7 +231,7 @@ class DecisionPolicyTests(unittest.TestCase):
         policy = CONTROL.load_decision_policy(POLICY_PATH)
         plan = CONTROL.create_plan(
             mode="qualification",
-            scenario="tcp-stream-64k",
+            selection="tcp-stream-64k",
             warmup_seconds="3",
             active_seconds="30",
             pairs="3",
@@ -258,7 +281,7 @@ class EvidenceSummaryTests(unittest.TestCase):
     ) -> dict[str, object]:
         return CONTROL.create_plan(
             mode=mode,
-            scenario=scenario,
+            selection=scenario,
             warmup_seconds="3",
             active_seconds="30",
             pairs="3",
@@ -607,6 +630,51 @@ class EvidenceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["status"], "INCONCLUSIVE")
         self.assertFalse(summary["adoption_claim"])
 
+    def test_tcp_frame_capacity_dry_run_requires_every_primary_and_guard(self) -> None:
+        plan = self.plan("qualification", "tcp-frame-capacity")
+        _root, parent, candidate = self.roots()
+        self.populate(plan, parent, candidate)
+        summary = self.summarize(plan, parent, candidate)
+        self.assertEqual(summary["scenario_group"], "tcp-frame-capacity")
+        self.assertEqual(summary["status"], "INCONCLUSIVE")
+        self.assertEqual(len(summary["primary_results"]), 2)
+        self.assertEqual(len(summary["guard_results"]), 3)
+
+        for entry in plan["scenarios"]:
+            with self.subTest(missing=entry["scenario"]):
+                _root, missing_parent, missing_candidate = self.roots()
+                self.populate(plan, missing_parent, missing_candidate)
+                for evidence_root in (missing_parent, missing_candidate):
+                    for path in evidence_root.glob(f"{entry['scenario']}-*.jsonl"):
+                        path.unlink()
+                with self.assertRaises(CONTROL.CandidateControlError) as captured:
+                    self.summarize(plan, missing_parent, missing_candidate)
+                self.assertEqual(
+                    captured.exception.missing_scenarios, [entry["scenario"]]
+                )
+
+    def test_calibrated_tcp_frame_capacity_group_can_win_or_confirm_guard_regression(
+        self,
+    ) -> None:
+        for expected_status, request_1k_value in (
+            ("CANDIDATE_WIN", 90),
+            ("REGRESSION", 110),
+        ):
+            with self.subTest(status=expected_status):
+                plan = self.plan(
+                    "qualification",
+                    "tcp-frame-capacity",
+                    decision_policy=synthetic_policy(),
+                )
+                _root, parent, candidate = self.roots()
+                values = {
+                    ("tcp-request-1k", pair, "candidate"): request_1k_value
+                    for pair in range(1, plan["pairs"] + 1)
+                }
+                self.populate(plan, parent, candidate, values)
+                summary = self.summarize(plan, parent, candidate)
+                self.assertEqual(summary["status"], expected_status)
+
     def test_calibrated_noise_band_is_inconclusive(self) -> None:
         plan = self.plan(
             "qualification",
@@ -838,7 +906,15 @@ class EvidenceSummaryTests(unittest.TestCase):
         self.assertEqual(CONTROL.run_summary_command(arguments), 2)
         summary = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(summary["status"], "INVALID_EVIDENCE")
-        self.assertIn("INVALID_EVIDENCE", markdown.read_text(encoding="utf-8"))
+        self.assertEqual(summary["mode"], "qualification")
+        self.assertEqual(summary["scenario_group"], "tcp-throughput")
+        self.assertEqual(
+            set(summary["missing_scenarios"]), set(summary["mandatory_scenarios"])
+        )
+        rendered = markdown.read_text(encoding="utf-8")
+        self.assertIn("INVALID_EVIDENCE", rendered)
+        self.assertIn("tcp-throughput", rendered)
+        self.assertIn("Missing scenarios", rendered)
 
     def test_summary_command_writes_valid_machine_and_markdown_results(self) -> None:
         plan, parent, candidate = self.fresh_diagnostic()

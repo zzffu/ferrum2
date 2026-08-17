@@ -43,6 +43,7 @@ TCP_REQUEST_SCENARIOS = (
     "tcp-request-4k",
     "tcp-request-16k",
 )
+QUALIFICATION_GROUPS = frozenset({"tcp-frame-capacity"})
 PROFILE_FIELDS = frozenset(
     {
         "kind",
@@ -144,6 +145,12 @@ UNCALIBRATED_POLICY = {
 class CandidateControlError(ValueError):
     """An invalid performance-candidate request or evidence set."""
 
+    def __init__(
+        self, message: str, *, missing_scenarios: Sequence[str] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.missing_scenarios = sorted(set(missing_scenarios or ()))
+
 
 def _allowed_integer(value: str, *, name: str, allowed: frozenset[int]) -> int:
     try:
@@ -228,11 +235,28 @@ def _scenario_entry(scenario: str, role: str) -> dict[str, object]:
     }
 
 
-def _qualification_scenarios(selected: str) -> list[dict[str, object]]:
+def _qualification_scenarios(
+    selected: str,
+) -> tuple[str, list[dict[str, object]]]:
+    if selected == "tcp-frame-capacity":
+        return (
+            selected,
+            [
+                _scenario_entry("tcp-stream-64k", "primary"),
+                _scenario_entry("tcp-bulk", "primary"),
+                *(
+                    _scenario_entry(scenario, "guard")
+                    for scenario in TCP_REQUEST_SCENARIOS
+                ),
+            ],
+        )
     family = SCENARIO_CATALOG[selected][2]
     if family == "tcp-throughput":
         guard = "tcp-bulk" if selected == "tcp-stream-64k" else "tcp-stream-64k"
-        return [_scenario_entry(selected, "primary"), _scenario_entry(guard, "guard")]
+        return (
+            "tcp-throughput",
+            [_scenario_entry(selected, "primary"), _scenario_entry(guard, "guard")],
+        )
     if family == "tcp-request":
         scenarios = [_scenario_entry(selected, "primary")]
         scenarios.extend(
@@ -241,17 +265,20 @@ def _qualification_scenarios(selected: str) -> list[dict[str, object]]:
             if scenario != selected
         )
         scenarios.append(_scenario_entry("tcp-bulk", "guard"))
-        return scenarios
+        return "tcp-request", scenarios
     if family == "udp":
         guard = "udp-mtu-1200" if selected == "udp-small-high" else "udp-small-high"
-        return [_scenario_entry(selected, "primary"), _scenario_entry(guard, "guard")]
+        return "udp", [
+            _scenario_entry(selected, "primary"),
+            _scenario_entry(guard, "guard"),
+        ]
     raise AssertionError(f"unhandled scenario family: {family}")
 
 
 def create_plan(
     *,
     mode: str,
-    scenario: str,
+    selection: str,
     warmup_seconds: str,
     active_seconds: str,
     pairs: str,
@@ -261,8 +288,12 @@ def create_plan(
 
     if mode not in MODES:
         raise CandidateControlError("mode must be diagnostic or qualification")
-    if scenario not in SCENARIO_CATALOG:
-        raise CandidateControlError("scenario is not a supported profile workload")
+    if mode == "diagnostic" and selection not in SCENARIO_CATALOG:
+        raise CandidateControlError("diagnostic selection must be one profile workload")
+    if mode == "qualification" and selection not in (
+        set(SCENARIO_CATALOG) | set(QUALIFICATION_GROUPS)
+    ):
+        raise CandidateControlError("qualification selection is not supported")
     warmup, active, pair_count = validate_measurement_inputs(
         warmup_seconds, active_seconds, pairs
     )
@@ -270,15 +301,17 @@ def create_plan(
         UNCALIBRATED_POLICY if decision_policy is None else decision_policy
     )
     validate_decision_policy(policy)
-    scenarios = (
-        [_scenario_entry(scenario, "diagnostic")]
-        if mode == "diagnostic"
-        else _qualification_scenarios(scenario)
-    )
+    if mode == "diagnostic":
+        scenario_group = "diagnostic"
+        scenarios = [_scenario_entry(selection, "diagnostic")]
+    else:
+        scenario_group, scenarios = _qualification_scenarios(selection)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": mode,
-        "selected_scenario": scenario,
+        "selection": selection,
+        "selected_scenario": selection if selection in SCENARIO_CATALOG else None,
+        "scenario_group": scenario_group,
         "warmup_seconds": warmup,
         "active_seconds": active,
         "pairs": pair_count,
@@ -532,7 +565,7 @@ def load_plan(
         validate_decision_policy(policy)
         expected = create_plan(
             mode=plan["mode"],
-            scenario=plan["selected_scenario"],
+            selection=plan["selection"],
             warmup_seconds=str(plan["warmup_seconds"]),
             active_seconds=str(plan["active_seconds"]),
             pairs=str(plan["pairs"]),
@@ -874,11 +907,15 @@ def summarize_evidence(
     environment_identity: tuple[object, ...] | None = None
     for member, root in (("parent", parent_root), ("candidate", candidate_root)):
         if not root.is_dir():
-            raise CandidateControlError(f"{member} evidence directory is missing")
+            raise CandidateControlError(
+                f"{member} evidence directory is missing",
+                missing_scenarios=list(planned),
+            )
         files = sorted(root.glob("*.jsonl"))
         if not files:
             raise CandidateControlError(
-                f"{member} evidence directory has no JSONL files"
+                f"{member} evidence directory has no JSONL files",
+                missing_scenarios=list(planned),
             )
         for path in files:
             row = _read_trial(path)
@@ -942,7 +979,8 @@ def summarize_evidence(
         missing = sorted(expected - set(rows))
         unexpected = sorted(set(rows) - expected)
         raise CandidateControlError(
-            f"evidence set is incomplete: missing={missing}, unexpected={unexpected}"
+            f"evidence set is incomplete: missing={missing}, unexpected={unexpected}",
+            missing_scenarios=sorted({key[0] for key in missing}),
         )
 
     scenario_summaries = []
@@ -1060,10 +1098,12 @@ def summarize_evidence(
         if result["role"] == "guard"
     ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "performance_candidate_summary",
         "mode": plan["mode"],
+        "selection": plan["selection"],
         "selected_scenario": plan["selected_scenario"],
+        "scenario_group": plan["scenario_group"],
         "parent_sha": parent_sha,
         "candidate_sha": candidate_sha,
         "pairs": plan["pairs"],
@@ -1101,10 +1141,12 @@ def invalid_summary(
         [entry["scenario"] for entry in plan["scenarios"]] if plan is not None else []
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "performance_candidate_summary",
         "mode": plan["mode"] if plan is not None else None,
+        "selection": plan["selection"] if plan is not None else None,
         "selected_scenario": plan["selected_scenario"] if plan is not None else None,
+        "scenario_group": plan["scenario_group"] if plan is not None else None,
         "parent_sha": parent_sha,
         "candidate_sha": candidate_sha,
         "decision_policy": copy.deepcopy(
@@ -1121,7 +1163,7 @@ def invalid_summary(
         "status": "INVALID_EVIDENCE",
         "workflow_failure_reason": str(error),
         "mandatory_scenarios": mandatory,
-        "missing_scenarios": mandatory,
+        "missing_scenarios": error.missing_scenarios,
         "primary_results": [],
         "guard_results": [],
         "error": str(error),
@@ -1141,11 +1183,22 @@ def summary_markdown(summary: dict[str, object]) -> str:
         "",
     ]
     if summary["status"] == "INVALID_EVIDENCE":
-        lines.extend([f"Evidence error: `{summary['error']}`", ""])
+        lines.extend(
+            [
+                f"- Mode: `{summary['mode']}`",
+                f"- Scenario group: `{summary['scenario_group']}`",
+                f"- Mandatory scenarios: `{', '.join(summary['mandatory_scenarios']) or '-'}`",
+                f"- Missing scenarios: `{', '.join(summary['missing_scenarios']) or '-'}`",
+                "",
+                f"Evidence error: `{summary['error']}`",
+                "",
+            ]
+        )
         return "\n".join(lines)
     lines.extend(
         [
             f"- Mode: `{summary['mode']}`",
+            f"- Scenario group: `{summary['scenario_group']}`",
             f"- Policy: `{summary['decision_policy']['policy_id']}` "
             f"(`{summary['decision_policy']['policy_sha256'] or 'in-memory'}`)",
             f"- Threshold availability: `{summary['threshold_availability']}`",
@@ -1274,7 +1327,7 @@ def _parser() -> argparse.ArgumentParser:
     relation.add_argument("--candidate-sha", required=True)
     plan = commands.add_parser("plan", help="write a canonical scenario plan")
     plan.add_argument("--mode", required=True)
-    plan.add_argument("--scenario", required=True)
+    plan.add_argument("--selection", required=True)
     plan.add_argument("--warmup-seconds", required=True)
     plan.add_argument("--active-seconds", required=True)
     plan.add_argument("--pairs", required=True)
@@ -1313,7 +1366,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             decision_policy = load_decision_policy(parsed.policy)
             plan = create_plan(
                 mode=parsed.mode,
-                scenario=parsed.scenario,
+                selection=parsed.selection,
                 warmup_seconds=parsed.warmup_seconds,
                 active_seconds=parsed.active_seconds,
                 pairs=parsed.pairs,
