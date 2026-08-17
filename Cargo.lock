@@ -516,9 +516,11 @@ dependencies = [
  "blake3",
  "hex",
  "hickory-proto",
+ "proc-macro2",
  "serde_json",
  "socket2",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
