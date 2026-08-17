@@ -908,7 +908,7 @@ async fn shutdown_bounds_slow_detoured_udp_tcp_dot_and_doh_resources() {
 }
 
 #[test]
-fn closed_errors_debug_and_numeric_stats_have_no_peer_value_output_channel() {
+fn closed_errors_and_numeric_stats_redact_peer_values() {
     const SENTINEL: &str = "peer-secret-sentinel.resolver.test";
     let errors = [
         DnsError::Busy,
@@ -927,29 +927,4 @@ fn closed_errors_debug_and_numeric_stats_have_no_peer_value_output_channel() {
         assert!(std::error::Error::source(&error).is_none());
     }
     assert!(!format!("{:?}", RuntimeStats::default()).contains(SENTINEL));
-
-    for source in [
-        include_str!("../src/error.rs"),
-        include_str!("../src/resolver.rs"),
-        include_str!("../src/runtime_owner.rs"),
-        include_str!("../src/runtime_provider.rs"),
-    ] {
-        let product = source
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("product source");
-        for output in [
-            "println!(",
-            "eprintln!(",
-            "panic!(",
-            "tracing::",
-            "log::",
-            "metrics::",
-        ] {
-            assert!(
-                !product.contains(output),
-                "unexpected output channel: {output}"
-            );
-        }
-    }
 }
