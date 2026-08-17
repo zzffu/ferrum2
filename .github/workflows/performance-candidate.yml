@@ -1,0 +1,221 @@
+name: performance-candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      parent_sha:
+        description: "Exact first-parent SHA"
+        required: true
+        type: string
+      scenario:
+        description: "Bounded workload"
+        required: true
+        type: choice
+        default: tcp-stream-64k
+        options:
+          - tcp-bulk
+          - tcp-stream-64k
+          - tcp-request-1k
+          - tcp-request-4k
+          - tcp-request-16k
+          - udp-small-high
+          - udp-mtu-1200
+      warmup_seconds:
+        description: "Warmup seconds"
+        required: true
+        type: choice
+        default: "3"
+        options: ["1", "3", "5", "10"]
+      active_seconds:
+        description: "Measured seconds"
+        required: true
+        type: choice
+        default: "30"
+        options: ["15", "30", "60"]
+      pairs:
+        description: "Alternating parent/candidate pairs"
+        required: true
+        type: choice
+        default: "3"
+        options: ["3", "5"]
+
+permissions:
+  contents: read
+
+jobs:
+  paired-profile:
+    name: paired-profile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PARENT_SHA: ${{ inputs.parent_sha }}
+      SCENARIO: ${{ inputs.scenario }}
+      WARMUP_SECONDS: ${{ inputs.warmup_seconds }}
+      ACTIVE_SECONDS: ${{ inputs.active_seconds }}
+      PAIRS: ${{ inputs.pairs }}
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Bind exact parent and runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PARENT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "$GITHUB_SHA^1")" = "$PARENT_SHA"
+          test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
+          case "$SCENARIO" in
+            tcp-bulk|tcp-stream-64k|tcp-request-1k|tcp-request-4k|tcp-request-16k|udp-small-high|udp-mtu-1200) ;;
+            *) exit 2 ;;
+          esac
+          case "$WARMUP_SECONDS:$ACTIVE_SECONDS:$PAIRS" in
+            1:15:3|1:15:5|1:30:3|1:30:5|1:60:3|1:60:5|
+            3:15:3|3:15:5|3:30:3|3:30:5|3:60:3|3:60:5|
+            5:15:3|5:15:5|5:30:3|5:30:5|5:60:3|5:60:5|
+            10:15:3|10:15:5|10:30:3|10:30:5|10:60:3|10:60:5) ;;
+            *) exit 2 ;;
+          esac
+          for process in ferrum2-client ferrum2-server; do
+            ! pgrep -x "$process" >/dev/null
+          done
+          rustup toolchain install 1.97.1 --profile minimal
+          rustc +1.97.1 -Vv
+          parent_dir="$RUNNER_TEMP/ferrum2-parent"
+          test ! -e "$parent_dir"
+          git worktree add --detach "$parent_dir" "$PARENT_SHA"
+          printf 'PARENT_DIR=%s\n' "$parent_dir" >>"$GITHUB_ENV"
+          exclude="$(git rev-parse --git-path info/exclude)"
+          printf '/profiles/\n' >>"$exclude"
+      - name: Prove parent and candidate correctness and build identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          for repository in "$PARENT_DIR" "$GITHUB_WORKSPACE"; do
+            (
+              cd "$repository"
+              test "$(git status --porcelain)" = ""
+              cargo +1.97.1 test --workspace --locked
+              cargo +1.97.1 build --profile profiling \
+                -p ferrum2-client -p ferrum2-server -p ferrum2-m4-qualification --bins --locked
+              target/profiling/m4-qualification self-check
+            )
+          done
+      - name: Run alternating parent and candidate pairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_member() {
+            member=$1
+            pair=$2
+            order=$3
+            if [ "$member" = parent ]; then
+              repository=$PARENT_DIR
+            else
+              repository=$GITHUB_WORKSPACE
+            fi
+            (
+              cd "$repository"
+              target/profiling/m4-qualification profile-workload \
+                --scenario "$SCENARIO" \
+                --warmup-seconds "$WARMUP_SECONDS" \
+                --active-seconds "$ACTIVE_SECONDS" \
+                --ready-file "profiles/paired/$SCENARIO-$member-$pair.ready" \
+                --output "profiles/paired/$SCENARIO-$member-$pair.jsonl" \
+                --parent-sha "$PARENT_SHA" \
+                --candidate-sha "$GITHUB_SHA" \
+                --member "$member" \
+                --pair "$pair" \
+                --order "$order" \
+                --build-profile current
+            )
+          }
+          for pair in $(seq 1 "$PAIRS"); do
+            if ((pair % 2 == 1)); then
+              run_member parent "$pair" 1
+              run_member candidate "$pair" 2
+            else
+              run_member candidate "$pair" 1
+              run_member parent "$pair" 2
+            fi
+          done
+      - name: Validate structured raw evidence and hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          parent_sha = os.environ["PARENT_SHA"]
+          candidate_sha = os.environ["GITHUB_SHA"]
+          scenario = os.environ["SCENARIO"]
+          pairs = int(os.environ["PAIRS"])
+          roots = {
+              "parent": Path(os.environ["PARENT_DIR"]),
+              "candidate": Path(os.environ["GITHUB_WORKSPACE"]),
+          }
+          manifest = []
+          for member, root in roots.items():
+              files = sorted((root / "profiles" / "paired").glob("*.jsonl"))
+              assert len(files) == pairs, (member, len(files), pairs)
+              for path in files:
+                  lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+                  assert len(lines) == 1, (path, len(lines))
+                  row = json.loads(lines[0])
+                  assert row["kind"] == "m18_profile_trial"
+                  assert row["parent_sha"] == parent_sha
+                  assert row["candidate_sha"] == candidate_sha
+                  assert row["member"] == member
+                  assert row["scenario"] == scenario
+                  assert row["correctness"] == row["status"] == "PASS"
+                  assert 1 <= row["pair"] <= pairs
+                  assert row["order"] in (1, 2)
+                  assert row["sha"] == (parent_sha if member == "parent" else candidate_sha)
+                  manifest.append({
+                      "member": member,
+                      "file": path.name,
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  })
+          output = Path(os.environ["RUNNER_TEMP"]) / "paired-profile-manifest.json"
+          output.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+          PY
+      - name: Upload paired raw evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: paired-profile-${{ inputs.scenario }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/profiles/paired/*.jsonl
+            ${{ runner.temp }}/ferrum2-parent/profiles/paired/*.jsonl
+            ${{ runner.temp }}/paired-profile-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Reap processes and remove parent worktree
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -u
+          cleanup_status=0
+          for signal in TERM KILL; do
+            for process in ferrum2-client ferrum2-server; do
+              pkill "-$signal" -x "$process" 2>/dev/null || status=$?
+              if [ "${status:-0}" -gt 1 ]; then cleanup_status=1; fi
+              status=0
+            done
+            sleep 1
+          done
+          for process in ferrum2-client ferrum2-server; do
+            if pgrep -x "$process" >/dev/null; then cleanup_status=1; fi
+          done
+          if [ -n "${PARENT_DIR:-}" ] && [ -e "$PARENT_DIR" ]; then
+            git worktree remove --force "$PARENT_DIR" || cleanup_status=1
+          fi
+          test "$cleanup_status" -eq 0
