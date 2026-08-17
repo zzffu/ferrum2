@@ -562,7 +562,10 @@ case "$tool:$1" in
   readlink:*) printf '%s\n' /fake/ferrum2-client ;;
   readelf:*) printf '%s\n' '    Build ID: 0123456789abcdef' ;;
   git:-C)
-    if [[ $3 == status ]]; then exit 0; fi
+    if [[ $3 == status ]]; then
+      [[ ! -e ${PROFILE_EXPECT_OUTPUT:?} ]] || exit 98
+      exit 0
+    fi
     if [[ ${5:-} == 'HEAD^{tree}' || ${4:-} == 'HEAD^{tree}' ]]; then printf '%040d\n' 2; else printf '%040d\n' 1; fi ;;
   *) exit 97 ;;
 esac
@@ -600,7 +603,8 @@ esac
             ])
             .arg(output)
             .env("PATH", &path)
-            .env("PROFILE_FAKE_LOG", &log);
+            .env("PROFILE_FAKE_LOG", &log)
+            .env("PROFILE_EXPECT_OUTPUT", output);
         if unsupported {
             command.env("PROFILE_FAKE_UNSUPPORTED", "1");
         }
@@ -635,6 +639,12 @@ esac
             .any(|line| line == "stage=samply status=PASS")
     );
     assert!(stages.lines().any(|line| line == "result=PASS exit_code=0"));
+    assert!(
+        fs::read_to_string(output.join("metadata.txt"))
+            .expect("profile metadata")
+            .lines()
+            .any(|line| line == "worktree_clean=true")
+    );
 
     let calls_before_overflow = fs::read(&log).expect("fake call log");
     for (duration, frequency) in [("18446744073709551616", "1"), ("1", "18446744073709551616")] {

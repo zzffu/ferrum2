@@ -131,6 +131,11 @@ script_dir_part=${script_path%/*}
 [[ $script_dir_part != "$script_path" ]] || script_dir_part=.
 script_dir=$(cd -- "$script_dir_part" && pwd -P) || exit 1
 repo_root=$(cd -- "$script_dir/.." && pwd -P) || exit 1
+candidate_sha=$(git -C "$repo_root" rev-parse HEAD) || die preflight "candidate SHA unavailable"
+candidate_tree=$(git -C "$repo_root" rev-parse 'HEAD^{tree}') || die preflight "candidate tree unavailable"
+git_status=$(git -C "$repo_root" status --porcelain=v1 --untracked-files=normal) || die preflight "worktree status unavailable"
+worktree_clean=false
+[[ -z $git_status ]] && worktree_clean=true
 expected_profiles_root=$repo_root/profiles
 if [[ ! -e $expected_profiles_root && ! -L $expected_profiles_root ]]; then
     mkdir -m 700 -- "$expected_profiles_root" || exit 1
@@ -175,11 +180,6 @@ output_created=1
 record_stage arguments PASS
 record_stage preflight STARTED
 
-candidate_sha=$(git -C "$repo_root" rev-parse HEAD) || die preflight "candidate SHA unavailable"
-candidate_tree=$(git -C "$repo_root" rev-parse 'HEAD^{tree}') || die preflight "candidate tree unavailable"
-git_status=$(git -C "$repo_root" status --porcelain=v1 --untracked-files=normal) || die preflight "worktree status unavailable"
-worktree_clean=false
-[[ -z $git_status ]] && worktree_clean=true
 rustc_version=$(rustc --version) || die preflight "rustc identity unavailable"
 cargo_version=$(cargo --version) || die preflight "Cargo identity unavailable"
 kernel=$(uname -srmo) || die preflight "kernel identity unavailable"
