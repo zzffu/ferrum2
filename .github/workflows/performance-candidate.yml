@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       parent_sha:
-        description: "Exact first-parent SHA"
+        description: "Exact ancestor commit SHA"
         required: true
         type: string
       scenario:
@@ -68,7 +68,10 @@ jobs:
           [[ "$PARENT_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git status --porcelain)" = ""
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse "$GITHUB_SHA^1")" = "$PARENT_SHA"
+          python3 -B tools/performance_candidate.py validate-git \
+            --repository "$GITHUB_WORKSPACE" \
+            --parent-sha "$PARENT_SHA" \
+            --candidate-sha "$GITHUB_SHA"
           test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
           case "$SCENARIO" in
             tcp-bulk|tcp-stream-64k|tcp-request-1k|tcp-request-4k|tcp-request-16k|udp-small-high|udp-mtu-1200) ;;
