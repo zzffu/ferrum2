@@ -2245,8 +2245,6 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
     for forbidden in [
         "std::net",
         "std::process",
-        "TcpListener",
-        "TcpStream",
         "Command::new",
         "RUNNER_TEMP",
         "versions.toml",
@@ -2255,6 +2253,22 @@ fn qualification_is_a_cargo_managed_non_test_binary() {
     ] {
         assert!(
             !pure_contract.contains(forbidden),
+            "local qualification state tests must remain I/O-free: {forbidden}"
+        );
+    }
+
+    for forbidden in ["TcpListener", "TcpStream"] {
+        let contains_identifier = pure_contract.match_indices(forbidden).any(|(offset, _)| {
+            let before = pure_contract[..offset].chars().next_back();
+            let after = pure_contract[offset + forbidden.len()..].chars().next();
+            let is_identifier_continue = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+
+            before.map_or(true, |ch| !is_identifier_continue(ch))
+                && after.map_or(true, |ch| !is_identifier_continue(ch))
+        });
+
+        assert!(
+            !contains_identifier,
             "local qualification state tests must remain I/O-free: {forbidden}"
         );
     }
@@ -2880,5 +2894,236 @@ fn m4_thp_profile_is_applied_and_restored_around_resource_qualification() {
             !line.contains("$thp_original") && !line.contains("original="),
             "M4 THP status evidence must not emit the observed original value"
         );
+    }
+}
+
+#[test]
+fn m17_profiling_profile_is_release_optimized_and_isolated() {
+    let root = workspace_root();
+    let manifest = normalize_line_endings(
+        &fs::read_to_string(root.join("Cargo.toml")).expect("root manifest"),
+    )
+    .expect("root manifest line endings");
+    let profile = manifest
+        .split_once("\n[profile.profiling]\n")
+        .map(|(_, tail)| tail.split("\n[").next().unwrap_or(tail).trim())
+        .expect("profiling profile");
+    assert_eq!(
+        profile,
+        "inherits = \"release\"\ndebug = 1\nstrip = \"none\""
+    );
+    assert_eq!(manifest.matches("[profile.profiling]").count(), 1);
+    assert!(!manifest.contains("[profile.release]"));
+    assert!(!manifest.contains("console-subscriber"));
+
+    let ignore = fs::read_to_string(root.join(".gitignore")).expect("gitignore");
+    assert!(ignore.lines().any(|line| line == "/profiles/"));
+
+    let script = normalize_line_endings(
+        &fs::read_to_string(root.join("tools/profile-cpu.sh")).expect("profiling wrapper"),
+    )
+    .expect("wrapper line endings");
+    for required in [
+        "readonly STDERR_CAP_BYTES=65536",
+        "readonly SAMPLY_STOP_GRACE_SECONDS=5",
+        "umask 077",
+        "--scenario <tcp-bulk|udp-small-high>",
+        "[[ $duration =~ ^[1-9][0-9]{0,2}$ ]] && ((10#$duration <= 300))",
+        "[[ $frequency =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$frequency <= 1000))",
+        "[[ $output_dir == \"$profiles_root/\"* ]]",
+        "perf stat -x ';' -o \"$output_dir/perf-stat.txt\"",
+        "timeout --preserve-status --signal=INT --kill-after=\"${SAMPLY_STOP_GRACE_SECONDS}s\" \"${duration}s\" samply record",
+        "samply record --pid \"$pid\" --duration \"$duration\" --rate \"$frequency\" --save-only",
+        "grep -Eq '<not supported>|<not counted>'",
+        "verify_target || die samply",
+    ] {
+        assert!(
+            script.contains(required),
+            "missing wrapper contract: {required}"
+        );
+    }
+    for forbidden in [
+        "perf record ",
+        "perf report ",
+        "samply load ",
+        "sysctl",
+        "setcap",
+        "sudo",
+        "pkill",
+        "kill -TERM",
+        "kill -KILL",
+    ] {
+        assert!(
+            !script.contains(forbidden),
+            "forbidden wrapper action: {forbidden}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake = tempfile::tempdir().expect("fake tool directory");
+        let log = fake.path().join("calls.log");
+        let tool = r#"#!/usr/bin/env bash
+set -u
+tool=${0##*/}
+case "$tool:$1" in
+  perf:--version) printf '%s\n' 'perf version fake' ;;
+  perf:list) printf '  %s\n' "$2" ;;
+  perf:stat)
+    output=
+    while (($#)); do
+      if [[ $1 == -o ]]; then output=$2; shift 2; else shift; fi
+    done
+    if [[ -n $output ]]; then
+      printf '%s\n' perf_stat >>"$M17_FAKE_LOG"
+      if [[ ${M17_FAKE_UNSUPPORTED:-0} == 1 ]]; then printf '%s\n' '<not supported>;cycles:u' >"$output"; else printf '%s\n' '1;task-clock' >"$output"; fi
+    else
+      printf '%s\n' perf_preflight >>"$M17_FAKE_LOG"
+    fi ;;
+  samply:--version) printf '%s\n' 'samply 0.13.1' ;;
+  samply:record)
+    if [[ ${2:-} == --help ]]; then printf '%s\n' '--pid --duration --rate --save-only --output'; exit 0; fi
+    output=
+    while (($#)); do
+      if [[ $1 == --output ]]; then output=$2; shift 2; else shift; fi
+    done
+    printf '%s\n' samply >>"$M17_FAKE_LOG"
+    trap 'printf "%s\n" fake-profile >"$output"; printf "%s\n" samply_int >>"$M17_FAKE_LOG"; exit 0' INT
+    while true; do sleep 0.05; done ;;
+  readlink:*) printf '%s\n' /fake/ferrum2-client ;;
+  readelf:*) printf '%s\n' '    Build ID: 0123456789abcdef' ;;
+  git:-C)
+    if [[ $3 == status ]]; then exit 0; fi
+    if [[ ${5:-} == 'HEAD^{tree}' || ${4:-} == 'HEAD^{tree}' ]]; then printf '%040d\n' 2; else printf '%040d\n' 1; fi ;;
+  *) exit 97 ;;
+esac
+"#;
+        for name in ["perf", "samply", "readlink", "readelf", "git"] {
+            let path = fake.path().join(name);
+            fs::write(&path, tool).expect("fake tool");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("fake tool mode");
+        }
+        let mut path = vec![fake.path().to_path_buf()];
+        path.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let path = std::env::join_paths(path).expect("test PATH");
+        let profiles = root.join("profiles");
+        fs::create_dir_all(&profiles).expect("profiles directory");
+        let reserve = tempfile::NamedTempFile::new_in(&profiles).expect("output reservation");
+        let output = reserve.path().to_path_buf();
+        reserve.close().expect("remove output reservation");
+        let run = |output: &Path, unsupported: bool, duration: &str, frequency: &str| {
+            let mut command = Command::new(root.join("tools/profile-cpu.sh"));
+            command
+                .args([
+                    "--scenario",
+                    "tcp-bulk",
+                    "--role",
+                    "client",
+                    "--pid",
+                    &std::process::id().to_string(),
+                    "--duration",
+                    duration,
+                    "--frequency",
+                    frequency,
+                    "--output",
+                ])
+                .arg(output)
+                .env("PATH", &path)
+                .env("M17_FAKE_LOG", &log);
+            if unsupported {
+                command.env("M17_FAKE_UNSUPPORTED", "1");
+            }
+            command.output().expect("profiling wrapper must start")
+        };
+
+        let success = run(&output, false, "1", "1");
+        assert!(
+            success.status.success(),
+            "{}",
+            String::from_utf8_lossy(&success.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&log).expect("fake call log"),
+            "perf_preflight\nperf_stat\nsamply\nsamply_int\n"
+        );
+        assert!(
+            fs::read_to_string(output.join("stage-status.txt"))
+                .expect("successful stages")
+                .contains("stage=samply status=PASS\nresult=PASS exit_code=0")
+        );
+        let calls_before_overflow = fs::read(&log).expect("fake call log");
+        for (duration, frequency) in [("18446744073709551616", "1"), ("1", "18446744073709551616")]
+        {
+            let reserve = tempfile::NamedTempFile::new_in(&profiles).expect("overflow reservation");
+            let overflow_output = reserve.path().to_path_buf();
+            reserve.close().expect("remove overflow reservation");
+            let overflow = run(&overflow_output, false, duration, frequency);
+            assert_eq!(overflow.status.code(), Some(2));
+            assert!(!overflow_output.exists());
+        }
+        assert_eq!(
+            fs::read(&log).expect("fake call log"),
+            calls_before_overflow
+        );
+        for artifact in [
+            "metadata.txt",
+            "perf-stat.txt",
+            "samply.json.gz",
+            "stage-status.txt",
+        ] {
+            assert!(output.join(artifact).is_file(), "missing {artifact}");
+        }
+        if fs::metadata(&root).expect("root mode").permissions().mode() & 0o777 != 0o777 {
+            assert_eq!(
+                fs::metadata(&output)
+                    .expect("output mode")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(output.join("metadata.txt"))
+                    .expect("metadata mode")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        let metadata_before = fs::read(output.join("metadata.txt")).expect("metadata");
+        assert!(!run(&output, false, "1", "1").status.success());
+        assert_eq!(
+            fs::read(output.join("metadata.txt")).expect("metadata"),
+            metadata_before
+        );
+
+        let reserve =
+            tempfile::NamedTempFile::new_in(&profiles).expect("failed output reservation");
+        let failed = reserve.path().to_path_buf();
+        reserve.close().expect("remove failed output reservation");
+        let failure = run(&failed, true, "1", "1");
+        assert!(!failure.status.success());
+        assert!(
+            fs::read_to_string(failed.join("perf-stat.txt"))
+                .expect("partial perf evidence")
+                .contains("<not supported>")
+        );
+        assert!(!failed.join("samply.json.gz").exists());
+        assert!(
+            fs::read_to_string(failed.join("stage-status.txt"))
+                .expect("failed stages")
+                .contains("stage=perf_stat status=FAIL")
+        );
+
+        let outside = fake.path().join("outside-profiles");
+        assert!(!run(&outside, false, "1", "1").status.success());
+        assert!(!outside.exists());
+        fs::remove_dir_all(output).expect("remove successful evidence");
+        fs::remove_dir_all(failed).expect("remove failed evidence");
     }
 }

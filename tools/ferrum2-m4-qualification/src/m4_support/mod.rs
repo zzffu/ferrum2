@@ -11,7 +11,9 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -62,6 +64,15 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+const PROFILE_WARMUP_SECONDS: std::ops::RangeInclusive<u64> = 1..=60;
+const PROFILE_ACTIVE_SECONDS: std::ops::RangeInclusive<u64> = 10..=900;
+const PROFILE_UDP_WORKERS: usize = 4;
+const PROFILE_UDP_PAYLOAD_BYTES: usize = 128;
+const PROFILE_UDP_MTU_PAYLOAD_BYTES: usize = 1_200;
+const PROFILE_TCP_STREAM_BATCH: usize = 4;
+const PROFILE_TCP_LATENCY_WORKERS: usize = 1;
+const PROFILE_TCP_LATENCY_ACTIVE_MAX_SECONDS: u64 = 60;
+const PROFILE_TCP_LATENCY_SAMPLE_CAP: usize = 2_000_000;
 
 static ACTIVE_PROCESSES: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
@@ -72,16 +83,21 @@ pub fn run(arguments: impl Iterator<Item = OsString>) -> Result<String, String> 
         .next()
         .and_then(|value| value.into_string().ok())
         .ok_or_else(|| {
-            "expected mode: throughput, resource, dns-resource, or self-check".to_owned()
+            "expected mode: throughput, resource, dns-resource, profile-workload, or self-check"
+                .to_owned()
         })?;
     let rest: Vec<_> = arguments.collect();
     match mode.as_str() {
         "throughput" => run_throughput(parse_hosted_args(&rest, true)?),
         "resource" => run_resource(parse_hosted_args(&rest, false)?),
         "dns-resource" => run_dns_resource(parse_hosted_args(&rest, false)?),
+        "profile-workload" => run_profile_workload(parse_profile_args(&rest)?),
         "self-check" if rest.is_empty() => run_self_check(),
         "self-check" => Err("self-check accepts no arguments".to_owned()),
-        _ => Err("expected mode: throughput, resource, dns-resource, or self-check".to_owned()),
+        _ => Err(
+            "expected mode: throughput, resource, dns-resource, profile-workload, or self-check"
+                .to_owned(),
+        ),
     }
 }
 
@@ -150,6 +166,1178 @@ fn parse_hosted_args(arguments: &[OsString], reference: bool) -> Result<HostedAr
         sslocal,
         ssserver,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileScenario {
+    TcpBulk,
+    TcpStream64k,
+    TcpRequest1k,
+    TcpRequest4k,
+    TcpRequest16k,
+    UdpSmallHigh,
+    UdpMtu1200,
+}
+
+impl ProfileScenario {
+    fn parse(value: OsString) -> Result<Self, String> {
+        match value.to_str() {
+            Some("tcp-bulk") => Ok(Self::TcpBulk),
+            Some("tcp-stream-64k") => Ok(Self::TcpStream64k),
+            Some("tcp-request-1k") => Ok(Self::TcpRequest1k),
+            Some("tcp-request-4k") => Ok(Self::TcpRequest4k),
+            Some("tcp-request-16k") => Ok(Self::TcpRequest16k),
+            Some("udp-small-high") => Ok(Self::UdpSmallHigh),
+            Some("udp-mtu-1200") => Ok(Self::UdpMtu1200),
+            _ => Err(
+                "profile scenario must be tcp-bulk, tcp-stream-64k, tcp-request-1k, \
+                 tcp-request-4k, tcp-request-16k, udp-small-high, or udp-mtu-1200"
+                    .to_owned(),
+            ),
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::TcpBulk => "tcp-bulk",
+            Self::TcpStream64k => "tcp-stream-64k",
+            Self::TcpRequest1k => "tcp-request-1k",
+            Self::TcpRequest4k => "tcp-request-4k",
+            Self::TcpRequest16k => "tcp-request-16k",
+            Self::UdpSmallHigh => "udp-small-high",
+            Self::UdpMtu1200 => "udp-mtu-1200",
+        }
+    }
+
+    const fn tcp_workers(self) -> Option<usize> {
+        match self {
+            Self::TcpBulk | Self::TcpStream64k => Some(STREAMS),
+            Self::TcpRequest1k | Self::TcpRequest4k | Self::TcpRequest16k => {
+                Some(PROFILE_TCP_LATENCY_WORKERS)
+            }
+            Self::UdpSmallHigh | Self::UdpMtu1200 => None,
+        }
+    }
+
+    const fn tcp_request_bytes(self) -> Option<usize> {
+        match self {
+            Self::TcpRequest1k => Some(1_024),
+            Self::TcpRequest4k => Some(4_096),
+            Self::TcpRequest16k => Some(16_384),
+            _ => None,
+        }
+    }
+
+    const fn udp_payload_bytes(self) -> Option<usize> {
+        match self {
+            Self::UdpSmallHigh => Some(PROFILE_UDP_PAYLOAD_BYTES),
+            Self::UdpMtu1200 => Some(PROFILE_UDP_MTU_PAYLOAD_BYTES),
+            _ => None,
+        }
+    }
+}
+
+struct ProfileArgs {
+    scenario: ProfileScenario,
+    warmup_seconds: u64,
+    active_seconds: u64,
+    ready_file: PathBuf,
+    raw: Option<ProfileRawArgs>,
+}
+
+#[derive(Clone, Copy)]
+enum ProfileMember {
+    Parent,
+    Candidate,
+}
+
+impl ProfileMember {
+    fn parse(value: &OsStr) -> Result<Self, String> {
+        match value.to_str() {
+            Some("parent") => Ok(Self::Parent),
+            Some("candidate") => Ok(Self::Candidate),
+            _ => Err("--member must be parent or candidate".to_owned()),
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Parent => "parent",
+            Self::Candidate => "candidate",
+        }
+    }
+}
+
+struct ProfileRawArgs {
+    output: PathBuf,
+    parent_sha: String,
+    candidate_sha: String,
+    member: ProfileMember,
+    pair: u8,
+    order: u8,
+    build_profile: String,
+}
+
+fn parse_profile_args(arguments: &[OsString]) -> Result<ProfileArgs, String> {
+    let mut scenario = None;
+    let mut warmup_seconds = None;
+    let mut active_seconds = None;
+    let mut ready_file = None;
+    let mut output = None;
+    let mut parent_sha = None;
+    let mut candidate_sha = None;
+    let mut member = None;
+    let mut raw_pair = None;
+    let mut order = None;
+    let mut build_profile = None;
+    let mut chunks = arguments.chunks_exact(2);
+    for pair in &mut chunks {
+        let flag = pair[0]
+            .to_str()
+            .ok_or_else(|| "profile option name is not UTF-8".to_owned())?;
+        let slot = match flag {
+            "--scenario" => &mut scenario,
+            "--warmup-seconds" => &mut warmup_seconds,
+            "--active-seconds" => &mut active_seconds,
+            "--ready-file" => &mut ready_file,
+            "--output" => &mut output,
+            "--parent-sha" => &mut parent_sha,
+            "--candidate-sha" => &mut candidate_sha,
+            "--member" => &mut member,
+            "--pair" => &mut raw_pair,
+            "--order" => &mut order,
+            "--build-profile" => &mut build_profile,
+            _ => return Err(format!("unsupported profile option: {flag}")),
+        };
+        if slot.replace(pair[1].clone()).is_some() {
+            return Err(format!("duplicate profile option: {flag}"));
+        }
+    }
+    if !chunks.remainder().is_empty() {
+        return Err("every profile option requires one value".to_owned());
+    }
+    let seconds = |value: Option<OsString>, name: &str, bounds: &std::ops::RangeInclusive<u64>| {
+        let value = value
+            .ok_or_else(|| format!("missing {name}"))?
+            .into_string()
+            .map_err(|_| format!("{name} is not UTF-8"))?;
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!("{name} must be an integer"));
+        }
+        let value = value
+            .parse::<u64>()
+            .map_err(|_| format!("{name} is outside its finite bound"))?;
+        bounds
+            .contains(&value)
+            .then_some(value)
+            .ok_or_else(|| format!("{name} is outside its finite bound"))
+    };
+    let ready_file = PathBuf::from(ready_file.ok_or_else(|| "missing --ready-file".to_owned())?);
+    if ready_file.is_absolute()
+        || !ready_file.starts_with("profiles")
+        || ready_file.components().count() < 2
+        || ready_file
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("--ready-file must be a relative child of profiles/".to_owned());
+    }
+    let scenario =
+        ProfileScenario::parse(scenario.ok_or_else(|| "missing --scenario".to_owned())?)?;
+    let warmup_seconds = seconds(warmup_seconds, "--warmup-seconds", &PROFILE_WARMUP_SECONDS)?;
+    let active_seconds = seconds(active_seconds, "--active-seconds", &PROFILE_ACTIVE_SECONDS)?;
+    if scenario.tcp_request_bytes().is_some()
+        && active_seconds > PROFILE_TCP_LATENCY_ACTIVE_MAX_SECONDS
+    {
+        return Err("TCP request-response active lifetime exceeds 60 seconds".to_owned());
+    }
+    let raw_values = [
+        output.is_some(),
+        parent_sha.is_some(),
+        candidate_sha.is_some(),
+        member.is_some(),
+        raw_pair.is_some(),
+        order.is_some(),
+        build_profile.is_some(),
+    ];
+    let raw = if raw_values.iter().all(|present| !present) {
+        None
+    } else if raw_values.iter().all(|present| *present) {
+        let text = |value: OsString, name: &str| {
+            value
+                .into_string()
+                .map_err(|_| format!("{name} is not UTF-8"))
+        };
+        let parent_sha = text(parent_sha.expect("complete raw args"), "--parent-sha")?;
+        let candidate_sha = text(candidate_sha.expect("complete raw args"), "--candidate-sha")?;
+        for (name, sha) in [
+            ("--parent-sha", &parent_sha),
+            ("--candidate-sha", &candidate_sha),
+        ] {
+            if sha.len() != 40
+                || !sha
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(format!("{name} must be a lowercase 40-character SHA"));
+            }
+        }
+        let bounded_number = |value: OsString, name: &str, maximum: u8| {
+            let value = text(value, name)?;
+            value
+                .parse::<u8>()
+                .ok()
+                .filter(|value| (1..=maximum).contains(value))
+                .ok_or_else(|| format!("{name} is outside its finite bound"))
+        };
+        let build_profile = text(build_profile.expect("complete raw args"), "--build-profile")?;
+        if !matches!(
+            build_profile.as_str(),
+            "current" | "thin" | "fat" | "fat-cgu1" | "source-normalized"
+        ) {
+            return Err("--build-profile is outside the registered M18 matrix".to_owned());
+        }
+        Some(ProfileRawArgs {
+            output: PathBuf::from(output.expect("complete raw args")),
+            parent_sha,
+            candidate_sha,
+            member: ProfileMember::parse(&member.expect("complete raw args"))?,
+            pair: bounded_number(raw_pair.expect("complete raw args"), "--pair", 5)?,
+            order: bounded_number(order.expect("complete raw args"), "--order", 2)?,
+            build_profile,
+        })
+    } else {
+        return Err("raw profile options must be supplied as one complete set".to_owned());
+    };
+    Ok(ProfileArgs {
+        scenario,
+        warmup_seconds,
+        active_seconds,
+        ready_file,
+        raw,
+    })
+}
+
+struct ReadyFile {
+    path: Option<PathBuf>,
+}
+
+impl ReadyFile {
+    fn publish(
+        path: &Path,
+        scenario: ProfileScenario,
+        client_pid: u32,
+        server_pid: u32,
+        warmup_seconds: u64,
+        active_seconds: u64,
+    ) -> Result<Self, String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "profile ready file has no parent".to_owned())?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(clean_io)?;
+        write!(
+            temporary,
+            "scenario={}\nclient_pid={}\nserver_pid={}\nwarmup_seconds={}\nactive_seconds={}\n",
+            scenario.label(),
+            client_pid,
+            server_pid,
+            warmup_seconds,
+            active_seconds,
+        )
+        .map_err(clean_io)?;
+        temporary.flush().map_err(clean_io)?;
+        #[cfg(unix)]
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(clean_io)?;
+        temporary.as_file().sync_all().map_err(clean_io)?;
+        fs::hard_link(temporary.path(), path).map_err(|_| {
+            "profile ready file already exists or could not be published".to_owned()
+        })?;
+        if let Err(error) = temporary.close() {
+            let _ = fs::remove_file(path);
+            return Err(clean_io(error));
+        }
+        Ok(Self {
+            path: Some(path.to_path_buf()),
+        })
+    }
+
+    fn remove(mut self) -> Result<(), String> {
+        let path = self.path.take().expect("ready file owner");
+        fs::remove_file(path).map_err(clean_io)
+    }
+}
+
+impl Drop for ReadyFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn resolve_profile_ready_file(relative: &Path) -> Result<PathBuf, String> {
+    let root = repository_root()?.join("profiles");
+    if fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err("profiles/ must not be a symlink".to_owned());
+    }
+    fs::create_dir_all(&root).map_err(clean_io)?;
+    let root = root.canonicalize().map_err(clean_io)?;
+    let requested = repository_root()?.join(relative);
+    let parent = requested
+        .parent()
+        .ok_or_else(|| "profile ready file has no parent".to_owned())?;
+    fs::create_dir_all(parent).map_err(clean_io)?;
+    let parent = parent.canonicalize().map_err(clean_io)?;
+    if !parent.starts_with(&root) {
+        return Err("profile ready file escaped profiles/".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).map_err(clean_io)?;
+        fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).map_err(clean_io)?;
+    }
+    Ok(parent.join(
+        requested
+            .file_name()
+            .ok_or_else(|| "profile ready file has no name".to_owned())?,
+    ))
+}
+
+struct ProfileOutcome {
+    summary: String,
+    metric: &'static str,
+    value: u64,
+    checked_units: u64,
+    p99_nanoseconds: Option<u64>,
+    io_completions: u64,
+}
+
+struct ProfileRawIdentity {
+    sha: String,
+    tree: String,
+    runner_sha256: String,
+    client_sha256: String,
+    server_sha256: String,
+    rustc: String,
+    kernel: String,
+    cpu_model: String,
+    cpu_count: usize,
+    memory_kib: u64,
+}
+
+impl ProfileRawIdentity {
+    fn load(raw: &ProfileRawArgs) -> Result<Self, String> {
+        let root = repository_root()?;
+        let git = |identity, args: &[&str]| {
+            probe_text(
+                identity,
+                "git",
+                ["-C", root.to_str().ok_or("repository root is not UTF-8")?]
+                    .into_iter()
+                    .chain(args.iter().copied()),
+                PROBE_TIMEOUT,
+            )
+        };
+        let sha = first_line(&git("profile checkout HEAD probe", &["rev-parse", "HEAD"])?);
+        let expected = match raw.member {
+            ProfileMember::Parent => &raw.parent_sha,
+            ProfileMember::Candidate => &raw.candidate_sha,
+        };
+        if &sha != expected {
+            return Err("profile checkout HEAD does not match selected member SHA".to_owned());
+        }
+        if !git(
+            "profile checkout status probe",
+            &["status", "--porcelain=v1"],
+        )?
+        .is_empty()
+        {
+            return Err("profile checkout is dirty before generated writes".to_owned());
+        }
+        let tree = first_line(&git(
+            "profile checkout tree probe",
+            &["rev-parse", "HEAD^{tree}"],
+        )?);
+        let rustc = first_line(&probe_text(
+            "profile Rust version probe",
+            "rustc",
+            ["--version"],
+            PROBE_TIMEOUT,
+        )?);
+        if !rustc.starts_with("rustc 1.97.1 ") {
+            return Err("profile Rust toolchain is not 1.97.1".to_owned());
+        }
+        let kernel = first_line(&probe_text(
+            "profile kernel identity probe",
+            "uname",
+            ["-srvmo"],
+            PROBE_TIMEOUT,
+        )?);
+        let (memory_kib, cpu_model) = linux_capacity()?;
+        let cpu_count = thread::available_parallelism()
+            .map_err(|_| "profile logical CPU count is unavailable".to_owned())?
+            .get();
+        let runner = std::env::current_exe().map_err(clean_io)?;
+        let client = ferrum_binary("ferrum2-client")?;
+        let server = ferrum_binary("ferrum2-server")?;
+        Ok(Self {
+            sha,
+            tree,
+            runner_sha256: sha256("profile runner SHA-256 probe", &runner)?,
+            client_sha256: sha256("profile client SHA-256 probe", &client)?,
+            server_sha256: sha256("profile server SHA-256 probe", &server)?,
+            rustc,
+            kernel,
+            cpu_model,
+            cpu_count,
+            memory_kib,
+        })
+    }
+}
+
+fn profile_raw_prefix(arguments: &ProfileArgs, raw: &ProfileRawArgs) -> String {
+    format!(
+        "\"kind\":\"m18_profile_trial\",\"parent_sha\":{},\"candidate_sha\":{},\
+         \"member\":{},\"pair\":{},\"order\":{},\"build_profile\":{},\"scenario\":{},\
+         \"warmup_seconds\":{},\"active_seconds\":{}",
+        json(&raw.parent_sha),
+        json(&raw.candidate_sha),
+        json(raw.member.label()),
+        raw.pair,
+        raw.order,
+        json(&raw.build_profile),
+        json(arguments.scenario.label()),
+        arguments.warmup_seconds,
+        arguments.active_seconds,
+    )
+}
+
+fn run_profile_scenario(arguments: &ProfileArgs) -> Result<ProfileOutcome, String> {
+    let ready_file = resolve_profile_ready_file(&arguments.ready_file)?;
+    match arguments.scenario {
+        ProfileScenario::TcpBulk
+        | ProfileScenario::TcpStream64k
+        | ProfileScenario::TcpRequest1k
+        | ProfileScenario::TcpRequest4k
+        | ProfileScenario::TcpRequest16k => run_profile_tcp(arguments, &ready_file),
+        ProfileScenario::UdpSmallHigh | ProfileScenario::UdpMtu1200 => {
+            run_profile_udp(arguments, &ready_file)
+        }
+    }
+}
+
+fn run_profile_workload(mut arguments: ProfileArgs) -> Result<String, String> {
+    let raw = arguments.raw.take();
+    let mut evidence = if let Some(raw) = &raw {
+        let output = resolve_profile_ready_file(&raw.output)?;
+        if output.extension() != Some(OsStr::new("jsonl")) {
+            return Err("profile --output must name a JSONL file below profiles/".to_owned());
+        }
+        Some(Evidence::create(&output)?)
+    } else {
+        None
+    };
+    let raw_identity = match &raw {
+        Some(raw) => match ProfileRawIdentity::load(raw) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                evidence
+                    .as_mut()
+                    .expect("raw evidence owner")
+                    .line(format!(
+                        "{{{},\"correctness\":\"FAIL\",\"status\":\"FAIL\",\"error\":{}}}",
+                        profile_raw_prefix(&arguments, raw),
+                        json(&error),
+                    ))?;
+                evidence.take().expect("raw evidence owner").finish()?;
+                return Err(error);
+            }
+        },
+        None => None,
+    };
+    let result = run_profile_scenario(&arguments);
+    let owners = assert_no_owners();
+    let result = match (result, owners) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(owner_error)) => Err(owner_error),
+        (Err(error), Err(owner_error)) => Err(format!("{error}; cleanup: {owner_error}")),
+    };
+    if let (Some(raw), Some(mut evidence), Some(identity)) =
+        (raw.as_ref(), evidence.take(), raw_identity.as_ref())
+    {
+        let prefix = profile_raw_prefix(&arguments, raw);
+        match &result {
+            Ok(outcome) => evidence.line(format!(
+                "{{{prefix},\"sha\":{},\"tree\":{},\"runner_sha256\":{},\
+                 \"client_sha256\":{},\"server_sha256\":{},\"rustc\":{},\"kernel\":{},\
+                 \"cpu_model\":{},\"cpu_count\":{},\"memory_kib\":{},\"metric\":{},\
+                 \"value\":{},\"checked_units\":{},\"p99_nanoseconds\":{},\
+                 \"io_completions\":{},\"correctness\":\"PASS\",\"status\":\"PASS\"}}",
+                json(&identity.sha),
+                json(&identity.tree),
+                json(&identity.runner_sha256),
+                json(&identity.client_sha256),
+                json(&identity.server_sha256),
+                json(&identity.rustc),
+                json(&identity.kernel),
+                json(&identity.cpu_model),
+                identity.cpu_count,
+                identity.memory_kib,
+                json(outcome.metric),
+                outcome.value,
+                outcome.checked_units,
+                outcome
+                    .p99_nanoseconds
+                    .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+                outcome.io_completions,
+            ))?,
+            Err(error) => evidence.line(format!(
+                "{{{prefix},\"sha\":{},\"tree\":{},\"runner_sha256\":{},\
+                 \"client_sha256\":{},\"server_sha256\":{},\"rustc\":{},\"kernel\":{},\
+                 \"cpu_model\":{},\"cpu_count\":{},\"memory_kib\":{},\
+                 \"correctness\":\"FAIL\",\"status\":\"FAIL\",\"error\":{}}}",
+                json(&identity.sha),
+                json(&identity.tree),
+                json(&identity.runner_sha256),
+                json(&identity.client_sha256),
+                json(&identity.server_sha256),
+                json(&identity.rustc),
+                json(&identity.kernel),
+                json(&identity.cpu_model),
+                identity.cpu_count,
+                identity.memory_kib,
+                json(error),
+            ))?,
+        }
+        evidence.finish()?;
+    }
+    result.map(|outcome| outcome.summary)
+}
+
+fn wait_for_profile_phase<T>(
+    client: &mut ProcessGuard,
+    server: &mut ProcessGuard,
+    gate: &StartGate,
+    workers: &[JoinHandle<Result<T, String>>],
+    deadline: Instant,
+    require_running_at_deadline: bool,
+) -> Result<(), String> {
+    loop {
+        client.ensure_running()?;
+        server.ensure_running()?;
+        let workers_running = ensure_profile_workers_running(gate, workers);
+        let now = Instant::now();
+        if now >= deadline && !require_running_at_deadline {
+            gate.require_active()?;
+            return Ok(());
+        }
+        workers_running?;
+        if now >= deadline {
+            return Ok(());
+        }
+        thread::sleep((deadline - now).min(Duration::from_millis(20)));
+    }
+}
+
+fn ensure_profile_workers_running<T>(
+    gate: &StartGate,
+    workers: &[JoinHandle<Result<T, String>>],
+) -> Result<(), String> {
+    gate.require_active()?;
+    if workers.iter().any(JoinHandle::is_finished) {
+        return Err("profile load worker ended early".to_owned());
+    }
+    Ok(())
+}
+
+enum ProfileTcpWorkerResult {
+    Bytes(u64),
+    Latencies(Vec<u64>),
+}
+
+fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<ProfileOutcome, String> {
+    let tcp_workers = arguments
+        .scenario
+        .tcp_workers()
+        .expect("TCP scenario has workers");
+    let mut directory = Some(
+        tempfile::Builder::new()
+            .prefix("profile-tcp-")
+            .tempdir()
+            .map_err(clean_io)?,
+    );
+    let (target_listener, target, server_slot, proxy_slot) = (|| {
+        let target_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
+        let target = v4(target_listener.local_addr().map_err(clean_io)?)?;
+        let server = PortReservation::new()?;
+        let proxy = PortReservation::new()?;
+        Ok::<_, String>((target_listener, target, server, proxy))
+    })()?;
+    let mut target_listener = Some(target_listener);
+    let mut server_reservation = Some(server_slot);
+    let mut proxy_reservation = Some(proxy_slot);
+    let server = server_reservation
+        .as_ref()
+        .expect("server reservation")
+        .address;
+    let proxy = proxy_reservation
+        .as_ref()
+        .expect("proxy reservation")
+        .address;
+    let client_config = directory
+        .as_ref()
+        .expect("profile config owner")
+        .path()
+        .join("client.toml");
+    let server_config = directory
+        .as_ref()
+        .expect("profile config owner")
+        .path()
+        .join("server.toml");
+    let mut target_worker = None;
+    let gate = Arc::new(StartGate::default());
+    let stop = Arc::new(AtomicBool::new(false));
+    let warmup = Duration::from_secs(arguments.warmup_seconds);
+    let active = Duration::from_secs(arguments.active_seconds);
+    let mut server_process = None;
+    let mut client_process = None;
+    let mut workers = Vec::with_capacity(tcp_workers);
+    let mut errors = Vec::new();
+    let mut ready = None;
+    let mut started = false;
+    let execution = (|| -> Result<(), String> {
+        fs::write(&client_config, ferrum_client_config(proxy, server, None)).map_err(clean_io)?;
+        fs::write(&server_config, ferrum_server_config(server, None)).map_err(clean_io)?;
+        let client_binary = ferrum_binary("ferrum2-client")?;
+        let server_binary = ferrum_binary("ferrum2-server")?;
+        target_worker = Some(TargetWorker::echo(
+            target_listener.take().expect("target listener"),
+            tcp_workers,
+        )?);
+        server_reservation
+            .take()
+            .expect("server reservation")
+            .release();
+        server_process = Some(spawn_proxy(
+            Topology::Ferrum,
+            "profile workload server",
+            &server_binary,
+            &server_config,
+        )?);
+        wait_for_listener(server_process.as_mut().expect("server process"), server)?;
+        proxy_reservation
+            .take()
+            .expect("proxy reservation")
+            .release();
+        client_process = Some(spawn_proxy(
+            Topology::Ferrum,
+            "profile workload client",
+            &client_binary,
+            &client_config,
+        )?);
+        wait_for_listener(client_process.as_mut().expect("client process"), proxy)?;
+        for _ in 0..tcp_workers {
+            let worker_gate = Arc::clone(&gate);
+            let worker_stop = Arc::clone(&stop);
+            let failure_gate = Arc::clone(&gate);
+            let failure_stop = Arc::clone(&stop);
+            let scenario = arguments.scenario;
+            workers.push(spawn_worker(move || {
+                let result = match scenario {
+                    ProfileScenario::TcpBulk => {
+                        load_stream(proxy, target, worker_gate, worker_stop, warmup, active)
+                            .map(ProfileTcpWorkerResult::Bytes)
+                    }
+                    ProfileScenario::TcpStream64k => {
+                        load_tcp_stream(proxy, target, worker_gate, worker_stop, warmup, active)
+                            .map(ProfileTcpWorkerResult::Bytes)
+                    }
+                    ProfileScenario::TcpRequest1k
+                    | ProfileScenario::TcpRequest4k
+                    | ProfileScenario::TcpRequest16k => load_tcp_request_response(
+                        proxy,
+                        target,
+                        scenario.tcp_request_bytes().expect("request scenario"),
+                        worker_gate,
+                        worker_stop,
+                        warmup,
+                        active,
+                    )
+                    .map(ProfileTcpWorkerResult::Latencies),
+                    ProfileScenario::UdpSmallHigh | ProfileScenario::UdpMtu1200 => {
+                        unreachable!("TCP runner received UDP scenario")
+                    }
+                };
+                if result.is_err() {
+                    failure_stop.store(true, Ordering::SeqCst);
+                    failure_gate.cancel();
+                }
+                result
+            })?);
+        }
+        let start = gate.start_when_ready(tcp_workers, Instant::now() + STARTUP_TIMEOUT)?;
+        started = true;
+        let warm_end = start + warmup;
+        let active_end = warm_end + active;
+        wait_for_profile_phase(
+            client_process.as_mut().expect("client process"),
+            server_process.as_mut().expect("server process"),
+            &gate,
+            &workers,
+            warm_end,
+            true,
+        )?;
+        gate.require_validated(tcp_workers)?;
+        client_process
+            .as_mut()
+            .expect("client process")
+            .ensure_running()?;
+        server_process
+            .as_mut()
+            .expect("server process")
+            .ensure_running()?;
+        ensure_profile_workers_running(&gate, &workers)?;
+        ready = Some(ReadyFile::publish(
+            ready_file,
+            arguments.scenario,
+            client_process.as_ref().expect("client process").id(),
+            server_process.as_ref().expect("server process").id(),
+            arguments.warmup_seconds,
+            arguments.active_seconds,
+        )?);
+        wait_for_profile_phase(
+            client_process.as_mut().expect("client process"),
+            server_process.as_mut().expect("server process"),
+            &gate,
+            &workers,
+            active_end,
+            false,
+        )
+    })();
+    let execution_succeeded = execution.is_ok();
+    if let Err(error) = execution {
+        errors.push(error);
+    }
+    if let Some(owner) = ready.take()
+        && let Err(error) = owner.remove()
+    {
+        errors.push(format!("ready cleanup failed: {error}"));
+    }
+    stop.store(true, Ordering::SeqCst);
+    gate.cancel();
+    let mut bytes = 0_u64;
+    let mut latencies = Vec::new();
+    for worker in workers {
+        match join_worker(worker).and_then(|result| result) {
+            Ok(ProfileTcpWorkerResult::Bytes(count)) => match bytes.checked_add(count) {
+                Some(total) => bytes = total,
+                None => errors.push("profile TCP byte count overflow".to_owned()),
+            },
+            Ok(ProfileTcpWorkerResult::Latencies(mut worker_latencies)) => {
+                if latencies.len().saturating_add(worker_latencies.len())
+                    > PROFILE_TCP_LATENCY_SAMPLE_CAP
+                {
+                    errors.push("profile TCP latency sample cap exceeded".to_owned());
+                } else {
+                    latencies.append(&mut worker_latencies);
+                }
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    if execution_succeeded && bytes == 0 && latencies.is_empty() {
+        errors.push("profile TCP completed no validated transactions".to_owned());
+    }
+    if started {
+        if let Some(worker) = target_worker.take()
+            && let Err(error) = worker.finish()
+        {
+            errors.push(format!("target cleanup failed: {error}"));
+        }
+    } else {
+        drop(target_worker.take());
+    }
+    for process in [&mut client_process, &mut server_process] {
+        if let Some(process) = process.as_mut()
+            && let Err(error) = process.terminate()
+        {
+            errors.push(format!("process cleanup failed: {error}"));
+        }
+    }
+    drop((client_process.take(), server_process.take()));
+    drop((proxy_reservation.take(), server_reservation.take()));
+    drop(target_listener.take());
+    if let Some(directory) = directory.take()
+        && let Err(error) = directory.close().map_err(clean_io)
+    {
+        errors.push(format!("config cleanup failed: {error}"));
+    }
+    for result in [
+        prove_tcp_rebind(proxy, "profile TCP client"),
+        prove_tcp_rebind(server, "profile TCP server"),
+        prove_tcp_rebind(target, "profile TCP target"),
+    ] {
+        if let Err(error) = result {
+            errors.push(format!("rebind failed: {error}"));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    if arguments.scenario == ProfileScenario::TcpBulk {
+        let transactions = bytes / PAYLOAD_BYTES as u64;
+        return Ok(ProfileOutcome {
+            summary: format!(
+                "m17_profile_workload_completion status=PASS scenario=tcp-bulk \
+                 transactions={transactions} bytes={bytes} workers={STREAMS} warmup_seconds={} \
+                 active_seconds={} drain=PASS rebind=PASS",
+                arguments.warmup_seconds, arguments.active_seconds,
+            ),
+            metric: "bytes_per_second",
+            value: rate_per_second(bytes, active)?,
+            checked_units: bytes,
+            p99_nanoseconds: None,
+            io_completions: transactions.saturating_mul(2),
+        });
+    }
+    if arguments.scenario == ProfileScenario::TcpStream64k {
+        let batches = bytes / (PAYLOAD_BYTES * PROFILE_TCP_STREAM_BATCH) as u64;
+        return Ok(ProfileOutcome {
+            summary: format!(
+                "m18_profile_workload_completion status=PASS scenario=tcp-stream-64k \
+                 batches={batches} bytes={bytes} workers={STREAMS} warmup_seconds={} \
+                 active_seconds={} drain=PASS rebind=PASS",
+                arguments.warmup_seconds, arguments.active_seconds,
+            ),
+            metric: "bytes_per_second",
+            value: rate_per_second(bytes, active)?,
+            checked_units: bytes,
+            p99_nanoseconds: None,
+            io_completions: batches.saturating_mul((PROFILE_TCP_STREAM_BATCH + 1) as u64),
+        });
+    }
+    let transactions = u64::try_from(latencies.len())
+        .map_err(|_| "profile TCP transaction count overflow".to_owned())?;
+    let p99_nanoseconds = percentile_99(latencies)?;
+    Ok(ProfileOutcome {
+        summary: format!(
+            "m18_profile_workload_completion status=PASS scenario={} transactions={transactions} \
+             p99_nanoseconds={p99_nanoseconds} workers={tcp_workers} warmup_seconds={} \
+             active_seconds={} drain=PASS rebind=PASS",
+            arguments.scenario.label(),
+            arguments.warmup_seconds,
+            arguments.active_seconds,
+        ),
+        metric: "p99_nanoseconds",
+        value: p99_nanoseconds,
+        checked_units: transactions,
+        p99_nanoseconds: Some(p99_nanoseconds),
+        io_completions: transactions.saturating_mul(2),
+    })
+}
+
+fn run_profile_udp(arguments: &ProfileArgs, ready_file: &Path) -> Result<ProfileOutcome, String> {
+    let payload_bytes = arguments
+        .scenario
+        .udp_payload_bytes()
+        .expect("UDP scenario has a payload size");
+    let mut directory = Some(
+        tempfile::Builder::new()
+            .prefix("profile-udp-")
+            .tempdir()
+            .map_err(clean_io)?,
+    );
+    let (server_slot, proxy_slot) =
+        (|| Ok::<_, String>((TcpUdpReservation::new()?, PortReservation::new()?)))()?;
+    let mut server_reservation = Some(server_slot);
+    let mut proxy_reservation = Some(proxy_slot);
+    let server = server_reservation
+        .as_ref()
+        .expect("server reservation")
+        .address;
+    let proxy = proxy_reservation
+        .as_ref()
+        .expect("proxy reservation")
+        .address;
+    let client_config = directory
+        .as_ref()
+        .expect("profile config owner")
+        .path()
+        .join("client.toml");
+    let server_config = directory
+        .as_ref()
+        .expect("profile config owner")
+        .path()
+        .join("server.toml");
+    let mut server_process = None;
+    let mut client_process = None;
+    let mut prepared = Vec::with_capacity(PROFILE_UDP_WORKERS);
+    let mut target_addresses = Vec::with_capacity(PROFILE_UDP_WORKERS);
+    let mut application_addresses = Vec::with_capacity(PROFILE_UDP_WORKERS);
+    let mut relay_addresses = Vec::with_capacity(PROFILE_UDP_WORKERS);
+    let gate = Arc::new(StartGate::default());
+    let stop = Arc::new(AtomicBool::new(false));
+    let warmup = Duration::from_secs(arguments.warmup_seconds);
+    let active = Duration::from_secs(arguments.active_seconds);
+    let mut workers = Vec::with_capacity(PROFILE_UDP_WORKERS);
+    let mut errors = Vec::new();
+    let mut ready = None;
+    let execution = (|| -> Result<(), String> {
+        fs::write(
+            &client_config,
+            m14_udp_client_config(proxy, server, server, server, server, false),
+        )
+        .map_err(clean_io)?;
+        fs::write(&server_config, m14_udp_server_config(server)).map_err(clean_io)?;
+        let client_binary = ferrum_binary("ferrum2-client")?;
+        let server_binary = ferrum_binary("ferrum2-server")?;
+        server_reservation
+            .take()
+            .expect("server reservation")
+            .release();
+        server_process = Some(spawn_proxy(
+            Topology::Ferrum,
+            "profile UDP server",
+            &server_binary,
+            &server_config,
+        )?);
+        wait_for_listener(server_process.as_mut().expect("server process"), server)?;
+        proxy_reservation
+            .take()
+            .expect("proxy reservation")
+            .release();
+        client_process = Some(spawn_proxy(
+            Topology::Ferrum,
+            "profile UDP client",
+            &client_binary,
+            &client_config,
+        )?);
+        wait_for_listener(client_process.as_mut().expect("client process"), proxy)?;
+        for worker_index in 0..PROFILE_UDP_WORKERS {
+            let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
+            target
+                .set_read_timeout(Some(IO_TIMEOUT))
+                .map_err(clean_io)?;
+            target
+                .set_write_timeout(Some(IO_TIMEOUT))
+                .map_err(clean_io)?;
+            let target_address = v4(target.local_addr().map_err(clean_io)?)?;
+            let (control, application, relay) = m14_udp_associate(proxy)?;
+            let application_address = v4(application.local_addr().map_err(clean_io)?)?;
+            target_addresses.push(target_address);
+            application_addresses.push(application_address);
+            relay_addresses.push(relay);
+            prepared.push((
+                worker_index,
+                control,
+                application,
+                relay,
+                target,
+                target_address,
+            ));
+        }
+        for (worker_index, control, application, relay, target, target_address) in
+            std::mem::take(&mut prepared)
+        {
+            let worker_gate = Arc::clone(&gate);
+            let worker_stop = Arc::clone(&stop);
+            let failure_gate = Arc::clone(&gate);
+            let failure_stop = Arc::clone(&stop);
+            workers.push(spawn_worker(move || {
+                let result = profile_udp_load(
+                    worker_index,
+                    control,
+                    application,
+                    relay,
+                    target,
+                    target_address,
+                    worker_gate,
+                    worker_stop,
+                    warmup,
+                    active,
+                    payload_bytes,
+                );
+                if result.is_err() {
+                    failure_stop.store(true, Ordering::SeqCst);
+                    failure_gate.cancel();
+                }
+                result
+            })?);
+        }
+        let start = gate.start_when_ready(PROFILE_UDP_WORKERS, Instant::now() + STARTUP_TIMEOUT)?;
+        let warm_end = start + warmup;
+        let active_end = warm_end + active;
+        wait_for_profile_phase(
+            client_process.as_mut().expect("client process"),
+            server_process.as_mut().expect("server process"),
+            &gate,
+            &workers,
+            warm_end,
+            true,
+        )?;
+        gate.require_validated(PROFILE_UDP_WORKERS)?;
+        client_process
+            .as_mut()
+            .expect("client process")
+            .ensure_running()?;
+        server_process
+            .as_mut()
+            .expect("server process")
+            .ensure_running()?;
+        ensure_profile_workers_running(&gate, &workers)?;
+        ready = Some(ReadyFile::publish(
+            ready_file,
+            arguments.scenario,
+            client_process.as_ref().expect("client process").id(),
+            server_process.as_ref().expect("server process").id(),
+            arguments.warmup_seconds,
+            arguments.active_seconds,
+        )?);
+        wait_for_profile_phase(
+            client_process.as_mut().expect("client process"),
+            server_process.as_mut().expect("server process"),
+            &gate,
+            &workers,
+            active_end,
+            false,
+        )
+    })();
+    let execution_succeeded = execution.is_ok();
+    if let Err(error) = execution {
+        errors.push(error);
+    }
+    if let Some(owner) = ready.take()
+        && let Err(error) = owner.remove()
+    {
+        errors.push(format!("ready cleanup failed: {error}"));
+    }
+    stop.store(true, Ordering::SeqCst);
+    gate.cancel();
+    drop(prepared);
+    let mut datagrams = 0_usize;
+    for worker in workers {
+        match join_worker(worker).and_then(|result| result) {
+            Ok(count) => match datagrams.checked_add(count) {
+                Some(total) => datagrams = total,
+                None => errors.push("profile UDP datagram count overflow".to_owned()),
+            },
+            Err(error) => errors.push(error),
+        }
+    }
+    if execution_succeeded && datagrams == 0 {
+        errors.push("profile UDP completed no validated datagrams".to_owned());
+    }
+    for process in [&mut client_process, &mut server_process] {
+        if let Some(process) = process.as_mut()
+            && let Err(error) = process.terminate()
+        {
+            errors.push(format!("process cleanup failed: {error}"));
+        }
+    }
+    drop((client_process.take(), server_process.take()));
+    drop((proxy_reservation.take(), server_reservation.take()));
+    if let Some(directory) = directory.take()
+        && let Err(error) = directory.close().map_err(clean_io)
+    {
+        errors.push(format!("config cleanup failed: {error}"));
+    }
+    for result in [
+        prove_tcp_rebind(proxy, "profile UDP client"),
+        prove_tcp_udp_rebind(server, "profile UDP server"),
+    ] {
+        if let Err(error) = result {
+            errors.push(format!("rebind failed: {error}"));
+        }
+    }
+    for (kind, addresses) in [
+        ("target", target_addresses),
+        ("application", application_addresses),
+        ("relay", relay_addresses),
+    ] {
+        for address in addresses {
+            if let Err(error) = prove_udp_rebind(address, &format!("profile UDP {kind}")) {
+                errors.push(format!("rebind failed: {error}"));
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    let summary = if arguments.scenario == ProfileScenario::UdpSmallHigh {
+        format!(
+            "m17_profile_workload_completion status=PASS scenario=udp-small-high \
+             datagrams={datagrams} workers={PROFILE_UDP_WORKERS} \
+             payload_bytes={PROFILE_UDP_PAYLOAD_BYTES} warmup_seconds={} active_seconds={} \
+             drain=PASS rebind=PASS",
+            arguments.warmup_seconds, arguments.active_seconds,
+        )
+    } else {
+        format!(
+            "m18_profile_workload_completion status=PASS scenario=udp-mtu-1200 \
+             datagrams={datagrams} workers={PROFILE_UDP_WORKERS} \
+             payload_bytes={PROFILE_UDP_MTU_PAYLOAD_BYTES} warmup_seconds={} active_seconds={} \
+             drain=PASS rebind=PASS",
+            arguments.warmup_seconds, arguments.active_seconds,
+        )
+    };
+    let checked_units =
+        u64::try_from(datagrams).map_err(|_| "profile UDP datagram count overflow".to_owned())?;
+    Ok(ProfileOutcome {
+        summary,
+        metric: "datagrams_per_second",
+        value: rate_per_second(checked_units, active)?,
+        checked_units,
+        p99_nanoseconds: None,
+        io_completions: checked_units.saturating_mul(4),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profile_udp_load(
+    worker_index: usize,
+    _control: TcpStream,
+    application: UdpSocket,
+    relay: SocketAddrV4,
+    target: UdpSocket,
+    target_address: SocketAddrV4,
+    gate: Arc<StartGate>,
+    stop: Arc<AtomicBool>,
+    warmup: Duration,
+    active: Duration,
+    payload_bytes: usize,
+) -> Result<usize, String> {
+    let started = gate.ready_and_wait()?;
+    let warm_end = started + warmup;
+    let active_end = warm_end + active;
+    let mut payload = [0x5a; PROFILE_UDP_MTU_PAYLOAD_BYTES];
+    let payload = &mut payload[..payload_bytes];
+    payload[8] = u8::try_from(worker_index).expect("profile UDP worker index");
+    let mut sequence = 0_u64;
+    let mut counted = 0_usize;
+    let mut reported_valid = false;
+    while Instant::now() < active_end && !stop.load(Ordering::SeqCst) {
+        payload[..8].copy_from_slice(&sequence.to_be_bytes());
+        let transfer_start = Instant::now();
+        m14_udp_round_trip(&application, relay, &target, target_address, payload)?;
+        let completion = Instant::now();
+        if !reported_valid {
+            gate.worker_validated()?;
+            reported_valid = true;
+        }
+        if transfer_is_measured(transfer_start, completion, warm_end, active_end) {
+            counted = counted
+                .checked_add(1)
+                .ok_or_else(|| "profile UDP datagram count overflow".to_owned())?;
+        }
+        sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| "profile UDP sequence overflow".to_owned())?;
+    }
+    Ok(counted)
 }
 
 struct HostedIdentity {
@@ -506,12 +1694,17 @@ fn throughput_trial(
     let mut client_process = spawn_proxy(topology, "client", &client_binary, &client_config)?;
     wait_for_listener(&mut client_process, proxy)?;
     let gate = Arc::new(StartGate::default());
+    let stop = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::with_capacity(STREAMS);
     for _ in 0..STREAMS {
         let worker_gate = Arc::clone(&gate);
-        match spawn_worker(move || load_stream(proxy, target, worker_gate)) {
+        let worker_stop = Arc::clone(&stop);
+        match spawn_worker(move || {
+            load_stream(proxy, target, worker_gate, worker_stop, WARMUP, MEASURE)
+        }) {
             Ok(worker) => workers.push(worker),
             Err(error) => {
+                stop.store(true, Ordering::SeqCst);
                 gate.cancel();
                 for worker in workers {
                     let _ = join_worker(worker);
@@ -521,6 +1714,8 @@ fn throughput_trial(
         }
     }
     if let Err(error) = gate.start_when_ready(STREAMS, Instant::now() + STARTUP_TIMEOUT) {
+        stop.store(true, Ordering::SeqCst);
+        gate.cancel();
         for worker in workers {
             let _ = join_worker(worker);
         }
@@ -567,26 +1762,25 @@ fn load_stream(
     proxy: SocketAddrV4,
     target: SocketAddrV4,
     gate: Arc<StartGate>,
+    stop: Arc<AtomicBool>,
+    warmup: Duration,
+    active: Duration,
 ) -> Result<u64, String> {
-    let prepared = (|| {
-        let stream = socks_connect(proxy, target, Instant::now() + STARTUP_TIMEOUT)?;
-        stream.set_nodelay(true).map_err(clean_io)?;
-        stream
-            .set_read_timeout(Some(IO_TIMEOUT))
-            .map_err(clean_io)?;
-        stream
-            .set_write_timeout(Some(IO_TIMEOUT))
-            .map_err(clean_io)?;
-        Ok::<_, String>(stream)
-    })();
+    let mut stream = match open_profile_stream(proxy, target) {
+        Ok(stream) => stream,
+        Err(error) => {
+            gate.cancel();
+            return Err(error);
+        }
+    };
     let started = gate.ready_and_wait()?;
-    let mut stream = prepared?;
     let payload = [0x5a; PAYLOAD_BYTES];
     let mut echoed = [0_u8; PAYLOAD_BYTES];
-    let warm_end = started + WARMUP;
-    let measure_end = warm_end + MEASURE;
+    let warm_end = started + warmup;
+    let measure_end = warm_end + active;
     let mut measured = 0_u64;
-    while Instant::now() < measure_end {
+    let mut reported_valid = false;
+    while Instant::now() < measure_end && !stop.load(Ordering::SeqCst) {
         let transfer_start = Instant::now();
         stream.write_all(&payload).map_err(clean_io)?;
         stream.read_exact(&mut echoed).map_err(clean_io)?;
@@ -594,12 +1788,157 @@ fn load_stream(
             return Err("echo payload mismatch".to_owned());
         }
         let completion = Instant::now();
+        if !reported_valid {
+            gate.worker_validated()?;
+            reported_valid = true;
+        }
         if transfer_is_measured(transfer_start, completion, warm_end, measure_end) {
-            measured += PAYLOAD_BYTES as u64;
+            measured = measured
+                .checked_add(PAYLOAD_BYTES as u64)
+                .ok_or_else(|| "throughput byte count overflow".to_owned())?;
         }
     }
     stream.shutdown(Shutdown::Both).map_err(clean_io)?;
     Ok(measured)
+}
+
+fn open_profile_stream(proxy: SocketAddrV4, target: SocketAddrV4) -> Result<TcpStream, String> {
+    let stream = socks_connect(proxy, target, Instant::now() + STARTUP_TIMEOUT)?;
+    stream.set_nodelay(true).map_err(clean_io)?;
+    stream
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .map_err(clean_io)?;
+    stream
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(clean_io)?;
+    Ok(stream)
+}
+
+fn load_tcp_stream(
+    proxy: SocketAddrV4,
+    target: SocketAddrV4,
+    gate: Arc<StartGate>,
+    stop: Arc<AtomicBool>,
+    warmup: Duration,
+    active: Duration,
+) -> Result<u64, String> {
+    let mut stream = match open_profile_stream(proxy, target) {
+        Ok(stream) => stream,
+        Err(error) => {
+            gate.cancel();
+            return Err(error);
+        }
+    };
+    let started = gate.ready_and_wait()?;
+    let warm_end = started + warmup;
+    let active_end = warm_end + active;
+    let mut payload = [0x5a; PAYLOAD_BYTES];
+    let mut expected = vec![0_u8; PAYLOAD_BYTES * PROFILE_TCP_STREAM_BATCH];
+    let mut echoed = vec![0_u8; PAYLOAD_BYTES * PROFILE_TCP_STREAM_BATCH];
+    let mut sequence = 0_u64;
+    let mut measured = 0_u64;
+    let mut reported_valid = false;
+    while Instant::now() < active_end && !stop.load(Ordering::SeqCst) {
+        let transfer_start = Instant::now();
+        for slot in expected.chunks_exact_mut(PAYLOAD_BYTES) {
+            payload[..8].copy_from_slice(&sequence.to_be_bytes());
+            slot.copy_from_slice(&payload);
+            stream.write_all(&payload).map_err(clean_io)?;
+            sequence = sequence
+                .checked_add(1)
+                .ok_or_else(|| "profile TCP stream sequence overflow".to_owned())?;
+        }
+        stream.read_exact(&mut echoed).map_err(clean_io)?;
+        if echoed != expected {
+            return Err("streaming echo payload mismatch".to_owned());
+        }
+        let completion = Instant::now();
+        if !reported_valid {
+            gate.worker_validated()?;
+            reported_valid = true;
+        }
+        if transfer_is_measured(transfer_start, completion, warm_end, active_end) {
+            measured = measured
+                .checked_add(expected.len() as u64)
+                .ok_or_else(|| "profile TCP stream byte count overflow".to_owned())?;
+        }
+    }
+    stream.shutdown(Shutdown::Both).map_err(clean_io)?;
+    Ok(measured)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_tcp_request_response(
+    proxy: SocketAddrV4,
+    target: SocketAddrV4,
+    payload_bytes: usize,
+    gate: Arc<StartGate>,
+    stop: Arc<AtomicBool>,
+    warmup: Duration,
+    active: Duration,
+) -> Result<Vec<u64>, String> {
+    let mut stream = match open_profile_stream(proxy, target) {
+        Ok(stream) => stream,
+        Err(error) => {
+            gate.cancel();
+            return Err(error);
+        }
+    };
+    let started = gate.ready_and_wait()?;
+    let warm_end = started + warmup;
+    let active_end = warm_end + active;
+    let mut payload = vec![0x5a; payload_bytes];
+    let mut echoed = vec![0_u8; payload_bytes];
+    let mut sequence = 0_u64;
+    let mut latencies = Vec::new();
+    let mut reported_valid = false;
+    while Instant::now() < active_end && !stop.load(Ordering::SeqCst) {
+        payload[..8].copy_from_slice(&sequence.to_be_bytes());
+        let transfer_start = Instant::now();
+        stream.write_all(&payload).map_err(clean_io)?;
+        stream.read_exact(&mut echoed).map_err(clean_io)?;
+        if echoed != payload {
+            return Err("request-response echo payload mismatch".to_owned());
+        }
+        let completion = Instant::now();
+        if !reported_valid {
+            gate.worker_validated()?;
+            reported_valid = true;
+        }
+        if transfer_is_measured(transfer_start, completion, warm_end, active_end) {
+            if latencies.len() == PROFILE_TCP_LATENCY_SAMPLE_CAP {
+                return Err("profile TCP latency sample cap exceeded".to_owned());
+            }
+            latencies.push(
+                u64::try_from(completion.duration_since(transfer_start).as_nanos())
+                    .map_err(|_| "profile TCP latency overflow".to_owned())?,
+            );
+        }
+        sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| "profile TCP request sequence overflow".to_owned())?;
+    }
+    stream.shutdown(Shutdown::Both).map_err(clean_io)?;
+    Ok(latencies)
+}
+
+fn rate_per_second(units: u64, active: Duration) -> Result<u64, String> {
+    u64::try_from(u128::from(units) * 1_000_000_000 / active.as_nanos())
+        .map_err(|_| "profile rate overflow".to_owned())
+}
+
+fn percentile_99(mut values: Vec<u64>) -> Result<u64, String> {
+    if values.is_empty() {
+        return Err("profile p99 sample set is empty".to_owned());
+    }
+    values.sort_unstable();
+    let rank = values
+        .len()
+        .checked_mul(99)
+        .and_then(|value| value.checked_add(99))
+        .ok_or_else(|| "profile p99 rank overflow".to_owned())?
+        / 100;
+    Ok(values[rank - 1])
 }
 
 fn transfer_is_measured(
@@ -1302,7 +2641,7 @@ fn m14_udp_round_trip(
 ) -> Result<(), String> {
     let request = m14_socks_datagram(target_address, payload);
     application.send_to(&request, relay).map_err(clean_io)?;
-    let mut received = [0_u8; 256];
+    let mut received = [0_u8; PROFILE_UDP_MTU_PAYLOAD_BYTES + 10];
     let (length, peer) = target.recv_from(&mut received).map_err(clean_io)?;
     if &received[..length] != payload {
         return Err("M14 UDP target payload mismatch".to_owned());
@@ -2225,6 +3564,144 @@ fn run_self_check() -> Result<String, String> {
         github_sha: sha.to_owned(),
     };
     validate_environment(sha, &good)?;
+    let profile_arguments: Vec<OsString> = [
+        "--scenario",
+        "tcp-bulk",
+        "--warmup-seconds",
+        "1",
+        "--active-seconds",
+        "10",
+        "--ready-file",
+        "profiles/self-check/ready.txt",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let profile = parse_profile_args(&profile_arguments)?;
+    if profile.scenario != ProfileScenario::TcpBulk
+        || profile.warmup_seconds != 1
+        || profile.active_seconds != 10
+        || profile.ready_file != Path::new("profiles/self-check/ready.txt")
+        || profile.raw.is_some()
+    {
+        return Err("valid profile workload arguments were not preserved".to_owned());
+    }
+    for scenario in [
+        "tcp-stream-64k",
+        "tcp-request-1k",
+        "tcp-request-4k",
+        "tcp-request-16k",
+        "udp-mtu-1200",
+    ] {
+        let mut fixed = profile_arguments.clone();
+        fixed[1] = OsString::from(scenario);
+        if parse_profile_args(&fixed)?.scenario.label() != scenario {
+            return Err("fixed M18 profile scenario was not preserved".to_owned());
+        }
+    }
+    let raw_arguments: Vec<OsString> = [
+        "--scenario",
+        "tcp-stream-64k",
+        "--warmup-seconds",
+        "1",
+        "--active-seconds",
+        "10",
+        "--ready-file",
+        "profiles/self-check/raw-ready.txt",
+        "--output",
+        "profiles/self-check/raw.jsonl",
+        "--parent-sha",
+        sha,
+        "--candidate-sha",
+        sha,
+        "--member",
+        "parent",
+        "--pair",
+        "5",
+        "--order",
+        "2",
+        "--build-profile",
+        "fat-cgu1",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let raw_profile = parse_profile_args(&raw_arguments)?;
+    let raw = raw_profile.raw.as_ref().expect("complete raw arguments");
+    if raw.output != Path::new("profiles/self-check/raw.jsonl")
+        || raw.parent_sha != sha
+        || raw.candidate_sha != sha
+        || raw.member.label() != "parent"
+        || raw.pair != 5
+        || raw.order != 2
+        || raw.build_profile != "fat-cgu1"
+    {
+        return Err("valid raw profile arguments were not preserved".to_owned());
+    }
+    expect_rejected("incomplete raw profile identity", || {
+        parse_profile_args(&raw_arguments[..raw_arguments.len() - 2])
+    })?;
+    let invalid_ready_profile = ProfileArgs {
+        scenario: ProfileScenario::TcpStream64k,
+        warmup_seconds: 1,
+        active_seconds: 10,
+        ready_file: PathBuf::from("profiles"),
+        raw: None,
+    };
+    expect_rejected("profile ready resolution reaches unified result", || {
+        run_profile_scenario(&invalid_ready_profile)
+    })?;
+    if percentile_99((1..=100).collect())? != 99 {
+        return Err("profile p99 rank is invalid".to_owned());
+    }
+    let mut overflowing = profile_arguments.clone();
+    overflowing[5] = OsString::from("901");
+    expect_rejected("overflowing profile active lifetime", || {
+        parse_profile_args(&overflowing)
+    })?;
+    let cancelled_profile_gate = StartGate::default();
+    for _ in 0..STREAMS {
+        cancelled_profile_gate.worker_validated()?;
+    }
+    cancelled_profile_gate.cancel();
+    expect_rejected("validated then cancelled profile load", || {
+        cancelled_profile_gate.require_validated(STREAMS)
+    })?;
+    let profile_ready = tempfile::tempdir().map_err(clean_io)?;
+    let ready_path = profile_ready.path().join("ready.txt");
+    let ready = ReadyFile::publish(&ready_path, ProfileScenario::TcpBulk, 11, 12, 1, 10)?;
+    if fs::read_to_string(&ready_path).map_err(clean_io)?
+        != "scenario=tcp-bulk\nclient_pid=11\nserver_pid=12\nwarmup_seconds=1\nactive_seconds=10\n"
+    {
+        return Err("profile ready file fields are incomplete".to_owned());
+    }
+    expect_rejected("profile ready collision", || {
+        ReadyFile::publish(&ready_path, ProfileScenario::TcpBulk, 21, 22, 1, 10)
+    })?;
+    if fs::read_to_string(&ready_path).map_err(clean_io)?
+        != "scenario=tcp-bulk\nclient_pid=11\nserver_pid=12\nwarmup_seconds=1\nactive_seconds=10\n"
+    {
+        return Err("profile ready collision overwrote the sentinel".to_owned());
+    }
+    ready.remove()?;
+    if ready_path.exists() {
+        return Err("profile ready file survived explicit cleanup".to_owned());
+    }
+    {
+        let _ready = ReadyFile::publish(&ready_path, ProfileScenario::UdpSmallHigh, 31, 32, 1, 10)?;
+    }
+    if ready_path.exists() {
+        return Err("profile ready file survived unwind cleanup".to_owned());
+    }
+    let raw_path = profile_ready.path().join("raw.jsonl");
+    let raw_line = "{\"kind\":\"m18_profile_trial\",\"status\":\"PASS\"}";
+    let mut raw_evidence = Evidence::create(&raw_path)?;
+    raw_evidence.line(raw_line.to_owned())?;
+    raw_evidence.finish()?;
+    if fs::read_to_string(&raw_path).map_err(clean_io)? != format!("{raw_line}\n") {
+        return Err("M18 raw profile row did not round-trip".to_owned());
+    }
+    expect_rejected("M18 raw profile overwrite", || Evidence::create(&raw_path))?;
     let thp = tempfile::tempdir().map_err(clean_io)?;
     let thp_profile = thp.path().join("max_ptes_none");
     fs::write(&thp_profile, "0\n").map_err(clean_io)?;
@@ -3192,6 +4669,7 @@ struct StartGate {
 #[derive(Default)]
 struct StartState {
     ready: usize,
+    validated: usize,
     start: Option<Instant>,
     cancelled: bool,
 }
@@ -3240,6 +4718,41 @@ impl StartGate {
         state.start = Some(start);
         self.changed.notify_all();
         Ok(start)
+    }
+
+    fn worker_validated(&self) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "load start gate is poisoned".to_owned())?;
+        state.validated += 1;
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    fn require_validated(&self, expected: usize) -> Result<(), String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "load start gate is poisoned".to_owned())?;
+        if state.cancelled {
+            return Err("profile load was cancelled".to_owned());
+        }
+        if state.validated != expected {
+            return Err("profile load workers did not validate warm-up traffic".to_owned());
+        }
+        Ok(())
+    }
+
+    fn require_active(&self) -> Result<(), String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "load start gate is poisoned".to_owned())?;
+        if state.cancelled {
+            return Err("profile load was cancelled".to_owned());
+        }
+        Ok(())
     }
 
     fn cancel(&self) {

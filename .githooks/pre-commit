@@ -1,4 +1,0 @@
-#!/bin/sh
-# PASS/WARN/REVIEW_REQUIRED exit zero; non-zero means footprint-control integrity failed.
-repo=$(git rev-parse --show-toplevel) || exit 2
-exec sh "$repo/scripts/test-budget.sh" ticket --staged

@@ -77,3 +77,8 @@ shadowsocks-crypto = { path = "vendor/shadowsocks-crypto" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = "none"

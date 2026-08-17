@@ -1,7 +1,0 @@
-interface:
-  display_name: "Milestone Workflow"
-  short_description: "Plan and deliver milestones with Git-native evidence"
-  default_prompt: "Run milestone-workflow in status mode for this repository."
-
-policy:
-  allow_implicit_invocation: false

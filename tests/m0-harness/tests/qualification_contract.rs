@@ -61,6 +61,121 @@ fn m14_performance_profile_extends_the_existing_resource_driver() {
     assert!(!driver.contains("m14-improvement"));
 }
 
+#[test]
+fn m17_profile_workload_reuses_owners_and_is_bounded() {
+    let driver = include_str!("../../../tools/ferrum2-m4-qualification/src/m4_support/mod.rs");
+    let profile = driver
+        .split_once("enum ProfileScenario")
+        .expect("profile workload contract")
+        .1
+        .split_once("struct HostedIdentity")
+        .expect("hosted driver boundary")
+        .0;
+
+    for required in [
+        "Some(\"tcp-bulk\") => Ok(Self::TcpBulk)",
+        "Some(\"udp-small-high\") => Ok(Self::UdpSmallHigh)",
+        "const PROFILE_WARMUP_SECONDS: std::ops::RangeInclusive<u64> = 1..=60;",
+        "const PROFILE_ACTIVE_SECONDS: std::ops::RangeInclusive<u64> = 10..=900;",
+        "const PROFILE_UDP_WORKERS: usize = 4;",
+        "const PROFILE_UDP_PAYLOAD_BYTES: usize = 128;",
+        "TargetWorker::echo(target_listener, STREAMS)",
+        "ProfileScenario::TcpBulk => {",
+        "load_stream(proxy, target, worker_gate, worker_stop, warmup, active)",
+        "m14_udp_associate(proxy)",
+        "m14_udp_round_trip(&application, relay, &target, target_address, payload)",
+        "gate.require_validated(STREAMS)",
+        "gate.require_validated(PROFILE_UDP_WORKERS)",
+        "ensure_profile_workers_running(&gate, &workers)?",
+        "gate.require_active()?",
+        "validated then cancelled profile load",
+        "fs::hard_link(temporary.path(), path)",
+        "client_process.ensure_running()",
+        "server_process.ensure_running()",
+        "owner.remove()",
+        "client_process.terminate()",
+        "server_process.terminate()",
+        "prove_tcp_rebind(proxy, \"profile TCP client\")",
+        "prove_tcp_udp_rebind(server, \"profile UDP server\")",
+    ] {
+        assert!(
+            driver.contains(required),
+            "missing M17 contract: {required}"
+        );
+    }
+    assert!(profile.contains(
+        "scenario={}\\nclient_pid={}\\nserver_pid={}\\nwarmup_seconds={}\\nactive_seconds={}\\n"
+    ));
+    assert!(
+        driver.contains("\"profile-workload\" => run_profile_workload(parse_profile_args(&rest)?)")
+    );
+    assert!(!profile.contains("HostedIdentity::load"));
+    assert!(profile.contains("m17_profile_workload_completion status=PASS scenario=tcp-bulk"));
+    assert!(
+        profile.contains("m17_profile_workload_completion status=PASS scenario=udp-small-high")
+    );
+    assert!(!profile.contains("score"));
+}
+
+#[test]
+fn m18_performance_workloads_are_bounded_and_emit_raw_trials() {
+    let driver = include_str!("../../../tools/ferrum2-m4-qualification/src/m4_support/mod.rs");
+    let profile = driver
+        .split_once("enum ProfileScenario")
+        .expect("profile workload contract")
+        .1
+        .split_once("struct HostedIdentity")
+        .expect("hosted driver boundary")
+        .0;
+
+    for required in [
+        "Some(\"tcp-stream-64k\") => Ok(Self::TcpStream64k)",
+        "Some(\"tcp-request-1k\") => Ok(Self::TcpRequest1k)",
+        "Some(\"tcp-request-4k\") => Ok(Self::TcpRequest4k)",
+        "Some(\"tcp-request-16k\") => Ok(Self::TcpRequest16k)",
+        "Some(\"udp-mtu-1200\") => Ok(Self::UdpMtu1200)",
+        "const PROFILE_TCP_STREAM_BATCH: usize = 4;",
+        "const PROFILE_TCP_LATENCY_WORKERS: usize = 1;",
+        "const PROFILE_TCP_LATENCY_ACTIVE_MAX_SECONDS: u64 = 60;",
+        "const PROFILE_TCP_LATENCY_SAMPLE_CAP: usize = 2_000_000;",
+        "const PROFILE_UDP_MTU_PAYLOAD_BYTES: usize = 1_200;",
+        "for slot in expected.chunks_exact_mut(PAYLOAD_BYTES)",
+        "stream.write_all(&payload).map_err(clean_io)?;",
+        "stream.read_exact(&mut echoed).map_err(clean_io)?;",
+        "streaming echo payload mismatch",
+        "request-response echo payload mismatch",
+        "percentile_99(latencies)?",
+        "raw profile options must be supplied as one complete set",
+        "ProfileRawIdentity::load(raw)",
+        "Evidence::create(&output)?",
+        "let result = run_profile_scenario(&arguments);",
+        "profile ready resolution reaches unified result",
+        "m18_profile_trial",
+        "correctness\\\":\\\"PASS",
+        "correctness\\\":\\\"FAIL",
+        "M18 raw profile row did not round-trip",
+        "M18 raw profile overwrite",
+    ] {
+        assert!(
+            driver.contains(required),
+            "missing M18 contract: {required}"
+        );
+    }
+    assert_eq!(driver.matches("enum ProfileScenario").count(), 1);
+    let workload = driver
+        .split_once("fn run_profile_workload")
+        .expect("profile workload")
+        .1
+        .split_once("fn wait_for_profile_phase")
+        .expect("profile workload end")
+        .0;
+    assert!(!workload.contains("resolve_profile_ready_file(&arguments.ready_file)?"));
+    assert!(!profile.contains("serde_json"));
+    assert!(!profile.contains("criterion"));
+    assert!(!profile.contains("panic=abort"));
+    assert!(!profile.contains("target-cpu=native"));
+}
+
 #[derive(Default)]
 struct FakeOps {
     fail_provision: Option<Reference>,
