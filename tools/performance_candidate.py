@@ -76,6 +76,15 @@ PROFILE_FIELDS = frozenset(
 )
 SHA256 = re.compile(r"[0-9a-f]{64}")
 U64_MAX = (1 << 64) - 1
+OUTLIER_MODIFIED_Z_THRESHOLD = Decimal("3.5")
+MODIFIED_Z_SCALE = Decimal("0.6745")
+HIGH_VARIANCE_MAD_MULTIPLIER = Decimal("6")
+WARNING_POLICY = {
+    "decision_effect": "none",
+    "outlier_method": "modified z-score using median absolute deviation",
+    "outlier_modified_z_threshold": 3.5,
+    "high_variance_rule": "spread exceeds six MADs, or a calibrated noise-band width",
+}
 MEASUREMENT_ENVIRONMENT = {
     "runner_image": "ubuntu-24.04",
     "runner_os": "Linux",
@@ -667,7 +676,8 @@ def _improvement(parent: int, candidate: int, direction: str) -> Decimal:
 
 
 def _display_decimal(value: Decimal) -> float:
-    return round(float(value), 9)
+    displayed = round(float(value), 9)
+    return 0.0 if displayed == 0 else displayed
 
 
 def _observed_direction(*, wins: int, losses: int) -> str:
@@ -678,6 +688,45 @@ def _observed_direction(*, wins: int, losses: int) -> str:
     if losses:
         return "negative"
     return "neutral"
+
+
+def _stability_warnings(
+    improvements: Sequence[Decimal], *, noise_band: object
+) -> tuple[Decimal, list[str]]:
+    median = _median(improvements)
+    minimum = min(improvements)
+    maximum = max(improvements)
+    spread = maximum - minimum
+    deviations = [abs(value - median) for value in improvements]
+    mad = _median(deviations)
+    warnings = []
+    if any(value > 0 for value in improvements) and any(
+        value < 0 for value in improvements
+    ):
+        warnings.append("MIXED_DIRECTION")
+    if mad > 0:
+        minimum_z = MODIFIED_Z_SCALE * abs(minimum - median) / mad
+        maximum_z = MODIFIED_Z_SCALE * abs(maximum - median) / mad
+        if minimum < median and minimum_z > OUTLIER_MODIFIED_Z_THRESHOLD:
+            warnings.append("EXTREME_NEGATIVE_PAIR")
+        if maximum > median and maximum_z > OUTLIER_MODIFIED_Z_THRESHOLD:
+            warnings.append("EXTREME_POSITIVE_PAIR")
+    elif spread > 0:
+        if minimum < median:
+            warnings.append("EXTREME_NEGATIVE_PAIR")
+        if maximum > median:
+            warnings.append("EXTREME_POSITIVE_PAIR")
+    if noise_band is not None:
+        high_variance = spread > Decimal(2) * _policy_percent(
+            noise_band, "noise_band_percent"
+        )
+    else:
+        high_variance = (mad > 0 and spread > HIGH_VARIANCE_MAD_MULTIPLIER * mad) or (
+            mad == 0 and spread > 0
+        )
+    if high_variance:
+        warnings.append("HIGH_VARIANCE")
+    return spread, warnings
 
 
 def _scenario_threshold_decision(
@@ -931,6 +980,11 @@ def summarize_evidence(
         losses = sum(value < 0 for value in improvements)
         ties = len(improvements) - wins - losses
         median_improvement = _median(improvements)
+        policy_entry = plan["decision_policy"]["scenarios"][scenario]
+        spread, warnings = _stability_warnings(
+            improvements,
+            noise_band=policy_entry["noise_band_percent"],
+        )
         threshold_decision = _scenario_threshold_decision(
             plan=plan,
             scenario_plan=scenario_plan,
@@ -952,8 +1006,12 @@ def summarize_evidence(
                 "median_improvement_percent": _display_decimal(median_improvement),
                 "minimum_improvement_percent": _display_decimal(min(improvements)),
                 "maximum_improvement_percent": _display_decimal(max(improvements)),
+                "spread_percent": _display_decimal(spread),
                 "observed_direction": _observed_direction(wins=wins, losses=losses),
-                "warnings": [],
+                "outlier_warning": any(
+                    warning.startswith("EXTREME_") for warning in warnings
+                ),
+                "warnings": warnings,
                 **threshold_decision,
             }
         )
@@ -1010,6 +1068,7 @@ def summarize_evidence(
         "candidate_sha": candidate_sha,
         "pairs": plan["pairs"],
         "decision_policy": plan["decision_policy"],
+        "warning_policy": dict(WARNING_POLICY),
         "decision_enabled": enabled_count > 0,
         "candidate_win_enabled": threshold_availability == "complete",
         "decision_reason": decision_reason,
@@ -1053,6 +1112,7 @@ def invalid_summary(
             if plan is not None
             else (UNCALIBRATED_POLICY if decision_policy is None else decision_policy)
         ),
+        "warning_policy": dict(WARNING_POLICY),
         "decision_enabled": False,
         "candidate_win_enabled": False,
         "decision_reason": "invalid evidence",
@@ -1090,9 +1150,10 @@ def summary_markdown(summary: dict[str, object]) -> str:
             f"(`{summary['decision_policy']['policy_sha256'] or 'in-memory'}`)",
             f"- Threshold availability: `{summary['threshold_availability']}`",
             f"- Decision: {summary['decision_reason']}",
+            "- Warnings are descriptive only and never change status or exit code.",
             "",
-            "| Scenario | Role | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Threshold decision | Status |",
-            "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|",
+            "| Scenario | Role | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Spread % | Warnings | Threshold decision | Status |",
+            "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
         ]
     )
     for scenario in summary["scenarios"]:
@@ -1103,6 +1164,8 @@ def summary_markdown(summary: dict[str, object]) -> str:
             f"{scenario['ties']} | {scenario['median_improvement_percent']:.6f} | "
             f"{scenario['minimum_improvement_percent']:.6f} | "
             f"{scenario['maximum_improvement_percent']:.6f} | "
+            f"{scenario['spread_percent']:.6f} | "
+            f"{', '.join(scenario['warnings']) or '-'} | "
             f"{scenario['threshold_decision']} | {scenario['status']} |"
         )
     lines.extend(

@@ -469,6 +469,67 @@ class EvidenceSummaryTests(unittest.TestCase):
         )
         self.assertEqual(scenario["median_improvement_percent"], 0.0)
 
+    def test_observed_direction_spread_and_outlier_warnings_are_descriptive(
+        self,
+    ) -> None:
+        cases = (
+            ((110, 120, 130), "positive", set()),
+            ((90, 80, 70), "negative", set()),
+            ((90, 100, 110), "mixed", {"MIXED_DIRECTION"}),
+            (
+                (4, 101, 102),
+                "mixed",
+                {"MIXED_DIRECTION", "EXTREME_NEGATIVE_PAIR", "HIGH_VARIANCE"},
+            ),
+            (
+                (99, 101, 196),
+                "mixed",
+                {"MIXED_DIRECTION", "EXTREME_POSITIVE_PAIR", "HIGH_VARIANCE"},
+            ),
+            ((100, 100, 100), "neutral", set()),
+        )
+        for candidates, direction, expected_warnings in cases:
+            with self.subTest(candidates=candidates):
+                plan = self.plan("qualification", "tcp-bulk")
+                _root, parent, candidate = self.roots()
+                values = {
+                    ("tcp-bulk", pair, "candidate"): value
+                    for pair, value in enumerate(candidates, start=1)
+                }
+                self.populate(plan, parent, candidate, values)
+                summary = self.summarize(plan, parent, candidate)
+                primary = next(
+                    item for item in summary["scenarios"] if item["role"] == "primary"
+                )
+                self.assertEqual(summary["status"], "INCONCLUSIVE")
+                self.assertEqual(primary["observed_direction"], direction)
+                self.assertEqual(set(primary["warnings"]), expected_warnings)
+                self.assertEqual(
+                    primary["spread_percent"],
+                    primary["maximum_improvement_percent"]
+                    - primary["minimum_improvement_percent"],
+                )
+
+    def test_warning_never_overrides_a_calibrated_candidate_decision(self) -> None:
+        plan = self.plan(
+            "qualification",
+            "tcp-stream-64k",
+            decision_policy=synthetic_policy(),
+        )
+        _root, parent, candidate = self.roots()
+        values = {
+            ("tcp-stream-64k", pair, "candidate"): value
+            for pair, value in enumerate((4, 110, 110), start=1)
+        }
+        self.populate(plan, parent, candidate, values)
+        summary = self.summarize(plan, parent, candidate)
+        primary = next(
+            item for item in summary["scenarios"] if item["role"] == "primary"
+        )
+        self.assertEqual(summary["status"], "CANDIDATE_WIN")
+        self.assertIn("EXTREME_NEGATIVE_PAIR", primary["warnings"])
+        self.assertIsNone(summary["workflow_failure_reason"])
+
     def test_even_median_averages_the_two_middle_deltas(self) -> None:
         self.assertEqual(
             CONTROL._median(
