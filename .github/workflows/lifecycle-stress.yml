@@ -1,0 +1,35 @@
+name: lifecycle-stress
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle-cycles:
+    name: lifecycle-cycles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify candidate and run repeated lifecycle qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          rustup toolchain install 1.97.1 --profile minimal
+          cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --bins --locked
+          timeout --signal=TERM --kill-after=30s 30m \
+            cargo +1.97.1 test -p ferrum2-m0-harness --test lifecycle_cycles \
+              full_qualification_runs_twenty_cycles_per_category_and_at_least_100_per_binary \
+              --locked -- --ignored --exact --nocapture
