@@ -1,2 +1,5 @@
 .worktrees/
 /target
+# Python cache
+__pycache__/
+*.py[cod]
