@@ -248,7 +248,23 @@ def bounded_run(
     return subprocess.CompletedProcess(arguments, status, stdout, stderr)
 
 
-def assert_cli_contract(spec: BinarySpec) -> None:
+def write_offline_config(
+    source: Path,
+    destination: Path,
+    spec: BinarySpec,
+    ports: tuple[int, ...],
+) -> None:
+    fixed_ports = (1080, 8388, 9090) if spec.role == "client" else (8388, 9090)
+    require(len(ports) == len(fixed_ports), "offline-config-port-count")
+    text = source.read_text(encoding="utf-8")
+    for fixed, allocated in zip(fixed_ports, ports, strict=True):
+        endpoint = f"127.0.0.1:{fixed}"
+        require(endpoint in text, "offline-config-endpoint")
+        text = text.replace(endpoint, f"127.0.0.1:{allocated}")
+    destination.write_text(text, encoding="utf-8", newline="\n")
+
+
+def assert_cli_contract(spec: BinarySpec, directory: Path) -> None:
     help_result = bounded_run([str(spec.path), "--help"])
     require(help_result.returncode == 0, "help-exit")
     require(b"Usage:" in help_result.stdout and help_result.stderr == b"", "help-output")
@@ -262,10 +278,17 @@ def assert_cli_contract(spec: BinarySpec) -> None:
         "version-output",
     )
 
-    traps = bind_traps(spec)
+    traps = tcp_listeners(3 if spec.role == "client" else 2)
+    for trap in traps:
+        trap.setblocking(False)
+    ports = tuple(int(trap.getsockname()[1]) for trap in traps)
+    valid_config = directory / f"{spec.name}-offline-valid.toml"
+    invalid_config = directory / f"{spec.name}-offline-invalid.toml"
+    write_offline_config(spec.valid_config, valid_config, spec, ports)
+    write_offline_config(spec.invalid_config, invalid_config, spec, ports)
     try:
         valid = bounded_run(
-            [str(spec.path), "--config", str(spec.valid_config), "--check-config"]
+            [str(spec.path), "--config", str(valid_config), "--check-config"]
         )
         require(
             valid.returncode == 0
@@ -276,7 +299,7 @@ def assert_cli_contract(spec: BinarySpec) -> None:
         assert_no_connections(traps)
 
         invalid = bounded_run(
-            [str(spec.path), "--config", str(spec.invalid_config), "--check-config"]
+            [str(spec.path), "--config", str(invalid_config), "--check-config"]
         )
         require(
             invalid.returncode == 2
@@ -365,22 +388,6 @@ def assert_tagged_offline_config(spec: BinarySpec, directory: Path) -> None:
     finally:
         for trap in traps:
             trap.close()
-
-
-def bind_traps(spec: BinarySpec) -> list[socket.socket]:
-    ports = [8388, 9090] if spec.role == "server" else [1080, 8388, 9090]
-    traps = []
-    try:
-        for port in ports:
-            trap = tcp_listener(port)
-            trap.setblocking(False)
-            traps.append(trap)
-    except BaseException:
-        for trap in traps:
-            trap.close()
-        raise
-    return traps
-
 
 def assert_no_connections(traps: list[socket.socket]) -> None:
     for trap in traps:
@@ -775,7 +782,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="ferrum2-m3-platform-") as temporary:
             directory = Path(temporary)
             for spec in specs:
-                assert_cli_contract(spec)
+                assert_cli_contract(spec, directory)
                 assert_tagged_offline_config(spec, directory)
                 assert_startup_rollback(spec, directory)
                 assert_tagged_startup_rollback(spec, directory)
