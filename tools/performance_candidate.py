@@ -75,12 +75,15 @@ PROFILE_FIELDS = frozenset(
 )
 SHA256 = re.compile(r"[0-9a-f]{64}")
 U64_MAX = (1 << 64) - 1
-DIRECTIONAL_REGRESSION_POLICY = {
-    "name": "mandatory-negative-median",
-    "regression_when": "mandatory scenario median improvement is below zero",
+UNCALIBRATED_POLICY = {
+    "schema_version": 1,
+    "name": "uncalibrated-hosted-runner",
+    "decision_enabled": False,
+    "decision_reason": "no calibrated noise or adoption threshold",
     "noise_threshold_percent": None,
+    "regression_threshold_percent": None,
     "adoption_threshold_percent": None,
-    "candidate_win_enabled": False,
+    "threshold_source": None,
 }
 
 
@@ -220,7 +223,7 @@ def create_plan(
         "warmup_seconds": warmup,
         "active_seconds": active,
         "pairs": pair_count,
-        "decision_policy": dict(DIRECTIONAL_REGRESSION_POLICY),
+        "decision_policy": dict(UNCALIBRATED_POLICY),
         "adoption_eligible": False,
         "scenarios": scenarios,
     }
@@ -413,6 +416,16 @@ def _display_decimal(value: Decimal) -> float:
     return round(float(value), 9)
 
 
+def _observed_direction(*, wins: int, losses: int) -> str:
+    if wins and losses:
+        return "mixed"
+    if wins:
+        return "positive"
+    if losses:
+        return "negative"
+    return "neutral"
+
+
 def summarize_evidence(
     *,
     plan: dict[str, object],
@@ -545,11 +558,7 @@ def summarize_evidence(
         losses = sum(value < 0 for value in improvements)
         ties = len(improvements) - wins - losses
         median_improvement = _median(improvements)
-        scenario_status = (
-            "REGRESSION"
-            if plan["mode"] == "qualification" and median_improvement < 0
-            else "MEASURED"
-        )
+        scenario_status = "MEASURED" if plan["mode"] == "diagnostic" else "INCONCLUSIVE"
         scenario_summaries.append(
             {
                 "scenario": scenario,
@@ -564,15 +573,29 @@ def summarize_evidence(
                 "median_improvement_percent": _display_decimal(median_improvement),
                 "minimum_improvement_percent": _display_decimal(min(improvements)),
                 "maximum_improvement_percent": _display_decimal(max(improvements)),
+                "noise_band_percent": None,
+                "regression_threshold_percent": None,
+                "adoption_threshold_percent": None,
+                "threshold_source": None,
+                "decision_enabled": False,
+                "decision_reason": "no calibrated noise or adoption threshold",
+                "threshold_decision": "UNAVAILABLE",
+                "observed_direction": _observed_direction(wins=wins, losses=losses),
+                "warnings": [],
                 "status": scenario_status,
             }
         )
-    if plan["mode"] == "diagnostic":
-        status = "MEASURED"
-    elif any(summary["status"] == "REGRESSION" for summary in scenario_summaries):
-        status = "REGRESSION"
-    else:
-        status = "MEASURED"
+    status = "MEASURED" if plan["mode"] == "diagnostic" else "INCONCLUSIVE"
+    primary_results = [
+        {"scenario": result["scenario"], "status": result["status"]}
+        for result in scenario_summaries
+        if result["role"] == "primary"
+    ]
+    guard_results = [
+        {"scenario": result["scenario"], "status": result["status"]}
+        for result in scenario_summaries
+        if result["role"] == "guard"
+    ]
     return {
         "schema_version": 1,
         "kind": "performance_candidate_summary",
@@ -582,8 +605,16 @@ def summarize_evidence(
         "candidate_sha": candidate_sha,
         "pairs": plan["pairs"],
         "decision_policy": plan["decision_policy"],
+        "decision_enabled": False,
+        "decision_reason": "no calibrated noise or adoption threshold",
+        "threshold_availability": "none",
         "adoption_claim": False,
         "status": status,
+        "workflow_failure_reason": None,
+        "mandatory_scenarios": list(planned),
+        "missing_scenarios": [],
+        "primary_results": primary_results,
+        "guard_results": guard_results,
         "scenarios": scenario_summaries,
         "evidence_files": sorted(
             evidence_files, key=lambda item: (item["member"], item["file"])
@@ -599,9 +630,17 @@ def invalid_summary(
         "kind": "performance_candidate_summary",
         "parent_sha": parent_sha,
         "candidate_sha": candidate_sha,
-        "decision_policy": dict(DIRECTIONAL_REGRESSION_POLICY),
+        "decision_policy": dict(UNCALIBRATED_POLICY),
+        "decision_enabled": False,
+        "decision_reason": "invalid evidence",
+        "threshold_availability": "none",
         "adoption_claim": False,
         "status": "INVALID_EVIDENCE",
+        "workflow_failure_reason": str(error),
+        "mandatory_scenarios": [],
+        "missing_scenarios": [],
+        "primary_results": [],
+        "guard_results": [],
         "error": str(error),
         "scenarios": [],
         "evidence_files": [],
@@ -623,18 +662,19 @@ def summary_markdown(summary: dict[str, object]) -> str:
         return "\n".join(lines)
     lines.extend(
         [
-            f"Mode: `{summary['mode']}`. A negative mandatory-scenario median is a conservative "
-            "regression guard. No hosted-runner adoption/noise threshold is approved, so this "
-            "workflow never emits `CANDIDATE_WIN`.",
+            f"Mode: `{summary['mode']}`. No hosted-runner noise, regression, or adoption "
+            "threshold is calibrated. Qualification results are `INCONCLUSIVE`; observed "
+            "direction is descriptive and cannot fail the workflow.",
             "",
-            "| Scenario | Role | Metric | Direction | Wins | Losses | Ties | Median % | Min % | Max % | Status |",
-            "|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+            "| Scenario | Role | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Status |",
+            "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for scenario in summary["scenarios"]:
         lines.append(
             f"| {scenario['scenario']} | {scenario['role']} | {scenario['metric']} | "
-            f"{scenario['direction']} | {scenario['wins']} | {scenario['losses']} | "
+            f"{scenario['direction']} | {scenario['observed_direction']} | "
+            f"{scenario['wins']} | {scenario['losses']} | "
             f"{scenario['ties']} | {scenario['median_improvement_percent']:.6f} | "
             f"{scenario['minimum_improvement_percent']:.6f} | "
             f"{scenario['maximum_improvement_percent']:.6f} | {scenario['status']} |"

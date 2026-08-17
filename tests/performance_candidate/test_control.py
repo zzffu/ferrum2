@@ -69,7 +69,7 @@ class ScenarioPlanTests(unittest.TestCase):
                     [(scenario, "diagnostic")],
                 )
                 self.assertFalse(plan["adoption_eligible"])
-                self.assertFalse(plan["decision_policy"]["candidate_win_enabled"])
+                self.assertFalse(plan["decision_policy"]["decision_enabled"])
                 self.assertIsNone(plan["decision_policy"]["noise_threshold_percent"])
 
     def test_tcp_throughput_qualification_adds_the_other_guard(self) -> None:
@@ -319,7 +319,7 @@ class EvidenceSummaryTests(unittest.TestCase):
             Decimal("25"),
         )
 
-    def test_guard_regression_fails_qualification_even_when_primary_wins(self) -> None:
+    def test_clear_guard_decline_is_inconclusive_without_calibration(self) -> None:
         plan = self.plan("qualification", "tcp-stream-64k")
         _root, parent, candidate = self.roots()
         values = {
@@ -328,12 +328,12 @@ class EvidenceSummaryTests(unittest.TestCase):
         self.populate(plan, parent, candidate, values)
         summary = self.summarize(plan, parent, candidate)
         scenarios = {item["scenario"]: item for item in summary["scenarios"]}
-        self.assertEqual(summary["status"], "REGRESSION")
+        self.assertEqual(summary["status"], "INCONCLUSIVE")
         self.assertEqual(scenarios["tcp-stream-64k"]["wins"], 3)
         self.assertEqual(scenarios["tcp-bulk"]["losses"], 3)
         self.assertEqual(scenarios["tcp-bulk"]["median_improvement_percent"], -96.0)
 
-    def test_negative_guard_median_is_regression_even_with_one_positive_pair(
+    def test_negative_guard_median_is_inconclusive_even_with_one_positive_pair(
         self,
     ) -> None:
         plan = self.plan("qualification", "tcp-stream-64k")
@@ -348,8 +348,35 @@ class EvidenceSummaryTests(unittest.TestCase):
         guard = next(
             item for item in summary["scenarios"] if item["scenario"] == "tcp-bulk"
         )
-        self.assertEqual(summary["status"], "REGRESSION")
+        self.assertEqual(summary["status"], "INCONCLUSIVE")
         self.assertEqual(guard["median_improvement_percent"], -96.0)
+
+    def test_tiny_negative_and_positive_medians_are_inconclusive_without_thresholds(
+        self,
+    ) -> None:
+        for candidates, observed in (
+            ((99_950, 99_900, 100_040), "mixed"),
+            ((100_050, 100_100, 99_960), "mixed"),
+        ):
+            with self.subTest(candidates=candidates):
+                plan = self.plan("qualification", "tcp-stream-64k")
+                _root, parent, candidate = self.roots()
+                values = {}
+                for scenario in plan["scenarios"]:
+                    for pair, value in enumerate(candidates, start=1):
+                        values[(scenario["scenario"], pair, "parent")] = 100_000
+                        values[(scenario["scenario"], pair, "candidate")] = value
+                self.populate(plan, parent, candidate, values)
+                summary = self.summarize(plan, parent, candidate)
+                self.assertEqual(summary["status"], "INCONCLUSIVE")
+                self.assertFalse(summary["decision_enabled"])
+                self.assertFalse(summary["adoption_claim"])
+                self.assertTrue(
+                    all(
+                        item["observed_direction"] == observed
+                        for item in summary["scenarios"]
+                    )
+                )
 
     def test_multi_scenario_qualification_dry_run_is_measured_without_threshold(
         self,
@@ -358,7 +385,7 @@ class EvidenceSummaryTests(unittest.TestCase):
         _root, parent, candidate = self.roots()
         self.populate(plan, parent, candidate)
         summary = self.summarize(plan, parent, candidate)
-        self.assertEqual(summary["status"], "MEASURED")
+        self.assertEqual(summary["status"], "INCONCLUSIVE")
         self.assertFalse(summary["adoption_claim"])
 
     def test_missing_mandatory_guard_is_invalid(self) -> None:
@@ -513,7 +540,7 @@ class EvidenceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["status"], "MEASURED")
         self.assertIn("| tcp-bulk |", markdown.read_text(encoding="utf-8"))
 
-    def test_summary_command_returns_nonzero_after_writing_regression(self) -> None:
+    def test_summary_command_keeps_uncalibrated_decline_non_failing(self) -> None:
         plan = self.plan("qualification", "tcp-stream-64k")
         root, parent, candidate = self.roots()
         values = {
@@ -537,10 +564,10 @@ class EvidenceSummaryTests(unittest.TestCase):
                 "markdown": markdown,
             },
         )()
-        self.assertEqual(CONTROL.run_summary_command(arguments), 3)
+        self.assertEqual(CONTROL.run_summary_command(arguments), 0)
         self.assertEqual(
             json.loads(output.read_text(encoding="utf-8"))["status"],
-            "REGRESSION",
+            "INCONCLUSIVE",
         )
 
 
