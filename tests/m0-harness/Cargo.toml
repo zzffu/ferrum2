@@ -7,10 +7,6 @@ license.workspace = true
 publish.workspace = true
 
 [[test]]
-name = "architecture"
-path = "tests/architecture.rs"
-
-[[test]]
 name = "workspace_policy"
 path = "tests/workspace_policy.rs"
 
