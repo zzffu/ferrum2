@@ -3,6 +3,14 @@ name: performance-candidate
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Single-scenario diagnostic or guarded qualification"
+        required: true
+        type: choice
+        default: qualification
+        options:
+          - qualification
+          - diagnostic
       parent_sha:
         description: "Exact ancestor commit SHA"
         required: true
@@ -49,7 +57,8 @@ jobs:
     timeout-minutes: 90
     env:
       PARENT_SHA: ${{ inputs.parent_sha }}
-      SCENARIO: ${{ inputs.scenario }}
+      MODE: ${{ inputs.mode }}
+      SELECTED_SCENARIO: ${{ inputs.scenario }}
       WARMUP_SECONDS: ${{ inputs.warmup_seconds }}
       ACTIVE_SECONDS: ${{ inputs.active_seconds }}
       PAIRS: ${{ inputs.pairs }}
@@ -73,14 +82,15 @@ jobs:
             --parent-sha "$PARENT_SHA" \
             --candidate-sha "$GITHUB_SHA"
           test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
-          case "$SCENARIO" in
-            tcp-bulk|tcp-stream-64k|tcp-request-1k|tcp-request-4k|tcp-request-16k|udp-small-high|udp-mtu-1200) ;;
-            *) exit 2 ;;
-          esac
-          python3 -B tools/performance_candidate.py validate-inputs \
+          performance_plan="$RUNNER_TEMP/performance-plan.json"
+          python3 -B tools/performance_candidate.py plan \
+            --mode "$MODE" \
+            --scenario "$SELECTED_SCENARIO" \
             --warmup-seconds "$WARMUP_SECONDS" \
             --active-seconds "$ACTIVE_SECONDS" \
-            --pairs "$PAIRS"
+            --pairs "$PAIRS" \
+            --output "$performance_plan"
+          printf 'PERFORMANCE_PLAN=%s\n' "$performance_plan" >>"$GITHUB_ENV"
           for process in ferrum2-client ferrum2-server; do
             ! pgrep -x "$process" >/dev/null
           done
@@ -111,9 +121,10 @@ jobs:
         run: |
           set -euo pipefail
           run_member() {
-            member=$1
-            pair=$2
-            order=$3
+            scenario=$1
+            member=$2
+            pair=$3
+            order=$4
             if [ "$member" = parent ]; then
               repository=$PARENT_DIR
             else
@@ -122,11 +133,11 @@ jobs:
             (
               cd "$repository"
               target/profiling/m4-qualification profile-workload \
-                --scenario "$SCENARIO" \
+                --scenario "$scenario" \
                 --warmup-seconds "$WARMUP_SECONDS" \
                 --active-seconds "$ACTIVE_SECONDS" \
-                --ready-file "profiles/paired/$SCENARIO-$member-$pair.ready" \
-                --output "profiles/paired/$SCENARIO-$member-$pair.jsonl" \
+                --ready-file "profiles/paired/$scenario-$member-$pair.ready" \
+                --output "profiles/paired/$scenario-$member-$pair.jsonl" \
                 --parent-sha "$PARENT_SHA" \
                 --candidate-sha "$GITHUB_SHA" \
                 --member "$member" \
@@ -135,14 +146,20 @@ jobs:
                 --build-profile current
             )
           }
-          for pair in $(seq 1 "$PAIRS"); do
-            if ((pair % 2 == 1)); then
-              run_member parent "$pair" 1
-              run_member candidate "$pair" 2
-            else
-              run_member candidate "$pair" 1
-              run_member parent "$pair" 2
-            fi
+          mapfile -t scenarios < <(
+            python3 -B tools/performance_candidate.py scenarios --plan "$PERFORMANCE_PLAN"
+          )
+          test "${#scenarios[@]}" -gt 0
+          for scenario in "${scenarios[@]}"; do
+            for pair in $(seq 1 "$PAIRS"); do
+              if ((pair % 2 == 1)); then
+                run_member "$scenario" parent "$pair" 1
+                run_member "$scenario" candidate "$pair" 2
+              else
+                run_member "$scenario" candidate "$pair" 1
+                run_member "$scenario" parent "$pair" 2
+              fi
+            done
           done
       - name: Validate structured raw evidence and hashes
         shell: bash
@@ -156,7 +173,8 @@ jobs:
 
           parent_sha = os.environ["PARENT_SHA"]
           candidate_sha = os.environ["GITHUB_SHA"]
-          scenario = os.environ["SCENARIO"]
+          plan = json.loads(Path(os.environ["PERFORMANCE_PLAN"]).read_text(encoding="utf-8"))
+          scenarios = {entry["scenario"] for entry in plan["scenarios"]}
           pairs = int(os.environ["PAIRS"])
           roots = {
               "parent": Path(os.environ["PARENT_DIR"]),
@@ -165,7 +183,8 @@ jobs:
           manifest = []
           for member, root in roots.items():
               files = sorted((root / "profiles" / "paired").glob("*.jsonl"))
-              assert len(files) == pairs, (member, len(files), pairs)
+              assert len(files) == pairs * len(scenarios), (member, len(files), pairs, scenarios)
+              seen = set()
               for path in files:
                   lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
                   assert len(lines) == 1, (path, len(lines))
@@ -174,16 +193,24 @@ jobs:
                   assert row["parent_sha"] == parent_sha
                   assert row["candidate_sha"] == candidate_sha
                   assert row["member"] == member
-                  assert row["scenario"] == scenario
+                  assert row["scenario"] in scenarios
                   assert row["correctness"] == row["status"] == "PASS"
                   assert 1 <= row["pair"] <= pairs
                   assert row["order"] in (1, 2)
                   assert row["sha"] == (parent_sha if member == "parent" else candidate_sha)
+                  key = (row["scenario"], row["pair"])
+                  assert key not in seen, (member, key)
+                  seen.add(key)
                   manifest.append({
                       "member": member,
                       "file": path.name,
                       "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                   })
+              assert seen == {
+                  (scenario, pair)
+                  for scenario in scenarios
+                  for pair in range(1, pairs + 1)
+              }
           output = Path(os.environ["RUNNER_TEMP"]) / "paired-profile-manifest.json"
           output.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
           PY
@@ -195,6 +222,7 @@ jobs:
           path: |
             ${{ github.workspace }}/profiles/paired/*.jsonl
             ${{ runner.temp }}/ferrum2-parent/profiles/paired/*.jsonl
+            ${{ runner.temp }}/performance-plan.json
             ${{ runner.temp }}/paired-profile-manifest.json
           if-no-files-found: error
           retention-days: 30

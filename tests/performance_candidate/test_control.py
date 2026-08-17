@@ -43,6 +43,68 @@ class MeasurementInputTests(unittest.TestCase):
                     CONTROL.validate_measurement_inputs(warmup, active, pairs)
 
 
+class ScenarioPlanTests(unittest.TestCase):
+    def plan(self, mode: str, scenario: str) -> dict[str, object]:
+        return CONTROL.create_plan(
+            mode=mode,
+            scenario=scenario,
+            warmup_seconds="3",
+            active_seconds="30",
+            pairs="3",
+        )
+
+    def entries(self, mode: str, scenario: str) -> list[tuple[str, str]]:
+        return [
+            (entry["scenario"], entry["role"])
+            for entry in self.plan(mode, scenario)["scenarios"]
+        ]
+
+    def test_diagnostic_plan_contains_only_the_selected_scenario(self) -> None:
+        for scenario in CONTROL.SCENARIO_CATALOG:
+            with self.subTest(scenario=scenario):
+                plan = self.plan("diagnostic", scenario)
+                self.assertEqual(
+                    self.entries("diagnostic", scenario),
+                    [(scenario, "diagnostic")],
+                )
+                self.assertFalse(plan["adoption_eligible"])
+                self.assertIsNone(plan["decision_policy"])
+
+    def test_tcp_throughput_qualification_adds_the_other_guard(self) -> None:
+        self.assertEqual(
+            self.entries("qualification", "tcp-stream-64k"),
+            [("tcp-stream-64k", "primary"), ("tcp-bulk", "guard")],
+        )
+        self.assertEqual(
+            self.entries("qualification", "tcp-bulk"),
+            [("tcp-bulk", "primary"), ("tcp-stream-64k", "guard")],
+        )
+
+    def test_tcp_request_qualification_runs_all_requests_and_bulk_guard(self) -> None:
+        entries = self.entries("qualification", "tcp-request-4k")
+        self.assertEqual(entries[0], ("tcp-request-4k", "primary"))
+        self.assertEqual(
+            set(entries[1:]),
+            {
+                ("tcp-request-1k", "guard"),
+                ("tcp-request-16k", "guard"),
+                ("tcp-bulk", "guard"),
+            },
+        )
+
+    def test_udp_qualification_runs_both_udp_scenarios(self) -> None:
+        self.assertEqual(
+            self.entries("qualification", "udp-small-high"),
+            [("udp-small-high", "primary"), ("udp-mtu-1200", "guard")],
+        )
+
+    def test_invalid_mode_and_scenario_are_rejected(self) -> None:
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "mode"):
+            self.plan("adopt", "tcp-bulk")
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "scenario"):
+            self.plan("qualification", "tcp-unknown")
+
+
 class GitRelationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
