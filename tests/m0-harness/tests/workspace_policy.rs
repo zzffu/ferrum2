@@ -213,7 +213,7 @@ fn workspace_members_share_the_declared_release_policy() {
 #[test]
 fn workspace_boundaries_are_expressed_by_cargo_metadata() {
     let metadata = metadata();
-    let core = package(&metadata, "ferrum2-core");
+    let core = package(metadata, "ferrum2-core");
     let core_dependencies: BTreeSet<_> = core["dependencies"]
         .as_array()
         .expect("core dependencies")
@@ -264,26 +264,35 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
         wintun_edges,
         vec![("ferrum2-tun", "cfg(all(windows, target_arch = \"x86_64\"))")]
     );
+    let wintun_src = PathBuf::from(
+        package(metadata, "ferrum2-wintun")["manifest_path"]
+            .as_str()
+            .expect("Wintun manifest path"),
+    )
+    .parent()
+    .expect("Wintun package directory")
+    .join("src")
+    .canonicalize()
+    .expect("Wintun source directory");
+    let unsafe_owner = wintun_src
+        .join("windows.rs")
+        .canonicalize()
+        .expect("Windows ABI owner");
     let mut wintun_sources = Vec::new();
-    rust_sources(
-        &PathBuf::from(
-            package(metadata, "ferrum2-wintun")["manifest_path"]
-                .as_str()
-                .expect("Wintun manifest path"),
-        )
-        .parent()
-        .expect("Wintun package directory")
-        .join("src"),
-        &mut wintun_sources,
-    );
-    let mut unsafe_owner_found = false;
+    rust_sources(&wintun_src, &mut wintun_sources);
+    let mut unsafe_owner_count = 0;
     for source in wintun_sources {
+        let source = source.canonicalize().expect("canonical Wintun source");
         let tokens = fs::read_to_string(&source)
             .expect("Wintun Rust source")
             .parse::<TokenStream>()
             .expect("valid Wintun Rust tokens");
-        if source.file_name().is_some_and(|name| name == "windows.rs") {
-            unsafe_owner_found = has_unsafe_token(tokens);
+        if source == unsafe_owner {
+            unsafe_owner_count += 1;
+            assert!(
+                has_unsafe_token(tokens),
+                "the declared Windows ABI owner disappeared"
+            );
         } else {
             assert!(
                 !has_unsafe_token(tokens),
@@ -292,23 +301,24 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
             );
         }
     }
-    assert!(
-        unsafe_owner_found,
-        "the declared Windows ABI owner disappeared"
-    );
+    assert_eq!(unsafe_owner_count, 1, "there must be one Windows ABI owner");
 
-    let mut qualification_targets = 0;
-    for package in metadata["packages"].as_array().expect("metadata packages") {
-        for target in package["targets"].as_array().expect("package targets") {
-            let name = target["name"].as_str().expect("target name");
-            if name.ends_with("qualification") {
-                qualification_targets += 1;
-                assert_eq!(target["kind"], serde_json::json!(["bin"]));
-                assert_eq!(target["test"], false, "{name} must not run in cargo test");
-            }
-        }
+    for (package_name, target_name) in [
+        ("ferrum2-m0-harness", "m0-qualification"),
+        ("ferrum2-m4-qualification", "m4-qualification"),
+    ] {
+        let target = package(metadata, package_name)["targets"]
+            .as_array()
+            .expect("package targets")
+            .iter()
+            .find(|target| target["name"] == target_name)
+            .unwrap_or_else(|| panic!("missing qualification target {target_name}"));
+        assert_eq!(target["kind"], serde_json::json!(["bin"]));
+        assert_eq!(
+            target["test"], false,
+            "{target_name} must not run in cargo test"
+        );
     }
-    assert_eq!(qualification_targets, 2);
 }
 
 #[test]
@@ -374,45 +384,47 @@ fn production_features_preserve_security_and_resource_boundaries() {
                 .any(|line| line == "tokio feature \"test-util\""),
             "{target} production graph enables tokio test-util"
         );
+        for forbidden in [
+            "aws-lc-rs ",
+            "aws-lc-sys ",
+            "quinn ",
+            "h3 ",
+            "ipconfig ",
+            "resolv-conf ",
+            "system-configuration ",
+        ] {
+            assert!(
+                !tree.lines().any(|line| line.starts_with(forbidden)),
+                "{target} production graph contains forbidden package {}",
+                forbidden.trim()
+            );
+        }
     }
 
     let resolver = dependency(package(metadata, "ferrum2-dns"), "hickory-resolver", None);
     assert_eq!(resolver["uses_default_features"], false);
-    let resolver_features = features(resolver);
-    for required in ["tokio", "tls-ring", "https-ring", "webpki-roots"] {
-        assert!(
-            resolver_features.contains(required),
-            "missing DNS feature {required}"
-        );
-    }
-    for forbidden in ["tls-aws-lc-rs", "https-aws-lc-rs", "system-config"] {
-        assert!(
-            !resolver_features.contains(forbidden),
-            "unexpected DNS provider feature {forbidden}"
-        );
-    }
+    assert_eq!(
+        features(resolver),
+        BTreeSet::from(["https-ring", "tls-ring", "tokio", "webpki-roots"])
+    );
 
     let smoltcp = dependency(package(metadata, "ferrum2-tun"), "smoltcp", None);
     assert_eq!(smoltcp["uses_default_features"], false);
-    let smoltcp_features = features(smoltcp);
-    for required in [
-        "std",
-        "medium-ip",
-        "proto-ipv4",
-        "proto-ipv6",
-        "socket-tcp",
-        "socket-tcp-reno",
-        "socket-udp",
-        "iface-max-addr-count-2",
-        "iface-max-route-count-2",
-        "assembler-max-segment-count-4",
-    ] {
-        assert!(
-            smoltcp_features.contains(required),
-            "missing bounded smoltcp feature {required}"
-        );
-    }
-    assert!(!smoltcp_features.contains("auto-icmp-echo-reply"));
+    assert_eq!(
+        features(smoltcp),
+        BTreeSet::from([
+            "assembler-max-segment-count-4",
+            "iface-max-addr-count-2",
+            "iface-max-route-count-2",
+            "medium-ip",
+            "proto-ipv4",
+            "proto-ipv6",
+            "socket-tcp",
+            "socket-tcp-reno",
+            "socket-udp",
+            "std",
+        ])
+    );
     let smoltcp_package = package(metadata, "smoltcp");
     let resolved_smoltcp = metadata["resolve"]["nodes"]
         .as_array()
@@ -428,7 +440,7 @@ fn production_features_preserve_security_and_resource_boundaries() {
 
 fn has_unsafe_token(tokens: TokenStream) -> bool {
     tokens.into_iter().any(|token| match token {
-        TokenTree::Ident(identifier) => identifier.to_string() == "unsafe",
+        TokenTree::Ident(identifier) => identifier == "unsafe",
         TokenTree::Group(group) => has_unsafe_token(group.stream()),
         TokenTree::Punct(_) | TokenTree::Literal(_) => false,
     })
@@ -486,45 +498,78 @@ fn vendored_crypto_is_v2_only_and_contains_no_unsafe_tokens() {
             "dep:zeroize",
         ])
     );
-    for dependency in [
-        "aes-v2",
-        "aes-gcm-v2",
-        "blake3-v2",
-        "chacha20poly1305-v2",
-        "ghash-v2",
+    for (dependency, package_name, version, expected_features) in [
+        ("aes-v2", "aes", "=0.9.1", &["zeroize"][..]),
+        (
+            "aes-gcm-v2",
+            "aes-gcm",
+            "=0.11.0",
+            &["aes", "bytes", "zeroize"][..],
+        ),
+        ("blake3-v2", "blake3", "=1.8.5", &["std", "zeroize"][..]),
+        (
+            "chacha20poly1305-v2",
+            "chacha20poly1305",
+            "=0.11.0",
+            &["bytes", "zeroize"][..],
+        ),
+        ("ghash-v2", "ghash", "=0.6.0", &["zeroize"][..]),
     ] {
         let specification = &vendor_manifest["dependencies"][dependency];
+        assert_eq!(
+            specification["package"].as_str(),
+            Some(package_name),
+            "{dependency} package identity"
+        );
+        assert_eq!(
+            specification["version"].as_str(),
+            Some(version),
+            "{dependency} version"
+        );
+        for alternative_source in ["git", "path", "registry"] {
+            assert!(
+                specification.get(alternative_source).is_none(),
+                "{dependency} changed source via {alternative_source}"
+            );
+        }
+        assert_eq!(
+            specification["optional"].as_bool(),
+            Some(true),
+            "{dependency} selection"
+        );
         assert_eq!(
             specification["default-features"].as_bool(),
             Some(false),
             "{dependency} default features"
         );
-        assert!(
-            specification["features"]
-                .as_array()
-                .expect("backend dependency features")
-                .iter()
-                .any(|feature| feature.as_str() == Some("zeroize")),
-            "{dependency} lost zeroization"
-        );
-        assert!(
-            !specification["features"]
-                .as_array()
-                .expect("backend dependency features")
-                .iter()
-                .any(|feature| feature.as_str() == Some("reduced-round")),
-            "{dependency} enabled reduced-round crypto"
+        let selected_features: BTreeSet<_> = specification["features"]
+            .as_array()
+            .expect("backend dependency features")
+            .iter()
+            .map(|feature| feature.as_str().expect("backend dependency feature"))
+            .collect();
+        assert_eq!(
+            selected_features,
+            expected_features.iter().copied().collect(),
+            "{dependency} feature identity"
         );
     }
     let zeroize = &vendor_manifest["dependencies"]["zeroize"];
+    assert_eq!(zeroize["version"].as_str(), Some("=1.9.0"));
+    assert_eq!(zeroize["optional"].as_bool(), Some(true));
     assert_eq!(zeroize["default-features"].as_bool(), Some(false));
-    assert!(
+    assert_eq!(
         zeroize["features"]
             .as_array()
             .expect("zeroize features")
             .iter()
-            .any(|feature| feature.as_str() == Some("alloc"))
+            .map(|feature| feature.as_str().expect("zeroize feature"))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["alloc"])
     );
+    for alternative_source in ["git", "path", "registry"] {
+        assert!(zeroize.get(alternative_source).is_none());
+    }
     let manifest = PathBuf::from(
         resolved["manifest_path"]
             .as_str()
