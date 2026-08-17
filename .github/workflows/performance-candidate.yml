@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       scenario:
-        description: "Bounded workload"
+        description: "Primary or diagnostic workload"
         required: true
         type: choice
         default: tcp-stream-64k
@@ -74,7 +74,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$PARENT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          PARENT_DIR="$RUNNER_TEMP/ferrum2-parent"
+          PERFORMANCE_PLAN="$RUNNER_TEMP/performance-plan.json"
+          PERFORMANCE_SUMMARY="$RUNNER_TEMP/performance-summary.json"
+          PERFORMANCE_MARKDOWN="$RUNNER_TEMP/performance-summary.md"
+          {
+            printf 'PARENT_DIR=%s\n' "$PARENT_DIR"
+            printf 'PERFORMANCE_PLAN=%s\n' "$PERFORMANCE_PLAN"
+            printf 'PERFORMANCE_SUMMARY=%s\n' "$PERFORMANCE_SUMMARY"
+            printf 'PERFORMANCE_MARKDOWN=%s\n' "$PERFORMANCE_MARKDOWN"
+          } >>"$GITHUB_ENV"
+          [[ "$PARENT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          PARENT_SHA="${PARENT_SHA,,}"
+          printf 'PARENT_SHA=%s\n' "$PARENT_SHA" >>"$GITHUB_ENV"
           test "$(git status --porcelain)" = ""
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python3 -B tools/performance_candidate.py validate-git \
@@ -82,24 +94,20 @@ jobs:
             --parent-sha "$PARENT_SHA" \
             --candidate-sha "$GITHUB_SHA"
           test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
-          performance_plan="$RUNNER_TEMP/performance-plan.json"
           python3 -B tools/performance_candidate.py plan \
             --mode "$MODE" \
             --scenario "$SELECTED_SCENARIO" \
             --warmup-seconds "$WARMUP_SECONDS" \
             --active-seconds "$ACTIVE_SECONDS" \
             --pairs "$PAIRS" \
-            --output "$performance_plan"
-          printf 'PERFORMANCE_PLAN=%s\n' "$performance_plan" >>"$GITHUB_ENV"
+            --output "$PERFORMANCE_PLAN"
           for process in ferrum2-client ferrum2-server; do
             ! pgrep -x "$process" >/dev/null
           done
           rustup toolchain install 1.97.1 --profile minimal
           rustc +1.97.1 -Vv
-          parent_dir="$RUNNER_TEMP/ferrum2-parent"
-          test ! -e "$parent_dir"
-          git worktree add --detach "$parent_dir" "$PARENT_SHA"
-          printf 'PARENT_DIR=%s\n' "$parent_dir" >>"$GITHUB_ENV"
+          test ! -e "$PARENT_DIR"
+          git worktree add --detach "$PARENT_DIR" "$PARENT_SHA"
           exclude="$(git rev-parse --git-path info/exclude)"
           printf '/profiles/\n' >>"$exclude"
       - name: Prove parent and candidate correctness and build identities
@@ -161,69 +169,43 @@ jobs:
               fi
             done
           done
-      - name: Validate structured raw evidence and hashes
+      - name: Summarize paired performance evidence
+        if: ${{ always() && !cancelled() }}
         shell: bash
         run: |
-          set -euo pipefail
-          python - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-
-          parent_sha = os.environ["PARENT_SHA"]
-          candidate_sha = os.environ["GITHUB_SHA"]
-          plan = json.loads(Path(os.environ["PERFORMANCE_PLAN"]).read_text(encoding="utf-8"))
-          scenarios = {entry["scenario"] for entry in plan["scenarios"]}
-          pairs = int(os.environ["PAIRS"])
-          roots = {
-              "parent": Path(os.environ["PARENT_DIR"]),
-              "candidate": Path(os.environ["GITHUB_WORKSPACE"]),
-          }
-          manifest = []
-          for member, root in roots.items():
-              files = sorted((root / "profiles" / "paired").glob("*.jsonl"))
-              assert len(files) == pairs * len(scenarios), (member, len(files), pairs, scenarios)
-              seen = set()
-              for path in files:
-                  lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
-                  assert len(lines) == 1, (path, len(lines))
-                  row = json.loads(lines[0])
-                  assert row["kind"] == "m18_profile_trial"
-                  assert row["parent_sha"] == parent_sha
-                  assert row["candidate_sha"] == candidate_sha
-                  assert row["member"] == member
-                  assert row["scenario"] in scenarios
-                  assert row["correctness"] == row["status"] == "PASS"
-                  assert 1 <= row["pair"] <= pairs
-                  assert row["order"] in (1, 2)
-                  assert row["sha"] == (parent_sha if member == "parent" else candidate_sha)
-                  key = (row["scenario"], row["pair"])
-                  assert key not in seen, (member, key)
-                  seen.add(key)
-                  manifest.append({
-                      "member": member,
-                      "file": path.name,
-                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                  })
-              assert seen == {
-                  (scenario, pair)
-                  for scenario in scenarios
-                  for pair in range(1, pairs + 1)
-              }
-          output = Path(os.environ["RUNNER_TEMP"]) / "paired-profile-manifest.json"
-          output.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-          PY
+          set -uo pipefail
+          summary_status=0
+          python3 -B tools/performance_candidate.py summarize \
+            --plan "$PERFORMANCE_PLAN" \
+            --parent-root "$PARENT_DIR/profiles/paired" \
+            --candidate-root "$GITHUB_WORKSPACE/profiles/paired" \
+            --parent-sha "$PARENT_SHA" \
+            --candidate-sha "$GITHUB_SHA" \
+            --output "$PERFORMANCE_SUMMARY" \
+            --markdown "$PERFORMANCE_MARKDOWN" || summary_status=$?
+          if [ -f "$PERFORMANCE_MARKDOWN" ]; then
+            if ! cat "$PERFORMANCE_MARKDOWN" >>"$GITHUB_STEP_SUMMARY"; then
+              if [ "$summary_status" -eq 0 ]; then
+                summary_status=1
+              fi
+            fi
+          else
+            if [ "$summary_status" -eq 0 ]; then
+              summary_status=1
+            fi
+          fi
+          exit "$summary_status"
       - name: Upload paired raw evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: paired-profile-${{ inputs.scenario }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: paired-profile-${{ inputs.mode }}-${{ inputs.scenario }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ github.workspace }}/profiles/paired/*.jsonl
             ${{ runner.temp }}/ferrum2-parent/profiles/paired/*.jsonl
             ${{ runner.temp }}/performance-plan.json
-            ${{ runner.temp }}/paired-profile-manifest.json
+            ${{ runner.temp }}/performance-summary.json
+            ${{ runner.temp }}/performance-summary.md
           if-no-files-found: error
           retention-days: 30
       - name: Reap processes and remove parent worktree
