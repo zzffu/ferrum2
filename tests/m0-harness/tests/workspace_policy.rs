@@ -349,6 +349,7 @@ fn production_features_preserve_security_and_resource_boundaries() {
         "proto-ipv4",
         "proto-ipv6",
         "socket-tcp",
+        "socket-tcp-reno",
         "socket-udp",
         "iface-max-addr-count-2",
         "iface-max-route-count-2",
@@ -359,7 +360,18 @@ fn production_features_preserve_security_and_resource_boundaries() {
             "missing bounded smoltcp feature {required}"
         );
     }
-    assert!(!smoltcp_features.contains("socket-icmp"));
+    assert!(!smoltcp_features.contains("auto-icmp-echo-reply"));
+    let smoltcp_package = package(metadata, "smoltcp");
+    let resolved_smoltcp = metadata["resolve"]["nodes"]
+        .as_array()
+        .expect("resolve nodes")
+        .iter()
+        .find(|node| node["id"] == smoltcp_package["id"])
+        .expect("resolved smoltcp node");
+    assert!(
+        !features(resolved_smoltcp).contains("auto-icmp-echo-reply"),
+        "the resolved packet stack must not synthesize ICMP replies"
+    );
 }
 
 fn has_unsafe_token(tokens: TokenStream) -> bool {
