@@ -104,6 +104,7 @@ class ScenarioPlanTests(unittest.TestCase):
         for scenario in CONTROL.SCENARIO_CATALOG:
             with self.subTest(scenario=scenario):
                 plan = self.plan("diagnostic", scenario)
+                self.assertEqual(plan["schema_version"], CONTROL.PLAN_SCHEMA_VERSION)
                 self.assertEqual(
                     self.entries("diagnostic", scenario),
                     [(scenario, "diagnostic")],
@@ -141,6 +142,54 @@ class ScenarioPlanTests(unittest.TestCase):
             [("udp-small-high", "primary"), ("udp-mtu-1200", "guard")],
         )
 
+    def test_udp_payload_matrix_records_exact_shadowsocks_bounds(self) -> None:
+        plan = self.plan("qualification", "udp-payload-matrix")
+        self.assertEqual(plan["scenario_group"], "udp-payload-matrix")
+        self.assertIsNone(plan["selected_scenario"])
+        self.assertEqual(
+            [
+                (
+                    entry["scenario"],
+                    entry["role"],
+                    entry["topology"],
+                    entry["application_payload_bytes"],
+                    entry["socks_datagram_bytes"],
+                    entry["upstream_wire_bytes"],
+                )
+                for entry in plan["scenarios"]
+            ],
+            [
+                ("udp-small-high", "primary", "shadowsocks", 128, 138, 186),
+                ("udp-mtu-1200", "guard", "shadowsocks", 1_200, 1_210, 1_258),
+                ("udp-payload-1472", "guard", "shadowsocks", 1_472, 1_482, 1_530),
+                ("udp-payload-1500", "guard", "shadowsocks", 1_500, 1_510, 1_558),
+                ("udp-payload-8192", "guard", "shadowsocks", 8_192, 8_202, 8_250),
+                ("udp-max-wire-65507", "guard", "shadowsocks", 65_449, 65_459, 65_507),
+            ],
+        )
+
+    def test_udp_direct_group_proves_socks_ipv4_application_bound(self) -> None:
+        plan = self.plan("qualification", "udp-direct-payload-bounds")
+        self.assertEqual(plan["scenario_group"], "udp-direct-payload-bounds")
+        self.assertIsNone(plan["selected_scenario"])
+        self.assertEqual(
+            [
+                (
+                    entry["scenario"],
+                    entry["role"],
+                    entry["topology"],
+                    entry["application_payload_bytes"],
+                    entry["socks_datagram_bytes"],
+                    entry["upstream_wire_bytes"],
+                )
+                for entry in plan["scenarios"]
+            ],
+            [
+                ("udp-direct-small-128", "primary", "direct", 128, 138, 128),
+                ("udp-direct-max-65497", "guard", "direct", 65_497, 65_507, 65_497),
+            ],
+        )
+
     def test_tcp_frame_capacity_group_has_two_primaries_and_three_latency_guards(
         self,
     ) -> None:
@@ -169,6 +218,8 @@ class ScenarioPlanTests(unittest.TestCase):
             self.plan("qualification", "tcp-unknown")
         with self.assertRaisesRegex(CONTROL.CandidateControlError, "diagnostic"):
             self.plan("diagnostic", "tcp-frame-capacity")
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "diagnostic"):
+            self.plan("diagnostic", "udp-payload-matrix")
 
 
 class DecisionPolicyTests(unittest.TestCase):
@@ -241,6 +292,10 @@ class DecisionPolicyTests(unittest.TestCase):
             path = pathlib.Path(directory) / "plan.json"
             for name, mutate in (
                 (
+                    "schema version",
+                    lambda value: value.update(schema_version=3),
+                ),
+                (
                     "digest",
                     lambda value: value["decision_policy"].update(
                         policy_sha256="0" * 64
@@ -312,6 +367,9 @@ class EvidenceSummaryTests(unittest.TestCase):
         value: object | None = None,
     ) -> dict[str, object]:
         metric, direction, _family = CONTROL.SCENARIO_CATALOG[scenario]
+        topology, payload_bytes, socks_bytes, upstream_bytes = (
+            CONTROL.SCENARIO_EVIDENCE[scenario]
+        )
         if value is None:
             if member == "parent":
                 value = 100
@@ -321,6 +379,7 @@ class EvidenceSummaryTests(unittest.TestCase):
         sha = self.PARENT_SHA if member == "parent" else self.CANDIDATE_SHA
         member_digit = "a" if member == "parent" else "b"
         return {
+            "schema_version": CONTROL.PROFILE_TRIAL_SCHEMA_VERSION,
             "kind": "m18_profile_trial",
             "parent_sha": self.PARENT_SHA,
             "candidate_sha": self.CANDIDATE_SHA,
@@ -331,6 +390,10 @@ class EvidenceSummaryTests(unittest.TestCase):
             "scenario": scenario,
             "warmup_seconds": plan["warmup_seconds"],
             "active_seconds": plan["active_seconds"],
+            "topology": topology,
+            "application_payload_bytes": payload_bytes,
+            "socks_datagram_bytes": socks_bytes,
+            "upstream_wire_bytes": upstream_bytes,
             "sha": sha,
             "tree": ("3" if member == "parent" else "4") * 40,
             "runner_sha256": member_digit * 64,
@@ -653,6 +716,30 @@ class EvidenceSummaryTests(unittest.TestCase):
                     captured.exception.missing_scenarios, [entry["scenario"]]
                 )
 
+    def test_udp_bound_summary_distinguishes_application_socks_and_upstream_wire(
+        self,
+    ) -> None:
+        for selection, expected in (
+            (
+                "udp-payload-matrix",
+                "65,449 application bytes and fills the AES-2022 response wire",
+            ),
+            (
+                "udp-direct-payload-bounds",
+                "65,497 application bytes plus the 10-byte",
+            ),
+        ):
+            with self.subTest(selection=selection):
+                plan = self.plan("qualification", selection)
+                _root, parent, candidate = self.roots()
+                self.populate(plan, parent, candidate)
+                summary = self.summarize(plan, parent, candidate)
+                markdown = CONTROL.summary_markdown(summary)
+                self.assertIn(expected, markdown)
+                self.assertIn("Application payload B", markdown)
+                self.assertIn("SOCKS datagram B", markdown)
+                self.assertIn("Upstream wire B", markdown)
+
     def test_calibrated_tcp_frame_capacity_group_can_win_or_confirm_guard_regression(
         self,
     ) -> None:
@@ -792,6 +879,14 @@ class EvidenceSummaryTests(unittest.TestCase):
 
     def test_missing_duplicate_mismatched_and_failed_rows_are_invalid(self) -> None:
         mutations = {
+            "legacy raw without schema version": lambda _plan, _parent, candidate: self.rewrite(
+                candidate / "tcp-bulk-candidate-1.jsonl",
+                lambda row: row.pop("schema_version"),
+            ),
+            "unsupported raw schema version": lambda _plan, _parent, candidate: self.rewrite(
+                candidate / "tcp-bulk-candidate-1.jsonl",
+                lambda row: row.update(schema_version=1),
+            ),
             "missing candidate": lambda _plan, _parent, candidate: (
                 candidate / "tcp-bulk-candidate-1.jsonl"
             ).unlink(),
@@ -804,6 +899,18 @@ class EvidenceSummaryTests(unittest.TestCase):
             "wrong scenario": lambda _plan, _parent, candidate: self.rewrite(
                 candidate / "tcp-bulk-candidate-1.jsonl",
                 lambda row: row.update(scenario="udp-small-high"),
+            ),
+            "wrong topology": lambda _plan, _parent, candidate: self.rewrite(
+                candidate / "tcp-bulk-candidate-1.jsonl",
+                lambda row: row.update(topology="direct"),
+            ),
+            "wrong payload bound": lambda _plan, _parent, candidate: self.rewrite(
+                candidate / "tcp-bulk-candidate-1.jsonl",
+                lambda row: row.update(application_payload_bytes=65_507),
+            ),
+            "unexpected UDP wire bound": lambda _plan, _parent, candidate: self.rewrite(
+                candidate / "tcp-bulk-candidate-1.jsonl",
+                lambda row: row.update(upstream_wire_bytes=65_507),
             ),
             "wrong pair": lambda _plan, _parent, candidate: self.rewrite(
                 candidate / "tcp-bulk-candidate-2.jsonl",
@@ -905,6 +1012,7 @@ class EvidenceSummaryTests(unittest.TestCase):
         )()
         self.assertEqual(CONTROL.run_summary_command(arguments), 2)
         summary = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(summary["schema_version"], CONTROL.SUMMARY_SCHEMA_VERSION)
         self.assertEqual(summary["status"], "INVALID_EVIDENCE")
         self.assertEqual(summary["mode"], "qualification")
         self.assertEqual(summary["scenario_group"], "tcp-throughput")
@@ -939,7 +1047,7 @@ class EvidenceSummaryTests(unittest.TestCase):
         )()
         self.assertEqual(CONTROL.run_summary_command(arguments), 0)
         summary = json.loads(output.read_text(encoding="utf-8"))
-        self.assertEqual(summary["schema_version"], 4)
+        self.assertEqual(summary["schema_version"], CONTROL.SUMMARY_SCHEMA_VERSION)
         self.assertEqual(summary["status"], "MEASURED")
         self.assertEqual(
             summary["build_identities"],

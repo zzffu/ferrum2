@@ -28,6 +28,14 @@ on:
           - tcp-request-16k
           - udp-small-high
           - udp-mtu-1200
+          - udp-payload-1472
+          - udp-payload-1500
+          - udp-payload-8192
+          - udp-max-wire-65507
+          - udp-direct-small-128
+          - udp-direct-max-65497
+          - udp-payload-matrix
+          - udp-direct-payload-bounds
           - tcp-frame-capacity
       warmup_seconds:
         description: "Warmup seconds"
@@ -146,10 +154,15 @@ jobs:
             fi
             (
               cd "$repository"
-              target/profiling/m4-qualification profile-workload \
+              # Use one candidate-built harness for both members so new scenario
+              # definitions are identical; the explicit paths still bind and hash
+              # each member's exact checkout and client/server binaries.
+              "$GITHUB_WORKSPACE/target/profiling/m4-qualification" profile-workload \
                 --scenario "$scenario" \
                 --warmup-seconds "$WARMUP_SECONDS" \
                 --active-seconds "$ACTIVE_SECONDS" \
+                --repository-root "$repository" \
+                --binary-dir "$repository/target/profiling" \
                 --ready-file "profiles/paired/$scenario-$member-$pair.ready" \
                 --output "profiles/paired/$scenario-$member-$pair.jsonl" \
                 --parent-sha "$PARENT_SHA" \

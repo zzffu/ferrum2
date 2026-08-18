@@ -21,6 +21,9 @@ ACTIVE_SECONDS = frozenset({15, 30, 60})
 PAIR_COUNTS = frozenset({3, 5})
 COMMIT_SHA = re.compile(r"[0-9a-fA-F]{40}")
 MODES = frozenset({"diagnostic", "qualification"})
+PLAN_SCHEMA_VERSION = 4
+PROFILE_TRIAL_SCHEMA_VERSION = 2
+SUMMARY_SCHEMA_VERSION = 5
 SCENARIO_CATALOG = {
     "tcp-bulk": ("bytes_per_second", "higher_is_better", "tcp-throughput"),
     "tcp-stream-64k": (
@@ -34,18 +37,86 @@ SCENARIO_CATALOG = {
     "udp-small-high": (
         "datagrams_per_second",
         "higher_is_better",
-        "udp",
+        "udp-established",
     ),
-    "udp-mtu-1200": ("datagrams_per_second", "higher_is_better", "udp"),
+    "udp-mtu-1200": (
+        "datagrams_per_second",
+        "higher_is_better",
+        "udp-established",
+    ),
+    "udp-payload-1472": (
+        "datagrams_per_second",
+        "higher_is_better",
+        "udp-ss-payload",
+    ),
+    "udp-payload-1500": (
+        "datagrams_per_second",
+        "higher_is_better",
+        "udp-ss-payload",
+    ),
+    "udp-payload-8192": (
+        "datagrams_per_second",
+        "higher_is_better",
+        "udp-ss-payload",
+    ),
+    "udp-max-wire-65507": (
+        "datagrams_per_second",
+        "higher_is_better",
+        "udp-ss-payload",
+    ),
+    "udp-direct-small-128": (
+        "datagrams_per_second",
+        "higher_is_better",
+        "udp-direct",
+    ),
+    "udp-direct-max-65497": (
+        "datagrams_per_second",
+        "higher_is_better",
+        "udp-direct",
+    ),
+}
+# For a UDP round trip, upstream_wire_bytes is the larger directional wire:
+# the AES-2022 response for Shadowsocks and the target-facing payload for Direct.
+SCENARIO_EVIDENCE = {
+    "tcp-bulk": ("shadowsocks", 65_536, None, None),
+    "tcp-stream-64k": ("shadowsocks", 65_536, None, None),
+    "tcp-request-1k": ("shadowsocks", 1_024, None, None),
+    "tcp-request-4k": ("shadowsocks", 4_096, None, None),
+    "tcp-request-16k": ("shadowsocks", 16_384, None, None),
+    "udp-small-high": ("shadowsocks", 128, 138, 186),
+    "udp-mtu-1200": ("shadowsocks", 1_200, 1_210, 1_258),
+    "udp-payload-1472": ("shadowsocks", 1_472, 1_482, 1_530),
+    "udp-payload-1500": ("shadowsocks", 1_500, 1_510, 1_558),
+    "udp-payload-8192": ("shadowsocks", 8_192, 8_202, 8_250),
+    # 65,449 application bytes fill the AES-2022 response wire to 65,507 bytes.
+    "udp-max-wire-65507": ("shadowsocks", 65_449, 65_459, 65_507),
+    # SOCKS/IPv4 consumes 10 of its 65,507-byte UDP datagram bound.
+    "udp-direct-small-128": ("direct", 128, 138, 128),
+    "udp-direct-max-65497": ("direct", 65_497, 65_507, 65_497),
 }
 TCP_REQUEST_SCENARIOS = (
     "tcp-request-1k",
     "tcp-request-4k",
     "tcp-request-16k",
 )
-QUALIFICATION_GROUPS = frozenset({"tcp-frame-capacity"})
+UDP_SS_PAYLOAD_MATRIX = (
+    "udp-small-high",
+    "udp-mtu-1200",
+    "udp-payload-1472",
+    "udp-payload-1500",
+    "udp-payload-8192",
+    "udp-max-wire-65507",
+)
+UDP_DIRECT_PAYLOAD_BOUNDS = (
+    "udp-direct-small-128",
+    "udp-direct-max-65497",
+)
+QUALIFICATION_GROUPS = frozenset(
+    {"tcp-frame-capacity", "udp-payload-matrix", "udp-direct-payload-bounds"}
+)
 PROFILE_FIELDS = frozenset(
     {
+        "schema_version",
         "kind",
         "parent_sha",
         "candidate_sha",
@@ -56,6 +127,10 @@ PROFILE_FIELDS = frozenset(
         "scenario",
         "warmup_seconds",
         "active_seconds",
+        "topology",
+        "application_payload_bytes",
+        "socks_datagram_bytes",
+        "upstream_wire_bytes",
         "sha",
         "tree",
         "runner_sha256",
@@ -226,12 +301,17 @@ def validate_git_relation(
 
 def _scenario_entry(scenario: str, role: str) -> dict[str, object]:
     metric, direction, _family = SCENARIO_CATALOG[scenario]
+    topology, payload_bytes, socks_bytes, upstream_bytes = SCENARIO_EVIDENCE[scenario]
     return {
         "scenario": scenario,
         "role": role,
         "mandatory": True,
         "metric": metric,
         "direction": direction,
+        "topology": topology,
+        "application_payload_bytes": payload_bytes,
+        "socks_datagram_bytes": socks_bytes,
+        "upstream_wire_bytes": upstream_bytes,
     }
 
 
@@ -250,6 +330,22 @@ def _qualification_scenarios(
                 ),
             ],
         )
+    if selected == "udp-payload-matrix":
+        return (
+            selected,
+            [
+                _scenario_entry(scenario, "primary" if index == 0 else "guard")
+                for index, scenario in enumerate(UDP_SS_PAYLOAD_MATRIX)
+            ],
+        )
+    if selected == "udp-direct-payload-bounds":
+        return (
+            selected,
+            [
+                _scenario_entry(scenario, "primary" if index == 0 else "guard")
+                for index, scenario in enumerate(UDP_DIRECT_PAYLOAD_BOUNDS)
+            ],
+        )
     family = SCENARIO_CATALOG[selected][2]
     if family == "tcp-throughput":
         guard = "tcp-bulk" if selected == "tcp-stream-64k" else "tcp-stream-64k"
@@ -266,9 +362,20 @@ def _qualification_scenarios(
         )
         scenarios.append(_scenario_entry("tcp-bulk", "guard"))
         return "tcp-request", scenarios
-    if family == "udp":
+    if family == "udp-established":
         guard = "udp-mtu-1200" if selected == "udp-small-high" else "udp-small-high"
         return "udp", [
+            _scenario_entry(selected, "primary"),
+            _scenario_entry(guard, "guard"),
+        ]
+    if family == "udp-ss-payload":
+        return "udp-ss-payload", [
+            _scenario_entry(selected, "primary"),
+            _scenario_entry("udp-small-high", "guard"),
+        ]
+    if family == "udp-direct":
+        guard = next(scenario for scenario in UDP_DIRECT_PAYLOAD_BOUNDS if scenario != selected)
+        return "udp-direct", [
             _scenario_entry(selected, "primary"),
             _scenario_entry(guard, "guard"),
         ]
@@ -307,7 +414,7 @@ def create_plan(
     else:
         scenario_group, scenarios = _qualification_scenarios(selection)
     return {
-        "schema_version": 3,
+        "schema_version": PLAN_SCHEMA_VERSION,
         "mode": mode,
         "selection": selection,
         "selected_scenario": selection if selection in SCENARIO_CATALOG else None,
@@ -600,6 +707,13 @@ def _required_u64(row: dict[str, object], field: str, *, positive: bool = False)
     return value
 
 
+def _optional_u64(row: dict[str, object], field: str) -> int | None:
+    value = row.get(field)
+    if value is None:
+        return None
+    return _required_u64(row, field, positive=True)
+
+
 def _require_pattern(value: str, pattern: re.Pattern[str], *, field: str) -> None:
     if pattern.fullmatch(value) is None:
         raise CandidateControlError(f"{field} has an invalid identity")
@@ -637,6 +751,8 @@ def _validate_trial(
     parent_sha: str,
     candidate_sha: str,
 ) -> tuple[str, int, str]:
+    if _required_u64(row, "schema_version", positive=True) != PROFILE_TRIAL_SCHEMA_VERSION:
+        raise CandidateControlError("evidence schema_version is unsupported")
     _required_string(row, "kind", expected="m18_profile_trial")
     _required_string(row, "parent_sha", expected=parent_sha)
     _required_string(row, "candidate_sha", expected=candidate_sha)
@@ -659,6 +775,18 @@ def _validate_trial(
         raise CandidateControlError("evidence warmup_seconds does not match the plan")
     if _required_u64(row, "active_seconds", positive=True) != plan["active_seconds"]:
         raise CandidateControlError("evidence active_seconds does not match the plan")
+    if _required_string(row, "topology") != planned[scenario]["topology"]:
+        raise CandidateControlError("evidence topology does not match the scenario")
+    if (
+        _required_u64(row, "application_payload_bytes", positive=True)
+        != planned[scenario]["application_payload_bytes"]
+    ):
+        raise CandidateControlError(
+            "evidence application_payload_bytes does not match the scenario"
+        )
+    for field in ("socks_datagram_bytes", "upstream_wire_bytes"):
+        if _optional_u64(row, field) != planned[scenario][field]:
+            raise CandidateControlError(f"evidence {field} does not match the scenario")
     expected_sha = parent_sha if member == "parent" else candidate_sha
     sha = _required_string(row, "sha", expected=expected_sha)
     tree = _required_string(row, "tree")
@@ -1035,6 +1163,12 @@ def summarize_evidence(
                 "mandatory": scenario_plan["mandatory"],
                 "metric": scenario_plan["metric"],
                 "direction": direction,
+                "topology": scenario_plan["topology"],
+                "application_payload_bytes": scenario_plan[
+                    "application_payload_bytes"
+                ],
+                "socks_datagram_bytes": scenario_plan["socks_datagram_bytes"],
+                "upstream_wire_bytes": scenario_plan["upstream_wire_bytes"],
                 "pairs": pair_summaries,
                 "wins": wins,
                 "losses": losses,
@@ -1100,7 +1234,7 @@ def summarize_evidence(
         for member in ("parent", "candidate")
     }
     return {
-        "schema_version": 4,
+        "schema_version": SUMMARY_SCHEMA_VERSION,
         "kind": "performance_candidate_summary",
         "mode": plan["mode"],
         "selection": plan["selection"],
@@ -1144,7 +1278,7 @@ def invalid_summary(
         [entry["scenario"] for entry in plan["scenarios"]] if plan is not None else []
     )
     return {
-        "schema_version": 4,
+        "schema_version": SUMMARY_SCHEMA_VERSION,
         "kind": "performance_candidate_summary",
         "mode": plan["mode"] if plan is not None else None,
         "selection": plan["selection"] if plan is not None else None,
@@ -1209,6 +1343,28 @@ def summary_markdown(summary: dict[str, object]) -> str:
             f"- Decision: {summary['decision_reason']}",
             "- Warnings are descriptive only and never change status or exit code.",
             "",
+        ]
+    )
+    scenario_names = {scenario["scenario"] for scenario in summary["scenarios"]}
+    if "udp-max-wire-65507" in scenario_names:
+        lines.extend(
+            [
+                "- UDP bound: a 65,507-byte application payload is not representable "
+                "through SOCKS/IPv4. The Shadowsocks maximum scenario carries 65,449 "
+                "application bytes and fills the AES-2022 response wire to 65,507 bytes.",
+                "",
+            ]
+        )
+    if "udp-direct-max-65497" in scenario_names:
+        lines.extend(
+            [
+                "- Direct UDP bound: 65,497 application bytes plus the 10-byte "
+                "SOCKS/IPv4 header fill the 65,507-byte SOCKS datagram.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
             "| Member | Commit | Tree | Runner SHA-256 | Client SHA-256 | Server SHA-256 |",
             "|---|---|---|---|---|---|",
         ]
@@ -1223,13 +1379,17 @@ def summary_markdown(summary: dict[str, object]) -> str:
     lines.extend(
         [
             "",
-            "| Scenario | Role | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Spread % | Warnings | Threshold decision | Status |",
-            "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
+            "| Scenario | Role | Topology | Application payload B | SOCKS datagram B | Upstream wire B | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Spread % | Warnings | Threshold decision | Status |",
+            "|---|---|---|---:|---:|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
         ]
     )
     for scenario in summary["scenarios"]:
         lines.append(
-            f"| {scenario['scenario']} | {scenario['role']} | {scenario['metric']} | "
+            f"| {scenario['scenario']} | {scenario['role']} | {scenario['topology']} | "
+            f"{scenario['application_payload_bytes']} | "
+            f"{scenario['socks_datagram_bytes'] if scenario['socks_datagram_bytes'] is not None else '-'} | "
+            f"{scenario['upstream_wire_bytes'] if scenario['upstream_wire_bytes'] is not None else '-'} | "
+            f"{scenario['metric']} | "
             f"{scenario['direction']} | {scenario['observed_direction']} | "
             f"{scenario['wins']} | {scenario['losses']} | "
             f"{scenario['ties']} | {scenario['median_improvement_percent']:.6f} | "

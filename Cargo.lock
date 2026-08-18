@@ -530,6 +530,10 @@ dependencies = [
 name = "ferrum2-m4-qualification"
 version = "0.1.0"
 dependencies = [
+ "ferrum2-core",
+ "ferrum2-crypto",
+ "ferrum2-shadowsocks",
+ "ferrum2-socks5",
  "hickory-proto",
  "rustls",
  "socket2",
