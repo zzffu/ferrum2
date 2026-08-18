@@ -19,6 +19,87 @@ fn series(output: &str) -> BTreeSet<String> {
 }
 
 #[test]
+fn prebound_handles_hide_untouched_series_and_preserve_explicit_zero_updates() {
+    let metrics = Metrics::new();
+    let empty = series(&metrics.encode_text().expect("empty metrics"));
+    for prefix in [
+        "ferrum2_tcp_connections_total{",
+        "ferrum2_tcp_failures_total{",
+        "ferrum2_tcp_bytes_total{",
+        "ferrum2_udp_datagrams_total{",
+        "ferrum2_udp_failures_total{",
+        "ferrum2_udp_bytes_total{",
+        "ferrum2_sniff_total{",
+    ] {
+        assert!(
+            empty.iter().all(|sample| !sample.starts_with(prefix)),
+            "untouched prebound series leaked for {prefix}"
+        );
+    }
+
+    metrics.add_bytes(Role::Client, Direction::InboundToOutbound, 0);
+    metrics.add_udp_bytes(Role::Server, Direction::TargetToClient, 0);
+    metrics.set_udp_buffered_bytes(Role::Client, 0);
+    let output = metrics.encode_text().expect("explicit zero metrics");
+    assert!(
+        output.contains(
+            "ferrum2_tcp_bytes_total{role=\"client\",direction=\"inbound_to_outbound\"} 0"
+        )
+    );
+    assert!(
+        output
+            .contains("ferrum2_udp_bytes_total{role=\"server\",direction=\"target_to_client\"} 0")
+    );
+    assert!(output.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 0"));
+    assert!(
+        !output.contains("ferrum2_udp_bytes_total{role=\"client\",direction=\"target_to_client\"}")
+    );
+}
+
+#[test]
+fn prebound_udp_datagram_grid_keeps_every_closed_tuple_distinct() {
+    let roles = [Role::Client, Role::Server];
+    let directions = [
+        Direction::InboundToOutbound,
+        Direction::OutboundToInbound,
+        Direction::ClientToTarget,
+        Direction::TargetToClient,
+    ];
+    let outcomes = [
+        Outcome::Accepted,
+        Outcome::Completed,
+        Outcome::Rejected,
+        Outcome::Failed,
+        Outcome::Cancelled,
+        Outcome::Timeout,
+    ];
+    let metrics = Metrics::new();
+    for role in roles {
+        for direction in directions {
+            for outcome in outcomes {
+                metrics.udp_datagram(role, direction, outcome);
+            }
+        }
+    }
+
+    let output = metrics.encode_text().expect("complete UDP datagram grid");
+    let datagrams = series(&output)
+        .into_iter()
+        .filter(|sample| sample.starts_with("ferrum2_udp_datagrams_total{"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(datagrams.len(), 48);
+    for role in roles {
+        for direction in directions {
+            for outcome in outcomes {
+                assert!(datagrams.contains(&format!(
+                    "ferrum2_udp_datagrams_total{{role=\"{role}\",direction=\"{direction}\",outcome=\"{outcome}\"}}"
+                )));
+            }
+        }
+    }
+}
+
+#[test]
 fn registry_preserves_the_fourteen_stable_families_and_allows_additions() {
     let metrics = Metrics::new();
     metrics.connection(Role::Client, Inbound::Socks5, Outcome::Accepted);
