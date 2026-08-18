@@ -1994,6 +1994,19 @@ class UdpIdleCpuControlTests(unittest.TestCase):
                     },
                 }
             )
+        else:
+            policy.update(
+                {
+                    "policy_id": "test-uncalibrated-udp-idle-cpu",
+                    "noise_ticks": None,
+                    "minimum_saved_ticks": None,
+                    "minimum_parent_signal_ticks": None,
+                    "clock_ticks_per_second": None,
+                    "qualification_parent_sha": None,
+                    "calibration_source": None,
+                    "calibration_environment": None,
+                }
+            )
         CONTROL.validate_udp_idle_cpu_policy(policy)
         return policy
 
@@ -2110,6 +2123,43 @@ class UdpIdleCpuControlTests(unittest.TestCase):
         with self.assertRaisesRegex(CONTROL.CandidateControlError, "clock-tick rate"):
             self.summarize([20] * 5, [10] * 5, wrong_clock)
 
+    def test_repository_policy_is_derived_from_the_frozen_aa_run(self) -> None:
+        policy = CONTROL.load_udp_idle_cpu_policy(IDLE_CPU_POLICY_PATH)
+        parent_ticks = [5, 4, 4, 5, 5]
+        candidate_ticks = [4, 5, 4, 4, 4]
+        saved_ticks = [
+            parent - candidate
+            for parent, candidate in zip(parent_ticks, candidate_ticks, strict=True)
+        ]
+        noise_ticks = max(abs(saved) for saved in saved_ticks)
+        self.assertEqual(saved_ticks, [1, -1, 0, 1, 1])
+        self.assertEqual(policy["noise_ticks"], noise_ticks)
+        self.assertEqual(policy["minimum_saved_ticks"], noise_ticks + 1)
+        self.assertEqual(
+            policy["minimum_parent_signal_ticks"],
+            max(2, 2 * (noise_ticks + 1)),
+        )
+        self.assertEqual(policy["clock_ticks_per_second"], 100)
+        self.assertEqual(
+            policy["qualification_parent_sha"],
+            CONTROL.UDP_IDLE_QUALIFICATION_PARENT_SHA,
+        )
+        self.assertEqual(
+            policy["calibration_source"],
+            "artifact:github-actions/zzffu/ferrum2/runs/32140503395/"
+            "artifacts/9326346892/"
+            "paired-profile-qualification-udp-idle-4096-32140503395-1@"
+            "sha256:80d322a861bcb354ac45f6e01dbeb6b78111c4e0d47b992f20880b75c554e1cb",
+        )
+        self.assertEqual(
+            policy["calibration_environment"],
+            {
+                **CONTROL.MEASUREMENT_ENVIRONMENT,
+                "warmup_seconds": 3,
+                "active_seconds": 30,
+            },
+        )
+
     def test_uncalibrated_aa_handles_zero_cpu_without_division(self) -> None:
         summary = self.summarize([0] * 5, [0] * 5, self.policy(calibrated=False))
         self.assertEqual(summary["status"], "UDP_IDLE_CPU_UNCALIBRATED")
@@ -2220,9 +2270,21 @@ class UdpIdleCpuControlTests(unittest.TestCase):
                     CONTROL._validate_udp_idle_evidence(malformed)
 
     def test_idle_full_evidence_set_and_markdown_are_non_adoption(self) -> None:
-        plan = self.plan(self.policy(calibrated=False))
         with tempfile.TemporaryDirectory(prefix="udp-idle-evidence-") as temporary:
             root = pathlib.Path(temporary)
+            idle_policy_path = root / "idle-policy.json"
+            idle_policy_document = {
+                key: value
+                for key, value in self.policy(calibrated=False).items()
+                if key != "policy_sha256"
+            }
+            idle_policy_path.write_text(
+                json.dumps(idle_policy_document, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            plan = self.plan(
+                CONTROL.load_udp_idle_cpu_policy(idle_policy_path)
+            )
             parent_root = root / "parent"
             candidate_root = root / "candidate"
             parent_root.mkdir()
@@ -2288,7 +2350,7 @@ class UdpIdleCpuControlTests(unittest.TestCase):
                     "candidate_sha": "2" * 40,
                     "policy": POLICY_PATH,
                     "scale_policy": None,
-                    "idle_cpu_policy": IDLE_CPU_POLICY_PATH,
+                    "idle_cpu_policy": idle_policy_path,
                     "repository": None,
                     "output": output,
                     "markdown": markdown_path,

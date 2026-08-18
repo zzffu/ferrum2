@@ -1,15 +1,25 @@
 {
   "schema_version": 1,
-  "policy_id": "ferrum2-udp-idle-4096-cpu-v1-uncalibrated",
+  "policy_id": "ferrum2-udp-idle-4096-cpu-v1-calibrated-20260818",
   "required_pairs": 5,
   "required_sessions": 4096,
   "candidate_maximum_percent_of_parent": 50,
   "minimum_wins_beyond_noise": 4,
-  "noise_ticks": null,
-  "minimum_saved_ticks": null,
-  "minimum_parent_signal_ticks": null,
-  "clock_ticks_per_second": null,
-  "qualification_parent_sha": null,
-  "calibration_source": null,
-  "calibration_environment": null
+  "noise_ticks": 1,
+  "minimum_saved_ticks": 2,
+  "minimum_parent_signal_ticks": 4,
+  "clock_ticks_per_second": 100,
+  "qualification_parent_sha": "2d6cf6428c7da0bd49dd54722463a5dab45756fe",
+  "calibration_source": "artifact:github-actions/zzffu/ferrum2/runs/32140503395/artifacts/9326346892/paired-profile-qualification-udp-idle-4096-32140503395-1@sha256:80d322a861bcb354ac45f6e01dbeb6b78111c4e0d47b992f20880b75c554e1cb",
+  "calibration_environment": {
+    "runner_image": "ubuntu-24.04",
+    "runner_os": "Linux",
+    "runner_arch": "X64",
+    "rust_toolchain": "1.97.1",
+    "cargo_profile": "profiling",
+    "evidence_build_profile": "current",
+    "pair_schedule": "alternating-parent-candidate",
+    "warmup_seconds": 3,
+    "active_seconds": 30
+  }
 }
