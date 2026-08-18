@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -11,7 +12,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tools" / "performance_candidate.py"
@@ -21,6 +22,236 @@ SPEC = importlib.util.spec_from_file_location("performance_candidate", MODULE_PA
 assert SPEC is not None and SPEC.loader is not None
 CONTROL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CONTROL)
+
+FINAL_CALIBRATION_POLICY_ID = (
+    "github-hosted-ubuntu-24.04-profiling-v1-"
+    "calibrated-final-harness-20260818"
+)
+FINAL_CALIBRATION_ENVIRONMENT = {
+    **CONTROL.MEASUREMENT_ENVIRONMENT,
+    "warmup_seconds": 3,
+    "active_seconds": 30,
+}
+TCP_CALIBRATION_SOURCE = (
+    "artifact:github-actions/zzffu/ferrum2/runs/32126651170/artifacts/"
+    "9321742851/paired-profile-qualification-tcp-frame-capacity-"
+    "32126651170-1@sha256:"
+    "ee1f51842a9e07126ca80b61905d452a8298e74923044d9e3ed795d1587edb97"
+)
+UDP_CALIBRATION_SOURCE = (
+    "artifact:github-actions/zzffu/ferrum2/runs/32126655215/artifacts/"
+    "9321908225/paired-profile-qualification-udp-payload-matrix-"
+    "32126655215-1@sha256:"
+    "fbd1356c631398fd087b9370d7498b1ed1fed31576535b9224aaf3fc0cc5379d"
+)
+UDP_DIRECT_CALIBRATION_SOURCE = (
+    "artifact:github-actions/zzffu/ferrum2/runs/32126658578/artifacts/"
+    "9321242153/paired-profile-qualification-udp-direct-payload-bounds-"
+    "32126658578-1@sha256:"
+    "29830b3b677a35ed8de55886defbd985c81396ca30ddb0945d8084005195c5dd"
+)
+FINAL_CALIBRATION_THRESHOLDS = {
+    "tcp-stream-64k": (
+        Decimal("2.290"),
+        Decimal("-2.291"),
+        TCP_CALIBRATION_SOURCE,
+    ),
+    "tcp-bulk": (
+        Decimal("0.912"),
+        Decimal("-0.913"),
+        TCP_CALIBRATION_SOURCE,
+    ),
+    "tcp-request-1k": (
+        Decimal("0.771"),
+        Decimal("-2.001"),
+        TCP_CALIBRATION_SOURCE,
+    ),
+    "tcp-request-4k": (
+        Decimal("0.809"),
+        Decimal("-2.001"),
+        TCP_CALIBRATION_SOURCE,
+    ),
+    "tcp-request-16k": (
+        Decimal("0.572"),
+        Decimal("-2.001"),
+        TCP_CALIBRATION_SOURCE,
+    ),
+    "udp-small-high": (
+        Decimal("0.436"),
+        Decimal("-0.437"),
+        UDP_CALIBRATION_SOURCE,
+    ),
+    "udp-mtu-1200": (
+        Decimal("0.692"),
+        Decimal("-0.693"),
+        UDP_CALIBRATION_SOURCE,
+    ),
+    "udp-payload-1472": (
+        Decimal("0.343"),
+        Decimal("-0.344"),
+        UDP_CALIBRATION_SOURCE,
+    ),
+    "udp-payload-1500": (
+        Decimal("0.394"),
+        Decimal("-0.395"),
+        UDP_CALIBRATION_SOURCE,
+    ),
+    "udp-payload-8192": (
+        Decimal("0.919"),
+        Decimal("-0.920"),
+        UDP_CALIBRATION_SOURCE,
+    ),
+    "udp-max-wire-65507": (
+        Decimal("1.206"),
+        Decimal("-1.207"),
+        UDP_CALIBRATION_SOURCE,
+    ),
+    "udp-direct-small-128": (
+        Decimal("2.789"),
+        Decimal("-2.790"),
+        UDP_DIRECT_CALIBRATION_SOURCE,
+    ),
+    "udp-direct-max-65497": (
+        Decimal("0.518"),
+        Decimal("-0.519"),
+        UDP_DIRECT_CALIBRATION_SOURCE,
+    ),
+}
+FINAL_AA_RAW_EVIDENCE = {
+    "tcp-stream-64k": (
+        "higher_is_better",
+        (
+            (239_451_067, 237_685_964),
+            (247_105_672, 241_443_362),
+            (248_093_081, 242_413_294),
+            (245_366_784, 238_909_303),
+            (246_633_813, 242_946_321),
+        ),
+    ),
+    "tcp-bulk": (
+        "higher_is_better",
+        (
+            (282_252_629, 283_331_788),
+            (285_116_552, 287_716_147),
+            (284_843_485, 279_742_600),
+            (282_447_052, 283_709_713),
+            (285_393_988, 282_355_302),
+        ),
+    ),
+    "tcp-request-1k": (
+        "lower_is_better",
+        (
+            (182_890, 179_805),
+            (183_100, 181_689),
+            (180_447, 179_725),
+            (179_304, 182_880),
+            (180_797, 180_256),
+        ),
+    ),
+    "tcp-request-4k": (
+        "lower_is_better",
+        (
+            (199_244, 197_081),
+            (199_374, 198_693),
+            (201_839, 197_893),
+            (199_354, 197_742),
+            (198_273, 199_215),
+        ),
+    ),
+    "tcp-request-16k": (
+        "lower_is_better",
+        (
+            (259_253, 257_771),
+            (256_349, 257_501),
+            (257_991, 255_468),
+            (255_648, 260_785),
+            (257_620, 258_702),
+        ),
+    ),
+    "udp-small-high": (
+        "higher_is_better",
+        (
+            (14_772, 14_704),
+            (14_979, 14_949),
+            (14_940, 14_875),
+            (14_900, 14_802),
+            (15_019, 14_972),
+        ),
+    ),
+    "udp-mtu-1200": (
+        "higher_is_better",
+        (
+            (14_343, 14_390),
+            (14_489, 14_375),
+            (14_460, 14_360),
+            (14_463, 14_384),
+            (14_468, 14_339),
+        ),
+    ),
+    "udp-payload-1472": (
+        "higher_is_better",
+        (
+            (14_305, 14_256),
+            (14_279, 14_270),
+            (14_318, 14_226),
+            (14_284, 14_239),
+            (14_239, 14_170),
+        ),
+    ),
+    "udp-payload-1500": (
+        "higher_is_better",
+        (
+            (14_228, 14_188),
+            (14_245, 14_189),
+            (14_288, 14_228),
+            (14_313, 14_268),
+            (14_324, 14_203),
+        ),
+    ),
+    "udp-payload-8192": (
+        "higher_is_better",
+        (
+            (11_505, 11_399),
+            (11_558, 11_429),
+            (11_546, 11_440),
+            (11_476, 11_455),
+            (11_460, 11_431),
+        ),
+    ),
+    "udp-max-wire-65507": (
+        "higher_is_better",
+        (
+            (5_560, 5_493),
+            (5_450, 5_507),
+            (5_635, 5_501),
+            (5_532, 5_494),
+            (5_464, 5_593),
+        ),
+    ),
+    "udp-direct-small-128": (
+        "higher_is_better",
+        (
+            (36_976, 37_779),
+            (37_077, 38_111),
+            (37_489, 36_110),
+            (35_633, 35_579),
+            (36_188, 37_904),
+        ),
+    ),
+    "udp-direct-max-65497": (
+        "higher_is_better",
+        (
+            (20_582, 20_725),
+            (20_880, 20_772),
+            (20_969, 20_747),
+            (20_605, 20_653),
+            (20_704, 20_776),
+        ),
+    ),
+}
+FINAL_AA_RAW_EVIDENCE_SHA256 = (
+    "bf6bc4e00d69e9e906c899b9188de5b7da806bb6591e4ff503fc869f7fc555c3"
+)
 
 
 def synthetic_policy(
@@ -318,7 +549,7 @@ class ScenarioPlanTests(unittest.TestCase):
             warmup_seconds="3",
             active_seconds="30",
             pairs="3",
-            decision_policy=CONTROL.load_decision_policy(POLICY_PATH),
+            decision_policy=copy.deepcopy(CONTROL.UNCALIBRATED_POLICY),
         )
 
     def entries(self, mode: str, scenario: str) -> list[tuple[str, str]]:
@@ -450,16 +681,156 @@ class ScenarioPlanTests(unittest.TestCase):
 
 
 class DecisionPolicyTests(unittest.TestCase):
-    def test_repository_policy_is_explicitly_uncalibrated_and_hashed(self) -> None:
+    def test_repository_policy_is_the_exact_final_harness_calibration(self) -> None:
         policy = CONTROL.load_decision_policy(POLICY_PATH)
         self.assertRegex(policy["policy_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(policy["policy_id"], FINAL_CALIBRATION_POLICY_ID)
+        self.assertEqual(
+            set(policy["scenarios"]), set(FINAL_CALIBRATION_THRESHOLDS)
+        )
         self.assertEqual(set(policy["scenarios"]), set(CONTROL.SCENARIO_CATALOG))
         for scenario, entry in policy["scenarios"].items():
             with self.subTest(scenario=scenario):
-                self.assertIsNone(entry["noise_band_percent"])
-                self.assertIsNone(entry["regression_threshold_percent"])
-                self.assertIsNone(entry["adoption_threshold_percent"])
-                self.assertIsNone(entry["calibration_source"])
+                noise, regression, source = FINAL_CALIBRATION_THRESHOLDS[scenario]
+                metric, direction, _family = CONTROL.SCENARIO_CATALOG[scenario]
+                self.assertEqual(entry["metric"], metric)
+                self.assertEqual(entry["direction"], direction)
+                self.assertEqual(
+                    Decimal(str(entry["noise_band_percent"])), noise
+                )
+                self.assertEqual(
+                    Decimal(str(entry["regression_threshold_percent"])),
+                    regression,
+                )
+                self.assertEqual(
+                    Decimal(str(entry["adoption_threshold_percent"])),
+                    Decimal("5.001"),
+                )
+                self.assertEqual(
+                    (
+                        entry["minimum_pairs"],
+                        entry["minimum_wins"],
+                        entry["minimum_losses"],
+                    ),
+                    (5, 4, 3),
+                )
+                self.assertEqual(entry["calibration_source"], source)
+                self.assertEqual(
+                    entry["calibration_environment"],
+                    FINAL_CALIBRATION_ENVIRONMENT,
+                )
+
+    def test_repository_thresholds_are_derived_from_all_65_raw_aa_pairs(
+        self,
+    ) -> None:
+        serialized = json.dumps(
+            FINAL_AA_RAW_EVIDENCE,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        self.assertEqual(
+            hashlib.sha256(serialized).hexdigest(),
+            FINAL_AA_RAW_EVIDENCE_SHA256,
+        )
+        self.assertEqual(len(FINAL_AA_RAW_EVIDENCE), 13)
+        self.assertEqual(
+            sum(len(pairs) for _direction, pairs in FINAL_AA_RAW_EVIDENCE.values()),
+            65,
+        )
+
+        policy = CONTROL.load_decision_policy(POLICY_PATH)
+        quantum = Decimal("0.001")
+        for scenario, (frozen_direction, pairs) in FINAL_AA_RAW_EVIDENCE.items():
+            with self.subTest(scenario=scenario):
+                metric, catalog_direction, _family = CONTROL.SCENARIO_CATALOG[
+                    scenario
+                ]
+                self.assertEqual(catalog_direction, frozen_direction)
+                self.assertEqual(len(pairs), 5)
+                deltas = []
+                for parent, candidate in pairs:
+                    self.assertIs(type(parent), int)
+                    self.assertIs(type(candidate), int)
+                    self.assertGreater(parent, 0)
+                    self.assertGreater(candidate, 0)
+                    difference = (
+                        candidate - parent
+                        if frozen_direction == "higher_is_better"
+                        else parent - candidate
+                    )
+                    expected_delta = (
+                        Decimal(difference) * Decimal(100) / Decimal(parent)
+                    )
+                    observed_delta = CONTROL._improvement(
+                        parent, candidate, frozen_direction
+                    )
+                    self.assertEqual(observed_delta, expected_delta)
+                    deltas.append(observed_delta)
+
+                median_absolute_delta = sorted(abs(delta) for delta in deltas)[2]
+                self.assertEqual(
+                    CONTROL._median([abs(delta) for delta in deltas]),
+                    median_absolute_delta,
+                )
+                noise = median_absolute_delta.quantize(
+                    quantum, rounding=ROUND_CEILING
+                )
+                adoption = max(Decimal(5), noise) + quantum
+                regression_floor = (
+                    Decimal(2) if metric == "p99_nanoseconds" else Decimal(0)
+                )
+                regression = -(max(regression_floor, noise) + quantum)
+                entry = policy["scenarios"][scenario]
+                self.assertEqual(
+                    Decimal(str(entry["noise_band_percent"])), noise
+                )
+                self.assertEqual(
+                    Decimal(str(entry["adoption_threshold_percent"])), adoption
+                )
+                self.assertEqual(
+                    Decimal(str(entry["regression_threshold_percent"])),
+                    regression,
+                )
+
+    def test_repository_calibration_eligibility_requires_five_matching_pairs(
+        self,
+    ) -> None:
+        policy = CONTROL.load_decision_policy(POLICY_PATH)
+        for selection in (
+            "tcp-frame-capacity",
+            "udp-payload-matrix",
+            "udp-direct-payload-bounds",
+        ):
+            with self.subTest(selection=selection, case="matched"):
+                matched = CONTROL.create_plan(
+                    mode="qualification",
+                    selection=selection,
+                    warmup_seconds="3",
+                    active_seconds="30",
+                    pairs="5",
+                    decision_policy=policy,
+                )
+                self.assertTrue(matched["adoption_eligible"])
+            with self.subTest(selection=selection, case="three-pair"):
+                three_pair = CONTROL.create_plan(
+                    mode="qualification",
+                    selection=selection,
+                    warmup_seconds="3",
+                    active_seconds="30",
+                    pairs="3",
+                    decision_policy=policy,
+                )
+                self.assertFalse(three_pair["adoption_eligible"])
+            with self.subTest(selection=selection, case="recipe-mismatch"):
+                mismatched = CONTROL.create_plan(
+                    mode="qualification",
+                    selection=selection,
+                    warmup_seconds="5",
+                    active_seconds="30",
+                    pairs="5",
+                    decision_policy=policy,
+                )
+                self.assertFalse(mismatched["adoption_eligible"])
 
     def test_policy_schema_rejects_shape_identity_and_partial_calibration_errors(
         self,
@@ -560,15 +931,18 @@ class EvidenceSummaryTests(unittest.TestCase):
         scenario: str,
         *,
         decision_policy: dict[str, object] | None = None,
+        warmup_seconds: int = 3,
+        active_seconds: int = 30,
+        pairs: int = 3,
     ) -> dict[str, object]:
         return CONTROL.create_plan(
             mode=mode,
             selection=scenario,
-            warmup_seconds="3",
-            active_seconds="30",
-            pairs="3",
+            warmup_seconds=str(warmup_seconds),
+            active_seconds=str(active_seconds),
+            pairs=str(pairs),
             decision_policy=(
-                CONTROL.load_decision_policy(POLICY_PATH)
+                copy.deepcopy(CONTROL.UNCALIBRATED_POLICY)
                 if decision_policy is None
                 else decision_policy
             ),
@@ -1041,6 +1415,107 @@ class EvidenceSummaryTests(unittest.TestCase):
         guard = next(item for item in summary["scenarios"] if item["role"] == "guard")
         self.assertEqual(guard["threshold_decision"], "CONFIRMED_REGRESSION")
 
+    def test_repository_policy_enforces_five_pair_adoption_boundaries(self) -> None:
+        policy = CONTROL.load_decision_policy(POLICY_PATH)
+        cases = (
+            (
+                "within-noise",
+                (101, 101, 101, 101, 101),
+                "INCONCLUSIVE",
+                "WITHIN_NOISE",
+            ),
+            (
+                "four-wins",
+                (110, 110, 110, 110, 90),
+                "CANDIDATE_WIN",
+                "CANDIDATE_IMPROVEMENT",
+            ),
+            (
+                "three-wins",
+                (110, 110, 110, 90, 90),
+                "INCONCLUSIVE",
+                "INSUFFICIENT_WINS",
+            ),
+        )
+        for name, candidates, expected_status, expected_decision in cases:
+            with self.subTest(case=name):
+                plan = self.plan(
+                    "qualification",
+                    "tcp-stream-64k",
+                    decision_policy=policy,
+                    pairs=5,
+                )
+                self.assertTrue(plan["adoption_eligible"])
+                _root, parent, candidate = self.roots()
+                values = {
+                    ("tcp-stream-64k", pair, "candidate"): value
+                    for pair, value in enumerate(candidates, start=1)
+                }
+                self.populate(plan, parent, candidate, values)
+                summary = self.summarize(plan, parent, candidate)
+                primary = next(
+                    item
+                    for item in summary["scenarios"]
+                    if item["scenario"] == "tcp-stream-64k"
+                )
+                self.assertEqual(summary["status"], expected_status)
+                self.assertEqual(
+                    primary["threshold_decision"], expected_decision
+                )
+                self.assertEqual(
+                    primary["wins"], sum(value > 100 for value in candidates)
+                )
+
+    def test_repository_policy_requires_three_losses_for_regression(self) -> None:
+        policy = CONTROL.load_decision_policy(POLICY_PATH)
+        plan = self.plan(
+            "qualification",
+            "tcp-stream-64k",
+            decision_policy=policy,
+            pairs=5,
+        )
+        _root, parent, candidate = self.roots()
+        values = {
+            ("tcp-bulk", pair, "candidate"): value
+            for pair, value in enumerate((90, 90, 90, 110, 110), start=1)
+        }
+        self.populate(plan, parent, candidate, values)
+        summary = self.summarize(plan, parent, candidate)
+        guard = next(
+            item
+            for item in summary["scenarios"]
+            if item["scenario"] == "tcp-bulk"
+        )
+        self.assertEqual(summary["status"], "REGRESSION")
+        self.assertEqual(guard["losses"], 3)
+        self.assertEqual(guard["threshold_decision"], "CONFIRMED_REGRESSION")
+
+        scenario_plan = next(
+            item for item in plan["scenarios"] if item["scenario"] == "tcp-bulk"
+        )
+        # With five pairs, a negative median necessarily has at least three losses,
+        # so exercise the minimum-loss branch directly at its decision boundary.
+        insufficient = CONTROL._scenario_threshold_decision(
+            plan=plan,
+            scenario_plan=scenario_plan,
+            wins=3,
+            losses=2,
+            median_improvement=Decimal("-10"),
+        )
+        confirmed = CONTROL._scenario_threshold_decision(
+            plan=plan,
+            scenario_plan=scenario_plan,
+            wins=2,
+            losses=3,
+            median_improvement=Decimal("-10"),
+        )
+        self.assertEqual(
+            insufficient["threshold_decision"], "INSUFFICIENT_LOSSES"
+        )
+        self.assertEqual(insufficient["status"], "INCONCLUSIVE")
+        self.assertFalse(insufficient["guard_passed"])
+        self.assertEqual(confirmed["threshold_decision"], "CONFIRMED_REGRESSION")
+
     def test_adoption_threshold_without_minimum_wins_is_inconclusive(self) -> None:
         plan = self.plan(
             "qualification",
@@ -1218,8 +1693,13 @@ class EvidenceSummaryTests(unittest.TestCase):
     def test_summary_command_writes_outputs_before_invalid_evidence_failure(
         self,
     ) -> None:
-        plan = self.plan("qualification", "tcp-stream-64k")
         root, parent, candidate = self.roots()
+        policy_path, policy = self.materialize_policy(
+            root, copy.deepcopy(CONTROL.UNCALIBRATED_POLICY)
+        )
+        plan = self.plan(
+            "qualification", "tcp-stream-64k", decision_policy=policy
+        )
         plan_path = root / "plan.json"
         output = root / "performance-summary.json"
         markdown = root / "performance-summary.md"
@@ -1233,7 +1713,7 @@ class EvidenceSummaryTests(unittest.TestCase):
                 "candidate_root": candidate,
                 "parent_sha": self.PARENT_SHA,
                 "candidate_sha": self.CANDIDATE_SHA,
-                "policy": POLICY_PATH,
+                "policy": policy_path,
                 "output": output,
                 "markdown": markdown,
             },
@@ -1253,8 +1733,12 @@ class EvidenceSummaryTests(unittest.TestCase):
         self.assertIn("Missing scenarios", rendered)
 
     def test_summary_command_writes_valid_machine_and_markdown_results(self) -> None:
-        plan, parent, candidate = self.fresh_diagnostic()
-        root = parent.parent
+        root, parent, candidate = self.roots()
+        policy_path, policy = self.materialize_policy(
+            root, copy.deepcopy(CONTROL.UNCALIBRATED_POLICY)
+        )
+        plan = self.plan("diagnostic", "tcp-bulk", decision_policy=policy)
+        self.populate(plan, parent, candidate)
         plan_path = root / "plan.json"
         output = root / "performance-summary.json"
         markdown = root / "performance-summary.md"
@@ -1268,7 +1752,7 @@ class EvidenceSummaryTests(unittest.TestCase):
                 "candidate_root": candidate,
                 "parent_sha": self.PARENT_SHA,
                 "candidate_sha": self.CANDIDATE_SHA,
-                "policy": POLICY_PATH,
+                "policy": policy_path,
                 "output": output,
                 "markdown": markdown,
             },
@@ -1302,8 +1786,13 @@ class EvidenceSummaryTests(unittest.TestCase):
         self.assertIn("| tcp-bulk |", rendered)
 
     def test_summary_command_keeps_uncalibrated_decline_non_failing(self) -> None:
-        plan = self.plan("qualification", "tcp-stream-64k")
         root, parent, candidate = self.roots()
+        policy_path, policy = self.materialize_policy(
+            root, copy.deepcopy(CONTROL.UNCALIBRATED_POLICY)
+        )
+        plan = self.plan(
+            "qualification", "tcp-stream-64k", decision_policy=policy
+        )
         values = {
             ("tcp-bulk", pair, "candidate"): 4 for pair in range(1, plan["pairs"] + 1)
         }
@@ -1321,7 +1810,7 @@ class EvidenceSummaryTests(unittest.TestCase):
                 "candidate_root": candidate,
                 "parent_sha": self.PARENT_SHA,
                 "candidate_sha": self.CANDIDATE_SHA,
-                "policy": POLICY_PATH,
+                "policy": policy_path,
                 "output": output,
                 "markdown": markdown,
             },
