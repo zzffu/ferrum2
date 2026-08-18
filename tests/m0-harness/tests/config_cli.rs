@@ -15,19 +15,292 @@ const CLIENT_BASE: &str = "schema_version = 1\n[client]\nlisten = \"127.0.0.1:10
 const SERVER_BASE: &str = "schema_version = 1\n[server]\nlisten = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
 const PAIRED_PORT_ATTEMPTS: usize = 256;
+const STARTUP_BIND_DIAGNOSTIC: &str =
+    "error[startup.bind] process: unable to prepare required endpoint";
+const STARTUP_BIND_STDERR: &[u8] =
+    b"error[startup.bind] process: unable to prepare required endpoint\n";
+const CLIENT_SHUTDOWN_REPORT_FIELDS: [&str; 17] = [
+    "actual_grace_deadline_elapsed_ns",
+    "actual_grace_deadline_source",
+    "cleanup_failure",
+    "event",
+    "forced_root_count",
+    "owner_baseline",
+    "owner_delta",
+    "owner_stopped",
+    "process_states",
+    "process_transitions",
+    "role",
+    "root",
+    "root_error_category",
+    "root_exit_category",
+    "root_exit_events",
+    "shutdown_grace_ns",
+    "termination_cause",
+];
+const OWNER_COUNTER_FIELDS: [&str; 22] = [
+    "active_supervisor_children",
+    "active_tun_handler_tasks",
+    "active_tun_tcp_flows",
+    "active_process_roots",
+    "connection_tasks",
+    "forced_shutdowns",
+    "listeners",
+    "owned_buffers",
+    "owned_permits",
+    "prepared_process_roots",
+    "process_forced_roots",
+    "process_root_reaps",
+    "process_root_rollbacks",
+    "process_supervisors",
+    "sniff_buffered_bytes",
+    "udp_buffered_bytes",
+    "udp_forced_shutdowns",
+    "udp_queued_datagrams",
+    "udp_scratch_buffers",
+    "udp_sessions",
+    "udp_sockets",
+    "udp_tasks",
+];
+const ACTIVE_OWNER_COUNTER_FIELDS: [&str; 17] = [
+    "active_supervisor_children",
+    "active_tun_handler_tasks",
+    "active_tun_tcp_flows",
+    "active_process_roots",
+    "connection_tasks",
+    "listeners",
+    "owned_buffers",
+    "owned_permits",
+    "prepared_process_roots",
+    "process_supervisors",
+    "sniff_buffered_bytes",
+    "udp_buffered_bytes",
+    "udp_queued_datagrams",
+    "udp_scratch_buffers",
+    "udp_sessions",
+    "udp_sockets",
+    "udp_tasks",
+];
 
-fn assert_startup_bind_failure(output: &Output, context: &str) {
+fn assert_closed_fields(value: &serde_json::Value, expected: &[&str], context: &str) {
+    let actual = value
+        .as_object()
+        .unwrap_or_else(|| panic!("{context} is not an object"))
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = expected
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected, "{context} fields");
+}
+
+fn assert_sensitive_config_values_absent(config: &str, stderr: &str, context: &str) {
+    for line in config.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if !matches!(name, "listen" | "server" | "psk") {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("{context} has a non-string {name} assignment"));
+        assert!(
+            !value.is_empty(),
+            "{context} has an empty {name} assignment"
+        );
+        assert!(
+            !stderr.contains(value),
+            "{context} disclosed configured {name} value"
+        );
+    }
+}
+
+fn parse_client_startup_bind_report(
+    stderr: &[u8],
+    config_path: &std::path::Path,
+    context: &str,
+) -> serde_json::Value {
+    let stderr = std::str::from_utf8(stderr).expect("UTF-8 client startup stderr");
+    let config_path = config_path.to_str().expect("UTF-8 config path");
+    let config =
+        std::fs::read_to_string(config_path).expect("read client config for redaction assertion");
+    assert!(
+        !stderr.contains(config_path),
+        "{context} disclosed the configuration path"
+    );
+    assert_sensitive_config_values_absent(&config, stderr, context);
+
+    assert!(
+        stderr.ends_with('\n'),
+        "{context} stderr is newline terminated"
+    );
+    let mut lines = stderr.lines();
+    let report_line = lines.next().expect("client shutdown report line");
+    assert_eq!(
+        lines.next(),
+        Some(STARTUP_BIND_DIAGNOSTIC),
+        "{context} canonical startup error"
+    );
+    assert_eq!(
+        lines.next(),
+        None,
+        "{context} stderr contains only two lines"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(report_line).expect("closed client shutdown report JSON");
+    assert_closed_fields(
+        &report,
+        &CLIENT_SHUTDOWN_REPORT_FIELDS,
+        "client shutdown report",
+    );
+    assert_eq!(report["event"], "process_shutdown_report", "{context}");
+    assert_eq!(report["role"], "client", "{context}");
+    assert_eq!(
+        report["process_states"],
+        serde_json::json!(["Validated", "Preparing", "Rollback", "Stopped"]),
+        "{context} process states"
+    );
+    let transitions = report["process_transitions"]
+        .as_array()
+        .expect("client process transition array");
+    assert_eq!(transitions.len(), 4, "{context} process transition count");
+    let mut previous_elapsed_ns = 0;
+    for (transition, expected_state) in
+        transitions
+            .iter()
+            .zip(["Validated", "Preparing", "Rollback", "Stopped"])
+    {
+        assert_closed_fields(transition, &["elapsed_ns", "state"], "process transition");
+        assert_eq!(transition["state"], expected_state, "{context}");
+        let elapsed_ns = transition["elapsed_ns"]
+            .as_u64()
+            .expect("transition elapsed nanoseconds");
+        assert!(
+            elapsed_ns >= previous_elapsed_ns,
+            "{context} process transition clock is not monotonic"
+        );
+        previous_elapsed_ns = elapsed_ns;
+    }
+    assert_eq!(
+        report["root_exit_events"],
+        serde_json::json!([]),
+        "{context}"
+    );
+    assert!(
+        report["shutdown_grace_ns"]
+            .as_u64()
+            .is_some_and(|value| value > 0),
+        "{context} shutdown grace"
+    );
+    assert!(report["actual_grace_deadline_elapsed_ns"].is_null());
+    assert!(report["actual_grace_deadline_source"].is_null());
+    assert_eq!(
+        report["termination_cause"], "PreparationFailed",
+        "{context}"
+    );
+    assert_eq!(
+        report["root"],
+        serde_json::json!({"name": "socks", "id": 0}),
+        "{context} failed root"
+    );
+    assert!(report["root_exit_category"].is_null(), "{context}");
+    assert_eq!(report["root_error_category"], "startup.bind", "{context}");
+    assert_eq!(report["forced_root_count"], 0, "{context}");
+    assert!(report["cleanup_failure"].is_null(), "{context}");
+    for field in ["owner_baseline", "owner_stopped", "owner_delta"] {
+        assert_closed_fields(&report[field], &OWNER_COUNTER_FIELDS, field);
+    }
+    for field in OWNER_COUNTER_FIELDS {
+        assert!(
+            report["owner_baseline"][field].as_u64().is_some(),
+            "{context} owner_baseline.{field}"
+        );
+        assert!(
+            report["owner_stopped"][field].as_u64().is_some(),
+            "{context} owner_stopped.{field}"
+        );
+        assert!(
+            report["owner_delta"][field].as_i64().is_some(),
+            "{context} owner_delta.{field}"
+        );
+    }
+    for field in ACTIVE_OWNER_COUNTER_FIELDS {
+        assert_eq!(
+            report["owner_stopped"][field].as_u64(),
+            Some(0),
+            "{context} owner_stopped.{field}"
+        );
+    }
+
+    report
+}
+
+fn stable_client_startup_bind_semantics(report: &serde_json::Value) -> serde_json::Value {
+    let mut stable = report.clone();
+    for transition in stable["process_transitions"]
+        .as_array_mut()
+        .expect("client process transition array")
+    {
+        transition
+            .as_object_mut()
+            .expect("client process transition object")
+            .remove("elapsed_ns");
+    }
+    for event in stable["root_exit_events"]
+        .as_array_mut()
+        .expect("client root exit event array")
+    {
+        event
+            .as_object_mut()
+            .expect("client root exit event object")
+            .remove("elapsed_ns");
+    }
+    stable
+}
+
+fn assert_startup_bind_failure(
+    output: &Output,
+    binary: &str,
+    config_path: &std::path::Path,
+    context: &str,
+) -> Option<serde_json::Value> {
     assert_eq!(output.status.code(), Some(1), "{context}");
     assert!(output.stdout.is_empty(), "{context}");
-    assert!(
-        output.stderr.starts_with(b"error[startup.bind]"),
-        "{context}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains(SYNTHETIC_PSK),
         "{context} leaked the configured PSK"
     );
+    match binary {
+        "ferrum2-client" => Some(parse_client_startup_bind_report(
+            &output.stderr,
+            config_path,
+            context,
+        )),
+        "ferrum2-server" => {
+            let stderr = std::str::from_utf8(&output.stderr).expect("UTF-8 server startup stderr");
+            let config_path = config_path.to_str().expect("UTF-8 config path");
+            let config = std::fs::read_to_string(config_path)
+                .expect("read server config for redaction assertion");
+            assert!(
+                !stderr.contains(config_path),
+                "{context} disclosed the configuration path"
+            );
+            assert_sensitive_config_values_absent(&config, stderr, context);
+            assert!(
+                output.stderr == STARTUP_BIND_STDERR,
+                "{context} server canonical startup error"
+            );
+            None
+        }
+        _ => panic!("unexpected binary {binary}"),
+    }
 }
 
 fn tun_only_client() -> String {
@@ -179,7 +452,7 @@ fn direct_check_config_is_offline_and_runtime_reaches_bind() {
     assert!(checked.stderr.is_empty());
 
     let run = run_binary("ferrum2-client", &["--config", direct.to_str().unwrap()]);
-    assert_startup_bind_failure(&run, "direct client runtime");
+    let _ = assert_startup_bind_failure(&run, "ferrum2-client", &direct, "direct client runtime");
     assert!(
         TcpStream::connect_timeout(
             &listener.local_addr().expect("occupied listener"),
@@ -320,7 +593,7 @@ fn schema_v2_check_succeeds_and_occupied_runtime_endpoints_fail_closed() {
         assert!(checked.stderr.is_empty(), "{binary}");
 
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
-        assert_startup_bind_failure(&run, binary);
+        let _ = assert_startup_bind_failure(&run, binary, &path, binary);
     }
 
     let migration_path = directory.path().join("client-v1-routed-udp.toml");
@@ -593,7 +866,7 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         assert!(checked.stderr.is_empty(), "{binary}");
 
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
-        assert_startup_bind_failure(&run, binary);
+        let _ = assert_startup_bind_failure(&run, binary, path, binary);
     }
 
     for (binary, path) in [
@@ -615,7 +888,7 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         assert!(checked.stderr.is_empty(), "{binary}");
 
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
-        assert_startup_bind_failure(&run, binary);
+        let _ = assert_startup_bind_failure(&run, binary, path, binary);
     }
 
     let invalid = directory.path().join("client-tagged-invalid.toml");
@@ -769,8 +1042,17 @@ fn one_entry_tagged_run_matches_legacy_startup_behavior() {
         );
         assert_eq!(tagged.status.code(), legacy.status.code(), "{binary}");
         assert_eq!(tagged.stdout, legacy.stdout, "{binary}");
-        assert_eq!(tagged.stderr, legacy.stderr, "{binary}");
-        assert_startup_bind_failure(&tagged, binary);
+        let legacy_report = assert_startup_bind_failure(&legacy, binary, &legacy_path, binary);
+        let tagged_report = assert_startup_bind_failure(&tagged, binary, &tagged_path, binary);
+        match (legacy_report, tagged_report) {
+            (Some(legacy), Some(tagged)) => assert_eq!(
+                stable_client_startup_bind_semantics(&tagged),
+                stable_client_startup_bind_semantics(&legacy),
+                "{binary} stable startup semantics"
+            ),
+            (None, None) => assert_eq!(tagged.stderr, legacy.stderr, "{binary}"),
+            _ => panic!("{binary} startup report shape changed between configurations"),
+        }
     }
 }
 

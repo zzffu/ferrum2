@@ -21,7 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ferrum2_runtime::{PreparedProcessRoot, ProcessCancellation, ProcessFuture, ProcessRoot};
+use ferrum2_runtime::{
+    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture, ProcessRoot,
+};
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::iface::{
     Config as InterfaceConfig, Interface, PollIngressSingleResult, Route, SocketHandle, SocketSet,
@@ -125,6 +127,7 @@ pub fn process_root<E, T, H, U, A, D>(
     startup: E,
     runtime: E,
     cleanup: E,
+    registry: OwnerRegistry,
     handle_tcp: H,
     handle_udp: U,
     packet_metrics: (A, D),
@@ -151,11 +154,14 @@ where
                 cleanup,
             },
             cancellation,
-            Arc::new(handle_tcp),
-            Arc::new(handle_udp),
-            PacketMetrics {
-                accepted: Box::new(accepted),
-                foundation_dropped: Box::new(foundation_dropped),
+            RootServices {
+                registry,
+                handle_tcp: Arc::new(handle_tcp),
+                handle_udp: Arc::new(handle_udp),
+                metrics: PacketMetrics {
+                    accepted: Box::new(accepted),
+                    foundation_dropped: Box::new(foundation_dropped),
+                },
             },
         )
         .await
@@ -171,6 +177,7 @@ pub fn process_root<E, T, H, U, A, D>(
     startup: E,
     _runtime: E,
     _cleanup: E,
+    _registry: OwnerRegistry,
     _handle_tcp: H,
     _handle_udp: U,
     _packet_metrics: (A, D),
@@ -219,6 +226,14 @@ struct RootErrors<E> {
 struct PacketMetrics {
     accepted: Box<dyn Fn() + Send + Sync>,
     foundation_dropped: Box<dyn Fn() + Send + Sync>,
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+struct RootServices<T> {
+    registry: OwnerRegistry,
+    handle_tcp: TcpHandler,
+    handle_udp: UdpHandler<T>,
+    metrics: PacketMetrics,
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -304,14 +319,18 @@ async fn prepare<E, T>(
     underlay: UnderlayPublisher,
     errors: RootErrors<E>,
     mut cancellation: ProcessCancellation,
-    handle_tcp: TcpHandler,
-    handle_udp: UdpHandler<T>,
-    metrics: PacketMetrics,
+    services: RootServices<T>,
 ) -> Result<Option<TunRoot<E, T>>, E>
 where
     E: Copy + Send + 'static,
     T: Send + 'static,
 {
+    let RootServices {
+        registry,
+        handle_tcp,
+        handle_udp,
+        metrics,
+    } = services;
     let timeout = config.ready_timeout;
     let deadline = std::time::Instant::now()
         .checked_add(timeout)
@@ -320,11 +339,19 @@ where
     let (done_sender, _done_receiver) = tokio::sync::oneshot::channel();
     let control = OwnerControl::new();
     let owner_control = control.clone();
+    let owner_registry = registry.clone();
     let thread = map_owner_spawn(
         std::thread::Builder::new()
             .name("ferrum2-tun-owner".into())
             .spawn(move || {
-                let result = owner_main(config, owner_control, ready_sender, deadline, metrics);
+                let result = owner_main(
+                    config,
+                    owner_control,
+                    ready_sender,
+                    deadline,
+                    owner_registry,
+                    metrics,
+                );
                 let _ = done_sender.send(result);
                 result
             }),
@@ -369,6 +396,7 @@ where
                     datagrams,
                     flow_count: control.flow_count,
                     mapping_count: control.mapping_count,
+                    registry,
                     handle_tcp,
                     handle_udp,
                 }));
@@ -520,6 +548,7 @@ struct TunRoot<E, T = ()> {
     datagrams: tokio::sync::mpsc::Receiver<UdpCandidate<T>>,
     flow_count: Arc<AtomicUsize>,
     mapping_count: Arc<AtomicUsize>,
+    registry: OwnerRegistry,
     handle_tcp: TcpHandler,
     handle_udp: UdpHandler<T>,
 }
@@ -575,7 +604,12 @@ where
                                     break 'required OwnerExit::RuntimeFailed;
                                 }
                             }
-                            tasks.spawn((self.handle_tcp)(flow, cancellation.clone()));
+                            let owner = self.registry.track_tun_handler_task();
+                            let handler = (self.handle_tcp)(flow, cancellation.clone());
+                            tasks.spawn(async move {
+                                let _owner = owner;
+                                handler.await;
+                            });
                         }
                     }
                     candidate = self.datagrams.recv() => {
@@ -585,7 +619,12 @@ where
                                     break 'required OwnerExit::RuntimeFailed;
                                 }
                             }
-                            tasks.spawn((self.handle_udp)(candidate, cancellation.clone()));
+                            let owner = self.registry.track_tun_handler_task();
+                            let handler = (self.handle_udp)(candidate, cancellation.clone());
+                            tasks.spawn(async move {
+                                let _owner = owner;
+                                handler.await;
+                            });
                         }
                     }
                     result = tasks.join_next(), if !tasks.is_empty() => {
@@ -672,6 +711,7 @@ fn owner_main<T: Send + 'static>(
     control: OwnerControl,
     ready: std::sync::mpsc::SyncSender<OwnerReady<T>>,
     deadline: std::time::Instant,
+    registry: OwnerRegistry,
     metrics: PacketMetrics,
 ) -> OwnerExit {
     let adapter_config = match ferrum2_wintun::AdapterConfig::new(
@@ -744,6 +784,7 @@ fn owner_main<T: Send + 'static>(
         config.tcp_buffer_bytes,
         config.tcp_timeout,
         Arc::clone(&control.flow_count),
+        registry,
         config.max_udp_mappings,
         config.max_udp_buffered_bytes,
         config.udp_timeout,
@@ -1293,6 +1334,7 @@ struct Stack<T = ()> {
     bridge_capacity: usize,
     flow_sender: tokio::sync::mpsc::Sender<TcpFlow>,
     flow_count: Arc<AtomicUsize>,
+    registry: OwnerRegistry,
     udp: UdpTable<T>,
 }
 
@@ -1316,6 +1358,7 @@ struct TcpFlowEntry {
     generation: GenerationId,
     socket: SocketHandle,
     owner: tcp::FlowOwner,
+    _registry_owner: ferrum2_runtime::TunTcpFlowOwner,
     pending: Option<TcpFlow>,
     published: bool,
     remote_closed: bool,
@@ -1332,6 +1375,7 @@ impl<T: Send + 'static> Stack<T> {
         tcp_buffer_bytes: usize,
         tcp_timeout: Duration,
         flow_count: Arc<AtomicUsize>,
+        registry: OwnerRegistry,
         max_udp_mappings: usize,
         max_udp_buffered_bytes: usize,
         udp_timeout: Duration,
@@ -1386,6 +1430,7 @@ impl<T: Send + 'static> Stack<T> {
                 bridge_capacity: mtu / 2,
                 flow_sender,
                 flow_count,
+                registry,
                 udp,
             },
             flow_receiver,
@@ -1443,11 +1488,13 @@ impl<T: Send + 'static> Stack<T> {
         }
         let socket = self.sockets.add(socket);
         let (flow, owner) = tcp::tcp_flow_pair(tuple.target, self.bridge_capacity);
+        let registry_owner = self.registry.track_tun_tcp_flow();
         self.flows[slot] = Some(TcpFlowEntry {
             tuple,
             generation,
             socket,
             owner,
+            _registry_owner: registry_owner,
             pending: Some(flow),
             published: false,
             remote_closed: false,
@@ -1609,6 +1656,7 @@ impl Stack<()> {
             tcp_buffer_bytes,
             tcp_timeout,
             flow_count,
+            OwnerRegistry::new(),
             1,
             65_536,
             tcp_timeout,
@@ -1685,9 +1733,9 @@ mod tests {
 
     use super::tcp::tcp_flow_pair;
     use super::{
-        GenerationTable, MemoryTx, OutputResult, OwnerControl, OwnerExit, OwnerThread,
-        PacketValidator, Stack, TunRoot, finish_stack_setup, map_owner_spawn, reconcile_owner_exit,
-        reported_owner_exit,
+        GenerationTable, MemoryTx, OutputResult, OwnerControl, OwnerExit, OwnerRegistry,
+        OwnerThread, PacketValidator, Stack, TunRoot, finish_stack_setup, map_owner_spawn,
+        reconcile_owner_exit, reported_owner_exit,
     };
 
     #[tokio::test]
@@ -2343,7 +2391,8 @@ mod tests {
     async fn tcp_handshake_publishes_once_and_preserves_both_byte_directions() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let (mut stack, mut flows) = Stack::new(
+        let registry = OwnerRegistry::new();
+        let (mut stack, mut flows, _datagrams) = Stack::<()>::new_with_udp(
             (
                 Ipv4Addr::new(198, 18, 0, 2),
                 30,
@@ -2355,9 +2404,15 @@ mod tests {
             4096,
             Duration::from_secs(60),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            registry.clone(),
+            1,
+            65_536,
+            Duration::from_secs(60),
         )
         .expect("bounded stack");
+        assert_eq!(registry.snapshot().active_tun_tcp_flows, 0);
         assert!(stack.enqueue(&ipv4_tcp(), true));
+        assert_eq!(registry.snapshot().active_tun_tcp_flows, 1);
         assert_eq!(
             stack.poll_quantum(Instant::ZERO),
             0,
@@ -2412,6 +2467,11 @@ mod tests {
                 .is_err(),
             "bytes beyond the bridge capacity apply backpressure"
         );
+        assert_eq!(
+            registry.snapshot().active_tun_tcp_flows,
+            1,
+            "the production Stack entry owns the pressured flow"
+        );
         stack.poll_quantum(Instant::from_millis(3));
         let mut observed = Vec::new();
         assert_eq!(
@@ -2444,7 +2504,9 @@ mod tests {
         );
         assert!(reset, "terminal drop emits a local TCP reset");
         assert_eq!(stack.live_tcp_flows(), 0);
+        assert_eq!(registry.snapshot().active_tun_tcp_flows, 0);
         assert!(stack.enqueue(&ipv4_tcp(), true));
+        assert_eq!(registry.snapshot().active_tun_tcp_flows, 1);
         assert_eq!(
             stack.flows[0]
                 .as_ref()
@@ -2453,6 +2515,12 @@ mod tests {
                 .generation,
             1,
             "reused tuples receive a new generation"
+        );
+        drop(stack);
+        assert_eq!(
+            registry.snapshot().active_tun_tcp_flows,
+            0,
+            "dropping Stack releases the production flow guard"
         );
     }
 
@@ -2649,6 +2717,7 @@ mod tests {
                 4096,
                 Duration::from_secs(60),
                 Arc::new(AtomicUsize::new(0)),
+                OwnerRegistry::new(),
                 1,
                 65_536,
                 Duration::from_secs(60),
@@ -2701,6 +2770,7 @@ mod tests {
             4096,
             Duration::from_secs(60),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            OwnerRegistry::new(),
             1,
             65_536,
             Duration::from_secs(60),
@@ -2901,7 +2971,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
-        use ferrum2_runtime::{ProcessCause, ProcessRootExit, ProcessSupervisor};
+        use ferrum2_runtime::{OwnerRegistry, ProcessCause, ProcessRootExit, ProcessSupervisor};
 
         let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
         let (_udp, datagram_receiver) = tokio::sync::mpsc::channel::<crate::UdpCandidate<()>>(1);
@@ -2918,6 +2988,8 @@ mod tests {
         });
         let calls = Arc::new(AtomicUsize::new(0));
         let handler_calls = Arc::clone(&calls);
+        let registry = OwnerRegistry::new();
+        let root_registry = registry.clone();
         let root = ferrum2_runtime::ProcessRoot::new(move || async move {
             Ok::<_, &'static str>(TunRoot {
                 owner: OwnerThread {
@@ -2933,6 +3005,7 @@ mod tests {
                 datagrams: datagram_receiver,
                 flow_count: Arc::new(AtomicUsize::new(0)),
                 mapping_count: Arc::new(AtomicUsize::new(0)),
+                registry: root_registry,
                 handle_tcp: Arc::new(move |flow, _| {
                     let calls = Arc::clone(&handler_calls);
                     Box::pin(async move {
@@ -2945,12 +3018,9 @@ mod tests {
                 handle_udp: Arc::new(|_: crate::UdpCandidate<()>, _| Box::pin(async {})),
             })
         });
-        let supervisor = ProcessSupervisor::new(
-            vec![root],
-            Duration::from_secs(1),
-            ferrum2_runtime::OwnerRegistry::new(),
-        )
-        .expect("one TUN root");
+        let supervisor =
+            ProcessSupervisor::new(vec![root], Duration::from_secs(1), registry.clone())
+                .expect("one TUN root");
         let run = tokio::spawn(supervisor.run_until(std::future::pending::<()>()));
         while !active.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
@@ -2962,6 +3032,7 @@ mod tests {
         }
         let report = run.await.expect("process report");
         assert_eq!(calls.load(Ordering::SeqCst), 33);
+        assert_eq!(registry.snapshot().active_tun_handler_tasks, 0);
         assert!(matches!(
             report.cause(),
             ProcessCause::RootStopped {
@@ -2969,5 +3040,261 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_owner() {
+        use ferrum2_runtime::{
+            OwnerRegistry, ProcessCause, ProcessCleanupFailure, ProcessExitKind, ProcessState,
+            ProcessSupervisor,
+        };
+
+        struct HandlerDrop(Arc<AtomicUsize>);
+
+        impl Drop for HandlerDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        enum FakeOwnerRequest {
+            Admit {
+                flow: crate::TcpFlow,
+                owner: super::tcp::FlowOwner,
+                result: std::sync::mpsc::SyncSender<bool>,
+            },
+        }
+
+        for owner_exit in [OwnerExit::Stopped, OwnerExit::CleanupFailed] {
+            let registry = OwnerRegistry::new();
+            let owner_registry = registry.clone();
+            let root_registry = registry.clone();
+            let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
+            let (_datagram_sender, datagram_receiver) =
+                tokio::sync::mpsc::channel::<crate::UdpCandidate<()>>(1);
+            let (owner_requests, requested_admissions) =
+                std::sync::mpsc::channel::<FakeOwnerRequest>();
+            let control = OwnerControl::new();
+            let active = Arc::clone(&control.active);
+            let admitting = Arc::clone(&control.admitting);
+            let owner_control = control.clone();
+            let flow_count = Arc::new(AtomicUsize::new(0));
+            let owner_count = Arc::new(AtomicUsize::new(1));
+            let owner_saw_aborted_flow = Arc::new(AtomicBool::new(false));
+            let owner_flow_count = Arc::clone(&flow_count);
+            let remaining_owners = Arc::clone(&owner_count);
+            let saw_aborted_flow = Arc::clone(&owner_saw_aborted_flow);
+            let (done_sender, done_receiver) = tokio::sync::oneshot::channel();
+            let thread = std::thread::spawn(move || {
+                let mut owners = Vec::new();
+                while !owner_control.stop.load(Ordering::Acquire) {
+                    match requested_admissions.try_recv() {
+                        Ok(FakeOwnerRequest::Admit {
+                            flow,
+                            owner,
+                            result,
+                        }) => {
+                            let accepted = owner_control.admitting.load(Ordering::Acquire)
+                                && flow_sender.blocking_send(flow).is_ok();
+                            if accepted {
+                                owners.push((owner, owner_registry.track_tun_tcp_flow()));
+                                owner_flow_count.fetch_add(1, Ordering::AcqRel);
+                            }
+                            let _ = result.send(accepted);
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            std::thread::yield_now();
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                let owned_flows = owners.len();
+                saw_aborted_flow.store(
+                    owned_flows != 0 && owners.iter().all(|(owner, _)| owner.is_aborted()),
+                    Ordering::Release,
+                );
+                drop(owners);
+                owner_flow_count.fetch_sub(owned_flows, Ordering::AcqRel);
+                remaining_owners.fetch_sub(1, Ordering::AcqRel);
+                let _ = done_sender.send(owner_exit);
+                owner_exit
+            });
+
+            let pressured = Arc::new(tokio::sync::Notify::new());
+            let pressure_reported = Arc::new(AtomicBool::new(false));
+            let handler_starts = Arc::new(AtomicUsize::new(0));
+            let handler_drops = Arc::new(AtomicUsize::new(0));
+            let handler_pressured = Arc::clone(&pressured);
+            let handler_pressure_reported = Arc::clone(&pressure_reported);
+            let recorded_handler_starts = Arc::clone(&handler_starts);
+            let recorded_handler_drops = Arc::clone(&handler_drops);
+            let root_flow_count = Arc::clone(&flow_count);
+            let root = ferrum2_runtime::ProcessRoot::new(move || async move {
+                Ok::<_, &'static str>(TunRoot {
+                    owner: OwnerThread {
+                        control,
+                        #[cfg(all(windows, target_arch = "x86_64"))]
+                        wake: None,
+                        thread: Some(thread),
+                    },
+                    done: done_receiver,
+                    runtime: Some("runtime"),
+                    cleanup: Some("cleanup"),
+                    flows: flow_receiver,
+                    datagrams: datagram_receiver,
+                    flow_count: root_flow_count,
+                    mapping_count: Arc::new(AtomicUsize::new(0)),
+                    registry: root_registry,
+                    handle_tcp: Arc::new(move |mut flow, _cancellation| {
+                        let pressured = Arc::clone(&handler_pressured);
+                        let pressure_reported = Arc::clone(&handler_pressure_reported);
+                        let starts = Arc::clone(&recorded_handler_starts);
+                        let drops = Arc::clone(&recorded_handler_drops);
+                        Box::pin(async move {
+                            starts.fetch_add(1, Ordering::SeqCst);
+                            let _drop = HandlerDrop(drops);
+                            flow.write_all(b"full")
+                                .await
+                                .expect("fill the bounded application-to-stack bridge");
+                            let unexpected = std::future::poll_fn(|context| {
+                                match tokio::io::AsyncWrite::poll_write(
+                                    std::pin::Pin::new(&mut flow),
+                                    context,
+                                    b"x",
+                                ) {
+                                    std::task::Poll::Pending => {
+                                        if !pressure_reported.swap(true, Ordering::SeqCst) {
+                                            pressured.notify_one();
+                                        }
+                                        std::task::Poll::Pending
+                                    }
+                                    ready => ready,
+                                }
+                            })
+                            .await;
+                            panic!(
+                                "pressured flow completed before forced cancellation: {unexpected:?}"
+                            );
+                        })
+                    }),
+                    handle_udp: Arc::new(|_: crate::UdpCandidate<()>, _| Box::pin(async {})),
+                })
+            });
+            let supervisor =
+                ProcessSupervisor::new(vec![root], Duration::from_secs(5), registry.clone())
+                    .expect("one TUN root");
+            let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+            let run = tokio::spawn(supervisor.run_until(async move {
+                let _ = shutdown_receiver.await;
+            }));
+
+            for _ in 0..100 {
+                if active.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(active.load(Ordering::Acquire), "TUN root becomes active");
+
+            let admit = |port| {
+                let (flow, owner) =
+                    tcp_flow_pair(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port)), 4);
+                let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(0);
+                owner_requests
+                    .send(FakeOwnerRequest::Admit {
+                        flow,
+                        owner,
+                        result: result_sender,
+                    })
+                    .expect("fake owner is accepting commands");
+                result_receiver.recv().expect("fake owner admission result")
+            };
+            assert!(admit(10_000), "active TUN owner admits the first flow");
+            tokio::time::timeout(Duration::from_secs(1), pressured.notified())
+                .await
+                .expect("TCP handler reaches real bridge backpressure");
+            assert_eq!(handler_starts.load(Ordering::SeqCst), 1);
+            assert_eq!(handler_drops.load(Ordering::SeqCst), 0);
+            assert_eq!(flow_count.load(Ordering::Acquire), 1);
+            assert_eq!(owner_count.load(Ordering::Acquire), 1);
+            assert_eq!(registry.snapshot().active_tun_tcp_flows, 1);
+            assert_eq!(registry.snapshot().active_tun_handler_tasks, 1);
+
+            shutdown_sender.send(()).expect("request process shutdown");
+            for _ in 0..100 {
+                if !admitting.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                !admitting.load(Ordering::Acquire),
+                "quiescing reaches the fake owner"
+            );
+            assert!(!admit(10_001), "quiescing rejects a new TCP flow");
+            assert_eq!(handler_starts.load(Ordering::SeqCst), 1);
+            assert_eq!(flow_count.load(Ordering::Acquire), 1);
+
+            tokio::time::advance(Duration::from_millis(4_999)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !run.is_finished(),
+                "pressured flow remains owned during grace"
+            );
+            assert_eq!(handler_drops.load(Ordering::SeqCst), 0);
+            assert_eq!(flow_count.load(Ordering::Acquire), 1);
+            assert_eq!(owner_count.load(Ordering::Acquire), 1);
+            assert_eq!(registry.snapshot().active_process_roots, 1);
+            assert_eq!(registry.snapshot().active_tun_tcp_flows, 1);
+            assert_eq!(registry.snapshot().active_tun_handler_tasks, 1);
+
+            tokio::time::advance(Duration::from_millis(1)).await;
+            let report = run.await.expect("forced TUN process report");
+            assert_eq!(handler_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(flow_count.load(Ordering::Acquire), 0);
+            assert_eq!(owner_count.load(Ordering::Acquire), 0);
+            assert!(owner_saw_aborted_flow.load(Ordering::Acquire));
+            assert_eq!(report.cause(), &ProcessCause::ExternalShutdown);
+            assert_eq!(report.forced_roots(), 1);
+            assert_eq!(
+                report.states(),
+                &[
+                    ProcessState::Validated,
+                    ProcessState::Preparing,
+                    ProcessState::Prepared,
+                    ProcessState::Active,
+                    ProcessState::Quiescing,
+                    ProcessState::Draining,
+                    ProcessState::Forced,
+                    ProcessState::Stopped,
+                ]
+            );
+            match owner_exit {
+                OwnerExit::Stopped => {
+                    assert_eq!(report.exit_kind(), ProcessExitKind::Forced);
+                    assert!(report.cleanup_failure().is_none());
+                }
+                OwnerExit::CleanupFailed => {
+                    assert_eq!(report.exit_kind(), ProcessExitKind::Failed);
+                    assert!(matches!(
+                        report.cleanup_failure(),
+                        Some(ProcessCleanupFailure::RootFailed {
+                            root,
+                            error: "cleanup",
+                        }) if root.get() == 0
+                    ));
+                }
+                OwnerExit::RuntimeFailed => unreachable!("test owner outcome is closed"),
+            }
+            let stopped = registry.snapshot();
+            assert_eq!(stopped.process_supervisors, 0);
+            assert_eq!(stopped.prepared_process_roots, 0);
+            assert_eq!(stopped.active_process_roots, 0);
+            assert_eq!(stopped.active_tun_tcp_flows, 0);
+            assert_eq!(stopped.active_tun_handler_tasks, 0);
+            assert_eq!(stopped.process_root_reaps, 1);
+            assert_eq!(stopped.process_forced_roots, 1);
+        }
     }
 }

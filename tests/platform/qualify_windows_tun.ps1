@@ -1,15 +1,25 @@
 param(
     [Parameter(Mandatory = $true)]
     # Legacy M15 mode contract: [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
-    [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "cleanup")]
+    [ValidateSet("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "cleanup")]
     [string]$Mode,
     [string]$WintunZip,
     [string]$RunToken,
-    [string]$IdentityLedger
+    [string]$IdentityLedger,
+    [string]$ClientBinary,
+    [string]$ServerBinary,
+    [string]$ProductRoot,
+    [string]$ArtifactDirectory,
+    [string]$RuntimeLibraryDirectory,
+    [switch]$RequireTcp08ProductMetrics
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+$tcp08ClockOriginUtc = [DateTime]::UtcNow.ToString("o")
+$tcp08ClockOriginTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+$controllerStartedUtc = $tcp08ClockOriginUtc
 
 if (-not $IsWindows -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne "X64") {
     throw "Windows AMD64 is required"
@@ -26,6 +36,18 @@ $expectedExports = @(
 ) | Sort-Object
 
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$clientBinaryInput = $ClientBinary
+$serverBinaryInput = $ServerBinary
+$resolvedProductRoot = if ($ProductRoot) {
+    if ($Mode -eq "cleanup") { [IO.Path]::GetFullPath($ProductRoot) } else { (Resolve-Path -LiteralPath $ProductRoot).Path }
+} else { $workspace }
+$clientBinaryExplicit = -not [string]::IsNullOrWhiteSpace($clientBinaryInput)
+$serverBinaryExplicit = -not [string]::IsNullOrWhiteSpace($serverBinaryInput)
+$runtimeLibraryDirectoryExplicit = -not [string]::IsNullOrWhiteSpace($RuntimeLibraryDirectory)
+$resolvedRuntimeLibraryDirectory = $null
+$runtimeVcruntimePath = $null
+$runtimeVcruntimeBytes = $null
+$runtimeVcruntimeSha256 = $null
 $runIdentity = if ($RunToken) { $RunToken } elseif ($Mode -eq "cleanup") { throw "cleanup requires RunToken" } else { "local-$PID" }
 if ($runIdentity -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,47}$') { throw "RunToken is invalid" }
 $work = if ($Mode -eq "network-feasibility") {
@@ -35,9 +57,39 @@ $work = if ($Mode -eq "network-feasibility") {
 } else {
     Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$runIdentity"
 }
-$binary = Join-Path $workspace "target\debug\ferrum2-client.exe"
-$serverBinary = Join-Path $workspace "target\debug\ferrum2-server.exe"
+$binary = if ($clientBinaryExplicit) {
+    if ($Mode -eq "cleanup") { [IO.Path]::GetFullPath($clientBinaryInput) } else { (Resolve-Path -LiteralPath $clientBinaryInput).Path }
+} else { [IO.Path]::GetFullPath((Join-Path $resolvedProductRoot "target\debug\ferrum2-client.exe")) }
+$serverBinary = if ($serverBinaryExplicit) {
+    if ($Mode -eq "cleanup") { [IO.Path]::GetFullPath($serverBinaryInput) } else { (Resolve-Path -LiteralPath $serverBinaryInput).Path }
+} else { [IO.Path]::GetFullPath((Join-Path $resolvedProductRoot "target\debug\ferrum2-server.exe")) }
 $siblingDll = Join-Path (Split-Path -Parent $binary) "wintun.dll"
+$tcp08Enabled = $Mode -in @("tcp08", "performance")
+if ($RequireTcp08ProductMetrics -and -not $tcp08Enabled) { throw "RequireTcp08ProductMetrics requires tcp08 or performance mode" }
+$tcp08ArtifactPath = if ($tcp08Enabled) {
+    if ($ArtifactDirectory) {
+        [IO.Path]::GetFullPath($ArtifactDirectory)
+    } else {
+        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-tcp08-artifacts\$runIdentity"
+    }
+} else { $null }
+$tcp08Events = [System.Collections.Generic.List[object]]::new()
+$tcp08Samples = [System.Collections.Generic.List[object]]::new()
+$tcp08CtrlBreak = $null
+$tcp08Result = "NOT_RUN"
+$tcp08ExitCode = $null
+$tcp08ShutdownReportCandidateWindow = $null
+$tcp08ArtifactInitialized = $false
+$tcp08CleanupSucceeded = $false
+$tcp08RequiredLogNames = @(
+    "client.stdout.log", "client.stderr.log", "server.stdout.log", "server.stderr.log",
+    "controller.stdout.log", "controller.stderr.log"
+)
+$tcp08RequiredJsonNames = @(
+    "metadata.json", "timeline.json", "process-report.json", "network-before.json",
+    "network-after.json", "process-before.json", "process-after.json", "binary-hashes.json",
+    "cleanup-report.json"
+)
 $managedAutoAdapterName = "F2-M16P-A-$runIdentity"
 $managedManualAdapterName = "F2-M16P-M-$runIdentity"
 $adapterName = if ($Mode -eq "network-feasibility") {
@@ -55,35 +107,303 @@ $managedRouteOnlyConfig = Join-Path $work "client-managed-route-only.toml"
 $failureConfig = Join-Path $work "client-failure.toml"
 $addressJournal = Join-Path $work "owned-target-addresses.txt"
 $dllJournal = Join-Path $work "owned-wintun-dll.txt"
+$runIdentityJournalRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "Ferrum2\ControllerRunIdentities"
+$runIdentityJournalPath = Join-Path $runIdentityJournalRoot "$runIdentity.json"
 
-function Get-ExactRunProcesses([string]$WorkPath) {
-    $executables = @($binary, $serverBinary)
+function Assert-True([bool]$Condition, [string]$Message) {
+    if (-not $Condition) { throw $Message }
+}
+
+function Get-ControllerWorkPaths {
+    $paths = @(
+        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$script:runIdentity"
+        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-network-$script:runIdentity"
+        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-product-$script:runIdentity"
+    )
+    return @($paths | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\', '/') })
+}
+
+function Assert-ClosedJsonProperties([object]$Object, [string[]]$Expected, [string]$Label) {
+    Assert-True ($null -ne $Object) "$Label is null"
+    $actual = @($Object.PSObject.Properties.Name | Sort-Object)
+    $expectedSorted = @($Expected | Sort-Object)
+    Assert-True (($actual -join "`n") -ceq ($expectedSorted -join "`n")) "$Label property set is invalid"
+}
+
+function Get-CanonicalJournalPath([string]$Path, [string]$Label) {
+    Assert-True (-not [string]::IsNullOrWhiteSpace($Path) -and $Path -cmatch '^[A-Za-z]:\\') "$Label is not an absolute local path"
+    $canonical = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    Assert-True ($canonical -cmatch '^[A-Za-z]:\\.+' -and
+        $canonical.Equals($Path.TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase)) "$Label is not canonical"
+    return $canonical
+}
+
+function Assert-NotReparsePoint([string]$Path, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-True (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "$Label must not be a reparse point"
+}
+
+function Initialize-RunIdentityJournalRoot {
+    if (-not (Test-Path -LiteralPath $script:runIdentityJournalRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:runIdentityJournalRoot -Force -ErrorAction Stop | Out-Null
+        $security = [Security.AccessControl.DirectorySecurity]::new()
+        $security.SetAccessRuleProtection($true, $false)
+        $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        $propagation = [Security.AccessControl.PropagationFlags]::None
+        $allow = [Security.AccessControl.AccessControlType]::Allow
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        foreach ($sid in @(
+            $currentSid,
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+        )) {
+            $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                $inheritance,
+                $propagation,
+                $allow
+            ))
+        }
+        $security.SetOwner($currentSid)
+        Set-Acl -LiteralPath $script:runIdentityJournalRoot -AclObject $security -ErrorAction Stop
+    }
+    Assert-NotReparsePoint $script:runIdentityJournalRoot "run identity journal root"
+    $allowedSids = @(
+        [Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+        'S-1-5-18',
+        'S-1-5-32-544'
+    )
+    $writeMask = [Security.AccessControl.FileSystemRights]::WriteData -bor
+        [Security.AccessControl.FileSystemRights]::AppendData -bor
+        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    $acl = Get-Acl -LiteralPath $script:runIdentityJournalRoot -ErrorAction Stop
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            ($rule.FileSystemRights -band $writeMask) -ne 0) {
+            Assert-True ($allowedSids -contains $rule.IdentityReference.Value) "run identity journal root grants write access outside the closed principal set"
+        }
+    }
+}
+
+function Write-RunIdentityJournal {
+    Initialize-RunIdentityJournalRoot
+    $journalPath = $script:runIdentityJournalPath
+    $pendingPath = "$journalPath.pending"
+    Assert-True (-not (Test-Path -LiteralPath $journalPath) -and -not (Test-Path -LiteralPath $pendingPath)) "run identity journal baseline is not absent"
+    $clientPath = [IO.Path]::GetFullPath($script:binary).TrimEnd('\', '/')
+    $serverPath = [IO.Path]::GetFullPath($script:serverBinary).TrimEnd('\', '/')
+    $productRoot = [IO.Path]::GetFullPath($script:resolvedProductRoot).TrimEnd('\', '/')
+    $workPath = [IO.Path]::GetFullPath($script:work).TrimEnd('\', '/')
+    $siblingPath = [IO.Path]::GetFullPath($script:siblingDll).TrimEnd('\', '/')
+    $controllerPath = (Resolve-Path -LiteralPath $PSCommandPath).Path
+    $serverRequired = $script:Mode -in @("tcp", "tcp08", "udp", "full", "performance")
+    $document = [ordered]@{
+        schema = "ferrum2.windows-tun.cleanup-identity.v1"
+        run_token = $script:runIdentity
+        mode = $script:Mode
+        work_path = $workPath
+        product_root = $productRoot
+        client_binary_path = $clientPath
+        client_binary_sha256 = if ($script:clientBinaryExplicit) { (Get-FileHash -LiteralPath $clientPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+        client_binary_explicit = [bool]$script:clientBinaryExplicit
+        server_binary_path = $serverPath
+        server_binary_sha256 = if ($script:serverBinaryExplicit) { (Get-FileHash -LiteralPath $serverPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+        server_binary_explicit = [bool]$script:serverBinaryExplicit
+        server_required = $serverRequired
+        sibling_dll_path = $siblingPath
+        dll_ownership = "owned"
+        dll_marker_path = [IO.Path]::GetFullPath($script:dllJournal).TrimEnd('\', '/')
+        expected_dll_sha256 = $script:expectedDllHash.ToLowerInvariant()
+        controller_path = $controllerPath
+        controller_sha256 = (Get-FileHash -LiteralPath $controllerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $json = $document | ConvertTo-Json -Depth 4 -Compress
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json + "`n")
+    $stream = [IO.FileStream]::new($pendingPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+    finally { $stream.Dispose() }
+    Move-Item -LiteralPath $pendingPath -Destination $journalPath -ErrorAction Stop
+}
+
+function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
+    Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "run identity journal is missing"
+    Assert-NotReparsePoint $Path "run identity journal"
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-True ($item.Length -gt 0 -and $item.Length -le 65536) "run identity journal size is invalid"
+    $document = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json -Depth 4 -ErrorAction Stop
+    Assert-ClosedJsonProperties $document @(
+        "schema", "run_token", "mode", "work_path", "product_root",
+        "client_binary_path", "client_binary_sha256", "client_binary_explicit",
+        "server_binary_path", "server_binary_sha256", "server_binary_explicit", "server_required",
+        "sibling_dll_path", "dll_ownership", "dll_marker_path", "expected_dll_sha256",
+        "controller_path", "controller_sha256"
+    ) "run identity journal"
+    Assert-True ($document.schema -ceq "ferrum2.windows-tun.cleanup-identity.v1" -and
+        $document.run_token -ceq $script:runIdentity) "run identity journal schema/token mismatch"
+    Assert-True ($document.mode -in @("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill")) "run identity journal mode is invalid"
+    $workPath = Get-CanonicalJournalPath ([string]$document.work_path) "journal work_path"
+    Assert-True (@($ExpectedWorks | Where-Object { $_.Equals($workPath, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) "run identity journal work path is outside the token scope"
+    $productRoot = Get-CanonicalJournalPath ([string]$document.product_root) "journal product_root"
+    $clientPath = Get-CanonicalJournalPath ([string]$document.client_binary_path) "journal client_binary_path"
+    $serverPath = Get-CanonicalJournalPath ([string]$document.server_binary_path) "journal server_binary_path"
+    $siblingPath = Get-CanonicalJournalPath ([string]$document.sibling_dll_path) "journal sibling_dll_path"
+    $markerPath = Get-CanonicalJournalPath ([string]$document.dll_marker_path) "journal dll_marker_path"
+    Assert-True ((Split-Path -Leaf $clientPath) -ceq "ferrum2-client.exe" -and
+        (Split-Path -Leaf $serverPath) -ceq "ferrum2-server.exe") "run identity journal executable leaf is invalid"
+    Assert-True ($siblingPath.Equals((Join-Path (Split-Path -Parent $clientPath) "wintun.dll"), [StringComparison]::OrdinalIgnoreCase)) "run identity journal sibling DLL derivation mismatch"
+    Assert-True ($document.dll_ownership -in @("owned", "borrowed")) "run identity journal DLL ownership classification is invalid"
+    Assert-True ($markerPath.Equals((Join-Path $workPath "owned-wintun-dll.txt"), [StringComparison]::OrdinalIgnoreCase)) "run identity journal DLL marker derivation mismatch"
+    Assert-True ($document.expected_dll_sha256 -ceq $script:expectedDllHash.ToLowerInvariant()) "run identity journal DLL hash mismatch"
+    foreach ($hashField in @("client_binary_sha256", "server_binary_sha256", "controller_sha256")) {
+        $hash = $document.$hashField
+        Assert-True ($null -eq $hash -or [string]$hash -cmatch '^[0-9a-f]{64}$') "run identity journal $hashField is invalid"
+    }
+    Assert-True ($document.client_binary_explicit -is [bool] -and
+        $document.server_binary_explicit -is [bool] -and $document.server_required -is [bool]) "run identity journal boolean field is invalid"
+    $expectedServerRequired = $document.mode -in @("tcp", "tcp08", "udp", "full", "performance")
+    Assert-True ($document.server_required -eq $expectedServerRequired) "run identity journal server requirement is inconsistent with mode"
+    if (-not $document.client_binary_explicit) {
+        Assert-True ($clientPath.Equals((Join-Path $productRoot "target\debug\ferrum2-client.exe"), [StringComparison]::OrdinalIgnoreCase)) "default client path escaped product root"
+    } else {
+        Assert-True ($null -ne $document.client_binary_sha256) "explicit client path lacks an identity hash"
+    }
+    if (-not $document.server_binary_explicit) {
+        Assert-True ($serverPath.Equals((Join-Path $productRoot "target\debug\ferrum2-server.exe"), [StringComparison]::OrdinalIgnoreCase)) "default server path escaped product root"
+    } else {
+        Assert-True ($null -ne $document.server_binary_sha256) "explicit server path lacks an identity hash"
+    }
+    foreach ($pair in @(
+        @($clientPath, $document.client_binary_sha256, "client"),
+        @($serverPath, $document.server_binary_sha256, "server")
+    )) {
+        Assert-NotReparsePoint $pair[0] "journaled $($pair[2]) binary"
+        if ((Test-Path -LiteralPath $pair[0] -PathType Leaf) -and $null -ne $pair[1]) {
+            Assert-True ((Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash.ToLowerInvariant() -ceq [string]$pair[1]) "journaled $($pair[2]) binary hash changed"
+        }
+    }
+    $controllerPath = Get-CanonicalJournalPath ([string]$document.controller_path) "journal controller_path"
+    Assert-NotReparsePoint $productRoot "journaled product root"
+    Assert-NotReparsePoint $controllerPath "journaled controller"
+    Assert-True ((Test-Path -LiteralPath $controllerPath -PathType Leaf) -and
+        (Get-FileHash -LiteralPath $controllerPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq [string]$document.controller_sha256) "journaled controller identity changed"
+    if ($script:clientBinaryExplicit) { Assert-True ($clientPath.Equals($script:binary, [StringComparison]::OrdinalIgnoreCase)) "cleanup client path does not match journal" }
+    if ($script:serverBinaryExplicit) { Assert-True ($serverPath.Equals($script:serverBinary, [StringComparison]::OrdinalIgnoreCase)) "cleanup server path does not match journal" }
+    if (-not [string]::IsNullOrWhiteSpace($script:ProductRoot)) { Assert-True ($productRoot.Equals($script:resolvedProductRoot, [StringComparison]::OrdinalIgnoreCase)) "cleanup product root does not match journal" }
+    return [pscustomobject]@{
+        WorkPath = $workPath
+        ProductRoot = $productRoot
+        ClientPath = $clientPath
+        ServerPath = $serverPath
+        SiblingDllPath = $siblingPath
+        DllMarkerPath = $markerPath
+        Document = $document
+    }
+}
+
+function Write-OwnedSiblingDllIntent {
+    Assert-True (Test-Path -LiteralPath $script:runIdentityJournalPath -PathType Leaf) "run identity journal must precede DLL ownership intent"
+    Assert-True ($script:runJournalIdentity -and $script:runJournalIdentity.Document.dll_ownership -ceq "owned") "borrowed DLL identity cannot create an ownership intent"
+    Assert-True (-not (Test-Path -LiteralPath $script:dllJournal)) "DLL ownership intent baseline is not absent"
+    Assert-True (-not (Test-Path -LiteralPath $script:siblingDll)) "DLL ownership intent cannot claim a pre-existing sibling DLL"
+    $document = [ordered]@{
+        schema = "ferrum2.windows-tun.owned-sibling-dll.v1"
+        run_token = $script:runIdentity
+        work_path = [IO.Path]::GetFullPath($script:work).TrimEnd('\', '/')
+        sibling_dll_path = [IO.Path]::GetFullPath($script:siblingDll).TrimEnd('\', '/')
+        sha256 = $script:expectedDllHash.ToLowerInvariant()
+    }
+    $json = $document | ConvertTo-Json -Depth 3 -Compress
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json + "`n")
+    $stream = [IO.FileStream]::new($script:dllJournal, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+    finally { $stream.Dispose() }
+}
+
+function Read-OwnedSiblingDllIntent([string]$Path, [object]$Identity) {
+    Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "DLL ownership intent is missing"
+    Assert-NotReparsePoint $Path "DLL ownership intent"
+    $document = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json -Depth 3 -ErrorAction Stop
+    Assert-ClosedJsonProperties $document @("schema", "run_token", "work_path", "sibling_dll_path", "sha256") "DLL ownership intent"
+    Assert-True ($document.schema -ceq "ferrum2.windows-tun.owned-sibling-dll.v1" -and
+        $document.run_token -ceq $script:runIdentity -and
+        $document.sha256 -ceq $script:expectedDllHash.ToLowerInvariant()) "DLL ownership intent schema/token/hash mismatch"
+    $intentWork = Get-CanonicalJournalPath ([string]$document.work_path) "DLL intent work_path"
+    $intentDll = Get-CanonicalJournalPath ([string]$document.sibling_dll_path) "DLL intent sibling_dll_path"
+    Assert-True ($intentWork.Equals($Identity.WorkPath, [StringComparison]::OrdinalIgnoreCase) -and
+        $intentDll.Equals($Identity.SiblingDllPath, [StringComparison]::OrdinalIgnoreCase) -and
+        $Path.Equals($Identity.DllMarkerPath, [StringComparison]::OrdinalIgnoreCase)) "DLL ownership intent does not match run identity"
+    return $document
+}
+
+function Remove-OwnedSiblingDll([object]$Identity) {
+    [void](Read-OwnedSiblingDllIntent $Identity.DllMarkerPath $Identity)
+    if (Test-Path -LiteralPath $Identity.SiblingDllPath) {
+        Assert-NotReparsePoint $Identity.SiblingDllPath "owned sibling DLL"
+        Assert-True ((Get-FileHash -LiteralPath $Identity.SiblingDllPath -Algorithm SHA256).Hash -ceq $script:expectedDllHash) "owned sibling DLL hash mismatch"
+        Remove-Item -LiteralPath $Identity.SiblingDllPath -Force -ErrorAction Stop
+    }
+    Assert-True (-not (Test-Path -LiteralPath $Identity.SiblingDllPath)) "owned sibling DLL residue"
+    Remove-Item -LiteralPath $Identity.DllMarkerPath -Force -ErrorAction Stop
+    $script:createdSiblingDll = $false
+}
+
+function Get-ExactRunProcesses([string]$WorkPath, [string[]]$Executables = @($script:binary, $script:serverBinary)) {
+    $canonicalWork = [IO.Path]::GetFullPath($WorkPath).TrimEnd('\', '/')
+    $workPrefix = $canonicalWork + [IO.Path]::DirectorySeparatorChar
     return @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
         $_.ExecutablePath -and
         $executables -contains $_.ExecutablePath -and
         $_.CommandLine -and
-        $_.CommandLine.IndexOf($WorkPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        $_.CommandLine.IndexOf("--config", [StringComparison]::Ordinal) -ge 0 -and
+        $_.CommandLine.IndexOf($workPrefix, [StringComparison]::OrdinalIgnoreCase) -ge 0
     })
 }
 
 if ($Mode -eq "cleanup") {
-    $cleanupWorks = @(
-        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$runIdentity"
-        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-network-$runIdentity"
-        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-product-$runIdentity"
-    )
+    $cleanupWorks = @(Get-ControllerWorkPaths)
     $cleanupAdapterNames = @(
         "Ferrum2-M15-$runIdentity", "Ferrum2-M16-$runIdentity",
         $managedAutoAdapterName, $managedManualAdapterName
     )
+    $pendingIdentityPath = "$runIdentityJournalPath.pending"
+    $cleanupIdentity = $null
+    if (Test-Path -LiteralPath $runIdentityJournalPath -PathType Leaf) {
+        Initialize-RunIdentityJournalRoot
+        Assert-True (-not (Test-Path -LiteralPath $pendingIdentityPath)) "completed and pending run identity journals coexist"
+        $cleanupIdentity = Read-RunIdentityJournal $runIdentityJournalPath $cleanupWorks
+    } elseif (Test-Path -LiteralPath $pendingIdentityPath) {
+        Initialize-RunIdentityJournalRoot
+        Assert-NotReparsePoint $pendingIdentityPath "pending run identity journal"
+        Assert-True (@($cleanupWorks | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) "pending identity journal coexists with mutable run work"
+        Remove-Item -LiteralPath $pendingIdentityPath -Force -ErrorAction Stop
+    }
+    $presentCleanupWorks = @($cleanupWorks | Where-Object { Test-Path -LiteralPath $_ })
+    Assert-True ($null -ne $cleanupIdentity -or $presentCleanupWorks.Count -eq 0) "controller work exists without a durable run identity journal"
+    if ($cleanupIdentity) {
+        foreach ($cleanupWork in $presentCleanupWorks) {
+            Assert-True ($cleanupWork.Equals($cleanupIdentity.WorkPath, [StringComparison]::OrdinalIgnoreCase)) "unowned token work path is present"
+            Assert-NotReparsePoint $cleanupWork "controller work directory"
+        }
+    }
+    $cleanupExecutables = if ($cleanupIdentity) {
+        @($cleanupIdentity.ClientPath, $cleanupIdentity.ServerPath)
+    } else { @($binary, $serverBinary) }
     foreach ($cleanupWork in $cleanupWorks) {
-        foreach ($process in @(Get-ExactRunProcesses $cleanupWork)) {
+        foreach ($process in @(Get-ExactRunProcesses $cleanupWork $cleanupExecutables)) {
             Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
         }
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
-        $processes = @($cleanupWorks | ForEach-Object { Get-ExactRunProcesses $_ })
+        $processes = @($cleanupWorks | ForEach-Object { Get-ExactRunProcesses $_ $cleanupExecutables })
         $adapters = @($cleanupAdapterNames | ForEach-Object {
             Get-NetAdapter -Name $_ -IncludeHidden -ErrorAction SilentlyContinue
         })
@@ -106,16 +426,24 @@ if ($Mode -eq "cleanup") {
         Get-NetIPAddress -InterfaceIndex 1 -IPAddress $address -ErrorAction SilentlyContinue |
             Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
     }
-    $ownsSiblingDll = @($cleanupWorks | Where-Object {
-        Test-Path -LiteralPath (Join-Path $_ "owned-wintun-dll.txt")
-    }).Count -ne 0
-    if ($ownsSiblingDll) {
-        if (Test-Path -LiteralPath $siblingDll) {
-            if ((Get-FileHash -LiteralPath $siblingDll -Algorithm SHA256).Hash -ne $expectedDllHash) { throw "owned sibling DLL hash mismatch" }
-            Remove-Item -LiteralPath $siblingDll -Force
+    $dllIntents = @($cleanupWorks | ForEach-Object {
+        $candidate = Join-Path $_ "owned-wintun-dll.txt"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { [IO.Path]::GetFullPath($candidate).TrimEnd('\', '/') }
+    })
+    Assert-True ($dllIntents.Count -le 1) "multiple DLL ownership intents exist for one run token"
+    if ($dllIntents.Count -eq 1) {
+        Assert-True ($null -ne $cleanupIdentity) "DLL ownership intent exists without a durable run identity journal"
+        Assert-True ($cleanupIdentity.Document.dll_ownership -ceq "owned") "borrowed DLL identity has an ownership intent"
+        Assert-True ($dllIntents[0].Equals($cleanupIdentity.DllMarkerPath, [StringComparison]::OrdinalIgnoreCase)) "DLL ownership intent path does not match run identity"
+        Remove-OwnedSiblingDll $cleanupIdentity
+    } elseif ($cleanupIdentity -and (Test-Path -LiteralPath $cleanupIdentity.SiblingDllPath)) {
+        if ($cleanupIdentity.Document.dll_ownership -ceq "owned") {
+            throw "owned sibling DLL exists without a matching ownership intent"
         }
+        Assert-NotReparsePoint $cleanupIdentity.SiblingDllPath "borrowed sibling DLL"
+        Assert-True ((Get-FileHash -LiteralPath $cleanupIdentity.SiblingDllPath -Algorithm SHA256).Hash -ceq $expectedDllHash) "borrowed sibling DLL hash changed"
     }
-    if (@($cleanupWorks | ForEach-Object { Get-ExactRunProcesses $_ }).Count -ne 0) { throw "controller process residue" }
+    if (@($cleanupWorks | ForEach-Object { Get-ExactRunProcesses $_ $cleanupExecutables }).Count -ne 0) { throw "controller process residue" }
     if (@($cleanupAdapterNames | ForEach-Object {
         Get-NetAdapter -Name $_ -IncludeHidden -ErrorAction SilentlyContinue
     }).Count -ne 0) { throw "controller adapter residue" }
@@ -124,12 +452,39 @@ if ($Mode -eq "cleanup") {
         if (Get-NetIPAddress -InterfaceIndex 1 -IPAddress $address -ErrorAction SilentlyContinue) { throw "controller address residue" }
         if (Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue) { throw "controller route residue" }
     }
-    if ($ownsSiblingDll -and (Test-Path -LiteralPath $siblingDll)) { throw "controller DLL residue" }
-    foreach ($cleanupWork in $cleanupWorks) {
-        if (Test-Path -LiteralPath $cleanupWork) { Remove-Item -LiteralPath $cleanupWork -Recurse -Force }
-        if (Test-Path -LiteralPath $cleanupWork) { throw "controller temp residue" }
+    if ($cleanupIdentity) {
+        if (Test-Path -LiteralPath $cleanupIdentity.WorkPath) {
+            Assert-NotReparsePoint $cleanupIdentity.WorkPath "controller work directory"
+            Remove-Item -LiteralPath $cleanupIdentity.WorkPath -Recurse -Force -ErrorAction Stop
+        }
+        Assert-True (-not (Test-Path -LiteralPath $cleanupIdentity.WorkPath)) "controller temp residue"
+        foreach ($cleanupWork in $cleanupWorks) {
+            if (-not $cleanupWork.Equals($cleanupIdentity.WorkPath, [StringComparison]::OrdinalIgnoreCase)) {
+                Assert-True (-not (Test-Path -LiteralPath $cleanupWork)) "unowned token work path residue"
+            }
+        }
+        Remove-Item -LiteralPath $runIdentityJournalPath -Force -ErrorAction Stop
+        Assert-True (-not (Test-Path -LiteralPath $runIdentityJournalPath)) "run identity journal residue"
     }
     return
+}
+
+if ($runtimeLibraryDirectoryExplicit) {
+    $runtimeDirectoryItem = Get-Item -LiteralPath $RuntimeLibraryDirectory -Force -ErrorAction Stop
+    Assert-True $runtimeDirectoryItem.PSIsContainer "RuntimeLibraryDirectory must be a directory"
+    Assert-True (($runtimeDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "RuntimeLibraryDirectory must not be a reparse point"
+    $resolvedRuntimeLibraryDirectory = [IO.Path]::GetFullPath($runtimeDirectoryItem.FullName)
+    $runtimeVcruntimePath = Join-Path $resolvedRuntimeLibraryDirectory "vcruntime140.dll"
+    Assert-True (Test-Path -LiteralPath $runtimeVcruntimePath -PathType Leaf) "RuntimeLibraryDirectory is missing vcruntime140.dll"
+    Assert-NotReparsePoint $runtimeVcruntimePath "runtime vcruntime140.dll"
+    $runtimeVcruntimeItem = Get-Item -LiteralPath $runtimeVcruntimePath -Force -ErrorAction Stop
+    $runtimeVcruntimeBytes = $runtimeVcruntimeItem.Length
+    $runtimeVcruntimeSha256 = (Get-FileHash -LiteralPath $runtimeVcruntimePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $env:Path = if ([string]::IsNullOrEmpty($env:Path)) {
+        $resolvedRuntimeLibraryDirectory
+    } else {
+        "$resolvedRuntimeLibraryDirectory;$env:Path"
+    }
 }
 
 $zipInput = if ($WintunZip) { $WintunZip } elseif ($env:FERRUM2_WINTUN_ZIP) { $env:FERRUM2_WINTUN_ZIP } else { throw "Wintun ZIP path is required via -WintunZip or FERRUM2_WINTUN_ZIP" }
@@ -150,6 +505,7 @@ $udpGateA = $null
 $udpGateB = $null
 $usedTcpPorts = [System.Collections.Generic.HashSet[int]]::new()
 $createdSiblingDll = $false
+$runJournalIdentity = $null
 $completed = $false
 $primaryError = $null
 $outerCleanupError = $null
@@ -239,8 +595,1032 @@ $capabilityFilteredPackets = [ordered]@{
     dynamic_udp_pinned = $null
 }
 
-function Assert-True([bool]$Condition, [string]$Message) {
-    if (-not $Condition) { throw $Message }
+function Get-Tcp08ElapsedMilliseconds([long]$MonotonicTimestamp) {
+    return [Math]::Round(
+        (($MonotonicTimestamp - $script:tcp08ClockOriginTimestamp) * 1000.0) / [Diagnostics.Stopwatch]::Frequency,
+        3
+    )
+}
+
+function Get-Tcp08MonotonicSample {
+    $timestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+    return [ordered]@{
+        monotonic_ticks = $timestamp
+        elapsed_ms = Get-Tcp08ElapsedMilliseconds $timestamp
+    }
+}
+
+function Add-Tcp08EventAtTimestamp([string]$Name, [long]$MonotonicTimestamp, [object]$Details = $null) {
+    if (-not $script:tcp08Enabled) { return }
+    $script:tcp08Events.Add([ordered]@{
+        ordinal = $script:tcp08Events.Count + 1
+        name = $Name
+        monotonic_ticks = $MonotonicTimestamp
+        elapsed_ms = Get-Tcp08ElapsedMilliseconds $MonotonicTimestamp
+        details = $Details
+    })
+}
+
+function Add-Tcp08Event([string]$Name, [object]$Details = $null) {
+    Add-Tcp08EventAtTimestamp $Name ([Diagnostics.Stopwatch]::GetTimestamp()) $Details
+}
+
+function Write-Tcp08Json([string]$Name, [object]$Value) {
+    if (-not $script:tcp08ArtifactInitialized) { return }
+    $path = Join-Path $script:tcp08ArtifactPath $Name
+    $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+}
+
+function Get-Tcp08ProcessSnapshot {
+    $captured = Get-Tcp08MonotonicSample
+    $controller = Get-Process -Id $PID -ErrorAction Stop
+    $products = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        $_.ExecutablePath -and @($script:binary, $script:serverBinary) -contains $_.ExecutablePath
+    } | ForEach-Object {
+        [ordered]@{
+            process_id = [uint32]$_.ProcessId
+            parent_process_id = [uint32]$_.ParentProcessId
+            name = [string]$_.Name
+            executable_path = [string]$_.ExecutablePath
+            creation_date = if ($_.CreationDate) { ([DateTime]$_.CreationDate).ToUniversalTime().ToString("o") } else { $null }
+        }
+    })
+    return [ordered]@{
+        captured_monotonic_ticks = $captured.monotonic_ticks
+        captured_elapsed_ms = $captured.elapsed_ms
+        controller = [ordered]@{
+            process_id = [uint32]$PID
+            name = $controller.ProcessName
+            start_time_utc = $controller.StartTime.ToUniversalTime().ToString("o")
+        }
+        products = $products
+    }
+}
+
+function Get-Tcp08ResidueNetworkSnapshot {
+    $captured = Get-Tcp08MonotonicSample
+    $testAddresses = @(
+        "198.18.0.2", "fd00::2", "192.0.2.201", "2001:db8::202", "192.0.2.203",
+        "2001:db8::204", "192.0.2.205", "2001:db8::206", "192.0.2.207", "2001:db8::208",
+        "192.0.2.250"
+    )
+    $adapterNames = @($script:adapterName, $script:managedAutoAdapterName, $script:managedManualAdapterName)
+    $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {
+        $adapterNames -contains $_.Name
+    } | ForEach-Object {
+        [ordered]@{ name = $_.Name; interface_index = [int]$_.ifIndex; status = [string]$_.Status }
+    })
+    $addresses = @(Get-NetIPAddress -ErrorAction SilentlyContinue | Where-Object {
+        $adapterNames -contains $_.InterfaceAlias -or $testAddresses -contains $_.IPAddress
+    } | ForEach-Object {
+        [ordered]@{
+            interface_index = [int]$_.InterfaceIndex
+            interface_alias = [string]$_.InterfaceAlias
+            address_family = [string]$_.AddressFamily
+            ip_address = [string]$_.IPAddress
+            prefix_length = [int]$_.PrefixLength
+            address_state = [string]$_.AddressState
+        }
+    })
+    $routes = @(Get-NetRoute -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object {
+        $adapterNames -contains $_.InterfaceAlias -or
+        $testAddresses -contains ([string]$_.DestinationPrefix).Split('/')[0]
+    } | ForEach-Object {
+        [ordered]@{
+            interface_index = [int]$_.InterfaceIndex
+            interface_alias = [string]$_.InterfaceAlias
+            destination_prefix = [string]$_.DestinationPrefix
+            next_hop = [string]$_.NextHop
+            route_metric = [int]$_.RouteMetric
+        }
+    })
+    return [ordered]@{
+        captured_monotonic_ticks = $captured.monotonic_ticks
+        captured_elapsed_ms = $captured.elapsed_ms
+        adapters = $adapters
+        addresses = $addresses
+        routes = $routes
+    }
+}
+
+function Initialize-Tcp08Artifacts {
+    if (-not $script:tcp08Enabled) { return }
+    $artifactFullPath = [IO.Path]::GetFullPath($script:tcp08ArtifactPath).TrimEnd('\', '/')
+    $workFullPath = [IO.Path]::GetFullPath($script:work).TrimEnd('\', '/')
+    $workPrefix = $workFullPath + [IO.Path]::DirectorySeparatorChar
+    Assert-True (-not $artifactFullPath.Equals($workFullPath, [StringComparison]::OrdinalIgnoreCase) -and
+        -not $artifactFullPath.StartsWith($workPrefix, [StringComparison]::OrdinalIgnoreCase)) "ArtifactDirectory must be outside the disposable run work directory"
+    $script:tcp08ArtifactPath = $artifactFullPath
+    if (Test-Path -LiteralPath $artifactFullPath) {
+        $ownedArtifactNames = @($script:tcp08RequiredJsonNames) + @(
+            "artifact-hashes.json", "client.stdout.log", "client.stderr.log",
+            "server.stdout.log", "server.stderr.log"
+        )
+        $ownedBaseline = @(Get-ChildItem -LiteralPath $artifactFullPath -Force | Where-Object {
+            $ownedArtifactNames -contains $_.Name
+        })
+        Assert-True ($ownedBaseline.Count -eq 0) "ArtifactDirectory already contains controller-owned evidence"
+    } else {
+        New-Item -ItemType Directory -Path $artifactFullPath | Out-Null
+    }
+    $script:tcp08ArtifactInitialized = $true
+    Add-Tcp08Event "vm_test_started" ([ordered]@{
+        controller_started_utc = $script:controllerStartedUtc
+        clock_origin_timestamp = $script:tcp08ClockOriginTimestamp
+    })
+    foreach ($name in @("client.stdout.log", "client.stderr.log", "server.stdout.log", "server.stderr.log")) {
+        New-Item -ItemType File -Path (Join-Path $artifactFullPath $name) -ErrorAction Stop | Out-Null
+    }
+    foreach ($name in @("controller.stdout.log", "controller.stderr.log")) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $artifactFullPath $name) -PathType Leaf) "outer pwsh redirection must create $name before controller startup"
+    }
+    try { Write-Tcp08Json "process-before.json" (Get-Tcp08ProcessSnapshot) }
+    catch {
+        Write-Tcp08Json "process-before.json" ([ordered]@{
+            schema = "ferrum2.windows-tun.tcp08-capture-unavailable.v1"
+            capture = "process-before"
+            error_type = $_.Exception.GetType().FullName
+        })
+        throw
+    }
+    try { Write-Tcp08Json "network-before.json" (Get-Tcp08ResidueNetworkSnapshot) }
+    catch {
+        Write-Tcp08Json "network-before.json" ([ordered]@{
+            schema = "ferrum2.windows-tun.tcp08-capture-unavailable.v1"
+            capture = "network-before"
+            error_type = $_.Exception.GetType().FullName
+        })
+        throw
+    }
+}
+
+function Write-Tcp08BinaryEvidence([string]$WintunDll) {
+    if (-not $script:tcp08ArtifactInitialized) { return }
+    Assert-True (Test-Path -LiteralPath $script:binary) "client binary is missing"
+    Assert-True (Test-Path -LiteralPath $script:serverBinary) "server binary is missing"
+    $controllerPath = $MyInvocation.ScriptName
+    if ([string]::IsNullOrWhiteSpace($controllerPath)) { $controllerPath = Join-Path $script:PSScriptRoot "qualify_windows_tun.ps1" }
+    Write-Tcp08Json "binary-hashes.json" ([ordered]@{
+        client = [ordered]@{
+            path = $script:binary
+            sha256 = (Get-FileHash -LiteralPath $script:binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            bytes = (Get-Item -LiteralPath $script:binary).Length
+            explicit = $script:clientBinaryExplicit
+        }
+        server = [ordered]@{
+            path = $script:serverBinary
+            sha256 = (Get-FileHash -LiteralPath $script:serverBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+            bytes = (Get-Item -LiteralPath $script:serverBinary).Length
+            explicit = $script:serverBinaryExplicit
+        }
+        controller = [ordered]@{
+            path = $controllerPath
+            sha256 = (Get-FileHash -LiteralPath $controllerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        runtime_library = [ordered]@{
+            explicit = [bool]$script:runtimeLibraryDirectoryExplicit
+            directory = $script:resolvedRuntimeLibraryDirectory
+            vcruntime140_dll = [ordered]@{
+                path = $script:runtimeVcruntimePath
+                bytes = $script:runtimeVcruntimeBytes
+                sha256 = $script:runtimeVcruntimeSha256
+            }
+        }
+        wintun_zip = [ordered]@{ path = $script:zip; sha256 = $script:expectedZipHash.ToLowerInvariant() }
+        wintun_dll = [ordered]@{ path = $WintunDll; sha256 = $script:expectedDllHash.ToLowerInvariant() }
+    })
+}
+
+function Write-Tcp08Metadata([string]$Target, [int]$TargetPort, [int]$GatePort, [int]$ServerPort, [int]$MetricsPort) {
+    if (-not $script:tcp08ArtifactInitialized) { return }
+    $currentVersion = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+    Write-Tcp08Json "metadata.json" ([ordered]@{
+        schema = "ferrum2.windows-tun.tcp08-metadata.v1"
+        mode = $script:Mode
+        run_token = $script:runIdentity
+        controller_started_utc = $script:controllerStartedUtc
+        product_root = $script:resolvedProductRoot
+        client_binary_explicit = $script:clientBinaryExplicit
+        server_binary_explicit = $script:serverBinaryExplicit
+        runtime_library = [ordered]@{
+            explicit = [bool]$script:runtimeLibraryDirectoryExplicit
+            directory = $script:resolvedRuntimeLibraryDirectory
+            vcruntime140_dll = [ordered]@{
+                path = $script:runtimeVcruntimePath
+                bytes = $script:runtimeVcruntimeBytes
+                sha256 = $script:runtimeVcruntimeSha256
+            }
+        }
+        artifact_directory = $script:tcp08ArtifactPath
+        cleanup_identity = [ordered]@{
+            journal_path = $script:runIdentityJournalPath
+            journal_sha256 = (Get-FileHash -LiteralPath $script:runIdentityJournalPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            consumption = "external cleanup with the same run token"
+        }
+        windows = [ordered]@{
+            product_name = [string]$currentVersion.ProductName
+            edition = [string]$currentVersion.EditionID
+            build = "$($currentVersion.CurrentBuildNumber).$($currentVersion.UBR)"
+        }
+        powershell_version = $PSVersionTable.PSVersion.ToString()
+        monotonic_clock = [ordered]@{
+            kind = "System.Diagnostics.Stopwatch"
+            frequency = [Diagnostics.Stopwatch]::Frequency
+            origin_timestamp = $script:tcp08ClockOriginTimestamp
+            origin_wall_clock_utc = $script:tcp08ClockOriginUtc
+        }
+        logs = [ordered]@{
+            client_stdout = [ordered]@{ name = "client.stdout.log"; producer = "CreateProcessW redirected child handle"; mode = "append" }
+            client_stderr = [ordered]@{ name = "client.stderr.log"; producer = "CreateProcessW redirected child handle"; mode = "append" }
+            server_stdout = [ordered]@{ name = "server.stdout.log"; producer = "CreateProcessW redirected child handle"; mode = "append" }
+            server_stderr = [ordered]@{ name = "server.stderr.log"; producer = "CreateProcessW redirected child handle"; mode = "append" }
+            controller_stdout = [ordered]@{ name = "controller.stdout.log"; producer = "outer pwsh stream redirection"; mode = "append" }
+            controller_stderr = [ordered]@{ name = "controller.stderr.log"; producer = "outer pwsh stream redirection"; mode = "append" }
+        }
+        artifact_manifest = [ordered]@{
+            controller_capture_is_point_in_time = $true
+            outer_redirection_may_still_be_open = $true
+            final_outer_recalculation_required = $true
+        }
+        tcp08 = [ordered]@{
+            target = $Target
+            target_port = $TargetPort
+            gate_port = $GatePort
+            server_port = $ServerPort
+            metrics_port = $MetricsPort
+            require_product_owner_metrics = [bool]$script:RequireTcp08ProductMetrics
+            pressure_chunk_bytes = 1048576
+            pressure_attempt_limit = 128
+            pressure_attempt_wait_ms = 100
+            ctrl_break_internal_wait_ms = 250
+            controller_grace_probe_ms = 300
+            shutdown_grace_ms = 1000
+            process_exit_wait_ms = 10000
+        }
+    })
+}
+
+function Get-Tcp08JsonProperty([object]$Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($property) { return $property.Value }
+    return $null
+}
+
+function Test-Tcp08JsonNumber([object]$Value) {
+    return $Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [uint16] -or $Value -is [int16] -or
+        $Value -is [uint32] -or $Value -is [int32] -or
+        $Value -is [uint64] -or $Value -is [int64] -or
+        $Value -is [single] -or $Value -is [double] -or $Value -is [decimal]
+}
+
+function ConvertTo-Tcp08NonNegativeUInt64([object]$Value, [string]$Field) {
+    Assert-True (Test-Tcp08JsonNumber $Value) "process shutdown report $Field is not numeric"
+    try { $number = [decimal]$Value }
+    catch { throw "process shutdown report $Field is outside the supported integer range" }
+    Assert-True ($number -ge 0 -and $number -le [decimal]([uint64]::MaxValue) -and
+        $number -eq [decimal]::Truncate($number)) "process shutdown report $Field is not a non-negative integer"
+    return [uint64]$number
+}
+
+function ConvertTo-Tcp08SignedInt64([object]$Value, [string]$Field) {
+    Assert-True (Test-Tcp08JsonNumber $Value) "process shutdown report $Field is not numeric"
+    try { $number = [decimal]$Value }
+    catch { throw "process shutdown report $Field is outside the supported integer range" }
+    Assert-True ($number -ge [decimal]([int64]::MinValue) -and $number -le [decimal]([int64]::MaxValue) -and
+        $number -eq [decimal]::Truncate($number)) "process shutdown report $Field is not an integer"
+    return [int64]$number
+}
+
+function ConvertTo-Tcp08ProductRoot([object]$Root) {
+    if ($null -eq $Root) { return $null }
+    Assert-ClosedJsonProperties $Root @("name", "id") "process shutdown report root"
+    $name = [string](Get-Tcp08JsonProperty $Root "name")
+    Assert-True (@("socks", "dns", "metrics", "tun") -ccontains $name) "process shutdown report root name is invalid"
+    $id = ConvertTo-Tcp08NonNegativeUInt64 (Get-Tcp08JsonProperty $Root "id") "root.id"
+    Assert-True ($id -lt 4) "process shutdown report root ID is outside the closed client topology"
+    return [ordered]@{
+        name = $name
+        id = $id
+    }
+}
+
+function ConvertTo-Tcp08OwnerCounters([object]$Counters, [bool]$AllowNegative = $false) {
+    if ($null -eq $Counters) { return $null }
+    $names = @(
+        "process_supervisors", "prepared_process_roots", "active_process_roots", "process_root_reaps",
+        "process_root_rollbacks", "process_forced_roots", "active_tun_tcp_flows", "active_tun_handler_tasks",
+        "active_supervisor_children", "connection_tasks", "owned_buffers", "owned_permits", "listeners",
+        "forced_shutdowns", "udp_sessions", "udp_sockets", "udp_tasks", "udp_queued_datagrams",
+        "udp_buffered_bytes", "udp_scratch_buffers", "udp_forced_shutdowns", "sniff_buffered_bytes"
+    )
+    Assert-ClosedJsonProperties $Counters $names "process shutdown report owner counters"
+    $sanitized = [ordered]@{}
+    foreach ($name in $names) {
+        $value = Get-Tcp08JsonProperty $Counters $name
+        $sanitized[$name] = if ($AllowNegative) {
+            ConvertTo-Tcp08SignedInt64 $value "owner.$name"
+        } else {
+            ConvertTo-Tcp08NonNegativeUInt64 $value "owner.$name"
+        }
+    }
+    return $sanitized
+}
+
+function ConvertTo-Tcp08CleanupFailure([object]$Failure, [int]$Depth = 0) {
+    if ($null -eq $Failure) { return $null }
+    Assert-True ($Depth -le 4) "process shutdown report cleanup nesting is invalid"
+    $allowedProperties = @("kind", "root", "roots", "root_error_category", "prior", "owner_baseline", "owner_stopped", "owner_delta")
+    $actualProperties = @($Failure.PSObject.Properties.Name)
+    Assert-True (@($actualProperties | Where-Object { -not ($allowedProperties -ccontains $_) }).Count -eq 0 -and
+        $actualProperties -ccontains "kind") "process shutdown report cleanup property set is invalid"
+    $kind = [string](Get-Tcp08JsonProperty $Failure "kind")
+    Assert-True ($kind -in @("RootFailed", "RootPanicked", "RootJoinFailed", "ForceReapTimedOut", "OwnerMismatch")) "process shutdown report cleanup kind is invalid"
+    $sanitized = [ordered]@{ kind = $kind }
+    $root = Get-Tcp08JsonProperty $Failure "root"
+    if ($null -ne $root) { $sanitized.root = ConvertTo-Tcp08ProductRoot $root }
+    $roots = Get-Tcp08JsonProperty $Failure "roots"
+    if ($null -ne $roots) {
+        $sanitizedRoots = @($roots | ForEach-Object { ConvertTo-Tcp08ProductRoot $_ })
+        Assert-True (@($sanitizedRoots | Group-Object id | Where-Object Count -gt 1).Count -eq 0 -and
+            @($sanitizedRoots | Group-Object name | Where-Object Count -gt 1).Count -eq 0) "process shutdown report cleanup roots contain duplicates"
+        $sanitized.roots = $sanitizedRoots
+    }
+    $errorCategory = Get-Tcp08JsonProperty $Failure "root_error_category"
+    if ($null -ne $errorCategory) {
+        $errorCategory = [string]$errorCategory
+        Assert-True ($errorCategory -match '^(startup|runtime|shutdown)\.[a-z]+$') "process shutdown report error category is invalid"
+        $sanitized.root_error_category = $errorCategory
+    }
+    $prior = Get-Tcp08JsonProperty $Failure "prior"
+    if ($null -ne $prior) { $sanitized.prior = ConvertTo-Tcp08CleanupFailure $prior ($Depth + 1) }
+    foreach ($name in @("owner_baseline", "owner_stopped", "owner_delta")) {
+        $value = Get-Tcp08JsonProperty $Failure $name
+        if ($null -ne $value) { $sanitized[$name] = ConvertTo-Tcp08OwnerCounters $value ($name -ceq "owner_delta") }
+    }
+    return $sanitized
+}
+
+function ConvertTo-Tcp08ProductShutdownReport([object]$Report) {
+    $requiredReportProperties = @(
+        "event", "role", "process_states", "process_transitions", "shutdown_grace_ns",
+        "actual_grace_deadline_elapsed_ns", "actual_grace_deadline_source", "termination_cause",
+        "root", "root_exit_category", "root_error_category", "forced_root_count",
+        "owner_baseline", "owner_stopped", "owner_delta", "cleanup_failure"
+    )
+    $allowedReportProperties = @($requiredReportProperties) + @("root_exit_events")
+    $actualReportProperties = @($Report.PSObject.Properties.Name)
+    Assert-True (@($actualReportProperties | Where-Object { -not ($allowedReportProperties -ccontains $_) }).Count -eq 0) "process shutdown report has unknown properties"
+    Assert-True (@($requiredReportProperties | Where-Object { -not ($actualReportProperties -ccontains $_) }).Count -eq 0) "process shutdown report is missing required properties"
+    Assert-True ((Get-Tcp08JsonProperty $Report "event") -ceq "process_shutdown_report") "process shutdown report event is invalid"
+    Assert-True ((Get-Tcp08JsonProperty $Report "role") -ceq "client") "process shutdown report role is invalid"
+    $allowedStates = @("Validated", "Preparing", "Prepared", "Active", "Rollback", "Fatal", "Quiescing", "Draining", "Forced", "Stopped")
+    $states = @(Get-Tcp08JsonProperty $Report "process_states")
+    Assert-True ($states.Count -gt 0 -and @($states | Where-Object { -not ($allowedStates -ccontains [string]$_) }).Count -eq 0) "process shutdown report states are invalid"
+    $rawTransitions = @(Get-Tcp08JsonProperty $Report "process_transitions")
+    Assert-True ($rawTransitions.Count -eq $states.Count) "process shutdown report state/transition count is inconsistent"
+    $transitions = [System.Collections.Generic.List[object]]::new()
+    $seenStates = @{}
+    $previousTransitionElapsed = $null
+    for ($index = 0; $index -lt $rawTransitions.Count; $index++) {
+        Assert-ClosedJsonProperties $rawTransitions[$index] @("state", "elapsed_ns") "process shutdown report transition"
+        $state = [string](Get-Tcp08JsonProperty $rawTransitions[$index] "state")
+        Assert-True ($allowedStates -ccontains $state) "process shutdown report transition is invalid"
+        Assert-True ($state -ceq [string]$states[$index]) "process shutdown report state/transition sequence is inconsistent"
+        Assert-True (-not $seenStates.ContainsKey($state)) "process shutdown report contains a duplicate state transition"
+        $seenStates[$state] = $true
+        $elapsed = ConvertTo-Tcp08NonNegativeUInt64 (Get-Tcp08JsonProperty $rawTransitions[$index] "elapsed_ns") "process_transitions[$index].elapsed_ns"
+        if ($null -ne $previousTransitionElapsed) {
+            Assert-True ($elapsed -ge $previousTransitionElapsed) "process shutdown report transitions are not monotonic"
+        }
+        $previousTransitionElapsed = $elapsed
+        $transitions.Add([ordered]@{ state = $state; elapsed_ns = $elapsed })
+    }
+    Assert-True ([string]$states[$states.Count - 1] -ceq "Stopped") "process shutdown report is not closed by Stopped"
+    $reportElapsed = [uint64]$previousTransitionElapsed
+
+    $rootExitEvents = [System.Collections.Generic.List[object]]::new()
+    $rootExitEventsAvailability = "unavailable"
+    $rootExitEventsSchemaGeneration = "legacy"
+    $rootExitEventsUnavailableReason = "legacy_process_shutdown_report_missing_root_exit_events"
+    $rootExitEventsProperty = $Report.PSObject.Properties["root_exit_events"]
+    if ($null -ne $rootExitEventsProperty) {
+        $rootExitEventsAvailability = "available"
+        $rootExitEventsSchemaGeneration = "current"
+        $rootExitEventsUnavailableReason = $null
+        $rawRootExitEvents = $rootExitEventsProperty.Value
+        Assert-True ($rawRootExitEvents -is [System.Array]) "process shutdown report root_exit_events is not an array"
+        Assert-True (@($rawRootExitEvents).Count -le 4) "process shutdown report has too many root exit events"
+        $seenRootIds = @{}
+        $seenRootNames = @{}
+        $previousRootElapsed = $null
+        $allowedRootPhases = @("Active", "Draining", "Forced", "WatchdogAbort")
+        $allowedRootExitCategories = @("Completed", "Failed", "Panicked", "JoinFailed", "Aborted")
+        foreach ($rawRootEvent in @($rawRootExitEvents)) {
+            Assert-ClosedJsonProperties $rawRootEvent @("root", "phase", "exit_category", "elapsed_ns") "process shutdown report root exit event"
+            $root = ConvertTo-Tcp08ProductRoot (Get-Tcp08JsonProperty $rawRootEvent "root")
+            Assert-True ($null -ne $root) "process shutdown report root exit event has no root"
+            $rootIdKey = ([uint64]$root.id).ToString([Globalization.CultureInfo]::InvariantCulture)
+            $rootNameKey = [string]$root.name
+            Assert-True (-not $seenRootIds.ContainsKey($rootIdKey)) "process shutdown report has a duplicate root exit ID"
+            Assert-True (-not $seenRootNames.ContainsKey($rootNameKey)) "process shutdown report has a duplicate stable root exit name"
+            $seenRootIds[$rootIdKey] = $true
+            $seenRootNames[$rootNameKey] = $true
+            $phase = [string](Get-Tcp08JsonProperty $rawRootEvent "phase")
+            Assert-True ($allowedRootPhases -ccontains $phase) "process shutdown report root exit phase is invalid"
+            $exitCategory = [string](Get-Tcp08JsonProperty $rawRootEvent "exit_category")
+            Assert-True ($allowedRootExitCategories -ccontains $exitCategory) "process shutdown report root exit category is invalid"
+            $elapsed = ConvertTo-Tcp08NonNegativeUInt64 (Get-Tcp08JsonProperty $rawRootEvent "elapsed_ns") "root_exit_events.elapsed_ns"
+            if ($null -ne $previousRootElapsed) {
+                Assert-True ($elapsed -ge $previousRootElapsed) "process shutdown report root exit events are not monotonic"
+            }
+            Assert-True ($elapsed -le $reportElapsed) "process shutdown report root exit event is later than report completion"
+            $previousRootElapsed = $elapsed
+            $rootExitEvents.Add([ordered]@{
+                root = $root
+                phase = $phase
+                exit_category = $exitCategory
+                elapsed_ns = $elapsed
+            })
+        }
+    }
+    $terminationCause = [string](Get-Tcp08JsonProperty $Report "termination_cause")
+    Assert-True (@("ExternalShutdown", "PreparationFailed", "PreparationPanicked", "ActivationFailed", "ActivationPanicked", "RootStopped") -ccontains $terminationCause) "process shutdown report cause is invalid"
+    $rootExitCategory = Get-Tcp08JsonProperty $Report "root_exit_category"
+    if ($null -ne $rootExitCategory) {
+        $rootExitCategory = [string]$rootExitCategory
+        Assert-True (@("Completed", "Failed", "Panicked", "JoinFailed") -ccontains $rootExitCategory) "process shutdown report root exit category is invalid"
+    }
+    $rootErrorCategory = Get-Tcp08JsonProperty $Report "root_error_category"
+    if ($null -ne $rootErrorCategory) {
+        $rootErrorCategory = [string]$rootErrorCategory
+        Assert-True ($rootErrorCategory -match '^(startup|runtime|shutdown)\.[a-z]+$') "process shutdown report root error category is invalid"
+    }
+    $actualGraceDeadline = Get-Tcp08JsonProperty $Report "actual_grace_deadline_elapsed_ns"
+    $actualGraceDeadlineSource = Get-Tcp08JsonProperty $Report "actual_grace_deadline_source"
+    if ($null -ne $actualGraceDeadlineSource) {
+        $actualGraceDeadlineSource = [string]$actualGraceDeadlineSource
+        Assert-True ($actualGraceDeadlineSource -eq "runtime_process_supervisor") "process shutdown report grace deadline source is invalid"
+    }
+    Assert-True (($null -eq $actualGraceDeadline) -eq ($null -eq $actualGraceDeadlineSource)) "process shutdown report actual grace deadline pair is incomplete"
+    if ($null -ne $actualGraceDeadline) {
+        $actualGraceDeadline = ConvertTo-Tcp08NonNegativeUInt64 $actualGraceDeadline "actual_grace_deadline_elapsed_ns"
+    }
+    $graceDeadlineSemantics = if ($null -ne $actualGraceDeadline) { "actual_runtime_deadline" }
+        else { "unavailable" }
+    $ownerBaseline = Get-Tcp08JsonProperty $Report "owner_baseline"
+    $ownerStopped = Get-Tcp08JsonProperty $Report "owner_stopped"
+    $ownerDelta = Get-Tcp08JsonProperty $Report "owner_delta"
+    Assert-True ($null -ne $ownerBaseline -and $null -ne $ownerStopped -and $null -ne $ownerDelta) "process shutdown report top-level owner triplet is incomplete"
+    return [ordered]@{
+        event = "process_shutdown_report"
+        role = "client"
+        process_states = @($states | ForEach-Object { [string]$_ })
+        process_transitions = $transitions
+        report_elapsed_ns = $reportElapsed
+        report_elapsed_source = "final_Stopped_process_transition"
+        root_exit_events = $rootExitEvents
+        root_exit_events_availability = $rootExitEventsAvailability
+        root_exit_events_schema_generation = $rootExitEventsSchemaGeneration
+        root_exit_events_unavailable_reason = $rootExitEventsUnavailableReason
+        shutdown_grace_ns = ConvertTo-Tcp08NonNegativeUInt64 (Get-Tcp08JsonProperty $Report "shutdown_grace_ns") "shutdown_grace_ns"
+        actual_grace_deadline_elapsed_ns = $actualGraceDeadline
+        actual_grace_deadline_source = $actualGraceDeadlineSource
+        grace_deadline_semantics = $graceDeadlineSemantics
+        termination_cause = $terminationCause
+        root = ConvertTo-Tcp08ProductRoot (Get-Tcp08JsonProperty $Report "root")
+        root_exit_category = $rootExitCategory
+        root_error_category = $rootErrorCategory
+        forced_root_count = ConvertTo-Tcp08NonNegativeUInt64 (Get-Tcp08JsonProperty $Report "forced_root_count") "forced_root_count"
+        owner_baseline = ConvertTo-Tcp08OwnerCounters $ownerBaseline
+        owner_stopped = ConvertTo-Tcp08OwnerCounters $ownerStopped
+        owner_delta = ConvertTo-Tcp08OwnerCounters $ownerDelta $true
+        cleanup_failure = ConvertTo-Tcp08CleanupFailure (Get-Tcp08JsonProperty $Report "cleanup_failure")
+    }
+}
+
+function Get-Tcp08ProductTransition([object]$Report, [string]$State) {
+    $matches = @($Report.process_transitions | Where-Object { $_.state -ceq $State })
+    Assert-True ($matches.Count -le 1) "validated process report contains duplicate $State transitions"
+    if ($matches.Count -eq 1) { return $matches[0] }
+    return $null
+}
+
+function Get-Tcp08SharedLogSnapshot([string]$Path, [string]$CapturePhase) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject][ordered]@{
+            capture_phase = $CapturePhase
+            byte_length = [int64]0
+            complete_byte_length = [int64]0
+            trailing_partial_byte_count = [int64]0
+            complete_line_count = 0
+            candidate_count = 0
+            lines = @()
+        }
+    }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+    try {
+        $byteLength = $stream.Length
+        Assert-True ($byteLength -le [int]::MaxValue) "TCP-08 client stderr is too large to snapshot"
+        $bytes = [byte[]]::new([int]$byteLength)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -eq 0) { break }
+            $offset += $read
+        }
+    } finally { $stream.Dispose() }
+    $lastLf = -1
+    for ($index = $offset - 1; $index -ge 0; $index--) {
+        if ($bytes[$index] -eq 10) { $lastLf = $index; break }
+    }
+    $completeByteLength = $lastLf + 1
+    $candidateCount = 0
+    if ($completeByteLength -gt 0) {
+        $text = [Text.Encoding]::UTF8.GetString($bytes, 0, $completeByteLength)
+        $rawLines = $text.Split([char]10)
+        for ($index = 0; $index -lt $rawLines.Length - 1; $index++) {
+            $line = $rawLines[$index].TrimEnd([char]13)
+            $lines.Add($line)
+            if ($line -match '"event"\s*:\s*"process_shutdown_report"') { $candidateCount++ }
+        }
+    }
+    return [pscustomobject][ordered]@{
+        capture_phase = $CapturePhase
+        byte_length = [int64]$offset
+        complete_byte_length = [int64]$completeByteLength
+        trailing_partial_byte_count = [int64]($offset - $completeByteLength)
+        complete_line_count = $lines.Count
+        candidate_count = $candidateCount
+        lines = $lines.ToArray()
+    }
+}
+
+function Get-Tcp08ForcedReportAssessment(
+    [object]$Report,
+    [int]$RecordIndex,
+    [int]$StderrLine,
+    [int]$CandidateOrdinal
+) {
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $activeTransition = Get-Tcp08ProductTransition $Report "Active"
+    $forcedTransition = Get-Tcp08ProductTransition $Report "Forced"
+    $quiescingTransition = Get-Tcp08ProductTransition $Report "Quiescing"
+    $drainingTransition = Get-Tcp08ProductTransition $Report "Draining"
+    $stoppedTransition = Get-Tcp08ProductTransition $Report "Stopped"
+    $forcedIntent = $null -ne $forcedTransition -or $Report.forced_root_count -gt 0 -or
+        @($Report.root_exit_events | Where-Object { $_.phase -in @("Forced", "WatchdogAbort") }).Count -gt 0
+    if (-not $forcedIntent) {
+        return [ordered]@{
+            record_index = $RecordIndex
+            stderr_line = $StderrLine
+            candidate_ordinal = $CandidateOrdinal
+            classification = "allowed_non_forced_report"
+            selection_reason = "no_forced_state_count_or_root_event"
+            failures = @()
+            product_timeline_events = @()
+        }
+    }
+
+    if ($null -eq $forcedTransition) { $failures.Add("missing_Forced_transition") }
+    if ($null -eq $activeTransition) { $failures.Add("missing_Active_transition") }
+    if ($null -eq $quiescingTransition) { $failures.Add("missing_Quiescing_transition") }
+    if ($null -eq $drainingTransition) { $failures.Add("missing_Draining_transition") }
+    if ($null -eq $stoppedTransition) { $failures.Add("missing_Stopped_transition") }
+    $expectedForcedStates = @("Validated", "Preparing", "Prepared", "Active", "Quiescing", "Draining", "Forced", "Stopped")
+    if ((@($Report.process_states) -join "|") -cne ($expectedForcedStates -join "|")) {
+        $failures.Add("forced_process_state_sequence_not_canonical")
+    }
+    foreach ($state in @("Active", "Quiescing", "Draining", "Forced", "Stopped")) {
+        if (@($Report.process_states | Where-Object { $_ -ceq $state }).Count -ne 1 -or
+            @($Report.process_transitions | Where-Object { $_.state -ceq $state }).Count -ne 1) {
+            $failures.Add("forced_process_state_count_not_one_$state")
+        }
+    }
+    if ($null -ne $activeTransition -and $null -ne $quiescingTransition -and
+        $null -ne $drainingTransition -and $null -ne $forcedTransition -and $null -ne $stoppedTransition) {
+        $requiredOrder = @("Active", "Quiescing", "Draining", "Forced", "Stopped")
+        $requiredIndexes = @($requiredOrder | ForEach-Object { [Array]::IndexOf([object[]]$Report.process_states, $_) })
+        if ($requiredIndexes[0] -ge $requiredIndexes[1] -or
+            $requiredIndexes[1] -ge $requiredIndexes[2] -or
+            $requiredIndexes[2] -ge $requiredIndexes[3] -or
+            $requiredIndexes[3] -ge $requiredIndexes[4]) {
+            $failures.Add("forced_process_state_order_not_Active_Quiescing_Draining_Forced_Stopped")
+        }
+    }
+    if ($Report.forced_root_count -le 0) { $failures.Add("forced_root_count_not_positive") }
+    if ($Report.termination_cause -cne "ExternalShutdown") { $failures.Add("termination_cause_not_ExternalShutdown") }
+    if ($null -ne $Report.root -or $null -ne $Report.root_exit_category -or $null -ne $Report.root_error_category) {
+        $failures.Add("ExternalShutdown_report_has_primary_root_exit")
+    }
+    if ($null -ne $Report.cleanup_failure) { $failures.Add("cleanup_failure_present") }
+    if ($Report.root_exit_events_availability -cne "available" -or
+        $Report.root_exit_events_schema_generation -cne "current") {
+        $failures.Add("current_root_exit_events_unavailable")
+    }
+    if ($null -eq $Report.actual_grace_deadline_elapsed_ns -or
+        $Report.actual_grace_deadline_source -cne "runtime_process_supervisor") {
+        $failures.Add("actual_runtime_grace_deadline_unavailable")
+    }
+    $tunEvents = @($Report.root_exit_events | Where-Object { $_.root.name -ceq "tun" })
+    if ($tunEvents.Count -ne 1) {
+        $failures.Add("stable_tun_root_event_count_not_one")
+    } elseif ($tunEvents[0].phase -cne "Forced") {
+        $failures.Add("stable_tun_root_not_cleanly_reaped_in_Forced_phase")
+    } elseif ($tunEvents[0].exit_category -cne "Completed") {
+        $failures.Add("stable_tun_root_exit_not_Completed")
+    }
+    $activeOwnerNames = @(
+        "process_supervisors", "prepared_process_roots", "active_process_roots",
+        "active_tun_tcp_flows", "active_tun_handler_tasks", "active_supervisor_children",
+        "connection_tasks", "owned_buffers", "owned_permits", "listeners", "udp_sessions",
+        "udp_sockets", "udp_tasks", "udp_queued_datagrams", "udp_buffered_bytes",
+        "udp_scratch_buffers", "sniff_buffered_bytes"
+    )
+    foreach ($name in $activeOwnerNames) {
+        if ($Report.owner_stopped.$name -ne $Report.owner_baseline.$name -or $Report.owner_delta.$name -ne 0) {
+            $failures.Add("active_owner_not_returned_to_baseline_$name")
+        }
+    }
+    foreach ($name in @("active_process_roots", "active_tun_tcp_flows", "active_tun_handler_tasks")) {
+        if ($Report.owner_baseline.$name -ne 0 -or $Report.owner_stopped.$name -ne 0) {
+            $failures.Add("required_active_owner_not_zero_$name")
+        }
+    }
+    foreach ($name in @("process_root_reaps", "process_root_rollbacks", "process_forced_roots", "forced_shutdowns", "udp_forced_shutdowns")) {
+        if ($Report.owner_delta.$name -lt 0) { $failures.Add("cumulative_owner_delta_negative_$name") }
+    }
+    if ($Report.owner_delta.process_forced_roots -le 0) { $failures.Add("process_forced_roots_delta_not_positive") }
+    if ($Report.owner_delta.process_root_reaps -le 0) { $failures.Add("process_root_reaps_delta_not_positive") }
+    if ($Report.owner_delta.process_forced_roots -ne $Report.forced_root_count) { $failures.Add("process_forced_roots_delta_count_mismatch") }
+    if ($null -ne $Report.actual_grace_deadline_elapsed_ns) {
+        if ($Report.actual_grace_deadline_elapsed_ns -gt $Report.report_elapsed_ns) {
+            $failures.Add("grace_deadline_later_than_report")
+        }
+        if ($Report.actual_grace_deadline_elapsed_ns -lt $Report.shutdown_grace_ns) {
+            $failures.Add("grace_deadline_precedes_configured_grace_origin")
+        }
+        if ($null -ne $drainingTransition -and
+            ($Report.actual_grace_deadline_elapsed_ns - $Report.shutdown_grace_ns) -lt $drainingTransition.elapsed_ns) {
+            $failures.Add("grace_deadline_creation_precedes_Draining_transition")
+        }
+        if ($null -ne $forcedTransition -and
+            $forcedTransition.elapsed_ns -lt $Report.actual_grace_deadline_elapsed_ns) {
+            $failures.Add("Forced_transition_precedes_grace_deadline")
+        }
+        if ($tunEvents.Count -eq 1 -and
+            $tunEvents[0].elapsed_ns -lt $Report.actual_grace_deadline_elapsed_ns) {
+            $failures.Add("stable_tun_root_event_precedes_grace_deadline")
+        }
+    }
+    if ($null -ne $stoppedTransition) {
+        if ($stoppedTransition.elapsed_ns -ne $Report.report_elapsed_ns) {
+            $failures.Add("Stopped_transition_report_elapsed_mismatch")
+        }
+        if (@($Report.root_exit_events | Where-Object { $_.elapsed_ns -gt $stoppedTransition.elapsed_ns }).Count -gt 0) {
+            $failures.Add("root_exit_event_later_than_Stopped_transition")
+        }
+    }
+
+    $classification = if ($failures.Count -eq 0) { "tcp08_forced_candidate" } else { "incomplete_forced_report" }
+    $selectionReason = if ($failures.Count -eq 0) {
+        "closed_forced_state_positive_forced_count_actual_deadline_and_stable_tun_root_event"
+    } else { "forced_intent_failed_closed_tcp08_criteria" }
+    $productEvents = [System.Collections.Generic.List[object]]::new()
+    if ($failures.Count -eq 0) {
+        $productEvents.Add([ordered]@{
+            name = "shutdown_signal_observed"
+            source_ordinal = 1
+            elapsed_ns = $quiescingTransition.elapsed_ns
+            clock_domain = "product_process_relative"
+            timestamp_source = "Quiescing_transition_upper_bound"
+        })
+        $productEvents.Add([ordered]@{
+            name = "quiescing_started"
+            source_ordinal = 2
+            elapsed_ns = $quiescingTransition.elapsed_ns
+            clock_domain = "product_process_relative"
+            timestamp_source = "Quiescing_transition"
+        })
+        $productEvents.Add([ordered]@{
+            name = "draining_started"
+            source_ordinal = 3
+            elapsed_ns = $drainingTransition.elapsed_ns
+            clock_domain = "product_process_relative"
+            timestamp_source = "Draining_transition"
+        })
+        $productEvents.Add([ordered]@{
+            name = "grace_deadline_created"
+            source_ordinal = 4
+            elapsed_ns = [uint64]($Report.actual_grace_deadline_elapsed_ns - $Report.shutdown_grace_ns)
+            clock_domain = "product_process_relative"
+            timestamp_source = "actual_grace_deadline_elapsed_ns_minus_shutdown_grace_ns"
+            deadline_elapsed_ns = $Report.actual_grace_deadline_elapsed_ns
+        })
+        $productEvents.Add([ordered]@{
+            name = "forced_started"
+            source_ordinal = 5
+            elapsed_ns = $forcedTransition.elapsed_ns
+            clock_domain = "product_process_relative"
+            timestamp_source = "Forced_transition"
+        })
+        $rootEventOrdinal = 6
+        foreach ($rootEvent in $Report.root_exit_events) {
+            $productEvents.Add([ordered]@{
+                name = "root_exit_observed"
+                source_ordinal = $rootEventOrdinal
+                elapsed_ns = $rootEvent.elapsed_ns
+                clock_domain = "product_process_relative"
+                timestamp_source = "root_exit_events"
+                root = $rootEvent.root
+                phase = $rootEvent.phase
+                exit_category = $rootEvent.exit_category
+            })
+            $rootEventOrdinal++
+        }
+    }
+    return [ordered]@{
+        record_index = $RecordIndex
+        stderr_line = $StderrLine
+        candidate_ordinal = $CandidateOrdinal
+        classification = $classification
+        selection_reason = $selectionReason
+        failures = $failures
+        product_timeline_events = @($productEvents | Sort-Object elapsed_ns, source_ordinal)
+    }
+}
+
+function Get-Tcp08ProductShutdownEvidence {
+    $path = Join-Path $script:tcp08ArtifactPath "client.stderr.log"
+    $reports = [System.Collections.Generic.List[object]]::new()
+    $assessments = [System.Collections.Generic.List[object]]::new()
+    $invalidRecordDetails = [System.Collections.Generic.List[object]]::new()
+    $invalidRecords = 0
+    $candidateLines = 0
+    $lineNumber = 0
+    $readFailureType = $null
+    $logSnapshot = $null
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        try {
+            $logSnapshot = Get-Tcp08SharedLogSnapshot $path "artifact_finalization"
+            foreach ($line in @($logSnapshot.lines)) {
+                $lineNumber++
+                if ($line -notmatch '"event"\s*:\s*"process_shutdown_report"') { continue }
+                $candidateLines++
+                $candidateOrdinal = $candidateLines
+                try {
+                    $parsed = $line | ConvertFrom-Json -Depth 16 -ErrorAction Stop
+                    $report = ConvertTo-Tcp08ProductShutdownReport $parsed
+                    $recordIndex = $reports.Count
+                    $reports.Add($report)
+                    $assessments.Add((Get-Tcp08ForcedReportAssessment $report $recordIndex $lineNumber $candidateOrdinal))
+                } catch {
+                    $invalidRecords++
+                    $invalidRecordDetails.Add([ordered]@{
+                        stderr_line = $lineNumber
+                        candidate_ordinal = $candidateOrdinal
+                        rejection = "invalid_closed_process_shutdown_report"
+                        error_type = $_.Exception.GetType().FullName
+                    })
+                }
+            }
+        } catch { $readFailureType = $_.Exception.GetType().FullName }
+    }
+    $availability = if ($reports.Count -gt 0) { "available" }
+        elseif ($readFailureType) { "read_failed" }
+        elseif ($invalidRecords -gt 0) { "invalid" }
+        else { "unavailable" }
+    $unavailableReason = if ($availability -eq "unavailable") { "no_closed_process_shutdown_report_record" } else { $null }
+    $schemaGeneration = if ($reports.Count -gt 0) {
+        $generations = @($reports | ForEach-Object { $_.root_exit_events_schema_generation } | Select-Object -Unique)
+        if ($generations.Count -eq 1) { [string]$generations[0] } else { "mixed" }
+    } elseif ($availability -eq "unavailable") { "legacy" }
+    else { "unknown" }
+    $allForcedMatches = @($assessments | Where-Object { $_.classification -ceq "tcp08_forced_candidate" })
+    $allIncompleteForced = @($assessments | Where-Object { $_.classification -ceq "incomplete_forced_report" })
+    $allAllowedNonForced = @($assessments | Where-Object { $_.classification -ceq "allowed_non_forced_report" })
+    $selectionWindow = $script:tcp08ShutdownReportCandidateWindow
+    $windowBoundsValid = $false
+    $windowAssessments = @()
+    $windowInvalidRecordDetails = @()
+    $windowCandidateLines = 0
+    if ($null -ne $selectionWindow) {
+        $lowerExclusive = [int]$selectionWindow.lower_exclusive_candidate_ordinal
+        $upperInclusive = [int]$selectionWindow.upper_inclusive_candidate_ordinal
+        $windowBoundsValid = $lowerExclusive -ge 0 -and $upperInclusive -ge $lowerExclusive -and
+            $upperInclusive -le $candidateLines
+        if ($windowBoundsValid) {
+            $windowAssessments = @($assessments | Where-Object {
+                $_.candidate_ordinal -gt $lowerExclusive -and $_.candidate_ordinal -le $upperInclusive
+            })
+            $windowInvalidRecordDetails = @($invalidRecordDetails | Where-Object {
+                $_.candidate_ordinal -gt $lowerExclusive -and $_.candidate_ordinal -le $upperInclusive
+            })
+            $windowCandidateLines = $windowAssessments.Count + $windowInvalidRecordDetails.Count
+        }
+    }
+    $forcedMatches = @($windowAssessments | Where-Object { $_.classification -ceq "tcp08_forced_candidate" })
+    $incompleteForced = @($windowAssessments | Where-Object { $_.classification -ceq "incomplete_forced_report" })
+    $allowedNonForced = @($windowAssessments | Where-Object { $_.classification -ceq "allowed_non_forced_report" })
+    $windowAvailability = if ($null -eq $selectionWindow) { "unavailable" }
+        elseif (-not $windowBoundsValid) { "invalid" }
+        elseif ($windowAssessments.Count -gt 0) { "available" }
+        elseif ($windowInvalidRecordDetails.Count -gt 0) { "invalid" }
+        else { "unavailable" }
+    $windowSchemaGeneration = if ($windowAssessments.Count -gt 0) {
+        $windowGenerations = @($windowAssessments | ForEach-Object {
+            $reports[[int]$_.record_index].root_exit_events_schema_generation
+        } | Select-Object -Unique)
+        if ($windowGenerations.Count -eq 1) { [string]$windowGenerations[0] } else { "mixed" }
+    } elseif ($windowBoundsValid -and $windowCandidateLines -eq 0) { "legacy" }
+    else { "unknown" }
+    $strictFailures = [System.Collections.Generic.List[string]]::new()
+    if ($script:RequireTcp08ProductMetrics) {
+        if ($readFailureType) { $strictFailures.Add("client_stderr_read_failed") }
+        if ($logSnapshot -and $logSnapshot.trailing_partial_byte_count -ne 0) { $strictFailures.Add("client_stderr_trailing_partial_record") }
+        if ($invalidRecords -ne 0) { $strictFailures.Add("invalid_process_shutdown_report_records") }
+        if ($allIncompleteForced.Count -ne 0) { $strictFailures.Add("incomplete_forced_reports_present") }
+        if ($null -eq $selectionWindow) {
+            $strictFailures.Add("tcp08_candidate_window_missing")
+        } elseif (-not $windowBoundsValid) {
+            $strictFailures.Add("tcp08_candidate_window_outside_client_stderr")
+        } else {
+            if ([int]$selectionWindow.candidate_delta -ne 1) { $strictFailures.Add("tcp08_candidate_window_delta_not_one") }
+            if ($windowCandidateLines -ne [int]$selectionWindow.candidate_delta) { $strictFailures.Add("tcp08_candidate_window_observation_mismatch") }
+            if ($windowAssessments.Count -ne 1) { $strictFailures.Add("tcp08_candidate_window_valid_record_count_not_one") }
+        }
+        if ($forcedMatches.Count -eq 0) { $strictFailures.Add("tcp08_forced_report_missing") }
+        if ($forcedMatches.Count -gt 1) { $strictFailures.Add("multiple_tcp08_forced_reports") }
+        if ($script:Mode -ceq "tcp08" -and $candidateLines -ne 1) {
+            $strictFailures.Add("focused_tcp08_candidate_line_count_not_one")
+        }
+    }
+    $strictStatus = if (-not $script:RequireTcp08ProductMetrics) { "not_required" }
+        elseif ($strictFailures.Count -eq 0) { "pass" }
+        else { "fail" }
+    $selectionReason = if ($null -eq $selectionWindow) { "tcp08_candidate_window_unavailable" }
+        elseif (-not $windowBoundsValid) { "tcp08_candidate_window_outside_client_stderr" }
+        elseif ($forcedMatches.Count -eq 1) { "unique_closed_tcp08_forced_report_in_frozen_candidate_window" }
+        elseif ($forcedMatches.Count -eq 0) { "no_closed_tcp08_forced_report_in_frozen_candidate_window" }
+        else { "multiple_closed_tcp08_forced_reports_in_frozen_candidate_window" }
+    $selected = if ($forcedMatches.Count -eq 1) { $forcedMatches[0] } else { $null }
+    return [ordered]@{
+        source = "client.stderr.log"
+        source_format = "closed allowlisted process_shutdown_report JSON line"
+        availability = $availability
+        schema_generation = $schemaGeneration
+        unavailable_reason = $unavailableReason
+        clock = [ordered]@{
+            kind = "product process-relative monotonic duration"
+            unit = "nanoseconds"
+            global_stopwatch_alignment_available = $false
+        }
+        strict_validation = [ordered]@{
+            required = [bool]$script:RequireTcp08ProductMetrics
+            status = $strictStatus
+            candidate_window = $selectionWindow
+            candidate_window_availability = $windowAvailability
+            candidate_window_schema_generation = $windowSchemaGeneration
+            candidate_line_count = $windowCandidateLines
+            valid_record_count = $windowAssessments.Count
+            invalid_record_count = $windowInvalidRecordDetails.Count
+            tcp08_forced_candidate_count = $forcedMatches.Count
+            incomplete_forced_report_count = $incompleteForced.Count
+            allowed_non_forced_report_count = $allowedNonForced.Count
+            non_forced_policy = "allowed_restart_or_other_closed_reports"
+            selected_record_index = if ($selected) { $selected.record_index } else { $null }
+            selected_stderr_line = if ($selected) { $selected.stderr_line } else { $null }
+            selected_candidate_ordinal = if ($selected) { $selected.candidate_ordinal } else { $null }
+            selection_reason = $selectionReason
+            failures = $strictFailures
+        }
+        all_log_counts = [ordered]@{
+            byte_length = if ($logSnapshot) { $logSnapshot.byte_length } else { $null }
+            complete_byte_length = if ($logSnapshot) { $logSnapshot.complete_byte_length } else { $null }
+            trailing_partial_byte_count = if ($logSnapshot) { $logSnapshot.trailing_partial_byte_count } else { $null }
+            complete_line_count = if ($logSnapshot) { $logSnapshot.complete_line_count } else { 0 }
+            candidate_line_count = $candidateLines
+            valid_record_count = $reports.Count
+            invalid_record_count = $invalidRecords
+            tcp08_forced_candidate_count = $allForcedMatches.Count
+            incomplete_forced_report_count = $allIncompleteForced.Count
+            allowed_non_forced_report_count = $allAllowedNonForced.Count
+        }
+        selected_tcp08_forced_product_timeline = if ($selected) { $selected.product_timeline_events } else { @() }
+        records = $reports
+        record_assessments = $assessments
+        invalid_candidate_records = $invalidRecords
+        invalid_record_details = $invalidRecordDetails
+        read_failure_type = $readFailureType
+    }
+}
+
+function Write-Tcp08UnavailableArtifact([string]$Name) {
+    Write-Tcp08Json $Name ([ordered]@{
+        schema = "ferrum2.windows-tun.tcp08-artifact-unavailable.v1"
+        artifact = $Name
+        status = "not_collected_before_finalization"
+    })
+}
+
+function Complete-Tcp08Artifacts([bool]$CleanupSucceeded, [object]$PrimaryFailure, [object]$CleanupFailure) {
+    if (-not $script:tcp08ArtifactInitialized) { return }
+    $completionErrors = [System.Collections.Generic.List[string]]::new()
+    try { Write-Tcp08Json "process-after.json" (Get-Tcp08ProcessSnapshot) }
+    catch {
+        $completionErrors.Add("process-after.json")
+        Write-Tcp08Json "process-after.json" ([ordered]@{
+            schema = "ferrum2.windows-tun.tcp08-capture-unavailable.v1"
+            capture = "process-after"
+            error_type = $_.Exception.GetType().FullName
+        })
+    }
+    try { Write-Tcp08Json "network-after.json" (Get-Tcp08ResidueNetworkSnapshot) }
+    catch {
+        $completionErrors.Add("network-after.json")
+        Write-Tcp08Json "network-after.json" ([ordered]@{
+            schema = "ferrum2.windows-tun.tcp08-capture-unavailable.v1"
+            capture = "network-after"
+            error_type = $_.Exception.GetType().FullName
+        })
+    }
+    $productEvidence = Get-Tcp08ProductShutdownEvidence
+    Write-Tcp08Json "process-report.json" ([ordered]@{
+        schema = "ferrum2.windows-tun.tcp08-process.v1"
+        result = $script:tcp08Result
+        process_exit_code = $script:tcp08ExitCode
+        ctrl_break = $script:tcp08CtrlBreak
+        samples = $script:tcp08Samples
+        product = $productEvidence
+    })
+    Write-Tcp08Json "cleanup-report.json" ([ordered]@{
+        schema = "ferrum2.windows-tun.tcp08-cleanup.v1"
+        cleanup_succeeded = $CleanupSucceeded
+        primary_failure_type = if ($PrimaryFailure) { $PrimaryFailure.Exception.GetType().FullName } else { $null }
+        primary_failure = if ($PrimaryFailure) { $PrimaryFailure.Exception.Message } else { $null }
+        cleanup_failure_type = if ($CleanupFailure) { $CleanupFailure.Exception.GetType().FullName } else { $null }
+        cleanup_failure = if ($CleanupFailure) { $CleanupFailure.Exception.Message } else { $null }
+    })
+    Write-Tcp08Json "timeline.json" ([ordered]@{
+        schema = "ferrum2.windows-tun.tcp08-timeline.v1"
+        clock = [ordered]@{
+            kind = "System.Diagnostics.Stopwatch"
+            frequency = [Diagnostics.Stopwatch]::Frequency
+            origin_timestamp = $script:tcp08ClockOriginTimestamp
+            origin_wall_clock_utc = $script:tcp08ClockOriginUtc
+        }
+        events = $script:tcp08Events
+        product = $productEvidence
+    })
+    foreach ($name in $script:tcp08RequiredJsonNames) {
+        if (-not (Test-Path -LiteralPath (Join-Path $script:tcp08ArtifactPath $name) -PathType Leaf)) {
+            $completionErrors.Add($name)
+            Write-Tcp08UnavailableArtifact $name
+        }
+    }
+    $missingLogs = @($script:tcp08RequiredLogNames | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $script:tcp08ArtifactPath $_) -PathType Leaf)
+    })
+    $hashRows = @(Get-ChildItem -LiteralPath $script:tcp08ArtifactPath -File | Where-Object {
+        $_.Name -ne "artifact-hashes.json"
+    } | Sort-Object Name | ForEach-Object {
+        $artifactFile = $_
+        try {
+            [ordered]@{
+                name = $artifactFile.Name
+                bytes = $artifactFile.Length
+                sha256 = (Get-FileHash -LiteralPath $artifactFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                status = "captured"
+            }
+        } catch {
+            $hashError = $_
+            $deferToOuterFinalizer = $artifactFile.Name -in @("controller.stdout.log", "controller.stderr.log")
+            if (-not $deferToOuterFinalizer) {
+                $completionErrors.Add("hash:$($artifactFile.Name)")
+            }
+            [ordered]@{
+                name = $artifactFile.Name
+                bytes = $artifactFile.Length
+                sha256 = $null
+                status = if ($deferToOuterFinalizer) { "deferred_to_final_outer_recalculation" } else { "capture_failed" }
+                error_type = $hashError.Exception.GetType().FullName
+            }
+        }
+    })
+    Write-Tcp08Json "artifact-hashes.json" ([ordered]@{
+        schema = "ferrum2.windows-tun.tcp08-artifact-hashes.v1"
+        capture = "controller point-in-time before outer pwsh redirection handles close"
+        final_outer_recalculation_required = $true
+        files = $hashRows
+    })
+    Assert-True ($missingLogs.Count -eq 0) "required externally/child-produced logs are missing: $($missingLogs -join ',')"
+    Assert-True ($completionErrors.Count -eq 0) "artifact capture failed: $($completionErrors -join ',')"
+    if ($script:RequireTcp08ProductMetrics) {
+        Assert-True ($productEvidence.strict_validation.status -ceq "pass") "strict TCP-08 product shutdown report validation failed: $($productEvidence.strict_validation.failures -join ',')"
+    }
 }
 
 function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
@@ -564,6 +1944,12 @@ function Get-ClientGaugeValue([string]$Metrics, [string]$Name) {
     return [uint64]$match.Groups[1].Value
 }
 
+function Get-ClientCounterValue([string]$Metrics, [string]$Name) {
+    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))_total\{role=`"client`"\} ([0-9]+)$")
+    Assert-True $match.Success "missing client counter: $Name"
+    return [uint64]$match.Groups[1].Value
+}
+
 function Get-AdapterTraffic([string]$Name) {
     $statistics = Get-NetAdapterStatistics -Name $Name -ErrorAction Stop
     return @{
@@ -644,7 +2030,15 @@ function Wait-ProcessExit([System.Diagnostics.Process]$Process, [int]$TimeoutSec
 
 function Start-Candidate([string]$Executable, [string]$Configuration) {
     $arguments = "--config `"$Configuration`""
-    $id = [Ferrum2ProcessGroup]::Start($Executable, $arguments, (Split-Path -Parent $Executable))
+    $stdoutPath = if ($script:tcp08Enabled) { Join-Path $script:tcp08ArtifactPath "client.stdout.log" } else { $null }
+    $stderrPath = if ($script:tcp08Enabled) { Join-Path $script:tcp08ArtifactPath "client.stderr.log" } else { $null }
+    $id = [Ferrum2ProcessGroup]::Start(
+        $Executable,
+        $arguments,
+        (Split-Path -Parent $Executable),
+        $stdoutPath,
+        $stderrPath
+    )
     return Get-Process -Id $id
 }
 
@@ -657,18 +2051,76 @@ function Stop-Candidate([System.Diagnostics.Process]$Process) {
     [Ferrum2ProcessGroup]::Close([uint32]$Process.Id)
 }
 
-function Wait-TcpListener([int]$Port, [int]$TimeoutSeconds = 10) {
+function Wait-TcpListener(
+    [int]$Port,
+    [System.Diagnostics.Process]$Process,
+    [string]$Label,
+    [int]$TimeoutSeconds = 10
+) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $foreignListenerPids = @()
     do {
-        if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) { return }
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            $exitCode = [Ferrum2ProcessGroup]::ExitCode([uint32]$Process.Id)
+            Add-Tcp08Event "server_listener_process_exited" ([ordered]@{
+                label = $Label
+                port = $Port
+                process_id = [uint32]$Process.Id
+                exit_code = $exitCode
+            })
+            throw "TCP listener process exited before readiness: label=$Label port=$Port pid=$($Process.Id) exit=$exitCode"
+        }
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+        if (@($listeners | Where-Object { [uint32]$_.OwningProcess -eq [uint32]$Process.Id }).Count -gt 0) {
+            $Process.Refresh()
+            if (-not $Process.HasExited) {
+                Add-Tcp08Event "server_listener_ready" ([ordered]@{
+                    label = $Label
+                    port = $Port
+                    process_id = [uint32]$Process.Id
+                })
+                return
+            }
+        }
+        $foreignListenerPids = @($listeners |
+            Where-Object { [uint32]$_.OwningProcess -ne [uint32]$Process.Id } |
+            ForEach-Object { [uint32]$_.OwningProcess } |
+            Sort-Object -Unique)
         Start-Sleep -Milliseconds 50
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "TCP listener readiness timeout"
+    $Process.Refresh()
+    if ($Process.HasExited) {
+        $exitCode = [Ferrum2ProcessGroup]::ExitCode([uint32]$Process.Id)
+        Add-Tcp08Event "server_listener_process_exited" ([ordered]@{
+            label = $Label
+            port = $Port
+            process_id = [uint32]$Process.Id
+            exit_code = $exitCode
+        })
+        throw "TCP listener process exited before readiness: label=$Label port=$Port pid=$($Process.Id) exit=$exitCode"
+    }
+    $foreignText = if ($foreignListenerPids.Count -eq 0) { "none" } else { $foreignListenerPids -join "," }
+    Add-Tcp08Event "server_listener_readiness_timeout" ([ordered]@{
+        label = $Label
+        port = $Port
+        process_id = [uint32]$Process.Id
+        foreign_listener_process_ids = @($foreignListenerPids)
+    })
+    throw "TCP listener readiness timeout: label=$Label port=$Port expected_pid=$($Process.Id) foreign_listener_pids=$foreignText"
 }
 
 function Start-Server([string]$Executable, [string]$Configuration) {
     $arguments = "--config `"$Configuration`""
-    $id = [Ferrum2ProcessGroup]::Start($Executable, $arguments, (Split-Path -Parent $Executable))
+    $stdoutPath = if ($script:tcp08Enabled) { Join-Path $script:tcp08ArtifactPath "server.stdout.log" } else { $null }
+    $stderrPath = if ($script:tcp08Enabled) { Join-Path $script:tcp08ArtifactPath "server.stderr.log" } else { $null }
+    $id = [Ferrum2ProcessGroup]::Start(
+        $Executable,
+        $arguments,
+        (Split-Path -Parent $Executable),
+        $stdoutPath,
+        $stderrPath
+    )
     $process = Get-Process -Id $id
     $script:serverProcesses.Add($process)
     return $process
@@ -714,6 +2166,7 @@ using System.Collections;
 using System.ComponentModel;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -722,11 +2175,50 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+public sealed class Ferrum2CtrlBreakResult {
+    public bool ProcessKnown { get; internal set; }
+    public bool SeparateConsole { get; internal set; }
+    public bool HadConsole { get; internal set; }
+    public bool FreeConsoleBeforeAttachResult { get; internal set; }
+    public int FreeConsoleBeforeAttachWin32Error { get; internal set; }
+    public bool AttachAttempted { get; internal set; }
+    public bool AttachConsoleResult { get; internal set; }
+    public int AttachConsoleWin32Error { get; internal set; }
+    public bool SetConsoleCtrlHandlerResult { get; internal set; }
+    public int SetConsoleCtrlHandlerWin32Error { get; internal set; }
+    public bool GenerateConsoleCtrlEventResult { get; internal set; }
+    public int GenerateConsoleCtrlEventWin32Error { get; internal set; }
+    public bool ResetConsoleCtrlHandlerResult { get; internal set; }
+    public int ResetConsoleCtrlHandlerWin32Error { get; internal set; }
+    public bool FreeConsoleAfterResult { get; internal set; }
+    public int FreeConsoleAfterWin32Error { get; internal set; }
+    public long SendStartedTimestamp { get; internal set; }
+    public long SendReturnedTimestamp { get; internal set; }
+    public long InternalWaitStartedTimestamp { get; internal set; }
+    public long InternalWaitReturnedTimestamp { get; internal set; }
+    public double SendDurationMilliseconds { get; internal set; }
+    public double InternalWaitMilliseconds { get; internal set; }
+    public double TotalDurationMilliseconds { get; internal set; }
+    public bool Succeeded { get; internal set; }
+}
+
 public static class Ferrum2ProcessGroup {
     private static readonly object Sync = new object();
     private const uint CREATE_NEW_CONSOLE = 0x00000010;
     private const uint CREATE_NEW_PROCESS_GROUP = 0x00000200;
+    private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     private const int STARTF_USESHOWWINDOW = 0x00000001;
+    private const int STARTF_USESTDHANDLES = 0x00000100;
+    private const uint FILE_APPEND_DATA = 0x00000004;
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint FILE_SHARE_DELETE = 0x00000004;
+    private const uint OPEN_EXISTING = 3;
+    private const uint OPEN_ALWAYS = 4;
+    private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+    private static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = new IntPtr(0x00020002);
+    private static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
     private static readonly Dictionary<uint, ProcessEntry> Processes = new Dictionary<uint, ProcessEntry>();
     private sealed class ProcessEntry {
         public IntPtr Handle;
@@ -740,11 +2232,37 @@ public static class Ferrum2ProcessGroup {
         public IntPtr stdin; public IntPtr stdout; public IntPtr stderr;
     }
     [StructLayout(LayoutKind.Sequential)]
+    private struct STARTUPINFOEX {
+        public STARTUPINFO startup;
+        public IntPtr attributeList;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SECURITY_ATTRIBUTES {
+        public int length;
+        public IntPtr securityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)] public bool inheritHandle;
+    }
+    [StructLayout(LayoutKind.Sequential)]
     private struct PROCESS_INFORMATION { public IntPtr process; public IntPtr thread; public uint processId; public uint threadId; }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CreateProcessW(string application, StringBuilder command, IntPtr processAttributes,
         IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory,
         ref STARTUPINFO startup, out PROCESS_INFORMATION process);
+    [DllImport("kernel32.dll", EntryPoint = "CreateProcessW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcessExtended(string application, StringBuilder command, IntPtr processAttributes,
+        IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory,
+        ref STARTUPINFOEX startup, out PROCESS_INFORMATION process);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string fileName, uint desiredAccess, uint shareMode,
+        ref SECURITY_ATTRIBUTES securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool InitializeProcThreadAttributeList(IntPtr attributeList, int attributeCount,
+        uint flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool UpdateProcThreadAttribute(IntPtr attributeList, uint flags, IntPtr attribute,
+        IntPtr value, IntPtr size, IntPtr previousValue, IntPtr returnSize);
+    [DllImport("kernel32.dll")]
+    private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GenerateConsoleCtrlEvent(uint control, uint group);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
@@ -759,15 +2277,81 @@ public static class Ferrum2ProcessGroup {
         return GetConsoleProcessList(new uint[1], 1) != 0;
     }
 
+    private static IntPtr OpenInheritable(string path, uint access, uint disposition) {
+        var security = new SECURITY_ATTRIBUTES {
+            length = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES)),
+            securityDescriptor = IntPtr.Zero,
+            inheritHandle = true
+        };
+        var handle = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ref security, disposition, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+        if (handle == INVALID_HANDLE_VALUE)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateFileW redirected stream");
+        return handle;
+    }
+
     public static int Start(string application, string arguments, string directory) {
+        return Start(application, arguments, directory, null, null);
+    }
+
+    public static int Start(string application, string arguments, string directory, string stdoutPath, string stderrPath) {
         var separateConsole = !HasConsole();
         var startup = new STARTUPINFO(); startup.cb = Marshal.SizeOf(startup);
         if (separateConsole) startup.flags = STARTF_USESHOWWINDOW;
-        PROCESS_INFORMATION process;
         var command = new StringBuilder("\"" + application + "\" " + arguments);
         var flags = CREATE_NEW_PROCESS_GROUP | (separateConsole ? CREATE_NEW_CONSOLE : 0);
-        if (!CreateProcessW(application, command, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, directory, ref startup, out process))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW");
+        var redirect = !String.IsNullOrWhiteSpace(stdoutPath) || !String.IsNullOrWhiteSpace(stderrPath);
+        if (redirect && (String.IsNullOrWhiteSpace(stdoutPath) || String.IsNullOrWhiteSpace(stderrPath)))
+            throw new ArgumentException("stdout and stderr redirection paths must be supplied together");
+        PROCESS_INFORMATION process;
+        if (!redirect) {
+            if (!CreateProcessW(application, command, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, directory, ref startup, out process))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW");
+        } else {
+            IntPtr stdoutHandle = IntPtr.Zero;
+            IntPtr stderrHandle = IntPtr.Zero;
+            IntPtr stdinHandle = IntPtr.Zero;
+            IntPtr attributeList = IntPtr.Zero;
+            IntPtr handleList = IntPtr.Zero;
+            try {
+                stdoutHandle = OpenInheritable(stdoutPath, FILE_APPEND_DATA, OPEN_ALWAYS);
+                stderrHandle = OpenInheritable(stderrPath, FILE_APPEND_DATA, OPEN_ALWAYS);
+                stdinHandle = OpenInheritable("NUL", GENERIC_READ, OPEN_EXISTING);
+                var startupEx = new STARTUPINFOEX();
+                startupEx.startup.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+                startupEx.startup.flags = (separateConsole ? STARTF_USESHOWWINDOW : 0) | STARTF_USESTDHANDLES;
+                startupEx.startup.stdin = stdinHandle;
+                startupEx.startup.stdout = stdoutHandle;
+                startupEx.startup.stderr = stderrHandle;
+                IntPtr attributeBytes = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeBytes);
+                if (attributeBytes == IntPtr.Zero)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "InitializeProcThreadAttributeList size");
+                attributeList = Marshal.AllocHGlobal(attributeBytes);
+                if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeBytes))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "InitializeProcThreadAttributeList");
+                startupEx.attributeList = attributeList;
+                handleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
+                Marshal.WriteIntPtr(handleList, 0 * IntPtr.Size, stdinHandle);
+                Marshal.WriteIntPtr(handleList, 1 * IntPtr.Size, stdoutHandle);
+                Marshal.WriteIntPtr(handleList, 2 * IntPtr.Size, stderrHandle);
+                if (!UpdateProcThreadAttribute(attributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                    handleList, new IntPtr(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "UpdateProcThreadAttribute handle list");
+                if (!CreateProcessExtended(application, command, IntPtr.Zero, IntPtr.Zero, true,
+                    flags | EXTENDED_STARTUPINFO_PRESENT, IntPtr.Zero, directory, ref startupEx, out process))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW redirected");
+            } finally {
+                if (attributeList != IntPtr.Zero) {
+                    DeleteProcThreadAttributeList(attributeList);
+                    Marshal.FreeHGlobal(attributeList);
+                }
+                if (handleList != IntPtr.Zero) Marshal.FreeHGlobal(handleList);
+                if (stdinHandle != IntPtr.Zero && stdinHandle != INVALID_HANDLE_VALUE) CloseHandle(stdinHandle);
+                if (stdoutHandle != IntPtr.Zero && stdoutHandle != INVALID_HANDLE_VALUE) CloseHandle(stdoutHandle);
+                if (stderrHandle != IntPtr.Zero && stderrHandle != INVALID_HANDLE_VALUE) CloseHandle(stderrHandle);
+            }
+        }
         CloseHandle(process.thread);
         lock (Sync) Processes.Add(process.processId, new ProcessEntry { Handle = process.process, SeparateConsole = separateConsole });
         return checked((int)process.processId);
@@ -790,23 +2374,63 @@ public static class Ferrum2ProcessGroup {
         lock (Sync) { if (!Processes.TryGetValue(processId, out process)) return; Processes.Remove(processId); }
         CloseHandle(process.Handle);
     }
-    public static bool Break(uint processGroup) {
-        ProcessEntry process; lock (Sync) if (!Processes.TryGetValue(processGroup, out process)) return false;
+    public static Ferrum2CtrlBreakResult BreakDetailed(uint processGroup) {
+        var total = Stopwatch.StartNew();
+        var result = new Ferrum2CtrlBreakResult();
+        ProcessEntry process;
+        lock (Sync) {
+            if (!Processes.TryGetValue(processGroup, out process)) {
+                total.Stop();
+                result.TotalDurationMilliseconds = total.Elapsed.TotalMilliseconds;
+                return result;
+            }
+        }
+        result.ProcessKnown = true;
+        result.SeparateConsole = process.SeparateConsole;
+        result.HadConsole = HasConsole();
         var attached = false;
         try {
             if (process.SeparateConsole) {
-                FreeConsole();
-                if (!AttachConsole(processGroup)) return false;
+                result.FreeConsoleBeforeAttachResult = FreeConsole();
+                result.FreeConsoleBeforeAttachWin32Error = result.FreeConsoleBeforeAttachResult ? 0 : Marshal.GetLastWin32Error();
+                result.AttachAttempted = true;
+                result.AttachConsoleResult = AttachConsole(processGroup);
+                result.AttachConsoleWin32Error = result.AttachConsoleResult ? 0 : Marshal.GetLastWin32Error();
+                if (!result.AttachConsoleResult) return result;
                 attached = true;
             }
-            if (!SetConsoleCtrlHandler(IntPtr.Zero, true)) return false;
-            try { return GenerateConsoleCtrlEvent(1, processGroup); }
-            finally { Thread.Sleep(250); SetConsoleCtrlHandler(IntPtr.Zero, false); }
+            result.SetConsoleCtrlHandlerResult = SetConsoleCtrlHandler(IntPtr.Zero, true);
+            result.SetConsoleCtrlHandlerWin32Error = result.SetConsoleCtrlHandlerResult ? 0 : Marshal.GetLastWin32Error();
+            if (!result.SetConsoleCtrlHandlerResult) return result;
+            try {
+                result.SendStartedTimestamp = Stopwatch.GetTimestamp();
+                result.GenerateConsoleCtrlEventResult = GenerateConsoleCtrlEvent(1, processGroup);
+                result.GenerateConsoleCtrlEventWin32Error = result.GenerateConsoleCtrlEventResult ? 0 : Marshal.GetLastWin32Error();
+                result.SendReturnedTimestamp = Stopwatch.GetTimestamp();
+                result.SendDurationMilliseconds = (result.SendReturnedTimestamp - result.SendStartedTimestamp) * 1000.0 / Stopwatch.Frequency;
+                result.Succeeded = result.GenerateConsoleCtrlEventResult;
+                return result;
+            }
+            finally {
+                result.InternalWaitStartedTimestamp = Stopwatch.GetTimestamp();
+                Thread.Sleep(250);
+                result.InternalWaitReturnedTimestamp = Stopwatch.GetTimestamp();
+                result.InternalWaitMilliseconds =
+                    (result.InternalWaitReturnedTimestamp - result.InternalWaitStartedTimestamp) * 1000.0 / Stopwatch.Frequency;
+                result.ResetConsoleCtrlHandlerResult = SetConsoleCtrlHandler(IntPtr.Zero, false);
+                result.ResetConsoleCtrlHandlerWin32Error = result.ResetConsoleCtrlHandlerResult ? 0 : Marshal.GetLastWin32Error();
+            }
         }
         finally {
-            if (attached) FreeConsole();
+            if (attached) {
+                result.FreeConsoleAfterResult = FreeConsole();
+                result.FreeConsoleAfterWin32Error = result.FreeConsoleAfterResult ? 0 : Marshal.GetLastWin32Error();
+            }
+            total.Stop();
+            result.TotalDurationMilliseconds = total.Elapsed.TotalMilliseconds;
         }
     }
+    public static bool Break(uint processGroup) { return BreakDetailed(processGroup).Succeeded; }
 }
 
 public sealed class Ferrum2TcpGateObservation {
@@ -850,20 +2474,49 @@ public sealed class Ferrum2TcpGateObservation {
     internal void Complete() { Volatile.Write(ref sessionComplete, 1); }
 }
 
+internal static class Ferrum2BackgroundTaskCleanup {
+    internal const int TimeoutMilliseconds = 5000;
+
+    internal static long CreateDeadline() {
+        return Environment.TickCount64 + TimeoutMilliseconds;
+    }
+
+    internal static Exception Wait(Task task, long deadline, string name) {
+        var remaining = deadline - Environment.TickCount64;
+        var boundedMilliseconds = remaining <= 0
+            ? 0
+            : (int)Math.Min(remaining, (long)Int32.MaxValue);
+        try {
+            if (!task.Wait(boundedMilliseconds)) {
+                return new TimeoutException(name + " did not stop within the bounded cleanup timeout");
+            }
+        } catch (AggregateException error) {
+            return new InvalidOperationException(name + " faulted during bounded cleanup", error.Flatten());
+        }
+        return task.IsCompleted
+            ? null
+            : new TimeoutException(name + " did not report completion after bounded cleanup wait");
+    }
+}
+
 public sealed class Ferrum2TcpGate : IDisposable {
     private readonly TcpListener listener;
     private readonly int upstreamPort;
     private readonly ConcurrentDictionary<int, ManualResetEventSlim> releases = new ConcurrentDictionary<int, ManualResetEventSlim>();
     private readonly ConcurrentDictionary<int, Ferrum2TcpGateObservation> observations = new ConcurrentDictionary<int, Ferrum2TcpGateObservation>();
     private readonly ConcurrentBag<TcpClient> clients = new ConcurrentBag<TcpClient>();
+    private readonly ConcurrentBag<Task> sessionTasks = new ConcurrentBag<Task>();
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
+    private readonly object clientSync = new object();
+    private readonly Task acceptTask;
     private int accepted;
+    private int disposed;
 
     public Ferrum2TcpGate(int listenPort, int upstreamPort) {
         this.upstreamPort = upstreamPort;
         listener = new TcpListener(IPAddress.Loopback, listenPort);
         listener.Start();
-        var ignored = Task.Run(AcceptLoop);
+        acceptTask = Task.Run(AcceptLoop);
     }
 
     public int Accepted { get { return Volatile.Read(ref accepted); } }
@@ -903,14 +2556,15 @@ public sealed class Ferrum2TcpGate : IDisposable {
         try {
             while (!stopped.IsCancellationRequested) {
                 var client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
-                clients.Add(client);
+                if (!RegisterClient(client)) return;
                 var index = Accepted + 1;
                 var release = new ManualResetEventSlim(false);
                 var observation = new Ferrum2TcpGateObservation();
                 releases[index] = release;
                 observations[index] = observation;
                 Volatile.Write(ref accepted, index);
-                var ignored = Task.Run(() => RunSession(client, release, observation));
+                var sessionTask = Task.Run(() => RunSession(client, release, observation));
+                sessionTasks.Add(sessionTask);
             }
         } catch (ObjectDisposedException) { }
         catch (SocketException) when (stopped.IsCancellationRequested) { }
@@ -921,6 +2575,7 @@ public sealed class Ferrum2TcpGate : IDisposable {
             release.Wait(stopped.Token);
             using (client)
             using (var upstream = new TcpClient(AddressFamily.InterNetwork)) {
+                if (!RegisterClient(upstream)) return;
                 upstream.Connect(IPAddress.Loopback, upstreamPort);
                 observation.SetStage(true, "source_stream");
                 observation.SetStage(false, "destination_stream");
@@ -966,36 +2621,89 @@ public sealed class Ferrum2TcpGate : IDisposable {
         catch (Exception) { observation.Fail(forward, "other"); }
     }
 
+    private void ReleaseSessions() {
+        foreach (var release in releases.Values) release.Set();
+    }
+
+    private bool RegisterClient(TcpClient client) {
+        lock (clientSync) {
+            if (Volatile.Read(ref disposed) != 0) {
+                client.Dispose();
+                return false;
+            }
+            clients.Add(client);
+            return true;
+        }
+    }
+
+    private void CloseClients() {
+        lock (clientSync) {
+            TcpClient client;
+            while (clients.TryTake(out client)) client.Dispose();
+        }
+    }
+
     public void Dispose() {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stopped.Cancel();
         listener.Stop();
-        foreach (var release in releases.Values) release.Set();
-        TcpClient client;
-        while (clients.TryTake(out client)) client.Dispose();
-        stopped.Dispose();
+        ReleaseSessions();
+        CloseClients();
+
+        var deadline = Ferrum2BackgroundTaskCleanup.CreateDeadline();
+        var failures = new List<Exception>();
+        var acceptFailure = Ferrum2BackgroundTaskCleanup.Wait(acceptTask, deadline, "TCP gate accept task");
+        if (acceptFailure != null) failures.Add(acceptFailure);
+        if (!acceptTask.IsCompleted) throw failures[0];
+
+        // AcceptLoop can win an accept race immediately before listener.Stop(). Once
+        // it has joined, no later client or session can escape these final snapshots.
+        ReleaseSessions();
+        CloseClients();
+        foreach (var sessionTask in sessionTasks.ToArray()) {
+            var sessionFailure = Ferrum2BackgroundTaskCleanup.Wait(sessionTask, deadline, "TCP gate session task");
+            if (sessionFailure != null) failures.Add(sessionFailure);
+        }
+        foreach (var sessionTask in sessionTasks) {
+            if (!sessionTask.IsCompleted) {
+                throw failures.Count == 1
+                    ? failures[0]
+                    : new AggregateException("TCP gate tasks did not complete during bounded cleanup", failures);
+            }
+        }
+
         foreach (var release in releases.Values) release.Dispose();
+        stopped.Dispose();
+        if (failures.Count == 1) throw failures[0];
+        if (failures.Count > 1) throw new AggregateException("TCP gate tasks faulted during bounded cleanup", failures);
     }
 }
 
 public sealed class Ferrum2TcpProbe : IDisposable {
     private readonly TcpListener listener;
     private readonly string mode;
+    private readonly Task worker;
     private readonly ManualResetEventSlim accepted = new ManualResetEventSlim(false);
     private readonly ManualResetEventSlim completed = new ManualResetEventSlim(false);
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
+    private readonly object clientSync = new object();
+    private readonly object signalSync = new object();
     private TcpClient client;
     private byte[] received = new byte[0];
     private long echoBytes;
     private int readEof;
     private int sendShutdown;
     private int sessionComplete;
+    private int readAttempts;
+    private int disposed;
+    private int signalsDisposed;
     private string fault;
 
     public Ferrum2TcpProbe(string address, int port, string mode) {
         this.mode = mode;
         listener = new TcpListener(IPAddress.Parse(address), port);
         listener.Start();
-        var ignored = Task.Run(Run);
+        worker = Task.Run(Run);
     }
 
     public bool WaitAccepted(int milliseconds) { return accepted.Wait(milliseconds); }
@@ -1006,11 +2714,85 @@ public sealed class Ferrum2TcpProbe : IDisposable {
     public string SendShutdown { get { return Volatile.Read(ref sendShutdown) == 0 ? "no" : "yes"; } }
     public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
     public string SessionComplete { get { return Volatile.Read(ref sessionComplete) == 0 ? "no" : "yes"; } }
+    public int ReadAttempts { get { return Volatile.Read(ref readAttempts); } }
+    public string WorkerStatus { get { return worker.Status.ToString(); } }
+    public bool ListenerActive {
+        get {
+            if (Volatile.Read(ref disposed) != 0) return false;
+            try { return listener.Server != null && listener.Server.IsBound; }
+            catch (ObjectDisposedException) { return false; }
+            catch (SocketException) { return false; }
+        }
+    }
+    public bool AcceptedSocketConnected {
+        get {
+            var current = Volatile.Read(ref client);
+            if (current == null) return false;
+            try { return current.Connected; }
+            catch (ObjectDisposedException) { return false; }
+            catch (SocketException) { return false; }
+        }
+    }
+    public bool AcceptedSocketOpen {
+        get {
+            var current = Volatile.Read(ref client);
+            if (current == null) return false;
+            try {
+                var socket = current.Client;
+                return socket != null && socket.Connected && !(socket.Poll(0, SelectMode.SelectRead) && socket.Available == 0);
+            }
+            catch (ObjectDisposedException) { return false; }
+            catch (SocketException) { return false; }
+        }
+    }
+    public int AcceptedSocketAvailable {
+        get {
+            var current = Volatile.Read(ref client);
+            if (current == null) return 0;
+            try { return current.Client.Available; }
+            catch (ObjectDisposedException) { return 0; }
+            catch (SocketException) { return 0; }
+        }
+    }
+    public string AcceptedSocketLocalEndpoint {
+        get {
+            var current = Volatile.Read(ref client);
+            if (current == null) return null;
+            try { return current.Client.LocalEndPoint == null ? null : current.Client.LocalEndPoint.ToString(); }
+            catch (ObjectDisposedException) { return null; }
+            catch (SocketException) { return null; }
+        }
+    }
+    public string AcceptedSocketRemoteEndpoint {
+        get {
+            var current = Volatile.Read(ref client);
+            if (current == null) return null;
+            try { return current.Client.RemoteEndPoint == null ? null : current.Client.RemoteEndPoint.ToString(); }
+            catch (ObjectDisposedException) { return null; }
+            catch (SocketException) { return null; }
+        }
+    }
+    public bool StallWaitActive {
+        get { return mode == "stall" && accepted.IsSet && !completed.IsSet && worker.Status != TaskStatus.RanToCompletion; }
+    }
+
+    private void Signal(ManualResetEventSlim signal) {
+        lock (signalSync) {
+            if (Volatile.Read(ref signalsDisposed) == 0) signal.Set();
+        }
+    }
 
     private async Task Run() {
         try {
-            client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
-            accepted.Set();
+            var acceptedClient = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
+            lock (clientSync) {
+                if (Volatile.Read(ref disposed) != 0) {
+                    acceptedClient.Dispose();
+                    return;
+                }
+                Volatile.Write(ref client, acceptedClient);
+            }
+            Signal(accepted);
             if (mode == "stall") {
                 stopped.Token.WaitHandle.WaitOne();
                 return;
@@ -1019,6 +2801,7 @@ public sealed class Ferrum2TcpProbe : IDisposable {
             using (var bytes = new MemoryStream()) {
                 var buffer = new byte[4096];
                 do {
+                    Interlocked.Increment(ref readAttempts);
                     var count = await stream.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
                     if (count == 0) { Volatile.Write(ref readEof, 1); break; }
                     bytes.Write(buffer, 0, count);
@@ -1038,38 +2821,61 @@ public sealed class Ferrum2TcpProbe : IDisposable {
         catch (IOException) { Interlocked.CompareExchange(ref fault, "io", null); }
         catch (ObjectDisposedException) { Interlocked.CompareExchange(ref fault, "disposed", null); }
         catch (SocketException) { Interlocked.CompareExchange(ref fault, "socket", null); }
-        catch (Exception) { Interlocked.CompareExchange(ref fault, "other", null); }
+        catch (Exception) {
+            Interlocked.CompareExchange(ref fault, "other", null);
+            throw;
+        }
         finally {
             Volatile.Write(ref sessionComplete, 1);
-            completed.Set();
+            Signal(completed);
         }
     }
 
     public void Dispose() {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stopped.Cancel();
         listener.Stop();
-        if (client != null) client.Dispose();
-        accepted.Dispose();
-        completed.Dispose();
+        lock (clientSync) {
+            var current = Volatile.Read(ref client);
+            if (current != null) current.Dispose();
+        }
+
+        Exception workerFailure = null;
+        var deadline = Ferrum2BackgroundTaskCleanup.CreateDeadline();
+        workerFailure = Ferrum2BackgroundTaskCleanup.Wait(worker, deadline, "TCP probe worker");
+        if (!worker.IsCompleted) {
+            throw workerFailure ?? new TimeoutException("TCP probe worker did not report completion after bounded cleanup wait");
+        }
+
+        lock (signalSync) {
+            Volatile.Write(ref signalsDisposed, 1);
+            accepted.Dispose();
+            completed.Dispose();
+        }
         stopped.Dispose();
+        if (workerFailure != null) throw workerFailure;
     }
 }
 
 public sealed class Ferrum2UdpGate : IDisposable {
     private readonly object sync = new object();
+    private readonly object upstreamSync = new object();
     private readonly UdpClient socket;
     private readonly int upstreamPort;
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
+    private readonly Task worker;
+    private UdpClient activeUpstream;
     private byte[] firstResponse;
     private IPEndPoint latestClient;
     private int requests;
     private int responses;
+    private int disposed;
     private string fault;
 
     public Ferrum2UdpGate(string listenAddress, int listenPort, int upstreamPort) {
         this.upstreamPort = upstreamPort;
         socket = new UdpClient(new IPEndPoint(IPAddress.Parse(listenAddress), listenPort));
-        var ignored = Task.Run(Run);
+        worker = Task.Run(Run);
     }
 
     public int Requests { get { return Volatile.Read(ref requests); } }
@@ -1104,39 +2910,81 @@ public sealed class Ferrum2UdpGate : IDisposable {
                 lock (sync) { latestClient = request.RemoteEndPoint; }
                 Interlocked.Increment(ref requests);
                 using (var upstream = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0))) {
-                    upstream.Connect(IPAddress.Loopback, upstreamPort);
-                    await upstream.SendAsync(request.Buffer, request.Buffer.Length).ConfigureAwait(false);
-                    var response = await upstream.ReceiveAsync().ConfigureAwait(false);
-                    lock (sync) {
-                        if (firstResponse == null) firstResponse = (byte[])response.Buffer.Clone();
+                    if (!RegisterUpstream(upstream)) return;
+                    try {
+                        upstream.Connect(IPAddress.Loopback, upstreamPort);
+                        await upstream.SendAsync(request.Buffer, request.Buffer.Length).ConfigureAwait(false);
+                        var response = await upstream.ReceiveAsync().ConfigureAwait(false);
+                        lock (sync) {
+                            if (firstResponse == null) firstResponse = (byte[])response.Buffer.Clone();
+                        }
+                        await socket.SendAsync(response.Buffer, response.Buffer.Length, request.RemoteEndPoint).ConfigureAwait(false);
+                        Interlocked.Increment(ref responses);
+                    } finally {
+                        UnregisterUpstream(upstream);
                     }
-                    await socket.SendAsync(response.Buffer, response.Buffer.Length, request.RemoteEndPoint).ConfigureAwait(false);
-                    Interlocked.Increment(ref responses);
                 }
             }
         } catch (ObjectDisposedException) { }
         catch (SocketException) when (stopped.IsCancellationRequested) { }
-        catch (Exception) { Interlocked.CompareExchange(ref fault, "other", null); }
+        catch (Exception) {
+            Interlocked.CompareExchange(ref fault, "other", null);
+            throw;
+        }
+    }
+
+    private bool RegisterUpstream(UdpClient upstream) {
+        lock (upstreamSync) {
+            if (Volatile.Read(ref disposed) != 0) {
+                upstream.Dispose();
+                return false;
+            }
+            activeUpstream = upstream;
+            return true;
+        }
+    }
+
+    private void UnregisterUpstream(UdpClient upstream) {
+        lock (upstreamSync) {
+            if (Object.ReferenceEquals(activeUpstream, upstream)) activeUpstream = null;
+        }
+    }
+
+    private void CloseActiveUpstream() {
+        lock (upstreamSync) {
+            if (activeUpstream != null) activeUpstream.Dispose();
+        }
     }
 
     public void Dispose() {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stopped.Cancel();
         socket.Dispose();
+        CloseActiveUpstream();
+
+        var deadline = Ferrum2BackgroundTaskCleanup.CreateDeadline();
+        var workerFailure = Ferrum2BackgroundTaskCleanup.Wait(worker, deadline, "UDP gate worker");
+        if (!worker.IsCompleted) {
+            throw workerFailure ?? new TimeoutException("UDP gate worker did not report completion after bounded cleanup wait");
+        }
         stopped.Dispose();
+        if (workerFailure != null) throw workerFailure;
     }
 }
 
 public sealed class Ferrum2UdpProbe : IDisposable {
     private readonly UdpClient socket;
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
+    private readonly Task worker;
     private byte[] received = new byte[0];
     private int requests;
     private int responses;
+    private int disposed;
     private string fault;
 
     public Ferrum2UdpProbe(string address, int port) {
         socket = new UdpClient(new IPEndPoint(IPAddress.Parse(address), port));
-        var ignored = Task.Run(Run);
+        worker = Task.Run(Run);
     }
 
     public int Requests { get { return Volatile.Read(ref requests); } }
@@ -1164,26 +3012,39 @@ public sealed class Ferrum2UdpProbe : IDisposable {
             }
         } catch (ObjectDisposedException) { }
         catch (SocketException) when (stopped.IsCancellationRequested) { }
-        catch (Exception) { Interlocked.CompareExchange(ref fault, "other", null); }
+        catch (Exception) {
+            Interlocked.CompareExchange(ref fault, "other", null);
+            throw;
+        }
     }
 
     public void Dispose() {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stopped.Cancel();
         socket.Dispose();
+
+        var deadline = Ferrum2BackgroundTaskCleanup.CreateDeadline();
+        var workerFailure = Ferrum2BackgroundTaskCleanup.Wait(worker, deadline, "UDP probe worker");
+        if (!worker.IsCompleted) {
+            throw workerFailure ?? new TimeoutException("UDP probe worker did not report completion after bounded cleanup wait");
+        }
         stopped.Dispose();
+        if (workerFailure != null) throw workerFailure;
     }
 }
 
 public sealed class Ferrum2DnsResponder : IDisposable {
     private readonly UdpClient socket;
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
+    private readonly Task worker;
     private int requests;
+    private int disposed;
 
     public Ferrum2DnsResponder(int port) : this("127.0.0.1", port) { }
 
     public Ferrum2DnsResponder(string address, int port) {
         socket = new UdpClient(new IPEndPoint(IPAddress.Parse(address), port));
-        var ignored = Task.Run(Run);
+        worker = Task.Run(Run);
     }
 
     public int Requests { get { return Volatile.Read(ref requests); } }
@@ -1213,9 +3074,17 @@ public sealed class Ferrum2DnsResponder : IDisposable {
     }
 
     public void Dispose() {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stopped.Cancel();
         socket.Dispose();
+
+        var deadline = Ferrum2BackgroundTaskCleanup.CreateDeadline();
+        var workerFailure = Ferrum2BackgroundTaskCleanup.Wait(worker, deadline, "DNS responder worker");
+        if (!worker.IsCompleted) {
+            throw workerFailure ?? new TimeoutException("DNS responder worker did not report completion after bounded cleanup wait");
+        }
         stopped.Dispose();
+        if (workerFailure != null) throw workerFailure;
     }
 }
 
@@ -1484,6 +3353,245 @@ public static class Ferrum2NetworkFeasibility {
     }
 }
 '@
+
+function Convert-Tcp08CtrlBreakResult([Ferrum2CtrlBreakResult]$Result) {
+    return [ordered]@{
+        process_known = $Result.ProcessKnown
+        separate_console = $Result.SeparateConsole
+        had_console = $Result.HadConsole
+        attach_attempted = $Result.AttachAttempted
+        free_console_before_attach = [ordered]@{
+            result = $Result.FreeConsoleBeforeAttachResult
+            win32_error = $Result.FreeConsoleBeforeAttachWin32Error
+        }
+        attach_console = [ordered]@{
+            result = $Result.AttachConsoleResult
+            win32_error = $Result.AttachConsoleWin32Error
+        }
+        set_console_ctrl_handler = [ordered]@{
+            result = $Result.SetConsoleCtrlHandlerResult
+            win32_error = $Result.SetConsoleCtrlHandlerWin32Error
+        }
+        generate_console_ctrl_event = [ordered]@{
+            result = $Result.GenerateConsoleCtrlEventResult
+            win32_error = $Result.GenerateConsoleCtrlEventWin32Error
+        }
+        reset_console_ctrl_handler = [ordered]@{
+            result = $Result.ResetConsoleCtrlHandlerResult
+            win32_error = $Result.ResetConsoleCtrlHandlerWin32Error
+        }
+        free_console_after = [ordered]@{
+            result = $Result.FreeConsoleAfterResult
+            win32_error = $Result.FreeConsoleAfterWin32Error
+        }
+        send_started_timestamp = $Result.SendStartedTimestamp
+        send_returned_timestamp = $Result.SendReturnedTimestamp
+        send_duration_ms = [Math]::Round($Result.SendDurationMilliseconds, 3)
+        internal_wait_started_timestamp = $Result.InternalWaitStartedTimestamp
+        internal_wait_returned_timestamp = $Result.InternalWaitReturnedTimestamp
+        internal_wait_ms = [Math]::Round($Result.InternalWaitMilliseconds, 3)
+        total_duration_ms = [Math]::Round($Result.TotalDurationMilliseconds, 3)
+        succeeded = $Result.Succeeded
+    }
+}
+
+function Test-Tcp08ClientSocketOpen([Net.Sockets.TcpClient]$Client) {
+    if (-not $Client) { return $false }
+    try {
+        $socket = $Client.Client
+        return $socket -and $socket.Connected -and -not ($socket.Poll(0, [Net.Sockets.SelectMode]::SelectRead) -and $socket.Available -eq 0)
+    } catch [ObjectDisposedException] { return $false }
+    catch [Net.Sockets.SocketException] { return $false }
+}
+
+function Get-Tcp08Endpoint([Net.Sockets.TcpClient]$Client, [bool]$Local) {
+    if (-not $Client) { return $null }
+    try {
+        $endpoint = if ($Local) { $Client.Client.LocalEndPoint } else { $Client.Client.RemoteEndPoint }
+        if ($endpoint) { return $endpoint.ToString() }
+        return $null
+    } catch [ObjectDisposedException] { return $null }
+    catch [Net.Sockets.SocketException] { return $null }
+}
+
+function Get-Tcp08MetricEvidence([int]$MetricsPort) {
+    $samples = @()
+    try {
+        $metrics = Get-Metrics $MetricsPort
+        $samples = @($metrics -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object {
+            $_ -match '^ferrum2_(tun_(packets_accepted|tcp_flows_active|handler_tasks_active)|tcp_connections_active|tcp_forced_shutdown|process_|runtime|root|owner|shutdown)'
+        })
+        return [ordered]@{
+            available = $true
+            required = [bool]$script:RequireTcp08ProductMetrics
+            unavailable_after_quiesce_expected = $false
+            owner_counts = [ordered]@{
+                active_tun_tcp_flows = Get-ClientGaugeValue $metrics "ferrum2_tun_tcp_flows_active"
+                active_tun_handler_tasks = Get-ClientGaugeValue $metrics "ferrum2_tun_handler_tasks_active"
+                active_process_roots = Get-ClientGaugeValue $metrics "ferrum2_process_roots_active"
+                forced_roots = Get-ClientCounterValue $metrics "ferrum2_process_roots_forced"
+            }
+            samples = $samples
+        }
+    } catch {
+        return [ordered]@{
+            available = $false
+            required = [bool]$script:RequireTcp08ProductMetrics
+            unavailable_after_quiesce_expected = $false
+            failure_type = $_.Exception.GetType().FullName
+            owner_counts = $null
+            samples = $samples
+        }
+    }
+}
+
+function Assert-Tcp08ProductOwnerMetrics([object]$Evidence, [string]$Phase) {
+    Assert-True $Evidence.available "TCP-08 product owner metrics were unavailable $Phase"
+    Assert-True ($Evidence.owner_counts.active_tun_tcp_flows -ge 1) "TCP-08 had no active product-owned TUN TCP flow $Phase"
+    Assert-True ($Evidence.owner_counts.active_tun_handler_tasks -ge 1) "TCP-08 had no active product-owned TUN handler task $Phase"
+    Assert-True ($Evidence.owner_counts.active_process_roots -ge 1) "TCP-08 had no active product-owned process root $Phase"
+    Assert-True ($Evidence.owner_counts.forced_roots -eq 0) "TCP-08 process root was already forced $Phase"
+}
+
+function Get-Tcp08ConnectionEvidence(
+    [string]$Target,
+    [int]$TargetPort,
+    [int]$GatePort,
+    [int]$ServerPort,
+    [System.Diagnostics.Process]$CandidateProcess
+) {
+    $candidatePid = if ($CandidateProcess) { [uint32]$CandidateProcess.Id } else { [uint32]0 }
+    $serverPids = @($script:serverProcesses | ForEach-Object { [uint32]$_.Id })
+    $relevantPorts = @($TargetPort, $GatePort, $ServerPort) | Sort-Object -Unique
+    $rows = @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {
+        $relevantPorts -contains [int]$_.LocalPort -or
+        $relevantPorts -contains [int]$_.RemotePort -or
+        $_.LocalAddress -eq $Target -or $_.RemoteAddress -eq $Target -or
+        [uint32]$_.OwningProcess -eq $candidatePid -or
+        $serverPids -contains [uint32]$_.OwningProcess
+    } | Sort-Object OwningProcess, LocalAddress, LocalPort, RemoteAddress, RemotePort | ForEach-Object {
+        $owner = [uint32]$_.OwningProcess
+        $role = if ($owner -eq [uint32]$PID) { "controller" }
+            elseif ($owner -eq $candidatePid) { "client" }
+            elseif ($serverPids -contains $owner) { "server" }
+            else { "other" }
+        [ordered]@{
+            local_address = [string]$_.LocalAddress
+            local_port = [int]$_.LocalPort
+            remote_address = [string]$_.RemoteAddress
+            remote_port = [int]$_.RemotePort
+            state = [string]$_.State
+            owning_process = $owner
+            owner_role = $role
+        }
+    })
+    $targetListener = @($rows | Where-Object {
+        $_.owning_process -eq [uint32]$PID -and $_.local_port -eq $TargetPort -and $_.state -eq "Listen"
+    }).Count
+    $targetAccepted = @($rows | Where-Object {
+        $_.owning_process -eq [uint32]$PID -and $_.local_port -eq $TargetPort -and $_.state -eq "Established"
+    }).Count
+    $pressureLogical = @($rows | Where-Object {
+        $_.owning_process -eq [uint32]$PID -and $_.remote_port -eq $TargetPort -and $_.state -eq "Established"
+    }).Count
+    $clientUnderlay = @($rows | Where-Object {
+        $_.owning_process -eq $candidatePid -and $_.remote_port -eq $GatePort -and $_.state -eq "Established"
+    }).Count
+    $serverRelay = @($rows | Where-Object {
+        $serverPids -contains $_.owning_process -and $_.remote_port -eq $TargetPort -and $_.state -eq "Established"
+    }).Count
+    return [ordered]@{
+        rows = $rows
+        assertions = [ordered]@{
+            target_listener = $targetListener
+            target_accepted = $targetAccepted
+            pressure_logical = $pressureLogical
+            client_underlay = $clientUnderlay
+            server_relay = $serverRelay
+        }
+    }
+}
+
+function Get-Tcp08LiveEvidence(
+    [string]$Phase,
+    [string]$Target,
+    [int]$TargetPort,
+    [int]$GatePort,
+    [int]$ServerPort,
+    [int]$MetricsPort,
+    [System.Diagnostics.Process]$CandidateProcess,
+    [object]$Pressure,
+    [Threading.Tasks.Task]$PressureWrite,
+    [Ferrum2TcpProbe]$TargetProbe,
+    [Ferrum2TcpGate]$Gate,
+    [int]$GateIndex
+) {
+    $captured = Get-Tcp08MonotonicSample
+    $CandidateProcess.Refresh()
+    $gateObservation = $Gate.Observation($GateIndex)
+    $connections = Get-Tcp08ConnectionEvidence $Target $TargetPort $GatePort $ServerPort $CandidateProcess
+    $pressureAvailable = try { $Pressure.Client.Client.Available } catch { $null }
+    return [ordered]@{
+        phase = $Phase
+        monotonic_ticks = $captured.monotonic_ticks
+        elapsed_ms = $captured.elapsed_ms
+        candidate = [ordered]@{
+            process_id = [uint32]$CandidateProcess.Id
+            has_exited = $CandidateProcess.HasExited
+        }
+        pressure_client = [ordered]@{
+            socket_open = Test-Tcp08ClientSocketOpen $Pressure.Client
+            connected_property = $Pressure.Client.Connected
+            local_endpoint = Get-Tcp08Endpoint $Pressure.Client $true
+            remote_endpoint = Get-Tcp08Endpoint $Pressure.Client $false
+            available_bytes = $pressureAvailable
+        }
+        pressure_write = [ordered]@{
+            status = if ($PressureWrite) { $PressureWrite.Status.ToString() } else { "missing" }
+            is_completed = if ($PressureWrite) { $PressureWrite.IsCompleted } else { $null }
+            is_faulted = if ($PressureWrite) { $PressureWrite.IsFaulted } else { $null }
+            is_canceled = if ($PressureWrite) { $PressureWrite.IsCanceled } else { $null }
+        }
+        target = [ordered]@{
+            listener_active = $TargetProbe.ListenerActive
+            accepted_socket_connected = $TargetProbe.AcceptedSocketConnected
+            accepted_socket_open = $TargetProbe.AcceptedSocketOpen
+            accepted_socket_available_bytes = $TargetProbe.AcceptedSocketAvailable
+            accepted_socket_local_endpoint = $TargetProbe.AcceptedSocketLocalEndpoint
+            accepted_socket_remote_endpoint = $TargetProbe.AcceptedSocketRemoteEndpoint
+            read_attempts = $TargetProbe.ReadAttempts
+            stall_wait_active = $TargetProbe.StallWaitActive
+            worker_status = $TargetProbe.WorkerStatus
+            session_complete = $TargetProbe.SessionComplete
+            fault = $TargetProbe.Fault
+        }
+        gate = if ($gateObservation) {
+            [ordered]@{
+                session_index = $GateIndex
+                client_to_server_bytes = $gateObservation.ClientToServerBytes
+                client_to_server_stage = $gateObservation.ClientToServerStage
+                client_to_server_eof = $gateObservation.ClientToServerEof
+                client_to_server_fault = $gateObservation.ClientToServerFault
+                server_to_client_bytes = $gateObservation.ServerToClientBytes
+                server_to_client_stage = $gateObservation.ServerToClientStage
+                server_to_client_eof = $gateObservation.ServerToClientEof
+                server_to_client_fault = $gateObservation.ServerToClientFault
+                session_complete = $gateObservation.SessionComplete
+            }
+        } else { $null }
+        metrics = if ($Phase -in @("during_grace", "after_process_exit")) {
+            [ordered]@{
+                available = $false
+                required = [bool]$script:RequireTcp08ProductMetrics
+                unavailable_after_quiesce_expected = $true
+                failure_type = "not_queried_after_process_quiesce"
+                owner_counts = $null
+                samples = @()
+            }
+        } else { Get-Tcp08MetricEvidence $MetricsPort }
+        connections = $connections
+    }
+}
 
 function Write-CapabilityEvidence([string]$Phase, [hashtable]$Data) {
     $row = [ordered]@{
@@ -2310,7 +4418,285 @@ function Invoke-AdapterCycles(
     Assert-True ($script:cycleRows -eq 100) "adapter cycle count mismatch"
 }
 
+function Complete-Tcp08PressureWriteCleanup([Threading.Tasks.Task]$Task) {
+    $classification = "completed_after_socket_close"
+    $exceptionTypes = @()
+    try {
+        Assert-True ($Task.Wait(5000)) "TCP-08 pressure writer did not stop within the bounded cleanup timeout"
+    } catch [AggregateException] {
+        $flattened = $_.Exception.Flatten()
+        $exceptions = @($flattened.InnerExceptions)
+        $exceptionTypes = @($exceptions | ForEach-Object { $_.GetType().FullName })
+        $unexpected = @($exceptions | Where-Object {
+            -not ($_ -is [OperationCanceledException]) -and
+            -not ($_ -is [ObjectDisposedException]) -and
+            -not ($_ -is [IO.IOException]) -and
+            -not ($_ -is [Net.Sockets.SocketException])
+        })
+        if ($unexpected.Count -gt 0) {
+            throw [InvalidOperationException]::new(
+                "TCP-08 pressure writer faulted with an unexpected exception after socket close",
+                $flattened
+            )
+        }
+        $classification = if ($Task.IsCanceled) { "cancelled_after_socket_close" } else { "expected_fault_after_socket_close" }
+    }
+    Assert-True $Task.IsCompleted "TCP-08 pressure writer did not report a terminal state after bounded cleanup wait"
+    return [ordered]@{
+        classification = $classification
+        task_status = $Task.Status.ToString()
+        exception_types = $exceptionTypes
+    }
+}
+
+function Invoke-Tcp08(
+    [string]$Target,
+    [int]$Port,
+    [int]$InterfaceIndex,
+    [Ferrum2TcpGate]$Gate,
+    [int]$GatePort,
+    [int]$ServerPort,
+    [int]$MetricsPort,
+    [bool]$CollectPerformance
+) {
+    $pressure = $null
+    $pressureWrite = $null
+    $stall = $null
+    $pressureClientOwned = $false
+    try {
+        $pressureGate = $Gate.Accepted + 1
+        $pressure = Open-TunTcp $Target $Port $InterfaceIndex
+        $script:tcpResources.Add([IDisposable]$pressure.Client)
+        $pressureClientOwned = $true
+        Assert-True ($Gate.WaitAccepted($pressureGate, 5000)) "backpressure route did not open"
+        $stall = [Ferrum2TcpProbe]::new($Target, $Port, "stall")
+        $script:tcpResources.Add($stall)
+        Add-Tcp08Event "pressure_listener_started" ([ordered]@{
+            target = $Target
+            port = $Port
+            listener_active = $stall.ListenerActive
+        })
+        $Gate.Release($pressureGate)
+        Assert-True ($stall.WaitAccepted(5000)) "backpressure target was not opened"
+        Add-Tcp08Event "pressure_target_accepted" ([ordered]@{
+            local_endpoint = $stall.AcceptedSocketLocalEndpoint
+            remote_endpoint = $stall.AcceptedSocketRemoteEndpoint
+        })
+        Assert-True ($stall.ListenerActive -and $stall.AcceptedSocketOpen -and
+            $stall.StallWaitActive -and $stall.ReadAttempts -eq 0) "backpressure target was not stably non-reading before pressure write"
+
+        $pressureChunk = [byte[]]::new(1024 * 1024)
+        Add-Tcp08Event "pressure_write_started" ([ordered]@{
+            pressure_gate_index = $pressureGate
+            chunk_bytes = $pressureChunk.Length
+            attempt_limit = 128
+            target_accepted_before_write = $true
+        })
+        $pendingAttempt = $null
+        for ($attempt = 0; $attempt -lt 128; $attempt++) {
+            $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureChunk, 0, $pressureChunk.Length)
+            if (-not $pressureWrite.Wait(100)) {
+                $pendingAttempt = $attempt + 1
+                break
+            }
+        }
+        Assert-True ($pressureWrite -and -not $pressureWrite.IsCompleted) "backpressure write unexpectedly drained"
+        Add-Tcp08Event "pressure_write_became_pending" ([ordered]@{
+            attempt = $pendingAttempt
+            task_status = $pressureWrite.Status.ToString()
+        })
+        if ($CollectPerformance) { Complete-PerformanceSample $script:activeProcess $MetricsPort }
+
+        $beforeSignal = Get-Tcp08LiveEvidence "before_ctrl_break" $Target $Port $GatePort $ServerPort $MetricsPort $script:activeProcess $pressure $pressureWrite $stall $Gate $pressureGate
+        $script:tcp08Samples.Add($beforeSignal)
+        if ($RequireTcp08ProductMetrics -or $beforeSignal.metrics.available) {
+            Assert-Tcp08ProductOwnerMetrics $beforeSignal.metrics "before CTRL_BREAK"
+        }
+        Assert-True $beforeSignal.pressure_client.socket_open "TCP-08 pressure client socket was not open before CTRL_BREAK"
+        Assert-True (-not $beforeSignal.pressure_write.is_completed) "TCP-08 pressure write was not pending before CTRL_BREAK"
+        Assert-True ($beforeSignal.target.listener_active -and $beforeSignal.target.accepted_socket_open -and
+            $beforeSignal.target.stall_wait_active -and $beforeSignal.target.read_attempts -eq 0) "TCP-08 target was not an open non-reading peer before CTRL_BREAK"
+        foreach ($name in @("target_listener", "target_accepted", "pressure_logical", "client_underlay", "server_relay")) {
+            Assert-True ($beforeSignal.connections.assertions[$name] -gt 0) "TCP-08 socket ownership witness missing before CTRL_BREAK: $name"
+        }
+
+        if ($script:tcp08Enabled) {
+            $shutdownReportPath = Join-Path $script:tcp08ArtifactPath "client.stderr.log"
+            $reportSnapshotBeforeSignal = Get-Tcp08SharedLogSnapshot $shutdownReportPath "before_ctrl_break"
+            Add-Tcp08Event "shutdown_report_candidate_window_opened" ([ordered]@{
+                process_id = [uint32]$script:activeProcess.Id
+                capture_phase = $reportSnapshotBeforeSignal.capture_phase
+                byte_length = $reportSnapshotBeforeSignal.byte_length
+                complete_byte_length = $reportSnapshotBeforeSignal.complete_byte_length
+                trailing_partial_byte_count = $reportSnapshotBeforeSignal.trailing_partial_byte_count
+                complete_line_count = $reportSnapshotBeforeSignal.complete_line_count
+                lower_exclusive_candidate_ordinal = $reportSnapshotBeforeSignal.candidate_count
+            })
+        }
+        $forcedShutdown = [Diagnostics.Stopwatch]::StartNew()
+        $breakResult = [Ferrum2ProcessGroup]::BreakDetailed([uint32]$script:activeProcess.Id)
+        $script:tcp08CtrlBreak = Convert-Tcp08CtrlBreakResult $breakResult
+        if ($breakResult.SendStartedTimestamp -gt 0) {
+            Add-Tcp08EventAtTimestamp "ctrl_break_send_started" $breakResult.SendStartedTimestamp ([ordered]@{
+                process_id = [uint32]$script:activeProcess.Id
+                source = "Ferrum2ProcessGroup.BreakDetailed"
+            })
+        }
+        if ($breakResult.SendReturnedTimestamp -gt 0) {
+            Add-Tcp08EventAtTimestamp "ctrl_break_send_returned" $breakResult.SendReturnedTimestamp ([ordered]@{
+                generate_console_ctrl_event_result = $breakResult.GenerateConsoleCtrlEventResult
+                win32_error = $breakResult.GenerateConsoleCtrlEventWin32Error
+                send_duration_ms = [Math]::Round($breakResult.SendDurationMilliseconds, 3)
+            })
+        }
+        if ($breakResult.InternalWaitStartedTimestamp -gt 0) {
+            Add-Tcp08EventAtTimestamp "ctrl_break_internal_wait_started" $breakResult.InternalWaitStartedTimestamp ([ordered]@{
+                configured_wait_ms = 250
+            })
+        }
+        if ($breakResult.InternalWaitReturnedTimestamp -gt 0) {
+            Add-Tcp08EventAtTimestamp "ctrl_break_internal_wait_returned" $breakResult.InternalWaitReturnedTimestamp ([ordered]@{
+                measured_wait_ms = [Math]::Round($breakResult.InternalWaitMilliseconds, 3)
+            })
+        }
+        Add-Tcp08Event "ctrl_break_call_returned" $script:tcp08CtrlBreak
+        Assert-True $breakResult.Succeeded "TCP-08 CTRL_BREAK delivery failed"
+        $exitedDuringGrace = [Ferrum2ProcessGroup]::Wait([uint32]$script:activeProcess.Id, 300)
+        Add-Tcp08Event "grace_probe_completed" ([ordered]@{
+            wait_ms = 300
+            process_exited = $exitedDuringGrace
+            pressure_write_pending = -not $pressureWrite.IsCompleted
+            target_socket_open = $stall.AcceptedSocketOpen
+        })
+        if ($exitedDuringGrace) {
+            Add-Tcp08Event "process_exited" ([ordered]@{
+                process_id = [uint32]$script:activeProcess.Id
+                observation = "controller_grace_probe"
+                elapsed_since_ctrl_break_call_ms = [Math]::Round($forcedShutdown.Elapsed.TotalMilliseconds, 3)
+            })
+            $script:tcp08ExitCode = [Ferrum2ProcessGroup]::ExitCode([uint32]$script:activeProcess.Id)
+            Add-Tcp08Event "process_exit_code" ([ordered]@{
+                process_id = [uint32]$script:activeProcess.Id
+                exit_code = $script:tcp08ExitCode
+            })
+        }
+        Assert-True (-not $exitedDuringGrace) "TCP-08 exited during grace"
+        Assert-True (-not $pressureWrite.IsCompleted) "TCP-08 pressured flow was not owned through grace"
+        Assert-True (Test-Tcp08ClientSocketOpen $pressure.Client) "TCP-08 pressure client socket closed during grace"
+        Assert-True ($stall.ListenerActive -and $stall.AcceptedSocketOpen -and $stall.StallWaitActive -and
+            $stall.ReadAttempts -eq 0) "TCP-08 target did not remain an open non-reading peer through grace"
+        $duringGrace = Get-Tcp08LiveEvidence "during_grace" $Target $Port $GatePort $ServerPort $MetricsPort $script:activeProcess $pressure $pressureWrite $stall $Gate $pressureGate
+        $script:tcp08Samples.Add($duringGrace)
+        if ($duringGrace.metrics.available) {
+            Assert-Tcp08ProductOwnerMetrics $duringGrace.metrics "during grace"
+        } else {
+            Assert-True $duringGrace.metrics.unavailable_after_quiesce_expected "TCP-08 owner metric loss during grace was not classified"
+            Add-Tcp08Event "product_owner_metrics_unavailable_after_quiesce" ([ordered]@{
+                expected = $true
+                required_before_ctrl_break = [bool]$RequireTcp08ProductMetrics
+                failure_type = $duringGrace.metrics.failure_type
+            })
+        }
+
+        Assert-True (Wait-ProcessExit $script:activeProcess 10) "TCP-08 forced cancellation did not exit"
+        $forcedShutdown.Stop()
+        Add-Tcp08Event "process_exited" ([ordered]@{
+            process_id = [uint32]$script:activeProcess.Id
+            observation = "controller_exit_wait"
+            elapsed_since_ctrl_break_call_ms = [Math]::Round($forcedShutdown.Elapsed.TotalMilliseconds, 3)
+        })
+        $script:tcp08ExitCode = [Ferrum2ProcessGroup]::ExitCode([uint32]$script:activeProcess.Id)
+        Add-Tcp08Event "process_exit_code" ([ordered]@{
+            process_id = [uint32]$script:activeProcess.Id
+            exit_code = $script:tcp08ExitCode
+        })
+        if ($script:tcp08Enabled) {
+            $reportSnapshotAfterExit = Get-Tcp08SharedLogSnapshot $shutdownReportPath "after_process_exit"
+            $script:tcp08ShutdownReportCandidateWindow = [ordered]@{
+                process_id = [uint32]$script:activeProcess.Id
+                lower_exclusive_candidate_ordinal = $reportSnapshotBeforeSignal.candidate_count
+                upper_inclusive_candidate_ordinal = $reportSnapshotAfterExit.candidate_count
+                candidate_delta = $reportSnapshotAfterExit.candidate_count - $reportSnapshotBeforeSignal.candidate_count
+                lower_capture = [ordered]@{
+                    capture_phase = $reportSnapshotBeforeSignal.capture_phase
+                    byte_length = $reportSnapshotBeforeSignal.byte_length
+                    complete_byte_length = $reportSnapshotBeforeSignal.complete_byte_length
+                    trailing_partial_byte_count = $reportSnapshotBeforeSignal.trailing_partial_byte_count
+                    complete_line_count = $reportSnapshotBeforeSignal.complete_line_count
+                }
+                upper_capture = [ordered]@{
+                    capture_phase = $reportSnapshotAfterExit.capture_phase
+                    byte_length = $reportSnapshotAfterExit.byte_length
+                    complete_byte_length = $reportSnapshotAfterExit.complete_byte_length
+                    trailing_partial_byte_count = $reportSnapshotAfterExit.trailing_partial_byte_count
+                    complete_line_count = $reportSnapshotAfterExit.complete_line_count
+                }
+            }
+            Add-Tcp08Event "shutdown_report_candidate_window_frozen" $script:tcp08ShutdownReportCandidateWindow
+        }
+        Assert-True ($forcedShutdown.ElapsedMilliseconds -ge 900) "TCP-08 force preceded the grace deadline"
+        if ($script:RequireTcp08ProductMetrics) {
+            Assert-True ($script:tcp08ShutdownReportCandidateWindow.candidate_delta -eq 1) "TCP-08 strict shutdown-report candidate delta was not one"
+        }
+        Assert-True ($script:tcp08ExitCode -eq 0) "TCP-08 forced shutdown was not clean: exit=$($script:tcp08ExitCode)"
+        $afterExit = Get-Tcp08LiveEvidence "after_process_exit" $Target $Port $GatePort $ServerPort $MetricsPort $script:activeProcess $pressure $pressureWrite $stall $Gate $pressureGate
+        $script:tcp08Samples.Add($afterExit)
+        if ($CollectPerformance) { $script:performanceForceDrain = $true }
+        [Ferrum2ProcessGroup]::Close([uint32]$script:activeProcess.Id)
+        $script:activeProcess = $null
+    } catch {
+        $script:tcp08Result = "FAIL"
+        Add-Tcp08Event "tcp08_failed" ([ordered]@{
+            failure_type = $_.Exception.GetType().FullName
+            failure = $_.Exception.Message
+        })
+        throw
+    } finally {
+        $pressureCleanupFailures = [Collections.Generic.List[Exception]]::new()
+        if ($pressureClientOwned -and $pressure) {
+            try { $pressure.Client.Dispose() }
+            catch { $pressureCleanupFailures.Add($_.Exception) }
+        }
+        if ($pressureWrite) {
+            try {
+                $pressureWriteCleanup = Complete-Tcp08PressureWriteCleanup $pressureWrite
+                Add-Tcp08Event "pressure_write_cleanup_completed" $pressureWriteCleanup
+            } catch {
+                $pressureCleanupFailures.Add($_.Exception)
+            }
+        }
+        if ($pressureClientOwned -and $pressure) {
+            try {
+                Assert-True $script:tcpResources.Remove([IDisposable]$pressure.Client) "TCP-08 pressure client ownership mismatch"
+                $pressureClientOwned = $false
+            } catch {
+                $pressureCleanupFailures.Add($_.Exception)
+            }
+        }
+        if (-not $pressureClientOwned -and $pressure) { $pressure = $null }
+        if ($pressureCleanupFailures.Count -eq 1) { throw $pressureCleanupFailures[0] }
+        if ($pressureCleanupFailures.Count -gt 1) {
+            throw [AggregateException]::new("TCP-08 pressure writer cleanup failed", $pressureCleanupFailures.ToArray())
+        }
+    }
+
+    try {
+        Wait-AdapterAbsent $script:adapterName
+        Assert-InterfaceGone $script:adapterName $script:ownedInterfaceIndex
+        Add-Tcp08Event "adapter_absent" ([ordered]@{ interface_index = $script:ownedInterfaceIndex })
+        $script:tcp08Result = "PASS"
+    } catch {
+        $script:tcp08Result = "FAIL"
+        Add-Tcp08Event "tcp08_failed" ([ordered]@{
+            failure_type = $_.Exception.GetType().FullName
+            failure = $_.Exception.Message
+        })
+        throw
+    }
+}
+
 try {
+    Initialize-Tcp08Artifacts
     Assert-True (-not (Test-Path -LiteralPath $work)) "run work baseline not absent"
     Assert-True (@(Get-ExactRunProcesses $work).Count -eq 0) "run process baseline not absent"
     Assert-True (-not (Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue)) "run adapter baseline not absent"
@@ -2319,6 +4705,8 @@ try {
         Assert-True (-not (Get-NetAdapter -Name $managedAutoAdapterName -IncludeHidden -ErrorAction SilentlyContinue)) "managed lifecycle adapter baseline not absent"
     }
     Assert-True ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq $expectedZipHash) "ZIP hash mismatch"
+    Write-RunIdentityJournal
+    $runJournalIdentity = Read-RunIdentityJournal $runIdentityJournalPath @(Get-ControllerWorkPaths)
     New-Item -ItemType Directory -Path $work | Out-Null
     Expand-Archive -LiteralPath $zip -DestinationPath $work
     $sourceDll = Join-Path $work "wintun\bin\amd64\wintun.dll"
@@ -2334,14 +4722,29 @@ try {
     $foundation++
 
     if ($Mode -notin @("network-feasibility", "managed-product", "full", "hard-kill")) {
-        Push-Location $workspace
-        try {
-            if ($Mode -in @("tcp", "udp", "performance")) { & cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --locked }
-            else { & cargo +1.97.1 build -p ferrum2-client --locked }
-            if ($LASTEXITCODE -ne 0) { throw "candidate build failed" }
+        $buildPackages = [System.Collections.Generic.List[string]]::new()
+        if (-not $clientBinaryExplicit) {
+            $buildPackages.Add("-p")
+            $buildPackages.Add("ferrum2-client")
         }
-        finally { Pop-Location }
+        if ($Mode -in @("tcp", "tcp08", "udp", "performance") -and -not $serverBinaryExplicit) {
+            $buildPackages.Add("-p")
+            $buildPackages.Add("ferrum2-server")
+        }
+        if ($buildPackages.Count -gt 0) {
+            Push-Location $resolvedProductRoot
+            try {
+                & cargo +1.97.1 build @buildPackages --locked
+                if ($LASTEXITCODE -ne 0) { throw "candidate build failed" }
+            }
+            finally { Pop-Location }
+        }
     }
+    Assert-True (Test-Path -LiteralPath $binary) "candidate client binary is missing after selection/build"
+    if ($Mode -in @("tcp", "tcp08", "udp", "performance")) {
+        Assert-True (Test-Path -LiteralPath $serverBinary) "candidate server binary is missing after selection/build"
+    }
+    if ($tcp08Enabled) { Write-Tcp08BinaryEvidence $sourceDll }
     if ($Mode -eq "managed-product") {
         Assert-PktMonAbsent
         $supportAddress = $capabilityIdentity.SupportAddress
@@ -2485,7 +4888,7 @@ listen = "127.0.0.1:$manualMetricsPort"
         Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "sibling DLL baseline not absent"
         Assert-InterfaceGone $managedAutoAdapterName $null
         Assert-InterfaceGone $managedManualAdapterName $null
-        Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+        Write-OwnedSiblingDllIntent
         Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
         $createdSiblingDll = $true
 
@@ -2643,8 +5046,8 @@ listen = "127.0.0.1:$manualMetricsPort"
         Assert-SnapshotEqual $physicalDnsBaseline @(Get-PhysicalDnsSnapshot 0) "managed product final physical DNS sentinel"
         Assert-PktMonAbsent
 
-        Remove-Item -LiteralPath $siblingDll -Force
-        $createdSiblingDll = $false
+        Remove-OwnedSiblingDll $runJournalIdentity
+        Assert-NotReparsePoint $work "controller work directory"
         Remove-Item -LiteralPath $work -Recurse -Force
         Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "managed product sibling DLL residue"
         Assert-True (-not (Test-Path -LiteralPath $work)) "managed product work residue"
@@ -2809,7 +5212,7 @@ listen = "127.0.0.1:$managedMetricsPort"
             Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "managed lifecycle config marker mismatch"
         }
         Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "managed lifecycle sibling DLL baseline not absent"
-        Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+        Write-OwnedSiblingDllIntent
         Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
         $createdSiblingDll = $true
         $dnsResponder = [Ferrum2DnsResponder]::new($managedDnsAddress, $managedDnsPort)
@@ -3093,8 +5496,7 @@ listen = "127.0.0.1:$managedMetricsPort"
         Assert-True $tcpResources.Remove($dnsResponder) "managed lifecycle DNS responder ownership mismatch"
         $dnsResponder.Dispose()
         $dnsResponder = $null
-        Remove-Item -LiteralPath $siblingDll -Force
-        $createdSiblingDll = $false
+        Remove-OwnedSiblingDll $runJournalIdentity
         Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "managed lifecycle sibling DLL residue"
     }
     if ($Mode -eq "network-feasibility") {
@@ -3203,7 +5605,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $offlineOutput = @(& $binary --config $config --check-config 2>&1)
         Assert-True ($LASTEXITCODE -eq 0) "network feasibility config validation failed"
         Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "network feasibility config marker mismatch"
-        Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+        Write-OwnedSiblingDllIntent
         Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
         $createdSiblingDll = $true
 
@@ -3446,7 +5848,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     Assert-InterfaceGone $adapterName $null
     $foundation++
 
-    Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+    Write-OwnedSiblingDllIntent
     Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
     $createdSiblingDll = $true
     $activeProcess = Start-Candidate $binary $config
@@ -3584,13 +5986,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $offlineOutput = @(& $binary --config $config --check-config 2>&1)
         Assert-True ($LASTEXITCODE -eq 0) "cycle config validation failed"
         Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "cycle config marker mismatch"
-        Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+        Write-OwnedSiblingDllIntent
         Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
         $createdSiblingDll = $true
         Invoke-AdapterCycles $binary $config
     }
-    if ($Mode -in @("tcp", "udp", "full", "performance")) {
-        $serverBinary = Join-Path $workspace "target\debug\ferrum2-server.exe"
+    if ($Mode -in @("tcp", "tcp08", "udp", "full", "performance")) {
         $serverPortA = Get-UniqueTcpPort
         $serverPortB = Get-UniqueTcpPort
         $gatePortA = Get-UniqueTcpPort
@@ -3602,7 +6003,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $performanceDirectInbound = ""
         $performanceDirectOutbound = ""
         $performanceDirectRule = ""
-        if ($Mode -eq "performance") {
+        if ($Mode -in @("tcp08", "performance")) {
             $performanceDirectSocksPort = Get-UniqueTcpPort
             $performanceDirectTargetPort = Get-UniqueTcpPort
             $performanceDirectInbound = "[[inbounds]]`ntag = `"performance-direct-socks`"`nlisten = `"127.0.0.1:$performanceDirectSocksPort`"`n"
@@ -3616,6 +6017,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             "192.0.2.205", "2001:db8::206", "192.0.2.207", "2001:db8::208"
         )
         $udpGateAddress = "192.0.2.250"
+        if ($tcp08Enabled) {
+            Write-Tcp08Metadata $targets[7] $ports[7] $gatePortA $serverPortA $metricsPort
+        }
         $serverAConfig = Join-Path $work "server-a.toml"
         $serverBConfig = Join-Path $work "server-b.toml"
         foreach ($serverCase in @(@($serverAConfig, $serverPortA), @($serverBConfig, $serverPortB))) {
@@ -3635,10 +6039,10 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "@ | Set-Content -LiteralPath $serverCase[0] -Encoding utf8NoBOM
         }
-        [void](Start-Server $serverBinary $serverAConfig)
-        [void](Start-Server $serverBinary $serverBConfig)
-        Wait-TcpListener $serverPortA
-        Wait-TcpListener $serverPortB
+        $serverProcessA = Start-Server $serverBinary $serverAConfig
+        $serverProcessB = Start-Server $serverBinary $serverBConfig
+        Wait-TcpListener $serverPortA $serverProcessA "server_a"
+        Wait-TcpListener $serverPortB $serverProcessB "server_b"
 
         $gateA = [Ferrum2TcpGate]::new($gatePortA, $serverPortA)
         $gateB = [Ferrum2TcpGate]::new($gatePortB, $serverPortA)
@@ -3891,13 +6295,25 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-True ($LASTEXITCODE -eq 0) "TCP config validation failed: $($offlineOutput -join '|')"
         Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "TCP config marker mismatch"
         if ($Mode -ne "full") {
-            Set-Content -LiteralPath $dllJournal -Value $expectedDllHash -Encoding ascii
+            Write-OwnedSiblingDllIntent
             Copy-Item -LiteralPath $sourceDll -Destination $siblingDll
             $createdSiblingDll = $true
         }
         $activeProcess = Start-Candidate $binary $config
+        if ($tcp08Enabled) {
+            Add-Tcp08Event "process_started" ([ordered]@{
+                process_id = [uint32]$activeProcess.Id
+                executable = $binary
+            })
+        }
         $adapter = Wait-AdapterReady $adapterName
         $ownedInterfaceIndex = [int]$adapter.ifIndex
+        if ($tcp08Enabled) {
+            Add-Tcp08Event "adapter_ready" ([ordered]@{
+                name = $adapterName
+                interface_index = $ownedInterfaceIndex
+            })
+        }
         if ($Mode -eq "performance") { Start-PerformanceSample $activeProcess $metricsPort }
         else { [void](Get-Metrics $metricsPort) }
         $readyRoutes = @(Get-InterfaceRouteSnapshot $ownedInterfaceIndex)
@@ -3913,14 +6329,21 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-True ($strongHostInterfaces.Count -eq 4) "strong-host interface rows missing"
         $weakHostInterfaces = @($strongHostInterfaces | Where-Object { $_.WeakHostSend -ne "Disabled" -or $_.WeakHostReceive -ne "Disabled" })
         Assert-True ($weakHostInterfaces.Count -eq 0) "weak-host forwarding is unsupported"
-        foreach ($target in $targets) {
-            $prefixLength = if ($target.Contains(":")) { 128 } else { 32 }
-            [void](Add-TunRoute $ownedInterfaceIndex "$target/$prefixLength" 500)
+        $routeTargetIndexes = if ($Mode -eq "tcp08") { @(7) } else { @(0..7) }
+        foreach ($targetIndex in $routeTargetIndexes) {
+            $prefixLength = if ($targets[$targetIndex].Contains(":")) { 128 } else { 32 }
+            [void](Add-TunRoute $ownedInterfaceIndex "$($targets[$targetIndex])/$prefixLength" 500)
         }
-        foreach ($targetIndex in @(0, 1, 2, 3, 7)) {
+        $localTargetIndexes = if ($Mode -eq "tcp08") { @(7) } else { @(0, 1, 2, 3, 7) }
+        foreach ($targetIndex in $localTargetIndexes) {
             [void](Add-TargetAddress $targets[$targetIndex])
         }
 
+        if ($Mode -eq "tcp08") {
+            Invoke-Tcp08 $targets[7] $ports[7] $ownedInterfaceIndex $gateA $gatePortA $serverPortA $metricsPort $false
+            $tcpRows++
+            Assert-True ($tcpRows -eq 1) "focused TCP-08 row count mismatch"
+        } else {
         $tcp01Target = $targets[0]
         $tcp01Port = $ports[0]
         $tcp01Payload = [Text.Encoding]::ASCII.GetBytes("tcp-01-half-close")
@@ -4052,36 +6475,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         Assert-ResetWithoutEgress $targets[6] $ports[6] $ownedInterfaceIndex @($gateA, $gateB)
         $tcpRows++
 
-        $pressureGate = $gateA.Accepted + 1
-        $pressure = Open-TunTcp $targets[7] $ports[7] $ownedInterfaceIndex
-        Assert-True ($gateA.WaitAccepted($pressureGate, 5000)) "backpressure route did not open"
-        $pressureChunk = [byte[]]::new(1024 * 1024)
-        $pressureWrite = $null
-        for ($attempt = 0; $attempt -lt 128; $attempt++) {
-            $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureChunk, 0, $pressureChunk.Length)
-            if (-not $pressureWrite.Wait(100)) { break }
-        }
-        Assert-True ($pressureWrite -and -not $pressureWrite.IsCompleted) "backpressure write unexpectedly drained"
-        $stall = [Ferrum2TcpProbe]::new($targets[7], $ports[7], "stall")
-        $tcpResources.Add($stall)
-        $gateA.Release($pressureGate)
-        Assert-True ($stall.WaitAccepted(5000)) "backpressure target was not opened"
-        if ($Mode -eq "performance") { Complete-PerformanceSample $activeProcess $metricsPort }
-        $forcedShutdown = [Diagnostics.Stopwatch]::StartNew()
-        Assert-True ([Ferrum2ProcessGroup]::Break([uint32]$activeProcess.Id)) "TCP-08 CTRL_BREAK delivery failed"
-        Assert-True (-not [Ferrum2ProcessGroup]::Wait([uint32]$activeProcess.Id, 300)) "TCP-08 exited during grace"
-        Assert-True (-not $pressureWrite.IsCompleted) "TCP-08 pressured flow was not owned through grace"
-        Assert-True (Wait-ProcessExit $activeProcess 10) "TCP-08 forced cancellation did not exit"
-        $forcedShutdown.Stop()
-        Assert-True ($forcedShutdown.ElapsedMilliseconds -ge 900) "TCP-08 force preceded the grace deadline"
-        $forcedExit = [Ferrum2ProcessGroup]::ExitCode([uint32]$activeProcess.Id)
-        Assert-True ($forcedExit -eq 0) "TCP-08 forced shutdown was not clean: exit=$forcedExit"
-        if ($Mode -eq "performance") { $performanceForceDrain = $true }
-        [Ferrum2ProcessGroup]::Close([uint32]$activeProcess.Id)
-        $activeProcess = $null
-        $pressure.Client.Dispose()
-        Wait-AdapterAbsent $adapterName
-        Assert-InterfaceGone $adapterName $ownedInterfaceIndex
+        Invoke-Tcp08 $targets[7] $ports[7] $ownedInterfaceIndex $gateA $gatePortA $serverPortA $metricsPort ($Mode -eq "performance")
 
         $activeProcess = Start-Candidate $binary $config
         $adapter = Wait-AdapterReady $adapterName
@@ -4103,6 +6497,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         }
         $tcpRows++
         Assert-True ($tcpRows -eq 8) "TCP row count mismatch"
+        }
 
         if ($Mode -in @("udp", "full", "performance")) {
             foreach ($targetIndex in @(4, 5, 6)) {
@@ -4298,6 +6693,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 }
 catch { $primaryError = $_ }
 finally {
+    Add-Tcp08Event "cleanup_started" ([ordered]@{ primary_failure = [bool]$primaryError })
     try {
     if ($udp4) { $udp4.Dispose() }
     if ($heldMetrics) { $heldMetrics.Stop() }
@@ -4374,11 +6770,23 @@ finally {
             Where-Object { $_.InterfaceIndex -eq $route.InterfaceIndex })
         Assert-True ($leaked.Count -eq 0) "controller-owned route leaked: $($route.DestinationPrefix)"
     }
-    if ($createdSiblingDll -and (Test-Path -LiteralPath $siblingDll)) { Remove-Item -LiteralPath $siblingDll -Force }
-    if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
+    if ($createdSiblingDll) { Remove-OwnedSiblingDll $runJournalIdentity }
+    if (Test-Path -LiteralPath $work) {
+        Assert-NotReparsePoint $work "controller work directory"
+        Remove-Item -LiteralPath $work -Recurse -Force
+    }
     if ($createdSiblingDll) { Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "owned sibling DLL leaked" }
     Assert-True (-not (Test-Path -LiteralPath $work)) "controller work directory leaked"
+    $tcp08CleanupSucceeded = $true
     } catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
+    Add-Tcp08Event "cleanup_completed" ([ordered]@{
+        succeeded = $tcp08CleanupSucceeded
+        cleanup_failure_type = if ($outerCleanupError) { $outerCleanupError.Exception.GetType().FullName } else { $null }
+    })
+    if ($tcp08ArtifactInitialized) {
+        try { Complete-Tcp08Artifacts $tcp08CleanupSucceeded $primaryError $outerCleanupError }
+        catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
+    }
 }
 
 if ($tcp01Diagnostic) {
@@ -4397,6 +6805,11 @@ if ($completed) {
     $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
     if ($Mode -eq "lifecycle") {
         Write-Output "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
+    } elseif ($Mode -eq "tcp08") {
+        Assert-True ($tcpRows -eq 1 -and $tcp08Result -eq "PASS" -and $tcp08CleanupSucceeded) "focused TCP-08 marker prerequisites mismatch"
+        Assert-True (Test-Path -LiteralPath (Join-Path $tcp08ArtifactPath "timeline.json")) "focused TCP-08 timeline artifact is missing"
+        $tcp08ClientHash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+        Write-Output "m15_windows_tun_tcp08 status=PASS tcp08=1/1 cleanup=PASS client_sha256=$tcp08ClientHash run_token=$runIdentity artifact_directory=$tcp08ArtifactPath"
     } elseif ($Mode -eq "tcp") {
         Write-Output "m15_windows_tun_e2e status=PASS profile=tcp tcp=8/8 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
     } elseif ($Mode -eq "cycles") {

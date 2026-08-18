@@ -451,6 +451,7 @@ dependencies = [
  "ferrum2-socks5",
  "ferrum2-tun",
  "hickory-proto",
+ "serde_json",
  "tokio",
  "tracing",
 ]

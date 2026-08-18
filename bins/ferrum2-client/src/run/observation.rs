@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use ferrum2_config::LoggingLevel;
@@ -89,7 +90,34 @@ fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String 
     let snapshot = registry.snapshot();
     metrics.set_udp_sessions_active(Role::Client, snapshot.udp_sessions);
     metrics.set_udp_buffered_bytes(Role::Client, snapshot.udp_buffered_bytes);
-    metrics.encode_text().unwrap_or_default()
+    let mut output = metrics.encode_text().unwrap_or_default();
+    if output.ends_with("# EOF\n") {
+        output.truncate(output.len() - "# EOF\n".len());
+    }
+    write!(
+        output,
+        concat!(
+            "# HELP ferrum2_process_roots_active Process roots currently owned by the client supervisor.\n",
+            "# TYPE ferrum2_process_roots_active gauge\n",
+            "ferrum2_process_roots_active{{role=\"client\"}} {}\n",
+            "# HELP ferrum2_process_roots_forced Process roots forced after a shutdown grace deadline.\n",
+            "# TYPE ferrum2_process_roots_forced counter\n",
+            "ferrum2_process_roots_forced_total{{role=\"client\"}} {}\n",
+            "# HELP ferrum2_tun_handler_tasks_active Handler tasks currently owned by the TUN process root.\n",
+            "# TYPE ferrum2_tun_handler_tasks_active gauge\n",
+            "ferrum2_tun_handler_tasks_active{{role=\"client\"}} {}\n",
+            "# HELP ferrum2_tun_tcp_flows_active TCP flows currently owned by the TUN foundation stack.\n",
+            "# TYPE ferrum2_tun_tcp_flows_active gauge\n",
+            "ferrum2_tun_tcp_flows_active{{role=\"client\"}} {}\n",
+            "# EOF\n",
+        ),
+        snapshot.active_process_roots,
+        snapshot.process_forced_roots,
+        snapshot.active_tun_handler_tasks,
+        snapshot.active_tun_tcp_flows,
+    )
+    .expect("writing owner metrics to a String cannot fail");
+    output
 }
 
 pub(super) fn run_error_for_supervisor(error: SupervisorError) -> RunError {
@@ -538,6 +566,27 @@ mod tests {
         let closed = render_client_metrics(&metrics, &registry);
         assert!(closed.contains("ferrum2_udp_sessions_active{role=\"client\"} 0"));
         assert!(closed.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 0"));
+    }
+
+    #[test]
+    fn metrics_render_exposes_live_tun_and_process_owner_counts() {
+        let registry = OwnerRegistry::new();
+        let metrics = Metrics::new();
+        let flow = registry.track_tun_tcp_flow();
+        let handler = registry.track_tun_handler_task();
+
+        let live = render_client_metrics(&metrics, &registry);
+        assert!(live.contains("ferrum2_process_roots_active{role=\"client\"} 0"));
+        assert!(live.contains("ferrum2_process_roots_forced_total{role=\"client\"} 0"));
+        assert!(live.contains("ferrum2_tun_handler_tasks_active{role=\"client\"} 1"));
+        assert!(live.contains("ferrum2_tun_tcp_flows_active{role=\"client\"} 1"));
+        assert_eq!(live.matches("# EOF").count(), 1);
+
+        drop(handler);
+        drop(flow);
+        let closed = render_client_metrics(&metrics, &registry);
+        assert!(closed.contains("ferrum2_tun_handler_tasks_active{role=\"client\"} 0"));
+        assert!(closed.contains("ferrum2_tun_tcp_flows_active{role=\"client\"} 0"));
     }
 
     #[test]

@@ -20,11 +20,13 @@ pub use metrics::{
     METRICS_CONNECTION_LIMIT, METRICS_HEADER_BYTES, METRICS_HEADER_TIMEOUT, MetricsEndpoint,
     MetricsEndpointError, serve_metrics_connection,
 };
-pub use owner::{OwnerRegistry, OwnerSnapshot};
+pub use owner::{OwnerRegistry, OwnerSnapshot, TunHandlerTaskOwner, TunTcpFlowOwner};
 pub use process::{
     PreparedProcessRoot, ProcessCancellation, ProcessCancellationPhase, ProcessCause,
     ProcessCleanupFailure, ProcessExitKind, ProcessFuture, ProcessReport, ProcessRoot,
-    ProcessRootExit, ProcessRootId, ProcessState, ProcessSupervisor, ProcessSupervisorConfigError,
+    ProcessRootEvent, ProcessRootEventPhase, ProcessRootExit, ProcessRootExitCategory,
+    ProcessRootId, ProcessState, ProcessSupervisor, ProcessSupervisorConfigError,
+    ProcessTransition,
 };
 pub use relay::{
     RELAY_BUFFER_BYTES, RelayFailure, RelayRunError, RelayStats, relay_bidirectional,

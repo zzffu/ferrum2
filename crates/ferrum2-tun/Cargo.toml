@@ -14,6 +14,9 @@ ferrum2-runtime.workspace = true
 smoltcp.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
 ferrum2-wintun.workspace = true
 

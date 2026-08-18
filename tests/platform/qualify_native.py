@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import platform
 import re
@@ -36,6 +37,74 @@ INVALID_STDERR = (
 )
 STARTUP_BIND_STDERR = (
     b"error[startup.bind] process: unable to prepare required endpoint\n"
+)
+STARTUP_BIND_REPORT_FIELDS = frozenset(
+    {
+        "actual_grace_deadline_elapsed_ns",
+        "actual_grace_deadline_source",
+        "cleanup_failure",
+        "event",
+        "forced_root_count",
+        "owner_baseline",
+        "owner_delta",
+        "owner_stopped",
+        "process_states",
+        "process_transitions",
+        "role",
+        "root",
+        "root_error_category",
+        "root_exit_category",
+        "root_exit_events",
+        "shutdown_grace_ns",
+        "termination_cause",
+    }
+)
+OWNER_COUNTER_FIELDS = frozenset(
+    {
+        "process_supervisors",
+        "prepared_process_roots",
+        "active_process_roots",
+        "process_root_reaps",
+        "process_root_rollbacks",
+        "process_forced_roots",
+        "active_tun_tcp_flows",
+        "active_tun_handler_tasks",
+        "active_supervisor_children",
+        "connection_tasks",
+        "owned_buffers",
+        "owned_permits",
+        "listeners",
+        "forced_shutdowns",
+        "udp_sessions",
+        "udp_sockets",
+        "udp_tasks",
+        "udp_queued_datagrams",
+        "udp_buffered_bytes",
+        "udp_scratch_buffers",
+        "udp_forced_shutdowns",
+        "sniff_buffered_bytes",
+    }
+)
+ACTIVE_OWNER_COUNTER_FIELDS = frozenset(
+    {
+        "process_supervisors",
+        "prepared_process_roots",
+        "active_process_roots",
+        "active_tun_tcp_flows",
+        "active_tun_handler_tasks",
+        "active_supervisor_children",
+        "connection_tasks",
+        "owned_buffers",
+        "owned_permits",
+        "listeners",
+        "udp_sessions",
+        "udp_sockets",
+        "udp_tasks",
+        "udp_queued_datagrams",
+        "udp_buffered_bytes",
+        "udp_scratch_buffers",
+        "sniff_buffered_bytes",
+    }
 )
 
 
@@ -73,6 +142,141 @@ class Capture:
 def require(condition: bool, root: str) -> None:
     if not condition:
         raise QualificationError(root)
+
+
+def startup_bind_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for name, item in pairs:
+        require(name not in value, "startup-bind-report-duplicate-field")
+        value[name] = item
+    return value
+
+
+def reject_startup_bind_json_number(value: str) -> float:
+    raise ValueError(f"unsupported JSON number: {value}")
+
+
+def json_integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def assert_owner_counters(value: object, signed: bool) -> dict[str, int]:
+    require(isinstance(value, dict), "startup-bind-report-owner-type")
+    require(set(value) == OWNER_COUNTER_FIELDS, "startup-bind-report-owner-fields")
+    require(
+        all(json_integer(counter) and (signed or counter >= 0) for counter in value.values()),
+        "startup-bind-report-owner-value",
+    )
+    return value
+
+
+def assert_client_startup_bind_report(
+    report_line: bytes,
+    expected_root: tuple[str, int],
+    expected_shutdown_grace_ns: int,
+) -> None:
+    try:
+        report = json.loads(
+            report_line,
+            object_pairs_hook=startup_bind_json_object,
+            parse_float=reject_startup_bind_json_number,
+            parse_constant=reject_startup_bind_json_number,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise QualificationError("startup-bind-report-json") from error
+    require(isinstance(report, dict), "startup-bind-report-type")
+    require(set(report) == STARTUP_BIND_REPORT_FIELDS, "startup-bind-report-fields")
+    require(report["event"] == "process_shutdown_report", "startup-bind-report-event")
+    require(report["role"] == "client", "startup-bind-report-role")
+
+    states = ["Validated", "Preparing", "Rollback", "Stopped"]
+    require(report["process_states"] == states, "startup-bind-report-states")
+    transitions = report["process_transitions"]
+    require(
+        isinstance(transitions, list) and len(transitions) == len(states),
+        "startup-bind-report-transitions",
+    )
+    elapsed: list[int] = []
+    for state, transition in zip(states, transitions, strict=True):
+        require(
+            isinstance(transition, dict)
+            and set(transition) == {"state", "elapsed_ns"}
+            and transition["state"] == state
+            and json_integer(transition["elapsed_ns"])
+            and transition["elapsed_ns"] >= 0,
+            "startup-bind-report-transition",
+        )
+        elapsed.append(transition["elapsed_ns"])
+    require(elapsed == sorted(elapsed), "startup-bind-report-transition-order")
+
+    require(report["root_exit_events"] == [], "startup-bind-report-root-events")
+    require(
+        report["shutdown_grace_ns"] == expected_shutdown_grace_ns,
+        "startup-bind-report-grace",
+    )
+    require(
+        report["actual_grace_deadline_elapsed_ns"] is None
+        and report["actual_grace_deadline_source"] is None,
+        "startup-bind-report-deadline",
+    )
+    require(
+        report["termination_cause"] == "PreparationFailed",
+        "startup-bind-report-cause",
+    )
+    root = report["root"]
+    require(
+        isinstance(root, dict)
+        and set(root) == {"name", "id"}
+        and root["name"] == expected_root[0]
+        and json_integer(root["id"])
+        and root["id"] == expected_root[1],
+        "startup-bind-report-root",
+    )
+    require(report["root_exit_category"] is None, "startup-bind-report-root-exit")
+    require(
+        report["root_error_category"] == "startup.bind",
+        "startup-bind-report-root-error",
+    )
+    require(
+        json_integer(report["forced_root_count"])
+        and report["forced_root_count"] == 0,
+        "startup-bind-report-forced-root",
+    )
+    require(report["cleanup_failure"] is None, "startup-bind-report-cleanup")
+
+    baseline = assert_owner_counters(report["owner_baseline"], signed=False)
+    stopped = assert_owner_counters(report["owner_stopped"], signed=False)
+    delta = assert_owner_counters(report["owner_delta"], signed=True)
+    require(all(counter == 0 for counter in baseline.values()), "startup-bind-report-baseline")
+    require(
+        all(stopped[name] == 0 for name in ACTIVE_OWNER_COUNTER_FIELDS),
+        "startup-bind-report-owner-leak",
+    )
+    require(
+        all(delta[name] == stopped[name] - baseline[name] for name in OWNER_COUNTER_FIELDS),
+        "startup-bind-report-owner-delta",
+    )
+
+
+def assert_startup_bind_stderr(
+    spec: BinarySpec,
+    stderr: bytes,
+    expected_client_root: tuple[str, int],
+    expected_shutdown_grace_ns: int,
+) -> None:
+    if spec.role == "server":
+        require(stderr == STARTUP_BIND_STDERR, "startup-bind-stderr")
+        return
+    lines = stderr.splitlines(keepends=True)
+    require(
+        len(lines) == 2
+        and lines[0].endswith(b"\n")
+        and lines[1] == STARTUP_BIND_STDERR,
+        "client-startup-bind-stderr",
+    )
+    assert_client_startup_bind_report(
+        lines[0][:-1], expected_client_root, expected_shutdown_grace_ns
+    )
 
 
 def environment_field(value: str | None) -> str:
@@ -467,10 +671,10 @@ def assert_startup_rollback(spec: BinarySpec, directory: Path) -> None:
         result = bounded_run([str(spec.path), "--config", str(config)])
         require(
             result.returncode == 1
-            and result.stdout == b""
-            and result.stderr == STARTUP_BIND_STDERR,
+            and result.stdout == b"",
             "occupied-listen-startup-rollback",
         )
+        assert_startup_bind_stderr(spec, result.stderr, ("socks", 0), 1_000_000_000)
         probes.append(tcp_listener(metrics))
         if spec.role == "server":
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -490,10 +694,10 @@ def assert_startup_rollback(spec: BinarySpec, directory: Path) -> None:
         result = bounded_run([str(spec.path), "--config", str(config)])
         require(
             result.returncode == 1
-            and result.stdout == b""
-            and result.stderr == STARTUP_BIND_STDERR,
+            and result.stdout == b"",
             "occupied-startup-rollback",
         )
+        assert_startup_bind_stderr(spec, result.stderr, ("metrics", 1), 1_000_000_000)
         assert_rebindable(spec, listen, None)
     finally:
         occupied_metrics.close()
@@ -534,10 +738,10 @@ def assert_tagged_startup_rollback_once(spec: BinarySpec, directory: Path) -> No
         result = bounded_run([str(spec.path), "--config", str(config)])
         require(
             result.returncode == 1
-            and result.stdout == b""
-            and result.stderr == STARTUP_BIND_STDERR,
+            and result.stdout == b"",
             "tagged-second-listener-rollback",
         )
+        assert_startup_bind_stderr(spec, result.stderr, ("socks", 0), 30_000_000_000)
         assert_no_connections(server_traps)
         assert_tagged_rebindable(spec, (listens[0],))
     finally:

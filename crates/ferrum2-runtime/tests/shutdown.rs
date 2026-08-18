@@ -9,7 +9,8 @@ use std::time::Duration;
 use ferrum2_runtime::{
     AcceptListener, BoundedSupervisor, DEFAULT_SHUTDOWN_GRACE, OwnerRegistry, PreparedProcessRoot,
     ProcessCancellation, ProcessCancellationPhase, ProcessCause, ProcessCleanupFailure,
-    ProcessExitKind, ProcessFuture, ProcessRoot, ProcessState, ProcessSupervisor,
+    ProcessExitKind, ProcessFuture, ProcessReport, ProcessRoot, ProcessRootEventPhase,
+    ProcessRootExitCategory, ProcessState, ProcessSupervisor,
 };
 use tokio::sync::Notify;
 
@@ -250,6 +251,34 @@ async fn start_process_shutdown_case(
     panic!("process root did not become active");
 }
 
+fn process_transition<E>(report: &ProcessReport<E>, expected: ProcessState) -> (usize, Duration) {
+    report
+        .transitions()
+        .iter()
+        .enumerate()
+        .find_map(|(position, transition)| {
+            (transition.state() == expected).then_some((position, transition.elapsed()))
+        })
+        .unwrap_or_else(|| panic!("missing {expected:?} transition"))
+}
+
+fn assert_process_timeline_is_monotonic<E>(report: &ProcessReport<E>) {
+    assert_eq!(report.states().len(), report.transitions().len());
+    assert!(
+        report
+            .states()
+            .iter()
+            .zip(report.transitions())
+            .all(|(state, transition)| *state == transition.state())
+    );
+    assert!(
+        report
+            .transitions()
+            .windows(2)
+            .all(|pair| pair[0].elapsed() <= pair[1].elapsed())
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
     let (graceful, graceful_tx, graceful_registry, graceful_phases, graceful_terminal_markers) =
@@ -275,6 +304,28 @@ async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
             ProcessState::Stopped,
         ]
     );
+    assert_process_timeline_is_monotonic(&graceful);
+    assert_eq!(
+        graceful.grace_deadline_elapsed(),
+        Some(Duration::from_secs(5))
+    );
+    let (graceful_quiescing_position, graceful_quiescing_elapsed) =
+        process_transition(&graceful, ProcessState::Quiescing);
+    let (graceful_draining_position, graceful_draining_elapsed) =
+        process_transition(&graceful, ProcessState::Draining);
+    let (graceful_stopped_position, graceful_stopped_elapsed) =
+        process_transition(&graceful, ProcessState::Stopped);
+    assert_eq!(graceful_quiescing_elapsed, Duration::ZERO);
+    assert_eq!(graceful_draining_elapsed, Duration::ZERO);
+    assert_eq!(graceful_stopped_elapsed, Duration::from_secs(2));
+    assert!(graceful_quiescing_position < graceful_draining_position);
+    assert!(graceful_draining_position < graceful_stopped_position);
+    assert_eq!(graceful.root_events().len(), 1);
+    let graceful_root = graceful.root_events()[0];
+    assert_eq!(graceful_root.root().get(), 0);
+    assert_eq!(graceful_root.phase(), ProcessRootEventPhase::Draining);
+    assert_eq!(graceful_root.exit(), ProcessRootExitCategory::Completed);
+    assert_eq!(graceful_root.elapsed(), Duration::from_secs(2));
     assert_eq!(
         *graceful_phases.lock().expect("phase lock"),
         [ProcessCancellationPhase::Quiescing]
@@ -286,8 +337,25 @@ async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
         start_process_shutdown_case(ProcessShutdownBehavior::AwaitForce, Duration::from_secs(5))
             .await;
     forced_tx.send(()).expect("request forced shutdown");
+    for _ in 0..100 {
+        let quiescing_observed = {
+            forced_phases.lock().expect("phase lock").as_slice()
+                == [ProcessCancellationPhase::Quiescing]
+        };
+        if quiescing_observed {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        *forced_phases.lock().expect("phase lock"),
+        [ProcessCancellationPhase::Quiescing],
+        "the root observes quiescing before paused time advances",
+    );
+    tokio::time::advance(Duration::from_millis(4_999)).await;
     tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(5)).await;
+    assert!(!forced.is_finished());
+    tokio::time::advance(Duration::from_millis(1)).await;
     let forced = forced.await.expect("forced process owner");
     assert_eq!(forced.exit_kind(), ProcessExitKind::Forced);
     assert_eq!(forced.forced_roots(), 1);
@@ -304,6 +372,31 @@ async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
             ProcessState::Stopped,
         ]
     );
+    assert_process_timeline_is_monotonic(&forced);
+    assert_eq!(
+        forced.grace_deadline_elapsed(),
+        Some(Duration::from_secs(5))
+    );
+    let (forced_quiescing_position, forced_quiescing_elapsed) =
+        process_transition(&forced, ProcessState::Quiescing);
+    let (forced_draining_position, forced_draining_elapsed) =
+        process_transition(&forced, ProcessState::Draining);
+    let (forced_position, forced_elapsed) = process_transition(&forced, ProcessState::Forced);
+    let (forced_stopped_position, forced_stopped_elapsed) =
+        process_transition(&forced, ProcessState::Stopped);
+    assert_eq!(forced_quiescing_elapsed, Duration::ZERO);
+    assert_eq!(forced_draining_elapsed, Duration::ZERO);
+    assert!(forced_elapsed >= Duration::from_secs(5));
+    assert!(forced_quiescing_position < forced_draining_position);
+    assert!(forced_draining_position < forced_position);
+    assert!(forced_position < forced_stopped_position);
+    assert!(forced_stopped_elapsed >= forced_elapsed);
+    assert_eq!(forced.root_events().len(), 1);
+    let forced_root = forced.root_events()[0];
+    assert_eq!(forced_root.root().get(), 0);
+    assert_eq!(forced_root.phase(), ProcessRootEventPhase::Forced);
+    assert_eq!(forced_root.exit(), ProcessRootExitCategory::Completed);
+    assert!(forced_root.elapsed() >= Duration::from_secs(5));
     assert_eq!(
         *forced_phases.lock().expect("phase lock"),
         [
@@ -326,11 +419,21 @@ async fn process_shutdown_table_drains_forces_and_reports_cleanup_failure() {
     failed_tx.send(()).expect("request cleanup failure");
     let failed = failed.await.expect("failed process owner");
     assert_eq!(failed.exit_kind(), ProcessExitKind::Failed);
+    assert_eq!(
+        failed.grace_deadline_elapsed(),
+        Some(Duration::from_secs(5))
+    );
     assert!(matches!(
         failed.cleanup_failure(),
         Some(ProcessCleanupFailure::RootFailed { root, error: "cleanup" })
             if root.get() == 0
     ));
+    assert_eq!(failed.root_events().len(), 1);
+    let failed_root = failed.root_events()[0];
+    assert_eq!(failed_root.root().get(), 0);
+    assert_eq!(failed_root.phase(), ProcessRootEventPhase::Draining);
+    assert_eq!(failed_root.exit(), ProcessRootExitCategory::Failed);
+    assert!(!format!("{:?}", failed.root_events()).contains("cleanup"));
     assert_eq!(failed_registry.snapshot().active_process_roots, 0);
     assert_eq!(failed_registry.snapshot().process_root_reaps, 1);
     assert_eq!(failed_terminal_markers.load(Ordering::SeqCst), 1);
@@ -378,6 +481,7 @@ async fn uncooperative_forced_root_is_aborted_and_reports_cleanup_failure() {
     let report = process.await.expect("bounded forced reap");
 
     assert_eq!(report.cause(), &ProcessCause::ExternalShutdown);
+    assert_eq!(report.grace_deadline_elapsed(), Some(Duration::ZERO));
     assert!(matches!(
         report.cleanup_failure(),
         Some(ProcessCleanupFailure::ForceReapTimedOut {
@@ -392,6 +496,28 @@ async fn uncooperative_forced_root_is_aborted_and_reports_cleanup_failure() {
                 )
     ));
     assert!(report.forced_roots() >= 2);
+    assert_eq!(report.root_events().len(), 3);
+    assert_eq!(report.root_events()[0].root().get(), 2);
+    assert_eq!(
+        report.root_events()[0].phase(),
+        ProcessRootEventPhase::Forced
+    );
+    assert_eq!(
+        report.root_events()[0].exit(),
+        ProcessRootExitCategory::Failed
+    );
+    for (event, expected_root) in report.root_events()[1..].iter().zip([0, 1]) {
+        assert_eq!(event.root().get(), expected_root);
+        assert_eq!(event.phase(), ProcessRootEventPhase::WatchdogAbort);
+        assert_eq!(event.exit(), ProcessRootExitCategory::Aborted);
+        assert!(event.elapsed() >= Duration::from_secs(5));
+    }
+    assert!(
+        report
+            .root_events()
+            .windows(2)
+            .all(|pair| pair[0].elapsed() <= pair[1].elapsed())
+    );
     assert_eq!(terminal_markers.load(Ordering::SeqCst), 3);
     assert_eq!(registry.snapshot().active_process_roots, 0);
     assert_eq!(registry.snapshot().process_root_reaps, 3);

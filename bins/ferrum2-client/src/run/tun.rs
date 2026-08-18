@@ -62,6 +62,7 @@ pub(super) fn process_root(
         RunError::StartupProtocol,
         RunError::RuntimeRoot,
         RunError::ShutdownCleanup,
+        context.registry.clone(),
         move |flow, cancellation| {
             let context = Arc::clone(&handler_context);
             let routing = Arc::clone(&tcp_routing);

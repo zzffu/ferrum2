@@ -287,10 +287,88 @@ pub enum ProcessExitKind {
     Failed,
 }
 
+/// One immutable process-state observation on the supervisor's monotonic clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessTransition {
+    state: ProcessState,
+    elapsed: Duration,
+}
+
+impl ProcessTransition {
+    /// Returns the state entered by this transition.
+    pub fn state(&self) -> ProcessState {
+        self.state
+    }
+
+    /// Returns monotonic time elapsed since this supervisor run began.
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+}
+
+/// Shutdown phase in which one active root was observed to have been reaped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessRootEventPhase {
+    /// The root stopped before process quiescing began and became the primary cause.
+    Active,
+    /// The root stopped while the process was inside its graceful drain bound.
+    Draining,
+    /// The root stopped after the grace deadline and cooperative force signal.
+    Forced,
+    /// The fixed force-reap watchdog expired and the root task was aborted.
+    WatchdogAbort,
+}
+
+/// Closed root outcome used by the shutdown timeline.
+///
+/// Unlike [`ProcessRootExit`], this category never retains a root error value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessRootExitCategory {
+    Completed,
+    Failed,
+    Panicked,
+    JoinFailed,
+    Aborted,
+}
+
+/// One immutable, secret-free root exit observation on the supervisor clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessRootEvent {
+    root: ProcessRootId,
+    phase: ProcessRootEventPhase,
+    exit: ProcessRootExitCategory,
+    elapsed: Duration,
+}
+
+impl ProcessRootEvent {
+    /// Returns the insertion-order identity of the reaped root.
+    pub fn root(&self) -> ProcessRootId {
+        self.root
+    }
+
+    /// Returns the shutdown phase in which the exit was observed.
+    pub fn phase(&self) -> ProcessRootEventPhase {
+        self.phase
+    }
+
+    /// Returns the closed root outcome without retaining the root error value.
+    pub fn exit(&self) -> ProcessRootExitCategory {
+        self.exit
+    }
+
+    /// Returns monotonic time elapsed since this supervisor run began.
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+}
+
 /// Bounded lifecycle report returned only after rollback or root reaping.
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProcessReport<E> {
     states: Vec<ProcessState>,
+    transitions: Vec<ProcessTransition>,
+    root_events: Vec<ProcessRootEvent>,
+    grace_deadline_elapsed: Option<Duration>,
     cause: ProcessCause<E>,
     forced_roots: usize,
     cleanup_failure: Option<ProcessCleanupFailure<E>>,
@@ -300,6 +378,27 @@ impl<E> ProcessReport<E> {
     /// Returns the complete bounded state sequence.
     pub fn states(&self) -> &[ProcessState] {
         &self.states
+    }
+
+    /// Returns the complete bounded state timeline on Tokio's monotonic clock.
+    pub fn transitions(&self) -> &[ProcessTransition] {
+        &self.transitions
+    }
+
+    /// Returns the ordered, bounded root exit timeline.
+    ///
+    /// Each active root contributes at most one event, including a root reaped
+    /// by the fixed watchdog, so the slice can never exceed the configured root
+    /// count. Root error values are deliberately excluded.
+    pub fn root_events(&self) -> &[ProcessRootEvent] {
+        &self.root_events
+    }
+
+    /// Returns the runtime-created grace deadline relative to this run's
+    /// monotonic start, or `None` when shutdown ended during rollback before a
+    /// drain deadline was created.
+    pub fn grace_deadline_elapsed(&self) -> Option<Duration> {
+        self.grace_deadline_elapsed
     }
 
     /// Returns the deterministic first termination cause.
@@ -326,6 +425,69 @@ impl<E> ProcessReport<E> {
         } else {
             ProcessExitKind::Graceful
         }
+    }
+}
+
+#[derive(Debug)]
+struct ProcessTimeline {
+    started_at: Instant,
+    states: Vec<ProcessState>,
+    transitions: Vec<ProcessTransition>,
+    root_events: Vec<ProcessRootEvent>,
+    root_event_limit: usize,
+    grace_deadline_elapsed: Option<Duration>,
+}
+
+impl ProcessTimeline {
+    fn new(root_count: usize) -> Self {
+        let mut timeline = Self {
+            started_at: Instant::now(),
+            states: Vec::new(),
+            transitions: Vec::new(),
+            root_events: Vec::with_capacity(root_count),
+            root_event_limit: root_count,
+            grace_deadline_elapsed: None,
+        };
+        timeline.push(ProcessState::Validated);
+        timeline.push(ProcessState::Preparing);
+        timeline
+    }
+
+    fn push(&mut self, state: ProcessState) {
+        self.states.push(state);
+        self.transitions.push(ProcessTransition {
+            state,
+            elapsed: Instant::now().duration_since(self.started_at),
+        });
+    }
+
+    fn record_grace_deadline(&mut self, deadline: Instant) {
+        debug_assert!(self.grace_deadline_elapsed.is_none());
+        self.grace_deadline_elapsed = Some(deadline.duration_since(self.started_at));
+    }
+
+    fn push_root_event(
+        &mut self,
+        root: ProcessRootId,
+        phase: ProcessRootEventPhase,
+        exit: ProcessRootExitCategory,
+    ) {
+        let root_is_new = self.root_events.iter().all(|event| event.root != root);
+        let within_bound =
+            root.get() < self.root_event_limit && self.root_events.len() < self.root_event_limit;
+        debug_assert!(
+            root_is_new && within_bound,
+            "an active process root is reaped exactly once",
+        );
+        if !root_is_new || !within_bound {
+            return;
+        }
+        self.root_events.push(ProcessRootEvent {
+            root,
+            phase,
+            exit,
+            elapsed: Instant::now().duration_since(self.started_at),
+        });
     }
 }
 
@@ -384,8 +546,9 @@ where
         let baseline = registry.snapshot();
         let process_guard = registry.track_process_supervisor();
         let (cancellation_source, cancellation) = ProcessCancellationSource::new();
-        let mut states = vec![ProcessState::Validated, ProcessState::Preparing];
-        let mut prepared = Vec::with_capacity(roots.len());
+        let root_count = roots.len();
+        let mut timeline = ProcessTimeline::new(root_count);
+        let mut prepared = Vec::with_capacity(root_count);
         tokio::pin!(shutdown);
 
         for (index, root) in roots.into_iter().enumerate() {
@@ -401,7 +564,7 @@ where
                         biased;
                         () = &mut shutdown => {
                             cancellation_source.quiesce();
-                            states.push(ProcessState::Rollback);
+                            timeline.push(ProcessState::Rollback);
                             let mut cleanup_failure = None;
                             if reap_on_cancellation {
                                 match preparation.await {
@@ -431,7 +594,7 @@ where
                                 cleanup_failure = rollback_failure;
                             }
                             return finish_report(
-                                states,
+                                timeline,
                                 ProcessCause::ExternalShutdown,
                                 0,
                                 cleanup_failure,
@@ -455,10 +618,10 @@ where
                 }),
                 Ok(PrepareOutcome::Failed(error)) => {
                     cancellation_source.quiesce();
-                    states.push(ProcessState::Rollback);
+                    timeline.push(ProcessState::Rollback);
                     let cleanup_failure = rollback_prepared(prepared, &registry).await;
                     return finish_report(
-                        states,
+                        timeline,
                         ProcessCause::PreparationFailed {
                             root: root_id,
                             error,
@@ -474,10 +637,10 @@ where
                 }
                 Ok(PrepareOutcome::Cancelled) | Err(()) => {
                     cancellation_source.quiesce();
-                    states.push(ProcessState::Rollback);
+                    timeline.push(ProcessState::Rollback);
                     let cleanup_failure = rollback_prepared(prepared, &registry).await;
                     return finish_report(
-                        states,
+                        timeline,
                         ProcessCause::PreparationPanicked { root: root_id },
                         0,
                         cleanup_failure,
@@ -491,14 +654,14 @@ where
             }
         }
 
-        states.push(ProcessState::Prepared);
+        timeline.push(ProcessState::Prepared);
         for position in 0..prepared.len() {
             if future_is_ready(shutdown.as_mut()).await {
                 cancellation_source.quiesce();
-                states.push(ProcessState::Rollback);
+                timeline.push(ProcessState::Rollback);
                 let cleanup_failure = rollback_prepared(prepared, &registry).await;
                 return finish_report(
-                    states,
+                    timeline,
                     ProcessCause::ExternalShutdown,
                     0,
                     cleanup_failure,
@@ -515,10 +678,10 @@ where
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     cancellation_source.quiesce();
-                    states.push(ProcessState::Rollback);
+                    timeline.push(ProcessState::Rollback);
                     let cleanup_failure = rollback_prepared(prepared, &registry).await;
                     return finish_report(
-                        states,
+                        timeline,
                         ProcessCause::ActivationFailed {
                             root: root_id,
                             error,
@@ -534,10 +697,10 @@ where
                 }
                 Err(_) => {
                     cancellation_source.quiesce();
-                    states.push(ProcessState::Rollback);
+                    timeline.push(ProcessState::Rollback);
                     let cleanup_failure = rollback_prepared(prepared, &registry).await;
                     return finish_report(
-                        states,
+                        timeline,
                         ProcessCause::ActivationPanicked { root: root_id },
                         0,
                         cleanup_failure,
@@ -553,10 +716,10 @@ where
 
         if future_is_ready(shutdown.as_mut()).await {
             cancellation_source.quiesce();
-            states.push(ProcessState::Rollback);
+            timeline.push(ProcessState::Rollback);
             let cleanup_failure = rollback_prepared(prepared, &registry).await;
             return finish_report(
-                states,
+                timeline,
                 ProcessCause::ExternalShutdown,
                 0,
                 cleanup_failure,
@@ -585,7 +748,7 @@ where
                 Err(_) => {
                     drop(guard);
                     cancellation_source.quiesce();
-                    states.push(ProcessState::Rollback);
+                    timeline.push(ProcessState::Rollback);
                     let mut cleanup_failure =
                         rollback_prepared(prepared.collect(), &registry).await;
                     let handoff_cleanup = rollback_unstarted(unstarted, &registry).await;
@@ -593,7 +756,7 @@ where
                         cleanup_failure = handoff_cleanup;
                     }
                     return finish_report(
-                        states,
+                        timeline,
                         ProcessCause::ActivationPanicked { root: root_id },
                         0,
                         cleanup_failure,
@@ -619,14 +782,19 @@ where
                 }
             })
             .collect::<Vec<_>>();
-        states.push(ProcessState::Active);
+        timeline.push(ProcessState::Active);
         tokio::task::yield_now().await;
 
         let cause = tokio::select! {
             biased;
             () = &mut shutdown => ProcessCause::ExternalShutdown,
             event = next_root_event(&mut active, &registry) => {
-                states.push(ProcessState::Fatal);
+                timeline.push_root_event(
+                    event.root,
+                    ProcessRootEventPhase::Active,
+                    root_exit_category(&event.exit),
+                );
+                timeline.push(ProcessState::Fatal);
                 ProcessCause::RootStopped {
                     root: event.root,
                     exit: event.exit,
@@ -635,9 +803,10 @@ where
         };
 
         cancellation_source.quiesce();
-        states.push(ProcessState::Quiescing);
-        states.push(ProcessState::Draining);
+        timeline.push(ProcessState::Quiescing);
+        timeline.push(ProcessState::Draining);
         let deadline = Instant::now() + shutdown_grace;
+        timeline.record_grace_deadline(deadline);
         let mut cleanup_failure = None;
         let mut forced_roots = 0;
         let mut force_reap_deadline = None;
@@ -647,13 +816,19 @@ where
                 let timed_out = tokio::select! {
                     biased;
                     event = next_root_event(&mut active, &registry) => {
+                        timeline.push_root_event(
+                            event.root,
+                            ProcessRootEventPhase::Forced,
+                            root_exit_category(&event.exit),
+                        );
                         record_cleanup_event(event, &mut cleanup_failure);
                         false
                     }
                     () = tokio::time::sleep_until(force_reap_deadline) => true,
                 };
                 if timed_out {
-                    let roots = abort_and_reap_remaining(&mut active, &registry).await;
+                    let roots =
+                        abort_and_reap_remaining(&mut active, &registry, &mut timeline).await;
                     cleanup_failure = Some(ProcessCleanupFailure::ForceReapTimedOut {
                         roots,
                         prior: cleanup_failure.take().map(Box::new),
@@ -664,13 +839,18 @@ where
             let timed_out = tokio::select! {
                 biased;
                 event = next_root_event(&mut active, &registry) => {
+                    timeline.push_root_event(
+                        event.root,
+                        ProcessRootEventPhase::Draining,
+                        root_exit_category(&event.exit),
+                    );
                     record_cleanup_event(event, &mut cleanup_failure);
                     false
                 }
                 () = tokio::time::sleep_until(deadline) => true,
             };
             if timed_out {
-                states.push(ProcessState::Forced);
+                timeline.push(ProcessState::Forced);
                 cancellation_source.force();
                 forced_roots = active.iter().filter(|entry| entry.is_running()).count();
                 registry.record_process_forced_roots(forced_roots);
@@ -679,7 +859,7 @@ where
         }
 
         finish_report(
-            states,
+            timeline,
             cause,
             forced_roots,
             cleanup_failure,
@@ -851,6 +1031,15 @@ fn root_exit<E>(result: Result<Result<(), E>, JoinError>) -> ProcessRootExit<E> 
     }
 }
 
+fn root_exit_category<E>(exit: &ProcessRootExit<E>) -> ProcessRootExitCategory {
+    match exit {
+        ProcessRootExit::Completed => ProcessRootExitCategory::Completed,
+        ProcessRootExit::Failed(_) => ProcessRootExitCategory::Failed,
+        ProcessRootExit::Panicked => ProcessRootExitCategory::Panicked,
+        ProcessRootExit::JoinFailed => ProcessRootExitCategory::JoinFailed,
+    }
+}
+
 fn record_cleanup_event<E>(
     event: RootEvent<E>,
     cleanup_failure: &mut Option<ProcessCleanupFailure<E>>,
@@ -874,6 +1063,7 @@ fn record_cleanup_event<E>(
 async fn abort_and_reap_remaining<E>(
     active: &mut [ActiveEntry<E>],
     registry: &OwnerRegistry,
+    timeline: &mut ProcessTimeline,
 ) -> Vec<ProcessRootId> {
     let roots = active
         .iter()
@@ -887,7 +1077,12 @@ async fn abort_and_reap_remaining<E>(
     }
     for entry in active {
         if let Some(task) = entry.task.take() {
-            let _ = task.await;
+            let result = task.await;
+            let exit = match result {
+                Err(error) if error.is_cancelled() => ProcessRootExitCategory::Aborted,
+                result => root_exit_category(&root_exit(result)),
+            };
+            timeline.push_root_event(entry.id, ProcessRootEventPhase::WatchdogAbort, exit);
             entry.guard.take();
             registry.record_process_root_reap();
         }
@@ -902,13 +1097,13 @@ struct FinishContext<'a> {
 }
 
 fn finish_report<E>(
-    mut states: Vec<ProcessState>,
+    mut timeline: ProcessTimeline,
     cause: ProcessCause<E>,
     forced_roots: usize,
     mut cleanup_failure: Option<ProcessCleanupFailure<E>>,
     finish: FinishContext<'_>,
 ) -> ProcessReport<E> {
-    states.push(ProcessState::Stopped);
+    timeline.push(ProcessState::Stopped);
     drop(finish.process_guard);
     let stopped = finish.registry.snapshot();
     if cleanup_failure.is_none() && !finish.baseline.has_same_active_owners(stopped) {
@@ -918,9 +1113,32 @@ fn finish_report<E>(
         });
     }
     ProcessReport {
-        states,
+        states: timeline.states,
+        transitions: timeline.transitions,
+        root_events: timeline.root_events,
+        grace_deadline_elapsed: timeline.grace_deadline_elapsed,
         cause,
         forced_roots,
         cleanup_failure,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_join_uses_closed_join_failed_category() {
+        let task = tokio::spawn(std::future::pending::<Result<(), &'static str>>());
+        tokio::task::yield_now().await;
+        task.abort();
+
+        let exit = root_exit(task.await);
+
+        assert!(matches!(&exit, ProcessRootExit::JoinFailed));
+        assert_eq!(
+            root_exit_category(&exit),
+            ProcessRootExitCategory::JoinFailed
+        );
     }
 }

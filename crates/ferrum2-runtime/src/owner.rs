@@ -16,6 +16,10 @@ pub struct OwnerSnapshot {
     pub process_root_rollbacks: usize,
     /// Active roots explicitly force-cancelled and joined after the grace deadline.
     pub process_forced_roots: usize,
+    /// TCP flows currently owned by a TUN foundation stack.
+    pub active_tun_tcp_flows: usize,
+    /// TCP or UDP handler tasks currently owned by a TUN process root.
+    pub active_tun_handler_tasks: usize,
     /// Children currently owned by a supervisor `JoinSet`.
     pub active_supervisor_children: usize,
     /// Active connection owner tasks.
@@ -54,6 +58,8 @@ struct OwnerCounters {
     process_root_reaps: AtomicUsize,
     process_root_rollbacks: AtomicUsize,
     process_forced_roots: AtomicUsize,
+    active_tun_tcp_flows: AtomicUsize,
+    active_tun_handler_tasks: AtomicUsize,
     supervisor_children: AtomicUsize,
     connection_tasks: AtomicUsize,
     buffers: AtomicUsize,
@@ -91,6 +97,11 @@ impl OwnerRegistry {
             process_root_reaps: self.counters.process_root_reaps.load(Ordering::SeqCst),
             process_root_rollbacks: self.counters.process_root_rollbacks.load(Ordering::SeqCst),
             process_forced_roots: self.counters.process_forced_roots.load(Ordering::SeqCst),
+            active_tun_tcp_flows: self.counters.active_tun_tcp_flows.load(Ordering::SeqCst),
+            active_tun_handler_tasks: self
+                .counters
+                .active_tun_handler_tasks
+                .load(Ordering::SeqCst),
             active_supervisor_children: self.counters.supervisor_children.load(Ordering::SeqCst),
             connection_tasks: self.counters.connection_tasks.load(Ordering::SeqCst),
             owned_buffers: self.counters.buffers.load(Ordering::SeqCst),
@@ -122,6 +133,20 @@ impl OwnerRegistry {
 
     pub(crate) fn track_active_process_root(&self) -> OwnerGuard {
         OwnerGuard::new(self, OwnerKind::ActiveProcessRoot)
+    }
+
+    /// Tracks one TUN TCP flow until the returned owner is dropped.
+    pub fn track_tun_tcp_flow(&self) -> TunTcpFlowOwner {
+        TunTcpFlowOwner {
+            _guard: OwnerGuard::new(self, OwnerKind::TunTcpFlow),
+        }
+    }
+
+    /// Tracks one TUN handler task until the returned owner is dropped.
+    pub fn track_tun_handler_task(&self) -> TunHandlerTaskOwner {
+        TunHandlerTaskOwner {
+            _guard: OwnerGuard::new(self, OwnerKind::TunHandlerTask),
+        }
     }
 
     pub(crate) fn track_connection_task(&self) -> OwnerGuard {
@@ -231,6 +256,8 @@ enum OwnerKind {
     ProcessSupervisor,
     PreparedProcessRoot,
     ActiveProcessRoot,
+    TunTcpFlow,
+    TunHandlerTask,
     SupervisorChild,
     ConnectionTask,
     Buffer,
@@ -241,6 +268,18 @@ enum OwnerKind {
     UdpTask,
     UdpQueueEntry,
     UdpScratch,
+}
+
+/// Drop guard for one TCP flow owned by a TUN foundation stack.
+#[derive(Debug)]
+pub struct TunTcpFlowOwner {
+    _guard: OwnerGuard,
+}
+
+/// Drop guard for one handler task owned by a TUN process root.
+#[derive(Debug)]
+pub struct TunHandlerTaskOwner {
+    _guard: OwnerGuard,
 }
 
 #[derive(Debug)]
@@ -283,6 +322,8 @@ fn counter(counters: &OwnerCounters, kind: OwnerKind) -> &AtomicUsize {
         OwnerKind::ProcessSupervisor => &counters.process_supervisors,
         OwnerKind::PreparedProcessRoot => &counters.prepared_process_roots,
         OwnerKind::ActiveProcessRoot => &counters.active_process_roots,
+        OwnerKind::TunTcpFlow => &counters.active_tun_tcp_flows,
+        OwnerKind::TunHandlerTask => &counters.active_tun_handler_tasks,
         OwnerKind::SupervisorChild => &counters.supervisor_children,
         OwnerKind::ConnectionTask => &counters.connection_tasks,
         OwnerKind::Buffer => &counters.buffers,
@@ -301,6 +342,8 @@ impl OwnerSnapshot {
         self.process_supervisors == other.process_supervisors
             && self.prepared_process_roots == other.prepared_process_roots
             && self.active_process_roots == other.active_process_roots
+            && self.active_tun_tcp_flows == other.active_tun_tcp_flows
+            && self.active_tun_handler_tasks == other.active_tun_handler_tasks
             && self.active_supervisor_children == other.active_supervisor_children
             && self.connection_tasks == other.connection_tasks
             && self.owned_buffers == other.owned_buffers
