@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 use crate::OwnerRegistry;
 
 /// Fixed application buffer capacity for each relay direction.
-pub const RELAY_BUFFER_BYTES: usize = 16_384;
+pub const RELAY_BUFFER_BYTES: usize = 32_768;
 
 /// Successfully forwarded byte totals retained by a relay outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
