@@ -8,9 +8,9 @@ use std::task::{Context, Poll, Waker};
 use ferrum2_core::{ConnectErrorKind, TargetAddr};
 use ferrum2_crypto::{MethodPsk, MethodSinglePskProvider, TcpMethodProfile};
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, FlowTerminal, MethodKeyAdapter, PlainDuplex,
-    ProtocolReason, ShadowsocksError, ShadowsocksTcpInbound, TcpKeyProvider, TcpReplayStore,
-    TransportPhase, encode_response_first_write,
+    ClientTcpOutbound, DetectionReason, FlowTerminal, MAX_ENCODE_PAYLOAD_LEN, MethodKeyAdapter,
+    PlainDuplex, ProtocolReason, ShadowsocksError, ShadowsocksTcpInbound, TcpKeyProvider,
+    TcpReplayStore, TransportPhase, encode_response_first_write,
 };
 
 use common::{
@@ -137,7 +137,7 @@ fn closed_contract_is_copyable_opaque_and_source_free() {
 }
 
 #[tokio::test]
-async fn write_admission_and_single_scratch_backpressure_cover_0_1_16384_16385() {
+async fn write_admission_and_single_scratch_backpressure_cover_0_1_max_and_max_plus_one() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let request_salt = salt_from_u64(1000);
@@ -155,13 +155,19 @@ async fn write_admission_and_single_scratch_backpressure_cover_0_1_16384_16385()
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     assert!(matches!(
-        Pin::new(&mut flow).poll_write_plain(&mut cx, &[2; 16_384]),
+        Pin::new(&mut flow).poll_write_plain(&mut cx, &[2; MAX_ENCODE_PAYLOAD_LEN]),
         Poll::Pending
     ));
     assert_eq!(observation.lock().expect("observation").write_calls, 2);
 
-    assert_eq!(write_plain(&mut flow, &[2; 16_384]).await, Ok(16_384));
-    assert_eq!(write_plain(&mut flow, &[3; 16_385]).await, Ok(16_384));
+    assert_eq!(
+        write_plain(&mut flow, &[2; MAX_ENCODE_PAYLOAD_LEN]).await,
+        Ok(MAX_ENCODE_PAYLOAD_LEN)
+    );
+    assert_eq!(
+        write_plain(&mut flow, &[3; MAX_ENCODE_PAYLOAD_LEN + 1]).await,
+        Ok(MAX_ENCODE_PAYLOAD_LEN)
+    );
 }
 
 #[tokio::test]
@@ -185,8 +191,8 @@ async fn response_pending_opposite_direction_failures_keep_protocol_or_transport
         .await
         .expect("client");
     assert_eq!(
-        write_plain(&mut client, &[0x5a; 16_385]).await,
-        Ok(16_384),
+        write_plain(&mut client, &[0x5a; MAX_ENCODE_PAYLOAD_LEN + 1]).await,
+        Ok(MAX_ENCODE_PAYLOAD_LEN),
         "response-pending client TX admits its structural maximum without a fatal"
     );
     assert_eq!(client.terminal(), None);
