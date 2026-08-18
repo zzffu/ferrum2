@@ -16,6 +16,7 @@ from decimal import Decimal
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tools" / "performance_candidate.py"
 POLICY_PATH = ROOT / "tools" / "performance_candidate_policy.json"
+SCALE_POLICY_PATH = ROOT / "tools" / "performance_candidate_scale_safety_policy.json"
 SPEC = importlib.util.spec_from_file_location("performance_candidate", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 CONTROL = importlib.util.module_from_spec(SPEC)
@@ -57,6 +58,232 @@ def synthetic_policy(
         )
     CONTROL.validate_decision_policy(policy)
     return policy
+
+
+def synthetic_scale_sample(
+    *, active: int, client_smaps: int, server_smaps: int, harness: int = 100
+) -> dict[str, int]:
+    return {
+        "client_active": active,
+        "server_active": active,
+        "client_fds": 20 if active else 10,
+        "server_fds": 20 if active else 10,
+        "client_tasks": 8 if active else 4,
+        "server_tasks": 8 if active else 4,
+        "client_rss_kib": client_smaps,
+        "server_rss_kib": server_smaps,
+        "client_smaps_rss_kib": client_smaps,
+        "server_smaps_rss_kib": server_smaps,
+        "client_anonymous_kib": client_smaps,
+        "server_anonymous_kib": server_smaps,
+        "client_anon_huge_pages_kib": 0,
+        "server_anon_huge_pages_kib": 0,
+        "harness_rss_kib": harness,
+    }
+
+
+def synthetic_scale_row(
+    *,
+    pair: int,
+    member: str,
+    full_completions: int = 100,
+    starve_first: bool = False,
+    client_touch_extra_kib: int = 0,
+    server_touch_extra_kib: int = 0,
+) -> dict[str, object]:
+    payload = CONTROL.SCALE_RECIPE["payload_bytes"]
+    completions = [full_completions] * 10_000
+    if starve_first:
+        completions[0] = 0
+    full_bytes = [value * payload for value in completions]
+    partial_bytes = [payload] * 1_000
+    full_checked = sum(full_bytes)
+    full_completion_sum = sum(completions)
+    elapsed = 30_000_000_000
+    fairness_derived = CONTROL._recompute_scale_fairness(full_bytes)
+    fairness = {
+        field: fairness_derived[field] for field in CONTROL.SCALE_FAIRNESS_FIELDS
+    }
+    established = synthetic_scale_sample(
+        active=10_000, client_smaps=2_000, server_smaps=3_000
+    )
+    touched = synthetic_scale_sample(
+        active=10_000,
+        client_smaps=3_000 + client_touch_extra_kib,
+        server_smaps=4_000 + server_touch_extra_kib,
+    )
+    quiet = synthetic_scale_sample(active=0, client_smaps=1_000, server_smaps=1_500)
+    client_increment = CONTROL._truncating_division(
+        (1_000 + client_touch_extra_kib) * 1_024, 10_000
+    )
+    server_increment = CONTROL._truncating_division(
+        (1_000 + server_touch_extra_kib) * 1_024, 10_000
+    )
+    partial_completions = 1_000
+    touch_completions = 20_000
+    scale = {
+        "schema_version": 1,
+        "recipe": dict(CONTROL.SCALE_RECIPE),
+        "correctness": {
+            "target_accepted": 10_000,
+            "client_active": 10_000,
+            "server_active": 10_000,
+            "touch_completed_flows": 10_000,
+            "touch_completed_round_trips": touch_completions,
+            "touch_checked_bytes": touch_completions * payload,
+            "payload_checks": touch_completions
+            + partial_completions
+            + full_completion_sum,
+            "partial_nonzero_flows": 1_000,
+            "full_nonzero_flows": sum(value != 0 for value in full_bytes),
+            "application_tasks_joined": 10_000,
+            "target_tasks_joined": 10_000,
+            "drain": "PASS",
+            "rebind": "PASS",
+            "cleanup": "PASS",
+        },
+        "traffic": {
+            "partial_checked_bytes": sum(partial_bytes),
+            "partial_io_completions": partial_completions,
+            "partial_discarded_tail_completions": 0,
+            "partial_flow_bytes": partial_bytes,
+            "full_checked_bytes": full_checked,
+            "full_io_completions": full_completion_sum,
+            "full_discarded_tail_completions": 0,
+            "full_elapsed_nanoseconds": elapsed,
+            "full_flow_bytes": full_bytes,
+            "full_flow_completions": completions,
+            "aggregate_bytes_per_second": full_checked * 1_000_000_000 // elapsed,
+        },
+        "fairness": fairness,
+        "resource": {
+            "pre_load": [dict(quiet)],
+            "established": [dict(established) for _ in range(5)],
+            "touched": [dict(touched) for _ in range(5)],
+            "partial_active": [dict(touched) for _ in range(5)],
+            "full_active": [dict(touched) for _ in range(5)],
+            "post_full": [dict(touched) for _ in range(5)],
+            "drained": [dict(quiet)],
+            "client_touched_increment_bytes_per_connection": client_increment,
+            "server_touched_increment_bytes_per_connection": server_increment,
+            "combined_touched_increment_bytes_per_connection": client_increment
+            + server_increment,
+            "harness_peak_rss_kib": 100,
+            "memory_available_kib": 16_000_000,
+            "nofile_soft": 65_536,
+        },
+    }
+    parent = "1" * 40
+    candidate = "2" * 40
+    is_parent = member == "parent"
+    return {
+        "schema_version": CONTROL.PROFILE_TRIAL_SCHEMA_VERSION,
+        "kind": "m18_profile_trial",
+        "parent_sha": parent,
+        "candidate_sha": candidate,
+        "member": member,
+        "pair": pair,
+        "order": 1 if (pair % 2 == 1) == is_parent else 2,
+        "build_profile": "current",
+        "scenario": CONTROL.SCALE_SCENARIO,
+        "warmup_seconds": 10,
+        "active_seconds": 30,
+        "topology": "shadowsocks",
+        "application_payload_bytes": payload,
+        "socks_datagram_bytes": None,
+        "upstream_wire_bytes": None,
+        "sha": parent if is_parent else candidate,
+        "tree": ("3" if is_parent else "4") * 40,
+        "runner_sha256": "a" * 64,
+        "client_sha256": ("b" if is_parent else "c") * 64,
+        "server_sha256": ("d" if is_parent else "e") * 64,
+        "rustc": "rustc 1.97.1 test",
+        "kernel": "test-kernel",
+        "cpu_model": "test-cpu",
+        "cpu_count": 8,
+        "memory_kib": 32_000_000,
+        "metric": "bytes_per_second",
+        "value": scale["traffic"]["aggregate_bytes_per_second"],
+        "checked_units": full_checked,
+        "p99_nanoseconds": None,
+        "io_completions": full_completion_sum * 2,
+        "scale": scale,
+        "correctness": "PASS",
+        "status": "PASS",
+    }
+
+
+def rewrite_scale_full_completions(
+    row: dict[str, object], completions: list[int]
+) -> None:
+    if len(completions) != CONTROL.SCALE_RECIPE["sessions"]:
+        raise AssertionError("scale completion fixture must cover all sessions")
+    scale = row["scale"]
+    traffic = scale["traffic"]
+    correctness = scale["correctness"]
+    payload = CONTROL.SCALE_RECIPE["payload_bytes"]
+    full_bytes = [value * payload for value in completions]
+    full_checked = sum(full_bytes)
+    full_completion_sum = sum(completions)
+    traffic["full_flow_bytes"] = full_bytes
+    traffic["full_flow_completions"] = list(completions)
+    traffic["full_checked_bytes"] = full_checked
+    traffic["full_io_completions"] = full_completion_sum
+    traffic["aggregate_bytes_per_second"] = (
+        full_checked * 1_000_000_000 // traffic["full_elapsed_nanoseconds"]
+    )
+    fairness = CONTROL._recompute_scale_fairness(full_bytes)
+    scale["fairness"] = {
+        field: fairness[field] for field in CONTROL.SCALE_FAIRNESS_FIELDS
+    }
+    correctness["full_nonzero_flows"] = sum(value != 0 for value in full_bytes)
+    correctness["payload_checks"] = (
+        correctness["touch_completed_round_trips"]
+        + traffic["partial_io_completions"]
+        + traffic["partial_discarded_tail_completions"]
+        + full_completion_sum
+        + traffic["full_discarded_tail_completions"]
+    )
+    row["value"] = traffic["aggregate_bytes_per_second"]
+    row["checked_units"] = full_checked
+    row["io_completions"] = full_completion_sum * 2
+
+
+def rewrite_scale_resource_increments(row: dict[str, object]) -> None:
+    resource = row["scale"]["resource"]
+    sessions = CONTROL.SCALE_RECIPE["sessions"]
+    increments = {}
+    for side in ("client", "server"):
+        field = f"{side}_smaps_rss_kib"
+        established = CONTROL._scale_stage_median(resource["established"], field)
+        touched = CONTROL._scale_stage_median(resource["touched"], field)
+        increments[side] = CONTROL._truncating_division(
+            (touched - established) * 1_024, sessions
+        )
+        resource[f"{side}_touched_increment_bytes_per_connection"] = increments[
+            side
+        ]
+    resource["combined_touched_increment_bytes_per_connection"] = (
+        increments["client"] + increments["server"]
+    )
+
+
+def synthetic_scale_lineage() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "head_sha": "0" * 40,
+        "head_tree": "4" * 40,
+        "parent_sha": "1" * 40,
+        "parent_tree": "3" * 40,
+        "candidate_sha": "2" * 40,
+        "candidate_tree": "4" * 40,
+        "counterfactual_patch_sha256": "f" * 64,
+        "runner_sha256": "a" * 64,
+        "parent_client_sha256": "b" * 64,
+        "parent_server_sha256": "d" * 64,
+        "candidate_client_sha256": "c" * 64,
+        "candidate_server_sha256": "e" * 64,
+    }
 
 
 class MeasurementInputTests(unittest.TestCase):
@@ -409,6 +636,7 @@ class EvidenceSummaryTests(unittest.TestCase):
             "checked_units": 1_000,
             "p99_nanoseconds": value if metric == "p99_nanoseconds" else None,
             "io_completions": 2_000,
+            "scale": None,
             "correctness": "PASS",
             "status": "PASS",
         }
@@ -1147,6 +1375,444 @@ class EvidenceSummaryTests(unittest.TestCase):
                 )
 
 
+class ScaleControlTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.policy = CONTROL.load_scale_safety_policy(SCALE_POLICY_PATH)
+        self.plan = CONTROL.create_plan(
+            mode="qualification",
+            selection=CONTROL.SCALE_SCENARIO,
+            warmup_seconds="10",
+            active_seconds="30",
+            pairs="5",
+            decision_policy=CONTROL.load_decision_policy(POLICY_PATH),
+            scale_safety_policy=self.policy,
+            scale_lineage=synthetic_scale_lineage(),
+        )
+
+    def summarize_rows(
+        self,
+        candidates: list[dict[str, object]],
+        parents: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        parents = parents or [
+            synthetic_scale_row(pair=pair, member="parent")
+            for pair in range(1, 6)
+        ]
+        rows = {
+            (CONTROL.SCALE_SCENARIO, row["pair"], row["member"]): row
+            for row in [*parents, *candidates]
+        }
+        identity_fields = (
+            "sha",
+            "tree",
+            "runner_sha256",
+            "client_sha256",
+            "server_sha256",
+        )
+        member_identity = {
+            "parent": tuple(parents[0][field] for field in identity_fields),
+            "candidate": tuple(candidates[0][field] for field in identity_fields),
+        }
+        return CONTROL._summarize_scale_evidence(
+            plan=self.plan,
+            rows=rows,
+            parent_sha="1" * 40,
+            candidate_sha="2" * 40,
+            member_identity=member_identity,
+            identity_fields=identity_fields,
+            evidence_files=[],
+        )
+
+    def trial_failures(self, row: dict[str, object]) -> set[str]:
+        _observation, failures = CONTROL._scale_trial_observation(row, self.policy)
+        return set(failures)
+
+    def test_scale_plan_is_qualification_only_and_requires_exact_recipe(self) -> None:
+        self.assertEqual(self.plan["scenario_group"], CONTROL.SCALE_SCENARIO)
+        self.assertFalse(self.plan["adoption_eligible"])
+        self.assertEqual(self.plan["scale_safety_policy"], self.policy)
+        for mode, warmup, active, pairs in (
+            ("diagnostic", "10", "30", "5"),
+            ("qualification", "5", "30", "5"),
+            ("qualification", "10", "15", "5"),
+            ("qualification", "10", "30", "3"),
+        ):
+            with self.subTest(values=(mode, warmup, active, pairs)):
+                with self.assertRaises(CONTROL.CandidateControlError):
+                    CONTROL.create_plan(
+                        mode=mode,
+                        selection=CONTROL.SCALE_SCENARIO,
+                        warmup_seconds=warmup,
+                        active_seconds=active,
+                        pairs=pairs,
+                        decision_policy=CONTROL.load_decision_policy(POLICY_PATH),
+                        scale_safety_policy=self.policy,
+                        scale_lineage=synthetic_scale_lineage(),
+                    )
+
+    def test_scale_vectors_fairness_quantiles_and_signed_rss_recompute(self) -> None:
+        row = synthetic_scale_row(pair=1, member="parent")
+        derived = CONTROL._validate_scale_evidence(row)
+        self.assertEqual(
+            row["scale"]["recipe"]["quiescent_sample_interval_milliseconds"],
+            1_000,
+        )
+        self.assertEqual(
+            row["scale"]["recipe"]["active_sample_slot_denominator"], 6
+        )
+        self.assertNotIn(
+            "resource_sample_interval_milliseconds", row["scale"]["recipe"]
+        )
+        self.assertEqual(derived["fairness"]["jain_fraction"], 1)
+        self.assertEqual(
+            row["scale"]["resource"][
+                "client_touched_increment_bytes_per_connection"
+            ],
+            102,
+        )
+        ratio_vector = [16_384] * 100 + [32_768] * 9_900
+        ratio = CONTROL._recompute_scale_fairness(ratio_vector)
+        self.assertEqual(ratio["p01_bytes"], 16_384)
+        self.assertEqual(ratio["median_bytes"], 32_768)
+        self.assertEqual(ratio["p01_median_fraction"], CONTROL.Fraction(1, 2))
+        jain_boundary = CONTROL._recompute_scale_fairness(
+            [0] * 1_000 + [32_768] * 9_000
+        )
+        self.assertEqual(jain_boundary["jain_fraction"], CONTROL.Fraction(9, 10))
+
+    def test_scale_safety_requires_four_throughput_wins_without_adoption(self) -> None:
+        candidates = [
+            synthetic_scale_row(
+                pair=pair,
+                member="candidate",
+                full_completions=101 if pair <= 4 else 100,
+            )
+            for pair in range(1, 6)
+        ]
+        passed = self.summarize_rows(candidates)
+        self.assertEqual(passed["status"], "SCALE_SAFETY_PASS")
+        self.assertFalse(passed["adoption_claim"])
+        self.assertEqual(passed["scale_safety"]["throughput_wins"], 4)
+
+        failed = self.summarize_rows(
+            [
+                synthetic_scale_row(
+                    pair=pair,
+                    member="candidate",
+                    full_completions=101 if pair <= 3 else 100,
+                )
+                for pair in range(1, 6)
+            ]
+        )
+        self.assertEqual(failed["status"], "SCALE_SAFETY_FAIL")
+        self.assertIn("THROUGHPUT_WINS", failed["scale_safety"]["failures"])
+
+    def test_zero_flow_is_valid_evidence_but_a_hard_scale_failure(self) -> None:
+        candidates = [
+            synthetic_scale_row(
+                pair=pair,
+                member="candidate",
+                full_completions=101,
+                starve_first=pair == 1,
+            )
+            for pair in range(1, 6)
+        ]
+        summary = self.summarize_rows(candidates)
+        self.assertEqual(summary["status"], "SCALE_SAFETY_FAIL")
+        self.assertTrue(
+            any("FULL_ALL_FLOWS_NONZERO" in failure for failure in summary["scale_safety"]["failures"])
+        )
+
+    def test_host_owner_tuple_and_zero_touched_rss_are_scale_failures(self) -> None:
+        mutations = {}
+
+        def low_cpu(row):
+            row["cpu_count"] = 3
+
+        mutations["HOST_CPU_COUNT"] = low_cpu
+
+        def low_memory(row):
+            row["memory_kib"] = 14_999_999
+
+        mutations["HOST_MEMORY_TOTAL"] = low_memory
+
+        def owner_drift(row):
+            row["scale"]["resource"]["touched"][2]["client_fds"] += 1
+
+        mutations["RESOURCE_TOUCHED_OWNER_TUPLE"] = owner_drift
+
+        def zero_touched(row):
+            resource = row["scale"]["resource"]
+            for stage in ("touched", "post_full"):
+                for sample in resource[stage]:
+                    sample["client_smaps_rss_kib"] = 0
+            resource["client_touched_increment_bytes_per_connection"] = -204
+            resource["combined_touched_increment_bytes_per_connection"] = -102
+
+        mutations["CLIENT_TOUCHED_RSS_ZERO"] = zero_touched
+
+        for expected, mutation in mutations.items():
+            with self.subTest(expected=expected):
+                candidates = [
+                    synthetic_scale_row(
+                        pair=pair, member="candidate", full_completions=101
+                    )
+                    for pair in range(1, 6)
+                ]
+                mutation(candidates[0])
+                summary = self.summarize_rows(candidates)
+                self.assertEqual(summary["status"], "SCALE_SAFETY_FAIL")
+                self.assertTrue(
+                    any(
+                        expected in failure
+                        for failure in summary["scale_safety"]["failures"]
+                    )
+                )
+
+    def test_scale_host_and_owner_tuple_boundaries_are_exhaustive(self) -> None:
+        for member in ("parent", "candidate"):
+            with self.subTest(member=member, boundary="host"):
+                boundary = synthetic_scale_row(pair=1, member=member)
+                boundary["cpu_count"] = 4
+                boundary["memory_kib"] = 15_000_000
+                failures = self.trial_failures(boundary)
+                self.assertNotIn("HOST_CPU_COUNT", failures)
+                self.assertNotIn("HOST_MEMORY_TOTAL", failures)
+            for field, value, expected in (
+                ("cpu_count", 3, "HOST_CPU_COUNT"),
+                ("memory_kib", 14_999_999, "HOST_MEMORY_TOTAL"),
+            ):
+                with self.subTest(member=member, field=field):
+                    row = synthetic_scale_row(pair=1, member=member)
+                    row[field] = value
+                    self.assertIn(expected, self.trial_failures(row))
+
+        for member in ("parent", "candidate"):
+            for stage in (
+                "established",
+                "touched",
+                "partial_active",
+                "full_active",
+                "post_full",
+            ):
+                for side in ("client", "server"):
+                    for counter in ("active", "fds", "tasks"):
+                        with self.subTest(
+                            member=member,
+                            stage=stage,
+                            side=side,
+                            counter=counter,
+                        ):
+                            row = synthetic_scale_row(pair=1, member=member)
+                            row["scale"]["resource"][stage][4][
+                                f"{side}_{counter}"
+                            ] += 1
+                            self.assertIn(
+                                f"RESOURCE_{stage.upper()}_OWNER_TUPLE",
+                                self.trial_failures(row),
+                            )
+
+    def test_scale_trial_fairness_and_rss_boundaries_are_exact(self) -> None:
+        for member in ("parent", "candidate"):
+            for side, touched, at_limit, above_limit in (
+                ("client", 3_000, 3_150, 3_151),
+                ("server", 4_000, 4_200, 4_201),
+            ):
+                for post, should_fail in ((at_limit, False), (above_limit, True)):
+                    with self.subTest(
+                        member=member, side=side, post=post, gate="post_full"
+                    ):
+                        row = synthetic_scale_row(pair=1, member=member)
+                        for sample in row["scale"]["resource"]["touched"]:
+                            self.assertEqual(sample[f"{side}_smaps_rss_kib"], touched)
+                        for sample in row["scale"]["resource"]["post_full"]:
+                            sample[f"{side}_smaps_rss_kib"] = post
+                        failure = f"{side.upper()}_POST_FULL_RSS"
+                        self.assertEqual(
+                            failure in self.trial_failures(row), should_fail
+                        )
+                with self.subTest(member=member, side=side, gate="zero_touched"):
+                    row = synthetic_scale_row(pair=1, member=member)
+                    for stage in ("touched", "post_full"):
+                        for sample in row["scale"]["resource"][stage]:
+                            sample[f"{side}_smaps_rss_kib"] = 0
+                    rewrite_scale_resource_increments(row)
+                    self.assertIn(
+                        f"{side.upper()}_TOUCHED_RSS_ZERO",
+                        self.trial_failures(row),
+                    )
+
+            jain_boundary = synthetic_scale_row(pair=1, member=member)
+            rewrite_scale_full_completions(
+                jain_boundary, [0] * 1_000 + [1] * 9_000
+            )
+            self.assertNotIn("TRIAL_JAIN", self.trial_failures(jain_boundary))
+            jain_below = synthetic_scale_row(pair=1, member=member)
+            rewrite_scale_full_completions(
+                jain_below, [0] * 1_001 + [1] * 8_999
+            )
+            self.assertIn("TRIAL_JAIN", self.trial_failures(jain_below))
+
+            ratio_boundary = synthetic_scale_row(pair=1, member=member)
+            rewrite_scale_full_completions(
+                ratio_boundary, [1] * 100 + [2] * 9_900
+            )
+            self.assertNotIn(
+                "TRIAL_P01_MEDIAN_RATIO", self.trial_failures(ratio_boundary)
+            )
+            ratio_below = synthetic_scale_row(pair=1, member=member)
+            rewrite_scale_full_completions(
+                ratio_below, [1] * 100 + [3] * 9_900
+            )
+            self.assertIn(
+                "TRIAL_P01_MEDIAN_RATIO", self.trial_failures(ratio_below)
+            )
+
+    def test_page_touch_growth_of_growth_boundary_is_signed_and_exact(self) -> None:
+        cases = (
+            ("client", 640_000, 0, "PAIR_1_CLIENT_PAGE_TOUCH_GOG"),
+            ("server", 0, 640_000, "PAIR_1_SERVER_PAGE_TOUCH_GOG"),
+            ("combined", 640_000, 640_000, "PAIR_1_COMBINED_PAGE_TOUCH_GOG"),
+        )
+        for name, client_limit, server_limit, expected in cases:
+            with self.subTest(side=name, boundary="equal"):
+                at_limit = self.summarize_rows(
+                    [
+                        synthetic_scale_row(
+                            pair=pair,
+                            member="candidate",
+                            full_completions=101,
+                            client_touch_extra_kib=client_limit,
+                            server_touch_extra_kib=server_limit,
+                        )
+                        for pair in range(1, 6)
+                    ]
+                )
+                self.assertEqual(at_limit["status"], "SCALE_SAFETY_PASS")
+            with self.subTest(side=name, boundary="above"):
+                above = self.summarize_rows(
+                    [
+                        synthetic_scale_row(
+                            pair=pair,
+                            member="candidate",
+                            full_completions=101,
+                            client_touch_extra_kib=client_limit
+                            + (1 if pair == 1 and name != "server" else 0),
+                            server_touch_extra_kib=server_limit
+                            + (1 if pair == 1 and name == "server" else 0),
+                        )
+                        for pair in range(1, 6)
+                    ]
+                )
+                self.assertEqual(above["status"], "SCALE_SAFETY_FAIL")
+                self.assertIn(expected, above["scale_safety"]["failures"])
+        negative = self.summarize_rows(
+            [
+                synthetic_scale_row(
+                    pair=pair,
+                    member="candidate",
+                    full_completions=101,
+                    client_touch_extra_kib=-500,
+                )
+                for pair in range(1, 6)
+            ]
+        )
+        self.assertEqual(negative["status"], "SCALE_SAFETY_PASS")
+
+    def test_scale_pair_and_median_threshold_boundaries_are_exact(self) -> None:
+        def candidates(counts: list[int]) -> list[dict[str, object]]:
+            return [
+                synthetic_scale_row(
+                    pair=pair,
+                    member="candidate",
+                    full_completions=count,
+                )
+                for pair, count in enumerate(counts, 1)
+            ]
+
+        pair_floor = self.summarize_rows(candidates([90, 101, 101, 101, 101]))
+        self.assertEqual(pair_floor["status"], "SCALE_SAFETY_PASS")
+        below_pair_floor = self.summarize_rows(
+            candidates([89, 101, 101, 101, 101])
+        )
+        self.assertIn(
+            "PAIR_1_THROUGHPUT_FLOOR",
+            below_pair_floor["scale_safety"]["failures"],
+        )
+
+        median_equal = self.summarize_rows(candidates([99, 99, 100, 101, 101]))
+        self.assertNotIn(
+            "MEDIAN_THROUGHPUT", median_equal["scale_safety"]["failures"]
+        )
+        median_below = self.summarize_rows(candidates([99, 99, 99, 101, 101]))
+        self.assertIn(
+            "MEDIAN_THROUGHPUT", median_below["scale_safety"]["failures"]
+        )
+
+        def fairness_candidates(
+            low: int, high: int, low_count: int
+        ) -> list[dict[str, object]]:
+            rows = candidates([101] * 5)
+            for row in rows:
+                rewrite_scale_full_completions(
+                    row, [low] * low_count + [high] * (10_000 - low_count)
+                )
+            return rows
+
+        jain_equal = self.summarize_rows(fairness_candidates(0, 1, 100))
+        self.assertNotIn(
+            "MEDIAN_JAIN_DELTA", jain_equal["scale_safety"]["failures"]
+        )
+        jain_below = self.summarize_rows(fairness_candidates(0, 1, 101))
+        self.assertIn(
+            "MEDIAN_JAIN_DELTA", jain_below["scale_safety"]["failures"]
+        )
+        ratio_equal = self.summarize_rows(fairness_candidates(19, 20, 100))
+        self.assertNotIn(
+            "MEDIAN_P01_MEDIAN_RATIO_DELTA",
+            ratio_equal["scale_safety"]["failures"],
+        )
+        ratio_below = self.summarize_rows(fairness_candidates(18, 20, 100))
+        self.assertIn(
+            "MEDIAN_P01_MEDIAN_RATIO_DELTA",
+            ratio_below["scale_safety"]["failures"],
+        )
+
+    def test_scale_schema_rejects_vector_mutation_and_bounds_input_before_decode(self) -> None:
+        row = synthetic_scale_row(pair=1, member="candidate")
+        malformed = copy.deepcopy(row)
+        malformed["scale"]["traffic"]["full_flow_bytes"].pop()
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "exactly 10000"):
+            CONTROL._validate_scale_evidence(malformed)
+        with tempfile.TemporaryDirectory(prefix="ferrum2-scale-reader-") as directory:
+            root = pathlib.Path(directory)
+            path = root / "scale.jsonl"
+            maximum = copy.deepcopy(row)
+            maximum["scale"]["traffic"]["partial_flow_bytes"] = [
+                CONTROL.U64_MAX
+            ] * 1_000
+            maximum["scale"]["traffic"]["full_flow_bytes"] = [
+                CONTROL.U64_MAX
+            ] * 10_000
+            maximum["scale"]["traffic"]["full_flow_completions"] = [
+                CONTROL.U64_MAX
+            ] * 10_000
+            compact = json.dumps(maximum, separators=(",", ":"))
+            self.assertLessEqual(len(compact.encode()), CONTROL.SCALE_TRIAL_MAX_BYTES)
+            self.assertGreater(len(compact.encode()), CONTROL.REGULAR_TRIAL_MAX_BYTES)
+            path.write_text(compact + "\n", encoding="utf-8")
+            self.assertEqual(CONTROL._read_trial(path)["scenario"], CONTROL.SCALE_SCENARIO)
+            path.write_bytes(b" " * (CONTROL.SCALE_TRIAL_MAX_BYTES + 2))
+            with self.assertRaisesRegex(CONTROL.CandidateControlError, "byte bound"):
+                CONTROL._read_trial(path)
+            path.write_text("[" * 2_000 + "]" * 2_000 + "\n", encoding="utf-8")
+            with self.assertRaises(CONTROL.CandidateControlError):
+                CONTROL._read_trial(path)
+            path.write_text('{"value":' + "9" * 100 + "}\n", encoding="utf-8")
+            with self.assertRaises(CONTROL.CandidateControlError):
+                CONTROL._read_trial(path)
+
+
 class GitRelationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="ferrum2-performance-git-")
@@ -1249,6 +1915,244 @@ class GitRelationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(CONTROL.CandidateControlError, "complete history"):
             CONTROL.validate_git_relation(shallow, self.base, self.multiple)
+
+
+class ScaleLineageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="ferrum2-scale-lineage-")
+        self.repository = pathlib.Path(self.temporary.name) / "repository"
+        self.repository.mkdir()
+        self._git("init", "--quiet", "--initial-branch=main")
+        self._git("config", "user.name", "Scale Test")
+        self._git("config", "user.email", "scale@example.invalid")
+        self._git("config", "commit.gpgsign", "false")
+        for path, replacements in CONTROL.SCALE_COUNTERFACTUAL_REPLACEMENTS.items():
+            destination = self.repository / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            literals = b"\n".join(old for old, _new in replacements)
+            destination.write_bytes(b"prefix\n" + literals + b"\nsuffix\n")
+        (self.repository / "extra.txt").write_text("unchanged\n", encoding="utf-8")
+        self._git("add", ".")
+        self.head = self._commit("H final tree")
+        self._apply_counterfactual()
+        self.parent = self._commit("P16 exact counterfactual")
+        self._git("checkout", "--quiet", self.head, "--", ".")
+        self.candidate = self._commit("C32 restore final tree")
+        binary_root = pathlib.Path(self.temporary.name) / "binaries"
+        binary_root.mkdir()
+        self.paths = {}
+        for name in (
+            "runner",
+            "parent-client",
+            "parent-server",
+            "candidate-client",
+            "candidate-server",
+        ):
+            path = binary_root / name
+            path.write_bytes(name.encode())
+            self.paths[name] = path
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _git(self, *arguments: str) -> str:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+                "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+            }
+        )
+        result = subprocess.run(
+            ["git", *arguments],
+            cwd=self.repository,
+            env=environment,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        return result.stdout.strip()
+
+    def _commit(self, message: str) -> str:
+        self._git("commit", "--quiet", "-am", message)
+        return self._git("rev-parse", "HEAD")
+
+    def _apply_counterfactual(self) -> None:
+        for path, replacements in CONTROL.SCALE_COUNTERFACTUAL_REPLACEMENTS.items():
+            destination = self.repository / path
+            value = destination.read_bytes()
+            for old, new in replacements:
+                self.assertEqual(value.count(old), 1)
+                value = value.replace(old, new, 1)
+            destination.write_bytes(value)
+
+    def build(self, parent: str | None = None, candidate: str | None = None):
+        return CONTROL.build_scale_lineage(
+            repository=self.repository,
+            head_sha=self.head,
+            parent_sha=parent or self.parent,
+            candidate_sha=candidate or self.candidate,
+            runner=self.paths["runner"],
+            parent_client=self.paths["parent-client"],
+            parent_server=self.paths["parent-server"],
+            candidate_client=self.paths["candidate-client"],
+            candidate_server=self.paths["candidate-server"],
+        )
+
+    def test_exact_h_p16_c32_lineage_binds_trees_patch_and_binaries(self) -> None:
+        source = CONTROL.validate_scale_source_lineage(
+            self.repository, self.head, self.parent, self.candidate
+        )
+        self.assertEqual(source["head_tree"], source["candidate_tree"])
+        self.assertEqual(
+            CONTROL.main(
+                [
+                    "scale-source-lineage",
+                    "--repository",
+                    str(self.repository),
+                    "--head-sha",
+                    self.head,
+                    "--parent-sha",
+                    self.parent,
+                    "--candidate-sha",
+                    self.candidate,
+                ]
+            ),
+            0,
+        )
+        lineage = self.build()
+        self.assertEqual(lineage["head_tree"], lineage["candidate_tree"])
+        self.assertNotEqual(lineage["head_tree"], lineage["parent_tree"])
+        self.assertRegex(lineage["counterfactual_patch_sha256"], r"^[0-9a-f]{64}$")
+        CONTROL.validate_scale_lineage_repository(self.repository, lineage)
+
+    def test_lineage_rejects_patch_digest_parent_chain_and_extra_path(self) -> None:
+        lineage = self.build()
+        tampered = copy.deepcopy(lineage)
+        tampered["counterfactual_patch_sha256"] = "0" * 64
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "patch digest"):
+            CONTROL.validate_scale_lineage_repository(self.repository, tampered)
+        tampered = copy.deepcopy(lineage)
+        tampered["candidate_sha"] = self.head
+        with self.assertRaises(CONTROL.CandidateControlError):
+            CONTROL.validate_scale_lineage_repository(self.repository, tampered)
+
+        self._git("checkout", "--quiet", "--detach", self.head)
+        self._apply_counterfactual()
+        (self.repository / "extra.txt").write_text("mutated\n", encoding="utf-8")
+        extra_parent = self._commit("P16 with extra path")
+        self._git("checkout", "--quiet", self.head, "--", ".")
+        extra_candidate = self._commit("C32 restore after extra path")
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "unexpected path"):
+            self.build(extra_parent, extra_candidate)
+
+    def test_scale_summary_command_revalidates_real_lineage_and_writes_all_outcomes(
+        self,
+    ) -> None:
+        lineage = self.build()
+        scale_policy = CONTROL.load_scale_safety_policy(SCALE_POLICY_PATH)
+        plan = CONTROL.create_plan(
+            mode="qualification",
+            selection=CONTROL.SCALE_SCENARIO,
+            warmup_seconds="10",
+            active_seconds="30",
+            pairs="5",
+            decision_policy=CONTROL.load_decision_policy(POLICY_PATH),
+            scale_safety_policy=scale_policy,
+            scale_lineage=lineage,
+        )
+        evidence_root = pathlib.Path(self.temporary.name) / "evidence"
+        parent_root = evidence_root / "parent"
+        candidate_root = evidence_root / "candidate"
+        parent_root.mkdir(parents=True)
+        candidate_root.mkdir(parents=True)
+
+        def bind(row: dict[str, object]) -> None:
+            member = row["member"]
+            row["parent_sha"] = self.parent
+            row["candidate_sha"] = self.candidate
+            row["sha"] = lineage[f"{member}_sha"]
+            row["tree"] = lineage[f"{member}_tree"]
+            row["runner_sha256"] = lineage["runner_sha256"]
+            row["client_sha256"] = lineage[f"{member}_client_sha256"]
+            row["server_sha256"] = lineage[f"{member}_server_sha256"]
+
+        rows: dict[tuple[str, int], dict[str, object]] = {}
+        for pair in range(1, 6):
+            for member in ("parent", "candidate"):
+                row = synthetic_scale_row(
+                    pair=pair,
+                    member=member,
+                    full_completions=(
+                        101 if member == "candidate" and pair <= 4 else 100
+                    ),
+                )
+                bind(row)
+                rows[(member, pair)] = row
+
+        def write_rows() -> None:
+            for (member, pair), row in rows.items():
+                root = parent_root if member == "parent" else candidate_root
+                (root / f"scale-{member}-{pair}.jsonl").write_text(
+                    json.dumps(row, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+
+        write_rows()
+        plan_path = evidence_root / "plan.json"
+        output = evidence_root / "summary.json"
+        markdown = evidence_root / "summary.md"
+        CONTROL.write_plan(plan_path, plan)
+        arguments = type(
+            "Arguments",
+            (),
+            {
+                "plan": plan_path,
+                "parent_root": parent_root,
+                "candidate_root": candidate_root,
+                "parent_sha": self.parent,
+                "candidate_sha": self.candidate,
+                "policy": POLICY_PATH,
+                "scale_policy": SCALE_POLICY_PATH,
+                "repository": self.repository,
+                "output": output,
+                "markdown": markdown,
+            },
+        )()
+
+        self.assertEqual(CONTROL.run_summary_command(arguments), 0)
+        self.assertEqual(
+            json.loads(output.read_text(encoding="utf-8"))["status"],
+            "SCALE_SAFETY_PASS",
+        )
+        self.assertIn(
+            "SCALE_SAFETY_PASS", markdown.read_text(encoding="utf-8")
+        )
+
+        safety = rows[("candidate", 1)]
+        completions = list(safety["scale"]["traffic"]["full_flow_completions"])
+        completions[0] = 0
+        rewrite_scale_full_completions(safety, completions)
+        write_rows()
+        self.assertEqual(CONTROL.run_summary_command(arguments), 3)
+        self.assertEqual(
+            json.loads(output.read_text(encoding="utf-8"))["status"],
+            "SCALE_SAFETY_FAIL",
+        )
+        self.assertIn(
+            "SCALE_SAFETY_FAIL", markdown.read_text(encoding="utf-8")
+        )
+
+        safety["scale"]["traffic"]["full_checked_bytes"] += 1
+        write_rows()
+        self.assertEqual(CONTROL.run_summary_command(arguments), 2)
+        self.assertEqual(
+            json.loads(output.read_text(encoding="utf-8"))["status"],
+            "INVALID_EVIDENCE",
+        )
+        self.assertIn("INVALID_EVIDENCE", markdown.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

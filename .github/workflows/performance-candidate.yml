@@ -12,7 +12,7 @@ on:
           - qualification
           - diagnostic
       parent_sha:
-        description: "Exact ancestor commit SHA"
+        description: "Exact ancestor SHA, or exact H/final SHA for tcp-scale-10k"
         required: true
         type: string
       selection:
@@ -37,6 +37,7 @@ on:
           - udp-payload-matrix
           - udp-direct-payload-bounds
           - tcp-frame-capacity
+          - tcp-scale-10k
       warmup_seconds:
         description: "Warmup seconds"
         required: true
@@ -63,9 +64,9 @@ jobs:
   paired-profile:
     name: paired-profile
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
-      PARENT_SHA: ${{ inputs.parent_sha }}
+      REQUESTED_PARENT_SHA: ${{ inputs.parent_sha }}
       MODE: ${{ inputs.mode }}
       SELECTION: ${{ inputs.selection }}
       WARMUP_SECONDS: ${{ inputs.warmup_seconds }}
@@ -84,49 +85,74 @@ jobs:
         run: |
           set -euo pipefail
           PARENT_DIR="$RUNNER_TEMP/ferrum2-parent"
+          CANDIDATE_DIR="$GITHUB_WORKSPACE"
           PERFORMANCE_PLAN="$RUNNER_TEMP/performance-plan.json"
           PERFORMANCE_SUMMARY="$RUNNER_TEMP/performance-summary.json"
           PERFORMANCE_MARKDOWN="$RUNNER_TEMP/performance-summary.md"
           PERFORMANCE_POLICY="$GITHUB_WORKSPACE/tools/performance_candidate_policy.json"
+          PERFORMANCE_SCALE_POLICY="$GITHUB_WORKSPACE/tools/performance_candidate_scale_safety_policy.json"
+          SCALE_LINEAGE="$RUNNER_TEMP/performance-scale-lineage.json"
           {
             printf 'PARENT_DIR=%s\n' "$PARENT_DIR"
+            printf 'CANDIDATE_DIR=%s\n' "$CANDIDATE_DIR"
             printf 'PERFORMANCE_PLAN=%s\n' "$PERFORMANCE_PLAN"
             printf 'PERFORMANCE_SUMMARY=%s\n' "$PERFORMANCE_SUMMARY"
             printf 'PERFORMANCE_MARKDOWN=%s\n' "$PERFORMANCE_MARKDOWN"
             printf 'PERFORMANCE_POLICY=%s\n' "$PERFORMANCE_POLICY"
+            printf 'PERFORMANCE_SCALE_POLICY=%s\n' "$PERFORMANCE_SCALE_POLICY"
+            printf 'SCALE_LINEAGE=%s\n' "$SCALE_LINEAGE"
           } >>"$GITHUB_ENV"
-          [[ "$PARENT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
-          PARENT_SHA="${PARENT_SHA,,}"
-          printf 'PARENT_SHA=%s\n' "$PARENT_SHA" >>"$GITHUB_ENV"
+          [[ "$REQUESTED_PARENT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          REQUESTED_PARENT_SHA="${REQUESTED_PARENT_SHA,,}"
           test "$(git status --porcelain)" = ""
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          python3 -B tools/performance_candidate.py validate-git \
-            --repository "$GITHUB_WORKSPACE" \
-            --parent-sha "$PARENT_SHA" \
-            --candidate-sha "$GITHUB_SHA"
           test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
-          python3 -B tools/performance_candidate.py plan \
-            --mode "$MODE" \
-            --selection "$SELECTION" \
-            --warmup-seconds "$WARMUP_SECONDS" \
-            --active-seconds "$ACTIVE_SECONDS" \
-            --pairs "$PAIRS" \
-            --policy "$PERFORMANCE_POLICY" \
-            --output "$PERFORMANCE_PLAN"
           for process in ferrum2-client ferrum2-server; do
             ! pgrep -x "$process" >/dev/null
           done
           rustup toolchain install 1.97.1 --profile minimal
           rustc +1.97.1 -Vv
           test ! -e "$PARENT_DIR"
-          git worktree add --detach "$PARENT_DIR" "$PARENT_SHA"
+          if [ "$SELECTION" = tcp-scale-10k ]; then
+            test "$MODE/$WARMUP_SECONDS/$ACTIVE_SECONDS/$PAIRS" = "qualification/10/30/5"
+            H_SHA="$REQUESTED_PARENT_SHA"
+            test "$(git rev-parse "$H_SHA^{commit}")" = "$H_SHA"
+            CANDIDATE_SHA="$(git rev-parse HEAD)"
+            PARENT_SHA="$(git rev-parse "$CANDIDATE_SHA^")"
+            test "$(git rev-parse "$PARENT_SHA^")" = "$H_SHA"
+            test "$(git rev-list --parents -n 1 "$PARENT_SHA" | wc -w)" -eq 2
+            test "$(git rev-list --parents -n 1 "$CANDIDATE_SHA" | wc -w)" -eq 2
+            test "$(git rev-parse "$CANDIDATE_SHA^{tree}")" = \
+              "$(git rev-parse "$H_SHA^{tree}")"
+            python3 -B tools/performance_candidate.py scale-source-lineage \
+              --repository "$GITHUB_WORKSPACE" \
+              --head-sha "$H_SHA" \
+              --parent-sha "$PARENT_SHA" \
+              --candidate-sha "$CANDIDATE_SHA"
+            git worktree add --detach "$PARENT_DIR" "$PARENT_SHA"
+          else
+            H_SHA="$GITHUB_SHA"
+            PARENT_SHA="$REQUESTED_PARENT_SHA"
+            CANDIDATE_SHA="$GITHUB_SHA"
+            python3 -B tools/performance_candidate.py validate-git \
+              --repository "$GITHUB_WORKSPACE" \
+              --parent-sha "$PARENT_SHA" \
+              --candidate-sha "$CANDIDATE_SHA"
+            git worktree add --detach "$PARENT_DIR" "$PARENT_SHA"
+          fi
+          {
+            printf 'H_SHA=%s\n' "$H_SHA"
+            printf 'PARENT_SHA=%s\n' "$PARENT_SHA"
+            printf 'CANDIDATE_SHA=%s\n' "$CANDIDATE_SHA"
+            printf 'CANDIDATE_DIR=%s\n' "$CANDIDATE_DIR"
+          } >>"$GITHUB_ENV"
           exclude="$(git rev-parse --git-path info/exclude)"
           printf '/profiles/\n' >>"$exclude"
       - name: Prove parent and candidate correctness and build identities
         shell: bash
         run: |
           set -euo pipefail
-          for repository in "$PARENT_DIR" "$GITHUB_WORKSPACE"; do
+          for repository in "$PARENT_DIR" "$CANDIDATE_DIR"; do
             (
               cd "$repository"
               test "$(git status --porcelain)" = ""
@@ -134,10 +160,42 @@ jobs:
                 -p ferrum2-client -p ferrum2-server --bins --locked
               cargo +1.97.1 test --workspace --locked
               cargo +1.97.1 build --profile profiling \
-                -p ferrum2-client -p ferrum2-server -p ferrum2-m4-qualification --bins --locked
-              target/profiling/m4-qualification self-check
+                -p ferrum2-client -p ferrum2-server --bins --locked
             )
           done
+          (
+            cd "$CANDIDATE_DIR"
+            cargo +1.97.1 build --profile profiling \
+              -p ferrum2-m4-qualification --bins --locked
+            target/profiling/m4-qualification self-check
+          )
+          plan_scale_arguments=()
+          if [ "$SELECTION" = tcp-scale-10k ]; then
+            python3 -B tools/performance_candidate.py scale-lineage \
+              --repository "$GITHUB_WORKSPACE" \
+              --head-sha "$H_SHA" \
+              --parent-sha "$PARENT_SHA" \
+              --candidate-sha "$CANDIDATE_SHA" \
+              --runner "$CANDIDATE_DIR/target/profiling/m4-qualification" \
+              --parent-client "$PARENT_DIR/target/profiling/ferrum2-client" \
+              --parent-server "$PARENT_DIR/target/profiling/ferrum2-server" \
+              --candidate-client "$CANDIDATE_DIR/target/profiling/ferrum2-client" \
+              --candidate-server "$CANDIDATE_DIR/target/profiling/ferrum2-server" \
+              --output "$SCALE_LINEAGE"
+            plan_scale_arguments=(
+              --scale-policy "$PERFORMANCE_SCALE_POLICY"
+              --scale-lineage "$SCALE_LINEAGE"
+            )
+          fi
+          python3 -B tools/performance_candidate.py plan \
+            --mode "$MODE" \
+            --selection "$SELECTION" \
+            --warmup-seconds "$WARMUP_SECONDS" \
+            --active-seconds "$ACTIVE_SECONDS" \
+            --pairs "$PAIRS" \
+            --policy "$PERFORMANCE_POLICY" \
+            "${plan_scale_arguments[@]}" \
+            --output "$PERFORMANCE_PLAN"
       - name: Run alternating parent and candidate pairs
         shell: bash
         run: |
@@ -150,14 +208,14 @@ jobs:
             if [ "$member" = parent ]; then
               repository=$PARENT_DIR
             else
-              repository=$GITHUB_WORKSPACE
+              repository=$CANDIDATE_DIR
             fi
             (
               cd "$repository"
               # Use one candidate-built harness for both members so new scenario
               # definitions are identical; the explicit paths still bind and hash
               # each member's exact checkout and client/server binaries.
-              "$GITHUB_WORKSPACE/target/profiling/m4-qualification" profile-workload \
+              "$CANDIDATE_DIR/target/profiling/m4-qualification" profile-workload \
                 --scenario "$scenario" \
                 --warmup-seconds "$WARMUP_SECONDS" \
                 --active-seconds "$ACTIVE_SECONDS" \
@@ -166,17 +224,22 @@ jobs:
                 --ready-file "profiles/paired/$scenario-$member-$pair.ready" \
                 --output "profiles/paired/$scenario-$member-$pair.jsonl" \
                 --parent-sha "$PARENT_SHA" \
-                --candidate-sha "$GITHUB_SHA" \
+                --candidate-sha "$CANDIDATE_SHA" \
                 --member "$member" \
                 --pair "$pair" \
                 --order "$order" \
                 --build-profile current
             )
           }
+          scenario_scale_arguments=()
+          if [ "$SELECTION" = tcp-scale-10k ]; then
+            scenario_scale_arguments=(--scale-policy "$PERFORMANCE_SCALE_POLICY")
+          fi
           mapfile -t scenarios < <(
             python3 -B tools/performance_candidate.py scenarios \
               --plan "$PERFORMANCE_PLAN" \
-              --policy "$PERFORMANCE_POLICY"
+              --policy "$PERFORMANCE_POLICY" \
+              "${scenario_scale_arguments[@]}"
           )
           test "${#scenarios[@]}" -gt 0
           for scenario in "${scenarios[@]}"; do
@@ -196,13 +259,21 @@ jobs:
         run: |
           set -uo pipefail
           summary_status=0
+          summary_scale_arguments=()
+          if [ "$SELECTION" = tcp-scale-10k ]; then
+            summary_scale_arguments=(
+              --scale-policy "$PERFORMANCE_SCALE_POLICY"
+              --repository "$GITHUB_WORKSPACE"
+            )
+          fi
           python3 -B tools/performance_candidate.py summarize \
             --plan "$PERFORMANCE_PLAN" \
             --parent-root "$PARENT_DIR/profiles/paired" \
-            --candidate-root "$GITHUB_WORKSPACE/profiles/paired" \
+            --candidate-root "$CANDIDATE_DIR/profiles/paired" \
             --parent-sha "$PARENT_SHA" \
-            --candidate-sha "$GITHUB_SHA" \
+            --candidate-sha "$CANDIDATE_SHA" \
             --policy "$PERFORMANCE_POLICY" \
+            "${summary_scale_arguments[@]}" \
             --output "$PERFORMANCE_SUMMARY" \
             --markdown "$PERFORMANCE_MARKDOWN" || summary_status=$?
           if [ -f "$PERFORMANCE_MARKDOWN" ]; then
@@ -228,7 +299,9 @@ jobs:
             ${{ runner.temp }}/performance-plan.json
             ${{ runner.temp }}/performance-summary.json
             ${{ runner.temp }}/performance-summary.md
+            ${{ runner.temp }}/performance-scale-lineage.json
             ${{ github.workspace }}/tools/performance_candidate_policy.json
+            ${{ github.workspace }}/tools/performance_candidate_scale_safety_policy.json
           if-no-files-found: error
           retention-days: 30
       - name: Reap processes and remove parent worktree
@@ -248,7 +321,11 @@ jobs:
           for process in ferrum2-client ferrum2-server; do
             if pgrep -x "$process" >/dev/null; then cleanup_status=1; fi
           done
-          if [ -n "${PARENT_DIR:-}" ] && [ -e "$PARENT_DIR" ]; then
-            git worktree remove --force "$PARENT_DIR" || cleanup_status=1
-          fi
+          for worktree in "${PARENT_DIR:-}" "${CANDIDATE_DIR:-}"; do
+            if [ -n "$worktree" ] \
+              && [ "$worktree" != "$GITHUB_WORKSPACE" ] \
+              && [ -e "$worktree" ]; then
+              git worktree remove --force "$worktree" || cleanup_status=1
+            fi
+          done
           test "$cleanup_status" -eq 0

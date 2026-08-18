@@ -536,8 +536,11 @@ dependencies = [
  "ferrum2-socks5",
  "hickory-proto",
  "rustls",
+ "serde",
+ "serde_json",
  "socket2",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -18,8 +18,11 @@ ferrum2-shadowsocks.workspace = true
 ferrum2-socks5.workspace = true
 hickory-proto.workspace = true
 rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 socket2.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

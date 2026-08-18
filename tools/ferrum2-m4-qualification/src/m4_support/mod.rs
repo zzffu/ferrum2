@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+mod tcp_scale;
+
 use ferrum2_core::TargetAddr;
 use ferrum2_crypto::MethodProfile;
 use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, max_udp_payload_len};
@@ -88,7 +90,9 @@ const PROFILE_TCP_STREAM_BATCH: usize = 4;
 const PROFILE_TCP_LATENCY_WORKERS: usize = 1;
 const PROFILE_TCP_LATENCY_ACTIVE_MAX_SECONDS: u64 = 60;
 const PROFILE_TCP_LATENCY_SAMPLE_CAP: usize = 2_000_000;
-const PROFILE_TRIAL_SCHEMA_VERSION: u8 = 2;
+const PROFILE_TRIAL_SCHEMA_VERSION: u8 = 3;
+const EVIDENCE_LINE_MAX_BYTES: usize = 16 * 1024;
+const TCP_SCALE_EVIDENCE_LINE_MAX_BYTES: usize = 512 * 1024;
 
 static ACTIVE_PROCESSES: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
@@ -188,6 +192,7 @@ fn parse_hosted_args(arguments: &[OsString], reference: bool) -> Result<HostedAr
 enum ProfileScenario {
     TcpBulk,
     TcpStream64k,
+    TcpScale10k,
     TcpRequest1k,
     TcpRequest4k,
     TcpRequest16k,
@@ -221,6 +226,7 @@ impl ProfileScenario {
         match value.to_str() {
             Some("tcp-bulk") => Ok(Self::TcpBulk),
             Some("tcp-stream-64k") => Ok(Self::TcpStream64k),
+            Some("tcp-scale-10k") => Ok(Self::TcpScale10k),
             Some("tcp-request-1k") => Ok(Self::TcpRequest1k),
             Some("tcp-request-4k") => Ok(Self::TcpRequest4k),
             Some("tcp-request-16k") => Ok(Self::TcpRequest16k),
@@ -233,7 +239,8 @@ impl ProfileScenario {
             Some("udp-direct-small-128") => Ok(Self::UdpDirectSmall128),
             Some("udp-direct-max-65497") => Ok(Self::UdpDirectMax65497),
             _ => Err(
-                "profile scenario must be tcp-bulk, tcp-stream-64k, tcp-request-1k, \
+                "profile scenario must be tcp-bulk, tcp-stream-64k, tcp-scale-10k, \
+                 tcp-request-1k, \
                  tcp-request-4k, tcp-request-16k, udp-small-high, udp-mtu-1200, \
                  udp-payload-1472, udp-payload-1500, udp-payload-8192, \
                  udp-max-wire-65507, udp-direct-small-128, or udp-direct-max-65497"
@@ -246,6 +253,7 @@ impl ProfileScenario {
         match self {
             Self::TcpBulk => "tcp-bulk",
             Self::TcpStream64k => "tcp-stream-64k",
+            Self::TcpScale10k => "tcp-scale-10k",
             Self::TcpRequest1k => "tcp-request-1k",
             Self::TcpRequest4k => "tcp-request-4k",
             Self::TcpRequest16k => "tcp-request-16k",
@@ -263,6 +271,7 @@ impl ProfileScenario {
     const fn tcp_workers(self) -> Option<usize> {
         match self {
             Self::TcpBulk | Self::TcpStream64k => Some(STREAMS),
+            Self::TcpScale10k => None,
             Self::TcpRequest1k | Self::TcpRequest4k | Self::TcpRequest16k => {
                 Some(PROFILE_TCP_LATENCY_WORKERS)
             }
@@ -316,6 +325,7 @@ impl ProfileScenario {
     const fn application_payload_bytes(self) -> usize {
         match self {
             Self::TcpBulk | Self::TcpStream64k => PAYLOAD_BYTES,
+            Self::TcpScale10k => tcp_scale::PAYLOAD_BYTES,
             Self::TcpRequest1k => 1_024,
             Self::TcpRequest4k => 4_096,
             Self::TcpRequest16k => 16_384,
@@ -467,6 +477,9 @@ fn parse_profile_args(arguments: &[OsString]) -> Result<ProfileArgs, String> {
         && active_seconds > PROFILE_TCP_LATENCY_ACTIVE_MAX_SECONDS
     {
         return Err("TCP request-response active lifetime exceeds 60 seconds".to_owned());
+    }
+    if scenario == ProfileScenario::TcpScale10k && (warmup_seconds != 10 || active_seconds != 30) {
+        return Err("tcp-scale-10k requires exactly 10 warmup and 30 active seconds".to_owned());
     }
     let (repository_root, binary_dir) = match (selected_repository_root, binary_dir) {
         (None, None) => (
@@ -676,6 +689,7 @@ struct ProfileOutcome {
     checked_units: u64,
     p99_nanoseconds: Option<u64>,
     io_completions: u64,
+    scale_json: Option<String>,
 }
 
 struct ProfileRawIdentity {
@@ -798,6 +812,7 @@ fn run_profile_scenario(arguments: &ProfileArgs) -> Result<ProfileOutcome, Strin
         | ProfileScenario::TcpRequest1k
         | ProfileScenario::TcpRequest4k
         | ProfileScenario::TcpRequest16k => run_profile_tcp(arguments, &ready_file),
+        ProfileScenario::TcpScale10k => tcp_scale::run(arguments, &ready_file),
         ProfileScenario::UdpSmallHigh
         | ProfileScenario::UdpMtu1200
         | ProfileScenario::UdpPayload1472
@@ -853,30 +868,40 @@ fn run_profile_workload(mut arguments: ProfileArgs) -> Result<String, String> {
     {
         let prefix = profile_raw_prefix(&arguments, raw);
         match &result {
-            Ok(outcome) => evidence.line(format!(
-                "{{{prefix},\"sha\":{},\"tree\":{},\"runner_sha256\":{},\
+            Ok(outcome) => {
+                let scale = outcome.scale_json.as_deref().unwrap_or("null");
+                let line = format!(
+                    "{{{prefix},\"sha\":{},\"tree\":{},\"runner_sha256\":{},\
                  \"client_sha256\":{},\"server_sha256\":{},\"rustc\":{},\"kernel\":{},\
                  \"cpu_model\":{},\"cpu_count\":{},\"memory_kib\":{},\"metric\":{},\
                  \"value\":{},\"checked_units\":{},\"p99_nanoseconds\":{},\
-                 \"io_completions\":{},\"correctness\":\"PASS\",\"status\":\"PASS\"}}",
-                json(&identity.sha),
-                json(&identity.tree),
-                json(&identity.runner_sha256),
-                json(&identity.client_sha256),
-                json(&identity.server_sha256),
-                json(&identity.rustc),
-                json(&identity.kernel),
-                json(&identity.cpu_model),
-                identity.cpu_count,
-                identity.memory_kib,
-                json(outcome.metric),
-                outcome.value,
-                outcome.checked_units,
-                outcome
-                    .p99_nanoseconds
-                    .map_or_else(|| "null".to_owned(), |value| value.to_string()),
-                outcome.io_completions,
-            ))?,
+                 \"io_completions\":{},\"scale\":{scale},\"correctness\":\"PASS\",\
+                 \"status\":\"PASS\"}}",
+                    json(&identity.sha),
+                    json(&identity.tree),
+                    json(&identity.runner_sha256),
+                    json(&identity.client_sha256),
+                    json(&identity.server_sha256),
+                    json(&identity.rustc),
+                    json(&identity.kernel),
+                    json(&identity.cpu_model),
+                    identity.cpu_count,
+                    identity.memory_kib,
+                    json(outcome.metric),
+                    outcome.value,
+                    outcome.checked_units,
+                    outcome
+                        .p99_nanoseconds
+                        .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+                    outcome.io_completions,
+                );
+                let limit = if arguments.scenario == ProfileScenario::TcpScale10k {
+                    TCP_SCALE_EVIDENCE_LINE_MAX_BYTES
+                } else {
+                    EVIDENCE_LINE_MAX_BYTES
+                };
+                evidence.line_with_limit(line, limit)?;
+            }
             Err(error) => evidence.line(format!(
                 "{{{prefix},\"sha\":{},\"tree\":{},\"runner_sha256\":{},\
                  \"client_sha256\":{},\"server_sha256\":{},\"rustc\":{},\"kernel\":{},\
@@ -1077,6 +1102,9 @@ fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
                         active,
                     )
                     .map(ProfileTcpWorkerResult::Latencies),
+                    ProfileScenario::TcpScale10k => {
+                        unreachable!("dedicated scale runner reached ordinary TCP worker")
+                    }
                     ProfileScenario::UdpSmallHigh
                     | ProfileScenario::UdpMtu1200
                     | ProfileScenario::UdpPayload1472
@@ -1218,6 +1246,7 @@ fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
             checked_units: bytes,
             p99_nanoseconds: None,
             io_completions: transactions.saturating_mul(2),
+            scale_json: None,
         });
     }
     if arguments.scenario == ProfileScenario::TcpStream64k {
@@ -1234,6 +1263,7 @@ fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
             checked_units: bytes,
             p99_nanoseconds: None,
             io_completions: batches.saturating_mul((PROFILE_TCP_STREAM_BATCH + 1) as u64),
+            scale_json: None,
         });
     }
     let transactions = u64::try_from(latencies.len())
@@ -1253,6 +1283,7 @@ fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
         checked_units: transactions,
         p99_nanoseconds: Some(p99_nanoseconds),
         io_completions: transactions.saturating_mul(2),
+        scale_json: None,
     })
 }
 
@@ -1530,6 +1561,7 @@ fn run_profile_udp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
         checked_units,
         p99_nanoseconds: None,
         io_completions: checked_units.saturating_mul(4),
+        scale_json: None,
     })
 }
 
@@ -3871,6 +3903,7 @@ fn validate_drain(sample: &PairSample, baseline: &PairSample) -> Result<(), Stri
 }
 
 fn run_self_check() -> Result<String, String> {
+    const MUTATION_COUNT: u64 = 40;
     let sha = "0123456789abcdef0123456789abcdef01234567";
     let good = EnvironmentIdentity {
         github_actions: "true".to_owned(),
@@ -3935,6 +3968,24 @@ fn run_self_check() -> Result<String, String> {
         if parse_profile_args(&fixed)?.scenario.label() != scenario {
             return Err("fixed M18 profile scenario was not preserved".to_owned());
         }
+    }
+    let mut scale_arguments = profile_arguments.clone();
+    scale_arguments[1] = OsString::from("tcp-scale-10k");
+    scale_arguments[3] = OsString::from("10");
+    scale_arguments[5] = OsString::from("30");
+    let scale_profile = parse_profile_args(&scale_arguments)?;
+    if scale_profile.scenario != ProfileScenario::TcpScale10k
+        || scale_profile.warmup_seconds != 10
+        || scale_profile.active_seconds != 30
+    {
+        return Err("fixed tcp-scale-10k recipe was not preserved".to_owned());
+    }
+    for (index, replacement) in [(3, "5"), (5, "15")] {
+        let mut malformed = scale_arguments.clone();
+        malformed[index] = OsString::from(replacement);
+        expect_rejected("tcp-scale-10k recipe mutation", || {
+            parse_profile_args(&malformed)
+        })?;
     }
     let ipv4_target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53))
         .map_err(|_| "self-check IPv4 UDP target is invalid".to_owned())?;
@@ -4056,7 +4107,7 @@ fn run_self_check() -> Result<String, String> {
         return Err("valid raw profile arguments were not preserved".to_owned());
     }
     if !profile_raw_prefix(&raw_profile, raw)
-        .starts_with("\"schema_version\":2,\"kind\":\"m18_profile_trial\"")
+        .starts_with("\"schema_version\":3,\"kind\":\"m18_profile_trial\"")
     {
         return Err("raw profile trial omitted its explicit schema version".to_owned());
     }
@@ -4139,7 +4190,7 @@ fn run_self_check() -> Result<String, String> {
         return Err("profile ready file survived unwind cleanup".to_owned());
     }
     let raw_path = profile_ready.path().join("raw.jsonl");
-    let raw_line = "{\"schema_version\":2,\"kind\":\"m18_profile_trial\",\"status\":\"PASS\"}";
+    let raw_line = "{\"schema_version\":3,\"kind\":\"m18_profile_trial\",\"status\":\"PASS\"}";
     let mut raw_evidence = Evidence::create(&raw_path)?;
     raw_evidence.line(raw_line.to_owned())?;
     raw_evidence.finish()?;
@@ -4441,12 +4492,16 @@ ferrum2_tcp_replay_entries 0\n\
     fs::create_dir_all(&root).map_err(clean_io)?;
     let path = root.join("self-check.jsonl");
     let mut file = BufWriter::new(File::create(&path).map_err(clean_io)?);
-    let line = "{\"kind\":\"self_check\",\"mutations\":23,\"status\":\"PASS\"}\n";
-    ensure_redacted(line)?;
+    tcp_scale::self_check()?;
+    let line =
+        format!("{{\"kind\":\"self_check\",\"mutations\":{MUTATION_COUNT},\"status\":\"PASS\"}}\n");
+    ensure_redacted(&line)?;
     file.write_all(line.as_bytes()).map_err(clean_io)?;
     file.flush().map_err(clean_io)?;
     assert_no_owners()?;
-    Ok("m4_self_check status=PASS mutations=23".to_owned())
+    Ok(format!(
+        "m4_self_check status=PASS mutations={MUTATION_COUNT}"
+    ))
 }
 
 fn expect_rejected<T>(
@@ -4515,10 +4570,11 @@ impl Evidence {
     }
 
     fn line(&mut self, line: String) -> Result<(), String> {
-        if line.len() > 16 * 1024 {
-            return Err("evidence line exceeds bound".to_owned());
-        }
-        ensure_redacted(&line)?;
+        self.line_with_limit(line, EVIDENCE_LINE_MAX_BYTES)
+    }
+
+    fn line_with_limit(&mut self, line: String, maximum: usize) -> Result<(), String> {
+        validate_evidence_line(&line, maximum)?;
         self.writer.write_all(line.as_bytes()).map_err(clean_io)?;
         self.writer.write_all(b"\n").map_err(clean_io)
     }
@@ -4528,6 +4584,13 @@ impl Evidence {
         self.finished = true;
         Ok(())
     }
+}
+
+fn validate_evidence_line(line: &str, maximum: usize) -> Result<(), String> {
+    if line.len() > maximum {
+        return Err("evidence line exceeds bound".to_owned());
+    }
+    ensure_redacted(line)
 }
 
 impl Drop for Evidence {

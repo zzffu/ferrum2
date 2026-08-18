@@ -1,0 +1,17 @@
+{
+  "maximum_page_touch_growth_of_growth_kib_per_connection_combined": 128,
+  "maximum_page_touch_growth_of_growth_kib_per_connection_per_process": 64,
+  "maximum_post_full_percent_of_page_touched": 105,
+  "minimum_median_jain_delta": -0.01,
+  "minimum_median_p01_median_ratio_delta": -0.05,
+  "minimum_median_throughput_improvement_percent": 0,
+  "minimum_pair_throughput_improvement_percent": -10,
+  "minimum_throughput_wins": 4,
+  "minimum_trial_jain_index": 0.9,
+  "minimum_trial_p01_median_ratio": 0.5,
+  "policy_id": "github-hosted-ubuntu-24.04-tcp-scale-10k-safety-v1",
+  "required_pairs": 5,
+  "required_partial_active_sessions": 1000,
+  "required_sessions": 10000,
+  "schema_version": 1
+}
