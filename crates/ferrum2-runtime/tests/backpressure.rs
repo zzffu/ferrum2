@@ -198,7 +198,7 @@ async fn stalled_writer_stops_upstream_at_one_fixed_buffer() {
         tokio::task::yield_now().await;
     }
 
-    assert_eq!(RELAY_BUFFER_BYTES, 32_768);
+    assert_eq!(RELAY_BUFFER_BYTES, 16_384);
     assert_eq!(bytes_read.load(Ordering::SeqCst), RELAY_BUFFER_BYTES);
     assert_eq!(registry.snapshot().owned_buffers, 2);
 

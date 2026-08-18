@@ -46,7 +46,7 @@ pub const MAX_PAYLOAD_LEN: usize = u16::MAX as usize;
 /// Fixed usable limit requested for each receive-direction scratch.
 pub const MAX_DECRYPT_WIRE_LEN: usize = MAX_PAYLOAD_LEN + TAG_LEN;
 /// Largest application chunk emitted by ferrum2.
-pub const MAX_ENCODE_PAYLOAD_LEN: usize = 32_768;
+pub const MAX_ENCODE_PAYLOAD_LEN: usize = 16_384;
 /// Fixed usable limit requested for the single per-flow encrypt scratch.
 pub const MAX_ENCRYPT_WIRE_LEN: usize = MAX_TCP_SALT_LEN
     + MAX_RESPONSE_FIXED_PLAINTEXT_LEN

@@ -213,7 +213,7 @@ async fn client_rx_and_server_tx_reuse_storage_across_32_subsequent_frames() {
 async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
     const CONTINUOUS_BYTES: usize = 262_144;
 
-    assert_eq!(MAX_ENCODE_PAYLOAD_LEN, 32_768);
+    assert_eq!(MAX_ENCODE_PAYLOAD_LEN, 16_384);
     let clock = FakeClock::new(NOW, 0);
     let plaintext = (0..CONTINUOUS_BYTES)
         .map(|index| (index % 251) as u8)
@@ -256,7 +256,7 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
             .writes
             .clone();
         let (request, frames) = writes.split_first().expect("request first-write");
-        assert_eq!(frames.len(), 8);
+        assert_eq!(frames.len(), 16);
         assert!(
             frames
                 .iter()
