@@ -11,6 +11,7 @@ name = "ferrum2-client"
 path = "src/main.rs"
 
 [dependencies]
+bytes.workspace = true
 ferrum2-config.workspace = true
 ferrum2-core.workspace = true
 ferrum2-crypto.workspace = true

@@ -259,15 +259,16 @@ async fn run_udp_route(
             }
             received = association.receive_response_wire() => {
                 let Ok(wire_len) = received else { return };
-                let Ok((source, payload)) = association.prepare_application_response(
+                let Ok(response) = association.prepare_application_response(
                     &context.egress,
                     &routing.outbounds,
                     wire_len,
                 ) else {
                     continue;
                 };
-                let Some(source) = source.as_socket_addr() else { continue };
-                if mapping.send_response(source, &payload) {
+                let Some(source) = response.datagram().target().as_socket_addr() else { continue };
+                let payload = response.datagram().payload();
+                if mapping.send_response(source, payload) {
                     context.metrics.udp_datagram(
                         Role::Client,
                         Direction::TargetToClient,
@@ -279,6 +280,7 @@ async fn run_udp_route(
                         payload.len() as u64,
                     );
                 }
+                association.recycle_application_response(response);
             }
         }
     }
@@ -629,11 +631,12 @@ mod tests {
         assert_eq!(&raw[..length], b"tun-direct");
         echo.send_to(b"tun-reply", peer).await.unwrap();
         let length = association.receive_response_wire().await.unwrap();
-        let (source, payload) = association
+        let response = association
             .prepare_application_response(&engine, &routing.outbounds, length)
             .unwrap_or_else(|_| panic!("direct TUN response"));
-        assert_eq!(source, target);
-        assert_eq!(payload, b"tun-reply");
+        assert_eq!(response.datagram().target(), &target);
+        assert_eq!(response.datagram().payload(), b"tun-reply");
+        association.recycle_application_response(response);
         assert!(live_ids.lock().expect("live SIP022 IDs").is_empty());
     }
 

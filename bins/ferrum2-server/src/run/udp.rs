@@ -3,6 +3,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use bytes::BytesMut;
 use ferrum2_config::{RouteAction, UdpConfig};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{Network, RouteMetadata, RouteProgramAction};
@@ -11,10 +12,11 @@ use ferrum2_observability::{
     Direction, Metrics, Outcome, Reason, Role, Stage, Transport as ObservationTransport,
 };
 use ferrum2_runtime::{
-    AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, MAX_UDP_WIRE_DATAGRAM_BYTES,
-    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture, SniffPrefixOutcome,
-    SystemDirectUdpSocketFactory, UdpBufferBudget, UdpBufferReservation, UdpCommitError,
-    UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
+    AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, DirectUdpSocketFactory,
+    MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, PreparedProcessRoot, ProcessCancellation,
+    ProcessFuture, SniffPrefixOutcome, SystemDirectUdpSocketFactory, UdpBufferBudget,
+    UdpBufferReservation, UdpCommitError, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
+    UdpSessionManager,
 };
 use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpPacketScratch, UdpServer};
 use ferrum2_sniff::{Progress as SniffProgress, Transport as SniffTransport};
@@ -353,12 +355,17 @@ enum ResponseEncodeError {
 struct UdpAdapterError;
 
 const UDP_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+const MAX_UDP_LISTENER_READINESS_DRAIN: usize = 32;
 
 pub(super) trait ServerUdpListener: Send + Sync + 'static {
-    fn recv_from(
+    fn recv_buf_from(
         &self,
-        destination: &mut [u8],
+        destination: &mut BytesMut,
     ) -> impl std::future::Future<Output = io::Result<(usize, SocketAddr)>> + Send;
+
+    fn try_recv_buf_from(&self, _destination: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
 
     fn send_to(
         &self,
@@ -368,8 +375,12 @@ pub(super) trait ServerUdpListener: Send + Sync + 'static {
 }
 
 impl ServerUdpListener for UdpSocket {
-    async fn recv_from(&self, destination: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        UdpSocket::recv_from(self, destination).await
+    async fn recv_buf_from(&self, destination: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        UdpSocket::recv_buf_from(self, destination).await
+    }
+
+    fn try_recv_buf_from(&self, destination: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        UdpSocket::try_recv_buf_from(self, destination)
     }
 
     async fn send_to(&self, source: &[u8], peer: SocketAddr) -> io::Result<usize> {
@@ -441,15 +452,13 @@ where
     }
 }
 
-type ProductionUdpRuntime<L> = DirectUdpRuntime<
-    dns_egress::ServerDnsResolver,
-    SystemDirectUdpSocketFactory,
-    ServerUdpResponseHandler<L>,
->;
+type ServerUdpRuntime<L, F> =
+    DirectUdpRuntime<dns_egress::ServerDnsResolver, F, ServerUdpResponseHandler<L>>;
 
-pub(super) struct PreparedUdpServer<L>
+pub(super) struct PreparedUdpServer<L, F = SystemDirectUdpSocketFactory>
 where
     L: ServerUdpListener,
+    F: DirectUdpSocketFactory,
 {
     inbound: usize,
     routing: Arc<ServerRouting>,
@@ -459,11 +468,11 @@ where
     config: UdpConfig,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
-    runtime: ProductionUdpRuntime<L>,
+    runtime: ServerUdpRuntime<L, F>,
     mappings: Arc<UdpMappings>,
     admission: Arc<tokio::sync::Mutex<()>>,
     scratch: UdpPacketScratch,
-    wire: Vec<u8>,
+    wire: BytesMut,
     maintenance: tokio::time::Interval,
     _receive_scratch: UdpBufferReservation,
     _receive_wire: UdpBufferReservation,
@@ -491,6 +500,19 @@ pub(super) fn prepare_udp_server<L>(
 ) -> Result<PreparedUdpServer<L>, RunError>
 where
     L: ServerUdpListener,
+{
+    prepare_udp_server_with_socket_factory(inbound, listener, shared, SystemDirectUdpSocketFactory)
+}
+
+fn prepare_udp_server_with_socket_factory<L, F>(
+    inbound: usize,
+    listener: Arc<L>,
+    shared: ServerUdpShared,
+    socket_factory: F,
+) -> Result<PreparedUdpServer<L, F>, RunError>
+where
+    L: ServerUdpListener,
+    F: DirectUdpSocketFactory,
 {
     let ServerUdpShared {
         routing,
@@ -520,7 +542,7 @@ where
         sessions,
         connect_timeout,
         dns_egress::ServerDnsResolver::new(dns, inbound, Network::Udp),
-        SystemDirectUdpSocketFactory,
+        socket_factory,
         handler,
         registry.clone(),
     );
@@ -530,6 +552,10 @@ where
     let receive_wire = budget
         .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
         .map_err(|_| RunError::StartupProtocol)?;
+    let wire = BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES);
+    if wire.capacity() != receive_wire.capacity() {
+        return Err(RunError::StartupProtocol);
+    }
     let mut maintenance = tokio::time::interval(UDP_RECONCILE_INTERVAL);
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     Ok(PreparedUdpServer {
@@ -545,16 +571,17 @@ where
         mappings,
         admission,
         scratch: UdpPacketScratch::new(),
-        wire: vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES],
+        wire,
         maintenance,
         _receive_scratch: receive_scratch,
         _receive_wire: receive_wire,
     })
 }
 
-impl<L> PreparedUdpServer<L>
+impl<L, SF> PreparedUdpServer<L, SF>
 where
     L: ServerUdpListener,
+    SF: DirectUdpSocketFactory,
 {
     async fn run_with_cancellation(
         self,
@@ -575,7 +602,7 @@ where
     ) -> Result<(), RunError>
     where
         S: std::future::Future<Output = ()>,
-        C: FnOnce(ProductionUdpRuntime<L>) -> F,
+        C: FnOnce(ServerUdpRuntime<L, SF>) -> F,
         F: std::future::Future<Output = usize>,
     {
         let Self {
@@ -597,28 +624,71 @@ where
             _receive_wire,
         } = self;
         maintenance.tick().await;
+        let mut removals = runtime.sessions().subscribe_removals();
         tokio::pin!(shutdown);
+        let mut readiness_drain = 0;
 
         let terminal = loop {
-            let received = tokio::select! {
-                biased;
-                _ = &mut shutdown => break Ok(()),
-                _ = maintenance.tick() => {
-                    reconcile_udp_generations(&runtime, &mappings);
-                    mappings.prune_protocol(&protocol, clock.monotonic_now());
-                    update_udp_resource_metrics(&metrics, &registry);
-                    continue;
+            if readiness_drain == MAX_UDP_LISTENER_READINESS_DRAIN {
+                readiness_drain = 0;
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break Ok(()),
+                    _ = tokio::task::yield_now() => {}
                 }
-                received = listener.recv_from(&mut wire) => received,
+            }
+            wire.clear();
+            let received = if readiness_drain == 0 {
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break Ok(()),
+                    _ = maintenance.tick() => {
+                        let maintenance_guard = tokio::select! {
+                            biased;
+                            _ = &mut shutdown => break Ok(()),
+                            guard = admission.lock() => guard,
+                        };
+                        mappings.prune_protocol(&protocol, clock.monotonic_now());
+                        drop(maintenance_guard);
+                        update_udp_resource_metrics(&metrics, &registry);
+                        continue;
+                    }
+                    removed = removals.recv() => {
+                        match removed {
+                            Ok(handle) => mappings.invalidate_handle(handle),
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                reconcile_udp_generations(&runtime, &mappings);
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                break Err(RunError::RuntimeRoot);
+                            }
+                        }
+                        continue;
+                    }
+                    received = listener.recv_buf_from(&mut wire) => received,
+                }
+            } else {
+                match listener.try_recv_buf_from(&mut wire) {
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        readiness_drain = 0;
+                        continue;
+                    }
+                    received => received,
+                }
             };
             let (wire_len, peer) = match received {
-                Ok(received) => received,
-                Err(_) => {
+                Ok(received)
+                    if received.0 == wire.len() && received.0 <= MAX_UDP_WIRE_DATAGRAM_BYTES =>
+                {
+                    received
+                }
+                Ok(_) | Err(_) => {
                     record_udp_failure(&metrics, Stage::Listen, Reason::Receive, Outcome::Failed);
                     break Err(RunError::RuntimeListener);
                 }
             };
-            let wire = &wire[..wire_len];
+            readiness_drain += 1;
+            let wire = wire.as_ref();
             let pending = match protocol.prepare_request(clock.as_ref(), wire, &mut scratch) {
                 Ok(pending) => pending,
                 Err(error) => {
@@ -626,9 +696,21 @@ where
                     continue;
                 }
             };
-            // ponytail: one gate closes cross-inbound bind races; shard by session if UDP
-            // admission throughput becomes measurable.
-            let _admission = admission.lock().await;
+            let terminal = select_udp_route(
+                &routing,
+                inbound,
+                pending.datagram().target(),
+                pending.datagram().payload(),
+                &metrics,
+            );
+            // The shared gate protects only protocol/mapping observations and their
+            // synchronous commit. In particular, it is never held while a provisional
+            // runtime session opens its socket below.
+            let admission_guard = tokio::select! {
+                biased;
+                _ = &mut shutdown => break Ok(()),
+                guard = admission.lock() => guard,
+            };
             let existing = match protocol.existing_capability(&pending) {
                 Ok(existing) => existing,
                 Err(error) => {
@@ -643,13 +725,6 @@ where
                 record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
                 continue;
             }
-            let terminal = select_udp_route(
-                &routing,
-                inbound,
-                pending.datagram().target(),
-                pending.datagram().payload(),
-                &metrics,
-            );
             if terminal == ServerTerminalRoute::Reject && routing.program().is_none() {
                 continue;
             }
@@ -699,15 +774,9 @@ where
                     continue;
                 }
                 let handle = binding.handle;
-                let Some(reserved) = reserve_udp_direct(terminal, || {
-                    std::future::ready(
-                        runtime.reserve_datagram(handle, pending.datagram().allocated_capacity()),
-                    )
-                })
-                .await
-                else {
-                    continue;
-                };
+                debug_assert_eq!(terminal, ServerTerminalRoute::Direct);
+                let reserved =
+                    runtime.reserve_datagram(handle, pending.datagram().allocated_capacity());
                 match reserved {
                     Ok(reservation) => {
                         let (datagram, commit) = pending.into_parts();
@@ -749,27 +818,116 @@ where
                 }
             }
 
-            let Some(admission) = reserve_udp_direct(terminal, || {
-                runtime.reserve_session(
+            drop(admission_guard);
+            debug_assert_eq!(terminal, ServerTerminalRoute::Direct);
+            let provisional = tokio::select! {
+                biased;
+                _ = &mut shutdown => break Ok(()),
+                provisional = runtime.reserve_session(
                     tokio::time::Instant::now(),
                     pending.datagram().allocated_capacity(),
-                )
-            })
-            .await
-            else {
-                continue;
+                ) => provisional,
             };
-            let admission = match admission {
+            let provisional = match provisional {
                 Ok(admission) => admission,
                 Err(error) => {
                     record_udp_runtime_failure(&metrics, error);
                     continue;
                 }
             };
+
+            // A concurrent packet may have committed this authenticated identity,
+            // replaced a stale runtime generation, or consumed the global protocol
+            // ceiling while the socket was opening. Recheck all three conditions
+            // before publishing the provisional resources.
+            let admission_guard = tokio::select! {
+                biased;
+                _ = &mut shutdown => break Ok(()),
+                guard = admission.lock() => guard,
+            };
+            let existing = match protocol.existing_capability(&pending) {
+                Ok(existing) => existing,
+                Err(error) => {
+                    record_udp_protocol_failure(&metrics, error);
+                    break Err(RunError::RuntimeRoot);
+                }
+            };
+            if existing
+                .and_then(|capability| mappings.inbound(capability))
+                .is_some_and(|bound_inbound| bound_inbound != inbound)
+            {
+                record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
+                continue;
+            }
+            if let Some((capability, binding)) = existing.and_then(|capability| {
+                mappings
+                    .handle(capability)
+                    .map(|binding| (capability, binding))
+            }) {
+                debug_assert_eq!(binding.inbound, inbound);
+                match runtime
+                    .reserve_datagram(binding.handle, pending.datagram().allocated_capacity())
+                {
+                    Ok(reservation) => {
+                        // The winning generation owns this request; dropping the
+                        // provisional admission rolls its session, bytes, socket, and
+                        // owner permit back before protocol activity is committed.
+                        drop(provisional);
+                        let (datagram, commit) = pending.into_parts();
+                        let committed =
+                            reservation.commit_with(datagram, tokio::time::Instant::now(), || {
+                                let accepted = protocol.commit_request(
+                                    commit,
+                                    peer,
+                                    clock.monotonic_now(),
+                                    &SystemRandom,
+                                )?;
+                                if accepted.capability() == capability {
+                                    Ok(())
+                                } else {
+                                    Err(UdpPacketError::Generation)
+                                }
+                            });
+                        match committed {
+                            Ok(()) => record_udp_request_accepted(&metrics, wire_len),
+                            Err(UdpCommitError::Runtime(error)) => {
+                                mappings.invalidate_handle(binding.handle);
+                                record_udp_runtime_failure(&metrics, error);
+                            }
+                            Err(UdpCommitError::Protocol(error)) => {
+                                record_udp_protocol_failure(&metrics, error);
+                            }
+                        }
+                        continue;
+                    }
+                    Err(UdpRuntimeError::Cancelled) => {
+                        mappings.invalidate_handle(binding.handle);
+                    }
+                    Err(error) => {
+                        record_udp_runtime_failure(&metrics, error);
+                        continue;
+                    }
+                }
+            }
+            if existing.is_none() {
+                reconcile_udp_generations(&runtime, &mappings);
+                mappings.prune_protocol(&protocol, clock.monotonic_now());
+                match protocol.session_count() {
+                    Ok(count) if count >= config.max_sessions => {
+                        record_udp_runtime_failure(&metrics, UdpRuntimeError::SessionLimit);
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        record_udp_protocol_failure(&metrics, error);
+                        break Err(RunError::RuntimeRoot);
+                    }
+                }
+            }
             let (datagram, commit) = pending.into_parts();
             let mut committed_capability = None;
             let committed = runtime.commit_session_with(
-                admission,
+                provisional,
                 datagram,
                 tokio::time::Instant::now(),
                 || {
@@ -802,6 +960,7 @@ where
                     record_udp_protocol_failure(&metrics, error)
                 }
             }
+            drop(admission_guard);
             update_udp_resource_metrics(&metrics, &registry);
         };
 
@@ -901,19 +1060,9 @@ fn select_udp_route(
     }
 }
 
-async fn reserve_udp_direct<R, F>(
-    terminal: ServerTerminalRoute,
-    reserve: impl FnOnce() -> F,
-) -> Option<R>
-where
-    F: std::future::Future<Output = R>,
-{
-    (terminal == ServerTerminalRoute::Direct).then_some(())?;
-    Some(reserve().await)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -937,13 +1086,16 @@ mod tests {
     }
 
     impl ServerUdpListener for ScriptedUdpListener {
-        async fn recv_from(&self, destination: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        async fn recv_buf_from(
+            &self,
+            destination: &mut BytesMut,
+        ) -> io::Result<(usize, SocketAddr)> {
             let request = self.request.lock().expect("scripted UDP request").take();
             let Some((wire, peer)) = request else {
                 self.terminal_gate.notified().await;
                 return Err(io::Error::other("listener terminal"));
             };
-            destination[..wire.len()].copy_from_slice(&wire);
+            destination.extend_from_slice(&wire);
             Ok((wire.len(), peer))
         }
 
@@ -962,8 +1114,114 @@ mod tests {
         sent: CapturedSends,
     }
 
+    struct AdmissionUdpListener {
+        request: Mutex<Option<(Vec<u8>, SocketAddr)>>,
+    }
+
+    struct BurstUdpListener {
+        requests: Mutex<VecDeque<(Vec<u8>, SocketAddr)>>,
+        awaited: AtomicUsize,
+        tried: AtomicUsize,
+        drain_cap_reached: Notify,
+    }
+
+    impl BurstUdpListener {
+        fn receive(&self, destination: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+            let request = self
+                .requests
+                .lock()
+                .expect("burst UDP requests")
+                .pop_front();
+            let Some((wire, peer)) = request else {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            };
+            destination.extend_from_slice(&wire);
+            Ok((wire.len(), peer))
+        }
+    }
+
+    impl ServerUdpListener for BurstUdpListener {
+        async fn recv_buf_from(
+            &self,
+            destination: &mut BytesMut,
+        ) -> io::Result<(usize, SocketAddr)> {
+            self.awaited.fetch_add(1, Ordering::SeqCst);
+            match self.receive(destination) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::future::pending().await
+                }
+                received => received,
+            }
+        }
+
+        fn try_recv_buf_from(&self, destination: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+            let tried = self.tried.fetch_add(1, Ordering::SeqCst) + 1;
+            let received = self.receive(destination);
+            if tried + 1 == MAX_UDP_LISTENER_READINESS_DRAIN {
+                self.drain_cap_reached.notify_one();
+            }
+            received
+        }
+
+        async fn send_to(&self, source: &[u8], _peer: SocketAddr) -> io::Result<usize> {
+            Ok(source.len())
+        }
+    }
+
+    impl ServerUdpListener for AdmissionUdpListener {
+        async fn recv_buf_from(
+            &self,
+            destination: &mut BytesMut,
+        ) -> io::Result<(usize, SocketAddr)> {
+            let request = self.request.lock().expect("admission request").take();
+            let Some((wire, peer)) = request else {
+                return std::future::pending().await;
+            };
+            destination.extend_from_slice(&wire);
+            Ok((wire.len(), peer))
+        }
+
+        async fn send_to(&self, source: &[u8], _peer: SocketAddr) -> io::Result<usize> {
+            Ok(source.len())
+        }
+    }
+
+    #[derive(Clone)]
+    struct GatedSocketFactory {
+        entered: Arc<AtomicUsize>,
+        entry_changed: Arc<Notify>,
+        open_gate: Arc<Semaphore>,
+    }
+
+    impl DirectUdpSocketFactory for GatedSocketFactory {
+        type Socket = UdpSocket;
+
+        async fn open(&self) -> io::Result<Self::Socket> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            self.entry_changed.notify_waiters();
+            let permit = self
+                .open_gate
+                .acquire()
+                .await
+                .map_err(|_| io::Error::other("open gate closed"))?;
+            permit.forget();
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await
+        }
+    }
+
+    fn gated_socket_factory() -> GatedSocketFactory {
+        GatedSocketFactory {
+            entered: Arc::new(AtomicUsize::new(0)),
+            entry_changed: Arc::new(Notify::new()),
+            open_gate: Arc::new(Semaphore::new(0)),
+        }
+    }
+
     impl ServerUdpListener for ConcurrentSendListener {
-        async fn recv_from(&self, _destination: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        async fn recv_buf_from(
+            &self,
+            _destination: &mut BytesMut,
+        ) -> io::Result<(usize, SocketAddr)> {
             std::future::pending().await
         }
 
@@ -1300,6 +1558,683 @@ mod tests {
         drop(codec);
         drop(manager);
         assert_eq!(active(registry.snapshot()), baseline);
+    }
+
+    #[tokio::test]
+    async fn listener_readiness_drain_yields_at_32_with_shutdown_priority() {
+        let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+        let (path, config) = server_test_config(listen);
+        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_100));
+        let listener = Arc::new(BurstUdpListener {
+            requests: Mutex::new((0..64).map(|_| (vec![0_u8], peer)).collect::<VecDeque<_>>()),
+            awaited: AtomicUsize::new(0),
+            tried: AtomicUsize::new(0),
+            drain_cap_reached: Notify::new(),
+        });
+        let keys = aes_keys();
+        let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let metrics = Arc::new(Metrics::new());
+        let sessions = UdpSessionManager::new(
+            udp_runtime_limits(&config.udp).expect("listener drain limits"),
+            registry.clone(),
+        );
+        let prepared = prepare_udp_server(
+            0,
+            Arc::clone(&listener),
+            ServerUdpShared {
+                routing: Arc::new(ServerRouting {
+                    legacy: config.route,
+                    program: config.route_program,
+                    outbound_count: config.outbounds.len(),
+                }),
+                protocol: Arc::clone(&protocol),
+                clock: Arc::new(SystemClock::new()),
+                config: config.udp,
+                sessions,
+                mappings: Arc::new(UdpMappings::new(config.udp.max_sessions)),
+                admission: Arc::new(tokio::sync::Mutex::new(())),
+                connect_timeout: config.runtime.connect_timeout,
+                dns: None,
+                registry: registry.clone(),
+                metrics: Arc::clone(&metrics),
+            },
+        )
+        .expect("prepared listener drain root");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(prepared.run_with_shutdown(
+            async move {
+                let _ = stopped.await;
+            },
+            |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            listener.drain_cap_reached.notified(),
+        )
+        .await
+        .expect("listener drain cap deadline");
+        stop.send(()).expect("stop listener drain root");
+        assert_eq!(task.await.expect("listener drain task"), Ok(()));
+        assert_eq!(listener.awaited.load(Ordering::SeqCst), 1);
+        assert_eq!(listener.tried.load(Ordering::SeqCst), 31);
+        assert_eq!(
+            listener
+                .requests
+                .lock()
+                .expect("remaining burst requests")
+                .len(),
+            32,
+            "shutdown wins immediately after the bounded batch yields"
+        );
+        assert_eq!(protocol.session_count().expect("protocol count"), 0);
+        assert!(metrics.encode_text().expect("drain metrics").contains(
+            "ferrum2_udp_failures_total{role=\"server\",stage=\"shadowsocks\",reason=\"bounds\"} 32"
+        ));
+        assert_eq!(active(registry.snapshot()), baseline);
+        std::fs::remove_file(path).expect("remove listener drain config");
+    }
+
+    #[tokio::test]
+    async fn slow_socket_opens_for_distinct_sessions_run_concurrently() {
+        let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+        let (path, mut config) = server_test_config(listen);
+        config.udp.max_sessions = 2;
+        let target = udp_loopback().await;
+        let target_address =
+            TargetAddr::ip(target.local_addr().expect("target address")).expect("numeric target");
+        let keys = aes_keys();
+        let clock = Arc::new(SystemClock::new());
+        let mut first_client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("first client");
+        let mut second_client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second client");
+        let first_wire = encoded_udp_request(
+            &mut first_client,
+            clock.as_ref(),
+            target_address.clone(),
+            b"first admission",
+        );
+        let second_wire = encoded_udp_request(
+            &mut second_client,
+            clock.as_ref(),
+            target_address,
+            b"second admission",
+        );
+        let first_listener = Arc::new(AdmissionUdpListener {
+            request: Mutex::new(Some((
+                first_wire,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_101)),
+            ))),
+        });
+        let second_listener = Arc::new(AdmissionUdpListener {
+            request: Mutex::new(Some((
+                second_wire,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_102)),
+            ))),
+        });
+        let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let sessions = UdpSessionManager::new(
+            udp_runtime_limits(&config.udp).expect("two-session limits"),
+            registry.clone(),
+        );
+        let mappings = Arc::new(UdpMappings::new(config.udp.max_sessions));
+        let metrics = Arc::new(Metrics::new());
+        let shared = ServerUdpShared {
+            routing: Arc::new(ServerRouting {
+                legacy: config.route,
+                program: config.route_program,
+                outbound_count: config.outbounds.len(),
+            }),
+            protocol: Arc::clone(&protocol),
+            clock,
+            config: config.udp,
+            sessions,
+            mappings,
+            admission: Arc::new(tokio::sync::Mutex::new(())),
+            connect_timeout: config.runtime.connect_timeout,
+            dns: None,
+            registry: registry.clone(),
+            metrics,
+        };
+        let socket_factory = gated_socket_factory();
+        let first = prepare_udp_server_with_socket_factory(
+            0,
+            first_listener,
+            shared.clone(),
+            socket_factory.clone(),
+        )
+        .expect("first prepared root");
+        let second = prepare_udp_server_with_socket_factory(
+            0,
+            second_listener,
+            shared,
+            socket_factory.clone(),
+        )
+        .expect("second prepared root");
+        let (stop_first, stopped_first) = tokio::sync::oneshot::channel::<()>();
+        let (stop_second, stopped_second) = tokio::sync::oneshot::channel::<()>();
+        let first_task = tokio::spawn(first.run_with_shutdown(
+            async move {
+                let _ = stopped_first.await;
+            },
+            |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+        let second_task = tokio::spawn(second.run_with_shutdown(
+            async move {
+                let _ = stopped_second.await;
+            },
+            |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+
+        wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 2).await;
+        assert_eq!(
+            registry.snapshot().udp_sessions,
+            2,
+            "both provisional sessions coexist while both socket opens are stalled"
+        );
+        socket_factory.open_gate.add_permits(2);
+
+        let mut received = [0_u8; 64];
+        let (first_len, _) = recv_udp(&target, &mut received).await;
+        let first_payload = received[..first_len].to_vec();
+        let (second_len, _) = recv_udp(&target, &mut received).await;
+        let second_payload = received[..second_len].to_vec();
+        let mut payloads = [first_payload, second_payload];
+        payloads.sort();
+        assert_eq!(
+            payloads,
+            [b"first admission".to_vec(), b"second admission".to_vec()]
+        );
+        assert_eq!(protocol.session_count().expect("protocol count"), 2);
+        assert_eq!(registry.snapshot().udp_sockets, 2);
+
+        stop_first.send(()).expect("stop first root");
+        stop_second.send(()).expect("stop second root");
+        assert_eq!(first_task.await.expect("first root task"), Ok(()));
+        assert_eq!(second_task.await.expect("second root task"), Ok(()));
+        assert_eq!(active(registry.snapshot()), baseline);
+        std::fs::remove_file(path).expect("remove admission config");
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_session_rolls_back_losing_socket_before_protocol_commit() {
+        let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+        let (path, mut config) = server_test_config(listen);
+        config.udp.max_sessions = 2;
+        let target = udp_loopback().await;
+        let target_address =
+            TargetAddr::ip(target.local_addr().expect("target address")).expect("numeric target");
+        let keys = aes_keys();
+        let clock = Arc::new(SystemClock::new());
+        let mut client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client protocol");
+        let wire = encoded_udp_request(
+            &mut client,
+            clock.as_ref(),
+            target_address,
+            b"one accepted datagram",
+        );
+        let first_listener = Arc::new(AdmissionUdpListener {
+            request: Mutex::new(Some((
+                wire.clone(),
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_103)),
+            ))),
+        });
+        let second_listener = Arc::new(AdmissionUdpListener {
+            request: Mutex::new(Some((
+                wire,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_104)),
+            ))),
+        });
+        let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let sessions = UdpSessionManager::new(
+            udp_runtime_limits(&config.udp).expect("two provisional limits"),
+            registry.clone(),
+        );
+        let mappings = Arc::new(UdpMappings::new(config.udp.max_sessions));
+        let metrics = Arc::new(Metrics::new());
+        let shared = ServerUdpShared {
+            routing: Arc::new(ServerRouting {
+                legacy: config.route,
+                program: config.route_program,
+                outbound_count: config.outbounds.len(),
+            }),
+            protocol: Arc::clone(&protocol),
+            clock,
+            config: config.udp,
+            sessions,
+            mappings: Arc::clone(&mappings),
+            admission: Arc::new(tokio::sync::Mutex::new(())),
+            connect_timeout: config.runtime.connect_timeout,
+            dns: None,
+            registry: registry.clone(),
+            metrics: Arc::clone(&metrics),
+        };
+        let socket_factory = gated_socket_factory();
+        let first = prepare_udp_server_with_socket_factory(
+            0,
+            first_listener,
+            shared.clone(),
+            socket_factory.clone(),
+        )
+        .expect("first prepared root");
+        let second = prepare_udp_server_with_socket_factory(
+            0,
+            second_listener,
+            shared,
+            socket_factory.clone(),
+        )
+        .expect("second prepared root");
+        let (stop_first, stopped_first) = tokio::sync::oneshot::channel::<()>();
+        let (stop_second, stopped_second) = tokio::sync::oneshot::channel::<()>();
+        let first_task = tokio::spawn(first.run_with_shutdown(
+            async move {
+                let _ = stopped_first.await;
+            },
+            |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+        let second_task = tokio::spawn(second.run_with_shutdown(
+            async move {
+                let _ = stopped_second.await;
+            },
+            |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+
+        wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 2).await;
+        socket_factory.open_gate.add_permits(2);
+        let mut received = [0_u8; 64];
+        let (length, _) = recv_udp(&target, &mut received).await;
+        assert_eq!(&received[..length], b"one accepted datagram");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if metrics.encode_text().expect("duplicate metrics").contains(
+                    "ferrum2_udp_replay_rejections_total{role=\"server\",direction=\"client_to_target\",reason=\"duplicate\"} 1",
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("losing duplicate commit deadline");
+        assert_pending(target.recv_from(&mut received), "duplicate target forward").await;
+        assert_eq!(protocol.session_count().expect("protocol count"), 1);
+        assert_eq!(
+            (
+                registry.snapshot().udp_sessions,
+                registry.snapshot().udp_sockets,
+                registry.snapshot().udp_tasks,
+            ),
+            (1, 1, 1),
+            "the losing provisional generation and socket are fully rolled back"
+        );
+        {
+            let state = mappings.state.lock().expect("winning mapping");
+            assert_eq!((state.by_capability.len(), state.by_handle.len()), (1, 1));
+        }
+
+        stop_first.send(()).expect("stop first root");
+        stop_second.send(()).expect("stop second root");
+        assert_eq!(first_task.await.expect("first root task"), Ok(()));
+        assert_eq!(second_task.await.expect("second root task"), Ok(()));
+        assert_eq!(active(registry.snapshot()), baseline);
+        std::fs::remove_file(path).expect("remove same-session config");
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_stalled_socket_open_and_rolls_back_provisional_session() {
+        let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+        let (path, config) = server_test_config(listen);
+        let target = udp_loopback().await;
+        let target_address =
+            TargetAddr::ip(target.local_addr().expect("target address")).expect("numeric target");
+        let keys = aes_keys();
+        let clock = Arc::new(SystemClock::new());
+        let mut client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client protocol");
+        let wire = encoded_udp_request(
+            &mut client,
+            clock.as_ref(),
+            target_address,
+            b"cancel stalled open",
+        );
+        let listener = Arc::new(AdmissionUdpListener {
+            request: Mutex::new(Some((
+                wire,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_105)),
+            ))),
+        });
+        let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let sessions = UdpSessionManager::new(
+            udp_runtime_limits(&config.udp).expect("single-session limits"),
+            registry.clone(),
+        );
+        let mappings = Arc::new(UdpMappings::new(config.udp.max_sessions));
+        let socket_factory = gated_socket_factory();
+        let prepared = prepare_udp_server_with_socket_factory(
+            0,
+            listener,
+            ServerUdpShared {
+                routing: Arc::new(ServerRouting {
+                    legacy: config.route,
+                    program: config.route_program,
+                    outbound_count: config.outbounds.len(),
+                }),
+                protocol: Arc::clone(&protocol),
+                clock,
+                config: config.udp,
+                sessions,
+                mappings: Arc::clone(&mappings),
+                admission: Arc::new(tokio::sync::Mutex::new(())),
+                connect_timeout: config.runtime.connect_timeout,
+                dns: None,
+                registry: registry.clone(),
+                metrics: Arc::new(Metrics::new()),
+            },
+            socket_factory.clone(),
+        )
+        .expect("prepared root");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(prepared.run_with_shutdown(
+            async move {
+                let _ = stopped.await;
+            },
+            |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+
+        wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 1).await;
+        assert_eq!(registry.snapshot().udp_sessions, 1);
+        stop.send(()).expect("stop stalled root");
+        assert_eq!(task.await.expect("stalled root task"), Ok(()));
+        assert_eq!(protocol.session_count().expect("protocol count"), 0);
+        {
+            let state = mappings.state.lock().expect("empty mappings");
+            assert!(state.by_capability.is_empty());
+        }
+        assert_eq!(active(registry.snapshot()), baseline);
+        std::fs::remove_file(path).expect("remove cancellation config");
+    }
+
+    #[tokio::test]
+    async fn post_open_session_limit_race_rolls_back_provisional_resources() {
+        let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+        let (path, mut config) = server_test_config(listen);
+        config.udp.max_sessions = 1;
+        let target = udp_loopback().await;
+        let target_address =
+            TargetAddr::ip(target.local_addr().expect("target address")).expect("numeric target");
+        let keys = aes_keys();
+        let clock = Arc::new(SystemClock::new());
+        let mut direct_client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("direct client");
+        let direct_wire = encoded_udp_request(
+            &mut direct_client,
+            clock.as_ref(),
+            target_address.clone(),
+            b"losing direct request",
+        );
+        let mut ceiling_client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("ceiling client");
+        let ceiling_wire = encoded_udp_request(
+            &mut ceiling_client,
+            clock.as_ref(),
+            target_address,
+            b"protocol ceiling owner",
+        );
+        let listener = Arc::new(AdmissionUdpListener {
+            request: Mutex::new(Some((
+                direct_wire,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_106)),
+            ))),
+        });
+        let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let sessions = UdpSessionManager::new(
+            udp_runtime_limits(&config.udp).expect("single-session limits"),
+            registry.clone(),
+        );
+        let mappings = Arc::new(UdpMappings::new(config.udp.max_sessions));
+        let admission = Arc::new(tokio::sync::Mutex::new(()));
+        let metrics = Arc::new(Metrics::new());
+        let socket_factory = gated_socket_factory();
+        let prepared = prepare_udp_server_with_socket_factory(
+            0,
+            listener,
+            ServerUdpShared {
+                routing: Arc::new(ServerRouting {
+                    legacy: config.route,
+                    program: config.route_program,
+                    outbound_count: config.outbounds.len(),
+                }),
+                protocol: Arc::clone(&protocol),
+                clock: Arc::clone(&clock),
+                config: config.udp,
+                sessions,
+                mappings: Arc::clone(&mappings),
+                admission: Arc::clone(&admission),
+                connect_timeout: config.runtime.connect_timeout,
+                dns: None,
+                registry: registry.clone(),
+                metrics: Arc::clone(&metrics),
+            },
+            socket_factory.clone(),
+        )
+        .expect("prepared root");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(prepared.run_with_shutdown(
+            async move {
+                let _ = stopped.await;
+            },
+            |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+
+        wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 1).await;
+        {
+            let _guard = admission.lock().await;
+            let mut scratch = UdpPacketScratch::new();
+            let pending = protocol
+                .prepare_request(clock.as_ref(), &ceiling_wire, &mut scratch)
+                .expect("prepare ceiling request");
+            let (_datagram, commit) = pending.into_parts();
+            let accepted = protocol
+                .commit_request(
+                    commit,
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_107)),
+                    clock.monotonic_now(),
+                    &SystemRandom,
+                )
+                .expect("commit ceiling owner");
+            mappings.publish_rejected(accepted.capability(), 0);
+        }
+        socket_factory.open_gate.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if metrics.encode_text().expect("limit metrics").contains(
+                    "ferrum2_udp_failures_total{role=\"server\",stage=\"relay\",reason=\"session_limit\"} 1",
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("post-open limit deadline");
+        assert_eq!(protocol.session_count().expect("protocol count"), 1);
+        assert_eq!(
+            (
+                registry.snapshot().udp_sessions,
+                registry.snapshot().udp_sockets,
+                registry.snapshot().udp_tasks,
+            ),
+            (0, 0, 0),
+            "the losing admission leaves no runtime generation or socket"
+        );
+        let mut received = [0_u8; 64];
+        assert_pending(target.recv_from(&mut received), "post-limit direct forward").await;
+
+        stop.send(()).expect("stop limit root");
+        assert_eq!(task.await.expect("limit root task"), Ok(()));
+        assert_eq!(active(registry.snapshot()), baseline);
+        std::fs::remove_file(path).expect("remove limit config");
+    }
+
+    #[tokio::test]
+    async fn replacement_generation_wins_while_socket_open_is_stalled() {
+        let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+        let (path, mut config) = server_test_config(listen);
+        config.udp.max_sessions = 2;
+        let target = udp_loopback().await;
+        let target_socket = target.local_addr().expect("target address");
+        let target_address = TargetAddr::ip(target_socket).expect("numeric target");
+        let keys = aes_keys();
+        let clock = Arc::new(SystemClock::new());
+        let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let sessions = UdpSessionManager::new(
+            udp_runtime_limits(&config.udp).expect("replacement limits"),
+            registry.clone(),
+        );
+        let mappings = Arc::new(UdpMappings::new(config.udp.max_sessions));
+        let mut client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client protocol");
+        let mut scratch = UdpPacketScratch::new();
+        let (capability, stale_handle) = commit_lifecycle_generation(
+            &mut client,
+            &protocol,
+            &sessions,
+            &mappings,
+            &clock,
+            target_socket,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_108)),
+            b"stale generation",
+            clock.monotonic_now(),
+            &mut scratch,
+        );
+        assert!(sessions.remove(stale_handle));
+        let request_wire = encoded_udp_request(
+            &mut client,
+            clock.as_ref(),
+            target_address.clone(),
+            b"replacement request",
+        );
+        let replacement_seed_wire = encoded_udp_request(
+            &mut client,
+            clock.as_ref(),
+            target_address,
+            b"replacement seed",
+        );
+        let listener = Arc::new(AdmissionUdpListener {
+            request: Mutex::new(Some((
+                request_wire,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_108)),
+            ))),
+        });
+        let socket_factory = gated_socket_factory();
+        let prepared = prepare_udp_server_with_socket_factory(
+            0,
+            listener,
+            ServerUdpShared {
+                routing: Arc::new(ServerRouting {
+                    legacy: config.route,
+                    program: config.route_program,
+                    outbound_count: config.outbounds.len(),
+                }),
+                protocol: Arc::clone(&protocol),
+                clock: Arc::clone(&clock),
+                config: config.udp,
+                sessions: sessions.clone(),
+                mappings: Arc::clone(&mappings),
+                admission: Arc::new(tokio::sync::Mutex::new(())),
+                connect_timeout: config.runtime.connect_timeout,
+                dns: None,
+                registry: registry.clone(),
+                metrics: Arc::new(Metrics::new()),
+            },
+            socket_factory.clone(),
+        )
+        .expect("prepared root");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(prepared.run_with_shutdown(
+            async move {
+                let _ = stopped.await;
+            },
+            |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+
+        wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 1).await;
+        assert_eq!(mappings.handle(capability), None);
+        let pending_seed = protocol
+            .prepare_request(clock.as_ref(), &replacement_seed_wire, &mut scratch)
+            .expect("prepare replacement seed");
+        let now = tokio::time::Instant::now();
+        let replacement_session = sessions.reserve_session(now).expect("replacement session");
+        let replacement_datagram = replacement_session
+            .reserve_datagram(
+                UdpDirection::ToTarget,
+                pending_seed.datagram().allocated_capacity(),
+            )
+            .expect("replacement seed reservation");
+        let (seed, _unused_protocol_commit) = pending_seed.into_parts();
+        let replacement_handle = replacement_session
+            .commit(replacement_datagram, seed, now)
+            .expect("replacement generation commit");
+        drop(
+            sessions
+                .pop(replacement_handle, UdpDirection::ToTarget)
+                .expect("replacement seed queue")
+                .expect("replacement seed datagram"),
+        );
+        assert_eq!(mappings.publish(capability, replacement_handle, 0), None);
+        socket_factory.open_gate.add_permits(1);
+
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(datagram) = sessions
+                    .pop(replacement_handle, UdpDirection::ToTarget)
+                    .expect("replacement request queue")
+                {
+                    break datagram;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("replacement request deadline");
+        assert_eq!(forwarded.datagram().payload(), b"replacement request");
+        drop(forwarded);
+        assert_eq!(
+            mappings
+                .handle(capability)
+                .expect("replacement mapping")
+                .handle,
+            replacement_handle
+        );
+        assert_eq!(protocol.session_count().expect("protocol count"), 1);
+        assert_eq!(
+            (
+                registry.snapshot().udp_sessions,
+                registry.snapshot().udp_sockets,
+                registry.snapshot().udp_tasks,
+            ),
+            (1, 0, 0),
+            "the provisional socket loses to the replacement runtime generation"
+        );
+
+        stop.send(()).expect("stop replacement root");
+        assert_eq!(task.await.expect("replacement root task"), Ok(()));
+        assert_eq!(active(registry.snapshot()), baseline);
+        std::fs::remove_file(path).expect("remove replacement config");
     }
 
     #[tokio::test]

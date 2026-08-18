@@ -746,7 +746,7 @@ async fn relay_udp_association<IO>(
                         return;
                     }
                 };
-                let (target, payload) = match prepared.prepare_application_response(
+                let response = match prepared.prepare_application_response(
                     &context.egress,
                     &routing.outbounds,
                     length,
@@ -770,9 +770,11 @@ async fn relay_udp_association<IO>(
                         return;
                     }
                 };
+                let target = response.datagram().target();
+                let payload = response.datagram().payload();
                 let Ok(send_deadline) = prepared.idle_deadline() else { return };
                 match send_with_lifecycle(
-                        endpoint.send(&target, &payload),
+                        endpoint.send(target, payload),
                         cancellation,
                         &mut session_cancellation,
                         send_deadline,
@@ -793,6 +795,7 @@ async fn relay_udp_association<IO>(
                 }
                 context.metrics.udp_datagram(Role::Client, Direction::TargetToClient, Outcome::Accepted);
                 context.metrics.add_udp_bytes(Role::Client, Direction::TargetToClient, payload.len() as u64);
+                prepared.recycle_application_response(response);
             }
         }
     }
@@ -944,11 +947,11 @@ async fn forward_udp_request(
     payload: Vec<u8>,
 ) -> bool {
     let payload_len = payload.len();
-    let wire_len = match prepared.prepare_application_request(
+    let wire_len = match prepared.prepare_owned_application_request(
         &context.egress,
         &routing.outbounds,
         target,
-        &payload,
+        bytes::Bytes::from(payload).into(),
         Instant::now(),
     ) {
         Ok(length) => length,

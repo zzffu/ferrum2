@@ -101,7 +101,6 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
     const SERVER_ZERO_SESSION: &str = "ferrum2_udp_sessions_active{role=\"server\"} 0";
     const SERVER_ROOT_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"server\"} 262028";
     const SERVER_ONE_SESSION: &str = "ferrum2_udp_sessions_active{role=\"server\"} 1";
-    const SERVER_ACTIVE_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"server\"} 327535";
 
     let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
     let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
@@ -245,12 +244,25 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
         malformed_echo.join().expect("malformed target join"),
         malformed
     );
-    let server_active = wait_for_metrics_sample(server_metrics, SERVER_ONE_SESSION);
-    assert!(
-        server_active
-            .windows(SERVER_ACTIVE_BUFFER.len())
-            .any(|window| window == SERVER_ACTIVE_BUFFER.as_bytes())
-    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let body = wait_for_metrics(server_metrics);
+        let one_session = body
+            .windows(SERVER_ONE_SESSION.len())
+            .any(|window| window == SERVER_ONE_SESSION.as_bytes());
+        let root_buffer = body
+            .windows(SERVER_ROOT_BUFFER.len())
+            .any(|window| window == SERVER_ROOT_BUFFER.as_bytes());
+        if one_session && root_buffer {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "active idle server UDP session retained an extra receive buffer: {}",
+            String::from_utf8_lossy(&body)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     drop((application, control));
 
     let client_body = wait_for_metrics_sample(client_metrics, CLIENT_ZERO_SESSION);
