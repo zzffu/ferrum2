@@ -89,33 +89,37 @@ impl OwnerRegistry {
     }
 
     /// Returns current owner counts without mutating runtime state.
+    ///
+    /// This is intentionally a non-transactional diagnostic snapshot. These
+    /// counters publish no object state, so relaxed loads preserve the exact
+    /// per-counter accounting contract without imposing a global order.
     pub fn snapshot(&self) -> OwnerSnapshot {
         OwnerSnapshot {
-            process_supervisors: self.counters.process_supervisors.load(Ordering::SeqCst),
-            prepared_process_roots: self.counters.prepared_process_roots.load(Ordering::SeqCst),
-            active_process_roots: self.counters.active_process_roots.load(Ordering::SeqCst),
-            process_root_reaps: self.counters.process_root_reaps.load(Ordering::SeqCst),
-            process_root_rollbacks: self.counters.process_root_rollbacks.load(Ordering::SeqCst),
-            process_forced_roots: self.counters.process_forced_roots.load(Ordering::SeqCst),
-            active_tun_tcp_flows: self.counters.active_tun_tcp_flows.load(Ordering::SeqCst),
+            process_supervisors: self.counters.process_supervisors.load(Ordering::Relaxed),
+            prepared_process_roots: self.counters.prepared_process_roots.load(Ordering::Relaxed),
+            active_process_roots: self.counters.active_process_roots.load(Ordering::Relaxed),
+            process_root_reaps: self.counters.process_root_reaps.load(Ordering::Relaxed),
+            process_root_rollbacks: self.counters.process_root_rollbacks.load(Ordering::Relaxed),
+            process_forced_roots: self.counters.process_forced_roots.load(Ordering::Relaxed),
+            active_tun_tcp_flows: self.counters.active_tun_tcp_flows.load(Ordering::Relaxed),
             active_tun_handler_tasks: self
                 .counters
                 .active_tun_handler_tasks
-                .load(Ordering::SeqCst),
-            active_supervisor_children: self.counters.supervisor_children.load(Ordering::SeqCst),
-            connection_tasks: self.counters.connection_tasks.load(Ordering::SeqCst),
-            owned_buffers: self.counters.buffers.load(Ordering::SeqCst),
-            owned_permits: self.counters.permits.load(Ordering::SeqCst),
-            listeners: self.counters.listeners.load(Ordering::SeqCst),
-            forced_shutdowns: self.counters.forced_shutdowns.load(Ordering::SeqCst),
-            udp_sessions: self.counters.udp_sessions.load(Ordering::SeqCst),
-            udp_sockets: self.counters.udp_sockets.load(Ordering::SeqCst),
-            udp_tasks: self.counters.udp_tasks.load(Ordering::SeqCst),
-            udp_queued_datagrams: self.counters.udp_queued_datagrams.load(Ordering::SeqCst),
-            udp_buffered_bytes: self.counters.udp_buffered_bytes.load(Ordering::SeqCst),
-            udp_scratch_buffers: self.counters.udp_scratch_buffers.load(Ordering::SeqCst),
-            udp_forced_shutdowns: self.counters.udp_forced_shutdowns.load(Ordering::SeqCst),
-            sniff_buffered_bytes: self.counters.sniff_buffered_bytes.load(Ordering::SeqCst),
+                .load(Ordering::Relaxed),
+            active_supervisor_children: self.counters.supervisor_children.load(Ordering::Relaxed),
+            connection_tasks: self.counters.connection_tasks.load(Ordering::Relaxed),
+            owned_buffers: self.counters.buffers.load(Ordering::Relaxed),
+            owned_permits: self.counters.permits.load(Ordering::Relaxed),
+            listeners: self.counters.listeners.load(Ordering::Relaxed),
+            forced_shutdowns: self.counters.forced_shutdowns.load(Ordering::Relaxed),
+            udp_sessions: self.counters.udp_sessions.load(Ordering::Relaxed),
+            udp_sockets: self.counters.udp_sockets.load(Ordering::Relaxed),
+            udp_tasks: self.counters.udp_tasks.load(Ordering::Relaxed),
+            udp_queued_datagrams: self.counters.udp_queued_datagrams.load(Ordering::Relaxed),
+            udp_buffered_bytes: self.counters.udp_buffered_bytes.load(Ordering::Relaxed),
+            udp_scratch_buffers: self.counters.udp_scratch_buffers.load(Ordering::Relaxed),
+            udp_forced_shutdowns: self.counters.udp_forced_shutdowns.load(Ordering::Relaxed),
+            sniff_buffered_bytes: self.counters.sniff_buffered_bytes.load(Ordering::Relaxed),
         }
     }
 
@@ -164,13 +168,13 @@ impl OwnerRegistry {
     ) -> Option<OwnerGuard> {
         self.counters
             .sniff_buffered_bytes
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current
                     .checked_add(capacity)
                     .filter(|updated| *updated <= aggregate_limit)
             })
             .ok()?;
-        self.counters.buffers.fetch_add(1, Ordering::SeqCst);
+        self.counters.buffers.fetch_add(1, Ordering::Relaxed);
         Some(OwnerGuard {
             counters: Arc::clone(&self.counters),
             kind: OwnerKind::Buffer,
@@ -209,45 +213,45 @@ impl OwnerRegistry {
     pub(crate) fn add_udp_buffered_bytes(&self, bytes: usize) {
         self.counters
             .udp_buffered_bytes
-            .fetch_add(bytes, Ordering::SeqCst);
+            .fetch_add(bytes, Ordering::Relaxed);
     }
 
     pub(crate) fn remove_udp_buffered_bytes(&self, bytes: usize) {
         let previous = self
             .counters
             .udp_buffered_bytes
-            .fetch_sub(bytes, Ordering::SeqCst);
+            .fetch_sub(bytes, Ordering::Relaxed);
         debug_assert!(previous >= bytes, "UDP byte owner counter underflow");
     }
 
     pub(crate) fn record_udp_forced_shutdowns(&self, count: usize) {
         self.counters
             .udp_forced_shutdowns
-            .fetch_add(count, Ordering::SeqCst);
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     pub(crate) fn record_forced_shutdowns(&self, count: usize) {
         self.counters
             .forced_shutdowns
-            .fetch_add(count, Ordering::SeqCst);
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     pub(crate) fn record_process_root_reap(&self) {
         self.counters
             .process_root_reaps
-            .fetch_add(1, Ordering::SeqCst);
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_process_root_rollback(&self) {
         self.counters
             .process_root_rollbacks
-            .fetch_add(1, Ordering::SeqCst);
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_process_forced_roots(&self, count: usize) {
         self.counters
             .process_forced_roots
-            .fetch_add(count, Ordering::SeqCst);
+            .fetch_add(count, Ordering::Relaxed);
     }
 }
 
@@ -291,7 +295,7 @@ pub(crate) struct OwnerGuard {
 
 impl OwnerGuard {
     fn new(registry: &OwnerRegistry, kind: OwnerKind) -> Self {
-        counter(&registry.counters, kind).fetch_add(1, Ordering::SeqCst);
+        counter(&registry.counters, kind).fetch_add(1, Ordering::Relaxed);
         Self {
             counters: Arc::clone(&registry.counters),
             kind,
@@ -306,13 +310,13 @@ impl Drop for OwnerGuard {
             let previous = self
                 .counters
                 .sniff_buffered_bytes
-                .fetch_sub(self.sniff_bytes, Ordering::SeqCst);
+                .fetch_sub(self.sniff_bytes, Ordering::Relaxed);
             debug_assert!(
                 previous >= self.sniff_bytes,
                 "sniff byte owner counter underflow"
             );
         }
-        let previous = counter(&self.counters, self.kind).fetch_sub(1, Ordering::SeqCst);
+        let previous = counter(&self.counters, self.kind).fetch_sub(1, Ordering::Relaxed);
         debug_assert!(previous > 0, "owner counter underflow");
     }
 }

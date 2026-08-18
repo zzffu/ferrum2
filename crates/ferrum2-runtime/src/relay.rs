@@ -3,11 +3,12 @@ use std::future::{Future, pending};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::Notify;
+use tokio::time::Instant;
 
 use crate::OwnerRegistry;
 
@@ -115,7 +116,8 @@ impl std::error::Error for RelayFailure {}
 
 struct ActivityIo<'a, T> {
     inner: &'a mut T,
-    activity: Arc<Notify>,
+    activity_epoch: Instant,
+    last_activity_nanos: Arc<AtomicU64>,
     bytes_written: u64,
 }
 
@@ -145,7 +147,11 @@ where
         if let Poll::Ready(Ok(written)) = result {
             if written > 0 {
                 self.bytes_written += written as u64;
-                self.activity.notify_one();
+                let elapsed = Instant::now().saturating_duration_since(self.activity_epoch);
+                self.last_activity_nanos.store(
+                    u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
             }
             Poll::Ready(Ok(written))
         } else {
@@ -208,23 +214,28 @@ where
     B: AsyncRead + AsyncWrite + Unpin,
     C: Future<Output = ()>,
 {
-    let activity = Arc::new(Notify::new());
+    let activity_epoch = Instant::now();
+    let last_activity_nanos = Arc::new(AtomicU64::new(0));
     let mut inbound = ActivityIo {
         inner: inbound,
-        activity: Arc::clone(&activity),
+        activity_epoch,
+        last_activity_nanos: Arc::clone(&last_activity_nanos),
         bytes_written: 0,
     };
     let mut outbound = ActivityIo {
         inner: outbound,
-        activity: Arc::clone(&activity),
+        activity_epoch,
+        last_activity_nanos: Arc::clone(&last_activity_nanos),
         bytes_written: 0,
     };
     let idle = async move {
         loop {
-            if tokio::time::timeout(idle_timeout, activity.notified())
-                .await
-                .is_err()
-            {
+            let observed = last_activity_nanos.load(Ordering::Relaxed);
+            let deadline = activity_epoch + Duration::from_nanos(observed) + idle_timeout;
+            tokio::time::sleep_until(deadline).await;
+            let latest = last_activity_nanos.load(Ordering::Relaxed);
+            let latest_deadline = activity_epoch + Duration::from_nanos(latest) + idle_timeout;
+            if Instant::now() >= latest_deadline {
                 return;
             }
         }

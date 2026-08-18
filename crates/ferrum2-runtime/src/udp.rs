@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
@@ -12,7 +12,7 @@ use bytes::BytesMut;
 use ferrum2_core::Datagram;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -43,6 +43,10 @@ pub const MIN_UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(86_400);
 /// Maximum ordered candidates consumed from system UDP resolution.
 pub const MAX_UDP_RESOLVED_CANDIDATES: usize = 16;
+/// Bounded per-association domain target cache entries.
+const UDP_DNS_CACHE_ENTRIES: usize = 16;
+/// Conservative reuse lifetime while the resolver API does not expose TTLs.
+const UDP_DNS_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Validated, protocol-neutral UDP resource limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,8 +250,11 @@ impl UdpBufferBudget {
     }
 
     /// Returns allocated-capacity bytes currently reserved.
+    ///
+    /// The atomic is only a numeric capacity gate; it does not publish buffer
+    /// contents or session state, which remain protected by their own owners.
     pub fn reserved_bytes(&self) -> usize {
-        self.inner.reserved.load(Ordering::SeqCst)
+        self.inner.reserved.load(Ordering::Relaxed)
     }
 
     /// Reserves exact allocated capacity before accepted protocol state advances.
@@ -255,7 +262,7 @@ impl UdpBufferBudget {
         if capacity > MAX_UDP_WIRE_DATAGRAM_BYTES {
             return Err(UdpRuntimeError::Bounds);
         }
-        let mut current = self.inner.reserved.load(Ordering::SeqCst);
+        let mut current = self.inner.reserved.load(Ordering::Relaxed);
         loop {
             let Some(next) = current.checked_add(capacity) else {
                 return Err(UdpRuntimeError::BufferLimit);
@@ -266,8 +273,8 @@ impl UdpBufferBudget {
             match self.inner.reserved.compare_exchange_weak(
                 current,
                 next,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => {
                     self.inner.registry.add_udp_buffered_bytes(capacity);
@@ -287,9 +294,17 @@ impl UdpBufferBudget {
     ) -> Result<UdpBufferReservation, UdpRuntimeError> {
         loop {
             let notified = self.inner.released.notified();
+            tokio::pin!(notified);
             match self.reserve(capacity) {
                 Ok(reservation) => return Ok(reservation),
-                Err(UdpRuntimeError::BufferLimit) => notified.await,
+                Err(UdpRuntimeError::BufferLimit) => {
+                    notified.as_mut().enable();
+                    match self.reserve(capacity) {
+                        Ok(reservation) => return Ok(reservation),
+                        Err(UdpRuntimeError::BufferLimit) => notified.as_mut().await,
+                        Err(error) => return Err(error),
+                    }
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -335,13 +350,15 @@ impl Drop for UdpBufferReservation {
         let previous = self
             .inner
             .reserved
-            .fetch_sub(self.capacity, Ordering::SeqCst);
+            .fetch_sub(self.capacity, Ordering::Relaxed);
         debug_assert!(
             previous >= self.capacity,
             "UDP buffer reservation underflow"
         );
         self.inner.registry.remove_udp_buffered_bytes(self.capacity);
-        self.inner.released.notify_waiters();
+        if self.capacity != 0 {
+            self.inner.released.notify_waiters();
+        }
     }
 }
 
@@ -360,6 +377,13 @@ impl AccountedDatagram {
     /// Returns the charged backing capacity.
     pub const fn allocated_capacity(&self) -> usize {
         self.reservation.capacity()
+    }
+
+    /// Separates the datagram from its exact capacity owner for a caller that
+    /// recycles the backing allocation into another already-accounted buffer.
+    /// The reservation must remain alive until that transfer is complete.
+    pub fn into_parts(self) -> (Datagram, UdpBufferReservation) {
+        (self.datagram, self.reservation)
     }
 }
 
@@ -440,6 +464,7 @@ struct UdpSessionManagerInner {
     runtime_owners: AtomicUsize,
     running_runtimes: AtomicUsize,
     state: Mutex<SessionState>,
+    removal_events: broadcast::Sender<UdpSessionHandle>,
     registry: OwnerRegistry,
 }
 
@@ -453,6 +478,7 @@ impl UdpSessionManager {
     /// Creates an empty manager without allocating per-session state.
     pub fn new(limits: UdpRuntimeLimits, registry: OwnerRegistry) -> Self {
         let budget = UdpBufferBudget::new(limits.max_buffered_bytes(), registry.clone());
+        let (removal_events, _) = broadcast::channel(limits.max_sessions());
         Self {
             inner: Arc::new(UdpSessionManagerInner {
                 limits,
@@ -461,6 +487,7 @@ impl UdpSessionManager {
                 runtime_owners: AtomicUsize::new(0),
                 running_runtimes: AtomicUsize::new(0),
                 state: Mutex::new(SessionState::default()),
+                removal_events,
                 registry,
             }),
         }
@@ -492,6 +519,12 @@ impl UdpSessionManager {
             .expect("UDP session state lock poisoned")
             .entries
             .len()
+    }
+
+    /// Subscribes to exact generation removals for event-driven mapping
+    /// invalidation. A lagged receiver must fall back to a batch liveness pass.
+    pub fn subscribe_removals(&self) -> broadcast::Receiver<UdpSessionHandle> {
+        self.inner.removal_events.subscribe()
     }
 
     /// Retains only committed live generations using one read-only state lock.
@@ -541,8 +574,10 @@ impl UdpSessionManager {
                 })
                 .min_by_key(|(slot, entry)| (entry.last_activity, **slot))
                 .map(|(slot, _)| *slot);
-            if let Some(slot) = expired {
-                remove_entry(&mut state, slot);
+            if let Some(slot) = expired
+                && let Some(handle) = remove_entry(&mut state, slot)
+            {
+                publish_removal(&self.inner, handle);
             }
         }
         if state.entries.len() == self.inner.limits.max_sessions() {
@@ -572,11 +607,12 @@ impl UdpSessionManager {
                 _guard: self.inner.registry.track_udp_session(),
             },
         );
-        Ok(PendingUdpSession {
+        let pending = PendingUdpSession {
             manager: Arc::clone(&self.inner),
             handle,
             committed: false,
-        })
+        };
+        Ok(pending)
     }
 
     /// Reserves one queue slot and its exact backing capacity for a live session.
@@ -596,8 +632,14 @@ impl UdpSessionManager {
             .state
             .lock()
             .expect("UDP session state lock poisoned");
-        if entry_matches(&state, handle) {
-            remove_entry(&mut state, handle.slot);
+        let removed = if entry_matches(&state, handle) {
+            remove_entry(&mut state, handle.slot)
+        } else {
+            None
+        };
+        drop(state);
+        if let Some(handle) = removed {
+            publish_removal(&self.inner, handle);
             true
         } else {
             false
@@ -613,8 +655,13 @@ impl UdpSessionManager {
             .expect("UDP session state lock poisoned");
         state.shutting_down = true;
         let slots: Vec<_> = state.entries.keys().copied().collect();
-        for slot in slots {
-            remove_entry(&mut state, slot);
+        let removed: Vec<_> = slots
+            .into_iter()
+            .filter_map(|slot| remove_entry(&mut state, slot))
+            .collect();
+        drop(state);
+        for handle in removed {
+            publish_removal(&self.inner, handle);
         }
     }
 
@@ -801,11 +848,17 @@ pub trait DirectUdpSocket: Send + Sync + 'static {
         target: SocketAddr,
     ) -> impl Future<Output = io::Result<usize>> + Send;
 
+    /// Waits until a non-blocking receive attempt may make progress.
+    fn readable(&self) -> impl Future<Output = io::Result<()>> + Send;
+
     /// Receives one complete target datagram and its source address.
-    fn recv_from(
+    fn recv_buf_from(
         &self,
-        payload: &mut [u8],
+        payload: &mut BytesMut,
     ) -> impl Future<Output = io::Result<(usize, SocketAddr)>> + Send;
+
+    /// Attempts one non-blocking receive into spare `BytesMut` capacity.
+    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)>;
 }
 
 impl DirectUdpSocket for UdpSocket {
@@ -813,8 +866,16 @@ impl DirectUdpSocket for UdpSocket {
         UdpSocket::send_to(self, payload, target).await
     }
 
-    async fn recv_from(&self, payload: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        UdpSocket::recv_from(self, payload).await
+    async fn readable(&self) -> io::Result<()> {
+        UdpSocket::readable(self).await
+    }
+
+    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        UdpSocket::recv_buf_from(self, payload).await
+    }
+
+    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        UdpSocket::try_recv_buf_from(self, payload)
     }
 }
 
@@ -837,16 +898,28 @@ impl DirectUdpSocket for SystemDirectUdpSocket {
         self.socket.send_to(payload, target).await
     }
 
-    async fn recv_from(&self, payload: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        let (length, source) = self.socket.recv_from(payload).await?;
-        let source = match source {
-            SocketAddr::V6(source) => match source.ip().to_ipv4_mapped() {
-                Some(ipv4) => SocketAddr::V4(SocketAddrV4::new(ipv4, source.port())),
-                None => SocketAddr::V6(source),
-            },
-            SocketAddr::V4(source) => SocketAddr::V4(source),
-        };
-        Ok((length, source))
+    async fn readable(&self) -> io::Result<()> {
+        self.socket.readable().await
+    }
+
+    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        let (length, source) = self.socket.recv_buf_from(payload).await?;
+        Ok((length, normalize_direct_source(source)))
+    }
+
+    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        let (length, source) = self.socket.try_recv_buf_from(payload)?;
+        Ok((length, normalize_direct_source(source)))
+    }
+}
+
+fn normalize_direct_source(source: SocketAddr) -> SocketAddr {
+    match source {
+        SocketAddr::V6(source) => match source.ip().to_ipv4_mapped() {
+            Some(ipv4) => SocketAddr::V4(SocketAddrV4::new(ipv4, source.port())),
+            None => SocketAddr::V6(source),
+        },
+        SocketAddr::V4(source) => SocketAddr::V4(source),
     }
 }
 
@@ -1187,6 +1260,69 @@ impl UdpShutdownControl {
     }
 }
 
+struct UdpDnsCacheEntry {
+    host: String,
+    port: u16,
+    candidates: Vec<SocketAddr>,
+    expires_at: Instant,
+    last_successful_index: usize,
+}
+
+#[derive(Default)]
+struct UdpDnsAssociationCache {
+    entries: VecDeque<UdpDnsCacheEntry>,
+}
+
+impl UdpDnsAssociationCache {
+    fn take(&mut self, host: &str, port: u16, now: Instant) -> Option<UdpDnsCacheEntry> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.host == host && entry.port == port)?;
+        let entry = self.entries.remove(index).expect("cache index exists");
+        if entry.expires_at <= now {
+            return None;
+        }
+        Some(entry)
+    }
+
+    fn insert(
+        &mut self,
+        host: &str,
+        port: u16,
+        candidates: Vec<SocketAddr>,
+        resolved_at: Instant,
+        last_successful_index: usize,
+    ) {
+        self.invalidate(host, port);
+        if self.entries.len() == UDP_DNS_CACHE_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(UdpDnsCacheEntry {
+            host: host.to_owned(),
+            port,
+            candidates,
+            expires_at: resolved_at + UDP_DNS_CACHE_TTL,
+            last_successful_index,
+        });
+    }
+
+    fn restore(&mut self, entry: UdpDnsCacheEntry) {
+        debug_assert!(self.entries.len() < UDP_DNS_CACHE_ENTRIES);
+        self.entries.push_back(entry);
+    }
+
+    fn invalidate(&mut self, host: &str, port: u16) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.host == host && entry.port == port)
+        {
+            self.entries.remove(index);
+        }
+    }
+}
+
 async fn run_direct_session<R, H, S>(
     manager: UdpSessionManager,
     resolver: Arc<R>,
@@ -1204,9 +1340,17 @@ where
 {
     let mut cancellation = manager.cancellation(handle)?;
     let notify = manager.notify(handle)?;
+    let mut dns_cache = UdpDnsAssociationCache::default();
     loop {
         while let Some(request) = manager.pop(handle, UdpDirection::ToTarget)? {
-            send_direct(&socket, &*resolver, request.datagram(), connect_timeout).await?;
+            send_direct(
+                &socket,
+                &*resolver,
+                &mut dns_cache,
+                request.datagram(),
+                connect_timeout,
+            )
+            .await?;
         }
         if *cancellation.borrow() {
             return Err(UdpRuntimeError::Cancelled);
@@ -1217,7 +1361,14 @@ where
             changed = cancellation.changed() => {
                 let _ = changed;
                 while let Some(request) = manager.pop(handle, UdpDirection::ToTarget)? {
-                    send_direct(&socket, &*resolver, request.datagram(), connect_timeout).await?;
+                    send_direct(
+                        &socket,
+                        &*resolver,
+                        &mut dns_cache,
+                        request.datagram(),
+                        connect_timeout,
+                    )
+                    .await?;
                 }
                 return Err(UdpRuntimeError::Cancelled);
             }
@@ -1256,32 +1407,39 @@ async fn receive_target<S>(
 where
     S: DirectUdpSocket,
 {
-    let reservation = budget
-        .reserve_when_available(MAX_UDP_WIRE_DATAGRAM_BYTES)
-        .await?;
-    let scratch_guard = registry.track_udp_scratch();
-    let mut scratch = BytesMut::zeroed(MAX_UDP_WIRE_DATAGRAM_BYTES);
-    if scratch.capacity() != reservation.capacity() {
-        return Err(UdpRuntimeError::Bounds);
+    loop {
+        socket
+            .readable()
+            .await
+            .map_err(|_| UdpRuntimeError::Receive)?;
+        let reservation = budget
+            .reserve_when_available(MAX_UDP_WIRE_DATAGRAM_BYTES)
+            .await?;
+        let scratch_guard = registry.track_udp_scratch();
+        let mut scratch = BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES);
+        if scratch.capacity() != reservation.capacity() {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        let (length, source) = match socket.try_recv_buf_from(&mut scratch) {
+            Ok(received) => received,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => return Err(UdpRuntimeError::Receive),
+        };
+        if length > MAX_UDP_WIRE_DATAGRAM_BYTES || scratch.len() != length {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        drop(scratch_guard);
+        let target = ferrum2_core::TargetAddr::ip(source).map_err(|_| UdpRuntimeError::Bounds)?;
+        let datagram = Datagram::new(target, scratch, MAX_UDP_WIRE_DATAGRAM_BYTES)
+            .map_err(|_| UdpRuntimeError::Bounds)?;
+        return reservation.attach(datagram);
     }
-    let (length, source) = socket
-        .recv_from(&mut scratch)
-        .await
-        .map_err(|_| UdpRuntimeError::Receive)?;
-    if length > MAX_UDP_WIRE_DATAGRAM_BYTES {
-        return Err(UdpRuntimeError::Bounds);
-    }
-    scratch.truncate(length);
-    drop(scratch_guard);
-    let target = ferrum2_core::TargetAddr::ip(source).map_err(|_| UdpRuntimeError::Bounds)?;
-    let datagram = Datagram::new(target, scratch, MAX_UDP_WIRE_DATAGRAM_BYTES)
-        .map_err(|_| UdpRuntimeError::Bounds)?;
-    reservation.attach(datagram)
 }
 
 async fn send_direct<R, S>(
     socket: &S,
     resolver: &R,
+    cache: &mut UdpDnsAssociationCache,
     datagram: &Datagram,
     timeout: Duration,
 ) -> Result<(), UdpRuntimeError>
@@ -1298,34 +1456,93 @@ where
     let ferrum2_core::TargetHostRef::Domain(host) = datagram.target().host() else {
         return Err(UdpRuntimeError::Resolve);
     };
-    let candidates = match tokio::time::timeout_at(
-        deadline,
-        resolver.resolve(host, datagram.target().port().get()),
-    )
-    .await
-    {
+    let port = datagram.target().port().get();
+    if let Some(mut entry) = cache.take(host, port, Instant::now()) {
+        match send_candidates(
+            socket,
+            datagram.payload(),
+            &entry.candidates,
+            entry.last_successful_index,
+            deadline,
+        )
+        .await
+        {
+            Ok(index) => {
+                entry.last_successful_index = index;
+                cache.restore(entry);
+                return Ok(());
+            }
+            Err(UdpRuntimeError::Send) if Instant::now() < deadline => {}
+            Err(error) => {
+                cache.restore(entry);
+                return Err(error);
+            }
+        }
+    }
+
+    let candidates = resolve_candidates(resolver, host, port, deadline).await?;
+    let resolved_at = Instant::now();
+    match send_candidates(socket, datagram.payload(), &candidates, 0, deadline).await {
+        Ok(index) => {
+            cache.insert(host, port, candidates, resolved_at, index);
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn resolve_candidates<R>(
+    resolver: &R,
+    host: &str,
+    port: u16,
+    deadline: Instant,
+) -> Result<Vec<SocketAddr>, UdpRuntimeError>
+where
+    R: UdpResolver,
+    <R::Candidates as IntoIterator>::IntoIter: Send,
+{
+    let candidates = match tokio::time::timeout_at(deadline, resolver.resolve(host, port)).await {
         Ok(Ok(candidates)) => candidates,
         Ok(Err(_)) => return Err(UdpRuntimeError::Resolve),
         Err(_) => return Err(UdpRuntimeError::Send),
     };
-    let mut attempted = false;
-    for candidate in candidates.into_iter().take(MAX_UDP_RESOLVED_CANDIDATES) {
-        attempted = true;
-        if send_candidate(socket, datagram.payload(), candidate, deadline)
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .take(MAX_UDP_RESOLVED_CANDIDATES)
+        .collect();
+    if candidates.is_empty() {
+        Err(UdpRuntimeError::Resolve)
+    } else {
+        Ok(candidates)
+    }
+}
+
+async fn send_candidates<S>(
+    socket: &S,
+    payload: &[u8],
+    candidates: &[SocketAddr],
+    start: usize,
+    deadline: Instant,
+) -> Result<usize, UdpRuntimeError>
+where
+    S: DirectUdpSocket,
+{
+    if candidates.is_empty() {
+        return Err(UdpRuntimeError::Resolve);
+    }
+    for offset in 0..candidates.len() {
+        let index = (start + offset) % candidates.len();
+        if send_candidate(socket, payload, candidates[index], deadline)
             .await
             .is_ok()
         {
-            return Ok(());
+            return Ok(index);
         }
         if Instant::now() >= deadline {
             return Err(UdpRuntimeError::Send);
         }
     }
-    if attempted {
-        Err(UdpRuntimeError::Send)
-    } else {
-        Err(UdpRuntimeError::Resolve)
-    }
+    Err(UdpRuntimeError::Send)
 }
 
 async fn send_candidate<S>(
@@ -1387,6 +1604,50 @@ impl PendingUdpSession {
         }
     }
 
+    /// Activates this generation and returns its first datagram directly to
+    /// the sole same-task consumer without a queue or notification round trip.
+    pub fn commit_immediate(
+        self,
+        datagram_reservation: PendingUdpDatagram,
+        datagram: Datagram,
+        now: Instant,
+    ) -> Result<(UdpSessionHandle, AccountedDatagram), UdpRuntimeError> {
+        match self.commit_immediate_with(datagram_reservation, datagram, now, || {
+            Ok::<(), Infallible>(())
+        }) {
+            Ok(result) => Ok(result),
+            Err(UdpCommitError::Runtime(error)) => Err(error),
+            Err(UdpCommitError::Protocol(never)) => match never {},
+        }
+    }
+
+    /// Atomically activates this generation, commits protocol state, and
+    /// returns the accounted first datagram without publishing it to a queue.
+    pub fn commit_immediate_with<E, C>(
+        mut self,
+        datagram_reservation: PendingUdpDatagram,
+        datagram: Datagram,
+        now: Instant,
+        protocol_commit: C,
+    ) -> Result<(UdpSessionHandle, AccountedDatagram), UdpCommitError<E>>
+    where
+        C: FnOnce() -> Result<(), E>,
+    {
+        if datagram_reservation.handle != self.handle
+            || datagram_reservation.manager.as_ptr() != Arc::as_ptr(&self.manager)
+        {
+            return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
+        }
+        let datagram = datagram_reservation.commit_immediate_inner_with(
+            datagram,
+            now,
+            true,
+            protocol_commit,
+        )?;
+        self.committed = true;
+        Ok((self.handle, datagram))
+    }
+
     /// Serializes generation recheck, protocol commit, activity, and enqueue.
     pub fn commit_with<E, C>(
         mut self,
@@ -1398,7 +1659,9 @@ impl PendingUdpSession {
     where
         C: FnOnce() -> Result<(), E>,
     {
-        if datagram_reservation.handle != self.handle {
+        if datagram_reservation.handle != self.handle
+            || datagram_reservation.manager.as_ptr() != Arc::as_ptr(&self.manager)
+        {
             return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
         }
         datagram_reservation.commit_inner_with(datagram, now, true, protocol_commit)?;
@@ -1456,6 +1719,34 @@ impl PendingUdpDatagram {
         self.commit_inner_with(datagram, now, false, protocol_commit)
     }
 
+    /// Commits accepted activity and returns this datagram directly to the
+    /// sole same-task consumer without queue ownership or notification work.
+    pub fn commit_immediate(
+        self,
+        datagram: Datagram,
+        now: Instant,
+    ) -> Result<AccountedDatagram, UdpRuntimeError> {
+        match self.commit_immediate_with(datagram, now, || Ok::<(), Infallible>(())) {
+            Ok(datagram) => Ok(datagram),
+            Err(UdpCommitError::Runtime(error)) => Err(error),
+            Err(UdpCommitError::Protocol(never)) => match never {},
+        }
+    }
+
+    /// Atomically rechecks generation, commits protocol state and activity,
+    /// and returns this datagram without publishing it to a queue.
+    pub fn commit_immediate_with<E, C>(
+        self,
+        datagram: Datagram,
+        now: Instant,
+        protocol_commit: C,
+    ) -> Result<AccountedDatagram, UdpCommitError<E>>
+    where
+        C: FnOnce() -> Result<(), E>,
+    {
+        self.commit_immediate_inner_with(datagram, now, false, protocol_commit)
+    }
+
     fn commit_inner_with<E, C>(
         mut self,
         datagram: Datagram,
@@ -1505,6 +1796,51 @@ impl PendingUdpDatagram {
         self.pending = false;
         notify.notify_one();
         Ok(())
+    }
+
+    fn commit_immediate_inner_with<E, C>(
+        mut self,
+        datagram: Datagram,
+        now: Instant,
+        activate_session: bool,
+        protocol_commit: C,
+    ) -> Result<AccountedDatagram, UdpCommitError<E>>
+    where
+        C: FnOnce() -> Result<(), E>,
+    {
+        let manager = self
+            .manager
+            .upgrade()
+            .ok_or(UdpCommitError::Runtime(UdpRuntimeError::Cancelled))?;
+        let reservation = self
+            .reservation
+            .take()
+            .ok_or(UdpCommitError::Runtime(UdpRuntimeError::Cancelled))?;
+        let accounted = reservation
+            .attach(datagram)
+            .map_err(UdpCommitError::Runtime)?;
+        {
+            let mut state = manager
+                .state
+                .lock()
+                .expect("UDP session state lock poisoned");
+            if state.shutting_down {
+                return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
+            }
+            let entry =
+                matching_entry_mut(&mut state, self.handle).map_err(UdpCommitError::Runtime)?;
+            if entry.committed == activate_session {
+                return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
+            }
+            protocol_commit().map_err(UdpCommitError::Protocol)?;
+            let index = self.direction.index();
+            debug_assert!(entry.pending[index] > 0);
+            entry.pending[index] -= 1;
+            entry.committed = true;
+            entry.last_activity = now;
+        }
+        self.pending = false;
+        Ok(accounted)
     }
 }
 
@@ -1596,9 +1932,85 @@ fn matching_entry_mut(
         .ok_or(UdpRuntimeError::Cancelled)
 }
 
-fn remove_entry(state: &mut SessionState, slot: u32) {
+fn remove_entry(state: &mut SessionState, slot: u32) -> Option<UdpSessionHandle> {
     if let Some(entry) = state.entries.remove(&slot) {
+        let handle = UdpSessionHandle {
+            slot,
+            generation: entry.generation,
+        };
         entry.cancellation.send_replace(true);
         entry.notify.notify_waiters();
+        Some(handle)
+    } else {
+        None
+    }
+}
+
+fn publish_removal(manager: &UdpSessionManagerInner, handle: UdpSessionHandle) {
+    let _ = manager.removal_events.send(handle);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn budget_wait_is_cancel_safe_and_release_cannot_be_lost() {
+        let registry = OwnerRegistry::new();
+        let manager = UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone());
+        let budget = manager.buffer_budget();
+        let mut held = Vec::new();
+        while let Ok(reservation) = budget.reserve(MAX_UDP_WIRE_DATAGRAM_BYTES) {
+            held.push(reservation);
+        }
+        assert!(!held.is_empty());
+        assert_eq!(
+            budget.reserve(MAX_UDP_WIRE_DATAGRAM_BYTES).unwrap_err(),
+            UdpRuntimeError::BufferLimit
+        );
+
+        let started = Arc::new(Notify::new());
+        let cancelled_budget = budget.clone();
+        let cancelled_started = Arc::clone(&started);
+        let cancelled = tokio::spawn(async move {
+            cancelled_started.notify_one();
+            cancelled_budget
+                .reserve_when_available(MAX_UDP_WIRE_DATAGRAM_BYTES)
+                .await
+        });
+        started.notified().await;
+        tokio::task::yield_now().await;
+        assert!(!cancelled.is_finished());
+        cancelled.abort();
+        assert!(
+            cancelled
+                .await
+                .expect_err("cancelled waiter")
+                .is_cancelled()
+        );
+
+        let started = Arc::new(Notify::new());
+        let waiting_budget = budget.clone();
+        let waiting_started = Arc::clone(&started);
+        let waiting = tokio::spawn(async move {
+            waiting_started.notify_one();
+            waiting_budget
+                .reserve_when_available(MAX_UDP_WIRE_DATAGRAM_BYTES)
+                .await
+        });
+        started.notified().await;
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+
+        drop(held.pop());
+        let acquired = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("released capacity wakes waiter")
+            .expect("waiter task")
+            .expect("capacity reservation");
+        drop(acquired);
+        drop(held);
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
     }
 }

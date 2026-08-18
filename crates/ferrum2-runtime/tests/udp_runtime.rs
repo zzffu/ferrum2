@@ -186,6 +186,141 @@ async fn batch_liveness_filter_rejects_shutdown_without_side_effects() {
 }
 
 #[test]
+fn removal_subscription_reports_each_exact_generation() {
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(limits(2), registry.clone());
+    let mut removals = manager.subscribe_removals();
+    let first = committed_session(&manager, Instant::now(), b"first");
+    let second = committed_session(&manager, Instant::now(), b"second");
+
+    assert!(manager.remove(first));
+    assert_eq!(removals.try_recv().expect("first removal"), first);
+    manager.cancel_all();
+    assert_eq!(removals.try_recv().expect("shutdown removal"), second);
+    assert!(matches!(
+        removals.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert_eq!(registry.snapshot().udp_sessions, 0);
+}
+
+#[test]
+fn lagged_removal_subscription_recovers_with_one_batch_liveness_pass() {
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(limits(1), registry.clone());
+    let mut removals = manager.subscribe_removals();
+    let first = committed_session(&manager, Instant::now(), b"first");
+    assert!(manager.remove(first));
+    let second = committed_session(&manager, Instant::now(), b"second");
+    assert!(manager.remove(second));
+
+    assert!(matches!(
+        removals.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(1))
+    ));
+    let live = committed_session(&manager, Instant::now(), b"live");
+    let mut indexed = vec![first, second, live];
+    manager.retain_live_sessions(&mut indexed);
+    assert_eq!(indexed, [live]);
+
+    assert!(manager.remove(live));
+    assert_eq!(registry.snapshot().udp_sessions, 0);
+}
+
+#[test]
+fn immediate_commit_preserves_budget_and_skips_queue_ownership() {
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(limits(1), registry.clone());
+    let now = Instant::now();
+    let session = manager.reserve_session(now).expect("session capacity");
+    let reservation = session
+        .reserve_datagram(UdpDirection::ToTarget, 7)
+        .expect("datagram capacity");
+
+    let (handle, datagram) = session
+        .commit_immediate(reservation, ip_datagram(b"request"), now)
+        .expect("immediate commit");
+
+    let active = registry.snapshot();
+    assert_eq!(active.udp_sessions, 1);
+    assert_eq!(active.udp_queued_datagrams, 0);
+    assert_eq!(active.udp_buffered_bytes, 7);
+    assert!(
+        manager
+            .pop(handle, UdpDirection::ToTarget)
+            .expect("live generation")
+            .is_none()
+    );
+    assert_eq!(datagram.datagram().payload(), b"request");
+
+    drop(datagram);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    assert!(manager.remove(handle));
+    assert_eq!(registry.snapshot().udp_sessions, 0);
+}
+
+#[test]
+fn immediate_protocol_rejection_rolls_back_every_provisional_owner() {
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(limits(1), registry.clone());
+    let now = Instant::now();
+    let session = manager.reserve_session(now).expect("session capacity");
+    let reservation = session
+        .reserve_datagram(UdpDirection::ToTarget, 7)
+        .expect("datagram capacity");
+
+    let result = session.commit_immediate_with(reservation, ip_datagram(b"request"), now, || {
+        Err("protocol rejection")
+    });
+
+    assert!(matches!(result, Err(UdpCommitError::Protocol(_))));
+    assert_eq!(manager.session_count(), 0);
+    assert_eq!(registry.snapshot().udp_sessions, 0);
+    assert_eq!(registry.snapshot().udp_queued_datagrams, 0);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+}
+
+#[test]
+fn pending_session_rejects_same_handle_reservation_from_another_manager() {
+    let registry = OwnerRegistry::new();
+    let first = UdpSessionManager::new(limits(1), registry.clone());
+    let second = UdpSessionManager::new(limits(1), registry.clone());
+    let now = Instant::now();
+
+    let first_session = first.reserve_session(now).expect("first session");
+    let second_session = second.reserve_session(now).expect("second session");
+    assert_eq!(first_session.handle(), second_session.handle());
+    let foreign = second_session
+        .reserve_datagram(UdpDirection::ToTarget, 7)
+        .expect("foreign reservation");
+    assert!(matches!(
+        first_session.commit_immediate(foreign, ip_datagram(b"foreign"), now),
+        Err(UdpRuntimeError::Cancelled)
+    ));
+    assert_eq!(first.session_count(), 0);
+    assert_eq!(second.session_count(), 1);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    drop(second_session);
+
+    let first_session = first.reserve_session(now).expect("next first session");
+    let second_session = second.reserve_session(now).expect("next second session");
+    assert_eq!(first_session.handle(), second_session.handle());
+    let foreign = second_session
+        .reserve_datagram(UdpDirection::ToTarget, 7)
+        .expect("next foreign reservation");
+    assert!(matches!(
+        first_session.commit(foreign, ip_datagram(b"foreign"), now),
+        Err(UdpRuntimeError::Cancelled)
+    ));
+    assert_eq!(first.session_count(), 0);
+    assert_eq!(second.session_count(), 1);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    drop(second_session);
+
+    assert_eq!(registry.snapshot().udp_sessions, 0);
+}
+
+#[test]
 fn validated_limits_freeze_defaults_and_inclusive_ranges() {
     let defaults = UdpRuntimeLimits::default();
     let actual = (
@@ -494,16 +629,33 @@ impl DirectUdpSocket for ScriptedSocket {
         }
     }
 
-    async fn recv_from(&self, payload: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    async fn readable(&self) -> io::Result<()> {
+        if !self.responses.lock().expect("response lock").is_empty() {
+            return Ok(());
+        }
+        self.response_ready.notified().await;
+        Ok(())
+    }
+
+    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
         loop {
             if let Some((response, source)) =
                 self.responses.lock().expect("response lock").pop_front()
             {
-                payload[..response.len()].copy_from_slice(&response);
+                payload.extend_from_slice(&response);
                 return Ok((response.len(), source));
             }
             self.response_ready.notified().await;
         }
+    }
+
+    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        let Some((response, source)) = self.responses.lock().expect("response lock").pop_front()
+        else {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        };
+        payload.extend_from_slice(&response);
+        Ok((response.len(), source))
     }
 }
 
@@ -773,6 +925,62 @@ async fn domain_resolution_and_candidate_sends_share_one_absolute_deadline() {
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
     assert_eq!(sends.lock().expect("send lock").len(), 2);
     runtime.shutdown(Duration::ZERO).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn association_dns_cache_reuses_results_and_expires_conservatively() {
+    let registry = OwnerRegistry::new();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let resolver = ScriptedResolver {
+        delay: Duration::ZERO,
+        candidates: vec![SocketAddr::from(([192, 0, 2, 1], 53))],
+        calls: Arc::clone(&resolver_calls),
+    };
+    let (socket, sends) = socket_fixture(Duration::ZERO, []);
+    let send_completed = Arc::clone(&socket.send_completed);
+    let (mut runtime, _) =
+        recording_runtime(&registry, resolver, socket, Duration::from_secs(10), false);
+    let now = Instant::now();
+    let admission = runtime
+        .reserve_session(now, 7)
+        .await
+        .expect("reserve direct session");
+    let handle = runtime
+        .commit_session(admission, domain_datagram(b"first__"), now)
+        .expect("commit first datagram");
+    send_completed.notified().await;
+
+    runtime
+        .reserve_datagram(handle, 7)
+        .expect("second capacity")
+        .commit(domain_datagram(b"second_"), Instant::now())
+        .expect("commit second datagram");
+    send_completed.notified().await;
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sends.lock().expect("send lock").len(), 2);
+
+    tokio::time::advance(Duration::from_secs(29)).await;
+    runtime
+        .reserve_datagram(handle, 7)
+        .expect("third capacity")
+        .commit(domain_datagram(b"third__"), Instant::now())
+        .expect("commit third datagram");
+    send_completed.notified().await;
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sends.lock().expect("send lock").len(), 3);
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    runtime
+        .reserve_datagram(handle, 7)
+        .expect("fourth capacity")
+        .commit(domain_datagram(b"fourth_"), Instant::now())
+        .expect("commit fourth datagram");
+    send_completed.notified().await;
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(sends.lock().expect("send lock").len(), 4);
+
+    runtime.shutdown(Duration::ZERO).await;
+    wait_for_zero_udp_owners(&registry).await;
 }
 
 #[tokio::test(start_paused = true)]
