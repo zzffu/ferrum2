@@ -18,6 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tools" / "performance_candidate.py"
 POLICY_PATH = ROOT / "tools" / "performance_candidate_policy.json"
 SCALE_POLICY_PATH = ROOT / "tools" / "performance_candidate_scale_safety_policy.json"
+IDLE_CPU_POLICY_PATH = ROOT / "tools" / "performance_candidate_idle_cpu_policy.json"
 SPEC = importlib.util.spec_from_file_location("performance_candidate", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 CONTROL = importlib.util.module_from_spec(SPEC)
@@ -439,6 +440,7 @@ def synthetic_scale_row(
         "p99_nanoseconds": None,
         "io_completions": full_completion_sum * 2,
         "scale": scale,
+        "udp_idle": None,
         "correctness": "PASS",
         "status": "PASS",
     }
@@ -514,6 +516,113 @@ def synthetic_scale_lineage() -> dict[str, object]:
         "parent_server_sha256": "d" * 64,
         "candidate_client_sha256": "c" * 64,
         "candidate_server_sha256": "e" * 64,
+    }
+
+
+def synthetic_udp_idle_row(
+    *,
+    pair: int,
+    member: str,
+    delta_ticks: int,
+) -> dict[str, object]:
+    sessions = CONTROL.UDP_IDLE_RECIPE["sessions"]
+    buffered = 262_028
+    quiet = {
+        "active_sessions": 0,
+        "buffered_bytes": buffered,
+        "fds": 10,
+        "tasks": 5,
+        "rss_kib": 2_000,
+        "smaps_rss_kib": 2_100,
+        "anonymous_kib": 1_000,
+        "anon_huge_pages_kib": 0,
+    }
+    established = {
+        "active_sessions": sessions,
+        "buffered_bytes": buffered,
+        "fds": 4_106,
+        "tasks": 12,
+        "rss_kib": 20_000,
+        "smaps_rss_kib": 21_000,
+        "anonymous_kib": 18_000,
+        "anon_huge_pages_kib": 0,
+    }
+    start_ticks = 1_000
+    is_parent = member == "parent"
+    parent = CONTROL.UDP_IDLE_QUALIFICATION_PARENT_SHA
+    candidate = "2" * 40
+    evidence = {
+        "schema_version": 1,
+        "recipe": dict(CONTROL.UDP_IDLE_RECIPE),
+        "correctness": {
+            "requests_sent": sessions,
+            "target_echoed": sessions,
+            "responses_validated": sessions,
+            "generator_workers_joined": CONTROL.UDP_IDLE_RECIPE["setup_workers"],
+            "retained_sessions": sessions,
+            "server_active_before": 0,
+            "server_active_after": sessions,
+            "server_active_drained": 0,
+            "server_buffered_before": buffered,
+            "server_buffered_after": buffered,
+            "server_buffered_drained": buffered,
+            "accepted_client_to_target": sessions,
+            "completed_target_to_client": sessions,
+            "drain": "PASS",
+            "rebind": "PASS",
+            "cleanup": "PASS",
+        },
+        "cpu": {
+            "process_start_time_ticks": 500,
+            "start_ticks": start_ticks,
+            "end_ticks": start_ticks + delta_ticks,
+            "delta_ticks": delta_ticks,
+            "clock_ticks_per_second": 100,
+            "elapsed_nanoseconds": 30_000_000_000,
+        },
+        "resource": {
+            "setup_elapsed_nanoseconds": 1_000_000_000,
+            "pre_load": dict(quiet),
+            "established": dict(established),
+            "after_idle_window": dict(established),
+            "drained": dict(quiet),
+        },
+    }
+    return {
+        "schema_version": CONTROL.PROFILE_TRIAL_SCHEMA_VERSION,
+        "kind": "m18_profile_trial",
+        "parent_sha": parent,
+        "candidate_sha": candidate,
+        "member": member,
+        "pair": pair,
+        "order": 1 if (pair % 2 == 1) == is_parent else 2,
+        "build_profile": "current",
+        "scenario": CONTROL.UDP_IDLE_SCENARIO,
+        "warmup_seconds": 3,
+        "active_seconds": 30,
+        "topology": "shadowsocks-server",
+        "application_payload_bytes": 128,
+        "socks_datagram_bytes": None,
+        "upstream_wire_bytes": None,
+        "sha": parent if is_parent else candidate,
+        "tree": "3" * 40,
+        "runner_sha256": "a" * 64,
+        "client_sha256": None,
+        "server_sha256": ("d" if is_parent else "e") * 64,
+        "rustc": "rustc 1.97.1 test",
+        "kernel": "test-kernel",
+        "cpu_model": "test-cpu",
+        "cpu_count": 8,
+        "memory_kib": 32_000_000,
+        "metric": "server_cpu_ticks",
+        "value": delta_ticks,
+        "checked_units": sessions,
+        "p99_nanoseconds": None,
+        "io_completions": sessions * 2,
+        "scale": None,
+        "udp_idle": evidence,
+        "correctness": "PASS",
+        "status": "PASS",
     }
 
 
@@ -1011,6 +1120,7 @@ class EvidenceSummaryTests(unittest.TestCase):
             "p99_nanoseconds": value if metric == "p99_nanoseconds" else None,
             "io_completions": 2_000,
             "scale": None,
+            "udp_idle": None,
             "correctness": "PASS",
             "status": "PASS",
         }
@@ -1862,6 +1972,338 @@ class EvidenceSummaryTests(unittest.TestCase):
                     json.loads(output.read_text(encoding="utf-8"))["status"],
                     expected_status,
                 )
+
+
+class UdpIdleCpuControlTests(unittest.TestCase):
+    def policy(self, *, calibrated: bool) -> dict[str, object]:
+        policy = CONTROL.load_udp_idle_cpu_policy(IDLE_CPU_POLICY_PATH)
+        if calibrated:
+            policy.update(
+                {
+                    "policy_id": "test-calibrated-udp-idle-cpu",
+                    "noise_ticks": 1,
+                    "minimum_saved_ticks": 2,
+                    "minimum_parent_signal_ticks": 4,
+                    "clock_ticks_per_second": 100,
+                    "qualification_parent_sha": CONTROL.UDP_IDLE_QUALIFICATION_PARENT_SHA,
+                    "calibration_source": "artifact:test/udp-idle-aa",
+                    "calibration_environment": {
+                        **CONTROL.MEASUREMENT_ENVIRONMENT,
+                        "warmup_seconds": 3,
+                        "active_seconds": 30,
+                    },
+                }
+            )
+        CONTROL.validate_udp_idle_cpu_policy(policy)
+        return policy
+
+    def plan(self, policy: dict[str, object]) -> dict[str, object]:
+        return CONTROL.create_plan(
+            mode="qualification",
+            selection=CONTROL.UDP_IDLE_SCENARIO,
+            warmup_seconds="3",
+            active_seconds="30",
+            pairs="5",
+            decision_policy=CONTROL.load_decision_policy(POLICY_PATH),
+            udp_idle_cpu_policy=policy,
+        )
+
+    def summarize(
+        self,
+        parent_ticks: list[int],
+        candidate_ticks: list[int],
+        policy: dict[str, object],
+        *,
+        candidate_tree: str | None = None,
+        candidate_runner: str | None = None,
+    ) -> dict[str, object]:
+        parents = [
+            synthetic_udp_idle_row(pair=pair, member="parent", delta_ticks=value)
+            for pair, value in enumerate(parent_ticks, start=1)
+        ]
+        candidates = [
+            synthetic_udp_idle_row(pair=pair, member="candidate", delta_ticks=value)
+            for pair, value in enumerate(candidate_ticks, start=1)
+        ]
+        if candidate_tree is None and policy["noise_ticks"] is not None:
+            candidate_tree = "4" * 40
+        if candidate_tree is not None:
+            for row in candidates:
+                row["tree"] = candidate_tree
+        if candidate_runner is not None:
+            for row in candidates:
+                row["runner_sha256"] = candidate_runner
+        rows = {
+            (CONTROL.UDP_IDLE_SCENARIO, row["pair"], row["member"]): row
+            for row in [*parents, *candidates]
+        }
+        identity_fields = (
+            "sha",
+            "tree",
+            "runner_sha256",
+            "client_sha256",
+            "server_sha256",
+        )
+        member_identity = {
+            "parent": tuple(parents[0][field] for field in identity_fields),
+            "candidate": tuple(candidates[0][field] for field in identity_fields),
+        }
+        return CONTROL._summarize_udp_idle_evidence(
+            plan=self.plan(policy),
+            rows=rows,
+            parent_sha=CONTROL.UDP_IDLE_QUALIFICATION_PARENT_SHA,
+            candidate_sha="2" * 40,
+            member_identity=member_identity,
+            identity_fields=identity_fields,
+            evidence_files=[],
+        )
+
+    def test_idle_plan_is_non_adoption_qualification_with_exact_recipe(self) -> None:
+        policy = self.policy(calibrated=False)
+        plan = self.plan(policy)
+        self.assertEqual(plan["scenario_group"], CONTROL.UDP_IDLE_SCENARIO)
+        self.assertFalse(plan["adoption_eligible"])
+        self.assertEqual(plan["udp_idle_cpu_policy"], policy)
+        self.assertEqual(plan["scenarios"], [CONTROL._udp_idle_scenario_entry()])
+        for mode, warmup, active, pairs in (
+            ("diagnostic", "3", "30", "5"),
+            ("qualification", "1", "30", "5"),
+            ("qualification", "3", "15", "5"),
+            ("qualification", "3", "30", "3"),
+        ):
+            with self.subTest(values=(mode, warmup, active, pairs)):
+                with self.assertRaises(CONTROL.CandidateControlError):
+                    CONTROL.create_plan(
+                        mode=mode,
+                        selection=CONTROL.UDP_IDLE_SCENARIO,
+                        warmup_seconds=warmup,
+                        active_seconds=active,
+                        pairs=pairs,
+                        decision_policy=CONTROL.load_decision_policy(POLICY_PATH),
+                        udp_idle_cpu_policy=policy,
+                    )
+
+    def test_policy_is_all_null_or_strictly_calibrated(self) -> None:
+        uncalibrated = self.policy(calibrated=False)
+        partial = copy.deepcopy(uncalibrated)
+        partial["noise_ticks"] = 1
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "complete"):
+            CONTROL.validate_udp_idle_cpu_policy(partial)
+        for field, value in (
+            ("minimum_saved_ticks", 1),
+            ("minimum_parent_signal_ticks", 3),
+            ("clock_ticks_per_second", 0),
+            ("candidate_maximum_percent_of_parent", 51),
+            ("minimum_wins_beyond_noise", 3),
+        ):
+            policy = self.policy(calibrated=True)
+            policy[field] = value
+            with self.subTest(field=field):
+                with self.assertRaises(CONTROL.CandidateControlError):
+                    CONTROL.validate_udp_idle_cpu_policy(policy)
+        wrong_parent = self.policy(calibrated=True)
+        wrong_parent["qualification_parent_sha"] = "0" * 40
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "pre-event.*50 ms"):
+            CONTROL.validate_udp_idle_cpu_policy(wrong_parent)
+        wrong_clock = self.policy(calibrated=True)
+        wrong_clock["clock_ticks_per_second"] = 250
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "clock-tick rate"):
+            self.summarize([20] * 5, [10] * 5, wrong_clock)
+
+    def test_uncalibrated_aa_handles_zero_cpu_without_division(self) -> None:
+        summary = self.summarize([0] * 5, [0] * 5, self.policy(calibrated=False))
+        self.assertEqual(summary["status"], "UDP_IDLE_CPU_UNCALIBRATED")
+        self.assertFalse(summary["adoption_claim"])
+        idle = summary["udp_idle_cpu"]
+        self.assertIsNone(idle["candidate_median_percent_of_parent"])
+        self.assertEqual(idle["recommended_noise_ticks"], 0)
+        self.assertEqual(idle["recommended_minimum_saved_ticks"], 1)
+        self.assertEqual(idle["recommended_minimum_parent_signal_ticks"], 2)
+        self.assertEqual(idle["recommended_clock_ticks_per_second"], 100)
+        self.assertEqual(
+            idle["qualification_parent_sha"],
+            CONTROL.UDP_IDLE_QUALIFICATION_PARENT_SHA,
+        )
+        self.assertEqual(
+            idle["qualification_baseline"],
+            CONTROL.UDP_IDLE_QUALIFICATION_BASELINE,
+        )
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "identical.*trees"):
+            self.summarize(
+                [0] * 5,
+                [0] * 5,
+                self.policy(calibrated=False),
+                candidate_tree="4" * 40,
+            )
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "identical harness"):
+            self.summarize(
+                [0] * 5,
+                [0] * 5,
+                self.policy(calibrated=False),
+                candidate_runner="f" * 64,
+            )
+
+    def test_calibrated_cross_multiplication_and_pair_gates_are_exact(self) -> None:
+        policy = self.policy(calibrated=True)
+        passed = self.summarize([20] * 5, [10, 10, 10, 10, 20], policy)
+        self.assertEqual(passed["status"], "UDP_IDLE_CPU_QUALIFICATION_PASS")
+        self.assertFalse(passed["adoption_claim"])
+        ratio_failed = self.summarize([20] * 5, [11] * 5, policy)
+        self.assertEqual(ratio_failed["status"], "UDP_IDLE_CPU_QUALIFICATION_FAIL")
+        self.assertIn("MEDIAN_REDUCTION", ratio_failed["udp_idle_cpu"]["failures"])
+        pair_failed = self.summarize([20] * 5, [10, 10, 10, 10, 22], policy)
+        self.assertIn(
+            "PAIR_5_REGRESSION_BEYOND_NOISE",
+            pair_failed["udp_idle_cpu"]["failures"],
+        )
+        signal_failed = self.summarize([3] * 5, [0] * 5, policy)
+        self.assertIn("PARENT_SIGNAL_FLOOR", signal_failed["udp_idle_cpu"]["failures"])
+        different_tree = self.summarize(
+            [20] * 5,
+            [10] * 5,
+            policy,
+            candidate_tree="4" * 40,
+        )
+        self.assertEqual(
+            different_tree["status"], "UDP_IDLE_CPU_QUALIFICATION_PASS"
+        )
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "different.*trees"):
+            self.summarize(
+                [20] * 5,
+                [10] * 5,
+                policy,
+                candidate_tree="3" * 40,
+            )
+
+    def test_idle_evidence_recomputes_cpu_lifecycle_and_resource_bounds(self) -> None:
+        row = synthetic_udp_idle_row(pair=1, member="parent", delta_ticks=20)
+        self.assertEqual(CONTROL._validate_udp_idle_evidence(row)["delta_ticks"], 20)
+        mutations = (
+            lambda value: value["udp_idle"]["cpu"].update(delta_ticks=19),
+            lambda value: value["udp_idle"]["cpu"].update(
+                elapsed_nanoseconds=30_250_000_001
+            ),
+            lambda value: value["udp_idle"]["correctness"].update(
+                server_active_after=4_095
+            ),
+            lambda value: value["udp_idle"]["correctness"].update(
+                server_buffered_before=CONTROL.UDP_IDLE_RECIPE[
+                    "server_max_buffered_bytes"
+                ]
+                + 1
+            ),
+            lambda value: value["udp_idle"]["resource"]["drained"].update(fds=11),
+            lambda value: value["udp_idle"]["resource"]["established"].update(
+                fds=4_105
+            ),
+            lambda value: value["udp_idle"]["resource"]["after_idle_window"].update(
+                tasks=13
+            ),
+            lambda value: value["udp_idle"]["resource"].update(
+                setup_elapsed_nanoseconds=20_000_000_001
+            ),
+            lambda value: value["udp_idle"]["resource"]["established"].update(
+                buffered_bytes=262_029
+            ),
+            lambda value: value["udp_idle"]["correctness"].update(
+                server_buffered_after=CONTROL.UDP_IDLE_RECIPE[
+                    "server_max_buffered_bytes"
+                ]
+                + 1
+            ),
+        )
+        for mutate in mutations:
+            malformed = copy.deepcopy(row)
+            mutate(malformed)
+            with self.subTest(mutation=mutate):
+                with self.assertRaises(CONTROL.CandidateControlError):
+                    CONTROL._validate_udp_idle_evidence(malformed)
+
+    def test_idle_full_evidence_set_and_markdown_are_non_adoption(self) -> None:
+        plan = self.plan(self.policy(calibrated=False))
+        with tempfile.TemporaryDirectory(prefix="udp-idle-evidence-") as temporary:
+            root = pathlib.Path(temporary)
+            parent_root = root / "parent"
+            candidate_root = root / "candidate"
+            parent_root.mkdir()
+            candidate_root.mkdir()
+            for pair in range(1, 6):
+                for member, evidence_root, ticks in (
+                    ("parent", parent_root, 2),
+                    ("candidate", candidate_root, 1),
+                ):
+                    row = synthetic_udp_idle_row(
+                        pair=pair, member=member, delta_ticks=ticks
+                    )
+                    (evidence_root / f"idle-{member}-{pair}.jsonl").write_text(
+                        json.dumps(row, separators=(",", ":")) + "\n",
+                        encoding="utf-8",
+                    )
+            summary = CONTROL.summarize_evidence(
+                plan=plan,
+                parent_root=parent_root,
+                candidate_root=candidate_root,
+                parent_sha=CONTROL.UDP_IDLE_QUALIFICATION_PARENT_SHA,
+                candidate_sha="2" * 40,
+            )
+            first_candidate = next(candidate_root.glob("*.jsonl"))
+            candidate_row = json.loads(first_candidate.read_text(encoding="utf-8"))
+            candidate_row["client_sha256"] = "c" * 64
+            first_candidate.write_text(
+                json.dumps(candidate_row, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(CONTROL.CandidateControlError, "unused client"):
+                CONTROL.summarize_evidence(
+                    plan=plan,
+                    parent_root=parent_root,
+                    candidate_root=candidate_root,
+                    parent_sha=CONTROL.UDP_IDLE_QUALIFICATION_PARENT_SHA,
+                    candidate_sha="2" * 40,
+                )
+            candidate_row["client_sha256"] = None
+            first_candidate.write_text(
+                json.dumps(candidate_row, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            plan_path = root / "plan.json"
+            output = root / "invalid-summary.json"
+            markdown_path = root / "invalid-summary.md"
+            CONTROL.write_plan(plan_path, plan)
+            for path in candidate_root.glob("*.jsonl"):
+                row = json.loads(path.read_text(encoding="utf-8"))
+                row["tree"] = "4" * 40
+                path.write_text(
+                    json.dumps(row, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+            arguments = type(
+                "Arguments",
+                (),
+                {
+                    "plan": plan_path,
+                    "parent_root": parent_root,
+                    "candidate_root": candidate_root,
+                    "parent_sha": CONTROL.UDP_IDLE_QUALIFICATION_PARENT_SHA,
+                    "candidate_sha": "2" * 40,
+                    "policy": POLICY_PATH,
+                    "scale_policy": None,
+                    "idle_cpu_policy": IDLE_CPU_POLICY_PATH,
+                    "repository": None,
+                    "output": output,
+                    "markdown": markdown_path,
+                },
+            )()
+            self.assertEqual(CONTROL.run_summary_command(arguments), 2)
+            self.assertEqual(
+                json.loads(output.read_text(encoding="utf-8"))["status"],
+                "INVALID_EVIDENCE",
+            )
+        self.assertEqual(summary["status"], "UDP_IDLE_CPU_UNCALIBRATED")
+        self.assertFalse(summary["adoption_claim"])
+        markdown = CONTROL.summary_markdown(summary)
+        self.assertIn("UDP idle CPU qualification", markdown)
+        self.assertIn("not an adoption claim", markdown)
 
 
 class ScaleControlTests(unittest.TestCase):

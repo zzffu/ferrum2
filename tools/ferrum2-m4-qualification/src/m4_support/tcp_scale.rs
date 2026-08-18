@@ -1352,7 +1352,7 @@ async fn execute(
         let mut ready = Some(ReadyFile::publish(
             ready_file,
             ProfileScenario::TcpScale10k,
-            client.id(),
+            Some(client.id()),
             Some(server.id()),
             arguments.warmup_seconds,
             arguments.active_seconds,
@@ -1642,6 +1642,7 @@ fn build_outcome(
             .checked_mul(2)
             .ok_or_else(|| "scale I/O completion count overflow".to_owned())?,
         scale_json: Some(scale_json),
+        udp_idle_json: None,
     })
 }
 
@@ -2025,6 +2026,7 @@ fn maximum_shape_trial() -> Result<String, String> {
         "p99_nanoseconds": null,
         "io_completions": u64::MAX,
         "scale": scale,
+        "udp_idle": null,
         "correctness": "PASS",
         "status": "PASS",
     }))

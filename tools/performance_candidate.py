@@ -22,13 +22,22 @@ ACTIVE_SECONDS = frozenset({15, 30, 60})
 PAIR_COUNTS = frozenset({3, 5})
 COMMIT_SHA = re.compile(r"[0-9a-fA-F]{40}")
 MODES = frozenset({"diagnostic", "qualification"})
-PLAN_SCHEMA_VERSION = 5
-PROFILE_TRIAL_SCHEMA_VERSION = 3
-SUMMARY_SCHEMA_VERSION = 6
+PLAN_SCHEMA_VERSION = 6
+PROFILE_TRIAL_SCHEMA_VERSION = 4
+SUMMARY_SCHEMA_VERSION = 7
 REGULAR_TRIAL_MAX_BYTES = 16 * 1024
 SCALE_TRIAL_MAX_BYTES = 512 * 1024
 SCALE_SCENARIO = "tcp-scale-10k"
+UDP_IDLE_SCENARIO = "udp-idle-4096"
+# This reachable pre-event baseline already allocates receive storage only after
+# readiness, but still scans every live mapping every 50 ms. Binding it isolates
+# the T3 liveness change from the earlier receive-buffer change.
+UDP_IDLE_QUALIFICATION_PARENT_SHA = "2d6cf6428c7da0bd49dd54722463a5dab45756fe"
+UDP_IDLE_QUALIFICATION_BASELINE = (
+    "pre-event-50ms-full-live-mapping-reconcile-after-readiness-buffering"
+)
 SCALE_POLICY_SCHEMA_VERSION = 1
+UDP_IDLE_POLICY_SCHEMA_VERSION = 1
 SCALE_RECIPE = {
     "sessions": 10_000,
     "setup_workers": 256,
@@ -45,6 +54,22 @@ SCALE_RECIPE = {
     "resource_samples_per_phase": 5,
     "quiescent_sample_interval_milliseconds": 1_000,
     "active_sample_slot_denominator": 6,
+}
+UDP_IDLE_RECIPE = {
+    "sessions": 4_096,
+    "setup_workers": 256,
+    "payload_bytes": 128,
+    "setup_deadline_seconds": 20,
+    "setup_schedule_lead_milliseconds": 500,
+    "setup_send_spacing_microseconds": 2_000,
+    "warmup_seconds": 3,
+    "active_seconds": 30,
+    "active_elapsed_maximum_slack_milliseconds": 250,
+    "idle_timeout_milliseconds": 60_000,
+    "drain_timeout_seconds": 120,
+    "server_max_buffered_bytes": 256 * 1024 * 1024,
+    "measurement_process": "ferrum2-server",
+    "traffic_path": "loopback-direct-sip022-server",
 }
 SCENARIO_CATALOG = {
     "tcp-bulk": ("bytes_per_second", "higher_is_better", "tcp-throughput"),
@@ -169,6 +194,7 @@ PROFILE_FIELDS = frozenset(
         "p99_nanoseconds",
         "io_completions",
         "scale",
+        "udp_idle",
         "correctness",
         "status",
     }
@@ -333,6 +359,74 @@ SCALE_SAMPLE_FIELDS = frozenset(
         "client_anon_huge_pages_kib",
         "server_anon_huge_pages_kib",
         "harness_rss_kib",
+    }
+)
+UDP_IDLE_POLICY_DOCUMENT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "policy_id",
+        "required_pairs",
+        "required_sessions",
+        "candidate_maximum_percent_of_parent",
+        "minimum_wins_beyond_noise",
+        "noise_ticks",
+        "minimum_saved_ticks",
+        "minimum_parent_signal_ticks",
+        "clock_ticks_per_second",
+        "qualification_parent_sha",
+        "calibration_source",
+        "calibration_environment",
+    }
+)
+UDP_IDLE_POLICY_RUNTIME_FIELDS = frozenset(
+    {*UDP_IDLE_POLICY_DOCUMENT_FIELDS, "policy_sha256"}
+)
+UDP_IDLE_FIELDS = frozenset(
+    {"schema_version", "recipe", "correctness", "cpu", "resource"}
+)
+UDP_IDLE_CORRECTNESS_FIELDS = frozenset(
+    {
+        "requests_sent",
+        "target_echoed",
+        "responses_validated",
+        "generator_workers_joined",
+        "retained_sessions",
+        "server_active_before",
+        "server_active_after",
+        "server_active_drained",
+        "server_buffered_before",
+        "server_buffered_after",
+        "server_buffered_drained",
+        "accepted_client_to_target",
+        "completed_target_to_client",
+        "drain",
+        "rebind",
+        "cleanup",
+    }
+)
+UDP_IDLE_CPU_FIELDS = frozenset(
+    {
+        "process_start_time_ticks",
+        "start_ticks",
+        "end_ticks",
+        "delta_ticks",
+        "clock_ticks_per_second",
+        "elapsed_nanoseconds",
+    }
+)
+UDP_IDLE_RESOURCE_FIELDS = frozenset(
+    {"setup_elapsed_nanoseconds", "pre_load", "established", "after_idle_window", "drained"}
+)
+UDP_IDLE_SAMPLE_FIELDS = frozenset(
+    {
+        "active_sessions",
+        "buffered_bytes",
+        "fds",
+        "tasks",
+        "rss_kib",
+        "smaps_rss_kib",
+        "anonymous_kib",
+        "anon_huge_pages_kib",
     }
 )
 CALIBRATION_ENVIRONMENT_FIELDS = frozenset(
@@ -704,6 +798,20 @@ def _scale_scenario_entry() -> dict[str, object]:
     }
 
 
+def _udp_idle_scenario_entry() -> dict[str, object]:
+    return {
+        "scenario": UDP_IDLE_SCENARIO,
+        "role": "idle_cpu_qualification",
+        "mandatory": True,
+        "metric": "server_cpu_ticks",
+        "direction": "lower_is_better",
+        "topology": "shadowsocks-server",
+        "application_payload_bytes": UDP_IDLE_RECIPE["payload_bytes"],
+        "socks_datagram_bytes": None,
+        "upstream_wire_bytes": None,
+    }
+
+
 def _qualification_scenarios(
     selected: str,
 ) -> tuple[str, list[dict[str, object]]]:
@@ -781,6 +889,7 @@ def create_plan(
     decision_policy: dict[str, object] | None = None,
     scale_safety_policy: dict[str, object] | None = None,
     scale_lineage: dict[str, object] | None = None,
+    udp_idle_cpu_policy: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the authoritative scenario plan for one manual workflow run."""
 
@@ -789,7 +898,9 @@ def create_plan(
     if mode == "diagnostic" and selection not in SCENARIO_CATALOG:
         raise CandidateControlError("diagnostic selection must be one profile workload")
     if mode == "qualification" and selection not in (
-        set(SCENARIO_CATALOG) | set(QUALIFICATION_GROUPS) | {SCALE_SCENARIO}
+        set(SCENARIO_CATALOG)
+        | set(QUALIFICATION_GROUPS)
+        | {SCALE_SCENARIO, UDP_IDLE_SCENARIO}
     ):
         raise CandidateControlError("qualification selection is not supported")
     warmup, active, pair_count = validate_measurement_inputs(
@@ -800,9 +911,12 @@ def create_plan(
     )
     validate_decision_policy(policy)
     is_scale = selection == SCALE_SCENARIO
+    is_udp_idle = selection == UDP_IDLE_SCENARIO
     if is_scale:
         if mode != "qualification":
             raise CandidateControlError("tcp-scale-10k is qualification-only")
+        if udp_idle_cpu_policy is not None:
+            raise CandidateControlError("UDP idle CPU policy is invalid for tcp-scale-10k")
         if (warmup, active, pair_count) != (10, 30, 5):
             raise CandidateControlError("tcp-scale-10k requires the exact 10/30/5 recipe")
         if scale_safety_policy is None or scale_lineage is None:
@@ -813,8 +927,22 @@ def create_plan(
         validate_scale_lineage_shape(scale_lineage)
         scenario_group = SCALE_SCENARIO
         scenarios = [_scale_scenario_entry()]
+    elif is_udp_idle:
+        if mode != "qualification":
+            raise CandidateControlError("udp-idle-4096 is qualification-only")
+        if (warmup, active, pair_count) != (3, 30, 5):
+            raise CandidateControlError("udp-idle-4096 requires the exact 3/30/5 recipe")
+        if udp_idle_cpu_policy is None:
+            raise CandidateControlError("udp-idle-4096 requires its dedicated CPU policy")
+        if scale_safety_policy is not None or scale_lineage is not None:
+            raise CandidateControlError("scale inputs are invalid for udp-idle-4096")
+        validate_udp_idle_cpu_policy(udp_idle_cpu_policy)
+        scenario_group = UDP_IDLE_SCENARIO
+        scenarios = [_udp_idle_scenario_entry()]
     elif scale_safety_policy is not None or scale_lineage is not None:
         raise CandidateControlError("scale policy and lineage are only valid for tcp-scale-10k")
+    elif udp_idle_cpu_policy is not None:
+        raise CandidateControlError("UDP idle CPU policy is only valid for udp-idle-4096")
     elif mode == "diagnostic":
         scenario_group = "diagnostic"
         scenarios = [_scenario_entry(selection, "diagnostic")]
@@ -825,7 +953,9 @@ def create_plan(
         "mode": mode,
         "selection": selection,
         "selected_scenario": (
-            selection if selection in SCENARIO_CATALOG or is_scale else None
+            selection
+            if selection in SCENARIO_CATALOG or is_scale or is_udp_idle
+            else None
         ),
         "scenario_group": scenario_group,
         "warmup_seconds": warmup,
@@ -835,7 +965,9 @@ def create_plan(
         "decision_policy": policy,
         "scale_safety_policy": copy.deepcopy(scale_safety_policy),
         "scale_lineage": copy.deepcopy(scale_lineage),
+        "udp_idle_cpu_policy": copy.deepcopy(udp_idle_cpu_policy),
         "adoption_eligible": not is_scale
+        and not is_udp_idle
         and mode == "qualification"
         and _plan_has_complete_applicable_policy(
             scenarios=scenarios,
@@ -977,6 +1109,101 @@ def load_scale_safety_policy(path: pathlib.Path) -> dict[str, object]:
     _exact_fields(document, SCALE_POLICY_DOCUMENT_FIELDS, "scale safety policy")
     policy = {**document, "policy_sha256": hashlib.sha256(raw).hexdigest()}
     validate_scale_safety_policy(policy)
+    return policy
+
+
+def validate_udp_idle_cpu_policy(policy: dict[str, object]) -> None:
+    if type(policy) is not dict:
+        raise CandidateControlError("UDP idle CPU policy must be a JSON object")
+    _exact_fields(policy, UDP_IDLE_POLICY_RUNTIME_FIELDS, "UDP idle CPU policy")
+    if (
+        type(policy["schema_version"]) is not int
+        or policy["schema_version"] != UDP_IDLE_POLICY_SCHEMA_VERSION
+    ):
+        raise CandidateControlError("UDP idle CPU policy schema_version is unsupported")
+    if type(policy["policy_id"]) is not str or not policy["policy_id"].strip():
+        raise CandidateControlError("UDP idle CPU policy_id must be non-empty")
+    digest = policy["policy_sha256"]
+    if type(digest) is not str or SHA256.fullmatch(digest) is None:
+        raise CandidateControlError("UDP idle CPU policy must have a SHA-256 identity")
+    exact = {
+        "required_pairs": 5,
+        "required_sessions": UDP_IDLE_RECIPE["sessions"],
+        "candidate_maximum_percent_of_parent": 50,
+        "minimum_wins_beyond_noise": 4,
+    }
+    for field, expected in exact.items():
+        if type(policy[field]) is not int or policy[field] != expected:
+            raise CandidateControlError(f"UDP idle CPU policy {field} must be {expected}")
+    calibration_fields = (
+        "noise_ticks",
+        "minimum_saved_ticks",
+        "minimum_parent_signal_ticks",
+        "clock_ticks_per_second",
+        "qualification_parent_sha",
+        "calibration_source",
+        "calibration_environment",
+    )
+    values = [policy[field] for field in calibration_fields]
+    if all(value is None for value in values):
+        return
+    if any(value is None for value in values):
+        raise CandidateControlError(
+            "UDP idle CPU policy calibration must be complete or entirely null"
+        )
+    for field in ("noise_ticks", "minimum_saved_ticks", "minimum_parent_signal_ticks"):
+        value = policy[field]
+        if type(value) is not int or not 0 <= value <= U64_MAX:
+            raise CandidateControlError(f"UDP idle CPU policy {field} must be u64")
+    clock_ticks_per_second = policy["clock_ticks_per_second"]
+    if (
+        type(clock_ticks_per_second) is not int
+        or not 0 < clock_ticks_per_second <= U64_MAX
+    ):
+        raise CandidateControlError(
+            "UDP idle CPU policy clock_ticks_per_second must be positive u64"
+        )
+    noise = policy["noise_ticks"]
+    if policy["minimum_saved_ticks"] < noise + 1:
+        raise CandidateControlError("UDP idle CPU minimum_saved_ticks is inside noise")
+    required_signal = max(2, 2 * (noise + 1))
+    if policy["minimum_parent_signal_ticks"] < required_signal:
+        raise CandidateControlError("UDP idle CPU parent signal floor is too weak")
+    source = policy["calibration_source"]
+    if type(source) is not str or re.fullmatch(r"(?:artifact|commit):\S+", source) is None:
+        raise CandidateControlError("UDP idle CPU calibration_source is invalid")
+    if policy["qualification_parent_sha"] != UDP_IDLE_QUALIFICATION_PARENT_SHA:
+        raise CandidateControlError(
+            "UDP idle CPU qualification_parent_sha must bind the pre-event 50 ms reconcile baseline"
+        )
+    environment = policy["calibration_environment"]
+    if type(environment) is not dict:
+        raise CandidateControlError("UDP idle CPU calibration_environment is required")
+    _exact_fields(
+        environment,
+        CALIBRATION_ENVIRONMENT_FIELDS,
+        "UDP idle CPU calibration_environment",
+    )
+    expected_environment = {
+        **MEASUREMENT_ENVIRONMENT,
+        "warmup_seconds": UDP_IDLE_RECIPE["warmup_seconds"],
+        "active_seconds": UDP_IDLE_RECIPE["active_seconds"],
+    }
+    if environment != expected_environment:
+        raise CandidateControlError("UDP idle CPU calibration_environment is unsupported")
+
+
+def load_udp_idle_cpu_policy(path: pathlib.Path) -> dict[str, object]:
+    try:
+        raw = path.read_bytes()
+        document = _strict_json(raw.decode("utf-8"), source="UDP idle CPU policy")
+    except (OSError, UnicodeError) as error:
+        raise CandidateControlError("unable to read UDP idle CPU policy") from error
+    if type(document) is not dict:
+        raise CandidateControlError("UDP idle CPU policy must be a JSON object")
+    _exact_fields(document, UDP_IDLE_POLICY_DOCUMENT_FIELDS, "UDP idle CPU policy")
+    policy = {**document, "policy_sha256": hashlib.sha256(raw).hexdigest()}
+    validate_udp_idle_cpu_policy(policy)
     return policy
 
 
@@ -1197,6 +1424,7 @@ def load_plan(
     path: pathlib.Path,
     decision_policy: dict[str, object] | None = None,
     scale_safety_policy: dict[str, object] | None = None,
+    udp_idle_cpu_policy: dict[str, object] | None = None,
 ) -> dict[str, object]:
     try:
         plan = _strict_json(path.read_text(encoding="utf-8"), source="performance plan")
@@ -1209,6 +1437,11 @@ def load_plan(
             if scale_safety_policy is None
             else scale_safety_policy
         )
+        selected_udp_idle_policy = (
+            plan.get("udp_idle_cpu_policy")
+            if udp_idle_cpu_policy is None
+            else udp_idle_cpu_policy
+        )
         expected = create_plan(
             mode=plan["mode"],
             selection=plan["selection"],
@@ -1218,6 +1451,7 @@ def load_plan(
             decision_policy=policy,
             scale_safety_policy=selected_scale_policy,
             scale_lineage=plan.get("scale_lineage"),
+            udp_idle_cpu_policy=selected_udp_idle_policy,
         )
     except (OSError, KeyError, TypeError) as error:
         raise CandidateControlError("performance plan is invalid") from error
@@ -1611,6 +1845,139 @@ def _validate_scale_evidence(row: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _validate_udp_idle_sample(value: object, field: str) -> dict[str, object]:
+    if type(value) is not dict:
+        raise CandidateControlError(f"{field} must be an object")
+    _exact_fields(value, UDP_IDLE_SAMPLE_FIELDS, field)
+    for key in UDP_IDLE_SAMPLE_FIELDS:
+        _scale_u64(value[key], f"{field}.{key}")
+    return value
+
+
+def _validate_udp_idle_evidence(row: dict[str, object]) -> dict[str, object]:
+    evidence = row["udp_idle"]
+    if type(evidence) is not dict:
+        raise CandidateControlError("udp-idle-4096 evidence requires an udp_idle object")
+    _exact_fields(evidence, UDP_IDLE_FIELDS, "UDP idle evidence")
+    if _scale_u64(evidence["schema_version"], "udp_idle.schema_version") != 1:
+        raise CandidateControlError("UDP idle evidence schema_version is unsupported")
+
+    recipe = evidence["recipe"]
+    if type(recipe) is not dict:
+        raise CandidateControlError("UDP idle recipe must be an object")
+    _exact_fields(recipe, frozenset(UDP_IDLE_RECIPE), "UDP idle recipe")
+    for field, expected in UDP_IDLE_RECIPE.items():
+        value = recipe[field]
+        if type(expected) is int:
+            value = _scale_u64(value, f"udp_idle.recipe.{field}")
+        if value != expected:
+            raise CandidateControlError(f"UDP idle recipe {field} does not match")
+
+    correctness = evidence["correctness"]
+    if type(correctness) is not dict:
+        raise CandidateControlError("UDP idle correctness must be an object")
+    _exact_fields(correctness, UDP_IDLE_CORRECTNESS_FIELDS, "UDP idle correctness")
+    for field in UDP_IDLE_CORRECTNESS_FIELDS - {"drain", "rebind", "cleanup"}:
+        _scale_u64(correctness[field], f"udp_idle.correctness.{field}")
+    for field in ("drain", "rebind", "cleanup"):
+        if correctness[field] != "PASS":
+            raise CandidateControlError(f"UDP idle correctness {field} must pass")
+    sessions = UDP_IDLE_RECIPE["sessions"]
+    exact_counts = {
+        "requests_sent": sessions,
+        "target_echoed": sessions,
+        "responses_validated": sessions,
+        "generator_workers_joined": UDP_IDLE_RECIPE["setup_workers"],
+        "retained_sessions": sessions,
+        "server_active_before": 0,
+        "server_active_after": sessions,
+        "server_active_drained": 0,
+        "accepted_client_to_target": sessions,
+        "completed_target_to_client": sessions,
+    }
+    for field, expected in exact_counts.items():
+        if correctness[field] != expected:
+            raise CandidateControlError(f"UDP idle correctness {field} is inconsistent")
+    baseline_buffered = correctness["server_buffered_before"]
+    if (
+        not 0 < baseline_buffered <= UDP_IDLE_RECIPE["server_max_buffered_bytes"]
+        or correctness["server_buffered_after"] != baseline_buffered
+        or correctness["server_buffered_drained"] != baseline_buffered
+    ):
+        raise CandidateControlError(
+            "UDP idle buffered-byte lifecycle did not preserve the root baseline"
+        )
+
+    cpu = evidence["cpu"]
+    if type(cpu) is not dict:
+        raise CandidateControlError("UDP idle CPU evidence must be an object")
+    _exact_fields(cpu, UDP_IDLE_CPU_FIELDS, "UDP idle CPU evidence")
+    for field in UDP_IDLE_CPU_FIELDS:
+        _scale_u64(cpu[field], f"udp_idle.cpu.{field}")
+    if cpu["process_start_time_ticks"] == 0 or cpu["clock_ticks_per_second"] == 0:
+        raise CandidateControlError("UDP idle CPU identity is incomplete")
+    if cpu["end_ticks"] < cpu["start_ticks"]:
+        raise CandidateControlError("UDP idle CPU ticks moved backwards")
+    delta = cpu["end_ticks"] - cpu["start_ticks"]
+    if cpu["delta_ticks"] != delta:
+        raise CandidateControlError("UDP idle CPU delta is inconsistent")
+    minimum_elapsed = UDP_IDLE_RECIPE["active_seconds"] * 1_000_000_000
+    maximum_elapsed = minimum_elapsed + (
+        UDP_IDLE_RECIPE["active_elapsed_maximum_slack_milliseconds"] * 1_000_000
+    )
+    if not minimum_elapsed <= cpu["elapsed_nanoseconds"] <= maximum_elapsed:
+        raise CandidateControlError("UDP idle CPU elapsed window is outside its strict bound")
+
+    resource = evidence["resource"]
+    if type(resource) is not dict:
+        raise CandidateControlError("UDP idle resource evidence must be an object")
+    _exact_fields(resource, UDP_IDLE_RESOURCE_FIELDS, "UDP idle resource evidence")
+    setup_elapsed = _scale_u64(
+        resource["setup_elapsed_nanoseconds"],
+        "udp_idle.resource.setup_elapsed_nanoseconds",
+    )
+    if not 0 < setup_elapsed <= UDP_IDLE_RECIPE["setup_deadline_seconds"] * 1_000_000_000:
+        raise CandidateControlError("UDP idle setup elapsed time is outside its bound")
+    samples = {
+        field: _validate_udp_idle_sample(resource[field], f"udp_idle.resource.{field}")
+        for field in ("pre_load", "established", "after_idle_window", "drained")
+    }
+    expected_active = {
+        "pre_load": 0,
+        "established": sessions,
+        "after_idle_window": sessions,
+        "drained": 0,
+    }
+    for field, expected in expected_active.items():
+        if samples[field]["active_sessions"] != expected:
+            raise CandidateControlError(f"UDP idle resource {field} active count is inconsistent")
+    for field in ("pre_load", "established", "after_idle_window", "drained"):
+        if samples[field]["buffered_bytes"] != baseline_buffered:
+            raise CandidateControlError(
+                f"UDP idle resource {field} buffered bytes changed from the root baseline"
+            )
+    expected_established_fds = samples["pre_load"]["fds"] + sessions
+    if (
+        expected_established_fds > U64_MAX
+        or samples["established"]["fds"] != expected_established_fds
+    ):
+        raise CandidateControlError(
+            "UDP idle established descriptor count does not prove every target socket"
+        )
+    for field in ("fds", "tasks"):
+        if samples["after_idle_window"][field] != samples["established"][field]:
+            raise CandidateControlError(
+                f"UDP idle {field} changed during the CPU window"
+            )
+        if samples["drained"][field] != samples["pre_load"][field]:
+            raise CandidateControlError(f"UDP idle drained {field} did not return to baseline")
+    if row["value"] != delta or row["checked_units"] != sessions:
+        raise CandidateControlError("UDP idle top-level CPU/session evidence is inconsistent")
+    if row["io_completions"] != sessions * 2:
+        raise CandidateControlError("UDP idle top-level I/O accounting is inconsistent")
+    return {"delta_ticks": delta, "samples": samples}
+
+
 def _validate_trial(
     row: dict[str, object],
     *,
@@ -1633,6 +2000,8 @@ def _validate_trial(
     scenario = _required_string(row, "scenario")
     if scenario not in planned:
         raise CandidateControlError(f"unexpected scenario in evidence: {scenario}")
+    is_scale = scenario == SCALE_SCENARIO
+    is_udp_idle = scenario == UDP_IDLE_SCENARIO
     pair = _required_u64(row, "pair", positive=True)
     if pair > plan["pairs"]:
         raise CandidateControlError("evidence pair is outside the planned range")
@@ -1661,15 +2030,23 @@ def _validate_trial(
     tree = _required_string(row, "tree")
     _require_pattern(sha, COMMIT_SHA, field="sha")
     _require_pattern(tree, COMMIT_SHA, field="tree")
-    for field in ("runner_sha256", "client_sha256", "server_sha256"):
+    for field in ("runner_sha256", "server_sha256"):
         _require_pattern(_required_string(row, field), SHA256, field=field)
+    if is_udp_idle:
+        if row["client_sha256"] is not None:
+            raise CandidateControlError(
+                "udp-idle-4096 evidence must mark the unused client binary null"
+            )
+    else:
+        _require_pattern(
+            _required_string(row, "client_sha256"), SHA256, field="client_sha256"
+        )
     for field in ("rustc", "kernel", "cpu_model"):
         _required_string(row, field)
     _required_u64(row, "cpu_count", positive=True)
     _required_u64(row, "memory_kib", positive=True)
     metric = _required_string(row, "metric", expected=planned[scenario]["metric"])
     value = _required_u64(row, "value")
-    is_scale = scenario == SCALE_SCENARIO
     _required_u64(row, "checked_units", positive=not is_scale)
     _required_u64(row, "io_completions", positive=not is_scale)
     p99 = row.get("p99_nanoseconds")
@@ -1684,8 +2061,16 @@ def _validate_trial(
         )
     if is_scale:
         _validate_scale_evidence(row)
+        if row["udp_idle"] is not None:
+            raise CandidateControlError("tcp-scale-10k evidence must have null udp_idle")
+    elif is_udp_idle:
+        if row["scale"] is not None:
+            raise CandidateControlError("udp-idle-4096 evidence must have null scale")
+        _validate_udp_idle_evidence(row)
     elif row["scale"] is not None:
         raise CandidateControlError("ordinary profile evidence must have null scale")
+    elif row["udp_idle"] is not None:
+        raise CandidateControlError("ordinary profile evidence must have null udp_idle")
     _required_string(row, "correctness", expected="PASS")
     _required_string(row, "status", expected="PASS")
     return scenario, pair, member
@@ -2191,6 +2576,7 @@ def _summarize_scale_evidence(
         "decision_policy": plan["decision_policy"],
         "scale_safety_policy": policy,
         "scale_lineage": plan["scale_lineage"],
+        "udp_idle_cpu_policy": None,
         "warning_policy": dict(WARNING_POLICY),
         "decision_enabled": True,
         "candidate_win_enabled": False,
@@ -2230,12 +2616,218 @@ def _summarize_scale_evidence(
             ),
             "pairs": pair_observations,
         },
+        "udp_idle_cpu": None,
         "evidence_files": sorted(
             evidence_files, key=lambda item: (item["member"], item["file"])
         ),
     }
 
 
+def _odd_integer_median(values: Sequence[int], field: str) -> int:
+    if not values or len(values) % 2 == 0:
+        raise CandidateControlError(f"{field} requires a nonempty odd vector")
+    return sorted(values)[len(values) // 2]
+
+
+def _summarize_udp_idle_evidence(
+    *,
+    plan: dict[str, object],
+    rows: dict[tuple[str, int, str], dict[str, object]],
+    parent_sha: str,
+    candidate_sha: str,
+    member_identity: dict[str, tuple[object, ...]],
+    identity_fields: tuple[str, ...],
+    evidence_files: list[dict[str, str]],
+) -> dict[str, object]:
+    policy = plan["udp_idle_cpu_policy"]
+    validate_udp_idle_cpu_policy(policy)
+    if (
+        policy["qualification_parent_sha"] is not None
+        and parent_sha != policy["qualification_parent_sha"]
+    ):
+        raise CandidateControlError(
+            "UDP idle CPU summary does not use the bound pre-event 50 ms reconcile baseline"
+        )
+    parent_ticks: list[int] = []
+    candidate_ticks: list[int] = []
+    saved_ticks: list[int] = []
+    clock_tick_rates: set[int] = set()
+    pairs: list[dict[str, object]] = []
+    for pair in range(1, plan["pairs"] + 1):
+        parent = rows[(UDP_IDLE_SCENARIO, pair, "parent")]
+        candidate = rows[(UDP_IDLE_SCENARIO, pair, "candidate")]
+        if {parent["order"], candidate["order"]} != {1, 2}:
+            raise CandidateControlError(f"UDP idle pair={pair} must contain orders 1 and 2")
+        expected_parent_order = 1 if pair % 2 else 2
+        if parent["order"] != expected_parent_order:
+            raise CandidateControlError(f"UDP idle pair={pair} does not alternate order")
+        parent_delta = _validate_udp_idle_evidence(parent)["delta_ticks"]
+        candidate_delta = _validate_udp_idle_evidence(candidate)["delta_ticks"]
+        clock_tick_rates.update(
+            (
+                parent["udp_idle"]["cpu"]["clock_ticks_per_second"],
+                candidate["udp_idle"]["cpu"]["clock_ticks_per_second"],
+            )
+        )
+        saved = parent_delta - candidate_delta
+        parent_ticks.append(parent_delta)
+        candidate_ticks.append(candidate_delta)
+        saved_ticks.append(saved)
+        pairs.append(
+            {
+                "pair": pair,
+                "parent_order": parent["order"],
+                "candidate_order": candidate["order"],
+                "parent_cpu_ticks": parent_delta,
+                "candidate_cpu_ticks": candidate_delta,
+                "saved_ticks": saved,
+            }
+        )
+    if len(clock_tick_rates) != 1:
+        raise CandidateControlError("UDP idle clock-tick rate changed between trials")
+    clock_tick_rate = next(iter(clock_tick_rates))
+    parent_median = _odd_integer_median(parent_ticks, "UDP idle parent median")
+    candidate_median = _odd_integer_median(candidate_ticks, "UDP idle candidate median")
+    median_saved = _odd_integer_median(saved_ticks, "UDP idle saved median")
+    calibrated = policy["noise_ticks"] is not None
+    if calibrated and clock_tick_rate != policy["clock_ticks_per_second"]:
+        raise CandidateControlError(
+            "UDP idle clock-tick rate does not match the A/A calibrated policy"
+        )
+    tree_index = identity_fields.index("tree")
+    runner_index = identity_fields.index("runner_sha256")
+    if (
+        member_identity["parent"][runner_index]
+        != member_identity["candidate"][runner_index]
+    ):
+        raise CandidateControlError(
+            "UDP idle parent and candidate evidence must use one identical harness"
+        )
+    trees_equal = (
+        member_identity["parent"][tree_index]
+        == member_identity["candidate"][tree_index]
+    )
+    if not calibrated and not trees_equal:
+        raise CandidateControlError(
+            "UDP idle A/A calibration requires identical parent and candidate source trees"
+        )
+    if calibrated and trees_equal:
+        raise CandidateControlError(
+            "UDP idle calibrated A/B requires different parent and candidate source trees"
+        )
+    observed_noise = None if calibrated else max(abs(value) for value in saved_ticks)
+    if observed_noise is not None and observed_noise > (U64_MAX - 2) // 2:
+        raise CandidateControlError("UDP idle A/A noise calibration arithmetic overflows u64")
+    failures: list[str] = []
+    wins_beyond_noise: int | None = None
+    if calibrated:
+        noise = policy["noise_ticks"]
+        wins_beyond_noise = sum(saved > noise for saved in saved_ticks)
+        if parent_median < policy["minimum_parent_signal_ticks"]:
+            failures.append("PARENT_SIGNAL_FLOOR")
+        if (
+            candidate_median * 100
+            > parent_median * policy["candidate_maximum_percent_of_parent"]
+        ):
+            failures.append("MEDIAN_REDUCTION")
+        if median_saved < policy["minimum_saved_ticks"]:
+            failures.append("MEDIAN_SAVED_TICKS")
+        if wins_beyond_noise < policy["minimum_wins_beyond_noise"]:
+            failures.append("WINS_BEYOND_NOISE")
+        for pair, (parent_tick, candidate_tick) in enumerate(
+            zip(parent_ticks, candidate_ticks, strict=True), start=1
+        ):
+            if candidate_tick > parent_tick + noise:
+                failures.append(f"PAIR_{pair}_REGRESSION_BEYOND_NOISE")
+        status = "UDP_IDLE_CPU_QUALIFICATION_PASS" if not failures else "UDP_IDLE_CPU_QUALIFICATION_FAIL"
+        decision_reason = (
+            "all dedicated UDP idle CPU qualification gates passed"
+            if not failures
+            else "one or more dedicated UDP idle CPU qualification gates failed"
+        )
+        threshold_availability = "idle_cpu"
+    else:
+        status = "UDP_IDLE_CPU_UNCALIBRATED"
+        decision_reason = "A/A evidence measured noise; policy thresholds remain uncalibrated"
+        threshold_availability = "uncalibrated"
+    failures = sorted(set(failures))
+    build_identities = {
+        member: dict(zip(identity_fields, member_identity[member], strict=True))
+        for member in ("parent", "candidate")
+    }
+    ratio = (
+        None
+        if parent_median == 0
+        else _display_decimal(
+            Decimal(candidate_median) * Decimal(100) / Decimal(parent_median)
+        )
+    )
+    return {
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "kind": "performance_candidate_summary",
+        "mode": plan["mode"],
+        "selection": plan["selection"],
+        "selected_scenario": UDP_IDLE_SCENARIO,
+        "scenario_group": UDP_IDLE_SCENARIO,
+        "parent_sha": parent_sha,
+        "candidate_sha": candidate_sha,
+        "build_identities": build_identities,
+        "pairs": plan["pairs"],
+        "decision_policy": plan["decision_policy"],
+        "scale_safety_policy": None,
+        "scale_lineage": None,
+        "udp_idle_cpu_policy": policy,
+        "warning_policy": dict(WARNING_POLICY),
+        "decision_enabled": calibrated,
+        "candidate_win_enabled": False,
+        "decision_reason": decision_reason,
+        "threshold_availability": threshold_availability,
+        "adoption_claim": False,
+        "status": status,
+        "workflow_failure_reason": None if not failures else "; ".join(failures),
+        "mandatory_scenarios": [UDP_IDLE_SCENARIO],
+        "missing_scenarios": [],
+        "primary_results": [],
+        "guard_results": [],
+        "scenarios": [{"scenario": UDP_IDLE_SCENARIO, "status": status}],
+        "scale_safety": None,
+        "udp_idle_cpu": {
+            "schema_version": 1,
+            "status": (
+                "UNCALIBRATED"
+                if not calibrated
+                else ("PASS" if not failures else "FAIL")
+            ),
+            "failures": failures,
+            "parent_median_ticks": parent_median,
+            "candidate_median_ticks": candidate_median,
+            "candidate_median_percent_of_parent": ratio,
+            "median_saved_ticks": median_saved,
+            "wins_beyond_noise": wins_beyond_noise,
+            "observed_noise_ticks": observed_noise,
+            "recommended_noise_ticks": (
+                policy["noise_ticks"] if calibrated else observed_noise
+            ),
+            "recommended_minimum_saved_ticks": (
+                policy["minimum_saved_ticks"] if calibrated else observed_noise + 1
+            ),
+            "recommended_minimum_parent_signal_ticks": (
+                policy["minimum_parent_signal_ticks"]
+                if calibrated
+                else max(2, 2 * (observed_noise + 1))
+            ),
+            "clock_ticks_per_second": clock_tick_rate,
+            "recommended_clock_ticks_per_second": (
+                policy["clock_ticks_per_second"] if calibrated else clock_tick_rate
+            ),
+            "qualification_parent_sha": UDP_IDLE_QUALIFICATION_PARENT_SHA,
+            "qualification_baseline": UDP_IDLE_QUALIFICATION_BASELINE,
+            "pairs": pairs,
+        },
+        "evidence_files": sorted(
+            evidence_files, key=lambda item: (item["member"], item["file"])
+        ),
+    }
 def summarize_evidence(
     *,
     plan: dict[str, object],
@@ -2257,6 +2849,7 @@ def summarize_evidence(
     if parent_sha == candidate_sha:
         raise CandidateControlError("summary parent and candidate must be different")
     is_scale = plan["selection"] == SCALE_SCENARIO
+    is_udp_idle = plan["selection"] == UDP_IDLE_SCENARIO
     if is_scale:
         lineage = plan["scale_lineage"]
         if (
@@ -2364,6 +2957,16 @@ def summarize_evidence(
 
     if is_scale:
         return _summarize_scale_evidence(
+            plan=plan,
+            rows=rows,
+            parent_sha=parent_sha,
+            candidate_sha=candidate_sha,
+            member_identity=member_identity,
+            identity_fields=identity_fields,
+            evidence_files=evidence_files,
+        )
+    if is_udp_idle:
+        return _summarize_udp_idle_evidence(
             plan=plan,
             rows=rows,
             parent_sha=parent_sha,
@@ -2511,6 +3114,7 @@ def summarize_evidence(
         "decision_policy": plan["decision_policy"],
         "scale_safety_policy": None,
         "scale_lineage": None,
+        "udp_idle_cpu_policy": None,
         "warning_policy": dict(WARNING_POLICY),
         "decision_enabled": enabled_count > 0,
         "candidate_win_enabled": threshold_availability == "complete",
@@ -2527,6 +3131,7 @@ def summarize_evidence(
         "guard_results": guard_results,
         "scenarios": scenario_summaries,
         "scale_safety": None,
+        "udp_idle_cpu": None,
         "evidence_files": sorted(
             evidence_files, key=lambda item: (item["member"], item["file"])
         ),
@@ -2565,6 +3170,9 @@ def invalid_summary(
         "scale_lineage": copy.deepcopy(
             plan.get("scale_lineage") if plan is not None else None
         ),
+        "udp_idle_cpu_policy": copy.deepcopy(
+            plan.get("udp_idle_cpu_policy") if plan is not None else None
+        ),
         "warning_policy": dict(WARNING_POLICY),
         "decision_enabled": False,
         "candidate_win_enabled": False,
@@ -2580,6 +3188,7 @@ def invalid_summary(
         "error": str(error),
         "scenarios": [],
         "scale_safety": None,
+        "udp_idle_cpu": None,
         "evidence_files": [],
     }
 
@@ -2606,6 +3215,44 @@ def summary_markdown(summary: dict[str, object]) -> str:
                 "",
             ]
         )
+        return "\n".join(lines)
+    if summary["selection"] == UDP_IDLE_SCENARIO:
+        idle = summary["udp_idle_cpu"]
+        lines.extend(
+            [
+                f"- Mode: `{summary['mode']}`",
+                f"- UDP idle CPU qualification: **{idle['status']}**",
+                f"- Dedicated policy: `{summary['udp_idle_cpu_policy']['policy_id']}` "
+                f"(`{summary['udp_idle_cpu_policy']['policy_sha256']}`)",
+                f"- Decision: {summary['decision_reason']}",
+                f"- Parent/candidate median ticks: `{idle['parent_median_ticks']} / "
+                f"{idle['candidate_median_ticks']}`",
+                f"- Candidate median % of parent: `"
+                f"{idle['candidate_median_percent_of_parent'] if idle['candidate_median_percent_of_parent'] is not None else '-'}`",
+                f"- Observed/recommended noise ticks: `"
+                f"{idle['observed_noise_ticks'] if idle['observed_noise_ticks'] is not None else '-'} / "
+                f"{idle['recommended_noise_ticks']}`",
+                f"- Recommended saved/signal floors: `"
+                f"{idle['recommended_minimum_saved_ticks']} / "
+                f"{idle['recommended_minimum_parent_signal_ticks']}`",
+                f"- Observed/recommended CLK_TCK: `{idle['clock_ticks_per_second']} / "
+                f"{idle['recommended_clock_ticks_per_second']}`",
+                f"- Bound A/B parent: `{idle['qualification_parent_sha']}`",
+                f"- Bound A/B scope: `{idle['qualification_baseline']}`",
+                f"- Failures: `{', '.join(idle['failures']) or '-'}`",
+                "- This qualification is not an adoption claim.",
+                "",
+                "| Pair | Parent order/ticks | Candidate order/ticks | Saved ticks |",
+                "|---:|---|---|---:|",
+            ]
+        )
+        for pair in idle["pairs"]:
+            lines.append(
+                f"| {pair['pair']} | {pair['parent_order']} / {pair['parent_cpu_ticks']} | "
+                f"{pair['candidate_order']} / {pair['candidate_cpu_ticks']} | "
+                f"{pair['saved_ticks']} |"
+            )
+        lines.append("")
         return "\n".join(lines)
     if summary["selection"] == SCALE_SCENARIO:
         scale = summary["scale_safety"]
@@ -2775,10 +3422,17 @@ def run_summary_command(parsed: argparse.Namespace) -> int:
             if scale_policy_path is None
             else load_scale_safety_policy(scale_policy_path)
         )
+        idle_policy_path = getattr(parsed, "idle_cpu_policy", None)
+        idle_policy = (
+            None
+            if idle_policy_path is None
+            else load_udp_idle_cpu_policy(idle_policy_path)
+        )
         plan = load_plan(
             parsed.plan,
             decision_policy=decision_policy,
             scale_safety_policy=scale_policy,
+            udp_idle_cpu_policy=idle_policy,
         )
         summary = summarize_evidence(
             plan=plan,
@@ -2805,13 +3459,23 @@ def run_summary_command(parsed: argparse.Namespace) -> int:
         "INCONCLUSIVE",
         "CANDIDATE_WIN",
         "SCALE_SAFETY_PASS",
+        "UDP_IDLE_CPU_UNCALIBRATED",
+        "UDP_IDLE_CPU_QUALIFICATION_PASS",
     }:
         return 0
-    if summary["status"] in {"REGRESSION", "SCALE_SAFETY_FAIL"}:
+    if summary["status"] in {
+        "REGRESSION",
+        "SCALE_SAFETY_FAIL",
+        "UDP_IDLE_CPU_QUALIFICATION_FAIL",
+    }:
         message = (
             "dedicated tcp-scale safety gate failed"
             if summary["status"] == "SCALE_SAFETY_FAIL"
-            else "calibrated mandatory scenario regressed"
+            else (
+                "dedicated UDP idle CPU qualification failed"
+                if summary["status"] == "UDP_IDLE_CPU_QUALIFICATION_FAIL"
+                else "calibrated mandatory scenario regressed"
+            )
         )
         print(f"performance-candidate: {message}", file=sys.stderr)
         return 3
@@ -2843,6 +3507,7 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--policy", required=True, type=pathlib.Path)
     plan.add_argument("--scale-policy", type=pathlib.Path)
     plan.add_argument("--scale-lineage", type=pathlib.Path)
+    plan.add_argument("--idle-cpu-policy", type=pathlib.Path)
     plan.add_argument("--output", required=True, type=pathlib.Path)
     scenarios = commands.add_parser(
         "scenarios", help="emit planned scenario names, one per line"
@@ -2850,6 +3515,7 @@ def _parser() -> argparse.ArgumentParser:
     scenarios.add_argument("--plan", required=True, type=pathlib.Path)
     scenarios.add_argument("--policy", required=True, type=pathlib.Path)
     scenarios.add_argument("--scale-policy", type=pathlib.Path)
+    scenarios.add_argument("--idle-cpu-policy", type=pathlib.Path)
     summary = commands.add_parser(
         "summarize", help="validate paired evidence and write machine/human summaries"
     )
@@ -2860,6 +3526,7 @@ def _parser() -> argparse.ArgumentParser:
     summary.add_argument("--candidate-sha", required=True)
     summary.add_argument("--policy", required=True, type=pathlib.Path)
     summary.add_argument("--scale-policy", type=pathlib.Path)
+    summary.add_argument("--idle-cpu-policy", type=pathlib.Path)
     summary.add_argument("--repository", type=pathlib.Path)
     summary.add_argument("--output", required=True, type=pathlib.Path)
     summary.add_argument("--markdown", required=True, type=pathlib.Path)
@@ -2909,6 +3576,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 if parsed.scale_lineage is None
                 else load_scale_lineage(parsed.scale_lineage)
             )
+            idle_policy = (
+                None
+                if parsed.idle_cpu_policy is None
+                else load_udp_idle_cpu_policy(parsed.idle_cpu_policy)
+            )
             plan = create_plan(
                 mode=parsed.mode,
                 selection=parsed.selection,
@@ -2918,6 +3590,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 decision_policy=decision_policy,
                 scale_safety_policy=scale_policy,
                 scale_lineage=scale_lineage,
+                udp_idle_cpu_policy=idle_policy,
             )
             write_plan(parsed.output, plan)
             return 0
@@ -2928,10 +3601,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 if parsed.scale_policy is None
                 else load_scale_safety_policy(parsed.scale_policy)
             )
+            idle_policy = (
+                None
+                if parsed.idle_cpu_policy is None
+                else load_udp_idle_cpu_policy(parsed.idle_cpu_policy)
+            )
             plan = load_plan(
                 parsed.plan,
                 decision_policy=decision_policy,
                 scale_safety_policy=scale_policy,
+                udp_idle_cpu_policy=idle_policy,
             )
             for scenario in plan["scenarios"]:
                 print(scenario["scenario"])

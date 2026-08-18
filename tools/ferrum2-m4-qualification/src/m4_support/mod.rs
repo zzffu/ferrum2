@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod tcp_scale;
+mod udp_idle;
 
 use ferrum2_core::TargetAddr;
 use ferrum2_crypto::MethodProfile;
@@ -22,7 +23,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -90,7 +91,7 @@ const PROFILE_TCP_STREAM_BATCH: usize = 4;
 const PROFILE_TCP_LATENCY_WORKERS: usize = 1;
 const PROFILE_TCP_LATENCY_ACTIVE_MAX_SECONDS: u64 = 60;
 const PROFILE_TCP_LATENCY_SAMPLE_CAP: usize = 2_000_000;
-const PROFILE_TRIAL_SCHEMA_VERSION: u8 = 3;
+const PROFILE_TRIAL_SCHEMA_VERSION: u8 = 4;
 const EVIDENCE_LINE_MAX_BYTES: usize = 16 * 1024;
 const TCP_SCALE_EVIDENCE_LINE_MAX_BYTES: usize = 512 * 1024;
 
@@ -193,6 +194,7 @@ enum ProfileScenario {
     TcpBulk,
     TcpStream64k,
     TcpScale10k,
+    UdpIdle4096,
     TcpRequest1k,
     TcpRequest4k,
     TcpRequest16k,
@@ -227,6 +229,7 @@ impl ProfileScenario {
             Some("tcp-bulk") => Ok(Self::TcpBulk),
             Some("tcp-stream-64k") => Ok(Self::TcpStream64k),
             Some("tcp-scale-10k") => Ok(Self::TcpScale10k),
+            Some("udp-idle-4096") => Ok(Self::UdpIdle4096),
             Some("tcp-request-1k") => Ok(Self::TcpRequest1k),
             Some("tcp-request-4k") => Ok(Self::TcpRequest4k),
             Some("tcp-request-16k") => Ok(Self::TcpRequest16k),
@@ -240,6 +243,7 @@ impl ProfileScenario {
             Some("udp-direct-max-65497") => Ok(Self::UdpDirectMax65497),
             _ => Err(
                 "profile scenario must be tcp-bulk, tcp-stream-64k, tcp-scale-10k, \
+                 udp-idle-4096, \
                  tcp-request-1k, \
                  tcp-request-4k, tcp-request-16k, udp-small-high, udp-mtu-1200, \
                  udp-payload-1472, udp-payload-1500, udp-payload-8192, \
@@ -254,6 +258,7 @@ impl ProfileScenario {
             Self::TcpBulk => "tcp-bulk",
             Self::TcpStream64k => "tcp-stream-64k",
             Self::TcpScale10k => "tcp-scale-10k",
+            Self::UdpIdle4096 => "udp-idle-4096",
             Self::TcpRequest1k => "tcp-request-1k",
             Self::TcpRequest4k => "tcp-request-4k",
             Self::TcpRequest16k => "tcp-request-16k",
@@ -271,7 +276,7 @@ impl ProfileScenario {
     const fn tcp_workers(self) -> Option<usize> {
         match self {
             Self::TcpBulk | Self::TcpStream64k => Some(STREAMS),
-            Self::TcpScale10k => None,
+            Self::TcpScale10k | Self::UdpIdle4096 => None,
             Self::TcpRequest1k | Self::TcpRequest4k | Self::TcpRequest16k => {
                 Some(PROFILE_TCP_LATENCY_WORKERS)
             }
@@ -326,6 +331,7 @@ impl ProfileScenario {
         match self {
             Self::TcpBulk | Self::TcpStream64k => PAYLOAD_BYTES,
             Self::TcpScale10k => tcp_scale::PAYLOAD_BYTES,
+            Self::UdpIdle4096 => udp_idle::PAYLOAD_BYTES,
             Self::TcpRequest1k => 1_024,
             Self::TcpRequest4k => 4_096,
             Self::TcpRequest16k => 16_384,
@@ -334,6 +340,9 @@ impl ProfileScenario {
     }
 
     const fn topology_label(self) -> &'static str {
+        if matches!(self, Self::UdpIdle4096) {
+            return "shadowsocks-server";
+        }
         match self.udp_topology() {
             Some(topology) => topology.label(),
             None => "shadowsocks",
@@ -341,6 +350,9 @@ impl ProfileScenario {
     }
 
     const fn socks_datagram_bytes(self) -> Option<usize> {
+        if matches!(self, Self::UdpIdle4096) {
+            return None;
+        }
         match self.udp_payload_bytes() {
             Some(payload) => Some(payload + PROFILE_SOCKS_IPV4_HEADER_BYTES),
             None => None,
@@ -348,6 +360,9 @@ impl ProfileScenario {
     }
 
     const fn upstream_wire_bytes(self) -> Option<usize> {
+        if matches!(self, Self::UdpIdle4096) {
+            return None;
+        }
         match self.udp_topology() {
             Some(ProfileUdpTopology::Shadowsocks) => {
                 Some(self.application_payload_bytes() + PROFILE_SS_AES_RESPONSE_OVERHEAD_BYTES)
@@ -481,6 +496,9 @@ fn parse_profile_args(arguments: &[OsString]) -> Result<ProfileArgs, String> {
     if scenario == ProfileScenario::TcpScale10k && (warmup_seconds != 10 || active_seconds != 30) {
         return Err("tcp-scale-10k requires exactly 10 warmup and 30 active seconds".to_owned());
     }
+    if scenario == ProfileScenario::UdpIdle4096 && (warmup_seconds != 3 || active_seconds != 30) {
+        return Err("udp-idle-4096 requires exactly 3 warmup and 30 active seconds".to_owned());
+    }
     let (repository_root, binary_dir) = match (selected_repository_root, binary_dir) {
         (None, None) => (
             repository_root()?
@@ -602,7 +620,7 @@ impl ReadyFile {
     fn publish(
         path: &Path,
         scenario: ProfileScenario,
-        client_pid: u32,
+        client_pid: Option<u32>,
         server_pid: Option<u32>,
         warmup_seconds: u64,
         active_seconds: u64,
@@ -615,7 +633,7 @@ impl ReadyFile {
             temporary,
             "scenario={}\nclient_pid={}\nserver_pid={}\nwarmup_seconds={}\nactive_seconds={}\n",
             scenario.label(),
-            client_pid,
+            client_pid.map_or_else(|| "none".to_owned(), |pid| pid.to_string()),
             server_pid.map_or_else(|| "none".to_owned(), |pid| pid.to_string()),
             warmup_seconds,
             active_seconds,
@@ -690,13 +708,14 @@ struct ProfileOutcome {
     p99_nanoseconds: Option<u64>,
     io_completions: u64,
     scale_json: Option<String>,
+    udp_idle_json: Option<String>,
 }
 
 struct ProfileRawIdentity {
     sha: String,
     tree: String,
     runner_sha256: String,
-    client_sha256: String,
+    client_sha256: Option<String>,
     server_sha256: String,
     rustc: String,
     kernel: String,
@@ -706,7 +725,12 @@ struct ProfileRawIdentity {
 }
 
 impl ProfileRawIdentity {
-    fn load(raw: &ProfileRawArgs, root: &Path, binary_dir: &Path) -> Result<Self, String> {
+    fn load(
+        raw: &ProfileRawArgs,
+        scenario: ProfileScenario,
+        root: &Path,
+        binary_dir: &Path,
+    ) -> Result<Self, String> {
         let git = |identity, args: &[&str]| {
             probe_text(
                 identity,
@@ -757,13 +781,13 @@ impl ProfileRawIdentity {
             .map_err(|_| "profile logical CPU count is unavailable".to_owned())?
             .get();
         let runner = std::env::current_exe().map_err(clean_io)?;
-        let client = profile_binary(binary_dir, "ferrum2-client")?;
         let server = profile_binary(binary_dir, "ferrum2-server")?;
+        let client_sha256 = profile_client_sha256(scenario, binary_dir)?;
         Ok(Self {
             sha,
             tree,
             runner_sha256: sha256("profile runner SHA-256 probe", &runner)?,
-            client_sha256: sha256("profile client SHA-256 probe", &client)?,
+            client_sha256,
             server_sha256: sha256("profile server SHA-256 probe", &server)?,
             rustc,
             kernel,
@@ -772,6 +796,17 @@ impl ProfileRawIdentity {
             memory_kib,
         })
     }
+}
+
+fn profile_client_sha256(
+    scenario: ProfileScenario,
+    binary_dir: &Path,
+) -> Result<Option<String>, String> {
+    if scenario == ProfileScenario::UdpIdle4096 {
+        return Ok(None);
+    }
+    let client = profile_binary(binary_dir, "ferrum2-client")?;
+    sha256("profile client SHA-256 probe", &client).map(Some)
 }
 
 fn profile_raw_prefix(arguments: &ProfileArgs, raw: &ProfileRawArgs) -> String {
@@ -813,6 +848,7 @@ fn run_profile_scenario(arguments: &ProfileArgs) -> Result<ProfileOutcome, Strin
         | ProfileScenario::TcpRequest4k
         | ProfileScenario::TcpRequest16k => run_profile_tcp(arguments, &ready_file),
         ProfileScenario::TcpScale10k => tcp_scale::run(arguments, &ready_file),
+        ProfileScenario::UdpIdle4096 => udp_idle::run(arguments, &ready_file),
         ProfileScenario::UdpSmallHigh
         | ProfileScenario::UdpMtu1200
         | ProfileScenario::UdpPayload1472
@@ -827,7 +863,12 @@ fn run_profile_scenario(arguments: &ProfileArgs) -> Result<ProfileOutcome, Strin
 fn run_profile_workload(mut arguments: ProfileArgs) -> Result<String, String> {
     let raw = arguments.raw.take();
     let raw_identity = raw.as_ref().map(|raw| {
-        ProfileRawIdentity::load(raw, &arguments.repository_root, &arguments.binary_dir)
+        ProfileRawIdentity::load(
+            raw,
+            arguments.scenario,
+            &arguments.repository_root,
+            &arguments.binary_dir,
+        )
     });
     let mut evidence = if let Some(raw) = &raw {
         let output = resolve_profile_ready_file(&arguments.repository_root, &raw.output)?;
@@ -870,17 +911,22 @@ fn run_profile_workload(mut arguments: ProfileArgs) -> Result<String, String> {
         match &result {
             Ok(outcome) => {
                 let scale = outcome.scale_json.as_deref().unwrap_or("null");
+                let udp_idle = outcome.udp_idle_json.as_deref().unwrap_or("null");
                 let line = format!(
                     "{{{prefix},\"sha\":{},\"tree\":{},\"runner_sha256\":{},\
                  \"client_sha256\":{},\"server_sha256\":{},\"rustc\":{},\"kernel\":{},\
                  \"cpu_model\":{},\"cpu_count\":{},\"memory_kib\":{},\"metric\":{},\
                  \"value\":{},\"checked_units\":{},\"p99_nanoseconds\":{},\
-                 \"io_completions\":{},\"scale\":{scale},\"correctness\":\"PASS\",\
+                 \"io_completions\":{},\"scale\":{scale},\"udp_idle\":{udp_idle},\
+                 \"correctness\":\"PASS\",\
                  \"status\":\"PASS\"}}",
                     json(&identity.sha),
                     json(&identity.tree),
                     json(&identity.runner_sha256),
-                    json(&identity.client_sha256),
+                    identity
+                        .client_sha256
+                        .as_deref()
+                        .map_or_else(|| "null".to_owned(), json),
                     json(&identity.server_sha256),
                     json(&identity.rustc),
                     json(&identity.kernel),
@@ -910,7 +956,10 @@ fn run_profile_workload(mut arguments: ProfileArgs) -> Result<String, String> {
                 json(&identity.sha),
                 json(&identity.tree),
                 json(&identity.runner_sha256),
-                json(&identity.client_sha256),
+                identity
+                    .client_sha256
+                    .as_deref()
+                    .map_or_else(|| "null".to_owned(), json),
                 json(&identity.server_sha256),
                 json(&identity.rustc),
                 json(&identity.kernel),
@@ -1102,8 +1151,8 @@ fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
                         active,
                     )
                     .map(ProfileTcpWorkerResult::Latencies),
-                    ProfileScenario::TcpScale10k => {
-                        unreachable!("dedicated scale runner reached ordinary TCP worker")
+                    ProfileScenario::TcpScale10k | ProfileScenario::UdpIdle4096 => {
+                        unreachable!("dedicated runner reached ordinary TCP worker")
                     }
                     ProfileScenario::UdpSmallHigh
                     | ProfileScenario::UdpMtu1200
@@ -1148,7 +1197,7 @@ fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
         ready = Some(ReadyFile::publish(
             ready_file,
             arguments.scenario,
-            client_process.as_ref().expect("client process").id(),
+            Some(client_process.as_ref().expect("client process").id()),
             Some(server_process.as_ref().expect("server process").id()),
             arguments.warmup_seconds,
             arguments.active_seconds,
@@ -1247,6 +1296,7 @@ fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
             p99_nanoseconds: None,
             io_completions: transactions.saturating_mul(2),
             scale_json: None,
+            udp_idle_json: None,
         });
     }
     if arguments.scenario == ProfileScenario::TcpStream64k {
@@ -1264,6 +1314,7 @@ fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
             p99_nanoseconds: None,
             io_completions: batches.saturating_mul((PROFILE_TCP_STREAM_BATCH + 1) as u64),
             scale_json: None,
+            udp_idle_json: None,
         });
     }
     let transactions = u64::try_from(latencies.len())
@@ -1284,6 +1335,7 @@ fn run_profile_tcp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
         p99_nanoseconds: Some(p99_nanoseconds),
         io_completions: transactions.saturating_mul(2),
         scale_json: None,
+        udp_idle_json: None,
     })
 }
 
@@ -1458,7 +1510,7 @@ fn run_profile_udp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
         ready = Some(ReadyFile::publish(
             ready_file,
             arguments.scenario,
-            client_process.as_ref().expect("client process").id(),
+            Some(client_process.as_ref().expect("client process").id()),
             server_process.as_ref().map(ProcessGuard::id),
             arguments.warmup_seconds,
             arguments.active_seconds,
@@ -1562,6 +1614,7 @@ fn run_profile_udp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
         p99_nanoseconds: None,
         io_completions: checked_units.saturating_mul(4),
         scale_json: None,
+        udp_idle_json: None,
     })
 }
 
@@ -3903,7 +3956,7 @@ fn validate_drain(sample: &PairSample, baseline: &PairSample) -> Result<(), Stri
 }
 
 fn run_self_check() -> Result<String, String> {
-    const MUTATION_COUNT: u64 = 40;
+    const MUTATION_COUNT: u64 = 43;
     let sha = "0123456789abcdef0123456789abcdef01234567";
     let good = EnvironmentIdentity {
         github_actions: "true".to_owned(),
@@ -3987,6 +4040,33 @@ fn run_self_check() -> Result<String, String> {
             parse_profile_args(&malformed)
         })?;
     }
+    let mut idle_arguments = profile_arguments.clone();
+    idle_arguments[1] = OsString::from("udp-idle-4096");
+    idle_arguments[3] = OsString::from("3");
+    idle_arguments[5] = OsString::from("30");
+    let idle_profile = parse_profile_args(&idle_arguments)?;
+    if idle_profile.scenario != ProfileScenario::UdpIdle4096
+        || idle_profile.warmup_seconds != 3
+        || idle_profile.active_seconds != 30
+        || idle_profile.scenario.socks_datagram_bytes().is_some()
+        || idle_profile.scenario.upstream_wire_bytes().is_some()
+    {
+        return Err("fixed udp-idle-4096 recipe was not preserved".to_owned());
+    }
+    for (index, replacement) in [(3, "1"), (5, "15")] {
+        let mut malformed = idle_arguments.clone();
+        malformed[index] = OsString::from(replacement);
+        expect_rejected("udp-idle-4096 recipe mutation", || {
+            parse_profile_args(&malformed)
+        })?;
+    }
+    let server_only_identity = tempfile::tempdir().map_err(clean_io)?;
+    if profile_client_sha256(ProfileScenario::UdpIdle4096, server_only_identity.path())?.is_some() {
+        return Err("UDP idle raw identity unexpectedly required a client binary".to_owned());
+    }
+    expect_rejected("ordinary profile missing client identity", || {
+        profile_client_sha256(ProfileScenario::TcpBulk, server_only_identity.path())
+    })?;
     let ipv4_target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53))
         .map_err(|_| "self-check IPv4 UDP target is invalid".to_owned())?;
     let direct_maximum = vec![0x5a; PROFILE_UDP_DIRECT_MAX_APPLICATION_PAYLOAD_BYTES];
@@ -4107,7 +4187,7 @@ fn run_self_check() -> Result<String, String> {
         return Err("valid raw profile arguments were not preserved".to_owned());
     }
     if !profile_raw_prefix(&raw_profile, raw)
-        .starts_with("\"schema_version\":3,\"kind\":\"m18_profile_trial\"")
+        .starts_with("\"schema_version\":4,\"kind\":\"m18_profile_trial\"")
     {
         return Err("raw profile trial omitted its explicit schema version".to_owned());
     }
@@ -4144,14 +4224,28 @@ fn run_self_check() -> Result<String, String> {
     })?;
     let profile_ready = tempfile::tempdir().map_err(clean_io)?;
     let ready_path = profile_ready.path().join("ready.txt");
-    let ready = ReadyFile::publish(&ready_path, ProfileScenario::TcpBulk, 11, Some(12), 1, 10)?;
+    let ready = ReadyFile::publish(
+        &ready_path,
+        ProfileScenario::TcpBulk,
+        Some(11),
+        Some(12),
+        1,
+        10,
+    )?;
     if fs::read_to_string(&ready_path).map_err(clean_io)?
         != "scenario=tcp-bulk\nclient_pid=11\nserver_pid=12\nwarmup_seconds=1\nactive_seconds=10\n"
     {
         return Err("profile ready file fields are incomplete".to_owned());
     }
     expect_rejected("profile ready collision", || {
-        ReadyFile::publish(&ready_path, ProfileScenario::TcpBulk, 21, Some(22), 1, 10)
+        ReadyFile::publish(
+            &ready_path,
+            ProfileScenario::TcpBulk,
+            Some(21),
+            Some(22),
+            1,
+            10,
+        )
     })?;
     if fs::read_to_string(&ready_path).map_err(clean_io)?
         != "scenario=tcp-bulk\nclient_pid=11\nserver_pid=12\nwarmup_seconds=1\nactive_seconds=10\n"
@@ -4165,7 +4259,7 @@ fn run_self_check() -> Result<String, String> {
     let direct_ready = ReadyFile::publish(
         &ready_path,
         ProfileScenario::UdpDirectSmall128,
-        30,
+        Some(30),
         None,
         1,
         10,
@@ -4180,7 +4274,7 @@ fn run_self_check() -> Result<String, String> {
         let _ready = ReadyFile::publish(
             &ready_path,
             ProfileScenario::UdpSmallHigh,
-            31,
+            Some(31),
             Some(32),
             1,
             10,
@@ -4189,8 +4283,22 @@ fn run_self_check() -> Result<String, String> {
     if ready_path.exists() {
         return Err("profile ready file survived unwind cleanup".to_owned());
     }
+    let idle_ready = ReadyFile::publish(
+        &ready_path,
+        ProfileScenario::UdpIdle4096,
+        None,
+        Some(33),
+        3,
+        30,
+    )?;
+    if fs::read_to_string(&ready_path).map_err(clean_io)?
+        != "scenario=udp-idle-4096\nclient_pid=none\nserver_pid=33\nwarmup_seconds=3\nactive_seconds=30\n"
+    {
+        return Err("UDP idle ready file did not bind the server-only measurement".to_owned());
+    }
+    idle_ready.remove()?;
     let raw_path = profile_ready.path().join("raw.jsonl");
-    let raw_line = "{\"schema_version\":3,\"kind\":\"m18_profile_trial\",\"status\":\"PASS\"}";
+    let raw_line = "{\"schema_version\":4,\"kind\":\"m18_profile_trial\",\"status\":\"PASS\"}";
     let mut raw_evidence = Evidence::create(&raw_path)?;
     raw_evidence.line(raw_line.to_owned())?;
     raw_evidence.finish()?;
@@ -4493,6 +4601,7 @@ ferrum2_tcp_replay_entries 0\n\
     let path = root.join("self-check.jsonl");
     let mut file = BufWriter::new(File::create(&path).map_err(clean_io)?);
     tcp_scale::self_check()?;
+    udp_idle::self_check()?;
     let line =
         format!("{{\"kind\":\"self_check\",\"mutations\":{MUTATION_COUNT},\"status\":\"PASS\"}}\n");
     ensure_redacted(&line)?;

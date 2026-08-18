@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "policy_id": "ferrum2-udp-idle-4096-cpu-v1-uncalibrated",
+  "required_pairs": 5,
+  "required_sessions": 4096,
+  "candidate_maximum_percent_of_parent": 50,
+  "minimum_wins_beyond_noise": 4,
+  "noise_ticks": null,
+  "minimum_saved_ticks": null,
+  "minimum_parent_signal_ticks": null,
+  "clock_ticks_per_second": null,
+  "qualification_parent_sha": null,
+  "calibration_source": null,
+  "calibration_environment": null
+}
