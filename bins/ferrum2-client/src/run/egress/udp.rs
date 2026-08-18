@@ -107,9 +107,9 @@ pub(in crate::run) struct ClientUdpAssociation {
     direct_source: Option<SocketAddr>,
     direct_peers: VecDeque<SocketAddr>,
     direct_timeout: std::time::Duration,
-    inner_wire: Vec<u8>,
+    inner_wire: Option<Vec<u8>>,
     upstream_wire: Vec<u8>,
-    scratch: UdpPacketScratch,
+    scratch: Option<UdpPacketScratch>,
     _fixed_capacity: Vec<UdpBufferReservation>,
     #[cfg(test)]
     io_fault: Option<Arc<UdpIoFaultPlan>>,
@@ -328,6 +328,12 @@ impl ClientUdpAssociation {
             scratch,
             ..
         } = self;
+        let inner_wire = inner_wire
+            .as_mut()
+            .expect("proxy UDP association owns its inner wire buffer");
+        let scratch = scratch
+            .as_mut()
+            .expect("proxy UDP association owns its packet scratch");
         let hops = plan.as_ref().expect("proxy UDP plan").hops();
         let plan = protocol
             .as_mut()
@@ -404,6 +410,12 @@ impl ClientUdpAssociation {
             scratch,
             ..
         } = self;
+        let inner_wire = inner_wire
+            .as_mut()
+            .expect("proxy UDP association owns its inner wire buffer");
+        let scratch = scratch
+            .as_mut()
+            .expect("proxy UDP association owns its packet scratch");
         let hops = plan.as_ref().expect("proxy UDP plan").hops();
         let plan = protocol
             .as_ref()
@@ -839,13 +851,19 @@ where
         .map_err(|_| ())?;
     let handle = pending_session.handle();
     let budget = udp.manager.buffer_budget();
-    let mut fixed_capacity = Vec::with_capacity(3);
-    for _ in 0..3 {
-        fixed_capacity.push(budget.reserve(MAX_UDP_WIRE_LEN).map_err(|_| ())?);
+    let (fixed_buffer_count, wire_capacity) = match selected {
+        SelectedEgress::Direct => (1, MAX_UDP_WIRE_DATAGRAM_BYTES),
+        SelectedEgress::Shadowsocks { .. } => (3, MAX_UDP_WIRE_LEN),
+    };
+    let mut fixed_capacity = Vec::with_capacity(fixed_buffer_count);
+    for _ in 0..fixed_buffer_count {
+        fixed_capacity.push(budget.reserve(wire_capacity).map_err(|_| ())?);
     }
-    let inner_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
-    let upstream_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
-    let scratch = UdpPacketScratch::new();
+    let inner_wire = matches!(selected, SelectedEgress::Shadowsocks { .. })
+        .then(|| vec![0_u8; MAX_UDP_WIRE_LEN]);
+    let upstream_wire = vec![0_u8; wire_capacity];
+    let scratch =
+        matches!(selected, SelectedEgress::Shadowsocks { .. }).then(UdpPacketScratch::new);
     let first_server = match selected {
         SelectedEgress::Shadowsocks { first_server } => Some(first_server),
         SelectedEgress::Direct => None,
@@ -1460,6 +1478,11 @@ mod tests {
             .expect("direct association");
         association.activate(&engine).expect("direct activation");
         let provisional = registry.snapshot();
+        assert_eq!(
+            provisional.udp_buffered_bytes,
+            baseline.udp_buffered_bytes + MAX_UDP_WIRE_DATAGRAM_BYTES,
+            "direct association owns only its receive/send wire buffer"
+        );
         let maximum = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
         assert_eq!(
             association

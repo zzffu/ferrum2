@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use ferrum2_config::{RouteAction, UdpConfig};
 use ferrum2_core::TargetAddr;
@@ -13,8 +13,8 @@ use ferrum2_observability::{
 use ferrum2_runtime::{
     AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, MAX_UDP_WIRE_DATAGRAM_BYTES,
     OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture, SniffPrefixOutcome,
-    SystemDirectUdpSocketFactory, UdpBufferReservation, UdpCommitError, UdpRuntimeError,
-    UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
+    SystemDirectUdpSocketFactory, UdpBufferBudget, UdpBufferReservation, UdpCommitError,
+    UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpPacketScratch, UdpServer};
 use ferrum2_sniff::{Progress as SniffProgress, Transport as SniffTransport};
@@ -158,8 +158,8 @@ impl UdpMappings {
         self.published.notify_waiters();
     }
 
-    fn reconcile_runtime(&self, mut is_live: impl FnMut(UdpSessionHandle) -> bool) {
-        let handles: Vec<_> = self
+    fn reconcile_runtime(&self, sessions: &UdpSessionManager) {
+        let candidates: Vec<_> = self
             .state
             .lock()
             .expect("UDP mapping lock poisoned")
@@ -167,8 +167,10 @@ impl UdpMappings {
             .keys()
             .copied()
             .collect();
-        for handle in handles {
-            if !is_live(handle) {
+        let mut live = candidates.clone();
+        sessions.retain_live_sessions(&mut live);
+        for handle in candidates {
+            if live.binary_search(&handle).is_err() {
                 self.invalidate_handle(handle);
             }
         }
@@ -206,9 +208,145 @@ fn retire_mapping_handle(state: &mut UdpMappingState, handle: UdpSessionHandle, 
 
 struct ResponseCodec {
     scratch: UdpPacketScratch,
-    wire: Vec<u8>,
+    available_wires: Vec<ResponseWire>,
     _scratch_reservation: UdpBufferReservation,
+}
+
+struct ResponseWire {
+    wire: Vec<u8>,
     _wire_reservation: UdpBufferReservation,
+}
+
+impl ResponseWire {
+    fn reserve(budget: &UdpBufferBudget) -> Result<Self, UdpRuntimeError> {
+        let reservation = budget.reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)?;
+        let wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+        if wire.capacity() != reservation.capacity() {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        Ok(Self {
+            wire,
+            _wire_reservation: reservation,
+        })
+    }
+}
+
+struct ResponseCodecPool {
+    state: Mutex<ResponseCodec>,
+    budget: UdpBufferBudget,
+    returned: tokio::sync::Notify,
+}
+
+impl ResponseCodecPool {
+    fn new(budget: UdpBufferBudget) -> Result<Self, UdpRuntimeError> {
+        let scratch_reservation = budget.reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)?;
+        let initial_wire = ResponseWire::reserve(&budget)?;
+        Ok(Self {
+            state: Mutex::new(ResponseCodec {
+                scratch: UdpPacketScratch::new(),
+                available_wires: vec![initial_wire],
+                _scratch_reservation: scratch_reservation,
+            }),
+            budget,
+            returned: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn try_encode(
+        self: &Arc<Self>,
+        protocol: &UdpServer,
+        capability: ServerResponseCapability,
+        clock: &SystemClock,
+        datagram: &ferrum2_core::Datagram,
+    ) -> Result<Option<EncodedResponseWire>, ResponseEncodeError> {
+        let mut codec = self
+            .state
+            .lock()
+            .map_err(|_| ResponseEncodeError::Protocol(UdpPacketError::StateUnavailable))?;
+        let mut response_wire = match codec.available_wires.pop() {
+            Some(wire) => wire,
+            None => match ResponseWire::reserve(&self.budget) {
+                Ok(wire) => wire,
+                Err(UdpRuntimeError::BufferLimit) => return Ok(None),
+                Err(error) => return Err(ResponseEncodeError::Runtime(error)),
+            },
+        };
+        let encoded = protocol.encode_response(
+            capability,
+            clock,
+            &SystemRandom,
+            datagram,
+            0,
+            &mut response_wire.wire,
+            &mut codec.scratch,
+        );
+        drop(codec);
+        match encoded {
+            Ok(encoded) => Ok(Some(EncodedResponseWire {
+                wire: ResponseWireLease {
+                    pool: Arc::clone(self),
+                    wire: Some(response_wire),
+                },
+                wire_len: encoded.wire_len(),
+                peer: encoded.peer(),
+            })),
+            Err(error) => {
+                self.release(response_wire);
+                Err(ResponseEncodeError::Protocol(error))
+            }
+        }
+    }
+
+    fn release(&self, response_wire: ResponseWire) {
+        let mut response_wire = Some(response_wire);
+        if let Ok(mut codec) = self.state.lock()
+            && codec.available_wires.is_empty()
+        {
+            codec
+                .available_wires
+                .push(response_wire.take().expect("response wire is available"));
+        }
+        drop(response_wire);
+        self.returned.notify_waiters();
+    }
+
+    fn notify_capacity_change(&self) {
+        self.returned.notify_waiters();
+    }
+}
+
+struct ResponseWireLease {
+    pool: Arc<ResponseCodecPool>,
+    wire: Option<ResponseWire>,
+}
+
+impl ResponseWireLease {
+    fn wire(&self, wire_len: usize) -> &[u8] {
+        &self
+            .wire
+            .as_ref()
+            .expect("response wire lease is live")
+            .wire[..wire_len]
+    }
+}
+
+impl Drop for ResponseWireLease {
+    fn drop(&mut self) {
+        if let Some(wire) = self.wire.take() {
+            self.pool.release(wire);
+        }
+    }
+}
+
+struct EncodedResponseWire {
+    wire: ResponseWireLease,
+    wire_len: usize,
+    peer: SocketAddr,
+}
+
+enum ResponseEncodeError {
+    Protocol(UdpPacketError),
+    Runtime(UdpRuntimeError),
 }
 
 #[derive(Clone, Copy)]
@@ -244,7 +382,7 @@ struct ServerUdpResponseHandler<L> {
     protocol: Arc<UdpServer>,
     mappings: Arc<UdpMappings>,
     clock: Arc<SystemClock>,
-    codec: Arc<OnceLock<tokio::sync::Mutex<ResponseCodec>>>,
+    codec: Arc<ResponseCodecPool>,
     metrics: Arc<Metrics>,
 }
 
@@ -264,29 +402,32 @@ where
             .capability(session)
             .await
             .ok_or(UdpAdapterError)?;
-        let codec = self.codec.get().ok_or(UdpAdapterError)?;
-        let mut codec = codec.lock().await;
-        let ResponseCodec { scratch, wire, .. } = &mut *codec;
-        let encoded = self
-            .protocol
-            .encode_response(
+        let encoded = loop {
+            let returned = self.codec.returned.notified();
+            match self.codec.try_encode(
+                &self.protocol,
                 capability,
                 self.clock.as_ref(),
-                &SystemRandom,
                 response.datagram(),
-                0,
-                wire,
-                scratch,
-            )
-            .map_err(|error| {
-                self.mappings.invalidate_handle(session);
-                record_udp_protocol_failure(&self.metrics, error);
-                UdpAdapterError
-            })?;
-        let wire_len = encoded.wire_len();
-        let peer = encoded.peer();
+            ) {
+                Ok(Some(encoded)) => break encoded,
+                Ok(None) => returned.await,
+                Err(ResponseEncodeError::Protocol(error)) => {
+                    self.mappings.invalidate_handle(session);
+                    record_udp_protocol_failure(&self.metrics, error);
+                    return Err(UdpAdapterError);
+                }
+                Err(ResponseEncodeError::Runtime(error)) => {
+                    record_udp_runtime_failure(&self.metrics, error);
+                    return Err(UdpAdapterError);
+                }
+            }
+        };
+        drop(response);
+        self.codec.notify_capacity_change();
+        let wire_len = encoded.wire_len;
         self.listener
-            .send_to(&wire[..wire_len], peer)
+            .send_to(encoded.wire.wire(wire_len), encoded.peer)
             .await
             .map_err(|_| {
                 record_udp_failure(&self.metrics, Stage::Direct, Reason::Send, Outcome::Failed);
@@ -364,7 +505,9 @@ where
         registry,
         metrics,
     } = shared;
-    let response_codec = Arc::new(OnceLock::new());
+    let budget = sessions.buffer_budget();
+    let response_codec =
+        Arc::new(ResponseCodecPool::new(budget.clone()).map_err(|_| RunError::StartupProtocol)?);
     let handler = ServerUdpResponseHandler {
         listener: Arc::clone(&listener),
         protocol: Arc::clone(&protocol),
@@ -381,21 +524,6 @@ where
         handler,
         registry.clone(),
     );
-    let budget = runtime.sessions().buffer_budget();
-    let response_scratch = budget
-        .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
-        .map_err(|_| RunError::StartupProtocol)?;
-    let response_wire = budget
-        .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
-        .map_err(|_| RunError::StartupProtocol)?;
-    response_codec
-        .set(tokio::sync::Mutex::new(ResponseCodec {
-            scratch: UdpPacketScratch::new(),
-            wire: vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES],
-            _scratch_reservation: response_scratch,
-            _wire_reservation: response_wire,
-        }))
-        .map_err(|_| RunError::StartupProtocol)?;
     let receive_scratch = budget
         .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
         .map_err(|_| RunError::StartupProtocol)?;
@@ -559,7 +687,6 @@ where
                     Ok(_) => record_udp_protocol_failure(&metrics, UdpPacketError::Generation),
                     Err(error) => record_udp_protocol_failure(&metrics, error),
                 }
-                update_udp_resource_metrics(&metrics, &registry);
                 continue;
             }
             if let Some((capability, binding)) = existing.and_then(|capability| {
@@ -610,7 +737,6 @@ where
                                 record_udp_protocol_failure(&metrics, error);
                             }
                         }
-                        update_udp_resource_metrics(&metrics, &registry);
                         continue;
                     }
                     Err(UdpRuntimeError::Cancelled) => {
@@ -719,14 +845,7 @@ where
     F: ferrum2_runtime::DirectUdpSocketFactory,
     H: DirectUdpPacketHandler,
 {
-    mappings.reconcile_runtime(|handle| match runtime.reserve_datagram(handle, 0) {
-        Ok(reservation) => {
-            drop(reservation);
-            true
-        }
-        Err(UdpRuntimeError::Cancelled) => false,
-        Err(_) => true,
-    });
+    mappings.reconcile_runtime(runtime.sessions());
 }
 
 fn select_udp_route(
@@ -796,15 +915,18 @@ where
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use ferrum2_core::Datagram;
     use ferrum2_runtime::UdpDirection;
     use ferrum2_shadowsocks::{UdpClientSession, UdpPacketError};
-    use tokio::sync::Notify;
+    use tokio::sync::{Notify, Semaphore};
 
     use super::*;
     use crate::run::test_support::*;
+
+    type CapturedSends = Arc<Mutex<Vec<(SocketAddr, Vec<u8>)>>>;
 
     struct ScriptedUdpListener {
         request: Mutex<Option<(Vec<u8>, SocketAddr)>>,
@@ -831,6 +953,353 @@ mod tests {
             self.sent.lock().expect("scripted sends").push(peer);
             Ok(source.len())
         }
+    }
+
+    struct ConcurrentSendListener {
+        entered: Arc<AtomicUsize>,
+        entry_changed: Arc<Notify>,
+        send_gate: Arc<Semaphore>,
+        sent: CapturedSends,
+    }
+
+    impl ServerUdpListener for ConcurrentSendListener {
+        async fn recv_from(&self, _destination: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+            std::future::pending().await
+        }
+
+        async fn send_to(&self, source: &[u8], peer: SocketAddr) -> io::Result<usize> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            self.entry_changed.notify_waiters();
+            let _permit = self
+                .send_gate
+                .acquire()
+                .await
+                .map_err(|_| io::Error::other("send gate closed"))?;
+            self.sent
+                .lock()
+                .expect("concurrent sends")
+                .push((peer, source.to_vec()));
+            Ok(source.len())
+        }
+    }
+
+    async fn wait_for_send_entries(entered: &AtomicUsize, entry_changed: &Notify, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let changed = entry_changed.notified();
+                if entered.load(Ordering::SeqCst) >= expected {
+                    break;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("response send entry deadline");
+    }
+
+    fn accounted_response(
+        client: &mut UdpClientSession,
+        protocol: &UdpServer,
+        manager: &UdpSessionManager,
+        clock: &SystemClock,
+        handle: UdpSessionHandle,
+        response: (SocketAddr, &'static [u8]),
+        scratch: &mut UdpPacketScratch,
+    ) -> AccountedDatagram {
+        let (target, payload) = response;
+        let wire = encoded_udp_request(
+            client,
+            clock,
+            TargetAddr::ip(target).expect("response source target"),
+            payload,
+        );
+        let pending = protocol
+            .prepare_request(clock, &wire, scratch)
+            .expect("prepare response payload");
+        let (datagram, _commit) = pending.into_parts();
+        let capacity = datagram.allocated_capacity();
+        manager
+            .reserve_datagram(handle, UdpDirection::ToClient, capacity)
+            .expect("reserve response payload")
+            .commit(datagram, tokio::time::Instant::now())
+            .expect("commit response payload");
+        manager
+            .pop(handle, UdpDirection::ToClient)
+            .expect("response generation")
+            .expect("accounted response")
+    }
+
+    #[tokio::test]
+    async fn response_codec_does_not_serialize_concurrent_sends() {
+        let keys = aes_keys();
+        let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+        let clock = Arc::new(SystemClock::new());
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let manager = UdpSessionManager::new(
+            UdpRuntimeLimits::new(2, 1024 * 1024, Duration::from_secs(60))
+                .expect("response limits"),
+            registry.clone(),
+        );
+        let mappings = Arc::new(UdpMappings::new(2));
+        let mut first_client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("first client");
+        let mut second_client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second client");
+        let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53));
+        let first_peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_001));
+        let second_peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_002));
+        let mut request_scratch = UdpPacketScratch::new();
+        let (_, first_handle) = commit_lifecycle_generation(
+            &mut first_client,
+            &protocol,
+            &manager,
+            &mappings,
+            &clock,
+            target,
+            first_peer,
+            b"first request",
+            ferrum2_crypto::MonotonicInstant::from_duration(Duration::ZERO),
+            &mut request_scratch,
+        );
+        let (_, second_handle) = commit_lifecycle_generation(
+            &mut second_client,
+            &protocol,
+            &manager,
+            &mappings,
+            &clock,
+            target,
+            second_peer,
+            b"second request",
+            ferrum2_crypto::MonotonicInstant::from_duration(Duration::ZERO),
+            &mut request_scratch,
+        );
+        let first_response = accounted_response(
+            &mut first_client,
+            &protocol,
+            &manager,
+            &clock,
+            first_handle,
+            (target, b"first response"),
+            &mut request_scratch,
+        );
+        let second_response = accounted_response(
+            &mut second_client,
+            &protocol,
+            &manager,
+            &clock,
+            second_handle,
+            (target, b"second response"),
+            &mut request_scratch,
+        );
+        let entered = Arc::new(AtomicUsize::new(0));
+        let entry_changed = Arc::new(Notify::new());
+        let send_gate = Arc::new(Semaphore::new(0));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let listener = Arc::new(ConcurrentSendListener {
+            entered: Arc::clone(&entered),
+            entry_changed: Arc::clone(&entry_changed),
+            send_gate: Arc::clone(&send_gate),
+            sent: Arc::clone(&sent),
+        });
+        let handler = Arc::new(ServerUdpResponseHandler {
+            listener,
+            protocol: Arc::clone(&protocol),
+            mappings,
+            clock: Arc::clone(&clock),
+            codec: Arc::new(
+                ResponseCodecPool::new(manager.buffer_budget()).expect("response codec"),
+            ),
+            metrics: Arc::new(Metrics::new()),
+        });
+
+        let first_task = tokio::spawn({
+            let handler = Arc::clone(&handler);
+            async move {
+                handler
+                    .handle_target_response(first_handle, first_response)
+                    .await
+            }
+        });
+        wait_for_send_entries(&entered, &entry_changed, 1).await;
+        let second_task = tokio::spawn({
+            let handler = Arc::clone(&handler);
+            async move {
+                handler
+                    .handle_target_response(second_handle, second_response)
+                    .await
+            }
+        });
+
+        wait_for_send_entries(&entered, &entry_changed, 2).await;
+        assert_eq!(
+            registry.snapshot().udp_buffered_bytes,
+            3 * MAX_UDP_WIRE_DATAGRAM_BYTES,
+            "two in-flight owned wires plus the shared codec scratch are charged"
+        );
+        send_gate.add_permits(2);
+        assert!(first_task.await.expect("first response task").is_ok());
+        assert!(second_task.await.expect("second response task").is_ok());
+        assert_eq!(
+            registry.snapshot().udp_buffered_bytes,
+            2 * MAX_UDP_WIRE_DATAGRAM_BYTES,
+            "the concurrency wire is released after the burst"
+        );
+        let idle_wire = {
+            let codec = handler.codec.state.lock().expect("response codec");
+            assert_eq!(codec.available_wires.len(), 1);
+            codec.available_wires[0].wire.as_ptr()
+        };
+
+        {
+            let sent = sent.lock().expect("concurrent sends");
+            assert_eq!(sent.len(), 2);
+            let mut response_scratch = UdpPacketScratch::new();
+            for (peer, wire) in &*sent {
+                let pending = if *peer == first_peer {
+                    first_client
+                        .prepare_response(clock.as_ref(), wire, &mut response_scratch)
+                        .expect("first encoded response")
+                } else {
+                    assert_eq!(*peer, second_peer);
+                    second_client
+                        .prepare_response(clock.as_ref(), wire, &mut response_scratch)
+                        .expect("second encoded response")
+                };
+                let expected = if *peer == first_peer {
+                    b"first response".as_slice()
+                } else {
+                    b"second response".as_slice()
+                };
+                assert_eq!(pending.datagram().payload(), expected);
+            }
+        }
+
+        let serial_response = accounted_response(
+            &mut first_client,
+            &protocol,
+            &manager,
+            &clock,
+            first_handle,
+            (target, b"serial response"),
+            &mut request_scratch,
+        );
+        assert!(
+            handler
+                .handle_target_response(first_handle, serial_response)
+                .await
+                .is_ok()
+        );
+        let codec = handler.codec.state.lock().expect("response codec");
+        assert_eq!(codec.available_wires.len(), 1);
+        assert_eq!(codec.available_wires[0].wire.as_ptr(), idle_wire);
+        drop(codec);
+        assert_eq!(
+            registry.snapshot().udp_buffered_bytes,
+            2 * MAX_UDP_WIRE_DATAGRAM_BYTES,
+            "steady-state serial responses reuse the same accounted wire"
+        );
+
+        manager.cancel_all();
+        drop(handler);
+        drop(manager);
+        assert_eq!(active(registry.snapshot()), baseline);
+    }
+
+    #[tokio::test]
+    async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
+        let keys = aes_keys();
+        let protocol = UdpServer::new(&keys).expect("server protocol");
+        let clock = SystemClock::new();
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let byte_limit = 1024 * 1024;
+        let manager = UdpSessionManager::new(
+            UdpRuntimeLimits::new(1, byte_limit, Duration::from_secs(60)).expect("response limits"),
+            registry.clone(),
+        );
+        let budget = manager.buffer_budget();
+        let codec = Arc::new(ResponseCodecPool::new(budget.clone()).expect("response codec"));
+        let mappings = UdpMappings::new(1);
+        let mut client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client protocol");
+        let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53));
+        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_003));
+        let mut scratch = UdpPacketScratch::new();
+        let (capability, _handle) = commit_lifecycle_generation(
+            &mut client,
+            &protocol,
+            &manager,
+            &mappings,
+            &clock,
+            target,
+            peer,
+            b"request",
+            ferrum2_crypto::MonotonicInstant::from_duration(Duration::ZERO),
+            &mut scratch,
+        );
+        let wire = encoded_udp_request(
+            &mut client,
+            &clock,
+            TargetAddr::ip(target).expect("response source target"),
+            b"response",
+        );
+        let pending = protocol
+            .prepare_request(&clock, &wire, &mut scratch)
+            .expect("prepare response datagram");
+
+        let first_encoded =
+            match codec.try_encode(&protocol, capability, &clock, pending.datagram()) {
+                Ok(Some(encoded)) => encoded,
+                Ok(None) => panic!("initial response wire is reserved"),
+                Err(_) => panic!("initial response encoding succeeds"),
+            };
+        let mut pressure = Vec::new();
+        let mut remaining = byte_limit - budget.reserved_bytes();
+        while remaining != 0 {
+            let capacity = remaining.min(MAX_UDP_WIRE_DATAGRAM_BYTES);
+            pressure.push(budget.reserve(capacity).expect("budget pressure"));
+            remaining -= capacity;
+        }
+        assert_eq!(budget.reserved_bytes(), byte_limit);
+        assert!(matches!(
+            codec.try_encode(&protocol, capability, &clock, pending.datagram()),
+            Ok(None)
+        ));
+
+        let returned = codec.returned.notified();
+        let released = pressure
+            .iter()
+            .position(|reservation| reservation.capacity() == MAX_UDP_WIRE_DATAGRAM_BYTES)
+            .expect("full response-wire pressure chunk");
+        drop(pressure.swap_remove(released));
+        codec.notify_capacity_change();
+        tokio::time::timeout(Duration::from_secs(1), returned)
+            .await
+            .expect("budget release notification");
+        let second_encoded =
+            match codec.try_encode(&protocol, capability, &clock, pending.datagram()) {
+                Ok(Some(encoded)) => encoded,
+                Ok(None) => panic!("released capacity funds a concurrent response wire"),
+                Err(_) => panic!("concurrent response encoding succeeds"),
+            };
+        assert_eq!(
+            budget.reserved_bytes(),
+            byte_limit,
+            "the second wire is fully budget-accounted while the first remains leased"
+        );
+
+        drop(second_encoded);
+        drop(first_encoded);
+        drop(pressure);
+        assert_eq!(budget.reserved_bytes(), 2 * MAX_UDP_WIRE_DATAGRAM_BYTES);
+        let state = codec.state.lock().expect("response codec");
+        assert_eq!(state.available_wires.len(), 1);
+        drop(state);
+        manager.cancel_all();
+        drop(codec);
+        drop(manager);
+        assert_eq!(active(registry.snapshot()), baseline);
     }
 
     #[tokio::test]
@@ -1269,16 +1738,7 @@ mod tests {
         assert_eq!(manager_registry.snapshot().udp_sessions, 1);
 
         assert!(manager.remove(handle_a));
-        mappings.reconcile_runtime(|handle| {
-            match manager.reserve_datagram(handle, UdpDirection::ToTarget, 0) {
-                Ok(reservation) => {
-                    drop(reservation);
-                    true
-                }
-                Err(UdpRuntimeError::Cancelled) => false,
-                Err(_) => true,
-            }
-        });
+        mappings.reconcile_runtime(&manager);
         assert_eq!(mappings.handle(capability_a), None);
         assert_eq!(mappings.inbound(capability_a), Some(0));
         assert_eq!(mappings.capability(handle_a).await, None);
@@ -1347,16 +1807,7 @@ mod tests {
         assert_eq!(manager_registry.snapshot().udp_sessions, 1);
 
         assert!(manager.remove(handle_b));
-        mappings.reconcile_runtime(|handle| {
-            match manager.reserve_datagram(handle, UdpDirection::ToTarget, 0) {
-                Ok(reservation) => {
-                    drop(reservation);
-                    true
-                }
-                Err(UdpRuntimeError::Cancelled) => false,
-                Err(_) => true,
-            }
-        });
+        mappings.reconcile_runtime(&manager);
         mappings.prune_protocol(
             &lifecycle_protocol,
             ferrum2_crypto::MonotonicInstant::from_duration(Duration::from_secs(120)),

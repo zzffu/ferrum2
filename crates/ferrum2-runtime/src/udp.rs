@@ -494,6 +494,29 @@ impl UdpSessionManager {
             .len()
     }
 
+    /// Retains only committed live generations using one read-only state lock.
+    ///
+    /// Shutdown, missing or stale generations, and provisional sessions are
+    /// not live. Queue and buffer capacity do not affect liveness, and this
+    /// check does not reserve capacity, refresh activity, or wake workers.
+    pub fn retain_live_sessions(&self, handles: &mut Vec<UdpSessionHandle>) {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .expect("UDP session state lock poisoned");
+        if state.shutting_down {
+            handles.clear();
+            return;
+        }
+        handles.retain(|handle| {
+            state
+                .entries
+                .get(&handle.slot)
+                .is_some_and(|entry| entry.generation == handle.generation && entry.committed)
+        });
+    }
+
     /// Reserves a new generation without committing protocol activity.
     ///
     /// At capacity, exactly the deterministic oldest committed idle-expired
@@ -629,33 +652,23 @@ impl UdpSessionManager {
             .map(|queued| queued.datagram))
     }
 
-    fn enqueue_accounted(
-        &self,
-        handle: UdpSessionHandle,
-        direction: UdpDirection,
-        datagram: AccountedDatagram,
-    ) -> Result<(), UdpRuntimeError> {
-        let notify = {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .expect("UDP session state lock poisoned");
-            if state.shutting_down {
-                return Err(UdpRuntimeError::Cancelled);
-            }
-            let entry = matching_entry_mut(&mut state, handle)?;
-            let index = direction.index();
-            if entry.pending[index] + entry.queues[index].len() >= UDP_SESSION_QUEUE_DEPTH {
-                return Err(UdpRuntimeError::QueueFull);
-            }
-            entry.queues[index].push_back(QueuedDatagram {
-                datagram,
-                _guard: self.inner.registry.track_udp_queue_entry(),
-            });
-            Arc::clone(&entry.notify)
-        };
-        notify.notify_one();
+    fn validate_direct_response(&self, handle: UdpSessionHandle) -> Result<(), UdpRuntimeError> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .expect("UDP session state lock poisoned");
+        if state.shutting_down {
+            return Err(UdpRuntimeError::Cancelled);
+        }
+        let entry = matching_entry(&state, handle)?;
+        if !entry.committed {
+            return Err(UdpRuntimeError::Cancelled);
+        }
+        let index = UdpDirection::ToClient.index();
+        if entry.pending[index] + entry.queues[index].len() >= UDP_SESSION_QUEUE_DEPTH {
+            return Err(UdpRuntimeError::QueueFull);
+        }
         Ok(())
     }
 
@@ -1220,14 +1233,11 @@ where
                 registry.clone(),
             ) => {
                 let response = response?;
-                manager.enqueue_accounted(
-                    handle,
-                    UdpDirection::ToClient,
-                    response,
-                )?;
-                let response = manager
-                    .pop(handle, UdpDirection::ToClient)?
-                    .ok_or(UdpRuntimeError::Receive)?;
+                // This task is the sole consumer of direct target responses and
+                // awaits the handler before receiving another one. Preserve the
+                // generation, shutdown, and queue-capacity checks without a
+                // same-task enqueue/notify/pop round trip.
+                manager.validate_direct_response(handle)?;
                 handler
                     .handle_target_response(handle, response)
                     .await

@@ -1,16 +1,18 @@
 mod common;
 
 use bytes::BytesMut;
+use ferrum2_crypto::TcpMethodProfile;
 use ferrum2_shadowsocks::{
     BufferRole, ClientTcpOutbound, MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN,
-    MAX_ENCRYPT_WIRE_LEN, ShadowsocksTcpInbound, TcpKeyProvider, TcpReplayStore,
+    MAX_ENCRYPT_WIRE_LEN, ShadowsocksTcpInbound, TAG_LEN, TcpKeyProvider, TcpReplayStore,
     encode_request_first_write, open_data_frame,
 };
 
 use common::{
     FakeClock, NOW, RecordingConnector, RecordingIo, RecordingObservers, ScriptedRandom,
-    client_random_bytes, flush_plain, provider, read_plain, response_wire_and_frames,
-    salt_from_u64, server_target, target, valid_request_wire, write_plain,
+    client_random_bytes, flush_plain, method_provider, method_salt_from_u64, provider, read_plain,
+    response_wire_and_frames, salt_from_u64, server_target, target, valid_request_wire,
+    write_plain,
 };
 
 fn assert_fixed_storage_identity(observers: &RecordingObservers) {
@@ -101,7 +103,7 @@ async fn maximum_request_uses_one_fixed_scratch_per_role_and_independent_payload
 }
 
 #[tokio::test]
-async fn client_flow_allocates_once_then_admits_0_1_16384_16385_with_fixed_cap() {
+async fn client_flow_allocates_once_then_admits_0_1_max_and_max_plus_one() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let salt = salt_from_u64(301);
@@ -205,6 +207,92 @@ async fn client_rx_and_server_tx_reuse_storage_across_32_subsequent_frames() {
             .expect("subsequent server TX frame");
     }
     assert_fixed_storage_identity(&server_observers);
+}
+
+#[tokio::test]
+async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
+    const CONTINUOUS_BYTES: usize = 262_144;
+
+    assert_eq!(MAX_ENCODE_PAYLOAD_LEN, 32_768);
+    let clock = FakeClock::new(NOW, 0);
+    let plaintext = (0..CONTINUOUS_BYTES)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    for (case, profile) in [
+        TcpMethodProfile::Blake3Aes128Gcm2022,
+        TcpMethodProfile::Blake3Aes256Gcm2022,
+        TcpMethodProfile::Blake3ChaCha20Poly13052022,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let keys = method_provider(profile);
+        let request_salt = method_salt_from_u64(profile, 400 + case as u64);
+        let client_random = ScriptedRandom::new(client_random_bytes(&request_salt));
+        let (client_io, client_observation) = RecordingIo::new([]);
+        let connector = RecordingConnector::succeeds(client_io);
+        let client_observers = RecordingObservers::default();
+        let outbound =
+            ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &client_random)
+                .with_observers(&client_observers, &client_observers);
+        let mut client = outbound.open_stream(&target()).await.expect("client");
+        let mut offset = 0;
+        while offset < plaintext.len() {
+            let written = write_plain(&mut client, &plaintext[offset..])
+                .await
+                .expect("steady frame");
+            assert_eq!(
+                written,
+                MAX_ENCODE_PAYLOAD_LEN.min(plaintext.len() - offset)
+            );
+            offset += written;
+        }
+        flush_plain(&mut client).await.expect("flush steady frames");
+        assert_fixed_storage_identity(&client_observers);
+
+        let writes = client_observation
+            .lock()
+            .expect("client writes")
+            .writes
+            .clone();
+        let (request, frames) = writes.split_first().expect("request first-write");
+        assert_eq!(frames.len(), 8);
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.len() == 2 + TAG_LEN + MAX_ENCODE_PAYLOAD_LEN + TAG_LEN)
+        );
+
+        let first_read_len = profile.initial_request_read_bytes();
+        let reads = [
+            request[..first_read_len].to_vec(),
+            request[first_read_len..].to_vec(),
+        ]
+        .into_iter()
+        .chain(frames.iter().cloned());
+        let (server_io, _) = RecordingIo::new(reads);
+        let replay = TcpReplayStore::new(1024).expect("capacity");
+        let server_random = ScriptedRandom::new([]);
+        let server_observers = RecordingObservers::default();
+        let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &server_random, &replay)
+            .with_observers(&server_observers, &server_observers);
+        let mut server = inbound
+            .accept_stream(server_io)
+            .await
+            .expect("server")
+            .stream;
+        let mut opened = Vec::with_capacity(CONTINUOUS_BYTES);
+        let mut destination = vec![0_u8; MAX_ENCODE_PAYLOAD_LEN];
+        while opened.len() < plaintext.len() {
+            let read = read_plain(&mut server, &mut destination)
+                .await
+                .expect("open steady frame");
+            assert_eq!(read, MAX_ENCODE_PAYLOAD_LEN);
+            opened.extend_from_slice(&destination[..read]);
+        }
+        assert_eq!(opened, plaintext);
+        assert_fixed_storage_identity(&server_observers);
+    }
 }
 
 #[test]

@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 use crate::OwnerRegistry;
 
 /// Fixed application buffer capacity for each relay direction.
-pub const RELAY_BUFFER_BYTES: usize = 16_384;
+pub const RELAY_BUFFER_BYTES: usize = 32_768;
 
 /// Successfully forwarded byte totals retained by a relay outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,7 +177,7 @@ where
 
 /// Runs the complete T07 relay lifecycle in the caller's connection-owner task.
 ///
-/// The seam owns exactly two fixed 16 KiB buffers, accounts for them in the
+/// The seam owns exactly two fixed 32 KiB buffers, accounts for them in the
 /// supplied registry, preserves half-close and backpressure, resets the idle
 /// deadline only after forwarded bytes, and observes cooperative cancellation.
 pub async fn relay_lifecycle<A, B, C>(
