@@ -1,16 +1,63 @@
 mod common;
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::{Barrier, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use bytes::BytesMut;
 use ferrum2_core::{Datagram, TargetAddr};
-use ferrum2_crypto::{MethodProfile, MonotonicInstant};
+use ferrum2_crypto::{MethodProfile, MonotonicInstant, RandomError, SecureRandom};
 use ferrum2_shadowsocks::{
     ServerResponseCapability, UdpClientSession, UdpPacketError, UdpPacketScratch, UdpServer,
 };
 
 use common::{FakeClock, FillRandom, udp_provider};
+
+#[derive(Default)]
+struct BlockingRandomState {
+    entered: bool,
+    released: bool,
+}
+
+struct BlockingRandom {
+    state: Mutex<BlockingRandomState>,
+    changed: Condvar,
+}
+
+impl BlockingRandom {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(BlockingRandomState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn wait_until_entered(&self) {
+        let mut state = self.state.lock().expect("blocking random state");
+        while !state.entered {
+            state = self.changed.wait(state).expect("blocking random wait");
+        }
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().expect("blocking random state");
+        state.released = true;
+        self.changed.notify_all();
+    }
+}
+
+impl SecureRandom for BlockingRandom {
+    fn fill(&self, destination: &mut [u8]) -> Result<(), RandomError> {
+        let mut state = self.state.lock().expect("blocking random state");
+        state.entered = true;
+        self.changed.notify_all();
+        while !state.released {
+            state = self.changed.wait(state).expect("blocking random wait");
+        }
+        destination.fill(0xa5);
+        Ok(())
+    }
+}
 
 fn instant(millis: u64) -> MonotonicInstant {
     MonotonicInstant::from_duration(Duration::from_millis(millis))
@@ -382,4 +429,318 @@ fn server_routes_by_authenticated_id_supports_roaming_and_rejects_stale_generati
         )
         .expect("replacement response");
     assert_eq!(encoded.peer(), peer_one);
+}
+
+#[test]
+fn capability_index_survives_middle_removal_and_generation_replacement() {
+    const SESSION_COUNT: u8 = 64;
+    const VICTIM: usize = 31;
+
+    let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let server_random = FillRandom::new(0x80);
+    let server = UdpServer::new(&keys).expect("server");
+    let peer: SocketAddr = "127.0.0.1:49152".parse().expect("peer");
+    let mut capabilities = Vec::with_capacity(usize::from(SESSION_COUNT));
+    let mut victim = None;
+
+    for index in 0..SESSION_COUNT {
+        let random = FillRandom::new(index + 1);
+        let mut client =
+            UdpClientSession::new(&keys, &random, |_| false).expect("distinct client session");
+        let wire = request_wire(&mut client, &clock, &random, b"request");
+        capabilities.push(accept(&server, &clock, &server_random, &wire, peer, 0));
+        if usize::from(index) == VICTIM {
+            victim = Some((client, random));
+        }
+    }
+
+    let stale = capabilities[VICTIM];
+    assert!(
+        server
+            .remove_session(stale, instant(60_000))
+            .expect("middle generation removal")
+    );
+    assert_eq!(
+        server.session_count().expect("session count"),
+        usize::from(SESSION_COUNT) - 1
+    );
+    assert_eq!(server.session_snapshot(stale).expect("stale lookup"), None);
+    assert!(
+        server
+            .session_snapshot(capabilities[VICTIM - 1])
+            .expect("preceding lookup")
+            .is_some()
+    );
+    assert!(
+        server
+            .session_snapshot(capabilities[VICTIM + 1])
+            .expect("following lookup")
+            .is_some()
+    );
+
+    let (mut victim_client, victim_random) = victim.expect("retained victim client");
+    let replacement_wire = request_wire(&mut victim_client, &clock, &victim_random, b"replacement");
+    let replacement = accept(
+        &server,
+        &clock,
+        &server_random,
+        &replacement_wire,
+        peer,
+        60_000,
+    );
+    assert_ne!(replacement, stale);
+    assert_eq!(
+        server.session_count().expect("restored session count"),
+        usize::from(SESSION_COUNT)
+    );
+    assert!(
+        server
+            .session_snapshot(replacement)
+            .expect("replacement lookup")
+            .is_some()
+    );
+
+    let mut output = vec![0_u8; 65_507];
+    let mut scratch = UdpPacketScratch::new();
+    assert_eq!(
+        server.encode_response(
+            stale,
+            &clock,
+            &server_random,
+            &datagram(b"stale"),
+            0,
+            &mut output,
+            &mut scratch,
+        ),
+        Err(UdpPacketError::Generation)
+    );
+}
+
+#[test]
+fn different_sessions_encode_concurrently_while_one_session_preserves_nonce_order() {
+    let keys = udp_provider(MethodProfile::Blake3ChaCha20Poly13052022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let first_random = FillRandom::new(0x10);
+    let second_random = FillRandom::new(0x20);
+    let server_random = FillRandom::new(0x80);
+    let mut first_client =
+        UdpClientSession::new(&keys, &first_random, |_| false).expect("first client");
+    let mut second_client =
+        UdpClientSession::new(&keys, &second_random, |_| false).expect("second client");
+    let server = UdpServer::new(&keys).expect("server");
+    let first_request = request_wire(&mut first_client, &clock, &first_random, b"first");
+    let second_request = request_wire(&mut second_client, &clock, &second_random, b"second");
+    let first_capability = accept(
+        &server,
+        &clock,
+        &server_random,
+        &first_request,
+        "127.0.0.1:49152".parse().expect("first peer"),
+        0,
+    );
+    let second_capability = accept(
+        &server,
+        &clock,
+        &server_random,
+        &second_request,
+        "127.0.0.2:49153".parse().expect("second peer"),
+        0,
+    );
+    let blocking_random = BlockingRandom::new();
+    let worker_start = Barrier::new(3);
+    let (completed_tx, completed_rx) = mpsc::channel();
+
+    let (first_wire, different_wire, same_wire) = std::thread::scope(|scope| {
+        let first_server = &server;
+        let first_clock = &clock;
+        let first_blocking_random = &blocking_random;
+        let first_worker = scope.spawn(move || -> Result<Vec<u8>, UdpPacketError> {
+            let mut output = vec![0_u8; 65_507];
+            let mut scratch = UdpPacketScratch::new();
+            let encoded = first_server.encode_response(
+                first_capability,
+                first_clock,
+                first_blocking_random,
+                &datagram(b"first response"),
+                0,
+                &mut output,
+                &mut scratch,
+            )?;
+            output.truncate(encoded.wire_len());
+            Ok(output)
+        });
+        blocking_random.wait_until_entered();
+
+        let different_tx = completed_tx.clone();
+        let different_start = &worker_start;
+        let different_server = &server;
+        let different_clock = &clock;
+        let different_worker = scope.spawn(move || {
+            different_start.wait();
+            let random = FillRandom::new(0xb0);
+            let mut output = vec![0_u8; 65_507];
+            let mut scratch = UdpPacketScratch::new();
+            let result = different_server
+                .encode_response(
+                    second_capability,
+                    different_clock,
+                    &random,
+                    &datagram(b"different session"),
+                    0,
+                    &mut output,
+                    &mut scratch,
+                )
+                .map(|encoded| {
+                    output.truncate(encoded.wire_len());
+                    output
+                });
+            different_tx
+                .send(("different", result))
+                .expect("different completion receiver");
+        });
+
+        let same_tx = completed_tx.clone();
+        let same_start = &worker_start;
+        let same_server = &server;
+        let same_clock = &clock;
+        let same_worker = scope.spawn(move || {
+            same_start.wait();
+            let random = FillRandom::new(0xc0);
+            let mut output = vec![0_u8; 65_507];
+            let mut scratch = UdpPacketScratch::new();
+            let result = same_server
+                .encode_response(
+                    first_capability,
+                    same_clock,
+                    &random,
+                    &datagram(b"same session"),
+                    0,
+                    &mut output,
+                    &mut scratch,
+                )
+                .map(|encoded| {
+                    output.truncate(encoded.wire_len());
+                    output
+                });
+            same_tx
+                .send(("same", result))
+                .expect("same completion receiver");
+        });
+
+        worker_start.wait();
+        let first_completion = completed_rx.recv_timeout(Duration::from_secs(5));
+        blocking_random.release();
+        let (first_label, first_result) =
+            first_completion.expect("another session must not wait for the blocked nonce owner");
+        assert_eq!(first_label, "different");
+        let different_wire = first_result.expect("different session response");
+
+        let (second_label, second_result) = completed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("same session resumes after its nonce owner");
+        assert_eq!(second_label, "same");
+        let same_wire = second_result.expect("same session response");
+        let first_wire = first_worker
+            .join()
+            .expect("blocked response worker")
+            .expect("first session response");
+        different_worker.join().expect("different worker");
+        same_worker.join().expect("same worker");
+        (first_wire, different_wire, same_wire)
+    });
+
+    let mut first_scratch = UdpPacketScratch::new();
+    assert_eq!(
+        accept_response(&first_client, &clock, &first_wire, &mut first_scratch, 1)
+            .expect("first ordered response")
+            .payload(),
+        b"first response"
+    );
+    assert_eq!(
+        accept_response(&first_client, &clock, &same_wire, &mut first_scratch, 2)
+            .expect("second ordered response")
+            .payload(),
+        b"same session"
+    );
+    let mut second_scratch = UdpPacketScratch::new();
+    assert_eq!(
+        accept_response(
+            &second_client,
+            &clock,
+            &different_wire,
+            &mut second_scratch,
+            1,
+        )
+        .expect("independent response")
+        .payload(),
+        b"different session"
+    );
+}
+
+#[test]
+fn concurrent_expiry_and_request_commit_never_returns_a_stale_capability() {
+    let keys = udp_provider(MethodProfile::Blake3Aes256Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let old_peer: SocketAddr = "127.0.0.1:49152".parse().expect("old peer");
+    let new_peer: SocketAddr = "127.0.0.2:49153".parse().expect("new peer");
+
+    for case in 0..32_u8 {
+        let client_random = FillRandom::new(0x10 + case);
+        let server_random = FillRandom::new(0x80);
+        let mut client =
+            UdpClientSession::new(&keys, &client_random, |_| false).expect("client session");
+        let server = UdpServer::new(&keys).expect("server");
+        let first_wire = request_wire(&mut client, &clock, &client_random, b"first");
+        let old_capability = accept(&server, &clock, &server_random, &first_wire, old_peer, 0);
+        let next_wire = request_wire(&mut client, &clock, &client_random, b"next");
+        let mut scratch = UdpPacketScratch::new();
+        let (_, commit) = server
+            .prepare_request(&clock, &next_wire, &mut scratch)
+            .expect("next request prepares")
+            .into_parts();
+        let start = Barrier::new(3);
+
+        let (removed, accepted) = std::thread::scope(|scope| {
+            let remove_start = &start;
+            let remove = scope.spawn(|| {
+                remove_start.wait();
+                server.remove_session(old_capability, instant(60_000))
+            });
+            let commit_start = &start;
+            let commit = scope.spawn(|| {
+                commit_start.wait();
+                server.commit_request(commit, new_peer, instant(60_000), &server_random)
+            });
+            start.wait();
+            (
+                remove.join().expect("remove worker").expect("remove state"),
+                commit
+                    .join()
+                    .expect("commit worker")
+                    .expect("request commit"),
+            )
+        });
+
+        let accepted_capability = accepted.capability();
+        let snapshot = server
+            .session_snapshot(accepted_capability)
+            .expect("accepted lookup")
+            .expect("accepted generation stays live");
+        assert_eq!(snapshot.peer(), new_peer);
+        assert_eq!(snapshot.last_activity(), instant(60_000));
+        assert_eq!(snapshot.highest_packet_id(), Some(1));
+        assert_eq!(server.session_count().expect("single session"), 1);
+        if removed {
+            assert_ne!(accepted_capability, old_capability);
+            assert_eq!(
+                server
+                    .session_snapshot(old_capability)
+                    .expect("stale lookup"),
+                None
+            );
+        } else {
+            assert_eq!(accepted_capability, old_capability);
+        }
+    }
 }
