@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -758,15 +758,30 @@ impl fmt::Debug for AcceptedUdpRequest {
 }
 
 struct ServerSession {
-    capability: ServerResponseCapability,
     outbound: UdpOutboundSession,
     replay: UdpReplayWindow,
     peer: SocketAddr,
     last_activity: MonotonicInstant,
+    // Lookups may retain this owner after map removal; the flag closes that race.
+    live: bool,
+}
+
+struct ServerSessionEntry {
+    capability: ServerResponseCapability,
+    outbound_session_id: UdpSessionId,
+    protocol: Arc<Mutex<ServerSession>>,
+}
+
+struct ServerSessionLookup {
+    binding: UdpSessionId,
+    protocol: Arc<Mutex<ServerSession>>,
 }
 
 struct ServerState {
-    sessions: HashMap<UdpSessionId, ServerSession>,
+    // Never acquire a per-session protocol lock while holding this map lock.
+    // Removal uses the inverse order and rechecks both indexes before unlinking.
+    sessions: HashMap<UdpSessionId, ServerSessionEntry>,
+    capability_sessions: HashMap<ServerResponseCapability, UdpSessionId>,
     next_generation: u64,
 }
 
@@ -774,6 +789,7 @@ impl Default for ServerState {
     fn default() -> Self {
         Self {
             sessions: HashMap::new(),
+            capability_sessions: HashMap::new(),
             next_generation: 1,
         }
     }
@@ -857,7 +873,7 @@ impl UdpServer {
         Ok(state
             .sessions
             .get(&pending.session_id)
-            .map(|session| session.capability))
+            .map(|entry| entry.capability))
     }
 
     /// Performs the atomic replay/generation recheck and peer/activity commit.
@@ -870,52 +886,79 @@ impl UdpServer {
         now: MonotonicInstant,
         random: &(impl SecureRandom + ?Sized),
     ) -> Result<AcceptedUdpRequest, UdpPacketError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
-        if let Some(session) = state.sessions.get_mut(&commit.session_id) {
-            session.replay.commit(commit.packet_id)?;
+        let UdpRequestCommit {
+            session_id,
+            packet_id,
+        } = commit;
+        loop {
+            let existing = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| UdpPacketError::StateUnavailable)?;
+                if let Some(entry) = state.sessions.get(&session_id) {
+                    Some((entry.capability, Arc::clone(&entry.protocol)))
+                } else {
+                    let generation = state.next_generation;
+                    let next_generation = state
+                        .next_generation
+                        .checked_add(1)
+                        .ok_or(UdpPacketError::Generation)?;
+                    let outbound = self
+                        .crypto
+                        .generate_distinct_outbound_session(random, &session_id, |candidate| {
+                            state.sessions.contains_key(candidate)
+                                || state
+                                    .sessions
+                                    .values()
+                                    .any(|entry| entry.outbound_session_id == *candidate)
+                        })
+                        .map_err(|_| UdpPacketError::Random)?;
+                    let outbound_session_id = outbound.session_id().clone();
+                    let mut replay = UdpReplayWindow::new();
+                    replay.commit(packet_id)?;
+                    let capability = ServerResponseCapability {
+                        slot: generation,
+                        generation,
+                    };
+                    let protocol = Arc::new(Mutex::new(ServerSession {
+                        outbound,
+                        replay,
+                        peer,
+                        last_activity: now,
+                        live: true,
+                    }));
+                    state.next_generation = next_generation;
+                    let previous_capability = state
+                        .capability_sessions
+                        .insert(capability, session_id.clone());
+                    let previous_session = state.sessions.insert(
+                        session_id.clone(),
+                        ServerSessionEntry {
+                            capability,
+                            outbound_session_id,
+                            protocol,
+                        },
+                    );
+                    debug_assert!(previous_capability.is_none());
+                    debug_assert!(previous_session.is_none());
+                    debug_assert_eq!(state.capability_sessions.len(), state.sessions.len());
+                    return Ok(AcceptedUdpRequest { capability });
+                }
+            };
+
+            let (capability, protocol) = existing.expect("existing session branch");
+            let mut session = protocol
+                .lock()
+                .map_err(|_| UdpPacketError::StateUnavailable)?;
+            if !session.live {
+                continue;
+            }
+            session.replay.commit(packet_id)?;
             session.peer = peer;
             session.last_activity = now;
-            return Ok(AcceptedUdpRequest {
-                capability: session.capability,
-            });
+            return Ok(AcceptedUdpRequest { capability });
         }
-
-        let generation = state.next_generation;
-        let next_generation = state
-            .next_generation
-            .checked_add(1)
-            .ok_or(UdpPacketError::Generation)?;
-        let outbound = self
-            .crypto
-            .generate_distinct_outbound_session(random, &commit.session_id, |candidate| {
-                state.sessions.keys().any(|id| id == candidate)
-                    || state
-                        .sessions
-                        .values()
-                        .any(|session| session.outbound.session_id() == candidate)
-            })
-            .map_err(|_| UdpPacketError::Random)?;
-        let mut replay = UdpReplayWindow::new();
-        replay.commit(commit.packet_id)?;
-        let capability = ServerResponseCapability {
-            slot: generation,
-            generation,
-        };
-        state.next_generation = next_generation;
-        state.sessions.insert(
-            commit.session_id,
-            ServerSession {
-                capability,
-                outbound,
-                replay,
-                peer,
-                last_activity: now,
-            },
-        );
-        Ok(AcceptedUdpRequest { capability })
     }
 
     /// Encodes a response only for the same live generation and latest peer.
@@ -930,16 +973,15 @@ impl UdpServer {
         output: &mut [u8],
         scratch: &mut UdpPacketScratch,
     ) -> Result<EncodedUdpResponse, UdpPacketError> {
-        let mut state = self
-            .state
+        let ServerSessionLookup { binding, protocol } = self
+            .session_by_capability(capability)?
+            .ok_or(UdpPacketError::Generation)?;
+        let mut session = protocol
             .lock()
             .map_err(|_| UdpPacketError::StateUnavailable)?;
-        let binding = session_id_for_binding(&state.sessions, capability)?;
-        let session = state
-            .sessions
-            .get_mut(&binding)
-            .filter(|session| session.capability == capability)
-            .ok_or(UdpPacketError::Generation)?;
+        if !session.live {
+            return Err(UdpPacketError::Generation);
+        }
         let wire_len = encode_packet(
             &self.crypto,
             &mut session.outbound,
@@ -965,20 +1007,44 @@ impl UdpServer {
         capability: ServerResponseCapability,
         now: MonotonicInstant,
     ) -> Result<bool, UdpPacketError> {
+        let Some(ServerSessionLookup { binding, protocol }) =
+            self.session_by_capability(capability)?
+        else {
+            return Ok(false);
+        };
+        let mut session = protocol
+            .lock()
+            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        if !session.live
+            || !now
+                .duration_since(session.last_activity)
+                .is_some_and(|age| age >= UDP_ASSOCIATION_RETENTION)
+        {
+            return Ok(false);
+        }
+
         let mut state = self
             .state
             .lock()
             .map_err(|_| UdpPacketError::StateUnavailable)?;
-        let removable = state.sessions.iter().find_map(|(id, session)| {
-            (session.capability == capability
-                && now
-                    .duration_since(session.last_activity)
-                    .is_some_and(|age| age >= UDP_ASSOCIATION_RETENTION))
-            .then(|| id.clone())
+        let reverse_matches = state
+            .capability_sessions
+            .get(&capability)
+            .is_some_and(|current| *current == binding);
+        let session_matches = state.sessions.get(&binding).is_some_and(|entry| {
+            entry.capability == capability && Arc::ptr_eq(&entry.protocol, &protocol)
         });
-        Ok(removable
-            .and_then(|id| state.sessions.remove(&id))
-            .is_some())
+        if !reverse_matches || !session_matches {
+            return Ok(false);
+        }
+
+        let removed_capability = state.capability_sessions.remove(&capability);
+        let removed_session = state.sessions.remove(&binding);
+        debug_assert!(removed_capability.is_some());
+        debug_assert!(removed_session.is_some());
+        debug_assert_eq!(state.capability_sessions.len(), state.sessions.len());
+        session.live = false;
+        Ok(true)
     }
 
     /// Returns a redacted live-generation snapshot.
@@ -986,19 +1052,18 @@ impl UdpServer {
         &self,
         capability: ServerResponseCapability,
     ) -> Result<Option<ServerSessionSnapshot>, UdpPacketError> {
-        let state = self
-            .state
+        let Some(ServerSessionLookup { protocol, .. }) = self.session_by_capability(capability)?
+        else {
+            return Ok(None);
+        };
+        let session = protocol
             .lock()
             .map_err(|_| UdpPacketError::StateUnavailable)?;
-        Ok(state
-            .sessions
-            .values()
-            .find(|session| session.capability == capability)
-            .map(|session| ServerSessionSnapshot {
-                peer: session.peer,
-                last_activity: session.last_activity,
-                highest_packet_id: session.replay.highest(),
-            }))
+        Ok(session.live.then(|| ServerSessionSnapshot {
+            peer: session.peer,
+            last_activity: session.last_activity,
+            highest_packet_id: session.replay.highest(),
+        }))
     }
 
     /// Returns the number of authenticated live client-session identities.
@@ -1008,22 +1073,34 @@ impl UdpServer {
             .map(|state| state.sessions.len())
             .map_err(|_| UdpPacketError::StateUnavailable)
     }
+
+    fn session_by_capability(
+        &self,
+        capability: ServerResponseCapability,
+    ) -> Result<Option<ServerSessionLookup>, UdpPacketError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let Some(binding) = state.capability_sessions.get(&capability) else {
+            return Ok(None);
+        };
+        let entry = state
+            .sessions
+            .get(binding)
+            .filter(|entry| entry.capability == capability)
+            .ok_or(UdpPacketError::StateUnavailable)?;
+        Ok(Some(ServerSessionLookup {
+            binding: binding.clone(),
+            protocol: Arc::clone(&entry.protocol),
+        }))
+    }
 }
 
 impl fmt::Debug for UdpServer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("UdpServer([redacted])")
     }
-}
-
-fn session_id_for_binding(
-    sessions: &HashMap<UdpSessionId, ServerSession>,
-    capability: ServerResponseCapability,
-) -> Result<UdpSessionId, UdpPacketError> {
-    sessions
-        .iter()
-        .find_map(|(id, session)| (session.capability == capability).then(|| id.clone()))
-        .ok_or(UdpPacketError::Generation)
 }
 
 /// Complete encoded response metadata without exposing wire IDs.

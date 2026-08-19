@@ -3,11 +3,16 @@
 use std::error::Error;
 use std::fmt;
 use std::fmt::Write as _;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
-use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder, text};
+use prometheus_client::encoding::{
+    EncodeLabelSet, EncodeLabelValue, EncodeMetric, LabelValueEncoder, MetricEncoder, NoLabelSet,
+    text,
+};
 use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::{MetricType, TypedMetric};
 use prometheus_client::registry::Registry;
 use tracing::{Level, Metadata};
 use tracing_subscriber::Layer as _;
@@ -573,62 +578,62 @@ impl_label_value!(Direction);
 impl_label_value!(SniffOutcome);
 impl_label_value!(SniffProtocol);
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct ConnectionLabels {
     role: Role,
     inbound: Inbound,
     outcome: Outcome,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct ActiveLabels {
     role: Role,
     inbound: Inbound,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct FailureLabels {
     role: Role,
     stage: Stage,
     reason: Reason,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct ByteLabels {
     role: Role,
     direction: Direction,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct ReplayRejectionLabels {
     reason: Reason,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct ForcedShutdownLabels {
     role: Role,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct UdpRoleLabels {
     role: Role,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct UdpDatagramLabels {
     role: Role,
     direction: Direction,
     outcome: Outcome,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct UdpReplayLabels {
     role: Role,
     direction: Direction,
     reason: Reason,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, prometheus_client::encoding::EncodeLabelSet)]
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct SniffLabels {
     role: Role,
     transport: Transport,
@@ -637,17 +642,341 @@ struct SniffLabels {
     protocol: SniffProtocol,
 }
 
-type ConnectionFamily = Family<ConnectionLabels, Counter>;
-type ActiveFamily = Family<ActiveLabels, Gauge>;
-type FailureFamily = Family<FailureLabels, Counter>;
-type ByteFamily = Family<ByteLabels, Counter>;
-type ReplayRejectionFamily = Family<ReplayRejectionLabels, Counter>;
-type ForcedShutdownFamily = Family<ForcedShutdownLabels, Counter>;
-type UdpRoleGaugeFamily = Family<UdpRoleLabels, Gauge>;
-type UdpRoleCounterFamily = Family<UdpRoleLabels, Counter>;
-type UdpDatagramFamily = Family<UdpDatagramLabels, Counter>;
-type UdpReplayFamily = Family<UdpReplayLabels, Counter>;
-type SniffFamily = Family<SniffLabels, Counter>;
+const ROLES: &[Role] = &[Role::Client, Role::Server];
+const TRANSPORTS: &[Transport] = &[Transport::Tcp, Transport::Udp];
+const INBOUNDS: &[Inbound] = &[Inbound::Socks5, Inbound::Shadowsocks];
+const OUTCOMES: &[Outcome] = &[
+    Outcome::Accepted,
+    Outcome::Completed,
+    Outcome::Rejected,
+    Outcome::Failed,
+    Outcome::Cancelled,
+    Outcome::Timeout,
+];
+const STAGES: &[Stage] = &[
+    Stage::Config,
+    Stage::Listen,
+    Stage::Socks5,
+    Stage::Shadowsocks,
+    Stage::Sniff,
+    Stage::Direct,
+    Stage::Relay,
+    Stage::Metrics,
+    Stage::Shutdown,
+];
+const REASONS: &[Reason] = &[
+    Reason::ConfigIo,
+    Reason::ConfigTooLarge,
+    Reason::ConfigSyntax,
+    Reason::ConfigSemantic,
+    Reason::SocksProtocol,
+    Reason::SocksUnsupported,
+    Reason::Authentication,
+    Reason::InvalidType,
+    Reason::TimestampSkew,
+    Reason::Replay,
+    Reason::ReplayCapacity,
+    Reason::FrameBounds,
+    Reason::AddressBounds,
+    Reason::ResponseBinding,
+    Reason::NonceExhausted,
+    Reason::RandomUnavailable,
+    Reason::ClockUnavailable,
+    Reason::HandshakeTimeout,
+    Reason::ConnectTimeout,
+    Reason::NetworkUnreachable,
+    Reason::HostUnreachable,
+    Reason::ConnectionRefused,
+    Reason::RelayIo,
+    Reason::IdleTimeout,
+    Reason::Cancelled,
+    Reason::Shutdown,
+    Reason::ListenerFailure,
+    Reason::Bounds,
+    Reason::Type,
+    Reason::Timestamp,
+    Reason::Address,
+    Reason::Padding,
+    Reason::Binding,
+    Reason::Duplicate,
+    Reason::TooOld,
+    Reason::SessionLimit,
+    Reason::BufferLimit,
+    Reason::QueueFull,
+    Reason::Clock,
+    Reason::Random,
+    Reason::Key,
+    Reason::Counter,
+    Reason::Resolve,
+    Reason::Send,
+    Reason::Receive,
+    Reason::Idle,
+];
+const DIRECTIONS: &[Direction] = &[
+    Direction::InboundToOutbound,
+    Direction::OutboundToInbound,
+    Direction::ClientToTarget,
+    Direction::TargetToClient,
+];
+const SNIFF_OUTCOMES: &[SniffOutcome] = &[
+    SniffOutcome::Matched,
+    SniffOutcome::Unknown,
+    SniffOutcome::Timeout,
+    SniffOutcome::Limit,
+    SniffOutcome::Invalid,
+    SniffOutcome::Unavailable,
+];
+const SNIFF_PROTOCOLS: &[SniffProtocol] = &[
+    SniffProtocol::Dns,
+    SniffProtocol::Tls,
+    SniffProtocol::Http,
+    SniffProtocol::None,
+];
+
+const CONNECTION_SERIES: usize = ROLES.len() * INBOUNDS.len() * OUTCOMES.len();
+const ACTIVE_SERIES: usize = ROLES.len() * INBOUNDS.len();
+const FAILURE_SERIES: usize = ROLES.len() * STAGES.len() * REASONS.len();
+const BYTE_SERIES: usize = ROLES.len() * DIRECTIONS.len();
+const REPLAY_REJECTION_SERIES: usize = REASONS.len();
+const FORCED_SHUTDOWN_SERIES: usize = ROLES.len();
+const UDP_ROLE_SERIES: usize = ROLES.len();
+const UDP_DATAGRAM_SERIES: usize = ROLES.len() * DIRECTIONS.len() * OUTCOMES.len();
+const UDP_REPLAY_SERIES: usize = ROLES.len() * DIRECTIONS.len() * REASONS.len();
+const SNIFF_SERIES: usize =
+    ROLES.len() * TRANSPORTS.len() * SNIFF_OUTCOMES.len() * SNIFF_PROTOCOLS.len();
+
+#[derive(Debug, Default)]
+struct CachedCounter {
+    value: AtomicU64,
+    touched: AtomicBool,
+}
+
+impl CachedCounter {
+    fn inc(&self) {
+        self.touched.store(true, Ordering::Relaxed);
+        self.value.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_by(&self, value: u64) {
+        self.touched.store(true, Ordering::Relaxed);
+        self.value.fetch_add(value, Ordering::Relaxed);
+    }
+}
+
+impl TypedMetric for CachedCounter {
+    const TYPE: MetricType = MetricType::Counter;
+}
+
+impl EncodeMetric for CachedCounter {
+    fn encode(&self, mut encoder: MetricEncoder) -> fmt::Result {
+        encoder.encode_counter::<NoLabelSet, _, u64>(&self.value.load(Ordering::Relaxed), None)
+    }
+
+    fn metric_type(&self) -> MetricType {
+        Self::TYPE
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.touched.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug, Default)]
+struct CachedGauge {
+    value: AtomicI64,
+    touched: AtomicBool,
+}
+
+impl CachedGauge {
+    fn inc(&self) {
+        self.touched.store(true, Ordering::Relaxed);
+        self.value.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dec(&self) {
+        self.touched.store(true, Ordering::Relaxed);
+        self.value.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn set(&self, value: i64) {
+        self.touched.store(true, Ordering::Relaxed);
+        self.value.store(value, Ordering::Relaxed);
+    }
+}
+
+impl TypedMetric for CachedGauge {
+    const TYPE: MetricType = MetricType::Gauge;
+}
+
+impl EncodeMetric for CachedGauge {
+    fn encode(&self, mut encoder: MetricEncoder) -> fmt::Result {
+        encoder.encode_gauge(&self.value.load(Ordering::Relaxed))
+    }
+
+    fn metric_type(&self) -> MetricType {
+        Self::TYPE
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.touched.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug)]
+struct ClosedFamily<S, M, const N: usize> {
+    entries: [(S, M); N],
+}
+
+#[derive(Debug)]
+struct SharedClosedFamily<S, M, const N: usize> {
+    inner: Arc<ClosedFamily<S, M, N>>,
+}
+
+impl<S, M, const N: usize> Clone for SharedClosedFamily<S, M, N> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<S, M: Default, const N: usize> SharedClosedFamily<S, M, N> {
+    fn new(labels: [S; N]) -> Self {
+        Self {
+            inner: Arc::new(ClosedFamily {
+                entries: labels.map(|labels| (labels, M::default())),
+            }),
+        }
+    }
+
+    fn metric(&self, index: usize) -> &M {
+        &self.inner.entries[index].1
+    }
+}
+
+impl<S, M, const N: usize> EncodeMetric for SharedClosedFamily<S, M, N>
+where
+    S: EncodeLabelSet,
+    M: EncodeMetric + TypedMetric,
+{
+    fn encode(&self, mut encoder: MetricEncoder) -> fmt::Result {
+        for (labels, metric) in &self.inner.entries {
+            if !metric.is_empty() {
+                metric.encode(encoder.encode_family(labels)?)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn metric_type(&self) -> MetricType {
+        M::TYPE
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner
+            .entries
+            .iter()
+            .all(|(_, metric)| metric.is_empty())
+    }
+}
+
+fn single_labels<A: Copy, S, const N: usize>(values: &[A], make: impl Fn(A) -> S) -> [S; N] {
+    assert_eq!(values.len(), N);
+    std::array::from_fn(|index| make(values[index]))
+}
+
+fn pair_labels<A: Copy, B: Copy, S, const N: usize>(
+    first: &[A],
+    second: &[B],
+    make: impl Fn(A, B) -> S,
+) -> [S; N] {
+    assert_eq!(first.len() * second.len(), N);
+    std::array::from_fn(|index| {
+        let second_index = index % second.len();
+        let first_index = index / second.len();
+        make(first[first_index], second[second_index])
+    })
+}
+
+fn triple_labels<A: Copy, B: Copy, C: Copy, S, const N: usize>(
+    first: &[A],
+    second: &[B],
+    third: &[C],
+    make: impl Fn(A, B, C) -> S,
+) -> [S; N] {
+    assert_eq!(first.len() * second.len() * third.len(), N);
+    std::array::from_fn(|index| {
+        let third_index = index % third.len();
+        let remaining = index / third.len();
+        let second_index = remaining % second.len();
+        let first_index = remaining / second.len();
+        make(first[first_index], second[second_index], third[third_index])
+    })
+}
+
+fn quadruple_labels<A: Copy, B: Copy, C: Copy, D: Copy, S, const N: usize>(
+    first: &[A],
+    second: &[B],
+    third: &[C],
+    fourth: &[D],
+    make: impl Fn(A, B, C, D) -> S,
+) -> [S; N] {
+    assert_eq!(first.len() * second.len() * third.len() * fourth.len(), N);
+    std::array::from_fn(|index| {
+        let fourth_index = index % fourth.len();
+        let remaining = index / fourth.len();
+        let third_index = remaining % third.len();
+        let remaining = remaining / third.len();
+        let second_index = remaining % second.len();
+        let first_index = remaining / second.len();
+        make(
+            first[first_index],
+            second[second_index],
+            third[third_index],
+            fourth[fourth_index],
+        )
+    })
+}
+
+const fn pair_index(first: usize, second: usize, second_count: usize) -> usize {
+    first * second_count + second
+}
+
+const fn triple_index(
+    first: usize,
+    second: usize,
+    third: usize,
+    second_count: usize,
+    third_count: usize,
+) -> usize {
+    pair_index(first, second, second_count) * third_count + third
+}
+
+const fn quadruple_index(
+    first: usize,
+    second: usize,
+    third: usize,
+    fourth: usize,
+    second_count: usize,
+    third_count: usize,
+    fourth_count: usize,
+) -> usize {
+    triple_index(first, second, third, second_count, third_count) * fourth_count + fourth
+}
+
+type ConnectionFamily = SharedClosedFamily<ConnectionLabels, CachedCounter, CONNECTION_SERIES>;
+type ActiveFamily = SharedClosedFamily<ActiveLabels, CachedGauge, ACTIVE_SERIES>;
+type FailureFamily = SharedClosedFamily<FailureLabels, CachedCounter, FAILURE_SERIES>;
+type ByteFamily = SharedClosedFamily<ByteLabels, CachedCounter, BYTE_SERIES>;
+type ReplayRejectionFamily =
+    SharedClosedFamily<ReplayRejectionLabels, CachedCounter, REPLAY_REJECTION_SERIES>;
+type ForcedShutdownFamily =
+    SharedClosedFamily<ForcedShutdownLabels, CachedCounter, FORCED_SHUTDOWN_SERIES>;
+type UdpRoleGaugeFamily = SharedClosedFamily<UdpRoleLabels, CachedGauge, UDP_ROLE_SERIES>;
+type UdpRoleCounterFamily = SharedClosedFamily<UdpRoleLabels, CachedCounter, UDP_ROLE_SERIES>;
+type UdpDatagramFamily = SharedClosedFamily<UdpDatagramLabels, CachedCounter, UDP_DATAGRAM_SERIES>;
+type UdpReplayFamily = SharedClosedFamily<UdpReplayLabels, CachedCounter, UDP_REPLAY_SERIES>;
+type SniffFamily = SharedClosedFamily<SniffLabels, CachedCounter, SNIFF_SERIES>;
 
 /// Explicit owner of the stable TCP, UDP, and authenticated sniff metric families.
 ///
@@ -678,21 +1007,90 @@ impl Metrics {
     ///
     /// Later releases may add families without removing or repurposing these.
     pub fn new() -> Self {
-        let connections = ConnectionFamily::default();
-        let active = ActiveFamily::default();
-        let failures = FailureFamily::default();
-        let bytes = ByteFamily::default();
+        let connections = ConnectionFamily::new(triple_labels(
+            ROLES,
+            INBOUNDS,
+            OUTCOMES,
+            |role, inbound, outcome| ConnectionLabels {
+                role,
+                inbound,
+                outcome,
+            },
+        ));
+        let active = ActiveFamily::new(pair_labels(ROLES, INBOUNDS, |role, inbound| {
+            ActiveLabels { role, inbound }
+        }));
+        let failures = FailureFamily::new(triple_labels(
+            ROLES,
+            STAGES,
+            REASONS,
+            |role, stage, reason| FailureLabels {
+                role,
+                stage,
+                reason,
+            },
+        ));
+        let bytes = ByteFamily::new(pair_labels(ROLES, DIRECTIONS, |role, direction| {
+            ByteLabels { role, direction }
+        }));
         let replay_entries = Gauge::default();
-        let replay_rejections = ReplayRejectionFamily::default();
-        let forced_shutdowns = ForcedShutdownFamily::default();
-        let udp_sessions_active = UdpRoleGaugeFamily::default();
-        let udp_datagrams = UdpDatagramFamily::default();
-        let udp_failures = FailureFamily::default();
-        let udp_bytes = ByteFamily::default();
-        let udp_buffered_bytes = UdpRoleGaugeFamily::default();
-        let udp_replay_rejections = UdpReplayFamily::default();
-        let udp_forced_shutdown = UdpRoleCounterFamily::default();
-        let sniff = SniffFamily::default();
+        let replay_rejections = ReplayRejectionFamily::new(single_labels(REASONS, |reason| {
+            ReplayRejectionLabels { reason }
+        }));
+        let forced_shutdowns =
+            ForcedShutdownFamily::new(single_labels(ROLES, |role| ForcedShutdownLabels { role }));
+        let udp_sessions_active =
+            UdpRoleGaugeFamily::new(single_labels(ROLES, |role| UdpRoleLabels { role }));
+        let udp_datagrams = UdpDatagramFamily::new(triple_labels(
+            ROLES,
+            DIRECTIONS,
+            OUTCOMES,
+            |role, direction, outcome| UdpDatagramLabels {
+                role,
+                direction,
+                outcome,
+            },
+        ));
+        let udp_failures = FailureFamily::new(triple_labels(
+            ROLES,
+            STAGES,
+            REASONS,
+            |role, stage, reason| FailureLabels {
+                role,
+                stage,
+                reason,
+            },
+        ));
+        let udp_bytes = ByteFamily::new(pair_labels(ROLES, DIRECTIONS, |role, direction| {
+            ByteLabels { role, direction }
+        }));
+        let udp_buffered_bytes =
+            UdpRoleGaugeFamily::new(single_labels(ROLES, |role| UdpRoleLabels { role }));
+        let udp_replay_rejections = UdpReplayFamily::new(triple_labels(
+            ROLES,
+            DIRECTIONS,
+            REASONS,
+            |role, direction, reason| UdpReplayLabels {
+                role,
+                direction,
+                reason,
+            },
+        ));
+        let udp_forced_shutdown =
+            UdpRoleCounterFamily::new(single_labels(ROLES, |role| UdpRoleLabels { role }));
+        let sniff = SniffFamily::new(quadruple_labels(
+            ROLES,
+            TRANSPORTS,
+            SNIFF_OUTCOMES,
+            SNIFF_PROTOCOLS,
+            |role, transport, outcome, protocol| SniffLabels {
+                role,
+                transport,
+                stage: Stage::Sniff,
+                outcome,
+                protocol,
+            },
+        ));
         let tun_packets_accepted = Counter::default();
         let tun_packets_foundation_dropped = Counter::default();
 
@@ -817,39 +1215,47 @@ impl Metrics {
 
     pub fn connection(&self, role: Role, inbound: Inbound, outcome: Outcome) {
         self.connections
-            .get_or_create(&ConnectionLabels {
-                role,
-                inbound,
-                outcome,
-            })
+            .metric(triple_index(
+                role as usize,
+                inbound as usize,
+                outcome as usize,
+                INBOUNDS.len(),
+                OUTCOMES.len(),
+            ))
             .inc();
     }
 
     pub fn active_connections_inc(&self, role: Role, inbound: Inbound) {
         self.active
-            .get_or_create(&ActiveLabels { role, inbound })
+            .metric(pair_index(role as usize, inbound as usize, INBOUNDS.len()))
             .inc();
     }
 
     pub fn active_connections_dec(&self, role: Role, inbound: Inbound) {
         self.active
-            .get_or_create(&ActiveLabels { role, inbound })
+            .metric(pair_index(role as usize, inbound as usize, INBOUNDS.len()))
             .dec();
     }
 
     pub fn failure(&self, role: Role, stage: Stage, reason: Reason) {
         self.failures
-            .get_or_create(&FailureLabels {
-                role,
-                stage,
-                reason,
-            })
+            .metric(triple_index(
+                role as usize,
+                stage as usize,
+                reason as usize,
+                STAGES.len(),
+                REASONS.len(),
+            ))
             .inc();
     }
 
     pub fn add_bytes(&self, role: Role, direction: Direction, bytes: u64) {
         self.bytes
-            .get_or_create(&ByteLabels { role, direction })
+            .metric(pair_index(
+                role as usize,
+                direction as usize,
+                DIRECTIONS.len(),
+            ))
             .inc_by(bytes);
     }
 
@@ -858,83 +1264,79 @@ impl Metrics {
     }
 
     pub fn replay_rejection(&self, reason: Reason) {
-        self.replay_rejections
-            .get_or_create(&ReplayRejectionLabels { reason })
-            .inc();
+        self.replay_rejections.metric(reason as usize).inc();
     }
 
     pub fn forced_shutdown(&self, role: Role) {
-        self.forced_shutdowns
-            .get_or_create(&ForcedShutdownLabels { role })
-            .inc();
+        self.forced_shutdowns.metric(role as usize).inc();
     }
 
     pub fn udp_sessions_active_inc(&self, role: Role) {
-        self.udp_sessions_active
-            .get_or_create(&UdpRoleLabels { role })
-            .inc();
+        self.udp_sessions_active.metric(role as usize).inc();
     }
 
     pub fn udp_sessions_active_dec(&self, role: Role) {
-        self.udp_sessions_active
-            .get_or_create(&UdpRoleLabels { role })
-            .dec();
+        self.udp_sessions_active.metric(role as usize).dec();
     }
 
     pub fn set_udp_sessions_active(&self, role: Role, sessions: usize) {
         let value = i64::try_from(sessions).unwrap_or(i64::MAX);
-        self.udp_sessions_active
-            .get_or_create(&UdpRoleLabels { role })
-            .set(value);
+        self.udp_sessions_active.metric(role as usize).set(value);
     }
 
     pub fn udp_datagram(&self, role: Role, direction: Direction, outcome: Outcome) {
         self.udp_datagrams
-            .get_or_create(&UdpDatagramLabels {
-                role,
-                direction,
-                outcome,
-            })
+            .metric(triple_index(
+                role as usize,
+                direction as usize,
+                outcome as usize,
+                DIRECTIONS.len(),
+                OUTCOMES.len(),
+            ))
             .inc();
     }
 
     pub fn udp_failure(&self, role: Role, stage: Stage, reason: Reason) {
         self.udp_failures
-            .get_or_create(&FailureLabels {
-                role,
-                stage,
-                reason,
-            })
+            .metric(triple_index(
+                role as usize,
+                stage as usize,
+                reason as usize,
+                STAGES.len(),
+                REASONS.len(),
+            ))
             .inc();
     }
 
     pub fn add_udp_bytes(&self, role: Role, direction: Direction, bytes: u64) {
         self.udp_bytes
-            .get_or_create(&ByteLabels { role, direction })
+            .metric(pair_index(
+                role as usize,
+                direction as usize,
+                DIRECTIONS.len(),
+            ))
             .inc_by(bytes);
     }
 
     pub fn set_udp_buffered_bytes(&self, role: Role, bytes: usize) {
         let value = i64::try_from(bytes).unwrap_or(i64::MAX);
-        self.udp_buffered_bytes
-            .get_or_create(&UdpRoleLabels { role })
-            .set(value);
+        self.udp_buffered_bytes.metric(role as usize).set(value);
     }
 
     pub fn udp_replay_rejection(&self, role: Role, direction: Direction, reason: Reason) {
         self.udp_replay_rejections
-            .get_or_create(&UdpReplayLabels {
-                role,
-                direction,
-                reason,
-            })
+            .metric(triple_index(
+                role as usize,
+                direction as usize,
+                reason as usize,
+                DIRECTIONS.len(),
+                REASONS.len(),
+            ))
             .inc();
     }
 
     pub fn udp_forced_shutdown(&self, role: Role) {
-        self.udp_forced_shutdown
-            .get_or_create(&UdpRoleLabels { role })
-            .inc();
+        self.udp_forced_shutdown.metric(role as usize).inc();
     }
 
     /// Records and traces exactly one closed tuple for an authenticated sniff.
@@ -946,13 +1348,15 @@ impl Metrics {
         protocol: SniffProtocol,
     ) {
         self.sniff
-            .get_or_create(&SniffLabels {
-                role,
-                transport,
-                stage: Stage::Sniff,
-                outcome,
-                protocol,
-            })
+            .metric(quadruple_index(
+                role as usize,
+                transport as usize,
+                outcome as usize,
+                protocol as usize,
+                TRANSPORTS.len(),
+                SNIFF_OUTCOMES.len(),
+                SNIFF_PROTOCOLS.len(),
+            ))
             .inc();
         emit_sniff(role, transport, outcome, protocol);
     }

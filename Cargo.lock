@@ -439,6 +439,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 name = "ferrum2-client"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "ferrum2-config",
  "ferrum2-core",
@@ -529,10 +530,17 @@ dependencies = [
 name = "ferrum2-m4-qualification"
 version = "0.1.0"
 dependencies = [
+ "ferrum2-core",
+ "ferrum2-crypto",
+ "ferrum2-shadowsocks",
+ "ferrum2-socks5",
  "hickory-proto",
  "rustls",
+ "serde",
+ "serde_json",
  "socket2",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -561,6 +569,7 @@ dependencies = [
 name = "ferrum2-server"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "ferrum2-config",
  "ferrum2-core",
