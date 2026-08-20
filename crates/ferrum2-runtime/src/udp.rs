@@ -43,10 +43,8 @@ pub const MIN_UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(86_400);
 /// Maximum ordered candidates consumed from system UDP resolution.
 pub const MAX_UDP_RESOLVED_CANDIDATES: usize = 16;
-/// Bounded per-association domain target cache entries.
-const UDP_DNS_CACHE_ENTRIES: usize = 16;
-/// Conservative reuse lifetime while the resolver API does not expose TTLs.
-const UDP_DNS_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Bounded per-association last-success candidate hints.
+const UDP_CANDIDATE_HINT_ENTRIES: usize = 16;
 
 /// Validated, protocol-neutral UDP resource limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1260,66 +1258,40 @@ impl UdpShutdownControl {
     }
 }
 
-struct UdpDnsCacheEntry {
+struct UdpCandidateHint {
     host: String,
     port: u16,
-    candidates: Vec<SocketAddr>,
-    expires_at: Instant,
     last_successful_index: usize,
 }
 
 #[derive(Default)]
-struct UdpDnsAssociationCache {
-    entries: VecDeque<UdpDnsCacheEntry>,
+struct UdpAssociationCandidateHints {
+    entries: VecDeque<UdpCandidateHint>,
 }
 
-impl UdpDnsAssociationCache {
-    fn take(&mut self, host: &str, port: u16, now: Instant) -> Option<UdpDnsCacheEntry> {
-        let index = self
-            .entries
+impl UdpAssociationCandidateHints {
+    fn start_index(&self, host: &str, port: u16) -> usize {
+        self.entries
             .iter()
-            .position(|entry| entry.host == host && entry.port == port)?;
-        let entry = self.entries.remove(index).expect("cache index exists");
-        if entry.expires_at <= now {
-            return None;
-        }
-        Some(entry)
+            .find(|entry| entry.host == host && entry.port == port)
+            .map_or(0, |entry| entry.last_successful_index)
     }
 
-    fn insert(
-        &mut self,
-        host: &str,
-        port: u16,
-        candidates: Vec<SocketAddr>,
-        resolved_at: Instant,
-        last_successful_index: usize,
-    ) {
-        self.invalidate(host, port);
-        if self.entries.len() == UDP_DNS_CACHE_ENTRIES {
-            self.entries.pop_front();
-        }
-        self.entries.push_back(UdpDnsCacheEntry {
-            host: host.to_owned(),
-            port,
-            candidates,
-            expires_at: resolved_at + UDP_DNS_CACHE_TTL,
-            last_successful_index,
-        });
-    }
-
-    fn restore(&mut self, entry: UdpDnsCacheEntry) {
-        debug_assert!(self.entries.len() < UDP_DNS_CACHE_ENTRIES);
-        self.entries.push_back(entry);
-    }
-
-    fn invalidate(&mut self, host: &str, port: u16) {
+    fn record_success(&mut self, host: &str, port: u16, last_successful_index: usize) {
         if let Some(index) = self
             .entries
             .iter()
             .position(|entry| entry.host == host && entry.port == port)
         {
             self.entries.remove(index);
+        } else if self.entries.len() == UDP_CANDIDATE_HINT_ENTRIES {
+            self.entries.pop_front();
         }
+        self.entries.push_back(UdpCandidateHint {
+            host: host.to_owned(),
+            port,
+            last_successful_index,
+        });
     }
 }
 
@@ -1340,13 +1312,13 @@ where
 {
     let mut cancellation = manager.cancellation(handle)?;
     let notify = manager.notify(handle)?;
-    let mut dns_cache = UdpDnsAssociationCache::default();
+    let mut candidate_hints = UdpAssociationCandidateHints::default();
     loop {
         while let Some(request) = manager.pop(handle, UdpDirection::ToTarget)? {
             send_direct(
                 &socket,
                 &*resolver,
-                &mut dns_cache,
+                &mut candidate_hints,
                 request.datagram(),
                 connect_timeout,
             )
@@ -1364,7 +1336,7 @@ where
                     send_direct(
                         &socket,
                         &*resolver,
-                        &mut dns_cache,
+                        &mut candidate_hints,
                         request.datagram(),
                         connect_timeout,
                     )
@@ -1439,7 +1411,7 @@ where
 async fn send_direct<R, S>(
     socket: &S,
     resolver: &R,
-    cache: &mut UdpDnsAssociationCache,
+    candidate_hints: &mut UdpAssociationCandidateHints,
     datagram: &Datagram,
     timeout: Duration,
 ) -> Result<(), UdpRuntimeError>
@@ -1457,34 +1429,19 @@ where
         return Err(UdpRuntimeError::Resolve);
     };
     let port = datagram.target().port().get();
-    if let Some(mut entry) = cache.take(host, port, Instant::now()) {
-        match send_candidates(
-            socket,
-            datagram.payload(),
-            &entry.candidates,
-            entry.last_successful_index,
-            deadline,
-        )
-        .await
-        {
-            Ok(index) => {
-                entry.last_successful_index = index;
-                cache.restore(entry);
-                return Ok(());
-            }
-            Err(UdpRuntimeError::Send) if Instant::now() < deadline => {}
-            Err(error) => {
-                cache.restore(entry);
-                return Err(error);
-            }
-        }
-    }
-
     let candidates = resolve_candidates(resolver, host, port, deadline).await?;
-    let resolved_at = Instant::now();
-    match send_candidates(socket, datagram.payload(), &candidates, 0, deadline).await {
+    let start_index = candidate_hints.start_index(host, port);
+    match send_candidates(
+        socket,
+        datagram.payload(),
+        &candidates,
+        start_index,
+        deadline,
+    )
+    .await
+    {
         Ok(index) => {
-            cache.insert(host, port, candidates, resolved_at, index);
+            candidate_hints.record_success(host, port, index);
             Ok(())
         }
         Err(error) => Err(error),

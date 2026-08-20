@@ -17,7 +17,7 @@ use ferrum2_shadowsocks::MethodKeyAdapter;
 use super::egress::{ClientEgressEngine, ClientOutboundContext};
 
 pub(super) struct ClientRouting {
-    pub(super) legacy: ferrum2_core::route::RouteTable,
+    pub(super) legacy: ferrum2_rule::RouteTable,
     pub(super) program: Option<ferrum2_config::CompiledRoute>,
     pub(super) outbounds: Arc<[ClientOutboundContext]>,
 }

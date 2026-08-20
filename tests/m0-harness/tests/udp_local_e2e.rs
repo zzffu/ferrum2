@@ -12,10 +12,11 @@ use std::time::{Duration, Instant};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RecordType};
 use local_support::{
-    ChildGuard, SYNTHETIC_PSK, active_child_count, bind_loopback_listener, run_binary,
-    start_dns_answer, unused_loopback, unused_tcp_udp_loopback, wait_for_bound, wait_for_listener,
-    wait_for_metrics, wait_for_metrics_sample, wait_for_tcp_udp_bound, write_server_config,
-    write_tagged_dns_server_config, write_udp_client_config,
+    ChildGuard, DnsReply, DnsStep, SYNTHETIC_PSK, active_child_count, bind_loopback_listener,
+    run_binary, start_dns_answer, start_dns_script, unused_loopback, unused_tcp_udp_loopback,
+    wait_for_bound, wait_for_listener, wait_for_metrics, wait_for_metrics_sample,
+    wait_for_tcp_udp_bound, write_server_config, write_tagged_dns_server_config,
+    write_udp_client_config,
 };
 
 // ponytail: file-wide lock; use socket inheritance if these tests need parallel throughput.
@@ -333,7 +334,8 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
     let final_name = "final-udp.test.";
     let selected_target = UdpSocket::bind("127.0.0.1:0").expect("selected target");
     let final_target = UdpSocket::bind("127.0.0.2:0").expect("final target");
-    for target in [&selected_target, &final_target] {
+    let failed_target = UdpSocket::bind("127.0.0.1:0").expect("no-fallback target");
+    for target in [&selected_target, &final_target, &failed_target] {
         target
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("target timeout");
@@ -345,6 +347,10 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
     let final_address = match final_target.local_addr().expect("final address") {
         SocketAddr::V4(address) => address,
         SocketAddr::V6(_) => unreachable!("IPv4 final target"),
+    };
+    let failed_address = match failed_target.local_addr().expect("failed address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 failed target"),
     };
     let selected_echo = thread::spawn(move || {
         let mut packet = [0_u8; 64];
@@ -363,7 +369,24 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
             .expect("final echo");
     });
     let selected_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 1), 2);
-    let final_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 2), 2);
+    let final_dns = start_dns_script(vec![
+        DnsStep {
+            record_type: RecordType::A,
+            reply: DnsReply::Addresses(vec![Ipv4Addr::new(127, 0, 0, 2)]),
+        },
+        DnsStep {
+            record_type: RecordType::AAAA,
+            reply: DnsReply::NoData,
+        },
+        DnsStep {
+            record_type: RecordType::A,
+            reply: DnsReply::NoData,
+        },
+        DnsStep {
+            record_type: RecordType::AAAA,
+            reply: DnsReply::NoData,
+        },
+    ]);
     let dns_addresses = [selected_dns.address(), final_dns.address()];
     let server_address = unused_tcp_udp_loopback();
     let client_address = unused_loopback();
@@ -394,10 +417,52 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
         b"selected",
     );
     dns_udp_round_trip(&application, relay, final_name, final_address, b"final");
+    let failed = {
+        let mut request = vec![0, 0, 0];
+        request.extend_from_slice(&domain_target("localhost", failed_address.port()));
+        request.extend_from_slice(b"must-not-arrive");
+        request
+    };
+    assert_eq!(
+        application
+            .send_to(&failed, relay)
+            .expect("no-fallback UDP send"),
+        failed.len()
+    );
+    application
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("no-fallback application timeout");
+    failed_target
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("no-fallback target timeout");
+    for (socket, message) in [
+        (&application, "configured DNS failure emitted a response"),
+        (&failed_target, "configured DNS failure reached localhost"),
+    ] {
+        assert!(
+            matches!(
+                socket.recv_from(&mut [0_u8; 64]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    )
+            ),
+            "{message}"
+        );
+    }
     selected_echo.join().expect("selected echo join");
     final_echo.join().expect("final echo join");
     assert_eq!(selected_dns.join(), [RecordType::A, RecordType::AAAA]);
-    assert_eq!(final_dns.join(), [RecordType::A, RecordType::AAAA]);
+    assert_eq!(
+        final_dns.join(),
+        [
+            RecordType::A,
+            RecordType::AAAA,
+            RecordType::A,
+            RecordType::AAAA
+        ]
+    );
     drop((application, control));
     let client_exit = client.terminate_and_reap_with_exit(Duration::from_secs(5));
     let server_exit = server.terminate_and_reap_with_exit(Duration::from_secs(5));
@@ -409,6 +474,8 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
             "final",
             "dns-direct",
             "app-direct",
+            "localhost",
+            "must-not-arrive",
         ]);
     }
     assert_eq!(active_child_count(), baseline_children);
@@ -418,6 +485,81 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
     drop(UdpSocket::bind(relay).expect("client relay exact rebind"));
     drop(UdpSocket::bind(dns_addresses[0]).expect("selected DNS exact rebind"));
     drop(UdpSocket::bind(dns_addresses[1]).expect("final DNS exact rebind"));
+    drop(failed_target);
+    drop(UdpSocket::bind(failed_address).expect("failed target exact rebind"));
+}
+
+#[test]
+fn v2_server_udp_without_dns_uses_system_resolver_and_reaps() {
+    let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
+    let baseline_children = active_child_count();
+    let directory = tempfile::tempdir().expect("system resolver tempdir");
+    let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("system resolver target");
+    target
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("system resolver target timeout");
+    let target_address = match target.local_addr().expect("system target address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 system target"),
+    };
+    let echo = thread::spawn(move || {
+        let mut packet = [0_u8; 64];
+        let (length, peer) = target
+            .recv_from(&mut packet)
+            .expect("system target receive");
+        target
+            .send_to(&packet[..length], peer)
+            .expect("system target echo");
+        packet[..length].to_vec()
+    });
+    let server_address = unused_tcp_udp_loopback();
+    let client_address = unused_loopback();
+    let server_config = directory.path().join("v2-system-resolver-server.toml");
+    fs::write(
+        &server_config,
+        format!(
+            "schema_version = 2\n\
+             [[inbounds]]\ntag = \"in\"\nlisten = \"{server_address}\"\n\
+             [[outbounds]]\ntag = \"direct\"\n\
+             [route]\nfinal = \"direct\"\n\
+             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
+             [udp]\nenabled = true\n"
+        ),
+    )
+    .expect("system resolver server config");
+    let client_config =
+        write_udp_client_config(directory.path(), client_address, server_address, None)
+            .expect("system resolver client config");
+    let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
+    wait_for_tcp_udp_bound(&mut server, server_address);
+    let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
+    wait_for_listener(&mut client, client_address);
+    let (control, application, relay) = udp_associate(client_address);
+    dns_udp_round_trip(
+        &application,
+        relay,
+        "localhost",
+        target_address,
+        b"system-resolver-udp",
+    );
+    assert_eq!(
+        echo.join().expect("system target join"),
+        b"system-resolver-udp"
+    );
+    drop((application, control));
+    let exits = [
+        client.terminate_and_reap_with_exit(Duration::from_secs(5)),
+        server.terminate_and_reap_with_exit(Duration::from_secs(5)),
+    ];
+    for exit in &exits {
+        exit.assert_stderr_excludes(&["localhost", "system-resolver-udp", SYNTHETIC_PSK]);
+    }
+    assert_eq!(active_child_count(), baseline_children);
+    drop(bind_loopback_listener(client_address).expect("system client exact rebind"));
+    drop(bind_loopback_listener(server_address).expect("system server TCP exact rebind"));
+    drop(UdpSocket::bind(server_address).expect("system server UDP exact rebind"));
+    drop(UdpSocket::bind(relay).expect("system relay exact rebind"));
+    drop(UdpSocket::bind(target_address).expect("system target exact rebind"));
 }
 
 fn disable_udp(path: &std::path::Path) {

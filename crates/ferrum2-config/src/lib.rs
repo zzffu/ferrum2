@@ -25,18 +25,33 @@ const DEFAULT_TUN_TCP_BUFFER_BYTES: u64 = 32_768;
 const DEFAULT_TUN_MAX_UDP_MAPPINGS: u64 = 1_024;
 const DEFAULT_TUN_MAX_UDP_BUFFERED_BYTES: u64 = 16_777_216;
 
+mod dependency;
 mod error;
 mod load;
 mod model;
+mod prepared;
 mod raw;
 mod validation;
 
 pub use error::{ConfigError, ConfigErrorKind, ConfigField};
 pub use load::{load_client, load_server};
 pub use model::{
-    ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, CompiledRoute, DnsConfig,
-    DnsInboundConfig, DnsIngressId, DnsQueryType, DnsServerConfig, DnsTransport, LoggingConfig,
-    LoggingLevel, MetricsConfig, ReplayConfig, RouteAction, RouteProtocol, RouteSniffConfig,
-    RuntimeConfig, SchemaVersion, ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig,
-    Sniffers, TunConfig, UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
+    ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, CompiledRoute, DnsCacheConfig,
+    DnsConfig, DnsInboundConfig, DnsIngressId, DnsPolicyBlueprintBinding, DnsQueryType,
+    DnsRuntimeConfig, DnsServerConfig, DnsStrategy, DnsTransport, LoggingConfig, LoggingLevel,
+    MetricsConfig, ReplayConfig, RouteAction, RouteProtocol, RouteSniffConfig, RuntimeConfig,
+    SchemaVersion, ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig, Sniffers, TunConfig,
+    UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
+};
+pub use prepared::{
+    ClientV2MaterializeContext, ClientV2MaterializeFuture, ClientV2Resources,
+    CompiledRuleSetResource, DialEndpoint, PreparedClientConfig, PreparedClientOutboundDescriptor,
+    PreparedClientOutboundKind, PreparedClientV2, PreparedDependencyNode, PreparedDnsAction,
+    PreparedDnsRule, PreparedDnsServerDescriptor, PreparedEgressRef,
+    PreparedFixedEndpointDescriptor, PreparedFixedEndpointTarget, PreparedRouteRuleSets,
+    PreparedRuleSet, PreparedServerConfig, PreparedServerV2, ResolvedDnsEndpoint,
+    ResolvedOutboundEndpoint, ResolverRef, RuleSetLoaderConfig, ServerV2MaterializeContext,
+    ServerV2MaterializeFuture, ServerV2Resources, finish_client_v2, finish_server_v2,
+    materialize_client_v2, materialize_server_v2, prepare_client, prepare_client_v2,
+    prepare_server, prepare_server_v2,
 };

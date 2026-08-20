@@ -9,6 +9,9 @@ use ferrum2_core::route::EgressPlanSnapshot;
 use ferrum2_core::{Connector, LocalEndpoint, TargetAddr};
 use ferrum2_crypto::{Clock, MethodSinglePskProvider, SecureRandom};
 #[cfg(test)]
+use ferrum2_dns::{ApplicationResolver, DnsStrategy};
+use ferrum2_runtime::ApplicationResolverAdapter;
+#[cfg(test)]
 use ferrum2_shadowsocks::{BufferObserver, FlowObserver};
 use ferrum2_shadowsocks::{MethodKeyAdapter, ShadowsocksError, TransportIo};
 
@@ -194,12 +197,27 @@ type DefaultClientConnector = TokioConnector<
     ferrum2_runtime::TcpConnector<
         ferrum2_runtime::SystemSocketInspector,
         ManagedTcpDialer,
-        ferrum2_runtime::SystemTcpResolver,
+        ApplicationResolverAdapter,
     >,
 >;
 
 #[cfg(any(not(windows), test))]
-type DefaultClientConnector = TokioConnector<ferrum2_runtime::TcpConnector>;
+type DefaultClientConnector = TokioConnector<
+    ferrum2_runtime::TcpConnector<
+        ferrum2_runtime::SystemSocketInspector,
+        ferrum2_runtime::SystemTcpDialer,
+        ApplicationResolverAdapter,
+    >,
+>;
+
+#[cfg(test)]
+pub(super) fn system_application_resolver() -> ApplicationResolverAdapter {
+    ApplicationResolverAdapter::new(
+        Arc::new(ApplicationResolver::system_default()),
+        0,
+        DnsStrategy::PreferIpv4,
+    )
+}
 
 pub(super) struct ClientShadowsocksContext {
     pub(super) tcp_server: TargetAddr,
@@ -231,7 +249,7 @@ pub(super) fn prepare_client_outbounds(
                         tcp_server: TargetAddr::ip(server)
                             .map_err(|_| RunError::StartupProtocol)?,
                         udp_server: server,
-                        keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
+                        keys: MethodKeyAdapter::new(MethodSinglePskProvider::from_shared(psk)),
                     })
                 }
                 ferrum2_config::ClientOutboundConfig::Direct => ClientOutboundContext::Direct,
@@ -252,6 +270,7 @@ pub(super) struct ClientEgressEngine<
     pub(super) random: R,
     phase_deadlines: (Duration, Duration),
     pub(super) udp: Option<ClientUdpContext>,
+    pub(super) application_resolver: ApplicationResolverAdapter,
     underlay: ferrum2_tun::UnderlayPublisher,
     auto_route: bool,
     #[cfg(all(windows, test))]
@@ -264,6 +283,7 @@ pub(super) struct ClientEgressEngine<
 
 impl<C, T, R> ClientEgressEngine<C, T, R> {
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn new(
         outbounds: Arc<[ClientOutboundContext]>,
         connector: C,
@@ -273,6 +293,30 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         udp: Option<ClientUdpContext>,
         #[cfg(test)] udp_id_random: Option<Arc<dyn SecureRandom>>,
     ) -> Self {
+        Self::new_with_application_resolver(
+            outbounds,
+            connector,
+            clock,
+            random,
+            phase_deadlines,
+            udp,
+            system_application_resolver(),
+            #[cfg(test)]
+            udp_id_random,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_with_application_resolver(
+        outbounds: Arc<[ClientOutboundContext]>,
+        connector: C,
+        clock: T,
+        random: R,
+        phase_deadlines: (Duration, Duration),
+        udp: Option<ClientUdpContext>,
+        application_resolver: ApplicationResolverAdapter,
+        #[cfg(test)] udp_id_random: Option<Arc<dyn SecureRandom>>,
+    ) -> Self {
         Self {
             outbounds,
             connector,
@@ -280,6 +324,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             random,
             phase_deadlines,
             udp,
+            application_resolver,
             underlay: ferrum2_tun::UnderlayPublisher::new(),
             auto_route: false,
             #[cfg(all(windows, test))]
@@ -407,6 +452,33 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         T: Clock + Sync,
         R: SecureRandom,
     {
+        self.open_tcp_for_ingress(
+            origin,
+            0,
+            plan,
+            application_target,
+            timeout_limit,
+            #[cfg(test)]
+            observers,
+        )
+        .await
+    }
+
+    pub(super) async fn open_tcp_for_ingress<'a>(
+        &'a self,
+        origin: ClientRequestOrigin,
+        ingress: usize,
+        plan: Option<EgressPlanSnapshot>,
+        application_target: &TargetAddr,
+        timeout_limit: Option<Duration>,
+        #[cfg(test)] observers: Option<(&'a dyn BufferObserver, &'a dyn FlowObserver)>,
+    ) -> Result<tcp::ClientTcpFlow<'a, C::Stream>, ClientOpenFailure>
+    where
+        C: Connector,
+        C::Stream: TransportIo + LocalEndpoint + 'a,
+        T: Clock + Sync,
+        R: SecureRandom,
+    {
         let selected = self
             .classify_selected(origin, plan.as_ref(), Some(application_target))
             .map_err(ClientOpenFailure::Plan)?;
@@ -417,10 +489,13 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             #[cfg(any(windows, test))]
             let connect = TCP_BINDING.scope(
                 direct_tcp_binding(origin, self.auto_route),
-                self.connector.connect(application_target),
+                self.application_resolver
+                    .scope_ingress(ingress, self.connector.connect(application_target)),
             );
             #[cfg(not(any(windows, test)))]
-            let connect = self.connector.connect(application_target);
+            let connect = self
+                .application_resolver
+                .scope_ingress(ingress, self.connector.connect(application_target));
             return match tokio::time::timeout(deadline, connect).await {
                 Ok(Ok(stream)) => Ok(tcp::ClientTcpFlow::Direct(stream)),
                 Ok(Err(error)) => Err(ClientOpenFailure::Connect(error.kind())),
@@ -458,12 +533,23 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         plan: Option<EgressPlanSnapshot>,
         target: Option<&TargetAddr>,
     ) -> Result<ClientUdpAssociation, ClientUdpPrepareFailure> {
+        self.prepare_udp_for_ingress(origin, 0, plan, target).await
+    }
+
+    pub(super) async fn prepare_udp_for_ingress(
+        &self,
+        origin: ClientRequestOrigin,
+        ingress: usize,
+        plan: Option<EgressPlanSnapshot>,
+        target: Option<&TargetAddr>,
+    ) -> Result<ClientUdpAssociation, ClientUdpPrepareFailure> {
         let selected = self
             .classify_selected(origin, plan.as_ref(), target)
             .map_err(ClientUdpPrepareFailure::Plan)?;
         udp::prepare(
             self,
             origin,
+            ingress,
             plan,
             selected,
             target,
@@ -489,6 +575,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         udp::prepare(
             self,
             ClientRequestOrigin::Socks,
+            0,
             Some(plan),
             selected,
             None,
@@ -633,6 +720,278 @@ mod m16_tests {
             self.events.lock().unwrap().push("connect");
             Ok(())
         }
+    }
+
+    #[derive(Clone, Copy)]
+    struct ApplicationRoute {
+        ingress: usize,
+        network: ferrum2_core::route::Network,
+        endpoint: SocketAddr,
+    }
+
+    struct RoutedApplicationBackend {
+        routes: Vec<ApplicationRoute>,
+        observed: Mutex<Vec<(usize, ferrum2_core::route::Network)>>,
+    }
+
+    impl ferrum2_dns::ApplicationResolveBackend for RoutedApplicationBackend {
+        fn resolve<'a>(
+            &'a self,
+            request: ferrum2_dns::ApplicationResolveRequest<'a>,
+        ) -> ferrum2_dns::ApplicationResolveFuture<'a> {
+            let context = request.context();
+            self.observed
+                .lock()
+                .expect("application observations")
+                .push((context.ingress(), context.network()));
+            let endpoint = self
+                .routes
+                .iter()
+                .find(|route| {
+                    route.ingress == context.ingress() && route.network == context.network()
+                })
+                .map(|route| route.endpoint);
+            Box::pin(async move {
+                endpoint
+                    .map(|endpoint| vec![endpoint])
+                    .ok_or(ferrum2_dns::DnsError::Timeout)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn application_dns_ingress_is_isolated_for_concurrent_tcp_and_udp() {
+        let tcp_listener_3 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let tcp_listener_7 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let udp_listener_3 = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let udp_listener_7 = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let backend = Arc::new(RoutedApplicationBackend {
+            routes: vec![
+                ApplicationRoute {
+                    ingress: 3,
+                    network: ferrum2_core::route::Network::Tcp,
+                    endpoint: tcp_listener_3.local_addr().unwrap(),
+                },
+                ApplicationRoute {
+                    ingress: 7,
+                    network: ferrum2_core::route::Network::Tcp,
+                    endpoint: tcp_listener_7.local_addr().unwrap(),
+                },
+                ApplicationRoute {
+                    ingress: 3,
+                    network: ferrum2_core::route::Network::Udp,
+                    endpoint: udp_listener_3.local_addr().unwrap(),
+                },
+                ApplicationRoute {
+                    ingress: 7,
+                    network: ferrum2_core::route::Network::Udp,
+                    endpoint: udp_listener_7.local_addr().unwrap(),
+                },
+            ],
+            observed: Mutex::new(Vec::new()),
+        });
+        let resolver = ApplicationResolverAdapter::new(
+            Arc::new(ApplicationResolver::configured(backend.clone())),
+            0,
+            DnsStrategy::PreferIpv4,
+        );
+        let connector =
+            TokioConnector::new(ferrum2_runtime::TcpConnector::with_resolution_adapters(
+                ferrum2_runtime::SystemSocketInspector,
+                ferrum2_runtime::SystemTcpDialer,
+                resolver.clone(),
+                Duration::from_secs(1),
+            ));
+        let registry = OwnerRegistry::new();
+        let engine = ClientEgressEngine::new_with_application_resolver(
+            vec![ClientOutboundContext::Direct].into(),
+            connector,
+            SystemClock::new(),
+            SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some(ClientUdpContext {
+                manager: UdpSessionManager::new(UdpRuntimeLimits::default(), registry),
+                live_ids: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            resolver,
+            None,
+        );
+        let direct = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
+        let tcp_target = TargetAddr::domain("tcp-ingress.invalid", 443).unwrap();
+        let udp_target = TargetAddr::domain("udp-ingress.invalid", 5353).unwrap();
+        let mut association_3 = engine
+            .prepare_udp_for_ingress(
+                ClientRequestOrigin::Socks,
+                3,
+                Some(direct.clone()),
+                Some(&udp_target),
+            )
+            .await
+            .unwrap();
+        let mut association_7 = engine
+            .prepare_udp_for_ingress(
+                ClientRequestOrigin::Socks,
+                7,
+                Some(direct.clone()),
+                Some(&udp_target),
+            )
+            .await
+            .unwrap();
+        let wire_3 = association_3
+            .prepare_application_request(
+                &engine,
+                &engine.outbounds,
+                udp_target.clone(),
+                b"ingress-3",
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("prepare ingress 3 datagram"));
+        let wire_7 = association_7
+            .prepare_application_request(
+                &engine,
+                &engine.outbounds,
+                udp_target.clone(),
+                b"ingress-7",
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("prepare ingress 7 datagram"));
+
+        let receive_3 = async {
+            let mut bytes = [0_u8; 32];
+            let (length, _) = udp_listener_3.recv_from(&mut bytes).await.unwrap();
+            bytes[..length].to_vec()
+        };
+        let receive_7 = async {
+            let mut bytes = [0_u8; 32];
+            let (length, _) = udp_listener_7.recv_from(&mut bytes).await.unwrap();
+            bytes[..length].to_vec()
+        };
+        let (tcp_3, tcp_7, udp_3, udp_7, accepted_3, accepted_7, payload_3, payload_7) = tokio::join!(
+            engine.open_tcp_for_ingress(
+                ClientRequestOrigin::Socks,
+                3,
+                Some(direct.clone()),
+                &tcp_target,
+                None,
+                None,
+            ),
+            engine.open_tcp_for_ingress(
+                ClientRequestOrigin::Socks,
+                7,
+                Some(direct.clone()),
+                &tcp_target,
+                None,
+                None,
+            ),
+            association_3.send_encoded_request(wire_3),
+            association_7.send_encoded_request(wire_7),
+            tcp_listener_3.accept(),
+            tcp_listener_7.accept(),
+            receive_3,
+            receive_7,
+        );
+        drop(tcp_3.unwrap());
+        drop(tcp_7.unwrap());
+        drop(accepted_3.unwrap());
+        drop(accepted_7.unwrap());
+        assert_eq!(udp_3.unwrap(), b"ingress-3".len());
+        assert_eq!(udp_7.unwrap(), b"ingress-7".len());
+        assert_eq!(payload_3, b"ingress-3");
+        assert_eq!(payload_7, b"ingress-7");
+
+        for (association, ingress, payload) in [
+            (&mut association_3, 3, b"again-3".as_slice()),
+            (&mut association_7, 7, b"again-7".as_slice()),
+        ] {
+            let wire = association
+                .prepare_application_request(
+                    &engine,
+                    &engine.outbounds,
+                    udp_target.clone(),
+                    payload,
+                    Instant::now(),
+                )
+                .unwrap_or_else(|_| panic!("prepare repeated ingress {ingress} datagram"));
+            association
+                .send_encoded_request(wire)
+                .await
+                .unwrap_or_else(|_| panic!("send repeated ingress {ingress} datagram"));
+        }
+
+        assert!(
+            engine
+                .open_tcp_for_ingress(
+                    ClientRequestOrigin::Socks,
+                    13,
+                    Some(direct.clone()),
+                    &tcp_target,
+                    None,
+                    None,
+                )
+                .await
+                .is_err(),
+            "configured failure must not fall back"
+        );
+        assert!(
+            engine
+                .open_tcp(
+                    ClientRequestOrigin::Socks,
+                    Some(direct.clone()),
+                    &tcp_target,
+                    None,
+                    None,
+                )
+                .await
+                .is_err(),
+            "compatibility entry point must retain ingress zero"
+        );
+        let mut failed_udp = engine
+            .prepare_udp_for_ingress(
+                ClientRequestOrigin::Socks,
+                13,
+                Some(direct),
+                Some(&udp_target),
+            )
+            .await
+            .unwrap();
+        let failed_wire = failed_udp
+            .prepare_application_request(
+                &engine,
+                &engine.outbounds,
+                udp_target,
+                b"no-fallback",
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("prepare failed-ingress datagram"));
+        assert_eq!(
+            failed_udp
+                .send_encoded_request(failed_wire)
+                .await
+                .expect_err("configured UDP failure must not fall back")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+
+        let observed = backend.observed.lock().unwrap();
+        for (ingress, network, expected) in [
+            (0, ferrum2_core::route::Network::Tcp, 1),
+            (3, ferrum2_core::route::Network::Tcp, 1),
+            (3, ferrum2_core::route::Network::Udp, 2),
+            (7, ferrum2_core::route::Network::Tcp, 1),
+            (7, ferrum2_core::route::Network::Udp, 2),
+            (13, ferrum2_core::route::Network::Tcp, 1),
+            (13, ferrum2_core::route::Network::Udp, 1),
+        ] {
+            assert_eq!(
+                observed
+                    .iter()
+                    .filter(|actual| **actual == (ingress, network))
+                    .count(),
+                expected,
+                "ingress {ingress} {network:?}"
+            );
+        }
+        assert_eq!(observed.len(), 9);
     }
 
     #[tokio::test]
@@ -806,7 +1165,7 @@ mod m16_tests {
     fn proxy() -> ferrum2_config::ClientOutboundConfig {
         ferrum2_config::ClientOutboundConfig::Shadowsocks {
             server: "198.51.100.222:62016".parse().unwrap(),
-            psk: ferrum2_crypto::MethodPsk::aes128(*b"m16-secret-key!!"),
+            psk: Arc::new(ferrum2_crypto::MethodPsk::aes128(*b"m16-secret-key!!")),
         }
     }
 

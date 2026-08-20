@@ -114,15 +114,21 @@ async fn run_udp(
     let Ok(target) = TargetAddr::ip(tuple.target()) else {
         return;
     };
-    let Some((terminal, selected_bound)) = select_udp_terminal(
-        &routing,
+    let Ok(mut route_scratch) = routing.route_scratch() else {
+        return;
+    };
+    let request = TunUdpRouteRequest {
+        routing: &routing,
         inbound,
         ipv4_dns_address,
-        &target,
-        candidate.payload(),
-        candidate.packet_payload_bound(),
-        &context.metrics,
-    ) else {
+        target: &target,
+        payload: candidate.payload(),
+        packet_payload_bound: candidate.packet_payload_bound(),
+        metrics: &context.metrics,
+    };
+    let Ok(Some((terminal, selected_bound))) =
+        select_udp_terminal_with_scratch(request, route_scratch.as_mut())
+    else {
         return;
     };
     let Ok(mapping) = candidate.commit(terminal, selected_bound).await else {
@@ -130,7 +136,7 @@ async fn run_udp(
     };
     match mapping.terminal().clone() {
         TunUdpTerminal::Route(plan) => {
-            run_udp_route(mapping, plan, cancellation, context, routing).await;
+            run_udp_route(mapping, plan, cancellation, context, routing, inbound).await;
         }
         TunUdpTerminal::HijackDns => {
             run_udp_dns(mapping, cancellation, context, inbound).await;
@@ -139,6 +145,61 @@ async fn run_udp(
     }
 }
 
+struct TunUdpRouteRequest<'a> {
+    routing: &'a ClientRouting,
+    inbound: usize,
+    ipv4_dns_address: Option<std::net::Ipv4Addr>,
+    target: &'a TargetAddr,
+    payload: &'a [u8],
+    packet_payload_bound: usize,
+    metrics: &'a ferrum2_observability::Metrics,
+}
+
+fn select_udp_terminal_with_scratch(
+    request: TunUdpRouteRequest<'_>,
+    scratch: Option<&mut ferrum2_rule::RuleEvaluationScratch>,
+) -> Result<Option<(TunUdpTerminal, usize)>, ferrum2_rule::RuleCompileError> {
+    if is_synthetic_dns_target(request.target, request.ipv4_dns_address) {
+        return Ok((request.payload.len() <= request.packet_payload_bound)
+            .then_some((TunUdpTerminal::HijackDns, request.packet_payload_bound)));
+    }
+    let terminal = request.routing.select_terminal_with_scratch(
+        request.inbound,
+        Network::Udp,
+        request.target,
+        Some(request.payload),
+        request.metrics,
+        scratch,
+    )?;
+    let selected = match terminal {
+        ClientTerminalRoute::Route(plan) => {
+            let Some(target) = request.target.as_socket_addr() else {
+                return Ok(None);
+            };
+            let encoded_target_len = match target {
+                SocketAddr::V4(_) => 7,
+                SocketAddr::V6(_) => 19,
+            };
+            let bound = composed_udp_plan_limit(
+                &request.routing.outbounds,
+                plan.hops(),
+                false,
+                encoded_target_len,
+            )
+            .min(request.packet_payload_bound);
+            (TunUdpTerminal::Route(plan), bound)
+        }
+        ClientTerminalRoute::HijackDns => (TunUdpTerminal::HijackDns, request.packet_payload_bound),
+        ClientTerminalRoute::Reject => (TunUdpTerminal::Reject, request.packet_payload_bound),
+    };
+    if request.payload.len() > selected.1 {
+        Ok(None)
+    } else {
+        Ok(Some(selected))
+    }
+}
+
+#[cfg(test)]
 fn select_udp_terminal(
     routing: &ClientRouting,
     inbound: usize,
@@ -148,30 +209,21 @@ fn select_udp_terminal(
     packet_payload_bound: usize,
     metrics: &ferrum2_observability::Metrics,
 ) -> Option<(TunUdpTerminal, usize)> {
-    if is_synthetic_dns_target(target, ipv4_dns_address) {
-        return (payload.len() <= packet_payload_bound)
-            .then_some((TunUdpTerminal::HijackDns, packet_payload_bound));
-    }
-    let terminal = routing.select_terminal(inbound, Network::Udp, target, Some(payload), metrics);
-    let selected = match terminal {
-        ClientTerminalRoute::Route(plan) => {
-            let encoded_target_len = match target.as_socket_addr()? {
-                SocketAddr::V4(_) => 7,
-                SocketAddr::V6(_) => 19,
-            };
-            let bound =
-                composed_udp_plan_limit(&routing.outbounds, plan.hops(), false, encoded_target_len)
-                    .min(packet_payload_bound);
-            (TunUdpTerminal::Route(plan), bound)
-        }
-        ClientTerminalRoute::HijackDns => (TunUdpTerminal::HijackDns, packet_payload_bound),
-        ClientTerminalRoute::Reject => (TunUdpTerminal::Reject, packet_payload_bound),
-    };
-    if payload.len() > selected.1 {
-        None
-    } else {
-        Some(selected)
-    }
+    let mut scratch = routing.route_scratch().ok().flatten();
+    select_udp_terminal_with_scratch(
+        TunUdpRouteRequest {
+            routing,
+            inbound,
+            ipv4_dns_address,
+            target,
+            payload,
+            packet_payload_bound,
+            metrics,
+        },
+        scratch.as_mut(),
+    )
+    .ok()
+    .flatten()
 }
 
 async fn run_udp_route(
@@ -180,6 +232,7 @@ async fn run_udp_route(
     cancellation: ProcessCancellation,
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
+    inbound: usize,
 ) {
     let mut force = cancellation.clone();
     let Ok(original_target) = TargetAddr::ip(mapping.tuple().target()) else {
@@ -187,8 +240,9 @@ async fn run_udp_route(
     };
     let prepared = tokio::select! {
         () = force.forced() => return,
-        prepared = context.egress.prepare_udp(
+        prepared = context.egress.prepare_udp_for_ingress(
             ClientRequestOrigin::Tun,
+            inbound,
             Some(plan),
             Some(&original_target),
         ) => prepared,
@@ -370,7 +424,7 @@ async fn run_tcp<IO>(
     let Ok(target) = TargetAddr::ip(target) else {
         return;
     };
-    let Some(selection) = routing
+    let Ok(Some(selection)) = routing
         .select_tcp(
             inbound,
             &target,
@@ -407,8 +461,9 @@ async fn run_tcp<IO>(
         ClientTerminalRoute::Route(plan) => {
             let opened = tokio::select! {
                 _ = cancellation.forced() => return,
-                opened = context.egress.open_tcp(
+                opened = context.egress.open_tcp_for_ingress(
                     ClientRequestOrigin::Tun,
+                    inbound,
                     Some(plan),
                     &target,
                     None,
@@ -543,7 +598,7 @@ mod tests {
             ferrum2_config::ClientOutboundConfig::Direct,
             ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: "192.0.2.77:8388".parse().unwrap(),
-                psk: default_test_psk(),
+                psk: Arc::new(default_test_psk()),
             },
         ])
         .expect("direct and proxy outbounds");
@@ -831,7 +886,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             inbound: Socks5Inbound::new(),
             egress: Arc::new(ClientEgressEngine::new(
                 outbounds,
-                TokioConnector::new(TcpConnector::new(runtime.connect_timeout)),
+                TokioConnector::new(TcpConnector::with_resolution_adapters(
+                    ferrum2_runtime::SystemSocketInspector,
+                    ferrum2_runtime::SystemTcpDialer,
+                    crate::run::egress::system_application_resolver(),
+                    runtime.connect_timeout,
+                )),
                 SystemClock::new(),
                 SystemRandom,
                 (runtime.connect_timeout, runtime.handshake_timeout),
@@ -902,8 +962,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             prepare_client_outbounds(vec![ferrum2_config::ClientOutboundConfig::Direct])
                 .expect("direct TUN outbound");
         let direct_routing = Arc::new(ClientRouting {
-            legacy: ferrum2_core::route::RouteTable::static_bindings(vec![0])
-                .expect("direct TUN route"),
+            legacy: ferrum2_rule::RouteTable::static_bindings(vec![0]).expect("direct TUN route"),
             program: None,
             outbounds: Arc::clone(&direct_outbounds),
         });
@@ -911,7 +970,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             inbound: Socks5Inbound::new(),
             egress: Arc::new(ClientEgressEngine::new(
                 direct_outbounds,
-                TokioConnector::new(TcpConnector::new(context.runtime.connect_timeout)),
+                TokioConnector::new(TcpConnector::with_resolution_adapters(
+                    ferrum2_runtime::SystemSocketInspector,
+                    ferrum2_runtime::SystemTcpDialer,
+                    crate::run::egress::system_application_resolver(),
+                    context.runtime.connect_timeout,
+                )),
                 SystemClock::new(),
                 SystemRandom,
                 (

@@ -335,7 +335,21 @@ async fn client_connection(
         initial_payload: _,
         reply,
     } = session;
-    let terminal = routing.select_terminal(inbound, Network::Tcp, &target, None, &context.metrics);
+    let Ok(mut route_scratch) = routing.route_scratch() else {
+        let _ = reply.failed(ConnectErrorKind::Other).await;
+        return;
+    };
+    let Ok(terminal) = routing.select_terminal_with_scratch(
+        inbound,
+        Network::Tcp,
+        &target,
+        None,
+        &context.metrics,
+        route_scratch.as_mut(),
+    ) else {
+        let _ = reply.failed(ConnectErrorKind::Other).await;
+        return;
+    };
     let plan = match terminal {
         ClientTerminalRoute::Route(plan) => plan,
         ClientTerminalRoute::Reject => {
@@ -372,8 +386,9 @@ async fn client_connection(
     };
     let opened = tokio::select! {
         _ = cancellation.cancelled() => return,
-        result = context.egress.open_tcp(
+        result = context.egress.open_tcp_for_ingress(
             ClientRequestOrigin::Socks,
+            inbound,
             Some(plan),
             &target,
             None,
@@ -507,8 +522,9 @@ async fn run_udp_association<IO, F, Fut>(
     let mut static_association = if let Some(plan) = static_plan {
         let prepared = tokio::select! {
             _ = cancellation.cancelled() => return,
-            prepared = context.egress.prepare_udp(
+            prepared = context.egress.prepare_udp_for_ingress(
                 ClientRequestOrigin::Socks,
+                inbound,
                 Some(plan),
                 None,
             ) => prepared,
@@ -812,6 +828,9 @@ async fn classify_udp_association<IO>(
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let mut control_byte = [0; 1];
+    let Ok(mut route_scratch) = routing.route_scratch() else {
+        return;
+    };
     let (target, payload, terminal) = loop {
         let idle_deadline = endpoint.idle_deadline(context.runtime.idle_timeout);
         let received = tokio::select! {
@@ -854,13 +873,16 @@ async fn classify_udp_association<IO>(
             }
         };
         let target = decoded.to_target_addr();
-        let terminal = routing.select_terminal(
+        let Ok(terminal) = routing.select_terminal_with_scratch(
             inbound,
             Network::Udp,
             &target,
             Some(decoded.payload()),
             &context.metrics,
-        );
+            route_scratch.as_mut(),
+        ) else {
+            return;
+        };
         if matches!(terminal, ClientTerminalRoute::Reject) {
             return;
         }
@@ -891,8 +913,9 @@ async fn classify_udp_association<IO>(
         ClientTerminalRoute::Route(plan) => {
             let prepared = tokio::select! {
                 _ = cancellation.cancelled() => return,
-                prepared = context.egress.prepare_udp(
+                prepared = context.egress.prepare_udp_for_ingress(
                     ClientRequestOrigin::Socks,
+                    inbound,
                     Some(plan),
                     Some(&target),
                 ) => prepared,
@@ -2772,7 +2795,7 @@ pub(in crate::run) mod tests {
             .map(
                 |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                     server: server.into(),
-                    psk: psk_for_method(method),
+                    psk: Arc::new(psk_for_method(method)),
                 },
             )
             .collect();
@@ -2852,7 +2875,7 @@ pub(in crate::run) mod tests {
                 .map(
                     |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                         server: server.into(),
-                        psk: psk_for_method(method),
+                        psk: Arc::new(psk_for_method(method)),
                     },
                 )
                 .collect(),
@@ -3013,7 +3036,7 @@ pub(in crate::run) mod tests {
                 .map(
                     |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                         server: server.into(),
-                        psk: psk_for_method(method),
+                        psk: Arc::new(psk_for_method(method)),
                     },
                 )
                 .collect(),
@@ -3243,7 +3266,7 @@ pub(in crate::run) mod tests {
                 .map(
                     |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                         server: server.into(),
-                        psk: psk_for_method(method),
+                        psk: Arc::new(psk_for_method(method)),
                     },
                 )
                 .collect(),

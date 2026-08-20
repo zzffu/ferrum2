@@ -10,16 +10,60 @@ use bytes::{Bytes, BytesMut};
 
 const MAX_DOMAIN_NAME_BYTES: usize = 255;
 
-/// A domain name whose storage is bounded before allocation.
+/// A canonical ASCII domain used by allocation-free policy matchers.
+///
+/// Canonicalization folds ASCII case and removes at most one trailing dot.
+/// The original [`DomainName`] remains available to protocol adapters.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CanonicalDomain(Box<str>);
+
+impl CanonicalDomain {
+    /// Validates and canonicalizes one non-empty ASCII domain.
+    pub fn new(value: &str) -> Result<Self, DomainNameError> {
+        match value.len() {
+            0 => return Err(DomainNameError::Empty),
+            1..=MAX_DOMAIN_NAME_BYTES if value.is_ascii() => {}
+            1..=MAX_DOMAIN_NAME_BYTES => return Err(DomainNameError::NonAscii),
+            _ => return Err(DomainNameError::TooLong),
+        }
+        let value = value.strip_suffix('.').unwrap_or(value);
+        if value.is_empty() {
+            Err(DomainNameError::Empty)
+        } else {
+            Ok(Self(value.to_ascii_lowercase().into_boxed_str()))
+        }
+    }
+
+    /// Returns the canonical lowercase domain without a trailing dot.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CanonicalDomain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CanonicalDomain([redacted])")
+    }
+}
+
+/// A domain name whose original and canonical storage is bounded before use.
 #[derive(Clone, Eq, Hash, PartialEq)]
-pub struct DomainName(Box<str>);
+pub struct DomainName {
+    original: Box<str>,
+    canonical: Option<CanonicalDomain>,
+}
 
 impl DomainName {
     /// Validates and stores a domain name.
     pub fn new(value: &str) -> Result<Self, DomainNameError> {
         match value.len() {
             0 => Err(DomainNameError::Empty),
-            1..=MAX_DOMAIN_NAME_BYTES if value.is_ascii() => Ok(Self(value.into())),
+            1..=MAX_DOMAIN_NAME_BYTES if value.is_ascii() => Ok(Self {
+                original: value.into(),
+                // A root-only name remains a valid protocol target but cannot
+                // participate in canonical policy matching.
+                canonical: CanonicalDomain::new(value).ok(),
+            }),
             1..=MAX_DOMAIN_NAME_BYTES => Err(DomainNameError::NonAscii),
             _ => Err(DomainNameError::TooLong),
         }
@@ -27,7 +71,12 @@ impl DomainName {
 
     /// Returns the validated domain name.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.original
+    }
+
+    /// Returns the canonical policy view when the name is not root-only.
+    pub fn canonical(&self) -> Option<&CanonicalDomain> {
+        self.canonical.as_ref()
     }
 }
 
@@ -106,6 +155,14 @@ impl TargetAddr {
         match &self.host {
             TargetHost::Ip(address) => TargetHostRef::Ip(*address),
             TargetHost::Domain(domain) => TargetHostRef::Domain(domain.as_str()),
+        }
+    }
+
+    /// Returns the allocation-free canonical policy view for a domain target.
+    pub fn canonical_domain(&self) -> Option<&CanonicalDomain> {
+        match &self.host {
+            TargetHost::Domain(domain) => domain.canonical(),
+            TargetHost::Ip(_) => None,
         }
     }
 
@@ -438,87 +495,26 @@ mod tests {
     }
 
     #[test]
-    fn route_table_is_ordered_conjunctive_exact_and_total() {
-        use route::{MAX_ROUTE_RULES, Network, RouteRule, RouteTable};
-
-        let domain = TargetAddr::domain("example.test", 443).expect("domain");
-        let ipv4 =
-            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 9), 443)).expect("IPv4");
-        let different_ipv4 =
-            TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 10), 443)).expect("IPv4");
-        let ipv6 = TargetAddr::ip(SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::LOCALHOST,
-            443,
-            0,
-            0,
-        )))
-        .expect("IPv6");
-        let route = RouteTable::routed(
-            vec![
-                RouteRule::new(Some(0), Some(Network::Tcp), Some(domain.clone()), 1),
-                RouteRule::new(Some(0), None, None, 2),
-                RouteRule::new(None, Some(Network::Udp), None, 3),
-                RouteRule::new(None, None, Some(ipv4.clone()), 4),
-                RouteRule::new(None, None, Some(ipv6.clone()), 5),
-            ],
-            6,
-        )
-        .expect("bounded route");
-        #[rustfmt::skip]
-        let cases = [
-            (0, Network::Tcp, domain.clone(), 1),
-            (0, Network::Tcp, TargetAddr::domain("EXAMPLE.TEST", 443).expect("case"), 1),
-            (0, Network::Udp, domain.clone(), 2),
-            (1, Network::Udp, domain.clone(), 3),
-            (1, Network::Tcp, ipv4, 4),
-            (1, Network::Tcp, different_ipv4, 6),
-            (1, Network::Tcp, ipv6, 5),
-            (1, Network::Tcp, TargetAddr::domain("example.test.", 443).expect("dot"), 6),
-            (1, Network::Tcp, TargetAddr::domain("example.test", 80).expect("port"), 6),
-        ];
-        assert!(route.is_routed());
-        for (inbound, network, target, expected) in cases {
-            assert_eq!(route.select(inbound, network, &target), expected);
-        }
-        let static_route = RouteTable::static_bindings(vec![7, 8]).expect("static route");
-        assert!(!static_route.is_routed());
-        assert_eq!(static_route.select(1, Network::Udp, &domain), 8);
-        let rendered = format!("{route:?}");
-        assert!(rendered.contains("[redacted]"));
-        assert!(!rendered.contains("example.test"));
-        assert!(!rendered.contains("192.0.2.9"));
-        #[rustfmt::skip]
-        let oversized = (0..=MAX_ROUTE_RULES).map(|_| RouteRule::new(Some(0), None, None, 0)).collect();
-        assert!(RouteTable::routed(oversized, 0).is_none());
+    fn canonical_domains_fold_ascii_case_and_one_trailing_dot() {
+        let domain = DomainName::new("ExAmPlE.Test.").expect("domain");
+        assert_eq!(domain.as_str(), "ExAmPlE.Test.");
+        assert_eq!(
+            domain.canonical().expect("canonical").as_str(),
+            "example.test"
+        );
+        assert!(DomainName::new(".").expect("root").canonical().is_none());
+        let target = TargetAddr::domain("EXAMPLE.TEST.", 443).expect("target");
+        assert_eq!(
+            target.canonical_domain().expect("canonical").as_str(),
+            "example.test"
+        );
     }
 
     #[test]
-    fn public_route_constructors_never_yield_empty_plans() {
-        use route::{EgressPlanHandle, RouteTable, compile_selector_plans};
-        use selector::{TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute};
-
-        assert_eq!(EgressPlanHandle::direct(7).snapshot_owned().hops(), &[7]);
-        assert!(RouteTable::static_bindings(Vec::new()).is_none());
-        assert_eq!(
-            RouteTable::routed(Vec::new(), 8)
-                .expect("mandatory final")
-                .final_plan_snapshot()
-                .hops(),
-            &[8]
-        );
-        let Err(error) = compile_selector_plans(
-            &[TaggedInbound::new("entry", 0)],
-            &[TaggedOutbound::new("out", 7)],
-            &[TaggedPlan::new("empty", Vec::new())],
-            &[],
-            TaggedRoute::Routed {
-                rules: Vec::new(),
-                final_outbound: Some("out"),
-            },
-        ) else {
-            panic!("empty plan was accepted")
-        };
-        assert_eq!(error, selector::SelectorCompileError::PlanHops);
+    fn public_direct_egress_handle_never_yields_an_empty_plan() {
+        let handle = route::EgressPlanHandle::direct(7);
+        assert_eq!(handle.snapshot().hops(), &[7]);
+        assert_eq!(handle.snapshot_owned().hops(), &[7]);
     }
 
     #[test]

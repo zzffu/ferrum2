@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde::de::{Deserializer, Visitor};
@@ -25,6 +26,7 @@ pub(super) struct RawClientRoot {
     pub(super) selectors: Option<Vec<RawSelector>>,
     pub(super) route: Option<RawRoute>,
     pub(super) dns: Option<RawDns>,
+    pub(super) rule_set_loader: Option<RawRuleSetLoader>,
     pub(super) tun: Option<RawTun>,
     pub(super) shadowsocks: Option<RawShadowsocks>,
     #[serde(default)]
@@ -46,6 +48,7 @@ pub(super) struct RawServerRoot {
     pub(super) selectors: Option<Vec<RawSelector>>,
     pub(super) route: Option<RawRoute>,
     pub(super) dns: Option<RawDns>,
+    pub(super) rule_set_loader: Option<RawRuleSetLoader>,
     pub(super) tun: Option<RawTun>,
     pub(super) shadowsocks: RawShadowsocks,
     #[serde(default)]
@@ -145,6 +148,8 @@ pub(super) struct RawClientOutbound {
     pub(super) server: Option<String>,
     pub(super) method: Option<String>,
     pub(super) psk: Option<SecretString>,
+    pub(super) domain_resolver: Option<String>,
+    pub(super) domain_strategy: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -185,6 +190,29 @@ pub(super) struct RawRoute {
     pub(super) sniff: Option<RawRouteSniff>,
     #[serde(default)]
     pub(super) rules: Vec<RawRouteRule>,
+    #[serde(default)]
+    pub(super) rule_set: Vec<RawRuleSet>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawRuleSet {
+    pub(super) tag: Option<String>,
+    #[serde(rename = "type")]
+    pub(super) rule_set_type: Option<String>,
+    pub(super) format: Option<String>,
+    pub(super) url: Option<String>,
+    pub(super) download_resolver: Option<String>,
+    pub(super) download_detour: Option<String>,
+    pub(super) update_interval_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawRuleSetLoader {
+    pub(super) cache_dir: Option<PathBuf>,
+    pub(super) download_timeout_ms: Option<u64>,
+    pub(super) max_redirects: Option<u8>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -196,6 +224,8 @@ pub(super) struct RawRouteRule {
     pub(super) protocol: Option<ScalarOrList<String>>,
     pub(super) domain: Option<ScalarOrList<String>>,
     pub(super) domain_suffix: Option<ScalarOrList<String>>,
+    pub(super) domain_keyword: Option<ScalarOrList<String>>,
+    pub(super) rule_set: Option<ScalarOrList<String>>,
     pub(super) ip: Option<ScalarOrList<String>>,
     pub(super) ip_cidr: Option<ScalarOrList<String>>,
     pub(super) port: Option<ScalarOrList<i64>>,
@@ -222,9 +252,20 @@ pub(super) struct RawDns {
     pub(super) timeout_ms: u64,
     #[serde(default = "default_dns_max_inflight")]
     pub(super) max_inflight: u32,
+    pub(super) strategy: Option<String>,
+    pub(super) cache: Option<RawDnsCache>,
     pub(super) inbounds: Option<Vec<RawDnsInbound>>,
     pub(super) servers: Option<Vec<RawDnsServer>>,
     pub(super) route: Option<RawDnsRoute>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawDnsCache {
+    #[serde(default = "default_dns_cache_enabled")]
+    pub(super) enabled: bool,
+    #[serde(default = "default_dns_cache_max_entries")]
+    pub(super) max_entries: usize,
 }
 
 #[derive(Clone, Deserialize)]
@@ -243,6 +284,8 @@ pub(super) struct RawDnsServer {
     pub(super) server_name: Option<String>,
     pub(super) path: Option<String>,
     pub(super) detour: Option<String>,
+    pub(super) domain_resolver: Option<String>,
+    pub(super) domain_strategy: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -265,10 +308,14 @@ pub(super) struct RawDnsRouteRule {
     pub(super) qtype: Option<ScalarOrList<String>>,
     pub(super) domain: Option<ScalarOrList<String>>,
     pub(super) domain_suffix: Option<ScalarOrList<String>>,
+    pub(super) domain_keyword: Option<ScalarOrList<String>>,
+    pub(super) rule_set: Option<ScalarOrList<String>>,
     pub(super) port: Option<ScalarOrList<i64>>,
     pub(super) port_range: Option<ScalarOrList<String>>,
     pub(super) server: Option<String>,
     pub(super) outbound: Option<String>,
+    pub(super) action: Option<String>,
+    pub(super) strategy: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -476,6 +523,14 @@ const fn default_dns_timeout_ms() -> u64 {
 
 const fn default_dns_max_inflight() -> u32 {
     DEFAULT_DNS_MAX_INFLIGHT
+}
+
+const fn default_dns_cache_enabled() -> bool {
+    true
+}
+
+const fn default_dns_cache_max_entries() -> usize {
+    8_192
 }
 
 const fn default_route_sniff_timeout_ms() -> u64 {

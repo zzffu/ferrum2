@@ -2,17 +2,19 @@ use std::error::Error;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ferrum2_config::{
-    ConfigErrorKind, ConfigField, DnsIngressId, DnsQueryType, DnsTransport, LoggingLevel,
-    MAX_CONFIG_BYTES, RouteAction, RouteProtocol, RuntimeConfig, SchemaVersion, Sniffers,
-    load_client, load_server,
+    ClientOutboundConfig, ConfigErrorKind, ConfigField, DnsIngressId, DnsQueryType, DnsStrategy,
+    DnsTransport, LoggingLevel, MAX_CONFIG_BYTES, RouteAction, RouteProtocol, RuntimeConfig,
+    SchemaVersion, Sniffers, load_client, load_server,
 };
 use ferrum2_core::TargetAddr;
-use ferrum2_core::route::{Network, RouteMetadata, RouteProgramAction, RouteTable};
+use ferrum2_core::route::Network;
 use ferrum2_crypto::TcpMethodProfile;
+use ferrum2_rule::{RouteMetadata, RouteProgramAction, RouteTable};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -400,6 +402,14 @@ fn tagged_graph_normalizes_complete_resolved_collections() {
         let config = load_client(TempConfig::text(&source).path()).expect(method);
         assert_eq!(config.inbounds.len(), 2, "{method}");
         assert_eq!(config.outbounds.len(), 2, "{method}");
+        let [
+            ClientOutboundConfig::Shadowsocks { psk: first, .. },
+            ClientOutboundConfig::Shadowsocks { psk: second, .. },
+        ] = config.outbounds.as_slice()
+        else {
+            panic!("global credentials did not produce two Shadowsocks outbounds");
+        };
+        assert!(Arc::ptr_eq(first, second), "{method}");
         assert_eq!(selected(&config.route, 1), 1, "{method}");
         let source = tagged_server(2, 2)
             .replacen("2022-blake3-aes-128-gcm", method, 1)
@@ -912,13 +922,13 @@ action = "reject""#;
         )))
     ));
 
-    let bounded_rules = "[[route.rules]]\nnetwork = \"tcp\"\naction = \"reject\"\n".repeat(64);
+    let bounded_rules = "[[route.rules]]\nnetwork = \"tcp\"\naction = \"reject\"\n".repeat(65);
     let bounded = routed(
         tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
         &format!("[route]\nfinal = \"o0\"\n{bounded_rules}"),
     );
-    load_server(TempConfig::text(&bounded).path()).expect("64 schema v2 rules");
-    let values = (0..64)
+    load_server(TempConfig::text(&bounded).path()).expect("more than 64 schema v2 rules");
+    let values = (0..65)
         .map(|index| format!("\"v{index}.example\""))
         .collect::<Vec<_>>()
         .join(", ");
@@ -928,7 +938,7 @@ action = "reject""#;
             "[route]\nfinal = \"o0\"\n[[route.rules]]\ndomain = [{values}]\naction = \"reject\""
         ),
     );
-    load_server(TempConfig::text(&bounded_values).path()).expect("64 matcher values");
+    load_server(TempConfig::text(&bounded_values).path()).expect("more than 64 matcher values");
 }
 
 #[test]
@@ -945,11 +955,6 @@ fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
             &format!("[route]\nfinal = \"o0\"\n{rules}"),
         )
     };
-    let values = (0..65)
-        .map(|index| format!("\"v{index}.example\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let too_many_rules = "[[route.rules]]\nnetwork = \"tcp\"\naction = \"reject\"\n".repeat(65);
     let migration = routed(
         tagged_client(1, 1),
         "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"udp\"\naction = \"reject\"",
@@ -960,8 +965,6 @@ fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
         ("v1 rejects M14 protocol", ConfigRole::Client, routed(tagged_client(1, 1), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\noutbound = \"o0\""), ConfigField::RouteRulesProtocol),
         ("v2 dangling final", ConfigRole::Client, client("").replacen("final = \"o0\"", "final = \"missing\"", 1), ConfigField::RouteFinal),
         ("v2 dangling rule action", ConfigRole::Client, client("[[route.rules]]\nnetwork = \"tcp\"\naction = \"route\"\noutbound = \"missing\""), ConfigField::RouteRulesOutbound),
-        ("65 rules", ConfigRole::Server, server(&too_many_rules), ConfigField::RouteRules),
-        ("65 matcher values", ConfigRole::Server, server(&format!("[[route.rules]]\ndomain = [{values}]\naction = \"reject\"")), ConfigField::RouteRules),
         ("empty matcher list", ConfigRole::Server, server("[[route.rules]]\nip = []\naction = \"reject\""), ConfigField::RouteRulesIp),
         ("duplicate normalized domain", ConfigRole::Server, server("[[route.rules]]\ndomain = [\"Example.COM.\", \"example.com\"]\naction = \"reject\""), ConfigField::RouteRulesDomain),
         ("normalized empty domain", ConfigRole::Server, server("[[route.rules]]\ndomain = \".\"\naction = \"reject\""), ConfigField::RouteRulesDomain),
@@ -1105,6 +1108,9 @@ server = "tls""#;
         with_dns(with_selectors(tagged_client(1, 3), graph), dns) + "\n[udp]\nenabled = false\n";
     let config = load_client(TempConfig::text(&source).path()).expect("client DNS graph");
     let dns = config.dns.as_ref().expect("validated DNS");
+    assert_eq!(dns.runtime.strategy(), DnsStrategy::PreferIpv4);
+    assert!(dns.runtime.cache().enabled);
+    assert_eq!(dns.runtime.cache().max_entries, 8_192);
     assert_eq!(
         (
             dns.timeout,
@@ -1448,6 +1454,14 @@ fn schema_v2_dns_rejects_role_mixing_closed_values_and_bounds() {
         .map(|index| format!("\"q{index}.example\""))
         .collect::<Vec<_>>()
         .join(", ");
+    load_client(
+        TempConfig::text(&client(
+            &format!("[[dns.route.rules]]\nqname = [{values}]\nserver = \"s0\""),
+            2,
+        ))
+        .path(),
+    )
+    .expect("more than 64 DNS matcher values");
     #[rustfmt::skip]
     let cases = vec![
         ("v1 rejects client qname", ConfigRole::Client, client("[[dns.route.rules]]\nqname = \"example.test\"\nserver = \"s0\"", 1), ConfigField::DnsRouteRulesQname),
@@ -1460,7 +1474,6 @@ fn schema_v2_dns_rejects_role_mixing_closed_values_and_bounds() {
         ("case-insensitive duplicate qtype", ConfigRole::Client, client("[[dns.route.rules]]\nqtype = [\"a\", \"A\"]\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQtype),
         ("duplicate normalized qname suffix", ConfigRole::Client, client("[[dns.route.rules]]\nqname_suffix = [\"Example.COM.\", \"example.com\"]\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQnameSuffix),
         ("normalized empty qname", ConfigRole::Client, client("[[dns.route.rules]]\nqname = \".\"\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQname),
-        ("65 DNS matcher values", ConfigRole::Client, client(&format!("[[dns.route.rules]]\nqname = [{values}]\nserver = \"s0\""), 2), ConfigField::DnsRouteRules),
         ("client legacy target mixing", ConfigRole::Client, client("[[dns.route.rules]]\ntarget = { host = \"example.test\", port = 53 }\nqname = \"example.test\"\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesTarget),
         ("server legacy target mixing", ConfigRole::Server, server("[[dns.route.rules]]\ntarget = { host = \"example.test\", port = 443 }\nport = 443\nserver = \"s0\""), ConfigField::DnsRouteRulesTarget),
         ("server reversed port range", ConfigRole::Server, server("[[dns.route.rules]]\nport_range = \"54:53\"\nserver = \"s0\""), ConfigField::DnsRouteRulesPortRange),
@@ -1506,6 +1519,13 @@ final = "s0""#;
         .map(|index| format!("[[dns.servers]]\ntag = \"s{index}\"\ntransport = \"udp\"\naddress = \"192.0.2.53:{}\"\n", 1_000 + index))
         .collect::<String>();
     let many_rules = "[[dns.route.rules]]\nnetwork = \"tcp\"\nserver = \"s0\"\n".repeat(65);
+    load_client(
+        TempConfig::text(
+            &client().replace("final = \"s0\"", &format!("final = \"s0\"\n{many_rules}")),
+        )
+        .path(),
+    )
+    .expect("more than 64 DNS rules");
     let doh_client = |server_name: &str, path: &str| {
         client()
             .replace("transport = \"udp\"", "transport = \"doh\"")
@@ -1558,7 +1578,6 @@ final = "s0""#;
         ("DoH fragment path", doh_client("resolver.example", "/dns-query#sentinel"), ConfigField::DnsServersPath, ConfigRole::Client),
         ("malformed TLS identity", doh_client("-invalid.example", "/dns-query"), ConfigField::DnsServersServerName, ConfigRole::Client),
         ("missing route", client().replace("[dns.route]\nfinal = \"s0\"", ""), ConfigField::DnsRoute, ConfigRole::Client),
-        ("65 DNS rules", client().replace("final = \"s0\"", &format!("final = \"s0\"\n{many_rules}")), ConfigField::DnsRouteRules, ConfigRole::Client),
         ("unknown final", client().replace("final = \"s0\"", "final = \"missing\""), ConfigField::DnsRouteFinal, ConfigRole::Client),
         ("unreachable server", with_dns(CLIENT_BASE.to_owned(), &two_servers), ConfigField::DnsRouteRulesServer, ConfigRole::Client),
         ("unknown route inbound", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\ninbound = \"missing\"\nserver = \"s0\""), ConfigField::DnsRouteRulesInbound, ConfigRole::Client),
@@ -1643,12 +1662,29 @@ final = "s0""#;
                 "address = \"192.0.2.53:53\"\ndetour = \"manual\"",
             ),
     );
-    assert_tagged_error(
-        "server selector detour",
-        ConfigRole::Server,
-        server_selector,
-        (ConfigErrorKind::Semantic, ConfigField::DnsServersDetour),
-        292,
+    let server_selector =
+        load_server(TempConfig::text(&server_selector).path()).expect("server DNS selector detour");
+    assert_eq!(
+        server_selector.dns.as_ref().unwrap().servers[0]
+            .detour
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .hops(),
+        &[0]
+    );
+    server_selector
+        .selector_control()
+        .switch("manual", "o1")
+        .unwrap();
+    assert_eq!(
+        server_selector.dns.as_ref().unwrap().servers[0]
+            .detour
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .hops(),
+        &[1]
     );
 
     let inbounds_64 = (0..64)
@@ -1713,13 +1749,14 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
     }
 
     let too_many = "[[route.rules]]\ninbound = \"i0\"\noutbound = \"o1\"\n".repeat(65);
-    assert_tagged_error(
-        "65 rules",
-        ConfigRole::Client,
-        routed(base, &format!("[route]\nfinal = \"o0\"\n{too_many}")),
-        (ConfigErrorKind::Semantic, ConfigField::RouteRules),
-        80,
-    );
+    load_client(
+        TempConfig::text(&routed(
+            base,
+            &format!("[route]\nfinal = \"o0\"\n{too_many}"),
+        ))
+        .path(),
+    )
+    .expect("more than 64 client route rules");
     let server_base = tagged_server(1, 2);
     let server_routed = |route| routed(server_base.clone(), route);
     #[rustfmt::skip]
@@ -1727,13 +1764,20 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
         ("server static mixing", format!("{server_base}[route]\nfinal = \"o0\"\n"), ConfigField::Route),
         ("server legacy mixing", format!("{SERVER_BASE}[route]\nfinal = \"o0\"\n"), ConfigField::Route),
         ("server partial static binding", server_base.replacen("outbound = \"o0\"\n", "", 1), ConfigField::InboundsOutbound),
-        ("server 65 rules", server_routed(&format!("[route]\nfinal = \"o0\"\n{}", "[[route.rules]]\ninbound = \"i0\"\noutbound = \"o1\"\n".repeat(65))), ConfigField::RouteRules),
         ("server wrong inbound namespace", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"o0\"\noutbound = \"o1\""), ConfigField::RouteRulesInbound),
         ("server wrong outbound namespace", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"i0\""), ConfigField::RouteRulesOutbound),
         ("server wrong final namespace", server_routed("[route]\nfinal = \"i0\""), ConfigField::RouteFinal),
         ("server invalid target", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\", port = 0 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
         ("server unreferenced outbound", server_routed("[route]\nfinal = \"o0\""), ConfigField::RouteRulesOutbound),
     ];
+    load_server(
+        TempConfig::text(&server_routed(&format!(
+            "[route]\nfinal = \"o0\"\n{}",
+            "[[route.rules]]\ninbound = \"i0\"\noutbound = \"o1\"\n".repeat(65)
+        )))
+        .path(),
+    )
+    .expect("more than 64 server route rules");
     for (index, (name, source, field)) in server_cases.into_iter().enumerate() {
         assert_tagged_error(
             name,

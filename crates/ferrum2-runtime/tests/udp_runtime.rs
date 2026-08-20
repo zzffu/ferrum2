@@ -600,6 +600,26 @@ impl UdpResolver for ScriptedResolver {
 }
 
 #[derive(Clone)]
+struct FailingOnCallResolver {
+    candidates: Vec<SocketAddr>,
+    fail_on_call: usize,
+    calls: Arc<AtomicUsize>,
+}
+
+impl UdpResolver for FailingOnCallResolver {
+    type Candidates = Vec<SocketAddr>;
+
+    async fn resolve(&self, _host: &str, _port: u16) -> io::Result<Self::Candidates> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == self.fail_on_call {
+            Err(io::Error::other("injected configured resolver failure"))
+        } else {
+            Ok(self.candidates.clone())
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ScriptedSocket {
     send_delay: Duration,
     send_failures: Arc<Mutex<VecDeque<bool>>>,
@@ -928,18 +948,25 @@ async fn domain_resolution_and_candidate_sends_share_one_absolute_deadline() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn association_dns_cache_reuses_results_and_expires_conservatively() {
+async fn association_resolves_every_datagram_reuses_hint_and_never_falls_back() {
     let registry = OwnerRegistry::new();
     let resolver_calls = Arc::new(AtomicUsize::new(0));
-    let resolver = ScriptedResolver {
-        delay: Duration::ZERO,
-        candidates: vec![SocketAddr::from(([192, 0, 2, 1], 53))],
+    let first = SocketAddr::from(([192, 0, 2, 1], 53));
+    let second = SocketAddr::from(([192, 0, 2, 2], 53));
+    let resolver = FailingOnCallResolver {
+        candidates: vec![first, second],
+        fail_on_call: 3,
         calls: Arc::clone(&resolver_calls),
     };
-    let (socket, sends) = socket_fixture(Duration::ZERO, []);
-    let send_completed = Arc::clone(&socket.send_completed);
-    let (mut runtime, _) =
-        recording_runtime(&registry, resolver, socket, Duration::from_secs(10), false);
+    let (socket, sends) = socket_fixture(Duration::ZERO, [true, false, false]);
+    let mut runtime = DirectUdpRuntime::with_adapters(
+        limits(1),
+        Duration::from_secs(10),
+        resolver,
+        scripted_factory(socket),
+        RecordingHandler::default(),
+        registry.clone(),
+    );
     let now = Instant::now();
     let admission = runtime
         .reserve_session(now, 7)
@@ -948,36 +975,44 @@ async fn association_dns_cache_reuses_results_and_expires_conservatively() {
     let handle = runtime
         .commit_session(admission, domain_datagram(b"first__"), now)
         .expect("commit first datagram");
-    send_completed.notified().await;
+    for _ in 0..200 {
+        if sends.lock().expect("send lock").len() >= 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(&sends.lock().expect("send lock")[..], &[first, second]);
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
 
     runtime
         .reserve_datagram(handle, 7)
         .expect("second capacity")
         .commit(domain_datagram(b"second_"), Instant::now())
         .expect("commit second datagram");
-    send_completed.notified().await;
-    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(sends.lock().expect("send lock").len(), 2);
-
-    tokio::time::advance(Duration::from_secs(29)).await;
-    runtime
-        .reserve_datagram(handle, 7)
-        .expect("third capacity")
-        .commit(domain_datagram(b"third__"), Instant::now())
-        .expect("commit third datagram");
-    send_completed.notified().await;
-    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(sends.lock().expect("send lock").len(), 3);
-
-    tokio::time::advance(Duration::from_secs(1)).await;
-    runtime
-        .reserve_datagram(handle, 7)
-        .expect("fourth capacity")
-        .commit(domain_datagram(b"fourth_"), Instant::now())
-        .expect("commit fourth datagram");
-    send_completed.notified().await;
+    for _ in 0..200 {
+        if sends.lock().expect("send lock").len() >= 3 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        &sends.lock().expect("send lock")[..],
+        &[first, second, second]
+    );
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(sends.lock().expect("send lock").len(), 4);
+
+    runtime
+        .reserve_datagram(handle, 7)
+        .expect("failure capacity")
+        .commit(domain_datagram(b"failure"), Instant::now())
+        .expect("commit resolver failure datagram");
+    wait_for_zero_udp_owners(&registry).await;
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        &sends.lock().expect("send lock")[..],
+        &[first, second, second],
+        "configured resolver failure must not trigger another resolver or socket fallback"
+    );
 
     runtime.shutdown(Duration::ZERO).await;
     wait_for_zero_udp_owners(&registry).await;

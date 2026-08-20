@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::thread::JoinHandle as ThreadJoinHandle;
 use std::time::Duration;
 
+use ferrum2_core::CanonicalDomain;
 use hickory_proto::op::Message;
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::lookup::Lookup;
@@ -19,6 +20,7 @@ use crate::resolver::{self, DnsUpstreamSpec, SelectedServer};
 use crate::runtime_provider::{
     DnsEgress, FerrumRuntimeProvider, QueryGuard, RuntimeCounters, SystemDnsEgress, TaskSet,
 };
+use crate::{DnsAddressRecords, DnsCacheQtype, FixedEndpointLookup};
 
 /// Current bounded DNS owner counts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -273,6 +275,131 @@ impl TaggedResolver {
                 .map_err(|_| DnsError::Timeout)?
                 .map_err(|_| DnsError::Shutdown)?;
             response.await.map_err(|_| DnsError::Shutdown)?
+        }
+    }
+
+    /// Resolves one canonical application or bootstrap domain through the
+    /// selected tagged server without exposing Hickory name construction to
+    /// composition crates.
+    pub fn lookup_canonical_ips(
+        &self,
+        server: usize,
+        domain: CanonicalDomain,
+    ) -> impl std::future::Future<Output = Result<Vec<IpAddr>, DnsError>> + Send + 'static {
+        let parsed: Result<Name, DnsError> = domain
+            .as_str()
+            .parse()
+            .map_err(|_| DnsError::Protocol)
+            .map(|mut name: Name| {
+                name.set_fqdn(true);
+                name
+            });
+        let lookup = parsed.map(|name| self.lookup_ips(server, name));
+        async move {
+            match lookup {
+                Ok(lookup) => lookup.await,
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    /// Resolves one fixed-endpoint family and preserves the upstream TTL for
+    /// the shared materialization cache.
+    pub fn lookup_fixed_endpoint(
+        &self,
+        server: usize,
+        domain: CanonicalDomain,
+        qtype: DnsCacheQtype,
+    ) -> impl std::future::Future<Output = Result<FixedEndpointLookup, DnsError>> + Send + 'static
+    {
+        let parsed: Result<Name, DnsError> = domain
+            .as_str()
+            .parse()
+            .map_err(|_| DnsError::Protocol)
+            .map(|mut name: Name| {
+                name.set_fqdn(true);
+                name
+            });
+        let lookup = parsed.map(|name| {
+            self.lookup(
+                server,
+                name,
+                match qtype {
+                    DnsCacheQtype::A => RecordType::A,
+                    DnsCacheQtype::Aaaa => RecordType::AAAA,
+                },
+            )
+        });
+        async move {
+            let lookup = match lookup {
+                Ok(lookup) => match lookup.await {
+                    Ok(lookup) => lookup,
+                    Err(DnsError::NxDomain | DnsError::NoData) => {
+                        return Ok(FixedEndpointLookup::negative(Duration::ZERO));
+                    }
+                    Err(error) => return Err(error),
+                },
+                Err(error) => return Err(error),
+            };
+            let ttl = lookup
+                .valid_until()
+                .saturating_duration_since(std::time::Instant::now());
+            match qtype {
+                DnsCacheQtype::A => {
+                    let mut addresses = Vec::new();
+                    for address in lookup
+                        .answers()
+                        .iter()
+                        .filter_map(|record| record.data.ip_addr())
+                        .filter_map(|address| match address {
+                            IpAddr::V4(address) => Some(address),
+                            IpAddr::V6(_) => None,
+                        })
+                    {
+                        if !addresses.contains(&address) {
+                            addresses.push(address);
+                            if addresses.len() == crate::MAX_APPLICATION_RESOLVED_CANDIDATES {
+                                break;
+                            }
+                        }
+                    }
+                    if addresses.is_empty() {
+                        Ok(FixedEndpointLookup::negative(Duration::ZERO))
+                    } else {
+                        Ok(FixedEndpointLookup::positive(
+                            DnsAddressRecords::A(addresses.into()),
+                            ttl,
+                        ))
+                    }
+                }
+                DnsCacheQtype::Aaaa => {
+                    let mut addresses = Vec::new();
+                    for address in lookup
+                        .answers()
+                        .iter()
+                        .filter_map(|record| record.data.ip_addr())
+                        .filter_map(|address| match address {
+                            IpAddr::V4(_) => None,
+                            IpAddr::V6(address) => Some(address),
+                        })
+                    {
+                        if !addresses.contains(&address) {
+                            addresses.push(address);
+                            if addresses.len() == crate::MAX_APPLICATION_RESOLVED_CANDIDATES {
+                                break;
+                            }
+                        }
+                    }
+                    if addresses.is_empty() {
+                        Ok(FixedEndpointLookup::negative(Duration::ZERO))
+                    } else {
+                        Ok(FixedEndpointLookup::positive(
+                            DnsAddressRecords::Aaaa(addresses.into()),
+                            ttl,
+                        ))
+                    }
+                }
+            }
         }
     }
 

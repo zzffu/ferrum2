@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 #[cfg(test)]
 use std::net::SocketAddrV4;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -14,8 +14,10 @@ use ferrum2_config::{DnsQueryType, DnsServerConfig, DnsTransport};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::EgressPlanSnapshot;
 use ferrum2_dns::{
+    ApplicationResolveBackend, ApplicationResolveFuture, ApplicationResolveRequest,
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
-    DnsEgressTaskKind, DnsIoFuture, DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport,
+    DnsEgressTaskKind, DnsError, DnsIoFuture, DnsProxy, DnsTaskRegistrar, DnsUpstreamSpec,
+    DnsUpstreamTransport,
 };
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 #[cfg(test)]
@@ -30,6 +32,31 @@ type ReserveFuture = Pin<
     Box<dyn Future<Output = Result<mpsc::OwnedPermit<Packet>, mpsc::error::SendError<()>>> + Send>,
 >;
 type DnsUdpPool = Arc<Mutex<Vec<IdleDnsUdp>>>;
+
+/// Configured application resolver backend bound to the one prepared client
+/// DNS proxy graph. Absence or shutdown is terminal and never reaches system
+/// DNS.
+pub(super) struct ClientConfiguredApplicationBackend {
+    proxy: Arc<OnceLock<Arc<DnsProxy>>>,
+}
+
+impl ClientConfiguredApplicationBackend {
+    pub(super) fn new(proxy: Arc<OnceLock<Arc<DnsProxy>>>) -> Self {
+        Self { proxy }
+    }
+}
+
+impl ApplicationResolveBackend for ClientConfiguredApplicationBackend {
+    fn resolve<'a>(
+        &'a self,
+        request: ApplicationResolveRequest<'a>,
+    ) -> ApplicationResolveFuture<'a> {
+        Box::pin(async move {
+            let proxy = self.proxy.get().ok_or(DnsError::Runtime)?;
+            proxy.resolve_application(request).await
+        })
+    }
+}
 
 pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamSpec> {
     servers
@@ -372,18 +399,24 @@ mod tests {
 
     use tokio::io::AsyncReadExt as _;
 
-    use ferrum2_core::route::{EgressPlanHandle, Network, compile_selector_plans};
-    use ferrum2_core::selector::{
-        SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute,
-        TaggedStaticBinding,
+    use ferrum2_config::{
+        ClientV2Resources, CompiledRuleSetResource, finish_client_v2, prepare_client_v2,
     };
+    use ferrum2_core::CanonicalDomain;
+    use ferrum2_core::route::{EgressPlanHandle, Network};
     use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
+    use ferrum2_dns::{ResolverGeneration, TaggedResolver};
+    use ferrum2_rule::{
+        MatchSetBuilder, SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan,
+        TaggedRoute, TaggedStaticBinding, compile_selector_plans,
+    };
     use ferrum2_shadowsocks::{MethodKeyAdapter, UdpPacketScratch, UdpServer};
 
     use crate::run::egress::{UdpIoFaultPlan, UdpIoOperation};
     use crate::run::test_support::*;
     use crate::run::{
-        dns_egress, run_with_registry_and_metrics, run_with_registry_and_metrics_inner,
+        ClientRunResources, dns_egress, run_with_registry_and_metrics,
+        run_with_registry_and_metrics_inner,
     };
 
     #[test]
@@ -509,6 +542,270 @@ mod tests {
         }
     }
 
+    async fn answer_policy_a(socket: &UdpSocket, expected: &str, address: Ipv4Addr) {
+        let mut wire = [0_u8; 4096];
+        let (length, peer) = socket.recv_from(&mut wire).await.expect("DNS query");
+        let request = Message::from_vec(&wire[..length]).expect("DNS query decode");
+        let [query] = request.queries.as_slice() else {
+            panic!("one DNS question");
+        };
+        assert_eq!(query.name().to_ascii(), expected);
+        assert_eq!(query.query_type(), RecordType::A);
+        let mut response = Message::response(request.id, OpCode::Query);
+        response.metadata.recursion_available = true;
+        response.add_query(query.clone());
+        response.add_answer(Record::from_rdata(
+            query.name().clone(),
+            60,
+            RData::A(A(address)),
+        ));
+        socket
+            .send_to(&response.to_vec().expect("DNS response encode"), peer)
+            .await
+            .expect("DNS response send");
+    }
+
+    async fn assert_no_policy_udp(socket: &UdpSocket, message: &str) {
+        let mut wire = [0_u8; 4096];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), socket.recv_from(&mut wire))
+                .await
+                .is_err(),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialized_client_policy_is_shared_by_wire_application_and_cache() {
+        let socks = reserve_address();
+        let dns_listen = reserve_address();
+        let local = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("local DNS upstream");
+        let fallback = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("fallback DNS upstream");
+        let mut source = format!(
+            r#"schema_version = 2
+
+[[inbounds]]
+tag = "proxy"
+listen = "{socks}"
+
+[[outbounds]]
+tag = "direct"
+type = "direct"
+
+[route]
+final = "direct"
+
+[[route.rule_set]]
+tag = "ads"
+type = "remote"
+url = "https://rules.example.invalid/ads.srs"
+download_resolver = "system"
+
+[[route.rule_set]]
+tag = "cnip"
+type = "remote"
+url = "https://rules.example.invalid/cnip.srs"
+download_resolver = "system"
+
+[dns]
+timeout_ms = 200
+max_inflight = 8
+strategy = "ipv4_only"
+
+[dns.cache]
+enabled = true
+max_entries = 16
+
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "{dns_listen}"
+
+[[dns.servers]]
+tag = "local"
+transport = "udp"
+address = "{}"
+
+[[dns.servers]]
+tag = "fallback"
+transport = "udp"
+address = "{}"
+
+[dns.route]
+final = "fallback"
+
+[[dns.route.rules]]
+inbound = "dns-in"
+rule_set = "ads"
+action = "reject"
+
+[[dns.route.rules]]
+inbound = "proxy"
+network = ["tcp", "udp"]
+rule_set = "cnip"
+action = "route"
+server = "local"
+strategy = "ipv4_only"
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"#,
+            local.local_addr().unwrap(),
+            fallback.local_addr().unwrap(),
+        );
+        for index in 0..63 {
+            source.push_str(&format!(
+                "\n[[dns.route.rules]]\nqname = [\"unused-{index}.indexed.invalid\"]\naction = \"reject\"\n"
+            ));
+        }
+        let path = std::env::temp_dir().join(format!(
+            "ferrum2-client-policy-composition-{}-{}.toml",
+            std::process::id(),
+            socks.port()
+        ));
+        std::fs::write(&path, source).expect("write V2 client config");
+        let prepared = prepare_client_v2(&path).expect("prepare V2 client config");
+        let mut ads = MatchSetBuilder::new();
+        ads.add_exact_domain("ads.example").unwrap();
+        let mut cnip = MatchSetBuilder::new();
+        cnip.add_ip("203.0.113.7".parse().unwrap()).unwrap();
+        let mut config = finish_client_v2(
+            prepared,
+            ClientV2Resources::new(
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    CompiledRuleSetResource::new(0, Arc::new(ads.build().unwrap()), 23),
+                    CompiledRuleSetResource::new(1, Arc::new(cnip.build().unwrap()), 23),
+                ],
+            ),
+        )
+        .expect("finish V2 client config");
+        let _ = std::fs::remove_file(path);
+        let metrics = Arc::new(Metrics::new());
+        crate::run::publish_rule_program_metadata(&config, &metrics);
+        let dns = config.dns.take().expect("materialized DNS graph");
+        let runtime = crate::run::ClientDnsProxyRuntime::try_new(
+            config.dns_route.as_mut(),
+            dns.runtime,
+            None,
+            &metrics,
+        )
+        .expect("client proxy runtime");
+        assert_eq!(runtime.generation, ResolverGeneration::new(23));
+        assert_eq!(runtime.policy.as_ref().unwrap().listener_count, 1);
+        assert_eq!(runtime.policy.as_ref().unwrap().ordinary_count, 1);
+        assert_eq!(runtime.cache.as_ref().unwrap().capacity().unwrap(), 16);
+        let (resolver, mut owner) = TaggedResolver::new(
+            dns_runtime_specs(&dns.servers),
+            dns.timeout,
+            dns.max_inflight,
+            Arc::new(ferrum2_dns::SystemDnsEgress),
+        )
+        .expect("tagged DNS resolver");
+        owner.ready().await.expect("tagged DNS ready");
+        let proxy = Arc::new(runtime.bind(DnsProxy::new(Arc::new(resolver), |_, _, _, _| Some(1))));
+
+        let name: Name = "ads.example.".parse().unwrap();
+        let mut request = Message::new(91, MessageType::Query, OpCode::Query);
+        request.add_query(Query::query(name, RecordType::A));
+        let response = proxy
+            .answer(
+                ferrum2_dns::ProxyIngress::Listener(0),
+                ferrum2_dns::ProxyTransport::Udp,
+                &request.to_vec().unwrap(),
+            )
+            .await
+            .expect("wire reject response");
+        let response = Message::from_vec(&response).unwrap();
+        assert_eq!(response.metadata.id, 91);
+        assert_eq!(response.metadata.response_code, ResponseCode::Refused);
+        assert_no_policy_udp(&local, "wire reject reached local upstream").await;
+        assert_no_policy_udp(&fallback, "wire reject reached fallback upstream").await;
+
+        let domain = CanonicalDomain::new("hit.example").unwrap();
+        let tcp_request = ferrum2_dns::ApplicationResolveRequest::new(
+            ferrum2_dns::ApplicationResolveContext::new(0, Network::Tcp),
+            &domain,
+            std::num::NonZeroU16::new(443).unwrap(),
+            crate::run::dns_strategy(dns.runtime.strategy()),
+        );
+        let hit = proxy.resolve_application(tcp_request);
+        let response = answer_policy_a(&local, "hit.example.", Ipv4Addr::new(203, 0, 113, 7));
+        let (hit, ()) = tokio::join!(hit, response);
+        assert_eq!(
+            hit.unwrap(),
+            [SocketAddr::from((Ipv4Addr::new(203, 0, 113, 7), 443))]
+        );
+        let udp_request = ferrum2_dns::ApplicationResolveRequest::new(
+            ferrum2_dns::ApplicationResolveContext::new(0, Network::Udp),
+            &domain,
+            std::num::NonZeroU16::new(443).unwrap(),
+            crate::run::dns_strategy(dns.runtime.strategy()),
+        );
+        assert_eq!(
+            proxy.resolve_application(udp_request).await.unwrap(),
+            [SocketAddr::from((Ipv4Addr::new(203, 0, 113, 7), 443))]
+        );
+        assert_no_policy_udp(&local, "TCP/UDP shared cache missed").await;
+
+        let miss_domain = CanonicalDomain::new("miss.example").unwrap();
+        let miss_request = ferrum2_dns::ApplicationResolveRequest::new(
+            ferrum2_dns::ApplicationResolveContext::new(0, Network::Tcp),
+            &miss_domain,
+            std::num::NonZeroU16::new(443).unwrap(),
+            crate::run::dns_strategy(dns.runtime.strategy()),
+        );
+        let miss = proxy.resolve_application(miss_request);
+        let responses = async {
+            answer_policy_a(&local, "miss.example.", Ipv4Addr::new(198, 51, 100, 9)).await;
+            answer_policy_a(&fallback, "miss.example.", Ipv4Addr::new(192, 0, 2, 9)).await;
+        };
+        let (miss, ()) = tokio::join!(miss, responses);
+        assert_eq!(
+            miss.unwrap(),
+            [SocketAddr::from((Ipv4Addr::new(192, 0, 2, 9), 443))]
+        );
+        let encoded = metrics.encode_text().expect("DNS policy metrics");
+        for expected in [
+            "ferrum2_rule_program_mode{program=\"dns_query\",mode=\"indexed\"} 1",
+            "ferrum2_rule_program_mode{program=\"dns_response\",mode=\"indexed\"} 1",
+            "ferrum2_rule_program_rules{program=\"dns_query\"} 65",
+            "ferrum2_rule_program_rules{program=\"dns_response\"} 1",
+            "ferrum2_dns_rule_query_match_total{source=\"rule_set\",type=\"domain\",result=\"matched\"} 1",
+            "ferrum2_dns_rule_response_match_total{source=\"rule_set\",type=\"ip_cidr\",result=\"matched\"} 2",
+            "ferrum2_dns_rule_response_match_total{source=\"rule_set\",type=\"ip_cidr\",result=\"missed\"} 1",
+            "ferrum2_dns_implicit_system_fallback_total 0",
+        ] {
+            assert!(
+                encoded.contains(expected),
+                "missing `{expected}`\n{encoded}"
+            );
+        }
+        for identity in [
+            "ferrum2_rule_program_candidate_count_sum{program=\"dns_query\"}",
+            "ferrum2_rule_program_candidate_count_count{program=\"dns_query\"}",
+            "ferrum2_rule_program_match_ns_sum{program=\"dns_query\"}",
+            "ferrum2_rule_program_match_ns_count{program=\"dns_query\"}",
+            "ferrum2_rule_program_candidate_count_sum{program=\"dns_response\"}",
+            "ferrum2_rule_program_candidate_count_count{program=\"dns_response\"}",
+            "ferrum2_rule_program_match_ns_sum{program=\"dns_response\"}",
+            "ferrum2_rule_program_match_ns_count{program=\"dns_response\"}",
+        ] {
+            assert!(
+                encoded
+                    .lines()
+                    .any(|line| line.starts_with(identity) && !line.ends_with(" 0")),
+                "zero or missing `{identity}`\n{encoded}"
+            );
+        }
+        owner.shutdown().await.expect("tagged DNS shutdown");
+    }
+
     #[tokio::test]
     async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_state() {
         let (route, selector) = compile_selector_plans(
@@ -573,7 +870,7 @@ mod tests {
             (0..3)
                 .map(|_| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                     server: first_server.into(),
-                    psk: default_test_psk(),
+                    psk: Arc::new(default_test_psk()),
                 })
                 .collect(),
         )
@@ -1063,7 +1360,7 @@ mod tests {
             .into_iter()
             .map(|server| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: server.into(),
-                psk: default_test_psk(),
+                psk: Arc::new(default_test_psk()),
             })
             .collect();
         let (route, selector, mut dns_roots) = compile_selector_plans_with_roots(
@@ -1096,10 +1393,10 @@ mod tests {
                 path: None,
                 detour: Some(dns_roots.remove(0)),
             }],
-            route: ferrum2_core::route::ActionTable::new(Vec::new(), 0)
-                .expect("selector DNS final"),
+            route: ferrum2_rule::ActionTable::new(Vec::new(), 0).expect("selector DNS final"),
             timeout: Duration::from_millis(150),
             max_inflight: std::num::NonZeroU16::new(1).expect("selector DNS admission"),
+            runtime: ferrum2_config::DnsRuntimeConfig::default(),
         });
 
         let upstream_task = tokio::spawn(async move {
@@ -1592,10 +1889,11 @@ mod tests {
                 path: None,
                 detour: Some(ferrum2_core::route::EgressPlanHandle::direct(0)),
             }],
-            route: ferrum2_core::route::ActionTable::new(Vec::new(), 0)
+            route: ferrum2_rule::ActionTable::new(Vec::new(), 0)
                 .expect("detoured DNS final action"),
             timeout: Duration::from_secs(1),
             max_inflight: std::num::NonZeroU16::new(1).expect("detoured DNS admission"),
+            runtime: ferrum2_config::DnsRuntimeConfig::default(),
         });
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);
@@ -1801,10 +2099,10 @@ mod tests {
                 path: None,
                 detour: Some(ferrum2_core::route::EgressPlanHandle::direct(0)),
             }],
-            route: ferrum2_core::route::ActionTable::new(Vec::new(), 0)
-                .expect("stalled DNS final action"),
+            route: ferrum2_rule::ActionTable::new(Vec::new(), 0).expect("stalled DNS final action"),
             timeout: Duration::from_secs(5),
             max_inflight: std::num::NonZeroU16::new(1).expect("one DNS admission"),
+            runtime: ferrum2_config::DnsRuntimeConfig::default(),
         });
         let registry = OwnerRegistry::new();
         let (observed, resolver) = tokio::sync::oneshot::channel();
@@ -1822,7 +2120,7 @@ mod tests {
             Arc::new(Metrics::new()),
             None,
             Some(observed),
-            dns_specs,
+            ClientRunResources::legacy(dns_specs),
         ));
         let (context, resolver) = resolver.await.expect("observed DNS resolver");
         let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))

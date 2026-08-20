@@ -8,6 +8,12 @@ pub enum ConfigErrorKind {
     TooLarge,
     Syntax,
     Semantic,
+    RuleCompile,
+    RuleAllocation,
+    DnsResolverRequired,
+    DnsReservedResolverName,
+    DnsDependencyCycle,
+    ResourceMaterialization,
 }
 
 impl ConfigErrorKind {
@@ -18,6 +24,12 @@ impl ConfigErrorKind {
             Self::TooLarge => "config.too_large",
             Self::Syntax => "config.syntax",
             Self::Semantic => "config.semantic",
+            Self::RuleCompile => "rule.compile",
+            Self::RuleAllocation => "rule.allocation",
+            Self::DnsResolverRequired => "dns.resolver_required",
+            Self::DnsReservedResolverName => "dns.reserved_resolver_name",
+            Self::DnsDependencyCycle => "dns.dependency_cycle",
+            Self::ResourceMaterialization => "config.resource_materialization",
         }
     }
 }
@@ -74,6 +86,8 @@ pub enum ConfigField {
     OutboundsServer,
     OutboundsMethod,
     OutboundsPsk,
+    OutboundsDomainResolver,
+    OutboundsDomainStrategy,
     Chains,
     ChainsTag,
     ChainsHops,
@@ -89,6 +103,8 @@ pub enum ConfigField {
     RouteRulesProtocol,
     RouteRulesDomain,
     RouteRulesDomainSuffix,
+    RouteRulesDomainKeyword,
+    RouteRulesRuleSet,
     RouteRulesIp,
     RouteRulesIpCidr,
     RouteRulesPort,
@@ -100,9 +116,25 @@ pub enum ConfigField {
     RouteSniff,
     RouteSniffTimeout,
     RouteSniffMaxBytes,
+    RouteRuleSet,
+    RouteRuleSetTag,
+    RouteRuleSetType,
+    RouteRuleSetFormat,
+    RouteRuleSetUrl,
+    RouteRuleSetDownloadResolver,
+    RouteRuleSetDownloadDetour,
+    RouteRuleSetUpdateInterval,
+    RuleSetLoader,
+    RuleSetLoaderCacheDir,
+    RuleSetLoaderDownloadTimeout,
+    RuleSetLoaderMaxRedirects,
     Dns,
     DnsTimeout,
     DnsMaxInflight,
+    DnsStrategy,
+    DnsCache,
+    DnsCacheEnabled,
+    DnsCacheMaxEntries,
     DnsInbounds,
     DnsInboundsTag,
     DnsInboundsListen,
@@ -113,6 +145,8 @@ pub enum ConfigField {
     DnsServersServerName,
     DnsServersPath,
     DnsServersDetour,
+    DnsServersDomainResolver,
+    DnsServersDomainStrategy,
     DnsRoute,
     DnsRouteRules,
     DnsRouteRulesInbound,
@@ -123,10 +157,16 @@ pub enum ConfigField {
     DnsRouteRulesQtype,
     DnsRouteRulesDomain,
     DnsRouteRulesDomainSuffix,
+    DnsRouteRulesDomainKeyword,
+    DnsRouteRulesRuleSet,
     DnsRouteRulesPort,
     DnsRouteRulesPortRange,
     DnsRouteRulesServer,
+    DnsRouteRulesAction,
+    DnsRouteRulesStrategy,
     DnsRouteFinal,
+    DnsDependencyCycle,
+    ResourceMaterialization,
 }
 
 impl ConfigField {
@@ -181,6 +221,8 @@ impl ConfigField {
             Self::OutboundsServer => "outbounds.server",
             Self::OutboundsMethod => "outbounds.method",
             Self::OutboundsPsk => "outbounds.psk",
+            Self::OutboundsDomainResolver => "outbounds.domain_resolver",
+            Self::OutboundsDomainStrategy => "outbounds.domain_strategy",
             Self::Chains => "chains",
             Self::ChainsTag => "chains.tag",
             Self::ChainsHops => "chains.hops",
@@ -196,6 +238,8 @@ impl ConfigField {
             Self::RouteRulesProtocol => "route.rules.protocol",
             Self::RouteRulesDomain => "route.rules.domain",
             Self::RouteRulesDomainSuffix => "route.rules.domain_suffix",
+            Self::RouteRulesDomainKeyword => "route.rules.domain_keyword",
+            Self::RouteRulesRuleSet => "route.rules.rule_set",
             Self::RouteRulesIp => "route.rules.ip",
             Self::RouteRulesIpCidr => "route.rules.ip_cidr",
             Self::RouteRulesPort => "route.rules.port",
@@ -207,9 +251,25 @@ impl ConfigField {
             Self::RouteSniff => "route.sniff",
             Self::RouteSniffTimeout => "route.sniff.timeout_ms",
             Self::RouteSniffMaxBytes => "route.sniff.max_bytes",
+            Self::RouteRuleSet => "route.rule_set",
+            Self::RouteRuleSetTag => "route.rule_set.tag",
+            Self::RouteRuleSetType => "route.rule_set.type",
+            Self::RouteRuleSetFormat => "route.rule_set.format",
+            Self::RouteRuleSetUrl => "route.rule_set.url",
+            Self::RouteRuleSetDownloadResolver => "route.rule_set.download_resolver",
+            Self::RouteRuleSetDownloadDetour => "route.rule_set.download_detour",
+            Self::RouteRuleSetUpdateInterval => "route.rule_set.update_interval_seconds",
+            Self::RuleSetLoader => "rule_set_loader",
+            Self::RuleSetLoaderCacheDir => "rule_set_loader.cache_dir",
+            Self::RuleSetLoaderDownloadTimeout => "rule_set_loader.download_timeout_ms",
+            Self::RuleSetLoaderMaxRedirects => "rule_set_loader.max_redirects",
             Self::Dns => "dns",
             Self::DnsTimeout => "dns.timeout_ms",
             Self::DnsMaxInflight => "dns.max_inflight",
+            Self::DnsStrategy => "dns.strategy",
+            Self::DnsCache => "dns.cache",
+            Self::DnsCacheEnabled => "dns.cache.enabled",
+            Self::DnsCacheMaxEntries => "dns.cache.max_entries",
             Self::DnsInbounds => "dns.inbounds",
             Self::DnsInboundsTag => "dns.inbounds.tag",
             Self::DnsInboundsListen => "dns.inbounds.listen",
@@ -220,6 +280,8 @@ impl ConfigField {
             Self::DnsServersServerName => "dns.servers.server_name",
             Self::DnsServersPath => "dns.servers.path",
             Self::DnsServersDetour => "dns.servers.detour",
+            Self::DnsServersDomainResolver => "dns.servers.domain_resolver",
+            Self::DnsServersDomainStrategy => "dns.servers.domain_strategy",
             Self::DnsRoute => "dns.route",
             Self::DnsRouteRules => "dns.route.rules",
             Self::DnsRouteRulesInbound => "dns.route.rules.inbound",
@@ -230,10 +292,16 @@ impl ConfigField {
             Self::DnsRouteRulesQtype => "dns.route.rules.qtype",
             Self::DnsRouteRulesDomain => "dns.route.rules.domain",
             Self::DnsRouteRulesDomainSuffix => "dns.route.rules.domain_suffix",
+            Self::DnsRouteRulesDomainKeyword => "dns.route.rules.domain_keyword",
+            Self::DnsRouteRulesRuleSet => "dns.route.rules.rule_set",
             Self::DnsRouteRulesPort => "dns.route.rules.port",
             Self::DnsRouteRulesPortRange => "dns.route.rules.port_range",
             Self::DnsRouteRulesServer => "dns.route.rules.server",
+            Self::DnsRouteRulesAction => "dns.route.rules.action",
+            Self::DnsRouteRulesStrategy => "dns.route.rules.strategy",
             Self::DnsRouteFinal => "dns.route.final",
+            Self::DnsDependencyCycle => "dns.dependency_cycle",
+            Self::ResourceMaterialization => "config.resource_materialization",
         }
     }
 }
@@ -258,12 +326,70 @@ impl ConfigError {
         self.field
     }
 
+    /// Creates the single redacted error exposed to injected resource materializers.
+    pub const fn resource_materialization() -> Self {
+        Self::new(
+            ConfigErrorKind::ResourceMaterialization,
+            ConfigField::ResourceMaterialization,
+        )
+    }
+
     pub(super) const fn new(kind: ConfigErrorKind, field: ConfigField) -> Self {
         Self { kind, field }
     }
 
     pub(super) const fn semantic(field: ConfigField) -> Self {
-        Self::new(ConfigErrorKind::Semantic, field)
+        match field {
+            ConfigField::DnsDependencyCycle => {
+                Self::new(ConfigErrorKind::DnsDependencyCycle, field)
+            }
+            ConfigField::ResourceMaterialization => {
+                Self::new(ConfigErrorKind::ResourceMaterialization, field)
+            }
+            _ => Self::new(ConfigErrorKind::Semantic, field),
+        }
+    }
+
+    /// Preserves closed compiler failures without retaining a matcher value.
+    pub(super) const fn from_rule_compile(
+        error: ferrum2_rule::RuleCompileError,
+        field: ConfigField,
+    ) -> Self {
+        use ferrum2_rule::RuleCompileError;
+
+        match error {
+            RuleCompileError::Allocation | RuleCompileError::IndexOverflow => {
+                Self::new(ConfigErrorKind::RuleAllocation, field)
+            }
+            RuleCompileError::InvalidId
+            | RuleCompileError::InvalidGeneration
+            | RuleCompileError::Internal => Self::new(ConfigErrorKind::RuleCompile, field),
+            RuleCompileError::EmptyMatcher
+            | RuleCompileError::EmptyField
+            | RuleCompileError::DuplicateField
+            | RuleCompileError::DuplicateValue
+            | RuleCompileError::ConflictingFields
+            | RuleCompileError::InvalidDomain
+            | RuleCompileError::NonCanonicalCidr
+            | RuleCompileError::InvalidTag
+            | RuleCompileError::DuplicateRuleSet => Self::semantic(field),
+        }
+    }
+
+    pub(super) const fn rule_allocation(field: ConfigField) -> Self {
+        Self::new(ConfigErrorKind::RuleAllocation, field)
+    }
+
+    pub(super) const fn rule_compile(field: ConfigField) -> Self {
+        Self::new(ConfigErrorKind::RuleCompile, field)
+    }
+
+    pub(super) const fn dns_resolver_required(field: ConfigField) -> Self {
+        Self::new(ConfigErrorKind::DnsResolverRequired, field)
+    }
+
+    pub(super) const fn dns_reserved_resolver_name(field: ConfigField) -> Self {
+        Self::new(ConfigErrorKind::DnsReservedResolverName, field)
     }
 }
 
@@ -274,6 +400,12 @@ impl fmt::Display for ConfigError {
             ConfigErrorKind::TooLarge => "configuration exceeds 1048576 bytes",
             ConfigErrorKind::Syntax => "configuration is not valid TOML",
             ConfigErrorKind::Semantic => "configuration value is invalid",
+            ConfigErrorKind::RuleCompile => "rule compilation failed",
+            ConfigErrorKind::RuleAllocation => "rule allocation failed",
+            ConfigErrorKind::DnsResolverRequired => "an explicit resolver is required",
+            ConfigErrorKind::DnsReservedResolverName => "the resolver name is reserved",
+            ConfigErrorKind::DnsDependencyCycle => "the resolver dependency graph contains a cycle",
+            ConfigErrorKind::ResourceMaterialization => "supplied resources are invalid",
         };
         write!(
             formatter,
@@ -285,3 +417,63 @@ impl fmt::Display for ConfigError {
 }
 
 impl Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use ferrum2_rule::RuleCompileError;
+
+    use super::{ConfigError, ConfigErrorKind, ConfigField};
+
+    #[test]
+    fn rule_compiler_categories_are_closed_and_value_free() {
+        let compile =
+            ConfigError::from_rule_compile(RuleCompileError::Internal, ConfigField::RouteRules);
+        assert_eq!(compile.kind(), ConfigErrorKind::RuleCompile);
+        assert_eq!(compile.code(), "rule.compile");
+        assert_eq!(
+            compile.to_string(),
+            "error[rule.compile] route.rules: rule compilation failed"
+        );
+
+        let allocation = ConfigError::from_rule_compile(
+            RuleCompileError::IndexOverflow,
+            ConfigField::DnsRouteRules,
+        );
+        assert_eq!(allocation.kind(), ConfigErrorKind::RuleAllocation);
+        assert_eq!(allocation.code(), "rule.allocation");
+        assert_eq!(
+            allocation.to_string(),
+            "error[rule.allocation] dns.route.rules: rule allocation failed"
+        );
+        let blueprint_allocation = ConfigError::rule_allocation(ConfigField::DnsRouteRulesRuleSet);
+        assert_eq!(blueprint_allocation.kind(), ConfigErrorKind::RuleAllocation);
+        assert_eq!(
+            blueprint_allocation.field(),
+            ConfigField::DnsRouteRulesRuleSet
+        );
+
+        let input = ConfigError::from_rule_compile(
+            RuleCompileError::NonCanonicalCidr,
+            ConfigField::RouteRulesIpCidr,
+        );
+        assert_eq!(input.kind(), ConfigErrorKind::Semantic);
+
+        let required = ConfigError::dns_resolver_required(ConfigField::OutboundsDomainResolver);
+        assert_eq!(required.code(), "dns.resolver_required");
+        assert_eq!(
+            required.to_string(),
+            "error[dns.resolver_required] outbounds.domain_resolver: an explicit resolver is required"
+        );
+
+        let reserved = ConfigError::dns_reserved_resolver_name(ConfigField::DnsServersTag);
+        assert_eq!(reserved.code(), "dns.reserved_resolver_name");
+        assert_eq!(
+            ConfigError::semantic(ConfigField::DnsDependencyCycle).code(),
+            "dns.dependency_cycle"
+        );
+        assert_eq!(
+            ConfigError::resource_materialization().code(),
+            "config.resource_materialization"
+        );
+    }
+}

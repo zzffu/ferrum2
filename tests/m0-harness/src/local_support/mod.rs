@@ -833,6 +833,7 @@ pub fn unused_tcp_udp_loopback() -> SocketAddrV4 {
 pub struct DnsAnswerServer {
     address: SocketAddrV4,
     observations: mpsc::Receiver<RecordType>,
+    pending_observations: Mutex<Vec<RecordType>>,
     stop: mpsc::Sender<()>,
     worker: Option<std::thread::JoinHandle<Vec<RecordType>>>,
 }
@@ -843,21 +844,59 @@ impl DnsAnswerServer {
     }
 
     pub fn wait_for_query(&self, expected: RecordType) {
-        assert_eq!(
-            self.observations
+        let mut pending = self
+            .pending_observations
+            .lock()
+            .expect("pending DNS observations");
+        if let Some(position) = pending.iter().position(|observed| *observed == expected) {
+            pending.swap_remove(position);
+            return;
+        }
+        loop {
+            let observed = self
+                .observations
                 .recv_timeout(Duration::from_secs(5))
-                .expect("DNS query observation"),
-            expected
-        );
+                .expect("DNS query observation");
+            if observed == expected {
+                return;
+            }
+            pending.push(observed);
+        }
     }
 
     pub fn join(mut self) -> Vec<RecordType> {
         let _ = self.stop.send(());
-        self.worker
+        let observed = self
+            .worker
             .take()
             .expect("DNS answer worker")
             .join()
-            .expect("DNS answer worker join")
+            .expect("DNS answer worker join");
+        let mut a = observed
+            .iter()
+            .filter(|record_type| **record_type == RecordType::A)
+            .count();
+        let mut aaaa = observed
+            .iter()
+            .filter(|record_type| **record_type == RecordType::AAAA)
+            .count();
+        let mut canonical = Vec::with_capacity(observed.len());
+        while a != 0 || aaaa != 0 {
+            if a != 0 {
+                canonical.push(RecordType::A);
+                a -= 1;
+            }
+            if aaaa != 0 {
+                canonical.push(RecordType::AAAA);
+                aaaa -= 1;
+            }
+        }
+        canonical.extend(
+            observed
+                .into_iter()
+                .filter(|record_type| !matches!(record_type, RecordType::A | RecordType::AAAA)),
+        );
+        canonical
     }
 }
 
@@ -917,9 +956,10 @@ pub fn start_dns_script(script: Vec<DnsStep>) -> DnsAnswerServer {
     let (observation, observations) = mpsc::channel();
     let (stop, stopped) = mpsc::channel();
     let worker = std::thread::spawn(move || {
+        let mut script = script.into_iter().map(Some).collect::<Vec<_>>();
         let mut observed = Vec::with_capacity(script.len());
         let mut request = [0_u8; 4096];
-        'steps: for step in script {
+        'steps: while script.iter().any(Option::is_some) {
             let (length, peer) = loop {
                 match socket.recv_from(&mut request) {
                     Ok(received) => break received,
@@ -938,11 +978,14 @@ pub fn start_dns_script(script: Vec<DnsStep>) -> DnsAnswerServer {
             };
             let request = Message::from_vec(&request[..length]).expect("DNS answer decode");
             let query = request.queries.first().expect("one DNS question").clone();
-            assert_eq!(
-                query.query_type(),
-                step.record_type,
-                "DNS script query type"
-            );
+            let position = script
+                .iter()
+                .position(|step| {
+                    step.as_ref()
+                        .is_some_and(|step| step.record_type == query.query_type())
+                })
+                .expect("DNS script query type");
+            let step = script[position].take().expect("pending DNS script step");
             observed.push(query.query_type());
             observation
                 .send(query.query_type())
@@ -981,6 +1024,7 @@ pub fn start_dns_script(script: Vec<DnsStep>) -> DnsAnswerServer {
     DnsAnswerServer {
         address,
         observations,
+        pending_observations: Mutex::new(Vec::new()),
         stop,
         worker: Some(worker),
     }
@@ -1221,7 +1265,7 @@ pub fn write_tagged_dns_server_matrix_config(
         "\n[udp]\nenabled = false\n"
     };
     let mut config = format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          [[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
          [[outbounds]]\ntag = \"app-direct\"\n\
          [[outbounds]]\ntag = \"dns-direct\"\n\

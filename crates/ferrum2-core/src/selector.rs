@@ -1,5 +1,3 @@
-use super::TargetAddr;
-use super::route::Network;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -21,6 +19,14 @@ impl<'a> TaggedInbound<'a> {
     pub const fn new(tag: &'a str, inbound: usize) -> Self {
         Self { tag, inbound }
     }
+
+    pub const fn tag(&self) -> &'a str {
+        self.tag
+    }
+
+    pub const fn inbound(&self) -> usize {
+        self.inbound
+    }
 }
 
 /// One tagged concrete outbound identity supplied to selector-aware compilation.
@@ -34,6 +40,14 @@ impl<'a> TaggedOutbound<'a> {
     pub const fn new(tag: &'a str, outbound: usize) -> Self {
         Self { tag, outbound }
     }
+
+    pub const fn tag(&self) -> &'a str {
+        self.tag
+    }
+
+    pub const fn outbound(&self) -> usize {
+        self.outbound
+    }
 }
 
 /// One tagged immutable multi-hop egress plan supplied to selector-aware compilation.
@@ -45,6 +59,14 @@ pub struct TaggedPlan<'a> {
 impl<'a> TaggedPlan<'a> {
     pub fn new(tag: &'a str, hops: Vec<usize>) -> Self {
         Self { tag, hops }
+    }
+
+    pub const fn tag(&self) -> &'a str {
+        self.tag
+    }
+
+    pub fn hops(&self) -> &[usize] {
+        &self.hops
     }
 }
 
@@ -63,56 +85,25 @@ impl<'a> SelectorDefinition<'a> {
             default,
         }
     }
-}
 
-/// One tagged static binding supplied to selector-aware compilation.
-pub struct TaggedStaticBinding<'a> {
-    pub(super) inbound: &'a str,
-    pub(super) outbound: &'a str,
-}
-
-impl<'a> TaggedStaticBinding<'a> {
-    pub const fn new(inbound: &'a str, outbound: &'a str) -> Self {
-        Self { inbound, outbound }
+    pub const fn tag(&self) -> &'a str {
+        self.tag
     }
-}
 
-/// One tagged routed rule supplied to selector-aware compilation.
-pub struct TaggedRouteRule<'a> {
-    pub(super) inbound: Option<&'a str>,
-    pub(super) network: Option<Network>,
-    pub(super) target: Option<TargetAddr>,
-    pub(super) outbound: Option<&'a str>,
-}
-
-impl<'a> TaggedRouteRule<'a> {
-    pub fn new(
-        inbound: Option<&'a str>,
-        network: Option<Network>,
-        target: Option<TargetAddr>,
-        outbound: Option<&'a str>,
-    ) -> Self {
-        Self {
-            inbound,
-            network,
-            target,
-            outbound,
-        }
+    pub fn outbounds(&self) -> &[&'a str] {
+        &self.outbounds
     }
-}
 
-/// Tagged static or routed actions supplied to selector-aware compilation.
-pub enum TaggedRoute<'a> {
-    Static(Vec<TaggedStaticBinding<'a>>),
-    Routed {
-        rules: Vec<TaggedRouteRule<'a>>,
-        final_outbound: Option<&'a str>,
-    },
+    pub const fn default(&self) -> Option<&'a str> {
+        self.default
+    }
 }
 
 /// Closed selector compilation failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectorCompileError {
+    Allocation,
+    RuleCompile,
     Inbounds,
     Outbounds,
     Plans,
@@ -203,6 +194,13 @@ pub struct SelectorControl {
 }
 
 impl SelectorControl {
+    /// Constructs an empty selector control for direct, non-selector routes.
+    pub fn empty() -> Self {
+        Self {
+            state: Arc::default(),
+        }
+    }
+
     /// Returns a selector's current immediate member tag.
     pub fn selected<'a>(&'a self, selector_tag: &str) -> Result<&'a str, SelectorError> {
         let selector = self

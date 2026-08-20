@@ -1,15 +1,19 @@
 #![forbid(unsafe_code)]
 
+mod application_resolver;
 mod connector;
 mod deadline;
 mod metrics;
 mod owner;
 mod process;
 mod relay;
+mod ruleset;
+mod ruleset_https;
 mod sniff;
 mod supervisor;
 mod udp;
 
+pub use application_resolver::ApplicationResolverAdapter;
 pub use connector::{
     DirectOutbound, MAX_RESOLVED_CANDIDATES, RuntimeTcpStream, SocketInspector,
     SystemSocketInspector, SystemTcpDialer, SystemTcpResolver, TcpConnector, TcpDialer,
@@ -31,6 +35,20 @@ pub use process::{
 pub use relay::{
     RELAY_BUFFER_BYTES, RelayFailure, RelayRunError, RelayStats, relay_bidirectional,
     relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout, relay_lifecycle,
+};
+pub use ruleset::{
+    BoxedRuleSetBody, LoadedRuleSet, PreparedRuleSetRefreshRoot, RuleSetBody, RuleSetCacheName,
+    RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadFuture, RuleSetDownloadRequest,
+    RuleSetDownloadResolver, RuleSetDownloadResponse, RuleSetDownloadStatus, RuleSetDownloader,
+    RuleSetLoadDisposition, RuleSetLoadError, RuleSetLoadErrorKind, RuleSetLoader,
+    RuleSetLoaderConfig, RuleSetRefreshObserver, RuleSetRefreshOutcome, RuleSetRefreshService,
+    RuleSetRemoteSource, RuleSetSnapshotMaterialization, RuleSetSnapshotParts,
+    materialize_rule_set_snapshot,
+};
+pub use ruleset_https::{
+    ExplicitRuleSetHostResolver, HttpsRuleSetDownloader, RuleSetDialer, RuleSetHostResolveObserver,
+    RuleSetHostResolveOutcome, RuleSetHostResolver, RuleSetHostResolverKind, SystemRuleSetDialer,
+    SystemRuleSetHostResolver,
 };
 pub use sniff::{PrefixDecision, SniffPrefix, SniffPrefixOutcome, collect_sniff_prefix};
 pub use supervisor::{

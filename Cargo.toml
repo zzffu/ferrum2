@@ -3,6 +3,7 @@ members = [
     "bins/ferrum2-client",
     "bins/ferrum2-server",
     "crates/ferrum2-core",
+    "crates/ferrum2-rule",
     "crates/ferrum2-crypto",
     "crates/ferrum2-shadowsocks",
     "crates/ferrum2-socks5",
@@ -15,6 +16,7 @@ members = [
     "crates/ferrum2-wintun",
     "tests/m0-harness",
     "tools/ferrum2-m4-qualification",
+    "tools/ferrum2-rule-qualification",
 ]
 exclude = ["vendor/shadowsocks-crypto"]
 resolver = "3"
@@ -28,6 +30,7 @@ publish = false
 
 [workspace.dependencies]
 ferrum2-core = { path = "crates/ferrum2-core", version = "=0.1.0" }
+ferrum2-rule = { path = "crates/ferrum2-rule", version = "=0.1.0" }
 ferrum2-crypto = { path = "crates/ferrum2-crypto", version = "=0.1.0" }
 ferrum2-shadowsocks = { path = "crates/ferrum2-shadowsocks", version = "=0.1.0" }
 ferrum2-socks5 = { path = "crates/ferrum2-socks5", version = "=0.1.0" }
@@ -43,14 +46,24 @@ hickory-resolver = { version = "=0.26.1", default-features = false, features = [
 hickory-proto = { version = "=0.26.1", default-features = false, features = ["std"] }
 hickory-server = { version = "=0.26.1", default-features = false }
 ipnet = { version = "=2.12.1", default-features = false }
+aho-corasick = "=1.1.4"
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+sha2 = { version = "=0.11.0", default-features = false }
+stats_alloc = "=0.1.10"
+url = { version = "=2.5.8", default-features = false, features = ["std"] }
 h2 = { version = "=0.4.15", default-features = false, features = ["stream"] }
+http-body-util = "=0.1.5"
+hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio", "http1"] }
 futures-util = { version = "=0.3.33", default-features = false, features = ["std"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
+tokio-util = { version = "=0.7.19", default-features = false, features = ["io"] }
+webpki-roots = "=1.0.9"
 httparse = { version = "=1.10.1", default-features = false }
 smoltcp = { version = "=0.13.1", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-tcp-reno", "socket-udp", "iface-max-addr-count-2", "iface-max-route-count-2", "assembler-max-segment-count-4"] }
 
-tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "sync", "time", "signal"] }
 bytes = "=1.12.1"
 socket2 = "=0.6.5"
 serde = { version = "=1.0.229", default-features = false, features = ["std", "derive"] }

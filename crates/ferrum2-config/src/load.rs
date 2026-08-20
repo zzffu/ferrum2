@@ -25,7 +25,7 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ValidatedServerConfig, Conf
     validate_server(raw, &source)
 }
 
-fn read_bounded_utf8(path: &Path) -> Result<Zeroizing<String>, ConfigError> {
+pub(super) fn read_bounded_utf8(path: &Path) -> Result<Zeroizing<String>, ConfigError> {
     let file =
         File::open(path).map_err(|_| ConfigError::new(ConfigErrorKind::Io, ConfigField::Config))?;
     let metadata = file
@@ -54,7 +54,7 @@ fn read_bounded_utf8(path: &Path) -> Result<Zeroizing<String>, ConfigError> {
     }
 }
 
-fn parse_toml<'a, T: Deserialize<'a>>(source: &'a str) -> Result<T, ConfigError> {
+pub(super) fn parse_toml<'a, T: Deserialize<'a>>(source: &'a str) -> Result<T, ConfigError> {
     toml::from_str(source)
         .map_err(|_| ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config))
 }

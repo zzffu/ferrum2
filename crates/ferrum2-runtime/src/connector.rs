@@ -228,6 +228,11 @@ impl<I, D, R> TcpConnector<I, D, R> {
             connect_timeout,
         }
     }
+
+    /// Returns the explicitly injected application resolver adapter.
+    pub const fn resolver(&self) -> &R {
+        &self.resolver
+    }
 }
 
 impl<I, D, R> Connector for TcpConnector<I, D, R>

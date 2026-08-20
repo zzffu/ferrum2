@@ -3,14 +3,21 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use ferrum2_config::{CompiledRoute, RouteAction, RouteProtocol, RuntimeConfig, Sniffers};
-use ferrum2_core::route::{Network, RouteMetadata, RouteProgramAction, RouteTable};
+use ferrum2_core::route::Network;
 use ferrum2_core::{DomainName, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr};
 use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
-    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, Stage, TraceRecord,
-    Transport as ObservationTransport, emit,
+    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, RuleMatchResult,
+    RuleMatchType, RuleProgram, RuleSource, Stage, TraceRecord, Transport as ObservationTransport,
+    emit,
+};
+use ferrum2_rule::{
+    RouteMatchObservation as EngineMatchObservation, RouteMatchSource as EngineMatchSource,
+    RouteMatchType as EngineMatchType, RouteMetadata, RouteProgramAction, RouteTable,
+    RuleCompileError, RuleEvaluationScratch,
 };
 use ferrum2_runtime::{
     AcceptListener, BoundedSupervisor, CancellationToken, DirectOutbound, OwnerRegistry,
@@ -37,6 +44,65 @@ pub(super) struct ServerRouting {
     pub(super) outbound_count: usize,
 }
 
+pub(super) struct RouteProgramObservation<'a> {
+    metrics: &'a Metrics,
+    candidates: usize,
+    match_ns: u64,
+}
+
+impl<'a> RouteProgramObservation<'a> {
+    pub(super) const fn new(metrics: &'a Metrics) -> Self {
+        Self {
+            metrics,
+            candidates: 0,
+            match_ns: 0,
+        }
+    }
+
+    pub(super) fn record_step(&mut self, candidates: usize, elapsed: Duration) {
+        self.candidates = self.candidates.saturating_add(candidates);
+        self.match_ns = self
+            .match_ns
+            .saturating_add(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
+    }
+
+    pub(super) fn record_matches(&self, observation: EngineMatchObservation) {
+        for source in EngineMatchSource::ALL {
+            for r#type in EngineMatchType::ALL {
+                if !observation.evaluated(source, r#type) {
+                    continue;
+                }
+                let result = if observation.matched(source, r#type) {
+                    RuleMatchResult::Matched
+                } else {
+                    RuleMatchResult::Missed
+                };
+                let source = match source {
+                    EngineMatchSource::Inline => RuleSource::Inline,
+                    EngineMatchSource::RuleSet => RuleSource::RuleSet,
+                };
+                let r#type = match r#type {
+                    EngineMatchType::Domain => RuleMatchType::Domain,
+                    EngineMatchType::DomainSuffix => RuleMatchType::DomainSuffix,
+                    EngineMatchType::DomainKeyword => RuleMatchType::DomainKeyword,
+                    EngineMatchType::IpCidr => RuleMatchType::IpCidr,
+                    EngineMatchType::Scalar => RuleMatchType::Scalar,
+                };
+                self.metrics.route_match(source, r#type, result);
+            }
+        }
+    }
+}
+
+impl Drop for RouteProgramObservation<'_> {
+    fn drop(&mut self) {
+        self.metrics
+            .observe_rule_program_candidate_count(RuleProgram::Route, self.candidates);
+        self.metrics
+            .observe_rule_program_match_ns(RuleProgram::Route, self.match_ns);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ServerTerminalRoute {
     Direct,
@@ -46,6 +112,13 @@ pub(super) enum ServerTerminalRoute {
 impl ServerRouting {
     pub(super) fn program(&self) -> Option<&CompiledRoute> {
         self.program.as_ref()
+    }
+
+    pub(super) fn route_scratch(&self) -> Result<Option<RuleEvaluationScratch>, RuleCompileError> {
+        self.program
+            .as_ref()
+            .map(CompiledRoute::evaluation_scratch)
+            .transpose()
     }
 
     pub(super) fn legacy(
@@ -232,6 +305,7 @@ pub(super) struct ServerContext {
 enum TcpRouteFailure {
     Cancelled,
     Read,
+    Rule(RuleCompileError),
 }
 
 struct TcpRouteSelection<P> {
@@ -274,16 +348,29 @@ where
             prefix,
         });
     };
-    let mut evaluation = program.evaluate(context.inbound, Network::Tcp, target);
+    let mut scratch = match program.evaluation_scratch() {
+        Ok(scratch) => scratch,
+        Err(error) => {
+            let _ = stream.mark_abortive_plain();
+            return Err(TcpRouteFailure::Rule(error));
+        }
+    };
+    let mut evaluation =
+        program.evaluate_with_scratch(context.inbound, Network::Tcp, target, &mut scratch);
+    evaluation.enable_match_observation();
     let mut protocol = None;
     let mut domain = None;
     let mut sniffed = false;
+    let mut observation = RouteProgramObservation::new(&context.metrics);
     tokio::pin!(cancellation);
 
     loop {
+        let started = Instant::now();
         let action = evaluation
             .next(RouteMetadata::new(protocol, domain.as_ref()))
             .expect("validated route program has one terminal action");
+        observation.record_step(evaluation.candidate_visits(), started.elapsed());
+        observation.record_matches(evaluation.last_match_observation());
         match action {
             RouteProgramAction::Continue(RouteAction::Sniff(sniffers)) if !sniffed => {
                 sniffed = true;
@@ -480,6 +567,19 @@ async fn server_connection(
         }
         Err(TcpRouteFailure::Read) => {
             record_failure(&context, Stage::Relay, Reason::RelayIo, Outcome::Failed);
+            context
+                .metrics
+                .active_connections_dec(Role::Server, Inbound::Shadowsocks);
+            return;
+        }
+        Err(TcpRouteFailure::Rule(error)) => {
+            let _category = super::run_error_for_rule_compile(error);
+            record_failure(
+                &context,
+                Stage::Config,
+                Reason::ConfigSemantic,
+                Outcome::Failed,
+            );
             context
                 .metrics
                 .active_connections_dec(Role::Server, Inbound::Shadowsocks);

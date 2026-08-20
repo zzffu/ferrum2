@@ -4,6 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::BytesMut;
@@ -380,17 +381,27 @@ impl Error for MethodSaltLengthError {}
 
 /// A method-bound single-PSK owner for M1 composition.
 pub struct MethodSinglePskProvider {
-    psk: MethodPsk,
+    psk: Arc<MethodPsk>,
 }
 
 impl MethodSinglePskProvider {
     /// Takes ownership of one validated method-bound PSK.
     pub fn new(psk: MethodPsk) -> Self {
+        Self { psk: Arc::new(psk) }
+    }
+
+    /// Takes shared ownership of one validated method-bound PSK.
+    ///
+    /// The secret itself remains a non-cloneable [`MethodPsk`]; cloning the
+    /// `Arc` only lets independently owned protocol graphs borrow the same
+    /// zeroizing allocation. The allocation is cleared when its last owner is
+    /// dropped.
+    pub fn from_shared(psk: Arc<MethodPsk>) -> Self {
         Self { psk }
     }
 
     /// Returns the immutable profile of the configured key.
-    pub const fn profile(&self) -> MethodProfile {
+    pub fn profile(&self) -> MethodProfile {
         self.psk.profile()
     }
 }

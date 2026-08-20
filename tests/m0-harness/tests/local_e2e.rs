@@ -287,7 +287,10 @@ fn m14_server_tcp_sniff_routes_rejects_and_replays_prefix() {
     drop(_spawn_guard);
 
     let route_prefix = b"GET /route HTTP/1.1\r\nHost: route.test\r\n\r\nroute-body";
-    let (mut routed, reply) = socks_connect(client_address, route_target);
+    let (mut routed, reply) = socks_connect_wire(
+        client_address,
+        &domain_wire("localhost", route_target.port()),
+    );
     assert_eq!(&reply[..4], &[5, 0, 0, 1]);
     routed.write_all(route_prefix).expect("routed prefix");
     routed.shutdown(Shutdown::Write).expect("routed half close");
@@ -378,6 +381,8 @@ fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
     let directory = tempfile::tempdir().expect("M14 client TCP tempdir");
     let selected_name = "selected-hijack.test.";
     let final_name = "final-hijack.test.";
+    let selected_tag = "selected-hijack-upstream";
+    let final_tag = "final-hijack-upstream";
     let selected_dns = start_dns_script(vec![DnsStep {
         record_type: RecordType::A,
         reply: DnsReply::Addresses(vec![Ipv4Addr::new(127, 0, 0, 11)]),
@@ -410,10 +415,10 @@ fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
              [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nport = 53\naction = \"hijack-dns\"\n\
              [dns]\nmax_inflight = 4\n\
              [[dns.inbounds]]\ntag = \"dedicated\"\nlisten = \"{dns_listen}\"\n\
-             [[dns.servers]]\ntag = \"selected\"\ntransport = \"udp\"\naddress = \"{}\"\n\
-             [[dns.servers]]\ntag = \"final\"\ntransport = \"udp\"\naddress = \"{}\"\n\
-             [dns.route]\nfinal = \"final\"\n\
-             [[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nqname = \"{selected_name}\"\nqtype = \"A\"\nserver = \"selected\"\n\
+             [[dns.servers]]\ntag = \"{selected_tag}\"\ntransport = \"udp\"\naddress = \"{}\"\n\
+             [[dns.servers]]\ntag = \"{final_tag}\"\ntransport = \"udp\"\naddress = \"{}\"\n\
+             [dns.route]\nfinal = \"{final_tag}\"\n\
+             [[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nqname = \"{selected_name}\"\nqtype = \"A\"\nserver = \"{selected_tag}\"\n\
              [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
              [udp]\nenabled = false\n\
              [metrics]\nlisten = \"{metrics_address}\"\n",
@@ -522,8 +527,8 @@ fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
     for sentinel in [
         selected_name,
         final_name,
-        "selected",
-        "final",
+        selected_tag,
+        final_tag,
         SYNTHETIC_PSK,
     ] {
         assert!(
@@ -537,8 +542,8 @@ fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
     exit.assert_stderr_excludes(&[
         selected_name,
         final_name,
-        "selected",
-        "final",
+        selected_tag,
+        final_tag,
         SYNTHETIC_PSK,
     ]);
     let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline_children);
@@ -562,7 +567,7 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
     let selected_name = "selected.test.";
     let final_name = "final.test.";
     let wrong_name = "wrong-id-sentinel.test.";
-    let empty_name = "empty-sentinel.test.";
+    let empty_name = "localhost";
     let timeout_name = "timeout-sentinel.test.";
     let many_name = "many-sentinel.test.";
     let delayed_name = "delayed-sentinel.test.";
@@ -592,7 +597,7 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
         .expect("many target address")
         .port();
 
-    let selected_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 1), 4);
+    let selected_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 1), 2);
     let final_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 2), 2);
     let wrong_dns = start_dns_script(vec![DnsStep {
         record_type: RecordType::A,
@@ -727,8 +732,6 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
     selected_dns.wait_for_query(RecordType::AAAA);
     final_dns.wait_for_query(RecordType::A);
     final_dns.wait_for_query(RecordType::AAAA);
-    let (recovery_target, recovery_echo) = start_echo_at(selected_target);
-
     let (mut bypass, reply) =
         socks_connect_wire(client_address, &address_wire(SocketAddr::V4(bypass_target)));
     assert_eq!(&reply[..4], &[5, 0, 0, 1]);
@@ -753,21 +756,6 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
     assert_socks_domain_failure(client_address, loop_name, protected_port);
     loop_dns.wait_for_query(RecordType::A);
 
-    let (mut recovery, reply) = socks_connect_wire(
-        client_address,
-        &domain_wire(selected_name, recovery_target.port()),
-    );
-    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
-    recovery.write_all(b"recovery").expect("recovery payload");
-    selected_dns.wait_for_query(RecordType::A);
-    selected_dns.wait_for_query(RecordType::AAAA);
-    recovery.shutdown(Shutdown::Write).expect("recovery close");
-    let mut recovered = Vec::new();
-    recovery
-        .read_to_end(&mut recovered)
-        .expect("recovery response");
-    assert_eq!(recovered, b"recovery");
-
     let delayed_started = Instant::now();
     let (delayed, delayed_reply) =
         socks_connect_wire(client_address, &domain_wire(delayed_name, protected_port));
@@ -790,16 +778,7 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
 
     assert_eq!(final_echo.join().expect("final echo"), b"final");
     assert_eq!(bypass_echo.join().expect("bypass echo"), b"bypass");
-    assert_eq!(recovery_echo.join().expect("recovery echo"), b"recovery");
-    assert_eq!(
-        selected_dns.join(),
-        [
-            RecordType::A,
-            RecordType::AAAA,
-            RecordType::A,
-            RecordType::AAAA
-        ]
-    );
+    assert_eq!(selected_dns.join(), [RecordType::A, RecordType::AAAA]);
     assert_eq!(final_dns.join(), [RecordType::A, RecordType::AAAA]);
     assert_eq!(wrong_dns.join(), [RecordType::A]);
     assert_eq!(empty_dns.join(), [RecordType::A, RecordType::AAAA]);

@@ -8,13 +8,13 @@ pub(in crate::run) use std::task::Context;
 pub(in crate::run) use std::time::Duration;
 
 pub(in crate::run) use ferrum2_config::ValidatedServerConfig;
-pub(in crate::run) use ferrum2_core::route::compile_selector_route;
-pub(in crate::run) use ferrum2_core::selector::{
-    SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedRoute, TaggedStaticBinding,
-};
 pub(in crate::run) use ferrum2_core::{ConnectErrorKind, Datagram, TargetAddr};
 pub(in crate::run) use ferrum2_crypto::{
     Clock, MethodProfile, MethodPsk, MethodSinglePskProvider, SystemClock, SystemRandom,
+};
+pub(in crate::run) use ferrum2_rule::{
+    SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedRoute, TaggedStaticBinding,
+    compile_selector_route,
 };
 pub(in crate::run) use ferrum2_runtime::{
     MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, OwnerSnapshot, ProcessCause, ProcessRoot,

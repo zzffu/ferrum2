@@ -12,9 +12,8 @@ use ferrum2_crypto::{Clock, MethodKeyProvider, SecureRandom, UdpSessionId};
 use ferrum2_runtime::{
     AccountedDatagram, DirectUdpSocket, DirectUdpSocketFactory, MAX_UDP_RESOLVED_CANDIDATES,
     MAX_UDP_WIRE_DATAGRAM_BYTES, PendingUdpDatagram, PendingUdpSession, SystemDirectUdpSocket,
-    SystemDirectUdpSocketFactory, SystemUdpResolver, UDP_SESSION_QUEUE_DEPTH, UdpBufferReservation,
-    UdpCommitError, UdpDirection, UdpResolver, UdpRuntimeError, UdpSessionHandle,
-    UdpSessionManager,
+    SystemDirectUdpSocketFactory, UDP_SESSION_QUEUE_DEPTH, UdpBufferReservation, UdpCommitError,
+    UdpDirection, UdpResolver, UdpRuntimeError, UdpSessionHandle, UdpSessionManager,
 };
 #[cfg(test)]
 use ferrum2_shadowsocks::MethodKeyAdapter;
@@ -29,8 +28,7 @@ use tokio::time::Instant;
 use super::{ClientEgressEngine, ClientOutboundContext, ClientRequestOrigin, SelectedEgress};
 
 const MAX_DIRECT_UDP_READINESS_DRAIN: usize = 32;
-const DIRECT_UDP_DNS_CACHE_CAPACITY: usize = 16;
-const DIRECT_UDP_DNS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+const DIRECT_UDP_CANDIDATE_HINT_CAPACITY: usize = 16;
 
 pub(in crate::run) struct ClientUdpContext {
     pub(in crate::run) manager: UdpSessionManager,
@@ -110,7 +108,8 @@ pub(in crate::run) struct ClientUdpAssociation {
     upstream: ClientUdpUpstream,
     direct_target: Option<TargetAddr>,
     direct_peers: VecDeque<SocketAddr>,
-    direct_dns_cache: DirectUdpDnsCache,
+    direct_candidate_hints: DirectUdpCandidateHints,
+    direct_resolver: ferrum2_runtime::ApplicationResolverAdapter,
     direct_timeout: std::time::Duration,
     pending_direct_response: Option<(BytesMut, SocketAddr)>,
     direct_wire: Option<BytesMut>,
@@ -137,44 +136,39 @@ enum ClientDirectUdpSocket {
 }
 
 #[derive(Default)]
-struct DirectUdpDnsCache {
-    entries: VecDeque<DirectUdpResolvedTarget>,
+struct DirectUdpCandidateHints {
+    entries: VecDeque<DirectUdpCandidateHint>,
 }
 
-struct DirectUdpResolvedTarget {
+struct DirectUdpCandidateHint {
     domain: String,
     port: u16,
-    ordered_addrs: Vec<SocketAddr>,
-    expires_at: Instant,
     last_successful_index: usize,
 }
 
-impl DirectUdpDnsCache {
-    fn take_valid(
-        &mut self,
-        domain: &str,
-        port: u16,
-        now: Instant,
-    ) -> Option<DirectUdpResolvedTarget> {
-        let position = self
-            .entries
+impl DirectUdpCandidateHints {
+    fn start_index(&self, domain: &str, port: u16) -> usize {
+        self.entries
             .iter()
-            .position(|entry| entry.domain == domain && entry.port == port)?;
-        let entry = self.entries.remove(position)?;
-        (entry.expires_at > now).then_some(entry)
+            .find(|entry| entry.domain == domain && entry.port == port)
+            .map_or(0, |entry| entry.last_successful_index)
     }
 
-    fn insert(&mut self, entry: DirectUdpResolvedTarget) {
+    fn record_success(&mut self, domain: &str, port: u16, last_successful_index: usize) {
         if let Some(position) = self
             .entries
             .iter()
-            .position(|cached| cached.domain == entry.domain && cached.port == entry.port)
+            .position(|entry| entry.domain == domain && entry.port == port)
         {
             self.entries.remove(position);
-        } else if self.entries.len() >= DIRECT_UDP_DNS_CACHE_CAPACITY {
+        } else if self.entries.len() >= DIRECT_UDP_CANDIDATE_HINT_CAPACITY {
             self.entries.pop_front();
         }
-        self.entries.push_back(entry);
+        self.entries.push_back(DirectUdpCandidateHint {
+            domain: domain.to_owned(),
+            port,
+            last_successful_index,
+        });
     }
 }
 
@@ -362,7 +356,13 @@ impl Drop for ClientUdpAssociation {
 }
 
 impl ClientUdpAssociation {
-    pub(in crate::run) fn activate(&mut self, egress: &ClientEgressEngine) -> Result<(), ()> {
+    pub(in crate::run) fn activate<C, T, R>(
+        &mut self,
+        egress: &ClientEgressEngine<C, T, R>,
+    ) -> Result<(), ()>
+    where
+        R: SecureRandom,
+    {
         if matches!(self.upstream, ClientUdpUpstream::Direct(_)) {
             return Ok(());
         }
@@ -397,12 +397,16 @@ impl ClientUdpAssociation {
         Instant::now() >= self.manager.idle_deadline(self.handle).unwrap_or(observed)
     }
 
-    pub(in crate::run) fn encode_request(
+    pub(in crate::run) fn encode_request<C, T, R>(
         &mut self,
-        egress: &ClientEgressEngine,
+        egress: &ClientEgressEngine<C, T, R>,
         outbounds: &[ClientOutboundContext],
         datagram: &Datagram,
-    ) -> Result<usize, UdpPacketError> {
+    ) -> Result<usize, UdpPacketError>
+    where
+        T: Clock,
+        R: SecureRandom,
+    {
         let Self {
             plan,
             protocol,
@@ -480,12 +484,15 @@ impl ClientUdpAssociation {
         Ok(wire_len)
     }
 
-    pub(in crate::run) fn accept_response(
+    pub(in crate::run) fn accept_response<C, T, R>(
         &mut self,
-        egress: &ClientEgressEngine,
+        egress: &ClientEgressEngine<C, T, R>,
         outbounds: &[ClientOutboundContext],
         wire_len: usize,
-    ) -> Result<AccountedDatagram, UdpPlanResponseError> {
+    ) -> Result<AccountedDatagram, UdpPlanResponseError>
+    where
+        T: Clock,
+    {
         let Self {
             plan,
             protocol,
@@ -641,14 +648,18 @@ impl ClientUdpAssociation {
         }
     }
 
-    pub(in crate::run) fn prepare_application_request(
+    pub(in crate::run) fn prepare_application_request<C, T, R>(
         &mut self,
-        engine: &ClientEgressEngine,
+        engine: &ClientEgressEngine<C, T, R>,
         outbounds: &[ClientOutboundContext],
         target: TargetAddr,
         payload: &[u8],
         now: Instant,
-    ) -> Result<usize, UdpPlanResponseError> {
+    ) -> Result<usize, UdpPlanResponseError>
+    where
+        T: Clock,
+        R: SecureRandom,
+    {
         self.prepare_owned_application_request(
             engine,
             outbounds,
@@ -658,14 +669,18 @@ impl ClientUdpAssociation {
         )
     }
 
-    pub(in crate::run) fn prepare_owned_application_request(
+    pub(in crate::run) fn prepare_owned_application_request<C, T, R>(
         &mut self,
-        engine: &ClientEgressEngine,
+        engine: &ClientEgressEngine<C, T, R>,
         outbounds: &[ClientOutboundContext],
         target: TargetAddr,
         payload: BytesMut,
         now: Instant,
-    ) -> Result<usize, UdpPlanResponseError> {
+    ) -> Result<usize, UdpPlanResponseError>
+    where
+        T: Clock,
+        R: SecureRandom,
+    {
         let encoded_target_len = match target.host() {
             TargetHostRef::Ip(std::net::IpAddr::V4(_)) => 7,
             TargetHostRef::Ip(std::net::IpAddr::V6(_)) => 19,
@@ -701,12 +716,15 @@ impl ClientUdpAssociation {
         Ok(wire_len)
     }
 
-    pub(in crate::run) fn prepare_application_response(
+    pub(in crate::run) fn prepare_application_response<C, T, R>(
         &mut self,
-        engine: &ClientEgressEngine,
+        engine: &ClientEgressEngine<C, T, R>,
         outbounds: &[ClientOutboundContext],
         wire_len: usize,
-    ) -> Result<AccountedDatagram, UdpPlanResponseError> {
+    ) -> Result<AccountedDatagram, UdpPlanResponseError>
+    where
+        T: Clock,
+    {
         let response = if matches!(self.upstream, ClientUdpUpstream::Direct(_)) {
             let (payload, source) =
                 self.pending_direct_response
@@ -803,8 +821,8 @@ impl ClientUdpAssociation {
                     .expect("direct UDP association owns its request wire buffer");
                 let (length, peer) = send_direct_target(
                     socket,
-                    &SystemUdpResolver,
-                    &mut self.direct_dns_cache,
+                    &self.direct_resolver,
+                    &mut self.direct_candidate_hints,
                     target,
                     &direct_wire[..wire_len],
                     self.direct_timeout,
@@ -876,13 +894,17 @@ impl ClientUdpAssociation {
         self.io_fault = fault;
     }
 
-    pub(in crate::run) async fn relay(
+    pub(in crate::run) async fn relay<C, T, R>(
         &mut self,
-        engine: &ClientEgressEngine,
+        engine: &ClientEgressEngine<C, T, R>,
         plan: Option<&EgressPlanSnapshot>,
         destination: SocketAddr,
         packet: Vec<u8>,
-    ) -> io::Result<((Vec<u8>, SocketAddr), bool)> {
+    ) -> io::Result<((Vec<u8>, SocketAddr), bool)>
+    where
+        T: Clock,
+        R: SecureRandom,
+    {
         if packet.len() > MAX_UDP_WIRE_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -993,6 +1015,7 @@ where
 pub(in crate::run) async fn prepare<C, T, R, F, Fut>(
     egress: &ClientEgressEngine<C, T, R>,
     origin: ClientRequestOrigin,
+    ingress: usize,
     plan: Option<EgressPlanSnapshot>,
     selected: SelectedEgress,
     target: Option<&TargetAddr>,
@@ -1117,7 +1140,8 @@ where
         upstream,
         direct_target: None,
         direct_peers: VecDeque::with_capacity(UDP_SESSION_QUEUE_DEPTH),
-        direct_dns_cache: DirectUdpDnsCache::default(),
+        direct_candidate_hints: DirectUdpCandidateHints::default(),
+        direct_resolver: egress.application_resolver.for_ingress(ingress),
         direct_timeout: egress.phase_deadlines.0,
         pending_direct_response: None,
         direct_wire: matches!(selected, SelectedEgress::Direct)
@@ -1134,7 +1158,7 @@ where
 async fn send_direct_target(
     socket: &impl DirectUdpSocket,
     resolver: &impl UdpResolver,
-    cache: &mut DirectUdpDnsCache,
+    candidate_hints: &mut DirectUdpCandidateHints,
     target: &TargetAddr,
     payload: &[u8],
     timeout: std::time::Duration,
@@ -1148,20 +1172,6 @@ async fn send_direct_target(
         return Err(io::Error::other("direct UDP target unavailable"));
     };
     let port = target.port().get();
-    if let Some(mut cached) = cache.take_valid(host, port, Instant::now())
-        && let Ok((length, peer, index)) = send_direct_candidates(
-            socket,
-            payload,
-            &cached.ordered_addrs,
-            cached.last_successful_index,
-            deadline,
-        )
-        .await
-    {
-        cached.last_successful_index = index;
-        cache.insert(cached);
-        return Ok((length, peer));
-    }
     let candidates = tokio::time::timeout_at(deadline, resolver.resolve(host, target.port().get()))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "direct UDP resolve timeout"))??;
@@ -1169,15 +1179,10 @@ async fn send_direct_target(
         .into_iter()
         .take(MAX_UDP_RESOLVED_CANDIDATES)
         .collect::<Vec<_>>();
+    let first_index = candidate_hints.start_index(host, port);
     let (length, peer, last_successful_index) =
-        send_direct_candidates(socket, payload, &candidates, 0, deadline).await?;
-    cache.insert(DirectUdpResolvedTarget {
-        domain: host.to_owned(),
-        port,
-        ordered_addrs: candidates,
-        expires_at: Instant::now() + DIRECT_UDP_DNS_CACHE_TTL,
-        last_successful_index,
-    });
+        send_direct_candidates(socket, payload, &candidates, first_index, deadline).await?;
+    candidate_hints.record_success(host, port, last_successful_index);
     Ok((length, peer))
 }
 
@@ -1457,6 +1462,22 @@ mod tests {
     use super::*;
     use crate::run::test_support::*;
 
+    struct FailingConfiguredApplicationBackend {
+        calls: AtomicUsize,
+    }
+
+    impl ferrum2_dns::ApplicationResolveBackend for FailingConfiguredApplicationBackend {
+        fn resolve<'a>(
+            &'a self,
+            _request: ferrum2_dns::ApplicationResolveRequest<'a>,
+        ) -> ferrum2_dns::ApplicationResolveFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(ferrum2_dns::DnsError::Timeout)
+            })
+        }
+    }
+
     struct InjectedManagedUdp {
         events: Mutex<Vec<&'static str>>,
         fail_binding: bool,
@@ -1701,7 +1722,7 @@ mod tests {
     }
 
     struct SequencedDirectTestResolver {
-        answers: Mutex<VecDeque<Vec<SocketAddr>>>,
+        answers: Mutex<VecDeque<Result<Vec<SocketAddr>, io::ErrorKind>>>,
         calls: AtomicUsize,
     }
 
@@ -1710,11 +1731,16 @@ mod tests {
 
         async fn resolve(&self, _host: &str, _port: u16) -> io::Result<Self::Candidates> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.answers
+            match self
+                .answers
                 .lock()
                 .expect("sequenced resolver answers")
                 .pop_front()
-                .ok_or_else(|| io::Error::other("injected resolver exhaustion"))
+                .ok_or_else(|| io::Error::other("injected resolver exhaustion"))?
+            {
+                Ok(candidates) => Ok(candidates),
+                Err(kind) => Err(io::Error::from(kind)),
+            }
         }
     }
 
@@ -1849,8 +1875,8 @@ mod tests {
         assert_eq!(&payload[..], b"accepted");
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn direct_udp_dns_cache_reuses_last_success_and_expires() {
+    #[tokio::test]
+    async fn direct_udp_resolves_every_send_and_reuses_last_success_hint() {
         let first: SocketAddr = "192.0.2.1:53".parse().unwrap();
         let second: SocketAddr = "192.0.2.2:53".parse().unwrap();
         let third: SocketAddr = "192.0.2.3:53".parse().unwrap();
@@ -1862,13 +1888,13 @@ mod tests {
             attempts: Mutex::new(Vec::new()),
             successful: Mutex::new(HashSet::from([second])),
         };
-        let target = TargetAddr::domain("cached-direct.invalid", 53).unwrap();
-        let mut cache = DirectUdpDnsCache::default();
+        let target = TargetAddr::domain("hinted-direct.invalid", 53).unwrap();
+        let mut hints = DirectUdpCandidateHints::default();
 
         let (_, peer) = send_direct_target(
             &socket,
             &resolver,
-            &mut cache,
+            &mut hints,
             &target,
             b"first",
             Duration::from_secs(1),
@@ -1882,34 +1908,34 @@ mod tests {
         send_direct_target(
             &socket,
             &resolver,
-            &mut cache,
+            &mut hints,
             &target,
-            b"cached",
+            b"resolve-again",
             Duration::from_secs(1),
         )
         .await
-        .expect("cached last-success send");
+        .expect("resolved last-success send");
         assert_eq!(socket.take_attempts(), [second]);
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
 
         socket.set_successful([third]);
         send_direct_target(
             &socket,
             &resolver,
-            &mut cache,
+            &mut hints,
             &target,
-            b"fallback",
+            b"rotate",
             Duration::from_secs(1),
         )
         .await
-        .expect("cached fallback send");
+        .expect("candidate rotation send");
         assert_eq!(socket.take_attempts(), [second, third]);
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 3);
 
         send_direct_target(
             &socket,
             &resolver,
-            &mut cache,
+            &mut hints,
             &target,
             b"new-last-success",
             Duration::from_secs(1),
@@ -1917,28 +1943,14 @@ mod tests {
         .await
         .expect("updated last-success send");
         assert_eq!(socket.take_attempts(), [third]);
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 4);
 
-        tokio::time::advance(DIRECT_UDP_DNS_CACHE_TTL + Duration::from_secs(1)).await;
         socket.set_successful([first]);
-        send_direct_target(
-            &socket,
-            &resolver,
-            &mut cache,
-            &target,
-            b"expired",
-            Duration::from_secs(1),
-        )
-        .await
-        .expect("expired cache refresh");
-        assert_eq!(socket.take_attempts(), [first]);
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
-
         let ip_target = TargetAddr::ip(first).unwrap();
         send_direct_target(
             &socket,
             &resolver,
-            &mut cache,
+            &mut hints,
             &ip_target,
             b"literal-ip",
             Duration::from_secs(1),
@@ -1946,69 +1958,75 @@ mod tests {
         .await
         .expect("literal IP send");
         assert_eq!(socket.take_attempts(), [first]);
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(hints.entries.len(), 1);
+        assert_eq!(hints.entries[0].last_successful_index, 2);
     }
 
     #[tokio::test]
-    async fn direct_udp_dns_cache_refreshes_early_after_cached_candidates_fail() {
+    async fn direct_udp_uses_fresh_resolver_results_and_never_falls_back() {
         let first: SocketAddr = "192.0.2.11:53".parse().unwrap();
         let second: SocketAddr = "192.0.2.12:53".parse().unwrap();
         let refreshed: SocketAddr = "192.0.2.13:53".parse().unwrap();
         let resolver = SequencedDirectTestResolver {
-            answers: Mutex::new(VecDeque::from([vec![first, second], vec![refreshed]])),
+            answers: Mutex::new(VecDeque::from([
+                Ok(vec![first, second]),
+                Ok(vec![refreshed]),
+                Err(io::ErrorKind::ConnectionRefused),
+            ])),
             calls: AtomicUsize::new(0),
         };
         let socket = SelectiveDirectTestSocket {
             attempts: Mutex::new(Vec::new()),
-            successful: Mutex::new(HashSet::from([first])),
+            successful: Mutex::new(HashSet::from([second])),
         };
-        let target = TargetAddr::domain("refresh-direct.invalid", 53).unwrap();
-        let mut cache = DirectUdpDnsCache::default();
+        let target = TargetAddr::domain("fresh-direct.invalid", 53).unwrap();
+        let mut hints = DirectUdpCandidateHints::default();
 
         send_direct_target(
             &socket,
             &resolver,
-            &mut cache,
+            &mut hints,
             &target,
             b"prime",
             Duration::from_secs(1),
         )
         .await
-        .expect("prime DNS cache");
-        assert_eq!(socket.take_attempts(), [first]);
+        .expect("prime candidate hint");
+        assert_eq!(socket.take_attempts(), [first, second]);
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
         socket.set_successful([refreshed]);
         send_direct_target(
             &socket,
             &resolver,
-            &mut cache,
+            &mut hints,
             &target,
-            b"early-refresh",
+            b"fresh-result",
             Duration::from_secs(1),
         )
         .await
-        .expect("early DNS refresh");
-        assert_eq!(socket.take_attempts(), [first, second, refreshed]);
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
-
-        send_direct_target(
-            &socket,
-            &resolver,
-            &mut cache,
-            &target,
-            b"refreshed-cache",
-            Duration::from_secs(1),
-        )
-        .await
-        .expect("refreshed cache send");
+        .expect("fresh resolver result");
         assert_eq!(socket.take_attempts(), [refreshed]);
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
+
+        let error = send_direct_target(
+            &socket,
+            &resolver,
+            &mut hints,
+            &target,
+            b"configured-failure",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("resolver failure is terminal");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        assert!(socket.take_attempts().is_empty());
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
-    async fn direct_udp_dns_cache_is_bounded() {
+    async fn direct_udp_candidate_hints_are_bounded() {
         let candidate: SocketAddr = "192.0.2.21:53".parse().unwrap();
         let resolver = DirectTestResolver {
             candidates: Some(vec![candidate]),
@@ -2018,34 +2036,103 @@ mod tests {
             attempts: Mutex::new(Vec::new()),
             successful: Mutex::new(HashSet::from([candidate])),
         };
-        let mut cache = DirectUdpDnsCache::default();
+        let mut hints = DirectUdpCandidateHints::default();
 
-        for index in 0..=DIRECT_UDP_DNS_CACHE_CAPACITY {
-            let domain = format!("cache-{index}.invalid");
+        for index in 0..=DIRECT_UDP_CANDIDATE_HINT_CAPACITY {
+            let domain = format!("hint-{index}.invalid");
             let target = TargetAddr::domain(&domain, 53).unwrap();
             send_direct_target(
                 &socket,
                 &resolver,
-                &mut cache,
+                &mut hints,
                 &target,
                 b"bounded",
                 Duration::from_secs(1),
             )
             .await
-            .expect("bounded cache send");
+            .expect("bounded hinted send");
         }
 
-        assert_eq!(cache.entries.len(), DIRECT_UDP_DNS_CACHE_CAPACITY);
+        assert_eq!(hints.entries.len(), DIRECT_UDP_CANDIDATE_HINT_CAPACITY);
         assert!(
-            cache
+            hints
                 .entries
                 .iter()
-                .all(|entry| entry.domain != "cache-0.invalid")
+                .all(|entry| entry.domain != "hint-0.invalid")
         );
         assert_eq!(
             resolver.calls.load(Ordering::SeqCst),
-            DIRECT_UDP_DNS_CACHE_CAPACITY + 1
+            DIRECT_UDP_CANDIDATE_HINT_CAPACITY + 1
         );
+    }
+
+    #[tokio::test]
+    async fn direct_tcp_and_udp_injection_share_configured_resolver_without_fallback() {
+        let backend = Arc::new(FailingConfiguredApplicationBackend {
+            calls: AtomicUsize::new(0),
+        });
+        let application_resolver = ferrum2_runtime::ApplicationResolverAdapter::new(
+            Arc::new(ferrum2_dns::ApplicationResolver::configured(
+                backend.clone(),
+            )),
+            0,
+            ferrum2_dns::DnsStrategy::PreferIpv4,
+        );
+        let connector = ferrum2_runtime::TcpConnector::with_resolution_adapters(
+            ferrum2_runtime::SystemSocketInspector,
+            ferrum2_runtime::SystemTcpDialer,
+            application_resolver.clone(),
+            Duration::from_secs(1),
+        );
+        assert!(
+            connector
+                .resolver()
+                .shares_resolver_with(&application_resolver)
+        );
+        let registry = OwnerRegistry::new();
+        let engine = ClientEgressEngine::new_with_application_resolver(
+            vec![ClientOutboundContext::Direct].into(),
+            TokioConnector::new(connector),
+            ferrum2_crypto::SystemClock::new(),
+            ferrum2_crypto::SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some(ClientUdpContext {
+                manager: UdpSessionManager::new(UdpRuntimeLimits::default(), registry),
+                live_ids: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            application_resolver.clone(),
+            None,
+        );
+        assert!(
+            engine
+                .application_resolver
+                .shares_resolver_with(&application_resolver)
+        );
+        let target = TargetAddr::domain("configured-only.invalid", 53).expect("domain target");
+        let mut association = engine
+            .prepare_udp(
+                ClientRequestOrigin::Socks,
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                Some(&target),
+            )
+            .await
+            .expect("direct association");
+        let Ok(wire_len) = association.prepare_application_request(
+            &engine,
+            &engine.outbounds,
+            target,
+            b"configured",
+            Instant::now(),
+        ) else {
+            panic!("prepare direct request");
+        };
+
+        let error = association
+            .send_encoded_request(wire_len)
+            .await
+            .expect_err("configured resolver failure must be terminal");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -2395,11 +2482,11 @@ mod tests {
                 attempts: Mutex::new(Vec::new()),
                 succeed_at,
             };
-            let mut cache = DirectUdpDnsCache::default();
+            let mut hints = DirectUdpCandidateHints::default();
             let result = send_direct_target(
                 &socket,
                 &resolver,
-                &mut cache,
+                &mut hints,
                 &domain,
                 b"candidate",
                 Duration::from_secs(1),
@@ -2420,12 +2507,12 @@ mod tests {
             attempts: Mutex::new(Vec::new()),
             succeed_at: Some(1),
         };
-        let mut cache = DirectUdpDnsCache::default();
+        let mut hints = DirectUdpCandidateHints::default();
         assert!(
             send_direct_target(
                 &socket,
                 &resolver,
-                &mut cache,
+                &mut hints,
                 &domain,
                 b"resolver-error",
                 Duration::from_secs(1),

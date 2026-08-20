@@ -1,343 +1,96 @@
-use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use ferrum2_core::TargetAddr;
-use ferrum2_core::route::{
-    ActionRule, ActionTable, EgressPlanHandle, Network, OrderedRouteProgram, OrderedRouteRule,
-    RouteMatcher, RouteMetadata, RouteProgramAction, RouteRuleAction, compile_selector_plans,
-    compile_selector_plans_with_roots, compile_selector_route,
-};
+use ferrum2_core::route::{EgressPlanHandle, compile_egress_plans_with_roots};
 use ferrum2_core::selector::{
-    SelectorCompileError, SelectorControl, SelectorDefinition, SelectorError, TaggedInbound,
-    TaggedOutbound, TaggedPlan, TaggedRoute, TaggedRouteRule, TaggedStaticBinding,
+    SelectorCompileError, SelectorDefinition, SelectorError, TaggedInbound, TaggedOutbound,
+    TaggedPlan,
 };
 
-fn nested_route() -> (ferrum2_core::route::RouteTable, SelectorControl) {
-    compile_selector_route(
+fn nested_graph() -> (ferrum2_core::selector::SelectorControl, EgressPlanHandle) {
+    let (control, mut roots) = compile_egress_plans_with_roots(
         &[TaggedInbound::new("entry", 0)],
         &[
             TaggedOutbound::new("leaf-a", 7),
             TaggedOutbound::new("leaf-b", 8),
         ],
+        &[],
         &[
             SelectorDefinition::new("inner", vec!["leaf-a", "leaf-b"], Some("leaf-a")),
             SelectorDefinition::new("outer", vec!["leaf-b", "inner"], Some("inner")),
         ],
-        TaggedRoute::Routed {
-            rules: vec![],
-            final_outbound: Some("outer"),
-        },
+        &["outer"],
     )
-    .expect("valid nested selector graph")
-}
-
-fn select(route: &ferrum2_core::route::RouteTable) -> usize {
-    route.select(
-        0,
-        Network::Tcp,
-        &TargetAddr::domain("selector.test", 443).expect("target"),
-    )
+    .expect("valid nested selector graph");
+    (control, roots.remove(0))
 }
 
 #[test]
-fn public_owned_plan_snapshot_is_redacted() {
-    let handle = EgressPlanHandle::direct(0xdead_beef);
-    let borrowed = handle.snapshot();
-    let snapshot = handle.snapshot_owned();
-
-    assert_eq!(borrowed.hops(), snapshot.hops());
-    assert!(std::ptr::eq(borrowed.hops(), snapshot.hops()));
-    let rendered = format!("{snapshot:?}");
-    assert!(rendered.contains("[redacted]"));
-    assert!(!rendered.contains("3735928559"));
-}
-
-#[test]
-fn public_control_resolves_nested_members_and_keeps_closed_failures_atomic() {
-    let (route, control) = nested_route();
-    let target = TargetAddr::domain("selector.test", 443).expect("target");
-    let borrowed_final = route.final_plan();
-    let owned_final = route.final_plan_snapshot();
+fn public_control_resolves_nested_members_and_switches_whole_plans() {
+    let (control, root) = nested_graph();
     assert_eq!(control.selected("outer"), Ok("inner"));
     assert_eq!(control.selected("inner"), Ok("leaf-a"));
-    assert_eq!((select(&route), route.final_outbound()), (7, 7));
+    assert_eq!(root.snapshot().hops(), &[7]);
 
-    for selector in ["missing-selector", "leaf-a"] {
-        let error = control.selected(selector).unwrap_err();
-        assert_eq!(error, SelectorError::UnknownSelector);
-        assert!(!format!("{error}\n{error:?}").contains(selector));
-    }
-    for member in ["missing-member", "Leaf-B", "outer", "leaf-a"] {
-        let error = control.switch("outer", member).unwrap_err();
-        assert_eq!(error, SelectorError::UnknownMember);
-        assert!(!format!("{error}\n{error:?}").contains(member));
-        assert_eq!(control.selected("outer"), Ok("inner"));
-    }
-
-    control.switch("outer", "leaf-b").expect("valid switch");
-    control.switch("outer", "leaf-b").expect("no-op switch");
-    assert_eq!((select(&route), route.final_outbound()), (8, 7));
     assert_eq!(
-        (
-            borrowed_final.hops(),
-            owned_final.hops(),
-            route.final_plan().hops(),
-            route.final_plan_snapshot().hops(),
-            route.select_plan_snapshot(0, Network::Tcp, &target).hops(),
-        ),
-        (&[7][..], &[7][..], &[7][..], &[7][..], &[8][..])
+        control.switch("missing", "leaf-a"),
+        Err(SelectorError::UnknownSelector)
     );
-    control.switch("outer", "inner").expect("nested switch");
-    control.switch("inner", "leaf-b").expect("inner switch");
-    assert_eq!(control.selected("outer"), Ok("inner"));
-    assert_eq!(select(&route), 8);
-    let rendered = format!("{control:?}");
-    assert!(rendered.contains("[redacted]"));
-    for private_name in ["outer", "inner", "leaf-a", "leaf-b"] {
-        assert!(!rendered.contains(private_name));
-    }
+    assert_eq!(
+        control.switch("outer", "missing"),
+        Err(SelectorError::UnknownMember)
+    );
+    control.switch("inner", "leaf-b").expect("valid switch");
+    assert_eq!(root.snapshot_owned().hops(), &[8]);
 }
 
 #[test]
-fn concurrent_queries_and_switches_observe_only_complete_members_and_leaves() {
-    let shared = Arc::new(nested_route());
+fn selector_reads_and_switches_are_atomic() {
+    let shared = Arc::new(nested_graph());
     let barrier = Arc::new(Barrier::new(5));
     let mut tasks = Vec::new();
     for task in 0..4 {
-        let (shared, barrier) = (Arc::clone(&shared), Arc::clone(&barrier));
+        let shared = Arc::clone(&shared);
+        let barrier = Arc::clone(&barrier);
         tasks.push(thread::spawn(move || {
             barrier.wait();
             for _ in 0..1_000 {
                 if task < 2 {
-                    assert!(["leaf-a", "leaf-b"].contains(&shared.1.selected("inner").unwrap()));
-                    assert!([7, 8].contains(&select(&shared.0)));
+                    assert!([7, 8].contains(&shared.1.snapshot().hops()[0]));
                 } else {
                     shared
-                        .1
+                        .0
                         .switch("inner", if task == 2 { "leaf-a" } else { "leaf-b" })
-                        .unwrap();
+                        .expect("member");
                 }
             }
         }));
     }
     barrier.wait();
-    tasks.into_iter().for_each(|task| task.join().unwrap());
-    shared.1.switch("inner", "leaf-b").unwrap();
-    assert_eq!(shared.1.selected("inner"), Ok("leaf-b"));
-    assert_eq!(select(&shared.0), 8);
-}
-
-#[test]
-fn terminal_route_resolves_selector_once_after_continuation() {
-    let (route, control) = nested_route();
-    let target = TargetAddr::domain("selector.test", 443).expect("target");
-    let program = OrderedRouteProgram::new(
-        vec![
-            OrderedRouteRule::new(
-                RouteMatcher::new(Vec::new()).unwrap(),
-                RouteRuleAction::Continue(&route),
-            ),
-            OrderedRouteRule::new(
-                RouteMatcher::new(Vec::new()).unwrap(),
-                RouteRuleAction::Terminal(&route),
-            ),
-        ],
-        &route,
-    )
-    .unwrap();
-    let mut evaluation = program.evaluate(0, Network::Tcp, &target);
-
-    assert!(matches!(
-        evaluation.next(RouteMetadata::new(None::<()>, None)),
-        Some(RouteProgramAction::Continue(_))
-    ));
-    control
-        .switch("inner", "leaf-b")
-        .expect("switch while continuation is pending");
-    let selected = match evaluation.next(RouteMetadata::new(None, None)) {
-        Some(RouteProgramAction::Terminal(route)) => {
-            route.select_plan_snapshot(0, Network::Tcp, &target)
-        }
-        _ => panic!("terminal route was not selected"),
-    };
-    control
-        .switch("inner", "leaf-a")
-        .expect("switch after terminal selection");
-
-    assert_eq!(
-        (
-            selected.hops(),
-            route.select_plan_snapshot(0, Network::Tcp, &target).hops()
-        ),
-        (&[8][..], &[7][..]),
-        "later switch changed the held snapshot"
-    );
-    assert!(evaluation.next(RouteMetadata::new(None, None)).is_none());
-}
-
-#[test]
-fn public_route_selection_snapshots_complete_static_rule_final_and_selector_plans() {
-    let inbounds = [TaggedInbound::new("entry", 0)];
-    #[rustfmt::skip]
-    let outbounds = [TaggedOutbound::new("a", 7), TaggedOutbound::new("b", 8), TaggedOutbound::new("c", 9)];
-    #[rustfmt::skip]
-    let plans = [
-        TaggedPlan::new("a-b", vec![7, 8]),
-        TaggedPlan::new("b-c", vec![8, 9]),
-        TaggedPlan::new("b-a", vec![8, 7]),
-    ];
-    let selectors = [
-        SelectorDefinition::new("manual", vec!["a-b", "c", "b-a"], Some("a-b")),
-        SelectorDefinition::new("inner", vec!["a", "b-c"], Some("a")),
-        SelectorDefinition::new("outer", vec!["c", "inner"], Some("inner")),
-    ];
-    #[rustfmt::skip]
-    let (route, control, handles) = compile_selector_plans_with_roots(
-        &inbounds, &outbounds, &plans, &selectors,
-        TaggedRoute::Routed { rules: vec![
-            TaggedRouteRule::new(Some("entry"), Some(Network::Tcp), None, Some("manual")),
-            TaggedRouteRule::new(Some("entry"), Some(Network::Udp), None, Some("outer")),
-        ], final_outbound: Some("b-c") },
-        &["manual"],
-    ).expect("valid routed plans");
-    let target = TargetAddr::domain("plans.test", 443).expect("target");
-    let borrowed = route.select_plan(0, Network::Tcp, &target);
-    let snapshot = route.select_plan_snapshot(0, Network::Tcp, &target);
-    let handle_snapshot = handles[0].snapshot_owned();
-    let nested_snapshot = route.select_plan_snapshot(0, Network::Udp, &target);
-    let cloned = snapshot.clone();
-    let held_ptr = snapshot.hops().as_ptr();
-    let cases = [
-        (borrowed, snapshot.clone(), &[7, 8][..]),
-        (
-            route.select_plan(0, Network::Udp, &target),
-            nested_snapshot.clone(),
-            &[7][..],
-        ),
-        (
-            route.select_plan(1, Network::Tcp, &target),
-            route.select_plan_snapshot(1, Network::Tcp, &target),
-            &[8, 9][..],
-        ),
-    ];
-    for (borrowed, owned, expected) in cases {
-        assert_eq!((borrowed.hops(), owned.hops()), (expected, expected));
+    for task in tasks {
+        task.join().expect("worker");
     }
-    assert!(std::ptr::eq(
-        route.final_plan().hops(),
-        route.final_plan_snapshot().hops()
-    ));
-    assert!(std::ptr::eq(borrowed.hops(), snapshot.hops()));
-    assert!(std::ptr::eq(snapshot.hops(), cloned.hops()));
-    assert!(std::ptr::eq(snapshot.hops(), handle_snapshot.hops()));
-    assert!(std::ptr::eq(
-        snapshot.hops(),
-        route.select_plan_snapshot(0, Network::Tcp, &target).hops()
-    ));
-
-    control.switch("manual", "c").expect("whole-plan switch");
-    #[rustfmt::skip]
-    assert_eq!((snapshot.hops(), handle_snapshot.hops(), snapshot.hops().as_ptr(), route.select_plan_snapshot(0, Network::Tcp, &target).hops(), handles[0].snapshot_owned().hops(), route.final_plan_snapshot().hops()), (&[7, 8][..], &[7, 8][..], held_ptr, &[9][..], &[9][..], &[8, 9][..]));
-    control.switch("inner", "b-c").expect("nested switch");
-    assert_eq!(
-        (
-            nested_snapshot.hops(),
-            route.select_plan_snapshot(0, Network::Udp, &target).hops()
-        ),
-        (&[7][..], &[8, 9][..])
-    );
-
-    #[rustfmt::skip]
-    let (static_route, _) = compile_selector_plans(
-        &inbounds, &outbounds[..2], &plans[..1], &[], TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "a-b")]),
-    ).expect("valid static plan");
-    let static_snapshot = static_route.select_plan_snapshot(0, Network::Tcp, &target);
-    assert_eq!(
-        (
-            static_route.select_plan(0, Network::Tcp, &target).hops(),
-            static_snapshot.hops()
-        ),
-        (&[7, 8][..], &[7, 8][..])
-    );
-    control.switch("manual", "b-a").expect("reversed plan");
-    let reversed_snapshot = route.select_plan_snapshot(0, Network::Tcp, &target);
-    assert_eq!(reversed_snapshot.hops(), &[8, 7]);
-    let keys = HashSet::from([snapshot]);
-    assert!(keys.contains(&static_snapshot));
-    assert!(!keys.contains(&reversed_snapshot));
-    assert!(!keys.contains(&nested_snapshot));
-    assert!(!keys.contains(&route.final_plan_snapshot()));
-    assert!(
-        std::panic::catch_unwind(|| static_route.select(0, Network::Tcp, &target)).is_err(),
-        "the direct-only accessor must not truncate a multi-hop plan"
-    );
 }
 
 #[test]
-fn action_table_preserves_the_separate_dns_action_namespace() {
-    let contexts = [
-        (2, Network::Tcp, "EXAMPLE.TEST.:53", 0),
-        (7, Network::Udp, "192.0.2.1:53", 1),
-        (2, Network::Tcp, "example.test:53", 2),
-        (2, Network::Tcp, "example.test.:54", 2),
-        (7, Network::Udp, "192.0.2.2:53", 2),
-    ];
-    let dns = ActionTable::new(
-        vec![
-            ActionRule::new(
-                Some(2),
-                Some(Network::Tcp),
-                Some(TargetAddr::domain("Example.test.", 53).unwrap()),
-                "primary",
-            ),
-            ActionRule::new(
-                None,
-                Some(Network::Udp),
-                Some(TargetAddr::ip("192.0.2.1:53".parse().unwrap()).unwrap()),
-                "lan",
-            ),
-            ActionRule::new(None, None, None, "shadow"),
-        ],
-        "final",
-    )
-    .unwrap();
-    for (inbound, network, target, expected) in contexts {
-        let target = target
-            .parse()
-            .ok()
-            .and_then(|socket| TargetAddr::ip(socket).ok())
-            .unwrap_or_else(|| {
-                let (host, port) = target.rsplit_once(':').unwrap();
-                TargetAddr::domain(host, port.parse().unwrap()).unwrap()
-            });
-        assert_eq!(
-            dns.select(inbound, network, &target),
-            ["primary", "lan", "shadow"][expected]
-        );
-    }
-    let final_only = ActionTable::new(Vec::new(), "final").unwrap();
-    assert_eq!(
-        final_only.select(
-            0,
-            Network::Tcp,
-            &TargetAddr::domain("unused.test", 443).unwrap()
-        ),
-        "final"
-    );
-}
-
-#[test]
-fn extra_root_failure_is_distinct_from_an_ordinary_route_action_failure() {
-    let Err(error) = compile_selector_plans_with_roots(
+fn plans_and_reachability_keep_existing_resource_bounds() {
+    let error = compile_egress_plans_with_roots(
         &[TaggedInbound::new("entry", 0)],
-        &[TaggedOutbound::new("out", 0)],
+        &[TaggedOutbound::new("out", 7)],
+        &[TaggedPlan::new("empty", Vec::new())],
+        &[],
+        &["out"],
+    )
+    .unwrap_err();
+    assert_eq!(error, SelectorCompileError::PlanHops);
+
+    let error = compile_egress_plans_with_roots(
+        &[TaggedInbound::new("entry", 0)],
+        &[TaggedOutbound::new("out", 7)],
         &[],
         &[],
-        TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "out")]),
         &["missing"],
-    ) else {
-        panic!("unknown extra root was accepted")
-    };
+    )
+    .unwrap_err();
     assert_eq!(error, SelectorCompileError::ExtraRoot);
 }

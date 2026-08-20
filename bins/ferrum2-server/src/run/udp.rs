@@ -2,15 +2,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bytes::BytesMut;
 use ferrum2_config::{RouteAction, UdpConfig};
 use ferrum2_core::TargetAddr;
-use ferrum2_core::route::{Network, RouteMetadata, RouteProgramAction};
+use ferrum2_core::route::Network;
 use ferrum2_crypto::{Clock as _, SystemClock, SystemRandom};
 use ferrum2_observability::{
     Direction, Metrics, Outcome, Reason, Role, Stage, Transport as ObservationTransport,
 };
+use ferrum2_rule::{RouteMetadata, RouteProgramAction, RuleCompileError, RuleEvaluationScratch};
 use ferrum2_runtime::{
     AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, DirectUdpSocketFactory,
     MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, PreparedProcessRoot, ProcessCancellation,
@@ -22,13 +24,15 @@ use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpPacketScr
 use ferrum2_sniff::{Progress as SniffProgress, Transport as SniffTransport};
 use tokio::net::UdpSocket;
 
-use super::RunError;
 use super::dns_egress;
 use super::observation::{
     record_sniff, record_udp_failure, record_udp_protocol_failure, record_udp_request_accepted,
     record_udp_runtime_failure, update_udp_resource_metrics,
 };
-use super::tcp::{ServerRouting, ServerTerminalRoute, route_metadata, sniff_order};
+use super::tcp::{
+    RouteProgramObservation, ServerRouting, ServerTerminalRoute, route_metadata, sniff_order,
+};
+use super::{RunError, run_error_for_rule_compile};
 
 pub(super) fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntimeLimits> {
     UdpRuntimeLimits::new(
@@ -471,6 +475,7 @@ where
     runtime: ServerUdpRuntime<L, F>,
     mappings: Arc<UdpMappings>,
     admission: Arc<tokio::sync::Mutex<()>>,
+    route_scratch: Option<RuleEvaluationScratch>,
     scratch: UdpPacketScratch,
     wire: BytesMut,
     maintenance: tokio::time::Interval,
@@ -488,7 +493,7 @@ pub(super) struct ServerUdpShared {
     pub(super) mappings: Arc<UdpMappings>,
     pub(super) admission: Arc<tokio::sync::Mutex<()>>,
     pub(super) connect_timeout: std::time::Duration,
-    pub(super) dns: Option<Arc<dns_egress::ServerDnsState>>,
+    pub(super) dns: dns_egress::ServerDnsResolver,
     pub(super) registry: OwnerRegistry,
     pub(super) metrics: Arc<Metrics>,
 }
@@ -541,7 +546,7 @@ where
     let runtime = DirectUdpRuntime::with_shared_adapters(
         sessions,
         connect_timeout,
-        dns_egress::ServerDnsResolver::new(dns, inbound, Network::Udp),
+        dns.for_inbound(inbound),
         socket_factory,
         handler,
         registry.clone(),
@@ -558,6 +563,9 @@ where
     }
     let mut maintenance = tokio::time::interval(UDP_RECONCILE_INTERVAL);
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let route_scratch = routing
+        .route_scratch()
+        .map_err(run_error_for_rule_compile)?;
     Ok(PreparedUdpServer {
         inbound,
         routing,
@@ -570,6 +578,7 @@ where
         runtime,
         mappings,
         admission,
+        route_scratch,
         scratch: UdpPacketScratch::new(),
         wire,
         maintenance,
@@ -617,6 +626,7 @@ where
             mut runtime,
             mappings,
             admission,
+            mut route_scratch,
             mut scratch,
             mut wire,
             mut maintenance,
@@ -702,7 +712,9 @@ where
                 pending.datagram().target(),
                 pending.datagram().payload(),
                 &metrics,
-            );
+                route_scratch.as_mut(),
+            )
+            .map_err(run_error_for_rule_compile)?;
             // The shared gate protects only protocol/mapping observations and their
             // synchronous commit. In particular, it is never held while a provisional
             // runtime session opens its socket below.
@@ -1013,19 +1025,28 @@ fn select_udp_route(
     target: &TargetAddr,
     payload: &[u8],
     metrics: &Metrics,
-) -> ServerTerminalRoute {
+    scratch: Option<&mut RuleEvaluationScratch>,
+) -> Result<ServerTerminalRoute, RuleCompileError> {
     let Some(program) = routing.program() else {
-        return routing.legacy(inbound, Network::Udp, target);
+        return Ok(routing.legacy(inbound, Network::Udp, target));
     };
-    let mut evaluation = program.evaluate(inbound, Network::Udp, target);
+    let Some(scratch) = scratch else {
+        return Err(RuleCompileError::Internal);
+    };
+    let mut evaluation = program.evaluate_with_scratch(inbound, Network::Udp, target, scratch);
+    evaluation.enable_match_observation();
     let mut protocol = None;
     let mut domain = None;
     let mut sniffed = false;
+    let mut observation = RouteProgramObservation::new(metrics);
     loop {
-        match evaluation
+        let started = Instant::now();
+        let action = evaluation
             .next(RouteMetadata::new(protocol, domain.as_ref()))
-            .expect("validated route program has one terminal action")
-        {
+            .expect("validated route program has one terminal action");
+        observation.record_step(evaluation.candidate_visits(), started.elapsed());
+        observation.record_matches(evaluation.last_match_observation());
+        match action {
             RouteProgramAction::Continue(RouteAction::Sniff(sniffers)) if !sniffed => {
                 sniffed = true;
                 let order = sniff_order(sniffers, Network::Udp);
@@ -1052,9 +1073,9 @@ fn select_udp_route(
                 (protocol, domain) = route_metadata(progress);
             }
             RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
-            RouteProgramAction::Continue(_) => return ServerTerminalRoute::Reject,
+            RouteProgramAction::Continue(_) => return Ok(ServerTerminalRoute::Reject),
             RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
-                return routing.terminal(action);
+                return Ok(routing.terminal(action));
             }
         }
     }
@@ -1596,7 +1617,7 @@ mod tests {
                 mappings: Arc::new(UdpMappings::new(config.udp.max_sessions)),
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: None,
+                dns: dns_egress::ServerDnsResolver::new(None),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             },
@@ -1697,7 +1718,7 @@ mod tests {
             mappings,
             admission: Arc::new(tokio::sync::Mutex::new(())),
             connect_timeout: config.runtime.connect_timeout,
-            dns: None,
+            dns: dns_egress::ServerDnsResolver::new(None),
             registry: registry.clone(),
             metrics,
         };
@@ -1813,7 +1834,7 @@ mod tests {
             mappings: Arc::clone(&mappings),
             admission: Arc::new(tokio::sync::Mutex::new(())),
             connect_timeout: config.runtime.connect_timeout,
-            dns: None,
+            dns: dns_egress::ServerDnsResolver::new(None),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
         };
@@ -1936,7 +1957,7 @@ mod tests {
                 mappings: Arc::clone(&mappings),
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: None,
+                dns: dns_egress::ServerDnsResolver::new(None),
                 registry: registry.clone(),
                 metrics: Arc::new(Metrics::new()),
             },
@@ -2023,7 +2044,7 @@ mod tests {
                 mappings: Arc::clone(&mappings),
                 admission: Arc::clone(&admission),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: None,
+                dns: dns_egress::ServerDnsResolver::new(None),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             },
@@ -2157,7 +2178,7 @@ mod tests {
                 mappings: Arc::clone(&mappings),
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: None,
+                dns: dns_egress::ServerDnsResolver::new(None),
                 registry: registry.clone(),
                 metrics: Arc::new(Metrics::new()),
             },
@@ -2294,7 +2315,7 @@ mod tests {
                 mappings,
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: None,
+                dns: dns_egress::ServerDnsResolver::new(None),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             };
@@ -2482,7 +2503,7 @@ mod tests {
                 mappings: Arc::clone(&mappings),
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: None,
+                dns: dns_egress::ServerDnsResolver::new(None),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             },

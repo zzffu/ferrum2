@@ -9,13 +9,6 @@ pub(in crate::run) use std::task::{Context, Poll};
 pub(in crate::run) use std::time::Duration;
 
 pub(in crate::run) use ferrum2_config::{RuntimeConfig, ValidatedClientConfig};
-pub(in crate::run) use ferrum2_core::route::{
-    compile_selector_plans, compile_selector_plans_with_roots, compile_selector_route,
-};
-pub(in crate::run) use ferrum2_core::selector::{
-    SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute, TaggedRouteRule,
-    TaggedStaticBinding,
-};
 pub(in crate::run) use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, Datagram, Inbound as _,
     LocalEndpoint, TargetAddr,
@@ -26,6 +19,11 @@ pub(in crate::run) use ferrum2_crypto::{
 };
 pub(in crate::run) use ferrum2_dns::{DnsProxy, DnsProxySockets};
 pub(in crate::run) use ferrum2_observability::Metrics;
+pub(in crate::run) use ferrum2_rule::{
+    SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute, TaggedRouteRule,
+    TaggedStaticBinding, compile_selector_plans, compile_selector_plans_with_roots,
+    compile_selector_route,
+};
 pub(in crate::run) use ferrum2_runtime::{
     OwnerRegistry, OwnerSnapshot, ProcessRoot, ProcessSupervisor, SupervisorError, TcpConnector,
     UdpDirection, UdpRuntimeLimits, UdpSessionManager,
@@ -55,7 +53,9 @@ pub(in crate::run) use super::egress::{
     ClientUdpContext, prepare_client_outbounds,
 };
 pub(in crate::run) use super::tokio_io::{TokioConnector, TokioFramed, TokioTransport};
-use super::{dns_egress, run_with_registry, run_with_registry_and_metrics_inner};
+use super::{
+    ClientRunResources, dns_egress, run_with_registry, run_with_registry_and_metrics_inner,
+};
 
 enum ScriptedMode {
     Duplex(tokio::io::DuplexStream),
@@ -343,7 +343,7 @@ pub(in crate::run) fn chain_test_setup(
     first_port: u16,
 ) -> (
     Arc<[ClientOutboundContext]>,
-    ferrum2_core::route::RouteTable,
+    ferrum2_rule::RouteTable,
     ferrum2_core::selector::SelectorControl,
 ) {
     let servers: [SocketAddrV4; 4] =
@@ -360,7 +360,7 @@ pub(in crate::run) fn chain_test_setup(
             .map(
                 |(server, psk)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                     server: server.into(),
-                    psk,
+                    psk: Arc::new(psk),
                 },
             )
             .collect(),
@@ -499,7 +499,7 @@ pub(in crate::run) fn client_udp_chain_test_config(
         .map(
             |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: server.into(),
-                psk: psk_for_method(method),
+                psk: Arc::new(psk_for_method(method)),
             },
         )
         .collect();
@@ -536,11 +536,11 @@ pub(in crate::run) fn tagged_client_test_config(
         .map(
             |(_, server)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: (*server).into(),
-                psk: psk_for_method(MethodProfile::Blake3Aes128Gcm2022),
+                psk: Arc::new(psk_for_method(MethodProfile::Blake3Aes128Gcm2022)),
             },
         )
         .collect();
-    config.route = ferrum2_core::route::RouteTable::static_bindings((0..mappings.len()).collect())
+    config.route = ferrum2_rule::RouteTable::static_bindings((0..mappings.len()).collect())
         .expect("bounded test mappings");
     (path, config)
 }
@@ -554,7 +554,7 @@ pub(in crate::run) fn test_routing(
     psk: ferrum2_crypto::MethodPsk,
 ) -> ClientRouting {
     ClientRouting {
-        legacy: ferrum2_core::route::RouteTable::static_bindings(vec![0]).expect("test route"),
+        legacy: ferrum2_rule::RouteTable::static_bindings(vec![0]).expect("test route"),
         program: None,
         outbounds: vec![ClientOutboundContext::Shadowsocks(
             ClientShadowsocksContext {
@@ -608,7 +608,7 @@ pub(in crate::run) fn spawn_test_client_with_random(
         Arc::new(Metrics::new()),
         Some(random),
         None,
-        dns_specs,
+        ClientRunResources::legacy(dns_specs),
     ));
     (stop, task)
 }
@@ -715,7 +715,12 @@ pub(in crate::run) fn udp_test_context_for_psk(
         inbound: Socks5Inbound::new(),
         egress: Arc::new(ClientEgressEngine::new(
             outbounds,
-            TokioConnector::new(TcpConnector::new(runtime.connect_timeout)),
+            TokioConnector::new(TcpConnector::with_resolution_adapters(
+                ferrum2_runtime::SystemSocketInspector,
+                ferrum2_runtime::SystemTcpDialer,
+                super::egress::system_application_resolver(),
+                runtime.connect_timeout,
+            )),
             SystemClock::new(),
             SystemRandom,
             (runtime.connect_timeout, runtime.handshake_timeout),

@@ -193,6 +193,9 @@ fn help_and_version_use_the_shared_cli_surface() {
         let stdout = String::from_utf8(help.stdout).expect("UTF-8 help");
         assert!(stdout.contains("--config <PATH>"), "{binary}");
         assert!(stdout.contains("--check-config"), "{binary}");
+        if binary == "ferrum2-client" {
+            assert!(stdout.contains("--materialize"), "{binary}");
+        }
 
         let version = run_binary(binary, &["--version"]);
         assert_eq!(version.status.code(), Some(0), "{binary} --version");
@@ -217,6 +220,15 @@ fn usage_errors_exit_two_without_starting_run_mode() {
             "{binary}"
         );
     }
+
+    let standalone_materialize = run_binary(
+        "ferrum2-client",
+        &["--config", "unused.toml", "--materialize"],
+    );
+    assert_eq!(standalone_materialize.status.code(), Some(2));
+    assert!(standalone_materialize.stdout.is_empty());
+    let stderr = String::from_utf8(standalone_materialize.stderr).expect("UTF-8 usage error");
+    assert!(stderr.contains("--check-config"), "{stderr}");
 }
 
 #[test]

@@ -87,6 +87,7 @@ fn workspace_members_share_the_declared_release_policy() {
         "ferrum2-client",
         "ferrum2-server",
         "ferrum2-core",
+        "ferrum2-rule",
         "ferrum2-crypto",
         "ferrum2-dns",
         "ferrum2-runtime",
@@ -221,7 +222,48 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
         .filter(|dependency| dependency["kind"].is_null())
         .map(|dependency| dependency["name"].as_str().expect("dependency name"))
         .collect();
-    assert_eq!(core_dependencies, BTreeSet::from(["bytes", "ipnet"]));
+    assert_eq!(core_dependencies, BTreeSet::from(["bytes"]));
+
+    let rule = package(metadata, "ferrum2-rule");
+    let rule_dependencies: BTreeSet<_> = rule["dependencies"]
+        .as_array()
+        .expect("rule dependencies")
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .map(|dependency| dependency["name"].as_str().expect("dependency name"))
+        .collect();
+    assert_eq!(
+        rule_dependencies,
+        BTreeSet::from(["aho-corasick", "ferrum2-core", "flate2", "ipnet"])
+    );
+    assert!(
+        core_dependencies
+            .iter()
+            .all(|dependency| *dependency != "ferrum2-rule"),
+        "ferrum2-core must not depend on the policy compiler"
+    );
+
+    let config = package(metadata, "ferrum2-config");
+    let config_dependencies: BTreeSet<_> = config["dependencies"]
+        .as_array()
+        .expect("config dependencies")
+        .iter()
+        .map(|dependency| dependency["name"].as_str().expect("dependency name"))
+        .collect();
+    assert!(
+        !config_dependencies.contains("ferrum2-dns")
+            && !config_dependencies.contains("hickory-proto"),
+        "configuration must expose a runtime-neutral DNS blueprint without DNS/Hickory edges"
+    );
+    let dns = package(metadata, "ferrum2-dns");
+    assert!(
+        dns["dependencies"]
+            .as_array()
+            .expect("DNS dependencies")
+            .iter()
+            .all(|dependency| dependency["name"] != "ferrum2-config"),
+        "DNS execution must consume the rule blueprint without a config back-edge"
+    );
 
     let harness = package(metadata, "ferrum2-m0-harness");
     let harness_node = metadata["resolve"]["nodes"]

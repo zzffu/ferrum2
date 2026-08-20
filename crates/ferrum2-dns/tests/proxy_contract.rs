@@ -1,12 +1,15 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use ferrum2_core::CanonicalDomain;
+use ferrum2_core::route::Network;
 use ferrum2_dns::{
-    DnsProxy, DnsProxyListeners, DnsUpstreamSpec, DnsUpstreamTransport, ProxyIngress,
-    ProxyTransport, TaggedResolver,
+    ApplicationResolveContext, ApplicationResolveRequest, DnsError, DnsProxy, DnsProxyListeners,
+    DnsStrategy, DnsUpstreamSpec, DnsUpstreamTransport, ProxyIngress, ProxyTransport,
+    TaggedResolver,
 };
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, SOA};
@@ -15,6 +18,107 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 static TEST_NETWORK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn application_resolution_uses_qtype_policy_strategy_and_no_system_fallback() {
+    let _network = TEST_NETWORK.lock().await;
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("application upstream bind");
+    let upstream_address = upstream.local_addr().expect("application upstream address");
+    let upstream_task = tokio::spawn(async move {
+        let mut wire = [0_u8; 4096];
+        for expected in [RecordType::A, RecordType::AAAA] {
+            let (length, peer) = upstream
+                .recv_from(&mut wire)
+                .await
+                .expect("application query");
+            let request = Message::from_vec(&wire[..length]).expect("application request");
+            let query = request
+                .queries
+                .first()
+                .expect("one application query")
+                .clone();
+            assert_eq!(query.query_type(), expected);
+            let answer = match expected {
+                RecordType::A => RData::A(A(Ipv4Addr::new(192, 0, 2, 73))),
+                RecordType::AAAA => {
+                    RData::AAAA(AAAA("2001:db8::73".parse().expect("application IPv6")))
+                }
+                _ => unreachable!("bounded application query types"),
+            };
+            let mut response = Message::response(request.id, OpCode::Query);
+            response
+                .add_query(query.clone())
+                .add_answer(Record::from_rdata(query.name().clone(), 30, answer));
+            upstream
+                .send_to(&response.to_vec().expect("application response"), peer)
+                .await
+                .expect("application response send");
+        }
+    });
+    let (resolver, mut owner) = TaggedResolver::direct(
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Udp,
+            address: upstream_address,
+            detour: None,
+        }],
+        Duration::from_secs(1),
+        NonZeroU16::new(2).expect("two application queries"),
+    )
+    .expect("application resolver");
+    owner.ready().await.expect("application resolver ready");
+    let resolver = Arc::new(resolver);
+    let proxy = DnsProxy::new(Arc::clone(&resolver), |ingress, transport, _, qtype| {
+        assert_eq!(ingress, ProxyIngress::Ordinary(7));
+        assert_eq!(transport, ProxyTransport::Tcp);
+        assert!(matches!(qtype, 1 | 28));
+        Some(0)
+    });
+    let domain = CanonicalDomain::new("Strategy.Example.").expect("canonical application name");
+    let request = ApplicationResolveRequest::new(
+        ApplicationResolveContext::new(7, Network::Tcp),
+        &domain,
+        NonZeroU16::new(443).expect("application port"),
+        DnsStrategy::PreferIpv6,
+    );
+
+    assert_eq!(
+        proxy
+            .resolve_application(request)
+            .await
+            .expect("configured application resolution"),
+        [
+            SocketAddr::new(
+                Ipv6Addr::from([
+                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x73
+                ])
+                .into(),
+                443
+            ),
+            SocketAddr::new(Ipv4Addr::new(192, 0, 2, 73).into(), 443),
+        ]
+    );
+    upstream_task.await.expect("application upstream join");
+
+    let closed = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| None);
+    assert_eq!(
+        closed
+            .resolve_application(request)
+            .await
+            .expect_err("missing configured selection is terminal"),
+        DnsError::InvalidServer
+    );
+    drop((closed, proxy, resolver));
+    assert_eq!(
+        owner
+            .shutdown()
+            .await
+            .expect("application resolver shutdown")
+            .runtime_tasks,
+        0
+    );
+}
 
 fn reserve_paired_addresses(count: usize) -> Vec<SocketAddr> {
     let mut reservations = Vec::with_capacity(count);

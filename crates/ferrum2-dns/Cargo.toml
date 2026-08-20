@@ -16,6 +16,7 @@ __interop-test-root = ["dep:rustls"]
 
 [dependencies]
 ferrum2-core.workspace = true
+ferrum2-rule.workspace = true
 futures-util.workspace = true
 hickory-proto.workspace = true
 hickory-resolver.workspace = true
@@ -28,6 +29,7 @@ h2.workspace = true
 # Exact 0.26.1 server-only gate; `https-ring` also locks its optional resolver/system-config edge.
 hickory-server = { workspace = true, features = ["__https"] }
 rustls.workspace = true
+stats_alloc.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls.workspace = true
 

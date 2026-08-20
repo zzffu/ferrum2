@@ -145,7 +145,7 @@ fn parse_client_startup_bind_report(
     assert_eq!(
         lines.next(),
         Some(STARTUP_BIND_DIAGNOSTIC),
-        "{context} canonical startup error"
+        "{context} canonical startup error; stderr={stderr:?}"
     );
     assert_eq!(
         lines.next(),
@@ -488,6 +488,112 @@ fn direct_check_config_is_offline_and_runtime_reaches_bind() {
         assert!(output.stdout.is_empty(), "{name}");
         assert_eq!(output.stderr, expected, "{name}");
     }
+}
+
+#[test]
+fn client_materialized_check_is_opt_in_and_never_prepares_listener() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let (occupied, listen) = reserve_loopback();
+    let cache = directory
+        .path()
+        .join("ruleset-cache")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let path = directory.path().join("materialized-client.toml");
+    let source = format!(
+        r#"schema_version = 2
+
+[[inbounds]]
+tag = "proxy"
+listen = "{listen}"
+
+[[outbounds]]
+tag = "direct"
+type = "direct"
+
+[route]
+final = "direct"
+
+[[route.rule_set]]
+tag = "ads"
+type = "remote"
+url = "https://localhost:9/ads.srs"
+download_resolver = "system"
+
+[[route.rules]]
+rule_set = "ads"
+action = "reject"
+
+[rule_set_loader]
+cache_dir = "{cache}"
+download_timeout_ms = 250
+max_redirects = 0
+"#
+    );
+    std::fs::write(&path, &source).expect("materialized check config");
+    let path_text = path.to_str().expect("UTF-8 config path");
+
+    let static_check = run_binary("ferrum2-client", &["--config", path_text, "--check-config"]);
+    assert_eq!(static_check.status.code(), Some(0));
+    assert_eq!(static_check.stdout, b"configuration valid\n");
+    assert!(static_check.stderr.is_empty());
+    assert!(!directory.path().join("ruleset-cache").exists());
+
+    let materialized_check = run_binary(
+        "ferrum2-client",
+        &["--config", path_text, "--check-config", "--materialize"],
+    );
+    assert_eq!(materialized_check.status.code(), Some(1));
+    assert!(materialized_check.stdout.is_empty());
+    assert_eq!(
+        materialized_check.stderr,
+        b"error[ruleset.download] materialization: RuleSet download failed\n"
+    );
+    assert!(!String::from_utf8_lossy(&materialized_check.stderr).contains(path_text));
+    assert!(
+        TcpStream::connect_timeout(
+            &occupied.local_addr().expect("occupied listener"),
+            std::time::Duration::from_secs(1),
+        )
+        .is_ok(),
+        "materialized validation disturbed the occupied listener"
+    );
+
+    let local = directory.path().join("local-materialized-client.toml");
+    std::fs::write(
+        &local,
+        format!(
+            "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{listen}\"\n[[outbounds]]\ntag = \"direct\"\ntype = \"direct\"\n[route]\nfinal = \"direct\"\n"
+        ),
+    )
+    .expect("local materialized config");
+    let successful = run_binary(
+        "ferrum2-client",
+        &[
+            "--config",
+            local.to_str().expect("UTF-8 local path"),
+            "--check-config",
+            "--materialize",
+        ],
+    );
+    assert_eq!(successful.status.code(), Some(0));
+    assert_eq!(successful.stdout, b"configuration valid\n");
+    assert!(successful.stderr.is_empty());
+
+    let v1 = write_client_config(directory.path(), listen, unused_loopback(), None)
+        .expect("V1 materialized-check config");
+    let v1_successful = run_binary(
+        "ferrum2-client",
+        &[
+            "--config",
+            v1.to_str().expect("UTF-8 V1 path"),
+            "--check-config",
+            "--materialize",
+        ],
+    );
+    assert_eq!(v1_successful.status.code(), Some(0));
+    assert_eq!(v1_successful.stdout, b"configuration valid\n");
+    assert!(v1_successful.stderr.is_empty());
 }
 
 #[test]

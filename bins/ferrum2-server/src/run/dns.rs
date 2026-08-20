@@ -32,24 +32,8 @@ impl PreparedProcessRoot<RunError> for ServerDnsRoot {
         mut cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), RunError>> {
         Box::pin(async move {
-            let ready = {
-                let owner = &mut self.owner;
-                tokio::select! {
-                    _ = cancellation.cancelled() => None,
-                    result = owner.ready() => Some(result),
-                }
-            };
-            match ready {
-                None => self.close().await,
-                Some(Err(_)) => {
-                    self.close().await?;
-                    Err(RunError::StartupProtocol)
-                }
-                Some(Ok(())) => {
-                    cancellation.cancelled().await;
-                    self.close().await
-                }
-            }
+            cancellation.cancelled().await;
+            self.close().await
         })
     }
 

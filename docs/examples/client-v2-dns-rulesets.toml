@@ -1,0 +1,200 @@
+schema_version = 2
+
+# Documentation-only listener and synthetic test key. Replace all example
+# endpoints and secrets before a real materialized start.
+[[inbounds]]
+tag = "proxy"
+listen = "127.0.0.1:1080"
+
+[[outbounds]]
+tag = "direct-out"
+type = "direct"
+
+[[outbounds]]
+tag = "ss-ip"
+type = "shadowsocks"
+server = "192.0.2.10:8388"
+
+[[outbounds]]
+tag = "ss-domain"
+type = "shadowsocks"
+server = "edge.example.invalid:8388"
+domain_resolver = "local"
+domain_strategy = "ipv4_only"
+
+[[selectors]]
+tag = "MY"
+outbounds = ["ss-domain", "ss-ip"]
+default = "ss-domain"
+
+[[selectors]]
+tag = "ai-selector"
+outbounds = ["ss-domain", "ss-ip"]
+default = "ss-domain"
+
+[dns]
+timeout_ms = 5000
+max_inflight = 256
+strategy = "ipv4_only"
+
+[dns.cache]
+enabled = true
+max_entries = 8192
+
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "127.0.0.1:5353"
+
+[[dns.servers]]
+tag = "local"
+transport = "udp"
+address = "192.0.2.53:53"
+
+[[dns.servers]]
+tag = "google"
+transport = "doh"
+address = "dns.google:443"
+domain_resolver = "local"
+domain_strategy = "ipv4_only"
+server_name = "dns.google"
+path = "/dns-query"
+detour = "MY"
+
+[dns.route]
+final = "google"
+
+[[dns.route.rules]]
+rule_set = "ads"
+action = "reject"
+
+[[dns.route.rules]]
+qname = [
+  "translate.googleapis.com",
+  "translate.google.com",
+  "translate-pa.googleapis.com",
+]
+action = "route"
+server = "google"
+
+[[dns.route.rules]]
+rule_set = "ai"
+action = "route"
+server = "google"
+strategy = "ipv4_only"
+
+[[dns.route.rules]]
+rule_set = "cn"
+action = "route"
+server = "local"
+strategy = "ipv4_only"
+
+[[dns.route.rules]]
+rule_set = "cnip"
+action = "route"
+server = "local"
+strategy = "ipv4_only"
+
+[route]
+final = "MY"
+
+[route.sniff]
+timeout_ms = 300
+max_bytes = 8192
+
+[rule_set_loader]
+cache_dir = "./rule-set-cache"
+download_timeout_ms = 15000
+max_redirects = 5
+
+[[route.rule_set]]
+tag = "ads"
+type = "remote"
+format = "binary"
+url = "https://raw.githubusercontent.com/DustinWin/ruleset_geodata/c1a9c12f6883814efc8aab387cdde75cd9e11297/ads.srs"
+download_resolver = "local"
+download_detour = "MY"
+update_interval_seconds = 86400
+
+[[route.rule_set]]
+tag = "ai"
+type = "remote"
+format = "binary"
+url = "https://raw.githubusercontent.com/DustinWin/ruleset_geodata/c1a9c12f6883814efc8aab387cdde75cd9e11297/ai.srs"
+download_resolver = "local"
+download_detour = "MY"
+update_interval_seconds = 86400
+
+[[route.rule_set]]
+tag = "cn"
+type = "remote"
+format = "binary"
+url = "https://raw.githubusercontent.com/DustinWin/ruleset_geodata/c1a9c12f6883814efc8aab387cdde75cd9e11297/cn.srs"
+download_resolver = "local"
+download_detour = "MY"
+update_interval_seconds = 86400
+
+[[route.rule_set]]
+tag = "cnip"
+type = "remote"
+format = "binary"
+url = "https://raw.githubusercontent.com/DustinWin/ruleset_geodata/c1a9c12f6883814efc8aab387cdde75cd9e11297/cnip.srs"
+download_resolver = "local"
+download_detour = "MY"
+update_interval_seconds = 86400
+
+[[route.rules]]
+network = "udp"
+action = "sniff"
+sniffers = "dns"
+
+[[route.rules]]
+network = ["tcp", "udp"]
+port = 53
+action = "hijack-dns"
+
+[[route.rules]]
+ip_cidr = [
+  "10.0.0.0/8",
+  "100.64.0.0/10",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "::1/128",
+  "fc00::/7",
+  "fe80::/10",
+]
+action = "route"
+outbound = "direct-out"
+
+[[route.rules]]
+domain_keyword = "translate"
+action = "route"
+outbound = "MY"
+
+[[route.rules]]
+rule_set = "ads"
+action = "reject"
+
+[[route.rules]]
+rule_set = "ai"
+action = "route"
+outbound = "ai-selector"
+
+[[route.rules]]
+rule_set = ["cn", "cnip"]
+action = "route"
+outbound = "direct-out"
+
+[udp]
+enabled = true
+max_sessions = 4096
+max_buffered_bytes = 16777216
+idle_timeout_ms = 300000
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+
+[logging]
+level = "info"

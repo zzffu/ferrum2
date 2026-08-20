@@ -306,6 +306,9 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
     let _spawn_guard = local_support::hold_process_spawns_at_or_below(0);
     let baseline_children = active_child_count();
     let directory = tempfile::tempdir().expect("M14 client UDP tempdir");
+    let selected_tag = "m14-selected-egress-secret";
+    let unselected_tag = "m14-unselected-egress-secret";
+    let selector_tag = "m14-selector-secret";
     let route_first = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("first route target");
     let route_later = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("later route target");
     let address = |socket: &UdpSocket| match socket.local_addr().expect("UDP target address") {
@@ -343,12 +346,12 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
         format!(
             "schema_version = 2\n\
              [[inbounds]]\ntag = \"in\"\nlisten = \"{client_address}\"\n\
-             [[outbounds]]\ntag = \"selected\"\nserver = \"{selected_server}\"\n\
-             [[outbounds]]\ntag = \"unselected\"\nserver = \"{unselected_server_address}\"\n\
-             [[selectors]]\ntag = \"manual\"\noutbounds = [\"selected\", \"unselected\"]\ndefault = \"selected\"\n\
-             [route]\nfinal = \"unselected\"\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"manual\"\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"unselected\"\n\
+             [[outbounds]]\ntag = \"{selected_tag}\"\nserver = \"{selected_server}\"\n\
+             [[outbounds]]\ntag = \"{unselected_tag}\"\nserver = \"{unselected_server_address}\"\n\
+             [[selectors]]\ntag = \"{selector_tag}\"\noutbounds = [\"{selected_tag}\", \"{unselected_tag}\"]\ndefault = \"{selected_tag}\"\n\
+             [route]\nfinal = \"{unselected_tag}\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"{selector_tag}\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"{unselected_tag}\"\n\
              [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"reject\"\n\
              [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\naction = \"sniff\"\nsniffers = \"dns\"\n\
              [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\nprotocol = \"dns\"\naction = \"hijack-dns\"\n\
@@ -528,9 +531,9 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
     let server_body = wait_for_metrics_sample(server_metrics, SERVER_ACCEPTED_TWO);
     for sentinel in [
         "hijack-association.test",
-        "selected",
-        "unselected",
-        "manual",
+        selected_tag,
+        unselected_tag,
+        selector_tag,
         SYNTHETIC_PSK,
     ] {
         for body in [&client_body, &server_body] {
@@ -549,9 +552,9 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
     for exit in &exits {
         exit.assert_stderr_excludes(&[
             "hijack-association.test",
-            "selected",
-            "unselected",
-            "manual",
+            selected_tag,
+            unselected_tag,
+            selector_tag,
             SYNTHETIC_PSK,
         ]);
     }

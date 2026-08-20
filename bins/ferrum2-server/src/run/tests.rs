@@ -10,6 +10,48 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use super::*;
 use crate::run::test_support::*;
 
+#[test]
+fn rule_and_dns_scratch_failures_keep_closed_runtime_categories() {
+    for error in [
+        RuleCompileError::Allocation,
+        RuleCompileError::IndexOverflow,
+    ] {
+        assert_eq!(run_error_for_rule_compile(error), RunError::RuleAllocation);
+        assert_eq!(
+            run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::Rule(error)),
+            RunError::RuleAllocation
+        );
+    }
+    for error in [
+        RuleCompileError::EmptyMatcher,
+        RuleCompileError::EmptyField,
+        RuleCompileError::DuplicateField,
+        RuleCompileError::DuplicateValue,
+        RuleCompileError::ConflictingFields,
+        RuleCompileError::InvalidDomain,
+        RuleCompileError::NonCanonicalCidr,
+        RuleCompileError::InvalidId,
+        RuleCompileError::InvalidTag,
+        RuleCompileError::DuplicateRuleSet,
+        RuleCompileError::InvalidGeneration,
+        RuleCompileError::Internal,
+    ] {
+        assert_eq!(run_error_for_rule_compile(error), RunError::RuleCompile);
+        assert_eq!(
+            run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::Rule(error)),
+            RunError::RuleCompile
+        );
+    }
+    assert_eq!(
+        run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::CacheAllocation),
+        RunError::RuleAllocation
+    );
+    assert_eq!(
+        run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::InvalidRuntime),
+        RunError::StartupProtocol
+    );
+}
+
 #[tokio::test]
 async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
     let listen = reserve_address();
@@ -352,6 +394,31 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
     assert!(encoded.contains(
         "ferrum2_tcp_failures_total{role=\"server\",stage=\"direct\",reason=\"connection_refused\"} 1"
     ));
+    for expected in [
+        "ferrum2_rule_program_mode{program=\"route\",mode=\"small_linear\"} 1",
+        "ferrum2_rule_program_rules{program=\"route\"} 6",
+        "ferrum2_route_match_total{source=\"inline\",type=\"domain\",result=\"matched\"}",
+        "ferrum2_route_match_total{source=\"inline\",type=\"scalar\",result=\"matched\"}",
+        "ferrum2_dns_implicit_system_fallback_total 0",
+    ] {
+        assert!(
+            encoded.contains(expected),
+            "missing `{expected}`\n{encoded}"
+        );
+    }
+    for identity in [
+        "ferrum2_rule_program_candidate_count_sum{program=\"route\"}",
+        "ferrum2_rule_program_candidate_count_count{program=\"route\"}",
+        "ferrum2_rule_program_match_ns_sum{program=\"route\"}",
+        "ferrum2_rule_program_match_ns_count{program=\"route\"}",
+    ] {
+        assert!(
+            encoded
+                .lines()
+                .any(|line| line.starts_with(identity) && !line.ends_with(" 0")),
+            "zero or missing `{identity}`\n{encoded}"
+        );
+    }
     assert_pending(target.accept(), "selected open failure fell back").await;
 
     let flow = outbound
@@ -548,7 +615,9 @@ async fn route_sniff_reject_udp_prepares_before_policy_and_rejects_before_reserv
         protocol = \"dns\"\n\
         domain = \"reject.test\"\n\
         action = \"reject\"\n";
-    let (path, config) = server_v2_test_config(listen, route);
+    let metrics = reserve_address();
+    let (path, mut config) = server_v2_test_config(listen, route);
+    config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
     wait_until_bound(&mut server, listen).await;
@@ -609,6 +678,40 @@ async fn route_sniff_reject_udp_prepares_before_policy_and_rejects_before_reserv
         .expect("routed UDP send");
     let (length, _) = recv_udp(&target, &mut received).await;
     assert_eq!(&received[..length], b"not-dns");
+
+    let mut metrics_client = tokio::net::TcpStream::connect(metrics)
+        .await
+        .expect("UDP route metrics connect");
+    metrics_client
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .expect("UDP route metrics request");
+    let mut encoded = String::new();
+    metrics_client
+        .read_to_string(&mut encoded)
+        .await
+        .expect("UDP route metrics response");
+    for expected in [
+        "ferrum2_rule_program_rules{program=\"route\"} 2",
+        "ferrum2_route_match_total{source=\"inline\",type=\"domain\",result=\"matched\"}",
+        "ferrum2_route_match_total{source=\"inline\",type=\"scalar\",result=\"matched\"}",
+    ] {
+        assert!(
+            encoded.contains(expected),
+            "missing `{expected}`\n{encoded}"
+        );
+    }
+    for identity in [
+        "ferrum2_rule_program_candidate_count_sum{program=\"route\"}",
+        "ferrum2_rule_program_match_ns_sum{program=\"route\"}",
+    ] {
+        assert!(
+            encoded
+                .lines()
+                .any(|line| line.starts_with(identity) && !line.ends_with(" 0")),
+            "zero or missing `{identity}`\n{encoded}"
+        );
+    }
 
     stop.send(()).expect("stop server");
     assert_eq!(

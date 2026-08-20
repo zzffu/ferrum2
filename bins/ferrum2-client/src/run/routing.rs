@@ -2,11 +2,17 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use ferrum2_config::{RouteAction, RouteProtocol, Sniffers};
-use ferrum2_core::route::{EgressPlanSnapshot, Network, RouteMetadata, RouteProgramAction};
+use ferrum2_core::route::{EgressPlanSnapshot, Network};
 use ferrum2_core::{DomainName, TargetAddr};
 use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
+use ferrum2_observability::{Metrics, RuleMatchResult, RuleMatchType, RuleProgram, RuleSource};
+use ferrum2_rule::{
+    RouteMatchObservation, RouteMatchSource as EngineMatchSource, RouteMatchType as EngineMatchType,
+};
+use ferrum2_rule::{RouteMetadata, RouteProgramAction, RuleCompileError, RuleEvaluationScratch};
 use ferrum2_runtime::{PrefixDecision, SniffPrefix, SniffPrefixOutcome, collect_sniff_prefix};
 use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress, Protocol, Transport};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
@@ -40,28 +46,44 @@ impl AsRef<[u8]> for TcpRoutePrefix {
 }
 
 impl ClientRouting {
-    pub(super) fn select_terminal(
+    pub(super) fn route_scratch(&self) -> Result<Option<RuleEvaluationScratch>, RuleCompileError> {
+        self.program
+            .as_ref()
+            .map(ferrum2_config::CompiledRoute::evaluation_scratch)
+            .transpose()
+    }
+
+    pub(super) fn select_terminal_with_scratch(
         &self,
         inbound: usize,
         network: Network,
         target: &TargetAddr,
         payload: Option<&[u8]>,
-        metrics: &ferrum2_observability::Metrics,
-    ) -> ClientTerminalRoute {
+        metrics: &Metrics,
+        scratch: Option<&mut RuleEvaluationScratch>,
+    ) -> Result<ClientTerminalRoute, RuleCompileError> {
         let Some(program) = self.program.as_ref() else {
-            return ClientTerminalRoute::Route(
+            return Ok(ClientTerminalRoute::Route(
                 self.legacy.select_plan_snapshot(inbound, network, target),
-            );
+            ));
         };
-        let mut evaluation = program.evaluate(inbound, network, target);
+        let Some(scratch) = scratch else {
+            return Err(RuleCompileError::Internal);
+        };
+        let mut evaluation = program.evaluate_with_scratch(inbound, network, target, scratch);
+        evaluation.enable_match_observation();
+        let mut observation = RouteProgramObservation::new(metrics);
         let mut protocol = None;
         let mut domain = None;
         let mut sniffed = false;
         loop {
-            match evaluation
+            let started = Instant::now();
+            let action = evaluation
                 .next(RouteMetadata::new(protocol, domain.as_ref()))
-                .expect("validated client route program has one terminal action")
-            {
+                .expect("validated client route program has one terminal action");
+            observation.record_step(evaluation.candidate_visits(), started.elapsed());
+            observation.record_matches(evaluation.last_match_observation());
+            match action {
                 RouteProgramAction::Continue(RouteAction::Sniff(_)) if !sniffed => {
                     sniffed = true;
                     let Some(payload) = payload else {
@@ -85,9 +107,9 @@ impl ClientRouting {
                     (protocol, domain) = route_metadata(progress);
                 }
                 RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
-                RouteProgramAction::Continue(_) => return ClientTerminalRoute::Reject,
+                RouteProgramAction::Continue(_) => return Ok(ClientTerminalRoute::Reject),
                 RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
-                    return terminal(action);
+                    return Ok(terminal(action));
                 }
             }
         }
@@ -100,33 +122,40 @@ impl ClientRouting {
         stream: &mut IO,
         cancellation: C,
         registry: &ferrum2_runtime::OwnerRegistry,
-        metrics: &ferrum2_observability::Metrics,
-    ) -> Option<TcpRouteSelection>
+        metrics: &Metrics,
+    ) -> Result<Option<TcpRouteSelection>, RuleCompileError>
     where
         IO: AsyncRead + Unpin,
         C: Future,
     {
         let Some(program) = self.program.as_ref() else {
-            return Some(TcpRouteSelection {
+            return Ok(Some(TcpRouteSelection {
                 terminal: ClientTerminalRoute::Route(self.legacy.select_plan_snapshot(
                     inbound,
                     Network::Tcp,
                     target,
                 )),
                 prefix: TcpRoutePrefix::Empty,
-            });
+            }));
         };
-        let mut evaluation = program.evaluate(inbound, Network::Tcp, target);
+        let mut scratch = program.evaluation_scratch()?;
+        let mut evaluation =
+            program.evaluate_with_scratch(inbound, Network::Tcp, target, &mut scratch);
+        evaluation.enable_match_observation();
+        let mut observation = RouteProgramObservation::new(metrics);
         let mut protocol = None;
         let mut domain = None;
         let mut prefix = TcpRoutePrefix::Empty;
         let mut sniffed = false;
         tokio::pin!(cancellation);
         loop {
-            match evaluation
+            let started = Instant::now();
+            let action = evaluation
                 .next(RouteMetadata::new(protocol, domain.as_ref()))
-                .expect("validated client route program has one terminal action")
-            {
+                .expect("validated client route program has one terminal action");
+            observation.record_step(evaluation.candidate_visits(), started.elapsed());
+            observation.record_matches(evaluation.last_match_observation());
+            match action {
                 RouteProgramAction::Continue(RouteAction::Sniff(sniffers)) if !sniffed => {
                     sniffed = true;
                     let order = sniff_order(sniffers);
@@ -178,7 +207,7 @@ impl ClientRouting {
                         | SniffPrefixOutcome::Unavailable => SniffProgress::NoMatch,
                         SniffPrefixOutcome::Cancelled | SniffPrefixOutcome::ReadError => {
                             record_sniff(metrics, SniffProgress::NoMatch, false);
-                            return None;
+                            return Ok(None);
                         }
                     };
                     record_sniff(
@@ -191,19 +220,78 @@ impl ClientRouting {
                 }
                 RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
                 RouteProgramAction::Continue(_) => {
-                    return Some(TcpRouteSelection {
+                    return Ok(Some(TcpRouteSelection {
                         terminal: ClientTerminalRoute::Reject,
                         prefix,
-                    });
+                    }));
                 }
                 RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
-                    return Some(TcpRouteSelection {
+                    return Ok(Some(TcpRouteSelection {
                         terminal: terminal(action),
                         prefix,
-                    });
+                    }));
                 }
             }
         }
+    }
+}
+
+struct RouteProgramObservation<'a> {
+    metrics: &'a Metrics,
+    candidates: usize,
+    match_ns: u64,
+}
+
+impl<'a> RouteProgramObservation<'a> {
+    const fn new(metrics: &'a Metrics) -> Self {
+        Self {
+            metrics,
+            candidates: 0,
+            match_ns: 0,
+        }
+    }
+
+    fn record_step(&mut self, candidates: usize, elapsed: Duration) {
+        self.candidates = self.candidates.saturating_add(candidates);
+        self.match_ns = self
+            .match_ns
+            .saturating_add(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
+    }
+
+    fn record_matches(&self, observation: RouteMatchObservation) {
+        for source in EngineMatchSource::ALL {
+            for r#type in EngineMatchType::ALL {
+                if !observation.evaluated(source, r#type) {
+                    continue;
+                }
+                let result = if observation.matched(source, r#type) {
+                    RuleMatchResult::Matched
+                } else {
+                    RuleMatchResult::Missed
+                };
+                let source = match source {
+                    EngineMatchSource::Inline => RuleSource::Inline,
+                    EngineMatchSource::RuleSet => RuleSource::RuleSet,
+                };
+                let r#type = match r#type {
+                    EngineMatchType::Domain => RuleMatchType::Domain,
+                    EngineMatchType::DomainSuffix => RuleMatchType::DomainSuffix,
+                    EngineMatchType::DomainKeyword => RuleMatchType::DomainKeyword,
+                    EngineMatchType::IpCidr => RuleMatchType::IpCidr,
+                    EngineMatchType::Scalar => RuleMatchType::Scalar,
+                };
+                self.metrics.route_match(source, r#type, result);
+            }
+        }
+    }
+}
+
+impl Drop for RouteProgramObservation<'_> {
+    fn drop(&mut self) {
+        self.metrics
+            .observe_rule_program_candidate_count(RuleProgram::Route, self.candidates);
+        self.metrics
+            .observe_rule_program_match_ns(RuleProgram::Route, self.match_ns);
     }
 }
 
@@ -336,6 +424,62 @@ pub(super) async fn relay_hijacked_tcp<IO, C>(
         };
         if !matches!(result, Ok(Ok(()))) {
             return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod match_observation_tests {
+    use ferrum2_rule::{
+        MatchSetBuilder, OrderedRouteProgram, OrderedRouteRule, RouteMatchField, RouteMatcher,
+        RouteRuleAction,
+    };
+
+    use super::*;
+
+    #[test]
+    fn selected_composite_exports_exact_match_and_closed_category_misses() {
+        let mut builder = MatchSetBuilder::new();
+        builder
+            .add_exact_domain("www.example.test")
+            .expect("exact")
+            .add_domain_suffix("other.invalid")
+            .expect("suffix")
+            .add_domain_keyword("missing-token")
+            .expect("keyword");
+        let matcher = RouteMatcher::<()>::try_new(vec![RouteMatchField::MatchSet(
+            builder.build().expect("match set"),
+        )])
+        .expect("matcher");
+        let program = OrderedRouteProgram::try_new(
+            vec![OrderedRouteRule::new(
+                matcher,
+                RouteRuleAction::Terminal(()),
+            )],
+            (),
+        )
+        .expect("program");
+        let mut scratch = program.evaluation_scratch().expect("scratch");
+        let target = TargetAddr::domain("www.example.test", 443).expect("target");
+        let mut evaluation = program.evaluate_with_scratch(0, Network::Tcp, &target, &mut scratch);
+        evaluation.enable_match_observation();
+        assert!(matches!(
+            evaluation.next(RouteMetadata::new(None, None)),
+            Some(RouteProgramAction::Terminal(_))
+        ));
+
+        let metrics = Metrics::new();
+        RouteProgramObservation::new(&metrics).record_matches(evaluation.last_match_observation());
+        let encoded = metrics.encode_text().expect("metrics");
+        for expected in [
+            "ferrum2_route_match_total{source=\"inline\",type=\"domain\",result=\"matched\"} 1",
+            "ferrum2_route_match_total{source=\"inline\",type=\"domain_suffix\",result=\"missed\"} 1",
+            "ferrum2_route_match_total{source=\"inline\",type=\"domain_keyword\",result=\"missed\"} 1",
+        ] {
+            assert!(
+                encoded.contains(expected),
+                "missing `{expected}`\n{encoded}"
+            );
         }
     }
 }

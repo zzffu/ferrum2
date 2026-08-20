@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 ferrum2-core.workspace = true
+ferrum2-rule.workspace = true
 ferrum2-crypto.workspace = true
 base64.workspace = true
 ipnet.workspace = true

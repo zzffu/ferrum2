@@ -10,6 +10,32 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use super::*;
 use crate::run::test_support::*;
 
+#[test]
+fn rule_scratch_failures_keep_closed_runtime_categories() {
+    for error in [
+        RuleCompileError::Allocation,
+        RuleCompileError::IndexOverflow,
+    ] {
+        assert_eq!(run_error_for_rule_compile(error), RunError::RuleAllocation);
+    }
+    for error in [
+        RuleCompileError::EmptyMatcher,
+        RuleCompileError::EmptyField,
+        RuleCompileError::DuplicateField,
+        RuleCompileError::DuplicateValue,
+        RuleCompileError::ConflictingFields,
+        RuleCompileError::InvalidDomain,
+        RuleCompileError::NonCanonicalCidr,
+        RuleCompileError::InvalidId,
+        RuleCompileError::InvalidTag,
+        RuleCompileError::DuplicateRuleSet,
+        RuleCompileError::InvalidGeneration,
+        RuleCompileError::Internal,
+    ] {
+        assert_eq!(run_error_for_rule_compile(error), RunError::RuleCompile);
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum DiagnosticTestRun {
     AwaitCancellation,
@@ -642,6 +668,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     std::fs::write(&path, source).expect("TUN TCP config");
     let config = ferrum2_config::load_client(&path).expect("validated TUN TCP config");
     std::fs::remove_file(path).expect("remove TUN TCP config");
+    let metrics = Metrics::new();
+    publish_rule_program_metadata(&config, &metrics);
     let routing = ClientRouting {
         legacy: config.route,
         program: config.route_program,
@@ -652,7 +680,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     let (mut flow, mut peer) = tokio::io::duplex(128);
     peer.write_all(wire).await.expect("write sniff prefix");
     peer.shutdown().await.expect("close sniff peer");
-    let metrics = Metrics::new();
     let registry = OwnerRegistry::new();
 
     let selection = routing
@@ -665,12 +692,38 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             &metrics,
         )
         .await
+        .expect("route scratch construction")
         .expect("sniff selection");
     assert!(matches!(selection.terminal, ClientTerminalRoute::Reject));
     assert!(matches!(
         &selection.prefix,
         TcpRoutePrefix::Collected(prefix) if prefix.outcome() == SniffPrefixOutcome::Complete
     ));
+    let encoded = metrics.encode_text().expect("client route metrics");
+    for expected in [
+        "ferrum2_rule_program_mode{program=\"route\",mode=\"small_linear\"} 1",
+        "ferrum2_rule_program_rules{program=\"route\"} 2",
+        "ferrum2_route_match_total{source=\"inline\",type=\"scalar\",result=\"matched\"}",
+        "ferrum2_dns_implicit_system_fallback_total 0",
+    ] {
+        assert!(
+            encoded.contains(expected),
+            "missing `{expected}`\n{encoded}"
+        );
+    }
+    for identity in [
+        "ferrum2_rule_program_candidate_count_sum{program=\"route\"}",
+        "ferrum2_rule_program_candidate_count_count{program=\"route\"}",
+        "ferrum2_rule_program_match_ns_sum{program=\"route\"}",
+        "ferrum2_rule_program_match_ns_count{program=\"route\"}",
+    ] {
+        assert!(
+            encoded
+                .lines()
+                .any(|line| line.starts_with(identity) && !line.ends_with(" 0")),
+            "zero or missing `{identity}`\n{encoded}"
+        );
+    }
     let mut replay = ReplayIo::new(flow, selection.prefix);
     let mut received = Vec::new();
     replay
@@ -704,6 +757,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 &metrics,
             )
             .await
+            .expect("route scratch construction")
             .expect("sniff falls through to final route");
         assert!(
             matches!(&selection.terminal, ClientTerminalRoute::Route(_)),
@@ -741,6 +795,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     tokio::time::advance(Duration::from_millis(1)).await;
     let selection = selection
         .await
+        .expect("route scratch construction")
         .expect("timeout falls through to final route");
     peer.shutdown().await.expect("timeout EOF");
     assert!(matches!(&selection.terminal, ClientTerminalRoute::Route(_)));
@@ -769,6 +824,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 &metrics,
             )
             .await
+            .expect("route scratch construction")
             .is_none(),
         "cancelled sniff cannot select a terminal"
     );
@@ -784,6 +840,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 &metrics,
             )
             .await
+            .expect("route scratch construction")
             .is_none(),
         "read failure cannot select a terminal"
     );
@@ -820,6 +877,7 @@ async fn tun_tcp_selector_is_snapshotted_once_before_open_and_never_reselected()
             &Metrics::new(),
         )
         .await
+        .expect("route scratch construction")
         .expect("first selection");
     let ClientTerminalRoute::Route(first) = first.terminal else {
         panic!("selector routes");
@@ -839,6 +897,7 @@ async fn tun_tcp_selector_is_snapshotted_once_before_open_and_never_reselected()
             &Metrics::new(),
         )
         .await
+        .expect("route scratch construction")
         .expect("second selection");
     let ClientTerminalRoute::Route(second) = second.terminal else {
         panic!("selector routes");
@@ -1214,6 +1273,90 @@ async fn tagged_prepare_failures_restore_full_baseline_and_exact_rebind() {
     }
 }
 
+#[test]
+fn client_udp_route_publishes_program_and_match_observations() {
+    use super::routing::ClientTerminalRoute;
+
+    let listen = reserve_address();
+    let path = std::env::temp_dir().join(format!(
+        "ferrum2-client-udp-route-metrics-{}-{}.toml",
+        std::process::id(),
+        listen.port()
+    ));
+    let source = format!(
+        "schema_version = 2\n\
+         [[inbounds]]\n\
+         tag = \"i0\"\n\
+         listen = \"{listen}\"\n\
+         [[outbounds]]\n\
+         tag = \"direct\"\n\
+         type = \"direct\"\n\
+         [route]\n\
+         final = \"direct\"\n\
+         [[route.rules]]\n\
+         network = \"udp\"\n\
+         port = 53\n\
+         action = \"reject\"\n\
+         [shadowsocks]\n\
+         method = \"2022-blake3-aes-128-gcm\"\n\
+         psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+    );
+    std::fs::write(&path, source).expect("UDP route metrics config");
+    let config = ferrum2_config::load_client(&path).expect("validated UDP route metrics config");
+    std::fs::remove_file(path).expect("remove UDP route metrics config");
+    let metrics = Metrics::new();
+    publish_rule_program_metadata(&config, &metrics);
+    let routing = ClientRouting {
+        legacy: config.route,
+        program: config.route_program,
+        outbounds: Arc::from([]),
+    };
+    let target = TargetAddr::ip("192.0.2.1:53".parse().expect("UDP route target"))
+        .expect("validated UDP route target");
+    let mut scratch = routing.route_scratch().expect("route scratch construction");
+    let terminal = routing.select_terminal_with_scratch(
+        0,
+        Network::Udp,
+        &target,
+        Some(b"payload"),
+        &metrics,
+        scratch.as_mut(),
+    );
+    assert!(matches!(terminal, Ok(ClientTerminalRoute::Reject)));
+    assert!(matches!(
+        routing.select_terminal_with_scratch(
+            0,
+            Network::Udp,
+            &target,
+            Some(b"payload"),
+            &metrics,
+            None,
+        ),
+        Err(RuleCompileError::Internal)
+    ));
+    let encoded = metrics.encode_text().expect("client UDP route metrics");
+    for expected in [
+        "ferrum2_rule_program_rules{program=\"route\"} 1",
+        "ferrum2_route_match_total{source=\"inline\",type=\"scalar\",result=\"matched\"}",
+    ] {
+        assert!(
+            encoded.contains(expected),
+            "missing `{expected}`\n{encoded}"
+        );
+    }
+    for identity in [
+        "ferrum2_rule_program_candidate_count_sum{program=\"route\"}",
+        "ferrum2_rule_program_match_ns_sum{program=\"route\"}",
+    ] {
+        assert!(
+            encoded
+                .lines()
+                .any(|line| line.starts_with(identity) && !line.ends_with(" 0")),
+            "zero or missing `{identity}`\n{encoded}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn udp_process_shutdown_drains_an_active_association_without_forcing() {
     let listens = [reserve_address(), reserve_address()];
@@ -1553,8 +1696,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
             supervisor: Some(supervisor),
             context: tcp_context,
             routing: Arc::new(ClientRouting {
-                legacy: ferrum2_core::route::RouteTable::static_bindings(vec![0, 1])
-                    .expect("test routes"),
+                legacy: ferrum2_rule::RouteTable::static_bindings(vec![0, 1]).expect("test routes"),
                 program: None,
                 outbounds: listens
                     .map(|_| {
@@ -1771,4 +1913,83 @@ async fn lifecycle_composition_contract_production_registry_witnesses_live_then_
     );
     assert_eq!(actual, expected, "TCP root cleanup");
     std::fs::remove_file(config_path).expect("remove client test config");
+}
+
+#[tokio::test]
+async fn application_resolver_observer_records_explicit_system_without_fallback() {
+    struct OutcomeBackend(Result<Vec<std::net::SocketAddr>, ferrum2_dns::DnsError>);
+
+    impl ferrum2_dns::ApplicationResolveBackend for OutcomeBackend {
+        fn resolve<'a>(
+            &'a self,
+            _request: ferrum2_dns::ApplicationResolveRequest<'a>,
+        ) -> ferrum2_dns::ApplicationResolveFuture<'a> {
+            let outcome = self.0.clone();
+            Box::pin(async move { outcome })
+        }
+    }
+
+    let metrics = Arc::new(Metrics::new());
+    let system = observed_application_resolver(
+        ferrum2_dns::ApplicationResolver::system(Arc::new(OutcomeBackend(Ok(vec![
+            "192.0.2.10:443".parse().expect("test address"),
+        ])))),
+        &metrics,
+    );
+    let configured = observed_application_resolver(
+        ferrum2_dns::ApplicationResolver::configured(Arc::new(OutcomeBackend(Err(
+            ferrum2_dns::DnsError::NoData,
+        )))),
+        &metrics,
+    );
+    let domain = ferrum2_core::CanonicalDomain::new("application.example")
+        .expect("canonical application domain");
+    let request = ferrum2_dns::ApplicationResolveRequest::new(
+        ferrum2_dns::ApplicationResolveContext::new(0, ferrum2_core::route::Network::Tcp),
+        &domain,
+        std::num::NonZeroU16::new(443).expect("non-zero port"),
+        ferrum2_dns::DnsStrategy::Ipv4Only,
+    );
+
+    assert!(system.resolve(request).await.is_ok());
+    assert_eq!(
+        configured.resolve(request).await,
+        Err(ferrum2_dns::DnsError::NoData)
+    );
+    let encoded = metrics
+        .encode_text()
+        .expect("encode application DNS metrics");
+    for expected in [
+        "ferrum2_dns_resolve_total{resolver=\"system\",purpose=\"application\",result=\"success\"} 1",
+        "ferrum2_dns_resolve_total{resolver=\"configured\",purpose=\"application\",result=\"failure\"} 1",
+        "ferrum2_dns_explicit_system_resolve_total{purpose=\"application\"} 1",
+        "ferrum2_dns_implicit_system_fallback_total 0",
+    ] {
+        assert!(
+            encoded.contains(expected),
+            "missing `{expected}`\n{encoded}"
+        );
+    }
+}
+
+#[test]
+fn configured_dns_cache_does_not_require_a_ruleset_policy() {
+    let metrics = Arc::new(Metrics::new());
+    let runtime = ClientDnsProxyRuntime::try_new(
+        None,
+        ferrum2_config::DnsRuntimeConfig::default(),
+        None,
+        &metrics,
+    )
+    .expect("standalone configured DNS cache");
+
+    assert!(runtime.policy.is_none());
+    assert_eq!(
+        runtime
+            .cache
+            .as_ref()
+            .map(|cache| cache.capacity().expect("cache capacity")),
+        Some(8_192)
+    );
+    assert_eq!(runtime.generation, ferrum2_dns::ResolverGeneration::new(0));
 }
